@@ -55,3 +55,145 @@ APEX ROADMAP — resume report — 2026-09-12 12:03 AWST
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
+  int-os:  tip 481fc579 Merge task/followups-r18 into roadmap/v2.2
+    task/p1-014-cf-environments
+      a67eb704 feat(secret): section 13.8 environment protection, as a one-s   [1/10 added lines on tip]
+      4d987517 test(secret): the approval race test could not fail, so it wa   [0/10 added lines on tip]
+      7f4475dd feat(cf): section 13.13 worktree previews, with ownership rea   [2/10 added lines on tip]
+    task/p1-025-plugin-trust
+      074989ae feat(agent): curate the MCP configuration a session is launch   [2/10 added lines on tip]
+      d214dae2 test(agent): prove a plugin's server is confined by making it   [4/10 added lines on tip]
+    task/p1-053a-android
+      00608951 feat(android): the APEX Remote protocol as a pure-JVM module   [0/10 added lines on tip]
+      7fccc335 test(android): 79 JVM tests, and the two that make the rest m   [0/10 added lines on tip]
+      74ecba13 build(android): an Android app module that assembles, and the   [0/10 added lines on tip]
+    task/p2-b-round18
+      15283c02 test(a11y): walk the greeter's accessibility tree over AT-SPI   [2/10 added lines on tip]
+      88877e7d test(a11y): mutate the AT-SPI suite, and correct what the har   [0/10 added lines on tip]
+      8477dcbc test(a11y): make the surface discover the a11y bus, not be ha   [0/10 added lines on tip]
+      39f20442 feat(installer): name every field, and audit the installer wi   [0/10 added lines on tip]
+
+  int-shell:  tip 34fef17 Merge task/p0-021-agent-parity into roadmap/v2.2
+    fix/labwc-desktop-parity  — squash-merged, safe to delete
+      landed whole as f609a6c fix(labwc): complete desktop parity (#6)
+    fix/popup-first-open-and-media-keys  — squash-merged, safe to delete
+      landed whole as b8a63a8 fix(popups): first-open rendering, dead toasts, and medi
+    fix/screenshot-off-hyprland  — squash-merged, safe to delete
+      landed whole as 4e267eb fix: screenshots and popup input regions off Hyprland (#
+    task/p0-016-agent-settings  — squash-merged, safe to delete
+      landed whole as 4335e42 fix(agents): the sudo caveat was written before no_new_p
+    task/p1-040-scaling-migration
+      a45cca8 fix(shell): the bar's notch widths stop crossing the window bo   [0/10 added lines on tip]
+      7e4a015 feat(shell): one shared ThemeSet per factor, derived from the    [0/10 added lines on tip]
+      4584fca feat(shell): every surface sizes itself from the output it is    [2/10 added lines on tip]
+      57111a0 fix(shell): each surface builds its own token set; the shared    [1/10 added lines on tip]
+      f5787d3 fix(shell): a popup is sized by the output it is anchored to,    [1/10 added lines on tip]
+
+  The per-commit lines above are a HEURISTIC: a low count can also mean
+  landed-then-rewritten. Settle any one of them with
+  `git diff <integration> <branch> -- $(git show --name-only --format= <commit>)`
+  before spending an agent on it.
+
+────────────────────────────────────────────────────────────────────────────
+  durability
+────────────────────────────────────────────────────────────────────────────
+  snapshot timer: active   last 2min 41s Sat
+  wip refs:
+    apex-os    dd3496b  apex-os-
+    apex-os    8177750  int-os-
+    apex-os    d9963d4  roadmap-state
+    apex-os    4d32e35  wt-ai-apps-
+    apex-os    55f08ae  wt-base-os-
+    apex-os    6c9c17f  wt-clippy-
+    apex-os    1951fdc  wt-disposable-
+    apex-os    2e3bbcd  wt-editors-
+    apex-os    31a3d16  wt-editors2-
+    apex-os    7ebac77  wt-followups-
+    apex-os    59b7328  wt-followups-int3-
+    apex-os    0683355  wt-greeter-os-
+    apex-os    c74f38d  wt-multilib2-
+    apex-os    0fd2d78  wt-p0-002-
+    apex-os    e63b0e3  wt-p0-003-
+    apex-os    cb17b4e  wt-p0-004-
+    apex-os    1a4b5f2  wt-p0-005-
+    apex-os    162d6fa  wt-p0-009-
+    apex-os    d4787a4  wt-p0-009b-
+    apex-os    f30f7ca  wt-p0-011-
+    apex-os    9b605a1  wt-p0-011b-
+    apex-os    746639a  wt-p0-014-
+    apex-os    580c657  wt-p0-019-os-
+    apex-os    00c1973  wt-p0-025-os-
+    apex-os    2c9c560  wt-p0-finish-
+    apex-shell 5f8e8fb  apex-shell-
+    apex-shell df979e1  int-shell-
+    apex-shell 68c971d  wt-base-shell-
+    apex-shell c8f1e50  wt-editors2-shell-
+    apex-shell 75049cf  wt-greeter-shell-
+    apex-shell ed92eaa  wt-lockhint-
+    apex-shell ad2d89d  wt-p0-005-shell-
+    apex-shell 6282c29  wt-p0-015-shell-
+    apex-shell 2afecfc  wt-p0-016-
+    apex-shell 5cf1789  wt-p0-017-
+    apex-shell e1d8a82  wt-p0-017b-
+    apex-shell 763c26e  wt-p0-018-prefix-
+    apex-shell 5b2a749  wt-p0-018b-
+    apex-shell 4eb5711  wt-p0-019-shell-
+    apex-shell a006b8c  wt-p0-023-
+    apex-shell b1621de  wt-p1-020-
+    apex-shell 3c297fc  wt-p1-023-
+    apex-shell ad337cd  wt-p1-029-
+    apex-shell 3db5952  wt-p1-038-
+    apex-shell f10daa7  wt-p1-039-
+    apex-shell 589d611  wt-p1-040-
+    apex-shell 71c31b7  wt-p1-040b-
+    apex-shell 086727e  wt-p1-044-shell-
+    apex-shell fb019fa  wt-p1-048-
+    apex-shell 8b2c759  wt-p1-052-shell-
+
+────────────────────────────────────────────────────────────────────────────
+  next
+────────────────────────────────────────────────────────────────────────────
+  7 agent(s) dispatched, ceiling 6
+
+  IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
+    p1-014         P1-014,P1-015,P1-016,P1-017      Cloudflare environment protection, worktree preview environm
+    p1-025         P1-025,P1-026,P1-027,P1-028      Skill inventory and audit, plugin provenance and isolation, 
+    p1-040-per-output-scaling P1-040                           Per-output scaling: two densities, two sizes, one shell
+    p1-053a        P1-053,P1-054,P1-055             Android app foundation, Agent Center parity, full PTY/TUI re
+    p2-b           P2-003,P2-004                    Accessibility baseline and internationalisation baseline
+
+  READY (dependencies believed satisfied — confirm against the agent table above):
+    p1-038-hardware P1-038                           The 18 labwc matrix rows that need real applications
+    p1-005         P1-005,P1-006,P1-007             Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets
+                   conflicts with p1-002
+    p1-008         P1-008,P1-009,P1-010             Cloudflare One, Workers AI and AI Gateway, Secrets Store
+                   conflicts with p1-002, p1-005
+    p1-011         P1-011,P1-012,P1-013             Temporary task credentials, transparent brokered wrangler/cl
+                   conflicts with p1-005, p1-008
+    p1-052-relay   P1-051,P1-052                    The APEX Remote remainder: relay, reconnect, mDNS, connectio
+    p1-053c        P1-059,P1-060                    Android voice, screenshot, file and clipboard handoff; ship 
+                   conflicts with p1-053b
+    base-partials  BASE-002,BASE-005,BASE-009,BAS   Close the eight BASE preservation items still marked partial
+    p2-a           P2-001,P2-002,P2-013             Encrypted backup framework, R2 backup backend, per-project i
+
+  HELD:
+    p1-053b        after p1-053a
+    p1-061         after p1-025
+    final          after *
+
+  COMPLETE (every roadmap item done — not offered again).
+  This says the WORK is done, not that it is landed — check the
+  unlanded section above before assuming roadmap/v2.2 carries it:
+    p0-014, p1-018, p1-020, p1-023, p1-035, p1-044, p2-e
+
+────────────────────────────────────────────────────────────────────────────
+  how to resume
+────────────────────────────────────────────────────────────────────────────
+  1. This page IS the resume. Do not re-derive it with git commands.
+  2. A dead agent is NOT resumed with SendMessage — that replays its whole
+     transcript through the model and cost 10% of a usage window on 2026-09-06.
+     Dispatch a FRESH agent and paste it ROADMAP/state/agents/<slug>.md.
+     Its worktree is intact; its branch is pushed; its card says what is next.
+  3. Land finished branches onto roadmap/v2.2, record them with set-status.py,
+     then dispatch from READY up to the ceiling.
+  4. Full context, if you need more than this page: ROADMAP/PROGRESS.md.
