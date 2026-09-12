@@ -1,0 +1,78 @@
+<?xml version="1.0"?>
+<!--
+  APEX Safe Graphics — labwc rc.xml (roadmap P2-018).
+
+  Loaded as `labwc -C /usr/share/apex/safe-graphics`, which is the whole point:
+  labwc reads rc.xml, autostart, environment and menu.xml from that directory
+  and does NOT read ~/.config/labwc at all.
+
+  That is P2-018's third criterion — "recovery does not depend on the broken
+  normal compositor configuration" — and it is load-bearing here rather than
+  tidy, because the user's rc.xml is a file APEX itself edits:
+  apex-input-apply splices a <libinput> element into it with ElementTree, and
+  apex-labwc-keybinds generates the keybind block. labwc falls back to its
+  defaults SILENTLY on a malformed rc.xml (see tests/test-labwc-session.sh),
+  so a session that read the user's copy would inherit a broken one without
+  saying so.
+
+  Deliberately bare. Every keybind and every menu entry below is a way to find
+  out what is wrong, fix it, or leave — there is no workspace switching, no
+  window management beyond close, and no launcher, because a recovery desktop
+  that grew a desktop's features would be a second desktop to keep working.
+-->
+<labwc_config>
+
+  <core>
+    <decoration>server</decoration>
+    <gap>0</gap>
+  </core>
+
+  <theme>
+    <name></name>
+    <font place="ActiveWindow">
+      <name>JetBrainsMono Nerd Font</name>
+      <size>10</size>
+    </font>
+  </theme>
+
+  <!-- Tap-to-click ON, unlike the greeter. A person in here is driving a menu
+       with a pointer, and a touchpad that needs a physical click is one more
+       thing that looks broken on a machine they already think is broken. -->
+  <libinput>
+    <device category="touchpad">
+      <tap>yes</tap>
+      <naturalScroll>no</naturalScroll>
+    </device>
+  </libinput>
+
+  <keyboard>
+    <!-- A terminal, because every remedy this session offers is a command. -->
+    <keybind key="W-Return">
+      <action name="Execute" command="/usr/libexec/apex-safe-graphics-terminal"/>
+    </keybind>
+    <!-- Close a window. Not "kill the session": Exit is on the menu, where it
+         cannot be hit by accident. -->
+    <keybind key="W-q">
+      <action name="Close"/>
+    </keybind>
+    <keybind key="A-Tab">
+      <action name="NextWindow"/>
+    </keybind>
+  </keyboard>
+
+  <mouse>
+    <!-- The root menu on a PLAIN right-click. The desktop session reserves
+         that for APEX Shell's context menu and puts its emergency menu behind
+         SUPER; there is no shell here, and a recovery menu reachable only by a
+         chord is a recovery menu somebody cannot find. -->
+    <context name="Root">
+      <mousebind button="Right" action="Press">
+        <action name="ShowMenu" menu="root-menu"/>
+      </mousebind>
+      <mousebind button="Left" action="Press">
+        <action name="ShowMenu" menu="root-menu"/>
+      </mousebind>
+    </context>
+  </mouse>
+
+</labwc_config>
