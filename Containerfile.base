@@ -1532,27 +1532,59 @@ RUN set -eux; \
     # the rest of the CLI surface, not here.
     grep -q '^ExecStart=/usr/bin/apex lid watch$' \
         /usr/lib/systemd/system/apex-lid.service; \
+    # ── every refusal below is an `if … exit 1`, never `! grep` ─────────────
+    # bash does NOT apply errexit to a pipeline whose status is inverted with
+    # `!` (bash(1), `set -e`): `set -e; ! grep -q x <<<x; echo REACHED` prints
+    # REACHED. Four Containerfile assertions on this branch have already been
+    # found that could never pass or never run, each costing a 50-minute build
+    # to discover — a `! grep` guard is a fifth of the same species, and it
+    # cannot fail a build no matter what it matches.
+    U=/usr/lib/systemd/system/apex-lid.service; \
     # The primitive is an inhibitor, and the image must never acquire a static
     # logind lid policy behind its back: `HandleLidSwitch=ignore` applies to a
     # machine with nothing running as readily as to one mid-build, and turns
-    # every laptop bag into an oven. If a future stanza drops one in, this
-    # fails the build rather than shipping it.
-    ! grep -rqs '^ *HandleLidSwitch *=' /usr/lib/systemd/logind.conf.d/ \
-        /etc/systemd/logind.conf.d/ /usr/lib/systemd/logind.conf 2>/dev/null; \
+    # every laptop bag into an oven.
+    if grep -rqs '^ *HandleLidSwitch *=' /usr/lib/systemd/logind.conf.d/ \
+            /etc/systemd/logind.conf.d/ /usr/lib/systemd/logind.conf; then \
+        echo "FATAL: a static HandleLidSwitch= shipped; the lid policy must be an inhibitor"; \
+        exit 1; \
+    fi; \
     # `Restart=always` on a driver that exits 0 on a desktop would restart it
     # for ever; the unit says on-failure and that is load bearing.
-    grep -q '^Restart=on-failure$' /usr/lib/systemd/system/apex-lid.service; \
+    grep -q '^Restart=on-failure$' "$U"; \
     # KillMode must stay at the default. `process` would leave the
     # `systemd-inhibit … sleep infinity` child alive with its keeper gone — a
     # lid lock nothing can drop.
-    ! grep -q '^KillMode=' /usr/lib/systemd/system/apex-lid.service; \
+    if grep -q '^KillMode=' "$U"; then \
+        echo "FATAL: KillMode is set; the inhibitor child must die with the driver"; exit 1; fi; \
     # ProtectSystem=strict or ProtectKernelTunables=yes would remount /sys
     # read-only and silently break every power-down write the unit exists to
     # make: the backlight, the keyboard LED. Both are refused here because the
     # symptom — a keyboard backlight that never dims — looks like anything but
     # a unit file.
-    ! grep -q '^ProtectSystem=strict$' /usr/lib/systemd/system/apex-lid.service; \
-    ! grep -q '^ProtectKernelTunables=yes$' /usr/lib/systemd/system/apex-lid.service; \
+    if grep -q '^ProtectSystem=strict$' "$U"; then \
+        echo "FATAL: ProtectSystem=strict makes /sys read-only; the power-down writes it"; exit 1; fi; \
+    if grep -q '^ProtectKernelTunables=yes$' "$U"; then \
+        echo "FATAL: ProtectKernelTunables=yes makes /sys read-only; the power-down writes it"; exit 1; fi; \
+    # ProtectHome=yes makes /run/user inaccessible AND EMPTY, which is where
+    # this driver finds every live session and every owner's home. Measured on
+    # the L16: `ls /run/user` under ProtectHome=yes returns nothing. The driver
+    # would then see zero sessions for ever, `pin = "auto"` would never
+    # activate, and the owner's ~/.config/apex/lid.toml would never be read —
+    # the silent-pin defect 2aa9ed45 fixed in the code, reintroduced by a unit.
+    if grep -q '^ProtectHome=yes$' "$U"; then \
+        echo "FATAL: ProtectHome=yes empties /run/user; the driver would see no sessions"; exit 1; fi; \
+    grep -q '^ProtectHome=no$' "$U"; \
+    # PrivateTmp=yes hides the /tmp and /var/tmp a project worktree may live
+    # in, and the guards' checkpoint runs inside one.
+    if grep -q '^PrivateTmp=yes$' "$U"; then \
+        echo "FATAL: PrivateTmp=yes hides worktrees under /tmp; the checkpoint runs in one"; exit 1; fi; \
+    # CAP_SYS_RESOURCE is what `runuser` needs — without it pam_limits refuses
+    # the session and the checkpoint dies at the moment work was to be saved.
+    # Found by bisection on the L16, not guessed: CAP_AUDIT_WRITE, CAP_CHOWN,
+    # CAP_FOWNER and CAP_SYS_ADMIN each fail on their own.
+    grep -q '^CapabilityBoundingSet=.*CAP_SYS_RESOURCE' "$U"; \
+    grep -q '^CapabilityBoundingSet=.*CAP_NET_ADMIN' "$U"; \
     # rfkill and `iw` are what the power-down half spends CAP_NET_ADMIN on.
     # They arrive as dependencies rather than named packages, so assert them:
     # without them the bluetooth block and the Wi-Fi power-save line fail at
