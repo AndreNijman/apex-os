@@ -787,8 +787,26 @@ suite really is a statement of current state and not a constant.
 
 ### CI, round 18b
 
-Dispatched rather than guessed at: `gh workflow run pr-validation.yml --ref
-task/p2-b-round18b`, run **34673525673**.
+Dispatched rather than guessed at, three times: runs **34673525673**,
+**34673943974** and **34674852755**. The last is the one to read.
+
+**Final state, run 34674852755:**
+
+| job | result |
+| --- | --- |
+| `Static validation` | **green** |
+| `Installer safety and UI` | **green** — `installer-a11y: 47 passed, 0 failed, 4 skipped` |
+| `Package engine` | red ONLY at `Run file-injection assertions` — the known cgroup failure, red on `roadmap/v2.2` itself (run 34672131214). Both new accessibility steps in that job are green. |
+| `Rust validation` | red at `§48 storage`, the SAME step that is red on `roadmap/v2.2`'s own run (job 103495368392). This branch changes no `.rs`, nothing under `apexd/`, and no storage code — checked, not assumed. |
+
+**The four CI skips are the honest half and should not be read as coverage.**
+Two are the wifi page's no-adapter shape, which is correct. The other two are
+the text-entry pair: **neither XTEST nor XSendEvent delivers synthesised text to
+that runner's X server**, while Tab, Return and space all reach the same widgets
+on the same display. So "what was typed is what the field contains" and "the
+password never crosses the bus" are measured on THIS LAPTOP ONLY. They say
+COULD-NOT-RUN on the runner rather than passing, which is the point, but the
+second machine does not cover them.
 
 - **`Package engine` — both new suites GREEN on the runner.** `Run greeter
   session-bus assertions` and `Run accessibility-stack assertions` both pass on
