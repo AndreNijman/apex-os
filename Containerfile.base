@@ -2248,6 +2248,50 @@ COPY files/branding/wallpapers/apex-wallpaper-default.jpg \
      /usr/share/backgrounds/apex/default.jpg
 COPY files/desktop/apex-greet/greetd-config.toml /etc/greetd/config.toml
 
+# ── The login screen's session bus ─────────────────────────────────────────
+# greetd's command is this wrapper, not the compositor directly. It gives the
+# greet session a D-Bus session bus and an accessibility bus and then EXECS the
+# compositor, so greetd still holds the compositor's own PID and tears the
+# greeter down exactly as before.
+#
+# Without it the greeter's accessibility markup reached nobody. Qt's AT-SPI
+# bridge resolves org.a11y.Bus on the SESSION bus like every other desktop
+# application, and the greet session had no session bus at all — so a login
+# screen that is fully marked up, and that a screen reader can both read and
+# operate under test, published zero nodes in production.
+#
+# THE ASSERTIONS BELOW ARE THE SAFETY ARGUMENT, and they are here rather than
+# only in tests/ because greetd is boot-critical: a greeter whose command names
+# a path nothing installed is a machine that cannot be logged into, and every
+# source-reading assertion in the repository would stay green while it was true
+# (the K12/K13 defect, where a launcher was repointed at a file no Containerfile
+# copied and the ISO would have booted with no installer at all).
+COPY --chmod=0755 files/system/libexec/apex-greet-session /usr/libexec/apex-greet-session
+RUN set -eux; \
+    sh -n /usr/libexec/apex-greet-session; \
+    test -x /usr/libexec/apex-greet-session; \
+    # greetd's command must NAME the wrapper, and the wrapper must exist at the
+    # path it is named by. Read out of the live config, not out of the repo.
+    grep -q '^command = "/usr/libexec/apex-greet-session ' /etc/greetd/config.toml; \
+    # …and the wrapper's last act must still be to exec what it was handed.
+    # A wrapper that forgot that line is a login screen that never paints.
+    tail -1 /usr/libexec/apex-greet-session | grep -qx 'exec "$@"'; \
+    # The pieces it uses are optional at runtime and asserted here, because
+    # "the greeter degrades gracefully" is only interesting if the good path is
+    # the one that ships. at-spi2-core arrives as a transitive dependency of
+    # gtk4/Qt and dbus-daemon with dbus; if either ever stops being installed,
+    # this build says so instead of shipping a silently unreadable greeter.
+    command -v dbus-daemon >/dev/null; \
+    test -x /usr/libexec/at-spi-bus-launcher; \
+    test -x /usr/libexec/at-spi2-registryd; \
+    # The one key a user who cannot see the screen can press, on both hosts.
+    grep -q 'apex-screen-reader' /usr/share/apex-greet/sway-greet.conf; \
+    grep -q 'apex-screen-reader' /usr/share/apex-greet/labwc-greet/rc.xml; \
+    # And the host config still parses. sway -C exits 1 on a bad config and 0 on
+    # a good one (checked in both directions), so a typo in the binding above
+    # fails the build rather than the login.
+    sway -C -c /usr/share/apex-greet/sway-greet.conf
+
 # ── Greeter wallpaper: the user's own, not the shipped default ─────────────
 # THE BUG: change your wallpaper in APEX Shell and the login/lock screen kept
 # showing the factory image forever. GreetSurface.qml hardcoded
