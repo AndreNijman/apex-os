@@ -367,14 +367,33 @@ $f"
         fi
     done
 
-    # The ring must close. One that never returns to its first member is one a
-    # keyboard user can fall out of.
-    firstname="${first#*|}"
-    if [ -n "$firstname" ] && printf '%s\n' "$ring" | grep -qF "|$firstname"; then
-        ok "page '$page': the Tab ring comes back round to where it started"
+    # The ring must close: one a keyboard user can fall out of is a trap with
+    # extra steps.
+    #
+    # The anchor used to be the control focused when the page OPENED, and that
+    # is not a property of a page containing a list. Measured on the wifi page:
+    # the first pass visits every network row individually, and every later pass
+    # re-enters the list at the ONE row GTK remembers — so the first row never
+    # comes round, and neither does the list itself. Anchoring the closure on
+    # either asserts something that was never true there.
+    #
+    # The anchor is the first stop whose role is NOT `list item`, and it must be
+    # reached at least TWICE: once on the way round, once on the way back. A
+    # ring that is all list items has no anchor and is reported rather than
+    # silently passed.
+    local anchor anchor_seen
+    anchor="$(printf '%s\n' "$ring" | grep -v '^$' | grep -v '^list item|' | head -1)"
+    if [ -z "$anchor" ]; then
+        bad "page '$page': the Tab ring comes back round" \
+            "$taps Tab presses never left the list — there is nothing else in the ring"
     else
-        bad "page '$page': the Tab ring comes back round to where it started" \
-            "'$firstname' never returned within $taps presses"
+        anchor_seen="$(printf '%s\n' "$ring" | grep -cxF "$anchor")"
+        if [ "$anchor_seen" -ge 2 ]; then
+            ok "page '$page': the Tab ring comes back round (to ${anchor#*|})"
+        else
+            bad "page '$page': the Tab ring comes back round" \
+                "'${anchor#*|}' was reached once and never again within $taps presses"
+        fi
     fi
 }
 
@@ -392,6 +411,174 @@ ring_now() {   # ring_now <page> <a name the ring must reach> — walk the page 
         return
     fi
     walk_ring "$page" "$wid" 12 3 "$sentinel"
+}
+
+# ── the wifi page's Tab ring, with a scanner that answers the same way on
+#    every machine ─────────────────────────────────────────────────────────────
+#
+# `wifi` was the last audited page whose ring had never been walked, and walking
+# it found the defect the name audit is structurally unable to see: every
+# network in the list was a Tab stop that announced NOTHING. Nine `list item`
+# nodes, all focusable, every name and description empty — a blind user tabbing
+# through this page was told "list item" nine times on the page where they
+# choose which network to join. `list item` is not in the audit's INTERACTIVE
+# role set, and widening that set would make the audit assert over every
+# dropdown popup GTK realises.
+#
+# The walk needs a network list, and on a real machine that list is whatever
+# this room can hear: a tap count tuned to nine networks is wrong in a café and
+# wrong on a CI runner, which has no adapter at all and builds the other shape
+# of the page entirely. So the scan is stubbed — `nmcli` and `rfkill` are
+# resolved through PATH by `subprocess.run`, so a directory in front of PATH
+# with two scripts in it gives the shipped code a fixed world to build from.
+#
+# That is what makes this measurable on a SECOND MACHINE: the adapter shape of
+# the wifi page has never been audited anywhere but a laptop with a Wi-Fi card,
+# and with the stub it builds identically on a runner with none. The page under
+# test is the shipped one; only the scanner behind it is ours.
+WIFI_STUB_SSIDS="APEX-TEST-OPEN APEX-TEST-WPA APEX-TEST-EAP APEX-TEST-WEAK"
+
+ring_wifi() {
+    local stub="$ATSPI_W/wifi-stub" dump="$ATSPI_W/dump-wifi-stub.txt"
+    local wid n built ssid found miss rows_bad glyphs
+
+    mkdir -p "$stub"
+    cat >"$stub/nmcli" <<'STUBEOF'
+#!/bin/sh
+# A fixed Wi-Fi world for the accessibility walk. Four networks: open, secured,
+# enterprise, and one weak enough to draw a single signal bar.
+case "$*" in
+  "-t -f TYPE device")              echo wifi ;;
+  "-t -f DEVICE,TYPE,STATE device") echo "wlan0:wifi:disconnected" ;;
+  "-t -f SSID,SIGNAL,SECURITY device wifi list")
+      printf 'APEX-TEST-OPEN:88:\n'
+      printf 'APEX-TEST-WPA:62:WPA2\n'
+      printf 'APEX-TEST-EAP:41:WPA2 802.1X\n'
+      printf 'APEX-TEST-WEAK:9:WPA2\n' ;;
+  *) : ;;
+esac
+exit 0
+STUBEOF
+    cat >"$stub/rfkill" <<'STUBEOF'
+#!/bin/sh
+# Never "Hard blocked: yes", so the page takes its adapter branch. Silent, so
+# nothing here can unblock a radio on the machine running the suite.
+exit 0
+STUBEOF
+    chmod +x "$stub/nmcli" "$stub/rfkill"
+
+    # The stub has to be able to RUN. $ATSPI_W is under TMPDIR, and a TMPDIR
+    # mounted noexec would make `subprocess.run` raise, `run()` return ("",1),
+    # `wifi_available()` say no, and the page build its no-adapter shape — at
+    # which point the sentinel never appears and the suite reports the wifi page
+    # as broken. That is a could-not-run wearing a product defect's clothes.
+    if [ "$("$stub/nmcli" -t -f TYPE device 2>/dev/null)" != "wifi" ]; then
+        skp "the wifi page's adapter shape can be built with a stubbed scanner" \
+            "$stub/nmcli will not execute — $ATSPI_W is probably mounted noexec. COULD-NOT-RUN, not a pass"
+        return
+    fi
+
+    for _ in $(seq 1 40); do
+        n="$(python3 "$WALK" --count 2>/dev/null || echo 0)"
+        [ "$n" = "0" ] && break
+        sleep 0.3
+    done
+
+    APEX_GUI_PAGE=wifi atspi_run_app env PATH="$stub:$PATH" python3 "$GUI" \
+        >"$ATSPI_W/gui-wifi-stub.out" 2>"$ATSPI_W/gui-wifi-stub.err" &
+    GPID=$!
+
+    # The scan runs on a worker thread and the rows arrive through idle_add, so
+    # the sentinel is a NETWORK ROW and not the password field: waiting on the
+    # field would walk a page whose list is still empty, and "every network is
+    # named" over zero networks is the false green this whole suite exists to
+    # refuse.
+    built=0
+    for _ in $(seq 1 100); do
+        python3 "$WALK" --dump >"$dump" 2>/dev/null
+        grep -qF '| role=list item | name=APEX-TEST-WEAK |' "$dump" && { built=1; break; }
+        kill -0 "$GPID" 2>/dev/null || break
+        sleep 0.4
+    done
+    if [ "$built" != "1" ]; then
+        bad "the wifi page's adapter shape can be built with a stubbed scanner" \
+            "no list item named APEX-TEST-WEAK ever reached the bus"
+        grep -v 'libEGL\|DRI3\|Adwaita-WARNING' "$ATSPI_W/gui-wifi-stub.err" 2>/dev/null \
+            | sed 's/^/      /' | head -8
+        kill "$GPID" 2>/dev/null
+        return
+    fi
+    ok "the wifi page's adapter shape can be built with a stubbed scanner"
+
+    # Finding 1, asserted directly rather than through the ring, so it holds for
+    # every network and not only for the ones a tap budget happens to reach.
+    found=0; miss=""
+    for ssid in $WIFI_STUB_SSIDS; do
+        if grep -qF "| role=list item | name=$ssid | desc=" "$dump"; then
+            found=$((found + 1))
+        else
+            miss="$miss $ssid"
+        fi
+    done
+    if [ "$found" -eq 4 ]; then
+        ok "page 'wifi': every network in the list announces its name ($found of 4)"
+    else
+        bad "page 'wifi': every network in the list announces its name" \
+            "$found of 4 —$miss reached the bus as an unnamed node, so a reader says 'list item' and nothing else"
+    fi
+
+    # The row is what takes the focus, so the row is where the rest of what a
+    # reader needs has to live: locked or open, and how strong the signal is.
+    rows_bad="$(grep -F '| role=list item |' "$dump" \
+        | grep -vcE '\| desc=(Open|Secured) network, signal [0-9]+ percent\.')"
+    if [ "${rows_bad:-1}" -eq 0 ]; then
+        ok "page 'wifi': each network says whether it is locked and how strong it is, in words"
+    else
+        bad "page 'wifi': each network says whether it is locked and how strong it is, in words" \
+            "$rows_bad row(s) carry no such description"
+    fi
+
+    # Finding 2. `▁▃▅▇` is a picture drawn in block characters and a reader
+    # spells it out one glyph at a time — "lower one eighth block, lower three
+    # eighths block" — in front of the network's name. Fixed patterns, one per
+    # glyph: a bracket expression over multi-byte characters is a set of BYTES
+    # in the C locale this suite may run under, and would match an em dash.
+    glyphs="$(grep -cF -e '▁' -e '▃' -e '▅' -e '▇' "$dump")"
+    if [ "${glyphs:-1}" -eq 0 ]; then
+        ok "page 'wifi': the signal bars are out of the accessibility tree, not read out glyph by glyph"
+    else
+        bad "page 'wifi': the signal bars are out of the accessibility tree, not read out glyph by glyph" \
+            "$glyphs node(s) carry a block character in a name or description"
+    fi
+
+    # These two fields exist only on the adapter shape, so until the stub they
+    # were measured on a laptop with a Wi-Fi card and SKIPPED everywhere else.
+    for ssid in "Network password" "Hidden network name"; do
+        if grep -qF "| name=$ssid |" "$dump"; then
+            ok "page 'wifi': the '$ssid' field announces itself (stubbed scanner, so this runs on any machine)"
+        else
+            bad "page 'wifi': the '$ssid' field announces itself (stubbed scanner, so this runs on any machine)" \
+                "no node named '$ssid'"
+        fi
+    done
+
+    wid="$(xdotool search --name "APEX-OS Installer" 2>/dev/null | head -1)"
+    if [ -z "$wid" ]; then
+        skp "page 'wifi': its Tab ring can be walked" \
+            "no installer window on the private display to send Tab to"
+        kill "$GPID" 2>/dev/null
+        return
+    fi
+
+    # 16 taps and a floor of 11. Both are consequences of the stub rather than
+    # guesses: the first pass is four rows then seven other stops, and every
+    # later pass re-enters the list at the one row GTK remembers, so the anchor
+    # (the first non-list-item stop) comes round at tap 13. The floor is `-ge`,
+    # so a future GTK that adds a stop still passes and one that loses a network
+    # row does not.
+    walk_ring wifi "$wid" 16 11 \
+        APEX-TEST-OPEN APEX-TEST-WPA APEX-TEST-EAP APEX-TEST-WEAK \
+        "Network password" "Connect" "Continue"
 }
 
 # Typing, reaching and reading back. Defined here rather than beside the
@@ -538,6 +725,12 @@ if [ "$WIFI_SHAPE" = no-adapter ]; then
 else
     ok "the wifi page built its adapter shape, and that is the shape audited"
 fi
+kill "$GPID" 2>/dev/null
+# …and now the SAME page again, with the scan stubbed, so its ring is walked
+# the same way on a laptop with a Wi-Fi card and on a runner with none. The
+# audit above measured whichever shape this machine builds; this measures the
+# shape a user with Wi-Fi actually sees.
+ring_wifi
 kill "$GPID" 2>/dev/null
 audit_page secureboot "Repeat the enrolment password"  4
 ring_now secureboot "Repeat the enrolment password"
