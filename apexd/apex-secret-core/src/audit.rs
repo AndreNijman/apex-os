@@ -38,6 +38,25 @@ fn unknown() -> String {
 /// be reading a `default` as a fact.
 pub const NOT_ATTEMPTED: &str = "not-attempted";
 
+/// What [`AuditLine::spend`] says on a line that never reached §13.14's budget
+/// check — every refusal before it, and every administrative event.
+///
+/// Distinct from `no-budget`, which is the answer for a project that was
+/// checked and had no budget to cross, and distinct again from `unknown`, which
+/// is what a line written before this field existed deserializes to. Three
+/// different facts: the check did not happen, the check happened and found
+/// nothing to enforce, and nobody knows. Collapsing any two of them would make
+/// `apex task audit` report a budget as satisfied on a request that was refused
+/// before anybody looked at it.
+pub const NOT_CHECKED: &str = "not-checked";
+
+/// What [`AuditLine::spend`] says for a project that has no `[agent.budget]`.
+///
+/// Its own word rather than `within`, because "there is no cap" and "there is a
+/// cap and this fits inside it" are the two things somebody reading a budget
+/// report most needs to tell apart.
+pub const NO_BUDGET: &str = "no-budget";
+
 /// What happened.
 ///
 /// A closed set, so `apex secret audit` can colour it and a reader can grep it.
@@ -157,6 +176,22 @@ pub struct AuditLine {
     /// token id, not a token.
     #[serde(default)]
     pub narrowing_detail: Option<String>,
+    /// §13.14: what the project's budget said about this operation.
+    ///
+    /// `within`, `over`, `unmeasurable` — [`crate::budget::Spend`]'s three
+    /// answers — or [`NO_BUDGET`] when the project declared none, or
+    /// [`NOT_CHECKED`] on a line that never got that far, or `unknown` on a
+    /// line written before this field existed.
+    ///
+    /// This field is what makes §13.14's *"usage visible in the task audit"*
+    /// a reading of the trail rather than a re-derivation: every operation
+    /// says what the budget thought of it at the moment it ran, so a budget
+    /// that was added, removed or changed later does not rewrite history.
+    #[serde(default = "unknown")]
+    pub spend: String,
+    /// Why, for the two arms that refuse. Never set for `within`.
+    #[serde(default)]
+    pub spend_detail: Option<String>,
 }
 
 impl AuditLine {
@@ -189,6 +224,8 @@ impl AuditLine {
             exit_code: None,
             narrowing: NOT_ATTEMPTED.to_string(),
             narrowing_detail: None,
+            spend: NOT_CHECKED.to_string(),
+            spend_detail: None,
         }
     }
 
@@ -224,6 +261,8 @@ impl AuditLine {
             exit_code: None,
             narrowing: NOT_ATTEMPTED.to_string(),
             narrowing_detail: None,
+            spend: NOT_CHECKED.to_string(),
+            spend_detail: None,
         }
     }
 }
