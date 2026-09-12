@@ -514,6 +514,12 @@ Item {
         // notice carries "󰀦" (nf-md-alert) on the same terms, out of the same
         // Material Design range as the three glyphs already on this surface.
         //
+        // Three tiers, in this order. The middle one tests the notice for TRUTH
+        // and not against "": a ctx that does not carry the property at all
+        // yields undefined, `undefined !== ""` is TRUE in JavaScript, and the
+        // line would then render undefined and swallow BOTH the caps-lock
+        // warning and — through the accessible name — anything a reader was
+        // waiting on. tests/greet-a11y-test.qml caught exactly that.
         // Three tiers, in this order. The recovery notice (roadmap P2-018) sits
         // above Caps Lock because it is the only thing on this screen that
         // explains why the session picker moved by itself — a greeter that
@@ -528,7 +534,7 @@ Item {
             anchors.horizontalCenter: parent.horizontalCenter
             height:  18
             text: root.ctx.hasError ? root.ctx.errorText
-                : (root.ctx.recoveryNotice !== "" ? "󰀦  " + root.ctx.recoveryNotice
+                : (root.ctx.recoveryNotice ? "󰀦  " + root.ctx.recoveryNotice
                 : (root.capsOn ? "󰪛  Caps Lock is on" : ""))
             color: root.ctx.hasError ? root.theme.errorColor : root.theme.subtext
             font.family:    root.theme.fontFamily
@@ -536,7 +542,7 @@ Item {
 
             Accessible.role: Accessible.AlertMessage
             Accessible.name: root.ctx.hasError ? root.ctx.errorText
-                           : (root.ctx.recoveryNotice !== "" ? root.ctx.recoveryNotice
+                           : (root.ctx.recoveryNotice ? root.ctx.recoveryNotice
                            : (root.capsOn ? "Caps Lock is on" : ""))
         }
     }

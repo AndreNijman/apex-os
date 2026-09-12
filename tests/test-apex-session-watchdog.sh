@@ -517,9 +517,29 @@ hasf "AG_REMEMBER is computed from recoverySession, not from a second spelling" 
 
 surface="$(cat "$SURFACE")"
 hasf "the surface shows the notice on the status line" \
-    'root.ctx.recoveryNotice !== ""' "$surface"
+    'root.ctx.recoveryNotice ? "' "$surface"
 hasf "…and a screen reader gets it without the glyph" \
-    ': (root.ctx.recoveryNotice !== "" ? root.ctx.recoveryNotice' "$surface"
+    ': (root.ctx.recoveryNotice ? root.ctx.recoveryNotice' "$surface"
+# The notice is tested for TRUTH, never against "". A ctx that does not carry
+# the property yields undefined, `undefined !== ""` is TRUE in JavaScript, and
+# the status line then renders undefined — swallowing the Caps Lock warning and,
+# through the accessible name, whatever a screen reader was waiting on. That is
+# not hypothetical: it is what the first version of this change did, and
+# tests/greet-a11y-test.qml went red on test_041 because of it. The surface is
+# the one place where this is reachable at runtime, so it is asserted here.
+case "$surface" in
+    *'recoveryNotice !== ""'*)
+        bad "the notice is tested for truth, not against the empty string" \
+            'the surface still compares recoveryNotice against ""' ;;
+    *)  ok "the notice is tested for truth, not against the empty string" ;;
+esac
+qmlctx="$(cat "$GREETER")"
+case "$qmlctx" in
+    *'_recoverWanted !== ""'*)
+        bad "…and so is the greeter's own recovery vote" \
+            'GreetContext still compares _recoverWanted against ""' ;;
+    *)  ok "…and so is the greeter's own recovery vote" ;;
+esac
 # The auth error is about the keystroke the user just made and must stay first.
 hasf "…and an auth error still outranks it" \
      'text: root.ctx.hasError ? root.ctx.errorText' "$surface"

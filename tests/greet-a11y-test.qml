@@ -71,6 +71,12 @@ Item {
         property bool   checking:  false
         property bool   hasError:  false
         property string errorText: ""
+        // The real GreetContext carries this (roadmap P2-018); the stub must
+        // too, or the surface's status line binds against undefined and this
+        // fixture stops testing the thing it is named for. It did: the notice
+        // shipped tested against "" rather than for truth, `undefined !== ""`
+        // is TRUE, and test_041 went red with the line rendering undefined.
+        property string recoveryNotice: ""
 
         property var    sessions:    [ { id: "apex-labwc", name: "APEX Desktop", exec: "x" },
                                        { id: "apex-gaming", name: "APEX Gaming", exec: "y" } ]
@@ -468,6 +474,35 @@ Item {
                    "caps lock is on and the status line announces '" +
                    st.Accessible.name + "'")
             keyClick(Qt.Key_Escape)
+        }
+
+        // The recovery notice (roadmap P2-018) is the only thing on this screen
+        // that explains why the session picker moved by itself. It is announced
+        // on the same terms as the other two: through Accessible.name, WITHOUT
+        // the Nerd Font glyph the visible text carries, because a reader handed
+        // a private-use codepoint spells it out or says nothing at all.
+        function test_042_recovery_notice_is_announced() {
+            var st = fixture.named("greetStatusLine")
+            verify(st !== null, "no item named greetStatusLine")
+            stubCtx.recoveryNotice = "Your desktop did not start — APEX Safe Graphics selected"
+            verify(st.Accessible.name.indexOf("APEX Safe Graphics") >= 0,
+                   "a recovery session was preselected and the status line announces '" +
+                   st.Accessible.name + "'")
+            verify(st.Accessible.name.indexOf("\uf0026") < 0,
+                   "the accessible name carries the alert glyph: '" + st.Accessible.name + "'")
+            compare(st.Accessible.role, Accessible.AlertMessage,
+                    "the notice must be an alert, or a reader will not interrupt for it")
+            // An auth error is about the keystroke the user just made, so it
+            // outranks a notice about something that happened before they sat
+            // down. Both are set here; the error must be the one announced.
+            stubCtx.errorText = "Authentication failed"
+            stubCtx.hasError  = true
+            verify(st.Accessible.name.indexOf("Authentication failed") >= 0,
+                   "an auth error must outrank the recovery notice, but the line says '" +
+                   st.Accessible.name + "'")
+            stubCtx.hasError       = false
+            stubCtx.errorText      = ""
+            stubCtx.recoveryNotice = ""
         }
     }
 }
