@@ -60,8 +60,12 @@ if ! command -v nft >/dev/null 2>&1; then
 else
     nft_out="$(nft -c -f "$RULES" 2>&1)" && nft_rc=0 || nft_rc=$?
     if [ "$nft_rc" != 0 ] && command -v unshare >/dev/null 2>&1; then
-        nft_out="$(unshare --user --map-root-user --net \
-                     nft -c -f "$RULES" 2>&1)" && nft_rc=0 || nft_rc=$?
+        ns_out="$(unshare --user --map-root-user --net \
+                    nft -c -f "$RULES" 2>&1)" && nft_rc=0 || nft_rc=$?
+        # unshare can be refused in its own right. Keep nft's own words in that
+        # case: reporting "unshare failed" as a FAIL on "the ruleset parses"
+        # would be a could-not-run wearing a syntax error's clothes.
+        case "$ns_out" in unshare:*) : ;; *) nft_out="$ns_out" ;; esac
     fi
     if [ "$nft_rc" = 0 ]; then
         ok "the ruleset parses"

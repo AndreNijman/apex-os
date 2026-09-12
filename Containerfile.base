@@ -1413,8 +1413,14 @@ RUN set -eux; \
     N=/usr/share/apex/nftables/apex.nft; \
     out="$(/usr/sbin/nft -c -f "$N" 2>&1)" && rc=0 || rc=$?; \
     if [ "$rc" != 0 ] && command -v unshare >/dev/null 2>&1; then \
-        out="$(unshare --user --map-root-user --net \
-                 /usr/sbin/nft -c -f "$N" 2>&1)" && rc=0 || rc=$?; \
+        ns_out="$(unshare --user --map-root-user --net \
+                    /usr/sbin/nft -c -f "$N" 2>&1)" && rc=0 || rc=$?; \
+        # unshare can be refused in its own right (no CAP_SYS_ADMIN, a seccomp
+        # filter, a uid_map the builder will not let us write). That is the
+        # namespace failing, not nft speaking, so keep nft's own words — or the
+        # next branch would print unshare's refusal as "nft rejected the
+        # ruleset" and fail the build on a diagnosis that is false.
+        case "$ns_out" in unshare:*) : ;; *) out="$ns_out" ;; esac; \
     fi; \
     if [ "$rc" = 0 ]; then \
         echo "firewall: the shipped ruleset parses"; \
