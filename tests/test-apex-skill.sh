@@ -155,13 +155,27 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "the word sandbox is spent only where bubblewrap runs"
-# P1-026's second criterion cannot be delivered whole: a plugin's hooks and
-# scripts are run by the agent and nothing in APEX confines them. The honest
-# report says so per component. The failure mode is a report that says
-# "sandboxed" because a field was vacuously true.
+sec "the word sandbox is spent only where bubblewrap runs, and never without a when"
+# P1-026's second criterion cannot be delivered whole, and the shortfall MOVED
+# when the session launcher started wrapping third-party definitions at launch.
+# There are now two ways an MCP server comes to be confined and they do not hold
+# in the same places, so the report must never print "sandboxed" without the
+# clause saying where it stops. The failure modes are symmetrical: a report that
+# says "sandboxed" of a hand-run session, and one that says "NOT sandboxed" of
+# a server every APEX-started session confines.
 has 'bubblewrap confines it' "$PROVRS" "a wrapped MCP server is the one thing called sandboxed"
-has 'Nothing here confines them' "$PROVRS" "hooks and executables are stated as unconfined"
+has 'sandboxed in a session `apex agent` starts' "$PROVRS" \
+    "a server the LAUNCH FILE wraps is named as that, not as unconfined"
+has 'Start the agent yourself' "$PROVRS" \
+    "and the at-launch sentence carries the clause saying where it stops"
+# Hooks and scripts get no sandbox FROM APEX — which is not the same as running
+# unconfined, because they are inside whatever the session itself is confined
+# to. The old wording here said "nothing in APEX confines them" and understated
+# it in one direction while a reader could take it the other way.
+has 'nothing here adds a sandbox of its own' "$PROVRS" \
+    "hooks are stated as getting no sandbox from APEX"
+has 'under `--sandbox unrestricted` is nothing' "$PROVRS" \
+    "and the case where the session has none either is named"
 has 'hasExecutableContent' "$PROVRS" \
     "the JSON pairs everythingExecutableIsSandboxed with whether there is anything to confine"
 has 'Nothing here' "$SKILLRS" "skill.rs says nothing confines a skill's scripts"
@@ -502,6 +516,35 @@ else
 fi
 run "$H" mcp list >/dev/null
 has 'plane' "$TMP/out" "apex mcp list carries the plane too, not only the new verb"
+
+# P1-028's second criterion: the per-connector switch, and the table that is a
+# measurement rather than a description. `connector.rs` once said in five places
+# that this did not exist, on a tip that had built it.
+run "$H" mcp planes >/dev/null
+has 'WHAT `--connectors` DOES' "$TMP/out" "the connector-policy table is printed"
+has 'local_only' "$TMP/out" "and names the value that removes the cloud plane without the network"
+# The qualifier. Every number in that table is about a session `apex agent`
+# started, and a readout that omitted this would be describing the machine.
+has 'started through `apex agent`' "$TMP/out" "the readout says where the selection applies"
+has 'Start the agent yourself' "$TMP/out" "and where it stops"
+if python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+ps={p["policy"] for p in d.get("connectorPolicies", [])}
+sys.exit(0 if d.get("perConnectorSwitch") is True
+         and d.get("appliesOnlyToSessionsStartedBy") == "apex agent"
+         and {"as_configured","local_only","curated","none"} <= ps else 1)' \
+    <(run "$H" mcp planes --json >/dev/null; cat "$TMP/out"); then
+    ok "the JSON carries the per-connector switch, its scope, and a row per policy"
+else
+    bad "the planes JSON does not report the per-connector switch and its scope"
+    sed 's/^/       /' "$TMP/out" >&2
+fi
+# `curated` with an empty connector_allow is REFUSED, not run: "nobody filled
+# this in" and "reach nothing" are different statements. A row of zeroes would
+# describe a session that never starts as one that starts empty.
+run "$H" mcp planes >/dev/null
+has 'refused, not run' "$TMP/out" "an empty connector_allow is a refusal, not a row of zeroes"
 
 sec "mcp memory: a view, never a store, and never a guess presented as a fact"
 rc="$(run "$H" mcp memory)"
