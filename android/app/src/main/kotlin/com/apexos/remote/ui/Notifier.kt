@@ -80,9 +80,11 @@ class Notifier(private val context: Context) {
         ).apply {
             description = "An agent on one of your machines needs you."
             // Off, deliberately. The content is minimized precisely because a
-            // lock screen is read by whoever is in the room; a badge that also
-            // announced a count on a wearable widens that for no gain.
-            setShowBadge(true)
+            // lock screen is read by whoever is in the room; a launcher badge
+            // that also announces a count widens that for no gain, and the
+            // Agent Center already shows the number to somebody who has the
+            // app open.
+            setShowBadge(false)
         }
         context.getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
     }
@@ -118,17 +120,16 @@ class Notifier(private val context: Context) {
         }
     }
 
-    /** Take down every notification for a machine — used when it is forgotten. */
-    fun clear(machine: String) {
-        val manager = NotificationManagerCompat.from(context)
-        for (kind in Alert.Kind.entries) {
-            // Ids are derived, so they can be recomputed rather than
-            // remembered. The session range is not enumerable, so this clears
-            // only what the group can be asked for; see `cancelAll`.
-            manager.cancel(NotificationContent.idFor(Alert.Key(machine, Alert.NO_SESSION, kind)))
-        }
-    }
-
+    /**
+     * Take down everything this app has posted.
+     *
+     * There is deliberately no per-machine version. Ids are derived from
+     * (machine, session, kind) and the session range is not enumerable, so a
+     * `clear(machine)` could only cancel the handful of ids it could guess —
+     * a function named for a thing it does not do, which is the same shape as
+     * a picker over a verb that does not exist. When one is needed, the ids
+     * posted per machine have to be remembered, not recomputed.
+     */
     fun cancelAll() = NotificationManagerCompat.from(context).cancelAll()
 
     /**
