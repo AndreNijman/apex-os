@@ -133,6 +133,12 @@ impl Roots {
         }
         std::fs::write(&p, body).map_err(|e| format!("{}: {e}", p.display()))
     }
+
+    /// Rename within the tree, for a write that must not be seen half-done.
+    fn rename(&self, from: &str, to: &str) -> Result<(), String> {
+        let (a, b) = (self.path(from), self.path(to));
+        std::fs::rename(&a, &b).map_err(|e| format!("{} -> {}: {e}", a.display(), b.display()))
+    }
 }
 
 /// How the driver reaches the rest of the system.
@@ -943,14 +949,82 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-fn load_period(roots: &Roots, which: &str) -> Option<ClosedPeriod> {
-    let text = roots.read_optional(which).ok().flatten()?;
-    serde_json::from_str(&text).ok()
+/// What is on disk where a closed period is kept.
+///
+/// THREE answers, and this used to be two. `load_period` was
+/// `roots.read_optional(which).ok().flatten()?` followed by
+/// `serde_json::from_str(&text).ok()`, and both `.ok()`s threw away a reason.
+/// `read_optional` is careful — it separates `NotFound` from every other error
+/// precisely so a caller can tell them apart — and this caller discarded
+/// exactly that distinction. A record that EXISTED and could not be read
+/// printed *"no lid-closed period has been recorded on this machine yet"*, and
+/// so did a file truncated by a crash mid-write. That is "permission denied is
+/// not absence" inside the one verb that delivers the owner's readout after
+/// they reopen the lid, and it is the answer that would send somebody looking
+/// for a bug in the driver when the real problem is a mode on a file.
+///
+/// It is reachable today rather than hypothetical: `apex-lid.service` sets
+/// `StateDirectory=apex/lid` with no `StateDirectoryMode` and no `UMask`, so
+/// the record is 0644 and an ordinary user can read it — and adding `UMask=0077`
+/// later would turn every unprivileged `apex lid report` into "nothing has
+/// happened", with no test going red.
+enum Record {
+    /// Nothing has ever been written here. The only one of the three that is
+    /// good news.
+    Absent,
+    /// A period the driver wrote, read back.
+    Found(Box<ClosedPeriod>),
+    /// It is there and it could not be turned into a period. Never "absent".
+    Unreadable(String),
 }
 
+fn load_period(roots: &Roots, which: &str) -> Record {
+    match roots.read_optional(which) {
+        Err(e) => Record::Unreadable(e),
+        Ok(None) => Record::Absent,
+        Ok(Some(text)) => match serde_json::from_str::<ClosedPeriod>(&text) {
+            Ok(p) => Record::Found(Box::new(p)),
+            // A truncated or hand-edited record. Named, not silently skipped:
+            // the file is still there and somebody has to be told why it did
+            // not come back.
+            Err(e) => Record::Unreadable(format!("{which}: {e}")),
+        },
+    }
+}
+
+/// The record, for a caller that can only carry on without one — the watch
+/// loop, which must keep running whatever it finds. It says what it could not
+/// read rather than starting a fresh period in silence, because the period it
+/// would have resumed is the one the owner is going to ask about.
+fn load_period_or_warn(roots: &Roots, which: &str) -> Option<ClosedPeriod> {
+    match load_period(roots, which) {
+        Record::Found(p) => Some(*p),
+        Record::Absent => None,
+        Record::Unreadable(e) => {
+            eprintln!(
+                "apex lid: the in-progress record could not be read ({e}); this close will be \
+                 recorded as a new period and whatever was in it is lost"
+            );
+            None
+        }
+    }
+}
+
+/// Write the record so that a failed write cannot destroy the last good one.
+///
+/// `Roots::write` is a bare `std::fs::write`, which TRUNCATES first: a crash, a
+/// kill, or a full disk between the truncate and the last byte leaves half a
+/// JSON document. The reader above now calls that unreadable, which is honest
+/// and still a lost record. Writing a sibling and renaming makes the swap
+/// atomic within the filesystem, so an interrupted write leaves the previous
+/// record intact instead of replacing it with rubble — and the machine this
+/// runs on is a laptop being deliberately suspended by a guard, which is
+/// exactly when a write gets interrupted.
 fn save_period(roots: &Roots, which: &str, p: &ClosedPeriod) -> Result<(), String> {
     let text = serde_json::to_string_pretty(p).map_err(|e| e.to_string())?;
-    roots.write(which, &format!("{text}\n"))
+    let tmp = format!("{which}.new");
+    roots.write(&tmp, &format!("{text}\n"))?;
+    roots.rename(&tmp, which)
 }
 
 // ── the CLI ──────────────────────────────────────────────────────────────────
@@ -1336,14 +1410,42 @@ fn pin(roots: &Roots, state: Option<String>) -> i32 {
 }
 
 fn report(roots: &Roots, as_json: bool) -> i32 {
-    let period = load_period(roots, LAST).or_else(|| load_period(roots, STATE));
-    let Some(p) = period else {
-        if as_json {
-            println!("{}", json!({ "period": Value::Null }));
-        } else {
-            println!("no lid-closed period has been recorded on this machine yet");
+    // LAST first, then the in-progress STATE — but an UNREADABLE record stops
+    // the search rather than falling through to the other file. Falling through
+    // would turn "your last close cannot be read" into "here is an older one",
+    // which is a true record of the wrong period and worse than no record: the
+    // owner reopens, asks what happened, and is shown something that did not.
+    let period = match load_period(roots, LAST) {
+        Record::Found(p) => Ok(Some(p)),
+        Record::Unreadable(e) => Err(e),
+        Record::Absent => match load_period(roots, STATE) {
+            Record::Found(p) => Ok(Some(p)),
+            Record::Unreadable(e) => Err(e),
+            Record::Absent => Ok(None),
+        },
+    };
+    let p = match period {
+        // The third answer, and the reason `Record` exists. A record that is
+        // there and could not be read is NOT a machine that has never had its
+        // lid shut, and the exit status says so too — a shell reading this is
+        // entitled to tell an owner "nothing yet" only when that is true.
+        Err(e) => {
+            if as_json {
+                println!("{}", json!({ "period": Value::Null, "error": e }));
+            } else {
+                eprintln!("apex lid: the record of the last close could not be read — {e}");
+            }
+            return 1;
         }
-        return 0;
+        Ok(None) => {
+            if as_json {
+                println!("{}", json!({ "period": Value::Null }));
+            } else {
+                println!("no lid-closed period has been recorded on this machine yet");
+            }
+            return 0;
+        }
+        Ok(Some(p)) => *p,
     };
     if as_json {
         println!("{}", json!({ "period": p, "summary": p.summary(), "vpn_held": p.vpn_held() }));
@@ -1410,7 +1512,7 @@ fn watch(roots: &Roots, once: bool, dry_run: bool, interval: Option<u64>) -> i32
     }
     let every = interval.unwrap_or(loaded.policy.poll_secs).max(1);
     let mut held: Option<InhibitorHandle> = None;
-    let mut period: Option<ClosedPeriod> = load_period(roots, STATE);
+    let mut period: Option<ClosedPeriod> = load_period_or_warn(roots, STATE);
 
     loop {
         let inputs = measure(roots, &runner);
@@ -1740,6 +1842,118 @@ mod tests {
     impl Drop for Tmp {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The three answers a record on disk can give, which used to be two.
+    ///
+    /// These run in CI today; `tests/test-apex-lid.sh` — which asserts the same
+    /// thing through the CLI and its exit status — does not yet, so this is
+    /// where the guarantee actually lives until that suite is wired in.
+    #[test]
+    fn a_record_that_could_not_be_read_is_not_a_record_that_is_absent() {
+        let t = Tmp::new("record");
+        let roots = t.roots();
+
+        // 1. genuinely nothing, which is the only one of the three that is
+        //    good news.
+        assert!(
+            matches!(load_period(&roots, LAST), Record::Absent),
+            "a file that was never written is Absent"
+        );
+
+        // 2. a whole record.
+        let p = ClosedPeriod {
+            closed_at: 11,
+            last_seen: 12,
+            opened_at: None,
+            sessions_at_close: 7,
+            why: "the known-good record".to_string(),
+            ended_by: None,
+            charge_at_close: None,
+            charge_last: None,
+            peak_c: None,
+            powered_down: Vec::new(),
+            skipped: Vec::new(),
+            vpn: Vec::new(),
+        };
+        save_period(&roots, LAST, &p).expect("the record must save");
+        match load_period(&roots, LAST) {
+            Record::Found(got) => assert_eq!(got.sessions_at_close, 7),
+            other => panic!("a written record must read back: {}", describe(&other)),
+        }
+
+        // 3. there, and unreadable. A directory rather than a mode, so the
+        //    case means the same thing when the tests run as root — which a
+        //    container job does, and where a chmod proves nothing.
+        std::fs::remove_file(roots.path(LAST)).expect("rm");
+        std::fs::create_dir_all(roots.path(LAST)).expect("mkdir");
+        match load_period(&roots, LAST) {
+            Record::Unreadable(e) => assert!(e.contains("last.json"), "{e}"),
+            other => panic!(
+                "a record that exists and cannot be read is NOT absence: {}",
+                describe(&other)
+            ),
+        }
+        std::fs::remove_dir(roots.path(LAST)).expect("rmdir");
+
+        // 4. and a crash between the truncate and the last byte. Same answer:
+        //    the file is still there and somebody has to be told why it did
+        //    not come back.
+        std::fs::write(roots.path(LAST), "{\"closed_at\":1,\"last_").expect("write");
+        match load_period(&roots, LAST) {
+            Record::Unreadable(e) => assert!(e.contains("last.json"), "{e}"),
+            other => panic!("a truncated record is unreadable, not absent: {}", describe(&other)),
+        }
+    }
+
+    fn describe(r: &Record) -> String {
+        match r {
+            Record::Absent => "Absent".to_string(),
+            Record::Found(_) => "Found".to_string(),
+            Record::Unreadable(e) => format!("Unreadable({e})"),
+        }
+    }
+
+    /// A failed write must cost the NEW record, never the last good one.
+    ///
+    /// `Roots::write` is a bare `std::fs::write`, which truncates before it
+    /// writes: in place, an interrupted save leaves half a document where the
+    /// owner's last close used to be. The sibling-and-rename means the failure
+    /// lands on a file nothing reads.
+    #[test]
+    fn a_save_that_fails_leaves_the_previous_record_intact() {
+        let t = Tmp::new("atomic");
+        let roots = t.roots();
+        let good = ClosedPeriod {
+            closed_at: 11,
+            last_seen: 12,
+            opened_at: None,
+            sessions_at_close: 7,
+            why: "the known-good record".to_string(),
+            ended_by: None,
+            charge_at_close: None,
+            charge_last: None,
+            peak_c: None,
+            powered_down: Vec::new(),
+            skipped: Vec::new(),
+            vpn: Vec::new(),
+        };
+        save_period(&roots, LAST, &good).expect("the first save must work");
+
+        // The temp file's path, made un-writable by being a directory.
+        std::fs::create_dir_all(roots.path(&format!("{LAST}.new"))).expect("mkdir");
+        let mut replacement = good.clone();
+        replacement.why = "the record that could not be written".to_string();
+        replacement.sessions_at_close = 99;
+        assert!(save_period(&roots, LAST, &replacement).is_err(), "the save must refuse");
+
+        match load_period(&roots, LAST) {
+            Record::Found(got) => {
+                assert_eq!(got.sessions_at_close, 7, "the last good record must survive");
+                assert_eq!(got.why, "the known-good record");
+            }
+            other => panic!("the previous record must still be whole: {}", describe(&other)),
         }
     }
 
