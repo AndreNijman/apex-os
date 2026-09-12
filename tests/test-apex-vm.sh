@@ -146,6 +146,20 @@ exit \${FAKE_${t//./_}_RC:-0}
 EOF
 done
 
+# mcopy additionally keeps the task script it was handed. The engine deletes
+# its scratch directory on teardown, so the generated task.sh cannot be read
+# back afterwards — and it is the one artifact whose CONTENT matters rather
+# than the argv that produced it.
+cat > "$BIN/mcopy" <<EOF
+#!/usr/bin/env bash
+{ printf 'mcopy'; printf ' <%s>' "\$@"; printf '\n'; } >> "$CALLS"
+case " \$* " in
+    *" ::/task.sh "*) cp -- "\${@: -2:1}" "$WORK/task-seen.sh" 2>/dev/null ;;
+esac
+exit \${FAKE_mcopy_RC:-0}
+EOF
+chmod 0755 "$BIN/mcopy"
+
 chmod 0755 "$BIN"/*
 
 # virtiofsd is a FILE the engine tests for, not a command it runs, so the
@@ -415,6 +429,62 @@ out=$(bash "$ENGINE" run --image "$GUEST" --egress report.json -- true 2>&1)
 c=$(calls)
 has "run: without --egress-to it says nothing left" "nothing left the VM" "$out"
 hasnt "run: without --egress-to no file is read out of the volume" "<::/report.json>" "$c"
+
+echo
+echo "── three defects found by review, each now with an assertion ──"
+
+# 1. --import must CONVERT. The domain declares qcow2 for the system disk, so
+# a raw image copied in produces a define that succeeds and a start that fails
+# with qemu refusing a magic number.
+RAWIMG="$WORK/raw.img"; printf 'not a qcow2' > "$RAWIMG"
+out=$(run_engine create imported --import "$RAWIMG")
+has "import: the image is converted to qcow2, not copied" \
+    "qemu-img <convert> <-O> <qcow2> <$RAWIMG>" "$(calls)"
+hasnt "import: no plain copy of the source" "<cp>" "$(calls)"
+
+# Same for the disposable path, which has the same domain and the same driver.
+reset_calls
+out=$(bash "$ENGINE" run --image "$RAWIMG" --name run-conv -- true 2>&1)
+has "run: the guest image is converted too" \
+    "qemu-img <convert> <-O> <qcow2> <$RAWIMG>" "$(calls)"
+
+# 2. egress must not overwrite a host file. `mcopy -n` means "no confirmation
+# when overwriting", which is the opposite of what the flag reads like.
+mkdir -p "$EGRESS"; printf 'the users own file' > "$EGRESS/report.json"
+before=$(sha256sum < "$EGRESS/report.json")
+reset_calls
+out=$(bash "$ENGINE" run --image "$GUEST" --name run-ovw \
+        --egress report.json --egress-to "$EGRESS" -- true 2>&1); rc=$?
+is "egress: refuses to overwrite (non-zero exit)" 1 "$rc"
+has "egress: says which file and how to allow it" "not overwriting it (--force" "$out"
+is "egress: the host's file is untouched" "$before" "$(sha256sum < "$EGRESS/report.json")"
+hasnt "egress: and nothing was read out of the volume for it" "<::/report.json>" "$(calls)"
+
+reset_calls
+out=$(bash "$ENGINE" run --image "$GUEST" --name run-force --force \
+        --egress report.json --egress-to "$EGRESS" -- true 2>&1)
+has "egress: --force does read it out" "<::/report.json>" "$(calls)"
+rm -f "$EGRESS/report.json"
+
+# The destination fence: teardown deletes the VM root, so a destination inside
+# it would report every file copied and produce none.
+out=$(run_engine run --image "$GUEST" --egress a.txt --egress-to "$VMHOME/inside" -- true); rc=$?
+is "egress: a destination inside the VM root is refused" 1 "$rc"
+has "egress: and it says why" "deleted by this command" "$out"
+
+# 3. the task script must keep the quoting the user typed. `${command[*]}`
+# joins with spaces and loses every quote, so `sh -c 'echo a b'` arrives as
+# three separate words.
+reset_calls
+out=$(bash "$ENGINE" run --image "$GUEST" --name run-quote -- sh -c 'echo "a b"' 2>&1)
+task=$(tail -1 "$WORK/task-seen.sh" 2>/dev/null)
+is "task: each argument is one shell word" "'sh' '-c' 'echo \"a b\"'" "$task"
+# And an argument containing a quote survives, which is the case the naive
+# join gets wrong in the other direction.
+reset_calls
+out=$(bash "$ENGINE" run --image "$GUEST" --name run-quote2 -- sh -c "echo it's" 2>&1)
+is "task: an embedded single quote is escaped, not dropped" \
+    "'sh' '-c' 'echo it'\\''s'" "$(tail -1 "$WORK/task-seen.sh" 2>/dev/null)"
 
 echo
 echo "── doctor, and the refusal every verb shares ──"

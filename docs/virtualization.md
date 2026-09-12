@@ -40,6 +40,9 @@ apex vm doctor
 sudo apex install qemu-kvm libvirt-daemon-kvm libvirt-client edk2-ovmf swtpm virtiofsd
 ```
 
+`mtools` and `dosfstools` are needed as well for `apex vm run`, which builds
+its volumes with `mkfs.vfat` and reads them back with `mcopy`.
+
 `apex vm doctor` probes each piece and prints exactly that line when something
 is missing. Every other verb refuses with the same text **before** creating
 anything, rather than failing halfway through defining a domain.
@@ -278,6 +281,14 @@ Default-deny at both ends. Without `--copy-in` the guest gets only the task
 script. Without `--egress-to` nothing leaves at all, whatever `--egress` says.
 `--egress` takes a plain filename: no directory component, no `..`, no
 wildcard.
+
+A third decision is separate from both: a nominated file that would land on
+top of something already at the destination is **not** copied unless `--force`
+says so. The file coming out was written by code the user ran in a VM because
+they did not trust it, so replacing something of theirs with it is a decision
+rather than a default. `--egress-to` is also refused if it resolves inside the
+VM root, because teardown deletes that tree — every file would be reported
+copied and none would survive.
 
 **There is no network and no flag to give it one.** `apex vm run --network`
 is refused with that reason rather than ignored: a disposable VM exists to run
