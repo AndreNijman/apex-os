@@ -3,7 +3,7 @@
  "updated": "2026-09-12T09:55+08:00",
  "_round": "Round 18. All four round-17 agents finished and every one of their branches is landed; the unlanded set is EMPTY in both repos for the first time in the program. The round's real work was the image build, which had been unbuildable since 2026-09-07 for two separate reasons of the same shape: an assertion that could only ever fail (polkit, 706489ec) and an assertion that could never RUN (nft, e24cd244 + cafd3635). Six fresh agents dispatched against the ceiling.",
  "_landed_this_round": {
-  "apex-os": "roadmap/v2.2 577425e9 -> cafd3635. e24cd244 + cafd3635, written by the orchestrator: the firewall stanza's nft -c could not run in a build container and took the whole base image down with it.",
+  "apex-os": "roadmap/v2.2 577425e9 -> 481fc579. e24cd244 + cafd3635 (the nft check could not run in a build container), 9f352724 (the expiry test used an openssl flag ubuntu-latest does not have), and 481fc579 task/followups-r18: test-apex-task.sh's carried failure was the TEST (70/1 -> 71/0), the apex-agentd flake was a barrier not a poll (0/50 idle and 0/50 under 16 spinners; a 300ms sleep between bind and the sweep makes the OLD test fail 20/20), apex remote is documented, and check-doc-verbs.sh now walks binary -> docs as well as docs -> binary (259 commands, 127 documented, 132 recorded as a ratchet). Plus the reason none of it would have run: the rust job was gated on a selector naming neither docs/ nor README.md - fifth instance of that bug in that file.",
   "apex-shell": "roadmap/v2.2 1417402 -> 34fef17: P0-021's last open criterion, written by the orchestrator while the six agents ran. The five session kinds rendered consistently by construction and nothing asserted it; four cases now do, mutation-proved three ways.",
   "p1-050": "task/p1-050-remote-protocol is landed BY CONTENT, settled rather than guessed: for all 7 commits, git diff roadmap/v2.2 branch -- <that commit's files> is 0 lines. It is 233 commits behind and 7 ahead, so the ahead-count read as unlanded work for three rounds. The branch is deletable."
  },
@@ -68,7 +68,9 @@
    "queue_id": null,
    "title": "test-apex-task.sh's carried failure, the undocumented apex remote verbs, and the agentd flake",
    "card": "ROADMAP/state/agents/followups.md (written at dispatch)",
-   "at_dispatch": "Three defects that have outlived three rounds because no unit owned them. check-doc-verbs.sh validates documented-verb -> real-command and never the reverse, which is why five apex remote verbs are documented nowhere and nothing noticed."
+   "at_dispatch": "Three defects that have outlived three rounds because no unit owned them. check-doc-verbs.sh validates documented-verb -> real-command and never the reverse, which is why five apex remote verbs are documented nowhere and nothing noticed.",
+   "completed": "2026-09-12T10:32+08:00",
+   "result": "DONE - all three closed, merged as 481fc579."
   },
   {
    "slug": "p1-053a",
@@ -120,6 +122,22 @@
    "title": "Accessibility baseline and internationalisation baseline",
    "card": "ROADMAP/state/agents/p2-b.md (carries the dead agent's NEXT list)",
    "at_dispatch": "Continues a dead agent from its card, NOT by messaging it. Its branch is landed; the card's NEXT starts at the sections array in AgentHelpContent.qml. Warned that an accessibility pass built from grepping for Accessible.name is the house defect."
+  },
+  {
+   "slug": "p1-062",
+   "items": [
+    "P1-062"
+   ],
+   "repo": "apex-os",
+   "worktree": "/var/tmp/apex-work/wt-p1-062",
+   "branch": "task/p1-062-chaos",
+   "agent_id": "acc1d9572368aba09",
+   "dispatched": "2026-09-12T10:35+08:00",
+   "session": "round 18 orchestrator",
+   "queue_id": null,
+   "title": "Destructive chaos/torture reliability test infrastructure",
+   "card": "ROADMAP/state/agents/p1-062.md (written at dispatch)",
+   "at_dispatch": "Took the slot followups freed. depends_on P0-001 does not block BUILDING the harness, only qualifying a machine with it. Handed this program's own incidents as the case list (a staged deployment discarded by a crash, the sysext-vs-hotfix reboot asymmetry) and told that a harness reporting 'no corruption' when it never injected the fault is the worst version of permission-denied-is-not-absence."
   }
  ],
  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -128,7 +146,8 @@
   "tests/test-apex-firewall.sh had never once parsed the policy": "Its parse case SKIPped for every non-root caller, so CI had never run it. Same private netns, same three-way verdict: 31 passed/1 skipped -> 32 passed/0 skipped, and against a mutant ruleset 30 passed/2 failed with the failure named.",
   "two can-only-fail assertions in one Containerfile": "706489ec (a grep that matched the policy file's own comment) and this one. Between them roadmap/v2.2 produced no image for five days. Both were written as build-time proof and both proved nothing. The pattern to watch: an assertion nobody has ever seen go red.",
   "apex-android does not exist": "gh repo view AndreNijman/apex-android -> could not resolve. queue.json names it as the repo for p1-053a.",
-  "the expiry test used an openssl flag the runner does not have": "apex-remote-core/tests/tls.rs minted its out-of-date certificate with openssl x509 -req -not_before/-not_after, which arrived in OpenSSL 3.5. This laptop has 3.5.7, ubuntu-latest has 3.0.13, where x509 answers 'Use -help for summary' and exits non-zero - a message nobody reads as a version problem. Replaced with openssl ca -startdate/-enddate and verified inside a docker.io/library/ubuntu:24.04 container with the runner's own openssl rather than by another 45-minute build. Fixed in 9f352724; the rust job is green on it."
+  "the expiry test used an openssl flag the runner does not have": "apex-remote-core/tests/tls.rs minted its out-of-date certificate with openssl x509 -req -not_before/-not_after, which arrived in OpenSSL 3.5. This laptop has 3.5.7, ubuntu-latest has 3.0.13, where x509 answers 'Use -help for summary' and exits non-zero - a message nobody reads as a version problem. Replaced with openssl ca -startdate/-enddate and verified inside a docker.io/library/ubuntu:24.04 container with the runner's own openssl rather than by another 45-minute build. Fixed in 9f352724; the rust job is green on it.",
+  "132 of 259 apex commands are documented nowhere": "Measured by the new reverse pass in check-doc-verbs.sh and recorded as a ratchet in tests/doc-verbs-undocumented. Worst clusters: apex shell 14 of 16, apex env 11 of 13, apex host 8 of 8, apex ai 7 of 7. Unowned. Also unowned: apexd-core/src/host.rs:185 still refuses a future hosts.toml with 'understands up to' and no remedy, the rule tasks.toml got in P1-045; tests/test-apex-host.sh:487 is green against the old wording, so both move together or not at all."
  },
  "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt \u2014 the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
  "_orchestrator": {

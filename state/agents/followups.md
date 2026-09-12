@@ -48,6 +48,7 @@ never needed — everything was in apex-os.
               not a connected socket
   `f9dff3b7`  docs(remote): APEX Remote was undocumented, and the doc checker
               could not have found it
+  `431ef97f`  ci: a docs-only PR skipped the job that checks the docs
 
 Nothing is left open on this card. If a fresh agent lands here, the only
 useful follow-ons are the two named under "Left deliberately undone" below.
@@ -108,6 +109,11 @@ MUTATIONS (deterministic, not waited for):
   sweep re-audits an already-closed grant, so the ending IS written twice —
     the_ending_is_recorded_once…  before  30/30 PASSED
     the_ending_is_recorded_once…  after   30/30 FAILED
+  Stated precisely, because the boundary matters: with the re-audit mutant and
+  NO widening, the old test caught it 30/30 on an idle box. Its soundness
+  depended on daemon two's sweep out-running the test's read — idle here it
+  usually did; with the window widened by 300ms it never did. The fixed test
+  does not depend on the race either way.
 Both sources restored byte-identical with plain `cp`. Clippy clean.
 `cargo test -p apex-agentd`: 231 passed, 0 failed.
 
@@ -140,7 +146,14 @@ Two things fell out of pointing it at every doc:
 
 And it RUNS now: it was in no workflow and no suite. It is a step in
 `pr-validation.yml` beside "Every verb is in the binary", which already builds
-the binary it needs.
+the binary it needs — and `431ef97f` is the half that makes that true. The
+`rust` job it lives in is gated on
+`^(apexd/|config/|tests/|files/desktop/…|…apex-mux)`, which named neither
+`docs/` nor `README.md`: a PR that deleted the line documenting
+`apex remote pair` and touched nothing else would have skipped the whole job,
+and a skipped job counts as success. Both are in the selector now. Fifth
+instance of that bug in that file; the four comments above it are the same
+shape.
 
 MUTATIONS, each restored byte-identical with plain `cp`:
   removed `apex remote pair` from docs/remote.md
