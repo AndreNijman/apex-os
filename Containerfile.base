@@ -936,6 +936,8 @@ RUN set -eux; \
 COPY files/system/libexec/apex-guest-wipe /usr/libexec/apex-guest-wipe
 COPY files/system/units/apex-guest-wipe@.service \
      /usr/lib/systemd/system/apex-guest-wipe@.service
+COPY files/system/units/apex-guest-session@.service \
+     /usr/lib/systemd/system/apex-guest-session@.service
 COPY files/system/shared-machine/guest-accounts /etc/apex/guest-accounts
 COPY files/system/shared-machine/greetd-kiosk.toml \
      /usr/share/apex/shared-machine/greetd-kiosk.toml
@@ -956,6 +958,26 @@ RUN set -eux; \
     test -f /usr/lib/systemd/system/apex-guest-wipe@.service; \
     test ! -e /etc/systemd/system/multi-user.target.wants/apex-guest-wipe@.service; \
     grep -q '^SuccessExitStatus=0 2$' /usr/lib/systemd/system/apex-guest-wipe@.service; \
+    : '── the session-end hook: installed, not enabled, and LOUD ──'; \
+    : 'The two units differ in exactly one judgement and it is not cosmetic.'; \
+    : 'The boot sweep above treats a refusal as success, because on a machine'; \
+    : 'with no guest configured refusing IS the right answer. The hook below'; \
+    : 'is only ever enabled for an account that is a configured guest, so a'; \
+    : 'refusal there means the guest left credentials behind -- it must fail'; \
+    : 'loudly, and a copied SuccessExitStatus would make it green instead.'; \
+    test -f /usr/lib/systemd/system/apex-guest-session@.service; \
+    ! grep -q '^SuccessExitStatus' /usr/lib/systemd/system/apex-guest-session@.service; \
+    : 'And it must hang off the unit logind actually stops. Binding to the'; \
+    : 'user slice never fires: logind does not stop user-<uid>.slice, and a'; \
+    : 'unit that BindsTo it keeps it from being collected, so the trigger the'; \
+    : 'hook is waiting for is the one the hook prevents. Measured on the L16.'; \
+    grep -q '^BindsTo=user-runtime-dir@%i.service$' \
+         /usr/lib/systemd/system/apex-guest-session@.service; \
+    grep -q '^WantedBy=user-runtime-dir@%i.service$' \
+         /usr/lib/systemd/system/apex-guest-session@.service; \
+    ! grep -qE '^(BindsTo|WantedBy)=user-%i\.slice$' \
+         /usr/lib/systemd/system/apex-guest-session@.service; \
+    test -z "$(find /etc/systemd/system -name 'apex-guest-session@*.service' -print -quit)"; \
     : '── the kiosk config is a recipe, and lands where recipes land ──'; \
     : 'greetd reads exactly one file, /etc/greetd/config.toml, and that file'; \
     : 'is installed by Containerfile.apex -- it does not exist in this stage.'; \
