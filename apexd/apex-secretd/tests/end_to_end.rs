@@ -1507,3 +1507,174 @@ fn two_operations_at_the_same_instant_cannot_both_spend_the_last_one_of_a_cap() 
          so the refused line lands first"
     );
 }
+
+#[test]
+fn the_daemon_reports_what_a_project_has_spent_and_what_is_left_of_each_cap() {
+    // §13.14's third criterion, and the reason it is a daemon verb: the trail
+    // is root-owned and `Request::Audit` hands back a bounded window, so a
+    // client counting what it was given would present an undercount as a fact.
+    // Asking for the number is also what keeps the report and the enforcement
+    // from drifting — both come out of the same reader over the same lines.
+    let provider = FakeMcp::start(false);
+    let daemon = Daemon::start("budget-report");
+    let project = budgeted_project(
+        &daemon,
+        "reported",
+        "[agent.budget]\noperations_daily = 10\nmemory_daily = 5.00\n\n\
+         [agent.budget.operations]\n\"mcp.request\" = 3\n\n\
+         [agent.budget.price]\n\"mcp.request\" = 1.50\n",
+    );
+    arrange_mcp(&daemon, provider.port, &project);
+
+    let ask = || match daemon
+        .client()
+        .call(&Request::Usage {
+            project: project.to_string_lossy().into_owned(),
+        })
+        .expect("usage")
+    {
+        Response::Usage { report } => *report,
+        other => panic!("expected a usage reply, got {other:?}"),
+    };
+
+    let before = ask();
+    assert!(before.budgeted, "the project declared three caps");
+    assert_eq!(before.operations, 0);
+    assert_eq!(
+        before
+            .caps
+            .iter()
+            .map(|c| (c.name.as_str(), c.used.as_str(), c.limit.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("operations_daily", "0", "10"),
+            ("mcp.request", "0", "3"),
+            ("memory_daily", "0.00", "5.00"),
+        ]
+    );
+
+    assert!(matches!(
+        mcp_call(&daemon, &project),
+        Response::Performed { .. }
+    ));
+    assert!(matches!(
+        mcp_call(&daemon, &project),
+        Response::Performed { .. }
+    ));
+
+    let after = ask();
+    assert_eq!(after.operations, 2);
+    assert_eq!(after.per_operation["mcp.request"], 2);
+    assert_eq!(after.per_service["memory"], 2);
+    assert_eq!(
+        after
+            .caps
+            .iter()
+            .map(|c| (c.name.as_str(), c.used.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("operations_daily", "2"),
+            ("mcp.request", "2"),
+            // Two at 1.50, in millionths, rendered back as money.
+            ("memory_daily", "3.00"),
+        ]
+    );
+    assert!(after.caps.iter().all(|c| c.unmeasurable.is_none()));
+
+    // A worktree under the project is a DIFFERENT root, matched exactly. It
+    // does its own work, under its own budget, and neither total may leak into
+    // the other: a prefix match would charge the worktree's deployments to the
+    // project as well as to itself, and a project's cap would then be spent by
+    // work nobody did in it.
+    let inner_root = project.join(".apex/worktrees/x");
+    std::fs::create_dir_all(&inner_root).expect("worktree dir");
+    daemon
+        .client()
+        .call(&Request::Grant {
+            project: inner_root.to_string_lossy().into_owned(),
+            service: "memory".into(),
+            capability: "mcp-request".into(),
+            revoke: false,
+        })
+        .expect("grant");
+    assert!(matches!(
+        mcp_call(&daemon, &inner_root),
+        Response::Performed { .. }
+    ));
+
+    let ask_at = |root: &Path| match daemon
+        .client()
+        .call(&Request::Usage {
+            project: root.to_string_lossy().into_owned(),
+        })
+        .expect("usage")
+    {
+        Response::Usage { report } => *report,
+        other => panic!("expected a usage reply, got {other:?}"),
+    };
+    let inner = ask_at(&inner_root);
+    assert_eq!(inner.operations, 1, "the parent's work was counted as the worktree's");
+    assert!(!inner.budgeted, "the worktree has no apex.toml of its own");
+    assert_eq!(
+        ask_at(&project).operations,
+        2,
+        "the worktree's work was charged to the project as well"
+    );
+}
+
+#[test]
+fn a_money_cap_nothing_can_price_is_reported_as_unmeasurable_and_not_as_zero_spent() {
+    // The report's own version of the module's argument. A budget with an
+    // unpriced operation against it is refusing every call — and a line reading
+    // `0.00 / 5.00` would tell the person looking at it that their budget was
+    // fine, which is the friendliest possible way to hide a broken one.
+    let provider = FakeMcp::start(false);
+    let daemon = Daemon::start("budget-report-unmeasurable");
+
+    // Priced at first, so one call gets through and lands in the trail.
+    let project = budgeted_project(
+        &daemon,
+        "unpriced",
+        "[agent.budget]\nmemory_daily = 5.00\n\n\
+         [agent.budget.price]\n\"mcp.request\" = 1.00\n",
+    );
+    arrange_mcp(&daemon, provider.port, &project);
+    assert!(matches!(
+        mcp_call(&daemon, &project),
+        Response::Performed { .. }
+    ));
+
+    // The price is then removed, which is what happens when somebody adds a
+    // budget and has not finished the price table.
+    std::fs::write(
+        project.join("apex.toml"),
+        "[agent.budget]\nmemory_daily = 5.00\n",
+    )
+    .expect("rewrite");
+
+    let report = match daemon
+        .client()
+        .call(&Request::Usage {
+            project: project.to_string_lossy().into_owned(),
+        })
+        .expect("usage")
+    {
+        Response::Usage { report } => *report,
+        other => panic!("expected a usage reply, got {other:?}"),
+    };
+    let money = report
+        .caps
+        .iter()
+        .find(|c| c.name == "memory_daily")
+        .expect("the money cap");
+    assert_eq!(money.used, "?", "an unmeasurable spend was rendered as a number");
+    let why = money.unmeasurable.as_deref().expect("a reason");
+    assert!(why.contains("mcp.request"), "{why}");
+    assert!(why.contains("being refused"), "{why}");
+
+    // And the operation really is refused, so the report is not overstating it.
+    assert!(matches!(
+        mcp_call(&daemon, &project),
+        Response::Error { .. }
+    ));
+}

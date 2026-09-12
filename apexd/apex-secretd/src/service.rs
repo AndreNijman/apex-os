@@ -234,6 +234,53 @@ impl Service {
         Response::Audit { entries }
     }
 
+    /// §13.14: what this project's budget allows and what it has spent today.
+    ///
+    /// The same reader, the same counter and the same trail the enforcement
+    /// uses — so the report cannot say a project is inside its budget while the
+    /// broker refuses it, which is what a second implementation in the CLI
+    /// would eventually do.
+    ///
+    /// A budget that cannot be read is an error here, exactly as it is a
+    /// refusal there. A report that quietly showed "no budget" for a project
+    /// whose `apex.toml` is unreadable would be the friendliest possible way to
+    /// tell somebody their cap is fine while it is not being enforced.
+    pub fn usage(&self, peer: Peer, project: &str) -> Response {
+        if !broker::valid_project(project) {
+            return Response::error(
+                ErrorKind::BadRequest,
+                format!("'{}' is not a project root", project.escape_debug()),
+            );
+        }
+        let Some(owner) = broker::owner(peer.uid) else {
+            return Response::error(
+                ErrorKind::PermissionDenied,
+                format!("uid {} is not an account on this machine", peer.uid),
+            );
+        };
+        let budget = match Budget::read_or_unbudgeted(Path::new(project), owner.uid, &owner.name) {
+            Ok(budget) => budget,
+            Err(e) => {
+                return Response::error(
+                    ErrorKind::BadRequest,
+                    format!(
+                        "this project's budget could not be read, so what it \
+                         allows is not known: {e}"
+                    ),
+                )
+            }
+        };
+        let usage = Usage::of(
+            &audit::tail(&self.store.audit_path(), usize::MAX),
+            peer.uid,
+            project,
+            store::now_ms(),
+        );
+        Response::Usage {
+            report: Box::new(budget::Report::new(project, &budget, &usage)),
+        }
+    }
+
     // ── administration, owner only ──────────────────────────────────────────
 
     pub fn add(&self, peer: Peer, new: NewService<'_>, value: SecretValue) -> Response {

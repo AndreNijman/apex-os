@@ -515,6 +515,118 @@ pub fn check(budget: &Budget, usage: &Usage, service: &str, operation: &str) -> 
     Spend::Within
 }
 
+/// One cap, and how much of it is gone.
+///
+/// Rendered rather than numeric, because a money cap and a count cap are read
+/// in different units and a reader that had to know which was which to print
+/// `5.00` instead of `5000000` would be a second place that knows about
+/// millionths.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Cap {
+    /// What it caps, as the project file spells it.
+    pub name: String,
+    /// `operations`, `operation` or `money`.
+    pub kind: String,
+    /// How much is gone.
+    pub used: String,
+    /// The cap itself.
+    pub limit: String,
+    /// Why this cap cannot be evaluated, when it cannot.
+    ///
+    /// A cap nothing can measure is **not** a cap with nothing used against it,
+    /// and a report that showed `0.00 / 5.00` for a money budget with no price
+    /// table would be telling somebody their budget was fine when in fact every
+    /// operation under it is being refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unmeasurable: Option<String>,
+}
+
+/// What a project's budget allows and what it has used today.
+///
+/// §13.14's *"usage visible in the task audit"*, as one answer from the daemon
+/// rather than a count a client derives. The client cannot derive it honestly:
+/// the trail is root-owned and `Request::Audit` hands back a bounded window, so
+/// a client that counted what it was given would present an undercount as a
+/// fact.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Report {
+    /// The root these numbers are for, exactly as matched.
+    pub project: String,
+    /// The start of the day, ms since the epoch.
+    pub day_start_ms: u64,
+    /// Whether the project declared a budget at all. The caps list is empty
+    /// either way when nothing is capped, and these are different facts.
+    pub budgeted: bool,
+    /// Brokered operations today, all credentials — whether or not anything
+    /// caps them.
+    pub operations: u64,
+    /// Today's operations by id, and by credential.
+    pub per_operation: BTreeMap<String, u64>,
+    pub per_service: BTreeMap<String, u64>,
+    /// Every cap the project declared, with what is left of it.
+    pub caps: Vec<Cap>,
+}
+
+impl Report {
+    /// Put a budget and a usage together.
+    pub fn new(project: &str, budget: &Budget, usage: &Usage) -> Report {
+        let mut caps = Vec::new();
+        if let Some(limit) = budget.operations_daily {
+            caps.push(Cap {
+                name: "operations_daily".to_string(),
+                kind: "operations".to_string(),
+                used: usage.operations.to_string(),
+                limit: limit.to_string(),
+                unmeasurable: None,
+            });
+        }
+        for (operation, limit) in &budget.per_operation_daily {
+            caps.push(Cap {
+                name: operation.clone(),
+                kind: "operation".to_string(),
+                used: usage
+                    .per_operation
+                    .get(operation)
+                    .copied()
+                    .unwrap_or(0)
+                    .to_string(),
+                limit: limit.to_string(),
+                unmeasurable: None,
+            });
+        }
+        for (service, limit) in &budget.money_daily {
+            let (used, unmeasurable) = match usage.money_spent(service, &budget.price) {
+                Ok(spent) => (money(spent), None),
+                Err(unpriced) => (
+                    "?".to_string(),
+                    Some(format!(
+                        "{unpriced} ran today and has no price under \
+                         [agent.budget.price], so what has been spent cannot be \
+                         added up. Every operation under '{service}' is being \
+                         refused until it has one"
+                    )),
+                ),
+            };
+            caps.push(Cap {
+                name: format!("{service}{MONEY_SUFFIX}"),
+                kind: "money".to_string(),
+                used,
+                limit: money(*limit),
+                unmeasurable,
+            });
+        }
+        Report {
+            project: project.to_string(),
+            day_start_ms: usage.day_start_ms,
+            budgeted: !budget.is_empty(),
+            operations: usage.operations,
+            per_operation: usage.per_operation.clone(),
+            per_service: usage.per_service.clone(),
+            caps,
+        }
+    }
+}
+
 /// Millionths, as a decimal somebody reads.
 ///
 /// Trailing zeros kept to two places, because money is written that way and
