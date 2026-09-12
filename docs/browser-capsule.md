@@ -51,7 +51,7 @@ A VM-tier browser capsule is listed under "what is not built".
 
 ```
 apex browser run --allow example.com:443 \
-    --download report.csv --download-to /home/u/results \
+    --download page.png --download-to /home/u/results \
     -- --screenshot page.png https://example.com/
 ```
 
@@ -59,15 +59,28 @@ A run makes one directory, `$XDG_STATE_HOME/apex/browser/<name>`, mode `0700`,
 and everything the browser is allowed to keep lives in it:
 
 ```
-<capsule>/profile/     the browser profile — fresh, and only ever this one
-<capsule>/downloads/   where the browser is told to put files
-<capsule>/console.log  what the run printed
+<capsule>/.profile/    the browser profile — fresh, and only ever this one
+<capsule>/             where the browser puts everything else it writes
 ```
 
 That directory is the session's working directory, which is the one host path
 a confined session gets bound writable. It is **not** the home: the home inside
 the capsule is a tmpfs, so `~/.mozilla` resolves to an empty directory that the
 browser creates for itself and that dies with the process.
+
+**The capsule directory is also the download directory**, and that is a
+correction rather than a design. The first version put downloads in a
+`downloads/` subdirectory, and the live lab caught what that costs:
+`--screenshot shot.png` writes `shot.png` to the browser's working directory,
+which is the capsule root, so the nomination loop looked one level down and
+reported that the capsule "did not produce" a file it was standing next to. A
+caller would have had to know the engine's internal layout to nominate anything
+the browser wrote for itself.
+
+The profile is `.profile` rather than `profile` for a reason that is not
+cosmetic: a nomination may not start with a dot, so the profile cannot be
+nominated at all — by construction, rather than by a check somebody has to
+remember to keep.
 
 ### The profile is fresh, and there is no flag that says otherwise
 
@@ -96,8 +109,8 @@ name it, and it lands under the same no-clobber rule as everything else.
 
 ### Downloads
 
-The profile pins the download directory to `<capsule>/downloads` and turns off
-the "ask me where" dialogue, because a headless browser has nobody to ask.
+The profile pins the download directory to the capsule and turns off the "ask
+me where" dialogue, because a headless browser has nobody to ask.
 
 Downloads reach the host exactly the way a disposable VM's files do:
 
@@ -106,9 +119,9 @@ Downloads reach the host exactly the way a disposable VM's files do:
   choosing a filename.
 * `--download-to DIR` is the only thing that makes anything leave at all.
   Without it nothing does, however much is nominated.
-* The copy loop runs over the nominations. It never lists the download
-  directory and copies what it finds, which is the same direction `apex vm
-  run` documents as its security property.
+* The copy loop runs over the nominations. It never lists the capsule and
+  copies what it finds, which is the same direction `apex vm run` documents as
+  its security property.
 * A nominated file that would land on top of an existing one is not copied
   unless `--force` says so. The file was produced by a page the caller did not
   trust enough to open in their own browser; replacing something of theirs with

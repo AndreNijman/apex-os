@@ -399,11 +399,18 @@ cmd_run() {
     # can reach, which is the half of the capability model a browser can
     # honestly use — see docs/browser-capsule.md for the half it cannot.
     if [ -n "$capability" ]; then
-        local pinned
-        pinned="$(capability_host "$capability")" \
-            || die "no stored credential named '$capability'.
+        local pinned cap_rc
+        pinned="$(capability_host "$capability")"; cap_rc=$?
+        case "$cap_rc" in
+            3) die "the secret service could not be asked, so this capsule's destination is unknown.
+  That is not the same as '$capability' being absent, and the difference decides
+  what fixes it: start the service (\`sudo systemctl start apex-secretd\`)
+  rather than storing a credential. What it said:
+  ${pinned}" ;;
+            1) die "the secret service has no credential named '$capability'.
   \`apex secret list\` shows what is stored; \`apex secret add $capability --host HOST\`
-  stores one. The capsule's destination comes from that host, not from --allow."
+  stores one. The capsule's destination comes from that host, not from --allow." ;;
+        esac
         [ -n "$pinned" ] || die "the credential '$capability' has no pinned host, so it cannot decide where a capsule may go"
         for d in "${allow[@]}"; do
             case "${d%%:*}" in
@@ -451,8 +458,20 @@ cmd_run() {
     CAPSULE_NAME="$name"
     trap 'capsule_teardown' EXIT INT TERM
 
-    local prof="$dir/profile" downloads="$dir/downloads"
-    mkdir -p "$downloads" || die "cannot create the capsule's download directory"
+    # The capsule directory IS the download directory, and the profile is
+    # hidden inside it. Found by the live lab rather than by design: with the
+    # downloads in a subdirectory, `--screenshot shot.png` wrote shot.png to
+    # the session's working directory — the capsule root — and the nomination
+    # loop looked for it one level down and reported that the capsule "did not
+    # produce" a file it was staring at. A caller would have had to know the
+    # engine's internal layout to nominate anything the browser wrote
+    # relatively.
+    #
+    # One directory removes that. The profile goes to `.profile` rather than
+    # `profile`, and the leading dot is not decoration: valid_download_name
+    # refuses a name that starts with one, so the profile cannot be nominated
+    # by construction rather than by a check somebody has to remember.
+    local prof="$dir/.profile" downloads="$dir"
     write_profile "$prof" "$downloads"
 
     # ── the session ─────────────────────────────────────────────────────────
@@ -578,11 +597,27 @@ cmd_run() {
 
 # The host a stored credential is pinned to. Printed by `apex secret list`,
 # which never prints a value — asking for the pin is not asking for the secret.
+#
+# THREE ANSWERS, NOT TWO. "the secret service did not answer", "it answered and
+# has no credential of that name" and "here is the pin" are different facts,
+# and the first written as the second is this repository's most-repeated
+# defect: a question that could not be asked, reported as the answer. A capsule
+# refused because secretd is stopped must say so, because the fix is
+# `systemctl start apex-secretd` and not `apex secret add`.
+#
+#   0  printed the pinned host
+#   1  the service answered; there is no credential of that name
+#   3  the service could not be asked
 capability_host() {
-    local want="$1" line
-    line="$("$APEX" secret list 2>/dev/null | awk -v n="$want" '$1 == n { print $2; exit }')"
-    [ -n "$line" ] || return 1
-    printf '%s' "$line"
+    local want="$1" out rc
+    out="$("$APEX" secret list 2>&1)"; rc=$?
+    if [ "$rc" != 0 ]; then
+        printf '%s' "$out"
+        return 3
+    fi
+    out="$(printf '%s\n' "$out" | awk -v n="$want" '$1 == n { print $2; exit }')"
+    [ -n "$out" ] || return 1
+    printf '%s' "$out"
 }
 
 # ── usage ───────────────────────────────────────────────────────────────────
@@ -608,8 +643,10 @@ Options for `run`:
                         on the runtime's allowlist (`apex agent allow`).
   --capability NAME     take the destination from a stored credential's pinned
                         host instead. The capsule is never given the value.
-  --download NAME       a plain filename in the capsule's download directory
-                        that may leave it. Repeatable.
+  --download NAME       a plain filename the capsule produced that may leave
+                        it — a download, or anything the browser wrote next to
+                        it. Repeatable. A name starting with a dot is refused,
+                        which is also what keeps the profile unnominatable.
   --download-to DIR     where nominated downloads land. Without it, nothing
                         leaves the capsule however much is nominated.
   --console-to FILE     save what the capsule printed before it is deleted.
@@ -621,7 +658,7 @@ Options for `run`:
 Everything after `--` goes to the browser:
 
   apex browser run --allow example.com:443 \
-      --download report.csv --download-to ~/results \
+      --download shot.png --download-to ~/results \
       -- --screenshot shot.png https://example.com/
 
 docs/browser-capsule.md records what each property rests on and what is not
