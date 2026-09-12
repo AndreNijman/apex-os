@@ -333,7 +333,7 @@ capsule_run() {
     local flow="$1"; shift
     local got="$OUT/$flow/got"
     mkdir -p "$got"
-    CAPSULE_OUT="$("$ENGINE" run --timeout 180 --download-to "$got" "$@" 2>&1)"
+    CAPSULE_OUT="$("$ENGINE" run --timeout 150 --download-to "$got" "$@" 2>&1)"
     printf '%s\n' "$CAPSULE_OUT" > "$OUT/$flow/engine.log"
     return 0
 }
@@ -353,7 +353,7 @@ flow_profile() {
     }
     capsule_run profile --allow "127.0.0.1:$PORT" \
         --download observed.txt \
-        -- --screenshot "$LAB/ignored.png" "https://127.0.0.1:$PORT/"
+        -- --screenshot "shot.png" "https://127.0.0.1:$PORT/"
     local obs="$OUT/profile/got/observed.txt"
     [[ -f "$obs" ]] || { cannot "the capsule produced no observation file, so nothing can be said about what it saw"; return; }
     local seen; seen="$(cat "$obs")"
@@ -397,7 +397,7 @@ flow_headless() {
 flow_network() {
     capsule_run network --allow "127.0.0.1:$PORT" \
         --download observed.txt \
-        -- --screenshot "$LAB/ignored2.png" "https://127.0.0.1:$PORT/"
+        -- --screenshot "shot.png" "https://127.0.0.1:$PORT/"
     local obs="$OUT/network/got/observed.txt"
     [[ -f "$obs" ]] || { cannot "the capsule produced no observation file"; return; }
     local seen; seen="$(cat "$obs")"
@@ -422,7 +422,7 @@ flow_network() {
 flow_downloads() {
     capsule_run downloads --allow "127.0.0.1:$PORT" \
         --download observed.txt \
-        -- --screenshot "$LAB/ignored3.png" "https://127.0.0.1:$PORT/"
+        -- --screenshot "shot.png" "https://127.0.0.1:$PORT/"
     local got="$OUT/downloads/got"
     local obs="$got/observed.txt"
     [[ -f "$obs" ]] || { cannot "the capsule produced no observation file"; return; }
@@ -454,9 +454,9 @@ PY
     chmod 0755 "$mutant"
     local mgot="$OUT/downloads/mutant-got"
     mkdir -p "$mgot"
-    "$mutant" run --timeout 180 --allow "127.0.0.1:$PORT" \
+    "$mutant" run --timeout 150 --allow "127.0.0.1:$PORT" \
         --download observed.txt --download-to "$mgot" \
-        -- --screenshot "$LAB/ignored4.png" "https://127.0.0.1:$PORT/" \
+        -- --screenshot "shot.png" "https://127.0.0.1:$PORT/" \
         > "$OUT/downloads/mutant.log" 2>&1
     if [[ -e "$mgot/leak.txt" ]]; then
         _chaos_pass "an engine whose loop runs over the directory DOES leak the unnominated file"
@@ -469,8 +469,8 @@ PY
     local nodest="$OUT/downloads/nodest"
     mkdir -p "$nodest"
     local out
-    out="$("$ENGINE" run --timeout 180 --allow "127.0.0.1:$PORT" --download observed.txt \
-        -- --screenshot "$LAB/ignored5.png" "https://127.0.0.1:$PORT/" 2>&1)"
+    out="$("$ENGINE" run --timeout 150 --allow "127.0.0.1:$PORT" --download observed.txt \
+        -- --screenshot "shot.png" "https://127.0.0.1:$PORT/" 2>&1)"
     says "without a destination nothing leaves, however much is nominated" "nothing left the capsule" "$out"
     claim_not "and no destination was invented" bash -c "compgen -G '$nodest/*' >/dev/null"
 }

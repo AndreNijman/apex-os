@@ -236,6 +236,15 @@ has "downloads are pinned to the capsule"   "browser.download.dir\", \"$ROOT/cap
 has "and are never asked about"             'always_ask_before_handling_new_types", false' "$userjs"
 has "the updater is off"                    'app.update.enabled", false'        "$userjs"
 has "telemetry is off"                      'toolkit.telemetry.enabled", false' "$userjs"
+# Found by the live lab: with only the telemetry preferences, the daemon
+# logged a capsule being denied firefox.settings.services.mozilla.com,
+# aus5.mozilla.org and location.services.mozilla.com, over and over, for the
+# rest of the run. The allowlist refused all of it — but an allowlist that
+# does not describe what the capsule talks to is doing the profile's job.
+has "the settings service is not contacted"  'services.settings.server", ""'         "$userjs"
+has "nor the geolocation one"                'geo.enabled", false'                   "$userjs"
+has "nor the captive-portal probe"           'captive-portal-service.enabled", false' "$userjs"
+has "nor safebrowsing"                       'safebrowsing.malware.enabled", false'  "$userjs"
 rm -rf "${ROOT:?}/cap-keep"
 
 echo "── the nomination loop ─────────────────────────────────────────────────"
