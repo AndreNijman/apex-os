@@ -1195,6 +1195,44 @@ RUN set -eux; \
     command -v fcitx5 >/dev/null; \
     dnf5 clean all
 
+# ── Stage 5a-a11y: the screen reader ───────────────────────────────────────
+# Asked of the built image's own rpmdb rather than by grepping Containerfiles —
+# a grep only finds what is named explicitly, and this image names almost none
+# of it — the accessibility plumbing was ALREADY here, as transitive
+# dependencies of gtk4 and Qt: at-spi2-core, at-spi2-atk, speech-dispatcher and
+# espeak-ng are all installed. A note on record that APEX shipped "zero
+# accessibility packages" was simply wrong.
+#
+# What was missing was the reader itself. Every piece except the one that
+# speaks: a blind user could not log in, could not run the installer, and could
+# not use the desktop, on a system that already carried the whole stack.
+#
+# Cost, measured rather than estimated (`dnf5 install --assumeno orca` inside
+# ghcr.io/andrenijman/apex-os:daily): FIVE packages — orca, brlapi,
+# python3-brlapi, python3-louis, python3-pyatspi — 4 MiB downloaded, 23 MiB
+# installed. Nothing pulls speech-dispatcher or espeak-ng, which is the rpmdb
+# confirming the paragraph above. This is a rounding error beside the 1.3 GB
+# the desktop AI apps put into this same tier (docs/update-cost.md).
+#
+# python3-pyatspi arriving with it is a side benefit worth naming: the AT-SPI
+# suites in tests/ were written to walk the bus over raw D-Bus precisely
+# because no bindings existed here.
+#
+# NOT autostarted, and that is a decision rather than an omission. A screen
+# reader that starts unbidden talks over a sighted user's first boot. orca is
+# started by the user who wants it. tests/test-apex-a11y-stack.sh asserts both
+# halves — that it is installed, and that nothing starts it.
+#
+# At the login screen it would have nothing to talk to in any case: the greet
+# session has no D-Bus session bus at all, so Qt's accessibility bridge has
+# nowhere to publish the greeter's tree. tests/test-apex-greet-session-bus.sh
+# measures that, on both greeter hosts, and goes red when somebody fixes it.
+RUN set -eux; \
+    dnf5 -y install orca; \
+    command -v orca >/dev/null; \
+    rpm -q orca at-spi2-core speech-dispatcher espeak-ng >/dev/null; \
+    dnf5 clean all
+
 # ── Stage 5a-laptop: ordinary laptop hardware every vendor ships ───────────
 # Gaps found by diffing the built image against Fedora's @hardware-support and
 # the things a normal laptop owner expects to just work:
