@@ -36,6 +36,25 @@ Item {
     property int    sessionIndex: 0
     property string _wantSession: ""    // desired id from last-session
 
+    // ── Recovery preselection (roadmap P2-018) ────────────────────
+    // The ONLY session id this greeter will ever select on its own initiative.
+    // /usr/libexec/apex-session-watchdog carries the same constant and
+    // tests/test-apex-session-watchdog.sh fails if the two drift apart. Named
+    // rather than discovered for the reason `defaultSession` is named: a
+    // greeter that acted on whatever a helper printed would be one typo away
+    // from selecting something nobody can log in to.
+    readonly property string recoverySession: "apex-safe-graphics"
+    property string _recoverWanted: ""   // set only by the watchdog's `check`
+    // Why recovery was preselected, shown on the greeter's status line. Set
+    // ONLY when the id actually matched an enumerated session — a notice for a
+    // session that is not in the picker is a dead end with an explanation.
+    property string recoveryNotice: ""
+    // The user has worked the session picker. From that moment their choice is
+    // final: `_selectWanted()` stops selecting anything, so neither a late line
+    // from the enumeration nor the watchdog can move the picker out from under
+    // them. This is what makes the recovery preselection a suggestion.
+    property bool   _userPicked:  false
+
     readonly property var currentSession:
         (sessions.length > 0 && sessionIndex >= 0 && sessionIndex < sessions.length)
             ? sessions[sessionIndex] : null
@@ -47,6 +66,14 @@ Item {
     function cycleSession(dir) {
         var n = ctx.sessions.length
         if (n === 0) return
+        // Touching the picker settles the question. Before this flag existed
+        // every `_addSession` line re-ran `_selectWanted()`, so a choice made
+        // while the enumeration was still arriving could be silently undone;
+        // with the watchdog able to preselect as well, a user who cycles away
+        // from recovery must not be put back into it.
+        ctx._userPicked     = true
+        ctx._recoverWanted  = ""
+        ctx.recoveryNotice  = ""
         ctx.sessionIndex = ((ctx.sessionIndex + dir) % n + n) % n
     }
 
@@ -79,6 +106,26 @@ Item {
     readonly property string defaultSession: "hyprland"
 
     function _selectWanted() {
+        // The user's own choice outranks every rule below it.
+        if (ctx._userPicked) return
+
+        // Recovery outranks the remembered session, because the remembered
+        // session is the one that has just failed to start three times running.
+        // The id is checked against `recoverySession` at the point it is read
+        // (see the watchdog Process below), so this loop can only ever land on
+        // APEX Safe Graphics — and only if it is actually in the picker.
+        if (ctx._recoverWanted) {
+            for (var r = 0; r < ctx.sessions.length; r++)
+                if (ctx.sessions[r].id === ctx._recoverWanted) {
+                    ctx.sessionIndex   = r
+                    ctx.recoveryNotice = "Your desktop did not start — "
+                                       + ctx.sessions[r].name + " selected"
+                    return
+                }
+            // Not installed: say nothing and fall through. A notice about a
+            // session the user cannot choose is worse than no notice.
+        }
+
         // A remembered session wins — WHILE IT IS STILL INSTALLED.
         //
         // The `return` that used to sit where the comment below is turned this
@@ -174,15 +221,37 @@ Item {
         var cmd  = ctx.sessionCommand.trim()
         var argv = cmd.length > 0 ? ["sh", "-lc", cmd]
                                   : ["sh", "-lc", "exec ${SHELL:-/bin/sh} -l"]
+        var sid  = ctx.currentSession ? ctx.currentSession.id : ""
         ctx._pendingArgv = argv
         persistProc.environment = {
             "AG_USER": ctx.username,
-            "AG_SESS": ctx.currentSession ? ctx.currentSession.id : ""
+            "AG_SESS": sid,
+            // RECOVERY IS NEVER REMEMBERED. last-session is written on every
+            // login, so before this flag one trip through APEX Safe Graphics
+            // made the recovery desktop the preselected default for ever —
+            // a user who went there once to fix their machine came back to a
+            // fixed machine and a picker still pointing at the rescue session.
+            // Skipping the write leaves the PREVIOUS memory intact rather than
+            // clearing it, so they land back on the desktop they were using.
+            // Gaming Mode's equivalent problem is solved elsewhere and
+            // differently (apex-session-select writes the file deliberately).
+            "AG_REMEMBER": (sid !== "" && sid !== ctx.recoverySession) ? "1" : "0"
         }
+        // The watchdog `record` goes LAST and is wrapped twice. It is on the
+        // only path to Greetd.launch() — the launch is deferred to
+        // persistProc.onExited — so a helper that hung here would be a machine
+        // nobody can log in to. `timeout` caps it; `|| true` covers a `timeout`
+        // that is not there to cap it with; and last-user/last-session are
+        // already on disk before it is called, so even the capped case loses
+        // nothing but the bounce count.
         persistProc.command = ["sh", "-c",
             "d=/var/lib/apex-greet; mkdir -p \"$d\" 2>/dev/null;" +
             " printf '%s' \"$AG_USER\" > \"$d/last-user\" 2>/dev/null || true;" +
-            " printf '%s' \"$AG_SESS\" > \"$d/last-session\" 2>/dev/null || true"]
+            " [ \"${AG_REMEMBER:-1}\" = 1 ] &&" +
+            "   printf '%s' \"$AG_SESS\" > \"$d/last-session\" 2>/dev/null;" +
+            " timeout 5 /usr/libexec/apex-session-watchdog record \"$AG_SESS\"" +
+            "   >/dev/null 2>&1 || true;" +
+            " true"]
         persistProc.running = true
     }
 
@@ -323,6 +392,42 @@ Item {
             onRead: function(line) {
                 var s = line.trim()
                 if (s !== "") { ctx._wantSession = s; ctx._selectWanted() }
+            }
+        }
+    }
+
+    // ── Bounce watchdog (roadmap P2-018) ──────────────────────────
+    //
+    // "A graphics/compositor/shell failure CAN ENTER a conservative recovery
+    // desktop" is the criterion, and the verb was the part that did not exist:
+    // APEX Safe Graphics shipped as a session a PERSON picks. A machine whose
+    // driver stopped working after an update bounces — greetd starts the
+    // session, it dies in a second, the login screen comes back — and nothing
+    // in the system counted, because greetd is a stock unit with no Restart=,
+    // no StartLimitBurst and no OnFailure=, and apex-boot-health's units are
+    // inert on a GRUB machine, which every APEX machine is.
+    //
+    // /usr/libexec/apex-session-watchdog counts. The greeter's whole part in it
+    // is this: `record` on the way out (above) and `check` on the way in.
+    //
+    // FAIL OPEN, three ways over:
+    //   * `timeout` caps it and a missing helper is a silent no-op — either way
+    //     the parser reads the bare `echo` and nothing is selected;
+    //   * the id is compared against `recoverySession` before it is used, so
+    //     garbage, a second line or an injected id selects NOTHING. The helper
+    //     cannot name a session; it can only vote for the one named here;
+    //   * it preselects. The user cycles away and that sticks (`_userPicked`).
+    Process {
+        running: true
+        command: ["sh", "-c",
+            "timeout 5 /usr/libexec/apex-session-watchdog check 2>/dev/null; echo"]
+        stdout: SplitParser {
+            onRead: function(line) {
+                var s = line.trim()
+                if (s !== "" && s === ctx.recoverySession) {
+                    ctx._recoverWanted = s
+                    ctx._selectWanted()
+                }
             }
         }
     }

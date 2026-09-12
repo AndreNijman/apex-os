@@ -1,0 +1,302 @@
+#!/bin/sh
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-session-watchdog — notice that the desktop is not starting, and offer
+#  the recovery session at the login screen (roadmap P2-018, criterion 1).
+#
+#  ── The hole it closes ──────────────────────────────────────────────────────
+#
+#  P2-018's first criterion is "a graphics/compositor/shell failure CAN ENTER a
+#  conservative recovery desktop". APEX Safe Graphics shipped as a session a
+#  PERSON enters: it is in the picker and `apex-safe-graphics` runs from a
+#  virtual console. Nothing noticed a failure. A machine whose GPU driver
+#  stopped working after an update bounces — greetd starts the session, the
+#  compositor dies in a second, greetd shows the login screen again — and every
+#  bounce looks exactly like the last one. greetd is a stock Fedora unit with
+#  no Restart=, no StartLimitBurst and no OnFailure=; apex-boot-health's units
+#  are inert on every published image because they condition on
+#  LoaderBootCountPath and every APEX image boots GRUB. So nothing in the whole
+#  system counted, and the user's only clue was that the password prompt kept
+#  coming back.
+#
+#  This counts. Three bounces and the greeter preselects APEX Safe Graphics and
+#  says why.
+#
+#  ── Why it counts at the GREETER and not in the session ─────────────────────
+#
+#  The session is the thing that is broken. A counter that lives inside it dies
+#  with it, and the wrappers that could survive — a shim around every session's
+#  Exec line — would put APEX code between greetd and every compositor on the
+#  machine, including the ones that work. The greeter is the one process that is
+#  demonstrably alive after each bounce, so it is the one that can see the
+#  pattern: it writes down what it launched and when (`record`), and the next
+#  greeter to start asks how long ago that was (`check`). A session that lasted
+#  less than the grace period below did not get anywhere.
+#
+#  ── The property this file is written to hold ───────────────────────────────
+#
+#  A counter that can strand somebody at a login screen is worse than no
+#  counter. So:
+#
+#    * `check` writes exactly one line to stdout, and that line is only ever
+#      the recovery session's id. It has no other output and no other effect on
+#      the greeter.
+#    * Every failure — no state directory, an unwritable one, a missing or
+#      corrupt record, a clock that went backwards, a recovery session that is
+#      not installed — produces NO output and exit 0. The greeter then selects
+#      what it would have selected anyway.
+#    * Nothing here loops, sleeps, waits or opens a socket. The greeter calls
+#      it on the path that leads to `Greetd.launch()`, so a hang here is a
+#      machine nobody can log in to. The greeter also wraps both calls in
+#      `timeout` and `|| true` — belt and braces, and the suite mutates this
+#      file into `sleep 60` to prove the braces hold.
+#    * Preselecting is all it does. The user can cycle the picker away from it
+#      and that choice sticks (GreetContext.qml `_userPicked`).
+#
+#  ── Verbs ───────────────────────────────────────────────────────────────────
+#
+#    record <session-id>   remember that this session is being launched, now.
+#    check                 print the recovery session's id if the desktop has
+#                          failed to start too many times running; else nothing.
+#    reset                 forget the failures (needs write access — the state
+#                          directory is 0755 greetd:greetd, so `sudo`).
+#    status                human-readable state; unprivileged.
+#
+#  ── State ───────────────────────────────────────────────────────────────────
+#
+#    <state>/session-launch    "<epoch> <session-id>", written by `record` and
+#                              CONSUMED by `check`. Consumed rather than read,
+#                              because greetd re-runs its `default_session`
+#                              command whenever the greeter exits — including
+#                              when the greeter itself crashes before any
+#                              launch — and a record left in place would be
+#                              counted twice by two checks for one bounce.
+#    <state>/session-failures  "<count> <session-id>". Survives a reboot on
+#                              purpose: a machine that bounced three times and
+#                              was then power-cycled is still broken.
+#
+#  Both are one short line, written to a temp file and renamed, so a teardown
+#  in the middle of a write leaves the previous line rather than half of a new
+#  one.
+#
+#  ── Reset policy, stated because it is a choice ─────────────────────────────
+#
+#  Any NON-RECOVERY session that survives the grace period clears the counter:
+#  the machine demonstrably reached a working desktop, which is the signal the
+#  counter exists to wait for. A visit to APEX Safe Graphics clears nothing —
+#  recovery working says nothing about whether the normal desktop was fixed,
+#  and a machine that cleared its counter there would spend three more bounces
+#  before offering recovery again. Recovery bouncing is not counted either;
+#  there is nowhere to escalate to.
+# ─────────────────────────────────────────────────────────────────────────────
+
+set -u
+
+# ── Tunables ────────────────────────────────────────────────────────────────
+# The environment overrides exist so the suite can drive this without a greeter,
+# a session or a wait. They are read from the greetd user's own environment,
+# which greetd sets; nothing a session user can reach writes it.
+STATE_DIR="${APEX_SESSION_WATCHDOG_STATE:-/var/lib/apex-greet}"
+SESSION_DIR="${APEX_SESSION_WATCHDOG_SESSIONS:-/usr/share/wayland-sessions}"
+
+# Seconds a session has to survive before it counts as having started. A
+# compositor that cannot open the GPU is gone in well under a second; a person
+# who logs in and immediately logs out again is rare, and costs them nothing
+# worse than a preselection they can cycle away from.
+GRACE="${APEX_SESSION_WATCHDOG_GRACE:-45}"
+# Consecutive failures before recovery is offered. Two is one accident away
+# from a false positive; three has to be a pattern.
+THRESHOLD="${APEX_SESSION_WATCHDOG_THRESHOLD:-3}"
+
+# The recovery session's id — the basename of its .desktop entry. NAMED, not
+# discovered: GreetContext.qml carries the same constant as `recoverySession`
+# and will only ever act on this one id, so a `check` that somehow printed
+# something else selects nothing. tests/test-apex-session-watchdog.sh extracts
+# both and fails if they drift apart.
+RECOVERY="apex-safe-graphics"
+
+LAUNCH_FILE="$STATE_DIR/session-launch"
+FAIL_FILE="$STATE_DIR/session-failures"
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+# A plain desktop-entry id and nothing else. Same class apex-session-select
+# validates against, for the same reason: this string reaches a path.
+valid_id() {
+    case "${1:-}" in
+        '' | *[!A-Za-z0-9._-]* | .* ) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+now_epoch() {
+    # `date +%s` is coreutils and is on every APEX image. If it were ever not,
+    # an empty answer makes every caller below treat the time as unknown, which
+    # is the fail-open direction.
+    date +%s 2>/dev/null
+}
+
+is_number() {
+    case "${1:-}" in
+        '' | *[!0-9]* ) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# Write one line atomically, or give up silently. Never leaves a temp file
+# behind in a directory the greeter reads.
+write_line() {
+    _wl_dest="$1"; _wl_text="$2"
+    _wl_tmp="$_wl_dest.tmp.$$"
+    if printf '%s\n' "$_wl_text" >"$_wl_tmp" 2>/dev/null; then
+        chmod 0644 "$_wl_tmp" 2>/dev/null
+        mv -f "$_wl_tmp" "$_wl_dest" 2>/dev/null || rm -f "$_wl_tmp" 2>/dev/null
+    else
+        rm -f "$_wl_tmp" 2>/dev/null
+    fi
+}
+
+# Read "<count> <id>" out of the failure file. Prints nothing when there is no
+# usable record, so callers see an empty count and treat it as zero.
+read_failures() {
+    _rf_line="$(head -n1 "$FAIL_FILE" 2>/dev/null)" || return 0
+    _rf_count="${_rf_line%% *}"
+    _rf_id="${_rf_line#* }"
+    is_number "$_rf_count" || return 0
+    [ "$_rf_id" = "$_rf_line" ] && return 0     # no space: malformed
+    valid_id "$_rf_id" || return 0
+    printf '%s %s\n' "$_rf_count" "$_rf_id"
+}
+
+recovery_installed() {
+    [ -r "$SESSION_DIR/$RECOVERY.desktop" ]
+}
+
+# ── record ──────────────────────────────────────────────────────────────────
+
+do_record() {
+    _id="${1:-}"
+    # An empty id is the greeter's "no wayland-sessions at all" path, which
+    # falls back to a login shell. There is nothing to name and nothing to
+    # escalate to, so record nothing.
+    valid_id "$_id" || return 0
+    _now="$(now_epoch)"
+    is_number "$_now" || return 0
+    [ -d "$STATE_DIR" ] || mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+    write_line "$LAUNCH_FILE" "$_now $_id"
+    return 0
+}
+
+# ── check ───────────────────────────────────────────────────────────────────
+#
+# Two steps, in this order and independent of each other:
+#
+#   1. Fold the pending launch record — if there is one — into the counter, and
+#      consume it whatever it said.
+#   2. Decide, from the counter alone, whether to offer recovery. Step 2 does
+#      not require step 1 to have found anything: the counter outlives a reboot
+#      and a greeter crash, and a machine that bounced three times and was then
+#      power-cycled has not been fixed by the power cycle.
+
+do_check() {
+    _line="$(head -n1 "$LAUNCH_FILE" 2>/dev/null)"
+    rm -f "$LAUNCH_FILE" 2>/dev/null
+
+    if [ -n "${_line:-}" ]; then
+        _at="${_line%% *}"
+        _lid="${_line#* }"
+        if is_number "$_at" && [ "$_lid" != "$_line" ] && valid_id "$_lid"; then
+            _now="$(now_epoch)"
+            if is_number "$_now" && [ "$_now" -ge "$_at" ]; then
+                _elapsed=$((_now - _at))
+                # The recovery session is neither counted nor credited. See the
+                # reset-policy note in the header.
+                if [ "$_lid" != "$RECOVERY" ]; then
+                    if [ "$_elapsed" -lt "$GRACE" ]; then
+                        _cur="$(read_failures)"
+                        _n=0
+                        if [ -n "$_cur" ]; then
+                            _cid="${_cur#* }"
+                            [ "$_cid" = "$_lid" ] && _n="${_cur%% *}"
+                        fi
+                        [ -d "$STATE_DIR" ] || mkdir -p "$STATE_DIR" 2>/dev/null
+                        write_line "$FAIL_FILE" "$((_n + 1)) $_lid"
+                    else
+                        # It started and it stayed. Whatever was being counted,
+                        # this machine reaches a desktop.
+                        rm -f "$FAIL_FILE" 2>/dev/null
+                    fi
+                fi
+            fi
+            # A clock that went backwards leaves _elapsed unknowable, so the
+            # record is dropped without counting. An NTP step at first boot is
+            # not evidence that the desktop is broken.
+        fi
+    fi
+
+    _cur="$(read_failures)"
+    [ -n "$_cur" ] || return 0
+    _n="${_cur%% *}"
+    _cid="${_cur#* }"
+    # Never offer recovery on the strength of recovery's own failures.
+    [ "$_cid" = "$RECOVERY" ] && return 0
+    [ "$_n" -ge "$THRESHOLD" ] || return 0
+    # An entry that is not installed cannot be selected, and printing its id
+    # would make the greeter show a reason for a session it cannot offer.
+    recovery_installed || return 0
+    printf '%s\n' "$RECOVERY"
+    return 0
+}
+
+# ── reset / status ──────────────────────────────────────────────────────────
+
+do_reset() {
+    if rm -f "$FAIL_FILE" "$LAUNCH_FILE" 2>/dev/null; then
+        printf 'apex-session-watchdog: failure count cleared\n'
+        return 0
+    fi
+    printf 'apex-session-watchdog: cannot write %s (try sudo)\n' "$STATE_DIR" >&2
+    return 1
+}
+
+do_status() {
+    printf 'state directory : %s\n' "$STATE_DIR"
+    printf 'grace period    : %s seconds\n' "$GRACE"
+    printf 'threshold       : %s consecutive failures\n' "$THRESHOLD"
+    printf 'recovery session: %s (%s)\n' "$RECOVERY" \
+        "$(recovery_installed && echo installed || echo 'NOT installed')"
+    _cur="$(read_failures)"
+    if [ -n "$_cur" ]; then
+        printf 'failures        : %s in a row for %s\n' "${_cur%% *}" "${_cur#* }"
+    else
+        printf 'failures        : none recorded\n'
+    fi
+    _line="$(head -n1 "$LAUNCH_FILE" 2>/dev/null)"
+    if [ -n "${_line:-}" ]; then
+        printf 'pending launch  : %s\n' "$_line"
+    else
+        printf 'pending launch  : none\n'
+    fi
+    return 0
+}
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: apex-session-watchdog <record <session-id> | check | reset | status>
+
+  record <id>  note that the greeter is launching this session, now
+  check        print the recovery session id if the desktop keeps failing
+  reset        forget the failure count (needs write access; use sudo)
+  status       show what is recorded
+EOF
+}
+
+case "${1:-}" in
+    record) do_record "${2:-}" ;;
+    check)  do_check ;;
+    reset)  do_reset ;;
+    status) do_status ;;
+    ''|-h|--help|help) usage; exit 0 ;;
+    # An unknown verb says so on STDERR and prints nothing on stdout, so a
+    # greeter that somehow called one selects nothing rather than a stray word.
+    *) printf 'apex-session-watchdog: unknown verb %s\n' "$1" >&2; usage; exit 2 ;;
+esac
