@@ -3025,44 +3025,55 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 4ae4cf22. PARTIAL, corrected from done: this item's own
-    evidence names an unmet criterion (no profile/projects/worktrees verb on the socket), and done was overstated.
-    Android Agent Center parity. Six commits on task/p1-053a-android-4 plus a merge of roadmap/v2.2. Verified
-    headless, NO device and NO emulator: 295 core JVM tests, 10 app JVM tests, a 43 MB debug APK, via ./gradlew
-    :core:test :app:testDebugUnitTest :app:assembleDebug with JAVA_HOME=/usr/lib/jvm/java-21-openjdk
-    ANDROID_HOME=/var/tmp/android-sdk. MET: the list and detail screens show agent graph, provider/model,
-    project/worktree/branch, the flattened policy, current activity, context gauge, elapsed time and status;
-    pause/resume/interrupt/stop are the daemon's own signals (SIGSTOP/SIGCONT/SIGINT/SIGTERM, spelled out on
-    screen, since there is no pause verb); attach opens a real PTY; reconnect is PtyAttachment's. COLOURS MATCH
-    THE DESKTOP AND A TEST SAYS SO IN BOTH HALVES: AgentStateAgreementTest parses vendored agentstate.js for
-    state->token and the new ToneColoursTest parses a vendored Colors.qml for token->colour, both verbatim from
-    apex-shell 6e74101, and tools/check-agent-state.sh diffs both against a live checkout (it did: identical,
-    branch roadmap/v2.2). Three desktop semantics carried rather than invented: live is exit_code==null &&
-    exit_signal==null and NOT !isTerminal(state) — state is whatever was last PUBLISHED, including by the agent
-    through the open Event verb, so sorting on it would let an agent hold the top of the list for ever; a finished
-    session's elapsed clock stops at its last activity, because a session that failed an hour ago did not take an
-    hour; darkSurface is luminance(background)<0.18 read off the surface rather than a theme flag, which matters
-    because Material You can hand a dark theme a pale surface. NOT MET, and the gap is the runtime's: 'start with
-    profile/project/worktree' is PARTIAL. apex-agent- core's Request has NO profile verb (profile.rs is
-    unreachable through it), NO projects verb and NO worktrees verb — read out of the enum, not remembered. Round
-    3 had built {"cmd":"worktrees"} and a parser for the answer; nothing could have parsed it and the phone would
-    have shown an error where it offered a picker. Removed, with the test kept and inverted so it cannot come
-    back. What is offered instead: the adapter from Hello.agents, a directory derived from what the daemon has
-    already reported, and a worktree NAME (RunRequest.worktree does exist), and the screen says why on screen
-    rather than implying a picker. P1-056 must start from this constraint. ALSO NOT VERIFIED: every Compose
-    behaviour (assembleDebug is the only gate a machine with no phone has); no relay leg, so LAN only; the CI
-    android job has still never run, though its path classifier was RUN against this branch's own diff
-    (android=true rust=true, the rust selection being over- selection from android/core/src/test/resources/ which
-    the workflow's own comment block justifies leaving alone). A DEFECT THIS ROUND ALSO FOUND, recorded here
-    because it hit both items: every socket write was on the MAIN THREAD — Android's
-    StrictMode.enableDeathOnNetwork() is on for every app targeting API 11 or later, so a signal button and the
-    first keystroke would each have killed the process, and locking the app closed sockets on the UI thread. Found
-    by reading rather than by any gate. Fixed: the terminal's io goes to a single-thread executor and the view
-    model's closes go to Dispatchers.IO. Mutation-checked: 8 mutations on the Agent Center model each turn a NAMED
-    test red (live from published state, a finished clock that keeps running, a sort without live-first, a zero
-    gauge for a session that never reported, an orphan dropped with both safety nets removed, the cycle net alone
-    removed, every request retried including signals, a stop during connect ignored); every file restored byte-
-    identical with plain cp.
+    CORRECTION 2026-09-12 by the orchestrator: the central claim below is HALF WRONG, and it propagated from
+    p1-053a's card into a dispatch brief and into this evidence field. Worktrees IS a variant of pub enum Request
+    in apexd/apex-agent-core/src/protocol.rs (enum at line 531, variant at 723) and of Response (1138/1172), and
+    has been since 2026-09-08. p1-053a read apexd/apex-agent-core/src/request.rs instead, whose Request is a
+    VALIDATION-ERROR enum (UnknownVerb, NoPackages, TooManyPackages, BadPackageName, BadReason,
+    UnexpectedArguments), not the wire protocol. The real vocabulary is 28 verbs: Attach Decide DeclareOrigin
+    ElevationChallenge Event Grants Hello Info Inject Input List Logs PrivilegeRequest Prune Remove
+    RenewSystemGrant RequestExecuted Requests Resize Revoke RevokeSystemGrant Run SecretUse Signal SystemGrants
+    Telemetry ToolCheck Worktrees. So round 3's worktrees request and its parser were CORRECT and were deleted for
+    a bad reason; p1-053b restored them in ca453ea3, landed as merge c2ca4ea6. WHAT IS STILL TRUE: Profile and
+    Projects are genuinely absent from the protocol Request, so the picker gap is real for those two only. Read
+    the rest of this field with that split in mind. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 4ae4cf22.
+    PARTIAL, corrected from done: this item's own evidence names an unmet criterion (no profile/projects/worktrees
+    verb on the socket), and done was overstated. Android Agent Center parity. Six commits on
+    task/p1-053a-android-4 plus a merge of roadmap/v2.2. Verified headless, NO device and NO emulator: 295 core
+    JVM tests, 10 app JVM tests, a 43 MB debug APK, via ./gradlew :core:test :app:testDebugUnitTest
+    :app:assembleDebug with JAVA_HOME=/usr/lib/jvm/java-21-openjdk ANDROID_HOME=/var/tmp/android-sdk. MET: the
+    list and detail screens show agent graph, provider/model, project/worktree/branch, the flattened policy,
+    current activity, context gauge, elapsed time and status; pause/resume/interrupt/stop are the daemon's own
+    signals (SIGSTOP/SIGCONT/SIGINT/SIGTERM, spelled out on screen, since there is no pause verb); attach opens a
+    real PTY; reconnect is PtyAttachment's. COLOURS MATCH THE DESKTOP AND A TEST SAYS SO IN BOTH HALVES:
+    AgentStateAgreementTest parses vendored agentstate.js for state->token and the new ToneColoursTest parses a
+    vendored Colors.qml for token->colour, both verbatim from apex-shell 6e74101, and tools/check-agent-state.sh
+    diffs both against a live checkout (it did: identical, branch roadmap/v2.2). Three desktop semantics carried
+    rather than invented: live is exit_code==null && exit_signal==null and NOT !isTerminal(state) — state is
+    whatever was last PUBLISHED, including by the agent through the open Event verb, so sorting on it would let an
+    agent hold the top of the list for ever; a finished session's elapsed clock stops at its last activity,
+    because a session that failed an hour ago did not take an hour; darkSurface is luminance(background)<0.18 read
+    off the surface rather than a theme flag, which matters because Material You can hand a dark theme a pale
+    surface. NOT MET, and the gap is the runtime's: 'start with profile/project/worktree' is PARTIAL. apex-agent-
+    core's Request has NO profile verb (profile.rs is unreachable through it), NO projects verb and NO worktrees
+    verb — read out of the enum, not remembered. Round 3 had built {"cmd":"worktrees"} and a parser for the
+    answer; nothing could have parsed it and the phone would have shown an error where it offered a picker.
+    Removed, with the test kept and inverted so it cannot come back. What is offered instead: the adapter from
+    Hello.agents, a directory derived from what the daemon has already reported, and a worktree NAME
+    (RunRequest.worktree does exist), and the screen says why on screen rather than implying a picker. P1-056 must
+    start from this constraint. ALSO NOT VERIFIED: every Compose behaviour (assembleDebug is the only gate a
+    machine with no phone has); no relay leg, so LAN only; the CI android job has still never run, though its path
+    classifier was RUN against this branch's own diff (android=true rust=true, the rust selection being over-
+    selection from android/core/src/test/resources/ which the workflow's own comment block justifies leaving
+    alone). A DEFECT THIS ROUND ALSO FOUND, recorded here because it hit both items: every socket write was on the
+    MAIN THREAD — Android's StrictMode.enableDeathOnNetwork() is on for every app targeting API 11 or later, so a
+    signal button and the first keystroke would each have killed the process, and locking the app closed sockets
+    on the UI thread. Found by reading rather than by any gate. Fixed: the terminal's io goes to a single-thread
+    executor and the view model's closes go to Dispatchers.IO. Mutation-checked: 8 mutations on the Agent Center
+    model each turn a NAMED test red (live from published state, a finished clock that keeps running, a sort
+    without live-first, a zero gauge for a session that never reported, an orphan dropped with both safety nets
+    removed, the cycle net alone removed, every request retried including signals, a stop during connect ignored);
+    every file restored byte- identical with plain cp.
 - id: P1-055
   title: Android full PTY/TUI remote terminal
   priority: P1
