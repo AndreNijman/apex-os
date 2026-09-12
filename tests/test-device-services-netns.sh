@@ -344,10 +344,14 @@ echo "CASE hs-smb-on-shared  $(tcp_probe "$SMB")"
 # nothing and the tool says the machine is sharing on no link at all.
 "$FIREWALL" hotspot add apexhost2 >/dev/null 2>&1
 LIST="$("$FIREWALL" hotspot list 2>&1 | tr '\n' ' ')"
+# `grep -qw`, not a `*apexhost*` glob: apexhost2 CONTAINS apexhost, so a glob
+# for the first name is satisfied by the second one and a parser that dropped
+# the first element would pass. That verdict could not fire until this line
+# said -w.
 v=NAMED
-case "$LIST" in *apexhost*)  ;; *) v=LOST-FIRST  ;; esac
-case "$LIST" in *apexhost2*) ;; *) v=LOST-SECOND ;; esac
-case "$LIST" in *'"'*)       v=QUOTED ;; esac
+grep -qw apexhost  <<<"$LIST" || v=LOST-FIRST
+grep -qw apexhost2 <<<"$LIST" || v=LOST-SECOND
+case "$LIST" in *'"'*)           v=QUOTED ;; esac
 case "$LIST" in *'not sharing'*) v=SAID-NOT-SHARING ;; esac
 echo "CASE hs-list           $v"
 
