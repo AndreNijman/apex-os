@@ -221,27 +221,37 @@ object Agentd {
     fun interrupt(id: Int): String = signal(id, "int")
 
     /**
-     * THERE IS NO `worktrees` VERB, AND THERE IS NO `projects` VERB EITHER.
+     * Per-worktree status for every remembered project, or for one slug.
      *
-     * This is recorded as a function that does not exist rather than as a
-     * comment somewhere, because an earlier round of this app built
-     * `{"cmd":"worktrees"}` and a `WorktreeStatus` to parse the answer. Nothing
-     * would have parsed: `apex-agent-core`'s `Request` is an internally-tagged
-     * serde enum whose entire vocabulary is Hello, Run, List, Info, Attach,
-     * Resize, Signal, Event, Logs, Remove, Prune, and the privilege and secret
-     * verbs. `apex-remoted` forwards a control line to the daemon unchanged —
-     * it refuses only `attach`, and for its own reasons — so the request would
-     * have reached a daemon that cannot deserialise it.
+     * ## This verb EXISTS. The comment that used to stand here said it did not.
      *
-     * What a phone can therefore actually offer when starting an agent is:
-     * which adapter (from `Hello.agents`), which directory, and which worktree
-     * *name* — because `RunRequest.worktree` does exist and means "create or
-     * reuse this git worktree under the project". [Places.from] derives the
-     * directories worth offering from the sessions the daemon already reports,
-     * which is the only source of them there is.
+     * An earlier round of this app built exactly this request, and then
+     * deleted it along with its parser under the belief that
+     * `apex-agent-core`'s `Request` vocabulary "is Hello, Run, List, Info,
+     * Attach, Resize, Signal, Event, Logs, Remove, Prune, and the privilege
+     * and secret verbs". That was read off `request.rs`'s `Verb` — the
+     * *privileged operation* vocabulary — and not off `protocol.rs`'s
+     * `Request`, which is the wire. `protocol.rs` has carried
+     * `Worktrees { project: Option<String> }` since `473b7f60` (2026-09-08);
+     * `apex-agentd/src/main.rs:906` dispatches it; and `apex-remoted`'s
+     * `control()` refuses exactly one verb, `attach`, so it is forwarded.
+     * See [WorktreeStatus] for the full account.
+     *
+     * `project` is a project **slug**, never a path. That is a security
+     * property of the request and not a convenience: answering it makes the
+     * daemon run git — including `merge-tree --write-tree`, which writes
+     * objects — in the named directory, and every confined session has this
+     * socket bound in. Keyed on a slug the daemon resolves by *searching* the
+     * remembered set, the reachable directories are exactly the ones the user
+     * already chose to remember. Sending a path here does not widen that; it
+     * just gets a `bad_request`.
      */
-    private const val NO_WORKTREE_VERB: String =
-        "apex-agentd has no worktrees verb; see the note in Agentd"
+    fun worktrees(project: String? = null): String =
+        if (project.isNullOrEmpty()) {
+            """{"cmd":"worktrees"}"""
+        } else {
+            """{"cmd":"worktrees","project":"${escape(project)}"}"""
+        }
 
     /**
      * Start a session.
@@ -327,6 +337,48 @@ object Agentd {
         val obj = require(reply, "session")
         return json.decodeFromJsonElement(AgentSession.serializer(), obj)
     }
+
+    /**
+     * The worktree rows, from a `worktrees` reply.
+     *
+     * Throws [AgentError] like every other parser here, with one case given a
+     * name: see [isTooOld]. The rows are returned flat, in the daemon's own
+     * order, because that order is what [Project.group] reads.
+     */
+    fun readWorktrees(reply: String): List<WorktreeStatus> {
+        val obj = require(reply, "worktrees")
+        val array = obj["worktrees"] ?: return emptyList()
+        return json.decodeFromJsonElement(
+            kotlinx.serialization.builtins.ListSerializer(WorktreeStatus.serializer()),
+            array,
+        )
+    }
+
+    /**
+     * Whether this refusal is "that machine's runtime predates this verb".
+     *
+     * Refusal, absence and could-not-run are three different answers, and on
+     * this socket two of them arrive as the same `kind`. `apex-agentd` answers
+     * an unknown `cmd` from `serde_json::from_str::<Request>` failing, which
+     * it reports as `bad_request` with the message `unparseable request:
+     * unknown variant \`worktrees\`, expected one of …` (`main.rs:612`) — and
+     * `worktrees` with a slug nothing matches *also* answers `bad_request`,
+     * with `no remembered project with slug …`. A screen that showed the first
+     * as "no projects" would be reporting a version skew as an empty machine.
+     *
+     * The `unknown variant` text is serde's, not APEX's, so this is keyed on
+     * both halves: the daemon's own prefix and serde's phrase. It is only ever
+     * used to choose *wording*; nothing is retried or skipped on the strength
+     * of it.
+     *
+     * This matters today and not hypothetically: the image on this developer's
+     * own machine is from 2026-09-05 and the verb landed on 2026-09-08, so
+     * every `worktrees` request against it takes exactly this path.
+     */
+    fun isTooOld(error: AgentError): Boolean =
+        error.kind == "bad_request" &&
+            error.message.startsWith("unparseable request:") &&
+            error.message.contains("unknown variant")
 
     fun readHello(reply: String): Hello {
         val obj = require(reply, "hello")
