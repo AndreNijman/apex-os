@@ -123,6 +123,21 @@ case "$ATSPI_BUS" in
         finish; exit 1 ;;
 esac
 
+# The precondition a real screen reader establishes, asserted rather than
+# assumed — and it is asserted because assuming it cost this unit a wrong
+# finding. On a developer's machine org.a11y.Status is already true before the
+# harness starts, which made it look as though Qt ignored the property; in a
+# bare container both flags are false, Qt publishes NOTHING, and the whole suite
+# reads as "the greeter has no accessibility tree". The flag is the switch Orca
+# throws on connecting, so the harness throws it, and says so here.
+case "$ATSPI_STATUS" in
+    *"'ScreenReaderEnabled': <true>"*)
+        ok "the accessibility status a screen reader sets is on ($ATSPI_STATUS)" ;;
+    *)  bad "the accessibility status a screen reader sets is on" \
+            "org.a11y.Status reads ${ATSPI_STATUS:-<no answer>} — Qt gates on this, so every assertion below would be about an empty tree"
+        finish; exit 1 ;;
+esac
+
 STAGE="$ATSPI_W/stage"
 mkdir -p "$STAGE" || exit 2
 cp "$SURFACE" "$STAGE/GreetSurface.qml"  || exit 2
