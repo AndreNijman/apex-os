@@ -104,6 +104,47 @@ object AppLock {
     }
 
     /**
+     * The lock on the front door: a prompt with no cipher behind it.
+     *
+     * Deliberately the weakest thing in this file, and named so that nobody
+     * mistakes it for the strong one. It carries no `CryptoObject`, so it
+     * authorises nothing and unlocks no key — all it does is stop a phone that
+     * was picked up off a table from showing which machines exist and what they
+     * are called. That is worth having and it is not what protects the device
+     * identity; [unlock] is.
+     *
+     * Said plainly because the failure mode of a lock like this is that a later
+     * change quietly starts relying on it — a `isUnlocked` flag consulted
+     * instead of a prompt, and the gate becomes a boolean somebody can flip.
+     */
+    suspend fun confirmPresence(activity: FragmentActivity): Unit =
+        suspendCancellableCoroutine { continuation ->
+            val info = BiometricPrompt.PromptInfo.Builder()
+                .setTitle("APEX Remote")
+                .setSubtitle("Unlock to see your computers")
+                .setAllowedAuthenticators(authenticators())
+                .apply {
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) setNegativeButtonText("Cancel")
+                }
+                .build()
+            val prompt = BiometricPrompt(
+                activity,
+                androidx.core.content.ContextCompat.getMainExecutor(activity),
+                object : BiometricPrompt.AuthenticationCallback() {
+                    override fun onAuthenticationSucceeded(
+                        result: BiometricPrompt.AuthenticationResult,
+                    ) = continuation.resume(Unit)
+
+                    override fun onAuthenticationError(code: Int, message: CharSequence) {
+                        continuation.resumeWithException(AppLockRefused(message.toString(), code))
+                    }
+                },
+            )
+            prompt.authenticate(info)
+            continuation.invokeOnCancellation { prompt.cancelAuthentication() }
+        }
+
+    /**
      * What [authoriseSeal] returns: the sealing half of a box, already through
      * a prompt, and an unambiguous refusal for everything else.
      */

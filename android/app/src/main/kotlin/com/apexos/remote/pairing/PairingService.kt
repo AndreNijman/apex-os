@@ -148,6 +148,13 @@ class PairingService {
         }
         val colon = address.lastIndexOf(':')
         if (colon < 0) return address to DEFAULT_PORT
+        // More than one colon and no brackets: an IPv6 address that was written
+        // down without them. There is no way to tell a port from a final group
+        // here, and guessing produces the exact bug this function exists to
+        // avoid — `2001:db8::1` becoming host `2001:db8:` on port 1, which
+        // connects to nothing and reports a refusal that names the wrong thing.
+        // So the whole string is the host and the default port is used.
+        if (address.indexOf(':') != colon) return address to DEFAULT_PORT
         return address.substring(0, colon) to (address.substring(colon + 1).toIntOrNull() ?: DEFAULT_PORT)
     }
 
