@@ -462,6 +462,10 @@ fn describe_transport(t: &servers::Transport) -> String {
 fn describe_credential(c: &servers::Credential) -> String {
     match c {
         servers::Credential::None => "none in the definition".to_string(),
+        servers::Credential::AgentAuthenticates { .. } => "none in the definition — so the \
+             agent authenticates to it ITSELF, and holds whatever token that \
+             produces. Route it through the broker with `apex mcp connect`"
+            .to_string(),
         servers::Credential::Brokered { service } => {
             format!("held by apex-secretd as '{service}' — the agent cannot read it")
         }
