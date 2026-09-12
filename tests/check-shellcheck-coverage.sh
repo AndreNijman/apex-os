@@ -41,9 +41,18 @@ command -v shellcheck >/dev/null || { echo "FATAL: shellcheck is not installed";
 # linted by nobody at all. All three were already clean at this severity, so
 # the gap cost nothing this time. A root nobody listed is the same hole as a
 # script nobody listed.
+#
+# And the same hole one level down: the exec bit was a discovery predicate. A
+# script the image installs with `COPY --chmod=0755` does not need to be
+# executable in the repo to be executable on the machine, so ten shipped shell
+# scripts had a shebang, ran on every boot or on every NetworkManager event, and
+# were linted by nobody — among them files/system/libexec/apex-env,
+# apex-session-select, apex-shell-autostart and the safe-graphics autostart. All
+# ten were clean at this severity, so this cost nothing either, which is the
+# point: the gap is only ever free until it is not. Discovery is now the shebang
+# alone. It reads the first two bytes of ~335 files and takes about a second.
 mapfile -t scripts < <(
-    find tests files android/tools -type f \
-        \( -name '*.sh' -o -perm -u+x \) 2>/dev/null \
+    find tests files android/tools -type f 2>/dev/null \
     | while IFS= read -r f; do
         case "$f" in */__pycache__/*|*/.git/*) continue ;; esac
         if [ "${f##*.}" = sh ]; then printf '%s\n' "$f"; continue; fi
