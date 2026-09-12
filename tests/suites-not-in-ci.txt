@@ -11,7 +11,6 @@ tests/test-apex-firewall-live.sh     loads nftables into the live kernel; needs 
 tests/test-apex-lid-live.sh          needs a real SW_LID device and a logind session
 #
 # ── DEBT: these can run headless and simply were never wired in ─────────────
-tests/test-apex-lid.sh               60 assertions for P1-063; no CI run has ever executed it
 tests/test-apex-firewall-ssh.sh      asserts the ssh allowance in the shipped ruleset
 tests/test-apex-devices.sh           55 assertions over six device areas
 tests/test-device-services-netns.sh  12 assertions; sends real packets in a private netns

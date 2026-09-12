@@ -97,13 +97,36 @@ jobs:
           # exactly the change most likely to introduce an id `apex ai pull`
           # would refuse. `config/` is small and every file in it is read by the
           # binary this job builds.
-          # files/desktop/{fish,nushell,shell}/ and the multiplexer adapter are
-          # in the RUST selector as well as the engine one, because the suites
-          # that assert them (test-shell-agent.sh, test-mux-layouts.sh) run in
-          # the rust job — it is the only one with a toolchain to build `apex`.
-          # A PR touching only one of those files would otherwise set
-          # engine=true, rust=false, skip the job, and pass: a skipped job counts
-          # as success. Fourth instance of this bug in this file.
+          # `files/` — the WHOLE tree — is in the RUST selector as well as the
+          # engine one. It began as files/desktop/{fish,nushell,shell}/ and the
+          # multiplexer adapter, added because test-shell-agent.sh and
+          # test-mux-layouts.sh assert them and run in the rust job, the only
+          # one with a toolchain to build `apex`. A PR touching only one of
+          # those set engine=true, rust=false, skipped the job, and passed: a
+          # skipped job counts as success. Fourth instance of this bug.
+          #
+          # It is now the whole tree because the narrow path was the wrong
+          # shape, and paying the debt one path at a time is what produced six
+          # numbered instances. Counted 2026-09-13: SIX suites in the rust job
+          # read something under files/ —
+          #   check-containerfile-assertions.sh  files/system/NetworkManager/
+          #   test-apex-blueprint.sh             files/system/libexec/apex-pkg
+          #   test-apex-lid.sh                   files/system/units/, and a grep
+          #                                      over ALL of files/ for a static
+          #                                      HandleLidSwitch=
+          #   test-apex-recover.sh               files/system/libexec/
+          #   test-apex-storage.sh               files/system/{libexec,units}/
+          #   test-boot-v2.sh                    files/scripts/boot-v2, units/
+          # — and the selector reached none of them. Deleting apex-lid.service,
+          # or adding `HandleLidSwitch=ignore` to any drop-in under files/, is a
+          # files/-only change: engine=true, rust=false, job skipped, PR green,
+          # on exactly the change those suites exist to catch. Seventh instance,
+          # and the only one of the seven that was never introduced by a single
+          # commit — it has been latent under every narrow entry above.
+          #
+          # The cost is that a files/-only PR now also spins the rust job. That
+          # is the trade this file already declares two screens up: "the unknown
+          # case fails towards running too much, never too little."
           # docs/ and README.md are in the RUST selector, and only because the
           # job that checks them is the one with a toolchain: check-doc-verbs.sh
           # asks the built `apex` binary what it can do, in both directions. A
@@ -127,7 +150,7 @@ jobs:
           # otherwise never run the check that the file is still what `snow`
           # produces, and hand-editing it is precisely how the Kotlin suite
           # stops being evidence about the protocol the desktop speaks.
-          grep -Eq '^(apexd/|config/|Containerfile|docs/|README\.md|tests/|files/desktop/(fish|nushell|shell)/|files/system/libexec/apex-mux|android/core/src/test/resources/)' <<<"$files" && rust=true
+          grep -Eq '^(apexd/|config/|Containerfile|docs/|README\.md|tests/|files/|android/core/src/test/resources/)' <<<"$files" && rust=true
           grep -Eq '^installer/' <<<"$files" && installer=true
           # files/** is the whole runtime payload of the image — the package
           # engine, session launchers, guards. A PR touching only that used to
@@ -677,9 +700,13 @@ jobs:
       # the refusal of a TCP endpoint — and they are in three different
       # languages, so nothing but a parity check can hold them together.
       #
-      # In `static` and not `rust` on purpose: the selectors would skip it. A PR
-      # touching only files/system/units/apex-aid.service does not set
-      # rust=true, and that unit is one of the files this check reads.
+      # In `static` and not `rust` on purpose. It was put here because a PR
+      # touching only files/system/units/apex-aid.service did not set rust=true,
+      # and that unit is one of the files this check reads. The rust selector
+      # gained `files/` on 2026-09-13, so that particular hole is closed — but
+      # `static` is the job with no selector at all, and a parity check across
+      # three languages is exactly the thing that should run on every PR rather
+      # than on the PRs somebody predicted. It stays here.
       #
       # `--self-test` is the part that makes it worth having: it mutates each
       # constant and asserts the check catches it, and it also asserts a COMMENT
@@ -942,6 +969,55 @@ jobs:
           cargo build -p apex --locked --manifest-path apexd/Cargo.toml
           test -x "$APEX"
           ./tests/test-apex-trust.sh --with-binary
+
+      # ── P1-063 lid, and the reason this step exists at all ─────────────────
+      # tests/test-apex-lid.sh is sixty assertions for the behaviour Andre
+      # asked for by name — close the lid at school and the agents keep
+      # running — and until this line, no CI run had ever executed one of
+      # them. It sat in tests/suites-not-in-ci.txt as debt: a file that looks
+      # like coverage and gates nothing.
+      #
+      # It lives in the RUST job because it drives the shipped `apex lid`
+      # binary, and this is the only job with a toolchain. tests/ is in the
+      # rust selector, so an edit to the suite reaches it.
+      #
+      # The suite opens no window, starts no compositor, suspends nothing and
+      # never touches the machine running it: every fixture is a tree under
+      # mktemp, HOME is pushed inside it so the invoking account's own
+      # ~/.config/apex/lid.toml cannot be read, and every power-down action is
+      # a logged argv rather than a syscall. The real SW_LID half needs uinput,
+      # root and a machine you are willing to watch sleep — that is
+      # test-apex-lid-live.sh, which stays exempt for that reason.
+      #
+      # The step reads the suite's own summary line back rather than banking
+      # exit 0, because the point of wiring a suite in is evidence that it RAN.
+      # It also fails on a SKIP: this suite ships no skip helper at all, by a
+      # decision written into its header, so a SKIP appearing means an
+      # assertion stopped being made.
+      - name: P1-063 lid — sixty assertions no CI run had ever executed
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX_BIN"
+          rc=0; out="$(./tests/test-apex-lid.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the lid suite exited $rc; it says FATAL and exits 2 when it cannot find the binary or python3"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^[[:space:]]*[0-9]+ passed, [0-9]+ failed$' || true)"
+          [ -n "$summary" ] || { echo "::error::the lid suite printed no summary line"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $1}')"
+          failed="$(printf '%s' "$summary" | awk '{print $3}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed lid assertions failed"; exit 1; }
+          [ "$passed" -ge 60 ] || { echo "::error::only $passed lid assertions ran; 60 ran on 2026-09-13, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the lid suite printed a SKIP; it ships no skip helper, so one appearing means an assertion stopped being made"
+              exit 1
+          fi
 
       # §25's binary half: `apex schema` against real state trees — a record
       # from before the version key existed migrated with a copy kept, a record
