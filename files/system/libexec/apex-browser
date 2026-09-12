@@ -247,6 +247,29 @@ user_pref("app.update.enabled", false);
 user_pref("browser.tabs.crashReporting.sendReport", false);
 user_pref("extensions.update.enabled", false);
 user_pref("extensions.getAddons.cache.enabled", false);
+// Vendor services the browser talks to on its own account. Measured, not
+// tidied away: with only the telemetry preferences above, the lab's daemon
+// logged a capsule being denied firefox.settings.services.mozilla.com,
+// aus5.mozilla.org and location.services.mozilla.com, repeatedly, while the
+// browser retried them for the rest of its run. The allowlist did its job —
+// none of it went anywhere — but a capsule whose allowlist does not describe
+// what it talks to is a capsule whose allowlist is doing work the profile
+// should have done, and the retries cost a run most of its wall clock.
+user_pref("services.settings.server", "");
+user_pref("browser.region.network.url", "");
+user_pref("browser.region.update.enabled", false);
+user_pref("geo.provider.network.url", "");
+user_pref("geo.enabled", false);
+user_pref("network.captive-portal-service.enabled", false);
+user_pref("network.connectivity-service.enabled", false);
+user_pref("browser.safebrowsing.malware.enabled", false);
+user_pref("browser.safebrowsing.phishing.enabled", false);
+user_pref("browser.safebrowsing.downloads.enabled", false);
+user_pref("browser.newtabpage.activity-stream.feeds.system.topstories", false);
+user_pref("browser.discovery.enabled", false);
+user_pref("browser.ping-centre.telemetry", false);
+user_pref("network.dns.disablePrefetch", true);
+user_pref("network.prefetch-next", false);
 EOF
     [ -s "$prof/user.js" ] || die "cannot write the capsule profile preferences"
 }

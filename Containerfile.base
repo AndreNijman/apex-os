@@ -1872,6 +1872,14 @@ RUN set -eux; \
     # for loopback — which inside the namespace is where the bridge is.
     grep -qE '^[^#]*network\.proxy\.type", 1' /usr/libexec/apex-browser; \
     grep -qE '^[^#]*allow_hijacking_localhost", true' /usr/libexec/apex-browser; \
+    # And the browser's own vendor traffic is turned off in the profile rather
+    # than left for the allowlist to refuse. Measured by the live lab: without
+    # these the daemon logged a capsule being denied Mozilla's settings,
+    # update and geolocation services over and over, and the retries cost the
+    # run most of its wall clock. An allowlist that does not describe what the
+    # capsule talks to is an allowlist doing the profile's job.
+    grep -qE '^[^#]*services\.settings\.server", ""' /usr/libexec/apex-browser; \
+    grep -qE '^[^#]*geo\.enabled", false' /usr/libexec/apex-browser; \
     # Removal is a recursive `rm -rf` driven by a name, so the four fences are
     # build-time facts — the same four apex-vm and apex-disposable carry.
     grep -qE '^[^#]*\[\[ "\$1" =~ \^\[a-z0-9\]\[a-z0-9-\]\{0,47\}\$ \]\]' /usr/libexec/apex-browser; \
