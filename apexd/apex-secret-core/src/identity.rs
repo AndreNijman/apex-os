@@ -39,10 +39,13 @@
 //!   cannot reach, by design"), and there is no ssh provider to hold to a
 //!   `host_group`. The refusal now names what the project bound, which is the
 //!   most an unenforceable binding can honestly do.
-//! * **agent** — **declared and reported, not enforced.** The agent runtime
-//!   picks its assistant from the user's own profile, not from the project
-//!   file; binding it would mean a check in `apex-agent-core`'s session start,
-//!   which is not this item's code.
+//! * **agent** — enforced, and it is this round's new work. `apex-agentd`
+//!   resolves which assistant a session runs, and it now asks the project
+//!   before it asks the user's own configuration: a session that names no
+//!   agent gets the bound one rather than `~/.config/apex/agent.json`'s
+//!   `default_agent`, and a session that names a *different* one is refused.
+//!   [`AgentIdentity::check`] is that refusal; `apex-agentd/src/session.rs`
+//!   is where it is applied, before the PTY, the worktree or the grant.
 //!
 //! [`Identities::report`] is what makes the difference visible rather than
 //! buried: `apex project identity` prints every section, what it binds, and
@@ -95,7 +98,7 @@ impl Kind {
     /// telling somebody their project binds an ssh host group, without telling
     /// them nothing looks at it, would be worse than not printing it at all.
     pub fn is_enforced(self) -> bool {
-        matches!(self, Kind::GitHub | Kind::Cloudflare)
+        matches!(self, Kind::GitHub | Kind::Cloudflare | Kind::Agent)
     }
 
     /// Where the check lives, or what would have to exist for one to.
@@ -116,9 +119,10 @@ impl Kind {
                  beside apex-secretd/src/providers/git.rs is what would check it"
             }
             Kind::Agent => {
-                "nothing yet. The agent runtime chooses its assistant from the \
-                 user's own profile; a check would go where a session resolves \
-                 its project, in apex-agent-core"
+                "the agent runtime, when a session starts in this project \
+                 (apex-agentd/src/session.rs). A session that names no agent \
+                 gets the bound one; a session that names a different one is \
+                 refused before anything is created"
             }
         }
     }
@@ -141,6 +145,48 @@ pub struct GitHubIdentity {
 /// The default for [`GitHubIdentity::host`].
 pub const GITHUB_HOST: &str = "github.com";
 
+/// `[identity.agent]`.
+///
+/// §36's `default = "claude"`, and the word is exact: it is the agent a session
+/// that named none gets. What §36 does *not* say, and what this build decides,
+/// is what happens when a session names a different one — and the sentence §36
+/// gives for the whole file settles it. *"This prevents deploying or pushing
+/// from the wrong account."* A binding that only applied when nobody said
+/// otherwise would prevent nothing: `--agent codex` would step around it, and
+/// stepping around it is exactly what an agent that can edit its own command
+/// line would do.
+///
+/// So the binding does two things, and the second is the enforcement:
+///
+/// 1. It **displaces the user's own default**. `apex agent run` in this project
+///    starts the bound agent, not `default_agent` from the user's config.
+/// 2. It **refuses a session that names a different one**, with a message that
+///    says where the binding is, because the way to change it is to change
+///    `apex.toml` — the same escape hatch [`IdentityError::WrongAccount`]
+///    names, and the same one §36's github binding has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentIdentity {
+    /// §36's `default`: the assistant this project's sessions run.
+    pub default: String,
+}
+
+impl AgentIdentity {
+    /// Whether a session that explicitly asked for `requested` may run here.
+    ///
+    /// Case-insensitive, because an adapter id is a lowercase word and
+    /// `--agent Claude` is a typo rather than a different request. Everything
+    /// else is refused.
+    pub fn check(&self, requested: &str) -> Result<(), IdentityError> {
+        if requested.eq_ignore_ascii_case(&self.default) {
+            return Ok(());
+        }
+        Err(IdentityError::WrongAgent {
+            requested: requested.to_string(),
+            bound: self.default.clone(),
+        })
+    }
+}
+
 /// Why a remote is not one this project may push to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityError {
@@ -152,6 +198,8 @@ pub enum IdentityError {
         bound: String,
         host: String,
     },
+    /// The session asked to run an agent this project did not bind.
+    WrongAgent { requested: String, bound: String },
 }
 
 impl std::fmt::Display for IdentityError {
@@ -173,6 +221,16 @@ impl std::fmt::Display for IdentityError {
                  line in apex.toml",
                 got.escape_debug(),
                 bound.escape_debug()
+            ),
+            IdentityError::WrongAgent { requested, bound } => write!(
+                f,
+                "this project binds [identity.agent] default = \"{}\", and \
+                 this session asked for '{}'. §36 binds a project to one \
+                 assistant so that work in it is not started under another by \
+                 accident, so the session is refused rather than started. If \
+                 the change is deliberate, change the line in apex.toml",
+                bound.escape_debug(),
+                requested.escape_debug()
             ),
         }
     }
@@ -261,7 +319,7 @@ pub struct Identities {
     /// `[identity.ssh] host_group`.
     pub ssh_host_group: Option<String>,
     /// `[identity.agent] default`.
-    pub agent_default: Option<String>,
+    pub agent: Option<AgentIdentity>,
 }
 
 impl Identities {
@@ -319,7 +377,8 @@ impl Identities {
             github,
             cloudflare: string(&["identity", "cloudflare", "account"])?,
             ssh_host_group: string(&["identity", "ssh", "host_group"])?,
-            agent_default: string(&["identity", "agent", "default"])?,
+            agent: string(&["identity", "agent", "default"])?
+                .map(|default| AgentIdentity { default }),
         })
     }
 
@@ -341,7 +400,10 @@ impl Identities {
                     .ssh_host_group
                     .as_ref()
                     .map(|g| format!("host_group = {g}")),
-                Kind::Agent => self.agent_default.as_ref().map(|d| format!("default = {d}")),
+                Kind::Agent => self
+                    .agent
+                    .as_ref()
+                    .map(|a| format!("default = {}", a.default)),
             };
             out.insert(
                 kind,
