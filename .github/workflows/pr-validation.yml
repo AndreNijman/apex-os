@@ -617,6 +617,25 @@ jobs:
       - name: §P1-061 app permissions — a revoked grant is refused, and the native one cannot be
         run: ./tests/test-apex-permissions.sh
 
+      # §P1-061 criterion 4, the other half: does a permission-store change
+      # reach a PipeWire client that is ALREADY RUNNING? The answer decides
+      # whether Timing::Immediate is a real variant or a placeholder, and for
+      # one round it was unmeasured because measuring it looked like it meant
+      # revoking a real camera grant. It does not: the harness brings its own
+      # session bus, PipeWire, WirePlumber and XDG_DATA_HOME, and takes the
+      # grant away from an application id that does not exist.
+      #
+      # Measured on the L16, 2026-09-12: it does NOT reach it. So this is a
+      # MEASUREMENT and not a gate — it prints what it found and exits 0 either
+      # way, because a machine where the answer flips is a machine where the
+      # model should change, and that is a decision for a person. It needs
+      # pipewire, wireplumber, gcc, the libpipewire headers and the pipewire
+      # tools, and skips cleanly without them, which is what it does on this
+      # runner. It is listed so the entry point exists rather than being
+      # something only one laptop knows about.
+      - name: §P1-061 app permissions — does a store change reach a running client (measurement)
+        run: ./tests/measure-permission-store-reach.sh
+
       # §26's channels, structural half, and this one has to be in `static`:
       # every assertion compares .github/workflows against apexd/, which are
       # different path selectors. A PR touching only build-image.yml sets
