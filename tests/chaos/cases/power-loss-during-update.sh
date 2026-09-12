@@ -1,3 +1,7 @@
+# shellcheck shell=bash
+# The CASE_* variables and the case_* functions are the contract
+# tests/chaos/run-chaos reads; nothing in this file uses them itself.
+# shellcheck disable=SC2034
 # ─────────────────────────────────────────────────────────────────────────────
 #  power-loss-during-update — the update note, torn in half.
 #

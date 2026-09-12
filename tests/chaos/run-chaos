@@ -230,8 +230,11 @@ for name in "${RUN[@]}"; do
     # the previous case's and silently passes. That is precisely the class of
     # bug this harness exists to refuse.
     unset -f case_setup case_inject case_prove case_prove_exposed case_baseline case_observe case_judge case_cleanup 2>/dev/null || true
-    CASE_TITLE=""; CASE_CRITERION=""; CASE_NEEDS=""; CASE_STAGED=0
-    CASE_ALLOW_CHANGED=""
+    # Reset so a case that declares none inherits nothing from the last.
+    # shellcheck disable=SC2034
+    CASE_TITLE=""; CASE_CRITERION=""; CASE_NEEDS=""
+    # shellcheck disable=SC2034
+    CASE_STAGED=0
     # shellcheck disable=SC1090
     . "$file"
 

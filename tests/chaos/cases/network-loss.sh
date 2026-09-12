@@ -1,3 +1,7 @@
+# shellcheck shell=bash
+# The CASE_* variables and the case_* functions are the contract
+# tests/chaos/run-chaos reads; nothing in this file uses them itself.
+# shellcheck disable=SC2034
 # ─────────────────────────────────────────────────────────────────────────────
 #  network-loss — the machine is asked about something on the network while it
 #  has no network at all.
@@ -84,23 +88,6 @@ CASE_NEEDS="apex-binary userns netns"
 # The port `apex doctor` probes. Hard-coded in main.rs; named once here so the
 # listener and the assertions cannot drift apart from each other.
 METRICS_PORT=9723
-
-# Every invocation shares this environment. `apex doctor` writes nothing, but
-# a subject that acquired a write would write into the bundle rather than into
-# the developer's home, and that is not a thing to leave to trust.
-_doctor_env() {
-    printf 'HOME=%s\n' "$CASE_ROOT/home"
-    printf 'XDG_CONFIG_HOME=%s\n' "$CASE_ROOT/home/.config"
-    printf 'XDG_STATE_HOME=%s\n' "$CASE_ROOT/home/.local/state"
-    printf 'XDG_CACHE_HOME=%s\n' "$CASE_ROOT/home/.cache"
-    printf 'APEX_STORAGE_ROOT=%s\n' "$CASE_ROOT/machine"
-    printf 'APEX_FIRMWARE_ROOT=%s\n' "$CASE_ROOT/machine"
-}
-
-_doctor() {
-    # shellcheck disable=SC2046
-    env $(_doctor_env) "$APEX_BIN" doctor --json
-}
 
 case_setup() {
     mkdir -p "$CASE_ROOT/home/.config" "$CASE_ROOT/home/.local/state" \
@@ -270,14 +257,14 @@ case_judge() {
     # The control. Asserted as well as proven, so a reader of the bundle sees
     # it in the expectation list rather than only in exposed.out.
     expect_json "with a listener bound in the namespace the endpoint reads reachable" \
-        "$CASE_DIR/baseline.out" "$METRICS_ROW['ok']" "True"
+        "$CASE_DIR/baseline.out" "${METRICS_ROW}['ok']" "True"
 
     # Both faults are a WARN, and that is right: neither A nor B is a machine
     # whose metrics endpoint is reachable. The boolean is not the defect.
     expect_json "with no network the endpoint does not read reachable" \
-        "$CASE_DIR/observe.json" "$METRICS_ROW['ok']" "False"
+        "$CASE_DIR/observe.json" "${METRICS_ROW}['ok']" "False"
     expect_json "with nothing listening the endpoint does not read reachable either" \
-        "$CASE_DIR/refused.json" "$METRICS_ROW['ok']" "False"
+        "$CASE_DIR/refused.json" "${METRICS_ROW}['ok']" "False"
 
     # The defect is the sentence. "Nobody could ask" and "we asked and the
     # answer was no" are different facts about the machine, and the person

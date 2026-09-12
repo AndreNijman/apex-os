@@ -90,8 +90,12 @@ export CHAOS_LIB_DIR CHAOS_REPO
 
 # ── the three verdict states ────────────────────────────────────────────────
 # Strings rather than an enum, because the bundle is JSON and a human reads it.
+# Read by run-chaos and by the cases, never in this file.
+# shellcheck disable=SC2034
 readonly CHAOS_SURVIVED="survived"
+# shellcheck disable=SC2034
 readonly CHAOS_FAILED="failed"
+# shellcheck disable=SC2034
 readonly CHAOS_CANNOT="could-not-inject"
 
 chaos_log()  { printf '\n>>> %s\n' "$*" >&2; }
@@ -178,8 +182,17 @@ chaos_write_env() {
         printf 'apex-bin: %s\n' "${CHAOS_APEX_REAL:-<unset>}"
         if chaos_have_apex_bin; then
             printf 'apex-version: %s\n' "$("$CHAOS_APEX_REAL" --version 2>&1 | head -1)"
+            # The binary's own digest, not just the tree's revision, and it is
+            # here because of a real half-hour: a mutation was reverted in the
+            # source, the tree came back clean, `cargo build` was NOT re-run,
+            # and a whole suite ran against the mutant binary at a spotless
+            # HEAD. `revision` said everything was fine. A replay would have
+            # reported "the verdict did not reproduce" and offered no reason.
+            printf 'apex-sha256: %s\n' \
+                "$(sha256sum < "$CHAOS_APEX_REAL" 2>/dev/null | cut -d' ' -f1)"
         else
             printf 'apex-version: <binary absent>\n'
+            printf 'apex-sha256: <binary absent>\n'
         fi
     } > "$out"
 }
