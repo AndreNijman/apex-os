@@ -1,0 +1,29 @@
+# Versions resolved from each project's own published metadata on 2026-09-12,
+# not from memory. `./gradlew dependencies` is the check that they still hold.
+[versions]
+kotlin = "2.4.20"
+agp = "9.4.0"
+# The lightweight API only: `org.bouncycastle.crypto.*`, never a JCA provider.
+# Android ships a stripped BouncyCastle under the `BC` name and Conscrypt owns
+# the JCA slots the stripped one used to hold, so `Cipher.getInstance` on a
+# phone reaches an implementation nobody here chose. The lightweight classes
+# are plain objects with no provider registration and behave identically on a
+# JVM and on a device.
+bouncycastle = "1.83"
+kotlinxSerialization = "1.9.0"
+kotlinxCoroutines = "1.10.2"
+junit = "5.14.0"
+
+[libraries]
+bouncycastle-provider = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version = "1.14.0" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
