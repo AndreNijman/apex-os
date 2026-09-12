@@ -96,6 +96,28 @@ impl Roots {
         std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))
     }
 
+    /// The inverse of [`Roots::path`]: the absolute path as the *machine*
+    /// spells it, given one that has already been re-rooted.
+    ///
+    /// Anything the driver discovers by walking a directory comes back rooted,
+    /// and anything it later hands to a function that roots again is rooted
+    /// twice. That is not a theoretical worry — it happened here, to the
+    /// keyboard backlight: `kbd_backlights` returned
+    /// `$FIXTURE/sys/class/leds/…/brightness`, `apply_sysfs` re-rooted it to
+    /// `$FIXTURE/$FIXTURE/sys/…`, and the write reported `ok` having zeroed
+    /// nothing. Every path that leaves a directory walk and enters a
+    /// `PowerAction` goes through here, so what is recorded, described and
+    /// applied is the machine's own spelling in every case.
+    fn unpath(&self, rooted: &Path) -> String {
+        match &self.fixture {
+            Some(root) => match rooted.strip_prefix(root) {
+                Ok(rest) => format!("/{}", rest.display()),
+                Err(_) => rooted.display().to_string(),
+            },
+            None => rooted.display().to_string(),
+        }
+    }
+
     fn read_optional(&self, absolute: &str) -> Result<Option<String>, String> {
         match std::fs::read_to_string(self.path(absolute)) {
             Ok(s) => Ok(Some(s)),
@@ -412,7 +434,7 @@ fn live_sessions(roots: &Roots) -> Vec<apex_agent_core::protocol::SessionInfo> {
 /// probe that reads as "there was never one" would hide exactly that.
 pub fn read_vpn(runner: &Runner) -> (Option<String>, VpnState) {
     let nm = runner.probe("nmcli", &["-t", "-f", "TYPE,NAME", "con", "show", "--active"]);
-    match &nm {
+    let nm_unreadable = match &nm {
         Ran::Ok(text) => {
             for line in text.lines() {
                 let Some((kind, name)) = line.split_once(':') else { continue };
@@ -420,27 +442,59 @@ pub fn read_vpn(runner: &Runner) -> (Option<String>, VpnState) {
                     return (Some(name.to_string()), VpnState::Up);
                 }
             }
+            None
         }
-        Ran::Failed(why) => {
-            return (None, VpnState::Unreadable { why: why.clone() });
-        }
+        Ran::Failed(why) => Some(why.clone()),
         Ran::NotRun(_) => {
-            return (
-                None,
-                VpnState::Unreadable {
-                    why: "NetworkManager was not queried (fixture root or dry run)".to_string(),
-                },
-            );
+            Some("NetworkManager was not queried (fixture root or dry run)".to_string())
         }
-    }
+    };
 
+    // sing-box is asked even when NetworkManager could not be, and that order
+    // is deliberate. APEX ships `sing-box.service`, and APEX Shell's VPN tab
+    // starts it; that tunnel is a tun device NetworkManager does not own and
+    // never lists. Returning `Unreadable` the moment nmcli is unavailable
+    // would have made the shipped VPN invisible on exactly the machines where
+    // NetworkManager is not the thing carrying it.
     let sb = runner.probe("systemctl", &["is-active", "sing-box.service"]);
     if let Ran::Ok(text) = &sb {
         if text.trim() == "active" {
             return (Some("sing-box".to_string()), VpnState::Up);
         }
     }
-    (None, VpnState::None)
+
+    // Only now is "there is no tunnel" a safe thing to say, and only if both
+    // were actually asked. A reading nobody finished is not a reading of none.
+    match nm_unreadable {
+        Some(why) => (None, VpnState::Unreadable { why }),
+        None => (None, VpnState::None),
+    }
+}
+
+/// A tunnel that was up earlier in this period and is not up now is **down**,
+/// not absent.
+///
+/// [`read_vpn`] has no memory. It asks NetworkManager and sing-box what is
+/// active at this instant, so a tunnel that has gone away answers exactly like
+/// a machine that never had one: `VpnState::None`. The period does have a
+/// memory, and this is where it is used — without it the timeline of a dropped
+/// VPN reads Up, Up, None, None, and the report says "the VPN held" about the
+/// criterion the whole request rests on.
+///
+/// The name is carried over from the last `Up` sample, so the report can say
+/// *which* tunnel went rather than announcing an anonymous drop.
+fn note_vpn(
+    period: &ClosedPeriod,
+    name: Option<String>,
+    state: VpnState,
+) -> (Option<String>, VpnState) {
+    if !matches!(state, VpnState::None) {
+        return (name, state);
+    }
+    match period.vpn.iter().rev().find(|s| matches!(s.state, VpnState::Up)) {
+        Some(was) => (was.name.clone(), VpnState::Down),
+        None => (name, state),
+    }
 }
 
 // ── policy loading ───────────────────────────────────────────────────────────
@@ -705,7 +759,10 @@ fn kbd_backlights(roots: &Roots) -> Result<Vec<(String, u32)>, String> {
         match std::fs::read_to_string(&p) {
             Ok(s) => {
                 let v = s.trim().parse::<u32>().unwrap_or(0);
-                out.push((p.to_string_lossy().to_string(), v));
+                // `unpath`, not `to_string_lossy`. This path is about to be
+                // stored in a `PowerAction` that `apply_sysfs` re-roots, and a
+                // rooted path stored here is a rooted path rooted twice.
+                out.push((roots.unpath(&p), v));
             }
             // Present and unreadable is reported by the caller as a skip with
             // this reason, not silently dropped.
@@ -863,10 +920,15 @@ fn apply_sysfs(roots: &Roots, path: &str, value: &str) -> String {
     format!("{path} <- {value}: {}", write_abs(&roots.path(path), value))
 }
 
+/// Write a sysfs attribute that is supposed to already exist.
+///
+/// There is deliberately no `create_dir_all` here, and there used to be. A
+/// sysfs attribute never needs its parent directory created: if the parent is
+/// missing, the path is wrong. Creating it turned a wrong path into a reported
+/// `ok` — which is exactly how the double-rooted keyboard-backlight write above
+/// went unnoticed, materialising `$FIXTURE/$FIXTURE/sys/class/leds/…` and
+/// calling it a success.
 fn write_abs(path: &Path, value: &str) -> String {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
     match std::fs::write(path, value) {
         Ok(()) => "ok".to_string(),
         // "Permission denied is not absence": a sysfs write that was refused is
@@ -985,6 +1047,101 @@ fn inhibitor_holders(runner: &Runner) -> Result<Vec<String>, String> {
     }
 }
 
+/// Whether logind will act on the lid at all, before any inhibitor is asked.
+///
+/// ── Found by measurement, on 2026-09-12, and it changes the answer ──────────
+///
+/// logind consults `HandleLidSwitchDocked` — whose default is `ignore` —
+/// **before** it consults any inhibitor, and it treats a machine as docked
+/// when an external display is connected as readily as when a real dock is.
+/// The L16 this was written on reads `Docked=true` with one DisplayPort
+/// monitor attached.
+///
+/// On such a machine the lid already does nothing, and APEX's inhibitor is not
+/// what is keeping it awake. `apex lid status` saying "keep-working: 1 live
+/// agent session" there is true and misleading in the same breath: it credits
+/// this feature with an outcome logind would have produced on its own, and it
+/// hides the fact that unplugging the monitor changes the behaviour. The sixth
+/// criterion is that the owner can see WHY the machine did what it did, so the
+/// readout says which of the two it is.
+///
+/// Nothing about the decision changes. A docked machine with live work still
+/// takes the inhibitor — the monitor may be unplugged at any moment, and a
+/// lock taken only after the lid shuts has already lost.
+struct Logind {
+    docked: Option<bool>,
+    external_displays: usize,
+    block_inhibited: Option<String>,
+}
+
+impl Logind {
+    fn read(roots: &Roots, runner: &Runner) -> Logind {
+        let docked = match runner.probe(
+            "busctl",
+            &[
+                "get-property",
+                "org.freedesktop.login1",
+                "/org/freedesktop/login1",
+                "org.freedesktop.login1.Manager",
+                "Docked",
+            ],
+        ) {
+            Ran::Ok(t) => match t.trim() {
+                "b true" => Some(true),
+                "b false" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        };
+        let block_inhibited = match runner.probe(
+            "busctl",
+            &[
+                "get-property",
+                "org.freedesktop.login1",
+                "/org/freedesktop/login1",
+                "org.freedesktop.login1.Manager",
+                "BlockInhibited",
+            ],
+        ) {
+            Ran::Ok(t) => Some(t.trim().trim_start_matches("s ").trim_matches('"').to_string()),
+            _ => None,
+        };
+        Logind { docked, external_displays: external_displays(roots), block_inhibited }
+    }
+
+    /// Whether logind would take the configured lid action at all.
+    ///
+    /// `None` when it could not be established — which is not "yes".
+    fn acts_on_lid(&self) -> Option<bool> {
+        if self.external_displays > 0 {
+            return Some(false);
+        }
+        self.docked.map(|d| !d)
+    }
+}
+
+/// Connected DRM connectors that are not the built-in panel.
+///
+/// The panel is excluded by name: `eDP` and `LVDS` are the laptop's own screen
+/// and are connected on every laptop ever made, so counting them would report
+/// every machine as docked.
+fn external_displays(roots: &Roots) -> usize {
+    let dir = roots.path("/sys/class/drm");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return 0 };
+    entries
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.contains("eDP") || name.contains("LVDS") || name.contains("Writeback") {
+                return false;
+            }
+            std::fs::read_to_string(e.path().join("status"))
+                .map(|s| s.trim() == "connected")
+                .unwrap_or(false)
+        })
+        .count()
+}
+
 fn status(roots: &Roots, as_json: bool) -> i32 {
     let runner = Runner::new(roots, true);
     let loaded = load_policy(roots);
@@ -992,11 +1149,18 @@ fn status(roots: &Roots, as_json: bool) -> i32 {
     let decision = loaded.policy.decide(&inputs);
     let held = inhibitor_holders(&runner);
     let (vpn_name, vpn) = read_vpn(&runner);
+    let logind = Logind::read(roots, &runner);
 
     if as_json {
         println!(
             "{}",
             json!({
+                "logind": {
+                    "docked": logind.docked,
+                    "external_displays": logind.external_displays,
+                    "block_inhibited": logind.block_inhibited,
+                    "acts_on_lid": logind.acts_on_lid(),
+                },
                 "policy_source": loaded.source,
                 "policy_error": loaded.error,
                 "pin": loaded.policy.pin.as_str(),
@@ -1068,6 +1232,39 @@ fn status(roots: &Roots, as_json: bool) -> i32 {
         Ok(h) if h.is_empty() => println!("inhibitor    nobody holds handle-lid-switch"),
         Ok(h) => println!("inhibitor    held by {}", h.join(", ")),
         Err(e) => println!("inhibitor    UNKNOWN — {e}"),
+    }
+    match logind.acts_on_lid() {
+        Some(false) => println!(
+            "logind       WILL NOT ACT ON THE LID — {}{}. HandleLidSwitchDocked (default \
+             `ignore`) is consulted BEFORE any inhibitor, so this machine already stays \
+             awake with the lid shut and APEX is not what is doing it. Unplug the \
+             display and this becomes APEX's job again.",
+            if logind.external_displays > 0 {
+                format!("{} external display(s) connected", logind.external_displays)
+            } else {
+                "logind reports this machine as docked".to_string()
+            },
+            match logind.block_inhibited.as_deref() {
+                Some(b) if b.contains("handle-lid-switch") =>
+                    "; the lid inhibitor is held as well",
+                _ => "",
+            }
+        ),
+        Some(true) => println!(
+            "logind       will act on the lid ({}), so the inhibitor is what decides",
+            match logind.block_inhibited.as_deref() {
+                Some(b) if b.contains("handle-lid-switch") => "handle-lid-switch is blocked",
+                Some(_) | None => "handle-lid-switch is not blocked",
+            }
+        ),
+        // Not "yes". Whether logind will act on the lid is the frame every
+        // other line here sits inside, and a frame nobody could read is not a
+        // frame that says "normal".
+        None => println!(
+            "logind       UNKNOWN — whether logind will act on the lid at all could not be \
+             established, so read the decision below as what APEX would do, not as what \
+             the machine will do"
+        ),
     }
     println!("decision     {}", decision.as_str());
     println!("             {}", decision.why());
@@ -1220,6 +1417,17 @@ fn watch(roots: &Roots, once: bool, dry_run: bool, interval: Option<u64>) -> i32
         let decision = loaded.policy.decide(&inputs);
         let closed = inputs.lid.treat_as_closed() && !inputs.lid.is_absent();
 
+        // A machine with no lid has nothing for this driver to watch, and
+        // `apex-lid.service` is enabled on every APEX install including
+        // desktops. Exiting says so once; looping would re-ask a question with
+        // no answer every `poll_secs` for the life of the machine. `--once`
+        // still prints its line below, because a suite asking "what would you
+        // do" deserves the same answer on a desktop as anywhere else.
+        if inputs.lid.is_absent() && !once {
+            eprintln!("apex lid: {}", decision.why());
+            return 0;
+        }
+
         // ── the inhibitor ───────────────────────────────────────────────────
         if decision.holds_inhibitor() {
             if held.is_none() {
@@ -1273,6 +1481,7 @@ fn watch(roots: &Roots, once: bool, dry_run: bool, interval: Option<u64>) -> i32
             if let Some(c) = inputs.thermal.celsius() {
                 p.peak_c = Some(p.peak_c.map_or(c, |b: f64| b.max(c)));
             }
+            let (vpn_name, vpn) = note_vpn(p, vpn_name, vpn);
             p.vpn.push(VpnSample { at: now(), name: vpn_name, state: vpn });
             let _ = save_period(roots, STATE, p);
         } else if !closed {
@@ -1288,11 +1497,36 @@ fn watch(roots: &Roots, once: bool, dry_run: bool, interval: Option<u64>) -> i32
 
         // ── a guard ─────────────────────────────────────────────────────────
         if let Some(guard) = decision.guard() {
-            if let Some(p) = period.as_mut() {
-                p.ended_by = Some(guard);
-                p.last_seen = now();
-                let _ = save_period(roots, LAST, p);
-            }
+            // `get_or_insert_with`, not `as_mut`. A guard can fire on the very
+            // first evaluation after the lid shuts — a laptop put away hot
+            // reaches its limit in no time at all, and a `GuardSuspend`
+            // decision does not hold the inhibitor, so the block above never
+            // opened a period to write into. Recording the guard only when a
+            // period happened to exist is how "say which guard fired" becomes
+            // "say which guard fired, sometimes": the owner reopens, runs
+            // `apex lid report`, and is shown the PREVIOUS close with
+            // `ended_by: null` — a true record of the wrong period, which is
+            // worse than no record at all. Measured, not reasoned about: over
+            // a fixture whose first poll was already at the thermal limit, the
+            // suspend happened and `last.json` kept `ended_by: null`.
+            let (vpn_name, vpn) = read_vpn(&runner);
+            let p = period.get_or_insert_with(|| ClosedPeriod {
+                closed_at: now(),
+                last_seen: now(),
+                opened_at: None,
+                sessions_at_close: inputs.work.live_count(),
+                why: decision.why().to_string(),
+                ended_by: None,
+                charge_at_close: inputs.charge.percent(),
+                charge_last: inputs.charge.percent(),
+                peak_c: inputs.thermal.celsius(),
+                powered_down: Vec::new(),
+                skipped: Vec::new(),
+                vpn: vec![VpnSample { at: now(), name: vpn_name, state: vpn }],
+            });
+            p.ended_by = Some(guard);
+            p.last_seen = now();
+            let _ = save_period(roots, LAST, p);
             eprintln!("apex lid: the {guard} guard fired — {}", decision.why());
             if guard.checkpoint_first() {
                 for line in checkpoint_live_work(roots, &runner, guard) {
@@ -1467,12 +1701,29 @@ mod tests {
     use super::*;
 
     struct Tmp(PathBuf);
+
+    /// Why this counter exists, having cost a red suite to find.
+    ///
+    /// `Tmp::new` named its directory after the tag, the pid and the current
+    /// SECOND. Two tests in this module with the same tag, running in parallel
+    /// in one process — which is how `cargo test` runs them — therefore shared
+    /// one directory. `the_plan_saves_the_value_it_is_about_to_replace` and a
+    /// new case both used "kbd"; the second applied a power-down that zeroed
+    /// the LED file the first was about to read, and the first failed claiming
+    /// the prior brightness had not been captured. It passed alone and failed
+    /// in a full run: the same shape as the XDG_CONFIG_HOME defect this unit
+    /// had already been burned by once.
+    ///
+    /// A unique tag would have fixed that one case. A counter fixes the class.
+    static TMP_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
     impl Tmp {
         fn new(tag: &str) -> Tmp {
             let p = std::env::temp_dir().join(format!(
-                "apex-lid-cli-{tag}-{}-{}",
+                "apex-lid-cli-{tag}-{}-{}-{}",
                 std::process::id(),
-                now()
+                now(),
+                TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             std::fs::create_dir_all(&p).expect("temp");
             Tmp(p)
@@ -1752,5 +2003,197 @@ mod tests {
             matches!(state, VpnState::Unreadable { .. }),
             "an unrun probe must not read as `no VPN`: {state:?}"
         );
+    }
+
+    #[test]
+    fn an_external_display_means_logind_decides_before_any_inhibitor_does() {
+        // Measured on the L16, 2026-09-12: `Docked` is true with one
+        // DisplayPort monitor attached, and logind consults
+        // HandleLidSwitchDocked — default `ignore` — BEFORE any inhibitor. On
+        // such a machine the lid already does nothing and APEX is not what is
+        // keeping it awake. The readout has to say which of the two it is, or
+        // it credits this feature with an outcome logind produced on its own.
+        let t = Tmp::new("drm-ext");
+        t.write("sys/class/drm/card1-eDP-1/status", "connected\n");
+        t.write("sys/class/drm/card1-DP-1/status", "connected\n");
+        t.write("sys/class/drm/card1-HDMI-A-1/status", "disconnected\n");
+        let roots = t.roots();
+        let runner = Runner::new(&roots, true);
+        let l = Logind::read(&roots, &runner);
+        assert_eq!(l.external_displays, 1, "the panel must not be counted as a monitor");
+        assert_eq!(
+            l.acts_on_lid(),
+            Some(false),
+            "with a monitor attached logind ignores the lid, whatever is inhibited"
+        );
+    }
+
+    #[test]
+    fn a_laptop_with_only_its_own_panel_is_not_docked_and_not_assumed_awake() {
+        let t = Tmp::new("drm-panel");
+        t.write("sys/class/drm/card1-eDP-1/status", "connected\n");
+        t.write("sys/class/drm/card1-DP-1/status", "disconnected\n");
+        t.write("sys/class/drm/card1-Writeback-1/status", "connected\n");
+        let roots = t.roots();
+        let runner = Runner::new(&roots, true);
+        let l = Logind::read(&roots, &runner);
+        assert_eq!(l.external_displays, 0, "eDP and Writeback are not external displays");
+        // busctl cannot run under a fixture root, so `Docked` is unknown — and
+        // unknown must not collapse into "logind will act on the lid". Every
+        // other line of the readout sits inside that frame, and a frame nobody
+        // could read is not a frame that says "normal".
+        assert_eq!(l.docked, None);
+        assert_eq!(l.acts_on_lid(), None, "unknown is not yes");
+    }
+
+    #[test]
+    fn powering_down_the_keyboard_backlight_zeroes_the_led_it_named() {
+        // The defect this exists for: `kbd_backlights` returned the path it had
+        // walked, which under a fixture root is already re-rooted, and
+        // `apply_sysfs` re-rooted it again. The write went to
+        // $FIXTURE/$FIXTURE/sys/class/leds/…, `write_abs` created the whole
+        // tree on the way, and the driver printed `ok` for a keyboard backlight
+        // it had not touched. Planning and describing were both correct; only
+        // the one thing that matters was wrong, which is why this assertion is
+        // on the LED file and not on the plan.
+        let t = Tmp::new("kbd-apply");
+        t.write("sys/class/leds/platform::kbd_backlight/brightness", "5\n");
+        let roots = t.roots();
+        let runner = Runner::new(&roots, false);
+
+        let pd = PowerDown {
+            display: false,
+            keyboard_backlight: true,
+            bluetooth: false,
+            wifi_powersave_off: false,
+            stop_user_units: Vec::new(),
+            stop_system_units: Vec::new(),
+        };
+        let plan = plan_powerdown(&roots, &pd, &runner);
+        assert_eq!(plan.actions.len(), 1, "{plan:?}");
+        match &plan.actions[0] {
+            PowerAction::KeyboardBacklight { path, value, prior } => {
+                assert_eq!(*prior, 5, "the plan must save the value it is replacing");
+                assert_eq!(*value, 0);
+                assert_eq!(
+                    path, "/sys/class/leds/platform::kbd_backlight/brightness",
+                    "the action must carry the MACHINE's spelling of the path, not the \
+                     fixture's — anything else is re-rooted a second time on the way in"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+
+        apply(&roots, &runner, &plan);
+        let led = t.0.join("sys/class/leds/platform::kbd_backlight/brightness");
+        assert_eq!(
+            std::fs::read_to_string(&led).unwrap().trim(),
+            "0",
+            "the LED the plan named must be the LED that was written"
+        );
+        // And nothing was conjured: a sysfs attribute never needs its parent
+        // created, so a path that does not exist must fail loudly rather than
+        // materialise a directory tree and report success.
+        assert!(
+            !t.0.join("tmp").exists(),
+            "a second, doubled path was created under the fixture: {:?}",
+            std::fs::read_dir(&t.0).map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>())
+        );
+
+        // The restore puts back 5, the value that was there.
+        apply(&roots, &runner, &plan.restore());
+        assert_eq!(std::fs::read_to_string(&led).unwrap().trim(), "5");
+    }
+
+    #[test]
+    fn sing_box_is_asked_even_when_networkmanager_could_not_be() {
+        // APEX ships sing-box.service and the shell's VPN tab starts it. That
+        // tunnel is a tun device NetworkManager does not own and never lists,
+        // so a `read_vpn` that returned the moment nmcli was unavailable made
+        // the shipped VPN invisible on exactly the machines carrying it
+        // outside NetworkManager. The fixture cannot run either program, which
+        // is the point: what is asserted is that BOTH were reached for.
+        let t = Tmp::new("vpn-singbox");
+        let roots = t.roots();
+        let runner = Runner::new(&roots, false);
+        let _ = read_vpn(&runner);
+        let log = std::fs::read_to_string(t.0.join("var/lib/apex/lid/commands.log"))
+            .expect("the fixture records every probe it refused to run");
+        assert!(log.contains("probe nmcli"), "NetworkManager must still be asked first: {log}");
+        assert!(
+            log.contains("probe systemctl is-active sing-box.service"),
+            "sing-box must be asked even when nmcli could not be: {log}"
+        );
+    }
+
+    #[test]
+    fn a_tunnel_that_goes_away_mid_period_is_recorded_as_a_drop_and_named() {
+        // `read_vpn` answers `None` both for "there is no VPN" and for "the
+        // VPN you had is gone", because it asks what is active now and nothing
+        // else. The period remembers, and this is where that memory is spent:
+        // without it the timeline reads Up, Up, None and `vpn_held` scored it
+        // as held.
+        let mut p = ClosedPeriod {
+            closed_at: 1_000,
+            last_seen: 1_030,
+            opened_at: None,
+            sessions_at_close: 1,
+            why: "one live agent session".into(),
+            ended_by: None,
+            charge_at_close: Some(80),
+            charge_last: Some(78),
+            peak_c: Some(50.0),
+            powered_down: Vec::new(),
+            skipped: Vec::new(),
+            vpn: vec![VpnSample {
+                at: 1_000,
+                name: Some("school-wg".into()),
+                state: VpnState::Up,
+            }],
+        };
+
+        let (name, state) = note_vpn(&p, None, VpnState::None);
+        assert_eq!(state, VpnState::Down, "a tunnel that was up and is not now has dropped");
+        assert_eq!(
+            name.as_deref(),
+            Some("school-wg"),
+            "the report must say WHICH tunnel went, not announce an anonymous drop"
+        );
+
+        p.vpn.push(VpnSample { at: 1_030, name, state });
+        assert_eq!(p.vpn_held(), Some(false));
+        assert!(p.summary().contains("the VPN DROPPED"), "{}", p.summary());
+    }
+
+    #[test]
+    fn a_period_that_never_had_a_tunnel_is_not_given_a_drop() {
+        // The guard on the rule above. A machine with no VPN at all must keep
+        // reporting that there was nothing to report — turning every laptop
+        // without a tunnel into a permanent "the VPN DROPPED" would make the
+        // one line that matters worthless.
+        let p = ClosedPeriod {
+            closed_at: 1_000,
+            last_seen: 1_000,
+            opened_at: None,
+            sessions_at_close: 1,
+            why: "one live agent session".into(),
+            ended_by: None,
+            charge_at_close: None,
+            charge_last: None,
+            peak_c: None,
+            powered_down: Vec::new(),
+            skipped: Vec::new(),
+            vpn: vec![VpnSample { at: 1_000, name: None, state: VpnState::None }],
+        };
+        let (name, state) = note_vpn(&p, None, VpnState::None);
+        assert_eq!(state, VpnState::None);
+        assert_eq!(name, None);
+
+        // And an unreadable sample is passed through untouched: "could not
+        // ask" is not "it went away", and promoting it to a drop would be the
+        // same class of lie in the other direction.
+        let unreadable = VpnState::Unreadable { why: "nmcli exited 1".into() };
+        let (_n, s) = note_vpn(&p, None, unreadable.clone());
+        assert_eq!(s, unreadable);
     }
 }
