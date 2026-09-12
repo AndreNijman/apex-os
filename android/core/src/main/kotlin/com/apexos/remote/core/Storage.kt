@@ -1,5 +1,7 @@
 package com.apexos.remote.core
 
+import com.apexos.remote.core.term.AccessoryKey
+import com.apexos.remote.core.term.AccessoryKeys
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -111,7 +113,50 @@ data class Settings(
      * root. So it is offered, and it is not what ships.
      */
     @SerialName("dynamic_colour") val dynamicColour: Boolean = false,
-)
+
+    /**
+     * The row of keys above the software keyboard.
+     *
+     * P1-055's criterion says *configurable*, and here is where the
+     * configuration lives — for the same reason `dynamicColour` does, and with
+     * more force: a scrollback cache, a preferences file or a `DataStore` for
+     * the accessory row would each be a second write path into app storage
+     * that `InsecureStorageTest`'s walk never looks at.
+     *
+     * Empty means "whatever this build ships", not "no keys": a stored empty
+     * list and an absent key are indistinguishable after a
+     * `kotlinx.serialization` default, and a row that vanished because a
+     * migration dropped a field would be the worse failure. [accessoryRow]
+     * resolves it.
+     */
+    @SerialName("accessory") val accessory: List<AccessoryKey> = emptyList(),
+
+    /**
+     * Terminal text size in scaled points.
+     *
+     * Not a taste setting. It is the one control that decides how many columns
+     * fit, and eighty columns is what every one of these TUIs lays out for —
+     * so on a phone held in portrait this is the difference between reading
+     * Claude Code's output and reading a wrapped smear of it.
+     */
+    @SerialName("terminal_text_sp") val terminalTextSp: Float = DEFAULT_TERMINAL_TEXT_SP,
+) {
+    /** The configured row, or the shipped one when nothing has been configured. */
+    val accessoryRow: List<AccessoryKey> get() = accessory.ifEmpty { AccessoryKeys.DEFAULT }
+
+    companion object {
+        /**
+         * Twelve points.
+         *
+         * Measured rather than chosen: at `FontFamily.Monospace` on Android the
+         * advance width is 0.6 em, so eighty columns need 576 px, which is
+         * inside the 1080 px short edge of every phone this app supports at
+         * any reasonable density — and legible at arm's length, which a size
+         * that made eighty columns fit a 720 px device would not be.
+         */
+        const val DEFAULT_TERMINAL_TEXT_SP: Float = 12f
+    }
+}
 
 /** Every machine this device knows, and how to put one back together. */
 @Serializable
