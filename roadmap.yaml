@@ -3802,87 +3802,87 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    ROUND 2, four commits on apex-os task/p2-016-multiuser-2, all pushed (344bd8fd, 5d74649e, 6f7c6db1, 0caec419),
-    branched from roadmap/v2.2 at 2aa9ed45; round 1's five are already merged at 1d1c6fb3. No apex-shell change
-    was needed in either round. Workspace 2998 -> 3007 passed / 0 failed, clippy --locked --workspace --all-
-    targets -D warnings clean. tests/test-apex-shared-machine.sh 39 -> 60 / 0. tests/test-apex-user.sh 57 / 0
-    (new, wired into CI and Containerfile.base). tests/check-containerfile-assertions.sh 76 -> 88 checked / 0
-    failed. Every apex user verb is documented, so nothing was added to the doc-verb debt list. THE ROUND'S POINT:
-    round 1 named five things it could not check because this machine has exactly one account at or above uid
-    1000. Round 2 created a real second account (apex-fx-guest, uid 1042, home under /var/tmp, not in wheel,
-    password locked), used it, and REMOVED it; four of the five are now measured and the fifth (a kiosk session
-    actually booted) is not. Verified after removal: getent passwd shows only andre at or above 1000, wheel is
-    byte-identical (wheel:x:10:andre), /var/lib/apex-greet/last-user matches its pre-round sha, and /etc/apex,
-    /var/lib/apex-secretd, /usr/local/libexec/apex-guest-wipe, the unit, its .wants directory, /tmp/apex-
-    agent-1042 and every fixture directory are gone, with systemctl --failed empty. One inert artefact remains and
-    needs no action: logind session record 21 is stuck in State=closing, a session whose leader died without
-    logind reaping it, which loginctl terminate-session cannot remove; it names a uid that is no longer an
-    account, holds no processes or units, and goes at the next boot. CRITERION 1 - PARTIAL, and closer. apex user
-    is new: list (no root needed), add, rm, guest enable/disable/status, over a shipped engine at
-    /usr/libexec/apex-user with a clap surface whose argv is pinned by tests. ADD MAKES A STANDARD ACCOUNT and
-    --admin is the opt-in, which is deliberately the opposite of the installer, whose line 570 is -G wheel
-    unconditionally and which is NOT changed, because a first account outside wheel is a machine nobody can
-    administer. Proved live by creating apex-fx-std (uid 1043, not in wheel, sudo answers 'a password is
-    required') and apex-fx-adm (uid 1044, in wheel) through the engine and removing both, wheel byte-identical
-    afterwards. Administrator means wheel because that is what the running machine resolves to, read rather than
-    recalled: polkit's 50-default.rules addAdminRule returns unix-group:wheel and sudoers has %wheel ALL=(ALL)
-    ALL. rm refuses uid 0, a system account, the account you are running as, a still-configured guest, and THE
-    LAST ADMINISTRATOR - the one refusal with no recovery path from inside a running system. Per-user agents,
-    secrets and session isolation are now MEASURED rather than argued: every test binary in the workspace, run by
-    the second account inside its own logind session, gives the owner's result (4339 passed, and the same 8
-    failures, which fail identically for uid 1000). Run OUTSIDE a session it is 35 failures, all /run/user/<uid>
-    and loginctl show-user, because an account with no session has no runtime directory. Round 1's scratch-root
-    defect demonstrated live: as uid 1042, mkdir /tmp/apex-agent/9042 is Permission denied while /tmp/apex-
-    agent-1042/1 succeeds - and mkdir -p /tmp/apex-agent/1 SUCCEEDS for the second account because session ids
-    restart at 1 and the directory is already there, owned by andre at 0700, so the old failure lands on the
-    chmod. THE HONEST BLOCKER IS FAST SWITCHING, WHICH HAS NO SURFACE AT ALL. Round 1 equated it with polkit
-    allow_inactive=no, which is the isolation half and not the switching half. Measured: zero hits for any switch-
-    user string across apex-os, and apex-shell's PowerMenu.qml offers Shutdown, Reboot, Windows, Gaming, Log Out,
-    Lock and Suspend and nothing else; greetd runs one session on one VT. Written into docs/multi-user.md as a gap
-    rather than left implied. CRITERION 2 - MET for the session-end path. Round 1 shipped the wipe engine with
-    nothing to run it (apex-guest-wipe@.service is After=user-%i.slice, which orders and never fires). apex-guest-
-    session@.service is the trigger, verified on the real second account both directions: allowlist names the
-    guest -> home cleared 12 entries to 0, /var/lib/apex-secretd/users/1042 gone, unit deactivated successfully;
-    allowlist emptied -> nothing removed, unit FAILED with status=2/INVALIDARGUMENT and the journal line refusing:
-    ... is not listed in /etc/apex/guest-accounts. THE OBVIOUS WIRING DOES NOT WORK AND FAILS SILENTLY:
-    BindsTo=user-%i.slice never fires, because logind does not stop the user slice - it stops user@<uid>.service
-    and user-runtime-dir@<uid>.service, and the slice then goes by garbage collection, which a unit that BindsTo
-    it prevents. Measured twice: with the hook installed user-1042.slice stayed active indefinitely after logout,
-    and was collected within seconds once the hook was removed. So the hook prevented the event it was waiting
-    for. The two units also differ in what a refusal MEANS and that is why they are separate files: the boot sweep
-    keeps SuccessExitStatus=0 2 because refusing on a machine with no guest is normal, and the session hook has
-    none, because a refusal there is a guest whose credentials were not cleared. That was not a hunch - with the
-    value copied across, the emptied-allowlist run reported success and systemctl status was green over an
-    untouched guest home. A third live cycle earned a third finding: a logind record stuck in State=closing still
-    counts as a session, so fence 4 refused, the unit went red and nothing was wiped - the correct conservative
-    answer, and visible only because the unit is loud. The boot sweep is the documented backstop. CRITERION 3 -
-    PARTIAL, unchanged and the trap still avoided. Nothing is enabled, nothing about ordinary desktop use is
-    weakened, and the absence assertion is still fed a config that HAS an auto-login stanza so it can fail. apex
-    user guest enable now does the README's manual steps as one command and was run for real against systemd.
-    STILL OPEN, and it is the same gap as round 1: no kiosk or guest session has ever been BOOTED; everything
-    about kiosk is shape assertions on shipped files, and no greetd config on any machine was touched to try.
-    CRITERION 4 - MET. Round 1 closed the origin-classification hole; round 2 found and closed an asymmetry
-    nothing had looked at. apex-remoted's control socket checked the caller for Pair and for nothing else: Status,
-    Devices and Revoke went straight to the state, on the argument that the socket is in a 0700 directory inside
-    XDG_RUNTIME_DIR - the same argument the pairing check dismisses one line above with 'checked anyway: it costs
-    one syscall'. Measured with the second account and BOTH filesystem fences opened by hand (the directory mode
-    and the socket mode - connect(2) needs write, so srwxr-xr-x alone stops another account), so that the refusal
-    under test was the daemon's and not the filesystem's: before, uid 1042 got the owner's machine key, LAN
-    addresses and rendezvous id from Status, the owner's paired-device list from Devices, and reached the owner's
-    device STORE through Revoke, which answered 'no paired device' - it had looked, and would have revoked one
-    whose name matched; only Pair said no. After, all four are refused and the owner is unaffected on the same
-    widened socket. The account half now applies to every request and the human-at-the-keyboard half stays on Pair
-    alone, because apex remote devices from a script is reasonable and pairing a phone from one is not. There is
-    no sudo path to keep open, unlike apex-agentd, whose peer::is_own_user doc comment claimed to be a gate when
-    it is a classification branch that deliberately lets sudo apex request approve through as uid 0; that comment
-    is corrected here. TWELVE MUTATIONS ACROSS THE FOUR COMMITS, every one caught by a named test and every file
-    restored byte-identical and checked with sha256sum -c. FOR THE INTEGRATOR: tests/check-doc-verbs.sh --reverse
-    is RED on roadmap/v2.2 itself - apex lid and its six subverbs landed at 2401a57c/2aa9ed45 documented nowhere
-    and declared nowhere. That is not from this branch, which touched no debt list. Follow-ups on
-    ROADMAP/state/agents/p2-016.md, in value order: fast user switching (the named criterion-1 gap, and not small
-    - greetd has no second seat, so it means a greeter on a spare VT plus loginctl activate, and the chvt half
-    cannot be tested on Andre's machine without taking his screen); a standard account offered at install time; a
-    kiosk session actually booted; ensure_private_dir still does not check ownership.
+    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 5eca2402. ROUND 2, five commits on apex-os
+    task/p2-016-multiuser-2, all pushed (344bd8fd, 5d74649e, 6f7c6db1, 0caec419, 8c14dbf9), branched from
+    roadmap/v2.2 at 2aa9ed45; round 1's five are already merged at 1d1c6fb3. No apex-shell change was needed in
+    either round. Workspace 2998 -> 3007 passed / 0 failed, clippy --locked --workspace --all- targets -D warnings
+    clean. tests/test-apex-shared-machine.sh 39 -> 60 / 0. tests/test-apex-user.sh 57 / 0 (new, wired into CI and
+    Containerfile.base). tests/check-containerfile-assertions.sh 76 -> 88 checked / 0 failed. Every apex user verb
+    is documented, so nothing was added to the doc-verb debt list. THE ROUND'S POINT: round 1 named five things it
+    could not check because this machine has exactly one account at or above uid 1000. Round 2 created a real
+    second account (apex-fx-guest, uid 1042, home under /var/tmp, not in wheel, password locked), used it, and
+    REMOVED it; four of the five are now measured and the fifth (a kiosk session actually booted) is not. Verified
+    after removal: getent passwd shows only andre at or above 1000, wheel is byte-identical (wheel:x:10:andre),
+    /var/lib/apex-greet/last-user matches its pre-round sha, and /etc/apex, /var/lib/apex-secretd,
+    /usr/local/libexec/apex-guest-wipe, the unit, its .wants directory, /tmp/apex- agent-1042 and every fixture
+    directory are gone, with systemctl --failed empty. One inert artefact remains and needs no action: logind
+    session record 21 is stuck in State=closing, a session whose leader died without logind reaping it, which
+    loginctl terminate-session cannot remove; it names a uid that is no longer an account, holds no processes or
+    units, and goes at the next boot. CRITERION 1 - PARTIAL, and closer. apex user is new: list (no root needed),
+    add, rm, guest enable/disable/status, over a shipped engine at /usr/libexec/apex-user with a clap surface
+    whose argv is pinned by tests. ADD MAKES A STANDARD ACCOUNT and --admin is the opt-in, which is deliberately
+    the opposite of the installer, whose line 570 is -G wheel unconditionally and which is NOT changed, because a
+    first account outside wheel is a machine nobody can administer. Proved live by creating apex-fx-std (uid 1043,
+    not in wheel, sudo answers 'a password is required') and apex-fx-adm (uid 1044, in wheel) through the engine
+    and removing both, wheel byte-identical afterwards. Administrator means wheel because that is what the running
+    machine resolves to, read rather than recalled: polkit's 50-default.rules addAdminRule returns unix-
+    group:wheel and sudoers has %wheel ALL=(ALL) ALL. rm refuses uid 0, a system account, the account you are
+    running as, a still-configured guest, and THE LAST ADMINISTRATOR - the one refusal with no recovery path from
+    inside a running system. Per-user agents, secrets and session isolation are now MEASURED rather than argued:
+    every test binary in the workspace, run by the second account inside its own logind session, gives the owner's
+    result (4339 passed, and the same 8 failures, which fail identically for uid 1000). Run OUTSIDE a session it
+    is 35 failures, all /run/user/<uid> and loginctl show-user, because an account with no session has no runtime
+    directory. Round 1's scratch-root defect demonstrated live: as uid 1042, mkdir /tmp/apex-agent/9042 is
+    Permission denied while /tmp/apex- agent-1042/1 succeeds - and mkdir -p /tmp/apex-agent/1 SUCCEEDS for the
+    second account because session ids restart at 1 and the directory is already there, owned by andre at 0700, so
+    the old failure lands on the chmod. THE HONEST BLOCKER IS FAST SWITCHING, WHICH HAS NO SURFACE AT ALL. Round 1
+    equated it with polkit allow_inactive=no, which is the isolation half and not the switching half. Measured:
+    zero hits for any switch- user string across apex-os, and apex-shell's PowerMenu.qml offers Shutdown, Reboot,
+    Windows, Gaming, Log Out, Lock and Suspend and nothing else; greetd runs one session on one VT. Written into
+    docs/multi-user.md as a gap rather than left implied. CRITERION 2 - MET for the session-end path. Round 1
+    shipped the wipe engine with nothing to run it (apex-guest-wipe@.service is After=user-%i.slice, which orders
+    and never fires). apex-guest- session@.service is the trigger, verified on the real second account both
+    directions: allowlist names the guest -> home cleared 12 entries to 0, /var/lib/apex-secretd/users/1042 gone,
+    unit deactivated successfully; allowlist emptied -> nothing removed, unit FAILED with status=2/INVALIDARGUMENT
+    and the journal line refusing: ... is not listed in /etc/apex/guest-accounts. THE OBVIOUS WIRING DOES NOT WORK
+    AND FAILS SILENTLY: BindsTo=user-%i.slice never fires, because logind does not stop the user slice - it stops
+    user@<uid>.service and user-runtime-dir@<uid>.service, and the slice then goes by garbage collection, which a
+    unit that BindsTo it prevents. Measured twice: with the hook installed user-1042.slice stayed active
+    indefinitely after logout, and was collected within seconds once the hook was removed. So the hook prevented
+    the event it was waiting for. The two units also differ in what a refusal MEANS and that is why they are
+    separate files: the boot sweep keeps SuccessExitStatus=0 2 because refusing on a machine with no guest is
+    normal, and the session hook has none, because a refusal there is a guest whose credentials were not cleared.
+    That was not a hunch - with the value copied across, the emptied-allowlist run reported success and systemctl
+    status was green over an untouched guest home. A third live cycle earned a third finding: a logind record
+    stuck in State=closing still counts as a session, so fence 4 refused, the unit went red and nothing was wiped
+    - the correct conservative answer, and visible only because the unit is loud. The boot sweep is the documented
+    backstop. CRITERION 3 - PARTIAL, unchanged and the trap still avoided. Nothing is enabled, nothing about
+    ordinary desktop use is weakened, and the absence assertion is still fed a config that HAS an auto-login
+    stanza so it can fail. apex user guest enable now does the README's manual steps as one command and was run
+    for real against systemd. STILL OPEN, and it is the same gap as round 1: no kiosk or guest session has ever
+    been BOOTED; everything about kiosk is shape assertions on shipped files, and no greetd config on any machine
+    was touched to try. CRITERION 4 - MET. Round 1 closed the origin-classification hole; round 2 found and closed
+    an asymmetry nothing had looked at. apex-remoted's control socket checked the caller for Pair and for nothing
+    else: Status, Devices and Revoke went straight to the state, on the argument that the socket is in a 0700
+    directory inside XDG_RUNTIME_DIR - the same argument the pairing check dismisses one line above with 'checked
+    anyway: it costs one syscall'. Measured with the second account and BOTH filesystem fences opened by hand (the
+    directory mode and the socket mode - connect(2) needs write, so srwxr-xr-x alone stops another account), so
+    that the refusal under test was the daemon's and not the filesystem's: before, uid 1042 got the owner's
+    machine key, LAN addresses and rendezvous id from Status, the owner's paired-device list from Devices, and
+    reached the owner's device STORE through Revoke, which answered 'no paired device' - it had looked, and would
+    have revoked one whose name matched; only Pair said no. After, all four are refused and the owner is
+    unaffected on the same widened socket. The account half now applies to every request and the human-at-the-
+    keyboard half stays on Pair alone, because apex remote devices from a script is reasonable and pairing a phone
+    from one is not. There is no sudo path to keep open, unlike apex-agentd, whose peer::is_own_user doc comment
+    claimed to be a gate when it is a classification branch that deliberately lets sudo apex request approve
+    through as uid 0; that comment is corrected here. TWELVE MUTATIONS ACROSS THE FOUR COMMITS, every one caught
+    by a named test and every file restored byte-identical and checked with sha256sum -c. FOR THE INTEGRATOR:
+    tests/check-doc-verbs.sh --reverse is RED on roadmap/v2.2 itself - apex lid and its six subverbs landed at
+    2401a57c/2aa9ed45 documented nowhere and declared nowhere. That is not from this branch, which touched no debt
+    list. Follow-ups on ROADMAP/state/agents/p2-016.md, in value order: fast user switching (the named criterion-1
+    gap, and not small - greetd has no second seat, so it means a greeter on a spare VT plus loginctl activate,
+    and the chvt half cannot be tested on Andre's machine without taking his screen); a standard account offered
+    at install time; a kiosk session actually booted; ensure_private_dir still does not check ownership.
 - id: P2-017
   title: APEX Online Accounts and brokered cloud identity layer
   priority: P2

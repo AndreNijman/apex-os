@@ -3,7 +3,7 @@
   "updated": "2026-09-12T18:35+08:00",
   "_round": "Round 21. Round 20's six all finished. FIVE landed (p1-063, p2-virt, p1-061 both repos, p1-053a round 4); p2-016 and p2-b are still alive and carried over. THE FINDING OF THE ROUND: bash does not apply errexit to a `!`-inverted command, so 46 build refusals across Containerfile.base/.core failed NOTHING \u2014 including three added the same day to repair assertions that could only fail. All 46 rewritten as `if ... FATAL ... exit 1`, and check-containerfile-assertions.sh gained a fourth number that fails on the class. Fresh image build 34687788947 kicked from the tip with the refusals effective for the first time.",
   "_landed_this_round": {
-    "apex-os": "roadmap/v2.2 d85f7edb -> 4ae4cf22. Five merges: ebce9b46 p1-063 lid, 14650ca3 p2-virt, 5ba789a5 p1-061, 4ae4cf22 p1-053a android round 4, plus b1d1c5bf the 46-refusal sweep.",
+    "apex-os": "roadmap/v2.2 d85f7edb -> 801ff065. Six merges: ebce9b46 p1-063 lid, 14650ca3 p2-virt, 5ba789a5 p1-061, 4ae4cf22 p1-053a android round 4, 5eca2402 p2-016 multi-user; plus b1d1c5bf the 46-refusal sweep and 801ff065 the two more the sweep's own gate caught on the p2-016 merge.",
     "apex-shell": "roadmap/v2.2 6e74101 -> bdfb056. One merge: p1-061 privacy/permissions page."
   },
   "_status_recorded_this_round": "P1-063, P2-008, P2-009, P1-061 recorded partial with their landing merges. P1-054 and P1-055 CORRECTED from done to partial: the Android agent recorded done while its own evidence named an unmet criterion in each (no profile/projects/worktrees verb on the socket; three of four TUIs, no gemini fixture). 88 done / 29 partial / 9 todo / 2 blocked of 128 before the correction.",
@@ -16,21 +16,6 @@
     "p1-052-relay": "Still not dispatchable as its own unit: P1-051 does not close until the device key lives in Android Keystore with setUserAuthenticationRequired, which is p1-053b's territory. P1-052 is done and the relay is deployed."
   },
   "agents": [
-    {
-      "slug": "p2-016",
-      "items": [
-        "P2-016"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p2-016b",
-      "branch": "task/p2-016-multiuser-2",
-      "agent_id": "af6aa0fbeeb8f484f",
-      "dispatched": "2026-09-12T17:20+08:00",
-      "session": "round 20 orchestrator",
-      "queue_id": "p2-016",
-      "card": "ROADMAP/state/agents/p2-016.md",
-      "at_dispatch": "Round 20, re-dispatched fresh off the card after the 5pm limit. Told to commit the first real thing within twenty minutes and to name its commit-message file after the unit, because the scratchpad is shared."
-    },
     {
       "slug": "p2-b",
       "items": [
@@ -48,21 +33,21 @@
       "at_dispatch": "Round 20, re-dispatched fresh off the card after the 5pm limit. Told to commit the first real thing within twenty minutes and to name its commit-message file after the unit, because the scratchpad is shared."
     },
     {
-      "slug": "p1-005",
+      "slug": "p1-011",
       "items": [
-        "P1-005",
-        "P1-006",
-        "P1-007"
+        "P1-011",
+        "P1-012",
+        "P1-013"
       ],
       "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p1-005",
-      "branch": "task/p1-005-cloudflare-caps",
+      "worktree": "/var/tmp/apex-work/wt-p1-011",
+      "branch": "task/p1-011-task-credentials",
       "agent_id": "a95ea6458b1c936dc",
       "dispatched": "2026-09-12T18:35+08:00",
       "session": "round 21 orchestrator",
-      "queue_id": "p1-005",
-      "card": "ROADMAP/state/agents/p1-005.md",
-      "at_dispatch": "Held for four rounds by the ceiling, dispatched the moment a slot freed. Told it holds the only Cloudflare slot; p1-002 confirmed landed. Given Andre's instruction to use the token in special.special THROUGH THE SECRET BROKER, never raw, never in a commit or a log, copies shredded."
+      "queue_id": "p1-011",
+      "card": "ROADMAP/state/agents/p1-011.md",
+      "at_dispatch": "Dispatched as p1-005 off a STALE READY list and REDIRECTED minutes later. task/p1-005-cloudflare-caps is fully landed (merge 4f80746e; the range against roadmap/v2.2 is empty, checked). P1-005 and P1-007 remain partial only for structural reasons that belong elsewhere: P1-005 c2 is the per-task credential, which IS P1-011; P1-007 c3 needs an elevated class that does not exist in apex-secret-core. Told that closing P1-011 closes P1-005 c2 and to say so in its evidence. Still holds the only Cloudflare slot; p1-005 and p1-008 are both landed so those conflicts are dead, and p1-014 is untouched."
     },
     {
       "slug": "p1-053b",
@@ -111,6 +96,24 @@
       "queue_id": "followups-3",
       "card": "ROADMAP/state/agents/followups-3.md",
       "at_dispatch": "Card written this round to collect five items that have been unowned for up to three rounds: apex remote documented nowhere (plus seven apex lid verbs), test-apex-task.sh 1 red, the provenance.rs 1-in-3 parallel flake, headless.sh calling its own stub, and integrate-4's two leftovers. Warned not to delete any branch an alive agent owns."
+    },
+    {
+      "slug": "p1-025",
+      "items": [
+        "P1-025",
+        "P1-026",
+        "P1-027",
+        "P1-028"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p1-025",
+      "branch": "task/p1-025-skills-plugins",
+      "agent_id": "ab257e3c9fa071423",
+      "dispatched": "2026-09-12T19:05+08:00",
+      "session": "round 21 orchestrator",
+      "queue_id": "p1-025",
+      "card": "ROADMAP/state/agents/p1-025.md",
+      "at_dispatch": "Took p2-016's slot when it landed. Told the exact reason its branch was ABORTED before commit: digest.rs's describe/is_measured/same_as and skill.rs's Origin::describe have no committed caller, the callers are in provenance.rs which is P1-026 and uncommitted, and clippy -D warnings turns an uncalled private fn into an error. It is half of a commit and lands the moment P1-026 is committed. Told explicitly NOT to reach for #[allow(dead_code)], and to look in refs/wip/ before concluding the uncommitted half is gone. Warned to coordinate with followups-3 over the provenance.rs flake."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -134,7 +137,9 @@
     "the image job died on a runner shutdown, not a defect": "34674350798: changes OK, rust OK, core OK, BASE OK in 14m - then image failed with 'The runner has received a shutdown signal' at 06:03, twelve minutes into the push step, with every build step green and no ::error:: emitted. Re-run with gh run rerun --failed rather than rebuilding core and base again.",
     "errexit does not apply to a `!`-inverted command": "THE defect class of round 21, and it invalidated three of my own fixes from the same day. bash(1) under `set -e` exempts 'any command in a pipeline but the last, or if the command's return value is being inverted with !'. So `set -e; ! grep -q x <<<x; echo REACHED` prints REACHED. Every `! grep` in these Containerfiles is written as a build-time refusal and 46 of them failed nothing \u2014 they are mid-stanza, so their status is discarded and the build only ever stops if some LATER command in the same RUN fails. Found by the p1-063 lid agent in its own stanza; it wrote its refusals as `if ... exit 1` from the start and that is the idiom adopted. Ten of the 46 are not greps and were never in reach of the resolver at all: `apex-mux nonsense-verb`, `apex vm create --graphics spice`, `apex secret --help`, `apex recover reset` as root, `command -v qemu-system-x86_64` \u2014 all carrying real security decisions and asserting nothing. Fixed in b1d1c5bf; the gate now reports a fourth number and exits 1 on it.",
     "706489ec misdiagnosed what broke the build, and the record is corrected": "706489ec's message says a bare `! grep -q '_keep'` 'failed on a correct file, and `set -eux` made that a failed image build'. It CANNOT have. `git show 5cb71ea0` puts all three polkit refusals in ONE commit with `<allow_inactive>yes` last, so the `_keep` line was mid-stanza from birth and never ran an exit status anybody read. The five-day breakage was the EFFECTIVE assertions: the nft check and the ApexShellKeybinds grep (neither inverted) and `mouse = true` (last in its stanza). Reasoned, not reproduced, by an agent with the same blind spot. Worth keeping as the lesson: a diagnosis written from a plausible mechanism inherits that mechanism's assumptions.",
-    "base build 34685637821 failed on a STALE commit, not a new defect": "base failed at step 79 on `test ! -e /etc/greetd/config.toml` in the guest-wipe stanza. The run built b0ea674b, which still carried that line; d85f7edb had already removed it and was on the tip. Checked rather than assumed \u2014 the failing assertion was read out of `git show b0ea674b:Containerfile.base`. core succeeded on that run, which is the first time core has passed since the SBOM work."
+    "base build 34685637821 failed on a STALE commit, not a new defect": "base failed at step 79 on `test ! -e /etc/greetd/config.toml` in the guest-wipe stanza. The run built b0ea674b, which still carried that line; d85f7edb had already removed it and was on the tip. Checked rather than assumed \u2014 the failing assertion was read out of `git show b0ea674b:Containerfile.base`. core succeeded on that run, which is the first time core has passed since the SBOM work.",
+    "the inert-refusal gate caught a regression on its first merge": "task/p2-016-multiuser-2 was branched before b1d1c5bf landed, so its two guest-session refusals used the `! grep` form. The gate reported 2 inert on the merge and they were fixed in 801ff065. Both carried real decisions: a copied SuccessExitStatus would have reported an unwiped guest home as green, and BindsTo=user-%i.slice is the ordering that never fires \u2014 the very defect that branch exists to fix. Any branch cut before b1d1c5bf may carry more; the gate runs in pr-validation and build-image.",
+    "the /etc audit is still clean after the live apex install": "p2-virt re-flagged the `sudo apex install wireguard-tools` an agent ran at 17:33 through the live, unguarded apex-pkg \u2014 the katana deletion path. Re-audited after the p2-016 landing: 888 image-owned files under /usr/etc, 0 missing from /etc. The removal pass did not fire. Andre's staged rollback reboot is safe from this."
   },
   "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt \u2014 the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
   "_orchestrator": {
@@ -182,6 +187,7 @@
     "p1-052-relay not re-dispatched": "Its remaining items belong to p1-053a: P1-051 does not close until the device key lives in Android Keystore with setUserAuthenticationRequired. P1-052 is done and the relay is deployed.",
     "the ChatGPT self-update repo is gone from this machine": "/etc/yum.repos.d/chatgpt.repo was live and enabled, owned by no rpm and never an image default, so ostree's /etc merge would have kept it across the update and the first post-landing test would have read as though the new Containerfile stanza failed. Removed 2026-09-12 with a copy in the session scratchpad; there was no chatgpt or codex timer, user or system, so the repo file was the whole side channel. CLAUDE.md updated in place.",
     "lid-closed continuous operation is P1-063": "Andre asked for the outcome, not the mechanism, so the mechanism was decided at dispatch. A handle-lid-switch block inhibitor held only while work is live; live work is MEASURED (an agent session; codex is an agent, so his own case needs no action from him) with a manual pin for the rest; thermal and battery guards suspend anyway and must name which fired, because lid closed means no airflow and 'it kept working until it died' is worse than suspending; and the VPN half is asserted rather than assumed, because wifi power saving and NM's reconnect logic can drop a long-lived tunnel with no suspend involved. Recorded in CLAUDE.md in his own words.",
-    "P1-054 and P1-055 were recorded done and are now partial": "The Android agent's own report names an unmet criterion in each \u2014 no profile/projects/worktrees verb on the socket for P1-054, three of four TUIs and no gemini fixture for P1-055 \u2014 and it recorded done anyway. Corrected by the orchestrator rather than left, because the roadmap counts are the only thing anyone reads at the end. p1-053b was told at dispatch not to repeat it."
+    "P1-054 and P1-055 were recorded done and are now partial": "The Android agent's own report names an unmet criterion in each \u2014 no profile/projects/worktrees verb on the socket for P1-054, three of four TUIs and no gemini fixture for P1-055 \u2014 and it recorded done anyway. Corrected by the orchestrator rather than left, because the roadmap counts are the only thing anyone reads at the end. p1-053b was told at dispatch not to repeat it.",
+    "the READY queue offers units whose work is already landed": "p1-005 was offered by resume.sh's READY list and dispatched, and its branch turned out to be fully landed already \u2014 the queue offers a unit while ANY of its items is short of done, and P1-005/P1-007 are partial for reasons that belong to other items. Cost one dispatch and a redirect. Before dispatching a unit whose card says 'unit done', run `git log origin/roadmap/v2.2..origin/<branch>` and read the recorded evidence for WHY an item is partial; 'partial' is not the same as 'has work left here'."
   }
 }
