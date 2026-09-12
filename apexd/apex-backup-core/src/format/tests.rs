@@ -243,6 +243,7 @@ fn a_manifest_round_trips_through_json() {
             digest: digest_hex(b"abc"),
         }],
         data_bytes: 3,
+        skipped: Vec::new(),
     };
     let text = serde_json::to_vec(&manifest).expect("serialises");
     assert_eq!(

@@ -37,8 +37,11 @@
 //! a high-entropy canary in the source tree and fails if it appears in any byte
 //! written to the target — chunks and manifest both.
 
+pub mod config;
 pub mod crypto;
 pub mod format;
+pub mod keys;
+pub mod session;
 pub mod target;
 pub mod verdict;
 
