@@ -53,7 +53,8 @@
     "P1-026",
     "P1-027",
     "P1-028"
-   ]
+   ],
+   "completed": "2026-09-12T14:05+08:00"
   },
   {
    "slug": "p1-053a",
@@ -70,7 +71,8 @@
     "P1-053",
     "P1-054",
     "P1-055"
-   ]
+   ],
+   "completed": "2026-09-12T14:05+08:00"
   },
   {
    "slug": "p1-040",
@@ -114,7 +116,55 @@
    "queue_id": "p1-062",
    "card": "ROADMAP/state/agents/p1-062.md",
    "at_dispatch": "Round 2, nothing pushed by the predecessor - it reached the third case and lost all of it. Told to commit the first working case before starting the second.",
-   "items": []
+   "items": [],
+   "completed": "2026-09-12T14:05+08:00"
+  },
+  {
+   "slug": "p2-virt",
+   "items": [
+    "P2-008",
+    "P2-009"
+   ],
+   "repo": "apex-os",
+   "worktree": "/var/tmp/apex-work/wt-p2-virt",
+   "branch": "task/p2-virt",
+   "agent_id": "a1580835c423971dc",
+   "dispatched": "2026-09-12T14:05+08:00",
+   "session": "round 19 orchestrator",
+   "queue_id": null,
+   "card": "ROADMAP/state/agents/p2-virt.md",
+   "at_dispatch": "Told to build on P1-062's VM lab, which landed hours earlier: bootlab/ already boots guests under Secure-Boot-enforcing OVMF with a software TPM, already probes for KVM, and already carries the could-not-inject verdict. P2-008 names six flows and a unit that builds three and claims six is the failure this program keeps catching."
+  },
+  {
+   "slug": "p2-016",
+   "items": [
+    "P2-016"
+   ],
+   "repo": "apex-os",
+   "worktree": "/var/tmp/apex-work/wt-p2-016",
+   "branch": "task/p2-016-multiuser",
+   "agent_id": "abdfcb385f60b607a",
+   "dispatched": "2026-09-12T14:05+08:00",
+   "session": "round 19 orchestrator",
+   "queue_id": null,
+   "card": "ROADMAP/state/agents/p2-016.md",
+   "at_dispatch": "Criterion 4 (remote agent permissions bound to the owning user/session) is origin::classify seen from the user axis rather than the device axis; tests/in-login-session.sh is how a second user is tested without a second human. Warned that criterion 3 fails if kiosk policy is bought by locking down every desktop."
+  },
+  {
+   "slug": "p1-053a-r3",
+   "items": [
+    "P1-054",
+    "P1-055"
+   ],
+   "repo": "apex-os",
+   "worktree": "/var/tmp/apex-work/wt-p1-053a3",
+   "branch": "task/p1-053a-android-3",
+   "agent_id": "a780ac1bdfdb01780",
+   "dispatched": "2026-09-12T14:05+08:00",
+   "session": "round 19 orchestrator",
+   "queue_id": "p1-053a",
+   "card": "ROADMAP/state/agents/p1-053a.md",
+   "at_dispatch": "P1-053 is done and landed (a1420b01). Told to take P1-055 first if the two compete, and to read apex-shell's agentstate.js mapping rather than invent a second state->colour table."
   }
  ],
  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
