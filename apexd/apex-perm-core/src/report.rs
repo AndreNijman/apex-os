@@ -331,7 +331,7 @@ pub fn flatpak_grants(
             Enforcer::SandboxContext {
                 key: "sockets=pulseaudio".into(),
             },
-            GrantOrigin::Manifest,
+            GrantOrigin::NotRequested,
         )
     });
 
@@ -407,7 +407,7 @@ pub fn flatpak_grants(
             Enforcer::SandboxContext {
                 key: "filesystems=home".into(),
             },
-            GrantOrigin::Manifest,
+            GrantOrigin::NotRequested,
         ),
     });
 
@@ -467,7 +467,7 @@ pub fn flatpak_grants(
             Enforcer::SandboxContext {
                 key: "shared=network".into(),
             },
-            GrantOrigin::Manifest,
+            GrantOrigin::NotRequested,
         )
     });
 
@@ -700,6 +700,26 @@ location\tlocation\tapp.zen_browser.zen\tEXACT,2215716777\t0x00";
         assert!(!grant_for(&cosmic, Capability::Camera)
             .revocation
             .offers_a_control());
+    }
+
+    /// A refusal's origin is an absence, and labelling it "the app asked for
+    /// it" beside the word "blocked" is a sentence that argues with itself.
+    #[test]
+    fn a_denial_is_not_attributed_to_the_manifest_that_did_not_ask() {
+        let rows = flatpak_grants(
+            "com.spotify.Client",
+            &Merged::from_manifest(&Context::parse(SPOTIFY)),
+            &Store::parse(STORE),
+            &hyprland(),
+        );
+        let d = grant_for(&rows, Capability::SensitiveDirectories);
+        assert_eq!(d.state, State::Denied);
+        assert!(matches!(d.origin, GrantOrigin::NotRequested));
+        // And the granted one still names the manifest, or this asserts
+        // nothing about telling them apart.
+        let n = grant_for(&rows, Capability::Network);
+        assert_eq!(n.state, State::Granted);
+        assert!(matches!(n.origin, GrantOrigin::Manifest));
     }
 
     #[test]

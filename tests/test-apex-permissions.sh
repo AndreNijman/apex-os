@@ -58,13 +58,26 @@
 #  asserted before any case runs rather than assumed. It revokes nothing on the
 #  machine it runs on.
 #
-#  PASS = the store refusal short-circuits the dialog, the same harness can
-#         still produce a grant, and the native node opens regardless.
+#  ── The CLI half ────────────────────────────────────────────────────────────
+#  `--with-binary` drives `apex permissions revoke` against a shimmed `flatpak`
+#  and `busctl`, so the three refusals it owes can be asserted without touching
+#  a real store: a native subject, a Flatpak whose manifest carries
+#  `devices=all`, and a capability this session has no portal for. Each must
+#  exit NON-ZERO with its own sentence — a revoke that printed success for
+#  something it could not do is the defect in command form. It DIES if the
+#  binary is absent; a skipped assertion reports as a pass.
 #
-#  Run from anywhere: ./tests/test-apex-permissions.sh
+#  PASS = the store refusal short-circuits the dialog, the same harness can
+#         still produce a grant, the native node opens regardless, and the CLI
+#         refuses the three revocations it cannot perform.
+#
+#  Run from anywhere: ./tests/test-apex-permissions.sh [--with-binary]
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
+REPO="$PWD"
+WITH_BINARY=0
+[ "${1:-}" = "--with-binary" ] && WITH_BINARY=1
 
 pass=0; fail=0; skip=0
 ok()      { printf 'PASS  %-62s\n' "$1"; pass=$((pass+1)); }
@@ -431,6 +444,103 @@ PYEOF
     skipped "a native process opens the camera node with nothing brokering it" \
             "$NODE refused this user — the seat is not active"
   fi
+fi
+
+# ── the CLI's refusals ───────────────────────────────────────────────────────
+if [ "$WITH_BINARY" = 1 ]; then
+  APEX="${APEX:-$REPO/apexd/target/debug/apex}"
+  [ -x "$APEX" ] || { echo "no apex binary at $APEX"; exit 2; }
+
+  CWORK=$(mktemp -d /tmp/apex-permcli.XXXXXX) || exit 2
+  trap 'rm -rf "$CWORK"' EXIT
+  CBIN="$CWORK/bin"; mkdir -p "$CBIN"
+
+  # A session with a Camera portal and no Usb portal — which is APEX's own
+  # Hyprland session, and the reason `usb-device` has to refuse differently
+  # from `camera`.
+  cat > "$CBIN/busctl" <<'EOF'
+#!/usr/bin/env bash
+cat <<'XML'
+org.freedesktop.portal.Camera             interface -  -  -
+org.freedesktop.portal.Location           interface -  -  -
+org.freedesktop.portal.Notification       interface -  -  -
+XML
+EOF
+
+  # `devices=all` for one app, a narrow context for the other.
+  cat > "$CBIN/flatpak" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  permission-list) exit 0 ;;
+  list) printf 'org.apex.Broker
+org.apex.RawDev
+' ;;
+  info)
+    case "$3" in
+      org.apex.RawDev) printf '[Context]
+sockets=wayland;
+devices=all;
+' ;;
+      *)               printf '[Context]
+shared=network;
+sockets=wayland;
+devices=dri;
+' ;;
+    esac ;;
+  *) echo "unexpected: $*" >&2; exit 9 ;;
+esac
+EOF
+  chmod +x "$CBIN/busctl" "$CBIN/flatpak"
+
+  cli() { PATH="$CBIN:$PATH" HOME="$CWORK" "$APEX" permissions "$@" 2>&1; }
+  refuses() {
+    local label=$1 want=$2; shift 2
+    local out rc
+    out=$(cli "$@"); rc=$?
+    if [ "$rc" -eq 0 ]; then
+      bad "$label" "exited 0; a revoke it cannot perform must not report success"
+    elif printf '%s' "$out" | grep -qF "$want"; then
+      ok "$label"
+    else
+      bad "$label" "no '$want' in: $(printf '%s' "$out" | head -2 | tr '\n' ' ')"
+    fi
+  }
+
+  refuses "revoking a native camera says whose permission it is" \
+          "belongs to your login session" revoke native:zed camera
+  refuses "revoking a devices=all camera refuses too" \
+          "cannot be revoked for one app" revoke org.apex.RawDev camera
+  refuses "a capability with no portal refuses with a different sentence" \
+          "is not brokered in this session" revoke org.apex.Broker usb-device
+
+  # And the control: the one that CAN be revoked names the exact command. A
+  # suite where every case refuses would pass on a binary that refused
+  # everything.
+  out=$(cli revoke org.apex.Broker camera --dry-run)
+  if printf '%s' "$out" | grep -qF "flatpak permission-set devices camera org.apex.Broker no"; then
+    ok "a brokered camera revocation is a store write, named exactly"
+  else
+    bad "a brokered camera revocation is a store write, named exactly" "$out"
+  fi
+  out=$(cli revoke org.apex.Broker camera --forget --dry-run)
+  if printf '%s' "$out" | grep -qF "flatpak permission-remove devices camera org.apex.Broker"; then
+    ok "--forget removes the entry instead of writing a refusal"
+  else
+    bad "--forget removes the entry instead of writing a refusal" "$out"
+  fi
+  out=$(cli revoke org.apex.Broker network --dry-run)
+  if printf '%s' "$out" | grep -qF "flatpak override --user --unshare=network org.apex.Broker"; then
+    ok "a sandbox capability is an override, and says it applies next launch"
+  else
+    bad "a sandbox capability is an override, and says it applies next launch" "$out"
+  fi
+  if printf '%s' "$out" | grep -qF "next time the app starts"; then
+    ok "the override's timing is stated rather than implied"
+  else
+    bad "the override's timing is stated rather than implied" "$out"
+  fi
+else
+  skipped "the CLI's refusals" "pass --with-binary"
 fi
 
 summary

@@ -365,6 +365,12 @@ impl Enforcer {
 pub enum GrantOrigin {
     /// The application shipped with it. The owner never chose this.
     Manifest,
+    /// The application never asked for it, so the sandbox was built without
+    /// it. Distinct from [`GrantOrigin::Manifest`], which would read as though
+    /// the manifest had granted the thing it is being denied — the origin of a
+    /// refusal is an absence, and saying "the app asked for it" beside the
+    /// word "blocked" is a sentence that contradicts itself.
+    NotRequested,
     /// `~/.local/share/flatpak/overrides/<app-id>` — the owner, or something
     /// acting as them, changed the sandbox.
     UserOverride { path: String },
@@ -383,6 +389,7 @@ impl GrantOrigin {
     pub fn tag(&self) -> &'static str {
         match self {
             GrantOrigin::Manifest => "manifest",
+            GrantOrigin::NotRequested => "not_requested",
             GrantOrigin::UserOverride { .. } => "user_override",
             GrantOrigin::SystemOverride { .. } => "system_override",
             GrantOrigin::StoreGrant { .. } => "store_grant",
@@ -395,6 +402,7 @@ impl GrantOrigin {
     pub fn label(&self) -> String {
         match self {
             GrantOrigin::Manifest => "the app asked for it when it was installed".into(),
+            GrantOrigin::NotRequested => "the app never asked for it".into(),
             GrantOrigin::UserOverride { path } => format!("you changed it — {path}"),
             GrantOrigin::SystemOverride { path } => {
                 format!("set for every user on this machine — {path}")

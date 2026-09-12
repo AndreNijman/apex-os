@@ -963,6 +963,23 @@ jobs:
           test -x "$APEX"
           ./tests/test-apex-qualify.sh --with-binary
 
+      # P1-061's binary half. The three refusals `apex permissions revoke` owes
+      # — a native subject, a Flatpak carrying `devices=all`, and a capability
+      # this session has no portal for — must each exit NON-ZERO with its own
+      # sentence, against a shimmed `flatpak` and `busctl` so no real store is
+      # touched. The control case, a capability that genuinely can be revoked,
+      # runs beside them: a suite where every case refuses would pass on a
+      # binary that refused everything.
+      - name: §P1-061 app permissions — revoke refuses what it cannot do, and names what it can
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-permissions.sh --with-binary
+
       # P1-025/026/027/028's binary half: the four verbs against fixture HOMEs,
       # including a skills directory that exists and is refused (which must
       # never read as a machine with no skills), a plugin edited after it was
