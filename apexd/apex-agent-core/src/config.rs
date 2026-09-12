@@ -244,7 +244,8 @@ impl Config {
             .retain(|name| crate::mcpconf::usable_as_connector_name(name));
         if self.connector_allow.len() != before {
             fixed.push(format!(
-                "{} connector name(s) in connector_allow are not names an MCP server can                  have, and were dropped",
+                "{} connector name(s) in connector_allow are not names an MCP server can \
+                 have, and were dropped",
                 before - self.connector_allow.len()
             ));
         }
