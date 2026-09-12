@@ -206,6 +206,7 @@ pub mod api;
 pub mod binding;
 pub mod dns;
 pub mod temporary;
+pub mod tools;
 
 use apex_secret_core::operation::{
     self, Effect, OperationSpec, ParamSpec, ProviderSpec, ResourceKind, Syntax,
@@ -218,6 +219,7 @@ use crate::provider::{Bind, Bound, Endpoint, Lease, Minted, Performed, Provider,
 use api::{Api, Body, Call, Multipart};
 use binding::{Account, Binding, BindingError, Bucket, Narrowing, Resource, Worker, Zone};
 use dns::{Lookup, Record};
+use tools::Tools;
 use temporary::Scope;
 
 /// The worker, zone or bucket a caller names.
@@ -1036,6 +1038,62 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             aliases: &[],
             same_everywhere: false,
         },
+        // ---------------------------------------------------------------
+        // P1-012: the tools, not the API.
+        //
+        // These four are NOT §13.2 names, and the two that came before them —
+        // `worker.route.read` and `access.service-token.create` — set the
+        // precedent: §13.2 is a vocabulary for the API surface, and §13.4 asks
+        // for a broker-owned `wrangler` child in as many words. The membership
+        // test skips them by name, as it skips those two.
+        //
+        // Each is one subcommand with an argv this build writes. There is
+        // deliberately no `cloudflare.wrangler.run`: a grant to pass one's own
+        // argv to wrangler is a grant to do everything wrangler can do, which
+        // is the thing this provider's whole vocabulary exists not to be.
+        // ---------------------------------------------------------------
+        OperationSpec {
+            id: "cloudflare.wrangler.deploy",
+            summary: "deploy one of this project's workers with the project's \
+                      own wrangler, run by the broker",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.wrangler.versions-upload",
+            summary: "upload a new version of one of this project's workers \
+                      with the project's own wrangler, without putting it in \
+                      front of traffic",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.terraform.plan",
+            summary: "show what terraform would change in this project, \
+                      changing nothing",
+            effect: Effect::Read,
+            resource: ResourceKind::None,
+            params: &[],
+            aliases: &[],
+            // Reads the project's own `.tf` files and its own state. Two
+            // projects, two different plans, one stored credential.
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.terraform.apply",
+            summary: "make the changes terraform plans for this project",
+            effect: Effect::Write,
+            resource: ResourceKind::None,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
     ],
 };
 
@@ -1119,6 +1177,7 @@ impl From<BindingError> for ProviderError {
 /// The Cloudflare provider.
 pub struct CloudflareProvider {
     api: Api,
+    tools: Tools,
 }
 
 impl CloudflareProvider {
@@ -1126,6 +1185,7 @@ impl CloudflareProvider {
     pub fn new() -> CloudflareProvider {
         CloudflareProvider {
             api: Api::cloudflare(),
+            tools: Tools::system(),
         }
     }
 
@@ -1135,7 +1195,16 @@ impl CloudflareProvider {
     pub fn at(port: u16) -> CloudflareProvider {
         CloudflareProvider {
             api: Api::loopback(port),
+            tools: Tools::system(),
         }
+    }
+
+    /// The same, with `wrangler` and `terraform` taken from a directory a test
+    /// wrote them into. Neither is installed on the machine this was built on.
+    #[cfg(test)]
+    pub fn with_tools(mut self, dir: &std::path::Path) -> CloudflareProvider {
+        self.tools = Tools::in_dir(dir);
+        self
     }
 
     /// §13.1, applied: what did this project bind that name to?
@@ -1156,6 +1225,66 @@ impl CloudflareProvider {
     /// moved under it, which is the check that matters; a mint that read a
     /// file the operation then refuses to act on has cost a round trip and
     /// nothing else.
+    /// P1-012: run one brokered subcommand with the credential in its
+    /// environment and nothing else of this daemon's in there.
+    fn run_brokered(
+        &self,
+        req: &Bind<'_>,
+        brokered: &'static tools::Brokered,
+        target: &Target,
+        value: &SecretValue,
+    ) -> Result<Performed, ProviderError> {
+        let token = value.as_str().filter(|t| api::valid_token(t)).ok_or_else(|| {
+            ProviderError::Refused(api::TransportError::BadCredential.to_string())
+        })?;
+        let Some(program) = self.tools.path(brokered.program) else {
+            // Absent, and said as absent. "`wrangler` is not installed" and
+            // "you may not run wrangler" have different fixes, and this
+            // provider does not report the first as the second.
+            return Err(ProviderError::Failed(format!(
+                "`{}` is not installed on this machine, so this operation \
+                 could not be carried out. It is not a permission this \
+                 credential lacks",
+                brokered.program.binary()
+            )));
+        };
+
+        let mut args: Vec<String> = brokered.args.iter().map(|a| (*a).to_string()).collect();
+        let mut extra: Vec<(&'static str, String)> = Vec::new();
+        match target {
+            Target::Worker(worker) => {
+                extra.push(("CLOUDFLARE_ACCOUNT_ID", worker.account.id.clone()));
+                if brokered.environment {
+                    // The one thing a caller contributes to this command line,
+                    // and it did not come from the caller: `resolve` got it out
+                    // of the project's own `apex.toml`, which is why a name the
+                    // project did not bind never reaches here.
+                    args.push("--env".to_string());
+                    args.push(worker.environment.clone());
+                }
+            }
+            Target::Account(account) => {
+                extra.push(("CLOUDFLARE_ACCOUNT_ID", account.id.clone()));
+            }
+            _ => {}
+        }
+
+        let tool = crate::broker::Tool {
+            program: &program.to_string_lossy(),
+            args: &args,
+            cwd: std::path::Path::new(req.project),
+            credential: (tools::CREDENTIAL_VARIABLE, token),
+            extra,
+        };
+        let out = crate::broker::run_tool(&tool, req.owner)
+            .map_err(ProviderError::Failed)?;
+        Ok(Performed {
+            code: out.code,
+            output: out.text,
+            created: None,
+        })
+    }
+
     fn narrowing(
         &self,
         req: &Bind<'_>,
@@ -1223,6 +1352,17 @@ impl CloudflareProvider {
             req.owner.uid,
             &req.owner.name,
         );
+
+        // Terraform acts on the project's whole Cloudflare footprint, so what
+        // it resolves to is the account the project bound — the same target
+        // `cloudflare.account.read` gets, and for the same reason: the thing
+        // that decides what happens is the project's own directory.
+        if matches!(
+            req.operation.id,
+            "cloudflare.terraform.plan" | "cloudflare.terraform.apply"
+        ) {
+            return Ok(Target::Account(binding?.account()?));
+        }
 
         if req.operation.id == "cloudflare.account.read" {
             // The one that has to work before the file exists, so that there is
@@ -1385,6 +1525,29 @@ impl CloudflareProvider {
     /// let that through.
     fn detail(operation: &OperationSpec, target: &Target, params: &operation::Params) -> String {
         let version = params.get("version").map(String::as_str).unwrap_or("");
+        // P1-012's four say which tool and which subcommand, because that is
+        // the thing a person reading the trail needs: "deploy" through the
+        // REST API and "deploy" through wrangler are different operations with
+        // different blast radii, and a sentence that did not distinguish them
+        // would make the trail agree with itself and mean nothing.
+        if let Some(brokered) = tools::brokered(operation.id) {
+            let what = format!("{} {}", brokered.program.binary(), brokered.args.join(" "));
+            return match target {
+                Target::Worker(worker) => format!(
+                    "run `{what}` for {} ({}) in account {} [{}]",
+                    worker.name,
+                    worker.environment,
+                    worker.account.named(),
+                    worker.account.id
+                ),
+                Target::Account(account) => format!(
+                    "run `{what}` in this project, against account {} [{}]",
+                    account.named(),
+                    account.id
+                ),
+                _ => format!("run `{what}` in this project"),
+            };
+        }
         match target {
             Target::Accounts => "list the accounts this credential can see".to_string(),
             Target::Account(account) => {
@@ -3241,6 +3404,15 @@ impl Provider for CloudflareProvider {
         // the API addresses one by id — so the id is discovered here, with the
         // credential, and never taken from the caller. See [`dns`] for why an
         // id parameter would make the `records` narrowing meaningless.
+        // P1-012: the operation is a child process rather than a request, so
+        // it leaves before a `Call` is ever built. The credential reaching it
+        // is whatever the framework presented — which, when §13.4's exchange
+        // worked, is a token that expires in minutes and is deleted the moment
+        // this returns.
+        if let Some(brokered) = tools::brokered(req.operation.id) {
+            return self.run_brokered(req, brokered, &target, value);
+        }
+
         let call = match (req.operation.id, &target) {
             (id @ ("cloudflare.dns.update" | "cloudflare.dns.delete"), Target::Record(record)) => {
                 let Some(kind) = record.kind.clone() else {
@@ -3505,7 +3677,7 @@ impl Provider for CloudflareProvider {
                 req.operation.id
             )));
         };
-        let (account, scope, strength) = match self.narrowing(req, policy.zone_scoped) {
+        let (account, scope, strength) = match self.narrowing(req, policy.zone_scoped()) {
             Ok(narrowing) => narrowing,
             Err(answer) => return Ok(answer),
         };

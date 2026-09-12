@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -160,6 +161,30 @@ worker = "project-preview"
 
 [cloudflare.production]
 worker = "project"
+"#;
+
+/// A stand-in for `wrangler` and for `terraform`.
+///
+/// It prints what it was given rather than doing anything, which is the whole
+/// point: the question P1-012 has to answer is *what environment did the
+/// broker build for this child*, and that cannot be measured from outside the
+/// child. It echoes the credential deliberately — a test where the token never
+/// comes back cannot tell a working scrub from a tool that printed nothing —
+/// and it names `CARGO_PKG_NAME`, which cargo puts in the environment of the
+/// process running these tests and which nothing in [`crate::broker::run_tool`]
+/// puts in a child's, so a build that stopped clearing the environment would be
+/// caught by that line turning from `<unset>` into a value. The test that reads
+/// it refuses to run if its own environment does not carry it, because a test
+/// that measures the absence of something that was never there measures
+/// nothing.
+const STUB_TOOL: &str = r#"#!/bin/sh
+echo "apex-stub: $(basename "$0") $*"
+echo "token=${CLOUDFLARE_API_TOKEN:-<unset>}"
+echo "account=${CLOUDFLARE_ACCOUNT_ID:-<unset>}"
+echo "cwd=$(pwd)"
+echo "inherited=${CARGO_PKG_NAME:-<unset>}"
+echo "home=${HOME:-<unset>}"
+exit 0
 "#;
 
 /// One request the double saw.
@@ -466,7 +491,11 @@ fn permission_groups() -> String {
     };
     for name in super::temporary::POLICY
         .iter()
-        .flat_map(|(_, policy)| policy.groups.iter())
+        .filter_map(|(_, policy)| match policy {
+            super::temporary::Narrowest::Token { groups, .. } => Some(groups.iter()),
+            super::temporary::Narrowest::Nothing(_) => None,
+        })
+        .flatten()
         .map(|slot| slot[0])
         .collect::<std::collections::BTreeSet<_>>()
     {
@@ -790,12 +819,14 @@ struct Fixture {
     store: PathBuf,
     project: PathBuf,
     fake: Fake,
+    tools: PathBuf,
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.store).ok();
         std::fs::remove_dir_all(&self.project).ok();
+        std::fs::remove_dir_all(&self.tools).ok();
     }
 }
 
@@ -827,9 +858,24 @@ impl Fixture {
         std::fs::create_dir_all(&project).expect("project");
         std::fs::write(project.join("apex.toml"), file).expect("apex.toml");
 
+        // Neither `wrangler` nor `terraform` is installed on the machine this
+        // was built on, and a build that could only run the real ones could
+        // not be tested at all — the same reason `Api` is a field. Each stub
+        // prints what it was given, so a test can measure the environment its
+        // child was built with rather than trusting that it was.
+        let tools = std::env::temp_dir().join(format!("apex-cf-tools-{tag}"));
+        std::fs::remove_dir_all(&tools).ok();
+        std::fs::create_dir_all(&tools).expect("tools");
+        for name in ["wrangler", "terraform"] {
+            let path = tools.join(name);
+            std::fs::write(&path, STUB_TOOL).expect("stub");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+
         let mut registry = Registry::new();
         registry
-            .register(Box::new(CloudflareProvider::at(fake.port)))
+            .register(Box::new(CloudflareProvider::at(fake.port).with_tools(&tools)))
             .expect("register");
         let service = Service::new(Store::new(store.clone()), false, registry);
 
@@ -868,6 +914,7 @@ impl Fixture {
             store,
             project,
             fake,
+            tools,
         }
     }
 
@@ -914,6 +961,15 @@ type OperationCase = (
 /// own declaration accepts.
 fn every_operation() -> Vec<OperationCase> {
     vec![
+        // P1-012's four make NO authenticated request: the operation is a
+        // child process, not a call. They are in this table anyway, and the
+        // count is 0 rather than the row being absent, because the sweep below
+        // asserts that every declared operation left a trail line — and an
+        // operation missing from here would quietly stop being swept.
+        ("cloudflare.wrangler.deploy", "project", vec![], 0),
+        ("cloudflare.wrangler.versions-upload", "project", vec![], 0),
+        ("cloudflare.terraform.plan", "", vec![], 0),
+        ("cloudflare.terraform.apply", "", vec![], 0),
         ("cloudflare.account.read", "", vec![], 1),
         ("cloudflare.worker.read", "project", vec![], 1),
         (
@@ -1685,25 +1741,47 @@ fn the_declaration_is_well_formed_and_every_name_is_one_section_thirteen_two_lis
     SPEC.validate().expect("the shipped cloudflare vocabulary must validate");
     let listed: Vec<&str> = SECTION_13_2.to_vec();
     for op in SPEC.operations {
-        // `worker.route.read` is the one addition, and it is §13.3's "Worker
-        // routes" rather than an invention.
+        // `worker.route.read` is §13.3's "Worker routes" rather than an
+        // invention, `access.service-token.create` is §13.3's "service
+        // tokens", and P1-012's four are §13.4's *"a broker-owned
+        // `wrangler`/API child process"* — the tool half of a sentence whose
+        // API half is the other thirty-two. §13.2 is a vocabulary for the API
+        // surface and says nothing about running a tool; a build that refused
+        // to name these because §13.2 does not would have nowhere to put them.
         if op.id == "cloudflare.worker.route.read"
             || op.id == "cloudflare.access.service-token.create"
+            || super::tools::brokered(op.id).is_some()
         {
             continue;
         }
         assert!(listed.contains(&op.id), "'{}' is not in §13.2", op.id);
     }
-    // Twenty-six of §13.2's thirty-two, and two additions. The arithmetic is
-    // asserted because the module note states it and a later task will read
-    // that note to work out what is left.
+    // All thirty-two of §13.2's, plus six that are not §13.2's: two from
+    // §13.3 and P1-012's four tool subcommands. The arithmetic is asserted
+    // because the module note states it and a later task will read that note
+    // to work out what is left.
     let from_13_2 = SPEC
         .operations
         .iter()
         .filter(|op| listed.contains(&op.id))
         .count();
     assert_eq!(from_13_2, 32, "every name §13.2 lists is implemented");
-    assert_eq!(SPEC.operations.len(), 34);
+    assert_eq!(SPEC.operations.len(), 38);
+    // Every operation that is not §13.2's is one this build can account for.
+    // A name that is in neither list is a name somebody added without saying
+    // where it came from.
+    let unaccounted: Vec<&str> = SPEC
+        .operations
+        .iter()
+        .map(|op| op.id)
+        .filter(|id| {
+            !listed.contains(id)
+                && *id != "cloudflare.worker.route.read"
+                && *id != "cloudflare.access.service-token.create"
+                && super::tools::brokered(id).is_none()
+        })
+        .collect();
+    assert!(unaccounted.is_empty(), "names from nowhere: {unaccounted:?}");
     assert_eq!(SECTION_13_2.len() - from_13_2, 0, "still unimplemented");
 
     // **Running a model is a write, and this is the only thing that says so.**
@@ -4247,4 +4325,230 @@ fn a_narrowing_setting_this_build_does_not_know_is_refused_rather_than_defaulted
     let (_, message) = reply.as_error().expect("an unknown setting must be refused");
     assert!(message.contains("temporary_credentials"), "{message}");
     assert!(f.fake.seen().is_empty() && f.fake.minting().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// §13.4's tool half — brokered wrangler and terraform (P1-012)
+// ---------------------------------------------------------------------------
+
+/// The line of the stub's output that starts with `key=`.
+fn stub_line<'a>(output: &'a str, key: &str) -> &'a str {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{key}=")))
+        .unwrap_or_else(|| panic!("the stub printed no '{key}' line: {output}"))
+}
+
+/// P1-012's second criterion and §13.4's sentence about it: *"Do not pass even
+/// the temporary token directly to the agent if a broker-owned `wrangler`
+/// child process can perform the operation."*
+///
+/// The tool runs believing it has credentials, because it does. The agent
+/// never had them: they were put in the child's environment by a process the
+/// agent cannot read, and the credential that went in is P1-011's — one that
+/// expires in minutes and is deleted the moment this returns.
+///
+/// Mutations: put the token in argv instead of the environment; present the
+/// stored token rather than the minted one. Both red.
+#[test]
+fn a_brokered_tool_is_given_the_credential_in_its_environment_and_never_in_its_argv() {
+    let f = Fixture::new("wrangler", Mode::Minting, &["cloudflare.wrangler.deploy"]);
+    let reply = f.use_it(f.record("cloudflare.wrangler.deploy", "project"));
+    let Response::Performed { output, exit_code, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(*exit_code, 0, "{output}");
+
+    // The tool was given a credential…
+    assert_eq!(
+        stub_line(output, "token"),
+        "«redacted»",
+        "the tool was run without a credential, or with one that was not \
+         scrubbed on the way back: {output}"
+    );
+    // …and it was the short-lived one, not the stored one. The stub echoes
+    // whatever it was given and the framework scrubs both, so the way to tell
+    // them apart is the far side: the mint happened, and the stored token was
+    // spent only on the exchange.
+    let exchange = f.fake.minting();
+    assert_eq!(exchange.len(), 3, "{exchange:#?}");
+    assert!(exchange.iter().all(|s| s.authorization.as_deref()
+        == Some(format!("Bearer {TOKEN}").as_str())));
+
+    // Not in argv. `/proc/<pid>/cmdline` is world-readable and an environment
+    // is not, which is the whole reason this is an environment variable.
+    let argv = output.lines().next().expect("the stub prints its argv first");
+    assert!(!argv.contains(TOKEN) && !argv.contains(MINTED), "{argv}");
+    assert!(!argv.contains("«redacted»"), "a credential was on the command line: {argv}");
+
+    // Not in the reply, not in the trail.
+    assert!(!output.contains(TOKEN) && !output.contains(MINTED), "{output}");
+    let trail = f.trail();
+    assert!(!trail.contains(TOKEN) && !trail.contains(MINTED), "{trail}");
+}
+
+/// The environment is built here, not inherited.
+///
+/// The daemon's own environment is root's. Passing it through would hand the
+/// child root's `HOME`, whatever systemd set, and any `CLOUDFLARE_*` variable
+/// that happened to be in it — which would make the credential the broker put
+/// there the second-most-interesting one in the room.
+///
+/// Mutation: delete `env_clear()` from `broker::run_tool`. Red.
+#[test]
+fn a_brokered_tool_gets_the_environment_this_daemon_built_and_not_the_one_it_has() {
+    // A test that measures the absence of something that was never there
+    // measures nothing, so the thing has to be there first.
+    assert!(
+        std::env::var("CARGO_PKG_NAME").is_ok(),
+        "this test needs a variable in its OWN environment to watch for in the \
+         child's; without one it would pass whatever the broker did"
+    );
+    let f = Fixture::new("env", Mode::Normal, &["cloudflare.terraform.plan"]);
+    let reply = f.use_it(f.record("cloudflare.terraform.plan", ""));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(
+        stub_line(output, "inherited"),
+        "<unset>",
+        "the child inherited this process's environment: {output}"
+    );
+    // And it got the owner's home rather than the daemon's.
+    assert_ne!(stub_line(output, "home"), "<unset>", "{output}");
+}
+
+/// The argv is this build's and the working directory is the caller's project.
+///
+/// `--env` is the one thing a caller contributes to a brokered command line,
+/// and it did not come from the caller: `resolve` took it out of the project's
+/// own `apex.toml`, which is why a worker the project did not bind cannot put
+/// anything there.
+///
+/// Mutations: drop `--env`; run in the daemon's directory instead of the
+/// project's. Both red.
+#[test]
+fn a_brokered_tool_runs_the_argv_this_build_wrote_in_the_project_that_asked() {
+    let f = Fixture::new("argv", Mode::Normal, &granted_everything());
+
+    let reply = f.use_it(f.record("cloudflare.wrangler.versions-upload", "project"));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    let argv = output.lines().next().expect("argv");
+    assert_eq!(
+        argv, "apex-stub: wrangler versions upload --env production",
+        "{output}"
+    );
+    assert_eq!(
+        stub_line(output, "cwd"),
+        f.project.to_string_lossy(),
+        "the tool ran somewhere other than the project that asked: {output}"
+    );
+    assert_eq!(stub_line(output, "account"), ACCOUNT, "{output}");
+
+    // Terraform takes no environment and must not be given one.
+    let reply = f.use_it(f.record("cloudflare.terraform.apply", ""));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(
+        output.lines().next().expect("argv"),
+        "apex-stub: terraform apply -input=false -no-color -auto-approve",
+        "{output}"
+    );
+}
+
+/// §13.1 applies to a tool exactly as it applies to a request: a name the
+/// project did not bind does not resolve, and nothing runs.
+#[test]
+fn a_worker_this_project_did_not_bind_never_reaches_wrangler() {
+    let f = Fixture::new("unbound", Mode::Normal, &["cloudflare.wrangler.deploy"]);
+    let reply = f.use_it(f.record("cloudflare.wrangler.deploy", "somebody-elses-worker"));
+    let (kind, message) = reply.as_error().expect("an unbound name must be refused");
+    assert_eq!(kind, ErrorKind::BadRequest, "{message}");
+    assert!(message.contains("does not bind"), "{message}");
+}
+
+/// A tool that is not installed is not a permission this credential lacks.
+///
+/// The same distinction the rest of this provider keeps, in the place it is
+/// easiest to lose: both end in "the operation did not happen", and only one
+/// of them is fixed by installing something.
+#[test]
+fn a_tool_that_is_not_installed_is_not_a_permission_this_credential_lacks() {
+    let f = Fixture::new("missing", Mode::Normal, &["cloudflare.wrangler.deploy"]);
+    std::fs::remove_file(f.tools.join("wrangler")).expect("remove the stub");
+    let reply = f.use_it(f.record("cloudflare.wrangler.deploy", "project"));
+    let (kind, message) = reply.as_error().expect("it cannot have run");
+    assert_eq!(
+        kind,
+        ErrorKind::Internal,
+        "a missing tool was reported as a permission problem: {message}"
+    );
+    assert!(message.contains("not installed"), "{message}");
+    assert!(
+        message.contains("not a permission"),
+        "the message does not say which of the two this is: {message}"
+    );
+}
+
+/// No brokered subcommand takes a parameter, and that is structural rather
+/// than incidental.
+///
+/// A parameter is the only thing a caller can send that this provider composes
+/// into what it runs. An operation called `cloudflare.wrangler.run` taking the
+/// caller's own argv would be a grant to do everything wrangler can do — which
+/// is the thing the other thirty-four names exist not to be — and the way that
+/// creeps in is one `params` entry at a time.
+#[test]
+fn nothing_a_caller_sends_can_reach_a_brokered_command_line() {
+    for op in SPEC.operations {
+        let Some(brokered) = super::tools::brokered(op.id) else {
+            continue;
+        };
+        assert!(
+            op.params.is_empty(),
+            "'{}' takes a parameter, and a parameter is the one thing a caller \
+             contributes to what runs",
+            op.id
+        );
+        // And every word of the argv is a literal in this build.
+        assert!(
+            !brokered.args.is_empty()
+                && brokered.args.iter().all(|a| !a.is_empty() && !a.contains(' ')),
+            "'{}' has an argv this build did not write plainly",
+            op.id
+        );
+    }
+}
+
+/// Terraform is the honest `Nothing`: what permissions a plan needs is decided
+/// by the project's own `.tf` files, which this build does not read.
+///
+/// A token minted broad *because we could not tell* would be worse than the
+/// stored one — it would read as narrowing in the trail while granting the
+/// same reach. So it says there is nothing narrower, and the trail says that
+/// rather than `denied` or `could-not-run`.
+///
+/// Mutation: give terraform a `Narrowest::Token` row. Red.
+#[test]
+fn terraform_says_there_is_nothing_narrower_rather_than_minting_a_token_it_cannot_describe() {
+    let f = Fixture::new("tf-mint", Mode::Minting, &["cloudflare.terraform.plan"]);
+    assert!(f
+        .use_it(f.record("cloudflare.terraform.plan", ""))
+        .as_error()
+        .is_none());
+    // It did not ask for one.
+    assert!(f.fake.minting().is_empty(), "{:#?}", f.fake.minting());
+    let trail = f.trail();
+    let line: serde_json::Value = serde_json::from_str(
+        trail.lines().rfind(|l| l.contains("\"used\"")).expect("a used line"),
+    )
+    .expect("json");
+    assert_eq!(line["narrowing"], "no-narrower-form", "{trail}");
+    assert!(
+        line["narrowing_detail"].as_str().expect("a reason").contains(".tf files"),
+        "the reason must say why there is nothing narrower: {line}"
+    );
 }
