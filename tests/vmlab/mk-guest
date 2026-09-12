@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  mk-guest — the one guest image every vmlab flow boots.
+#
+#  `apex vm run`'s contract (docs/virtualization.md) is that the caller brings
+#  an image which mounts the filesystem labelled APEXIN, runs task.sh from it,
+#  writes to APEXOUT and powers off. `apex vm create` has no contract at all:
+#  it makes a machine. One guest satisfies both here, because a lab with two
+#  guests is a lab where "the flow failed" and "the other guest is different"
+#  are indistinguishable.
+#
+#  It is files/scripts/boot-v2/apex-guest-micro's initramfs with five additions
+#  and nothing else conceptual:
+#
+#    * it reports what it can SEE — Secure Boot state out of efivarfs, a TPM
+#      out of /sys/class/tpm, its network interfaces out of /sys/class/net.
+#      Every P2-008 assertion that can be made from inside the guest is made
+#      from inside the guest, because the alternative is asserting the XML the
+#      lab itself wrote.
+#    * it appends one line per boot to a file on its own ESP, which is what
+#      makes `apex vm snapshot revert` observable: the count after a revert is
+#      the count at snapshot time plus one, and nothing else produces that.
+#    * it mounts a virtiofs share if one is attached, reads the host's file out
+#      of it, and tries to write — which is the only way to tell a read-only
+#      share from a read-write one that happens not to have been written to.
+#    * it runs the APEXIN task.
+#    * everything it says on the serial console it ALSO writes to APEXOUT as
+#      guest-report.txt. `apex vm run` deletes the whole VM directory on the
+#      way out, console log included, so a claim about what a disposable guest
+#      saw has to leave through the egress boundary like any other file — and
+#      making the lab's own evidence go through the thing under test is the
+#      right way round.
+#
+#  SEVEN MODULES, INSMODded BY PATH
+#  Fedora 43's kernel has virtio_blk, virtio_pci, TCG_CRB, efivarfs, 8250 and
+#  NLS_ASCII built in, and fat/vfat/fuse/virtiofs/virtio_net as modules. busybox
+#  modprobe would need modules.dep and xz support, so the seven are decompressed
+#  at BUILD time and insmodded by absolute path in dependency order. A missing
+#  one is a build failure here rather than a guest that boots and then cannot
+#  see the volume it was given, which reads as an apex-vm defect.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+# shellcheck source=files/scripts/boot-v2/lib.sh
+. "$REPO/files/scripts/boot-v2/lib.sh"
+
+OUT="${1:?usage: mk-guest OUT.cpio.gz}"
+
+BB="$(command -v busybox)" || die "busybox not found"
+file -b "$BB" | grep -q 'statically linked' \
+    || die "$BB is not statically linked; this initramfs assumes it is"
+
+KVER="$(cat /etc/apex-bootlab-kver 2>/dev/null || true)"
+[[ -n "$KVER" ]] || die "/etc/apex-bootlab-kver missing — mk-guest runs inside the boot lab image"
+MODDIR="/usr/lib/modules/$KVER/kernel"
+
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+chmod 0755 "$WORK"
+mkdir -p "$WORK"/{bin,dev,proc,sys,mod,in,out,share,esp}
+install -m 0755 "$BB" "$WORK/bin/busybox"
+for l in sh mount umount echo cat poweroff sleep ls grep printf tr tail head \
+         insmod mkdir cp sync dd md5sum find date; do
+    ln -sf busybox "$WORK/bin/$l"
+done
+
+# Dependency order is the insmod order: fat before vfat, fuse before virtiofs,
+# failover before net_failover before virtio_net. Stated as a list rather than
+# resolved from modules.dep, because the list is seven long and a resolver
+# would be more code than the thing it resolves.
+#
+# virtio_net is here for a reason worth writing down. `apex vm run` promises a
+# disposable guest NO network, and the guest counting its own interfaces is how
+# that gets proven — but a guest with no virtio_net driver reports `lo` alone
+# whether or not an interface is attached, so the proof would pass on a domain
+# that HAD one. Measured, not reasoned: the first lab guest had no virtio_net
+# and reported `netifs=lo,` from a VM whose domain carried
+# `<interface type='user'/>`. With the driver present, an `apex vm create`
+# guest shows eth0 and an `apex vm run` guest does not, which is the difference
+# the assertion is about.
+for m in fs/fat/fat fs/fat/vfat fs/fuse/fuse fs/fuse/virtiofs \
+         net/core/failover drivers/net/net_failover drivers/net/virtio_net; do
+    src="$MODDIR/$m.ko.xz"
+    [[ -f "$src" ]] || die "no $src — the lab kernel does not have $(basename "$m") as a module"
+    xz -dc "$src" > "$WORK/mod/$(basename "$m").ko" \
+        || die "cannot decompress $src"
+done
+
+cat > "$WORK/init" <<'INIT'
+#!/bin/busybox sh
+# APEX vmlab guest. Every line it prints is prefixed APEX-VMLAB, so a host-side
+# assertion keys on a string only this file emits into the serial log — never
+# on one the lab itself could have written into the work directory.
+export PATH=/bin
+B=/bin/busybox
+# Every APEX-VMLAB line goes to the serial console AND to /report.txt, which is
+# copied to APEXOUT once that volume is mounted. `apex vm create` guests are
+# read through the console; `apex vm run` guests cannot be, because teardown
+# removes the console log with everything else.
+say() { echo "APEX-VMLAB: $*"; echo "APEX-VMLAB: $*" >> /report.txt; }
+$B mount -t proc     proc     /proc
+$B mount -t sysfs    sysfs    /sys
+$B mount -t devtmpfs devtmpfs /dev 2>/dev/null
+
+for m in fat vfat fuse failover net_failover virtio_net virtiofs; do
+    $B insmod "/mod/$m.ko" 2>/dev/null
+done
+
+say "userspace-reached"
+say "cmdline=$($B cat /proc/cmdline)"
+
+# ── Secure Boot, read out of the firmware rather than out of the domain ─────
+# SecureBoot-8be4df61… is 5 bytes: 4 of EFI variable attributes then one byte
+# of value. SetupMode is the same shape. Both are reported, because
+# "SecureBoot=1 while SetupMode=1" is the theatre case — a firmware that says
+# it is enforcing while its key database is empty and anything boots.
+SB=unknown; SM=unknown
+if $B mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null; then
+    G=8be4df61-93ca-11d2-aa0d-00e098032b8c
+    for v in SecureBoot SetupMode; do
+        f="/sys/firmware/efi/efivars/$v-$G"
+        if [ -f "$f" ]; then
+            # dd, not `od -j4`. An efivarfs file is 4 bytes of EFI variable
+            # attributes then the value, and busybox od's -j did not skip them
+            # here: it reported 6 for both variables, which is the BS|RT
+            # attribute byte at offset 0, not the value. Reading sequentially
+            # through dd gives 1/0, which is what the firmware actually says.
+            val=$($B dd if="$f" bs=1 skip=4 count=1 2>/dev/null | $B od -An -tu1 | $B tr -d ' \n')
+            [ -n "$val" ] || val=unreadable
+        else
+            val=absent
+        fi
+        [ "$v" = SecureBoot ] && SB="$val" || SM="$val"
+    done
+else
+    SB=no-efivarfs; SM=no-efivarfs
+fi
+say "SecureBoot=$SB SetupMode=$SM"
+
+# ── TPM ─────────────────────────────────────────────────────────────────────
+# The device node, not the ACPI table: a TPM2 table with no driver behind it is
+# a guest that cannot use the TPM, and reporting the table would call that a
+# working flow. tpm_crb is built into the Fedora kernel, so a tpm0 here means
+# the emulator answered.
+if [ -e /sys/class/tpm/tpm0 ]; then
+    ver=$($B cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null || echo '?')
+    say "tpm=present version_major=$ver"
+else
+    say "tpm=absent"
+fi
+
+# ── network, from the guest's side of the boundary ──────────────────────────
+# `apex vm run` promises no network at all. The domain XML is the lab's own
+# artefact; this is the guest counting its own interfaces.
+say "netifs=$($B ls /sys/class/net 2>/dev/null | $B tr '\n' ',')"
+
+# ── the boot tally on this guest's own ESP ──────────────────────────────────
+# One line per boot, on the FAT partition the firmware booted from. It is what
+# makes `apex vm snapshot revert` observable from outside: the tally is disk
+# state, so reverting the disk reverts it, and a revert that silently did
+# nothing leaves a count one higher than the assertion expects.
+if $B mount -t vfat -o iocharset=ascii /dev/vda1 /esp 2>/dev/null; then
+    $B mkdir -p /esp/vmlab 2>/dev/null
+    echo "boot" >> /esp/vmlab/boots.txt
+    n=$($B grep -c boot /esp/vmlab/boots.txt 2>/dev/null || echo 0)
+    say "boots=$n"
+    $B sync
+    $B umount /esp
+else
+    say "boots=<no-esp>"
+fi
+
+# ── a virtiofs share, if one was attached ───────────────────────────────────
+# Both tags are tried and each reports separately. A share that is not attached
+# says so; a share that is attached and unmountable says something different,
+# and the two must not collapse into one silence.
+for tag in labshare labro; do
+    if $B mount -t virtiofs "$tag" /share 2>/dev/null; then
+        say "share $tag mounted"
+        say "share $tag read=$($B cat /share/from-host.txt 2>/dev/null || echo '<unreadable>')"
+        if echo guest-wrote-this > /share/from-guest.txt 2>/dev/null; then
+            $B sync
+            say "share $tag write=ok"
+        else
+            say "share $tag write=refused"
+        fi
+        $B umount /share
+    else
+        say "share $tag absent"
+    fi
+done
+
+# ── the APEXIN task ─────────────────────────────────────────────────────────
+# The guest contract docs/virtualization.md states, and nothing more: mount
+# APEXIN, run task.sh from it, let it write to APEXOUT. /dev/vdb and /dev/vdc
+# are where `apex vm run` attaches them; the labels are checked rather than
+# assumed, so a guest handed the wrong disk says so instead of running a task
+# script that is not there.
+if $B mount -t vfat -o ro,iocharset=ascii /dev/vdb /in 2>/dev/null; then
+    say "apexin mounted"
+    # The write that must fail. `<readonly/>` on the vdb disk is the engine's
+    # claim; this is the guest testing it. A guest that CAN write to its
+    # copy-in volume can rewrite its own task between the host staging it and
+    # the guest running it.
+    if echo x > /in/should-not-work 2>/dev/null; then
+        say "apexin write=ACCEPTED"
+    else
+        say "apexin write=refused"
+    fi
+    if $B mount -t vfat -o iocharset=ascii /dev/vdc /out 2>/dev/null; then
+        say "apexout mounted"
+    else
+        say "apexout=<absent>"
+    fi
+    if [ -f /in/task.sh ]; then
+        say "task-start"
+        cd /out 2>/dev/null || cd /
+        $B sh /in/task.sh > /out/guest.log 2>&1
+        say "task-rc=$?"
+        $B sync
+    else
+        say "task=<no task.sh on APEXIN>"
+    fi
+    # The report leaves through the egress boundary like anything else: it is
+    # a file on APEXOUT and the caller has to nominate it by name.
+    $B cp /report.txt /out/guest-report.txt 2>/dev/null
+    $B sync
+    $B umount /out 2>/dev/null
+    $B umount /in  2>/dev/null
+else
+    say "apexin absent"
+fi
+
+say "clean-poweroff"
+$B poweroff -f
+# poweroff -f should never return. Spinning rather than falling off the end of
+# init keeps a firmware problem from being reported as a kernel panic.
+while : ; do $B sleep 60; done
+INIT
+chmod 0755 "$WORK/init"
+for l in od dd wc; do ln -sf busybox "$WORK/bin/$l"; done
+
+mkdir -p "$(dirname "$OUT")"
+( cd "$WORK" && find . -print0 | cpio --null -o -H newc --quiet ) | gzip -9 > "$OUT"
+
+[[ -s "$OUT" ]] || die "produced no initramfs at $OUT"
+# The same postcondition apex-guest-micro asserts, for the same reason: a cpio
+# whose ./init is mode 0644 panics with "Failed to execute /init", which reads
+# as a broken UKI rather than as a broken archive.
+LISTING="$(zcat "$OUT" | cpio -itv --quiet 2>/dev/null)"
+grep -qE '^-rwxr-xr-x .* (\./)?init$' <<<"$LISTING" \
+    || die "./init is missing or not executable in $OUT:
+$LISTING"
+for m in fat vfat fuse virtiofs failover net_failover virtio_net; do
+    grep -qE "mod/$m\.ko\$" <<<"$LISTING" \
+        || die "$m.ko did not make it into $OUT"
+done
+info "vmlab guest: $(stat -c %s "$OUT") bytes"

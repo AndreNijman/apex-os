@@ -94,6 +94,9 @@ VM_URI="${APEX_VM_URI:-qemu:///session}"
 # file also produced.
 VIRSH="${APEX_VM_VIRSH:-virsh}"
 QEMU_IMG="${APEX_VM_QEMU_IMG:-qemu-img}"
+# lsusb is in the same list because the USB guard turns on whether it can be
+# RUN, and a suite has to be able to make it absent without emptying $PATH.
+LSUSB="${APEX_VM_LSUSB:-lsusb}"
 
 # The pieces that are files rather than commands. Probed at the point of use
 # and never hardcoded into the XML without checking: OVMF's layout changed
@@ -101,6 +104,7 @@ QEMU_IMG="${APEX_VM_QEMU_IMG:-qemu-img}"
 # there fails at start with "failed to open file".
 VIRTIOFSD="${APEX_VM_VIRTIOFSD:-/usr/libexec/virtiofsd}"
 SWTPM="${APEX_VM_SWTPM:-swtpm}"
+SWTPM_SETUP="${APEX_VM_SWTPM_SETUP:-swtpm_setup}"
 
 # ── output ──────────────────────────────────────────────────────────────────
 msg()  { printf 'apex-vm: %s\n' "$*" >&2; }
@@ -202,6 +206,18 @@ have_ovmf() { ovmf_secboot_descriptor >/dev/null; }
 
 have_swtpm() { command -v "$SWTPM" >/dev/null 2>&1; }
 
+# swtpm_setup, which is a SEPARATE package from swtpm and is the one libvirt
+# actually needs first. It creates the domain's TPM state directory before the
+# emulator is started; libvirt's qemu driver invokes it by name.
+#
+# Checked against Fedora 43's metadata rather than assumed: `swtpm` neither
+# Requires nor Recommends `swtpm-tools`, and ships no swtpm_setup of its own.
+# So a user who installs exactly what this file used to print gets a doctor
+# saying "Every flow is available" and a --tpm domain that defines and then
+# fails at start — the failure shape this file's header says it exists to
+# prevent, produced by this file's own install line.
+have_swtpm_setup() { command -v "$SWTPM_SETUP" >/dev/null 2>&1; }
+
 have_virtiofsd() { [ -x "$VIRTIOFSD" ]; }
 
 # A Secure-Boot-enforcing OVMF, asked of the FIRMWARE DESCRIPTORS rather than
@@ -252,7 +268,14 @@ ovmf_secboot_descriptor() {
 # The one sentence every refusal shares. It names the package set, not a
 # generic "install virtualization", because a user who has to guess the package
 # names is a user who installs the wrong ones.
-INSTALL_HINT='sudo apex install qemu-kvm libvirt-daemon-kvm libvirt-client edk2-ovmf swtpm virtiofsd'
+#
+# Three of these are here because their absence produces a failure that reads as
+# something else, and all three were found by running the flows rather than by
+# reading the package list:
+#   swtpm-tools   carries swtpm_setup — see have_swtpm_setup
+#   mtools        `apex vm run` reads its egress volume with mcopy
+#   dosfstools    and builds both volumes with mkfs.vfat
+INSTALL_HINT='sudo apex install qemu-kvm libvirt-daemon-kvm libvirt-client edk2-ovmf swtpm swtpm-tools virtiofsd mtools dosfstools'
 
 # require_stack — refuse BEFORE anything is created, naming the missing piece.
 #
@@ -610,6 +633,7 @@ cmd_doctor() {
     probe_line "libvirt session daemon ($VM_URI answers)" have_libvirt_session || fail=1
     probe_line "Secure-Boot-enforcing OVMF firmware" have_ovmf || fail=1
     probe_line "software TPM (swtpm)" have_swtpm || fail=1
+    probe_line "software TPM setup (swtpm_setup, from swtpm-tools)" have_swtpm_setup || fail=1
     probe_line "virtiofs daemon ($VIRTIOFSD)" have_virtiofsd || fail=1
     printf '\n'
     if [ "$fail" = 0 ]; then
@@ -638,9 +662,20 @@ cmd_create() {
     [ "$TPM" = 1 ] && ! have_swtpm && die "--tpm needs swtpm, which is not installed.
   Create it with --no-tpm, or install the stack:
     $INSTALL_HINT"
+    [ "$TPM" = 1 ] && ! have_swtpm_setup && die "--tpm needs swtpm_setup, which is in swtpm-tools — a different
+  package from swtpm, and one swtpm does not pull in. libvirt runs it to create
+  the domain's TPM state, so without it the domain defines and then fails to
+  start. Create it with --no-tpm, or install the stack:
+    $INSTALL_HINT"
     [ "${#SHARE_SRC[@]}" -gt 0 ] && ! have_virtiofsd && die "--share needs virtiofsd at $VIRTIOFSD, which is not there.
   Create it without a share, or install the stack:
     $INSTALL_HINT"
+    # --usb at create time was not checked at all, while `usb attach` was: the
+    # same <hostdev>, reached by a different verb, with a different answer.
+    # A create that names a device the machine does not have produced a domain
+    # that defined cleanly and then would not start.
+    local _u
+    for _u in "${USB_IDS[@]}"; do usb_present_or_die "$_u"; done
 
     local dir; dir="$(vm_dir "$NAME")"
     [ -e "$dir" ] && die "a VM called '$NAME' already exists at $dir (apex vm rm $NAME to replace it)"
@@ -1076,6 +1111,29 @@ EOF
     esac
 }
 
+# usb_present_or_die ID — is this device plugged into THIS machine?
+#
+# Asked of the host before libvirt is, because libvirt's "no such device" names
+# a bus and a device number the user never typed.
+#
+# The shape matters more than the check. This was written as
+#   `command -v lsusb && ! lsusb -d $id && die`
+# which SKIPS the guard entirely on a machine without usbutils and hands
+# libvirt a <hostdev> for a device that may not be there — producing a domain
+# that defines and then will not start. "The question could not be asked" was
+# being reported as "the answer is yes". That is this repository's recorded
+# "permission denied is not absence" defect, and the lab found it because the
+# container it runs in has no lsusb.
+usb_present_or_die() {
+    local id="$1"
+    command -v "$LSUSB" >/dev/null 2>&1 || die "lsusb is not installed, so whether USB device $id is plugged into
+  this machine cannot be checked — and a <hostdev> for a device that is not
+  there gives a domain that defines and then refuses to start. Install it:
+    sudo apex install usbutils"
+    "$LSUSB" -d "$id" >/dev/null 2>&1 \
+        || die "no USB device $id is plugged into this machine (\`lsusb\` lists what is)"
+}
+
 usb_attach() {
     local name="${1:-}" id="${2:-}"; shift 2 2>/dev/null || true
     local live=0
@@ -1092,11 +1150,7 @@ usb_attach() {
     known_vm "$name"
     id="$(printf '%s' "$id" | tr 'A-F' 'a-f')"
 
-    # Asked of the host before libvirt is: "no such device" from libvirt names
-    # a bus and a device number the user never typed.
-    if command -v lsusb >/dev/null 2>&1 && ! lsusb -d "$id" >/dev/null 2>&1; then
-        die "no USB device $id is plugged into this machine (\`lsusb\` lists what is)"
-    fi
+    usb_present_or_die "$id"
 
     local tmp; tmp="$(mktemp)" || die "no temp file"
     USB_IDS=("$id"); xml_hostdev "$id" > "$tmp"
@@ -1272,6 +1326,7 @@ valid_egress_dest() {
 
 cmd_run() {
     local name="" memory=2048 cpus=2 timeout=600 image="" egress_to="" force=0
+    local console_to=""
     local -a copy_in=() egress=() command=()
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -1283,6 +1338,7 @@ cmd_run() {
             --copy-in)   shift; copy_in+=("${1:-}") ;;
             --egress)    shift; egress+=("${1:-}") ;;
             --egress-to) shift; egress_to="${1:-}" ;;
+            --console-to) shift; console_to="${1:-}" ;;
             --force)     force=1 ;;
             --network)
                 refuse "--network is not accepted by \`apex vm run\`.
@@ -1316,6 +1372,15 @@ cmd_run() {
         valid_egress_name "$n" \
             || die "--egress takes a plain filename, no directories and no wildcards (got '$n')"
     done
+    # --console-to's destination is validated the same way --egress-to's is and
+    # for the same reason: teardown deletes the VM's whole directory, so a
+    # console log written inside it would be reported saved and then removed.
+    if [ -n "$console_to" ]; then
+        case "$console_to" in */) die "--console-to names a file, not a directory" ;; esac
+        valid_egress_dest "$(dirname -- "$console_to")" \
+            || die "--console-to needs an absolute path outside $VM_ROOT
+  (teardown deletes that tree, so a log written into it would not survive)"
+    fi
     if [ -n "$egress_to" ]; then
         valid_egress_dest "$egress_to" \
             || die "--egress-to needs an absolute directory outside $VM_ROOT
@@ -1330,7 +1395,7 @@ cmd_run() {
     require_stack
     command -v mcopy >/dev/null 2>&1 \
         || die "mtools is not installed; it is what reads the egress volume without mounting it.
-    $INSTALL_HINT mtools"
+    $INSTALL_HINT"
     command -v mkfs.vfat >/dev/null 2>&1 || die "dosfstools is not installed (mkfs.vfat)"
 
     local dir; dir="$(vm_dir "$name")"
@@ -1456,6 +1521,34 @@ cmd_run() {
         msg "nothing left the VM: --egress-to was not given"
     fi
 
+    # ── the console log, if it was asked for ────────────────────────────────
+    #
+    # Opt-in, and it has to be, because the alternative was silence. Teardown
+    # removes the VM's directory — disks, volumes and the serial log with them
+    # — so the documented outcome for a guest that does not satisfy the
+    # contract ("an empty egress and a timeout warning") came with no way to
+    # find out WHY. The console is the only thing a guest that never mounted
+    # APEXIN can have said.
+    #
+    # It is a nomination like any other rather than a default, because the
+    # serial log is bytes the guest chose to write and this verb's whole
+    # argument is that such bytes leave only where the caller named a
+    # destination. The no-clobber rule is the egress one, for the same reason:
+    # the file was authored by code the user did not trust.
+    if [ -n "$console_to" ]; then
+        local clog; clog="$(vm_console "$name")"
+        if [ ! -f "$clog" ]; then
+            warn "console: the VM wrote no serial output at all"
+        elif [ -e "$console_to" ] && [ "$force" != 1 ]; then
+            warn "console: $console_to already exists; not overwriting it (--force to allow)"
+            blocked=$((blocked + 1))
+        elif mkdir -p "$(dirname -- "$console_to")" && cp -- "$clog" "$console_to"; then
+            msg "console: the guest's serial output -> $console_to"
+        else
+            warn "console: could not write $console_to"
+        fi
+    fi
+
     [ "$missing" -eq 0 ] && [ "$blocked" -eq 0 ]
 }
 
@@ -1492,6 +1585,9 @@ run options:
   --copy-in PATH        copied into the read-only APEXIN volume. Repeatable.
   --egress NAME         a filename the task may hand back. Repeatable.
   --egress-to DIR       where those files land. WITHOUT IT, NOTHING LEAVES.
+  --console-to FILE     save the guest's serial output there before teardown
+                        deletes it — the only diagnostic a guest that never
+                        ran the task can leave behind
   --force               let egress overwrite a file that is already there
   --timeout SECS (600)  how long to wait for the guest to power off
 

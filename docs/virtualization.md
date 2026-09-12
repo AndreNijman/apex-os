@@ -37,11 +37,20 @@ So the engine ships in the image and the stack arrives on demand:
 
 ```
 apex vm doctor
-sudo apex install qemu-kvm libvirt-daemon-kvm libvirt-client edk2-ovmf swtpm virtiofsd
+sudo apex install qemu-kvm libvirt-daemon-kvm libvirt-client edk2-ovmf \
+                 swtpm swtpm-tools virtiofsd mtools dosfstools
 ```
 
-`mtools` and `dosfstools` are needed as well for `apex vm run`, which builds
-its volumes with `mkfs.vfat` and reads them back with `mcopy`.
+Three of those are in the line because leaving them out produces a failure that
+reads as something else, and all three were found by running the flows rather
+than by reading a package list:
+
+* **`swtpm-tools`** carries `swtpm_setup`, which libvirt runs to create a
+  domain's TPM state. `swtpm` neither requires nor recommends it on Fedora 43
+  and does not ship it. Without it every `--tpm` domain defines cleanly and
+  then fails at start. `apex vm doctor` probes it as its own row.
+* **`mtools`** and **`dosfstools`** are what `apex vm run` builds its volumes
+  with (`mkfs.vfat`) and reads the egress volume back with (`mcopy`).
 
 `apex vm doctor` probes each piece and prints exactly that line when something
 is missing. Every other verb refuses with the same text **before** creating
@@ -106,8 +115,13 @@ apex vm console dev
 ```
 
 Secure Boot enforcing and an emulated TPM 2.0 by default. `--import FILE`
-starts from an existing qcow2 — copied, never used as a backing file, because a
-backing file makes the VM depend on a path the user may move.
+starts from an existing disk image — **converted** with `qemu-img`, never used
+as a backing file. Not a backing file because that makes the VM a delta over a
+path the user may move; not a plain copy because the domain declares
+`<driver type='qcow2'/>` and a raw image would define cleanly and then fail at
+start with qemu refusing a magic number. Converting also gives an imported disk
+the internal snapshots `apex vm snapshot` needs, which a raw image cannot hold
+at all.
 
 ### Secure Boot
 
@@ -205,7 +219,11 @@ apex vm usb attach dev 046d:c52b
 
 `VENDOR:PRODUCT` is what `lsusb` prints. The engine checks `lsusb` first,
 because libvirt's "no such device" names a bus and device number the user never
-typed.
+typed — and **refuses when `lsusb` is not installed at all**, rather than
+skipping the check. "The question could not be asked" is not "the answer is
+yes", and a `<hostdev>` for a device that is not there gives a domain that
+defines and then will not start. `apex vm create --usb` makes the same check;
+it used not to, so the same device reached through two verbs got two answers.
 
 Two things are emitted that are easy to miss: `<controller type='usb'
 model='qemu-xhci' ports='15'/>`, because q35's implicit controller has no free
@@ -282,6 +300,14 @@ script. Without `--egress-to` nothing leaves at all, whatever `--egress` says.
 `--egress` takes a plain filename: no directory component, no `..`, no
 wildcard.
 
+`--console-to FILE` saves the guest's serial output before teardown deletes it.
+It is opt-in rather than a default, and that is the argument rather than
+caution: the serial log is bytes the guest chose to write, so it leaves only
+where the caller named a destination — the same rule as every other file. It is
+also the only diagnostic a guest that never mounted `APEXIN` can leave behind,
+and without it "an empty egress and a timeout warning" came with no way to find
+out why.
+
 A third decision is separate from both: a nominated file that would land on
 top of something already at the destination is **not** copied unless `--force`
 says so. The file coming out was written by code the user ran in a VM because
@@ -309,16 +335,60 @@ which is the correct outcome rather than a silent success.
 
 ## What is proven, and how
 
+Two suites, and they prove different things.
+
 `tests/test-apex-vm.sh` drives the shipped engine with recording stubs for
-`virsh` and `qemu-img` on `$PATH` and asserts the exact argv and the exact XML.
-That covers argument handling, the refusals, and every element listed above.
+`virsh`, `qemu-img`, `mkfs.vfat`, `mcopy`, `lsusb`, `swtpm` and `swtpm_setup`
+on `$PATH` and asserts the exact argv and the exact XML. That is the claim
+"the engine emits the right domain", and it runs everywhere.
 
 `tests/vmlab/run-vmlab` boots real guests through the engine against a real
-`virtqemud` inside the boot-lab container, and emits a verdict per flow. It
-uses the chaos harness's three-state verdict (`tests/chaos/lib.sh`): a flow
-that could not be exercised because the runner has no `/dev/kvm` reports
-`could-not-run` **with a reason**, never a pass. GitHub's runners mostly do not
-have KVM; this laptop does.
+`virtqemud` inside `bootlab/`'s container, and emits a verdict per flow. That
+is the different claim "libvirt accepts it, qemu starts it, the firmware
+enforces it and the guest can see it". It uses the chaos harness's three-state
+verdict (`tests/chaos/lib.sh`) with one arm renamed: a flow that could not be
+exercised reports `could-not-run` **with a reason**, never a pass.
+
+```
+podman build -t apex-bootlab bootlab/
+./tests/vmlab/run-vmlab                 # all seven
+./tests/vmlab/run-vmlab --flow share    # one
+./tests/vmlab/run-vmlab --no-kvm        # the could-not-run arm, on purpose
+```
+
+Every assertion is made either by the guest about itself over the serial
+console or by a tool reading an artefact from outside. None is made against a
+string the lab also produced.
+
+### The last full run, on a laptop with KVM
+
+| flow | verdict | what the guest or the host observed |
+|---|---|---|
+| create | verified (13) | libvirt defined and started it; the guest reached userspace, got the command line the UKI was *signed* with, and powered itself off; `rm` left no domain and no directory |
+| Secure Boot | verified (8) | three boots of the same signed UKI: against the APEX variable store it boots and reports `SecureBoot=1 SetupMode=0`; against libvirt's own `enrolled-keys` store (Microsoft's db) the firmware **refuses it**; against a key-free store it boots in setup mode — which is what shows the refusal was about keys |
+| TPM | verified (5) | `/sys/class/tpm/tpm0` with `tpm_version_major=2` inside the guest, and **absent** in a `--no-tpm` guest |
+| snapshot | verified (10) | a tally the guest keeps on its own ESP: boot (1), snapshot, boot (2), revert, boot — and it is 2, not 3. `qemu-img snapshot -l` shows the snapshot in **both** `disk.qcow2` and `nvram.qcow2` |
+| share | verified (16) | two virtiofs devices; the guest mounts both tags, reads the host's file, writes through the read-write one so the file appears **on the host**, and is refused on the read-only one |
+| USB | **could-not-run** | see below |
+| egress (P2-009) | verified (16) | the hostile task's unnominated file did not leave, while the guest's own log proves it existed; the guest sees only `lo`; the copy-in volume refused its write; and an engine mutated to iterate the volume instead of the nominations **does** leak it |
+
+After all seven: no domains, **no libvirt networks**, and an empty VM root.
+
+Two caveats, stated rather than left in the verdict file:
+
+* **USB passthrough is `could-not-run`, and always will be from a suite.** It
+  means taking a physical device away from the machine running the tests. What
+  the lab does exercise against a real libvirt is the refusal when `lsusb`
+  cannot be run at all, the same refusal from `create --usb`, the malformed-id
+  refusal, and that no `<hostdev>` reached the domain in any of them.
+* **The share flow runs `virtiofsd` through a wrapper adding `--sandbox
+  none`.** Its default `namespace` sandbox unshares a user namespace and mounts
+  its own `/proc`, which cannot nest inside the lab container's user namespace
+  — measured three ways: `namespace` fails with `MountProc` EPERM (also under
+  `seccomp=unconfined`), `chroot` refuses for a non-root user, `none` works.
+  libvirt's `<binary>` offers only the first two. Everything else in that flow
+  is the shipped path, and the wrapper logs the argv it substituted into the
+  run's bundle.
 
 ## What is not built
 
@@ -342,3 +412,9 @@ Stated rather than left to be discovered:
   building that image is not part of this verb. What is built and proven is the
   boundary: the volumes, the nomination-only egress, and the teardown.
 * **No live migration, no CPU pinning, no PCI/GPU passthrough.**
+* **virtiofsd's own namespace sandbox is not exercised by the lab**, only by a
+  real machine. See the caveat above.
+* **The lab boots guests that are shut off.** `apex vm snapshot` on a *running*
+  domain, `apex vm stop` over ACPI (the lab's guests power themselves off, so
+  `shutdown` is never sent), `usb detach` and `share remove` are argv-tested
+  and not live-tested.
