@@ -62,8 +62,10 @@ KIOSK_CONF="$ROOT/files/system/shared-machine/greetd-kiosk.toml"
 KIOSK_SWAY="$ROOT/files/system/shared-machine/sway-kiosk.conf"
 ALLOW_SHIPPED="$ROOT/files/system/shared-machine/guest-accounts"
 WIPE_UNIT="$ROOT/files/system/units/apex-guest-wipe@.service"
+HOOK_UNIT="$ROOT/files/system/units/apex-guest-session@.service"
 
-for f in "$ENGINE" "$GREET_CONF" "$KIOSK_CONF" "$KIOSK_SWAY" "$ALLOW_SHIPPED" "$WIPE_UNIT"; do
+for f in "$ENGINE" "$GREET_CONF" "$KIOSK_CONF" "$KIOSK_SWAY" "$ALLOW_SHIPPED" \
+         "$WIPE_UNIT" "$HOOK_UNIT"; do
     [ -f "$f" ] || { echo "FATAL: cannot find $f" >&2; exit 2; }
 done
 command -v bash >/dev/null 2>&1 || { echo "FATAL: bash is required" >&2; exit 2; }
@@ -374,6 +376,152 @@ if [ -e "$OWNER_HOME/.config/token" ] && [ -e "$STORE/users/1000/github.secret" 
     bad "an allowlisted non-guest IS wipeable — the allowlist is the only fence between the tool and any account (rc=$rc)"
 else
     ok "an account listed in the allowlist is wiped, which is why the shipped allowlist is empty and documented as the whole fence (rc=$rc)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+section "criterion 2 — the engine accepts the uid the session hook instances by"
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# apex-guest-session@.service can only be instanced by uid, because every unit
+# logind creates per user is named by uid. The allowlist is deliberately still
+# a list of NAMES — a uid is a number a later useradd can hand to somebody
+# else — so the engine resolves one to the other, and these assert that the
+# resolution feeds the fences rather than stepping around them.
+seed
+rc="$(wipe "$FIX/allow-guest" 1500)"
+[ "$rc" = 0 ] && ok "a uid that resolves to an allowlisted account is wiped" \
+              || bad "a uid that resolves to an allowlisted account is wiped" \
+                     "rc=$rc  $(cat "$WORK/err")"
+[ -e "$GUEST_HOME/.config/token" ] \
+    && bad "and the wipe reached the same files the name would have" \
+    || ok "and the wipe reached the same files the name would have"
+[ -e "$STORE/users/1500/github.secret" ] \
+    && bad "and the same credential namespace" \
+    || ok "and the same credential namespace"
+grep -q "uid 1500 is the account 'apex-guest'" "$WORK/err" \
+    && ok "and it says out loud which account the uid resolved to" \
+    || bad "and it says out loud which account the uid resolved to" "$(cat "$WORK/err")"
+
+# The fence that would be defeated by resolving a uid AFTER the allowlist
+# check, or by skipping the allowlist for a numeric argument. 1000 is the
+# owner: a real account, present in the fixture passwd, absent from this
+# allowlist.
+seed
+rc="$(wipe "$FIX/allow-guest" 1000)"
+[ "$rc" = 2 ] && ok "a uid whose account is not allowlisted is refused" \
+              || bad "a uid whose account is not allowlisted is refused" "rc=$rc"
+grep -q "is not listed in" "$WORK/err" \
+    && ok "and the refusal is the allowlist's, so resolution happens before it" \
+    || bad "and the refusal is the allowlist's, so resolution happens before it" \
+           "$(cat "$WORK/err")"
+[ -e "$OWNER_HOME/.config/token" ] \
+    && ok "and the owner's home is untouched" \
+    || bad "and the owner's home is untouched"
+
+# An unresolvable uid must be a refusal and not a fall-through to treating the
+# digits as an account name — otherwise an allowlist that happened to contain a
+# line of digits would authorise a wipe nobody asked for. 4242 is in
+# allow-digits and in no passwd file.
+seed
+printf '4242\n' > "$FIX/allow-digits"
+rc="$(wipe "$FIX/allow-digits" 4242)"
+[ "$rc" = 2 ] && ok "a uid with no account is refused, not treated as a name" \
+              || bad "a uid with no account is refused, not treated as a name" "rc=$rc"
+grep -q "no account on this machine has uid 4242" "$WORK/err" \
+    && ok "and the refusal names the uid it could not resolve" \
+    || bad "and the refusal names the uid it could not resolve" "$(cat "$WORK/err")"
+
+# ─────────────────────────────────────────────────────────────────────────────
+section "criterion 2 — the session-end hook is wired to the unit logind stops"
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Round 1 shipped the wipe with no trigger: apex-guest-wipe@.service is
+# `After=user-%i.slice`, which ORDERS it and never FIRES it. The hook unit is
+# the trigger, and the whole of what these assert is that it hangs off the
+# right thing, because the wrong thing fails silently.
+#
+# Measured on a real second account on the L16: binding to the user slice never
+# fires. logind does not stop `user-<uid>.slice` — the journal at logout shows
+# it stopping `user@<uid>.service` and `user-runtime-dir@<uid>.service` and
+# nothing else, and the slice then goes away by garbage collection. A unit that
+# `BindsTo=` the slice is a reference that keeps it from being collected, so
+# the hook prevents the very event it is waiting for: `user-1042.slice` stayed
+# `active` indefinitely after the guest logged out, and was collected within
+# seconds once the hook was removed.
+hook_binds_to_the_slice() { grep -qE '^(BindsTo|WantedBy)=user-%i\.slice$' "$1"; }
+
+grep -q '^BindsTo=user-runtime-dir@%i.service$' "$HOOK_UNIT" \
+    && ok "the hook binds to user-runtime-dir@%i.service, which logind stops" \
+    || bad "the hook binds to user-runtime-dir@%i.service, which logind stops"
+grep -q '^WantedBy=user-runtime-dir@%i.service$' "$HOOK_UNIT" \
+    && ok "and it is pulled in by the same unit, so enable(8) is the whole wiring" \
+    || bad "and it is pulled in by the same unit, so enable(8) is the whole wiring"
+
+if hook_binds_to_the_slice "$HOOK_UNIT"; then
+    bad "and it does not bind to the user slice, which never fires"
+else
+    ok "and it does not bind to the user slice, which never fires"
+fi
+# That absence means nothing unless the check can see a presence.
+sed 's/^BindsTo=user-runtime-dir@%i.service$/BindsTo=user-%i.slice/' \
+    "$HOOK_UNIT" > "$WORK/slice-bound.service"
+if hook_binds_to_the_slice "$WORK/slice-bound.service"; then
+    ok "and the check that says so would notice the slice binding if it came back"
+else
+    bad "and the check that says so would notice the slice binding if it came back"
+fi
+
+# Reverse-order stop. Ordering the hook BEFORE the runtime dir on the way up
+# is what puts the wipe AFTER it on the way down, so the wipe sees a torn-down
+# session rather than a live one.
+grep -q '^Before=user-runtime-dir@%i.service$' "$HOOK_UNIT" \
+    && ok "the hook is ordered Before the runtime dir, so its ExecStop runs after it" \
+    || bad "the hook is ordered Before the runtime dir, so its ExecStop runs after it"
+
+grep -q '^ExecStop=/usr/libexec/apex-guest-wipe %i$' "$HOOK_UNIT" \
+    && ok "the wipe is the hook's ExecStop, instanced by uid" \
+    || bad "the wipe is the hook's ExecStop, instanced by uid"
+grep -q '^ExecStart=/bin/true$' "$HOOK_UNIT" \
+    && ok "and nothing at all happens at login" \
+    || bad "and nothing at all happens at login"
+grep -q '^RemainAfterExit=yes$' "$HOOK_UNIT" \
+    && ok "and it stays active for the session, so there is something to stop" \
+    || bad "and it stays active for the session, so there is something to stop"
+
+# THE assertion of this section. The boot sweep treats exit 2 as success
+# because on a machine with no guest configured refusing is correct. This unit
+# is only ever enabled for an account that IS a configured guest, so a refusal
+# means the guest's credentials are still there — and with the boot unit's
+# SuccessExitStatus copied across, that refusal reported success. Measured: the
+# allowlist emptied, a real guest logged out, `systemctl status` green, home
+# untouched.
+has_success_exit() { grep -q '^SuccessExitStatus' "$1"; }
+if has_success_exit "$HOOK_UNIT"; then
+    bad "a fence holding at session end is a UNIT FAILURE, not a success" \
+        "SuccessExitStatus would make an unwiped guest look green"
+else
+    ok "a fence holding at session end is a UNIT FAILURE, not a success"
+fi
+printf 'SuccessExitStatus=0 2\n' > "$WORK/quiet.service"
+cat "$HOOK_UNIT" >> "$WORK/quiet.service"
+if has_success_exit "$WORK/quiet.service"; then
+    ok "and the check that says so would notice one if it were added"
+else
+    bad "and the check that says so would notice one if it were added"
+fi
+# The boot unit keeps it, and must: without it a machine with no guest would
+# show a failed unit at every boot. The two answers are opposite on purpose.
+has_success_exit "$WIPE_UNIT" \
+    && ok "while the boot-time sweep keeps it, because refusing at boot is normal" \
+    || bad "while the boot-time sweep keeps it, because refusing at boot is normal"
+
+# Inert like everything else here: enabling it is `systemctl enable
+# apex-guest-session@<uid>.service` and this repo does not do it.
+if grep -rn 'apex-guest-session@' "$ROOT"/Containerfile* 2>/dev/null \
+        | grep -qE 'systemctl enable|\.wants/'; then
+    bad "no Containerfile enables the session hook"
+else
+    ok "no Containerfile enables the session hook"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

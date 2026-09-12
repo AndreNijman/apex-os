@@ -338,6 +338,14 @@ pub const ENV_ENGINE: &str = "/usr/libexec/apex-env";
 /// it, and APEX has not grown a second container runtime.
 pub const DISPOSABLE_ENGINE: &str = "/usr/libexec/apex-disposable";
 
+/// The account engine behind `apex user` (P2-016).
+///
+/// A constant, like every other engine path here, and this one more than most:
+/// it runs `useradd`, `userdel` and `systemctl enable` as root, so a
+/// caller-controlled variable naming it would be a way to have `sudo apex
+/// user` execute somebody else's program.
+pub const USER_ENGINE: &str = "/usr/libexec/apex-user";
+
 /// The virtualization engine behind `apex vm` (P2-008).
 ///
 /// A constant, like every other engine path here, and for the same reason: a
@@ -464,6 +472,30 @@ pub fn env(args: &[String]) -> i32 {
 /// `status()` rather than `output()`: `run` gives the terminal to an
 /// interactive capsule shell, and the teardown has to happen when that shell
 /// exits.
+/// `apex user …`.
+///
+/// `status()` rather than `output()` for the same reason as the rest: the
+/// engine writes its refusals to stderr and the user needs to read them as
+/// they happen, and `apex user list` is a table that should stream.
+///
+/// Not made privileged here. `apex user list` is deliberately usable by
+/// anybody, and the engine refuses the verbs that need root with a sentence
+/// naming sudo — which is a better failure than this binary deciding on the
+/// caller's behalf that a read-only question needs a password.
+pub fn user(args: &[String]) -> i32 {
+    match Command::new(USER_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the account engine: {e}");
+            eprintln!(
+                "apex: no account engine on this system — it predates `apex user`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
 pub fn disposable(args: &[String]) -> i32 {
     match Command::new(DISPOSABLE_ENGINE).args(args).status() {
         Ok(status) => status.code().unwrap_or(-1),

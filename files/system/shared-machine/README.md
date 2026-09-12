@@ -1,5 +1,8 @@
 # Shared-machine recipes — guest and kiosk (roadmap P2-016)
 
+`docs/multi-user.md` is the surface above this: `apex user`, what
+"standard" and "administrator" mean on APEX, and what is not built.
+
 Everything in this directory is **inert on a stock APEX**. No guest account is
 created, no kiosk config is installed, no unit is enabled. That is deliberate
 and it is the criterion:
@@ -22,6 +25,7 @@ one appears.
 | `sway-kiosk.conf` | `/usr/share/apex/shared-machine/sway-kiosk.conf` | No — a recipe |
 | `../libexec/apex-guest-wipe` | `/usr/libexec/apex-guest-wipe` | Installed, refuses everything |
 | `../units/apex-guest-wipe@.service` | `/usr/lib/systemd/system/` | Installed, not enabled |
+| `../units/apex-guest-session@.service` | `/usr/lib/systemd/system/` | Installed, not enabled |
 
 ## Guest sessions, and the thing everybody gets wrong
 
@@ -56,16 +60,35 @@ It is the guarantee that nothing of theirs is still here afterwards.
 Three steps, none of which this repo performs:
 
 ```sh
-# 1. the account. NOT in wheel, and a home the wipe is allowed to empty.
-sudo useradd -m -d /home/apex-guest -s /bin/bash apex-guest
+# 1. the account. `apex user add` makes a STANDARD one -- not in wheel --
+#    which is what a guest has to be.
+sudo apex user add apex-guest
 sudo passwd -d apex-guest          # no password, if that is the intent
 
-# 2. allow the wipe to act on it
-echo apex-guest | sudo tee -a /etc/apex/guest-accounts
+# 2. the allowlist and the session hook, together
+sudo apex user guest enable apex-guest
 
-# 3. run the wipe when the guest's session ends
+# 3. optional: also sweep at boot, for what a power cut left behind. This one
+#    is by NAME, and it is a different unit -- see below.
 sudo systemctl enable apex-guest-wipe@apex-guest.service
 ```
+
+`apex user guest enable` is the whole of step 2: it writes the name to
+`/etc/apex/guest-accounts` and enables `apex-guest-session@<uid>.service` — by
+uid, because every unit logind creates per user is named by uid, and the wipe
+engine resolves it back to the name. It refuses an administrator, the account
+you are running as, uid 0, a system account, and a home the wipe would not
+clear. `sudo apex user guest disable apex-guest` undoes it; `apex user guest
+status` says who is configured. By hand, if you would rather:
+
+```sh
+echo apex-guest | sudo tee -a /etc/apex/guest-accounts
+sudo systemctl enable apex-guest-session@"$(id -u apex-guest)".service
+```
+
+Step 2 is what makes a guest disposable in the ordinary case and step 3 is the
+backstop. They are separate units because a refusal means opposite things in
+the two places — see below.
 
 The engine refuses every account that is not in that file. It also refuses uid
 0, a home of `/`, `/home`, `/var/home`, `/root` or empty, an account that does
@@ -74,15 +97,70 @@ in that order, before anything is removed — modelled on the four
 `apex-disposable` puts on its recursive removal, for the same reason: a wrong
 argument here is unrecoverable.
 
-### What is not done yet
+### Session end: what fires it, and the version that looks right and does not
 
-The unit is ordered `After=user-%i.slice`, which orders it but does not *fire*
-it when the slice stops. Wiring the wipe to logind's session end — a
-`BindsTo=` + `ExecStop=` pair on the slice, or a `pam_exec` line at
-`session close` — needs a machine with a real second account to verify on, and
-is **untested**. Until it is, the safe deployment is the boot-time instance,
-which clears whatever the previous day left behind. The engine itself is
-exercised end to end by `tests/test-apex-shared-machine.sh`, fences included.
+Round 1 shipped the engine with no trigger — `apex-guest-wipe@.service` is
+`After=user-%i.slice`, which *orders* it and never *fires* it.
+`apex-guest-session@.service` is the trigger, and it was verified on a real
+second account rather than reasoned about. Both directions:
+
+| allowlist | after the guest logs out |
+|---|---|
+| names the guest | home cleared, `/var/lib/apex-secretd/users/<uid>` gone, unit deactivated successfully |
+| emptied | nothing removed, unit **failed**, journal: `refusing: … is not listed in /etc/apex/guest-accounts` |
+
+The second row is the one that had to be checked. The two units disagree about
+what a refusal means, and it is not a detail:
+
+* `apex-guest-wipe@.service` runs at boot on any machine, where "no guest is
+  configured" is the normal answer. It carries `SuccessExitStatus=0 2`, so a
+  refusal is quiet.
+* `apex-guest-session@.service` is only ever enabled for an account that *is* a
+  configured guest, at the one moment the wipe is supposed to happen. A refusal
+  there means the guest's credentials are still sitting there for the next
+  guest. It has **no** `SuccessExitStatus` on purpose. With the boot unit's
+  copied across, that exact refusal produced a green `systemctl status` over an
+  untouched guest home.
+
+**The obvious wiring does not work and fails silently.** Binding the hook to
+the user slice — `BindsTo=user-%i.slice`, `WantedBy=user-%i.slice` — reads
+like the right hook and never fires:
+
+* logind does not stop `user-<uid>.slice`. At logout it stops
+  `user@<uid>.service` and `user-runtime-dir@<uid>.service`; the slice then
+  goes away by garbage collection, once it is empty and nothing refers to it.
+* a unit that `BindsTo=` the slice **is** something that refers to it. With the
+  hook installed, `user-1042.slice` stayed `active` indefinitely after the
+  guest logged out — sessions removed, `user@1042.service` inactive, slice
+  still up. Remove the hook and the same slice was collected within seconds.
+
+So the hook prevented the event it was waiting for. `user-runtime-dir@<uid>`
+is explicitly stopped by logind and has no such loop, and `Before=` it on the
+way up is what puts the wipe *after* it on the way down — the wipe sees a
+torn-down session, not a live one.
+
+The engine is exercised end to end by `tests/test-apex-shared-machine.sh`,
+fences included; the unit's shape — what it binds to, and that it has no
+`SuccessExitStatus` — is asserted there and at build time in
+`Containerfile.base`.
+
+**One failure mode the loudness earned, on the third live cycle.** A logind
+session record stuck in `State=closing` — a session whose leader process is
+gone but which logind never reaped — still counts as a session, so fence 4
+refuses and the wipe does not run. The guest's credentials stay where they are.
+That is the conservative answer and it is correct: from inside the engine, "the
+record is stuck" and "somebody is still sitting at that desktop" look the same.
+What makes it survivable is that the unit fails rather than reporting success,
+so the journal says `refusing: … still has an active login session` and
+`systemctl --failed` shows it. The boot-time sweep clears it at the next boot,
+which is what that unit is the backstop for. `loginctl list-sessions` shows the
+stuck record.
+
+The boot sweep is not smarter about this, and it is worth saying so or the next
+reader will go looking for the difference: both units run the same engine and
+the same fence 4. It succeeds because logind keeps its session records in
+`/run/systemd/sessions`, which does not survive a reboot — the stuck record is
+simply gone by the time the sweep runs, along with every other session.
 
 ## Kiosk
 
@@ -108,7 +186,14 @@ purpose-made, not in `wheel`, and not the machine owner's.
 
 ## Not enabled on the development laptop
 
-None of this is enabled on the L16 this was written on, and no account was
-created there. `getent passwd` on that machine lists exactly one account at or
-above uid 1000. Everything asserted about guest and kiosk in the test suite is
-asserted against fixture trees, not against a live second user.
+Nothing here is enabled on the L16. The session-end measurements above were
+made with a **temporary** fixture account (`apex-fx-guest`, uid 1042, home
+under `/var/tmp`, not in `wheel`, password locked) created for the purpose and
+deleted afterwards, with the hook installed under `/etc/systemd/system` and
+removed with it. Everything in `tests/test-apex-shared-machine.sh` is asserted
+against fixture trees and shipped files, not against a live account, so the
+suite is as true on a one-account machine as on a twenty-account one.
+
+The kiosk half was **not** booted. It is still shape assertions on shipped
+files: no kiosk session has ever run, and no greetd config on any machine was
+touched to try.
