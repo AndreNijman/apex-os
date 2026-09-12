@@ -2313,6 +2313,51 @@ jobs:
           # on paths built from variables inside a container it starts itself.
           shellcheck -S warning -x tests/vmlab/run-vmlab tests/vmlab/mk-guest
 
+      - name: Every suite is actually run by CI
+        # `if: !cancelled()` for the reason the comment block below gives
+        # about placement, read in its other direction. That block is about a
+        # known-red step ABOVE the gates; the same "a skipped check counts as
+        # success" shape arrives from any red step above them, known or not.
+        # On run 34714159369 it did: `Run virtualization assertions` went red
+        # and BOTH of these gates reported `-`, so the branch that was wiring
+        # suites into CI got no runner evidence that the suite gate passed.
+        # A gate a defect elsewhere in the job can switch off is not a gate.
+        if: ${{ !cancelled() }}
+        run: |
+          # The harder half of the same defect. CI invokes suites BY NAME, so
+          # writing tests/test-foo.sh, landing it, and never adding a workflow
+          # line leaves a file that looks like coverage and gates nothing.
+          # Measured 2026-09-12: 70 suites, 13 named in no workflow at all —
+          # including tests/test-apex-lid.sh, sixty assertions for a feature the
+          # owner asked for by name, which no CI run had ever executed.
+          ./tests/check-suites-run-in-ci.sh
+
+      - name: Every shell script is linted, by discovery
+        # `if: !cancelled()` for the reason the comment block below gives
+        # about placement, read in its other direction. That block is about a
+        # known-red step ABOVE the gates; the same "a skipped check counts as
+        # success" shape arrives from any red step above them, known or not.
+        # On run 34714159369 it did: `Run virtualization assertions` went red
+        # and BOTH of these gates reported `-`, so the branch that was wiring
+        # suites into CI got no runner evidence that the suite gate passed.
+        # A gate a defect elsewhere in the job can switch off is not a gate.
+        if: ${{ !cancelled() }}
+        run: |
+          # The step above lints a hand-written LIST. A list cannot cover a file
+          # nobody remembered to add, and on 2026-09-12 it did not: 140 shell
+          # scripts under tests/ and files/, 38 named, 102 not — including four
+          # suites landed in the previous two days and both of the checkers
+          # written to catch exactly this species of gap. That is the same
+          # defect as a path selector naming nothing: the step runs, reports
+          # success, and inspects nothing.
+          #
+          # This one FINDS the scripts. It lives in the engine job because the
+          # engine selector — `^(files/|tests/|Containerfile|\.github/workflows/)`
+          # — covers every directory it walks, so no edit to a discovered script
+          # can reach `main` without this step running. Putting it anywhere else
+          # would make it another instance of the bug the comments above describe.
+          ./tests/check-shellcheck-coverage.sh
+
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
       # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict
       # comes from apex-shell's own src/services/plugins/manifest.js, through
@@ -2343,31 +2388,6 @@ jobs:
       # "a skipped check counts as success" shape this repository has been
       # bitten by, and it would have switched off the shellcheck gate on the
       # very files this branch adds. Anything expected to be red belongs at the
-      - name: Every suite is actually run by CI
-        run: |
-          # The harder half of the same defect. CI invokes suites BY NAME, so
-          # writing tests/test-foo.sh, landing it, and never adding a workflow
-          # line leaves a file that looks like coverage and gates nothing.
-          # Measured 2026-09-12: 70 suites, 13 named in no workflow at all —
-          # including tests/test-apex-lid.sh, sixty assertions for a feature the
-          # owner asked for by name, which no CI run had ever executed.
-          ./tests/check-suites-run-in-ci.sh
-
-      - name: Every shell script is linted, by discovery
-        run: |
-          # The step above lints a hand-written LIST. A list cannot cover a file
-          # nobody remembered to add, and on 2026-09-12 it did not: 140 shell
-          # scripts under tests/ and files/, 38 named, 102 not — including four
-          # suites landed in the previous two days and both of the checkers
-          # written to catch exactly this species of gap. That is the same
-          # defect as a path selector naming nothing: the step runs, reports
-          # success, and inspects nothing.
-          #
-          # This one FINDS the scripts. It lives in the engine job because the
-          # engine selector is `^(files/|tests/|Containerfile)`, which is
-          # precisely the set it walks — putting it anywhere else would make it
-          # the sixth instance of the bug the comments above it describe.
-          ./tests/check-shellcheck-coverage.sh
       # bottom of its job.
       - name: Run plugin CLI assertions
         run: ./tests/test-apex-plugin.sh
