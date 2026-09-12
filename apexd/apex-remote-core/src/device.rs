@@ -516,6 +516,67 @@ mod tests {
     }
 
     #[test]
+    fn a_paired_device_belongs_to_one_account_and_not_to_the_machine() {
+        // P2-016 criterion 4: remote agent permissions are bound to the owning
+        // user. A paired phone reaches `apex-agentd` through `apex-remoted`,
+        // and both are per-user systemd services — but the thing that actually
+        // decides which account a device can drive is where its record lives.
+        //
+        // It lives under `$XDG_STATE_HOME`, so it is already per-account. That
+        // was UNASSERTED: the existing round-trip test checks the file is 0600
+        // in a 0700 directory, which is a claim about other accounts not
+        // READING it, and says nothing about two accounts not SHARING it. A
+        // store that had drifted to /var/lib would still be 0600 and would
+        // still pass that test, while every account on the machine paired into
+        // one list.
+        //
+        // Asserted through `path_in`, which `path()` calls, so moving the
+        // store to a machine-global constant fails here.
+        let mine = Path::new("/home/owner/.local/state");
+        let theirs = Path::new("/home/guest/.local/state");
+        assert_ne!(DeviceStore::path_in(mine), DeviceStore::path_in(theirs));
+        assert!(DeviceStore::path_in(mine).starts_with(mine));
+        assert!(DeviceStore::path_in(theirs).starts_with(theirs));
+
+        // The identity key is the other half and has the same requirement: it
+        // is what a device authenticates the machine by, so one key shared
+        // across accounts would mean a device paired with one account could
+        // complete a handshake with another's daemon.
+        assert_ne!(
+            crate::identity::Identity::path_in(mine),
+            crate::identity::Identity::path_in(theirs)
+        );
+        assert!(crate::identity::Identity::path_in(mine).starts_with(mine));
+
+        // And neither may sit in a machine-global directory, which is the
+        // shape the drift would take. Stated as paths rather than as a rule
+        // about `state_home()`, because a constant is exactly what would
+        // replace the call.
+        for p in [DeviceStore::path_in(mine), crate::identity::Identity::path_in(mine)] {
+            for global in ["/var", "/etc", "/usr", "/run", "/tmp"] {
+                assert!(
+                    !p.starts_with(global),
+                    "{} is under {global}, so it is the machine's and not one account's",
+                    p.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_live_store_paths_are_the_ones_this_account_owns() {
+        // `path_in` is only the formula; this ties the live readers to it, so
+        // a `path()` that stopped consulting `state_home()` — went back to a
+        // constant, or to a shared directory — is caught.
+        let state = apex_agent_core::paths::state_home();
+        assert_eq!(DeviceStore::path(), DeviceStore::path_in(&state));
+        assert_eq!(
+            crate::identity::Identity::path(),
+            crate::identity::Identity::path_in(&state)
+        );
+    }
+
+    #[test]
     fn a_missing_store_is_empty_and_a_corrupt_one_is_an_error() {
         let t = tmp("corrupt");
         let path = store_in(&t.0);
