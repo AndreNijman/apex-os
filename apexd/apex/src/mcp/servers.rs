@@ -1031,18 +1031,24 @@ mod tests {
         // The document `apex mcp list --json` emits has to say it too, and
         // with its own word: a consumer branching on `where` must be able to
         // tell "nothing to protect" from "the model holds it".
-        let doc = as_json(&[Server {
-            name: "cf".into(),
-            key: "cf".into(),
-            surface: Surface::User,
-            transport: Transport::Endpoint {
-                kind: "http".into(),
-                url: "https://bindings.mcp.cloudflare.com/mcp".into(),
+        let doc = as_json(
+            &[Server {
+                name: "cf".into(),
+                key: "cf".into(),
+                surface: Surface::User,
+                transport: Transport::Endpoint {
+                    kind: "http".into(),
+                    url: "https://bindings.mcp.cloudflare.com/mcp".into(),
+                },
+                credential: Credential::AgentAuthenticates {
+                    url: "https://bindings.mcp.cloudflare.com/mcp".into(),
+                },
+            }],
+            &mcpconf::Curated {
+                document: serde_json::json!({}),
+                decisions: Vec::new(),
             },
-            credential: Credential::AgentAuthenticates {
-                url: "https://bindings.mcp.cloudflare.com/mcp".into(),
-            },
-        }]);
+        );
         assert_eq!(doc["servers"][0]["credential"]["where"], "agent");
         assert_eq!(doc["servers"][0]["agentReadable"], true);
         assert_eq!(doc["agentReadable"], 1);
