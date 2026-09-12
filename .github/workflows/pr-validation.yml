@@ -970,6 +970,48 @@ jobs:
           test -x "$APEX"
           ./tests/test-apex-trust.sh --with-binary
 
+      # §27's other half, and the half that refuses things. The step above
+      # guards the READOUT — that `apex trust` describes the machine's trust
+      # state without lying about it. This one guards the GATE: that
+      # `apex update` refuses an image whose signature does not verify, permits
+      # one it merely could not check, and says which of the two happened.
+      # It was DEBT in tests/suites-not-in-ci.txt; no CI run had executed it.
+      #
+      # Every assertion needs a minted CA and a real signature, so it is slower
+      # than the readout suite and it needs openssl. It never touches a real
+      # deployment: the fixtures are a mktemp tree passed as APEX_TRUST_ROOT.
+      #
+      # The floor is the assertion that matters on a RUNNER specifically. This
+      # repository has a standing note that the CI runner is a second
+      # environment, openssl among the differences, and the suite already
+      # feature-detects `openssl x509 -not_before`. A runner whose openssl
+      # cannot mint one of these certificates would quietly assert less and
+      # still print a green summary — so the count is read back and floored.
+      - name: §27 trust — the gate rather than the readout, so a bad signature is refused
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          rc=0; out="$(./tests/test-apex-trust-enforcement.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the trust-enforcement suite exited $rc; it exits 1 before asserting anything if openssl is missing"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^[[:space:]]*[0-9]+ passed, [0-9]+ failed$' || true)"
+          [ -n "$summary" ] || { echo "::error::the trust-enforcement suite printed no summary line"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $1}')"
+          failed="$(printf '%s' "$summary" | awk '{print $3}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed trust-enforcement assertions failed"; exit 1; }
+          [ "$passed" -ge 77 ] || { echo "::error::only $passed trust-enforcement assertions ran; 77 ran on 2026-09-13, so some no longer execute — the runner's openssl is the first thing to check, the suite drops assertions it cannot mint a certificate for"; exit 1; }
+          if printf '%s\n' "$out" | grep -qiE '^[[:space:]]*(SKIP|skipped)'; then
+              echo "::error::the trust-enforcement suite printed a SKIP; a could-not-run is not a pass"
+              exit 1
+          fi
+
       # ── P1-063 lid, and the reason this step exists at all ─────────────────
       # tests/test-apex-lid.sh is sixty assertions for the behaviour Andre
       # asked for by name — close the lid at school and the agents keep
@@ -2337,6 +2379,44 @@ jobs:
               echo "::error::only $passed device-image assertions ran; 39 ran on 2026-09-13, so some no longer execute"
               exit 1
           }
+
+      # tests/test-apex-devices.sh — 55 assertions over six device areas, and
+      # until this line no CI run had executed one of them. It was DEBT in
+      # tests/suites-not-in-ci.txt, not a decision.
+      #
+      # It is shell-only: it drives files/system/libexec/apex-devices against a
+      # fixture tree under mktemp, with a $PATH of its own stubs, so it reaches
+      # no device on the machine running it. Engine job, because the engine
+      # selector is `^(files/|tests/|…)` and the helper it drives lives under
+      # files/.
+      #
+      # The point of the suite is the EACCES sweep's finding — that a reader
+      # which collapses "permission denied" into "there is none" is the same
+      # bug in fourteen places — so its fixtures are deliberately unreadable in
+      # places and it counts a `skipped` of its own. The step therefore fails on
+      # skipped > 0 as well as on failed > 0, and separately on a bare `SKIP`
+      # line, which would be an echo that bypassed the counter.
+      - name: P1 devices — 55 assertions over six device areas
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          rc=0; out="$(./tests/test-apex-devices.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the devices suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex-devices: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::the devices suite printed no summary line"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $2}')"
+          failed="$(printf '%s' "$summary" | awk '{print $4}')"
+          skipped="$(printf '%s' "$summary" | awk '{print $6}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed device assertions failed"; exit 1; }
+          [ "$skipped" = 0 ] || { echo "::error::$skipped device assertions could not run on this runner; a could-not-run is not a pass"; exit 1; }
+          [ "$passed" -ge 55 ] || { echo "::error::only $passed device assertions ran; 55 ran on 2026-09-13, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the devices suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
+              exit 1
+          fi
 
       - name: ShellCheck the privileged helpers
         run: |
