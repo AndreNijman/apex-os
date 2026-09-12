@@ -207,6 +207,14 @@ has "the browser is told to be headless"            '<--headless>'          "$ar
 has "and not to join a running browser"             '<--no-remote>'         "$argv"
 has "and to use the capsule's own profile"          "<--profile> <$ROOT/cap-one/.profile>" "$argv"
 has "the caller's own arguments survive"            '<--screenshot> <shot.png>' "$argv"
+
+# {capsule} exists because Firefox's --screenshot writes NOTHING when given a
+# relative filename — measured — and a caller cannot type the path of a
+# capsule this engine names for them.
+argv2=$(reset_calls; "$ENGINE" run --name cap-tok --allow e.example:443 \
+            -- --screenshot '{capsule}/shot.png' https://e.example/ >/dev/null 2>&1; session_argv)
+has   "{capsule} becomes the capsule's own directory" "<--screenshot> <$ROOT/cap-tok/shot.png>" "$argv2"
+hasnt "and no unexpanded token reaches the browser"   '{capsule}' "$argv2"
 has "including the URL"                             '<https://e.example/>'  "$argv"
 
 echo "── user.js, which is the only thing pointing at the bridge ─────────────"

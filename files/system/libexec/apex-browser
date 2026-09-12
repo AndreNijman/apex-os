@@ -520,6 +520,32 @@ cmd_run() {
     # --cwd is the capsule: a confined session's working directory is the one
     # host path bound writable, which is why the profile and the downloads live
     # there and not in the masked home.
+    # ── {capsule} in the browser's own arguments ────────────────────────────
+    #
+    # Measured, and the measurement is the whole reason this exists: Firefox's
+    # `--screenshot` with a RELATIVE filename writes nothing at all. Not to the
+    # working directory, not anywhere the capsule can see — the run exits 0 and
+    # produces no file, which the nomination loop then reports as "the capsule
+    # did not produce" it. An absolute path works.
+    #
+    # But a caller cannot write an absolute path into a capsule whose name this
+    # engine generates, and teardown deletes the directory afterwards anyway.
+    # So the capsule's own path is substitutable: the literal token {capsule}
+    # in any browser argument becomes the capsule directory, which is also the
+    # download directory, which is where nominations are looked up.
+    #
+    #     apex browser run --allow e.example --download shot.png \
+    #         --download-to ~/out -- --screenshot {capsule}/shot.png https://e/
+    #
+    # A token rather than a rewrite of --screenshot specifically: this engine
+    # does not know which of a browser's flags take paths, and guessing would
+    # be a list to keep correct for every browser and every version.
+    local -a expanded=()
+    for ba in "${browser_args[@]}"; do
+        expanded+=("${ba//\{capsule\}/$dir}")
+    done
+    browser_args=("${expanded[@]}")
+
     local -a session_argv=(
         "$APEX" agent run
         --agent generic
@@ -719,11 +745,15 @@ Options for `run`:
   --name NAME           name the capsule instead of generating one.
   --timeout SECONDS     how long to let it run (default 300).
 
-Everything after `--` goes to the browser:
+Everything after `--` goes to the browser, with one substitution: the literal
+token {capsule} becomes the capsule's own directory, which is also where
+nominated files are looked for. Firefox's --screenshot writes nothing at all
+when given a relative filename, and a capsule's path cannot be typed in
+advance because this command generates it.
 
   apex browser run --allow example.com:443 \
       --download shot.png --download-to ~/results \
-      -- --screenshot shot.png https://example.com/
+      -- --screenshot {capsule}/shot.png https://example.com/
 
 docs/browser-capsule.md records what each property rests on and what is not
 built.

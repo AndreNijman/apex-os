@@ -18,7 +18,7 @@ guarantee pointed at a browser:
 | the profile you use is unreachable | the agent sandbox's `--tmpfs $HOME` (`apex-agent-core/src/sandbox.rs`) |
 | headless is structural, not a flag | the same sandbox's `--tmpfs /run` and masked `$XDG_RUNTIME_DIR`: there is no compositor socket to open a window on |
 | the browser reaches only named hosts | `NetworkPolicy::Allowlist` — `--unshare-net` plus agentd's CONNECT proxy, which asks `destination::Allowlist` twice (`apex-agentd/src/egress.rs`) |
-| ignoring the proxy opens nothing | the same `--unshare-net`: no route, no resolver, so an unproxied connection is `ENETUNREACH`, not a direct one |
+| ignoring the proxy opens nothing | the same `--unshare-net`: the namespace has only `lo`, so there is no route to try and no resolver to ask |
 | downloads leave only when nominated | `apex vm run`'s egress rule — the loop runs over the **nominations**, never over the directory's contents |
 | nothing survives the run | `apex vm run`'s four-way fence on a recursive removal: narrow name pattern, final component not a symlink, `realpath`, and the resolved path equal to exactly `<root>/<name>` |
 
@@ -52,8 +52,16 @@ A VM-tier browser capsule is listed under "what is not built".
 ```
 apex browser run --allow example.com:443 \
     --download page.png --download-to /home/u/results \
-    -- --screenshot page.png https://example.com/
+    -- --screenshot {capsule}/page.png https://example.com/
 ```
+
+`{capsule}` in any browser argument becomes the capsule's own directory. It is
+not a convenience: Firefox's `--screenshot` writes **nothing at all** when it
+is given a relative filename — measured, and the run still exits 0 — and a
+caller cannot type the path of a capsule this command names for them. A token
+rather than a rewrite of `--screenshot` specifically, because the engine does
+not know which of a browser's flags take paths and guessing would be a list to
+keep correct for every browser and every version.
 
 A run makes one directory, `$XDG_STATE_HOME/apex/browser/<name>`, mode `0700`,
 and everything the browser is allowed to keep lives in it:
@@ -157,9 +165,17 @@ variables. `network.proxy.type=1` and the http/ssl proxy host and port are
 written into the profile by the engine, which makes those preferences part of
 the security surface and not cosmetic — the suite asserts them.
 
-Ignoring them buys nothing. The namespace has no route and no resolver, so a
-browser that bypassed the proxy would get `ENETUNREACH` rather than a direct
-connection.
+Ignoring them buys nothing, and the lab measures it rather than quoting it. A
+capsule's interface list is `lo` and nothing else, so a connection aimed past
+loopback has no route to try: `curl` to an address in TEST-NET-2 fails to
+connect in 0 ms, and a connection by *name* does not get that far, because
+there is no resolver in the namespace at all — the daemon is what resolves,
+which is also why the allowlist checks a name rather than an address.
+
+That the **browser** uses the bridge, and not only that `curl` can, has its own
+evidence and it comes from the enforcer: a capsule pointed at a destination
+nobody allowed produces a denial in agentd's own log naming that host, and
+nothing but a proxied request could have produced it.
 
 Two consequences, stated because they are limits rather than holes:
 
