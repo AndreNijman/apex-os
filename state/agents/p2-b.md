@@ -70,7 +70,7 @@ suite and a mutation pair.
 
 | sub-feature | state | assertion |
 | --- | --- | --- |
-| keyboard layout before password | **DONE — greeter and installer** | Greeter: `tests/test-apex-greet-a11y.sh` test_030-034 + `tests/test-apex-greet-layout.sh`. Installer (round 2): `installer/test-installer-keymap.sh` **42 assertions** and `installer/test-installer-locale.sh` **26**. The criterion itself is measured, not inferred — cage started with `XKB_DEFAULT_LAYOUT=de` hands a GTK4 client a keymap where the physical Y key gives `z`, Z gives `y`, `;` gives `ö`. The layout is applied to the RUNNING session by restarting the compositor, which is the only thing that can work (see the design fork). |
+| keyboard layout before password | **DONE — greeter and installer** | Greeter: `tests/test-apex-greet-a11y.sh` test_030-034 + `tests/test-apex-greet-layout.sh`. Installer (round 2): `installer/test-installer-keymap.sh` **43 assertions** and `installer/test-installer-locale.sh` **26**. The criterion itself is measured, not inferred — cage started with `XKB_DEFAULT_LAYOUT=de` hands a GTK4 client a keymap where the physical Y key gives `z`, Z gives `y`, `;` gives `ö`. The layout is applied to the RUNNING session by restarting the compositor, which is the only thing that can work (see the design fork). |
 | timezone choice | **DONE (installer)** | Engine: `test-installer-locale.sh` — an explicit timezone becomes `/etc/localtime`; an explicitly chosen UTC is **not** overruled by the pre-existing Perth fallback, while an absent choice still keeps it. GUI: a searchable picker on the keyboard page fed from tzdata's own `zone1970.tab` (312 zones), asserted at runtime by `test-installer-keymap.sh` §6 and §6b — the real page is driven, Continue is pressed, and the recorded zone must be one that exists on the system; §6b proves the pick also SURVIVES the compositor restart. **This row was twice written as DONE while a path through it did not work** — first while the GUI had no timezone widget at all — the engine honoured a key nothing set, so the override path was unreachable from the installer. and then while the pick was silently discarded by the compositor restart (a new process, empty `answers`, dropdown reset to the ISO default, and a resume note that tells the user to check the KEYBOARD so nobody looks again). Both caught in review; both fixed rather than softened. |
 | multiple layouts | **greeter DONE** | `test-apex-greet-layout.sh` "both configured layouts survive extraction" / "a three-layout machine reports all three in order". Nothing in the desktop shell switches layouts yet. |
 | IME / fcitx5 | present in image, untested | `Containerfile.core:1182-1189` installs fcitx5 + chinese-addons/hangul/anthy/m17n; autostarted in 3 places. `QT_IM_MODULE`/`GTK_IM_MODULE` deliberately unset (Wayland text-input-v3). No suite asserts any of it. |
@@ -221,6 +221,12 @@ every boot lands on the diagnostic screen — and every assertion in the suite
 passed, because they all read the source tree, where the file plainly exists.
 The guard now resolves the exec target out of the launcher rather than
 hardcoding a name.
+
+**Round 1's pairs (M1-M7, N1-N8) were NOT re-taken.** The coordinator's
+mid-round correction — that `cp -p` preserves the mtime and is as unsafe as `mv`
+— matters where a compile step can be skipped. Those pairs are QML and shell,
+which have no build artefact to go stale, so their verdicts stand. Round 2's
+restores are `git checkout --` regardless.
 
 **Earlier rounds' survivors, kept for the record:**
 
@@ -386,6 +392,12 @@ input device or the wlroots X11 backend, and there is no `Xvfb`, `Xephyr`,
 for the same reason. What IS shipped is the layer below it — libxkbcommon, the
 single component that decides the answer — asserted against the real library.
 
+## Housekeeping
+
+The `claude-memory` MCP server returned 502 for this entire session, so the
+session-close journal CLAUDE.md asks for could not be written. **This card is the
+durable record of round 2.** Nothing else was lost; both branches are pushed.
+
 ## Packages installed on this laptop (round 2), and what each unblocked
 
 Andre lifted the no-install constraint mid-round: `sudo apex install <pkg>`
@@ -485,7 +497,7 @@ render-context fix.
 - `installer/apex-install` — accepts `keymap`/`keyvariant`/`timezone`, prefers
   them over every inference, validates the layout against xkb's own `base.lst`
   before anything is erased.
-- `installer/test-installer-keymap.sh` — **42 assertions**.
+- `installer/test-installer-keymap.sh` — **43 assertions** (CI run 34661483871 shows 42; it predates the round-trip assertion added in `d85c584f`).
 - `installer/test-installer-locale.sh` — **26 assertions**.
 - `installer/test-installer.sh` — **44**, of which 11 engine cases had been dead
   since July and 2 GUI render rows are the new page.
