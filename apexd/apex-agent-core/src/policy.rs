@@ -563,6 +563,109 @@ impl std::fmt::Display for ConnectorPolicy {
     }
 }
 
+/// Dimension 8: which plugins a session loads at all (P1-026).
+///
+/// Dimension 7 decides which MCP servers reach the session, and
+/// [`crate::mcpconf`] confines the ones it keeps. Neither reaches a plugin's
+/// **hooks** — commands Claude spawns itself from the plugin's
+/// `hooks/hooks.json`, outside the tool permission system, before the session
+/// has done anything. That was measured, not reasoned: with round 1's curated
+/// `--strict-mcp-config` document in place, a fixture plugin's MCP server was
+/// dropped and its `SessionStart` hook still ran. [`crate::pluginconf`] has the
+/// table.
+///
+/// So this dimension **removes** where dimension 7 confines, and the asymmetry
+/// is not an oversight. APEX does not own the agent's process, so it cannot put
+/// a sandbox around a process the agent spawns; what it can do is decide which
+/// plugins are loaded. The mechanism is `enabledPlugins` in the `--settings`
+/// document APEX already writes — the one mechanism of four measured that
+/// removes the plugin's code while leaving APEX's own hook bridge and the
+/// curated MCP document running. `--safe-mode` and `--bare` each take both of
+/// those with them.
+///
+/// `Copy`, like the other seven, so the **names** live in
+/// [`crate::config::Config::plugin_allow`] rather than here — the same shape
+/// and the same reason as [`ConnectorPolicy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginPolicy {
+    /// The default. Every plugin this machine has enabled, which is what a
+    /// session got before this dimension existed. It removes nothing, and the
+    /// readouts say so rather than implying a confinement that is not there: a
+    /// kept plugin's hooks run inside whatever the session is confined to, and
+    /// under `--sandbox unrestricted` that is nothing.
+    #[default]
+    AsConfigured,
+    /// Only the plugins the runtime's configuration names, by name.
+    Curated,
+    /// No plugins at all.
+    ///
+    /// Renamed on the wire for the reason [`ConnectorPolicy::NoConnectors`] is:
+    /// snake_case would put `no_plugins` in a record while [`as_str`] and the
+    /// flag both say `none`.
+    ///
+    /// [`as_str`]: PluginPolicy::as_str
+    #[serde(rename = "none")]
+    NoPlugins,
+}
+
+impl PluginPolicy {
+    pub const ALL: &'static [PluginPolicy] = &[
+        PluginPolicy::AsConfigured,
+        PluginPolicy::Curated,
+        PluginPolicy::NoPlugins,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PluginPolicy::AsConfigured => "as_configured",
+            PluginPolicy::Curated => "curated",
+            PluginPolicy::NoPlugins => "none",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<PluginPolicy> {
+        match s {
+            "as_configured" | "as-configured" | "all" => Some(PluginPolicy::AsConfigured),
+            "curated" => Some(PluginPolicy::Curated),
+            "none" | "no_plugins" | "no-plugins" => Some(PluginPolicy::NoPlugins),
+            _ => None,
+        }
+    }
+
+    /// Whether this value removes anything at all.
+    ///
+    /// What decides whether an `enabledPlugins` block is written into the
+    /// settings document. `AsConfigured` writes none, so a session that asked
+    /// for nothing keeps the user's own object untouched.
+    pub fn reduces(&self) -> bool {
+        !matches!(self, PluginPolicy::AsConfigured)
+    }
+
+    /// Whether a plugin's own hooks can still run under this value alone.
+    ///
+    /// `Curated` is `true` here for [`ConnectorPolicy::keeps_any_cloud`]'s
+    /// reason: it *may* keep a plugin that ships hooks, and which ones it
+    /// keeps is a question about the names rather than about the dimension.
+    pub fn keeps_any_plugin(&self) -> bool {
+        matches!(self, PluginPolicy::AsConfigured | PluginPolicy::Curated)
+    }
+
+    pub fn describe(&self) -> &'static str {
+        match self {
+            PluginPolicy::AsConfigured => "every plugin this machine has enabled",
+            PluginPolicy::Curated => "only the plugins named in the runtime's configuration",
+            PluginPolicy::NoPlugins => "no plugins at all",
+        }
+    }
+}
+
+impl std::fmt::Display for PluginPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
 /// Where a privileged or capability request came from (§7's `request_origin`).
 ///
 /// The vocabulary only. P0-013 attaches it to requests and records it in the
@@ -692,6 +795,14 @@ pub struct AgentPolicy {
     /// six keys and gets the value a session has always had.
     #[serde(default)]
     pub connectors: ConnectorPolicy,
+    /// Dimension 8. Set with `--plugins`.
+    ///
+    /// `#[serde(default)]` for the same reason, and it matters more here than
+    /// for dimension 7: a client that predates this sends seven keys, and the
+    /// value it gets is the one that removes nothing, so an older client can
+    /// never accidentally start a session with a plugin missing.
+    #[serde(default)]
+    pub plugins: PluginPolicy,
 }
 
 impl AgentPolicy {
@@ -823,6 +934,7 @@ impl AgentPolicy {
         &self,
         allowlist: &crate::destination::Allowlist,
         connectors: &[String],
+        plugins: &[String],
     ) -> Result<(), PolicyError> {
         self.validate()?;
         if self.effective_network() == NetworkPolicy::Allowlist && allowlist.is_empty() {
@@ -836,6 +948,13 @@ impl AgentPolicy {
         if self.connectors == ConnectorPolicy::Curated && connectors.is_empty() {
             return Err(PolicyError::ConnectorListEmpty);
         }
+        // And the same rule again for dimension 8, because the mistake is the
+        // same one: `--plugins curated` with an empty `plugin_allow` is
+        // `--plugins none` wearing a name that says otherwise, and a person
+        // reading `curated` in `apex agent status` would have no way to tell.
+        if self.plugins == PluginPolicy::Curated && plugins.is_empty() {
+            return Err(PolicyError::PluginListEmpty);
+        }
         Ok(())
     }
 
@@ -845,7 +964,7 @@ impl AgentPolicy {
     /// whatever the Agent Center grows cannot disagree about which dimensions
     /// exist or what they are called. `network` reports the effective value,
     /// which is what the session actually has.
-    pub fn dimensions(&self) -> [(&'static str, &'static str); 7] {
+    pub fn dimensions(&self) -> [(&'static str, &'static str); 8] {
         [
             ("native", self.native.as_str()),
             ("sandbox", self.sandbox.as_str()),
@@ -854,6 +973,7 @@ impl AgentPolicy {
             ("network", self.effective_network().as_str()),
             ("origin", self.origin.as_str()),
             ("connectors", self.connectors.as_str()),
+            ("plugins", self.plugins.as_str()),
         ]
     }
 }
@@ -873,6 +993,8 @@ pub enum PolicyError {
     AllowlistEmpty,
     /// A curated-connector session with nothing on its connector list.
     ConnectorListEmpty,
+    /// `--plugins curated` with nothing in `plugin_allow`.
+    PluginListEmpty,
     /// Break-glass inside a sandbox that would keep `no_new_privs` on anyway.
     BreakGlassCannotBeConfined(SandboxPolicy),
     /// Raw secret values in the session environment.
@@ -914,6 +1036,13 @@ impl std::fmt::Display for PolicyError {
                  no connectors under another name; name them in `connector_allow` in the \
                  runtime's configuration, or use `--connectors none` if reaching none of \
                  them is what you meant"
+            ),
+            PolicyError::PluginListEmpty => write!(
+                f,
+                "`--plugins curated` with nothing on the plugin list is a session with no \
+                 plugins under another name; name them in `plugin_allow` in the runtime's \
+                 configuration, or use `--plugins none` if loading none of them is what you \
+                 meant"
             ),
             PolicyError::BrokeredNetworkNeedsBroker => write!(
                 f,
@@ -1003,11 +1132,13 @@ impl PolicyPreset {
     /// so a change to one mode cannot silently move another and so each line
     /// can be read against §4.
     ///
-    /// Every preset names `AsConfigured` for dimension 7, and that is a
+    /// Every preset names `AsConfigured` for dimensions 7 and 8, and that is a
     /// statement rather than an omission: none of §4's named modes reduces the
-    /// connector set, because every one of them is a *widening* of the default.
-    /// A preset that quietly curated connectors would be `--unrestricted`
-    /// taking something away.
+    /// connector set or the plugin set, because every one of them is a
+    /// *widening* of the default. A preset that quietly curated connectors
+    /// would be `--unrestricted` taking something away, and one that quietly
+    /// dropped plugins would break the user's own commands in the mode they
+    /// reached for to get MORE freedom.
     pub fn policy(&self) -> AgentPolicy {
         match self {
             PolicyPreset::Default => AgentPolicy::default(),
@@ -1019,6 +1150,7 @@ impl PolicyPreset {
                 network: NetworkPolicy::Open,
                 origin: OriginPolicy::LocalElevationOnly,
                 connectors: ConnectorPolicy::AsConfigured,
+                plugins: PluginPolicy::AsConfigured,
             },
             PolicyPreset::Unrestricted => AgentPolicy {
                 native: NativeMode::Inherit,
@@ -1028,6 +1160,7 @@ impl PolicyPreset {
                 network: NetworkPolicy::Open,
                 origin: OriginPolicy::LocalElevationOnly,
                 connectors: ConnectorPolicy::AsConfigured,
+                plugins: PluginPolicy::AsConfigured,
             },
             PolicyPreset::UnsafeSystemAccess => AgentPolicy {
                 native: NativeMode::Bypass,
@@ -1037,6 +1170,7 @@ impl PolicyPreset {
                 network: NetworkPolicy::Open,
                 origin: OriginPolicy::LocalElevationOnly,
                 connectors: ConnectorPolicy::AsConfigured,
+                plugins: PluginPolicy::AsConfigured,
             },
             PolicyPreset::UnsafeEverything => AgentPolicy {
                 native: NativeMode::Bypass,
@@ -1053,6 +1187,7 @@ impl PolicyPreset {
                 // does not become remotely authorisable by being break-glass.
                 origin: OriginPolicy::LocalElevationOnly,
                 connectors: ConnectorPolicy::AsConfigured,
+                plugins: PluginPolicy::AsConfigured,
             },
         }
     }
@@ -1138,7 +1273,8 @@ mod tests {
                 "secrets",
                 "network",
                 "origin",
-                "connectors"
+                "connectors",
+                "plugins"
             ]
         );
     }
@@ -1153,6 +1289,7 @@ mod tests {
             network: NetworkPolicy::Allowlist,
             origin: OriginPolicy::RemoteElevationAllowed,
             connectors: ConnectorPolicy::Curated,
+            plugins: PluginPolicy::Curated,
         };
         let text = serde_json::to_string(&p).expect("serialise");
         assert_eq!(serde_json::from_str::<AgentPolicy>(&text).unwrap(), p);
@@ -1166,6 +1303,7 @@ mod tests {
             "network",
             "origin",
             "connectors",
+            "plugins",
         ] {
             assert!(v.get(key).is_some(), "{key} missing from {text}");
         }
@@ -1182,6 +1320,10 @@ mod tests {
         // back as the connector set a session has always had, and never as a
         // curated one with an empty list.
         assert_eq!(p.connectors, ConnectorPolicy::AsConfigured);
+        // And dimension 8 the same, where the cost of getting it wrong is a
+        // session that quietly lost a plugin because an older writer said
+        // nothing about one.
+        assert_eq!(p.plugins, PluginPolicy::AsConfigured);
         assert_eq!(p, AgentPolicy { sandbox: SandboxPolicy::Strict, ..AgentPolicy::default() });
 
         let empty: AgentPolicy = serde_json::from_str("{}").expect("parse");
@@ -1312,11 +1454,11 @@ mod tests {
         assert_eq!(p.validate(), Ok(()));
         // What is refused is the pair of an allowlist mode and no allowlist.
         assert_eq!(
-            p.validate_for(&Allowlist::default(), &[]),
+            p.validate_for(&Allowlist::default(), &[], &[]),
             Err(PolicyError::AllowlistEmpty)
         );
         let allow = Allowlist::parse(&["api.example.com"]).expect("parse");
-        assert_eq!(p.validate_for(&allow, &[]), Ok(()));
+        assert_eq!(p.validate_for(&allow, &[], &[]), Ok(()));
 
         // No other mode cares whether the list is empty: `open` was never
         // going to consult it, and the two offline modes are not supposed to
@@ -1328,7 +1470,7 @@ mod tests {
         ] {
             let p = AgentPolicy { network, ..p };
             assert_eq!(
-                p.validate_for(&Allowlist::default(), &[]),
+                p.validate_for(&Allowlist::default(), &[], &[]),
                 Ok(()),
                 "{network}"
             );
@@ -1372,11 +1514,11 @@ mod tests {
         };
         assert_eq!(p.validate(), Ok(()));
         assert_eq!(
-            p.validate_for(&Allowlist::default(), &[]),
+            p.validate_for(&Allowlist::default(), &[], &[]),
             Err(PolicyError::ConnectorListEmpty)
         );
         assert_eq!(
-            p.validate_for(&Allowlist::default(), &["memory".to_string()]),
+            p.validate_for(&Allowlist::default(), &["memory".to_string()], &[]),
             Ok(())
         );
         // And no other value consults the list at all.
@@ -1390,7 +1532,7 @@ mod tests {
                 ..AgentPolicy::default()
             };
             assert_eq!(
-                p.validate_for(&Allowlist::default(), &[]),
+                p.validate_for(&Allowlist::default(), &[], &[]),
                 Ok(()),
                 "{connectors}"
             );
