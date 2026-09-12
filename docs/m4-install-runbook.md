@@ -129,7 +129,7 @@ Boot APEX **manually** (F12 one-shot), Void untouched:
 - greeter (apex-greet under sway) renders + password login works;
 - Brain_Shell/APEX Shell comes up themed (chartreuse), hot-reload intact;
 - `apex status` reports amd-zen/thinkpad-l16-g2, tiers apply, AC/battery autoswitch;
-- suspend/resume works (`apex doctor suspend`); charge thresholds honoured;
+- suspend/resume works (`systemctl suspend`, then `apex qualify record sleep --pass`); charge thresholds honoured;
 - `ausearch -m avc` shows no unexplained denials;
 - migration checklist items work (sing-box via systemctl, Chrome, ghostty, fish/zoxide, docker, Bambu, NPU llama.cpp-Vulkan…).
 
