@@ -251,3 +251,76 @@ fn a_manifest_round_trips_through_json() {
         manifest
     );
 }
+
+/// Two snapshots inside one second sort by when they were made.
+///
+/// The defect `tests/test-apex-backup-s3.sh` found: the stamp is accurate to
+/// the second, so before the tail carried milliseconds the order inside one
+/// second was the order of two random numbers — and `apex backup restore
+/// latest` restored the earlier of two about one run in three.
+#[test]
+fn ids_made_in_the_same_second_sort_by_their_millisecond() {
+    let base = 1_789_207_872_000u64;
+    // Every millisecond of one second, in a shuffled order, so a test that
+    // happened to generate them in order would not pass by accident.
+    let mut made: Vec<SnapshotId> = Vec::new();
+    for offset in [0u64, 999, 1, 500, 37, 998, 250, 3] {
+        made.push(SnapshotId::new(base + offset).expect("an id"));
+    }
+    let mut sorted = made.clone();
+    sorted.sort();
+    let order: Vec<usize> = sorted
+        .iter()
+        .map(|id| made.iter().position(|m| m == id).expect("its own"))
+        .collect();
+    // Where each id sits in `made`, once sorted. The offsets were
+    // [0, 999, 1, 500, 37, 998, 250, 3], so in time order that is
+    // 0ms, 1ms, 3ms, 37ms, 250ms, 500ms, 998ms, 999ms — positions
+    // 0, 2, 7, 4, 6, 3, 5, 1.
+    assert_eq!(order, vec![0, 2, 7, 4, 6, 3, 5, 1], "made: {made:?}");
+}
+
+/// The same, said in the way that cannot be got wrong by hand.
+#[test]
+fn a_later_millisecond_always_makes_a_greater_id() {
+    let base = 1_789_207_872_000u64;
+    // 200 pairs, so the 20 bits of randomness left in the tail cannot make
+    // this pass by luck: before the fix it was a coin toss each time.
+    for offset in 0..200u64 {
+        let earlier = SnapshotId::new(base + offset).expect("an id");
+        let later = SnapshotId::new(base + offset + 1).expect("an id");
+        assert!(
+            earlier < later,
+            "{earlier} was made before {later} and does not sort before it"
+        );
+    }
+}
+
+/// The shape did not change, so ids already on a target still parse and still
+/// sort against new ones.
+#[test]
+fn the_millisecond_tail_is_still_eight_lowercase_hex_digits() {
+    for ms in [0u64, 1, 9, 10, 255, 256, 999] {
+        let id = SnapshotId::new(1_789_207_872_000 + ms).expect("an id");
+        let text = id.as_str();
+        assert_eq!(
+            SnapshotId::parse(text).as_ref(),
+            Some(&id),
+            "{text} no longer parses as an id"
+        );
+        let tail = text.split_once('-').expect("a tail").1;
+        assert_eq!(tail.len(), 8, "{text}");
+        assert!(
+            tail.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+            "{text}"
+        );
+        assert_eq!(
+            &tail[..3],
+            &format!("{ms:03x}"),
+            "the millisecond is not the first three digits of {text}"
+        );
+    }
+    // An id written before this change still parses, so a target that already
+    // holds snapshots keeps working.
+    assert!(SnapshotId::parse("20260912T014233Z-0badc0de").is_some());
+}

@@ -33,8 +33,22 @@ default = "claude"
         })
     );
     assert_eq!(identities.cloudflare.as_deref(), Some("example"));
-    assert_eq!(identities.ssh_host_group.as_deref(), Some("robotics"));
-    assert_eq!(identities.agent_default.as_deref(), Some("claude"));
+    assert_eq!(
+        identities.ssh,
+        Some(SshIdentity {
+            host_group: "robotics".to_string(),
+            // §36's example names the group and not its members, so a file
+            // with no `[ssh.host_groups]` binds a group with none — and that
+            // refuses every host rather than allowing any.
+            hosts: Vec::new(),
+        })
+    );
+    assert_eq!(
+        identities.agent,
+        Some(AgentIdentity {
+            default: "claude".to_string()
+        })
+    );
 }
 
 #[test]
@@ -183,9 +197,19 @@ host_group = "robotics"
     assert!(github.enforced_by.contains("git provider"));
 
     let ssh = &report[&Kind::Ssh];
-    assert_eq!(ssh.binds.as_deref(), Some("host_group = robotics"));
-    assert!(!ssh.enforced, "nothing in this build checks an ssh host group");
-    assert!(ssh.enforced_by.contains("nothing yet"), "{}", ssh.enforced_by);
+    // The row names the group AND its members, because a group with no members
+    // refuses every host and an operator reading "host_group = robotics" alone
+    // would have no way to see that.
+    assert_eq!(
+        ssh.binds.as_deref(),
+        Some("host_group = robotics (no hosts — every ssh host is refused)")
+    );
+    assert!(ssh.enforced, "P2-013 round 2 made this true");
+    assert!(
+        ssh.enforced_by.contains("apex-backup-core/src/config.rs"),
+        "the row has to name the file: {}",
+        ssh.enforced_by
+    );
 
     // A section the project does not have is still reported, so the surface is
     // the same four every time.
@@ -193,17 +217,89 @@ host_group = "robotics"
     assert!(report[&Kind::Cloudflare].binds.is_none());
 }
 
-/// Exactly two of §36's four are checked by this build. Pinned, so that adding
-/// an enforcement point without saying so fails a test, and so that claiming
-/// one that does not exist does too.
+/// The other half of the row above, and the one that would have been a lie if
+/// the label had been flipped before the check existed.
 #[test]
-fn exactly_github_and_cloudflare_are_enforced() {
+fn the_agent_row_says_enforced_and_names_the_daemon_that_enforces_it() {
+    let identities = parse("[identity.agent]\ndefault = \"codex\"\n");
+    let report = identities.report();
+    let agent = &report[&Kind::Agent];
+    assert_eq!(agent.binds.as_deref(), Some("default = codex"));
+    assert!(agent.enforced, "P2-013 round 2 made this true");
+    assert!(
+        agent.enforced_by.contains("apex-agentd/src/session.rs"),
+        "the row has to name the file, or 'enforced' is unfalsifiable: {}",
+        agent.enforced_by
+    );
+}
+
+// ── §36's agent binding, which is this round's enforcement ──────────────────
+
+fn agent(default: &str) -> AgentIdentity {
+    AgentIdentity {
+        default: default.to_string(),
+    }
+}
+
+#[test]
+fn a_session_that_asks_for_the_bound_agent_is_allowed() {
+    assert_eq!(agent("claude").check("claude"), Ok(()));
+}
+
+/// The refusal §36 exists for, one layer over from the github one.
+#[test]
+fn a_session_that_asks_for_an_agent_this_project_did_not_bind_is_refused() {
+    let err = agent("claude").check("codex").expect_err("refused");
+    assert_eq!(
+        err,
+        IdentityError::WrongAgent {
+            requested: "codex".to_string(),
+            bound: "claude".to_string(),
+        }
+    );
+    let why = err.to_string();
+    assert!(why.contains("codex"), "{why}");
+    assert!(why.contains("claude"), "{why}");
+    // The remedy, which is the same one the github refusal names: the file is
+    // the project's own, so changing the binding is how you change the answer.
+    assert!(why.contains("apex.toml"), "{why}");
+}
+
+/// `--agent Claude` is a typo and not a different request.
+#[test]
+fn the_agent_check_is_case_insensitive() {
+    assert_eq!(agent("claude").check("Claude"), Ok(()));
+    assert_eq!(agent("Claude").check("claude"), Ok(()));
+}
+
+/// A name that merely starts with the bound one is a different agent.
+///
+/// Written because a `starts_with` would pass every other test in this file,
+/// and `claude-code` is a name somebody will eventually add.
+#[test]
+fn an_agent_whose_name_merely_begins_with_the_bound_one_is_refused() {
+    agent("claude")
+        .check("claude-code")
+        .expect_err("a prefix is not the bound agent");
+    agent("claude").check("").expect_err("nothing is not claude");
+}
+
+/// All four of §36's sections are checked by this build. Pinned, so that
+/// claiming an enforcement point that does not exist fails a test — which is
+/// the direction that matters, since "enforced" is what an operator reads
+/// `apex project identity` for.
+///
+/// It was two until P2-013's second round, which added the agent check in
+/// `apex-agentd`'s session start and the ssh one in the backup target's
+/// configuration.
+#[test]
+fn all_four_of_section_thirty_sixs_bindings_are_enforced() {
     let enforced: Vec<&str> = Kind::ALL
         .into_iter()
         .filter(|k| k.is_enforced())
         .map(Kind::as_str)
         .collect();
-    assert_eq!(enforced, vec!["github", "cloudflare"]);
+    assert_eq!(enforced, vec!["github", "cloudflare", "ssh", "agent"]);
 
     for kind in Kind::ALL {
         let where_ = kind.enforced_by();
@@ -212,6 +308,13 @@ fn exactly_github_and_cloudflare_are_enforced() {
             assert!(
                 !where_.starts_with("nothing"),
                 "{kind:?} claims enforcement and names nowhere"
+            );
+            // A file path, so the claim can be checked by opening it. This is
+            // the assertion that would have caught a label flipped ahead of
+            // the check it describes.
+            assert!(
+                where_.contains(".rs"),
+                "{kind:?} claims enforcement and names no file: {where_}"
             );
         } else {
             assert!(

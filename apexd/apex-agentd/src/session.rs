@@ -17,6 +17,7 @@ use apex_agent_core::config;
 use apex_agent_core::policy::{NetworkPolicy, PolicyError};
 use apex_agent_core::profile;
 use apex_agent_core::project;
+use apex_secret_core::identity;
 use apex_agent_core::protocol::{AgentState, ErrorKind, Response, RunRequest, SessionInfo};
 use apex_agent_core::sandbox::{self, EgressBridge, SandboxError, SandboxSpec, BRIDGE_PORT};
 use apex_agent_core::session as logic;
@@ -51,9 +52,81 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     }
 
     let cfg = daemon.config.lock().expect("config lock").clone();
-    let agent_id = req.agent.clone().unwrap_or_else(|| cfg.default_agent.clone());
-    let adapter = adapter::by_id(&agent_id)
-        .with_context(|| format!("no agent adapter named {agent_id:?}"))?;
+
+    // ── §36's `[identity.agent]`, before anything is resolved ──────────────
+    //
+    // P2-013. Which assistant runs here is the project's to say, and this is
+    // the only place in the build that decides it — so it is the only place
+    // the binding can be enforced.
+    //
+    // The root is the PROJECT's, not `req.cwd`. A check keyed on the working
+    // directory would be stepped around by `cd src && apex agent run --agent
+    // other`, which is not a hypothetical: a session's own cwd is the first
+    // thing an agent can change. `project::detect` is the same git-toplevel
+    // rule `apex secret` grants are keyed on, so the binding and the grant
+    // describe the same project.
+    //
+    // A directory that is not in a repository has no project record anywhere
+    // in this build, and rather than ignore an `apex.toml` sitting in it, the
+    // directory itself is used. That errs towards enforcing.
+    let project_root = project::detect(&cwd)
+        .map(|p| PathBuf::from(p.root))
+        .unwrap_or_else(|| cwd.clone());
+    // The owner is this daemon's own uid and not the peer's: the session will
+    // run as this user, `apex-agentd` is a user service, and an owner taken
+    // from the request would be the request deciding whose file counts.
+    //
+    // Safe: getuid cannot fail.
+    let owner_uid = unsafe { libc::getuid() };
+    let owner_name = std::env::var("USER").unwrap_or_else(|_| format!("uid {owner_uid}"));
+    // A project with no `apex.toml` binds nothing. **Every other failure
+    // refuses**: a file that could not be read is not a file that says
+    // nothing, and starting the user's default agent because `apex.toml` was
+    // unreadable is how a session would unbind the project it is starting in.
+    let identities =
+        identity::Identities::read_or_unbound(&project_root, owner_uid, &owner_name).map_err(
+            |e| {
+                IdentityRefused(format!(
+                    "this project's apex.toml could not be read, so which agent \
+                     it binds is unknown, and a session will not be started \
+                     under an assistant this build cannot check: {e}"
+                ))
+            },
+        )?;
+
+    let bound_agent = identities.agent.as_ref();
+    let agent_id = match (req.agent.as_deref(), bound_agent) {
+        // Named, and the project binds one: §36's refusal.
+        (Some(requested), Some(bound)) => {
+            bound
+                .check(requested)
+                .map_err(|e| IdentityRefused(e.to_string()))?;
+            requested.to_string()
+        }
+        // Named nothing: the binding DISPLACES the user's own default. This
+        // half is the difference between a binding and a suggestion.
+        (None, Some(bound)) => bound.default.clone(),
+        (Some(requested), None) => requested.to_string(),
+        (None, None) => cfg.default_agent.clone(),
+    };
+    let adapter = adapter::by_id(&agent_id).ok_or_else(|| {
+        // Which of the two said it matters, because the remedies differ: one
+        // is a typo on a command line and the other is a line in a file.
+        match bound_agent {
+            Some(bound) if bound.default == agent_id => anyhow::Error::new(IdentityRefused(
+                format!(
+                    "this project binds [identity.agent] default = \"{}\", and \
+                     this build has no agent adapter by that name. The binding \
+                     is refused rather than ignored — falling back to the \
+                     user's default would start a session under an assistant \
+                     the project did not name. known agents: {}",
+                    bound.default.escape_debug(),
+                    adapter::ids().join(", ")
+                ),
+            )),
+            _ => anyhow::anyhow!("no agent adapter named {agent_id:?}"),
+        }
+    })?;
 
     // The generic adapter carries no program of its own, so the caller has to
     // supply one; anything else would be a session with nothing to run.
@@ -1080,6 +1153,22 @@ impl std::fmt::Display for OriginRefused {
 
 impl std::error::Error for OriginRefused {}
 
+/// §36's `[identity.*]` refused this session. P2-013.
+///
+/// Its own type for the same reason [`OriginRefused`] is: the remedy is
+/// neither the sandbox nor a policy dimension. It is a line in the project's
+/// own `apex.toml`, and the message says which one.
+#[derive(Debug)]
+pub struct IdentityRefused(pub String);
+
+impl std::fmt::Display for IdentityRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for IdentityRefused {}
+
 /// A system-access grant that was refused, or a TTL that was not issuable.
 ///
 /// Its own type for the same reason as the three above: the remedies are
@@ -1181,6 +1270,12 @@ pub fn run_error(e: anyhow::Error) -> Response {
         return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
     }
     if e.downcast_ref::<BudgetRefused>().is_some() {
+        return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
+    }
+    // A project binding is policy, not a privilege decision: nothing about
+    // this session's grant or origin would change the answer, and a client
+    // that offered to re-ask for root would be offering the wrong remedy.
+    if e.downcast_ref::<IdentityRefused>().is_some() {
         return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
     }
     Response::error(ErrorKind::BadRequest, format!("{e:#}"))

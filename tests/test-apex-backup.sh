@@ -100,21 +100,19 @@ for kind in local nas ssh s3 r2; do
         && ok "\`backup targets\` names ${kind}" \
         || { bad "\`backup targets\` names ${kind}"; printf '      %s\n' "$targets"; }
 done
-for kind in local nas r2; do
+# All five are carried as of P2-001's second round. `ssh` and `s3` refused
+# before it; the whole of ssh is now exercised by tests/test-apex-backup-ssh.sh
+# against a real sshd, and the whole of s3 by tests/test-apex-backup-s3.sh
+# against a loopback double that verifies the SigV4 signature independently.
+for kind in local nas ssh s3 r2; do
     printf '%s' "$targets" | grep -E "^  ${kind} +carried" -q \
         && ok "${kind} is carried" || bad "${kind} is carried"
 done
-# The two that refuse do so by name, with a reason. A target kind that parsed
-# and then did nothing would be the worst defect this subsystem could ship.
-for kind in ssh s3; do
-    printf '%s' "$targets" | grep -E "^  ${kind} +REFUSED" -q \
-        && ok "${kind} is refused rather than silently doing nothing" \
-        || bad "${kind} is refused rather than silently doing nothing"
-done
-printf '%s' "$targets" | grep -q "SigV4" \
-    && ok "s3's refusal says what is missing" || bad "s3's refusal says what is missing"
-printf '%s' "$targets" | grep -q "sshd" \
-    && ok "ssh's refusal says what is missing" || bad "ssh's refusal says what is missing"
+# And none of them still prints a refusal it does not mean, which would send an
+# operator away from a target that works.
+printf '%s' "$targets" | grep -q "REFUSED" \
+    && { bad "no kind still prints a refusal"; printf '%s\n' "$targets"; } \
+    || ok "no kind still prints a refusal"
 
 # ── a key ────────────────────────────────────────────────────────────────────
 section "the keypair"
@@ -413,7 +411,8 @@ sed "s|^recipient = .*|recipient = \"${RECIPIENT%?}X\"|" "${PROJ}/apex.toml" > "
 mv "${PROJ}/apex.toml.typo" "${PROJ}/apex.toml"
 typo="$("$APEX" backup run --project "$PROJ" 2>&1)"
 [ $? -ne 0 ] && ok "a one-character typo in the recipient refuses the run" \
-             || bad "a one-character typo in the recipient refuses the run"
+             || { bad "a one-character typo in the recipient refuses the run"
+                  printf '      %s\n' "$typo"; }
 
 # ── the at-rest half, as real root ───────────────────────────────────────────
 section "the private key, measured as real root"

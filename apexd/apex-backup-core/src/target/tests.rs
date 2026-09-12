@@ -1,11 +1,12 @@
 use super::*;
 
-/// P2-001 criterion 1 names five kinds. This build carries three and refuses
-/// two, and the refusals are part of the vocabulary rather than gaps in it —
-/// an operator who writes `target = "ssh"` must be told this build will not do
-/// it, not told that `ssh` is not a word.
+/// P2-001 criterion 1 names five kinds, and this build now carries all five.
+///
+/// It carried three and refused two — `ssh` and `s3` — until P2-001's second
+/// round added an ssh transport and a SigV4 signer. The list is pinned rather
+/// than computed so that a kind quietly ceasing to be carried fails here.
 #[test]
-fn all_five_kinds_parse_and_exactly_two_refuse() {
+fn all_five_kinds_parse_and_all_five_are_carried() {
     for kind in Kind::ALL {
         assert_eq!(Kind::parse(kind.as_str()), Some(kind));
     }
@@ -14,31 +15,39 @@ fn all_five_kinds_parse_and_exactly_two_refuse() {
         .filter(|k| k.is_implemented())
         .map(Kind::as_str)
         .collect();
-    assert_eq!(implemented, vec!["local", "nas", "r2"]);
-
-    let refusing: Vec<&str> = Kind::ALL
-        .into_iter()
-        .filter(|k| !k.is_implemented())
-        .map(Kind::as_str)
-        .collect();
-    assert_eq!(refusing, vec!["ssh", "s3"]);
+    assert_eq!(implemented, vec!["local", "nas", "ssh", "s3", "r2"]);
 }
 
-/// A kind that is not implemented must say what it would take. "Not
-/// implemented" on its own sends an operator to the source.
+/// The two halves of the refusal machinery, held together.
+///
+/// **Nothing refuses today**, so the `Some` arm below runs zero times, and
+/// saying so is the point: the invariant is not "there is a refusal", it is
+/// "implemented and refusing are opposites". A build that adds a sixth kind
+/// gets the `Some` arm back, and a build that flips `is_implemented` without
+/// clearing the reason — which would tell an operator to give up on a target
+/// that works — fails here either way.
 #[test]
 fn every_unimplemented_kind_says_what_is_missing_and_every_implemented_one_says_nothing() {
+    let mut refusing = 0;
     for kind in Kind::ALL {
         match kind.unimplemented_reason() {
             Some(why) => {
                 assert!(!kind.is_implemented(), "{kind} refuses and is implemented");
                 assert!(why.len() > 80, "{kind}'s reason is a stub: {why}");
+                refusing += 1;
             }
-            None => assert!(kind.is_implemented(), "{kind} has no reason and is not implemented"),
+            None => assert!(
+                kind.is_implemented(),
+                "{kind} has no reason and is not implemented, so an operator \
+                 who names it is told nothing at all"
+            ),
         }
     }
-    assert!(Kind::S3.unimplemented_reason().is_some_and(|w| w.contains("SigV4")));
-    assert!(Kind::Ssh.unimplemented_reason().is_some_and(|w| w.contains("sshd")));
+    assert_eq!(
+        refusing, 0,
+        "a kind started refusing; add it to the vocabulary tests and to \
+         `apex backup targets`'s expected output"
+    );
 }
 
 #[test]
