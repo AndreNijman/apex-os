@@ -1,0 +1,184 @@
+{
+  "reply": "worktrees",
+  "worktrees": [
+    {
+      "name": "apex-os",
+      "slug": "apex-os",
+      "path": "/var/home/andre/Projects/apex/apex-os",
+      "branch": "roadmap/v2.2",
+      "head": "4ae4cf22f1a0",
+      "is_agent": false,
+      "base": "roadmap/v2.2",
+      "dirty": true,
+      "diff": {
+        "files": 0,
+        "insertions": 0,
+        "deletions": 0
+      },
+      "ahead": null,
+      "behind": null,
+      "upstream": "origin/roadmap/v2.2",
+      "unpushed": 0,
+      "conflicts": {
+        "state": "not_applicable"
+      },
+      "tests": {
+        "state": "unobserved"
+      },
+      "sessions": [],
+      "ready": {
+        "ready_to_propose": false,
+        "blockers": [
+          "uncommitted changes"
+        ]
+      }
+    },
+    {
+      "name": "wt-p1-053b",
+      "slug": "apex-os",
+      "path": "/var/home/andre/Projects/apex/apex-os/.apex/worktrees/wt-p1-053b",
+      "branch": "task/p1-053b-android-ux",
+      "head": "9c1e77aa0b31",
+      "is_agent": true,
+      "base": "roadmap/v2.2",
+      "dirty": false,
+      "diff": {
+        "files": 7,
+        "insertions": 412,
+        "deletions": 38
+      },
+      "ahead": 3,
+      "behind": 0,
+      "upstream": "origin/task/p1-053b-android-ux",
+      "unpushed": 0,
+      "conflicts": {
+        "state": "clean"
+      },
+      "tests": {
+        "state": "passed",
+        "command": "cargo test --locked",
+        "finished": 1757650000,
+        "head": "9c1e77aa0b31"
+      },
+      "sessions": [
+        4,
+        11
+      ],
+      "ready": {
+        "ready_to_propose": true,
+        "blockers": []
+      }
+    },
+    {
+      "name": "wt-conflicted",
+      "slug": "apex-os",
+      "path": "/var/home/andre/Projects/apex/apex-os/.apex/worktrees/wt-conflicted",
+      "branch": "task/other",
+      "head": "1122334455aa",
+      "is_agent": true,
+      "base": "roadmap/v2.2",
+      "dirty": true,
+      "diff": {
+        "files": 2,
+        "insertions": 9,
+        "deletions": 90
+      },
+      "ahead": 1,
+      "behind": 12,
+      "upstream": null,
+      "unpushed": null,
+      "conflicts": {
+        "state": "conflicted",
+        "paths": [
+          "apexd/apex-agent-core/src/protocol.rs",
+          "android/core/build.gradle.kts"
+        ]
+      },
+      "tests": {
+        "state": "failed",
+        "command": "./gradlew :core:test",
+        "finished": 1757640000,
+        "head": "1122334455aa"
+      },
+      "sessions": [
+        7
+      ],
+      "ready": {
+        "ready_to_propose": false,
+        "blockers": [
+          "uncommitted changes",
+          "would conflict with roadmap/v2.2",
+          "the last test run failed"
+        ]
+      }
+    },
+    {
+      "name": "wt-unknown",
+      "slug": "apex-os",
+      "path": "/var/home/andre/Projects/apex/apex-os/.apex/worktrees/wt-unknown",
+      "branch": null,
+      "head": null,
+      "is_agent": true,
+      "base": "roadmap/v2.2",
+      "dirty": false,
+      "diff": {
+        "files": 0,
+        "insertions": 0,
+        "deletions": 0
+      },
+      "ahead": null,
+      "behind": null,
+      "upstream": null,
+      "unpushed": null,
+      "conflicts": {
+        "state": "unknown",
+        "reason": "this worktree is not on a branch"
+      },
+      "tests": {
+        "state": "running",
+        "command": "cargo test --locked",
+        "started": 1757655000,
+        "head": null
+      },
+      "sessions": [],
+      "ready": {
+        "ready_to_propose": false,
+        "blockers": [
+          "nothing committed yet"
+        ]
+      }
+    },
+    {
+      "name": "apex-shell",
+      "slug": "apex-shell",
+      "path": "/var/home/andre/Projects/apex/apex-shell",
+      "branch": "roadmap/v2.2",
+      "head": "6e741011cd22",
+      "is_agent": false,
+      "base": "roadmap/v2.2",
+      "dirty": false,
+      "diff": {
+        "files": 0,
+        "insertions": 0,
+        "deletions": 0
+      },
+      "ahead": null,
+      "behind": null,
+      "upstream": "origin/roadmap/v2.2",
+      "unpushed": 2,
+      "conflicts": {
+        "state": "not_applicable"
+      },
+      "tests": {
+        "state": "unobserved"
+      },
+      "sessions": [],
+      "ready": {
+        "ready_to_propose": false,
+        "blockers": [
+          "nothing to propose"
+        ]
+      }
+    }
+  ]
+}

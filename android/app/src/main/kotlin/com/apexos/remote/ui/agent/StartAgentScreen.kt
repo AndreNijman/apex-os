@@ -48,18 +48,22 @@ import com.apexos.remote.ui.theme.MachineText
  *   adapter — `Hello.agents` is the list of adapters this runtime has — so
  *   that is what is offered, under its own name rather than dressed up as a
  *   profile.
- * * **There is no projects or worktrees verb either.** The vocabulary is
- *   Hello, Run, List, Info, Attach, Resize, Signal, Event, Logs, Remove,
- *   Prune and the privilege and secret verbs. An earlier round of this app
- *   built `{"cmd":"worktrees"}` and a parser for the answer; nothing would
- *   have parsed it, and a phone offering that picker would have shown an
- *   error.
+ * * **There is no projects verb.** There *is* a `worktrees` verb — the
+ *   comment that used to stand here said there was not, and it was wrong; see
+ *   [com.apexos.remote.core.agent.WorktreeStatus] for what it actually is and
+ *   how the mistake was made. It answers with every remembered project's
+ *   worktrees, which is where the Worktrees screen gets its listing. It is
+ *   deliberately NOT what this screen offers, for a reason that survives the
+ *   correction: it is answered by running git in every remembered project,
+ *   including `merge-tree --write-tree`, and making that the cost of opening
+ *   a "start an agent" form would put seconds of git between a tap and a
+ *   text field.
  *
- * So the directories offered are the ones the daemon has already mentioned —
- * every `cwd` and `project` of every session it reports — with a text field
- * for anything else. `RunRequest.worktree` *does* exist and means "create or
- * reuse this git worktree under the project", so that is a free-text name and
- * is honestly labelled as one.
+ * So the directories offered here are the ones the daemon has already
+ * mentioned — every `cwd` and `project` of every session it reports — with a
+ * text field for anything else. `RunRequest.worktree` means "create or reuse
+ * this git worktree under the project", so that is a free-text name and is
+ * honestly labelled as one.
  *
  * Saying that plainly is better than inventing a picker the runtime will not
  * accept.
