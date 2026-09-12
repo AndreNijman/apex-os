@@ -375,11 +375,62 @@ pub fn has_controlling_tty(pid: libc::pid_t) -> Result<bool, String> {
     Ok(tty != 0)
 }
 
+/// Whether a cgroup path passes through a systemd **user manager**.
+///
+/// One path segment of the form `user@<n>.service`, tested as a segment rather
+/// than with two independent `contains` calls, because the whole weight of the
+/// ordering below rests on this answer and "the string has `/user@` somewhere
+/// and `.service` somewhere else" is a different question.
+///
+/// Everything a user's own systemd instance creates — a service, a timer's
+/// job, a transient scope from `systemd-run --user` — is placed *below* this
+/// segment. logind's session scopes are not: they are direct children of
+/// `user-<uid>.slice`, a sibling of `user@<uid>.service`. That asymmetry is
+/// what makes the segment decidable, and it is not a convention this code
+/// chose — it is where the two different creators put their cgroups.
+fn is_under_user_manager(cgroup: &str) -> bool {
+    cgroup
+        .split('/')
+        .any(|seg| seg.starts_with("user@") && seg.ends_with(".service"))
+}
+
 /// The classification itself, over values rather than over `/proc`.
 ///
 /// Split out so the rule is testable without a fixture filesystem, and so the
 /// three cases can be read against §7 in one place.
+///
+/// ## The user-manager test comes FIRST, and that ordering is the security
+///
+/// The two conditions are not disjoint, and until 2026-09-12 the session test
+/// ran first, which made §7's first column — the one root approval and
+/// break-glass are reserved for — claimable by any unprivileged process on the
+/// machine:
+///
+/// ```text
+/// $ systemd-run --user --scope --quiet --unit=session-4242.scope -- cat /proc/self/cgroup
+/// 0::/user.slice/user-1000.slice/user@1000.service/app.slice/session-4242.scope
+/// ```
+///
+/// That path contains `/session-` and `.scope`, so it classified as
+/// `local-terminal`: a process choosing its own unit name was enough to be
+/// observed as a human at the keyboard. Naming a transient unit needs no
+/// privilege — it is the user's own systemd instance — so the observation this
+/// module exists to make could be dictated by the thing being observed.
+///
+/// Testing the user manager first closes it, because the containment is
+/// one-directional: a user manager's cgroup may have anything named below it,
+/// and a logind session scope can never appear below one. So a path through
+/// `user@<n>.service` is a user service whatever a deeper scope calls itself,
+/// and the only way left to reach the first column is to actually hold a
+/// logind session — which is what `tests/in-login-session.sh` mints through
+/// PAM, and which that script deliberately never faked for exactly this
+/// reason.
 pub fn classify(cgroup: &str, has_tty: bool) -> Option<RequestOrigin> {
+    if is_under_user_manager(cgroup) {
+        // A systemd user service. Nobody logged in to start it and nobody is
+        // waiting on it, which is exactly what §7 means by `scheduled-job`.
+        return Some(RequestOrigin::ScheduledJob);
+    }
     if cgroup.contains("/session-") && cgroup.contains(".scope") {
         // A login session: somebody logged in and this descends from it. The
         // tty split is presentation — APEX Shell is a graphical process with
@@ -390,11 +441,6 @@ pub fn classify(cgroup: &str, has_tty: bool) -> Option<RequestOrigin> {
         } else {
             RequestOrigin::ApexShell
         });
-    }
-    if cgroup.contains("/user@") && cgroup.contains(".service") {
-        // A systemd user service. Nobody logged in to start it and nobody is
-        // waiting on it, which is exactly what §7 means by `scheduled-job`.
-        return Some(RequestOrigin::ScheduledJob);
     }
     None
 }
@@ -483,6 +529,128 @@ mod observation_tests {
         // called `session-manager.service` is still a user service.
         let cg = "/user.slice/user-1000.slice/user@1000.service/app.slice/session-manager.service";
         assert_eq!(classify(cg, true), Some(RequestOrigin::ScheduledJob));
+    }
+
+    #[test]
+    fn a_transient_scope_named_like_a_session_cannot_buy_the_first_column() {
+        // THE spoof. Measured on a live APEX laptop on 2026-09-12, as the
+        // ordinary unprivileged user, with no sudo and no prompt:
+        //
+        //   $ systemd-run --user --scope --quiet --unit=session-4242.scope \
+        //         -- cat /proc/self/cgroup
+        //   0::/user.slice/user-1000.slice/user@1000.service/app.slice/session-4242.scope
+        //
+        // Before the ordering was fixed this classified as `local-terminal`,
+        // which is what §7 reserves root approval and break-glass for. Naming
+        // a transient unit costs nothing — it is the caller's own systemd
+        // instance — so the observation could be dictated by the process being
+        // observed, and the entire "origin is established, not asserted"
+        // property of this module was decoration.
+        //
+        // Every shape a user manager can be talked into producing, including
+        // the `--unit=session-9999.scope` form the p0-014 card recorded and
+        // the nested slices systemd actually uses.
+        for cg in [
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/session-4242.scope",
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/session-9999.scope",
+            "/user.slice/user-1000.slice/user@1000.service/session-1.scope",
+            "/user.slice/user-1000.slice/user@1000.service/background.slice/session-7.scope",
+            // Root has a user manager too, and root's is the one where being
+            // wrong costs the most.
+            "/user.slice/user-0.slice/user@0.service/app.slice/session-3.scope",
+        ] {
+            for tty in [true, false] {
+                let got = classify(cg, tty).expect("classified");
+                assert_eq!(got, RequestOrigin::ScheduledJob, "{cg}");
+                assert!(
+                    !got.is_local(),
+                    "{cg} was called local: a process that picked its own unit \
+                     name has just been observed as a human at the keyboard"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_real_session_scopes_this_machine_produces_are_still_local() {
+        // The other half of the ordering change, and the reason it is safe to
+        // make. Read off a live APEX laptop on 2026-09-12 — every `0::` line
+        // of every process on the machine, deduplicated — the ONLY paths
+        // carrying a `/session-N.scope` segment were direct children of
+        // `user-<uid>.slice`. Nothing legitimate sits below `user@N.service`
+        // and calls itself a session, so testing the user manager first takes
+        // nothing away from a real login.
+        //
+        // `session-c1.scope` is the greeter's: logind session ids are not
+        // numeric, so a rule that required digits would refuse greetd.
+        for (cg, tty, want) in [
+            (
+                // The measured desktop session: the login shell this was run
+                // from, and quickshell (apex-shell) in the same scope.
+                "/user.slice/user-1000.slice/session-4.scope",
+                true,
+                RequestOrigin::LocalTerminal,
+            ),
+            (
+                "/user.slice/user-1000.slice/session-4.scope",
+                false,
+                RequestOrigin::ApexShell,
+            ),
+            (
+                "/user.slice/user-977.slice/session-c1.scope",
+                false,
+                RequestOrigin::ApexShell,
+            ),
+            (
+                // A second human, logged in at the same time. Session
+                // isolation is about this case existing at all.
+                "/user.slice/user-1001.slice/session-12.scope",
+                true,
+                RequestOrigin::LocalTerminal,
+            ),
+        ] {
+            let got = classify(cg, tty).expect("classified");
+            assert_eq!(got, want, "{cg} (tty={tty})");
+            assert!(got.is_local(), "{cg} stopped being local");
+        }
+    }
+
+    #[test]
+    fn session_slice_is_not_session_dash_and_never_was() {
+        // `user@1000.service/session.slice/pipewire.service` is on this
+        // machine right now, and it is a hair away from the session test:
+        // `session.slice` versus `session-4.scope`. It must classify as a user
+        // service through the user-manager arm, and it would ALSO have missed
+        // the old session arm — so this asserts the near-miss stays a miss
+        // from both directions rather than relying on the new ordering to
+        // cover a second bug.
+        let cg = "/user.slice/user-1000.slice/user@1000.service/session.slice/pipewire.service";
+        assert!(!cg.contains("/session-"), "the near-miss stopped being near");
+        for tty in [true, false] {
+            assert_eq!(classify(cg, tty), Some(RequestOrigin::ScheduledJob));
+        }
+    }
+
+    #[test]
+    fn the_user_manager_segment_is_a_segment_and_not_a_substring() {
+        // `is_under_user_manager` is the whole ordering guard, so the shape it
+        // matches is pinned here rather than left to the two `contains` calls
+        // it replaced — which would have said yes to any path with `/user@`
+        // anywhere and `.service` anywhere else.
+        assert!(is_under_user_manager(
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/x.scope"
+        ));
+        assert!(is_under_user_manager("/user@0.service"));
+        // A unit whose NAME merely begins with `user@` is not a user manager,
+        // and neither is one that merely mentions it.
+        assert!(!is_under_user_manager(
+            "/user.slice/user-1000.slice/session-4.scope"
+        ));
+        assert!(!is_under_user_manager("/system.slice/user@service"));
+        assert!(!is_under_user_manager(
+            "/user.slice/user-1000.slice/session-4.scope/user@1000.service.d"
+        ));
+        assert!(!is_under_user_manager(""));
     }
 
     #[test]
