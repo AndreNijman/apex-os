@@ -3443,7 +3443,7 @@ tasks:
 - id: P2-008
   title: First-party virtualization UX
   priority: P2
-  status: todo
+  status: partial
   area: virtualization
   depends_on: []
   acceptance:
@@ -3451,10 +3451,41 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Live lab tests/vmlab/run-vmlab boots real guests through the shipped engine (files/system/libexec/apex-vm)
+    against a real virtqemud inside bootlab's container, as a NON-ROOT user so qemu:///session is genuinely the
+    per-user daemon (uid 0's session URI resolves to the system daemon's socket, so a root lab would have tested
+    the daemon apex-vm refuses to use). Final run on the L16, 6 verified / 1 could-not-run / 0 failed. create
+    verified (13 observations): libvirt defined and started it, the guest reached userspace with the command line
+    the UKI was SIGNED with, powered itself off, and rm left no domain and no directory. Secure Boot verified (8):
+    the same signed UKI boots against the APEX variable store reporting SecureBoot=1 SetupMode=0 from inside the
+    guest, is REFUSED by libvirt's own enrolled-keys store (Microsoft's db), and boots in SETUP MODE against a
+    key-free store - which is what shows the refusal was about keys rather than a broken image. TPM verified (5):
+    /sys/class/tpm/tpm0 with tpm_version_major=2 inside the guest, and absent under --no-tpm. snapshot verified
+    (10): a tally the guest keeps on its own ESP goes 1, snapshot, 2, revert, 2 - not 3 - and qemu-img snapshot -l
+    shows the snapshot in BOTH disk.qcow2 and nvram.qcow2, which is the disk-and-varstore-together claim. share
+    verified (16): two virtiofs devices, the guest mounts both tags, reads the host's file, its write appears ON
+    THE HOST, and the read-only share refuses it; virtiofsd is wrapped with --sandbox none because its default
+    namespace sandbox cannot nest inside the lab container's user namespace (measured three ways: namespace fails
+    MountProc EPERM also under seccomp=unconfined, chroot needs root, none works) and the wrapper logs the argv it
+    substituted into the run's bundle. USB passthrough is COULD-NOT-RUN and will be from any suite: it means
+    detaching a physical device from the machine running the tests. Verified live for USB instead: the refusal
+    when lsusb cannot be run at all, the same refusal from create --usb, the malformed-id refusal, and that no
+    hostdev reached the domain in any of them. After all seven flows: no domains, NO LIBVIRT NETWORKS, empty VM
+    root. Three defects the lab found and this branch fixed, each now also a unit test: the install line named no
+    swtpm-tools while libvirt runs swtpm_setup, so doctor said every flow is available on a machine where every
+    --tpm domain defines and then fails at start; the USB guard skipped itself when lsusb was absent, reporting a
+    question that could not be asked as the answer yes; and apex vm run deleted its own only diagnostic, now
+    --console-to. tests/test-apex-vm.sh 133 passed 0 failed (from 106), every new assertion shown to fail against
+    a mutated engine and the engine restored byte-identical. cargo test --locked workspace 0 failed; clippy
+    --locked --workspace --all-targets -D warnings clean; shellcheck -S warning -x clean. Branch task/p2-virt-2,
+    five commits, all pushed. PARTIAL rather than done because one of the six named flows was never demonstrated
+    end to end: making it done needs a manual run on a machine with a spare USB device somebody is willing to have
+    detached.
 - id: P2-009
   title: Disposable VM agent execution
   priority: P2
-  status: todo
+  status: partial
   area: virtualization
   depends_on:
   - P2-008
@@ -3463,6 +3494,28 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    apex vm run verified live by tests/vmlab/run-vmlab's egress flow on the L16, 16 observations, 0 failed. The
+    security half is what is proven, hostilely: the task writes report.json AND an unnominated leak.txt, the
+    guest's own task log (nominated, so it comes out through the boundary under test) shows leak.txt really was
+    created inside the VM, and it does not arrive on the host - a refusal rather than an absence. The falsifying
+    control is inside the flow: the engine is copied, its egress loop turned around to iterate the CONTENTS of the
+    volume instead of the nominations - the exact defect the shipped loop's comment says it exists not to have -
+    the same task is re-run, and the unnominated file DOES then leak. Two more properties proven from inside the
+    guest rather than from the XML the lab itself wrote: the copy-in volume refuses the guest's write (so a task
+    cannot rewrite its own task.sh), and the guest sees only lo. That last one is only meaningful because
+    virtio_net is in the lab guest's initramfs AND the create flow asserts the same guest sees eth0 on a --network
+    user VM - without that control, lo-only would have passed on a domain that had an interface, which is how the
+    first lab guest behaved. Default-deny confirmed both ways: without --egress-to nothing leaves however much is
+    nominated, and no destination is invented. Nothing survives teardown: no domain, no directory, no volumes. One
+    defect found and fixed: teardown deleted the VM directory including the serial log, so the documented outcome
+    for a guest that never mounted APEXIN - an empty egress and a timeout warning - came with no way to find out
+    why; --console-to FILE saves it, opt-in and validated like --egress-to, and it had to be added to
+    apexd/apex/src/vm.rs as well because that clap surface enumerates its flags and would have refused a flag the
+    engine and the docs both had. PARTIAL rather than done because no guest image carrying an agent CLI exists:
+    what is verified is the BOUNDARY - the read-only copy-in volume, nomination-only egress, no network, and
+    teardown - with an arbitrary command as the task. docs/virtualization.md states that building a guest that
+    carries claude or codex is separate work. Branch task/p2-virt-2.
 - id: P2-010
   title: Hardware qualification database
   priority: P2

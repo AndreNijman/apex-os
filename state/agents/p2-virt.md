@@ -30,7 +30,7 @@ Round 1 ended with the engine **never having booted a guest**, and with
 
 ## Round 2 (this branch) — the lab, and what it found
 
-Four commits on `task/p2-virt-2`, all pushed.
+Five commits on `task/p2-virt-2`, all pushed (tip `beea67b5`).
 
 `tests/vmlab/run-vmlab` + `tests/vmlab/mk-guest`: real guests booted through the
 shipped engine against a real `virtqemud`, inside `bootlab/`'s container, as a
@@ -47,7 +47,7 @@ Verdicts are the chaos harness's, with `could-not-inject` renamed
 | secure-boot | verified |
 | tpm | verified |
 | snapshot | verified |
-| share | verified (virtiofsd wrapped with `--sandbox none`; see below) |
+| share | verified — 16 (virtiofsd wrapped with `--sandbox none`; see below) |
 | usb | **could-not-run** — passthrough means taking a device off this laptop |
 | egress (P2-009) | verified, including the falsifying mutation |
 
