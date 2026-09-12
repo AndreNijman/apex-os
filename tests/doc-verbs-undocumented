@@ -176,7 +176,6 @@ apex backup list
 apex backup verify
 apex backup restore
 
-apex secret list
 apex secret remove
 apex secret revoke
 apex secret approve

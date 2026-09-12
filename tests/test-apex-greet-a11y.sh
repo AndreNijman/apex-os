@@ -137,7 +137,7 @@ n_fail="$(printf '%s' "$totals" | sed -E 's/.*, ([0-9]+) failed.*/\1/')"
 # The count is exact rather than a floor: the QtTest total is
 # initTestCase + the assertions + cleanupTestCase, so a test function that is
 # dropped changes it, and so does one that is added without this line moving.
-EXPECT_TESTS=22
+EXPECT_TESTS=23
 n_ran=$(( n_pass + n_fail ))
 if [ "$n_ran" -eq "$EXPECT_TESTS" ]; then
     ok "all $EXPECT_TESTS fixture test functions ran"

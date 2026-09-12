@@ -1,5 +1,9 @@
 package com.apexos.remote.core.agent
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -431,12 +435,114 @@ class HandoffTest {
     // ── the file criterion, and the permissions that guard it ───────────────
 
     @Test
-    fun `the file handoff refusal names what is missing rather than apologising`() {
-        assertTrue(Handoff.Files.WHY.isNotBlank())
+    fun `what the user is told about a file says where it goes, not where they put it`() {
+        // This replaces an assertion that the refusal named `apex agent send`,
+        // which was right while there was no transport. There is one now, and
+        // the thing a person has to be told changed with it: not "this cannot
+        // be done" but "here is what happens to your photo". The destination
+        // is the daemon's, inside the session's own scratch, and the agent
+        // learns about it by having the path typed unsubmitted — both halves
+        // are what somebody deciding whether to send a picture needs.
+        assertTrue(Handoff.Files.WHERE.isNotBlank())
         assertTrue(
-            Handoff.Files.WHY.contains("apex agent send"),
-            "the refusal must name the thing that DOES work, or it is an apology",
+            Handoff.Files.WHERE.contains("inbox"),
+            "the user is not told where the file goes",
         )
+        assertTrue(
+            Handoff.Files.WHERE.contains("without being submitted"),
+            "the user is not told that nothing runs on its own",
+        )
+    }
+
+    @Test
+    fun `the size limit is the daemon's number and not a policy of this app's`() {
+        // `inject::MAX_BYTES`. A phone with a smaller number would refuse a
+        // file the machine would have taken; a larger one would carry a file
+        // across a mobile connection to be told it was always too big.
+        assertEquals(32L * 1024 * 1024, Handoff.Files.MAX_BYTES)
+        assertTrue(
+            Handoff.Files.tooBig(40_000_000).contains("${Handoff.Files.MAX_BYTES}"),
+            "a refusal that does not name the limit cannot be acted on",
+        )
+    }
+
+    @Test
+    fun `every name the daemon reduces is the name this app shows`() {
+        // The other half of `apexd/apex-agent-core/tests/android_safe_names.rs`.
+        // This asserts `preview` produces the fixture; that one asserts
+        // `inject::safe_name` produces it. A Kotlin mirror checked only by a
+        // Kotlin author agrees with whatever that author believed, which is
+        // how this app was twice wrong about the protocol.
+        val stream = javaClass.classLoader.getResourceAsStream("safe-names.json")
+            ?: error("the shared name fixture is missing from the test resources")
+        val fixture = Json.parseToJsonElement(stream.bufferedReader().readText()).jsonObject
+        var checked = 0
+        for ((raw, expected) in fixture) {
+            if (raw == "_note") continue
+            checked++
+            val got = Handoff.Files.preview(raw)
+            if (expected is JsonNull) {
+                assertNull(got, "the daemon refuses ${'$'}{raw.toPrintable()} and this app shows ${'$'}got")
+            } else {
+                assertEquals(
+                    (expected as JsonPrimitive).content,
+                    got,
+                    "the daemon makes a different name of ${'$'}{raw.toPrintable()}",
+                )
+            }
+        }
+        assertTrue(checked >= 15, "only ${'$'}checked names were checked; the fixture has been gutted")
+    }
+
+    @Test
+    fun `the previewed name is what the daemon will make of it, including the awkward cases`() {
+        // Mirrors `inject::safe_name`. It does NOT change what is sent — the
+        // name goes over the wire as the picker gave it — so the only way this
+        // can be wrong is by telling the user a filename they will not find.
+        assertEquals(
+            "Screenshot_2026-09-13_at_14.02.11.png",
+            Handoff.Files.preview("Screenshot 2026-09-13 at 14.02.11.png"),
+        )
+        // A name that is a path is not a path: the alphabet has no `/`.
+        assertEquals(
+            ".._.._.ssh_authorized_keys",
+            Handoff.Files.preview("../../.ssh/authorized_keys"),
+        )
+        // A name that survives the alphabet as nothing but dots would make the
+        // destination `001-...`, which is a traversal spelled as a filename.
+        // The daemon prefixes it; so does this.
+        assertEquals("file...", Handoff.Files.preview("..."))
+        // But `..` itself never reaches that line: `safe_name` returns
+        // `NoFileName` for it, and a preview that answered `file..` would
+        // promise a file the user will never find. Null, and the screen says
+        // so. Three names, one rule.
+        assertNull(Handoff.Files.preview(".."))
+        assertNull(Handoff.Files.preview("."))
+        assertNull(Handoff.Files.preview(""))
+        // And a control byte is refused rather than replaced, for the reason
+        // `NameError::ControlByte` gives: a user who typed a newline into a
+        // filename has either made a mistake worth seeing or is being used by
+        // something that made it for them.
+        assertNull(Handoff.Files.preview("shot\n.png"))
+
+        // A long name keeps its TAIL, because the extension is the part that
+        // tells an agent what it is looking at.
+        val long = "a".repeat(60) + ".png"
+        val shown = Handoff.Files.preview(long)
+        assertNotNull(shown)
+        assertEquals(Handoff.Files.MAX_NAME, shown!!.length)
+        assertTrue(shown.endsWith(".png"), "the extension did not survive: $shown")
+
+        // Non-ASCII is replaced rather than passed through: the name ends up
+        // as bytes on a PTY, where a quote opens a string and `$` starts an
+        // expansion, and none of those has to be escaped if none can be
+        // present. ONE underscore for `é` — this is the assertion that caught
+        // the first draft, which guessed two.
+        assertEquals("resum_.pdf", Handoff.Files.preview("resumé.pdf"))
+        // And ONE for an emoji, which is where a Kotlin loop over `Char` and
+        // a Rust loop over `chars()` genuinely disagree: a surrogate pair is
+        // two units here and one scalar there.
+        assertEquals("holiday_.jpg", Handoff.Files.preview("holiday\uD83C\uDF34.jpg"))
     }
 
     @Test
@@ -452,3 +558,25 @@ class HandoffTest {
         )
     }
 }
+
+/**
+ * A name with a control byte in it, rendered so a failing test's own output is
+ * readable.
+ *
+ * Four of the fixture's names carry a real LF, BEL, TAB or DEL. Putting one
+ * into an assertion message unescaped writes it to the terminal running the
+ * suite, which is the same class of thing the reduction under test exists to
+ * prevent.
+ */
+private fun String.toPrintable(): String =
+    buildString {
+        append('"')
+        for (ch in this@toPrintable) {
+            if (ch.code < 0x20 || ch.code == 0x7f) {
+                append("\\u%04x".format(ch.code))
+            } else {
+                append(ch)
+            }
+        }
+        append('"')
+    }

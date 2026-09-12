@@ -1580,7 +1580,7 @@ fn same_peer(a: libc::c_int, b: libc::c_int) -> bool {
     }
 }
 
-fn write_response(writer: &mut UnixStream, response: &Response) -> Result<()> {
+pub(crate) fn write_response(writer: &mut UnixStream, response: &Response) -> Result<()> {
     let mut line = serde_json::to_string(response)?;
     line.push('\n');
     writer.write_all(line.as_bytes())?;
