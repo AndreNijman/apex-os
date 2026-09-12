@@ -262,6 +262,23 @@ EOF
     return 0
 }
 
+# Launch an application the way a real one starts: with a session bus, and
+# WITHOUT AT_SPI_BUS_ADDRESS.
+#
+# That variable is a shortcut. An application that has it connects straight to
+# the named bus; an application without it has to do what every real desktop
+# application does -- resolve org.a11y.Bus on the session bus and ask it for the
+# address. Leaving the shortcut in the environment made this harness unable to
+# tell the two paths apart: the mutant that breaks the session bus SURVIVED,
+# because the application under test still had a direct address to fall back on.
+#
+# The walker keeps the variable, because the walker is the assistive technology
+# in this picture and a screen reader is told where the bus is. The application
+# must find it.
+atspi_run_app() {
+    env -u AT_SPI_BUS_ADDRESS "$@"
+}
+
 # How many applications are registered with the private registry right now.
 # Prints a number; prints 0 if the registry cannot be reached at all, so callers
 # must treat "cannot reach" separately from "nothing registered" where it
