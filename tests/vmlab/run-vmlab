@@ -603,23 +603,26 @@ flow_share() {
     # unprivileged user where sandbox mod is namespace". The wrapper records
     # the argv it finally ran, so what was substituted is a file rather than a
     # claim.
-    cat > "$W/virtiofsd-nosandbox" <<'WRAP'
+    # The log path is written INTO the wrapper rather than passed in the
+    # environment: virtiofsd is spawned by virtqemud, a daemon that was
+    # autospawned before this flow existed and inherits nothing from it. The
+    # first version used an env var and produced an empty file.
+    local vfs_argv="$W/virtiofsd-argv.txt"; : > "$vfs_argv"
+    cat > "$W/virtiofsd-nosandbox" <<WRAP
 #!/usr/bin/env bash
 args=()
-while [ $# -gt 0 ]; do
-    case "$1" in
+while [ \$# -gt 0 ]; do
+    case "\$1" in
         --uid-map|--gid-map)     shift 2; continue ;;
         --uid-map=*|--gid-map=*) shift;   continue ;;
     esac
-    args+=("$1"); shift
+    args+=("\$1"); shift
 done
-printf '%q ' /usr/libexec/virtiofsd --sandbox none "${args[@]}" >> "${VMLAB_VIRTIOFSD_ARGV:-/dev/null}"
-printf '\n' >> "${VMLAB_VIRTIOFSD_ARGV:-/dev/null}"
-exec /usr/libexec/virtiofsd --sandbox none "${args[@]}"
+{ printf '%q ' /usr/libexec/virtiofsd --sandbox none "\${args[@]}"; printf '\\n'; } >> "$vfs_argv"
+exec /usr/libexec/virtiofsd --sandbox none "\${args[@]}"
 WRAP
     chmod 0755 "$W/virtiofsd-nosandbox"
     export APEX_VM_VIRTIOFSD="$W/virtiofsd-nosandbox"
-    export VMLAB_VIRTIOFSD_ARGV="$W/virtiofsd-argv.txt"; : > "$VMLAB_VIRTIOFSD_ARGV"
 
     rmvm "$n"
     mkvm "$n" --uefi-vars "$W/vars-apex.fd" --share "$rw:labshare" --share-ro "$ro:labro" >/dev/null 2>&1
@@ -650,8 +653,12 @@ WRAP
     says_not "share add on a share-less domain does not claim success" "added" "$out"
     says "and says why, naming the memory backing" "shared memory backing" "$out"
     rmvm "$m"
-    cp -f "$VMLAB_VIRTIOFSD_ARGV" /out/share/virtiofsd-argv.txt 2>/dev/null
-    unset APEX_VM_VIRTIOFSD VMLAB_VIRTIOFSD_ARGV
+    mkdir -p /out/share; cp -f "$vfs_argv" /out/share/virtiofsd-argv.txt 2>/dev/null
+    # The substitution is evidence rather than a sentence: the wrapper logged
+    # what it actually ran, and if it logged nothing the caveat is unproven.
+    claim "the wrapper recorded the argv it substituted" test -s "$vfs_argv"
+    says "and what it added was exactly --sandbox none" "--sandbox none" "$(cat "$vfs_argv" 2>/dev/null)"
+    unset APEX_VM_VIRTIOFSD
     FLOW_REASON="virtiofsd was run through a wrapper adding --sandbox none: its default namespace sandbox cannot nest inside the lab container's user namespace (MountProc EPERM, also under seccomp=unconfined). Everything else is the shipped path."
 }
 
