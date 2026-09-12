@@ -1226,6 +1226,50 @@ merge base (`4b1e797f`) this branch changes **two files**, both under
 directly says 60 files and is misleading — that is the base moving, the same
 trap round 2 recorded.
 
+## ROUND 22 — the wifi ring walk, and what it found
+
+Branch `task/p2-b-round22` in both repos, cut off apex-os `cd4a799e` and
+apex-shell `bfb24ed` (both merges fast-forwards).
+
+### FOUND, by walking the ring the round-21 walk had not reached
+
+Measured on this laptop, which HAS a Wi-Fi adapter, so it builds the ADAPTER
+shape (`nmcli -t -f TYPE device` prints `wifi`). CI has no adapter and builds
+the other one; both are now walked.
+
+1. **Every network in the list was a Tab stop that announced NOTHING.** Nine
+   `role=list item` nodes on the bus, every one `focusable,selectable` with an
+   empty name AND an empty description. A blind user tabbing through the Wi-Fi
+   page was told "list item" nine times and never heard one network's name — on
+   the page where they choose which network to join. This is the house defect
+   the installer was already audited for, one layer down: the SSID IS in the
+   tree, as a label inside the row, but the node that takes the focus is the
+   `GtkListBoxRow` GTK creates when a plain `Gtk.Box` is handed to
+   `ListBox.append`, and this file never saw that row to name it.
+   **The page audit could not see it**: `list item` is not in the audit's
+   INTERACTIVE role set, and widening that set would make the audit assert over
+   every dropdown popup GTK realises. The ring walk saw it on the first pass.
+2. **The signal bars are read out one glyph at a time.** `▁▃▅▇` is a picture
+   drawn in block characters; a reader says "lower one eighth block, lower three
+   eighths block…" in front of the network name. Now built with
+   `accessible_role=PRESENTATION` and out of the tree, with the strength said in
+   words in the row description instead.
+3. **The page opened with focus on a nameless scroll container.**
+   `role=generic | name= | states=focusable,focused` — GTK makes a
+   ScrolledWindow focusable so it can be scrolled from the keyboard, and it was
+   the first focusable widget on the page. `walk_ring`'s "something has keyboard
+   focus when it opens" assertion PASSED on it, printing an empty name: the
+   assertion took any focused node, named or not. Both are fixed — the container
+   is no longer focusable, the list itself is named and takes the focus, and the
+   assertion now requires the name.
+4. **A Tab ring containing a list is not a cycle, and the closure assertion was
+   anchored on the wrong thing.** Measured: the first pass visits every row
+   individually; every later pass re-enters the list at the ONE row GTK
+   remembers. So the first row never comes round, and anchoring "the ring comes
+   back round" on the initial focus (or on the first stop) is asserting
+   something that was never true of a page with a list. The anchor is now the
+   first stop whose role is not `list item`.
+
 ## NEXT
 
 **One line, and it is the load-bearing part of this card:** in
