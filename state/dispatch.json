@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-13T03:45+08:00",
+  "updated": "2026-09-13T04:05+08:00",
   "_round": "Round 23. TODO IS ZERO: 90 done / 36 partial / 0 todo / 2 blocked of 128 \u2014 every roadmap item has been started, and what remains is finishing partials plus the two LUKS/TPM items that are genuinely blocked. Six agents dispatched fresh after the 3am limit killed five of round 22's.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 c3bfbb0b -> e799422b. Agent-merged: p1-061, p2-b, p1-053c, p2-a. Orchestrator-merged: followups-4 (two suites wired), p1-053c handoff. Plus the skopeo retry, the workflow selector fix, the suite-gate comment fix and the SBOM budget.",
@@ -79,24 +79,6 @@
       "at_dispatch": "Predecessor's two commits are landed. Re-given the three measured protocol facts and the requests.json guard, because this unit has been wrong about the vocabulary three times. Told P1-060 almost certainly cannot close and not to record done to tidy the board."
     },
     {
-      "slug": "p2-f",
-      "items": [
-        "P2-016",
-        "P2-017",
-        "P2-018",
-        "P2-019"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p2-f",
-      "branch": "task/p2-f-2",
-      "agent_id": "a74b503ecce8868a4",
-      "dispatched": "2026-09-13T03:45+08:00",
-      "session": "round 23 orchestrator",
-      "queue_id": "p2-f",
-      "card": "ROADMAP/state/agents/p2-f.md",
-      "at_dispatch": "Round 2. Told to inspect the killed round-2 branch before redoing anything, and that round 1's refusal to build the boot counter STANDS unless it can demonstrate the counter cannot strand a user at a login screen. Carries round 1's own correction: GreetContext.qml is in apex-os, and a failed grep is not an absence."
-    },
-    {
       "slug": "p2-d",
       "items": [
         "P2-008",
@@ -112,6 +94,22 @@
       "queue_id": "p2-d",
       "card": "ROADMAP/state/agents/p2-d.md",
       "at_dispatch": "The unmet criterion is capability auth: a capsule cannot authenticate to a site, because the daemon performs the operation and agentd's proxy tunnels CONNECT, so a TLS tunnel has nowhere to put a header. Told to solve or scope it rather than paper over, and that P2-008's USB and P2-009's agent-carrying guest image are not closable by cleverness."
+    },
+    {
+      "slug": "p2-b",
+      "items": [
+        "P2-003",
+        "P2-004"
+      ],
+      "repo": "both",
+      "worktree": "/var/tmp/apex-work/wt-p2-b4",
+      "branch": "task/p2-b-round19",
+      "agent_id": "aa7596a0c9b4a752f",
+      "dispatched": "2026-09-13T04:05+08:00",
+      "session": "round 23 orchestrator",
+      "queue_id": "p2-b",
+      "card": "ROADMAP/state/agents/p2-b.md",
+      "at_dispatch": "Took p2-f's slot. Warned FIRST that its own card was rebuilt from a transcript after being truncated 1121->16 lines, so older detail is a summary and roadmap.yaml's evidence wins. Given the two claims the last round overturned: the QTranslator blocker is the HOST (quickshell calls it 0 times and builds a bare QQmlEngine), and the CJK-tofu claim was never run and is false \u2014 the real P2-004 gap is layout, 0 LayoutMirroring and 0 layoutDirection, which is buildable. Told that when a mutant 'survives' it should suspect the harness first, because three did last round for that reason."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -158,7 +156,10 @@
     "nothing selected on .github/workflows \u2014 the sixth instance": "No selector mentioned workflow files, so a workflow-only change set rust/installer/engine/android all false, skipped every job and passed. The sharp version: deleting the line that invokes a suite IS a workflow-only change, so check-suites-run-in-ci.sh \u2014 the gate whose purpose is noticing an unrun suite \u2014 would have been disarmed by the very deletion it exists to catch. Added to the engine selector and proved end to end by deleting every test-apex-vm.sh invocation and watching it fail.",
     "one unretried skopeo inspect discarded an hour of build": "core failed on 'Resolve upstream fedora-bootc digest' with a fatal from cdn01.quay.io \u2014 and took base, image and qcow2 with it. The previous run had built core from the same base minutes earlier. Five attempts with a widening gap now, last failure still fatal so an unreachable base stops the build rather than being retried into a silent skip. Both arms tested against a fake skopeo on PATH.",
     "base failed on a cross-repo keybind mismatch that was already fixed": "Build 34703551001 (aa01d569) failed at check-labwc-keybinds. p2-b's 3c41696e \u2014 'the shipped rc.xml seed had lost a keybind' \u2014 landed AFTER that build, on both repos. Verified against the REPO trees rather than the live machine's installed paths: 70 defaults, rc.xml matches, rc=0. The first check ran against /usr/share on this laptop, which is a 2026-09-05 image and proves nothing about the tree \u2014 a verification that did not verify, caught before it was believed.",
-    "an agent truncated a 1121-line card to 16 lines": "p2-b's splice anchored on its final section's heading TEXT with str.index, and the same text appears inline in the round-19 prose near the top, so it cut from the wrong place. ROADMAP/ is not a git repo and no backup existed. The card was rebuilt from the session transcript \u2014 faithful in substance, NOT byte-for-byte for the pre-round-20 sections, and it says so at the top. Lesson for every agent: anchor a splice on something unique, and ROADMAP/ has no undo but the wip snapshot."
+    "an agent truncated a 1121-line card to 16 lines": "p2-b's splice anchored on its final section's heading TEXT with str.index, and the same text appears inline in the round-19 prose near the top, so it cut from the wrong place. ROADMAP/ is not a git repo and no backup existed. The card was rebuilt from the session transcript \u2014 faithful in substance, NOT byte-for-byte for the pre-round-20 sections, and it says so at the top. Lesson for every agent: anchor a splice on something unique, and ROADMAP/ has no undo but the wip snapshot.",
+    "the containerfile checker could not see through a directory COPY without a trailing slash": "Third resolver bug in that gate, found by p2-f: `COPY files/desktop/apex-greet /usr/share/apex-greet` has no trailing slash, so a grep against a file INSIDE it did not resolve and every boot-critical greeter assertion sat in the could-not-check bucket. Fixed by the unit that found it and proven by a mutation that passed silently before and fails now: 171 -> 181 checked. Running total for this gate: 106 -> 145 (multi-line COPY) -> 170 (merges) -> 181 (directory COPY). Every one of those increments was assertions that existed and were never being checked.",
+    "a regression shipped and was caught in the same round: undefined !== \"\"": "p2-f's greeter status line tested a notice against `\"\"`. A ctx without the property yields `undefined`, and `undefined !== \"\"` is TRUE, so the line rendered the string 'undefined' AND swallowed the Caps Lock warning and the screen-reader announcement \u2014 on the login screen. test-apex-greet-a11y.sh went 5/0 -> 4/1 and was right. Both bindings test for truth now. Note the division of labour it recorded: with the fixture's ctx made faithful, reverting the spelling no longer reddens the a11y fixture \u2014 only the watchdog suite catches it.",
+    "nmtui is named by no APEX dnf list": "The safe-graphics menu offers nmtui, which is inherited from fedora-bootc:43 and required by nothing \u2014 not even a weak dep of NetworkManager. A base-image change upstream would remove it and the recovery menu would offer a binary that is not there. Now asserted at build time (thunar too). If it fires, the fix is NetworkManager-tui in core."
   },
   "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt \u2014 the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
   "_orchestrator": {
