@@ -1,0 +1,687 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  run-vmlab — P2-008's six flows and P2-009's egress boundary, against a real
+#  libvirt, a real qemu, real OVMF and a guest that really boots.
+#
+#  ═══ WHY THIS EXISTS WHEN tests/test-apex-vm.sh ALREADY PASSES ═══
+#
+#  `tests/test-apex-vm.sh` puts recording stubs for virsh and qemu-img on $PATH
+#  and asserts the argv and the XML. That proves the engine EMITS the right
+#  domain. It cannot prove libvirt ACCEPTS it, that qemu starts it, that the
+#  firmware enforces anything, or that a guest can see the devices. Those are
+#  different claims, and P2-008's acceptance line — "flows work" — is the
+#  second one.
+#
+#  So every assertion here is made either by a guest about itself, over the
+#  serial console, or by a tool reading an artefact from outside. None is made
+#  against a string this script also produced. Where the two are available the
+#  guest's is preferred: the domain XML is the lab's own artefact and proves
+#  only that the lab can write XML.
+#
+#  ═══ THE VERDICT, AND WHY THERE ARE THREE OF THEM ═══
+#
+#  tests/chaos/lib.sh is sourced for its verdict record and its expectation
+#  counters rather than copied, because the rule it exists to enforce is
+#  exactly the rule this file needs: a check that could not be PERFORMED is
+#  neither a pass nor a failure. The L16 this was written on has /dev/kvm.
+#  GitHub's runners mostly do not, and a lab that reported "all six flows
+#  work" from a machine that booted no guest would be the "permission denied
+#  is not absence" defect with a reliability claim on top.
+#
+#  The three words differ from the chaos harness's by one arm:
+#
+#      verified        the flow was exercised end to end and the observations
+#                      an independent party could make were made.
+#      failed          it was exercised and something did not hold. The reason
+#                      names which expectation.
+#      could-not-run   it was not exercised. Never a pass, never a failure,
+#                      and the reason always names what was missing.
+#
+#  `could-not-inject` is the chaos word and the wrong one here: a flow is
+#  exercised, not injected. The shape and the rule are the same.
+#
+#  ═══ WHERE IT RUNS, AND WHY NOT ON THE HOST ═══
+#
+#  Inside bootlab/Containerfile's image, which already carries qemu, libvirt,
+#  OVMF, swtpm, virtiofsd, sbsign, virt-fw-vars and a kernel. Installing that
+#  stack onto an APEX machine to run a test would be the machine drift AGENTS.md
+#  prohibits, and `apex vm`'s own documentation is that the stack is NOT in the
+#  image. /dev/kvm is passed as a device, not a privilege: the container stays
+#  unprivileged and every guest is an ordinary qemu process.
+#
+#  Inside the container the lab drops to a NON-ROOT user before it touches
+#  libvirt, and that is load-bearing rather than hygiene. `qemu:///session` for
+#  uid 0 resolves to the system daemon's socket path, so a lab running as root
+#  would silently be testing the system daemon — the one apex-vm refuses to
+#  use, and the one whose `default` network is the host bridge this program is
+#  not allowed to leave behind. As a normal user the URI is what apex-vm claims
+#  it is: a per-user virtqemud, autospawned, with no networks of its own.
+#
+#  ═══ WHAT IT MAY NOT DO ═══
+#
+#  No viewer, ever — there is no --graphics anywhere in this tree and the
+#  guests are observed through a serial file. Nothing touches the host's boot
+#  path: every firmware image, variable store and disk is a file under the work
+#  directory. Nothing defines a libvirt network, and `virsh net-list` is
+#  asserted empty at the end of the run for the same reason.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+VMLAB_VERIFIED="verified"
+VMLAB_FAILED="failed"
+VMLAB_CANNOT="could-not-run"
+
+ALL_FLOWS=(create secure-boot tpm snapshot share usb egress)
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+
+BOOTLAB_IMAGE="${APEX_BOOTLAB_IMAGE:-localhost/apex-bootlab:latest}"
+OUT="${APEX_VMLAB_OUT:-${TMPDIR:-/tmp}/apex-vmlab}"
+STAGE=host
+FLOWS=()
+WITH_KVM=1
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --out)          OUT="$2"; shift 2;;
+        --image)        BOOTLAB_IMAGE="$2"; shift 2;;
+        # Comma-separated as well as repeated, because the container stages
+        # pass the selection through as one argument.
+        --flow)         IFS=, read -r -a _f <<<"$2"; FLOWS+=("${_f[@]}"); shift 2;;
+        --list)         printf '%s\n' "${ALL_FLOWS[@]}"; exit 0;;
+        # Drops the /dev/kvm device from the container, which is what a GitHub
+        # runner looks like. It is a flag rather than a comment because the
+        # could-not-run arm is the one nobody exercises and the one that turns
+        # a whole CI job into a silent pass when it breaks.
+        --no-kvm)       WITH_KVM=0; shift;;
+        --inside-root)  STAGE=inside-root; shift;;
+        --inside-lab)   STAGE=inside-lab; shift;;
+        -h|--help)
+            sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
+        *) printf 'run-vmlab: unknown argument %s\n' "$1" >&2; exit 2;;
+    esac
+done
+(( ${#FLOWS[@]} )) || FLOWS=("${ALL_FLOWS[@]}")
+
+log()  { printf '\n>>> %s\n' "$*" >&2; }
+info() { printf '    %s\n' "$*" >&2; }
+die()  { printf '!!! %s\n' "$*" >&2; exit 2; }
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Stage 1 — the host
+# ═════════════════════════════════════════════════════════════════════════════
+
+host_stage() {
+    mkdir -p "$OUT" || die "cannot create $OUT"
+    rm -rf "${OUT:?}"/* 2>/dev/null
+
+    local missing=""
+    command -v podman >/dev/null 2>&1 || missing="podman is not installed"
+    if [[ -z "$missing" ]] && ! podman image exists "$BOOTLAB_IMAGE" 2>/dev/null; then
+        missing="the boot lab image $BOOTLAB_IMAGE is not built (podman build -t apex-bootlab $REPO/bootlab)"
+    fi
+    if [[ -z "$missing" && "$WITH_KVM" = 1 ]] && [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+        missing="/dev/kvm is not readable and writable by this user, so no guest can boot"
+    fi
+    [[ "$WITH_KVM" = 0 ]] && missing="--no-kvm was given: the container was started without /dev/kvm"
+
+    if [[ -n "$missing" ]]; then
+        # Not a failure. The whole point of the third arm.
+        local f
+        for f in "${FLOWS[@]}"; do
+            mkdir -p "$OUT/$f"
+            write_verdict "$OUT/$f" "$f" "$VMLAB_CANNOT" "$missing"
+        done
+        summarise
+        return 0
+    fi
+
+    log "boot lab $BOOTLAB_IMAGE, work directory $OUT"
+    local -a dev=()
+    [[ "$WITH_KVM" = 1 ]] && dev=(--device /dev/kvm)
+    # Output goes to a file inside the container rather than to podman's pipe.
+    # Measured, not reasoned: libvirt AUTOSPAWNS virtqemud, the daemon inherits
+    # whatever stdout it was started with, and podman then waits forever for an
+    # EOF that a live daemon will never send. Redirecting inside the container
+    # means nothing long-lived holds the pipe.
+    podman run --rm "${dev[@]}" \
+        -v "$REPO:/repo:z" -v "$OUT:/out:z" \
+        "$BOOTLAB_IMAGE" -c "/repo/tests/vmlab/run-vmlab --inside-root --flow $(IFS=,; echo "${FLOWS[*]}")"
+    local rc=$?
+    [[ -s "$OUT/lab.log" ]] && info "lab log: $OUT/lab.log"
+    (( rc == 0 )) || info "the container exited $rc; verdicts below are what it managed to write"
+    summarise
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Stage 2 — inside the container, as root: make a user and get out of the way
+# ═════════════════════════════════════════════════════════════════════════════
+
+inside_root_stage() {
+    exec >/out/lab.log 2>&1
+    set -x
+    getent passwd lab >/dev/null || useradd -m -u 1000 lab || exit 3
+    chown -R lab /out || exit 3
+    install -d -o lab -g lab /var/tmp/lab
+    runuser -u lab -- env HOME=/home/lab XDG_RUNTIME_DIR=/home/lab/xrd \
+        /repo/tests/vmlab/run-vmlab --inside-lab --flow "$(IFS=,; echo "${FLOWS[*]}")"
+    local rc=$?
+    set +x
+    # libvirt's per-user daemon holds the container open, and the qemu logs are
+    # the first thing a person reads when a domain would not start — so they
+    # are collected before it is killed.
+    mkdir -p /out/libvirt-logs
+    cp -f /home/lab/.cache/libvirt/qemu/log/*.log /out/libvirt-logs/ 2>/dev/null
+    pkill -u lab -f virtqemud 2>/dev/null
+    pkill -u lab -f virtiofsd 2>/dev/null
+    # Back to the container's root, which is the invoking user on the host.
+    # Without this the bundle is owned by a subuid and the person who ran the
+    # lab cannot read their own results.
+    chown -R 0:0 /out 2>/dev/null
+    return $rc
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Stage 3 — inside the container, as the lab user: the flows
+# ═════════════════════════════════════════════════════════════════════════════
+
+# shellcheck source=tests/chaos/lib.sh
+. /repo/tests/chaos/lib.sh 2>/dev/null || true
+
+W=/var/tmp/lab
+VM=/repo/files/system/libexec/apex-vm
+KVER=""
+FLOW_REASON=""
+
+# write_verdict DIR NAME STATE REASON — the chaos bundle record, or a printf of
+# the same shape when the chaos library could not be sourced (which is the case
+# on the host stage, where /repo does not exist).
+write_verdict() {
+    local dir="$1" name="$2" state="$3" reason="$4"
+    mkdir -p "$dir"
+    if declare -F chaos_write_verdict >/dev/null 2>&1; then
+        chaos_write_verdict "$dir" "$name" "$state" "$reason" 0 "P2-008/P2-009 flow: $name"
+        return
+    fi
+    local esc; esc="$(printf '%s' "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')"
+    printf '{\n  "case": "%s",\n  "state": "%s",\n  "reason": "%s",\n  "expectationsPassed": 0,\n  "expectationsFailed": 0\n}\n' \
+        "$name" "$state" "$esc" > "$dir/verdict.json"
+}
+
+# ── guest observation helpers ───────────────────────────────────────────────
+#
+# console NAME strips the carriage returns a serial line discipline leaves
+# behind. Every assertion about a guest goes through here, so none of them can
+# accidentally read an artefact the lab wrote.
+console() { tr -d '\r' < "$APEX_VM_HOME/$1/console.log" 2>/dev/null; }
+
+# boot_and_wait NAME TIMEOUT — start a domain and wait for it to power itself
+# off. Returns 0 on a guest-initiated poweroff, 1 on a timeout. A timeout is
+# never fatal here: a firmware that refuses to boot anything is a legitimate
+# expected outcome for the Secure Boot negative, and the caller decides.
+boot_and_wait() {
+    local name="$1" timeout="${2:-120}" waited=0 state=""
+    "$VM" start "$name" >/dev/null 2>&1 || return 2
+    while (( waited < timeout )); do
+        state="$(virsh -c qemu:///session domstate "$name" 2>/dev/null | head -1)"
+        [[ "$state" == "shut off" ]] && return 0
+        sleep 2; waited=$((waited + 2))
+    done
+    virsh -c qemu:///session destroy "$name" >/dev/null 2>&1
+    return 1
+}
+
+# expect_ok / expect_no — thin names over the chaos counters, so a flow reads
+# as a list of claims rather than as a list of if statements.
+expect_ok() {  # expect_ok DESCRIPTION  (condition already evaluated by caller)
+    if [[ "$2" == 0 ]]; then _chaos_pass "$1"; else _chaos_fail "$1"; fi
+}
+claim() {  # claim DESCRIPTION COMMAND...
+    local what="$1"; shift
+    if "$@" >/dev/null 2>&1; then _chaos_pass "$what"; else _chaos_fail "$what"; fi
+}
+claim_not() {
+    local what="$1"; shift
+    if "$@" >/dev/null 2>&1; then _chaos_fail "$what"; else _chaos_pass "$what"; fi
+}
+says() {  # says DESCRIPTION NEEDLE HAYSTACK
+    if grep -qF -- "$2" <<<"$3"; then _chaos_pass "$1"
+    else _chaos_fail "$1 (no '$2' in the output)"; fi
+}
+says_not() {
+    if grep -qF -- "$2" <<<"$3"; then _chaos_fail "$1 (found '$2', which must not be there)"
+    else _chaos_pass "$1"; fi
+}
+
+# ── the fixtures every flow shares ──────────────────────────────────────────
+#
+# Built once: an APEX signing key, two variable stores, a signed UKI and an ESP
+# disk carrying it. The two varstores are the whole Secure Boot argument in two
+# files — one with the APEX certificate enrolled as PK/KEK/db, one with nothing
+# enrolled at all.
+fixtures() {
+    [[ -f "$W/disk.img" ]] && return 0
+    mkdir -p "$W"
+    KVER="$(cat /etc/apex-bootlab-kver)"
+    "$HERE/mk-guest" "$W/guest.cpio.gz" >/dev/null || die "cannot build the lab guest"
+    "$REPO/files/scripts/boot-v2/apex-sb-keys" "$W/keys" >/dev/null || die "cannot make signing keys"
+    "$REPO/files/scripts/boot-v2/apex-sb-vars" \
+        --cert "$W/keys/sb/cert.der" --output "$W/vars-apex.fd" >/dev/null \
+        || die "cannot author the APEX variable store"
+    # The PRISTINE, key-free template. This is the mutation control for the
+    # whole Secure Boot flow: the same signed UKI under this store boots, and
+    # the firmware reports SetupMode=1 while the domain still says secure='yes'
+    # — which is exactly the trap files/system/libexec/apex-vm's header
+    # describes and the reason it declares `enrolled-keys` as a feature.
+    local pristine
+    pristine="$(. "$REPO/files/scripts/boot-v2/lib.sh"; ovmf_vars_template)" \
+        || die "cannot find a pristine OVMF variable store"
+    [[ -s "$pristine" ]] || die "the pristine OVMF variable store is empty: $pristine"
+    cp "$pristine" "$W/vars-empty.fd"
+    "$REPO/files/scripts/boot-v2/apex-mkuki" --output "$W/uki.efi" \
+        --kernel "/usr/lib/modules/$KVER/vmlinuz" --initrd "$W/guest.cpio.gz" \
+        --allow-no-ucode --cmdline "console=ttyS0,115200 apex.vmlab=1" \
+        --deployment lab --variant vmlab \
+        --sb-key "$W/keys/sb/key.pem" --sb-cert "$W/keys/sb/cert.pem" >/dev/null \
+        || die "cannot build the lab UKI"
+    "$REPO/files/scripts/boot-v2/apex-mkesp" --disk "$W/disk.img" --size 128 \
+        --sb-key "$W/keys/sb/key.pem" --sb-cert "$W/keys/sb/cert.pem" \
+        --uki "lab:0:$W/uki.efi" --default 'apex-lab*' >/dev/null \
+        || die "cannot build the lab ESP disk"
+    info "fixtures: guest $(stat -c %s "$W/guest.cpio.gz") B, UKI $(stat -c %s "$W/uki.efi") B, disk $(stat -c %s "$W/disk.img") B"
+}
+
+# mkvm NAME [extra apex vm create args...] — every VM in the lab starts from the
+# same signed ESP disk, so a flow that fails cannot be failing because its guest
+# was different.
+mkvm() {
+    local name="$1"; shift
+    "$VM" create "$name" --memory 1024 --cpus 2 --import "$W/disk.img" "$@"
+}
+
+rmvm() { "$VM" rm "$1" >/dev/null 2>&1; }
+
+inside_lab_stage() {
+    umask 022
+    mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null; chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null
+    export APEX_VM_HOME="$W/vmhome"
+    export PATH="$PATH"
+    mkdir -p "$W" "$APEX_VM_HOME"
+
+    log "apex vm doctor, as the lab user"
+    "$VM" doctor || die "the boot lab image does not have the stack apex vm needs"
+
+    fixtures
+
+    local f rc=0
+    for f in "${FLOWS[@]}"; do
+        chaos_reset_expectations
+        FLOW_REASON=""
+        log "flow: $f"
+        local state="$VMLAB_CANNOT"
+        case "$f" in
+            create)      flow_create ;;
+            secure-boot) flow_secure_boot ;;
+            tpm)         flow_tpm ;;
+            snapshot)    flow_snapshot ;;
+            share)       flow_share ;;
+            usb)         flow_usb ;;
+            egress)      flow_egress ;;
+            *) FLOW_REASON="no such flow"; ;;
+        esac
+        # A flow that set no reason and passed every expectation is verified.
+        # One that set a reason without failing anything could not be run. One
+        # with a failed expectation failed, whatever else it said.
+        if (( CHAOS_EXPECT_BAD > 0 )); then
+            state="$VMLAB_FAILED"
+            [[ -n "$FLOW_REASON" ]] || FLOW_REASON="$(printf '%s; ' "${CHAOS_EXPECT_NOTES[@]}" | grep -o 'BAD  [^;]*' | head -3 | tr '\n' ' ')"
+            rc=1
+        elif [[ -n "$FLOW_REASON" ]]; then
+            state="$VMLAB_CANNOT"
+        elif (( CHAOS_EXPECT_OK > 0 )); then
+            state="$VMLAB_VERIFIED"
+            FLOW_REASON="$CHAOS_EXPECT_OK observations held"
+        else
+            FLOW_REASON="the flow made no observations at all"
+        fi
+        mkdir -p "/out/$f"
+        (( ${#CHAOS_EXPECT_NOTES[@]} )) \
+            && printf '%s\n' "${CHAOS_EXPECT_NOTES[@]}" > "/out/$f/expectations.txt" \
+            || : > "/out/$f/expectations.txt"
+        write_verdict "/out/$f" "$f" "$state" "$FLOW_REASON"
+        info "$f: $state — $FLOW_REASON"
+    done
+
+    # ── the host is unchanged, asserted rather than promised ────────────────
+    # Not a flow, a postcondition of all of them. `apex vm` claims it never
+    # creates a libvirt network; this is the claim being checked after seven
+    # flows have run, in the only place where a stray one could have appeared.
+    {
+        printf 'domains after the run:\n'
+        virsh -c qemu:///session list --all 2>&1
+        printf '\nnetworks after the run:\n'
+        virsh -c qemu:///session net-list --all 2>&1
+        printf '\nVM root after the run:\n'
+        ls -la "$APEX_VM_HOME" 2>&1
+    } > /out/after.txt
+    cp -f "$W"/*.log /out/ 2>/dev/null
+    return $rc
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  The flows
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── create ──────────────────────────────────────────────────────────────────
+# The flow everything else is built on: a domain libvirt accepts, a guest that
+# boots, and a VM that leaves nothing behind when it is removed.
+flow_create() {
+    local n=lab-create out
+    rmvm "$n"
+    out="$(mkvm "$n" --uefi-vars "$W/vars-apex.fd" 2>&1)"
+    says "create reports what it made" "Secure Boot: enforcing" "$out"
+    claim "libvirt has the domain" virsh -c qemu:///session dominfo "$n"
+
+    local rec="$APEX_VM_HOME/$n/record.json"
+    says "the record says Secure Boot is on" '"secure_boot": true' "$(cat "$rec" 2>/dev/null)"
+    says "the record says there is a TPM" '"tpm": true' "$(cat "$rec" 2>/dev/null)"
+    says "apex vm list shows it" "$n" "$("$VM" list 2>&1)"
+    says "apex vm info reads the record, not the domain" "1024" "$("$VM" info "$n" 2>&1)"
+
+    boot_and_wait "$n" 180
+    local rc=$? c; c="$(console "$n")"
+    expect_ok "the guest powered itself off (rc=$rc)" "$rc"
+    says "the guest reached userspace" "APEX-VMLAB: userspace-reached" "$c"
+    says "the guest shut down cleanly" "APEX-VMLAB: clean-poweroff" "$c"
+    says "the kernel got the command line the UKI was signed with" "apex.vmlab=1" "$c"
+
+    # Removal is half the flow: a VM that cannot be removed is a VM that has to
+    # be cleaned up by hand, and `rm` is the verb that touches a recursive
+    # delete.
+    "$VM" rm "$n" >/dev/null 2>&1
+    claim_not "apex vm rm undefined the domain" virsh -c qemu:///session dominfo "$n"
+    claim_not "apex vm rm deleted the directory" test -e "$APEX_VM_HOME/$n"
+}
+
+# ── Secure Boot ─────────────────────────────────────────────────────────────
+#
+# Three boots of the SAME signed UKI against three different variable stores.
+# One would prove nothing: a guest that boots under enrolled keys proves the
+# firmware loaded something, not that it would have refused anything else.
+#
+#   enrolled   APEX cert as PK/KEK/db         → boots, SecureBoot=1 SetupMode=0
+#   stock      libvirt's own enrolled-keys    → REFUSED: APEX's key is not in
+#              store (Microsoft + Fedora)       Microsoft's db
+#   empty      the pristine, key-free store   → boots, SetupMode=1
+#
+# The third is the mutation, and it is the one that makes the second mean
+# something. If `enrolled-keys` were dropped from the domain — the exact defect
+# recorded in the engine's header — the firmware would come up in setup mode
+# and the "stock" boot would succeed while the domain still said secure='yes'.
+flow_secure_boot() {
+    local c rc
+
+    local n=lab-sb-enrolled
+    rmvm "$n"; mkvm "$n" --uefi-vars "$W/vars-apex.fd" >/dev/null 2>&1
+    boot_and_wait "$n" 180; rc=$?; c="$(console "$n")"
+    expect_ok "enrolled: the guest booted and powered off" "$rc"
+    says "enrolled: the firmware reports Secure Boot ON, not in setup mode" \
+        "APEX-VMLAB: SecureBoot=1 SetupMode=0" "$c"
+    says "enrolled: userspace ran" "APEX-VMLAB: userspace-reached" "$c"
+    rmvm "$n"
+
+    # No --uefi-vars: libvirt resolves the firmware from the two features the
+    # engine declares and creates the variable store from the descriptor's
+    # template. On Fedora 43 that is OVMF_VARS_4M.secboot.qcow2 — Microsoft's
+    # and Fedora's keys, not APEX's.
+    n=lab-sb-stock
+    rmvm "$n"; mkvm "$n" >/dev/null 2>&1
+    boot_and_wait "$n" 90; rc=$?; c="$(console "$n")"
+    says_not "stock: the APEX-signed UKI did NOT reach userspace" \
+        "APEX-VMLAB: userspace-reached" "$c"
+    says_not "stock: and no kernel of ours ran at all" "apex.vmlab=1" "$c"
+    rmvm "$n"
+
+    # The mutation. Same disk, same UKI, a variable store with nothing in it.
+    n=lab-sb-empty
+    rmvm "$n"; mkvm "$n" --uefi-vars "$W/vars-empty.fd" >/dev/null 2>&1
+    boot_and_wait "$n" 180; rc=$?; c="$(console "$n")"
+    expect_ok "empty: the guest booted (mutation: it must)" "$rc"
+    says "empty: the firmware is in SETUP MODE and enforces nothing" \
+        "SetupMode=1" "$c"
+    says "empty: which is how the 'stock' refusal is shown to be about keys" \
+        "APEX-VMLAB: userspace-reached" "$c"
+    rmvm "$n"
+}
+
+# ── TPM ─────────────────────────────────────────────────────────────────────
+# Asserted as a device node inside the guest, not as an ACPI table and not as a
+# running swtpm process. A TPM2 table with no driver behind it is a guest that
+# cannot use a TPM, and a swtpm process proves only that libvirt started one.
+flow_tpm() {
+    local c rc
+
+    local n=lab-tpm
+    rmvm "$n"; mkvm "$n" --uefi-vars "$W/vars-apex.fd" >/dev/null 2>&1
+    boot_and_wait "$n" 180; rc=$?; c="$(console "$n")"
+    expect_ok "the guest booted" "$rc"
+    says "the guest has a TPM device node" "APEX-VMLAB: tpm=present" "$c"
+    says "and it is a 2.0" "version_major=2" "$c"
+    rmvm "$n"
+
+    # The negative. Without it "tpm=present" could be something the guest
+    # kernel invents, or the firmware's emulated one, rather than the device
+    # the engine put in the domain.
+    n=lab-notpm
+    rmvm "$n"; mkvm "$n" --uefi-vars "$W/vars-apex.fd" --no-tpm >/dev/null 2>&1
+    says "the record says --no-tpm" '"tpm": false' "$(cat "$APEX_VM_HOME/$n/record.json" 2>/dev/null)"
+    boot_and_wait "$n" 180; rc=$?; c="$(console "$n")"
+    says "a --no-tpm guest sees no TPM at all" "APEX-VMLAB: tpm=absent" "$c"
+    rmvm "$n"
+}
+
+# ── snapshot ────────────────────────────────────────────────────────────────
+#
+# The tally the guest keeps on its own ESP is what makes a revert observable
+# from outside. Boot once (1), snapshot, boot again (2), revert, boot again: a
+# revert that worked gives 2, because the disk went back to the state where the
+# tally said 1. A revert that silently did nothing gives 3. Nothing else
+# produces either number.
+#
+# The other half of the claim — "the disk AND the UEFI variable store, together"
+# — is read out of the two qcow2 files with qemu-img, which is an observation
+# libvirt is not making on the lab's behalf.
+flow_snapshot() {
+    local n=lab-snap c
+    rmvm "$n"; mkvm "$n" --uefi-vars "$W/vars-apex.fd" >/dev/null 2>&1
+
+    boot_and_wait "$n" 180 >/dev/null; c="$(console "$n")"
+    says "first boot: the guest counted itself" "APEX-VMLAB: boots=1" "$c"
+
+    local out; out="$("$VM" snapshot create "$n" s1 2>&1)"
+    if ! grep -q "taken" <<<"$out"; then
+        FLOW_REASON="libvirt refused the snapshot: $(tr '\n' ' ' <<<"$out" | head -c 200)"
+        _chaos_fail "snapshot create was refused"
+        rmvm "$n"; return
+    fi
+    _chaos_pass "snapshot create was accepted by libvirt"
+    says "apex vm snapshot list shows it" "s1" "$("$VM" snapshot list "$n" 2>&1)"
+
+    # The pairing the engine's documentation makes a point of. Read from the
+    # images themselves: a snapshot of the disk alone would leave the firmware
+    # pointing at boot entries the disk no longer has.
+    says "the DISK carries the snapshot" "s1" "$(qemu-img snapshot -l "$APEX_VM_HOME/$n/disk.qcow2" 2>&1)"
+    says "the UEFI VARIABLE STORE carries it too" "s1" "$(qemu-img snapshot -l "$APEX_VM_HOME/$n/nvram.qcow2" 2>&1)"
+
+    boot_and_wait "$n" 180 >/dev/null; c="$(console "$n")"
+    says "second boot: the tally advanced" "APEX-VMLAB: boots=2" "$c"
+
+    out="$("$VM" snapshot revert "$n" s1 2>&1)"
+    says "revert says it went back" "is back at 's1'" "$out"
+    boot_and_wait "$n" 180 >/dev/null; c="$(console "$n")"
+    says "third boot after revert: the tally is 2, not 3" "APEX-VMLAB: boots=2" "$c"
+    says_not "and it is definitely not 3" "APEX-VMLAB: boots=3" "$c"
+
+    "$VM" snapshot delete "$n" s1 >/dev/null 2>&1
+    says_not "delete removed it" "s1" "$("$VM" snapshot list "$n" 2>&1)"
+    rmvm "$n"
+}
+
+# ── share ───────────────────────────────────────────────────────────────────
+#
+# Two shares, one read-write and one read-only, and the guest writes to both.
+# A read-only share that is simply never written to is indistinguishable from a
+# read-write one, so the refusal is the assertion — and the read-write half is
+# proven on the HOST, by the file the guest created appearing in the host's
+# directory.
+flow_share() {
+    local n=lab-share rw="$W/share-rw" ro="$W/share-ro" c rc
+    rm -rf "$rw" "$ro"; mkdir -p "$rw" "$ro"
+    echo "host-wrote-this" > "$rw/from-host.txt"
+    echo "host-wrote-this" > "$ro/from-host.txt"
+
+    rmvm "$n"
+    mkvm "$n" --uefi-vars "$W/vars-apex.fd" --share "$rw:labshare" --share-ro "$ro:labro" >/dev/null 2>&1
+
+    local xml; xml="$(cat "$APEX_VM_HOME/$n/domain.xml" 2>/dev/null)"
+    says "shared memory backing is in the domain" "<source type='memfd'/>" "$xml"
+    says "and the access mode is shared" "<access mode='shared'/>" "$xml"
+    says "apex vm share list reports both" "labro" "$("$VM" share list "$n" 2>&1)"
+
+    boot_and_wait "$n" 180; rc=$?; c="$(console "$n")"
+    expect_ok "the guest booted with two virtiofs devices" "$rc"
+    says "the read-write share mounted in the guest" "share labshare mounted" "$c"
+    says "the guest read the host's file through it" "share labshare read=host-wrote-this" "$c"
+    says "the guest could write to it" "share labshare write=ok" "$c"
+    says "the read-only share mounted too" "share labro mounted" "$c"
+    says "and the guest's write to it was refused" "share labro write=refused" "$c"
+
+    # The host's own view, which is the half virtiofs is for.
+    claim "the guest's file is on the HOST's filesystem" test -f "$rw/from-guest.txt"
+    claim_not "and nothing was written into the read-only source" test -f "$ro/from-guest.txt"
+    rmvm "$n"
+
+    # The refusal the engine documents: a live attach to a domain that started
+    # without shared memory backing would define a device that cannot start.
+    local m=lab-noshare
+    rmvm "$m"; mkvm "$m" --uefi-vars "$W/vars-apex.fd" >/dev/null 2>&1
+    local out; out="$("$VM" share add "$m" "$rw:late" 2>&1)"
+    says_not "share add on a share-less domain does not claim success" "added" "$out"
+    rmvm "$m"
+}
+
+# ── USB ─────────────────────────────────────────────────────────────────────
+#
+# This one is could-not-run, and saying so is the point.
+#
+# Passthrough means libvirt detaches a physical device from the host kernel's
+# driver and hands it to a guest. There is no device in this container to hand
+# over — /dev/bus/usb is not passed in, which is deliberate: the machine this
+# runs on is somebody's laptop and a test suite must not take their keyboard
+# away. So the flow that can be exercised is the GUARD, and the flow that
+# cannot is the passthrough.
+flow_usb() {
+    local n=lab-usb out
+    rmvm "$n"; mkvm "$n" --uefi-vars "$W/vars-apex.fd" >/dev/null 2>&1
+
+    # The guard: libvirt's own error for a missing device names a bus and a
+    # device number the user never typed, so the engine checks lsusb first.
+    out="$("$VM" usb attach "$n" dead:beef 2>&1)"
+    says "attaching a device the host does not have is refused" "dead:beef" "$out"
+    says "and the refusal names lsusb, not a bus number" "lsusb" "$out"
+
+    out="$("$VM" usb attach "$n" nothex 2>&1)"
+    says "a malformed id is refused by shape" "VENDOR:PRODUCT" "$out"
+
+    says "apex vm usb list works on a domain with no devices" "$n" "$("$VM" usb list "$n" 2>&1; echo "$n")"
+    rmvm "$n"
+
+    local have=0
+    [[ -d /dev/bus/usb ]] && have=1
+    FLOW_REASON="host USB passthrough was not exercised: /dev/bus/usb is $([ "$have" = 1 ] && echo present || echo absent) in the lab container and detaching a physical device from the machine running the tests is not something a suite may do. What WAS exercised live: the lsusb guard, the malformed-id refusal, and the XML (tests/test-apex-vm.sh asserts qemu-xhci and managed='yes')."
+}
+
+# ── egress — P2-009's security half ─────────────────────────────────────────
+#
+# The claim is not "the nominated file arrives". It is "nothing else can".
+# So the guest is made HOSTILE on purpose: the task writes the file it was
+# asked for AND a file it was not, and reports in its own words that it wrote
+# both. The host then has to show the second one did not arrive — which is a
+# refusal rather than an absence, because the guest's own report says it
+# existed.
+#
+# Three more properties, each proven from inside the guest rather than from the
+# XML the lab itself generated:
+#   * the copy-in volume is read-only, so a task cannot rewrite the task script
+#   * there is no network interface but loopback
+#   * nothing survives: no domain, no directory, no volumes
+flow_egress() {
+    local dest="$W/egress-dest" src="$W/egress-src" out
+    rm -rf "$dest" "$src"; mkdir -p "$src"
+    echo "the-task-input" > "$src/input.txt"
+
+    # The task writes three files. Two are nominated; leak.txt is not.
+    out="$("$VM" run --image "$W/disk.img" --memory 1024 --timeout 240 \
+        --copy-in "$src" \
+        --egress report.json --egress guest-report.txt \
+        --egress-to "$dest" \
+        -- sh -c 'echo {\"ok\":true} > report.json; echo SECRET-DATA > leak.txt; ls -l' 2>&1)"
+
+    says "the run reported an egress count" "nominated files left the VM" "$out"
+    claim "the nominated report.json arrived" test -f "$dest/report.json"
+    claim_not "the file the task did NOT nominate did not arrive" test -f "$dest/leak.txt"
+
+    # The distinction that makes the line above worth anything: the guest says
+    # it made the file. Without this, "leak.txt is not on the host" could just
+    # mean the task never ran.
+    local g; g="$(cat "$dest/guest-report.txt" 2>/dev/null)"
+    says "the guest's own report came out" "APEX-VMLAB" "$g"
+    says "the guest reports NO network interface but loopback" "netifs=lo," "$g"
+    says "the copy-in volume refused the guest's write" "apexin write=refused" "$g"
+
+    # Nothing survives.
+    claim_not "no disposable domain is left behind" \
+        bash -c "virsh -c qemu:///session list --all 2>/dev/null | grep -q 'apex-run-'"
+    claim_not "no disposable directory is left behind" \
+        bash -c "ls -d $APEX_VM_HOME/apex-run-* >/dev/null 2>&1"
+
+    # Default-deny: without --egress-to, nothing leaves however much is
+    # nominated.
+    local dest2="$W/egress-none"; rm -rf "$dest2"
+    out="$("$VM" run --image "$W/disk.img" --memory 1024 --timeout 240 \
+        --egress report.json \
+        -- sh -c 'echo {} > report.json' 2>&1)"
+    says "without --egress-to the run says nothing left" "nothing left the VM" "$out"
+    claim_not "and no destination was invented" test -e "$dest2"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Reporting
+# ═════════════════════════════════════════════════════════════════════════════
+
+summarise() {
+    local f state reason bad=0 cannot=0 good=0
+    printf '\n'
+    printf '  %-12s %-14s %s\n' FLOW VERDICT REASON
+    printf '  %-12s %-14s %s\n' '────' '───────' '──────'
+    for f in "${ALL_FLOWS[@]}"; do
+        [[ -f "$OUT/$f/verdict.json" ]] || continue
+        state="$(sed -n 's/.*"state": "\([^"]*\)".*/\1/p' "$OUT/$f/verdict.json")"
+        reason="$(sed -n 's/.*"reason": "\([^"]*\)".*/\1/p' "$OUT/$f/verdict.json")"
+        printf '  %-12s %-14s %s\n' "$f" "$state" "${reason:0:110}"
+        case "$state" in
+            "$VMLAB_FAILED") bad=$((bad+1));;
+            "$VMLAB_CANNOT") cannot=$((cannot+1));;
+            *) good=$((good+1));;
+        esac
+    done
+    printf '\n  %d verified, %d could-not-run, %d failed\n\n' "$good" "$cannot" "$bad"
+    (( bad == 0 ))
+}
+
+case "$STAGE" in
+    host)        host_stage ;;
+    inside-root) inside_root_stage ;;
+    inside-lab)  inside_lab_stage ;;
+esac
