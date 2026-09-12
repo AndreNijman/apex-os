@@ -9,11 +9,13 @@ import org.junit.jupiter.api.Test
 /**
  * The one part of the start screen that is a decision rather than a layout.
  *
- * P1-054 asks for "profile/project/worktree", and two of those three are not
- * things this socket can be asked about: `apex-agent-core`'s `Request` has no
- * profile verb, no projects verb and no worktrees verb. So the directories
- * offered are derived from what the daemon has already said, and that
- * derivation is testable where a picker is not.
+ * P1-054 asks for "profile/project/worktree". There is no profile verb on this
+ * socket (`profile.rs` is not reachable through `Request`) and no projects
+ * verb. There IS a `worktrees` verb — an earlier round of this app recorded
+ * that there was not, and it was wrong — but it is answered by running git in
+ * every remembered project, which is not a price to pay for opening a form.
+ * So the directories offered here are derived from what the daemon has already
+ * said, and that derivation is testable where a picker is not.
  */
 class StartAgentTest {
     private fun session(id: Int, cwd: String, project: String? = null, lastActivity: Long = 0) =
