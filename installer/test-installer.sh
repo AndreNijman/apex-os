@@ -86,8 +86,10 @@ ANS=$(mktemp /tmp/apex-test-answers.XXXXXX)
 SCRATCH_IMAGE="localhost/apex-engine-probe:test"
 ENGINE_IMAGE=""
 scratch_made=0
+BUILD_CTX=""
 cleanup() {
     rm -f "$ANS"
+    [ -n "$BUILD_CTX" ] && rm -rf "$BUILD_CTX"
     [ "$scratch_made" = 1 ] && sudo -n podman rmi -f "$SCRATCH_IMAGE" >/dev/null 2>&1
 }
 trap cleanup EXIT
@@ -310,18 +312,37 @@ fi
 # hard-wired to 1280x720 — the only supported way to get another geometry is
 # the wlr-output-management protocol, which cage speaks and wlr-randr drives.
 # Hence the one-package derived image.
+# An EMPTY build context, made here rather than named. This used to be
+# /var/empty, which exists on Fedora and does NOT exist on a stock
+# ubuntu-24.04 GitHub runner — so `podman build` failed instantly with a
+# missing-context error, and because the build's output went to /dev/null the
+# suite reported only "could not build", with the actual reason discarded.
+#
+# That went unnoticed because this job is gated on installer changes and the
+# roadmap branches had not touched installer/ until now. It is a pre-existing
+# defect surfaced by this branch, not one it introduced.
+BUILD_CTX=$(mktemp -d /tmp/apex-guitest-ctx.XXXXXX)
+build_img() {   # build_img <tag> <containerfile-on-stdin>
+    local tag=$1 err
+    if err=$(sudo -n podman build -t "$tag" -f - "$BUILD_CTX" 2>&1 >/dev/null); then
+        return 0
+    fi
+    # The reason, not just the verdict. A build that fails for no stated cause
+    # is the shape of bug this whole file exists to prevent.
+    printf 'FAIL  %-30s could not build %s\n' "gui: render image" "$tag"
+    printf '      podman said: %s\n' "$(printf '%s' "$err" | tail -3 | tr '\n' ' ')"
+    fail=$((fail+1)); gui_skip=1
+    return 1
+}
+
 if [ "$gui_skip" = 0 ] && ! sudo -n podman image exists "$GUITEST" 2>/dev/null; then
     echo "      ($GUITEST missing — building it, first run only)"
     printf 'FROM registry.fedoraproject.org/fedora:43\nRUN dnf install -y cage gtk4 libadwaita python3-gobject gobject-introspection python3-cairo cairo-gobject mesa-dri-drivers seatd grim && dnf clean all\n' \
-        | sudo -n podman build -t "$GUITEST" -f - /var/empty >/dev/null 2>&1 \
-        || { printf 'FAIL  %-30s could not build %s\n' "gui: render image" "$GUITEST"
-             fail=$((fail+1)); gui_skip=1; }
+        | build_img "$GUITEST"
 fi
 if [ "$gui_skip" = 0 ] && ! sudo -n podman image exists "$RANDR" 2>/dev/null; then
     printf 'FROM %s\nRUN dnf install -y wlr-randr && dnf clean all\n' "$GUITEST" \
-        | sudo -n podman build -t "$RANDR" -f - /var/empty >/dev/null 2>&1 \
-        || { printf 'FAIL  %-30s could not build %s\n' "gui: render image" "$RANDR"
-             fail=$((fail+1)); gui_skip=1; }
+        | build_img "$RANDR"
 fi
 
 if [ "$gui_skip" = 0 ]; then
