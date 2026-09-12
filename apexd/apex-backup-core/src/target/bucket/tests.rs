@@ -83,7 +83,7 @@ const SNAP: &str = "20260912T014233Z-0badc0de";
 #[test]
 fn an_object_is_addressed_by_the_bucket_the_prefix_and_the_snapshot() {
     let dir = work();
-    let target = R2Target::new(
+    let target = BucketTarget::r2(
         FakeBroker::new(dir.path()),
         "example-backups",
         "apex-backup",
@@ -105,7 +105,7 @@ fn an_object_is_addressed_by_the_bucket_the_prefix_and_the_snapshot() {
 #[test]
 fn every_object_key_this_build_produces_is_one_the_framework_will_carry() {
     let dir = work();
-    let target = R2Target::new(
+    let target = BucketTarget::r2(
         FakeBroker::new(dir.path()),
         "example-backups",
         "apex-backup",
@@ -150,7 +150,7 @@ fn the_staging_directory_is_not_dot_prefixed_because_the_framework_refuses_one()
 #[test]
 fn an_upload_sends_base64_and_not_the_sealed_bytes() {
     let dir = work();
-    let target = R2Target::new(
+    let target = BucketTarget::r2(
         FakeBroker::new(dir.path()),
         "example-backups",
         "apex-backup",
@@ -196,7 +196,7 @@ fn raw_sealed_bytes_would_not_survive_the_brokers_lossy_conversion() {
 fn a_fetched_object_is_decoded_back_to_the_bytes_that_were_put() {
     let dir = work();
     let sealed: Vec<u8> = (0..=255u8).collect();
-    let target = R2Target::new(
+    let target = BucketTarget::r2(
         FakeBroker::answering(
             dir.path(),
             vec![Ok(data_encoding::BASE64.encode(&sealed))],
@@ -212,7 +212,7 @@ fn a_fetched_object_is_decoded_back_to_the_bytes_that_were_put() {
 #[test]
 fn a_refused_fetch_is_could_not_run_and_is_never_reported_as_a_missing_object() {
     let dir = work();
-    let target = R2Target::new(
+    let target = BucketTarget::r2(
         FakeBroker::answering(
             dir.path(),
             vec![Err(TargetError::Unavailable(
@@ -230,7 +230,7 @@ fn a_refused_fetch_is_could_not_run_and_is_never_reported_as_a_missing_object() 
 #[test]
 fn a_reply_that_is_not_base64_is_not_treated_as_an_object_or_as_an_absence() {
     let dir = work();
-    let target = R2Target::new(
+    let target = BucketTarget::r2(
         FakeBroker::answering(
             dir.path(),
             vec![Ok("<html><body>502 Bad Gateway</body></html>".to_string())],
@@ -261,7 +261,7 @@ fn a_listing_names_the_snapshots_in_the_bucket_under_this_prefix() {
         ]
     })
     .to_string();
-    let target = R2Target::new(
+    let target = BucketTarget::r2(
         FakeBroker::answering(dir.path(), vec![Ok(body)]),
         "example-backups",
         "apex-backup",
@@ -286,7 +286,7 @@ fn a_listing_that_did_not_parse_is_could_not_run_and_not_an_empty_bucket() {
         serde_json::json!({"success": false, "errors": [{"code": 10001}]}).to_string(),
         serde_json::json!({"result": "a string"}).to_string(),
     ] {
-        let target = R2Target::new(
+        let target = BucketTarget::r2(
             FakeBroker::answering(dir.path(), vec![Ok(body.clone())]),
             "example-backups",
             "apex-backup",
@@ -305,7 +305,7 @@ fn a_listing_that_did_not_parse_is_could_not_run_and_not_an_empty_bucket() {
 #[test]
 fn preparing_lists_the_bucket_so_an_unbound_one_refuses_before_anything_is_sealed() {
     let dir = work();
-    let target = R2Target::new(
+    let target = BucketTarget::r2(
         FakeBroker::answering(
             dir.path(),
             vec![Err(TargetError::Refused(
@@ -335,7 +335,7 @@ fn preparing_lists_the_bucket_so_an_unbound_one_refuses_before_anything_is_seale
 #[test]
 fn a_staged_chunk_is_removed_whether_the_upload_worked_or_not() {
     let dir = work();
-    let target = R2Target::new(
+    let target = BucketTarget::r2(
         FakeBroker::answering(
             dir.path(),
             vec![
@@ -369,7 +369,7 @@ fn a_staged_chunk_is_removed_whether_the_upload_worked_or_not() {
 #[test]
 fn the_staging_cleanup_cannot_remove_a_directory_that_still_holds_something() {
     let dir = work();
-    let target = R2Target::new(
+    let target = BucketTarget::r2(
         FakeBroker::new(dir.path()),
         "example-backups",
         "apex-backup",
@@ -391,7 +391,7 @@ fn the_staging_cleanup_cannot_remove_a_directory_that_still_holds_something() {
 #[test]
 fn the_upload_names_the_staged_file_by_a_path_relative_to_the_project() {
     let dir = work();
-    let target = R2Target::new(
+    let target = BucketTarget::r2(
         FakeBroker::new(dir.path()),
         "example-backups",
         "apex-backup",
@@ -418,7 +418,7 @@ fn the_upload_names_the_staged_file_by_a_path_relative_to_the_project() {
 #[test]
 fn nothing_in_this_target_can_hold_a_token() {
     let dir = work();
-    let target = R2Target::new(
+    let target = BucketTarget::r2(
         FakeBroker::new(dir.path()),
         "example-backups",
         "apex-backup",
@@ -445,4 +445,81 @@ fn a_very_long_error_body_is_squashed_to_one_bounded_line() {
     assert!(!line.contains('\n'));
     assert!(line.chars().count() <= 301, "{} characters", line.chars().count());
     assert!(line.ends_with('…'));
+}
+
+// ── one target, two providers ──────────────────────────────────────────────
+
+/// The whole of what separates the S3 path from the R2 one: which two
+/// capabilities it spends, and the word it calls itself.
+///
+/// Asserted on the calls a run actually makes rather than on the `Ops`
+/// constant, because a constant nobody reads is a constant that can be right
+/// while the code spends something else.
+#[test]
+fn an_s3_target_spends_the_s3_capabilities_and_never_cloudflares() {
+    let dir = work();
+    let target = BucketTarget::s3(
+        FakeBroker::new(dir.path()),
+        "example-backups",
+        "apex-backup",
+        dir.path(),
+    );
+
+    target.prepare().expect("prepare");
+    target.put(SNAP, "data.000000", b"bytes").expect("put");
+    // The get decodes base64, so it is answered with some.
+    let _ = target.get(SNAP, "data.000000");
+    // The listing wants the envelope; an empty body is `Unavailable`, which is
+    // fine here because what is being measured is which operation was spent.
+    let _ = target.list();
+
+    let operations: Vec<String> = target
+        .broker
+        .borrow()
+        .calls
+        .iter()
+        .map(|c| c.operation.clone())
+        .collect();
+    for operation in &operations {
+        assert!(
+            operation.starts_with("s3."),
+            "an s3 target spent '{operation}'"
+        );
+    }
+    assert!(operations.contains(&"s3.object.read".to_string()));
+    assert!(operations.contains(&"s3.object.write".to_string()));
+
+    assert!(
+        target.describe().starts_with("s3 bucket "),
+        "{}",
+        target.describe()
+    );
+}
+
+#[test]
+fn an_r2_target_still_spends_the_cloudflare_capabilities() {
+    let dir = work();
+    let target = BucketTarget::r2(
+        FakeBroker::new(dir.path()),
+        "example-backups",
+        "apex-backup",
+        dir.path(),
+    );
+    target.prepare().expect("prepare");
+    target.put(SNAP, "data.000000", b"bytes").expect("put");
+
+    let operations: Vec<String> = target
+        .broker
+        .borrow()
+        .calls
+        .iter()
+        .map(|c| c.operation.clone())
+        .collect();
+    for operation in &operations {
+        assert!(
+            operation.starts_with("cloudflare.r2."),
+            "an r2 target spent '{operation}'"
+        );
+    }
+    assert!(target.describe().starts_with("r2 bucket "), "{}", target.describe());
 }

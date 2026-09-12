@@ -2112,6 +2112,42 @@ jobs:
       - name: §13.5 backup — encrypted at rest, versioned restore, and the four verdicts
         run: ./tests/test-apex-backup.sh
 
+      # P2-001's ssh target, against a REAL sshd on loopback — the fixture the
+      # target's own source named as the reason it used to be refused, since a
+      # transport proven against a fake `ssh` on PATH is a test of the argument
+      # list and not of a backup.
+      #
+      # openssh-server is installed explicitly rather than assumed. The suite
+      # exits 2 with COULD NOT RUN when there is no sshd, which is neither a
+      # pass nor a failure, and a step that took that as a pass would make the
+      # ssh target look proven on every runner while being proven on none —
+      # `set -e` here turns that 2 into a failed step, which is the point.
+      #
+      # The sshd it starts is UNPRIVILEGED, on a kernel-chosen high port, from a
+      # config file inside its own fixture, and it is killed by pid. Nothing
+      # under /etc/ssh and no system unit is read or written.
+      - name: §13.5 backup over ssh — a real sshd on loopback
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server
+          ./tests/test-apex-backup-ssh.sh
+
+      # P2-001's s3 target, through a REAL apex-secretd, against a loopback
+      # double that recomputes the SigV4 signature with nothing but Python's
+      # `hmac` and `hashlib` and answers 403 when it does not match.
+      #
+      # Three implementations of the signature and that is the point: the one
+      # under test, botocore's numbers pinned as known-answer tests beside it,
+      # and the double's. A signer compared only with itself is a signer that
+      # will be consistently wrong and fail only at a real S3.
+      #
+      # NO AWS ACCOUNT AND NO OUTBOUND CONNECTION. The endpoint is 127.0.0.1 on
+      # a kernel-chosen port and the access key id is AWS's own documentation
+      # example, which authorises nothing.
+      - name: §13.5 backup to S3 — SigV4 against an independent verifier
+        run: ./tests/test-apex-backup-s3.sh
+
       - name: ShellCheck the privileged helpers
         run: |
           set -euo pipefail

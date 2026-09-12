@@ -3,7 +3,8 @@
 //! A target does four things and knows nothing about encryption: put an object,
 //! get an object, list the snapshots, and say whether it is ready. That is the
 //! whole seam, and it is why the same snapshot bytes go to a directory, a NAS
-//! mount and an R2 bucket without three formats existing.
+//! mount, another machine over ssh and a bucket without five formats
+//! existing.
 //!
 //! # The five kinds P2-001 names, and which are real here
 //!
@@ -12,14 +13,16 @@
 //! | `local` | a directory on this machine. Real. |
 //! | `nas` | a directory on a mounted filesystem, with the mount's identity checked. Real. |
 //! | `r2` | an R2 bucket, through the `apex-secretd` broker. Real. |
-//! | `ssh` | **declared and refused**, naming what is missing. |
-//! | `s3` | **declared and refused**, naming what is missing. |
+//! | `ssh` | a directory on another machine, over a real `ssh`. Real. |
+//! | `s3` | an S3 bucket, or any S3-compatible endpoint, through the broker. Real. |
 //!
-//! The two refusals are deliberate and are not stubs: each returns a
-//! [`TargetError`] that says what it would take, and neither has a code path
-//! that could report success. A backup target that silently does nothing is the
-//! worst defect this subsystem could ship, so the unimplemented ones refuse at
-//! the moment the project names them — at configuration time, not at run time.
+//! All five are carried as of P2-001's second round; `ssh` and `s3` were
+//! declared-and-refusing before it, each naming what it would take. The
+//! refusal machinery stays anyway — [`Kind::unimplemented_reason`] still
+//! exists and [`crate::config::BackupConfig`] still checks it while reading
+//! the file — because a target that silently does nothing is the worst defect
+//! this subsystem could ship, and the next kind anybody adds should have
+//! somewhere to be honest before it works.
 //!
 //! # Why a missing object is not an error
 //!
@@ -33,11 +36,13 @@ use std::fmt;
 use crate::format::SnapshotId;
 use crate::verdict::Verdict;
 
+pub mod bucket;
 pub mod fs;
-pub mod r2;
+pub mod ssh;
 
+pub use bucket::BucketTarget;
 pub use fs::FsTarget;
-pub use r2::R2Target;
+pub use ssh::SshTarget;
 
 /// Why a target could not do what was asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,33 +180,28 @@ impl Kind {
 
     /// Whether this build can actually carry a snapshot there.
     pub fn is_implemented(self) -> bool {
-        matches!(self, Kind::Local | Kind::Nas | Kind::R2)
+        matches!(
+            self,
+            Kind::Local | Kind::Nas | Kind::Ssh | Kind::S3 | Kind::R2
+        )
     }
 
-    /// Why not, for the two that are not, in the words the operator needs.
+    /// Why not, in the words the operator needs, for any kind this build does
+    /// not carry.
     ///
-    /// Returned at configuration time. A target kind that parsed and then did
-    /// nothing at run time would be the worst thing this subsystem could do.
+    /// **Every one of §13.5's five is carried now**, so this answers `None` for
+    /// all of them — and it stays, rather than being deleted with the last
+    /// refusal, because the shape it enforces is the thing that matters: a
+    /// target kind that parsed and then did nothing at run time would be the
+    /// worst defect this subsystem could ship, and a build that adds a sixth
+    /// name has somewhere to put the reason it is not ready.
+    ///
+    /// `every_unimplemented_kind_says_what_is_missing_and_every_implemented_one_says_nothing`
+    /// holds the two halves together, so a kind cannot be implemented and carry
+    /// a reason, or be unimplemented and carry none.
     pub fn unimplemented_reason(self) -> Option<&'static str> {
         match self {
-            Kind::Ssh => Some(
-                "this build has no ssh transport. The work it needs is a \
-                 loopback sshd fixture to prove the command construction and \
-                 the framing against, because a transport proven only against \
-                 a fake `ssh` on PATH is a test of the argument list and not \
-                 of a backup. Until then `ssh` is a name this build refuses \
-                 rather than one it silently mishandles",
-            ),
-            Kind::S3 => Some(
-                "this build cannot sign an S3 request. S3 needs SigV4, and \
-                 nothing in this workspace has a signer — the Cloudflare \
-                 broker spends a bearer token inside a curl it owns and speaks \
-                 no TLS of its own. P1-005 recorded the same wall from the \
-                 other side: R2's temp-access-credentials yields SigV4 \
-                 credentials a REST-only transport cannot spend. Use `r2`, \
-                 which is brokered and bucket-scoped",
-            ),
-            _ => None,
+            Kind::Local | Kind::Nas | Kind::Ssh | Kind::S3 | Kind::R2 => None,
         }
     }
 }

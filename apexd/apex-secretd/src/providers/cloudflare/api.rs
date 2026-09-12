@@ -53,9 +53,6 @@
 //! contains a byte the far side or the child chose travels in a `Reply`, and
 //! the `Err` side of this module carries only sentences composed here.
 
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
 
 use apex_secret_core::SecretValue;
 
@@ -293,69 +290,6 @@ fn quoted(value: &str) -> String {
     out
 }
 
-/// A directory the child can read one file out of and nobody else can list.
-///
-/// Root-owned and `0711`: the owner can open a path it is told, and cannot
-/// enumerate what is in there. The file itself is `0400` and handed to the
-/// owner, because the child has already dropped privileges by the time it
-/// reads it.
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl Scratch {
-    fn new(owner: &Owner) -> Result<Scratch, TransportError> {
-        let mut name = [0u8; 16];
-        // Not for secrecy — the file is the caller's own data and is mode 0400
-        // to the caller. It is so that two calls at once cannot collide and so
-        // that the path is not one another user could have created first.
-        std::fs::File::open("/dev/urandom")
-            .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut name))
-            .map_err(|e| TransportError::NoScratch(e.to_string()))?;
-        let hex: String = name.iter().map(|b| format!("{b:02x}")).collect();
-        let dir = std::env::temp_dir().join(format!("apex-cf-{hex}"));
-        std::fs::create_dir(&dir).map_err(|e| TransportError::NoScratch(e.to_string()))?;
-        let scratch = Scratch(dir);
-        std::fs::set_permissions(&scratch.0, std::fs::Permissions::from_mode(0o711))
-            .map_err(|e| TransportError::NoScratch(e.to_string()))?;
-        let _ = owner;
-        Ok(scratch)
-    }
-
-    fn write(&self, name: &str, bytes: &[u8], owner: &Owner) -> Result<PathBuf, TransportError> {
-        let path = self.0.join(name);
-        let mut file =
-            std::fs::File::create(&path).map_err(|e| TransportError::NoScratch(e.to_string()))?;
-        file.write_all(bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|e| TransportError::NoScratch(e.to_string()))?;
-        drop(file);
-        chown(&path, owner.uid, owner.gid)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))
-            .map_err(|e| TransportError::NoScratch(e.to_string()))?;
-        Ok(path)
-    }
-}
-
-fn chown(path: &Path, uid: u32, gid: u32) -> Result<(), TransportError> {
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
-        return Err(TransportError::NoScratch("that path cannot be named".into()));
-    };
-    // Safe: `c` is a NUL-terminated path that outlives the call. `lchown` and
-    // not `chown` so this cannot be redirected through a link, though the
-    // directory it is in is not writable by anyone but root.
-    if unsafe { libc::lchown(c.as_ptr(), uid, gid) } != 0 {
-        return Err(TransportError::NoScratch(
-            std::io::Error::last_os_error().to_string(),
-        ));
-    }
-    Ok(())
-}
-
 /// Make the call.
 ///
 /// The credential is written to the child's stdin and nowhere else.
@@ -404,8 +338,11 @@ pub fn call(
             config.push_str(&format!("data-binary = {}\n", quoted(json)));
         }
         Body::Multipart { boundary, bytes } => {
-            scratch = Scratch::new(owner)?;
-            let path = scratch.write("body", bytes, owner)?;
+            scratch = crate::broker::Scratch::new(owner)
+                .map_err(TransportError::NoScratch)?;
+            let path = scratch
+                .write("body", bytes, owner)
+                .map_err(TransportError::NoScratch)?;
             config.push_str(&format!(
                 "header = {}\n",
                 quoted(&format!(
@@ -421,8 +358,11 @@ pub fn call(
             content_type,
             bytes,
         } => {
-            scratch = Scratch::new(owner)?;
-            let path = scratch.write("body", bytes, owner)?;
+            scratch = crate::broker::Scratch::new(owner)
+                .map_err(TransportError::NoScratch)?;
+            let path = scratch
+                .write("body", bytes, owner)
+                .map_err(TransportError::NoScratch)?;
             // `content_type` is `&'static str` and not a caller's string, so
             // there is no header to inject here. That is the whole reason the
             // type is what it is: an R2 object's media type is chosen from a

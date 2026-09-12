@@ -283,15 +283,19 @@ impl Provider for GitProvider {
             // that knows why somebody hit this, which is an ssh remote.
             //
             // §36's `[identity.ssh] host_group` is named here when the project
-            // has one, because this is the only place an ssh remote is spoken
-            // about at all — and a binding nothing enforces should at least
-            // appear where the thing it describes is refused.
-            let bound = match &identities.ssh_host_group {
-                Some(group) => format!(
+            // has one, because this is the only place an ssh *remote* is spoken
+            // about at all — and somebody reading this refusal should not be
+            // left thinking the binding is what refused them. It is not: the
+            // binding is checked where this build does authenticate over ssh,
+            // which is the backup target, and a git remote over ssh is refused
+            // here whatever the group says.
+            let bound = match &identities.ssh {
+                Some(ssh) => format!(
                     ". This project binds [identity.ssh] host_group = \"{}\", \
-                     which nothing in this build checks — there is no ssh \
-                     provider for it to constrain",
-                    group.escape_debug()
+                     and that is not what refused this: the host group is \
+                     checked by the ssh backup target, and a git remote over \
+                     ssh is refused here whichever hosts the group contains",
+                    ssh.host_group.escape_debug()
                 ),
                 None => String::new(),
             };
@@ -603,8 +607,10 @@ mod tests {
         );
     }
 
-    /// A binding nothing enforces should at least appear where the thing it
-    /// describes is refused.
+    /// Somebody reading this refusal must not be left thinking the host group
+    /// is what refused them. It is not, and since P2-013's second round the
+    /// group IS enforced somewhere else, so the wording has to separate the
+    /// two or it teaches the wrong thing about both.
     #[test]
     fn an_ssh_remote_is_still_refused_and_names_the_host_group_the_project_bound() {
         let repo = Repo::new();
@@ -616,8 +622,12 @@ mod tests {
         assert!(why.contains("ssh agent"), "{why}");
         assert!(why.contains("robotics"), "the bound host group is not named: {why}");
         assert!(
-            why.contains("nothing in this build checks"),
-            "a binding nothing enforces must say so: {why}"
+            why.contains("not what refused this"),
+            "the refusal must not read as the host group refusing it: {why}"
+        );
+        assert!(
+            why.contains("backup target"),
+            "and it must say where the group IS checked: {why}"
         );
     }
 

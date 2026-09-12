@@ -33,16 +33,21 @@
 //!   the account the project bound. That is §36's sentence, made true: an agent
 //!   that can `git remote add` cannot push this project's code to an account
 //!   the owner never named.
-//! * **ssh** — **declared and reported, not enforced.** Nothing in this
-//!   workspace authenticates over ssh: the git provider refuses an ssh remote
-//!   outright ("an ssh remote uses your ssh agent, which a confined session
-//!   cannot reach, by design"), and there is no ssh provider to hold to a
-//!   `host_group`. The refusal now names what the project bound, which is the
-//!   most an unenforceable binding can honestly do.
-//! * **agent** — **declared and reported, not enforced.** The agent runtime
-//!   picks its assistant from the user's own profile, not from the project
-//!   file; binding it would mean a check in `apex-agent-core`'s session start,
-//!   which is not this item's code.
+//! * **ssh** — enforced, and it is this round's other new work. It was true
+//!   until P2-001's ssh backup target that nothing in this workspace
+//!   authenticated over ssh and so there was nothing to hold to a
+//!   `host_group`. There is now exactly one such thing, and
+//!   [`SshIdentity::check`] is applied where a project's `[backup.ssh]` is read
+//!   — at configuration time, before a connection is attempted. The git
+//!   provider still refuses an ssh remote outright, for the separate reason it
+//!   always did: a confined session cannot reach the owner's ssh agent.
+//! * **agent** — enforced, and it is this round's new work. `apex-agentd`
+//!   resolves which assistant a session runs, and it now asks the project
+//!   before it asks the user's own configuration: a session that names no
+//!   agent gets the bound one rather than `~/.config/apex/agent.json`'s
+//!   `default_agent`, and a session that names a *different* one is refused.
+//!   [`AgentIdentity::check`] is that refusal; `apex-agentd/src/session.rs`
+//!   is where it is applied, before the PTY, the worktree or the grant.
 //!
 //! [`Identities::report`] is what makes the difference visible rather than
 //! buried: `apex project identity` prints every section, what it binds, and
@@ -54,6 +59,32 @@
 //! opens every component below the project root with `O_NOFOLLOW`, requires a
 //! regular file owned by the account the operation runs as, caps the size, and
 //! reports a parse failure as a position and never as the text at it.
+//!
+//! # Where a host group's members come from
+//!
+//! §36 names the group and not its contents. This build reads them from a
+//! second section of the same file:
+//!
+//! ```toml
+//! [identity.ssh]
+//! host_group = "robotics"
+//!
+//! [ssh.host_groups]
+//! robotics = ["backup.robotics.example", "nas.robotics.example"]
+//! ```
+//!
+//! Two sections rather than a list under `[identity.ssh]`, because a project
+//! that moves between groups then edits one line instead of rewriting the set,
+//! and because the table is the shape a machine-level group file would have if
+//! one is ever added. Members are exact host names, compared case-insensitively
+//! — never patterns. A pattern language here would be a second, weaker copy of
+//! the question "is this the host I meant", and getting a glob subtly wrong is
+//! how a binding comes to allow more than its author read it as allowing.
+//!
+//! A group that `[ssh.host_groups]` does not define, or defines as an empty
+//! list, refuses **every** host. That is deliberate and it is the same rule as
+//! everywhere else here: a binding whose members could not be established has
+//! not told you that any host is allowed.
 //!
 //! **And the same caveat.** `apex.toml` is writable by the account that owns
 //! the project, so a binding is the project describing itself and never an
@@ -95,7 +126,13 @@ impl Kind {
     /// telling somebody their project binds an ssh host group, without telling
     /// them nothing looks at it, would be worse than not printing it at all.
     pub fn is_enforced(self) -> bool {
-        matches!(self, Kind::GitHub | Kind::Cloudflare)
+        // All four, as of P2-013's second round. Written as a `matches!` over
+        // the names rather than `true` so that adding a fifth §36 section does
+        // not silently inherit a claim nothing checks.
+        matches!(
+            self,
+            Kind::GitHub | Kind::Cloudflare | Kind::Agent | Kind::Ssh
+        )
     }
 
     /// Where the check lives, or what would have to exist for one to.
@@ -110,15 +147,18 @@ impl Kind {
                  id this binds (apex-secretd/src/providers/cloudflare/binding.rs)"
             }
             Kind::Ssh => {
-                "nothing yet. No provider in this workspace authenticates over \
-                 ssh — the git provider refuses an ssh remote outright — so \
-                 there is nothing to hold to a host group. An ssh provider \
-                 beside apex-secretd/src/providers/git.rs is what would check it"
+                "the ssh backup target, which is the only thing in this \
+                 workspace that authenticates over ssh, when a project's \
+                 [backup.ssh] is read (apex-backup-core/src/config.rs). The \
+                 git provider still refuses an ssh remote outright, for the \
+                 separate reason that a confined session cannot reach the \
+                 owner's ssh agent"
             }
             Kind::Agent => {
-                "nothing yet. The agent runtime chooses its assistant from the \
-                 user's own profile; a check would go where a session resolves \
-                 its project, in apex-agent-core"
+                "the agent runtime, when a session starts in this project \
+                 (apex-agentd/src/session.rs). A session that names no agent \
+                 gets the bound one; a session that names a different one is \
+                 refused before anything is created"
             }
         }
     }
@@ -141,6 +181,93 @@ pub struct GitHubIdentity {
 /// The default for [`GitHubIdentity::host`].
 pub const GITHUB_HOST: &str = "github.com";
 
+/// `[identity.agent]`.
+///
+/// §36's `default = "claude"`, and the word is exact: it is the agent a session
+/// that named none gets. What §36 does *not* say, and what this build decides,
+/// is what happens when a session names a different one — and the sentence §36
+/// gives for the whole file settles it. *"This prevents deploying or pushing
+/// from the wrong account."* A binding that only applied when nobody said
+/// otherwise would prevent nothing: `--agent codex` would step around it, and
+/// stepping around it is exactly what an agent that can edit its own command
+/// line would do.
+///
+/// So the binding does two things, and the second is the enforcement:
+///
+/// 1. It **displaces the user's own default**. `apex agent run` in this project
+///    starts the bound agent, not `default_agent` from the user's config.
+/// 2. It **refuses a session that names a different one**, with a message that
+///    says where the binding is, because the way to change it is to change
+///    `apex.toml` — the same escape hatch [`IdentityError::WrongAccount`]
+///    names, and the same one §36's github binding has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentIdentity {
+    /// §36's `default`: the assistant this project's sessions run.
+    pub default: String,
+}
+
+impl AgentIdentity {
+    /// Whether a session that explicitly asked for `requested` may run here.
+    ///
+    /// Case-insensitive, because an adapter id is a lowercase word and
+    /// `--agent Claude` is a typo rather than a different request. Everything
+    /// else is refused.
+    pub fn check(&self, requested: &str) -> Result<(), IdentityError> {
+        if requested.eq_ignore_ascii_case(&self.default) {
+            return Ok(());
+        }
+        Err(IdentityError::WrongAgent {
+            requested: requested.to_string(),
+            bound: self.default.clone(),
+        })
+    }
+}
+
+/// `[identity.ssh]`, with the members of the group it names.
+///
+/// §36's `host_group = "robotics"` plus `[ssh.host_groups] robotics = [...]`.
+/// The two are read together and kept together, because a group name on its own
+/// is not a check: the thing that refuses a host is the membership list, and a
+/// type that carried only the name would make every caller go and find it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshIdentity {
+    /// §36's `host_group`: which group this project's ssh work belongs to.
+    pub host_group: String,
+    /// The hosts `[ssh.host_groups] <host_group>` lists, in the file's order.
+    ///
+    /// Empty when the table does not define the group, and the two cases are
+    /// deliberately not distinguished: neither of them says that any host is
+    /// allowed, and both refuse.
+    pub hosts: Vec<String>,
+}
+
+impl SshIdentity {
+    /// Whether `host` is one this project's bound group contains.
+    ///
+    /// Case-insensitive, because a host name is. Exact, because a pattern
+    /// language here would be a second and weaker copy of the question this
+    /// binding exists to answer.
+    pub fn check(&self, host: &str) -> Result<(), IdentityError> {
+        if self.hosts.is_empty() {
+            return Err(IdentityError::EmptyHostGroup {
+                group: self.host_group.clone(),
+            });
+        }
+        if self
+            .hosts
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(host))
+        {
+            return Ok(());
+        }
+        Err(IdentityError::WrongHost {
+            host: host.to_string(),
+            group: self.host_group.clone(),
+            known: self.hosts.clone(),
+        })
+    }
+}
+
 /// Why a remote is not one this project may push to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityError {
@@ -152,6 +279,17 @@ pub enum IdentityError {
         bound: String,
         host: String,
     },
+    /// The session asked to run an agent this project did not bind.
+    WrongAgent { requested: String, bound: String },
+    /// The ssh host is not one the project's bound host group contains.
+    WrongHost {
+        host: String,
+        group: String,
+        known: Vec<String>,
+    },
+    /// The project binds a host group that `[ssh.host_groups]` does not define,
+    /// or defines as an empty list.
+    EmptyHostGroup { group: String },
 }
 
 impl std::fmt::Display for IdentityError {
@@ -173,6 +311,42 @@ impl std::fmt::Display for IdentityError {
                  line in apex.toml",
                 got.escape_debug(),
                 bound.escape_debug()
+            ),
+            IdentityError::WrongAgent { requested, bound } => write!(
+                f,
+                "this project binds [identity.agent] default = \"{}\", and \
+                 this session asked for '{}'. §36 binds a project to one \
+                 assistant so that work in it is not started under another by \
+                 accident, so the session is refused rather than started. If \
+                 the change is deliberate, change the line in apex.toml",
+                bound.escape_debug(),
+                requested.escape_debug()
+            ),
+            IdentityError::WrongHost { host, group, known } => write!(
+                f,
+                "'{}' is not in [ssh.host_groups] {} = [{}], which is the \
+                 group this project binds with [identity.ssh] host_group. §36 \
+                 binds a project to the hosts it may reach over ssh so that \
+                 work does not go to the wrong machine, so this is refused \
+                 rather than attempted. If the host belongs here, add it to \
+                 that list in apex.toml",
+                host.escape_debug(),
+                group.escape_debug(),
+                known
+                    .iter()
+                    .map(|h| format!("\"{}\"", h.escape_debug()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            IdentityError::EmptyHostGroup { group } => write!(
+                f,
+                "this project binds [identity.ssh] host_group = \"{}\", and \
+                 [ssh.host_groups] does not define that group or defines it as \
+                 an empty list. A group whose members could not be established \
+                 has not said that any host is allowed, so every host is \
+                 refused. Add [ssh.host_groups] {} = [\"…\"] to apex.toml",
+                group.escape_debug(),
+                group.escape_debug()
             ),
         }
     }
@@ -258,10 +432,10 @@ pub struct Identities {
     /// addressed by is `account_id`, read by the Cloudflare provider's own
     /// binding — this is the name a person recognises.
     pub cloudflare: Option<String>,
-    /// `[identity.ssh] host_group`.
-    pub ssh_host_group: Option<String>,
+    /// `[identity.ssh] host_group`, with the members of that group.
+    pub ssh: Option<SshIdentity>,
     /// `[identity.agent] default`.
-    pub agent_default: Option<String>,
+    pub agent: Option<AgentIdentity>,
 }
 
 impl Identities {
@@ -318,8 +492,19 @@ impl Identities {
         Ok(Identities {
             github,
             cloudflare: string(&["identity", "cloudflare", "account"])?,
-            ssh_host_group: string(&["identity", "ssh", "host_group"])?,
-            agent_default: string(&["identity", "agent", "default"])?,
+            ssh: match string(&["identity", "ssh", "host_group"])? {
+                Some(host_group) => {
+                    // The group's members live in a second section, so the
+                    // lookup key is composed. `strings` answers an empty list
+                    // for a key that is not there, which is the same answer as
+                    // a group defined empty — and `check` refuses both.
+                    let hosts = config.strings(&["ssh", "host_groups", &host_group])?;
+                    Some(SshIdentity { host_group, hosts })
+                }
+                None => None,
+            },
+            agent: string(&["identity", "agent", "default"])?
+                .map(|default| AgentIdentity { default }),
         })
     }
 
@@ -337,11 +522,21 @@ impl Identities {
                     .as_ref()
                     .map(|g| format!("account = {} on {}", g.account, g.host)),
                 Kind::Cloudflare => self.cloudflare.as_ref().map(|a| format!("account = {a}")),
-                Kind::Ssh => self
-                    .ssh_host_group
+                Kind::Ssh => self.ssh.as_ref().map(|s| {
+                    format!(
+                        "host_group = {} ({})",
+                        s.host_group,
+                        if s.hosts.is_empty() {
+                            "no hosts — every ssh host is refused".to_string()
+                        } else {
+                            s.hosts.join(", ")
+                        }
+                    )
+                }),
+                Kind::Agent => self
+                    .agent
                     .as_ref()
-                    .map(|g| format!("host_group = {g}")),
-                Kind::Agent => self.agent_default.as_ref().map(|d| format!("default = {d}")),
+                    .map(|a| format!("default = {}", a.default)),
             };
             out.insert(
                 kind,
