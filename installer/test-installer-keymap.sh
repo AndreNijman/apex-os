@@ -832,7 +832,9 @@ rc = app.run([])
 sys.exit(app.exit_code if app.exit_code is not None else rc)
 PY2
 
-    # The state file the pre-restart process would have left behind.
+    # The state file the pre-restart process would have left behind. Seeded
+    # deterministically with a zone that is NOT this machine's, so a reset to the
+    # host default is visible.
     printf 'layout=de\nvariant=\ntimezone=Europe/Berlin\n' > "$W/resume-state"
 
     r_out="$(env WLR_BACKENDS=headless WLR_RENDERER=pixman GSK_RENDERER=cairo \
@@ -866,6 +868,32 @@ PY2
     is "pressing Continue on a resumed session moves ON to wifi" "wifi" "$post_page"
     is "…and does NOT ask for another restart" "None" "$post_ec"
     is "…carrying the pre-restart time zone into the answers" "Europe/Berlin" "$post_tz"
+
+    # ── the ROUND TRIP, on the file the GUI itself wrote ────────────────────
+    # Everything above resumes from a hand-seeded file, which measures the READ
+    # half only. A mutant that stopped `nxt` writing `timezone=` survived all of
+    # it — the write half is asserted in §5, but nothing joined the two, and a
+    # feature that writes one spelling and reads another would pass both halves
+    # separately. $W/gui-state is what the real GUI produced in §6; resume from
+    # exactly that.
+    if [ -s "$W/gui-state" ]; then
+        rt_out="$(env WLR_BACKENDS=headless WLR_RENDERER=pixman GSK_RENDERER=cairo \
+            GDK_BACKEND=wayland LIBGL_ALWAYS_SOFTWARE=1 \
+            APEX_INSTALLER_RESUMED=1 APEX_INSTALLER_STATE="$W/gui-state" \
+            XKB_DEFAULT_LAYOUT=de \
+            timeout 90 cage -- python3 "$W/drive-resume.py" "$GUI" 2>&1)"
+        rt_tz="$(printf '%s' "$rt_out" | sed -n 's/.*RESUME preselect .*timezone=\([^ ]*\).*/\1/p' | head -1)"
+        want_tz="$(sed -n 's/^timezone=//p' "$W/gui-state" | head -1)"
+        if [ -n "$want_tz" ] && [ "$rt_tz" = "$want_tz" ]; then
+            ok "round trip: the zone the GUI WROTE in §6 is the zone it READS back ($want_tz)"
+        else
+            bad "round trip: the zone the GUI WROTE in §6 is the zone it READS back" \
+                "wrote [${want_tz:-<nothing>}] read [${rt_tz:-<nothing>}]"
+        fi
+    else
+        bad "round trip: the zone the GUI WROTE in §6 is the zone it READS back" \
+            "§6 left no state file to resume from"
+    fi
 fi
 
 finish
