@@ -1441,7 +1441,20 @@ jobs:
       # A container that cannot be pulled or a dnf that cannot resolve leaves
       # the suite unrun and says so, rather than reddening the job over a
       # network hiccup — the same trade the labwc step above makes.
+      # ── the four accessibility steps run even after an earlier failure ────
+      # Not `continue-on-error`: these steps still fail the job. `!cancelled()`
+      # only stops an UNRELATED red step earlier in this job from hiding them.
+      #
+      # That is not hypothetical. `Run virtualization assertions` is red on
+      # roadmap/v2.2 itself, a hundred lines above these, and GitHub stops a job
+      # at its first failing step — so on 2026-09-12 all four accessibility
+      # suites silently stopped running in CI while reporting nothing at all.
+      # A job that halts at step N is evidence about steps 1..N and about
+      # nothing after it, and a unit whose whole argument is "a second machine
+      # finds what a laptop cannot" cannot afford to lose the second machine to
+      # somebody else's red step.
       - name: Run greeter accessibility assertions
+        if: ${{ !cancelled() }}
         run: |
           if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
                 dnf -y install --setopt=install_weak_deps=False \
@@ -1496,6 +1509,7 @@ jobs:
       # "did not run" rather than reddening the job, the same trade the greeter
       # a11y step makes.
       - name: Run greeter AT-SPI assertions
+        if: ${{ !cancelled() }}
         run: |
           if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
                 dnf -y install --setopt=install_weak_deps=False \
@@ -1513,6 +1527,7 @@ jobs:
           fi
 
       - name: Run greeter keyboard-layout assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-greet-layout.sh
 
       # The other half of the same finding, and the more important one: the
@@ -1528,6 +1543,7 @@ jobs:
       # dbus-daemon and gdbus are what it needs; without them it SKIPs and says
       # nothing was measured.
       - name: Install the bus tools the greeter session-bus suite measures with
+        if: ${{ !cancelled() }}
         run: |
           sudo apt-get update -qq
           for p in dbus dbus-x11 libglib2.0-bin; do
@@ -1538,6 +1554,7 @@ jobs:
           done
 
       - name: Run greeter session-bus assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-greet-session-bus.sh
 
       # The image ships a screen reader, and nothing starts it. Reads
@@ -1546,6 +1563,7 @@ jobs:
       # line. The rpmdb section SKIPs on a runner, which has no ostree
       # deployment to ask; the two sections that gate the change do run.
       - name: Run accessibility-stack assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-a11y-stack.sh
 
       # §9's resolver, which is the same engine as the package suite above and
