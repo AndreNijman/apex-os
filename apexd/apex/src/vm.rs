@@ -212,6 +212,14 @@ pub struct RunArgs {
     /// whatever `--egress` says.
     #[arg(long, value_name = "DIR")]
     pub egress_to: Option<String>,
+    /// Let egress overwrite a file that is already at the destination.
+    ///
+    /// Without it an existing file is left alone and the run reports which one
+    /// it would not replace. The file coming out was written by code you ran
+    /// in a VM because you did not trust it, so replacing something of yours
+    /// with it is a decision rather than a default.
+    #[arg(long, requires = "egress_to")]
+    pub force: bool,
     /// Memory in MiB.
     #[arg(long, value_name = "MIB")]
     pub memory: Option<u32>,
@@ -445,6 +453,9 @@ fn run_argv(a: RunArgs) -> Vec<String> {
         v.push("--egress-to".to_string());
         v.push(d);
     }
+    if a.force {
+        v.push("--force".to_string());
+    }
     v.push("--".to_string());
     v.extend(a.command);
     v
@@ -664,6 +675,26 @@ mod tests {
         assert!(a.contains(&"log.txt".to_string()));
         let i = a.iter().position(|x| x == "--egress-to").expect("--egress-to");
         assert_eq!(a[i + 1], "/home/u/out");
+    }
+
+    #[test]
+    fn overwriting_the_host_is_a_separate_decision_from_letting_a_file_out() {
+        // Two flags, not one. `--egress-to` says a file may leave the VM;
+        // `--force` says it may land on top of something of the user's. The
+        // file coming out was written by code they ran in a VM because they
+        // did not trust it.
+        let a = build(&[
+            "run", "--image", "/g.qcow2", "--egress", "r.json", "--egress-to", "/o", "--", "m",
+        ]);
+        assert!(!a.iter().any(|x| x == "--force"));
+        let f = build(&[
+            "run", "--image", "/g.qcow2", "--egress", "r.json", "--egress-to", "/o", "--force",
+            "--", "m",
+        ]);
+        assert!(f.contains(&"--force".to_string()));
+        // And --force alone is meaningless, so it is refused rather than
+        // quietly ignored.
+        assert!(refused(&["run", "--image", "/g.qcow2", "--force", "--", "m"]));
     }
 
     #[test]

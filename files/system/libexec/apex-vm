@@ -658,11 +658,21 @@ cmd_create() {
 
     if [ -n "$IMPORT_DISK" ]; then
         [ -f "$IMPORT_DISK" ] || { remove_vm_dir "$NAME"; die "--import: no file at $IMPORT_DISK"; }
-        # A copy rather than a backing file. A backing file means the VM's disk
-        # is a delta over a path the user may move or delete, and the failure
-        # then arrives months later as a domain that will not start.
-        cp -- "$IMPORT_DISK" "$(vm_disk "$NAME")" \
-            || { remove_vm_dir "$NAME"; die "--import: cannot copy $IMPORT_DISK"; }
+        # CONVERTED, not copied, and not used as a backing file.
+        #
+        # Not a backing file, because that makes the VM's disk a delta over a
+        # path the user may move or delete and the failure arrives months later
+        # as a domain that will not start.
+        #
+        # Not a plain copy either, which is what this did first. The domain
+        # declares `<driver type='qcow2'/>` for the system disk, so a raw image
+        # handed to --import produced a domain that defined cleanly and then
+        # failed at start with qemu refusing the image format — an error about
+        # a magic number, for a command whose only argument was a filename.
+        # Converting also gives an imported disk the internal snapshots
+        # `apex vm snapshot` needs, which a raw image cannot hold at all.
+        "$QEMU_IMG" convert -O qcow2 "$IMPORT_DISK" "$(vm_disk "$NAME")" >/dev/null 2>&1 \
+            || { remove_vm_dir "$NAME"; die "--import: qemu-img cannot read $IMPORT_DISK as a disk image"; }
     else
         "$QEMU_IMG" create -f qcow2 "$(vm_disk "$NAME")" "$DISK_SIZE" >/dev/null \
             || { remove_vm_dir "$NAME"; die "qemu-img could not create the disk"; }
@@ -1244,8 +1254,24 @@ valid_egress_name() {
     return 0
 }
 
+# --egress-to's destination. Absolute, and refused if it resolves inside the VM
+# root: teardown deletes that tree, so a destination in there would report
+# every file copied and then produce none. apex-disposable's valid_copy_out
+# makes the same check for the same reason.
+valid_egress_dest() {
+    local dest="$1" root d
+    case "$dest" in /*) ;; *) return 1 ;; esac
+    case "$dest" in *$'\n'*) return 1 ;; esac
+    root="$(realpath -m -- "$VM_ROOT" 2>/dev/null)" || return 1
+    d="$(realpath -m -- "$dest" 2>/dev/null)" || return 1
+    case "$d" in
+        "$root"|"$root"/*) return 1 ;;
+    esac
+    return 0
+}
+
 cmd_run() {
-    local name="" memory=2048 cpus=2 timeout=600 image="" egress_to=""
+    local name="" memory=2048 cpus=2 timeout=600 image="" egress_to="" force=0
     local -a copy_in=() egress=() command=()
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -1257,6 +1283,7 @@ cmd_run() {
             --copy-in)   shift; copy_in+=("${1:-}") ;;
             --egress)    shift; egress+=("${1:-}") ;;
             --egress-to) shift; egress_to="${1:-}" ;;
+            --force)     force=1 ;;
             --network)
                 refuse "--network is not accepted by \`apex vm run\`.
   A disposable VM exists to run something you do not trust; an outbound
@@ -1290,7 +1317,10 @@ cmd_run() {
             || die "--egress takes a plain filename, no directories and no wildcards (got '$n')"
     done
     if [ -n "$egress_to" ]; then
-        case "$egress_to" in /*) ;; *) die "--egress-to needs an absolute directory" ;; esac
+        valid_egress_dest "$egress_to" \
+            || die "--egress-to needs an absolute directory outside $VM_ROOT
+  (a destination inside it is deleted by this command's own teardown, so every
+  file would be reported copied and none would survive)"
         [ "${#egress[@]}" -gt 0 ] \
             || die "--egress-to was given but nothing was nominated with --egress, so nothing would leave"
     fi
@@ -1324,7 +1354,22 @@ cmd_run() {
     local in_img="$dir/in.img" out_img="$dir/out.img"
     truncate -s 64M "$in_img" || die "cannot create the copy-in volume"
     mkfs.vfat -F 32 -n APEXIN "$in_img" >/dev/null || die "cannot format the copy-in volume"
-    { printf '#!/bin/sh\n'; printf '%s\n' "${command[*]}"; } > "$dir/task.sh"
+    # Each argument single-quoted, not "${command[*]}".
+    #
+    # `[*]` joins with a space and loses every quote the user typed, so
+    # `apex vm run -- sh -c 'echo "a b"'` became `sh -c echo "a b"` inside the
+    # guest — a different command, silently. The task script is a shell script,
+    # so each word has to arrive as one word.
+    {
+        printf '#!/bin/sh\n'
+        local w first=1
+        for w in "${command[@]}"; do
+            [ "$first" = 1 ] || printf ' '
+            first=0
+            printf "'%s'" "${w//\'/\'\\\'\'}"
+        done
+        printf '\n'
+    } > "$dir/task.sh"
     mcopy -i "$in_img" "$dir/task.sh" ::/task.sh || die "cannot stage the task"
     for n in "${copy_in[@]}"; do
         mcopy -s -i "$in_img" "$n" "::/$(basename -- "$n")" \
@@ -1340,7 +1385,11 @@ cmd_run() {
     # not a second idea of what a domain looks like. Network `none` is passed
     # positionally and there is no path by which it can be anything else.
     SHARE_SRC=(); SHARE_TAG=(); SHARE_RO=(); USB_IDS=()
-    cp -- "$image" "$(vm_disk "$name")" || die "cannot copy the guest image"
+    # Converted for the same reason `--import` is: the domain declares qcow2
+    # for the system disk, and a raw guest image handed to --image would define
+    # and then fail at start.
+    "$QEMU_IMG" convert -O qcow2 "$image" "$(vm_disk "$name")" >/dev/null 2>&1 \
+        || die "--image: qemu-img cannot read $image as a disk image"
     {
         domain_xml "$name" "$memory" "$cpus" 0 0 none \
             | sed "/<\/devices>/i\\
@@ -1376,10 +1425,23 @@ cmd_run() {
     # That direction is the security property: iterating the image and copying
     # what matches would let the guest decide what leaves by choosing filenames,
     # which is the defect this verb exists to not have.
-    local copied=0 missing=0
+    local copied=0 missing=0 blocked=0
     if [ -n "$egress_to" ]; then
         mkdir -p "$egress_to" || die "cannot create $egress_to"
         for n in "${egress[@]}"; do
+            # Never over an existing host file without --force. `mcopy -n`
+            # would have done exactly that: in mtools `-n` means "no
+            # confirmation when overwriting", not "do not overwrite", so the
+            # first version of this loop silently replaced whatever was already
+            # at the destination with whatever the guest produced. That is the
+            # same rule apex-disposable applies to --copy-out, and it matters
+            # more here because the file is written by code the user is running
+            # in a VM precisely because they do not trust it.
+            if [ -e "$egress_to/$n" ] && [ "$force" != 1 ]; then
+                blocked=$((blocked + 1))
+                warn "egress: $egress_to/$n already exists; not overwriting it (--force to allow)"
+                continue
+            fi
             if mcopy -n -i "$out_img" "::/$n" "$egress_to/$n" 2>/dev/null; then
                 copied=$((copied + 1))
                 msg "egress: $n -> $egress_to/$n"
@@ -1389,11 +1451,12 @@ cmd_run() {
             fi
         done
         msg "egress: ${copied} of ${#egress[@]} nominated files left the VM; everything else stayed in it"
+        [ "$blocked" -gt 0 ] && warn "egress: ${blocked} were blocked by an existing file on the host"
     else
         msg "nothing left the VM: --egress-to was not given"
     fi
 
-    [ "$missing" -eq 0 ]
+    [ "$missing" -eq 0 ] && [ "$blocked" -eq 0 ]
 }
 
 # ── usage ───────────────────────────────────────────────────────────────────
@@ -1429,6 +1492,7 @@ run options:
   --copy-in PATH        copied into the read-only APEXIN volume. Repeatable.
   --egress NAME         a filename the task may hand back. Repeatable.
   --egress-to DIR       where those files land. WITHOUT IT, NOTHING LEAVES.
+  --force               let egress overwrite a file that is already there
   --timeout SECS (600)  how long to wait for the guest to power off
 
   The VM has NO network and no flag to give it one. Only the names given to
