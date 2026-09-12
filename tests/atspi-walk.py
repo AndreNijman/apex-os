@@ -276,18 +276,27 @@ def main():
         # connected to the accessibility bus.
         target = args[args.index("--get-text") + 1]
         TEXT = ATSPI + ".Text"
+        # FOCUSABLE nodes only. A caption sitting beside a field is a Gtk.Label,
+        # it carries the Text interface too, and its accessible name is the very
+        # string the field was named after -- so a plain name match returned the
+        # caption's text ("Username") instead of what the user had typed, and an
+        # assertion built on it compared a label against itself. A caption is
+        # never focusable; the field always is.
+        candidates = []
         for r in roots:
             for n in flatten(r):
-                if target in (n["name"], n["description"]):
-                    if TEXT not in n["interfaces"]:
-                        print("NO-TEXT-INTERFACE")
-                        return 0
-                    got = t.call(n["bus"], n["path"], TEXT, "GetText",
-                                 GLib.Variant("(ii)", (0, -1)),
-                                 GLib.VariantType("(s)"))
-                    print(got[0] if got else "")
-                    return 0
-        print("no node named or described %r" % target, file=sys.stderr)
+                if target in (n["name"], n["description"]) and "focusable" in n["states"]:
+                    candidates.append(n)
+        for n in candidates:
+            if TEXT not in n["interfaces"]:
+                print("NO-TEXT-INTERFACE")
+                return 0
+            got = t.call(n["bus"], n["path"], TEXT, "GetText",
+                         GLib.Variant("(ii)", (0, -1)),
+                         GLib.VariantType("(s)"))
+            print(got[0] if got else "")
+            return 0
+        print("no FOCUSABLE node named or described %r" % target, file=sys.stderr)
         return 1
 
     if "--json" in args:
