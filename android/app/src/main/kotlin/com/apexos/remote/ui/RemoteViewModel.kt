@@ -10,9 +10,9 @@ import com.apexos.remote.core.PairedMachine
 import com.apexos.remote.core.Pairing
 import com.apexos.remote.core.PairingException
 import com.apexos.remote.core.PairingOffer
-import com.apexos.remote.core.SecretBox
 import com.apexos.remote.core.Settings
 import com.apexos.remote.data.MachineRepository
+import com.apexos.remote.pairing.GatedBox
 import com.apexos.remote.pairing.PairingService
 import com.apexos.remote.security.AppLock
 import com.apexos.remote.security.AppLockRefused
@@ -100,7 +100,11 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      * importance.
      */
     fun unlockApp(activity: FragmentActivity) = viewModelScope.launch {
-        if (_state.value.unlocked) return@launch
+        // Not before [refresh] has answered. A phone that cannot authenticate
+        // at all sets `unlocked` there; prompting first would error instantly,
+        // leave a failure notice on screen, and then be overruled a moment
+        // later by a refresh that says no lock was needed.
+        if (_state.value.loading || _state.value.unlocked) return@launch
         try {
             AppLock.confirmPresence(activity)
             _state.update { it.copy(unlocked = true, failure = null) }
@@ -140,17 +144,15 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             }
             _state.update { it.copy(busy = "Pairing with ${offer.machine}…", failure = null) }
             try {
-                val gated = AppLock.canAuthenticate(BiometricManager.from(getApplication()))
                 val machine = pairing.pair(
                     offer = offer,
                     deviceName = Device.checkName(deviceName),
-                    boxFor = { deviceId -> sealingBox(activity, deviceId, offer.machine, gated) },
-                    // Claimed only when it is true. The desktop records this
-                    // against the device and uses it to decide whether an
-                    // approval needs a second factor, so a phone that promised
-                    // one it does not have would weaken the machine as well as
-                    // itself.
-                    userVerification = gated,
+                    // The prompt happens inside this, before a byte is sent.
+                    // What comes back carries the gate the key actually has,
+                    // which is what the desktop is told — a phone that promised
+                    // a second factor it does not have would weaken the machine
+                    // as well as itself.
+                    boxFor = { deviceId -> sealingBox(activity, deviceId, offer.machine) },
                     nowMs = now,
                 )
                 val store = repository.remember(machine)
@@ -191,8 +193,28 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             }
             _state.update { it.copy(busy = null, connection = report, message = null) }
         } catch (e: Exception) {
-            _state.update { it.copy(busy = null, failure = describe(e)) }
+            _state.update { it.copy(busy = null, failure = describeConnectFailure(machine, e)) }
         }
+    }
+
+    /**
+     * A connection failure, in words that name the actual cause.
+     *
+     * The keystore's own exceptions do not. A key invalidated by a newly
+     * enrolled fingerprint — which is deliberate, and is what
+     * `setInvalidatedByBiometricEnrollment(true)` buys — surfaces as
+     * `KeyPermanentlyInvalidatedException` at `Cipher.init`; a keystore that was
+     * wiped surfaces as an AEAD tag mismatch, because [KeystoreSecretBox.forDevice]
+     * helpfully created a fresh key that cannot open the old ciphertext. Both
+     * mean the same thing to the person holding the phone, and neither says it.
+     */
+    private fun describeConnectFailure(machine: PairedMachine, e: Throwable): String = when {
+        e is android.security.keystore.KeyPermanentlyInvalidatedException ||
+            e is javax.crypto.AEADBadTagException ->
+            "the key this phone used with ${machine.machine} is no longer usable — a new " +
+                "fingerprint or a new screen lock invalidates it, which is the point. " +
+                "Forget ${machine.machine} and pair again."
+        else -> describe(e)
     }
 
     fun forget(machine: PairedMachine) = viewModelScope.launch {
@@ -217,10 +239,17 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         activity: FragmentActivity,
         deviceId: String,
         machineName: String,
-        gated: Boolean,
-    ): SecretBox {
-        val box = KeystoreSecretBox.forDevice(deviceId, requireAuthentication = gated)
-        return AppLock.authoriseSeal(activity, box, machineName)
+    ): GatedBox {
+        val canGate = AppLock.canAuthenticate(BiometricManager.from(getApplication()))
+        val box = KeystoreSecretBox.forDevice(deviceId, requireAuthentication = canGate)
+        // `authenticationIsRequired` and not `canGate`: the first is read off
+        // the key with `KeyInfo`, the second is a question asked of the system,
+        // and the desktop is told the one that is true of the key protecting
+        // this pairing.
+        return GatedBox(
+            AppLock.authoriseSeal(activity, box, machineName),
+            box.authenticationIsRequired,
+        )
     }
 
     /**

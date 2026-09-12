@@ -3,11 +3,13 @@ package com.apexos.remote.core
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.security.SecureRandom
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -48,7 +50,19 @@ import javax.crypto.spec.GCMParameterSpec
  * machine without a device can exercise. What is proved is the half a keystore
  * cannot fix: whatever box is wired in, the bytes that reach the filesystem
  * contain no device secret, no pairing token and no session plaintext.
+ *
+ * ## The deadline is not boilerplate
+ *
+ * Both halves of every handshake here run in this process, one of them on a
+ * thread, over pipes. A handshake that cannot complete — the wrong key, a
+ * changed prologue — leaves both sides blocked on a read that will never
+ * arrive, and without a deadline the suite does not fail: it *hangs*. That was
+ * measured rather than imagined. Mutating the session below to use a key the
+ * store had not pinned turned a ten-second run into a ten-minute one that
+ * finally reported "`:core:test` FAILED" and named no test at all. A failure
+ * nobody can read is barely better than no failure.
  */
+@Timeout(value = 60, unit = TimeUnit.SECONDS)
 class InsecureStorageTest {
 
     /** Distinctive enough that finding it anywhere is unambiguous. */
@@ -81,6 +95,8 @@ class InsecureStorageTest {
         val machine: PairedMachine,
         val deviceSecret: ByteArray,
         val token: ByteArray,
+        /** The desktop half, kept so the session runs against the key that was pinned. */
+        val desktop: InMemoryStaticKey,
     )
 
     /**
@@ -136,11 +152,12 @@ class InsecureStorageTest {
             deviceName = "pixel-8",
             userVerification = true,
         )
-        responder.join()
+        joinOrFail(responder, "the desktop half of the pairing never finished")
         return Paired(
             machine = MachineStore.record(identity, offer, answer, box, nowMs),
             deviceSecret = secret,
             token = tokenBytes,
+            desktop = desktop,
         )
     }
 
@@ -151,18 +168,18 @@ class InsecureStorageTest {
      * its own, so the test really does hold two distinct strings that were
      * session plaintext on this machine at the moment the directory is walked.
      */
-    private fun talkOverASession(machine: PairedMachine, identity: StaticKey) {
-        val desktopSecret = InMemoryStaticKey.generate()
+    private fun talkOverASession(paired: Paired, identity: StaticKey) {
+        // The key the store pinned at pairing, not a fresh one. That makes the
+        // session go through `Device.checkKey(machine.desktopKey)` — the path
+        // the app really uses — instead of past it.
+        val desktopSecret = paired.desktop
+        val machine = paired.machine
         val toDesktop = PipedOutputStream()
         val desktopReads = PipedInputStream(toDesktop, 1 shl 16)
         val toDevice = PipedOutputStream()
         val deviceReads = PipedInputStream(toDevice, 1 shl 16)
 
-        // The machine record pins a desktop key from pairing; this session is a
-        // fresh pair of halves, so the session's desktop key is the one used
-        // here. That is a property of the test harness and not of the protocol:
-        // what matters for the scan is that real transport bytes were produced.
-        val desktopPublic = desktopSecret.publicKey
+        val desktopPublic = Device.checkKey(machine.desktopKey)
         val responder = Thread {
             assertEquals(Transport.HELLO_SESSION.toInt(), desktopReads.read())
             val handshake = Noise.sessionResponder(desktopSecret, REMOTE_PROTOCOL_VERSION)
@@ -189,7 +206,22 @@ class InsecureStorageTest {
         session.send(Frame.Data(1u, typedByTheUser))
         val back = session.receive()
         check(back is Frame.Data && back.bytes.contentEquals(printedByTheMachine))
-        responder.join()
+        joinOrFail(responder, "the desktop half of the session never finished")
+    }
+
+    /**
+     * Wait for the far half, and say so when it does not come back.
+     *
+     * A responder blocked on a read it will never satisfy is the shape every
+     * failure in this file takes, and `Thread.join()` with no argument turns
+     * that into a suite that never returns.
+     */
+    private fun joinOrFail(thread: Thread, what: String) {
+        thread.join(20_000)
+        if (thread.isAlive) {
+            thread.interrupt()
+            throw AssertionError("$what — it is still blocked after twenty seconds")
+        }
     }
 
     /** Every file under [directory], with its bytes. */
@@ -209,7 +241,7 @@ class InsecureStorageTest {
         // identity for a session. Everything the app does with a key, done.
         val reloaded = storage.load()
         val identity = reloaded.identityFor(reloaded.find(paired.machine.deviceId)!!, box)
-        talkOverASession(paired.machine, identity)
+        talkOverASession(paired, identity)
 
         // A second write, because a preference change is a write and the
         // criterion is about what is on disk at any moment, not only after the

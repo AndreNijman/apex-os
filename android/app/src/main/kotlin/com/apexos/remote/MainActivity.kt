@@ -32,6 +32,11 @@ class MainActivity : FragmentActivity() {
                 activity = this,
                 deviceName = defaultDeviceName(),
                 launchPayload = payload,
+                // Cleared once a screen has it. Otherwise locking and
+                // unlocking again would navigate back to a code that has since
+                // expired, and the user would be looking at a failure they did
+                // nothing to cause.
+                onPayloadConsumed = { payload = null },
             )
         }
     }
