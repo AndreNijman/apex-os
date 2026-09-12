@@ -261,11 +261,28 @@ cmd_hotspot() {
             unreadable) msg "cannot read the ruleset; reading it needs root"
                         msg "  try: sudo apex firewall hotspot list" ;;
             loaded)
+                # Flattened first, and the quotes taken off. nft prints a set's
+                # elements quoted, and wraps them one per line as soon as there
+                # is more than one:
+                #
+                #     elements = { "apexhost",
+                #                  "apexhost2" }
+                #
+                # A line-at-a-time `s/.*elements = { \(.*\) }.*/\1/` matches
+                # neither line, so with two shared links it came back EMPTY and
+                # this printed "not sharing this machine's connection on any
+                # link" while both were open — a firewall tool reporting a shut
+                # link as the answer for an open one. With one link it matched
+                # and printed the name with nft's quotes still on it. Measured
+                # in a namespace against the real `nft list set`, not guessed
+                # at; tests/test-device-services-netns.sh keeps it measured.
                 local out
                 out="$(nft list set $TABLE "$HOTSPOT_SET" 2>/dev/null |
-                       sed -n 's/.*elements = { \(.*\) }.*/\1/p' | tr -d ' ')"
+                       tr '\n\t' '  ' |
+                       sed -n 's/.*elements = {\([^}]*\)}.*/\1/p' |
+                       tr -d '"' | tr -s ' ' | sed 's/^ *//; s/ *$//; s/ *, */, /g')"
                 if [ -n "$out" ]; then
-                    msg "sharing this machine's connection on: ${out//,/, }"
+                    msg "sharing this machine's connection on: $out"
                     msg "  DHCP and DNS are open on those links only"
                 else
                     msg "not sharing this machine's connection on any link"
