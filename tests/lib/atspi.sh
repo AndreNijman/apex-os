@@ -222,19 +222,27 @@ EOF
     export AT_SPI_BUS_ADDRESS="$ATSPI_BUS"
 
     # ── the flag a screen reader sets ───────────────────────────────────────
-    # Toolkit bridges are gated on org.a11y.Status.IsEnabled: GTK and Qt both
-    # publish nothing while it is false, which is the production default. A
-    # screen reader turns it on when it starts; so does this. Deliberately NOT
-    # done with QT_LINUX_ACCESSIBILITY_ALWAYS_ON — that variable forces the Qt
-    # bridge past the very gate that decides whether real users get a tree, so a
-    # suite that set it would pass on an image where accessibility is off.
-    gdbus call --session -d org.a11y.Bus -o /org/a11y/bus \
-        -m org.freedesktop.DBus.Properties.Set org.a11y.Status IsEnabled "<true>" \
-        >/dev/null 2>&1
-    gdbus call --session -d org.a11y.Bus -o /org/a11y/bus \
-        -m org.freedesktop.DBus.Properties.Set org.a11y.Status ScreenReaderEnabled "<true>" \
-        >/dev/null 2>&1
-
+    # Set because a screen reader sets it, and because a bridge that DOES gate
+    # on it must find it true. What it is not is this harness's guarantee that a
+    # tree appears -- that was measured rather than assumed, and the result is
+    # worth writing down because it is the opposite of the obvious one:
+    #
+    #   * org.a11y.Status.IsEnabled cannot be pushed false here at all. Setting
+    #     it to <false> and reading it straight back returns <true>;
+    #     at-spi-bus-launcher reports the bus as enabled once anything is using
+    #     it. So it is not usable as a test lever in either direction.
+    #   * Qt 6.10.3 publishes whenever it can REACH an a11y bus, with IsEnabled
+    #     true or false and with AT_SPI_BUS_ADDRESS exported or not. All four
+    #     combinations register.
+    #
+    # The gate that actually decides is therefore reachability: an application
+    # with no D-Bus session bus cannot resolve org.a11y.Bus and publishes
+    # nothing at all. That is not a hypothetical -- it is the shipped greeter's
+    # situation, and tests/test-apex-greet-session-bus.sh is about exactly it.
+    #
+    # QT_LINUX_ACCESSIBILITY_ALWAYS_ON is still deliberately NOT set. It forces
+    # the bridge past every check including reachability, which would make this
+    # harness pass on an image where accessibility genuinely cannot work.
     # ── the registry ────────────────────────────────────────────────────────
     "$ATSPI_REGISTRYD" >"$ATSPI_W/registry.out" 2>"$ATSPI_W/registry.err" &
     ATSPI_REGISTRY_PID=$!
