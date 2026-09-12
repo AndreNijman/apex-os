@@ -2,8 +2,10 @@ package com.apexos.remote.ui.agent
 
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.net.Uri
 import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -91,6 +93,18 @@ fun SessionScreen(
     onRefresh: () -> Unit,
     /** Type a line into the session without attaching a terminal. */
     onReply: (String) -> Unit,
+    /**
+     * Hand a picked photo, screenshot or file to the session (P1-059).
+     *
+     * A `Uri` and not a path: `PickVisualMedia` and `OpenDocument` return one
+     * this app may read and nothing else, which is the whole of the fourth
+     * criterion — asking for `READ_MEDIA_IMAGES` instead would buy the entire
+     * library for the life of the grant and buy nothing the picker has not
+     * already given.
+     */
+    onSendFile: (Uri) -> Unit,
+    /** Something that worked and still has to be said; see AgentUiState.notice. */
+    notice: String? = null,
     onBack: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -159,7 +173,7 @@ fun SessionScreen(
                 onStop = onStop,
             )
 
-            ReplyBox(session, machine, liveSessions, onReply)
+            ReplyBox(session, machine, liveSessions, onReply, onSendFile, notice)
 
             Section("Where it is running")
             Field("Directory", session.cwd)
@@ -455,6 +469,8 @@ private fun ReplyBox(
     machine: String,
     liveSessions: List<AgentSession>,
     onReply: (String) -> Unit,
+    onSendFile: (Uri) -> Unit,
+    notice: String?,
 ) {
     if (!session.live || !session.needsYou || session.paused) return
     var text by remember(session.id) { mutableStateOf("") }
@@ -494,6 +510,22 @@ private fun ReplyBox(
             }
         }
     }
+
+    // Android-mediated selections, and nothing else. Neither of these needs a
+    // permission: the picker returns a URI for the one item that was chosen,
+    // and `Handoff.Files.FORBIDDEN_PERMISSIONS` plus `ManifestTest` are what
+    // stop somebody reaching for `READ_MEDIA_IMAGES` the next time a file is
+    // hard to read. Two launchers rather than one because the photo picker is
+    // a better thing for a photo — it shows the camera roll — and
+    // `OpenDocument` is the honest answer for everything else.
+    val photos = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri -> if (uri != null) onSendFile(uri) }
+    val documents = rememberLauncherForActivityResult(
+        // An empty list would mean "nothing", not "anything". `*/*` is the
+        // wildcard a document provider understands.
+        ActivityResultContracts.OpenDocument(),
+    ) { uri -> if (uri != null) onSendFile(uri) }
 
     Section("Reply")
     Text(
@@ -639,6 +671,23 @@ private fun ReplyBox(
         ) { Text("Paste") }
     }
 
+    Spacer(Modifier.height(12.dp))
+    Row(modifier = Modifier.padding(horizontal = 16.dp)) {
+        OutlinedButton(
+            onClick = {
+                photos.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
+                )
+            },
+            shape = RoundedCornerShape(6.dp),
+        ) { Text("Photo") }
+        Spacer(Modifier.width(8.dp))
+        OutlinedButton(
+            onClick = { documents.launch(arrayOf("*/*")) },
+            shape = RoundedCornerShape(6.dp),
+        ) { Text("File") }
+    }
+
     Spacer(Modifier.height(8.dp))
     Text(
         Handoff.Files.WHERE,
@@ -646,6 +695,17 @@ private fun ReplyBox(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(horizontal = 16.dp),
     )
+    // Where the file landed, which is also the text the agent was given. Shown
+    // in the ordinary colour and not as an error: it is the thing the person
+    // will refer to when they type the rest of their sentence.
+    if (!notice.isNullOrBlank()) {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            notice,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
+    }
     Spacer(Modifier.height(8.dp))
 }
 
