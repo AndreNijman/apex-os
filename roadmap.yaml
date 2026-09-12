@@ -1568,7 +1568,7 @@ tasks:
 - id: P1-014
   title: Cloudflare environment protection policies
   priority: P1
-  status: todo
+  status: done
   area: cloudflare-deploy
   depends_on:
   - P1-013
@@ -1579,10 +1579,37 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Cloudflare environment protection policies, landed from task/p1-014-cf-environments (a67eb704 the feature,
+    4d987517 the race-test rewrite), merged to roadmap/v2.2 as 514d46a3. Recorded now rather than then because the
+    agent that built it was killed by a session limit before it could run this script; the work was already on the
+    tip. PREVIEW/STAGING CAN BE UNATTENDED: UNATTENDED_BY_DEFAULT, and it is the whole list — everything else is
+    protected whatever it is called, so prod, live and production-eu get no free pass by being spelled
+    differently. The environment comes from binding::Worker's own field, not from parsing a name. PRODUCTION
+    APPROVAL IS DEFAULT: a one-shot owner approval, a new store table, a protocol verb and an Approved/Withdrawn
+    pair of audit events distinct from Granted — a grant keeps standing, an approval is spent by the next matching
+    operation and expires on its own, and a trail that spelled both 'granted' would make 'the owner allows this'
+    and 'the owner allowed this once' the same sentence. Consumed inside use_capability AFTER the pin and the
+    creates check and BEFORE the value is read: refusing for a host mismatch after spending the one approval they
+    gave would make the owner give another. Spent on commit, not on success — refunding a failed perform would let
+    an agent retry until something worked, and they approved one deployment rather than one successful deployment.
+    Guarded by a mutex because apex-secretd serves one thread per connection and an approval is single-use. OWNER
+    MAY EXPLICITLY ENABLE UNATTENDED PRODUCTION: unattended = true under [cloudflare.<env>], a compatible
+    extension since unknown keys there were ignored. Gated operations are the ones that change what a protected
+    worker SERVES — worker.deploy, worker.rollback, wrangler.deploy — and deliberately NOT worker.upload-version,
+    because section 13.7 puts the upload before the approval point and gating it would force approval at step one
+    of a five-step flow. approval_policy gains two distinct words: approval-required on the refusal, owner when
+    one is spent. Bound gains approval: Approval, which closes half of the 'Bound carries no provider payload'
+    framework gap generally rather than for Cloudflare. NOT DONE, with the reason: apex cf status does not print
+    which environments are unattended by RULE, only the key as the file states it — the rule lives in the provider
+    inside the daemon and the CLI cannot reach it, and a second copy of the list in the CLI crate would be two
+    lists that drift. The fix, if wanted, is a daemon verb that answers 'what does this project bind', not a
+    copied constant. 2821 -> 2848 passed, 0 failed. Eight mutations, each biting a named test; the list is in
+    4d987517's message. Clippy --all-targets clean.
 - id: P1-015
   title: Cloudflare worktree preview environments
   priority: P1
-  status: todo
+  status: partial
   area: cloudflare-preview
   depends_on:
   - P1-013
@@ -1593,6 +1620,29 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Worktree preview environments, landed from task/p1-014-cf-environments (7f4475dd), merged to roadmap/v2.2 as
+    514d46a3. Recorded now rather than then because the agent that built it was killed by a session limit first.
+    All three acceptance criteria are met; this is marked partial rather than done because two of section 13.13's
+    five named resources cannot be reached by anything in this build, and that is a fact about the vocabulary
+    rather than about effort. WORKTREE CAN OWN PREVIEW WORKER/HOSTNAME/RESOURCES: met, and ownership is derived
+    from the AUDIT TRAIL rather than from a manifest, so it cannot drift from what actually happened — the same
+    argument the budget work later reused. Request::Audit gained an optional project, filtered BEFORE the line
+    limit (the trail is one file for the machine, so a caller filtering the last thousand lines itself would see a
+    thousand from elsewhere and conclude the worktree had done nothing) and matched exactly, never as a prefix,
+    since a worktree lives under its project and a prefix match would sweep in another worktree's preview. DESTROY
+    PLAN SHOWN BEFORE CLEANUP: apex cf preview plan, and destroy prints the plan and does nothing without --yes.
+    WORKTREE REMOVAL CAN CLEAN EPHEMERAL RESOURCES: apex project remove <name> --destroy-preview, which destroys
+    BEFORE removing the checkout and leaves the worktree in place on any failure. THE TWO GAPS, both also in the
+    code's own docs: (1) section 13.13's D1 preview database and KV preview namespace are UNREACHABLE — nothing in
+    the 32 operations creates or deletes a D1 database or a KV namespace, and a worktree cannot own what nothing
+    here can make. That is a vocabulary expansion and its own task: six operations, plus the binding question of
+    how an id that does not exist yet gets into apex.toml. (2) R2 buckets, Secrets Store secrets and Access
+    service tokens are creatable and NOT deletable; the plan names them as not-destroyable with where to remove
+    them by hand, and deliberately does not call that 'clean'. Also: git worktree remove run by hand bypasses the
+    cleanup, and git has no hook that would let it not. 2848 -> 2857 passed, 0 failed. Eight mutations (M9-M16),
+    all biting named tests; M9 caught a test that could not fail — the noise came before the lines that mattered,
+    so a last-N window still held them — and it was fixed rather than softened. Clippy --all-targets clean.
 - id: P1-016
   title: Cloudflare cost guardrails
   priority: P1
@@ -1637,7 +1687,7 @@ tasks:
 - id: P1-017
   title: Cloudflare MCP through APEX broker
   priority: P1
-  status: todo
+  status: done
   area: mcp
   depends_on:
   - P1-001
@@ -1648,6 +1698,47 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Cloudflare MCP through the APEX broker, landed from task/p1-014-cf-guardrails (tip dbcdc21). MCP CALLS PASS
+    CAPABILITY POLICY: mcp.request goes through every step of use_capability's pipeline — the closed vocabulary,
+    the per-project grant (decide), section 13.14's budget and its in-flight reservation, which is new this round
+    rather than inherited, the endpoint pin, and the audit line. Measured end to end against the real daemon on a
+    real socket: a request without a grant never reaches the provider, a wildcard grant is accepted only for an
+    operation that reaches the same thing everywhere, and a per-operation cap on mcp.request refuses the call past
+    it. PROVIDER CREDENTIALS ARE NOT HANDED DIRECTLY TO THE MODEL — tested hostilely rather than by absence. Every
+    prior MCP test showed that nothing on APEX's side put the token where a session could reach it, which is a
+    test that nobody handed it over, not that nobody CAN. Section 13.12 is about the other direction: a remote MCP
+    server is somebody else's code and an MCP client's job is to show the model its reply. The fixture now echoes
+    the Authorization header it received into its JSON-RPC result, in both plain-JSON and event-stream framing,
+    and the test asserts three things — the server really received Bearer <sentinel>, the caller's output does not
+    contain it, and the redaction marker IS present, which is what stops a fixture that quietly stopped echoing
+    from passing. Two independent scrubs cover that path (broker's HTTP reader and the framework's scrub_all after
+    perform), so neither alone bites; removing both turns the test red. A second test smuggles a url and an
+    endpoint into the body — the one field a session controls, since mcp.request declares no resource and no
+    parameters — pointing at a second live server on loopback, and measures at both: the stored server got the
+    message with the fields intact and inert, the other was never contacted. A mutation that took the
+    destination's port out of the body DOES reach the other server, which records a real limit worth knowing: the
+    framework's pin compares scheme and host and NOT port, so what protects this path is that perform builds the
+    request from the stored record itself and never from bound.endpoint. THE GAP THIS ROUND CLOSED, and the reason
+    P1-017 was not already met: apex mcp list classified a remote server with no Authorization header as
+    Credential::None, agent_readable() false — so section 13.12's exact case, 'the MCP server supports OAuth',
+    read as the criterion being met. It is an absence inferred from a file that would not mention it either way: a
+    remote server either needs no credential or the AGENT authenticates to it, and a token the agent's own runtime
+    obtained is agent-readable by construction because the agent is what sends it. New variant
+    Credential::AgentAuthenticates, agent_readable() true, '"where": "agent"' in the JSON so a consumer can tell
+    'nothing to protect' from 'the model holds it', and the printed way out is apex mcp connect <name>. Stdio
+    keeps None. Connecting such a server now also reports that it replaced a credential, which it previously
+    denied. CHECKED, NOT ASSUMED: Cloudflare's remote MCP servers (mcp.cloudflare.com,
+    bindings.mcp.cloudflare.com, docs., observability. and a dozen more) accept a Cloudflare API token as
+    Authorization: Bearer — their own agents docs say so for CI and automation, user and account tokens both — so
+    apex mcp connect can route them. They are a DIFFERENT host from api.cloudflare.com and therefore need their
+    own stored credential with its own pin; the existing cloudflare credential cannot be reused. No hostname is
+    hardcoded anywhere: the rule is about remote servers and a list of Cloudflare's would go stale. NOT DONE,
+    deliberately: no live connect was run against a real Cloudflare MCP endpoint, because it would rewrite the
+    user's ~/.claude.json and spend the real token; the connect flow is driven against a temporary home instead.
+    Nine mutations (M13b, M13c, M14, M18, M19, M20, M21 and the budget ones that gate mcp.request), each biting a
+    named test. Workspace 2906 -> 2910 passed, 0 failed. Clippy --locked --workspace --all-targets -D warnings
+    clean.
 - id: P1-018
   title: MCP auth helper integration
   priority: P1
