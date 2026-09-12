@@ -103,9 +103,17 @@ the negative one — that the capsule cannot read the cookies of the browser you
 use — and it holds because of the masked home rather than because the capsule
 is careful. There is no code path that could copy them in.
 
-A cookie jar can be carried **out** like any other file, by nominating it. That
-is deliberate: a caller who wants the session the automation established has to
-name it, and it lands under the same no-clobber rule as everything else.
+**A cookie jar cannot be carried out either**, and that follows from the
+layout rather than from a rule somebody wrote. Cookies live in the profile,
+the profile is `.profile`, and a nomination may not start with a dot or carry
+a directory component — so there is no filename that names the cookie jar. A
+capsule's session ends with the capsule.
+
+That is the stronger position and it is the one this verb takes. Handing a
+session back to the host is the thing a persistent profile would be for, and
+persistence is listed under "what is not built" for the same reason: a cookie
+jar an automation accumulates and nothing expires is long-lived credential
+storage, which is what capability auth exists to replace.
 
 ### Downloads
 

@@ -411,6 +411,13 @@ Stated rather than left to be discovered:
   `codex` inside a disposable VM needs a guest image that carries it, and
   building that image is not part of this verb. What is built and proven is the
   boundary: the volumes, the nomination-only egress, and the teardown.
+* **There is no VM-tier browser capsule.** P2-012 wanted one and took the
+  container-less sandbox instead, for three reasons `docs/browser-capsule.md`
+  records: no guest image carries a browser either, `apex vm run` refuses
+  `--network` on purpose and a browser with no network is not a browser, and
+  the virt stack is deliberately not in the image. What that verb DID reuse is
+  the rule rather than the machinery — the nomination-only egress loop,
+  default-deny at both ends, and the four-way fence on the teardown.
 * **No live migration, no CPU pinning, no PCI/GPU passthrough.**
 * **virtiofsd's own namespace sandbox is not exercised by the lab**, only by a
   real machine. See the caveat above.
