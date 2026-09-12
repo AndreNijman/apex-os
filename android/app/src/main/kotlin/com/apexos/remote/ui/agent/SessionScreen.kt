@@ -641,7 +641,7 @@ private fun ReplyBox(
 
     Spacer(Modifier.height(8.dp))
     Text(
-        Handoff.Files.WHY,
+        Handoff.Files.WHERE,
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(horizontal = 16.dp),
