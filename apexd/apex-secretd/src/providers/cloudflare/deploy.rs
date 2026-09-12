@@ -96,8 +96,18 @@ pub fn current(
     else {
         return Current::CouldNotRun("the reply carried no list of deployments".to_string());
     };
-    // The most recent is the one serving. An empty list is a worker whose code
-    // exists and has never been put in front of anything.
+    // **The most recent is the one serving, and this build has not verified
+    // that cloudflare lists it first.** The schema says nothing about the
+    // order of `deployments`, there is no account here to ask, and it is the
+    // one assumption in this module that a single live request would settle.
+    // If the list came back oldest-first, a staged rollout would keep traffic
+    // on the ORIGINAL version and retire the one actually serving — the exact
+    // canary-ending failure the refusals below exist to prevent. It would be
+    // visible in the trail immediately: the wrong `version_id` in the second
+    // half of the split. Stated here rather than assumed silently.
+    //
+    // An empty list is a worker whose code exists and has never been put in
+    // front of anything.
     let Some(latest) = deployments.first() else {
         return Current::None;
     };

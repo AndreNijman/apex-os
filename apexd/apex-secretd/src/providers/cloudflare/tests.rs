@@ -4840,3 +4840,65 @@ fn a_staged_rollout_and_a_full_deployment_do_not_read_the_same_in_the_trail() {
         "the two runs are indistinguishable in the trail"
     );
 }
+
+/// "Short-lived/scoped credentials used where provider supports them" means
+/// *every* operation that has a narrow form, not the handful a test happened
+/// to pick.
+///
+/// This is the only thing that exercises `secret.bind`'s two-group policy —
+/// the one row in [`super::temporary::POLICY`] that needs more than one
+/// permission group, and therefore the only one where a build that looked up
+/// just the first slot would still look correct.
+///
+/// Mutation: take only `wanted[0]` in `temporary::group_ids`. Red.
+#[test]
+fn every_operation_with_a_narrow_form_actually_gets_one() {
+    let f = Fixture::new("sweep-mint", Mode::Minting, &granted_everything());
+    with_files(&f);
+
+    let mut narrowed = 0;
+    for (operation, resource, options, _) in every_operation() {
+        let policy = super::temporary::policy_for(operation).expect("every operation has a row");
+        let super::temporary::Narrowest::Token { groups, .. } = policy else {
+            continue;
+        };
+        // The fixture's account deliberately does not offer this one, so it is
+        // the could-not-run row rather than a narrowed one.
+        if operation == "cloudflare.hyperdrive.read" {
+            continue;
+        }
+        let before = f.fake.minting().len();
+        let mut rec = f.record(operation, resource);
+        for (name, value) in &options {
+            rec = rec.param(name, value);
+        }
+        let reply = f.use_it(rec);
+        assert!(reply.as_error().is_none(), "{operation} was refused: {reply:?}");
+
+        let exchange = &f.fake.minting()[before..];
+        assert_eq!(
+            exchange.len(),
+            3,
+            "{operation} did not ask for, spend and give back a short-lived \
+             credential: {exchange:#?}"
+        );
+        let creation = exchange
+            .iter()
+            .find(|s| s.method == "POST")
+            .unwrap_or_else(|| panic!("{operation} created no token"));
+        let body: serde_json::Value =
+            serde_json::from_str(&creation.body).expect("the creation body is json");
+        assert_eq!(
+            body["policies"][0]["permission_groups"]
+                .as_array()
+                .expect("groups")
+                .len(),
+            groups.len(),
+            "{operation} asked for a token carrying the wrong number of \
+             permission groups: {body}"
+        );
+        narrowed += 1;
+    }
+    // A sweep that swept nothing would pass.
+    assert!(narrowed >= 20, "only {narrowed} operations were measured");
+}

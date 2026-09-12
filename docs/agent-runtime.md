@@ -1719,8 +1719,39 @@ which is also what `git push` uses there, through the `gh auth git-credential`
 helper your `~/.gitconfig` already names.
 
 Scoped-credential *issuance* — asking a provider for a narrower token per task —
-is §13.4: the `mint` call exists on the provider trait and no shipped provider
-implements it, so the service uses the credential it was given.
+is §13.4, and Cloudflare does it. Before an operation runs, the broker spends
+the stored token on two requests — which permission groups does this account
+have, and please issue a token with exactly one of them at exactly one scope —
+and then performs the operation with the token that came back, which expires in
+five minutes and is deleted the moment the operation returns. The agent does
+not hold either one.
+
+Asking does not always work, and the trail says which of four things happened:
+the credential was narrowed, there is nothing narrower to narrow it to, the
+account refused to issue one, or the attempt did not run. The last three carry
+on with the stored credential, because §13.4 says *prefer* — Cloudflare requires
+Super Administrator on an account to create a token, so "refused" is an ordinary
+answer rather than an alarming one. A project that will not accept that says so
+in its own `apex.toml`:
+
+```toml
+[cloudflare]
+temporary_credentials = "require"   # or "prefer", the default, or "off"
+```
+
+and then an operation that cannot be given a narrow credential is refused
+rather than carried out with the broad one.
+
+§13.4 also asks for the *tool* rather than the API where a tool can do the job,
+and that is what a managed session's `wrangler` and `terraform` are. Four
+subcommands — `wrangler deploy`, `wrangler versions upload`, `terraform plan`,
+`terraform apply` — are run by `apex-secretd` with the credential in the child's
+environment and an argv APEX writes. A skill goes on typing `wrangler deploy`;
+the shim on the session's own `PATH` routes it. Anything else — `wrangler
+--version`, `terraform fmt` — execs the real tool unchanged and unauthenticated,
+which is the truth: the agent has no credential. There is deliberately no "run
+wrangler with my arguments" capability, because a grant to that is a grant to
+everything wrangler can do.
 
 `http` is accepted only for a loopback host, where the credential does not cross
 a network. It exists so the credential path can be tested end to end against a
