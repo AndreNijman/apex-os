@@ -327,6 +327,112 @@ Item {
         }
     }
 
+    // ── Keyboard layout ───────────────────────────────────────────
+    //
+    // Three files in this repository already carry the same note — the keymap
+    // generator, sway-greet.conf and labwc-greet/environment: on a QWERTZ or
+    // AZERTY machine a password typed on a US map does not match, and a user
+    // who has just installed APEX cannot get in. All three fixed which layout
+    // the greeter STARTS on. None of them tells the user what that layout is,
+    // and none lets them change it, so a wrong one still presents as an
+    // ordinary "wrong password" with no way to diagnose it from the login
+    // screen. This is the readout and the switch.
+    //
+    // Read from sway, not from the environment. XKB_DEFAULT_LAYOUT is what the
+    // host was ASKED for; sway's input report is what it actually resolved, and
+    // that is what the keystrokes will follow.
+    //
+    // sway is the greeter's host (greetd-config.toml). Under the documented
+    // labwc fallback there is no such IPC, swaymsg fails, and the fallback
+    // Process below leaves an indicator with no switch — the honest state
+    // there, rather than a control that does nothing.
+    property var    layouts:    []
+    property string layoutName: "us"
+
+    readonly property bool canSwitchLayout: ctx.layouts.length > 1
+
+    function cycleLayout(dir) {
+        if (!ctx.canSwitchLayout) return
+        layoutSwitchProc.command = ["sh", "-c",
+            "swaymsg input type:keyboard xkb_switch_layout " +
+            (dir < 0 ? "prev" : "next") + " >/dev/null 2>&1 || true"]
+        layoutSwitchProc.running = true
+    }
+
+    // Parses the one `active<TAB>name,name,…` line LAYOUT_SCRIPT emits.
+    // Separated from the Process so tests can drive it directly, the way
+    // _addSession is driven by the session-list suite.
+    function _setLayouts(line) {
+        var parts = String(line).split("\t")
+        if (parts.length < 2) return
+        var active = parts[0].trim()
+        var all    = parts[1].split(",")
+        var clean  = []
+        for (var i = 0; i < all.length; i++) {
+            var v = all[i].trim()
+            if (v !== "" && clean.indexOf(v) < 0) clean.push(v)
+        }
+        if (clean.length === 0) return
+        ctx.layouts    = clean
+        ctx.layoutName = (active !== "") ? active : clean[0]
+    }
+
+    // The extraction is deliberately grep/sed only — no jq, no python. The
+    // greeter runs as the `greetd` system user before any session exists, and
+    // an absent interpreter would leave the indicator silently stuck on its
+    // default, which is the exact failure this feature exists to end.
+    //
+    // Newlines are squashed first so the array survives as one token: sway
+    // renders xkb_layout_names as ["English (US)", "French"], and anything that
+    // splits on commas keeps only the first entry — which reads as a
+    // single-layout machine and hides the switch on precisely the machines that
+    // need it.
+    readonly property string layoutScript:
+        "j=$(swaymsg -t get_inputs -r 2>/dev/null | tr -d '\\n');" +
+        " [ -n \"$j\" ] || exit 0;" +
+        " a=$(printf '%s' \"$j\" | grep -o '\"xkb_active_layout_name\"[[:space:]]*:[[:space:]]*\"[^\"]*\"'" +
+        "      | head -n1 | sed 's/.*:[[:space:]]*\"//; s/\"$//');" +
+        " n=$(printf '%s' \"$j\" | grep -o '\"xkb_layout_names\"[[:space:]]*:[[:space:]]*\\[[^]]*\\]'" +
+        "      | head -n1 | sed 's/.*\\[//; s/\\]//; s/\"//g; s/[[:space:]]*,[[:space:]]*/,/g;" +
+        "                    s/^[[:space:]]*//; s/[[:space:]]*$//');" +
+        " [ -n \"$n\" ] || exit 0;" +
+        " printf '%s\\t%s\\n' \"$a\" \"$n\""
+
+    Process {
+        id: layoutSwitchProc
+        running: false
+        // Re-read rather than assume the switch landed: sway refuses
+        // xkb_switch_layout on a keyboard with one configured layout, and an
+        // indicator that advanced its own index would then be lying.
+        onExited: function(exitCode, exitStatus) { layoutReadProc.running = true }
+    }
+
+    Process {
+        id: layoutReadProc
+        running: true
+        command: ["sh", "-c", ctx.layoutScript]
+        stdout: SplitParser {
+            onRead: function(line) { ctx._setLayouts(line) }
+        }
+    }
+
+    // Fallback for the labwc host, and for any sway that answers nothing: the
+    // layout the session was ASKED to come up on. Better a readout that is
+    // right by default than a hardcoded "us" that lies on an AZERTY machine.
+    // It defers to sway whenever sway has answered.
+    Process {
+        running: true
+        command: ["sh", "-c", "printf '%s\\n' \"${XKB_DEFAULT_LAYOUT:-}\""]
+        stdout: SplitParser {
+            onRead: function(line) {
+                var v = line.trim()
+                if (v === "" || ctx.layouts.length > 0) return
+                ctx.layouts    = v.split(",")
+                ctx.layoutName = ctx.layouts[0]
+            }
+        }
+    }
+
     // ── Session list from /usr/share/wayland-sessions/*.desktop ───
     //
     // TryExec is honoured, per the desktop-entry spec: an entry whose TryExec
