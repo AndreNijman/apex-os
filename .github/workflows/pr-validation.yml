@@ -102,7 +102,14 @@ jobs:
           # A PR touching only one of those files would otherwise set
           # engine=true, rust=false, skip the job, and pass: a skipped job counts
           # as success. Fourth instance of this bug in this file.
-          grep -Eq '^(apexd/|config/|tests/|files/desktop/(fish|nushell|shell)/|files/system/libexec/apex-mux)' <<<"$files" && rust=true
+          # docs/ and README.md are in the RUST selector, and only because the
+          # job that checks them is the one with a toolchain: check-doc-verbs.sh
+          # asks the built `apex` binary what it can do, in both directions. A
+          # docs-only PR — deleting the line that documents `apex remote pair`,
+          # say — set every selector false, skipped the job, and passed, which
+          # is exactly the change that checker exists to catch. Fifth instance
+          # of this bug in this file; the four above it are the same shape.
+          grep -Eq '^(apexd/|config/|docs/|README\.md|tests/|files/desktop/(fish|nushell|shell)/|files/system/libexec/apex-mux)' <<<"$files" && rust=true
           grep -Eq '^installer/' <<<"$files" && installer=true
           # files/** is the whole runtime payload of the image — the package
           # engine, session launchers, guards. A PR touching only that used to
