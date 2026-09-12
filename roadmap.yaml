@@ -2957,7 +2957,7 @@ tasks:
 - id: P1-054
   title: Android Agent Center parity
   priority: P1
-  status: done
+  status: partial
   area: android
   depends_on:
   - P1-053
@@ -2972,46 +2972,48 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Android Agent Center parity. LANDED-READY on apex-os task/p1-053a-android-4 (six commits plus a merge of
-    roadmap/v2.2; head 31e819dc). Verified headless, NO device and NO emulator: 295 core JVM tests, 10 app JVM
-    tests, a 43 MB debug APK, via ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug with
-    JAVA_HOME=/usr/lib/jvm/java-21-openjdk ANDROID_HOME=/var/tmp/android-sdk. MET: the list and detail screens
-    show agent graph, provider/model, project/worktree/branch, the flattened policy, current activity, context
-    gauge, elapsed time and status; pause/resume/interrupt/stop are the daemon's own signals
-    (SIGSTOP/SIGCONT/SIGINT/SIGTERM, spelled out on screen, since there is no pause verb); attach opens a real
-    PTY; reconnect is PtyAttachment's. COLOURS MATCH THE DESKTOP AND A TEST SAYS SO IN BOTH HALVES:
-    AgentStateAgreementTest parses vendored agentstate.js for state->token and the new ToneColoursTest parses a
-    vendored Colors.qml for token->colour, both verbatim from apex-shell 6e74101, and tools/check-agent-state.sh
-    diffs both against a live checkout (it did: identical, branch roadmap/v2.2). Three desktop semantics carried
-    rather than invented: live is exit_code==null && exit_signal==null and NOT !isTerminal(state) — state is
-    whatever was last PUBLISHED, including by the agent through the open Event verb, so sorting on it would let an
-    agent hold the top of the list for ever; a finished session's elapsed clock stops at its last activity,
-    because a session that failed an hour ago did not take an hour; darkSurface is luminance(background)<0.18 read
-    off the surface rather than a theme flag, which matters because Material You can hand a dark theme a pale
-    surface. NOT MET, and the gap is the runtime's: 'start with profile/project/worktree' is PARTIAL. apex-agent-
-    core's Request has NO profile verb (profile.rs is unreachable through it), NO projects verb and NO worktrees
-    verb — read out of the enum, not remembered. Round 3 had built {"cmd":"worktrees"} and a parser for the
-    answer; nothing could have parsed it and the phone would have shown an error where it offered a picker.
-    Removed, with the test kept and inverted so it cannot come back. What is offered instead: the adapter from
-    Hello.agents, a directory derived from what the daemon has already reported, and a worktree NAME
-    (RunRequest.worktree does exist), and the screen says why on screen rather than implying a picker. P1-056 must
-    start from this constraint. ALSO NOT VERIFIED: every Compose behaviour (assembleDebug is the only gate a
-    machine with no phone has); no relay leg, so LAN only; the CI android job has still never run, though its path
-    classifier was RUN against this branch's own diff (android=true rust=true, the rust selection being over-
-    selection from android/core/src/test/resources/ which the workflow's own comment block justifies leaving
-    alone). A DEFECT THIS ROUND ALSO FOUND, recorded here because it hit both items: every socket write was on the
-    MAIN THREAD — Android's StrictMode.enableDeathOnNetwork() is on for every app targeting API 11 or later, so a
-    signal button and the first keystroke would each have killed the process, and locking the app closed sockets
-    on the UI thread. Found by reading rather than by any gate. Fixed: the terminal's io goes to a single-thread
-    executor and the view model's closes go to Dispatchers.IO. Mutation-checked: 8 mutations on the Agent Center
-    model each turn a NAMED test red (live from published state, a finished clock that keeps running, a sort
-    without live-first, a zero gauge for a session that never reported, an orphan dropped with both safety nets
-    removed, the cycle net alone removed, every request retried including signals, a stop during connect ignored);
-    every file restored byte-identical with plain cp.
+    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 4ae4cf22. PARTIAL, corrected from done: this item's own
+    evidence names an unmet criterion (no profile/projects/worktrees verb on the socket), and done was overstated.
+    Android Agent Center parity. Six commits on task/p1-053a-android-4 plus a merge of roadmap/v2.2. Verified
+    headless, NO device and NO emulator: 295 core JVM tests, 10 app JVM tests, a 43 MB debug APK, via ./gradlew
+    :core:test :app:testDebugUnitTest :app:assembleDebug with JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+    ANDROID_HOME=/var/tmp/android-sdk. MET: the list and detail screens show agent graph, provider/model,
+    project/worktree/branch, the flattened policy, current activity, context gauge, elapsed time and status;
+    pause/resume/interrupt/stop are the daemon's own signals (SIGSTOP/SIGCONT/SIGINT/SIGTERM, spelled out on
+    screen, since there is no pause verb); attach opens a real PTY; reconnect is PtyAttachment's. COLOURS MATCH
+    THE DESKTOP AND A TEST SAYS SO IN BOTH HALVES: AgentStateAgreementTest parses vendored agentstate.js for
+    state->token and the new ToneColoursTest parses a vendored Colors.qml for token->colour, both verbatim from
+    apex-shell 6e74101, and tools/check-agent-state.sh diffs both against a live checkout (it did: identical,
+    branch roadmap/v2.2). Three desktop semantics carried rather than invented: live is exit_code==null &&
+    exit_signal==null and NOT !isTerminal(state) — state is whatever was last PUBLISHED, including by the agent
+    through the open Event verb, so sorting on it would let an agent hold the top of the list for ever; a finished
+    session's elapsed clock stops at its last activity, because a session that failed an hour ago did not take an
+    hour; darkSurface is luminance(background)<0.18 read off the surface rather than a theme flag, which matters
+    because Material You can hand a dark theme a pale surface. NOT MET, and the gap is the runtime's: 'start with
+    profile/project/worktree' is PARTIAL. apex-agent- core's Request has NO profile verb (profile.rs is
+    unreachable through it), NO projects verb and NO worktrees verb — read out of the enum, not remembered. Round
+    3 had built {"cmd":"worktrees"} and a parser for the answer; nothing could have parsed it and the phone would
+    have shown an error where it offered a picker. Removed, with the test kept and inverted so it cannot come
+    back. What is offered instead: the adapter from Hello.agents, a directory derived from what the daemon has
+    already reported, and a worktree NAME (RunRequest.worktree does exist), and the screen says why on screen
+    rather than implying a picker. P1-056 must start from this constraint. ALSO NOT VERIFIED: every Compose
+    behaviour (assembleDebug is the only gate a machine with no phone has); no relay leg, so LAN only; the CI
+    android job has still never run, though its path classifier was RUN against this branch's own diff
+    (android=true rust=true, the rust selection being over- selection from android/core/src/test/resources/ which
+    the workflow's own comment block justifies leaving alone). A DEFECT THIS ROUND ALSO FOUND, recorded here
+    because it hit both items: every socket write was on the MAIN THREAD — Android's
+    StrictMode.enableDeathOnNetwork() is on for every app targeting API 11 or later, so a signal button and the
+    first keystroke would each have killed the process, and locking the app closed sockets on the UI thread. Found
+    by reading rather than by any gate. Fixed: the terminal's io goes to a single-thread executor and the view
+    model's closes go to Dispatchers.IO. Mutation-checked: 8 mutations on the Agent Center model each turn a NAMED
+    test red (live from published state, a finished clock that keeps running, a sort without live-first, a zero
+    gauge for a session that never reported, an orphan dropped with both safety nets removed, the cycle net alone
+    removed, every request retried including signals, a stop during connect ignored); every file restored byte-
+    identical with plain cp.
 - id: P1-055
   title: Android full PTY/TUI remote terminal
   priority: P1
-  status: done
+  status: partial
   area: android
   depends_on:
   - P1-053
@@ -3026,56 +3028,58 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Android full PTY/TUI remote terminal. LANDED-READY on apex-os task/p1-053a-android-4 (six commits plus a merge
-    of roadmap/v2.2; head 31e819dc). Verified headless, NO device and NO emulator: 295 core JVM tests, 10 app JVM
-    tests, a 43 MB debug APK, via ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug with
-    JAVA_HOME=/usr/lib/jvm/java-21-openjdk ANDROID_HOME=/var/tmp/android-sdk. MET: real PTY output with ANSI
-    16/256/truecolor and attributes — term/Palette.kt fills the hole Colour.resolveCube documents and leaves, and
-    render() is the whole SGR decision (bold brightens, inverse swaps AFTER resolution so an inverted default cell
-    swaps the theme's two defaults rather than two nulls, dim blends towards what is actually behind the ink,
-    hidden wins over everything). Text input plus Ctrl/Esc/Tab/arrows/function keys through onPreviewKeyEvent,
-    with modifiers that ARM rather than send (there is no chord on a touchscreen) and a hidden permanently-EMPTY
-    text field — empty because an IME with text in it tries to EDIT that text, and the consequence is that
-    backspace then arrives only as a key event, so a build handling only onValueChange ships a terminal you cannot
-    correct a typo in. A CONFIGURABLE accessory row stored on MachineStore and never in a preferences file,
-    because a second write path into app storage is one InsecureStorageTest's walk never looks at. Scrollback,
-    search, selection and copy/paste in term/Viewport.kt, with every position held as dropped+index rather than an
-    absolute index, because Screen evicts and a viewport remembering 'line 300' would creep through the output at
-    the rate the scrollback overflows. Orientation through one onSizeChanged that a rotation, a keyboard and a
-    split-screen resize all reach. THE LAST CRITERION IS TESTED HOSTILELY, NOT ASSERTED: a reconnect test that
-    passes because the connection was politely closed has proved nothing. A phone does not get a FIN — it goes
-    into a lift, and soTimeout is deliberately zero after the handshake, so the socket sits in read for hours
-    while every layer above sees exactly what an idle terminal looks like. FrameChannel.lastFrameNanos tells them
-    apart (the desktop pings every 15s and pings are consumed inside the channel, so the question is 'has any
-    FRAME arrived' and it can only be answered below the multiplexer); the watchdog closes after three missed
-    pings, and answers null for a transport that cannot report liveness so the attachment emits
-    WatchdogUnavailable rather than arming over nothing — a watchdog watching nothing being the exact failure it
-    exists to prevent. LowBandwidthTest: a 17-byte-per-frame trickle paints the same screen as an unthrottled link
-    with the throttle ASSERTED to have applied (130 frames where an unthrottled link uses 1); one byte per frame
-    still answers ESC[6n and ESC[c; a silent machine is abandoned and re-attached; a PINGED silent machine is left
-    alone; a link that trickles AND drops recovers the identical screen. THREE DEFECTS FOUND. (1) PtyAttachment
-    SILENTLY DROPPED the terminal's answers to a replay's opening frames: the listener read the field meaning
-    'attached', which the attaching thread sets after openChannel returns, while apex-agentd starts replaying the
-    instant it answers — so a TUI's ESC[6n was computed and thrown away and the TUI waited for ever, a remote
-    terminal that hangs with nothing in any log, against three of the four TUIs this criterion names. It raced,
-    passing on an idle machine and failing as a 20s timeout only under the full suite. Its regression test FORCES
-    the ordering (the channel holds the attaching thread inside send(Open)); twenty-five attachments went on
-    passing against the reverted defect on a quiet box. (2) SIX OF THE SIXTEEN ANSI COLOURS were the same hex as
-    their normal twin — Catppuccin's own mapping, deliberate there — so the app rendered TEN distinct colours
-    where the criterion says sixteen and git's 31 and 91 would have looked identical. Found because deleting the
-    bold-brightening rule changed nothing any test could see. (3) EVERY SOCKET WRITE WAS ON THE MAIN THREAD:
-    Android installs StrictMode.enableDeathOnNetwork() for every app targeting API 11 or later, not a flag and not
-    relaxed by a debug build, so the FIRST KEYSTROKE would have thrown NetworkOnMainThreadException and killed the
-    process; a rotation reached Mux.request, a blocking round trip with a 15s deadline, an ANR even without the
-    throw. 'Supports normal text input' was FALSE on the target platform while every gate this project has was
-    green. Found by READING, because nothing here can find it — no JVM test reaches a Compose callback and
-    assembleDebug compiles code it never runs. Fixed with a single-thread executor (single because keystrokes must
-    stay ordered; a pool delivers ls as sl). Also fixed: start() guarded on thread.isAlive, and a FINISHED thread
-    is also not alive, so a second start threw IllegalThreadStateException; stop() during connect() had nothing to
-    close, so a screen left while connecting attached anyway; the renderer allocated a Cell and an Ink per cell
-    per frame. NOT MET: 'works with Claude/OpenCode/Codex/Gemini TUIs' is THREE OF FOUR — there is still no gemini
-    fixture, because gemini is not installed on this machine. NOT VERIFIED: every Compose behaviour, assembleDebug
-    being the only gate a machine with no phone has, and the IME path in particular (composition and suggestion
+    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 4ae4cf22. PARTIAL, corrected from done: this item's own
+    evidence names an unmet criterion (three of four TUIs; no gemini fixture), and done was overstated. Android
+    full PTY/TUI remote terminal. Six commits on task/p1-053a-android-4 plus a merge of roadmap/v2.2. Verified
+    headless, NO device and NO emulator: 295 core JVM tests, 10 app JVM tests, a 43 MB debug APK, via ./gradlew
+    :core:test :app:testDebugUnitTest :app:assembleDebug with JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+    ANDROID_HOME=/var/tmp/android-sdk. MET: real PTY output with ANSI 16/256/truecolor and attributes —
+    term/Palette.kt fills the hole Colour.resolveCube documents and leaves, and render() is the whole SGR decision
+    (bold brightens, inverse swaps AFTER resolution so an inverted default cell swaps the theme's two defaults
+    rather than two nulls, dim blends towards what is actually behind the ink, hidden wins over everything). Text
+    input plus Ctrl/Esc/Tab/arrows/function keys through onPreviewKeyEvent, with modifiers that ARM rather than
+    send (there is no chord on a touchscreen) and a hidden permanently-EMPTY text field — empty because an IME
+    with text in it tries to EDIT that text, and the consequence is that backspace then arrives only as a key
+    event, so a build handling only onValueChange ships a terminal you cannot correct a typo in. A CONFIGURABLE
+    accessory row stored on MachineStore and never in a preferences file, because a second write path into app
+    storage is one InsecureStorageTest's walk never looks at. Scrollback, search, selection and copy/paste in
+    term/Viewport.kt, with every position held as dropped+index rather than an absolute index, because Screen
+    evicts and a viewport remembering 'line 300' would creep through the output at the rate the scrollback
+    overflows. Orientation through one onSizeChanged that a rotation, a keyboard and a split-screen resize all
+    reach. THE LAST CRITERION IS TESTED HOSTILELY, NOT ASSERTED: a reconnect test that passes because the
+    connection was politely closed has proved nothing. A phone does not get a FIN — it goes into a lift, and
+    soTimeout is deliberately zero after the handshake, so the socket sits in read for hours while every layer
+    above sees exactly what an idle terminal looks like. FrameChannel.lastFrameNanos tells them apart (the desktop
+    pings every 15s and pings are consumed inside the channel, so the question is 'has any FRAME arrived' and it
+    can only be answered below the multiplexer); the watchdog closes after three missed pings, and answers null
+    for a transport that cannot report liveness so the attachment emits WatchdogUnavailable rather than arming
+    over nothing — a watchdog watching nothing being the exact failure it exists to prevent. LowBandwidthTest: a
+    17-byte-per-frame trickle paints the same screen as an unthrottled link with the throttle ASSERTED to have
+    applied (130 frames where an unthrottled link uses 1); one byte per frame still answers ESC[6n and ESC[c; a
+    silent machine is abandoned and re-attached; a PINGED silent machine is left alone; a link that trickles AND
+    drops recovers the identical screen. THREE DEFECTS FOUND. (1) PtyAttachment SILENTLY DROPPED the terminal's
+    answers to a replay's opening frames: the listener read the field meaning 'attached', which the attaching
+    thread sets after openChannel returns, while apex-agentd starts replaying the instant it answers — so a TUI's
+    ESC[6n was computed and thrown away and the TUI waited for ever, a remote terminal that hangs with nothing in
+    any log, against three of the four TUIs this criterion names. It raced, passing on an idle machine and failing
+    as a 20s timeout only under the full suite. Its regression test FORCES the ordering (the channel holds the
+    attaching thread inside send(Open)); twenty-five attachments went on passing against the reverted defect on a
+    quiet box. (2) SIX OF THE SIXTEEN ANSI COLOURS were the same hex as their normal twin — Catppuccin's own
+    mapping, deliberate there — so the app rendered TEN distinct colours where the criterion says sixteen and
+    git's 31 and 91 would have looked identical. Found because deleting the bold-brightening rule changed nothing
+    any test could see. (3) EVERY SOCKET WRITE WAS ON THE MAIN THREAD: Android installs
+    StrictMode.enableDeathOnNetwork() for every app targeting API 11 or later, not a flag and not relaxed by a
+    debug build, so the FIRST KEYSTROKE would have thrown NetworkOnMainThreadException and killed the process; a
+    rotation reached Mux.request, a blocking round trip with a 15s deadline, an ANR even without the throw.
+    'Supports normal text input' was FALSE on the target platform while every gate this project has was green.
+    Found by READING, because nothing here can find it — no JVM test reaches a Compose callback and assembleDebug
+    compiles code it never runs. Fixed with a single-thread executor (single because keystrokes must stay ordered;
+    a pool delivers ls as sl). Also fixed: start() guarded on thread.isAlive, and a FINISHED thread is also not
+    alive, so a second start threw IllegalThreadStateException; stop() during connect() had nothing to close, so a
+    screen left while connecting attached anyway; the renderer allocated a Cell and an Ink per cell per frame. NOT
+    MET: 'works with Claude/OpenCode/Codex/Gemini TUIs' is THREE OF FOUR — there is still no gemini fixture,
+    because gemini is not installed on this machine. NOT VERIFIED: every Compose behaviour, assembleDebug being
+    the only gate a machine with no phone has, and the IME path in particular (composition and suggestion
     behaviour against a permanently-empty field is reasoned from the API, not observed); no relay leg, so LAN
     only. Mutation-checked: 17 mutations across the terminal, viewport, palette, watchdog and fixtures each turn a
     NAMED test red; every file restored byte-identical with plain cp.
@@ -3187,6 +3191,7 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
+    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 5ba789a5, and on apex-shell roadmap/v2.2 as merge bdfb056.
     Both halves pushed: apex-os task/p1-061-app-permissions @16a37751, apex-shell @d1f5a6f. C1 DESIGN docs/app-
     permissions.md, measured on l16 not assumed: portal interface set is a property of the SESSION
     (Usb/Secret/RemoteDesktop absent under Hyprland's default=hyprland;gtk, present under niri's gtk;gnome); no
@@ -3278,58 +3283,58 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Lid-closed continuous operation. Round 2 on apex-os task/p1-063-lid-2, SIX commits pushed. tests/test-apex-
-    lid.sh 60/0, tests/test-apex-lid-live.sh 13 passed with one honest could-not-run, clippy --locked --workspace
-    --all-targets -D warnings clean. ROUND 1 SHIPPED A POLICY AND A DRIVER NOTHING EVER RAN: no unit, no
-    Containerfile stanza, so on a built image every criterion was unmet however green the suites were. apex-
-    lid.service now exists and is enabled. FIVE PRODUCT DEFECTS FOUND AND FIXED THIS ROUND, all mutation-proved,
-    every file restored byte-identical. (1) A DROPPED VPN WAS REPORTED AS ONE THAT HELD - read_vpn has no memory,
-    so a tunnel that went away answered None, identical to never having had one, and vpn_held scored the timeline
-    as an unordered set: Up Up None None printed 'the VPN held'. VpnState::Down was UNREACHABLE from the driver,
-    so criterion 2 COULD NOT FAIL. Fixed in the driver (note_vpn carries the tunnel name forward) and in vpn_held
-    (reads the timeline in order), with the converse guarded too - a tunnel brought up midway is not retroactively
-    a drop. Same function also returned the moment nmcli was unavailable, so sing-box, APEX's OWN shipped VPN and
-    a tun device NetworkManager never lists, was never asked about. (2) THE KEYBOARD BACKLIGHT WAS NEVER ZEROED -
-    kbd_backlights returned an already-re-rooted path that apply_sysfs re-rooted again; write_abs created the
-    whole tree and reported ok. Planning and describing were right; only the write was wrong. (3) A GUARD FIRING
-    ON THE FIRST POLL LEFT NO RECORD - GuardSuspend opens no keep-working period, so ended_by was written only if
-    one happened to exist. A laptop put away hot reaches its limit immediately, so the common case is the one with
-    no period: the owner reopens and is shown the PREVIOUS close with ended_by null. (4) THE UNIT DISABLED THE
-    FEATURE IT SHIPPED - ProtectHome=yes makes /run/user inaccessible AND EMPTY, and that is where the driver
-    finds every live session and every owner's home; measured with systemd-run, ls /run/user returned nothing
-    under it and '0 1000 1042' without. Zero sessions for ever, pin=auto never activates, the owner's
-    ~/.config/apex/lid.toml never read - the silent-pin defect 2aa9ed45 fixed in code, reintroduced by a unit
-    file. PrivateTmp=yes hid the worktrees the guards' checkpoint runs in (0 entries against 407). runuser could
-    not open a session at all without CAP_SYS_RESOURCE, bisected: CAP_AUDIT_WRITE, CAP_CHOWN, CAP_FOWNER and
-    CAP_SYS_ADMIN each fail alone. (5) EVERY '! grep' REFUSAL IN THE BUILD STANZA WAS INERT - bash does not apply
-    errexit to a pipeline inverted with '!', verified, so the KillMode, ProtectSystem=strict,
-    ProtectKernelTunables and static-HandleLidSwitch guards could never fail a build. All rewritten as if-grep-
-    then-FATAL-exit-1, and the suite now asserts no lid refusal is spelled '! grep'. NOTE FOR ANOTHER UNIT: the
-    pre-existing '! grep -q apex-remote' in the firewall stanza has the same defect, and check-containerfile-
-    assertions.sh does not catch this class. CRITERION 2 IS ASSERTED LIVE ON THE L16: a real WireGuard tunnel
-    (real keys, real handshake, two netns with the veth created INSIDE one so neither end ever exists in the root
-    namespace and NetworkManager cannot auto-create a saved profile) carried 47 of 47 pings with 0 percent loss
-    across a REAL SW_LID close, rx 500 to 6004 bytes DURING the closed window, peer still handshaken after; NM's
-    nine saved connections identical before and after. The lid event was real: uinput device tagged power-switch
-    by udev, logind said 'Watching system buttons on /dev/input/event21', logged 'Lid closed.' and 'Lid opened.',
-    flipped its own LidClosed property, and no suspend or sleep line appeared in the journal. WHAT IS NOT MET.
-    Criterion 1 lacks CAUSATION ONLY: the machine did not suspend, but THE L16 IS DOCKED (Docked=b true,
-    card1-DP-1 connected) and logind consults HandleLidSwitchDocked, default ignore, BEFORE any inhibitor - so the
-    lid would have done nothing with or without the lock. The live suite reports that as COULD-NOT-RUN rather than
-    banking a pass it did not earn; re-running with the external display unplugged closes it and is the single
-    outstanding assertion for this item. That finding is now surfaced in apex lid status, which says which of the
-    two is keeping the machine awake, with 'could not be established' as a third answer that is not 'yes'.
-    Criterion 3's 'draws measurably less' COULD NOT BE MEASURED HERE: measuring it means applying the real power-
-    down to Andre's live desktop - blanking his panel, blocking his bluetooth, stopping his timers - which the
-    standing rules forbid; the power-down and its exact restore are asserted over a fixture, and the two ways it
-    could kill a VPN with the machine awake are closed by name against the SHIPPED defaults with eleven forbidden
-    units active in the fixture so the assertion can actually fail. Criterion 4 is asserted as 'the driver does
-    nothing, so today's behaviour stands' and not by observing a real suspend, which is forbidden here. Criteria 5
-    and 6 are met. The apex-shell tile is still unwritten; status --json now carries everything it needs including
-    a logind object (docked, external_displays, block_inhibited, acts_on_lid), and apex lid pin needs no privilege
-    by design, so the tile is a read plus one exec with no polkit anywhere. Unrelated pre-existing flake recorded
-    on the card: provenance.rs's a_git_status_that_could_not_run test fails about one run in three in parallel and
-    never with --test-threads=1; provenance.rs is untouched by this branch.
+    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge ebce9b46. Lid-closed continuous operation. Round 2 on apex-
+    os task/p1-063-lid-2, SIX commits pushed. tests/test-apex- lid.sh 60/0, tests/test-apex-lid-live.sh 13 passed
+    with one honest could-not-run, clippy --locked --workspace --all-targets -D warnings clean. ROUND 1 SHIPPED A
+    POLICY AND A DRIVER NOTHING EVER RAN: no unit, no Containerfile stanza, so on a built image every criterion
+    was unmet however green the suites were. apex- lid.service now exists and is enabled. FIVE PRODUCT DEFECTS
+    FOUND AND FIXED THIS ROUND, all mutation-proved, every file restored byte-identical. (1) A DROPPED VPN WAS
+    REPORTED AS ONE THAT HELD - read_vpn has no memory, so a tunnel that went away answered None, identical to
+    never having had one, and vpn_held scored the timeline as an unordered set: Up Up None None printed 'the VPN
+    held'. VpnState::Down was UNREACHABLE from the driver, so criterion 2 COULD NOT FAIL. Fixed in the driver
+    (note_vpn carries the tunnel name forward) and in vpn_held (reads the timeline in order), with the converse
+    guarded too - a tunnel brought up midway is not retroactively a drop. Same function also returned the moment
+    nmcli was unavailable, so sing-box, APEX's OWN shipped VPN and a tun device NetworkManager never lists, was
+    never asked about. (2) THE KEYBOARD BACKLIGHT WAS NEVER ZEROED - kbd_backlights returned an already-re-rooted
+    path that apply_sysfs re-rooted again; write_abs created the whole tree and reported ok. Planning and
+    describing were right; only the write was wrong. (3) A GUARD FIRING ON THE FIRST POLL LEFT NO RECORD -
+    GuardSuspend opens no keep-working period, so ended_by was written only if one happened to exist. A laptop put
+    away hot reaches its limit immediately, so the common case is the one with no period: the owner reopens and is
+    shown the PREVIOUS close with ended_by null. (4) THE UNIT DISABLED THE FEATURE IT SHIPPED - ProtectHome=yes
+    makes /run/user inaccessible AND EMPTY, and that is where the driver finds every live session and every
+    owner's home; measured with systemd-run, ls /run/user returned nothing under it and '0 1000 1042' without.
+    Zero sessions for ever, pin=auto never activates, the owner's ~/.config/apex/lid.toml never read - the silent-
+    pin defect 2aa9ed45 fixed in code, reintroduced by a unit file. PrivateTmp=yes hid the worktrees the guards'
+    checkpoint runs in (0 entries against 407). runuser could not open a session at all without CAP_SYS_RESOURCE,
+    bisected: CAP_AUDIT_WRITE, CAP_CHOWN, CAP_FOWNER and CAP_SYS_ADMIN each fail alone. (5) EVERY '! grep' REFUSAL
+    IN THE BUILD STANZA WAS INERT - bash does not apply errexit to a pipeline inverted with '!', verified, so the
+    KillMode, ProtectSystem=strict, ProtectKernelTunables and static-HandleLidSwitch guards could never fail a
+    build. All rewritten as if-grep- then-FATAL-exit-1, and the suite now asserts no lid refusal is spelled '!
+    grep'. NOTE FOR ANOTHER UNIT: the pre-existing '! grep -q apex-remote' in the firewall stanza has the same
+    defect, and check-containerfile- assertions.sh does not catch this class. CRITERION 2 IS ASSERTED LIVE ON THE
+    L16: a real WireGuard tunnel (real keys, real handshake, two netns with the veth created INSIDE one so neither
+    end ever exists in the root namespace and NetworkManager cannot auto-create a saved profile) carried 47 of 47
+    pings with 0 percent loss across a REAL SW_LID close, rx 500 to 6004 bytes DURING the closed window, peer
+    still handshaken after; NM's nine saved connections identical before and after. The lid event was real: uinput
+    device tagged power-switch by udev, logind said 'Watching system buttons on /dev/input/event21', logged 'Lid
+    closed.' and 'Lid opened.', flipped its own LidClosed property, and no suspend or sleep line appeared in the
+    journal. WHAT IS NOT MET. Criterion 1 lacks CAUSATION ONLY: the machine did not suspend, but THE L16 IS DOCKED
+    (Docked=b true, card1-DP-1 connected) and logind consults HandleLidSwitchDocked, default ignore, BEFORE any
+    inhibitor - so the lid would have done nothing with or without the lock. The live suite reports that as COULD-
+    NOT-RUN rather than banking a pass it did not earn; re-running with the external display unplugged closes it
+    and is the single outstanding assertion for this item. That finding is now surfaced in apex lid status, which
+    says which of the two is keeping the machine awake, with 'could not be established' as a third answer that is
+    not 'yes'. Criterion 3's 'draws measurably less' COULD NOT BE MEASURED HERE: measuring it means applying the
+    real power- down to Andre's live desktop - blanking his panel, blocking his bluetooth, stopping his timers -
+    which the standing rules forbid; the power-down and its exact restore are asserted over a fixture, and the two
+    ways it could kill a VPN with the machine awake are closed by name against the SHIPPED defaults with eleven
+    forbidden units active in the fixture so the assertion can actually fail. Criterion 4 is asserted as 'the
+    driver does nothing, so today's behaviour stands' and not by observing a real suspend, which is forbidden
+    here. Criteria 5 and 6 are met. The apex-shell tile is still unwritten; status --json now carries everything
+    it needs including a logind object (docked, external_displays, block_inhibited, acts_on_lid), and apex lid pin
+    needs no privilege by design, so the tile is a read plus one exec with no polkit anywhere. Unrelated pre-
+    existing flake recorded on the card: provenance.rs's a_git_status_that_could_not_run test fails about one run
+    in three in parallel and never with --test-threads=1; provenance.rs is untouched by this branch.
 - id: P2-001
   title: Encrypted backup framework
   priority: P2
@@ -3585,36 +3590,36 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Live lab tests/vmlab/run-vmlab boots real guests through the shipped engine (files/system/libexec/apex-vm)
-    against a real virtqemud inside bootlab's container, as a NON-ROOT user so qemu:///session is genuinely the
-    per-user daemon (uid 0's session URI resolves to the system daemon's socket, so a root lab would have tested
-    the daemon apex-vm refuses to use). Final run on the L16, 6 verified / 1 could-not-run / 0 failed. create
-    verified (13 observations): libvirt defined and started it, the guest reached userspace with the command line
-    the UKI was SIGNED with, powered itself off, and rm left no domain and no directory. Secure Boot verified (8):
-    the same signed UKI boots against the APEX variable store reporting SecureBoot=1 SetupMode=0 from inside the
-    guest, is REFUSED by libvirt's own enrolled-keys store (Microsoft's db), and boots in SETUP MODE against a
-    key-free store - which is what shows the refusal was about keys rather than a broken image. TPM verified (5):
-    /sys/class/tpm/tpm0 with tpm_version_major=2 inside the guest, and absent under --no-tpm. snapshot verified
-    (10): a tally the guest keeps on its own ESP goes 1, snapshot, 2, revert, 2 - not 3 - and qemu-img snapshot -l
-    shows the snapshot in BOTH disk.qcow2 and nvram.qcow2, which is the disk-and-varstore-together claim. share
-    verified (16): two virtiofs devices, the guest mounts both tags, reads the host's file, its write appears ON
-    THE HOST, and the read-only share refuses it; virtiofsd is wrapped with --sandbox none because its default
-    namespace sandbox cannot nest inside the lab container's user namespace (measured three ways: namespace fails
-    MountProc EPERM also under seccomp=unconfined, chroot needs root, none works) and the wrapper logs the argv it
-    substituted into the run's bundle. USB passthrough is COULD-NOT-RUN and will be from any suite: it means
-    detaching a physical device from the machine running the tests. Verified live for USB instead: the refusal
-    when lsusb cannot be run at all, the same refusal from create --usb, the malformed-id refusal, and that no
-    hostdev reached the domain in any of them. After all seven flows: no domains, NO LIBVIRT NETWORKS, empty VM
-    root. Three defects the lab found and this branch fixed, each now also a unit test: the install line named no
-    swtpm-tools while libvirt runs swtpm_setup, so doctor said every flow is available on a machine where every
-    --tpm domain defines and then fails at start; the USB guard skipped itself when lsusb was absent, reporting a
-    question that could not be asked as the answer yes; and apex vm run deleted its own only diagnostic, now
-    --console-to. tests/test-apex-vm.sh 133 passed 0 failed (from 106), every new assertion shown to fail against
-    a mutated engine and the engine restored byte-identical. cargo test --locked workspace 0 failed; clippy
-    --locked --workspace --all-targets -D warnings clean; shellcheck -S warning -x clean. Branch task/p2-virt-2,
-    five commits, all pushed. PARTIAL rather than done because one of the six named flows was never demonstrated
-    end to end: making it done needs a manual run on a machine with a spare USB device somebody is willing to have
-    detached.
+    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 14650ca3. Live lab tests/vmlab/run-vmlab boots real guests
+    through the shipped engine (files/system/libexec/apex-vm) against a real virtqemud inside bootlab's container,
+    as a NON-ROOT user so qemu:///session is genuinely the per-user daemon (uid 0's session URI resolves to the
+    system daemon's socket, so a root lab would have tested the daemon apex-vm refuses to use). Final run on the
+    L16, 6 verified / 1 could-not-run / 0 failed. create verified (13 observations): libvirt defined and started
+    it, the guest reached userspace with the command line the UKI was SIGNED with, powered itself off, and rm left
+    no domain and no directory. Secure Boot verified (8): the same signed UKI boots against the APEX variable
+    store reporting SecureBoot=1 SetupMode=0 from inside the guest, is REFUSED by libvirt's own enrolled-keys
+    store (Microsoft's db), and boots in SETUP MODE against a key-free store - which is what shows the refusal was
+    about keys rather than a broken image. TPM verified (5): /sys/class/tpm/tpm0 with tpm_version_major=2 inside
+    the guest, and absent under --no-tpm. snapshot verified (10): a tally the guest keeps on its own ESP goes 1,
+    snapshot, 2, revert, 2 - not 3 - and qemu-img snapshot -l shows the snapshot in BOTH disk.qcow2 and
+    nvram.qcow2, which is the disk-and-varstore-together claim. share verified (16): two virtiofs devices, the
+    guest mounts both tags, reads the host's file, its write appears ON THE HOST, and the read-only share refuses
+    it; virtiofsd is wrapped with --sandbox none because its default namespace sandbox cannot nest inside the lab
+    container's user namespace (measured three ways: namespace fails MountProc EPERM also under
+    seccomp=unconfined, chroot needs root, none works) and the wrapper logs the argv it substituted into the run's
+    bundle. USB passthrough is COULD-NOT-RUN and will be from any suite: it means detaching a physical device from
+    the machine running the tests. Verified live for USB instead: the refusal when lsusb cannot be run at all, the
+    same refusal from create --usb, the malformed-id refusal, and that no hostdev reached the domain in any of
+    them. After all seven flows: no domains, NO LIBVIRT NETWORKS, empty VM root. Three defects the lab found and
+    this branch fixed, each now also a unit test: the install line named no swtpm-tools while libvirt runs
+    swtpm_setup, so doctor said every flow is available on a machine where every --tpm domain defines and then
+    fails at start; the USB guard skipped itself when lsusb was absent, reporting a question that could not be
+    asked as the answer yes; and apex vm run deleted its own only diagnostic, now --console-to. tests/test-apex-
+    vm.sh 133 passed 0 failed (from 106), every new assertion shown to fail against a mutated engine and the
+    engine restored byte-identical. cargo test --locked workspace 0 failed; clippy --locked --workspace --all-
+    targets -D warnings clean; shellcheck -S warning -x clean. Branch task/p2-virt-2, five commits, all pushed.
+    PARTIAL rather than done because one of the six named flows was never demonstrated end to end: making it done
+    needs a manual run on a machine with a spare USB device somebody is willing to have detached.
 - id: P2-009
   title: Disposable VM agent execution
   priority: P2
@@ -3628,27 +3633,28 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    apex vm run verified live by tests/vmlab/run-vmlab's egress flow on the L16, 16 observations, 0 failed. The
-    security half is what is proven, hostilely: the task writes report.json AND an unnominated leak.txt, the
-    guest's own task log (nominated, so it comes out through the boundary under test) shows leak.txt really was
-    created inside the VM, and it does not arrive on the host - a refusal rather than an absence. The falsifying
-    control is inside the flow: the engine is copied, its egress loop turned around to iterate the CONTENTS of the
-    volume instead of the nominations - the exact defect the shipped loop's comment says it exists not to have -
-    the same task is re-run, and the unnominated file DOES then leak. Two more properties proven from inside the
-    guest rather than from the XML the lab itself wrote: the copy-in volume refuses the guest's write (so a task
-    cannot rewrite its own task.sh), and the guest sees only lo. That last one is only meaningful because
-    virtio_net is in the lab guest's initramfs AND the create flow asserts the same guest sees eth0 on a --network
-    user VM - without that control, lo-only would have passed on a domain that had an interface, which is how the
-    first lab guest behaved. Default-deny confirmed both ways: without --egress-to nothing leaves however much is
-    nominated, and no destination is invented. Nothing survives teardown: no domain, no directory, no volumes. One
-    defect found and fixed: teardown deleted the VM directory including the serial log, so the documented outcome
-    for a guest that never mounted APEXIN - an empty egress and a timeout warning - came with no way to find out
-    why; --console-to FILE saves it, opt-in and validated like --egress-to, and it had to be added to
-    apexd/apex/src/vm.rs as well because that clap surface enumerates its flags and would have refused a flag the
-    engine and the docs both had. PARTIAL rather than done because no guest image carrying an agent CLI exists:
-    what is verified is the BOUNDARY - the read-only copy-in volume, nomination-only egress, no network, and
-    teardown - with an arbitrary command as the task. docs/virtualization.md states that building a guest that
-    carries claude or codex is separate work. Branch task/p2-virt-2.
+    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 14650ca3. apex vm run verified live by tests/vmlab/run-
+    vmlab's egress flow on the L16, 16 observations, 0 failed. The security half is what is proven, hostilely: the
+    task writes report.json AND an unnominated leak.txt, the guest's own task log (nominated, so it comes out
+    through the boundary under test) shows leak.txt really was created inside the VM, and it does not arrive on
+    the host - a refusal rather than an absence. The falsifying control is inside the flow: the engine is copied,
+    its egress loop turned around to iterate the CONTENTS of the volume instead of the nominations - the exact
+    defect the shipped loop's comment says it exists not to have - the same task is re-run, and the unnominated
+    file DOES then leak. Two more properties proven from inside the guest rather than from the XML the lab itself
+    wrote: the copy-in volume refuses the guest's write (so a task cannot rewrite its own task.sh), and the guest
+    sees only lo. That last one is only meaningful because virtio_net is in the lab guest's initramfs AND the
+    create flow asserts the same guest sees eth0 on a --network user VM - without that control, lo-only would have
+    passed on a domain that had an interface, which is how the first lab guest behaved. Default-deny confirmed
+    both ways: without --egress-to nothing leaves however much is nominated, and no destination is invented.
+    Nothing survives teardown: no domain, no directory, no volumes. One defect found and fixed: teardown deleted
+    the VM directory including the serial log, so the documented outcome for a guest that never mounted APEXIN -
+    an empty egress and a timeout warning - came with no way to find out why; --console-to FILE saves it, opt-in
+    and validated like --egress-to, and it had to be added to apexd/apex/src/vm.rs as well because that clap
+    surface enumerates its flags and would have refused a flag the engine and the docs both had. PARTIAL rather
+    than done because no guest image carrying an agent CLI exists: what is verified is the BOUNDARY - the read-
+    only copy-in volume, nomination-only egress, no network, and teardown - with an arbitrary command as the task.
+    docs/virtualization.md states that building a guest that carries claude or codex is separate work. Branch
+    task/p2-virt-2.
 - id: P2-010
   title: Hardware qualification database
   priority: P2
