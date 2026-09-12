@@ -91,11 +91,34 @@ data class PairedMachine(
         "PairedMachine(machine=$machine, deviceId=$deviceId, sealed=<${sealed.length} chars>)"
 }
 
+/**
+ * What the person holding the phone has chosen about how the app looks.
+ *
+ * On [MachineStore] rather than in a `SharedPreferences` file, and the reason
+ * is the leak test rather than tidiness. `AppStorage` is the only writer to app
+ * storage precisely so that `InsecureStorageTest` can walk the whole directory
+ * and account for every byte in it; a preferences file would be a second write
+ * path, and one the scan never looks at. A boolean is cheap to carry here.
+ */
+@Serializable
+data class Settings(
+    /**
+     * Material You instead of the APEX palette.
+     *
+     * Off by default. Dynamic colour is genuinely nicer on a phone whose owner
+     * has chosen a wallpaper, and it is by construction *not* APEX's colours —
+     * and this is the app that shows which machine is about to run something as
+     * root. So it is offered, and it is not what ships.
+     */
+    @SerialName("dynamic_colour") val dynamicColour: Boolean = false,
+)
+
 /** Every machine this device knows, and how to put one back together. */
 @Serializable
 data class MachineStore(
     val v: Int = VERSION,
     val machines: List<PairedMachine> = emptyList(),
+    val settings: Settings = Settings(),
 ) {
     fun with(machine: PairedMachine): MachineStore =
         copy(machines = machines.filterNot { it.deviceId == machine.deviceId } + machine)

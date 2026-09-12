@@ -110,29 +110,7 @@ class SecretStorageTest {
      * `java.util.Base64` reaches for; hex in both cases is what a debug helper
      * prints; and the raw-byte window catches an encoding nobody listed.
      */
-    private fun tracesOf(secret: ByteArray, bytes: ByteArray): List<String> {
-        val text = String(bytes, Charsets.UTF_8)
-        val found = mutableListOf<String>()
-        fun check(label: String, needle: String) {
-            if (needle.isNotEmpty() && text.contains(needle)) found += label
-        }
-        check("base64url", Base64Url.encode(secret))
-        check("base64url of the first half", Base64Url.encode(secret.copyOf(16)))
-        check("standard base64", Base64.getEncoder().encodeToString(secret))
-        check("standard base64 unpadded", Base64.getEncoder().withoutPadding().encodeToString(secret))
-        check("base64url via the JDK", Base64.getUrlEncoder().withoutPadding().encodeToString(secret))
-        check("lower-case hex", Vectors.encodeHex(secret))
-        check("upper-case hex", Vectors.encodeHex(secret).uppercase())
-        check("a JSON byte array", secret.joinToString(",") { (it.toInt() and 0xff).toString() })
-        // The catch-all: the raw 32 bytes anywhere in the file, in any framing.
-        for (i in 0..bytes.size - secret.size) {
-            if (bytes.copyOfRange(i, i + secret.size).contentEquals(secret)) {
-                found += "the raw bytes at offset $i"
-                break
-            }
-        }
-        return found
-    }
+    private fun tracesOf(secret: ByteArray, bytes: ByteArray): List<String> = Traces.of(secret, bytes)
 
     @Test
     fun theWrittenStoreContainsNoTraceOfThePrivateKey() {

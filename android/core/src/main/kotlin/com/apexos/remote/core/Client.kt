@@ -112,6 +112,16 @@ object Client {
                 "this machine does not accept this device: it is not paired, or it has been revoked",
                 e,
             )
+        } catch (e: java.net.SocketException) {
+            // The same refusal, arriving as a reset rather than as a clean
+            // close. Which of the two a phone sees depends on the network in
+            // between, not on what the desktop decided, so they must mean the
+            // same thing here — otherwise a revoked device reports "not paired"
+            // on Wi-Fi and "connection reset" on mobile data.
+            throw SessionRefused(
+                "this machine does not accept this device: it is not paired, or it has been revoked",
+                e,
+            )
         }
         return Session(machine, handshake.intoTransport(), input, output)
     }
@@ -134,8 +144,23 @@ class Session internal constructor(
     private val channel: NoiseChannel,
     private val input: InputStream,
     private val output: OutputStream,
-) {
+) : java.io.Closeable {
     private val writeLock = Any()
+    private val outstanding = java.util.concurrent.ConcurrentHashMap<Long, Long>()
+    private val nextToken = java.util.concurrent.atomic.AtomicLong(0)
+
+    /**
+     * The last measured round trip, in milliseconds, or `null` before the first
+     * [ping] comes back.
+     *
+     * P1-052 asks for the connection path and its quality to be visible at
+     * *both* ends. This is this end's half, and it is measured on a frame that
+     * crosses the same path as everything else — a ping to the relay's front
+     * door would report the health of a machine nobody is talking to.
+     */
+    @Volatile
+    var roundTripMs: Long? = null
+        private set
 
     /** Send one frame. Safe to call from several threads; serialised here. */
     fun send(frame: Frame) {
@@ -150,11 +175,114 @@ class Session internal constructor(
         for (frame in Frame.dataFrames(channelId, bytes)) send(frame)
     }
 
+    /** Measure the connection. The answer lands in [roundTripMs]. */
+    fun ping() {
+        val token = nextToken.incrementAndGet()
+        outstanding[token] = System.nanoTime()
+        send(Frame.Ping(token))
+    }
+
     /**
-     * Read one frame. One reader only: the receiving nonce is a counter too,
-     * and two readers would each advance it past the other's message.
+     * Read one frame, answering keepalives on the way.
+     *
+     * `apex-remoted` sends a `Ping` every fifteen seconds — it is the only
+     * traffic an idle session has, and an idle session with no traffic is one a
+     * NAT eventually forgets — and it measures the round trip from the `Pong`
+     * that comes back. A client that handed those frames to its caller would
+     * make every caller handle them, and a client that ignored them would leave
+     * the desktop reporting an unknown connection quality forever. So they are
+     * answered here and never surface: exactly what the desktop's own frame
+     * loop does with the mirror image of this.
+     *
+     * One reader only. The receiving nonce is a counter too, and two readers
+     * would each advance it past the other's message.
      */
-    fun receive(): Frame = Frame.decode(channel.open(Transport.readMessage(input)))
+    fun receive(): Frame {
+        while (true) {
+            val frame = readFrame()
+            when (frame) {
+                is Frame.Ping -> send(Frame.Pong(frame.token))
+                is Frame.Pong -> {
+                    // A token this end never sent is ignored rather than timed.
+                    // The desktop applies the same rule in the other direction
+                    // and for the same reason: a peer that echoed a number of
+                    // its own choosing could otherwise report any quality it
+                    // liked, including a good one for a connection that is
+                    // unusable.
+                    val sent = outstanding.remove(frame.token)
+                    if (sent != null) {
+                        roundTripMs = (System.nanoTime() - sent) / 1_000_000
+                    }
+                }
+                else -> return frame
+            }
+        }
+    }
+
+    /** One frame off the wire, keepalives and all. The only reader of [input]. */
+    private fun readFrame(): Frame = Frame.decode(channel.open(Transport.readMessage(input)))
+
+    /**
+     * Ping, and read until the answer comes back. Returns the round trip in
+     * milliseconds.
+     *
+     * Separate from [ping] because the two have different callers. [ping] is
+     * for a session with a frame loop already running: it posts the ping and
+     * the loop times the answer whenever it arrives. This is for a session that
+     * has nothing else to do yet — the moment after a connection opens, when
+     * the only question is whether frames actually cross this path, which a
+     * completed handshake does not answer.
+     *
+     * **Only before a channel is open.** Anything that is not a keepalive
+     * belongs to a caller, and this method has nowhere to put it, so it refuses
+     * rather than swallowing somebody's terminal. A silent peer is the
+     * transport's problem: whatever read deadline the stream carries is what
+     * ends the wait.
+     */
+    fun measureRoundTrip(): Long {
+        val token = nextToken.incrementAndGet()
+        val sentAt = System.nanoTime()
+        outstanding[token] = sentAt
+        send(Frame.Ping(token))
+        while (true) {
+            when (val frame = readFrame()) {
+                is Frame.Ping -> send(Frame.Pong(frame.token))
+                is Frame.Pong -> {
+                    // Somebody else's token, or one already answered. Ignored
+                    // for the same reason [receive] ignores it: a peer that
+                    // echoed a number of its own choosing must not be able to
+                    // report a quality it did not earn.
+                    if (frame.token == token) {
+                        outstanding.remove(token)
+                        return ((System.nanoTime() - sentAt) / 1_000_000).also { roundTripMs = it }
+                    }
+                }
+                else -> throw WireException(
+                    WireError.Malformed(
+                        "a $frame arrived while measuring the connection; measure before opening a channel",
+                    ),
+                )
+            }
+        }
+    }
+
+    /**
+     * Hang up.
+     *
+     * [Closeable] and not a bare method, so a caller can `use` a session and a
+     * screen that goes away cannot leave a socket open. Both streams are
+     * closed and failures are swallowed: the far end may already be gone, and
+     * a throw from a close is a throw that hides whatever ended the session.
+     *
+     * Closing does not invalidate the channel's keys, and nothing here tries to
+     * pretend otherwise — a Noise transport has no "closed" state. What it does
+     * is end the stream, after which [send] and [receive] fail. That is the
+     * only signal a caller needs.
+     */
+    override fun close() {
+        runCatching { output.close() }
+        runCatching { input.close() }
+    }
 }
 
 /**
