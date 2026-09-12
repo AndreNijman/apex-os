@@ -70,8 +70,8 @@ suite and a mutation pair.
 
 | sub-feature | state | assertion |
 | --- | --- | --- |
-| keyboard layout before password | **DONE — greeter and installer** | Greeter: `tests/test-apex-greet-a11y.sh` test_030-034 + `tests/test-apex-greet-layout.sh`. Installer (round 2): `installer/test-installer-keymap.sh` **35 assertions** and `installer/test-installer-locale.sh` **22**. The criterion itself is measured, not inferred — cage started with `XKB_DEFAULT_LAYOUT=de` hands a GTK4 client a keymap where the physical Y key gives `z`, Z gives `y`, `;` gives `ö`. The layout is applied to the RUNNING session by restarting the compositor, which is the only thing that can work (see the design fork). |
-| timezone choice | **DONE (installer)** | Engine: `test-installer-locale.sh` — an explicit timezone becomes `/etc/localtime`; an explicitly chosen UTC is **not** overruled by the pre-existing Perth fallback, while an absent choice still keeps it. GUI: a searchable picker on the keyboard page fed from tzdata's own `zone1970.tab` (312 zones), asserted at runtime by `test-installer-keymap.sh` §6 — the real page is driven, Continue is pressed, and the recorded zone must be one that exists on the system. **This row was briefly written as DONE while the GUI had no timezone widget at all** — the engine honoured a key nothing set, so the override path was unreachable from the installer. Caught in review; the fix was to add the picker rather than soften the claim. |
+| keyboard layout before password | **DONE — greeter and installer** | Greeter: `tests/test-apex-greet-a11y.sh` test_030-034 + `tests/test-apex-greet-layout.sh`. Installer (round 2): `installer/test-installer-keymap.sh` **42 assertions** and `installer/test-installer-locale.sh` **26**. The criterion itself is measured, not inferred — cage started with `XKB_DEFAULT_LAYOUT=de` hands a GTK4 client a keymap where the physical Y key gives `z`, Z gives `y`, `;` gives `ö`. The layout is applied to the RUNNING session by restarting the compositor, which is the only thing that can work (see the design fork). |
+| timezone choice | **DONE (installer)** | Engine: `test-installer-locale.sh` — an explicit timezone becomes `/etc/localtime`; an explicitly chosen UTC is **not** overruled by the pre-existing Perth fallback, while an absent choice still keeps it. GUI: a searchable picker on the keyboard page fed from tzdata's own `zone1970.tab` (312 zones), asserted at runtime by `test-installer-keymap.sh` §6 and §6b — the real page is driven, Continue is pressed, and the recorded zone must be one that exists on the system; §6b proves the pick also SURVIVES the compositor restart. **This row was twice written as DONE while a path through it did not work** — first while the GUI had no timezone widget at all — the engine honoured a key nothing set, so the override path was unreachable from the installer. and then while the pick was silently discarded by the compositor restart (a new process, empty `answers`, dropdown reset to the ISO default, and a resume note that tells the user to check the KEYBOARD so nobody looks again). Both caught in review; both fixed rather than softened. |
 | multiple layouts | **greeter DONE** | `test-apex-greet-layout.sh` "both configured layouts survive extraction" / "a three-layout machine reports all three in order". Nothing in the desktop shell switches layouts yet. |
 | IME / fcitx5 | present in image, untested | `Containerfile.core:1182-1189` installs fcitx5 + chinese-addons/hangul/anthy/m17n; autostarted in 3 places. `QT_IM_MODULE`/`GTK_IM_MODULE` deliberately unset (Wayland text-input-v3). No suite asserts any of it. |
 | CJK | fonts present, shell will tofu | `Containerfile.core:1319-1329` ships Noto CJK sans+serif. But apex-shell hardcodes `font.family: "JetBrains Mono"` at ~45 sites, which has no CJK coverage. |
@@ -128,6 +128,28 @@ Full script: `scratchpad/mutate-greet.sh`.
 | N6 | `CfgRow` stops announcing the readback | `test_013_description_carries_the_rows_prose_and_readback` |
 | N7 | a segmented pill's `Accessible.name` → `""` | `test_022_each_pill_names_its_option` |
 | N8 | `CfgRow` slot `enabled: !unavailable` → `true` | `test_045_a_disabled_control_ignores_the_keyboard` |
+
+### Round 2c — the CI finding and the resume path (5 pairs)
+
+| # | mutant | caught by |
+| --- | --- | --- |
+| K17 | engine stops recognising `Etc/UTC` | `a live environment on Etc/UTC is treated as unset` |
+| K18 | the Perth fallback becomes unconditional | `a live environment on a real zone is carried into the install` |
+| K19 | the suite's host redirect goes back to a blanket `sed` | `…while still WRITING its result into the deploy root` |
+| K20 | the GUI stops writing `timezone=` to the state file | `the GUI's state file carries the time zone` + the §6b round trip |
+| K21 | the restart loop guard is deleted | `pressing Continue on a resumed session moves ON to wifi` |
+
+**K18 is the one that matters most.** Recognising `Etc/UTC` is only half a fix;
+the other half is that a live environment which HAS already resolved a correct
+zone must keep it. Without K18's assertion the fix could have degenerated into
+"always Australia/Perth" and still passed every other check.
+
+**K20 first survived, and that was a real gap.** §6b resumed from a hand-seeded
+state file, so it measured the READ half only; the WRITE half lives in §5. Both
+passed separately and nothing joined them, so a feature that wrote one spelling
+and read another would have satisfied the suite. §6b now also resumes from the
+file the real GUI produced in §6 and requires the zone it reads back to be the
+zone it wrote.
 
 ### Round 2b — internationalisation (4 pairs, all CAUGHT)
 
@@ -463,8 +485,8 @@ render-context fix.
 - `installer/apex-install` — accepts `keymap`/`keyvariant`/`timezone`, prefers
   them over every inference, validates the layout against xkb's own `base.lst`
   before anything is erased.
-- `installer/test-installer-keymap.sh` — **35 assertions**.
-- `installer/test-installer-locale.sh` — **22 assertions**.
+- `installer/test-installer-keymap.sh` — **42 assertions**.
+- `installer/test-installer-locale.sh` — **26 assertions**.
 - `installer/test-installer.sh` — **44**, of which 11 engine cases had been dead
   since July and 2 GUI render rows are the new page.
 
@@ -528,8 +550,12 @@ than introducing them (the July-dead engine half, and the `/var/empty` build
 context). The engine cases now PASS on the ubuntu runner, which is the first time
 they have run anywhere but the ISO build box.
 
-**Red jobs that are not this branch's**, checked rather than assumed: `Rust
-validation` and `Package engine`. Against its true branch point
+**Red jobs that are not this branch's**, proven by evidence rather than by
+construction: run **34640150697**, at the predecessor's tip `69f59cb0` and
+before this branch touched `installer/` at all, already shows
+`Rust validation: failure`, `Package engine: failure` and
+`Installer safety and UI: **skipped**`. So both were red before, and the
+installer job genuinely had never run. Against its true branch point
 (`git merge-base` = `4f80746e`, not `origin/roadmap/v2.2`, which has moved ahead)
 this branch changes **15 files, +3337/−48, and not one `.rs` file, nothing under
 `apex-agentd/`, and no package engine**. The Rust failure is the known cgroup
