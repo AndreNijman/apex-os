@@ -576,6 +576,11 @@ main() {
     while (( $# )); do
         case "$1" in
             --flow) shift; FLOWS=("${1:?--flow needs a name}") ;;
+            # --out and --list mirror tests/vmlab/run-vmlab's, because CI reads
+            # a bundle the same way for both: run with --out, then walk --list
+            # and refuse any flow that FAILED or that gave no reason.
+            --out)  shift; OUT="${1:?--out needs a directory}" ;;
+            --list) printf '%s\n' "${FLOWS[@]}"; exit 0 ;;
             --keep) KEEP=1 ;;
             -h|--help) sed -n '1,80p' "${BASH_SOURCE[0]}"; exit 0 ;;
             *) die "unknown option '$1'" ;;

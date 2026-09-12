@@ -371,12 +371,17 @@ cmd_run() {
     local ba
     for ba in "${browser_args[@]}"; do
         case "$ba" in
-            --profile|-profile|-P|--profile-manager|-ProfileManager|--ProfileManager)
+            --profile|-profile|-P|--profile-manager|-ProfileManager|--ProfileManager|--profile=*|-profile=*|-P=*)
                 refuse "'$ba' cannot be passed to the capsule's browser.
   The capsule writes its own profile and deletes it afterwards; a second
   --profile on the command line would win over that one, and the capsule would
-  be using a directory it does not own and will not clean up." ;;
-            --display|-display|--display=*)
+  be using a directory it does not own and will not clean up.
+
+  The '=' spellings are here because Firefox accepts them. Measured, not
+  assumed: \`firefox --profile=DIR\` creates and uses a profile at DIR, so a
+  refusal that listed only the space-separated form could be walked around
+  with one character." ;;
+            --display|-display|--display=*|-display=*)
                 refuse "'$ba' cannot be passed to the capsule's browser.
   A capsule is headless because its /run is a tmpfs and there is no compositor
   socket in its namespace — naming a display would not produce a window, it
