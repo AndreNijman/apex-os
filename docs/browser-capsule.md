@@ -184,6 +184,21 @@ Two consequences, stated because they are limits rather than holes:
 * **A tunnel is opaque.** This is a destination policy: a capsule allowed to
   reach a host can send that host anything.
 
+## The browser talks to its vendor, and the allowlist is what stops it
+
+A capsule's profile turns off telemetry, the updater, remote settings, the
+region and geolocation services, the captive-portal and connectivity probes,
+safebrowsing and prefetch. That is hygiene, and it is not sufficient: with all
+of it applied, the lab's daemon still logs a capsule being denied
+`firefox.settings.services.mozilla.com` and `aus5.mozilla.org`.
+
+Which is the point worth taking away. **The allowlist is the boundary and the
+preferences are not.** A capsule reaches exactly the destinations it was
+allowed, whatever the browser decides it would like to contact, and the daemon
+writes down every refusal. The preferences exist so that a run's allowlist
+roughly describes what the capsule talks to, not because anything depends on
+them.
+
 ## Firefox keeps its own sandbox, and that needed a measurement
 
 Firefox confines its own content processes with a user namespace, which means

@@ -250,11 +250,16 @@ user_pref("extensions.getAddons.cache.enabled", false);
 // Vendor services the browser talks to on its own account. Measured, not
 // tidied away: with only the telemetry preferences above, the lab's daemon
 // logged a capsule being denied firefox.settings.services.mozilla.com,
-// aus5.mozilla.org and location.services.mozilla.com, repeatedly, while the
-// browser retried them for the rest of its run. The allowlist did its job —
-// none of it went anywhere — but a capsule whose allowlist does not describe
-// what it talks to is a capsule whose allowlist is doing work the profile
-// should have done, and the retries cost a run most of its wall clock.
+// aus5.mozilla.org and location.services.mozilla.com, repeatedly, for the
+// rest of its run. The allowlist did its job — none of it went anywhere —
+// but a capsule whose allowlist does not describe what it talks to is one
+// whose allowlist is doing work the profile should have done.
+//
+// AND THESE DO NOT FULLY STOP IT, which is stated here rather than left to be
+// rediscovered: with every preference below applied, the lab's daemon still
+// logs occasional denials for the settings and update services. What they buy
+// is fewer, not none. THE ALLOWLIST IS THE BOUNDARY; this list is hygiene in
+// front of it, and a capsule reaches only what it was allowed either way.
 user_pref("services.settings.server", "");
 user_pref("browser.region.network.url", "");
 user_pref("browser.region.update.enabled", false);
