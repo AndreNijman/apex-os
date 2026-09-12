@@ -504,27 +504,40 @@ Item {
             }
         }
 
-        // Status line — error message or caps-lock warning.
+        // Status line — error message, recovery notice, or caps-lock warning.
         //
         // Everything this line says, the surface ALSO says in a way no reader
         // can hear: a shake, a red border, a Nerd Font glyph. AlertMessage is
         // what makes a reader interrupt for it rather than wait to be asked,
         // and the accessible name drops the glyph — a reader given "󰪛" spells
-        // out a private-use codepoint or says nothing at all.
+        // out a private-use codepoint or says nothing at all. The recovery
+        // notice carries "󰀦" (nf-md-alert) on the same terms, out of the same
+        // Material Design range as the three glyphs already on this surface.
+        //
+        // Three tiers, in this order. The recovery notice (roadmap P2-018) sits
+        // above Caps Lock because it is the only thing on this screen that
+        // explains why the session picker moved by itself — a greeter that
+        // silently changed the selection would read as the machine having lost
+        // the user's preference, which is the failure the notice exists to
+        // prevent. It sits below the auth error because an error is about the
+        // keystroke the user just made. It goes with the preselection: cycling
+        // the picker clears both (GreetContext cycleSession).
         Text {
             id: statusLine
             objectName: "greetStatusLine"
             anchors.horizontalCenter: parent.horizontalCenter
             height:  18
             text: root.ctx.hasError ? root.ctx.errorText
-                : (root.capsOn ? "󰪛  Caps Lock is on" : "")
+                : (root.ctx.recoveryNotice !== "" ? "󰀦  " + root.ctx.recoveryNotice
+                : (root.capsOn ? "󰪛  Caps Lock is on" : ""))
             color: root.ctx.hasError ? root.theme.errorColor : root.theme.subtext
             font.family:    root.theme.fontFamily
             font.pixelSize: 14
 
             Accessible.role: Accessible.AlertMessage
             Accessible.name: root.ctx.hasError ? root.ctx.errorText
-                           : (root.capsOn ? "Caps Lock is on" : "")
+                           : (root.ctx.recoveryNotice !== "" ? root.ctx.recoveryNotice
+                           : (root.capsOn ? "Caps Lock is on" : ""))
         }
     }
 
