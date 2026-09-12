@@ -28,3 +28,9 @@ zeroize = "1"
 data-encoding = "2"
 # Ephemeral secrets and snapshot ids.
 getrandom = { version = "0.2", features = ["std"] }
+
+[dev-dependencies]
+# Fixtures live under /var/tmp, never /tmp: this project's suites are run on a
+# machine whose /tmp is a tmpfs sized for a desktop, and a backup fixture is
+# megabytes.
+tempfile = "3"
