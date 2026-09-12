@@ -1733,7 +1733,8 @@ jobs:
           # helpers do: these scripts run `mount`, `chmod 0000` and `rm` with
           # expansions, and an empty variable in one of those is a path on the
           # machine running it.
-          shellcheck -S warning -x tests/chaos/run-chaos tests/chaos/lib.sh
+          shellcheck -S warning -x tests/chaos/run-chaos tests/chaos/chaos-loop \
+            tests/chaos/lib.sh
           shellcheck -S warning -x tests/chaos/cases/*.sh
 
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────

@@ -137,6 +137,19 @@ chaos_have_mountns_tmpfs() {
 
 chaos_have_kvm() { [[ -r /dev/kvm && -w /dev/kvm ]]; }
 
+chaos_have_podman() { command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; }
+
+# The boot lab image, which is the only thing that can boot a guest under
+# Secure-Boot-enforcing OVMF here. Probed by asking podman whether the image
+# EXISTS, not by asking whether podman exists: an absent lab is the normal
+# state of a fresh checkout, and it must read as could-not-inject rather than
+# as anything about APEX.
+CHAOS_BOOTLAB_IMAGE="${CHAOS_BOOTLAB_IMAGE:-localhost/apex-bootlab}"
+chaos_have_bootlab() {
+    chaos_have_podman || return 1
+    podman image exists "$CHAOS_BOOTLAB_IMAGE" >/dev/null 2>&1
+}
+
 chaos_have_apex_bin() { [[ -x "${CHAOS_APEX_REAL:-}" ]]; }
 
 # chaos_prereq NAME — 0 if satisfied, 1 otherwise, and it prints the reason a
@@ -158,6 +171,13 @@ chaos_prereq() {
         kvm)
             chaos_have_kvm && return 0
             echo "/dev/kvm is absent or not writable"; return 1 ;;
+        podman)
+            chaos_have_podman && return 0
+            echo "podman is absent or cannot talk to its service"; return 1 ;;
+        bootlab)
+            chaos_have_bootlab && return 0
+            echo "the boot lab image '$CHAOS_BOOTLAB_IMAGE' is not built (podman build -t $CHAOS_BOOTLAB_IMAGE -f bootlab/Containerfile .)"
+            return 1 ;;
         *)
             echo "unknown prerequisite '$1' — the harness will not guess"; return 1 ;;
     esac
@@ -179,6 +199,8 @@ chaos_write_env() {
         printf 'netns: %s\n'    "$(chaos_have_netns && echo yes || echo no)"
         printf 'tmpfs-ns: %s\n' "$(chaos_have_mountns_tmpfs && echo yes || echo no)"
         printf 'kvm: %s\n'      "$(chaos_have_kvm && echo yes || echo no)"
+        printf 'podman: %s\n'   "$(chaos_have_podman && echo yes || echo no)"
+        printf 'bootlab: %s\n'  "$(chaos_have_bootlab && echo yes || echo no)"
         printf 'apex-bin: %s\n' "${CHAOS_APEX_REAL:-<unset>}"
         if chaos_have_apex_bin; then
             printf 'apex-version: %s\n' "$("$CHAOS_APEX_REAL" --version 2>&1 | head -1)"
