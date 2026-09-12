@@ -92,8 +92,7 @@ use std::process::Command;
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use apex_agent_core::mcpconf::{self, Approval, Wrap};
-use apex_agent_core::policy::ConnectorPolicy;
+use apex_agent_core::mcpconf::Wrap;
 
 use crate::digest::{self, Digest};
 use crate::mcp::servers;
@@ -891,24 +890,11 @@ pub fn build_at(home: &Path, store: &Path) -> Report {
 
     let found_servers = servers::discover(home, None);
     // What a session started through `apex agent` would be handed, for this
-    // `$HOME`, under the default connector policy. The same function
-    // `apex-agentd` calls in `install_mcp_config` and the same one
-    // `apex mcp planes` measures its table with, so the three cannot disagree
-    // about what confines a plugin's server.
-    //
-    // `AsConfigured`, so the allowlist is not consulted and `&[]` is not a
-    // statement about this machine's `connector_allow`; no cwd, so no
-    // repository definitions and no per-directory approvals to read. The
-    // wrapper is this binary — `None` would be a could-not-run and `curate`
-    // reports the servers unconfined and says why, rather than claiming a
-    // sandbox it could not build.
-    let launch = mcpconf::curate(
-        &mcpconf::read(home, None),
-        &Approval::default(),
-        ConnectorPolicy::AsConfigured,
-        &[],
-        std::env::current_exe().ok().as_deref(),
-    );
+    // `$HOME`. Through the one function `apex mcp list` and `apex mcp planes`
+    // also call, so no two readouts can disagree about what confines a
+    // plugin's server. No cwd, for the same reason `discover` is given none
+    // here: a repository's definitions are not a plugin's.
+    let launch = crate::connector::launch_verdicts(home, None);
 
     if let Some(doc) = installed
         .as_ref()

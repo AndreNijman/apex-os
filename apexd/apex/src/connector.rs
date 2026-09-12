@@ -447,6 +447,31 @@ impl Launch {
     }
 }
 
+/// The session launcher's verdicts for this `$HOME`, under the default policy.
+///
+/// The one place three readouts get their confinement answers from —
+/// `apex mcp list`, `apex mcp planes` and `apex provenance show` — so none of
+/// them can decide a plugin's server is sandboxed while another decides it is
+/// not. It is the same [`mcpconf::curate`] call `apex-agentd` makes in
+/// `install_mcp_config`, which is what makes these readouts about a real
+/// launch rather than about this file's opinion of one.
+///
+/// [`ConnectorPolicy::AsConfigured`], so `connector_allow` is not consulted;
+/// `&[]` is passed rather than this machine's real list precisely so nobody
+/// reads a selection into an answer that is only about wrapping. The wrapper is
+/// this binary — `None` would be a could-not-run, and `curate` reports the
+/// servers unconfined and says why rather than claiming a sandbox it could not
+/// build.
+pub fn launch_verdicts(home: &Path, cwd: Option<&Path>) -> Curated {
+    mcpconf::curate(
+        &mcpconf::read(home, cwd),
+        &mcpconf::approvals(home, cwd),
+        ConnectorPolicy::AsConfigured,
+        &[],
+        std::env::current_exe().ok().as_deref(),
+    )
+}
+
 /// The plane readout: every connector by plane, and what each policy removes.
 pub fn plane_report(found: &[Server], launch: &Launch) -> String {
     let mut out = String::new();
