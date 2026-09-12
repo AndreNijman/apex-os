@@ -442,6 +442,117 @@ impl std::fmt::Display for OriginPolicy {
     }
 }
 
+/// Dimension 7: which MCP connectors a session is given (P1-028).
+///
+/// The dimension that did not exist, and whose absence was the whole of
+/// P1-028's second remainder. Before it, the only way to reduce the cloud
+/// plane was `--sandbox strict` removing the session's network, which takes
+/// every cloud connector at once and cannot select one; and the only way to
+/// stop a single connector was to disable the whole plugin that defined it.
+///
+/// `Copy`, like the other six, and for [`AgentPolicy`]'s stated reason. So the
+/// **names** live in [`crate::config::Config::connector_allow`] rather than
+/// here — the same shape `NetworkPolicy::Allowlist` already uses for its
+/// destinations, and for the same reason: a list the confined thing gets to
+/// write is not a boundary, so it comes from the runtime's configuration and
+/// never from the request. [`AgentPolicy::validate_for`] refuses
+/// [`ConnectorPolicy::Curated`] with an empty list exactly as it refuses an
+/// allowlisted session with nothing on its allowlist.
+///
+/// This does not change what the sandbox enforces; it changes what the agent
+/// is handed. Enforcement is `--strict-mcp-config` plus a file the runtime
+/// wrote, and only for an adapter that has such a flag —
+/// [`crate::adapter::Adapter::strict_mcp`] says which, and
+/// [`crate::mcpconf`] builds the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorPolicy {
+    /// The default. Every connector this machine defines, exactly as it is
+    /// defined — which is what a session got before this dimension existed.
+    #[default]
+    AsConfigured,
+    /// The cloud plane removed: no endpoint off this machine, every program on
+    /// it kept. Not the same as `--sandbox strict`, which removes the network
+    /// and therefore the cloud plane as a consequence; this removes the
+    /// connectors and leaves the network alone.
+    LocalOnly,
+    /// Only the connectors the runtime's configuration names, by name. The
+    /// per-connector switch.
+    Curated,
+    /// No connectors at all.
+    NoConnectors,
+}
+
+impl ConnectorPolicy {
+    pub const ALL: &'static [ConnectorPolicy] = &[
+        ConnectorPolicy::AsConfigured,
+        ConnectorPolicy::LocalOnly,
+        ConnectorPolicy::Curated,
+        ConnectorPolicy::NoConnectors,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConnectorPolicy::AsConfigured => "as_configured",
+            ConnectorPolicy::LocalOnly => "local_only",
+            ConnectorPolicy::Curated => "curated",
+            ConnectorPolicy::NoConnectors => "none",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ConnectorPolicy> {
+        match s {
+            "as_configured" | "as-configured" | "all" => Some(ConnectorPolicy::AsConfigured),
+            "local_only" | "local-only" | "local" => Some(ConnectorPolicy::LocalOnly),
+            "curated" => Some(ConnectorPolicy::Curated),
+            "none" | "no_connectors" | "no-connectors" => Some(ConnectorPolicy::NoConnectors),
+            _ => None,
+        }
+    }
+
+    /// Whether this value removes anything at all.
+    ///
+    /// What decides whether a session needs a curated configuration written
+    /// for it when nothing else would have asked for one.
+    pub fn reduces(&self) -> bool {
+        !matches!(self, ConnectorPolicy::AsConfigured)
+    }
+
+    /// Whether a cloud endpoint can reach the session under this value alone.
+    ///
+    /// `Curated` is `true` here and that is deliberate: it *may* keep a cloud
+    /// connector, and which ones it keeps is a question about the names, not
+    /// about the dimension. A method that answered "no" would let a report
+    /// claim the cloud plane was gone when one endpoint was still on the list.
+    pub fn keeps_any_cloud(&self) -> bool {
+        matches!(
+            self,
+            ConnectorPolicy::AsConfigured | ConnectorPolicy::Curated
+        )
+    }
+
+    pub fn describe(&self) -> &'static str {
+        match self {
+            ConnectorPolicy::AsConfigured => {
+                "every connector this machine defines, as it is defined"
+            }
+            ConnectorPolicy::LocalOnly => {
+                "programs on this machine only — every cloud endpoint removed"
+            }
+            ConnectorPolicy::Curated => {
+                "only the connectors named in the runtime's configuration"
+            }
+            ConnectorPolicy::NoConnectors => "no connectors at all",
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectorPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
 /// Where a privileged or capability request came from (§7's `request_origin`).
 ///
 /// The vocabulary only. P0-013 attaches it to requests and records it in the
@@ -534,11 +645,16 @@ impl std::fmt::Display for RequestOrigin {
     }
 }
 
-/// The six dimensions of §3.1, as six independent fields.
+/// §3.1's dimensions, as independent fields. Six when the split landed; seven
+/// since P1-028 added the connector policy.
 ///
 /// `Copy`, because it is passed through the daemon, the protocol, the sandbox
 /// builder and the CLI, and a policy that has to be cloned invites a call site
-/// that mutates a copy and enforces the original.
+/// that mutates a copy and enforces the original. That is also why
+/// [`ConnectorPolicy`] names no connectors itself: a `Vec` here would end the
+/// `Copy`, so the names live in the runtime's configuration beside
+/// `network_allow`, which is where a list the confined thing must not write
+/// belongs anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AgentPolicy {
     /// Dimension 1. Set with `--native` / `--agent-bypass`.
@@ -560,6 +676,12 @@ pub struct AgentPolicy {
     /// Dimension 6. Set with `--origin-policy`.
     #[serde(default)]
     pub origin: OriginPolicy,
+    /// Dimension 7. Set with `--connectors`.
+    ///
+    /// `#[serde(default)]` like the rest, so a client that predates it sends
+    /// six keys and gets the value a session has always had.
+    #[serde(default)]
+    pub connectors: ConnectorPolicy,
 }
 
 impl AgentPolicy {
@@ -690,21 +812,30 @@ impl AgentPolicy {
     pub fn validate_for(
         &self,
         allowlist: &crate::destination::Allowlist,
+        connectors: &[String],
     ) -> Result<(), PolicyError> {
         self.validate()?;
         if self.effective_network() == NetworkPolicy::Allowlist && allowlist.is_empty() {
             return Err(PolicyError::AllowlistEmpty);
         }
+        // Exactly the allowlist rule, one dimension over: a curated session
+        // with nothing on its list is refused rather than started with
+        // everything removed. The two readings of an empty list — "no
+        // connectors" and "nobody has filled this in" — are not the same
+        // thing, and `--connectors none` already says the first one.
+        if self.connectors == ConnectorPolicy::Curated && connectors.is_empty() {
+            return Err(PolicyError::ConnectorListEmpty);
+        }
         Ok(())
     }
 
-    /// The six dimensions as label and value, in §3.1's order.
+    /// The dimensions as label and value, in §3.1's order.
     ///
     /// One place builds this, so `apex agent status`, the session listing and
     /// whatever the Agent Center grows cannot disagree about which dimensions
     /// exist or what they are called. `network` reports the effective value,
     /// which is what the session actually has.
-    pub fn dimensions(&self) -> [(&'static str, &'static str); 6] {
+    pub fn dimensions(&self) -> [(&'static str, &'static str); 7] {
         [
             ("native", self.native.as_str()),
             ("sandbox", self.sandbox.as_str()),
@@ -712,6 +843,7 @@ impl AgentPolicy {
             ("secrets", self.secrets.as_str()),
             ("network", self.effective_network().as_str()),
             ("origin", self.origin.as_str()),
+            ("connectors", self.connectors.as_str()),
         ]
     }
 }
@@ -729,6 +861,8 @@ pub enum PolicyError {
     BrokeredNetworkNeedsBroker,
     /// An allowlisted session with nothing on its allowlist.
     AllowlistEmpty,
+    /// A curated-connector session with nothing on its connector list.
+    ConnectorListEmpty,
     /// Break-glass inside a sandbox that would keep `no_new_privs` on anyway.
     BreakGlassCannotBeConfined(SandboxPolicy),
     /// Raw secret values in the session environment.
@@ -763,6 +897,13 @@ impl std::fmt::Display for PolicyError {
                 "`--network allowlist` with nothing on the allowlist is an offline session \
                  under another name; add a destination with `apex agent allow <host>`, or \
                  use `--network offline` if reaching nothing is what you meant"
+            ),
+            PolicyError::ConnectorListEmpty => write!(
+                f,
+                "`--connectors curated` with nothing on the connector list is a session with \
+                 no connectors under another name; name them in `connector_allow` in the \
+                 runtime's configuration, or use `--connectors none` if reaching none of \
+                 them is what you meant"
             ),
             PolicyError::BrokeredNetworkNeedsBroker => write!(
                 f,
@@ -846,11 +987,17 @@ impl PolicyPreset {
         }
     }
 
-    /// The six coordinates of this mode.
+    /// The coordinates of this mode, one per dimension.
     ///
     /// Written out per preset rather than built by mutating the one above it,
     /// so a change to one mode cannot silently move another and so each line
     /// can be read against §4.
+    ///
+    /// Every preset names `AsConfigured` for dimension 7, and that is a
+    /// statement rather than an omission: none of §4's named modes reduces the
+    /// connector set, because every one of them is a *widening* of the default.
+    /// A preset that quietly curated connectors would be `--unrestricted`
+    /// taking something away.
     pub fn policy(&self) -> AgentPolicy {
         match self {
             PolicyPreset::Default => AgentPolicy::default(),
@@ -861,6 +1008,7 @@ impl PolicyPreset {
                 secrets: SecretPolicy::Brokered,
                 network: NetworkPolicy::Open,
                 origin: OriginPolicy::LocalElevationOnly,
+                connectors: ConnectorPolicy::AsConfigured,
             },
             PolicyPreset::Unrestricted => AgentPolicy {
                 native: NativeMode::Inherit,
@@ -869,6 +1017,7 @@ impl PolicyPreset {
                 secrets: SecretPolicy::Brokered,
                 network: NetworkPolicy::Open,
                 origin: OriginPolicy::LocalElevationOnly,
+                connectors: ConnectorPolicy::AsConfigured,
             },
             PolicyPreset::UnsafeSystemAccess => AgentPolicy {
                 native: NativeMode::Bypass,
@@ -877,6 +1026,7 @@ impl PolicyPreset {
                 secrets: SecretPolicy::Brokered,
                 network: NetworkPolicy::Open,
                 origin: OriginPolicy::LocalElevationOnly,
+                connectors: ConnectorPolicy::AsConfigured,
             },
             PolicyPreset::UnsafeEverything => AgentPolicy {
                 native: NativeMode::Bypass,
@@ -892,6 +1042,7 @@ impl PolicyPreset {
                 // "local approval required" from Remote Control. Break-glass
                 // does not become remotely authorisable by being break-glass.
                 origin: OriginPolicy::LocalElevationOnly,
+                connectors: ConnectorPolicy::AsConfigured,
             },
         }
     }
@@ -970,7 +1121,15 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["native", "sandbox", "system", "secrets", "network", "origin"]
+            vec![
+                "native",
+                "sandbox",
+                "system",
+                "secrets",
+                "network",
+                "origin",
+                "connectors"
+            ]
         );
     }
 
@@ -983,12 +1142,21 @@ mod tests {
             secrets: SecretPolicy::None,
             network: NetworkPolicy::Allowlist,
             origin: OriginPolicy::RemoteElevationAllowed,
+            connectors: ConnectorPolicy::Curated,
         };
         let text = serde_json::to_string(&p).expect("serialise");
         assert_eq!(serde_json::from_str::<AgentPolicy>(&text).unwrap(), p);
         // And the keys are the ones the CLI and the shell read.
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-        for key in ["native", "sandbox", "system", "secrets", "network", "origin"] {
+        for key in [
+            "native",
+            "sandbox",
+            "system",
+            "secrets",
+            "network",
+            "origin",
+            "connectors",
+        ] {
             assert!(v.get(key).is_some(), "{key} missing from {text}");
         }
     }
@@ -1000,6 +1168,10 @@ mod tests {
         // the parse and not come back loose.
         let p: AgentPolicy = serde_json::from_str(r#"{"sandbox":"strict"}"#).expect("parse");
         assert_eq!(p.sandbox, SandboxPolicy::Strict);
+        // Dimension 7 above all: a record written before it existed must come
+        // back as the connector set a session has always had, and never as a
+        // curated one with an empty list.
+        assert_eq!(p.connectors, ConnectorPolicy::AsConfigured);
         assert_eq!(p, AgentPolicy { sandbox: SandboxPolicy::Strict, ..AgentPolicy::default() });
 
         let empty: AgentPolicy = serde_json::from_str("{}").expect("parse");
@@ -1130,11 +1302,11 @@ mod tests {
         assert_eq!(p.validate(), Ok(()));
         // What is refused is the pair of an allowlist mode and no allowlist.
         assert_eq!(
-            p.validate_for(&Allowlist::default()),
+            p.validate_for(&Allowlist::default(), &[]),
             Err(PolicyError::AllowlistEmpty)
         );
         let allow = Allowlist::parse(&["api.example.com"]).expect("parse");
-        assert_eq!(p.validate_for(&allow), Ok(()));
+        assert_eq!(p.validate_for(&allow, &[]), Ok(()));
 
         // No other mode cares whether the list is empty: `open` was never
         // going to consult it, and the two offline modes are not supposed to
@@ -1145,7 +1317,50 @@ mod tests {
             NetworkPolicy::Brokered,
         ] {
             let p = AgentPolicy { network, ..p };
-            assert_eq!(p.validate_for(&Allowlist::default()), Ok(()), "{network}");
+            assert_eq!(
+                p.validate_for(&Allowlist::default(), &[]),
+                Ok(()),
+                "{network}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_curated_session_with_nothing_on_its_connector_list_is_refused() {
+        use crate::destination::Allowlist;
+
+        // Dimension 7's half of the rule the allowlist already has, and the
+        // reason it is a refusal rather than a default: an empty list would
+        // start a session with every connector removed while the user believed
+        // they had named some, and `--connectors none` already spells that.
+        let p = AgentPolicy {
+            connectors: ConnectorPolicy::Curated,
+            ..AgentPolicy::default()
+        };
+        assert_eq!(p.validate(), Ok(()));
+        assert_eq!(
+            p.validate_for(&Allowlist::default(), &[]),
+            Err(PolicyError::ConnectorListEmpty)
+        );
+        assert_eq!(
+            p.validate_for(&Allowlist::default(), &["memory".to_string()]),
+            Ok(())
+        );
+        // And no other value consults the list at all.
+        for connectors in [
+            ConnectorPolicy::AsConfigured,
+            ConnectorPolicy::LocalOnly,
+            ConnectorPolicy::NoConnectors,
+        ] {
+            let p = AgentPolicy {
+                connectors,
+                ..AgentPolicy::default()
+            };
+            assert_eq!(
+                p.validate_for(&Allowlist::default(), &[]),
+                Ok(()),
+                "{connectors}"
+            );
         }
     }
 

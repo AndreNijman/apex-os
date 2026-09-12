@@ -61,6 +61,7 @@ pub mod hook;
 pub mod inject;
 pub mod journal;
 pub mod layout;
+pub mod mcpconf;
 pub mod mux;
 pub mod lock;
 pub mod origin;

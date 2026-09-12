@@ -33,7 +33,7 @@ use apex_agent_core::origin::{
     may_declare, Capability, OriginError, OriginSource, Ruling, SessionOrigin,
 };
 use apex_agent_core::policy::{
-    AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyPreset, RequestOrigin,
+    AgentPolicy, ConnectorPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyPreset, RequestOrigin,
     SandboxPolicy, SecretPolicy, SystemAccess,
 };
 use apex_agent_core::destination::Allowlist;
@@ -317,6 +317,7 @@ fn the_named_modes_are_reachable_and_so_is_everything_between_them() {
         secrets: SecretPolicy::None,
         network: NetworkPolicy::Offline,
         origin: OriginPolicy::LocalElevationOnly,
+        connectors: ConnectorPolicy::LocalOnly,
     };
     assert!(
         !PolicyPreset::ALL.iter().any(|p| p.policy() == bespoke),
@@ -410,9 +411,9 @@ fn a_network_mode_is_refused_wherever_it_could_not_be_enforced() {
         network: NetworkPolicy::Allowlist,
         ..AgentPolicy::default()
     };
-    assert!(allowlisted.validate_for(&Allowlist::default()).is_err());
+    assert!(allowlisted.validate_for(&Allowlist::default(), &[]).is_err());
     assert!(allowlisted
-        .validate_for(&Allowlist::parse(&["api.example.com"]).expect("parse"))
+        .validate_for(&Allowlist::parse(&["api.example.com"]).expect("parse"), &[])
         .is_ok());
 
     // The argv builder refuses it a third time when the route the mode

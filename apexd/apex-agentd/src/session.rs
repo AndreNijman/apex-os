@@ -9,6 +9,7 @@ use anyhow::{bail, Context, Result};
 use apex_agent_core::adapter;
 use apex_agent_core::checkpoint;
 use apex_agent_core::hook;
+use apex_agent_core::mcpconf;
 use apex_agent_core::client::SESSION_ENV;
 use apex_agent_core::paths;
 use apex_agent_core::config;
@@ -74,7 +75,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
         );
     }
 
-    // Resolve the six permission dimensions before anything is created.
+    // Resolve the permission dimensions before anything is created.
     //
     // Normalised first, so the record and the enforcement agree about what the
     // session has — a `strict` request carries the client's default `open`
@@ -87,8 +88,11 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     // configuration. A destination policy that only changed on a daemon
     // restart is one people widen once and never narrow again, and this is the
     // daemon reading its own user's file — nothing the session can write.
-    let allowlist = config::Config::load().allowlist();
-    policy.validate_for(&allowlist).map_err(PolicyRefused)?;
+    let runtime_config = config::Config::load();
+    let allowlist = runtime_config.allowlist();
+    policy
+        .validate_for(&allowlist, &runtime_config.connector_allow)
+        .map_err(PolicyRefused)?;
 
     // Dimension 1 is the agent's own, and only the adapter knows whether this
     // one can express it. Refused rather than dropped: a `--agent-bypass` that
@@ -277,7 +281,27 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
         .is_confined()
         .then(|| install_git_shim(&scratch))
         .flatten();
+    // §10.2 and P1-026/P1-028: the connectors this session gets, decided by the
+    // runtime and handed over as a file, rather than whatever the agent finds
+    // on the machine. Best-effort in the same sense the hook settings are — a
+    // session whose configuration could not be written starts with the
+    // connectors it would have had — but not silently: `install_mcp_config`
+    // says what went wrong and the session record says the configuration is
+    // absent, so nothing downstream reports a confinement that did not happen.
+    let mcp_config = install_mcp_config(
+        adapter,
+        &scratch,
+        &workdir,
+        &policy,
+        &runtime_config.connector_allow,
+    );
+
     let mut extra = extra;
+    if let Some(path) = mcp_config.as_ref() {
+        let mut with_mcp = adapter.mcp_config_args(path);
+        with_mcp.append(&mut extra);
+        extra = with_mcp;
+    }
     if let Some(path) = hook_settings.as_ref() {
         let mut with_hooks = adapter.hook_settings_args(path);
         with_hooks.append(&mut extra);
@@ -318,6 +342,13 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     // agent's own writable `~/.claude` all still silence it — which is why
     // nothing downstream is allowed to depend on the hook having run.
     if let Some(path) = hook_settings.as_ref() {
+        spec.ro.push(path.clone());
+    }
+    // Read-only for the reason the hook settings are, and here it is the whole
+    // point rather than tidiness: the scratch is bound writable, so a curated
+    // MCP configuration the session could rewrite is one it could put its own
+    // unwrapped definitions back into — which is the hole this closes.
+    if let Some(path) = mcp_config.as_ref() {
         spec.ro.push(path.clone());
     }
     // Read-only for the same reason the hook settings are: the scratch is
@@ -802,6 +833,72 @@ fn install_hook_settings(
         Err(e) => {
             eprintln!(
                 "apex-agentd: writing {} failed ({e}), so {} runs without its hook bridge",
+                path.display(),
+                adapter.id
+            );
+            None
+        }
+    }
+}
+
+/// Write the curated MCP configuration for a session, and say where it went.
+///
+/// `None` when this adapter cannot be told to use one configuration and ignore
+/// the rest, when the write failed, and — the case worth naming — when the
+/// session asked for nothing to be reduced and nothing needed confining. All
+/// three end the same way downstream: the agent loads the definitions it finds,
+/// exactly as it did before this existed.
+///
+/// That last skip is not laziness. A curated document is `--strict-mcp-config`,
+/// and strict means the session's own later edits to `~/.claude.json` stop
+/// reaching the agent. Paying that for a session with nothing to confine and
+/// nothing to remove would be a behaviour change bought for nothing — so the
+/// file is written when the policy reduces something, or when there is
+/// third-party executable content to wrap, and not otherwise.
+fn install_mcp_config(
+    adapter: &adapter::Adapter,
+    scratch: &Path,
+    workdir: &Path,
+    policy: &apex_agent_core::policy::AgentPolicy,
+    allow: &[String],
+) -> Option<PathBuf> {
+    if !adapter.strict_mcp {
+        return None;
+    }
+    let home = paths::home();
+    let defs = mcpconf::read(&home, Some(workdir));
+    let approval = mcpconf::approvals(&home, Some(workdir));
+    // The same resolver the hook bridge uses, and deliberately not a second
+    // one: a wrapper that pointed at a different build from the daemon it
+    // reports to is the one pairing guaranteed to be wrong.
+    let apex = apex_program();
+    let curated = mcpconf::curate(&defs, &approval, policy.connectors, allow, apex.as_deref());
+
+    let wraps = curated.confined() > 0;
+    if !policy.connectors.reduces() && !wraps {
+        return None;
+    }
+
+    let path = mcpconf::config_path(scratch);
+    let document = curated.document.to_string();
+    match std::fs::write(&path, document) {
+        Ok(()) => {
+            if curated.dropped() > 0 || wraps {
+                eprintln!(
+                    "apex-agentd: {} connector(s) for this session, {} of them sandboxed,                      {} removed",
+                    curated.kept(),
+                    curated.confined(),
+                    curated.dropped()
+                );
+            }
+            Some(path)
+        }
+        Err(e) => {
+            // Loud, because the quiet version of this is a session that looks
+            // curated and is not. Every connector the policy meant to remove
+            // is reachable after this line.
+            eprintln!(
+                "apex-agentd: writing {} failed ({e}), so {} starts with the connectors it                  finds and NOT the ones this session asked for",
                 path.display(),
                 adapter.id
             );
