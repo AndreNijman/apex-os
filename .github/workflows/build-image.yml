@@ -432,8 +432,30 @@ jobs:
           # `sudo podman login` created ROOT-OWNED in this job's runtime dir —
           # the same rootful/rootless split the cosign login step above exists
           # for. It has nothing to log in to here anyway.
-          D="$(skopeo inspect --no-creds --format '{{.Digest}}' "docker://$UPSTREAM_BASE")"
-          test -n "$D"
+          # Retried, because this one call decides whether an hour of build
+          # happens. On 2026-09-12 it failed on a fatal from quay's CDN —
+          # cdn01.quay.io returning an error for the blob behind the manifest —
+          # and took `core`, and therefore `base`, `image` and `qcow2`, with it.
+          # Nothing was wrong with the tree: the previous run had built `core`
+          # from the same base minutes earlier. A single transient read is not a
+          # reason to discard a build.
+          #
+          # Five attempts with a widening gap, and the LAST failure is still
+          # fatal: a genuinely unreachable base must stop the build, not be
+          # retried into a silent skip. The attempt number is printed so a log
+          # says whether it was flaky or dead.
+          D=""
+          for _try in 1 2 3 4 5; do
+              if D="$(skopeo inspect --no-creds --format '{{.Digest}}' \
+                        "docker://$UPSTREAM_BASE" 2>&1)" && [ -n "$D" ]; then
+                  echo "resolved on attempt $_try"
+                  break
+              fi
+              echo "attempt $_try failed: $D"
+              D=""
+              [ "$_try" -lt 5 ] && sleep $(( _try * 10 ))
+          done
+          test -n "$D" || { echo "::error::could not resolve $UPSTREAM_BASE after 5 attempts"; exit 1; }
           echo "digest=$D" >> "$GITHUB_OUTPUT"
           echo "fedora-bootc digest: $D"
 
