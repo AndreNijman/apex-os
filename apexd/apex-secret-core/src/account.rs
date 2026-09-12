@@ -220,6 +220,16 @@ pub struct Provider {
     /// The endpoint path stored with the credential, for a provider whose
     /// destination is fixed. Empty when the path is per-account.
     pub path: &'static str,
+    /// Whether [`Provider::path`] is a prefix that the account's own username
+    /// completes.
+    ///
+    /// Nextcloud's files endpoint is `/remote.php/dav/files/<username>/`, and
+    /// a credential stored without that last segment points at a collection
+    /// the server answers 404 for — on every real Nextcloud, for every file.
+    /// A boolean rather than a `{username}` placeholder in the path, because a
+    /// placeholder invites a provider to put one somewhere the join cannot
+    /// safely substitute.
+    pub path_carries_username: bool,
     /// What the user is told to go and do to get a credential. A provider
     /// whose instructions are wrong is a support burden, so this is one line
     /// naming the page, not a tutorial.
@@ -231,6 +241,18 @@ impl Provider {
     /// Look a scope up by the name a person types.
     pub fn scope(&self, name: &str) -> Option<&'static Scope> {
         self.scopes.iter().find(|s| s.name == name)
+    }
+
+    /// The endpoint path to store for an account with this username.
+    ///
+    /// The join is here rather than in the front-end so that a second caller —
+    /// a Settings page, a migration — cannot get it wrong in a different way.
+    pub fn path_for(&self, username: &str) -> String {
+        if self.path_carries_username && !username.is_empty() {
+            format!("{}/{}", self.path.trim_end_matches('/'), username)
+        } else {
+            self.path.to_string()
+        }
     }
 
     /// The host, for a listing: the fixed one, or what the user must supply.
@@ -370,6 +392,7 @@ pub const PROVIDERS: &[Provider] = &[
         presentation: Presentation::Basic,
         host: Host::PerAccount,
         path: "",
+        path_carries_username: false,
         obtain: "your server's own account settings; most offer a per-device password",
         scopes: WEBDAV_SCOPES,
     },
@@ -383,6 +406,8 @@ pub const PROVIDERS: &[Provider] = &[
         presentation: Presentation::Basic,
         host: Host::PerAccount,
         path: "/remote.php/dav/files",
+        // Nextcloud's files endpoint ends in the account's own name.
+        path_carries_username: true,
         obtain: "Settings -> Security -> Devices & sessions -> Create new app password",
         scopes: WEBDAV_SCOPES,
     },
@@ -394,6 +419,7 @@ pub const PROVIDERS: &[Provider] = &[
         presentation: Presentation::SigV4,
         host: Host::PerAccount,
         path: "",
+        path_carries_username: false,
         obtain: "an access key pair from the bucket's own console",
         scopes: S3_SCOPES,
     },
@@ -405,6 +431,7 @@ pub const PROVIDERS: &[Provider] = &[
         presentation: Presentation::Bearer,
         host: Host::Fixed("www.googleapis.com"),
         path: "/drive/v3",
+        path_carries_username: false,
         obtain: "sign in on another device when APEX prints the code",
         scopes: DRIVE_SCOPES,
     },
@@ -416,6 +443,7 @@ pub const PROVIDERS: &[Provider] = &[
         presentation: Presentation::Bearer,
         host: Host::Fixed("graph.microsoft.com"),
         path: "/v1.0/me",
+        path_carries_username: false,
         obtain: "sign in on another device when APEX prints the code",
         scopes: GRAPH_SCOPES,
     },
@@ -720,6 +748,25 @@ mod tests {
         // obtained differently and the path is not the same.
         assert_ne!(nc.id, dav.id);
         assert_ne!(nc.path, dav.path);
+    }
+
+    #[test]
+    fn nextcloud_endpoints_end_in_the_account_name_and_the_others_do_not() {
+        // Measured against the published shape rather than guessed: Nextcloud
+        // serves files at /remote.php/dav/files/<username>/, so a credential
+        // stored at the bare prefix points at a collection the server answers
+        // 404 for — on every real Nextcloud, for every file, which is the kind
+        // of defect that looks like a wrong password.
+        let nc = provider("nextcloud").unwrap();
+        assert_eq!(nc.path_for("me"), "/remote.php/dav/files/me");
+        // A bare WebDAV server's path is whatever the user gave, so nothing is
+        // appended and an empty default stays empty.
+        assert_eq!(provider("webdav").unwrap().path_for("me"), "");
+        assert_eq!(provider("google").unwrap().path_for("me"), "/drive/v3");
+        // And with no username there is nothing to append; `add` refuses that
+        // case for a Basic provider before it gets here, and this is the
+        // belt-and-braces half.
+        assert_eq!(nc.path_for(""), "/remote.php/dav/files");
     }
 
     #[test]

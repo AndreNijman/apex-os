@@ -280,14 +280,20 @@ fn add(
         );
     }
 
-    let path = path.unwrap_or(provider.path);
+    // The provider's own path, completed with the account name where the
+    // provider says its endpoint ends in one — Nextcloud's does. `--path`
+    // still wins: a deployment behind a reverse proxy can have any prefix.
+    let path = match path {
+        Some(p) => p.to_string(),
+        None => provider.path_for(username.trim()),
+    };
     let service = account.service();
     Client::connect()?.add(
         &service,
         &host,
         "https",
         Some(username),
-        path,
+        &path,
         provider.presentation.service_auth(),
         port,
         &SecretValue::new(value.as_bytes().to_vec()),

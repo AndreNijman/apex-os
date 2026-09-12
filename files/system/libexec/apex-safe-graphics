@@ -136,6 +136,15 @@ collect() {
         } >> "$out"
     fi
     rm -f "${out}.err"
+    # A command that succeeded and printed nothing is the third case, and it is
+    # the one that would otherwise leave an empty file behind — `journalctl -b
+    # --user` in a container with no user journal exits 0 with no output. An
+    # empty file reads as "there was nothing to report about this", which is
+    # true here and is NOT true of the two cases above, so all three say which
+    # one they are rather than leaving the reader to guess from a file size.
+    if [ ! -s "$out" ]; then
+        printf 'no-output: %s exited 0 and printed nothing\n' "$1" > "$out"
+    fi
 }
 
 do_diagnose() {
