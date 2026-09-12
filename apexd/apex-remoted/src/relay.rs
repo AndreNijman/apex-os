@@ -51,6 +51,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use apex_remote_core::relay::{Endpoint, Notice, Op, Opening, Receiver, RelayError, Role, Sender};
+use apex_remote_core::tls::{TlsError, Trust};
 
 use crate::state::State;
 
@@ -103,8 +104,9 @@ impl Sources {
 /// Why an attempt to reach the relay ended.
 #[derive(Debug)]
 pub enum DialError {
-    /// The address asks for TLS, which nothing in this workspace speaks.
-    NeedsTls(String),
+    /// The address asks for TLS and the TLS leg could not be established —
+    /// most importantly because the relay's certificate did not verify.
+    Tls(TlsError),
     Io(std::io::Error),
     Relay(RelayError),
 }
@@ -112,12 +114,7 @@ pub enum DialError {
 impl std::fmt::Display for DialError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DialError::NeedsTls(url) => write!(
-                f,
-                "{url} is a TLS address and this build speaks no TLS, so the relay is not \
-                 dialled. APEX Remote still works on this network; see \
-                 ROADMAP/design/P1-052-relay.md"
-            ),
+            DialError::Tls(e) => write!(f, "{e}"),
             DialError::Io(e) => write!(f, "{e}"),
             DialError::Relay(e) => write!(f, "{e}"),
         }
@@ -136,6 +133,12 @@ impl From<RelayError> for DialError {
     }
 }
 
+impl From<TlsError> for DialError {
+    fn from(e: TlsError) -> DialError {
+        DialError::Tls(e)
+    }
+}
+
 /// Keep this machine reachable through the relay, for as long as it runs.
 ///
 /// Never returns. One waiting connection at a time: the moment the relay says
@@ -144,13 +147,33 @@ impl From<RelayError> for DialError {
 /// reachable by a second device while the first is connected.
 pub fn supervise(state: Arc<State>, endpoint: Endpoint) {
     let rendezvous = apex_remote_core::rendezvous::rendezvous_id(&state.identity.public_bytes());
+
+    // The root store is read once, here, and not per dial. It is a directory
+    // walk and a few hundred certificate parses, and the loop below can retry
+    // every two seconds. Reading it up front also decides the failure mode: a
+    // machine whose store is unreadable says so once and stops, instead of
+    // logging the same thing every two seconds for as long as it is switched
+    // on. Not dialling is the right answer there — the alternative is
+    // carrying a remote-control session over a connection nothing verified.
+    let trust = if endpoint.secure {
+        match Trust::system() {
+            Ok(trust) => Some(trust),
+            Err(e) => {
+                eprintln!("apex-remoted: the relay {endpoint} cannot be verified: {e}");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     eprintln!(
         "apex-remoted: relay {endpoint}, rendezvous {rendezvous} \
          (outbound only; no inbound port is opened)"
     );
     let mut backoff = BACKOFF_MIN;
     loop {
-        match wait_for_a_device(&endpoint, &rendezvous) {
+        match wait_for_a_device(&endpoint, &rendezvous, trust.as_ref()) {
             Ok(joined) => {
                 backoff = BACKOFF_MIN;
                 let state = Arc::clone(&state);
@@ -170,9 +193,16 @@ pub fn supervise(state: Arc<State>, endpoint: Endpoint) {
 }
 
 /// One joined relay connection: the two halves, and the socket under them.
+///
+/// The halves are boxed rather than `TcpStream`, because over `wss://` they
+/// are the two ends of one `rustls::ClientConnection` and not two descriptors
+/// for one socket. `socket` stays a real `TcpStream` either way: shutting it
+/// down is what unblocks a reader parked in the receiver, and that has to keep
+/// working on the TLS path too — a TLS reader blocked on the network is
+/// blocked in a plain `read` on exactly this socket.
 pub struct Joined {
-    pub receiver: Receiver<TcpStream>,
-    pub sender: Arc<Mutex<Sender<TcpStream>>>,
+    pub receiver: Receiver<Box<dyn Read + Send>>,
+    pub sender: Arc<Mutex<Sender<Box<dyn Write + Send>>>>,
     /// Held so the connection can be shut down from another thread.
     pub socket: TcpStream,
 }
@@ -180,8 +210,12 @@ pub struct Joined {
 /// Open the host side of the rendezvous and block until a device arrives.
 ///
 /// A keepalive thread pings while this waits, and stops when the wait ends.
-fn wait_for_a_device(endpoint: &Endpoint, rendezvous: &str) -> Result<Joined, DialError> {
-    let joined = dial(endpoint, rendezvous, Role::Host)?;
+fn wait_for_a_device(
+    endpoint: &Endpoint,
+    rendezvous: &str,
+    trust: Option<&Trust>,
+) -> Result<Joined, DialError> {
+    let joined = dial(endpoint, rendezvous, Role::Host, trust)?;
 
     // The keepalive runs only while waiting. Once a device is on the far end
     // the session's own traffic keeps the connection warm, and an extra ping
@@ -244,18 +278,44 @@ fn wait_for_a_device(endpoint: &Endpoint, rendezvous: &str) -> Result<Joined, Di
 }
 
 /// Dial one connection to the relay and complete the WebSocket handshake.
-pub fn dial(endpoint: &Endpoint, rendezvous: &str, role: Role) -> Result<Joined, DialError> {
-    if endpoint.secure {
-        return Err(DialError::NeedsTls(endpoint.to_string()));
-    }
+///
+/// `trust` is the root store, and is required for a `wss://` endpoint. It is
+/// an argument rather than something read in here so that it is read once per
+/// daemon rather than once per reconnect — see [`supervise`].
+pub fn dial(
+    endpoint: &Endpoint,
+    rendezvous: &str,
+    role: Role,
+    trust: Option<&Trust>,
+) -> Result<Joined, DialError> {
     let socket = TcpStream::connect((endpoint.host.as_str(), endpoint.port))?;
     // Nagle off: the carried stream is a terminal, and coalescing a keystroke
     // with whatever comes next is exactly the latency this feature is judged
     // on.
     socket.set_nodelay(true).ok();
 
-    let mut writing = socket.try_clone()?;
-    let mut reading = socket.try_clone()?;
+    let (mut reading, mut writing): (Box<dyn Read + Send>, Box<dyn Write + Send>) =
+        if endpoint.secure {
+            // TLS FIRST, and the upgrade request written into it afterwards.
+            // The ordering is the point: the rendezvous id lives in that
+            // request's path, so a client that wrote it before the handshake
+            // would publish to every on-path observer the one value a device
+            // pins when it scans a QR code.
+            //
+            // Arriving here with no root store is a programming error rather
+            // than a configuration one — `supervise` refuses to start without
+            // one — and it is still refused rather than downgraded, because
+            // the cost of being wrong is a session carried in the clear.
+            let trust = trust.ok_or_else(|| {
+                TlsError::NoRoots("this dial was given no root store to verify against".into())
+            })?;
+            // The name checked is the relay's, from its URL. Never the address
+            // that was resolved and dialled.
+            let (r, w) = trust.connect(socket.try_clone()?, &endpoint.host)?;
+            (Box::new(r), Box::new(w))
+        } else {
+            (Box::new(socket.try_clone()?), Box::new(socket.try_clone()?))
+        };
     let opening = Opening::new();
     writing.write_all(&opening.request(endpoint, rendezvous, role))?;
     writing.flush()?;
@@ -341,18 +401,336 @@ fn splice(mut joined: Joined, state: &Arc<State>) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// A listener that speaks no TLS at all, and keeps every byte it was sent.
+    ///
+    /// Stands in for the worst thing that could be on the far end of a
+    /// `wss://` address: something that will happily talk, in the clear, to a
+    /// client sloppy enough to send first and encrypt later.
+    fn a_plain_listener() -> (u16, Arc<Mutex<Vec<u8>>>) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&heard);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 4096];
+                if let Ok(n) = stream.read(&mut buf) {
+                    if let Ok(mut h) = recorded.lock() {
+                        h.extend_from_slice(&buf[..n]);
+                    }
+                }
+                // Answer as a web server would, so the client fails on what it
+                // reads rather than on a timeout.
+                let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+            }
+        });
+        (port, heard)
+    }
+
     #[test]
-    fn a_tls_relay_is_refused_by_name_rather_than_dialled_in_the_clear() {
-        // The failure this prevents is the worst one available here: a client
-        // that "handled" wss:// by opening a plain socket to port 443 would
-        // send the upgrade request in the clear and, if anything answered,
-        // carry the session over an unencrypted link while the configuration
-        // said otherwise.
-        let e = Endpoint::parse("wss://relay.example.com").expect("parse");
-        let Err(DialError::NeedsTls(named)) = dial(&e, "abc", Role::Host) else {
-            panic!("a wss relay was dialled");
+    fn a_wss_relay_that_cannot_be_verified_is_refused_and_never_downgraded() {
+        // The worst failure available here is not "it did not connect". It is
+        // a client that answers a wss:// address by opening a plain socket and
+        // sending its upgrade request anyway: the rendezvous id lives in that
+        // request's path, so it would be handed to every on-path observer, and
+        // the session would then ride an unencrypted link while the
+        // configuration said wss://.
+        //
+        // So the assertion is in two halves — it failed, AND the request never
+        // reached the wire.
+        let (port, heard) = a_plain_listener();
+        let endpoint = Endpoint::parse(&format!("wss://127.0.0.1:{port}")).expect("parse");
+        let trust = Trust::system().expect("this machine's root store");
+
+        let Err(e) = dial(&endpoint, "aaaabbbbccccdddd", Role::Host, Some(&trust)) else {
+            panic!("a relay that presented no certificate at all was dialled");
         };
-        assert!(named.contains("relay.example.com"), "{named}");
+        // A plain-HTTP server presented no certificate at all, so this must
+        // NOT be reported as a certificate refusal — an operator reading that
+        // would go and inspect a CA store over a server that speaks no TLS.
+        assert!(
+            matches!(e, DialError::Tls(TlsError::Handshake(_))),
+            "a server that speaks no TLS was blamed on its certificate: {e}"
+        );
+        assert!(e.to_string().contains("handshake"), "{e}");
+
+        let said = heard.lock().expect("lock").clone();
+        assert!(
+            !window_contains(&said, b"GET /r/"),
+            "the upgrade request went out in the clear: {:?}",
+            String::from_utf8_lossy(&said)
+        );
+        assert!(
+            !window_contains(&said, b"aaaabbbbccccdddd"),
+            "the rendezvous id went out in the clear"
+        );
+        // What it did send is a TLS record: content type 22 (handshake),
+        // legacy version 3.1. Proving the refusal was "it would not talk
+        // plaintext" and not "it never opened the socket".
+        assert!(
+            said.starts_with(&[0x16, 0x03]),
+            "the first bytes on the wire were not a TLS ClientHello: {:?}",
+            &said[..said.len().min(16)]
+        );
+    }
+
+    #[test]
+    fn a_wss_relay_with_no_root_store_is_refused_rather_than_dialled_in_the_clear() {
+        // `supervise` will not start without a store, so this is the
+        // belt-and-braces half: even called directly, the secure path has no
+        // branch that falls through to plaintext.
+        let (port, heard) = a_plain_listener();
+        let endpoint = Endpoint::parse(&format!("wss://127.0.0.1:{port}")).expect("parse");
+        let Err(e) = dial(&endpoint, "aaaabbbbccccdddd", Role::Host, None) else {
+            panic!("a wss relay was dialled with no root store");
+        };
+        assert!(matches!(e, DialError::Tls(_)), "{e}");
+        assert!(e.to_string().contains("root certificates"), "{e}");
+        assert!(heard.lock().expect("lock").is_empty(), "bytes were sent anyway");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  A relay that really speaks TLS, and a dial that really reaches it
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Mint a CA and a server certificate for `127.0.0.1`, and return both
+    /// paths plus the directory holding them.
+    ///
+    /// `subjectAltName = IP:127.0.0.1` rather than a DNS name, because
+    /// `dial` checks the certificate against `Endpoint.host` — which for a
+    /// loopback relay URL IS the address. That is the property being relied
+    /// on, so the certificate has to be the kind that can satisfy it.
+    fn mint_for_loopback() -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!(
+            "apex-remoted-wss-{}-{}",
+            std::process::id(),
+            apex_remote_core::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let run = |args: &[&str]| {
+            let out = Command::new("openssl").args(args).output().expect("openssl");
+            assert!(
+                out.status.success(),
+                "openssl {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let s = |p: &std::path::Path| p.display().to_string();
+        let (ca_key, ca_pem) = (dir.join("ca.key"), dir.join("ca.pem"));
+        let (key, csr, pem, ext) = (
+            dir.join("leaf.key"),
+            dir.join("leaf.csr"),
+            dir.join("leaf.pem"),
+            dir.join("leaf.ext"),
+        );
+        for k in [&ca_key, &key] {
+            run(&["genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", &s(k)]);
+        }
+        run(&[
+            "req", "-x509", "-new", "-key", &s(&ca_key), "-sha256", "-days", "3650",
+            "-subj", "/CN=apex relay loopback CA",
+            "-addext", "basicConstraints=critical,CA:TRUE",
+            "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+            "-out", &s(&ca_pem),
+        ]);
+        std::fs::write(
+            &ext,
+            "subjectAltName = IP:127.0.0.1\n\
+             basicConstraints = critical,CA:FALSE\n\
+             keyUsage = critical,digitalSignature,keyEncipherment\n\
+             extendedKeyUsage = serverAuth\n",
+        )
+        .expect("ext");
+        run(&["req", "-new", "-key", &s(&key), "-subj", "/CN=127.0.0.1", "-out", &s(&csr)]);
+        run(&[
+            "x509", "-req", "-in", &s(&csr), "-CA", &s(&ca_pem), "-CAkey", &s(&ca_key),
+            "-CAcreateserial", "-sha256", "-days", "365", "-extfile", &s(&ext),
+            "-out", &s(&pem),
+        ]);
+        (dir, ca_pem, pem)
+    }
+
+    /// Read one frame a CLIENT sent. Clients mask; that is RFC 6455 §5.3.
+    fn read_client_frame(r: &mut impl Read) -> Option<(u8, Vec<u8>)> {
+        let mut head = [0u8; 2];
+        r.read_exact(&mut head).ok()?;
+        let op = head[0] & 0x0f;
+        let masked = head[1] & 0x80 != 0;
+        let mut len = (head[1] & 0x7f) as usize;
+        if len == 126 {
+            let mut ext = [0u8; 2];
+            r.read_exact(&mut ext).ok()?;
+            len = u16::from_be_bytes(ext) as usize;
+        }
+        let mut mask = [0u8; 4];
+        if masked {
+            r.read_exact(&mut mask).ok()?;
+        }
+        let mut payload = vec![0u8; len];
+        r.read_exact(&mut payload).ok()?;
+        if masked {
+            for (i, b) in payload.iter_mut().enumerate() {
+                *b ^= mask[i % 4];
+            }
+        }
+        Some((op, payload))
+    }
+
+    /// Write one frame as a SERVER. Servers must not mask.
+    fn write_server_frame(w: &mut impl Write, op: u8, payload: &[u8]) -> std::io::Result<()> {
+        let mut out = vec![0x80 | op];
+        if payload.len() < 126 {
+            out.push(payload.len() as u8);
+        } else {
+            out.push(126);
+            out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        }
+        out.extend_from_slice(payload);
+        w.write_all(&out)?;
+        w.flush()
+    }
+
+    /// A relay that terminates TLS, completes the RFC 6455 upgrade, announces
+    /// itself, and echoes what it is sent.
+    fn a_tls_relay(cert: &std::path::Path, key: &std::path::Path) -> u16 {
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+        let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
+            .expect("cert")
+            .collect::<Result<_, _>>()
+            .expect("cert parse");
+        let key = PrivateKeyDer::from_pem_file(key).expect("key");
+        let config = Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("server config"),
+        );
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let config = Arc::clone(&config);
+                std::thread::spawn(move || {
+                    let Ok(conn) = rustls::ServerConnection::new(config) else { return };
+                    let mut tls = rustls::StreamOwned::new(conn, stream);
+
+                    // Byte at a time, so the first frame is not swallowed with
+                    // the response head — the same reason the client reads
+                    // this way.
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while tls.read_exact(&mut byte).is_ok() {
+                        head.push(byte[0]);
+                        if head.ends_with(b"\r\n\r\n") || head.len() > 16 * 1024 {
+                            break;
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&head).to_string();
+                    let Some(key) = text.split("\r\n").find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        (name.trim().eq_ignore_ascii_case("sec-websocket-key"))
+                            .then(|| value.trim().to_string())
+                    }) else {
+                        return;
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 101 Switching Protocols\r\n\
+                         Upgrade: websocket\r\n\
+                         Connection: Upgrade\r\n\
+                         Sec-WebSocket-Accept: {}\r\n\r\n",
+                        apex_remote_core::relay::accept_for(&key)
+                    );
+                    if tls.write_all(reply.as_bytes()).is_err() {
+                        return;
+                    }
+                    let _ = tls.flush();
+                    let _ = write_server_frame(&mut tls, 0x1, Notice::Waiting.text().as_bytes());
+
+                    while let Some((op, payload)) = read_client_frame(&mut tls) {
+                        let answered = match op {
+                            0x2 => write_server_frame(&mut tls, 0x2, &payload),
+                            0x9 => write_server_frame(&mut tls, 0xa, &payload),
+                            0x8 => break,
+                            _ => Ok(()),
+                        };
+                        if answered.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn a_wss_relay_is_dialled_verified_and_carries_frames_both_ways() {
+        // THE headline claim of this unit, and the one thing every other test
+        // here only approaches from one side: `tests/tls.rs` proves what the
+        // TLS layer refuses over a raw byte stream, and the relay suite proves
+        // the room protocol over ws://. Neither runs `dial`'s secure branch to
+        // a SUCCESS — the upgrade request written into a `TlsWriter`, the
+        // response read a byte at a time back out of a `TlsReader`, and then
+        // real frames through `Sender`/`Receiver` over the split connection.
+        let (dir, ca, cert) = mint_for_loopback();
+        let key = dir.join("leaf.key");
+        let port = a_tls_relay(&cert, &key);
+
+        let trust = Trust::from_pem_file(&ca).expect("trust the minted CA");
+        let endpoint = Endpoint::parse(&format!("wss://127.0.0.1:{port}")).expect("parse");
+        assert!(endpoint.secure, "the test is not exercising the TLS branch");
+
+        let mut joined = dial(&endpoint, "aaaabbbbccccdddd", Role::Host, Some(&trust))
+            .expect("a wss:// relay that verifies should be dialled");
+
+        // The relay's own notice, decoded from a frame that arrived encrypted.
+        let first = joined.receiver.message().expect("the waiting notice");
+        assert_eq!(first.op, Op::Text);
+        assert_eq!(Notice::parse(&first.payload), Some(Notice::Waiting));
+
+        // A keepalive ping from ANOTHER thread while this one is blocked in a
+        // read. That overlap is not hypothetical — it is exactly what
+        // `wait_for_a_device` does for as long as a desktop waits — and it is
+        // what deadlocks if the reader holds the TLS connection's lock across
+        // its socket read. A deadlock here hangs the test rather than failing
+        // it, which is why the ping is sent from a thread that cannot be the
+        // one parked in `message()`.
+        {
+            let sender = Arc::clone(&joined.sender);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                if let Ok(mut s) = sender.lock() {
+                    let _ = s.ping(b"apex");
+                }
+            });
+        }
+        let pong = joined.receiver.message().expect("a pong");
+        assert_eq!(pong.op, Op::Pong, "the keepalive did not survive the TLS leg");
+        assert_eq!(pong.payload, b"apex");
+
+        // And the carried stream itself: a payload out and the same bytes
+        // back, through the codec, through TLS, both ways.
+        let carried = b"apex-remote-wss-carried-payload-4f2a91c7";
+        joined.sender.lock().expect("sender").binary(carried).expect("binary");
+        let echoed = joined.receiver.message().expect("the echo");
+        assert_eq!(echoed.op, Op::Binary);
+        assert_eq!(echoed.payload, carried, "the payload did not survive the TLS leg");
+
+        let _ = joined.socket.shutdown(std::net::Shutdown::Both);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn window_contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
     }
 
     #[test]

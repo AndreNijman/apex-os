@@ -79,14 +79,44 @@ struct Observed {
 }
 
 struct Relay {
+    host: String,
     port: u16,
     seen: Arc<Mutex<Observed>>,
     /// Every socket the relay is holding, so a test can drop them all.
     cut: Arc<Mutex<Vec<TcpStream>>>,
+    /// Set when `APEX_RELAY_URL` pointed the suite at a relay that is not the
+    /// double — in practice `wrangler dev --local` serving `relay/src/index.js`.
+    /// `None` is the normal run and nothing about it changes.
+    external: Option<String>,
 }
 
 impl Relay {
     fn start() -> Relay {
+        // `APEX_RELAY_URL=ws://127.0.0.1:8787` runs this suite against the
+        // real Worker instead of the double. §4 of
+        // ROADMAP/design/P1-052-relay.md records the Worker as the one piece
+        // of P1-052 that had never been executed, because running it needs
+        // wrangler; `wrangler dev --local` needs no Cloudflare account, so the
+        // gap was a missing dependency rather than a missing permission.
+        //
+        // The double stays the default, and a default run is byte-identical
+        // to what it was before this hook existed.
+        if let Ok(url) = std::env::var("APEX_RELAY_URL") {
+            let endpoint = Endpoint::parse(&url).expect("APEX_RELAY_URL is not a relay address");
+            assert!(
+                !endpoint.secure,
+                "this suite drives a relay over ws://. What TLS refuses is proved in \
+                 apex-remote-core's tls suite against a minted CA; pointing it at \
+                 wrangler's self-signed certificate would only re-test that refusal."
+            );
+            return Relay {
+                host: endpoint.host.clone(),
+                port: endpoint.port,
+                seen: Arc::new(Mutex::new(Observed::default())),
+                cut: Arc::new(Mutex::new(Vec::new())),
+                external: Some(url),
+            };
+        }
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
         let port = listener.local_addr().expect("addr").port();
         let seen = Arc::new(Mutex::new(Observed::default()));
@@ -104,20 +134,82 @@ impl Relay {
                 });
             }
         });
-        Relay { port, seen, cut }
+        Relay { host: "127.0.0.1".into(), port, seen, cut, external: None }
     }
 
     fn url(&self) -> String {
-        format!("ws://127.0.0.1:{}", self.port)
+        match &self.external {
+            Some(url) => url.clone(),
+            None => format!("ws://127.0.0.1:{}", self.port),
+        }
     }
 
+    fn is_external(&self) -> bool {
+        self.external.is_some()
+    }
+
+    /// What the relay operator saw.
+    ///
+    /// A real relay does not hand this over, so asking for it in external mode
+    /// is a test that should have skipped. It panics rather than returning an
+    /// empty `Observed`, because an empty one would make `assert!(x.is_empty())`
+    /// pass and turn a skipped claim into a claim that looked proved.
     fn seen(&self) -> std::sync::MutexGuard<'_, Observed> {
+        assert!(
+            !self.is_external(),
+            "this assertion reads the double's own record, which a real relay does \
+             not provide — the test should have skipped in external mode"
+        );
         self.seen.lock().expect("observed")
+    }
+
+    /// Is a desktop parked on this rendezvous right now?
+    ///
+    /// Asked by dialling as a HOST and expecting to be refused: a 409 is the
+    /// relay saying somebody already holds the room, which is precisely the
+    /// question. This replaces counting arrivals when the suite is pointed at
+    /// a real relay, and it is the stronger question of the two — it is the
+    /// Durable Object's own `waiting()` answering about live sockets, rather
+    /// than a tally of connections that once arrived and may since have died.
+    /// That distinction is the bug §2 records the double having had.
+    ///
+    /// A 101 means the room was empty and this probe has just taken it. The
+    /// socket is shut immediately so the room is freed and the desktop can
+    /// re-arm on its own backoff; the caller retries.
+    fn host_is_parked(&self, rendezvous: &str) -> bool {
+        let endpoint = Endpoint::parse(&self.url()).expect("endpoint");
+        let Ok(socket) = TcpStream::connect((self.host.as_str(), self.port)) else {
+            return false;
+        };
+        socket.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        let (Ok(mut writing), Ok(mut reading)) = (socket.try_clone(), socket.try_clone()) else {
+            return false;
+        };
+        let opening = Opening::new();
+        if writing
+            .write_all(&opening.request(&endpoint, rendezvous, Role::Host))
+            .is_err()
+        {
+            return false;
+        }
+        let _ = writing.flush();
+        match opening.accept(&mut reading) {
+            Err(e) => format!("{e}").contains("409"),
+            Ok(()) => {
+                let _ = socket.shutdown(std::net::Shutdown::Both);
+                false
+            }
+        }
     }
 
     /// Drop every connection the relay holds, the way a network change does:
     /// no close frame, no warning, a socket that simply stops being there.
     fn cut_everything(&self) {
+        assert!(
+            !self.is_external(),
+            "cutting every socket reaches inside the double — the test should have \
+             skipped in external mode"
+        );
         if let Ok(mut v) = self.cut.lock() {
             for s in v.drain(..) {
                 let _ = s.shutdown(std::net::Shutdown::Both);
@@ -469,8 +561,15 @@ impl Harness {
             // And the relay leg: the desktop has to have dialled out and be
             // waiting before a device can be joined to it. Waiting for this
             // rather than sleeping is what makes the suite deterministic.
-            if up && self.relay.seen().arrivals.iter().any(|a| a == "host") {
-                return true;
+            if up {
+                let parked = if self.relay.is_external() {
+                    self.relay.host_is_parked(&self.rendezvous())
+                } else {
+                    self.relay.seen().arrivals.iter().any(|a| a == "host")
+                };
+                if parked {
+                    return true;
+                }
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -480,6 +579,21 @@ impl Harness {
     /// Wait until the relay is holding `n` host connections in total.
     fn hosts_seen(&self, n: usize) -> bool {
         let deadline = Instant::now() + Duration::from_secs(10);
+        if self.relay.is_external() {
+            // The tally does not exist against a real relay, so the same
+            // question is asked of the relay's live state: is a desktop parked
+            // again? "Re-armed" means exactly that, and every caller of this
+            // is asking whether the desktop came back after a device consumed
+            // its waiting connection.
+            let rendezvous = self.rendezvous();
+            while Instant::now() < deadline {
+                if self.relay.host_is_parked(&rendezvous) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            return false;
+        }
         while Instant::now() < deadline {
             if self.relay.seen().arrivals.iter().filter(|a| *a == "host").count() >= n {
                 return true;
@@ -527,7 +641,8 @@ impl Harness {
         let rendezvous = self.rendezvous();
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            let socket = TcpStream::connect(("127.0.0.1", self.relay.port)).expect("dial relay");
+            let socket = TcpStream::connect((self.relay.host.as_str(), self.relay.port))
+                .expect("dial relay");
             socket.set_nodelay(true).ok();
             socket.set_read_timeout(Some(Duration::from_secs(20))).ok();
             let mut writing = socket.try_clone().expect("clone");
@@ -766,7 +881,15 @@ fn a_device_reaches_the_desktop_through_a_relay_neither_of_them_listens_on() {
     // P1-052's "no inbound router port forwarding" made mechanical: the relay
     // never connects to the desktop, so the only way this works is the
     // connection the desktop already made.
-    {
+    if h.relay.is_external() {
+        // A real relay does not report what arrived, so the same fact is
+        // established from the outside: a host is already holding this
+        // rendezvous, and this test has not put it there.
+        assert!(
+            h.relay.host_is_parked(&h.rendezvous()),
+            "no desktop was parked on the rendezvous, so it never dialled out"
+        );
+    } else {
         let seen = h.relay.seen();
         assert_eq!(seen.arrivals.first().map(String::as_str), Some("host"));
         assert!(
@@ -809,6 +932,18 @@ fn a_device_reaches_the_desktop_through_a_relay_neither_of_them_listens_on() {
 
 #[test]
 fn the_relay_carries_the_session_and_can_read_none_of_it() {
+    if std::env::var_os("APEX_RELAY_URL").is_some() {
+        // The claim here is about what the relay OPERATOR can see, and it is
+        // asserted by reading everything the double copied. A real relay does
+        // not hand that over, and inferring it from the outside would be
+        // weaker than the thing being claimed. The double remains the right
+        // place for this one.
+        eprintln!(
+            "SKIP-EXTERNAL: the_relay_carries_the_session_and_can_read_none_of_it: \
+             needs the double's record of every payload it copied"
+        );
+        return;
+    }
     let h = harness!("opaque");
     let device = Device::new();
     let offer = h.offer();
@@ -901,7 +1036,7 @@ fn a_guest_that_arrives_with_no_desktop_waiting_is_refused_by_status_not_by_sile
     // whose desktop is off should be told so, not left holding a socket.
     let relay = Relay::start();
     let endpoint = Endpoint::parse(&relay.url()).expect("endpoint");
-    let socket = TcpStream::connect(("127.0.0.1", relay.port)).expect("dial");
+    let socket = TcpStream::connect((relay.host.as_str(), relay.port)).expect("dial");
     let mut writing = socket.try_clone().expect("clone");
     let mut reading = socket.try_clone().expect("clone");
     let opening = Opening::new();
@@ -912,7 +1047,9 @@ fn a_guest_that_arrives_with_no_desktop_waiting_is_refused_by_status_not_by_sile
     let refused = opening.accept(&mut reading);
     let Err(e) = refused else { panic!("a guest with no host was upgraded") };
     assert!(format!("{e}").contains("409"), "{e}");
-    assert_eq!(relay.seen().refusals, vec![409]);
+    if !relay.is_external() {
+        assert_eq!(relay.seen().refusals, vec![409]);
+    }
 }
 
 #[test]
@@ -926,7 +1063,7 @@ fn two_desktops_cannot_hold_one_rendezvous() {
     let endpoint = Endpoint::parse(&relay.url()).expect("endpoint");
     let mut held = Vec::new();
     for (n, want) in [(0usize, true), (1usize, false)] {
-        let socket = TcpStream::connect(("127.0.0.1", relay.port)).expect("dial");
+        let socket = TcpStream::connect((relay.host.as_str(), relay.port)).expect("dial");
         let mut writing = socket.try_clone().expect("clone");
         let mut reading = socket.try_clone().expect("clone");
         let opening = Opening::new();
@@ -943,7 +1080,9 @@ fn two_desktops_cannot_hold_one_rendezvous() {
         );
         held.push(socket);
     }
-    assert_eq!(relay.seen().refusals, vec![409]);
+    if !relay.is_external() {
+        assert_eq!(relay.seen().refusals, vec![409]);
+    }
 }
 
 #[test]
@@ -1065,6 +1204,18 @@ fn the_desktop_measures_the_connection_and_a_device_cannot_invent_the_answer() {
 
 #[test]
 fn a_network_change_costs_the_session_and_costs_nothing_else() {
+    if std::env::var_os("APEX_RELAY_URL").is_some() {
+        // A network change is simulated by cutting every socket the relay
+        // holds, from inside it. Nothing outside a relay can do that to it,
+        // and killing the client end instead would be testing a different
+        // event — the desktop noticing its own socket close, rather than the
+        // relay's peer vanishing.
+        eprintln!(
+            "SKIP-EXTERNAL: a_network_change_costs_the_session_and_costs_nothing_else: \
+             needs to cut the sockets the double is holding"
+        );
+        return;
+    }
     // What this proves, exactly: when every relay socket dies mid-session,
     // the desktop re-arms on its own, a device that dials again gets a fresh
     // Noise_IK session, the agent runtime's sessions are all still there with
