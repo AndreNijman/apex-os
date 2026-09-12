@@ -76,3 +76,37 @@ the next action cannot.
 ## What a resume costs now
 
 One `resume.sh` run and one dispatch per dead agent. No transcript replay.
+
+## `settled.json` — so the same false positive is not chased twice
+
+`unlanded.py`'s line-presence heuristic cannot tell *"landed in August, then
+four lines rewritten in September for a better reason"* from orphaned work, and
+its own docstring says so. The consequence is that a commit somebody has already
+settled by hand gets re-flagged every time the report regenerates — **every five
+hours, forever** — and the next orchestrator pays the same `git diff` to reach
+the same answer. On 2026-09-13 two such commits were sitting in the report; one
+of them had been settled in a previous round and written down nowhere a script
+could read.
+
+So a settled commit goes in `settled.json`, keyed by abbreviated sha, and the
+report prints it in its own section **with its reason** instead of in the
+unlanded list:
+
+```json
+{ "c8239748": "SETTLED 2026-09-13 (round 23). The prescribed diff across the one file it touches is EMPTY. Content-landed; nothing to do." }
+```
+
+Three properties it was built to have, each verified in both directions:
+
+- **The reason is mandatory in practice.** An entry with no reason is
+  indistinguishable from a commit somebody wanted to stop seeing, which is the
+  failure mode this whole directory exists to prevent.
+- **A malformed file refuses rather than degrading.** A status page that quietly
+  drops its suppression list is how real unlanded work goes unreported —
+  the same reasoning that makes `unlanded.py` refuse a missing repo argument.
+- **Stale entries are reported as safe to delete.** When the heuristic stops
+  flagging a commit — it landed, it was dropped, the branch is gone — the report
+  says so instead of letting the file accumulate suppressions nobody can audit.
+
+Add an entry only after actually running the command the report prescribes:
+`git diff <integration> <branch> -- $(git show --name-only --format= <commit>)`.
