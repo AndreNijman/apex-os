@@ -19,6 +19,7 @@ mod firmware;
 mod gaming;
 mod gitshim;
 mod host;
+mod lid;
 mod mcp;
 mod migrate;
 mod mode;
@@ -110,6 +111,18 @@ enum Cmd {
     /// attached controllers. Exits non-zero when Gaming Mode would not start,
     /// so it is usable as a check.
     Gaming(gaming::GamingArgs),
+    /// Keep working with the lid shut, and say what that cost (P1-063).
+    ///
+    /// The lever is a logind `handle-lid-switch` block inhibitor held only
+    /// while there is live work, never an edit to `HandleLidSwitch=`: a machine
+    /// with nothing running must suspend in a bag exactly as it does today.
+    /// Thermal and battery guards suspend anyway and name themselves, and
+    /// `apex lid report` says what the last closed period actually did — how
+    /// long, what ran, whether the VPN held, what it cost in battery.
+    Lid {
+        #[command(subcommand)]
+        cmd: Option<lid::LidCmd>,
+    },
     /// What verified this boot, and what the boot counter believes (§22).
     ///
     /// Read-only. GRUB is the default bootloader for every published APEX
@@ -1418,6 +1431,7 @@ async fn main() {
         // "unavailable, and why" rather than demanding a password to answer
         // "what verified my boot".
         Cmd::Boot { cmd } => boot::boot_main(cmd),
+        Cmd::Lid { cmd } => lid::main(cmd),
         // Same shape as `boot`, and for the same reason: the honest answer to
         // "is my operating system signed" must not cost a password, so the
         // offline half is file reads and `--verify` is the only path that
