@@ -1131,7 +1131,7 @@ pub fn resolve_policy(cfg: &config::Config, args: &RunArgs) -> Result<AgentPolic
     // The allowlist goes in because `--network allowlist` with nothing on it
     // is a refusal too, and the user who typed the flag is the one who can
     // fix it.
-    policy.validate_for(&cfg.allowlist(), &cfg.connector_allow)?;
+    policy.validate_for(&cfg.allowlist(), &cfg.connector_allow, &cfg.plugin_allow)?;
     Ok(policy.normalised())
 }
 
