@@ -39,6 +39,7 @@
 
 pub mod crypto;
 pub mod format;
+pub mod target;
 pub mod verdict;
 
 pub use verdict::Verdict;
