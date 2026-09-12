@@ -116,15 +116,29 @@ host_stage() {
     mkdir -p "$OUT" || die "cannot create $OUT"
     rm -rf "${OUT:?}"/* 2>/dev/null
 
-    local missing=""
-    command -v podman >/dev/null 2>&1 || missing="podman is not installed"
+    # KVM FIRST, and the order is the decision. Without it no guest can boot and
+    # nothing else about the machine matters, so asking anything else first
+    # would report "podman is not installed" on a KVM-less runner — a true
+    # sentence about the wrong obstacle. It also means the common CI case
+    # answers without starting podman at all.
+    #
+    # The node is a variable for the same reason virsh and lsusb are variables
+    # in the engine: this is the branch a KVM-less runner takes, so it has to be
+    # reachable on a machine that HAS KVM. Pointing APEX_VMLAB_KVM at a path
+    # that is not there exercises the real branch; --no-kvm short-circuits
+    # earlier and proves a different line.
+    local missing="" kvm_node="${APEX_VMLAB_KVM:-/dev/kvm}"
+    if [[ "$WITH_KVM" = 0 ]]; then
+        missing="--no-kvm was given: no /dev/kvm is passed to the container, so no guest can boot"
+    elif [[ ! -r "$kvm_node" || ! -w "$kvm_node" ]]; then
+        missing="$kvm_node is not readable and writable by this user, so no guest can boot"
+    fi
+    if [[ -z "$missing" ]]; then
+        command -v podman >/dev/null 2>&1 || missing="podman is not installed"
+    fi
     if [[ -z "$missing" ]] && ! podman image exists "$BOOTLAB_IMAGE" 2>/dev/null; then
         missing="the boot lab image $BOOTLAB_IMAGE is not built (podman build -t apex-bootlab $REPO/bootlab)"
     fi
-    if [[ -z "$missing" && "$WITH_KVM" = 1 ]] && [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
-        missing="/dev/kvm is not readable and writable by this user, so no guest can boot"
-    fi
-    [[ "$WITH_KVM" = 0 ]] && missing="--no-kvm was given: the container was started without /dev/kvm"
 
     if [[ -n "$missing" ]]; then
         # Not a failure. The whole point of the third arm.
@@ -187,12 +201,21 @@ inside_root_stage() {
 # ═════════════════════════════════════════════════════════════════════════════
 
 # shellcheck source=tests/chaos/lib.sh
-. /repo/tests/chaos/lib.sh 2>/dev/null || true
+# $REPO resolves to the checkout on the host and to /repo inside the container,
+# so the same verdict writer is used in both stages and a bundle written by the
+# host's could-not-run path has the same shape as one written by a real run.
+. "$REPO/tests/chaos/lib.sh" 2>/dev/null || true
 
 W=/var/tmp/lab
 VM=/repo/files/system/libexec/apex-vm
 KVER=""
+# FLOW_REASON is free text that always reaches the record. FLOW_CANNOT is the
+# separate question "was this flow exercised at all" — separate because a flow
+# can be exercised with a caveat worth recording (the share flow is) without
+# that caveat turning a verification into a could-not-run, and because a flow
+# that was NOT exercised must never become a pass just by saying nothing.
 FLOW_REASON=""
+FLOW_CANNOT=0
 
 # write_verdict DIR NAME STATE REASON — the chaos bundle record, or a printf of
 # the same shape when the chaos library could not be sourced (which is the case
@@ -300,7 +323,16 @@ mkvm() {
     "$VM" create "$name" --memory 1024 --cpus 2 --import "$W/disk.img" "$@"
 }
 
-rmvm() { "$VM" rm "$1" >/dev/null 2>&1; }
+# rmvm keeps the guest's serial log first. It is the diagnostic somebody reads
+# when a flow goes red, and `apex vm rm` deletes it with everything else.
+CUR_FLOW=""
+rmvm() {
+    if [[ -n "$CUR_FLOW" && -f "$APEX_VM_HOME/$1/console.log" ]]; then
+        mkdir -p "/out/$CUR_FLOW"
+        tr -d '\r' < "$APEX_VM_HOME/$1/console.log" > "/out/$CUR_FLOW/console-$1.log" 2>/dev/null
+    fi
+    "$VM" rm "$1" >/dev/null 2>&1
+}
 
 inside_lab_stage() {
     umask 022
@@ -317,8 +349,9 @@ inside_lab_stage() {
     local f rc=0
     for f in "${FLOWS[@]}"; do
         chaos_reset_expectations
-        FLOW_REASON=""
+        FLOW_REASON=""; FLOW_CANNOT=0
         log "flow: $f"
+        CUR_FLOW="$f"
         local state="$VMLAB_CANNOT"
         case "$f" in
             create)      flow_create ;;
@@ -335,14 +368,15 @@ inside_lab_stage() {
         # with a failed expectation failed, whatever else it said.
         if (( CHAOS_EXPECT_BAD > 0 )); then
             state="$VMLAB_FAILED"
-            [[ -n "$FLOW_REASON" ]] || FLOW_REASON="$(printf '%s; ' "${CHAOS_EXPECT_NOTES[@]}" | grep -o 'BAD  [^;]*' | head -3 | tr '\n' ' ')"
+            FLOW_REASON="$(printf '%s; ' "${CHAOS_EXPECT_NOTES[@]}" | grep -o 'BAD  [^;]*' | head -3 | tr '\n' ' ')${FLOW_REASON:+ — $FLOW_REASON}"
             rc=1
-        elif [[ -n "$FLOW_REASON" ]]; then
+        elif (( FLOW_CANNOT == 1 )); then
             state="$VMLAB_CANNOT"
         elif (( CHAOS_EXPECT_OK > 0 )); then
             state="$VMLAB_VERIFIED"
-            FLOW_REASON="$CHAOS_EXPECT_OK observations held"
+            FLOW_REASON="$CHAOS_EXPECT_OK observations held${FLOW_REASON:+ — $FLOW_REASON}"
         else
+            state="$VMLAB_CANNOT"
             FLOW_REASON="the flow made no observations at all"
         fi
         mkdir -p "/out/$f"
@@ -395,6 +429,11 @@ flow_create() {
     says "the guest reached userspace" "APEX-VMLAB: userspace-reached" "$c"
     says "the guest shut down cleanly" "APEX-VMLAB: clean-poweroff" "$c"
     says "the kernel got the command line the UKI was signed with" "apex.vmlab=1" "$c"
+    # The control that makes `apex vm run`'s "no network" claim mean something.
+    # This VM has the default --network user, and the guest carries virtio_net,
+    # so it MUST see an interface here. If it did not, `netifs=lo,` in the
+    # egress flow would prove nothing but a missing driver.
+    says "the default --network user really gives the guest an interface" "netifs=eth0" "$c"
 
     # Removal is half the flow: a VM that cannot be removed is a VM that has to
     # be cleaned up by hand, and `rm` is the verb that touches a recursive
@@ -541,6 +580,47 @@ flow_share() {
     echo "host-wrote-this" > "$rw/from-host.txt"
     echo "host-wrote-this" > "$ro/from-host.txt"
 
+    # virtiofsd's DEFAULT sandbox is `namespace`: it unshares a user namespace,
+    # maps ids through newuidmap and mounts its own /proc. That cannot nest
+    # inside the lab container's user namespace — measured, three ways:
+    # `--sandbox namespace` fails with MountProc EPERM (also under
+    # seccomp=unconfined and unmask=all), `--sandbox chroot` refuses for a
+    # non-root user, and `--sandbox none` works. libvirt's <binary> element
+    # offers only namespace and chroot, so the substitution is a wrapper on the
+    # path the engine already takes from $APEX_VM_VIRTIOFSD.
+    #
+    # This is a property of virtiofsd inside a container, not of apex-vm: the
+    # domain, the memfd shared-memory backing, the guest-side mount, the
+    # read-only semantics and the host-visible write are all the real thing.
+    # Recorded in the verdict rather than left in a comment, and the real
+    # binary's presence is asserted so the engine's own default is known good
+    # on this machine.
+    claim "the engine's default virtiofsd exists and is executable" \
+        test -x /usr/libexec/virtiofsd
+    # --uid-map/--gid-map go with it. libvirt passes them for an unprivileged
+    # domain, and virtiofsd accepts them ONLY with the namespace sandbox —
+    # measured: with the flag alone it exits "uid_map can only be used by
+    # unprivileged user where sandbox mod is namespace". The wrapper records
+    # the argv it finally ran, so what was substituted is a file rather than a
+    # claim.
+    cat > "$W/virtiofsd-nosandbox" <<'WRAP'
+#!/usr/bin/env bash
+args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --uid-map|--gid-map)     shift 2; continue ;;
+        --uid-map=*|--gid-map=*) shift;   continue ;;
+    esac
+    args+=("$1"); shift
+done
+printf '%q ' /usr/libexec/virtiofsd --sandbox none "${args[@]}" >> "${VMLAB_VIRTIOFSD_ARGV:-/dev/null}"
+printf '\n' >> "${VMLAB_VIRTIOFSD_ARGV:-/dev/null}"
+exec /usr/libexec/virtiofsd --sandbox none "${args[@]}"
+WRAP
+    chmod 0755 "$W/virtiofsd-nosandbox"
+    export APEX_VM_VIRTIOFSD="$W/virtiofsd-nosandbox"
+    export VMLAB_VIRTIOFSD_ARGV="$W/virtiofsd-argv.txt"; : > "$VMLAB_VIRTIOFSD_ARGV"
+
     rmvm "$n"
     mkvm "$n" --uefi-vars "$W/vars-apex.fd" --share "$rw:labshare" --share-ro "$ro:labro" >/dev/null 2>&1
 
@@ -568,7 +648,11 @@ flow_share() {
     rmvm "$m"; mkvm "$m" --uefi-vars "$W/vars-apex.fd" >/dev/null 2>&1
     local out; out="$("$VM" share add "$m" "$rw:late" 2>&1)"
     says_not "share add on a share-less domain does not claim success" "added" "$out"
+    says "and says why, naming the memory backing" "shared memory backing" "$out"
     rmvm "$m"
+    cp -f "$VMLAB_VIRTIOFSD_ARGV" /out/share/virtiofsd-argv.txt 2>/dev/null
+    unset APEX_VM_VIRTIOFSD VMLAB_VIRTIOFSD_ARGV
+    FLOW_REASON="virtiofsd was run through a wrapper adding --sandbox none: its default namespace sandbox cannot nest inside the lab container's user namespace (MountProc EPERM, also under seccomp=unconfined). Everything else is the shipped path."
 }
 
 # ── USB ─────────────────────────────────────────────────────────────────────
@@ -585,21 +669,31 @@ flow_usb() {
     local n=lab-usb out
     rmvm "$n"; mkvm "$n" --uefi-vars "$W/vars-apex.fd" >/dev/null 2>&1
 
-    # The guard: libvirt's own error for a missing device names a bus and a
-    # device number the user never typed, so the engine checks lsusb first.
+    # The lab container has no lsusb, which is the interesting case rather than
+    # an inconvenience: it is a machine where the question "is this device
+    # plugged in" CANNOT BE ASKED. The engine must refuse rather than skip the
+    # check, and this is the live proof of the fix — the first run of this lab
+    # found the opposite, and libvirt was handed the hostdev.
     out="$("$VM" usb attach "$n" dead:beef 2>&1)"
-    says "attaching a device the host does not have is refused" "dead:beef" "$out"
-    says "and the refusal names lsusb, not a bus number" "lsusb" "$out"
+    says_not "a hostdev for an unverifiable device is NOT attached" "attached to" "$out"
+    says "and the refusal names lsusb" "lsusb" "$out"
+    claim_not "libvirt has no hostdev for it" \
+        bash -c "virsh -c qemu:///session dumpxml $n 2>/dev/null | grep -q hostdev"
 
     out="$("$VM" usb attach "$n" nothex 2>&1)"
     says "a malformed id is refused by shape" "VENDOR:PRODUCT" "$out"
 
-    says "apex vm usb list works on a domain with no devices" "$n" "$("$VM" usb list "$n" 2>&1; echo "$n")"
+    # The same question through the other verb, which used not to ask it.
+    out="$("$VM" create lab-usb-create --import "$W/disk.img" --usb dead:beef 2>&1)"
+    says "create --usb makes the same check usb attach makes" "lsusb" "$out"
+    claim_not "and leaves no half-made VM behind" test -e "$APEX_VM_HOME/lab-usb-create"
+
     rmvm "$n"
 
     local have=0
     [[ -d /dev/bus/usb ]] && have=1
-    FLOW_REASON="host USB passthrough was not exercised: /dev/bus/usb is $([ "$have" = 1 ] && echo present || echo absent) in the lab container and detaching a physical device from the machine running the tests is not something a suite may do. What WAS exercised live: the lsusb guard, the malformed-id refusal, and the XML (tests/test-apex-vm.sh asserts qemu-xhci and managed='yes')."
+    FLOW_CANNOT=1
+    FLOW_REASON="host USB passthrough itself was not exercised: /dev/bus/usb is $([ "$have" = 1 ] && echo present || echo absent) in the lab container, and detaching a physical device from the machine running the tests is not something a suite may do. What WAS exercised live, against a real libvirt: the refusal when lsusb cannot be run, the same refusal from create --usb, the malformed-id refusal, and that no hostdev reached the domain in any of them. The XML itself (qemu-xhci with ports, managed='yes') is asserted in tests/test-apex-vm.sh."
 }
 
 # ── egress — P2-009's security half ─────────────────────────────────────────
@@ -622,10 +716,11 @@ flow_egress() {
     echo "the-task-input" > "$src/input.txt"
 
     # The task writes three files. Two are nominated; leak.txt is not.
+    local clog="$W/egress-console.log"; rm -f "$clog"
     out="$("$VM" run --image "$W/disk.img" --memory 1024 --timeout 240 \
         --copy-in "$src" \
-        --egress report.json --egress guest-report.txt \
-        --egress-to "$dest" \
+        --egress report.json --egress guest-report.txt --egress guest.log \
+        --egress-to "$dest" --console-to "$clog" \
         -- sh -c 'echo {\"ok\":true} > report.json; echo SECRET-DATA > leak.txt; ls -l' 2>&1)"
 
     says "the run reported an egress count" "nominated files left the VM" "$out"
@@ -638,13 +733,55 @@ flow_egress() {
     local g; g="$(cat "$dest/guest-report.txt" 2>/dev/null)"
     says "the guest's own report came out" "APEX-VMLAB" "$g"
     says "the guest reports NO network interface but loopback" "netifs=lo," "$g"
+    says_not "and specifically no ethernet device" "eth0" "$g"
     says "the copy-in volume refused the guest's write" "apexin write=refused" "$g"
+    # The task ran and SAID it made the file. Without this the line above could
+    # mean the guest never started.
+    # guest.log is the task's own stdout — the `ls -l` it ran — and it is
+    # nominated like the rest. It is what turns "leak.txt is not on the host"
+    # from an absence into a refusal: the guest says it made the file.
+    says "the guest's task log shows leak.txt was really created in the VM" "leak.txt" \
+        "$(cat "$dest/guest.log" 2>/dev/null)"
+
+    # --console-to is the only way to read a disposable guest at all; teardown
+    # deletes the VM's directory, console log included.
+    claim "--console-to saved the guest's serial output" test -s "$clog"
+    says "which is the same guest, saying the same things" "APEX-VMLAB: clean-poweroff" \
+        "$(tr -d '\r' < "$clog" 2>/dev/null)"
+    cp -f "$clog" /out/egress/ 2>/dev/null
 
     # Nothing survives.
     claim_not "no disposable domain is left behind" \
         bash -c "virsh -c qemu:///session list --all 2>/dev/null | grep -q 'apex-run-'"
     claim_not "no disposable directory is left behind" \
         bash -c "ls -d $APEX_VM_HOME/apex-run-* >/dev/null 2>&1"
+
+    # ── the mutation, and it is the most important thing in this file ──────
+    #
+    # "leak.txt did not arrive" is worth nothing unless it COULD have. So the
+    # engine is copied, its egress loop is turned around to iterate the
+    # CONTENTS of the volume instead of the nominations — the exact defect the
+    # shipped loop's comment says it exists not to have — and the same task is
+    # run again. The unnominated file must now arrive. If it does not, this
+    # whole flow is green for some reason other than the one it claims.
+    #
+    # The copy is in the lab's work directory and the shipped engine is never
+    # touched.
+    local mutant="$W/apex-vm-mutant" mdest="$W/egress-mutant"
+    rm -rf "$mdest"
+    sed 's|^        for n in "${egress\[@\]}"; do|        for n in $(mdir -i "$out_img" -b ::/ 2>/dev/null \| sed "s\|^::/\|\|" \| tr -d "\\r"); do|' \
+        "$VM" > "$mutant"
+    chmod 0755 "$mutant"
+    if ! grep -q 'for n in \$(mdir' "$mutant"; then
+        _chaos_fail "the mutation could not be applied, so the egress assertion is unproven"
+    else
+        APEX_VM_HOME="$APEX_VM_HOME" "$mutant" run --image "$W/disk.img" --memory 1024 \
+            --timeout 240 --egress report.json --egress-to "$mdest" \
+            -- sh -c 'echo {} > report.json; echo SECRET-DATA > leak.txt' >/dev/null 2>&1
+        claim "MUTATION: an engine that iterates the volume DOES leak the unnominated file" \
+            test -f "$mdest/leak.txt"
+        claim_not "and the shipped engine did not, from the same task" test -f "$dest/leak.txt"
+    fi
 
     # Default-deny: without --egress-to, nothing leaves however much is
     # nominated.
