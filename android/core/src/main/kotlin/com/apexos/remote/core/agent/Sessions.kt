@@ -1,6 +1,9 @@
 package com.apexos.remote.core.agent
 
 import kotlinx.serialization.SerialName
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -221,27 +224,37 @@ object Agentd {
     fun interrupt(id: Int): String = signal(id, "int")
 
     /**
-     * THERE IS NO `worktrees` VERB, AND THERE IS NO `projects` VERB EITHER.
+     * Per-worktree status for every remembered project, or for one slug.
      *
-     * This is recorded as a function that does not exist rather than as a
-     * comment somewhere, because an earlier round of this app built
-     * `{"cmd":"worktrees"}` and a `WorktreeStatus` to parse the answer. Nothing
-     * would have parsed: `apex-agent-core`'s `Request` is an internally-tagged
-     * serde enum whose entire vocabulary is Hello, Run, List, Info, Attach,
-     * Resize, Signal, Event, Logs, Remove, Prune, and the privilege and secret
-     * verbs. `apex-remoted` forwards a control line to the daemon unchanged —
-     * it refuses only `attach`, and for its own reasons — so the request would
-     * have reached a daemon that cannot deserialise it.
+     * ## This verb EXISTS. The comment that used to stand here said it did not.
      *
-     * What a phone can therefore actually offer when starting an agent is:
-     * which adapter (from `Hello.agents`), which directory, and which worktree
-     * *name* — because `RunRequest.worktree` does exist and means "create or
-     * reuse this git worktree under the project". [Places.from] derives the
-     * directories worth offering from the sessions the daemon already reports,
-     * which is the only source of them there is.
+     * An earlier round of this app built exactly this request, and then
+     * deleted it along with its parser under the belief that
+     * `apex-agent-core`'s `Request` vocabulary "is Hello, Run, List, Info,
+     * Attach, Resize, Signal, Event, Logs, Remove, Prune, and the privilege
+     * and secret verbs". That was read off `request.rs`'s `Verb` — the
+     * *privileged operation* vocabulary — and not off `protocol.rs`'s
+     * `Request`, which is the wire. `protocol.rs` has carried
+     * `Worktrees { project: Option<String> }` since `473b7f60` (2026-09-08);
+     * `apex-agentd/src/main.rs:906` dispatches it; and `apex-remoted`'s
+     * `control()` refuses exactly one verb, `attach`, so it is forwarded.
+     * See [WorktreeStatus] for the full account.
+     *
+     * `project` is a project **slug**, never a path. That is a security
+     * property of the request and not a convenience: answering it makes the
+     * daemon run git — including `merge-tree --write-tree`, which writes
+     * objects — in the named directory, and every confined session has this
+     * socket bound in. Keyed on a slug the daemon resolves by *searching* the
+     * remembered set, the reachable directories are exactly the ones the user
+     * already chose to remember. Sending a path here does not widen that; it
+     * just gets a `bad_request`.
      */
-    private const val NO_WORKTREE_VERB: String =
-        "apex-agentd has no worktrees verb; see the note in Agentd"
+    fun worktrees(project: String? = null): String =
+        if (project.isNullOrEmpty()) {
+            """{"cmd":"worktrees"}"""
+        } else {
+            """{"cmd":"worktrees","project":"${escape(project)}"}"""
+        }
 
     /**
      * Start a session.
@@ -266,6 +279,117 @@ object Agentd {
         if (!prompt.isNullOrEmpty()) append(""","prompt":"""").append(escape(prompt)).append('"')
         if (!worktree.isNullOrEmpty()) append(""","worktree":"""").append(escape(worktree)).append('"')
         append('}')
+    }
+
+    // ---- approvals (P1-057) ---------------------------------------------
+    //
+    // Note which verb is NOT here: `decide`. See the head of `Approvals.kt` —
+    // `privilege.rs:1176` refuses it from any non-local origin, before the
+    // pending check, and no setting changes that. A builder for it would be a
+    // builder for a request that is always refused.
+
+    /** Every privilege request the daemon has, decided or not. */
+    fun requests(): String = """{"cmd":"requests"}"""
+
+    /** Per-project grants: project root -> grant keys. */
+    fun grants(): String = """{"cmd":"grants"}"""
+
+    /** System-access grants, each with the state the daemon computed for it. */
+    fun systemGrants(): String = """{"cmd":"system_grants"}"""
+
+    /**
+     * Withdraw a per-project grant, or every grant for the project.
+     *
+     * Omitting `key` revokes them all — `Request::Revoke.key` is
+     * `#[serde(default)]` and absent means "everything for this project". That
+     * is a wide action, so the key is never omitted by accident here: a caller
+     * passing null has asked for it.
+     *
+     * Allowed from a phone, unlike `decide`, and the asymmetry is the point:
+     * `privilege.rs:1289` gates this on the caller not being a managed session
+     * and applies no origin check, because revoking only ever removes
+     * authority. A device that cannot grant anything can still take it back.
+     */
+    fun revoke(project: String, key: String? = null): String = buildString {
+        append("""{"cmd":"revoke","project":"""").append(escape(project)).append('"')
+        if (key != null) append(""","key":"""").append(escape(key)).append('"')
+        append('}')
+    }
+
+    /** End a live system-access grant now. Allowed from a phone, as above. */
+    fun revokeSystemGrant(id: Int): String =
+        """{"cmd":"revoke_system_grant","id":$id}"""
+
+    fun readRequests(reply: String): List<PrivilegeRequest> {
+        val obj = require(reply, "requests")
+        val array = obj["requests"] ?: return emptyList()
+        return json.decodeFromJsonElement(
+            ListSerializer(PrivilegeRequest.serializer()),
+            array,
+        )
+    }
+
+    /**
+     * One request, from a `privilege_request`.
+     *
+     * Read from the top level like [readSession]: `Response::Request` is a
+     * newtype variant under an internal tag, so `id`, `verb` and the rest sit
+     * beside `"reply"` rather than under a key.
+     */
+    fun readRequest(reply: String): PrivilegeRequest {
+        val obj = require(reply, "request")
+        return json.decodeFromJsonElement(PrivilegeRequest.serializer(), obj)
+    }
+
+    fun readGrants(reply: String): Grants {
+        val obj = require(reply, "grants")
+        val projects = obj["projects"] ?: return emptyMap()
+        return json.decodeFromJsonElement(
+            MapSerializer(
+                String.serializer(),
+                ListSerializer(
+                    String.serializer(),
+                ),
+            ),
+            projects,
+        )
+    }
+
+    /**
+     * System grants, paired with the state the daemon computed for each.
+     *
+     * `states` arrives as `[["active","14m left"], …]` — an array of
+     * two-element ARRAYS, because that is how serde serializes a Rust tuple.
+     * Decoding it as objects would throw, and decoding it as a flat list of
+     * strings would silently pair every grant with the wrong half.
+     *
+     * The two lists are the same length by the daemon's contract. A reply that
+     * breaks it is not trusted into a zip: a grant with no state is shown with
+     * an empty one rather than dropped, because a live root grant missing from
+     * a list the user is reading is the worst outcome available here.
+     */
+    fun readSystemGrants(reply: String): List<Pair<SystemGrant, GrantState>> {
+        val obj = require(reply, "system_grants")
+        val grants = obj["grants"]?.let {
+            json.decodeFromJsonElement(
+                ListSerializer(SystemGrant.serializer()),
+                it,
+            )
+        } ?: return emptyList()
+        val states = obj["states"]?.let {
+            json.decodeFromJsonElement(
+                ListSerializer(
+                    ListSerializer(
+                        String.serializer(),
+                    ),
+                ),
+                it,
+            )
+        } ?: emptyList()
+        return grants.mapIndexed { i, g ->
+            val pair = states.getOrNull(i).orEmpty()
+            g to GrantState(pair.getOrElse(0) { "" }, pair.getOrElse(1) { "" })
+        }
     }
 
     /**
@@ -314,7 +438,7 @@ object Agentd {
     fun readSessions(reply: String): List<AgentSession> {
         val obj = require(reply, "sessions")
         val array = obj["sessions"] ?: return emptyList()
-        return json.decodeFromJsonElement(kotlinx.serialization.builtins.ListSerializer(AgentSession.serializer()), array)
+        return json.decodeFromJsonElement(ListSerializer(AgentSession.serializer()), array)
     }
 
     /**
@@ -327,6 +451,48 @@ object Agentd {
         val obj = require(reply, "session")
         return json.decodeFromJsonElement(AgentSession.serializer(), obj)
     }
+
+    /**
+     * The worktree rows, from a `worktrees` reply.
+     *
+     * Throws [AgentError] like every other parser here, with one case given a
+     * name: see [isTooOld]. The rows are returned flat, in the daemon's own
+     * order, because that order is what [Project.group] reads.
+     */
+    fun readWorktrees(reply: String): List<WorktreeStatus> {
+        val obj = require(reply, "worktrees")
+        val array = obj["worktrees"] ?: return emptyList()
+        return json.decodeFromJsonElement(
+            ListSerializer(WorktreeStatus.serializer()),
+            array,
+        )
+    }
+
+    /**
+     * Whether this refusal is "that machine's runtime predates this verb".
+     *
+     * Refusal, absence and could-not-run are three different answers, and on
+     * this socket two of them arrive as the same `kind`. `apex-agentd` answers
+     * an unknown `cmd` from `serde_json::from_str::<Request>` failing, which
+     * it reports as `bad_request` with the message `unparseable request:
+     * unknown variant \`worktrees\`, expected one of …` (`main.rs:612`) — and
+     * `worktrees` with a slug nothing matches *also* answers `bad_request`,
+     * with `no remembered project with slug …`. A screen that showed the first
+     * as "no projects" would be reporting a version skew as an empty machine.
+     *
+     * The `unknown variant` text is serde's, not APEX's, so this is keyed on
+     * both halves: the daemon's own prefix and serde's phrase. It is only ever
+     * used to choose *wording*; nothing is retried or skipped on the strength
+     * of it.
+     *
+     * This matters today and not hypothetically: the image on this developer's
+     * own machine is from 2026-09-05 and the verb landed on 2026-09-08, so
+     * every `worktrees` request against it takes exactly this path.
+     */
+    fun isTooOld(error: AgentError): Boolean =
+        error.kind == "bad_request" &&
+            error.message.startsWith("unparseable request:") &&
+            error.message.contains("unknown variant")
 
     fun readHello(reply: String): Hello {
         val obj = require(reply, "hello")

@@ -214,6 +214,28 @@ pub struct Readiness {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeStatus {
     pub name: String,
+    /// The slug of the project this worktree belongs to.
+    ///
+    /// Added so a client can GROUP a listing without inferring the grouping
+    /// from the order rows arrive in. `Request::Worktrees { project: None }`
+    /// answers with every remembered project's worktrees in one flat list, and
+    /// before this the only way to tell where one project ended and the next
+    /// began was that `is_agent == false` opens a project — true, but a
+    /// property of this function's emission order rather than a fact the reply
+    /// stated, and a project whose main tree could not be statted breaks it
+    /// silently. The Android client had to carry exactly that inference.
+    ///
+    /// It is also the value `Request::Worktrees.project` takes, so a client
+    /// that has listed everything can now ask about ONE project. Without it
+    /// that parameter was unreachable: nothing else in the reply is a slug.
+    ///
+    /// `#[serde(default)]` and additive, by this crate's own criterion for
+    /// what is not a protocol bump: a client that predates it ignores the key
+    /// and groups exactly as it did before, and a daemon that predates it
+    /// sends an empty string, which is not a slug and not mistakable for one.
+    /// The failure loses a grouping, never a restriction.
+    #[serde(default)]
+    pub slug: String,
     pub path: String,
     pub branch: Option<String>,
     pub head: Option<String>,
@@ -318,6 +340,7 @@ pub fn readiness(
 /// interrogated.
 pub fn status(
     repo: &Path,
+    slug: &str,
     wt: &AgentWorktree,
     base: Option<&str>,
     tests: TestState,
@@ -397,6 +420,7 @@ pub fn status(
 
     WorktreeStatus {
         name: wt.name.clone(),
+        slug: slug.to_string(),
         path: wt.path.to_string_lossy().into_owned(),
         branch,
         head,
@@ -477,7 +501,7 @@ where
         .map(|wt| {
             let tests = tests_for(&wt.path);
             let sessions = ids.get(wt.path.as_path()).cloned().unwrap_or_default();
-            status(repo, wt, base.as_deref(), tests, sessions)
+            status(repo, &project.slug, wt, base.as_deref(), tests, sessions)
         })
         .collect())
 }

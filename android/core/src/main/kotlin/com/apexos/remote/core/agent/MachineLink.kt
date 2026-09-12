@@ -124,6 +124,56 @@ class MachineLink(
         )
     }
 
+    /**
+     * Per-worktree status for every remembered project, or for one slug.
+     *
+     * Retried on a dropped connection like every other question here, and this
+     * one deserves the note: answering it makes the daemon run git in every
+     * remembered project, `merge-tree --write-tree` included. That writes
+     * objects, which sounds like an action — but it writes only unreferenced
+     * ones into the object database to answer "would this merge", and the
+     * answer to asking twice is the same answer. It is a question.
+     *
+     * It is also slow, which is why it is not folded into the Agent Center's
+     * four-second poll. `Mux.CONTROL_TIMEOUT_MS` is five minutes, matching
+     * `apex-remoted`'s own, so a large repository has room.
+     */
+    fun worktrees(project: String? = null): List<WorktreeStatus> =
+        Agentd.readWorktrees(request(Agentd.worktrees(project)))
+
+    /** The same, grouped into the projects the daemon walked. */
+    fun projects(): List<Project> = Project.group(worktrees())
+
+    // ---- approvals (P1-057) ---------------------------------------------
+    //
+    // There is no `decide` here and there must not be one. See `Approvals.kt`.
+
+    fun requests(): List<PrivilegeRequest> = Agentd.readRequests(request(Agentd.requests()))
+
+    /** Only the ones still waiting on a human — at the machine, not here. */
+    fun pendingRequests(): List<PrivilegeRequest> = requests().filter { it.isPending }
+
+    fun grants(): Grants = Agentd.readGrants(request(Agentd.grants()))
+
+    fun systemGrants(): List<Pair<SystemGrant, GrantState>> =
+        Agentd.readSystemGrants(request(Agentd.systemGrants()))
+
+    /**
+     * Withdraw a per-project grant, or all of them for the project.
+     *
+     * **Not retried**, and that is not tidiness. `revoke` without a key
+     * removes every grant for a project, and a reply lost after the daemon
+     * acted would have the retry answer `no_such_request` — reporting a
+     * failure for something that succeeded, which on a screen about authority
+     * is the wrong way round. The caller is told the connection went.
+     */
+    fun revoke(project: String, key: String? = null): Grants =
+        Agentd.readGrants(request(Agentd.revoke(project, key), retry = false))
+
+    /** End a live system-access grant now. Not retried, for the reason above. */
+    fun revokeSystemGrant(id: Int): List<Pair<SystemGrant, GrantState>> =
+        Agentd.readSystemGrants(request(Agentd.revokeSystemGrant(id), retry = false))
+
     // ---- the connection -------------------------------------------------
 
     /**
