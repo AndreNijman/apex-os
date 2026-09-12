@@ -184,7 +184,10 @@ else
         "$before application(s) already present — the tree below is not only the greeter's"
 fi
 
-"$QMLRUN" -platform wayland "$STAGE/app.qml" >"$ATSPI_W/app.out" 2>"$ATSPI_W/app.err" &
+# atspi_run_app, not a bare exec: the surface must DISCOVER the accessibility
+# bus through org.a11y.Bus on the session bus, exactly as a real application
+# does, rather than being handed the address in AT_SPI_BUS_ADDRESS.
+atspi_run_app "$QMLRUN" -platform wayland "$STAGE/app.qml" >"$ATSPI_W/app.out" 2>"$ATSPI_W/app.err" &
 APP_PID=$!
 
 registered=0
