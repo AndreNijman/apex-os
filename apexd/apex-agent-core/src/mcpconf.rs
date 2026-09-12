@@ -77,6 +77,18 @@
 //! document at all — [`crate::adapter::Adapter::strict_mcp`] is a per-adapter
 //! fact, and a runtime that pretended otherwise would report a confinement it
 //! had not applied.
+//!
+//! The larger limit is one this file cannot fix and must therefore keep
+//! saying: **this document only exists on the path that writes it.** A person
+//! who types `claude` in a terminal is not running through `apex agent`,
+//! nothing passes `--mcp-config`, and every plugin's server starts from the
+//! definition the plugin wrote. So a wrapper this adds is a confinement of
+//! APEX-started sessions, not of the machine, and [`Wrap`] carries that
+//! distinction into every decision rather than leaving it to a footnote:
+//! [`Wrap::InDefinition`] survives a hand-run and [`Wrap::AtLaunch`] does not.
+//! `apex mcp confine` is the verb that moves one to the other, by writing the
+//! wrapper into the definition on disk — which a plugin update then overwrites,
+//! which is why this exists at all.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -441,18 +453,83 @@ pub fn unwrap_wrapped(command: &str, args: &[String]) -> Option<(String, Vec<Str
 //  the curated document
 // ═════════════════════════════════════════════════════════════════════════════
 
+/// What confines a kept connector, and **when** — which is a different
+/// question from whether, and the one a reader of a security report is
+/// entitled to.
+///
+/// Four values, not a boolean and not an `Option<bool>`. The split that
+/// matters is between the first two: a definition that already names
+/// `apex mcp run` is confined however the agent is started, and one this
+/// rewrites at launch is confined *only in a session APEX started*. A person
+/// who types `claude` in a terminal gets the bare definition, because nothing
+/// APEX writes is on that path at all. Collapsing those two into `true` is how
+/// a report comes to claim a sandbox that a hand-run session does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wrap {
+    /// The definition on disk starts through `apex mcp run`, so bubblewrap
+    /// confines it whoever starts the agent. `apex mcp confine` writes these.
+    InDefinition,
+    /// The definition is bare and the curated launch configuration rewrites it.
+    /// Confined in a session started through `apex agent`, on an adapter that
+    /// can be told to ignore every other MCP configuration — and **not**
+    /// confined when the agent is run by hand.
+    AtLaunch,
+    /// A local program that nothing wraps. [`Decision::why`] carries which of
+    /// the reasons, because "your own definition" and "the runtime could not
+    /// find its own binary" are a choice and a failure respectively.
+    Not,
+    /// No local process to wrap: a cloud endpoint, or a transport this cannot
+    /// place. Not the same statement as [`Wrap::Not`], and a report that said
+    /// "NOT sandboxed" here would be describing a program that does not exist.
+    NoProcess,
+}
+
+impl Wrap {
+    /// The old two-and-a-half-valued answer, for consumers that only ask
+    /// whether bubblewrap runs at all.
+    ///
+    /// `None` is "no process", exactly as before. Anything that reads this and
+    /// prints a sandbox should print [`Wrap::qualifier`] beside it.
+    pub fn confined(&self) -> Option<bool> {
+        match self {
+            Wrap::InDefinition | Wrap::AtLaunch => Some(true),
+            Wrap::Not => Some(false),
+            Wrap::NoProcess => None,
+        }
+    }
+
+    /// Whether the confinement survives somebody running the agent by hand.
+    ///
+    /// The question [`Wrap::AtLaunch`] exists to answer `false` to.
+    pub fn survives_a_hand_run(&self) -> bool {
+        matches!(self, Wrap::InDefinition)
+    }
+
+    /// A stable name for a JSON consumer, so nobody has to match on prose.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Wrap::InDefinition => "definition",
+            Wrap::AtLaunch => "launch",
+            Wrap::Not => "none",
+            Wrap::NoProcess => "no_process",
+        }
+    }
+}
+
 /// Whether a connector reached the session, and what happened to it.
 ///
-/// `confined` is three-valued on purpose. `Some(true)` is bubblewrap running;
-/// `Some(false)` is a program that runs with everything the session has;
-/// `None` is "there is no local process here to confine", which is an endpoint
-/// and is not the same statement as either.
+/// `confined` says what confines the program and when; see [`Wrap`] for why
+/// "sandboxed" on its own is not an answer a report may print. It is `None`
+/// for a connector that was removed — not because nothing is known, but
+/// because the question does not arise for a program that never starts, and
+/// answering it anyway is how a count of sandboxed connectors comes to include
+/// ones that were not there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
     pub name: String,
     pub origin: Origin,
     pub kept: bool,
-    pub confined: Option<bool>,
+    pub confined: Option<Wrap>,
     pub why: String,
 }
 
@@ -463,7 +540,14 @@ impl Decision {
             "origin": self.origin.tag(),
             "definedIn": self.origin.describe(),
             "kept": self.kept,
-            "sandboxed": self.confined,
+            "sandboxed": self.confined.and_then(|w| w.confined()),
+            // The field that distinguishes the two ways of being sandboxed.
+            // A consumer that reads only `sandboxed` is told the truth; one
+            // that needs to know whether a hand-run session has it too reads
+            // this.
+            "sandboxedBy": self.confined.map_or("not_kept", |w| w.tag()),
+            "sandboxSurvivesAHandRun":
+                self.confined.is_some_and(|w| w.survives_a_hand_run()),
             "why": self.why,
         })
     }
@@ -489,7 +573,21 @@ impl Curated {
     pub fn confined(&self) -> usize {
         self.decisions
             .iter()
-            .filter(|d| d.kept && d.confined == Some(true))
+            .filter(|d| d.kept && d.confined.and_then(|w| w.confined()) == Some(true))
+            .count()
+    }
+
+    /// How many of the confined ones stay confined when somebody runs the
+    /// agent by hand.
+    ///
+    /// Never higher than [`Curated::confined`], and the gap between them is
+    /// exactly the confinement this file is buying — which is worth a number
+    /// rather than a footnote, because that gap disappears the moment the
+    /// session is not one APEX started.
+    pub fn confined_everywhere(&self) -> usize {
+        self.decisions
+            .iter()
+            .filter(|d| d.kept && d.confined.is_some_and(|w| w.survives_a_hand_run()))
             .count()
     }
 
@@ -502,7 +600,7 @@ impl Curated {
     pub fn has_unconfined_program(&self) -> bool {
         self.decisions
             .iter()
-            .any(|d| d.kept && d.confined == Some(false))
+            .any(|d| d.kept && d.confined.and_then(|w| w.confined()) == Some(false))
     }
 
     pub fn to_json(&self) -> Value {
@@ -510,6 +608,7 @@ impl Curated {
             "kept": self.kept(),
             "dropped": self.dropped(),
             "sandboxed": self.confined(),
+            "sandboxedWithoutThisFile": self.confined_everywhere(),
             "unconfinedProgramKept": self.has_unconfined_program(),
             "connectors": self.decisions.iter().map(Decision::to_json).collect::<Vec<_>>(),
         })
@@ -572,17 +671,17 @@ pub fn curate(
                 if let Some(inner) = unwrap_wrapped(command, args) {
                     (
                         def.def.clone(),
-                        Some(true),
+                        Wrap::InDefinition,
                         format!(
                             "already wrapped: it starts through `apex mcp run {}`, so bubblewrap \
-                             confines it",
+                             confines it however the agent is started",
                             inner.0
                         ),
                     )
                 } else if !def.origin.is_third_party() {
                     (
                         def.def.clone(),
-                        Some(false),
+                        Wrap::Not,
                         "NOT sandboxed: your own definition, left exactly as you wrote it — \
                          `apex mcp confine` is the verb that changes that"
                             .to_string(),
@@ -590,7 +689,7 @@ pub fn curate(
                 } else if !usable_as_server_name(&def.name) {
                     (
                         def.def.clone(),
-                        Some(false),
+                        Wrap::Not,
                         "NOT sandboxed: its name cannot be a directory component, so \
                          `apex mcp run` has nowhere to put its policy or its private home"
                             .to_string(),
@@ -601,15 +700,22 @@ pub fn curate(
                             let (command, args) = wrap(apex, &def.name, command, args);
                             (
                                 rewrite(&def.def, &command, &args),
-                                Some(true),
-                                "sandboxed: the launch configuration starts it through \
-                                 `apex mcp run`, so bubblewrap confines it"
+                                Wrap::AtLaunch,
+                                // The qualifier is in the sentence, not in a
+                                // footnote further down the report: this
+                                // wrapper exists only inside the file the
+                                // runtime wrote, and a person who starts the
+                                // agent by hand never sees that file.
+                                "sandboxed: this launch configuration starts it through \
+                                 `apex mcp run`, so bubblewrap confines it in a session started \
+                                 through `apex agent` — running the agent yourself gets the \
+                                 definition as the plugin wrote it"
                                     .to_string(),
                             )
                         }
                         None => (
                             def.def.clone(),
-                            Some(false),
+                            Wrap::Not,
                             "NOT sandboxed, and this is a could-not-run rather than a choice: \
                              the runtime could not find its own `apex` binary to wrap it with"
                                 .to_string(),
@@ -619,12 +725,12 @@ pub fn curate(
             }
             Wire::Endpoint { url } => (
                 def.def.clone(),
-                None,
+                Wrap::NoProcess,
                 format!("cloud endpoint {url} — no local process, so no local sandbox applies"),
             ),
             Wire::Unplaceable(what) => (
                 def.def.clone(),
-                None,
+                Wrap::NoProcess,
                 format!(
                     "kept as defined, and it is defined as {what} — which side of this machine \
                      it is on cannot be said, so nothing here claims to confine it"
@@ -637,7 +743,7 @@ pub fn curate(
             name: def.name.clone(),
             origin: def.origin.clone(),
             kept: true,
-            confined,
+            confined: Some(confined),
             why: note,
         });
     }
@@ -812,6 +918,108 @@ mod tests {
     }
 
     #[test]
+    fn a_sandbox_that_only_exists_in_this_file_is_not_reported_as_one_that_survives() {
+        // The distinction `Wrap` exists for, and the one a boolean loses.
+        //
+        // Two plugin servers, identical in every way that matters except that
+        // one's own definition already names `apex mcp run`. BOTH are confined
+        // in a session APEX starts, so `confined()` counts two and a report
+        // built on that number alone would say "2 sandboxed" — true, and
+        // misleading, because the moment somebody types `claude` in a terminal
+        // only one of them still is. This file is not on that path: nothing
+        // passes `--mcp-config` there, so the bare definition is what runs.
+        let defs = vec![
+            def(
+                "plugin:p:bare",
+                plugin("p"),
+                json!({"command": "node", "args": ["server.js"]}),
+            ),
+            def(
+                "plugin:p:wrapped",
+                plugin("p"),
+                json!({"command": "apex",
+                       "args": ["mcp", "run", "plugin:p:wrapped", "--", "node", "s.js"]}),
+            ),
+        ];
+        let c = curate(
+            &defs,
+            &Approval::default(),
+            ConnectorPolicy::AsConfigured,
+            &[],
+            Some(&apex()),
+        );
+
+        assert_eq!(c.confined(), 2, "both are confined in a session APEX starts");
+        assert_eq!(
+            c.confined_everywhere(),
+            1,
+            "only the one wrapped in its own definition survives a hand-run"
+        );
+
+        let bare = c.decisions.iter().find(|d| d.name == "plugin:p:bare").expect("bare");
+        let wrapped = c.decisions.iter().find(|d| d.name == "plugin:p:wrapped").expect("wrapped");
+        assert_eq!(bare.confined, Some(Wrap::AtLaunch));
+        assert_eq!(wrapped.confined, Some(Wrap::InDefinition));
+        assert!(!bare.confined.unwrap().survives_a_hand_run());
+        assert!(wrapped.confined.unwrap().survives_a_hand_run());
+
+        // The qualifier travels with the sentence, not in a footnote at the
+        // bottom of some report that a JSON consumer never reads.
+        assert!(
+            bare.why.contains("through `apex agent`"),
+            "an at-launch sandbox must say where it applies:\n{}",
+            bare.why
+        );
+        assert!(
+            bare.why.contains("running the agent yourself"),
+            "and where it does not:\n{}",
+            bare.why
+        );
+        assert!(
+            wrapped.why.contains("however the agent is started"),
+            "{}",
+            wrapped.why
+        );
+
+        let j = c.to_json();
+        assert_eq!(j["sandboxed"], 2);
+        assert_eq!(j["sandboxedWithoutThisFile"], 1);
+        let by: Vec<&str> = j["connectors"]
+            .as_array()
+            .expect("connectors")
+            .iter()
+            .map(|c| c["sandboxedBy"].as_str().expect("sandboxedBy"))
+            .collect();
+        assert_eq!(by, vec!["launch", "definition"]);
+    }
+
+    #[test]
+    fn a_removed_connector_is_not_reported_as_a_process_that_nothing_confines() {
+        // The outer `Option`. A dropped connector has no confinement state at
+        // all — it never starts — and the two ways of having nothing to say
+        // are different: `not_kept` is "the question does not arise" and
+        // `no_process` is "it runs, off this machine". Collapsed together, a
+        // count of unconfined programs would include connectors that were
+        // removed precisely so they would not run.
+        let defs = vec![def(
+            "plugin:p:srv",
+            plugin("p"),
+            json!({"command": "node", "args": []}),
+        )];
+        let c = curate(
+            &defs,
+            &Approval::default(),
+            ConnectorPolicy::NoConnectors,
+            &[],
+            Some(&apex()),
+        );
+        assert_eq!(c.kept(), 0);
+        assert_eq!(c.decisions[0].confined, None);
+        assert!(!c.has_unconfined_program(), "a removed program is not an unconfined one");
+        assert_eq!(c.to_json()["connectors"][0]["sandboxedBy"], "not_kept");
+    }
+
+    #[test]
     fn an_already_wrapped_definition_is_not_wrapped_twice() {
         // The regression a second wrap would be: `apex mcp run x -- apex mcp
         // run x -- …`, which starts a sandbox inside a sandbox to run the same
@@ -876,9 +1084,14 @@ mod tests {
             &[],
             Some(&apex()),
         );
-        assert_eq!(c.decisions[0].confined, None);
+        // `Some(NoProcess)`, not `None`: a kept endpoint with no process and a
+        // connector that was REMOVED are different facts, and the outer option
+        // is what keeps them apart. Before `Wrap` existed both were `None` and
+        // a reader could not tell whether the thing had run at all.
+        assert_eq!(c.decisions[0].confined, Some(Wrap::NoProcess));
         assert!(!c.has_unconfined_program());
         assert_eq!(c.to_json()["connectors"][0]["sandboxed"], Value::Null);
+        assert_eq!(c.to_json()["connectors"][0]["sandboxedBy"], "no_process");
     }
 
     #[test]
@@ -1003,7 +1216,7 @@ mod tests {
             Some(&apex()),
         );
         assert_eq!(c.kept(), 1);
-        assert_eq!(c.decisions[0].confined, None);
+        assert_eq!(c.decisions[0].confined, Some(Wrap::NoProcess));
         assert!(c.decisions[0].why.contains("cannot be said"));
 
         // Under a reducing policy it goes, because it cannot be SHOWN to be on
