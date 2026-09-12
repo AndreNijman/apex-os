@@ -86,7 +86,7 @@ different configurations:
 | --- | --- | --- |
 | labwc | `default=gtk`, ScreenCast/Screenshot `wlr`, Secret `gnome-keyring` | `files/system/xdg-desktop-portal/labwc-portals.conf` |
 | niri | `default=gtk;gnome`, ScreenCast/Screenshot `gnome`, Secret `gnome-keyring` | `files/system/xdg-desktop-portal/niri-portals.conf` |
-| Hyprland | `default=hyprland;gtk` | **the packaged file; APEX ships no override** |
+| Hyprland | `default=hyprland;gtk` | **was the packaged file, with no APEX override — §7** |
 
 `hyprland.portal` implements Screenshot, ScreenCast, GlobalShortcuts and
 InputCapture. `gtk.portal` implements FileChooser, AppChooser, Print,
@@ -110,12 +110,15 @@ Two consequences the model has to carry:
   application — sandboxed or not — is being brokered for device access, and a
   page that showed a USB row with a "denied" tick would be inventing an
   enforcement that is not running.
-* **The Hyprland session has no Secret portal.** That is a real gap, not a
+* **The Hyprland session had no Secret portal.** A real gap rather than a
   design decision: the niri and labwc configurations both pin
-  `org.freedesktop.impl.portal.Secret=gnome-keyring` and Hyprland's does not,
-  purely because APEX never wrote an override for it. `gnome-keyring.portal`
-  additionally carries `UseIn=gnome`, so it is not reachable by a wildcard in a
-  Hyprland session either — only by being named. Tracked in §7 below.
+  `org.freedesktop.impl.portal.Secret=gnome-keyring` and Hyprland's did not,
+  purely because APEX had never written an override for it.
+  `gnome-keyring.portal` additionally carries `UseIn=gnome`, so it was not
+  reachable by any default list in a Hyprland session either — only by being
+  named. Closed on this branch; §7 has the fix and the experiment that
+  established the mechanism. The measurement above is from before it, and is
+  left as measured.
 
 ### 2.2 The portal permission store, and the third answer
 
@@ -335,7 +338,26 @@ implements Secret. A Flatpak asking for the Secret portal on APEX's default
 session gets nothing, where the same Flatpak on the niri session gets
 gnome-keyring.
 
-The fix is a `hyprland-portals.conf` override of the same shape as the other
-two. It is small, but it changes which portal backend answers on the default
-session, so it is stated here and handled as its own change rather than folded
-into the permission model.
+**Closed on this branch.** `files/system/xdg-desktop-portal/hyprland-portals.conf`
+pins `org.freedesktop.impl.portal.Secret=gnome-keyring`, restating
+`default=hyprland;gtk` (a config in `/etc` replaces the one in `/usr/share`
+rather than merging with it) and making the capture pins explicit so the build
+can assert them. `Containerfile.base` now asserts that all three sessions pin
+Secret, enumerated rather than counted.
+
+The mechanism was verified rather than assumed, because `gnome-keyring.portal`
+carries `UseIn=gnome` and a Hyprland session is not gnome. On a private D-Bus
+session with `XDG_CURRENT_DESKTOP=Hyprland`, a test backend whose `.portal` file
+declared `UseIn=gnome` **was** resolved when an explicit
+`org.freedesktop.impl.portal.Access=<backend>` line named it, and was **not**
+resolved when the same fixture left it to `default`. Naming a backend overrides
+its `UseIn`; that is what makes both this pin and niri's work.
+
+What was deliberately **not** added is `gnome` on the end of the default list.
+It would also reach Usb, RemoteDesktop, Background, Clipboard, Wallpaper and
+Lockdown — which is why the niri session has them — but it starts
+`xdg-desktop-portal-gnome` in a session with no GNOME shell behind it, for
+interfaces whose backends talk to Mutter, and whether those answer usefully
+there was not measured. An interface that exists and cannot answer is worse
+than one that is honestly absent: the model reports the second as
+`NoPrimitive`, and would report the first as a broker that is really there.
