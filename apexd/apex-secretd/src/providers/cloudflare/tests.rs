@@ -2064,6 +2064,184 @@ fn an_object_read_answers_with_bytes_and_still_has_the_credential_taken_out() {
     assert!(!f.trail().contains(TOKEN));
 }
 
+// ── P2-002: what a backup actually asks R2 for ──────────────────────────────
+//
+// The three tests below are the backup framework's own call sequence, run
+// through the real broker against the double that 401s an unauthenticated
+// request. They live here rather than in `apex-backup-core` because this is
+// where a real credential, a real store, a real grant check and a real project
+// binding exist — `apex-backup-core` has the target's logic and a broker
+// double, and neither of those can prove that the token is spent and does not
+// come back.
+//
+// They are Rust and not a shell suite for a measured reason: `Api::loopback` is
+// `#[cfg(test)]`, so a SHIPPED apex-secretd always addresses
+// api.cloudflare.com — and even if it did not, `service.rs`'s host pin refuses
+// a credential stored for one host being sent to another. There is no way to
+// aim the shipped daemon at a double, which is why every Cloudflare unit in
+// this repository is proven here and none of them has a shell test.
+
+/// Where a backup stages a chunk inside the project. Underscore and not a dot,
+/// because `valid_name` requires the first byte of a path segment to be
+/// alphanumeric or `_` — asserted below, end to end, rather than believed.
+const BACKUP_STAGING: &str = "_apex-backup";
+const BACKUP_SNAPSHOT: &str = "20260912T014233Z-0badc0de";
+
+/// A sealed chunk is not text. This is what one looks like after base64, which
+/// is the framing the backup format uses because a brokered reply is
+/// `String::from_utf8_lossy` of curl's stdout.
+const BACKUP_CHUNK_BASE64: &str = "q83vASNFZ4mrze//AAECA/79/A==";
+
+fn stage_a_chunk(fixture: &Fixture) -> String {
+    let relative = format!("{BACKUP_STAGING}/{BACKUP_SNAPSHOT}/data.000000");
+    let path = fixture.project.join(&relative);
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("staging dir");
+    std::fs::write(&path, BACKUP_CHUNK_BASE64).expect("the staged chunk");
+    relative
+}
+
+#[test]
+fn a_backups_chunk_reaches_r2_under_the_key_it_chose_and_the_token_does_not_come_back() {
+    let f = Fixture::new(
+        "r2backup",
+        Mode::Normal,
+        &["cloudflare.r2.object.read", "cloudflare.r2.object.write"],
+    );
+    let staged = stage_a_chunk(&f);
+
+    // 1. The bucket listing, which is a read with no key — one operation and
+    //    not two, which is why versioned restore needs no new capability.
+    let listing = f.use_it(f.record("cloudflare.r2.object.read", BUCKET));
+    let Response::Performed { output, .. } = &listing else {
+        panic!("the listing was refused: {listing:?}");
+    };
+    assert!(output.contains("\"key\""), "{output}");
+
+    // 2. The upload, naming the staged file by a path relative to the project.
+    let mut write = f.record(
+        "cloudflare.r2.object.write",
+        &format!("{BUCKET}/apex-backup/{BACKUP_SNAPSHOT}/data.000000"),
+    );
+    write.params.insert("file".into(), staged.clone());
+    let reply = f.use_it(write);
+    let Response::Performed { output, exit_code, .. } = &reply else {
+        panic!("the upload was refused: {reply:?}");
+    };
+    assert_eq!(*exit_code, 0, "{output}");
+
+    let seen = f.fake.seen();
+    let put = seen
+        .iter()
+        .find(|s| s.method == "PUT")
+        .expect("the chunk was uploaded");
+    assert_eq!(
+        put.path,
+        format!(
+            "/client/v4/accounts/{ACCOUNT}/r2/buckets/{BUCKET}/objects/apex-backup/{BACKUP_SNAPSHOT}/data.000000"
+        ),
+        "the object key is not the one the backup chose"
+    );
+    // The project's own staged bytes arrived, unchanged and still ASCII.
+    assert_eq!(put.body, BACKUP_CHUNK_BASE64);
+    assert!(put.body.is_ascii(), "what went up is not ASCII");
+
+    // The credential was spent...
+    assert!(
+        f.fake.authorizations().iter().any(|a| a.contains(TOKEN)),
+        "the token never reached the double, so nothing was authenticated"
+    );
+    // ...and is in neither the reply nor the trail.
+    assert!(!output.contains(TOKEN), "the upload handed back the token");
+    assert!(!f.trail().contains(TOKEN));
+
+    // 3. And reading one back is addressed by the same key.
+    let read = f.use_it(f.record(
+        "cloudflare.r2.object.read",
+        &format!("{BUCKET}/apex-backup/{BACKUP_SNAPSHOT}/data.000000"),
+    ));
+    let Response::Performed { output, .. } = &read else {
+        panic!("the read was refused: {read:?}");
+    };
+    assert!(!output.contains(TOKEN));
+    let after = f.fake.seen();
+    assert!(
+        after.iter().any(|s| s.method == "GET"
+            && s.path.ends_with(&format!(
+                "/objects/apex-backup/{BACKUP_SNAPSHOT}/data.000000"
+            ))),
+        "the read did not address the object the upload wrote"
+    );
+}
+
+/// A backup cannot reach a bucket the project never wrote down, and the check
+/// happens before anything leaves the machine.
+#[test]
+fn a_backup_to_a_bucket_this_project_did_not_bind_never_reaches_cloudflare() {
+    let f = Fixture::new(
+        "r2backupunbound",
+        Mode::Normal,
+        &["cloudflare.r2.object.read", "cloudflare.r2.object.write"],
+    );
+    let staged = stage_a_chunk(&f);
+
+    let mut write = f.record(
+        "cloudflare.r2.object.write",
+        &format!("someone-elses-bucket/apex-backup/{BACKUP_SNAPSHOT}/data.000000"),
+    );
+    write.params.insert("file".into(), staged);
+    let reply = f.use_it(write);
+    let (kind, message) = reply.as_error().expect("refused");
+    assert_eq!(kind, ErrorKind::BadRequest, "{message}");
+    assert!(message.contains("example-assets"), "{message}");
+    assert!(
+        f.fake.seen().is_empty(),
+        "a bucket the project never bound produced a request anyway"
+    );
+}
+
+/// The staging directory's name, proven against the framework rather than
+/// argued from its source. `.apex-backup/` is refused; `_apex-backup/` is not.
+#[test]
+fn a_dot_prefixed_staging_directory_is_refused_and_the_underscore_one_is_not() {
+    let f = Fixture::new(
+        "r2backupdot",
+        Mode::Normal,
+        &["cloudflare.r2.object.write"],
+    );
+    let dotted = format!(".apex-backup/{BACKUP_SNAPSHOT}/data.000000");
+    let path = f.project.join(&dotted);
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("staging dir");
+    std::fs::write(&path, BACKUP_CHUNK_BASE64).expect("the staged chunk");
+
+    let mut write = f.record(
+        "cloudflare.r2.object.write",
+        &format!("{BUCKET}/apex-backup/{BACKUP_SNAPSHOT}/data.000000"),
+    );
+    write.params.insert("file".into(), dotted);
+    let reply = f.use_it(write);
+    assert!(
+        reply.as_error().is_some(),
+        "a dot-prefixed staging path was accepted: {reply:?}"
+    );
+    assert!(
+        f.fake.seen().is_empty(),
+        "a refused path still produced a request"
+    );
+
+    // And the one the backup format actually uses goes through.
+    let staged = stage_a_chunk(&f);
+    let mut write = f.record(
+        "cloudflare.r2.object.write",
+        &format!("{BUCKET}/apex-backup/{BACKUP_SNAPSHOT}/data.000000"),
+    );
+    write.params.insert("file".into(), staged);
+    let reply = f.use_it(write);
+    assert!(
+        matches!(reply, Response::Performed { exit_code: 0, .. }),
+        "the underscore staging path was refused: {reply:?}"
+    );
+}
+
 // ── §13.3's storage surfaces: D1, KV, Queues, Hyperdrive ────────────────────
 //
 // Nine mutations were run against the arms below, one at a time, each restored
