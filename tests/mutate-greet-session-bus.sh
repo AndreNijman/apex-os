@@ -187,6 +187,28 @@ mutate C11 "$LABWCRC" \
     "the labwc fallback host binds the same key"
 
 
+# C12 — the wrapper stops cleaning up after the compositor. It EXECS, so it is
+#       not there to do it; without the watcher every login and every greeter
+#       restart leaves a session bus, an accessibility bus, a launcher and a
+#       registry behind as orphans owned by the greetd user. Nothing about
+#       accessibility goes wrong, which is exactly why it needs its own mutant.
+mutate C12 "$WRAP" \
+    '        while kill -0 $$ 2>/dev/null; do sleep 2; done' \
+    '        return 0
+        while kill -0 $$ 2>/dev/null; do sleep 2; done' \
+    "the wrapper takes its buses away when the compositor goes"
+
+# C13 — the fallback host's rc.xml stops being well-formed. labwc has no
+#       validate verb, and a malformed config means it comes up with its
+#       BUILT-IN keybindings instead of this file's — a greeter a stray shortcut
+#       can escape from.
+mutate C13 "$LABWCRC" \
+    '    </keybind>
+  </keyboard>' \
+    '    </keybind>
+  </keyboardTYPO>' \
+    "the fallback host's rc.xml is well-formed XML"
+
 echo
 printf 'mutants applied=%d, failed-to-apply=%d, caught=%d, SURVIVED=%d\n' \
     "$applied" "$noapply" "$caught" "$survived"

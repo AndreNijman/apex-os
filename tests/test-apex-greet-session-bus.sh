@@ -243,11 +243,20 @@ section "the host config still parses, and the parse check can fail"
 # config, so it is put through sway's own parser. The negative control is the
 # point: a check that always says "valid" is not a check, and `sway -C` prints
 # its errors and could easily have exited 0 for both.
+sway -C -c "$SWAY_CONF" >"$W/sway.out" 2>&1; SWAY_RC=$?
 if ! command -v sway >/dev/null 2>&1; then
     skp "the greeter's sway config parses" "sway is not installed here; COULD-NOT-RUN"
+elif [ "$SWAY_RC" -eq 126 ]; then
+    # /usr/bin/sway carries the file capability cap_sys_nice=ep, and exec of a
+    # binary with an EFFECTIVE file capability outside the bounding set is
+    # EPERM. Inside a container sway therefore cannot run at all, for a good
+    # config and a broken one alike — which is exactly why this check is here
+    # and not in Containerfile.base.
+    skp "the greeter's sway config parses" \
+        "sway cannot be executed here (rc=126; cap_sys_nice outside the bounding set); COULD-NOT-RUN"
+    skp "…and sway -C really does refuse a config with a bad binding" "same reason"
 else
-    sway -C -c "$SWAY_CONF" >"$W/sway.out" 2>&1
-    if [ $? -eq 0 ]; then
+    if [ "$SWAY_RC" -eq 0 ]; then
         ok "the greeter's sway config parses"
     else
         bad "the greeter's sway config parses" "$(grep ERROR "$W/sway.out" | head -2 | tr '\n' ' ')"
@@ -273,6 +282,16 @@ grep -q 'apex-screen-reader' "$LABWC_RC" \
     && ok "the labwc fallback host binds the same key" \
     || bad "the labwc fallback host binds the same key" \
            "the fallback would leave a blind user with no reader and no way to know"
+# labwc has no `-C`-style validate verb, so the config gets the check its format
+# allows. A malformed rc.xml is a fallback host that comes up with labwc's
+# BUILT-IN keybindings instead of this file's — which is a greeter a stray
+# shortcut can escape from.
+if python3 -c "import xml.etree.ElementTree as ET,sys; ET.parse(sys.argv[1])" "$LABWC_RC" 2>"$W/rc.err"; then
+    ok "and the fallback host's rc.xml is well-formed XML"
+else
+    bad "and the fallback host's rc.xml is well-formed XML" \
+        "$(tr '\n' ' ' <"$W/rc.err" | tail -c 120)"
+fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "the chain, executed: what the greeter's own client can see"
@@ -500,6 +519,38 @@ else
         "$(probe_get "$W/bare.probe" a11y_bus_error)"
     skp "and a screen reader has a registry to enumerate the tree with" \
         "no accessibility bus to look on"
+fi
+
+# ── and it takes its buses away again ──────────────────────────────────────
+# The wrapper execs, so it is not around to clean up; the watcher it leaves
+# behind is. Without one, every login and every greeter restart would leave a
+# session bus, an accessibility bus, a launcher and a registry behind as orphans
+# owned by the greetd user — and whether greetd's own teardown reaps them is a
+# property of greetd that this repository has not measured, which is why the
+# cleanup is owned here rather than assumed there.
+#
+# Checked BEFORE this suite's own reap runs, or it would be measuring itself.
+bare_busdir="$W/run-1/apex-greet-bus"
+still_alive() {
+    local f p n=0
+    for f in bus.pid a11y.pid registry.pid; do
+        p="$(cat "$bare_busdir/$f" 2>/dev/null)"
+        case "$p" in ''|*[!0-9]*) continue ;; esac
+        kill -0 "$p" 2>/dev/null && n=$((n + 1))
+    done
+    printf '%s' "$n"
+}
+if [ ! -d "$bare_busdir" ]; then
+    skp "the wrapper takes its buses away when the compositor goes" \
+        "no bus directory was made, so there is nothing to have cleaned up"
+else
+    for _ in $(seq 1 30); do [ "$(still_alive)" = "0" ] && break; sleep 0.5; done
+    if [ "$(still_alive)" = "0" ]; then
+        ok "the wrapper takes its buses away when the compositor goes"
+    else
+        bad "the wrapper takes its buses away when the compositor goes" \
+            "$(still_alive) of its processes are still running 15s after the chain exited — every login would leave a set behind"
+    fi
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
