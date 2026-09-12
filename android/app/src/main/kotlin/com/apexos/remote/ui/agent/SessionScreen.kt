@@ -1,5 +1,10 @@
 package com.apexos.remote.ui.agent
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.speech.RecognizerIntent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,6 +27,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -29,32 +35,27 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
-import android.content.ActivityNotFoundException
-import android.content.Intent
-import android.speech.RecognizerIntent
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.ui.platform.LocalClipboardManager
-import com.apexos.remote.core.agent.Handoff
-import com.apexos.remote.core.agent.Reply
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.apexos.remote.core.agent.AgentGraph
-import com.apexos.remote.core.agent.AgentStates
 import com.apexos.remote.core.agent.AgentSession
+import com.apexos.remote.core.agent.AgentStates
 import com.apexos.remote.core.agent.Elapsed
 import com.apexos.remote.core.agent.Gauge
+import com.apexos.remote.core.agent.Handoff
+import com.apexos.remote.core.agent.Reply
 import com.apexos.remote.core.agent.live
 import com.apexos.remote.ui.theme.ApexTones
 import com.apexos.remote.ui.theme.MachineText
+import com.apexos.remote.ui.theme.labelColumnWidth
 
 /**
  * One agent, in full: what it is, what it is doing, what it forked, and the
@@ -198,7 +199,7 @@ fun SessionScreen(
                         Text(
                             "Context",
                             style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier.width(110.dp),
+                            modifier = Modifier.width(labelColumnWidth()),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         LinearProgressIndicator(
@@ -428,7 +429,7 @@ private fun Field(label: String, value: String) {
             label,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(110.dp),
+            modifier = Modifier.width(labelColumnWidth()),
         )
         Text(value, style = MachineText, modifier = Modifier.weight(1f))
     }
