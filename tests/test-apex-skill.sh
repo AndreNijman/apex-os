@@ -185,6 +185,12 @@ has 'under `--sandbox unrestricted` is nothing' "$PROVRS" \
     "and the case where the session has none either is named"
 has 'hasExecutableContent' "$PROVRS" \
     "the JSON pairs everythingExecutableIsSandboxed with whether there is anything to confine"
+# A shortfall reported with no remedy is the same defect as a control reported
+# as missing, which round 2 of this unit had to go back and delete five of.
+has 'removableByPluginPolicy' "$PROVRS" \
+    "and says, beside it, that dimension 8 can start the session without the plugin"
+has '--plugins none' "$PROVRS" \
+    "the hooks line names the flag that removes them, not just the sandbox that does not reach them"
 has 'Nothing here' "$SKILLRS" "skill.rs says nothing confines a skill's scripts"
 # `trustOnFirstUse` in the data, not only in a paragraph: a match here means the
 # tree has not changed SINCE APEX first saw it, which is not verification.
