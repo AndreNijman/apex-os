@@ -1429,6 +1429,60 @@ jobs:
           path: ${{ runner.temp }}/vmlab
           if-no-files-found: ignore
 
+      # ── P2-012's browser capsule ──────────────────────────────────────────
+      #
+      # The everywhere half. A recording stub for `apex` on $APEX_BROWSER_APEX,
+      # and assertions on the two argvs and the one file that decide anything:
+      # the SESSION argv, where the confinement is asked for (a dropped word
+      # there is a capsule whose home is not masked or whose network is not
+      # filtered, reported as neither, and it is not a compile error); the
+      # BROWSER argv, for --headless, --no-remote and the capsule's own
+      # --profile; and user.js, which is the only thing pointing Firefox at the
+      # egress bridge because Firefox does not read $HTTP_PROXY.
+      - name: Run browser capsule assertions
+        run: ./tests/test-apex-browser.sh
+
+      # ── and its live lab, wherever this runs ──────────────────────────────
+      #
+      # tests/browserlab/run-browserlab boots real capsules through the shipped
+      # engine against a real apex-agentd, a real bwrap namespace and a real
+      # browser. On a runner it will almost always report could-not-run, and
+      # that is the point rather than a shortfall: it needs a runtime built
+      # from THIS branch, and session.rs::bridge_program refuses a bridge under
+      # /tmp or $HOME — a checkout on a runner is under $HOME, so the lab says
+      # so and names it.
+      #
+      # The rule enforced here is the vmlab's and not "it passed": a flow that
+      # could not run must say WHY, and no flow may come back `failed`. A
+      # runner that can run them verifies them instead, which is also a pass.
+      - name: P2-012 the browserlab, and its verdicts wherever this runs
+        run: |
+          set -euo pipefail
+          ./tests/browserlab/run-browserlab --out "$RUNNER_TEMP/browserlab"
+          bad=0
+          for f in $(./tests/browserlab/run-browserlab --list); do
+            v="$RUNNER_TEMP/browserlab/$f/verdict.json"
+            if [ ! -f "$v" ]; then echo "no verdict for $f"; bad=1; continue; fi
+            state=$(sed -n 's/.*"state": "\([^"]*\)".*/\1/p' "$v")
+            reason=$(sed -n 's/.*"reason": "\([^"]*\)".*/\1/p' "$v")
+            echo "$f: $state — $reason"
+            case "$state" in
+              failed) echo "  ^ a flow FAILED"; bad=1 ;;
+              could-not-run|verified) ;;
+              *) echo "  ^ unknown verdict state"; bad=1 ;;
+            esac
+            if [ -z "$reason" ]; then echo "  ^ no reason given"; bad=1; fi
+          done
+          exit $bad
+
+      - name: Keep the browserlab bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browserlab-bundles
+          path: ${{ runner.temp }}/browserlab
+          if-no-files-found: ignore
+
       # The half the suite above deliberately cannot answer. Its device-profile
       # coverage is argv-PINNED — it proves the engine emits the flags its
       # author intended, with a stubbed container manager. It cannot prove
@@ -1797,6 +1851,20 @@ jobs:
       - name: Run the keybind reload assertions
         run: ./tests/test-labwc-keybind-reload.sh
 
+      # P2-018's recovery session, in the same job for the same reason: it
+      # starts a real labwc under WLR_BACKENDS=headless, so it needs the
+      # compositor this step just installed and nothing else. Its own
+      # structural half runs anywhere and its live half skips cleanly where
+      # labwc will not start, so a runner that cannot host a compositor
+      # reports a skip rather than a false green.
+      #
+      # The assertion that matters here is the one no structural check can
+      # make: an unparseable rc.xml is planted exactly where the user's lives
+      # and the session has to come up anyway, which is what `labwc -C` buys
+      # and what its absence would silently cost.
+      - name: Run the safe-graphics recovery assertions
+        run: ./tests/test-apex-safe-graphics.sh
+
       # End-to-end, against a real daemon on an isolated socket: that the
       # daemon resolves the asking session from the connection's PEER
       # CREDENTIALS and not from anything the client sent. The negative control
@@ -2081,6 +2149,9 @@ jobs:
             tests/test-apex-greet-a11y.sh tests/test-apex-greet-layout.sh \
             tests/test-apex-greet-session-bus.sh tests/test-apex-a11y-stack.sh \
             tests/test-labwc-keybind-reload.sh \
+            tests/test-apex-safe-graphics.sh \
+            files/system/libexec/apex-safe-graphics \
+            files/system/libexec/apex-safe-graphics-terminal \
             tests/test-apex-chaos.sh tests/test-apex-vm.sh
           # The chaos harness separately, with -x so the driver's `. lib.sh`
           # is followed, and the cases as bash fragments because they are
@@ -2127,6 +2198,31 @@ jobs:
       # "a skipped check counts as success" shape this repository has been
       # bitten by, and it would have switched off the shellcheck gate on the
       # very files this branch adds. Anything expected to be red belongs at the
+      - name: Every suite is actually run by CI
+        run: |
+          # The harder half of the same defect. CI invokes suites BY NAME, so
+          # writing tests/test-foo.sh, landing it, and never adding a workflow
+          # line leaves a file that looks like coverage and gates nothing.
+          # Measured 2026-09-12: 70 suites, 13 named in no workflow at all —
+          # including tests/test-apex-lid.sh, sixty assertions for a feature the
+          # owner asked for by name, which no CI run had ever executed.
+          ./tests/check-suites-run-in-ci.sh
+
+      - name: Every shell script is linted, by discovery
+        run: |
+          # The step above lints a hand-written LIST. A list cannot cover a file
+          # nobody remembered to add, and on 2026-09-12 it did not: 140 shell
+          # scripts under tests/ and files/, 38 named, 102 not — including four
+          # suites landed in the previous two days and both of the checkers
+          # written to catch exactly this species of gap. That is the same
+          # defect as a path selector naming nothing: the step runs, reports
+          # success, and inspects nothing.
+          #
+          # This one FINDS the scripts. It lives in the engine job because the
+          # engine selector is `^(files/|tests/|Containerfile)`, which is
+          # precisely the set it walks — putting it anywhere else would make it
+          # the sixth instance of the bug the comments above it describe.
+          ./tests/check-shellcheck-coverage.sh
       # bottom of its job.
       - name: Run plugin CLI assertions
         run: ./tests/test-apex-plugin.sh

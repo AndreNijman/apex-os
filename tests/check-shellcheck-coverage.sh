@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  check-shellcheck-coverage.sh — every shell script is linted, by DISCOVERY.
+#
+#  pr-validation.yml lints a hand-written LIST of scripts. A list cannot cover
+#  a file nobody remembered to add, and on 2026-09-12 it did not: 144 shell
+#  scripts existed under tests/ and files/, 38 were named, and 106 were not —
+#  including four suites landed in the previous two days
+#  (test-apex-user.sh, test-apex-lid.sh, test-apex-lid-live.sh,
+#  test-apex-permissions.sh) and both of the checkers written to catch exactly
+#  this species of gap. That is the same defect as a CI path selector that
+#  names nothing: the step runs, reports success, and inspects nothing.
+#
+#  So this file finds the scripts instead of being told them. 78 of the 106
+#  were already clean; the 28 that were not are listed in
+#  tests/shellcheck-known-failing.txt so the hole closes for every NEW script
+#  today rather than after someone fixes 28 old ones.
+#
+#  Both arms fail, and the second is the one that matters:
+#    * a script NOT on the list with a warning        -> fail, named
+#    * a script ON the list that is now CLEAN         -> fail, "remove it"
+#  Without the second, the list rots into a permanent exemption and the debt
+#  it records is never paid.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 1
+
+KNOWN=tests/shellcheck-known-failing.txt
+FLAGS=(-S warning -x)
+
+command -v shellcheck >/dev/null || { echo "FATAL: shellcheck is not installed"; exit 1; }
+
+# Every shell script under tests/ and files/. A shebang naming zsh or fish is
+# NOT a shell shellcheck can read, and counting one as a failure would park it
+# on the known-failing list for ever.
+mapfile -t scripts < <(
+    find tests files -type f \
+        \( -name '*.sh' -o -perm -u+x \) 2>/dev/null \
+    | while IFS= read -r f; do
+        case "$f" in */__pycache__/*|*/.git/*) continue ;; esac
+        if [ "${f##*.}" = sh ]; then printf '%s\n' "$f"; continue; fi
+        head -c2 "$f" 2>/dev/null | grep -q '^#!' || continue
+        head -n1 "$f" | grep -qE '\b(sh|bash|dash|ksh)\b' && printf '%s\n' "$f"
+      done | sort -u
+)
+
+known=()
+[ -f "$KNOWN" ] && mapfile -t known < <(grep -vE '^\s*(#|$)' "$KNOWN")
+is_known() { local n; for n in ${known[@]+"${known[@]}"}; do [ "$n" = "$1" ] && return 0; done; return 1; }
+
+new_fail=(); fixed=(); checked=0; skipped=0
+for f in ${scripts[@]+"${scripts[@]}"}; do
+    checked=$((checked + 1))
+    if shellcheck "${FLAGS[@]}" "$f" >/dev/null 2>&1; then
+        is_known "$f" && fixed+=("$f")
+    else
+        is_known "$f" && skipped=$((skipped + 1)) || new_fail+=("$f")
+    fi
+done
+
+printf '\nshellcheck coverage: %d scripts discovered, %d known-failing, %d newly failing, %d now clean\n' \
+    "$checked" "$skipped" "${#new_fail[@]}" "${#fixed[@]}"
+
+rc=0
+if [ "${#new_fail[@]}" -gt 0 ]; then
+    echo "  FAIL — these are not on $KNOWN and do not pass shellcheck ${FLAGS[*]}:"
+    printf '    %s\n' "${new_fail[@]}"
+    rc=1
+fi
+if [ "${#fixed[@]}" -gt 0 ]; then
+    echo "  FAIL — these are on $KNOWN but now PASS. Delete their lines; the list must shrink:"
+    printf '    %s\n' "${fixed[@]}"
+    rc=1
+fi
+[ "$rc" -eq 0 ] && echo "  every discovered script is either clean or a recorded, still-failing exception"
+exit "$rc"

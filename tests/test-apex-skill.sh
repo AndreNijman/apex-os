@@ -50,9 +50,15 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WITH_BINARY=0
 [[ "${1:-}" == "--with-binary" ]] && WITH_BINARY=1
 
-PASS=0 FAIL=0
+PASS=0 FAIL=0 NOTRUN=0
 ok()  { PASS=$((PASS + 1)); printf '  ok   %s\n' "$*"; }
 bad() { FAIL=$((FAIL + 1)); printf '  FAIL %s\n' "$*"; }
+# A third answer, and it is the point of this suite rather than a convenience.
+# "Could not run" is not "passed" and is not "failed", and the one thing it
+# must never do is stay silent: a check that quietly did not happen is how a
+# suite reports 82/0 about something it never measured. Counted, printed in
+# the summary, and deliberately NOT added to PASS.
+skipped() { NOTRUN=$((NOTRUN + 1)); printf '  ----  %s\n' "$*"; }
 sec() { printf '\n== %s ==\n' "$*"; }
 has() { # has <needle> <haystack-file> <label>
     if grep -qF -- "$1" "$2"; then ok "$3"; else
@@ -70,7 +76,8 @@ PROVRS="$REPO/apexd/apex/src/provenance.rs"
 DIGESTRS="$REPO/apexd/apex/src/digest.rs"
 CONNRS="$REPO/apexd/apex/src/connector.rs"
 MAINRS="$REPO/apexd/apex/src/main.rs"
-for f in "$SKILLRS" "$PROVRS" "$DIGESTRS" "$CONNRS" "$MAINRS"; do
+AGENTRS="$REPO/apexd/apex/src/agent.rs"
+for f in "$SKILLRS" "$PROVRS" "$DIGESTRS" "$CONNRS" "$MAINRS" "$AGENTRS"; do
     [[ -f "$f" ]] || { echo "FATAL: missing $f" >&2; exit 1; }
 done
 
@@ -178,16 +185,60 @@ has 'under `--sandbox unrestricted` is nothing' "$PROVRS" \
     "and the case where the session has none either is named"
 has 'hasExecutableContent' "$PROVRS" \
     "the JSON pairs everythingExecutableIsSandboxed with whether there is anything to confine"
+# A shortfall reported with no remedy is the same defect as a control reported
+# as missing, which round 2 of this unit had to go back and delete five of.
+has 'removableByPluginPolicy' "$PROVRS" \
+    "and says, beside it, that dimension 8 can start the session without the plugin"
+has '--plugins none' "$PROVRS" \
+    "the hooks line names the flag that removes them, not just the sandbox that does not reach them"
 has 'Nothing here' "$SKILLRS" "skill.rs says nothing confines a skill's scripts"
 # `trustOnFirstUse` in the data, not only in a paragraph: a match here means the
 # tree has not changed SINCE APEX first saw it, which is not verification.
 has 'trustOnFirstUse' "$PROVRS" "the JSON declares the baseline is trust-on-first-use"
 has '"signed": false' "$PROVRS" "the JSON declares that nothing here is signed"
 
+sec "dimension 8: the plugin content no MCP confinement reaches"
+# P1-026 criterion 2's second half. Dimension 7 confines what a plugin
+# DECLARES in its .mcp.json; a plugin's hooks are spawned by the agent itself
+# and no MCP configuration of any kind is involved. So the dimension removes
+# where the other one confines, and these check that the removal is wired all
+# the way from the flag to the document — not that a constant exists.
+has '--plugins' "$AGENTRS" "apex agent run takes --plugins"
+has 'PLUGIN_POLICY_VERSION' "$AGENTRS" \
+    "and refuses to send it to a daemon that would drop it, at its OWN revision"
+# The fail-open this dimension shipped with for one revision: `plugins` was in
+# dimensions() before it was in the version table, so every unrecognised name
+# fell through to POLICY_DIMENSIONS_VERSION — revision 2 — and a protocol-2
+# daemon was told it understood a key it drops.
+has '"sandbox" | "connectors" | "plugins"' "$AGENTRS" \
+    "no late dimension falls through to the revision the first six shipped in"
+has '"--plugins", self.plugins' "$AGENTRS" \
+    "a remote run carries the flag, or the far end loads every plugin it has"
+
+LIVERS="$REPO/apexd/apex/tests/plugin_removal_live.rs"
+if [[ -f "$LIVERS" ]]; then
+    ok "the live removal test exists"
+    # The three properties that separate this from a grep for a JSON key.
+    has 'pluginconf::curate' "$LIVERS" "it curates through the real function"
+    has 'hook::settings_json' "$LIVERS" \
+        "and starts the agent with the document apex-agentd actually writes"
+    has 'hook_settings_args' "$LIVERS" \
+        "passed with the adapter's own argv, not a hand-rolled --settings"
+    has 'run_session(&root, &home, &sentinel, None)' "$LIVERS" \
+        "the control run comes first: the hook has to RUN before a removal means anything"
+    has 'known_marketplaces.json' "$LIVERS" \
+        "the fixture registers its marketplace — an unregistered plugin is silently inert"
+    has '#[ignore' "$LIVERS" "it is opt-in, because CI has no claude to drive"
+else
+    bad "apexd/apex/tests/plugin_removal_live.rs is missing: criterion 2's second half has no live proof"
+fi
+
 # ═════════════════════════════════════════════════════════════════════════════
 if [[ "$WITH_BINARY" -eq 0 ]]; then
     printf '\n%s\n' "── binary checks skipped (pass --with-binary) ──"
-    printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+    printf '\n%d passed, %d failed' "$PASS" "$FAIL"
+    if [[ "$NOTRUN" -gt 0 ]]; then printf ', %d could not run' "$NOTRUN"; fi
+    printf '\n'
     [[ "$FAIL" -eq 0 ]] || exit 1
     exit 0
 fi
@@ -564,5 +615,36 @@ fi
 # that dialled somebody's memory server would be measuring their NAS.
 hasnt '--probe' "$TMP/err" "nothing here probed a live server"
 
-printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+sec "dimension 8, live: a removed plugin's hook is observed not to run"
+# The only assertion in this file that watches a process. Everything above is
+# a claim ABOUT code; this starts a real agent against a fixture home holding a
+# real enabled plugin, and looks for the mark its SessionStart hook leaves.
+#
+# `claude` is not on the CI runners, so this is the one check here that has a
+# third answer. It is never silently skipped: a could-not-run line is printed
+# and counted, so a run that measured nothing cannot read as a run that held.
+if ! command -v claude >/dev/null 2>&1; then
+    skipped "no \`claude\` on PATH — the live plugin-removal test did NOT run here"
+elif ! command -v cargo >/dev/null 2>&1; then
+    skipped "no \`cargo\` on PATH — the live plugin-removal test did NOT run here"
+else
+    # Nothing leaves the machine and nothing touches the real home: the test
+    # sets its own HOME, its own XDG_RUNTIME_DIR, and an ANTHROPIC_BASE_URL on
+    # a dead local port. Slow on purpose — the two removal runs have to wait
+    # out a window the control runs proved is long enough.
+    if (cd "$REPO/apexd" && cargo test --locked -p apex --test plugin_removal_live \
+            -- --ignored --exact a_removed_plugins_hook_is_observed_not_to_run) \
+            >"$TMP/live" 2>&1; then
+        ok "a plugin removed by dimension 8 did not run its SessionStart hook, and the kept runs did"
+    else
+        bad "the live plugin-removal test failed"
+        tail -40 "$TMP/live" | sed 's/^/       /' >&2
+    fi
+fi
+
+printf '\n%d passed, %d failed' "$PASS" "$FAIL"
+if [[ "$NOTRUN" -gt 0 ]]; then
+    printf ', %d could not run' "$NOTRUN"
+fi
+printf '\n'
 [[ "$FAIL" -eq 0 ]] || exit 1

@@ -1,0 +1,25 @@
+# APEX Safe Graphics — labwc environment.
+#
+# labwc reads this file at startup and exports each KEY=value into the
+# compositor's and its clients' environment.
+#
+# These are a MIRROR of what /usr/libexec/apex-safe-graphics exports before it
+# execs labwc, and the duplication is deliberate rather than an oversight: the
+# compositor picks its renderer from the environment it was STARTED with, so
+# the script's copy is the one that decides, and this copy is what reaches a
+# client started by the autostart — and what applies if somebody runs
+# `labwc -C /usr/share/apex/safe-graphics` by hand.
+#
+# WLR_BACKENDS is deliberately absent. Unset, wlroots picks DRM on a real
+# machine; set here, a test could not ask for a headless one and this session
+# could only ever be exercised by taking somebody's display away.
+#
+# XKB_DEFAULT_LAYOUT is deliberately absent for the greeter's reason: a value
+# pinned here OVERRIDES the correct one, and typing a password on the wrong
+# layout is how a recovery session locks somebody out of their own machine.
+
+WLR_RENDERER=pixman
+WLR_NO_HARDWARE_CURSORS=1
+LIBGL_ALWAYS_SOFTWARE=1
+GALLIUM_DRIVER=llvmpipe
+QT_QUICK_BACKEND=software

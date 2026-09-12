@@ -48,8 +48,31 @@ for path in sys.argv[1:]:
     lines = open(path).read().split('\n')
 
     # The file's own COPY map, image path -> repo path.
-    copies = []
+    #
+    # Join continuation lines FIRST. This file writes any COPY whose two paths
+    # are long across two physical lines:
+    #
+    #     COPY files/system/NetworkManager/20-apex-wifi-powersave.conf \\
+    #          /etc/NetworkManager/conf.d/20-apex-wifi-powersave.conf
+    #
+    # A single-line regex sees neither half, so the destination looked like a
+    # path nothing copies and EVERY assertion against it was written off as
+    # "no COPY source here" -- 96 of them, the largest unresolved category,
+    # reported as unchecked when they were perfectly checkable.
+    joined_copy_lines = []
+    buf = ''
     for l in lines:
+        stripped = l.rstrip()
+        if stripped.endswith('\\'):
+            buf += stripped[:-1].rstrip() + ' '
+            continue
+        joined_copy_lines.append(buf + stripped)
+        buf = ''
+    if buf:
+        joined_copy_lines.append(buf)
+
+    copies = []
+    for l in joined_copy_lines:
         m = re.match(r'^COPY\s+(?:--\S+\s+)*(\S+)\s+(\S+)\s*$', l)
         if m:
             copies.append((m.group(1), m.group(2)))
@@ -333,10 +356,25 @@ print()
 print(f"containerfile assertions: {checked} checked, {failures} failed, {unresolved} could not be resolved, {inert} inert")
 if unresolved:
     print("  UNRESOLVED (not checked, and not a pass — these run only inside the build):")
+    # A bare total says how much is unchecked but not where the risk is. The
+    # apex-vm `--help | grep` that failed base at step 120/165 was a pipe, and
+    # a pipe is the category the build alone can settle -- so the breakdown is
+    # the part worth reading.
+    import collections as _c
+    reason = _c.Counter()
+    for e in unresolved_examples:
+        if 'reads a pipe' in e:            reason['a pipe — only the build can run it'] += 1
+        elif 'has no COPY source here' in e: reason['the build creates the file; no COPY to resolve'] += 1
+        elif 'loop variable' in e:         reason['pattern built from a loop variable'] += 1
+        elif 'unparseable' in e:           reason['shell-unparseable'] += 1
+        else:                              reason['a target this resolver cannot follow'] += 1
+    for why, n in reason.most_common():
+        print(f"    {n:4}  {why}")
+    print("    examples:")
     for e in unresolved_examples[:12]:
-        print(f"    {e}")
+        print(f"      {e}")
     if len(unresolved_examples) > 12:
-        print(f"    … and {len(unresolved_examples) - 12} more")
+        print(f"      … and {len(unresolved_examples) - 12} more")
 if inert:
     print("  INERT (a `!` refusal errexit does not apply to — it fails nothing):")
     for e in inert_examples[:60]:

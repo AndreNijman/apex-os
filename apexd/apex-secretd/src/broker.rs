@@ -635,6 +635,132 @@ pub fn perform_http(
     })
 }
 
+/// How a brokered HTTP request presents the stored credential.
+///
+/// A provider says which, rather than the broker inferring it from
+/// [`ServiceInfo::auth`]. `auth` has two values because that is all the *store*
+/// needs to know — `bearer`, or bytes somebody else interprets — and "somebody
+/// else" is the provider. A WebDAV app password and a raw `Authorization`
+/// header are both stored as `raw` and are not the same request.
+pub enum HttpAuth<'a> {
+    /// `Authorization:` built by [`ServiceInfo::header_value`].
+    Header,
+    /// HTTP Basic, as `user = "name:password"` in the configuration on curl's
+    /// **stdin**.
+    ///
+    /// curl's own `--user`, deliberately, rather than a base64 this file would
+    /// compute: the encoding is not the hard part, keeping the credential off
+    /// the command line is, and `user` in a config read from stdin is the one
+    /// channel `perform_http` already argues is unreadable by a third party.
+    /// `--basic` is set with it so curl cannot be talked into a different
+    /// scheme by a `WWW-Authenticate` the far end chose.
+    Basic { username: &'a str },
+}
+
+/// One WebDAV request to the server a credential belongs to.
+///
+/// `rel_path` is a [`apex_secret_core::operation::Syntax::Path`] the framework
+/// has already checked: `/`-joined names, no leading `/`, no `//`, no `..`, no
+/// `:`. So it can be appended to the pinned endpoint without encoding and
+/// without climbing out of it — and it is checked a second time here, because
+/// this function builds a URL and "the caller checked" is not a property this
+/// file can see.
+pub struct WebdavRequest<'a> {
+    pub method: &'a str,
+    pub rel_path: &'a str,
+    pub body: &'a [u8],
+    pub depth: Option<&'a str>,
+    pub content_type: Option<&'a str>,
+}
+
+/// The URL a WebDAV request goes to: the pinned endpoint, then the path.
+///
+/// Its own function so the join is one place a reader can check. The host,
+/// scheme, port and base path are all from the stored record; the only caller
+/// contribution is `rel_path`, and [`apex_secret_core::operation::valid_path`]
+/// is what stops it being an authority, an absolute path or a climb.
+pub fn webdav_url(info: &ServiceInfo, rel_path: &str) -> Result<String, String> {
+    if !apex_secret_core::operation::valid_path(rel_path) {
+        return Err(format!(
+            "'{}' is not a path within this account",
+            rel_path.escape_debug()
+        ));
+    }
+    Ok(format!(
+        "{}/{rel_path}",
+        info.url().trim_end_matches('/')
+    ))
+}
+
+/// Carry one WebDAV request to the account's own server.
+///
+/// The same channels as [`perform_http`] and for the same reasons: the
+/// credential goes down curl's stdin as a configuration, a body goes in a file
+/// in a directory only root can write, and response headers come back ahead of
+/// the body on stdout so there is no third path. Redirects are not followed, so
+/// the far end cannot move the request to a host the owner did not choose.
+pub fn perform_webdav(
+    info: &ServiceInfo,
+    value: &SecretValue,
+    auth: &HttpAuth<'_>,
+    req: &WebdavRequest<'_>,
+    owner: &Owner,
+    dir: &Path,
+) -> Result<Output, String> {
+    let token = value
+        .as_str()
+        .ok_or_else(|| "that credential is not text, so it cannot be presented".to_string())?;
+    let url = webdav_url(info, req.rel_path)?;
+
+    let staged = if req.body.is_empty() {
+        None
+    } else {
+        Some(TempFile::create(dir, req.body)?)
+    };
+
+    let mut config = String::new();
+    config.push_str(&format!("url = {}\n", quote(&url)));
+    config.push_str(&format!("request = {}\n", quote(req.method)));
+    match auth {
+        HttpAuth::Header => config.push_str(&format!(
+            "header = {}\n",
+            quote(&format!("Authorization: {}", info.header_value(token)))
+        )),
+        HttpAuth::Basic { username } => {
+            config.push_str(&format!("user = {}\n", quote(&format!("{username}:{token}"))));
+            config.push_str("basic\n");
+        }
+    }
+    if let Some(depth) = req.depth {
+        config.push_str(&format!("header = {}\n", quote(&format!("Depth: {depth}"))));
+    }
+    if let Some(ct) = req.content_type {
+        config.push_str(&format!("header = {}\n", quote(&format!("Content-Type: {ct}"))));
+    }
+    // See `perform_http`: curl sends `Expect: 100-continue` for a body over a
+    // kilobyte, and a server that honours it answers with a header block of its
+    // own — two blocks, and a stripper written for one hands the caller a reply
+    // with HTTP in front of it.
+    config.push_str("header = \"Expect:\"\n");
+    if let Some(file) = &staged {
+        config.push_str(&format!("data-binary = {}\n", quote(&format!("@{}", file.path))));
+    }
+    config.push_str("dump-header = \"-\"\n");
+    config.push_str("silent\nshow-error\nfail-with-body\n");
+    config.push_str("proto = \"=https,http\"\n");
+    config.push_str(&format!("max-filesize = {HTTP_MAX_BYTES}\n"));
+    config.push_str(&format!("max-time = {GIT_TIMEOUT_SECS}\n"));
+
+    let mut out = merged(run_curl(&config, owner)?);
+    let (_headers, rest) = strip_http_headers(&out.text);
+    // Both spellings, because a Basic request never builds `header_value` and a
+    // header request never builds the `user:` pair — scrubbing only the one the
+    // request used would leave the other reachable the day a provider changes
+    // which it asks for.
+    out.text = scrub(&scrub(&rest, token), &info.header_value(token));
+    Ok(out)
+}
+
 /// Split curl's stdout into the header blocks it dumped and the body.
 ///
 /// `dump-header = "-"` writes every response's headers before the body, and
