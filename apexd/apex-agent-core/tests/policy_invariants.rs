@@ -33,8 +33,8 @@ use apex_agent_core::origin::{
     may_declare, Capability, OriginError, OriginSource, Ruling, SessionOrigin,
 };
 use apex_agent_core::policy::{
-    AgentPolicy, ConnectorPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyPreset, RequestOrigin,
-    SandboxPolicy, SecretPolicy, SystemAccess,
+    AgentPolicy, ConnectorPolicy, NativeMode, NetworkPolicy, OriginPolicy, PluginPolicy,
+    PolicyPreset, RequestOrigin, SandboxPolicy, SecretPolicy, SystemAccess,
 };
 use apex_agent_core::destination::Allowlist;
 use apex_agent_core::request::{Decision, PrivilegeRequest, Verb};
@@ -318,6 +318,7 @@ fn the_named_modes_are_reachable_and_so_is_everything_between_them() {
         network: NetworkPolicy::Offline,
         origin: OriginPolicy::LocalElevationOnly,
         connectors: ConnectorPolicy::LocalOnly,
+        plugins: PluginPolicy::NoPlugins,
     };
     assert!(
         !PolicyPreset::ALL.iter().any(|p| p.policy() == bespoke),
@@ -411,9 +412,15 @@ fn a_network_mode_is_refused_wherever_it_could_not_be_enforced() {
         network: NetworkPolicy::Allowlist,
         ..AgentPolicy::default()
     };
-    assert!(allowlisted.validate_for(&Allowlist::default(), &[]).is_err());
     assert!(allowlisted
-        .validate_for(&Allowlist::parse(&["api.example.com"]).expect("parse"), &[])
+        .validate_for(&Allowlist::default(), &[], &[])
+        .is_err());
+    assert!(allowlisted
+        .validate_for(
+            &Allowlist::parse(&["api.example.com"]).expect("parse"),
+            &[],
+            &[],
+        )
         .is_ok());
 
     // The argv builder refuses it a third time when the route the mode
@@ -805,7 +812,7 @@ fn the_settings_file_apex_injects_cannot_move_the_agents_permission_mode() {
     //               `apex agent statusline` runs the user's own command and
     //               copies its output through. It is presentation and a
     //               measurement; nothing about it touches a permission.
-    let doc = apex_agent_core::hook::settings_json(std::path::Path::new("/usr/bin/apex"), None);
+    let doc = apex_agent_core::hook::settings_json(std::path::Path::new("/usr/bin/apex"), None, None);
     let obj = doc.as_object().expect("an object");
     let mut keys: Vec<&String> = obj.keys().collect();
     keys.sort();

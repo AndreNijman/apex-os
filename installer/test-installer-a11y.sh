@@ -639,7 +639,21 @@ advance_with() {   # advance_with <xdotool key name>
     done
     # The page must be GONE, not merely overlaid. A dialog on top of the welcome
     # page would satisfy "the next page's sentinel appeared" on its own.
-    grep -q '| name=Begin |' "$ATSPI_W/dump-adv-$key.txt" || ADV_LEFT=1
+    #
+    # Bounded settle window, and it is not a "wait until it passes": the dump
+    # above is taken the instant the NEXT page's sentinel first appears, and GTK
+    # tears the old page's widgets off the accessibility bus a beat later. CI
+    # went red here on 2026-09-12 with no installer change on either side since
+    # this assertion was written — `Begin` was still on the bus on the runner
+    # and gone on this laptop, which is a race in the assertion rather than a
+    # page that stayed. If `Begin` is still there after the window it is still a
+    # FAILURE, and the mutant for an inert button (B7) never reaches this line
+    # at all, because the next page's sentinel never appears.
+    for _ in $(seq 1 25); do
+        grep -q '| name=Begin |' "$ATSPI_W/dump-adv-$key.txt" || { ADV_LEFT=1; break; }
+        sleep 0.4
+        python3 "$WALK" --dump >"$ATSPI_W/dump-adv-$key.txt" 2>/dev/null
+    done
     return 0
 }
 

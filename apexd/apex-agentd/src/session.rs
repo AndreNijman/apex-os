@@ -12,6 +12,7 @@ use apex_agent_core::hook;
 use apex_agent_core::mcpconf;
 use apex_agent_core::client::SESSION_ENV;
 use apex_agent_core::paths;
+use apex_agent_core::pluginconf;
 use apex_agent_core::config;
 use apex_agent_core::policy::{NetworkPolicy, PolicyError};
 use apex_agent_core::profile;
@@ -91,7 +92,11 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     let runtime_config = config::Config::load();
     let allowlist = runtime_config.allowlist();
     policy
-        .validate_for(&allowlist, &runtime_config.connector_allow)
+        .validate_for(
+            &allowlist,
+            &runtime_config.connector_allow,
+            &runtime_config.plugin_allow,
+        )
         .map_err(PolicyRefused)?;
 
     // Dimension 1 is the agent's own, and only the adapter knows whether this
@@ -270,7 +275,13 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     // by design — a session whose hooks could not be installed reports its
     // state from the PTY scanner, which is the fallback §6.1 keeps and not a
     // reason to refuse to start. `hook_settings` says what went wrong, once.
-    let hook_settings = install_hook_settings(adapter, &scratch, detected.as_ref().map(|p| std::path::Path::new(&p.root)));
+    let hook_settings = install_hook_settings(
+        adapter,
+        &scratch,
+        detected.as_ref().map(|p| std::path::Path::new(&p.root)),
+        &policy,
+        &runtime_config.plugin_allow,
+    );
 
     // §12: the shim's directory goes first on the session's PATH, so a skill's
     // own `git push` reaches the broker without the skill knowing there is one.
@@ -806,6 +817,8 @@ fn install_hook_settings(
     adapter: &adapter::Adapter,
     scratch: &Path,
     project: Option<&Path>,
+    policy: &apex_agent_core::policy::AgentPolicy,
+    plugin_allow: &[String],
 ) -> Option<PathBuf> {
     if !adapter.hooks {
         return None;
@@ -826,8 +839,28 @@ fn install_hook_settings(
     // question. See `statusline::overlay` for why the presentation keys have
     // to travel with it and why the command must not.
     let status = apex_agent_core::statusline::user_status_line(&paths::home(), project);
+
+    // Dimension 8. Read here rather than inside the document builder for the
+    // same reason the status line is: `hook::settings_json` is pure, and which
+    // plugins this machine has enabled is a filesystem question.
+    let installed = pluginconf::read(&paths::home());
+    let curated = pluginconf::curate(&installed, policy.plugins, plugin_allow);
+    if let Some(c) = &curated {
+        // Said out loud, because the quiet version of this is a session that
+        // silently lost the plugin whose command the user was about to type.
+        // `removed_code` is the number that says what the removal bought: a
+        // plugin that ships only commands runs nothing on its own, and a
+        // report that counted it would overstate the case.
+        eprintln!(
+            "apex-agentd: {} plugin(s) for this session, {} removed ({} of those ran code              of their own — hooks or the scripts beside them — that no MCP confinement              would have reached)",
+            c.kept.len(),
+            c.removed.len(),
+            c.removed_code(&installed),
+        );
+    }
+
     let path = hook::settings_path(scratch);
-    let document = hook::settings_json(&apex, status.as_ref()).to_string();
+    let document = hook::settings_json(&apex, status.as_ref(), curated.as_ref()).to_string();
     match std::fs::write(&path, document) {
         Ok(()) => Some(path),
         Err(e) => {

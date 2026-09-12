@@ -1488,6 +1488,21 @@ jobs:
       - name: Run shared-machine (guest, kiosk) assertions
         run: ./tests/test-apex-shared-machine.sh
 
+      # P2-016 criterion 1. One assertion carries it: `apex user add` without
+      # --admin must not put the account in wheel, because wheel is what
+      # polkit's auth_admin and sudo both resolve to on APEX. A dropped
+      # condition there is not a compile error and not a visible failure -- it
+      # is every account APEX creates able to approve a root operation, which
+      # is the state installer/apex-install is in today.
+      #
+      # It runs the real /usr/libexec/apex-user against a fixture passwd and
+      # group file, with every privileged tool (useradd, userdel, gpasswd,
+      # systemctl) replaced by a stub that records its argv. So the decisions
+      # go through the production path while no account is created, removed or
+      # changed, and nothing is written outside its temp directory.
+      - name: Run account (standard vs administrator) assertions
+        run: ./tests/test-apex-user.sh
+
       # What a screen reader and a keyboard-only user get from the login
       # screen. P2-003's "accessible login" and P2-004's "keyboard layout
       # before password" both land on the same surface, so they are measured
@@ -1520,7 +1535,20 @@ jobs:
       # A container that cannot be pulled or a dnf that cannot resolve leaves
       # the suite unrun and says so, rather than reddening the job over a
       # network hiccup — the same trade the labwc step above makes.
+      # ── the four accessibility steps run even after an earlier failure ────
+      # Not `continue-on-error`: these steps still fail the job. `!cancelled()`
+      # only stops an UNRELATED red step earlier in this job from hiding them.
+      #
+      # That is not hypothetical. `Run virtualization assertions` is red on
+      # roadmap/v2.2 itself, a hundred lines above these, and GitHub stops a job
+      # at its first failing step — so on 2026-09-12 all four accessibility
+      # suites silently stopped running in CI while reporting nothing at all.
+      # A job that halts at step N is evidence about steps 1..N and about
+      # nothing after it, and a unit whose whole argument is "a second machine
+      # finds what a laptop cannot" cannot afford to lose the second machine to
+      # somebody else's red step.
       - name: Run greeter accessibility assertions
+        if: ${{ !cancelled() }}
         run: |
           if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
                 dnf -y install --setopt=install_weak_deps=False \
@@ -1534,7 +1562,66 @@ jobs:
               fi
           fi
 
+      # The AT-SPI walk: the greeter in a real window on a private wlroots
+      # compositor, read back over D-Bus exactly as Orca reads it. This was the
+      # last accessibility suite in this unit verified on ONE laptop, and the
+      # round-18b dispatch is the argument for not leaving it there — CI found
+      # two false greens in the installer audit that a laptop could not.
+      #
+      # Same Fedora container as the step above, for the same reason (the
+      # greeter imports QtQuick.Effects, which is Qt 6.5+, and the runner ships
+      # 6.4), plus four things that step does not need:
+      #
+      #   labwc                     a wlroots compositor. The suite refuses the
+      #                             offscreen QPA deliberately: offscreen
+      #                             provides no platform accessibility, so the
+      #                             bridge publishes nothing and every assertion
+      #                             would read an empty tree and have to be
+      #                             written to expect one.
+      #   xorg-x11-server-Xwayland  labwc exits at startup without it ("cannot
+      #                             create xwayland server"). Nothing in the
+      #                             suite is an X client; labwc simply will not
+      #                             start.
+      #   mesa-dri-drivers          llvmpipe. Without it the Qt client cannot
+      #                             make an EGL context in a container with no
+      #                             /dev/dri, and it fails in the most confusing
+      #                             possible way: the process stays alive, its
+      #                             stderr is empty, and it registers nothing.
+      #   at-spi2-core, python3-gobject, dbus-daemon, glib2
+      #                             the bus, the registry, and the walker.
+      #
+      # Verified by running it in this exact container before it was written
+      # here, not dispatched blind: 31 passed, 0 failed, identical to the
+      # laptop's 31. That run is also what corrected tests/lib/atspi.sh — see
+      # its "the flag a screen reader sets" note. On a bare container
+      # org.a11y.Status starts FALSE, Qt publishes nothing, and the suite reads
+      # as "the greeter has no accessibility tree"; on a developer machine the
+      # flags are already true, which is why the old finding said Qt ignored
+      # them.
+      #
+      # exit 97 = the container could not resolve its packages: reported as
+      # "did not run" rather than reddening the job, the same trade the greeter
+      # a11y step makes.
+      - name: Run greeter AT-SPI assertions
+        if: ${{ !cancelled() }}
+        run: |
+          if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
+                dnf -y install --setopt=install_weak_deps=False \
+                    qt6-qtdeclarative-devel qt6-qtwayland labwc \
+                    xorg-x11-server-Xwayland mesa-dri-drivers \
+                    at-spi2-core python3-gobject dbus-daemon glib2 \
+                    >/dev/null 2>&1 || exit 97
+                ./tests/test-apex-greet-atspi.sh'; then
+              rc=$?
+              if [ "$rc" -eq 97 ]; then
+                  echo "could not install the accessibility stack in the container; the AT-SPI walk did not run"
+              else
+                  exit "$rc"
+              fi
+          fi
+
       - name: Run greeter keyboard-layout assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-greet-layout.sh
 
       # The other half of the same finding, and the more important one: the
@@ -1550,16 +1637,31 @@ jobs:
       # dbus-daemon and gdbus are what it needs; without them it SKIPs and says
       # nothing was measured.
       - name: Install the bus tools the greeter session-bus suite measures with
+        if: ${{ !cancelled() }}
         run: |
           sudo apt-get update -qq
-          for p in dbus dbus-x11 libglib2.0-bin; do
+          for p in dbus dbus-x11 libglib2.0-bin at-spi2-core; do
             sudo apt-get install -y -qq "$p" || echo "note: $p unavailable"
           done
           for b in dbus-daemon dbus-run-session gdbus; do
             command -v "$b" >/dev/null && echo "have: $b" || echo "MISSING: $b"
           done
+          # at-spi2-core is what the wrapper execs. Without it the two
+          # accessibility-bus assertions SKIP with a reason rather than being
+          # measured, which is a runner that says nothing about the half of the
+          # change that matters most.
+          # `|| true` is load-bearing, not decoration: this step runs under
+          # `bash -e`, a for-loop exits with its last command's status, and a
+          # final `[ -x ]` that is false therefore FAILED THE WHOLE STEP on the
+          # first dispatch — while the packages it was reporting on had
+          # installed perfectly.
+          for f in /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher; do
+            [ -x "$f" ] && echo "have: $f" || true
+          done
+          true
 
       - name: Run greeter session-bus assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-greet-session-bus.sh
 
       # The image ships a screen reader, and nothing starts it. Reads
@@ -1568,6 +1670,7 @@ jobs:
       # line. The rpmdb section SKIPs on a runner, which has no ostree
       # deployment to ask; the two sections that gate the change do run.
       - name: Run accessibility-stack assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-a11y-stack.sh
 
       # §9's resolver, which is the same engine as the package suite above and
@@ -1930,6 +2033,7 @@ jobs:
             files/system/libexec/apex-plugin \
             files/system/libexec/apex-disposable \
             files/system/libexec/apex-vm \
+            files/system/libexec/apex-screen-reader \
             tests/test-apex-recover.sh \
             tests/test-apex-pkg.sh tests/test-apex-firstrun.sh \
             tests/test-labwc-keybinds.sh tests/test-apex-env.sh \

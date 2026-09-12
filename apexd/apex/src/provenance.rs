@@ -188,18 +188,45 @@ impl Revision {
 /// checkout it is pointed at, and `apex provenance show` runs against real
 /// marketplace checkouts on somebody's machine. A measurement that modifies
 /// what it measures is not one.
-fn git(prog: &str, dir: &Path, args: &[&str]) -> Result<String, String> {
+fn git(prog: &str, dir: &Path, args: &[&str]) -> Result<String, GitErr> {
     let out = Command::new(prog)
         .arg("--no-optional-locks")
         .arg("-C")
         .arg(dir)
         .args(args)
         .output()
-        .map_err(|e| format!("git could not be run: {e}"))?;
+        .map_err(|e| GitErr::CouldNotRun(format!("git could not be run: {e}")))?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        return Err(GitErr::Refused(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Why a git query did not answer, in the two arms this module exists to keep
+/// apart.
+///
+/// It was one `String`, and both arms landed in the same `Err(_) => {}` in
+/// [`revision_of_with`], which then fell through to
+/// "is not a git checkout and carries no revision file". So a git that could
+/// not be STARTED — not installed, refused by the kernel, killed by a resource
+/// limit — was reported as a directory that is simply not a repository, which
+/// is the reassuring answer and the wrong one. That is the exact collapse the
+/// `symlink_metadata` call above this one refuses to make about the directory,
+/// made about the program instead, in the module whose whole subject is telling
+/// a measurement apart from a guess.
+///
+/// The distinction is not academic here. It is what turned a flaky test in this
+/// file into a mystery: `rev-parse` failed to exec, and the panic said the
+/// fixture "is not a git checkout" about a directory the test had just written
+/// a git into.
+enum GitErr {
+    /// The program could not be started at all. Nothing was measured.
+    CouldNotRun(String),
+    /// git started, ran, and answered no. That IS a measurement — a directory
+    /// that is not a repository reaches here, and so does one with no commits.
+    Refused(String),
 }
 
 /// The revision of one marketplace checkout.
@@ -239,6 +266,7 @@ pub fn revision_of_with(dir: &Path, prog: &str) -> Revision {
             ));
         }
     }
+    let mut refused: Option<String> = None;
     match git(prog, dir, &["rev-parse", "HEAD"]) {
         Ok(sha) if !sha.is_empty() => {
             let dirty = match git(prog, dir, &["status", "--porcelain"]) {
@@ -254,7 +282,16 @@ pub fn revision_of_with(dir: &Path, prog: &str) -> Revision {
             return Revision::Commit { sha, dirty, remote };
         }
         Ok(_) => {}
-        Err(_) => {}
+        // Could not START git. Not "this is not a checkout": nothing was
+        // measured, and the caller must be told which of the two it is.
+        Err(GitErr::CouldNotRun(why)) => {
+            return Revision::Unmeasured(format!("{}: {why}", dir.display()));
+        }
+        // git ran and said no. A directory that is not a repository lands here,
+        // which is a real answer, so the revision-file fallback below is right.
+        // Its reason is kept rather than dropped: if the fallback finds nothing
+        // either, git's own sentence is the most specific thing anyone has.
+        Err(GitErr::Refused(why)) => refused = Some(why),
     }
     // Not a git checkout. The official marketplace ships its revision in
     // `.gcs-sha`; read it as a claim rather than ignoring a real fact.
@@ -280,10 +317,18 @@ pub fn revision_of_with(dir: &Path, prog: &str) -> Revision {
             }
         }
     }
-    Revision::Unmeasured(format!(
+    // Both fallbacks are exhausted. git's own sentence, where it gave one, is
+    // the most specific thing anybody has about why — an empty repository and a
+    // directory that is not one at all both reach here, and they are not the
+    // same problem to whoever has to fix it.
+    let mut why = format!(
         "{} is not a git checkout and carries no revision file",
         dir.display()
-    ))
+    );
+    if let Some(reason) = refused.filter(|r| !r.is_empty()) {
+        why.push_str(&format!(" (git said: {reason})"));
+    }
+    Revision::Unmeasured(why)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1285,6 +1330,48 @@ mod tests {
         home.join("store/plugin-provenance.json")
     }
 
+    /// Wait until a script this test just wrote can actually be exec'd.
+    ///
+    /// ETXTBSY, and it is not hypothetical. This binary is ~600 tests in ONE
+    /// process, threaded, and every test that spawns a child forks. A fork
+    /// landing between the `open` and the `close` inside the `std::fs::write`
+    /// that created this script gives that child a WRITE handle on it, and
+    /// `execve` refuses any file somebody holds open for writing. The child
+    /// closes it a moment later when it execs its own program, so the window is
+    /// microseconds wide and it is real: measured on 2026-09-12 over the whole
+    /// binary, 2 failures in 60 runs, and 0 in 60 with `--test-threads=1`.
+    ///
+    /// That is the flake this file carried for three rounds. It was
+    /// undiagnosable from its own panic, which said the fixture
+    /// "is not a git checkout and carries no revision file" about a directory
+    /// the test had just written a git into — `revision_of_with` took a git
+    /// that could not START the same way as a git that ran and said no. The
+    /// `GitErr` split above fixed that, and the panic then read
+    /// `git could not be run: Text file busy (os error 26)`.
+    ///
+    /// Retrying is the whole fix and it terminates: once `fs::write` has
+    /// returned, no thread holds a write fd on this path, so no FUTURE fork can
+    /// inherit one. Only children forked during the write can be holding it,
+    /// and each releases it the instant it execs. One successful exec therefore
+    /// proves the window is shut for good.
+    fn wait_until_executable(prog: &Path) {
+        for _ in 0..200 {
+            match Command::new(prog).arg("--probe").output() {
+                // 26 is ETXTBSY. Spelled as a raw errno and not as
+                // `io::ErrorKind::ExecutableFileBusy`, which needs Rust 1.83
+                // and this workspace declares `rust-version = "1.75"`.
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                _ => return,
+            }
+        }
+        panic!(
+            "{} was still Text file busy after a second of retries",
+            prog.display()
+        );
+    }
+
     /// A machine with one marketplace and one installed plugin.
     fn machine(home: &Path, install: &Path) {
         std::fs::create_dir_all(home.join(".claude/plugins")).expect("mkdir");
@@ -1743,6 +1830,7 @@ mod tests {
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
                 .expect("chmod");
         }
+        wait_until_executable(&fake);
         let rev = revision_of_with(&root, fake.to_str().expect("utf8"));
         match &rev {
             Revision::Commit { dirty, .. } => assert_eq!(
@@ -1761,6 +1849,72 @@ mod tests {
             "it must never claim the tree matches: {}",
             rev.describe()
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_git_that_could_not_be_started_is_not_a_directory_that_is_not_a_checkout() {
+        // The collapse this module exists to refuse, in the last place it was
+        // still being made. `revision_of_with` took EVERY `Err` from git the
+        // same way and fell through to "is not a git checkout and carries no
+        // revision file" — a statement about the DIRECTORY, made when the only
+        // thing that failed was starting the program. The directory might be a
+        // perfectly good checkout; nobody looked.
+        //
+        // Not academic. It is what hid the ETXTBSY flake in
+        // `a_git_status_that_could_not_run_…` for three rounds: the panic named
+        // a fixture "not a git checkout" about a directory the test had just
+        // written a git into, so the one word that would have pointed at exec —
+        // busy — never appeared.
+        let root = fixture("nogit");
+        let missing = root.join("there-is-no-git-here");
+        let rev = revision_of_with(&root, missing.to_str().expect("utf8"));
+        match &rev {
+            Revision::Unmeasured(why) => {
+                assert!(
+                    why.contains("could not be run"),
+                    "a git that could not be started must say that: {why}"
+                );
+                assert!(
+                    !why.contains("not a git checkout"),
+                    "and must not report it as a directory that is not a repository: {why}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_git_that_ran_and_said_no_is_still_a_directory_that_is_not_a_checkout() {
+        // The other half of the same split, and the reason it is a split rather
+        // than "treat every git failure as unmeasured". A git that RUNS and
+        // exits non-zero has measured something: the directory is not a
+        // repository. That answer must keep falling through to the revision
+        // file, or every plain directory carrying a `.gcs-sha` would stop
+        // reporting the revision it does have.
+        let root = fixture("refusedgit");
+        let fake = root.join("fakegit");
+        std::fs::write(&fake, "#!/bin/sh\nexit 128\n").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        wait_until_executable(&fake);
+        std::fs::write(
+            root.join(".gcs-sha"),
+            "01a9cec39b961236e2d99fa2db9b22b534fa27a9\n",
+        )
+        .expect("write");
+        match revision_of_with(&root, fake.to_str().expect("utf8")) {
+            Revision::Claimed { sha, from } => {
+                assert_eq!(from, ".gcs-sha");
+                assert!(sha.starts_with("01a9cec"), "{sha}");
+            }
+            other => panic!("a git that ran and refused must not stop the fallback: {other:?}"),
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 

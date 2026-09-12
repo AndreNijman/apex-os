@@ -1,0 +1,116 @@
+# APEX-OS — wipe a disposable guest WHEN ITS SESSION ENDS (systemd SYSTEM
+# service, P2-016 criterion 2).
+#
+# `%i` is the guest's **uid**, not its name. That is the one unusual thing
+# about this unit and it is forced: everything here hangs off logind's per-user
+# units, and those are named by uid. `apex-guest-wipe` accepts either and
+# resolves a uid through passwd, so the allowlist stays a list of names.
+#
+#     sudo systemctl enable apex-guest-session@1042.service
+#
+# NOT ENABLED BY THIS REPO, and enabling it for a uid that is not a configured
+# guest does nothing destructive: every fence in the engine still applies, and
+# a fence that holds shows up as a failed unit rather than as a wipe.
+#
+# ── Why this exists next to apex-guest-wipe@.service ────────────────────────
+#
+# They are not one unit with two triggers. They differ in what a REFUSAL means,
+# and that is the reason they cannot be the same file:
+#
+#   * `apex-guest-wipe@.service` is the boot-time sweep. It clears whatever a
+#     power cut left behind, and on a machine with no guest configured it is
+#     *expected* to refuse — so it carries `SuccessExitStatus=0 2` and a
+#     refusal is quiet.
+#   * this unit is only ever enabled for an account that IS a configured guest,
+#     at the one moment the wipe is supposed to happen. A refusal here means
+#     the guest's credentials are STILL THERE for the next guest. It must be
+#     loud, so there is deliberately **no SuccessExitStatus** and a fence that
+#     holds leaves a failed unit in `systemctl --failed`.
+#
+# Measured on the L16 with a real second account, both directions:
+#
+#     allowlist names the guest   → home cleared, /var/lib/apex-secretd/users/
+#                                   1042 gone, unit "Deactivated successfully"
+#     allowlist emptied           → nothing removed, unit FAILED with
+#                                   status=2/INVALIDARGUMENT and the journal
+#                                   line "refusing: … is not listed in
+#                                   /etc/apex/guest-accounts"
+#
+# The second run is the one that matters. With `SuccessExitStatus=0 2` copied
+# over from the boot unit, that same refusal reported success, and
+# `systemctl status` was green over a guest home that had not been touched.
+#
+# ── How it fires, and the thing that does NOT work ──────────────────────────
+#
+# `WantedBy=user-runtime-dir@%i.service` is the trigger and `BindsTo=` is the
+# stop. logind starts `user-runtime-dir@<uid>.service` at login, which pulls
+# this in; `ExecStart` is `/bin/true` and `RemainAfterExit=yes` keeps it active
+# for the life of the session. When the last session closes, logind stops
+# `user@<uid>.service` and then `user-runtime-dir@<uid>.service` (after
+# `UserStopDelaySec`, 10s by default); `BindsTo=` stops this unit with it, and
+# `ExecStop=` is the wipe.
+#
+# `Before=user-runtime-dir@%i.service` is not a typo and it is load-bearing.
+# systemd stops units in the reverse of their start order, so ordering this
+# BEFORE the runtime dir on the way up orders it AFTER it on the way down: the
+# wipe runs once /run/user/<uid> has been torn down and the user's processes
+# are gone, not while they are still writing to the home it is clearing.
+#
+# THE OBVIOUS VERSION OF THIS UNIT DOES NOT WORK, and the failure is silent, so
+# it is written down here rather than rediscovered. Binding to the user slice —
+# `BindsTo=user-%i.slice`, `WantedBy=user-%i.slice` — looks like the right
+# hook and never fires. Measured, twice:
+#
+#   * logind does not stop `user-<uid>.slice`. The journal at logout shows it
+#     stopping `user@<uid>.service` and `user-runtime-dir@<uid>.service` and
+#     nothing else; the slice goes away by garbage collection once it is empty
+#     and nothing refers to it.
+#   * a unit that `BindsTo=` the slice IS something that refers to it. With the
+#     hook installed, `user-1042.slice` stayed `active` indefinitely after the
+#     guest logged out — sessions removed, `user@1042.service` inactive, slice
+#     still up — so the stop that was supposed to trigger the wipe never
+#     happened. Removing the hook, the same slice was collected again within
+#     seconds.
+#
+# So the hook prevented the very event it was waiting for. `user-runtime-dir@`
+# is explicitly stopped by logind and has no such feedback loop.
+
+[Unit]
+Description=Wipe the disposable guest uid %i when its session ends
+Documentation=man:apex(1)
+# If logind tears down the guest's runtime directory, this goes with it — and
+# stopping this unit is what runs the wipe.
+BindsTo=user-runtime-dir@%i.service
+# Reverse-order stop. See the header: this is why the wipe sees a torn-down
+# session instead of a live one.
+Before=user-runtime-dir@%i.service
+
+[Service]
+Type=oneshot
+# Nothing happens at login. The unit exists during the session only so that it
+# has something to stop.
+ExecStart=/bin/true
+RemainAfterExit=yes
+ExecStop=/usr/libexec/apex-guest-wipe %i
+# Deliberately NO SuccessExitStatus. See the header: a refusal here is a guest
+# whose credentials were not cleared, and it must show up red.
+
+# Hardening. Same set as the boot-time unit: it removes things under the
+# guest's home and under /var, and nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/apex-secretd /var/lib/apex-greet /home /var/home
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+PrivateNetwork=yes
+
+[Install]
+# By uid, because that is how logind names its per-user units. `systemctl
+# enable` turns this into
+# /etc/systemd/system/user-runtime-dir@<uid>.service.wants/, which is the whole
+# of the wiring — there is no drop-in to write and nothing to un-write by hand.
+WantedBy=user-runtime-dir@%i.service
