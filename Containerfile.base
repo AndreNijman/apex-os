@@ -972,7 +972,8 @@ RUN set -eux; \
     : 'refusal there means the guest left credentials behind -- it must fail'; \
     : 'loudly, and a copied SuccessExitStatus would make it green instead.'; \
     test -f /usr/lib/systemd/system/apex-guest-session@.service; \
-    ! grep -q '^SuccessExitStatus' /usr/lib/systemd/system/apex-guest-session@.service; \
+    if grep -q '^SuccessExitStatus' /usr/lib/systemd/system/apex-guest-session@.service \
+        ; then echo "FATAL: a copied SuccessExitStatus would turn a guest-wipe refusal green"; exit 1; fi; \
     : 'And it must hang off the unit logind actually stops. Binding to the'; \
     : 'user slice never fires: logind does not stop user-<uid>.slice, and a'; \
     : 'unit that BindsTo it keeps it from being collected, so the trigger the'; \
@@ -981,8 +982,9 @@ RUN set -eux; \
          /usr/lib/systemd/system/apex-guest-session@.service; \
     grep -q '^WantedBy=user-runtime-dir@%i.service$' \
          /usr/lib/systemd/system/apex-guest-session@.service; \
-    ! grep -qE '^(BindsTo|WantedBy)=user-%i\.slice$' \
-         /usr/lib/systemd/system/apex-guest-session@.service; \
+    if grep -qE '^(BindsTo|WantedBy)=user-%i\.slice$' \
+         /usr/lib/systemd/system/apex-guest-session@.service \
+        ; then echo "FATAL: the session hook binds to user-%i.slice, which logind never stops"; exit 1; fi; \
     test -z "$(find /etc/systemd/system -name 'apex-guest-session@*.service' -print -quit)"; \
     : '── the kiosk config is a recipe, and lands where recipes land ──'; \
     : 'greetd reads exactly one file, /etc/greetd/config.toml, and the'; \
