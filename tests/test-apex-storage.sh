@@ -465,6 +465,42 @@ mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME"
 FIX="$TMP/machine"
 export APEX_STORAGE_ROOT="$FIX"
 
+# ── the two loop names the erase fixture is allowed to use ───────────────────
+#
+# Four erase requests in this suite are supposed to come back PERMITTED, so the
+# only thing between them and `wipefs` is the fixture gate in erase(). They must
+# therefore name devices that exist NOWHERE on the machine running the suite.
+#
+# They used to be hardcoded as loop7 and loop8, above a comment asserting those
+# "exist on no machine this suite runs on". That was true of this laptop and
+# false the first time CI ran it: a GitHub runner pre-creates /dev/loop0 through
+# /dev/loop15, and the guard below fired exactly as designed —
+#
+#     FAIL /dev/loop7 EXISTS here and this suite expects a permit for it
+#
+# So the pair is chosen at runtime instead. The guard stays: it is what turns
+# this from a promise into a measurement.
+LA=""; LB=""
+_n=7
+while [ "$_n" -lt 512 ]; do
+    _m=$((_n + 1))
+    if [ ! -e "/dev/loop$_n" ] && [ ! -e "/dev/loop${_n}p1" ] \
+    && [ ! -e "/dev/loop$_m" ] && [ ! -e "/dev/loop${_m}p1" ]; then
+        LA="loop$_n"; LB="loop$_m"; break
+    fi
+    _n=$((_n + 1))
+done
+if [ -z "$LA" ]; then
+    # Could-not-run, said out loud. Silently picking a name that exists is how
+    # a suite ends up pointing wipefs at somebody's disk.
+    echo "FATAL: every loop index from 7 to 512 exists on this machine, so this" >&2
+    echo "       suite cannot name a device that is safe to be told to erase." >&2
+    exit 1
+fi
+# Loop devices are major 7, minor = index; the partition keeps the old
+# index*10+1 shape so an unchanged machine produces the unchanged 7:71.
+LA_PART_MINOR=$(( ${LA#loop} * 10 + 1 ))
+
 # A whole machine: one NVMe with five partitions, one loop device that must be
 # skipped, a composefs root and a btrfs volume under five mount points.
 build_machine() {
@@ -525,15 +561,15 @@ build_machine() {
     # development machine's real /dev/loop0 is attached to
     # /lib/extensions/apex-user.raw — a merged system extension — so a fixture
     # device sharing that name would, if a mutation ever dropped the fixture
-    # gate in erase(), aim wipefs at live machine state. loop7 and loop8 exist
-    # on no machine this suite runs on.
+    # gate in erase(), aim wipefs at live machine state. $LA and $LB are chosen
+    # at the top of this file precisely because they exist on no machine.
     #
-    # loop7 has no `loop/` directory: not an attached loop device, and the one
+    # $LA has no `loop/` directory: not an attached loop device, and the one
     # device in this fixture a correct guard is supposed to permit.
-    # loop8 has one, so it is in use by whoever attached it — and it appears in
+    # $LB has one, so it is in use by whoever attached it — and it appears in
     # the mount table zero times, which is the whole point.
     local l
-    for l in loop7 loop8; do
+    for l in "$LA" "$LB"; do
         mkdir -p "$FIX/sys/devices/virtual/block/$l/holders" \
                  "$FIX/sys/devices/virtual/block/$l/queue"
         ln -sfn "../devices/virtual/block/$l" "$FIX/sys/block/$l"
@@ -542,28 +578,28 @@ build_machine() {
         printf '0\n'      > "$FIX/sys/devices/virtual/block/$l/ro"
         printf '0\n'      > "$FIX/sys/devices/virtual/block/$l/queue/rotational"
     done
-    mkdir -p "$FIX/sys/devices/virtual/block/loop8/loop"
+    mkdir -p "$FIX/sys/devices/virtual/block/${LB}/loop"
     printf '/var/tmp/some-image.raw\n' \
-        > "$FIX/sys/devices/virtual/block/loop8/loop/backing_file"
+        > "$FIX/sys/devices/virtual/block/${LB}/loop/backing_file"
     mkdir -p "$FIX/sys/devices/virtual/block/loop0/holders"
 
     # A partition with a legible, non-ESP type — the case that must come back
-    # PERMITTED. It hangs off loop7 rather than off nvme0n1 for one reason:
+    # PERMITTED. It hangs off $LA rather than off nvme0n1 for one reason:
     # nvme0n1p1..p5 are the real names of real partitions on the machine that
     # runs this suite, one of which holds another operating system. A test
     # asserting "this device is erasable" must never name a device that
     # exists, because the only thing standing between that assertion and
     # `wipefs` is the fixture gate — and the whole point of a mutation battery
     # is to find out what happens when one `if` goes missing.
-    mkdir -p "$FIX/sys/devices/virtual/block/loop7/loop7p1/holders"
-    printf '65536\n' > "$FIX/sys/devices/virtual/block/loop7/loop7p1/size"
-    printf '1\n'     > "$FIX/sys/devices/virtual/block/loop7/loop7p1/partition"
-    printf '7:71\n'  > "$FIX/sys/devices/virtual/block/loop7/loop7p1/dev"
+    mkdir -p "$FIX/sys/devices/virtual/block/${LA}/${LA}p1/holders"
+    printf '65536\n' > "$FIX/sys/devices/virtual/block/${LA}/${LA}p1/size"
+    printf '1\n'     > "$FIX/sys/devices/virtual/block/${LA}/${LA}p1/partition"
+    printf '7:%s\n' "$LA_PART_MINOR" > "$FIX/sys/devices/virtual/block/$LA/${LA}p1/dev"
     {
         printf 'E:ID_FS_TYPE=ext4\n'
         printf 'E:ID_PART_ENTRY_SCHEME=gpt\n'
         printf 'E:ID_PART_ENTRY_TYPE=%s\n' "$LINUX_GUID"
-    } > "$FIX/run/udev/data/b7:71"
+    } > "$FIX/run/udev/data/b7:$LA_PART_MINOR"
 
     # Measured on the L16: / is composefs, and one btrfs volume is mounted at
     # five paths of which only /sysroot exposes the whole filesystem.
@@ -775,7 +811,7 @@ sec "nothing this suite expects a permit for exists on the machine running it"
 # assertion that keeps that true as the fixture grows, and it is not
 # theoretical: the development machine's /dev/loop0 is a live system extension
 # and its nvme0n1p1..p5 include another installed operating system.
-for d in loop7 loop7p1 loop8 loop8p1; do
+for d in "$LA" "${LA}p1" "$LB" "${LB}p1"; do
     if [[ -e "/dev/$d" ]]; then
         bad "/dev/$d EXISTS here and this suite expects a permit for it"
     else
@@ -810,7 +846,7 @@ has 'mounted nowhere' "$TMP/erase" "and the refusal says why nothing else caught
 # real disk. Refusing a partition for having no NAME would be four false
 # refusals out of five, which is how a guard teaches a user it is noise — so
 # the positive case has to be asserted, on a partition that exists nowhere.
-erase_try /dev/loop7p1 /dev/loop7p1
+erase_try /dev/${LA}p1 /dev/${LA}p1
 if [[ "$ERC" -eq 0 ]]; then
     ok "an unmounted, unnamed, non-ESP partition is permitted"
 else
@@ -833,19 +869,19 @@ hasnt 'EFI System Partition' "$TMP/erase" "nor mistaken for the ESP"
 erase_try /dev/sdz /dev/sdz
 refused_with 'is not a block device on this machine' "a device that does not exist is refused"
 
-erase_try /dev/loop7 yes
+erase_try /dev/${LA} yes
 refused_with 'you have to type it exactly' "the wrong confirmation token is refused"
 
 sec "a check that could not be performed refuses, and says which check"
 printf '1000\n' > "$FIX/.fixture/euid"
-erase_try /dev/loop7 /dev/loop7
+erase_try /dev/${LA} /dev/${LA}
 refused_with 'must run as root' "an unprivileged erase is refused"
 n="$(grep -c '^  - ' "$TMP/erase")"
 [[ "$n" == "1" ]] && ok "and privilege is reported alone, so nobody reaches for --force" \
                   || bad "an unprivileged erase reported $n refusals at once"
 
 rm -f "$FIX/.fixture/euid"
-erase_try /dev/loop7 /dev/loop7
+erase_try /dev/${LA} /dev/${LA}
 refused_with 'could not be checked' "an unreadable effective uid refuses"
 has 'which user is running this' "$TMP/erase" "naming the check that did not happen"
 hasnt 'must run as root' "$TMP/erase" \
@@ -853,7 +889,7 @@ hasnt 'must run as root' "$TMP/erase" \
 printf '0\n' > "$FIX/.fixture/euid"
 
 mv "$FIX/proc/self/mountinfo" "$TMP/mountinfo.saved"
-erase_try /dev/loop7 /dev/loop7
+erase_try /dev/${LA} /dev/${LA}
 refused_with 'could not be checked' "an unreadable mount table refuses"
 has 'which filesystems are mounted' "$TMP/erase" \
     "because an unreadable mountinfo is not an empty mount table"
@@ -862,32 +898,32 @@ mv "$TMP/mountinfo.saved" "$FIX/proc/self/mountinfo"
 # Every holders directory on the development machine is empty — there is no
 # LUKS anywhere on it — so this rule cannot be exercised live even once. That
 # is the argument for the guard being pure and fixture-driven.
-mkdir -p "$FIX/sys/devices/virtual/block/loop7/holders/dm-0"
-erase_try /dev/loop7 /dev/loop7
+mkdir -p "$FIX/sys/devices/virtual/block/${LA}/holders/dm-0"
+erase_try /dev/${LA} /dev/${LA}
 refused_with 'stacked on it' "a device with a holder is refused"
-rmdir "$FIX/sys/devices/virtual/block/loop7/holders/dm-0"
+rmdir "$FIX/sys/devices/virtual/block/${LA}/holders/dm-0"
 
 # Mode 100: traversable, unlistable — which is precisely what "the holders of
 # this device cannot be listed" means, and the mode that reaches the holders
 # reading itself.
-chmod 100 "$FIX/sys/devices/virtual/block/loop7/holders"
-erase_try /dev/loop7 /dev/loop7
+chmod 100 "$FIX/sys/devices/virtual/block/${LA}/holders"
+erase_try /dev/${LA} /dev/${LA}
 refused_with 'could not be checked' "an unlistable holders directory refuses"
-has 'stacked on /dev/loop7' "$TMP/erase" "naming the check that did not happen"
+has "stacked on /dev/$LA" "$TMP/erase" "naming the check that did not happen"
 hasnt 'has  stacked on it' "$TMP/erase" "and is not reported as an absence of holders"
-chmod 755 "$FIX/sys/devices/virtual/block/loop7/holders"
+chmod 755 "$FIX/sys/devices/virtual/block/${LA}/holders"
 
 # Mode 000 is not traversable, so the enumerator's own probe for a `partition`
 # file inside that directory fails first and the request is refused as an
 # incomplete enumeration rather than as unlistable holders. Both refuse, which
 # is the only thing that matters; asserted here so that the interaction is a
 # recorded fact rather than a surprise for whoever changes either one.
-chmod 000 "$FIX/sys/devices/virtual/block/loop7/holders"
-erase_try /dev/loop7 /dev/loop7
+chmod 000 "$FIX/sys/devices/virtual/block/${LA}/holders"
+erase_try /dev/${LA} /dev/${LA}
 [[ "$ERC" -eq 3 ]] && ok "an untraversable subdirectory of a device refuses as well" \
                    || bad "an untraversable subdirectory exited $ERC: $(cat "$TMP/erase")"
 hasnt 'would erase' "$TMP/erase" "and is never permitted"
-chmod 755 "$FIX/sys/devices/virtual/block/loop7/holders"
+chmod 755 "$FIX/sys/devices/virtual/block/${LA}/holders"
 
 # The defect: chmod 100 is readable to nobody and still traversable, so
 # holders/ and dev keep answering and only the LISTING fails. Every partition
@@ -921,20 +957,20 @@ sec "an attached loop device is in no mount table at all"
 # /proc/1/mountinfo zero times, and its holders directory is empty. Every other
 # rule in the guard passed it, and wipefs on a loop device writes straight
 # through to the backing file.
-erase_try /dev/loop8 /dev/loop8
+erase_try /dev/${LB} /dev/${LB}
 refused_with 'is a loop device attached to' "an attached loop device is refused"
 has '/var/tmp/some-image.raw' "$TMP/erase" "naming the file it would write through to"
 has 'losetup -d' "$TMP/erase" "with a way to detach it"
 has '--expect-backing-file' "$TMP/erase" "and a way through for somebody who means it"
 
-erase_try /dev/loop8 /dev/loop8 --expect-backing-file /var/tmp/other.raw
+erase_try /dev/${LB} /dev/${LB} --expect-backing-file /var/tmp/other.raw
 refused_with 'not to /var/tmp/other.raw' "asserting the wrong backing file is refused"
 has 'some-image.raw' "$TMP/erase" "and both paths are named"
 
-erase_try /dev/loop7 /dev/loop7 --expect-backing-file /var/tmp/some-image.raw
+erase_try /dev/${LA} /dev/${LA} --expect-backing-file /var/tmp/some-image.raw
 refused_with 'backs no file' "asserting a backing file for a device that has none is refused"
 
-erase_try /dev/loop8 /dev/loop8 --expect-backing-file /var/tmp/some-image.raw
+erase_try /dev/${LB} /dev/${LB} --expect-backing-file /var/tmp/some-image.raw
 if [[ "$ERC" -eq 0 ]]; then
     ok "and naming the backing file correctly is permission"
 else
@@ -945,27 +981,27 @@ fi
 # loop device" is one `Err` arm away, and it is the arm that erases the live
 # system extension: /dev/loop0's node is there, and only its CONTENT says what
 # it would destroy. Mutation M11 was completely green until this existed.
-chmod 000 "$FIX/sys/devices/virtual/block/loop8/loop/backing_file"
-erase_try /dev/loop8 /dev/loop8
+chmod 000 "$FIX/sys/devices/virtual/block/${LB}/loop/backing_file"
+erase_try /dev/${LB} /dev/${LB}
 refused_with 'could not be checked' "an unreadable backing_file refuses"
 has 'attached loop device' "$TMP/erase" "naming the check that did not happen"
 hasnt 'would erase' "$TMP/erase" "and is never read as 'not a loop device'"
-chmod 644 "$FIX/sys/devices/virtual/block/loop8/loop/backing_file"
+chmod 644 "$FIX/sys/devices/virtual/block/${LB}/loop/backing_file"
 
 # Measured: /sys/block/loopN/loopNp1 has a `partition` file and NO loop/
 # directory, so read on its own a loop partition answers "not an attached loop
 # device" — while wipefs on it writes through the parent into the backing file
 # just the same. would_destroy walks downward only, so nothing else relates a
 # partition back up to its disk.
-mkdir -p "$FIX/sys/devices/virtual/block/loop8/loop8p1/holders"
-printf '1\n' > "$FIX/sys/devices/virtual/block/loop8/loop8p1/partition"
-erase_try /dev/loop8p1 /dev/loop8p1
+mkdir -p "$FIX/sys/devices/virtual/block/${LB}/${LB}p1/holders"
+printf '1\n' > "$FIX/sys/devices/virtual/block/${LB}/${LB}p1/partition"
+erase_try /dev/${LB}p1 /dev/${LB}p1
 refused_with 'is a loop device attached to' \
     "a partition of an attached loop device inherits its parent's backing file"
-rm -rf "$FIX/sys/devices/virtual/block/loop8/loop8p1"
+rm -rf "$FIX/sys/devices/virtual/block/${LB}/${LB}p1"
 
 sec "and a device with nothing wrong with it is erasable"
-erase_try /dev/loop7 /dev/loop7
+erase_try /dev/${LA} /dev/${LA}
 if [[ "$ERC" -eq 0 ]]; then
     ok "an unmounted device with no holders and no backing file is permitted"
     has 'would erase' "$TMP/erase" "and the fixture gate reports what it did not do"
@@ -973,7 +1009,7 @@ else
     bad "the permittable device was refused: $(cat "$TMP/erase")"
 fi
 # The gate, again, from the outside: a fixture holds a real Permit and must
-# still spawn nothing. There is no /dev/loop7 on this machine to erase, so the
+# still spawn nothing. There is no /dev/${LA} on this machine to erase, so the
 # proof is that the run said "fixture root" rather than failing to find it.
 has 'fixture root, nothing was touched' "$TMP/erase" "and says nothing was touched"
 
