@@ -620,7 +620,22 @@ fn status(json: bool) -> Result<i32> {
     let environments = config.sections(&["cloudflare"]);
     for name in &environments {
         if let Ok(Some(worker)) = config.string(&["cloudflare", name, "worker"]) {
-            println!("{:<12}{worker}", format!("{name}:"));
+            // §13.8's opt-out, reported as the FILE states it and never
+            // re-derived. The rule that decides which environments are
+            // unattended without a line lives in the provider, inside the
+            // daemon, and a second copy of it here would be a second copy of
+            // it here — the defect this repository already has a name for.
+            // What this can honestly say is what is written down.
+            let opted_out = match config.boolean(&["cloudflare", name, "unattended"]) {
+                Ok(Some(true)) => "  [unattended = true]",
+                Ok(Some(false)) => "  [unattended = false]",
+                Ok(None) => "",
+                // A value that is not a boolean is a file the daemon will
+                // refuse to read at all, so saying nothing here would hide the
+                // reason every operation in this project is about to fail.
+                Err(_) => "  [unattended is not true or false — the daemon will refuse this file]",
+            };
+            println!("{:<12}{worker}{opted_out}", format!("{name}:"));
             bound = true;
         }
     }

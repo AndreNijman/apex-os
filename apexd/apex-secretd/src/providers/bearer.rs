@@ -33,7 +33,7 @@ use apex_secret_core::operation::{
 };
 use apex_secret_core::SecretValue;
 
-use crate::provider::{Bind, Bound, Endpoint, Lease, Minted, Performed, Provider, ProviderError};
+use crate::provider::{Approval, Bind, Bound, Endpoint, Lease, Minted, Performed, Provider, ProviderError};
 
 pub const SPEC: ProviderSpec = ProviderSpec {
     id: "demo",
@@ -154,6 +154,10 @@ impl Provider for BearerProvider {
             endpoint: Endpoint::from_url(&url)?,
             detail: format!("{} {}", req.operation.id, self.path(req)),
             creates: None,
+            // A bearer request reaches only the endpoint pinned when its
+            // credential was stored, so there is no second thing for the owner
+            // to be asked about.
+            approval: Approval::Standing,
         })
     }
 

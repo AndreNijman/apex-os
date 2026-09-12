@@ -32,7 +32,7 @@
 
 use std::io::Read;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use apex_agent_core::protocol::{
     Request as AgentRequest, Response as AgentResponse, BROKERED_SECRET_SERVICE_VERSION,
     GENERIC_CAPABILITY_VERSION,
@@ -129,6 +129,38 @@ pub enum SecretCmd {
         #[arg(long)]
         json: bool,
     },
+    /// §13.8: approve ONE operation on ONE resource, once.
+    ///
+    /// Not a grant. A grant says an agent may deploy this project's workers
+    /// and keeps saying it; this is spent by the first deployment that matches
+    /// and expires on its own. It is what a production deployment needs when
+    /// the project has not written `unattended = true` under its environment.
+    ///
+    /// `apex secret approve cloudflare cloudflare.worker.deploy my-worker`
+    Approve {
+        service: String,
+        operation: String,
+        /// Exactly what the operation will name — the worker, the bucket.
+        ///
+        /// `allow_hyphen_values` for `Use`'s reason: `-f` has to reach the
+        /// service's validator and be refused as "not a resource this
+        /// operation can act on", rather than being rejected here as an
+        /// unknown option.
+        #[arg(default_value = "", allow_hyphen_values = true)]
+        resource: String,
+        /// How long it may be spent for, in minutes. The default is 15 and the
+        /// most is 1440; longer is refused rather than shortened.
+        #[arg(long, value_name = "MINUTES")]
+        minutes: Option<u64>,
+        /// Take an approval back instead of giving one.
+        #[arg(long)]
+        withdraw: bool,
+    },
+    /// Every approval outstanding, soonest to expire first.
+    Approvals {
+        #[arg(long)]
+        json: bool,
+    },
     /// Use a capability. The service performs it; you get the result.
     Use {
         service: String,
@@ -197,6 +229,14 @@ pub fn main(cmd: SecretCmd) -> i32 {
             everywhere,
         } => grant(&service, &operation, true, everywhere),
         SecretCmd::Grants { json } => grants(json),
+        SecretCmd::Approve {
+            service,
+            operation,
+            resource,
+            minutes,
+            withdraw,
+        } => approve(&service, &operation, &resource, minutes, withdraw),
+        SecretCmd::Approvals { json } => approvals(json),
         SecretCmd::Use {
             service,
             operation,
@@ -446,6 +486,109 @@ fn describe_scope(project: &str) -> String {
     } else {
         format!("for {project}")
     }
+}
+
+/// §13.8's verb. Always for the project you are standing in.
+///
+/// There is no `--everywhere`, and there will not be one: an approval that
+/// applied wherever the agent happened to be standing would be standing
+/// permission with a shorter life, which is the thing §13.8 says has to be
+/// written down in the project file instead.
+fn approve(
+    service: &str,
+    operation: &str,
+    resource: &str,
+    minutes: Option<u64>,
+    withdraw: bool,
+) -> Result<i32> {
+    let project = current_project_root()?;
+    // Minutes here, milliseconds on the wire. The unit a person types is not
+    // the unit a clock compares, and converting at the edge keeps the
+    // service's bound expressible in one unit rather than two.
+    let ttl_ms = match minutes {
+        Some(m) => Some(
+            m.checked_mul(60_000)
+                .ok_or_else(|| anyhow!("{m} minutes is longer than this can express"))?,
+        ),
+        None => None,
+    };
+    let reply = Client::connect()?.call(&Request::Approve {
+        project: project.clone(),
+        service: service.to_string(),
+        operation: operation.to_string(),
+        resource: resource.to_string(),
+        ttl_ms,
+        withdraw,
+    })?;
+    let pending = match reply {
+        Response::Approvals { pending } => pending,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
+    let named = if resource.is_empty() {
+        operation.to_string()
+    } else {
+        format!("{operation} {resource}")
+    };
+    if withdraw {
+        println!("withdrew the approval for {named} in {project}");
+        return Ok(0);
+    }
+    // The expiry, because an approval nobody spends is gone and the person who
+    // gave it is the only one who can give another.
+    let mine = pending
+        .iter()
+        .find(|a| a.operation == operation || a.resource == resource);
+    match mine {
+        Some(a) => println!(
+            "approved {named} in {project}, once, for the next {}",
+            roughly_ms(a.expires_ms.saturating_sub(a.granted_ms))
+        ),
+        None => println!("approved {named} in {project}, once"),
+    }
+    println!("it is spent by the next matching operation, whether that operation succeeds or not");
+    Ok(0)
+}
+
+fn approvals(json: bool) -> Result<i32> {
+    let pending = match Client::connect()?.call(&Request::Approvals)? {
+        Response::Approvals { pending } => pending,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&pending)?);
+        return Ok(0);
+    }
+    if pending.is_empty() {
+        println!("nothing is approved; an operation that needs one will be refused");
+        return Ok(0);
+    }
+    let now = apex_secret_core::store::now_ms();
+    for a in &pending {
+        println!(
+            "{}:{}{} in {} — {} left",
+            a.service,
+            a.operation,
+            if a.resource.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", a.resource)
+            },
+            a.project,
+            roughly_ms(a.expires_ms.saturating_sub(now))
+        );
+    }
+    Ok(0)
+}
+
+/// A duration in milliseconds, in the largest unit that does not lie.
+fn roughly_ms(ms: u64) -> String {
+    let seconds = ms / 1000;
+    let (n, unit) = match seconds {
+        0..=90 => (seconds, "second"),
+        91..=3599 => (seconds / 60, "minute"),
+        _ => (seconds / 3600, "hour"),
+    };
+    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
 fn grants(json: bool) -> Result<i32> {

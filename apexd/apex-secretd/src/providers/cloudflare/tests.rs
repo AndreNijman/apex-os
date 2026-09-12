@@ -162,14 +162,25 @@ office = "f70ff985-a4ef-4643-bbbc-4a0ed4fc8415"
 [cloudflare.staging]
 worker = "never-deployed"
 
+# Unattended for the same reason production is, and it is the clearest
+# demonstration of §13.8's polarity in this file: `canary` is not spelled
+# `production`, and it is protected anyway until this line says otherwise.
 [cloudflare.canary]
 worker = "already-split"
+unattended = true
 
 [cloudflare.preview]
 worker = "project-preview"
 
+# §13.8: this fixture's project has opted INTO unattended production, so the
+# deployment mechanics below can be exercised without an owner's approval in
+# every one of them. The protection itself is tested against
+# `PROTECTED_PROJECT_FILE`, which is this file without this line — and the
+# tests that use it are the ones that go red if `protection()` stops being
+# called at all.
 [cloudflare.production]
 worker = "project"
+unattended = true
 "#;
 
 /// The version serving traffic in the double, and the one being rolled out.
@@ -5079,4 +5090,413 @@ fn every_operation_with_a_narrow_form_actually_gets_one() {
     }
     // A sweep that swept nothing would pass.
     assert!(narrowed >= 20, "only {narrowed} operations were measured");
+}
+
+// ── §13.8, environment protection (P1-014) ──────────────────────────────────
+
+/// The fixture's project with §13.8 left at its defaults.
+///
+/// Byte-for-byte [`PROJECT_FILE`] without the two `unattended = true` lines,
+/// so every difference between a test that uses this one and a test that uses
+/// the other is the protection and nothing else.
+fn protected_project_file() -> String {
+    let file = PROJECT_FILE.replace("unattended = true\n", "");
+    // The prose above each one still says the word, so the check is on lines
+    // that would be READ rather than on the text: a comment mentioning
+    // `unattended` is not an opt-out, and a test that could not tell the two
+    // apart would either never pass or pass without checking anything.
+    assert!(
+        !file.lines().any(|line| line.trim_start().starts_with("unattended")),
+        "the protected fixture still opts out somewhere"
+    );
+    assert_eq!(
+        file.len(),
+        PROJECT_FILE.len() - 2 * "unattended = true\n".len(),
+        "the protected fixture differs from PROJECT_FILE by more than the two \
+         opt-out lines"
+    );
+    file
+}
+
+impl Fixture {
+    /// Record one owner approval, the way `apex secret approve` does.
+    fn approve(&self, operation: &str, resource: &str) -> Response {
+        self.service.approve(
+            me(),
+            crate::service::NewApproval {
+                project: self.project.to_str().expect("utf8"),
+                service: "cloudflare",
+                operation,
+                resource,
+                ttl_ms: None,
+                withdraw: false,
+            },
+        )
+    }
+
+    fn outstanding(&self) -> Vec<apex_secret_core::store::Approval> {
+        match self.service.approvals(me()) {
+            Response::Approvals { pending } => pending,
+            other => panic!("not an approvals reply: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn preview_and_staging_deploy_unattended_and_every_other_environment_does_not() {
+    // §13.8's table, and the polarity that makes it more than a spelling
+    // check. `preview` and `staging` are the WHOLE list of names an agent may
+    // deploy to on its own without the owner having written anything down;
+    // `canary`, `production` and a name nobody has invented yet are protected
+    // by the same rule, because the rule is "not on the list" and not "called
+    // production".
+    let f = Fixture::with_project(
+        "protection",
+        Mode::Normal,
+        &["cloudflare.worker.deploy"],
+        &protected_project_file(),
+    );
+
+    // Unattended: staging's worker has never been deployed, so the refusal
+    // that comes back is §13.7's — which is proof the request got past §13.8
+    // rather than proof it was allowed to finish.
+    let reply = f.use_it(
+        f.record("cloudflare.worker.deploy", "never-deployed").param("version", NEW_VERSION),
+    );
+    assert!(
+        reply.as_error().is_none(),
+        "a staging deploy must not need an approval: {reply:?}"
+    );
+
+    for (worker, environment) in [("project", "production"), ("already-split", "canary")] {
+        let reply = f.use_it(
+            f.record("cloudflare.worker.deploy", worker).param("version", NEW_VERSION),
+        );
+        let (kind, message) = reply
+            .as_error()
+            .unwrap_or_else(|| panic!("{environment} deployed unattended: {reply:?}"));
+        assert_eq!(kind, ErrorKind::PermissionDenied, "{message}");
+        // The refusal has to carry both ways out, or the reader is told no and
+        // nothing else.
+        assert!(message.contains(environment), "{message}");
+        assert!(message.contains("apex secret approve"), "{message}");
+        assert!(message.contains("unattended = true"), "{message}");
+    }
+}
+
+#[test]
+fn an_owner_may_enable_unattended_production_for_their_own_project() {
+    // §13.8's last line, and the only thing that implements it: one key in the
+    // project's own file. The SAME worker, in the SAME environment, with the
+    // same grant — the only difference is the line the owner wrote.
+    let bare = Fixture::with_project(
+        "optout-off",
+        Mode::Normal,
+        &["cloudflare.worker.deploy"],
+        &protected_project_file(),
+    );
+    let refused = bare
+        .use_it(bare.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION));
+    assert!(refused.as_error().is_some(), "{refused:?}");
+
+    let opted_in = Fixture::with_project(
+        "optout-on",
+        Mode::Normal,
+        &["cloudflare.worker.deploy"],
+        PROJECT_FILE,
+    );
+    let allowed = opted_in.use_it(
+        opted_in.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION),
+    );
+    assert!(
+        allowed.as_error().is_none(),
+        "the owner opted in and it was still refused: {allowed:?}"
+    );
+    // And the trail says it was a grant, not an approval — the opt-out is not
+    // a silent self-approval.
+    assert!(
+        opted_in.trail().contains("\"approval_policy\":\"grant\""),
+        "{}",
+        opted_in.trail()
+    );
+}
+
+#[test]
+fn a_protected_deployment_runs_once_on_an_approval_and_is_refused_the_second_time() {
+    // The whole of "production approval is default": the approval is SPENT.
+    // A mechanism where the owner's yes kept working would be a grant with a
+    // longer command.
+    let f = Fixture::with_project(
+        "spend",
+        Mode::Normal,
+        &["cloudflare.worker.deploy"],
+        &protected_project_file(),
+    );
+    assert!(f.outstanding().is_empty());
+
+    let reply = f.approve("cloudflare.worker.deploy", "project");
+    assert!(reply.as_error().is_none(), "{reply:?}");
+    assert_eq!(f.outstanding().len(), 1, "{:?}", f.outstanding());
+
+    let first = f
+        .use_it(f.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION));
+    assert!(first.as_error().is_none(), "the approved deployment was refused: {first:?}");
+    assert!(
+        f.outstanding().is_empty(),
+        "the approval survived being used: {:?}",
+        f.outstanding()
+    );
+
+    let second = f
+        .use_it(f.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION));
+    assert_eq!(
+        second.as_error().map(|(kind, _)| kind),
+        Some(ErrorKind::PermissionDenied),
+        "one approval authorised two deployments: {second:?}"
+    );
+
+    // §11's field tells the two apart, which is the only way an owner reading
+    // the trail a week later can.
+    let trail = f.trail();
+    assert!(trail.contains("\"approval_policy\":\"owner\""), "{trail}");
+    assert!(trail.contains("\"approval_policy\":\"approval-required\""), "{trail}");
+    assert!(
+        !trail.contains("\"approval_policy\":\"grant\",\"constraints\":[],\"reason\":null,\"exit_code\":0"),
+        "a protected deployment was recorded as authorised by a grant: {trail}"
+    );
+}
+
+#[test]
+fn an_approval_for_one_worker_does_not_approve_another() {
+    // The reason an approval is keyed on the resource and a grant is not.
+    // Approving the preview deployment must not approve the production one —
+    // they are the same operation under the same credential in the same
+    // project, and the resource is the only thing that separates them.
+    let f = Fixture::with_project(
+        "scope",
+        Mode::Normal,
+        &["cloudflare.worker.deploy", "cloudflare.worker.rollback"],
+        &protected_project_file(),
+    );
+    assert!(f.approve("cloudflare.worker.deploy", "already-split").as_error().is_none());
+
+    let other_worker = f
+        .use_it(f.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION));
+    assert!(
+        other_worker.as_error().is_some(),
+        "an approval for 'already-split' deployed 'project': {other_worker:?}"
+    );
+
+    // And not another operation on the same worker either.
+    assert!(f.approve("cloudflare.worker.deploy", "project").as_error().is_none());
+    let other_operation = f
+        .use_it(f.record("cloudflare.worker.rollback", "project").param("version", OLD_VERSION));
+    assert!(
+        other_operation.as_error().is_some(),
+        "an approval to deploy authorised a rollback: {other_operation:?}"
+    );
+}
+
+#[test]
+fn uploading_a_version_to_production_needs_no_approval_and_deploying_it_does() {
+    // §13.7's flow is upload -> preview -> health check -> staged -> full, and
+    // §13.8 sits on the last two steps. Asking the owner at step one is asking
+    // them before there is anything to look at, which is how approvals get
+    // approved without being read. This is the test that says so: the same
+    // worker, in the same protected environment, two operations, two answers.
+    let f = Fixture::with_project(
+        "upload",
+        Mode::Normal,
+        &["cloudflare.worker.upload-version", "cloudflare.worker.deploy"],
+        &protected_project_file(),
+    );
+    std::fs::create_dir_all(f.project.join("dist")).expect("dist");
+    std::fs::write(f.project.join("dist/worker.js"), "export default {};\n").expect("worker");
+
+    let upload = f.use_it(
+        f.record("cloudflare.worker.upload-version", "project")
+            .param("script", "dist/worker.js")
+            .param("compatibility-date", "2026-09-01"),
+    );
+    assert!(
+        upload.as_error().is_none(),
+        "uploading a version is not a deployment and must not need an approval: {upload:?}"
+    );
+
+    let deploy = f
+        .use_it(f.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION));
+    assert!(
+        deploy.as_error().is_some(),
+        "putting that version in front of traffic must need one: {deploy:?}"
+    );
+}
+
+#[test]
+fn an_approval_is_spent_by_a_deployment_that_failed() {
+    // Spent on commit, not on success. An agent that could burn a failed
+    // deployment and keep the approval could retry until something worked, and
+    // the owner approved one deployment rather than one successful one.
+    //
+    // `never-deployed` is staging, so a *partial* rollout to it is refused by
+    // §13.7 — which needs a protected worker to be a useful test here. So this
+    // uses production with a percentage, where the far side's lookup is what
+    // fails.
+    let f = Fixture::with_project(
+        "burn",
+        Mode::Normal,
+        &["cloudflare.worker.deploy"],
+        &protected_project_file(),
+    );
+    assert!(f.approve("cloudflare.worker.deploy", "already-split").as_error().is_none());
+
+    let reply = f.use_it(
+        f.record("cloudflare.worker.deploy", "already-split")
+            .param("version", NEW_VERSION)
+            .param("percentage", "25"),
+    );
+    let (_, message) = reply.as_error().expect("already split, so the rollout is refused");
+    assert!(message.contains("already split"), "{message}");
+    assert!(
+        f.outstanding().is_empty(),
+        "a failed deployment gave the approval back: {:?}",
+        f.outstanding()
+    );
+}
+
+#[test]
+fn an_approval_that_has_expired_is_not_an_approval() {
+    let f = Fixture::with_project(
+        "expiry",
+        Mode::Normal,
+        &["cloudflare.worker.deploy"],
+        &protected_project_file(),
+    );
+    let reply = f.service.approve(
+        me(),
+        crate::service::NewApproval {
+            project: f.project.to_str().expect("utf8"),
+            service: "cloudflare",
+            operation: "cloudflare.worker.deploy",
+            resource: "project",
+            ttl_ms: Some(1),
+            withdraw: false,
+        },
+    );
+    assert!(reply.as_error().is_none(), "{reply:?}");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    let deploy = f
+        .use_it(f.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION));
+    assert_eq!(
+        deploy.as_error().map(|(kind, _)| kind),
+        Some(ErrorKind::PermissionDenied),
+        "an expired approval was spent: {deploy:?}"
+    );
+    // And it is not reported as outstanding either, because an approval that
+    // cannot be spent is not one.
+    assert!(f.outstanding().is_empty(), "{:?}", f.outstanding());
+}
+
+#[test]
+fn two_deployments_racing_one_approval_produce_exactly_one_deployment() {
+    // `apex-secretd` serves one thread per connection, so the read-check-write
+    // of the approvals file is genuinely concurrent. Without the mutex both
+    // threads read the file, both find the approval, both deploy, and both
+    // write back a file missing one entry — a single-use approval used twice,
+    // which is the one failure this whole mechanism exists to prevent.
+    let f = Fixture::with_project(
+        "race",
+        Mode::Normal,
+        &["cloudflare.worker.deploy"],
+        &protected_project_file(),
+    );
+    assert!(f.approve("cloudflare.worker.deploy", "project").as_error().is_none());
+
+    let allowed = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            scope.spawn(|| {
+                let reply = f.use_it(
+                    f.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION),
+                );
+                if reply.as_error().is_none() {
+                    allowed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+        }
+    });
+    assert_eq!(
+        allowed.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "one approval authorised more than one deployment under contention"
+    );
+}
+
+#[test]
+fn a_project_that_spells_unattended_as_a_string_is_refused_rather_than_protected() {
+    // `unattended = "true"` is somebody switching §13.8 off and being told it
+    // worked. Reading it as absent would leave production protected while the
+    // file says it is not — and the person would go looking for the reason in
+    // the wrong place. Refused when the file is read.
+    let file = PROJECT_FILE.replace("unattended = true", "unattended = \"true\"");
+    let f = Fixture::with_project(
+        "badbool",
+        Mode::Normal,
+        &["cloudflare.worker.deploy"],
+        &file,
+    );
+    let reply = f
+        .use_it(f.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION));
+    let (_, message) = reply.as_error().expect("a quoted boolean is not a boolean");
+    assert!(message.contains("true or false"), "{message}");
+    assert!(message.contains("unattended"), "{message}");
+}
+
+#[test]
+fn the_refusal_names_the_environment_and_not_only_the_worker() {
+    // A message that said "this needs approval" would tell the reader nothing
+    // they did not already know. What makes a production deploy different from
+    // a preview one is invisible to everything but the binding, so the binding
+    // is what has to say it.
+    let f = Fixture::with_project(
+        "message",
+        Mode::Normal,
+        &["cloudflare.worker.deploy"],
+        &protected_project_file(),
+    );
+    let reply = f
+        .use_it(f.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION));
+    let (_, message) = reply.as_error().expect("protected");
+    for expected in [
+        "project",
+        "production",
+        "apex secret approve cloudflare cloudflare.worker.deploy project",
+        "[cloudflare.production]",
+        "apex.toml",
+    ] {
+        assert!(message.contains(expected), "'{expected}' is missing from: {message}");
+    }
+}
+
+#[test]
+fn approving_records_a_line_of_its_own_in_the_trail() {
+    // `granted` and `approved` are different facts, and a trail that spelled
+    // both `granted` could not answer "did the owner approve this deployment,
+    // or had they allowed every deployment months ago".
+    let f = Fixture::with_project(
+        "trail",
+        Mode::Normal,
+        &["cloudflare.worker.deploy"],
+        &protected_project_file(),
+    );
+    let reply = f.approve("cloudflare.worker.deploy", "project");
+    assert!(reply.as_error().is_none(), "{reply:?}");
+    let trail = f.trail();
+    assert!(trail.contains("\"event\":\"approved\""), "{trail}");
+    assert!(trail.contains("cloudflare.worker.deploy project"), "{trail}");
+    assert_ne!(
+        AuditEvent::Approved.as_str(),
+        AuditEvent::Granted.as_str(),
+        "an approval and a grant must not read the same in the trail"
+    );
 }

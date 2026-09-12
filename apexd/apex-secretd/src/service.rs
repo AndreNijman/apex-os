@@ -23,6 +23,7 @@
 //! returns a value.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use apex_secret_core::audit::{self, AuditEvent, AuditLine};
 use apex_secret_core::capability::{self, CapabilityRecord, EndpointError};
@@ -42,6 +43,17 @@ use crate::provider::{self, Registry};
 /// rather than a credential in somebody's hands.
 const MAX_EXPIRY_AHEAD_MS: u64 = 60 * 60 * 1000;
 
+/// §11's `approval_policy` on a request that needed the owner and did not have
+/// them.
+///
+/// Its own word, distinct from `grant`, because the refused line would
+/// otherwise say the request was authorised by a grant — which is true and
+/// misleading at once: the grant was there, and it was not enough.
+pub const APPROVAL_REQUIRED: &str = "approval-required";
+
+/// §11's `approval_policy` on a request the owner approved, once.
+pub const OWNER: &str = "owner";
+
 /// The daemon's state.
 pub struct Service {
     store: Store,
@@ -55,6 +67,26 @@ pub struct Service {
     /// it can actually perform.
     registry: Registry,
     audit_counter: AtomicU64,
+    /// Held across the read-check-write of one account's approvals file.
+    ///
+    /// `main.rs` serves one thread per connection, so every store file this
+    /// daemon writes is read-modify-written concurrently. For grants that is
+    /// benign — `allow` and `revoke` are idempotent, and two callers making the
+    /// same grant twice make it once. For an approval it is not: an approval is
+    /// **spent**, and two operations that read the file at the same moment
+    /// would both find it, both perform, and both write back a file missing one
+    /// entry. That is a single-use approval used twice, which is the one thing
+    /// this whole mechanism exists to prevent.
+    ///
+    /// One mutex for every account rather than one per uid: the critical
+    /// section is two small file operations, contention between two accounts
+    /// deploying at the same instant costs microseconds, and a map of mutexes
+    /// keyed on a number the caller influences is a way to grow memory.
+    ///
+    /// This is enough **because this daemon is the only writer**. The store is
+    /// root-owned and `0700`, and `apex secret approve` reaches it through this
+    /// socket like everything else; there is no second process to race with.
+    approvals: Mutex<()>,
 }
 
 impl Service {
@@ -64,6 +96,7 @@ impl Service {
             protected,
             registry,
             audit_counter: AtomicU64::new(0),
+            approvals: Mutex::new(()),
         }
     }
 
@@ -201,7 +234,7 @@ impl Service {
                     peer.uid,
                     peer.pid,
                     service,
-                    "credential and every grant that named it",
+                    "credential, every grant that named it, and every approval",
                 ));
                 Response::Ok
             }
@@ -291,6 +324,201 @@ impl Service {
         }
     }
 
+    /// §13.8: approve one operation, once, or take an approval back.
+    ///
+    /// ## What this is not
+    ///
+    /// It is not a grant, and the differences are the design rather than
+    /// details. A grant is consulted and stays; this is spent by the first
+    /// matching operation and expires on its own. A grant is keyed on the
+    /// operation; this is keyed on the operation **and the resource**, because
+    /// approving the preview deploy must not approve the production one. And
+    /// [`store::ANY_PROJECT`] is refused outright — an approval that applied
+    /// wherever the agent happened to be standing would be standing permission
+    /// with a shorter life, which is precisely the thing §13.8 says has to be
+    /// written down explicitly instead.
+    ///
+    /// ## Why the resource is not checked for existence
+    ///
+    /// The owner may approve a deployment of a worker that has never been
+    /// deployed, in a project whose `apex.toml` they are about to write. What
+    /// resolves a name is a provider's `bind`, which needs a credential in
+    /// scope and a request in flight; running it here would mean resolving the
+    /// caller's project twice for a verb that authorises nothing by itself. An
+    /// approval that matches nothing is harmless: it expires.
+    pub fn approve(&self, peer: Peer, asked: NewApproval<'_>) -> Response {
+        let NewApproval {
+            project,
+            service,
+            operation,
+            resource,
+            ttl_ms,
+            withdraw,
+        } = asked;
+        if !broker::valid_project(project) {
+            return Response::error(
+                ErrorKind::BadRequest,
+                "an approval is for one operation in one project, named by its \
+                 absolute path"
+                    .to_string(),
+            );
+        }
+        // Through the registry, so an approval is written under the canonical
+        // id whichever spelling was typed, and an operation nothing offers
+        // cannot be approved at all.
+        let op = match self.registry.lookup(operation) {
+            Ok((_, op)) => op,
+            Err(e) => return Response::error(ErrorKind::BadRequest, e.to_string()),
+        };
+        // The resource the approval names is the one a request will carry, so
+        // it is checked with the operation's own grammar. Without this an
+        // owner could approve `../../etc` and be told it had worked, and then
+        // wonder why the deployment they approved was still refused.
+        //
+        // The RESOURCE only. An approval names no options on purpose — see
+        // [`store::Approval`] — so checking the full declaration here would
+        // refuse every approval for an operation with a required parameter,
+        // which is most of the ones worth approving.
+        if let Err(e) = op.check_resource(resource) {
+            return Response::error(ErrorKind::BadRequest, e.to_string());
+        }
+        if !store::valid_service_name(service) {
+            return refuse_store(StoreError::BadServiceName(service.to_string()));
+        }
+        let ttl = ttl_ms.unwrap_or(store::APPROVAL_TTL_MS);
+        // Refused rather than clamped, for `deploy::share`'s reason: somebody
+        // who wrote a week meant a week, and silently giving them a day would
+        // be this service deciding what they meant.
+        if !withdraw && (ttl == 0 || ttl > store::MAX_APPROVAL_TTL_MS) {
+            return Response::error(
+                ErrorKind::BadRequest,
+                format!(
+                    "an approval lives between 1 and {} milliseconds, and \
+                     {ttl} is not in that range",
+                    store::MAX_APPROVAL_TTL_MS
+                ),
+            );
+        }
+
+        let now = store::now_ms();
+        let (pending, event, detail) = {
+            let _held = self.approvals.lock().expect("approvals lock");
+            let mut approvals = self.store.approvals(peer.uid);
+            approvals.prune(now);
+            if withdraw {
+                if !approvals.withdraw(project, service, &provider::grant_names(op), resource) {
+                    return Response::error(
+                        ErrorKind::NoSuchService,
+                        format!(
+                            "nothing is approved for {}{} in {project}",
+                            op.id,
+                            if resource.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" {resource}")
+                            }
+                        ),
+                    );
+                }
+            } else {
+                // A credential that does not exist cannot be approved against,
+                // for `grant`'s reason: otherwise a typo produces an approval
+                // that silently never matches, and the owner believes they
+                // approved something.
+                if self.store.info(peer.uid, service).is_none() {
+                    return refuse_store(StoreError::NoSuchService(service.to_string()));
+                }
+                approvals.approve(store::Approval {
+                    project: project.to_string(),
+                    service: service.to_string(),
+                    operation: op.id.to_string(),
+                    resource: resource.to_string(),
+                    granted_ms: now,
+                    expires_ms: now.saturating_add(ttl),
+                });
+            }
+            if let Err(e) = self.store.save_approvals(peer.uid, &approvals) {
+                return refuse_store(e);
+            }
+            (
+                approvals.pending.clone(),
+                if withdraw {
+                    AuditEvent::Withdrawn
+                } else {
+                    AuditEvent::Approved
+                },
+                format!("{} {resource} in {project}", op.id),
+            )
+        };
+        self.record(AuditLine::administrative(
+            &self.next_audit_id(),
+            event,
+            peer.uid,
+            peer.pid,
+            service,
+            detail.trim_end(),
+        ));
+        Response::Approvals { pending }
+    }
+
+    /// What the owner has outstanding, soonest to expire first.
+    ///
+    /// Expired ones are dropped on the way past rather than shown: an approval
+    /// that cannot be spent is not outstanding, and listing it would invite
+    /// somebody to believe the operation it names is still authorised.
+    pub fn approvals(&self, peer: Peer) -> Response {
+        let now = store::now_ms();
+        let _held = self.approvals.lock().expect("approvals lock");
+        let mut approvals = self.store.approvals(peer.uid);
+        if approvals.prune(now) > 0 {
+            // Best effort: a list that could not tidy up is still an honest
+            // list, because `prune` already removed them from what is returned.
+            let _ = self.store.save_approvals(peer.uid, &approvals);
+        }
+        approvals.pending.sort_by_key(|a| a.expires_ms);
+        Response::Approvals {
+            pending: approvals.pending,
+        }
+    }
+
+    /// Spend the approval this request needs, or say why there is none.
+    ///
+    /// Held under [`Service::approvals`]' mutex for the whole read-check-write,
+    /// so two requests cannot both find the same approval. The `Ok` arm means
+    /// one was found **and the file recording that it is gone has been
+    /// written** — a spend that was not persisted is a spend that did not
+    /// happen, and returning success for one would be a single-use approval
+    /// that survives its use.
+    fn spend_approval(
+        &self,
+        peer: Peer,
+        project: &str,
+        service: &str,
+        op: &'static OperationSpec,
+        resource: &str,
+        now: u64,
+    ) -> Result<(), String> {
+        let _held = self.approvals.lock().expect("approvals lock");
+        let mut approvals = self.store.approvals(peer.uid);
+        approvals.prune(now);
+        let names = provider::grant_names(op);
+        if approvals
+            .spend(project, service, &names, resource, now)
+            .is_none()
+        {
+            return Err(String::new());
+        }
+        self.store
+            .save_approvals(peer.uid, &approvals)
+            .map_err(|e| {
+                format!(
+                    "the owner's approval for this operation could not be \
+                     spent: {e}. It has NOT been used and the operation has \
+                     not run"
+                )
+            })
+    }
+
     // ── the framework ───────────────────────────────────────────────────────
 
     /// Why a request was allowed, in §11's `approval_policy` vocabulary.
@@ -342,8 +570,8 @@ impl Service {
     /// Perform a capability.
     ///
     /// The order is the security argument, and every step before the last can
-    /// refuse. Steps 1–7 and 9–12 belong to the framework and apply to every
-    /// provider that will ever be registered; only 8 and 10 are the provider's,
+    /// refuse. Steps 1–7 and 9–13 belong to the framework and apply to every
+    /// provider that will ever be registered; only 8 and 11 are the provider's,
     /// and neither of them decides whether the request was allowed.
     ///
     ///  1. the caller's account, from the kernel — never from the request;
@@ -358,10 +586,12 @@ impl Service {
     ///  9. that endpoint is pinned against the one the credential was stored
     ///     for — the provider does not get to skip this, because it has not
     ///     been given the value yet;
-    /// 10. the value is read, once, and the provider presents it;
-    /// 11. the value — and any short-lived one minted from it — is scrubbed
+    /// 10. §13.8: where the provider said the grant is not enough, the owner's
+    ///     one-shot approval is found and SPENT, or the request is refused;
+    /// 11. the value is read, once, and the provider presents it;
+    /// 12. the value — and any short-lived one minted from it — is scrubbed
     ///     out of everything returned;
-    /// 12. the trail records the record the decision was made on.
+    /// 13. the trail records the record the decision was made on.
     ///
     /// `body` is the message an operation carries, for the one operation that
     /// carries one. It is not checked here and never can be: what a message
@@ -551,6 +781,43 @@ impl Service {
                     ErrorKind::BadRequest,
                 );
             }
+        }
+
+        // §13.8, and the last thing that can refuse for free.
+        //
+        // AFTER the pin and after the `creates` check, because both of those
+        // cost nothing and an approval costs the owner's attention: refusing a
+        // request for a host mismatch *after* spending the one approval they
+        // gave would make them give another. BEFORE the value is read, for the
+        // ordinary reason every other check is — the credential is not touched
+        // for a request that is not going to happen.
+        //
+        // Spent on commit and not on success. `perform` failing does not put
+        // the approval back: an agent that could burn a failed deploy and keep
+        // the approval could retry until something worked, and the owner
+        // approved one deployment rather than one successful deployment. The
+        // audit line says which it was.
+        if let Some(why) = bound.approval.why() {
+            record.approval_policy = APPROVAL_REQUIRED.to_string();
+            if let Err(unspendable) = self.spend_approval(
+                peer,
+                &project,
+                &record.provider,
+                op,
+                &record.resource,
+                now,
+            ) {
+                let reason = if unspendable.is_empty() {
+                    format!(
+                        "{why}.\nThis machine has no approval outstanding for it, \
+                         so it has not run."
+                    )
+                } else {
+                    unspendable
+                };
+                return refuse(&record, reason, ErrorKind::PermissionDenied);
+            }
+            record.approval_policy = OWNER.to_string();
         }
 
         // Every check has passed. Only now is the value read.
@@ -840,6 +1107,25 @@ fn scrub_all(text: &str, values: &[Option<&SecretValue>]) -> String {
 /// A struct rather than seven parameters: an endpoint is one thing described
 /// seven ways, and a call site that passed `path` where `scheme` goes would
 /// compile.
+/// What an `approve` was asked to record, before any of it has been judged.
+///
+/// A struct rather than six parameters, for [`NewService`]'s reason: a call
+/// site that passed `operation` where `resource` goes would compile, and the
+/// consequence would be an approval that matches nothing — which looks exactly
+/// like an approval that was spent.
+pub struct NewApproval<'a> {
+    pub project: &'a str,
+    pub service: &'a str,
+    /// Any spelling the registry resolves; the canonical id is what is stored.
+    pub operation: &'a str,
+    /// Exactly what the operation will name. Empty for one that names nothing.
+    pub resource: &'a str,
+    /// How long it may be spent for. `None` is [`store::APPROVAL_TTL_MS`].
+    pub ttl_ms: Option<u64>,
+    /// Take one back instead of giving one.
+    pub withdraw: bool,
+}
+
 pub struct NewService<'a> {
     pub service: &'a str,
     pub host: &'a str,
@@ -1489,6 +1775,7 @@ mod tests {
                     "creator.token.create" => Some(format!("issued-{}", req.resource)),
                     _ => None,
                 },
+                approval: provider::Approval::Standing,
             })
         }
 
@@ -1637,5 +1924,176 @@ mod tests {
             "it was stored under a name nothing checked"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── §13.8's approval verb, at the framework's own level ─────────────────
+
+    fn approval_of<'a>(project: &'a str, operation: &'a str, resource: &'a str) -> NewApproval<'a> {
+        NewApproval {
+            project,
+            service: "demo",
+            operation,
+            resource,
+            ttl_ms: None,
+            withdraw: false,
+        }
+    }
+
+    #[test]
+    fn an_approval_cannot_be_given_for_every_project() {
+        // An approval that applied wherever the agent happened to be standing
+        // would be standing permission with a shorter life, which is precisely
+        // the thing §13.8 says has to be written into the project file
+        // instead. `*` is a valid grant key and must not be a valid approval
+        // key, so the two paths are checked separately rather than sharing a
+        // validator that would have had to allow it.
+        let (svc, dir) = temp_service("approve-star");
+        let peer = me();
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"t".to_vec()));
+        let reply = svc.approve(peer, approval_of(store::ANY_PROJECT, "git.push", "origin"));
+        let (kind, message) = reply.as_error().expect("`*` is not a project");
+        assert_eq!(kind, ErrorKind::BadRequest, "{message}");
+        assert!(message.contains("absolute path"), "{message}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_approval_is_recorded_under_the_canonical_operation_id() {
+        // The same property a grant has, and for the same reason: an alias is
+        // an input this service accepts, never a spelling it stores. An
+        // approval filed under `git-push` would stop matching the moment the
+        // request arrived as `git.push`.
+        let (svc, dir) = temp_service("approve-alias");
+        let peer = me();
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"t".to_vec()));
+        let reply = svc.approve(peer, approval_of("/tmp/p", "git-push", "origin"));
+        let Response::Approvals { pending } = reply else {
+            panic!("{reply:?}");
+        };
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].operation, "git.push", "an alias became a stored fact");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_approval_for_an_operation_nothing_offers_is_refused_rather_than_stored() {
+        // The closed vocabulary, at this verb too. An approval for `exec`
+        // would sit in the file looking like permission for something.
+        let (svc, dir) = temp_service("approve-unknown");
+        let peer = me();
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"t".to_vec()));
+        assert!(svc
+            .approve(peer, approval_of("/tmp/p", "exec", "sh"))
+            .as_error()
+            .is_some());
+        // And a resource the operation's own grammar refuses.
+        let reply = svc.approve(peer, approval_of("/tmp/p", "git.push", "https://evil.example/x"));
+        let (kind, message) = reply.as_error().expect("a URL is not a resource");
+        assert_eq!(kind, ErrorKind::BadRequest, "{message}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_approval_for_a_credential_that_does_not_exist_is_refused() {
+        // `grant`'s reason: otherwise a typo produces an approval that
+        // silently never matches, and the owner believes they approved
+        // something.
+        let (svc, dir) = temp_service("approve-typo");
+        let peer = me();
+        let reply = svc.approve(peer, approval_of("/tmp/p", "git.push", "origin"));
+        assert_eq!(
+            reply.as_error().map(|(kind, _)| kind),
+            Some(ErrorKind::NoSuchService)
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_approval_that_would_outlive_the_bound_is_refused_and_not_shortened() {
+        // `deploy::share`'s rule. Somebody who wrote a week meant a week, and
+        // silently giving them a day would be this service deciding what they
+        // meant — in the direction of MORE standing permission than they asked
+        // for the life of, which is the wrong direction to guess in.
+        let (svc, dir) = temp_service("approve-ttl");
+        let peer = me();
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"t".to_vec()));
+        for bad in [0, store::MAX_APPROVAL_TTL_MS + 1] {
+            let mut asked = approval_of("/tmp/p", "git.push", "origin");
+            asked.ttl_ms = Some(bad);
+            let reply = svc.approve(peer, asked);
+            let (kind, message) = reply.as_error().unwrap_or_else(|| panic!("{bad} was accepted"));
+            assert_eq!(kind, ErrorKind::BadRequest, "{message}");
+        }
+        let mut good = approval_of("/tmp/p", "git.push", "origin");
+        good.ttl_ms = Some(store::MAX_APPROVAL_TTL_MS);
+        assert!(svc.approve(peer, good).as_error().is_none(), "the bound itself is allowed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn withdrawing_something_that_was_never_approved_says_so() {
+        // A verb that answered "done" to a withdraw that withdrew nothing
+        // would let somebody believe they had taken back an approval that is
+        // still outstanding.
+        let (svc, dir) = temp_service("approve-withdraw");
+        let peer = me();
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"t".to_vec()));
+        let mut asked = approval_of("/tmp/p", "git.push", "origin");
+        asked.withdraw = true;
+        assert_eq!(
+            svc.approve(peer, asked).as_error().map(|(kind, _)| kind),
+            Some(ErrorKind::NoSuchService)
+        );
+
+        assert!(svc.approve(peer, approval_of("/tmp/p", "git.push", "origin")).as_error().is_none());
+        let mut asked = approval_of("/tmp/p", "git.push", "origin");
+        asked.withdraw = true;
+        assert!(svc.approve(peer, asked).as_error().is_none());
+        let Response::Approvals { pending } = svc.approvals(peer) else {
+            panic!("not an approvals reply");
+        };
+        assert!(pending.is_empty(), "{pending:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn one_accounts_approvals_are_not_another_accounts() {
+        // The store is per-uid and the daemon derives the uid from
+        // SO_PEERCRED, so this is really a test that the approval path did not
+        // introduce the one thing the rest of the store is built to prevent.
+        let (svc, dir) = temp_service("approve-uid");
+        let peer = me();
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"t".to_vec()));
+        assert!(svc.approve(peer, approval_of("/tmp/p", "git.push", "origin")).as_error().is_none());
+
+        let other = Peer { uid: peer.uid.wrapping_add(1), ..peer };
+        let Response::Approvals { pending } = svc.approvals(other) else {
+            panic!("not an approvals reply");
+        };
+        assert!(pending.is_empty(), "another account saw this one's approvals: {pending:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_three_approval_policy_words_stay_distinct() {
+        // `Approval::Standing` is not "no check" — it is "the grant that was
+        // already checked is the answer". If the three words collapsed, the
+        // trail could no longer tell a standing grant from an approval the
+        // owner gave from a request that was refused for want of one, and
+        // those are the only three things §11's field is for.
+        assert_eq!(
+            provider::Approval::Standing.why(),
+            None,
+            "a standing decision has no reason, because nothing refused"
+        );
+        assert_eq!(
+            provider::Approval::Required("because".into()).why(),
+            Some("because")
+        );
+        assert_ne!(APPROVAL_REQUIRED, OWNER);
+        assert_ne!(APPROVAL_REQUIRED, "grant");
+        assert_ne!(OWNER, "grant");
+        assert_ne!(APPROVAL_REQUIRED, UNDECIDED);
+        assert_ne!(OWNER, UNDECIDED);
     }
 }
