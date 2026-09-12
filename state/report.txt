@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-12 22:05 AWST
+APEX ROADMAP — resume report — 2026-09-13 03:05 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -7,86 +7,80 @@ APEX ROADMAP — resume report — 2026-09-12 22:05 AWST
   BASE          16         2         -         -
   L              -         1         -         2
   P0            24         1         -         -
-  P1            41        17         5         -
-  P2             5        10         4         -
-  ALL           86        31         9         2   of 128
+  P1            43        18         2         -
+  P2             5        14         -         -
+  ALL           88        36         2         2   of 128
 
   P0 not done: P0-001(part)
 
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p2-b       dead 202m  P2-003,P2-004                      task/p2-b-round19
-             head 4db2cfe7 ci(a11y): a reporting loop failed the step it was rep
-             dirty 0 file(s), 0 unpushed, card 213m
-             NEXT Ordered. The previous items 1-3 are DONE (round 19). 1-4 below are
+  p2-b       dead 189m  P2-003,P2-004                      task/p2-b-round19
+             head d12e9ef4 test(installer): two mutants for the ring walk, one o
+             dirty 0 file(s), 0 unpushed, card 193m
+             NEXT Ordered, and rewritten after round 20. Items 1-2 are unchanged and
 
-  p1-011     dead 202m  P1-011,P1-012,P1-013               task/p1-011-task-credentials
-             head 7798fad0 docs(cloudflare): the mint path, measured against a r
-             dirty 6 file(s), ? unpushed, card 792m
-             NEXT **Unit done.** All three items are implemented, tested and pushed 
+  p2-a       dead 189m  P2-001,P2-002,P2-013               task/p2-a
+             head 6c0b425a Merge roadmap/v2.2 into task/p2-a-backup
+             dirty 0 file(s), ? unpushed, card 1075m
+             NEXT *(kept current — a fresh agent replaces the dead one by reading th
 
-  p1-053b    dead 202m  P1-056,P1-057,P1-058               task/p1-053b-android-ux
-             head efd42be3 feat(agent): a worktrees reply could be grouped only 
-             dirty 1 file(s), 0 unpushed, card 218m
-             NEXT Nothing has been started. Create the branch, decide the (a)/(b) qu
+  p1-053c    dead 189m  P1-059,P1-060                      task/p1-053c-android-handoff
+             head a79b89ae feat(android): crash reports that cannot carry what t
+             dirty 1 file(s), 0 unpushed, card 243m
+             NEXT Round 1 in progress. Nothing landed yet.
 
-  base-partials dead 208m  BASE-009,BASE-010,BASE-013,BASE-014 task/base-partials
-             head 
-             dirty 0 file(s), ? unpushed, card 209m
-             NEXT Round 13 (fresh agent; its dispatch prompt described ROUND 11's st
+  p1-061     dead 189m  P1-061,P1-062                      task/p1-061-app-permissions
+             head 44503bfb Merge remote-tracking branch 'origin/roadmap/v2.2' in
+             dirty 0 file(s), 0 unpushed, card 190m
+             NEXT Nothing this round left half-done. Three things a later round coul
 
-  followups-3 dead 202m                                     task/followups-3
-             head a9aff5b7 docs(lid): apex lid, seven verbs that shipped and wer
-             dirty 0 file(s), 0 unpushed, card 231m
-             NEXT Nothing started. Take them in the order above; 2, 3 and 4 are the 
-
-  p1-025     dead 202m  P1-025,P1-026,P1-027,P1-028        task/p1-025-skills-plugins
-             head be1e1780 test(provenance): the two arms nothing reached, and a
-             dirty 0 file(s), 0 unpushed, card 556m
-             NEXT Round 2 (this agent, fresh branch `task/p1-025-plugin-trust-2` in
+  followups-4 dead 189m                                     task/followups-4
+             head dd28fd3d docs(roadmap): followups-4 agent card — the two debt 
+             dirty 1 file(s), 0 unpushed, card -
+             NEXT (no card)
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 20d8ffa9 docs(test): name the one place the inert-refusal dete
-    task/followups-3
-      9ef8a555 fix(provenance): a git that could not be started was reported   [1/10 added lines on tip]
-      a9aff5b7 docs(lid): apex lid, seven verbs that shipped and were writte   [0/10 added lines on tip]
-    task/p1-011-temp-credentials
-      7798fad0 docs(cloudflare): the mint path, measured against a real acco   [0/10 added lines on tip]
-    task/p1-025-plugin-trust-3
-      d02528d3 feat(policy): dimension 8 — a plugin's hooks are code no MCP    [1/10 added lines on tip]
-    task/p1-053b-android-ux
-      ca453ea3 fix(android): the worktrees verb exists; the note saying it d   [0/10 added lines on tip]
-      f79d60c8 feat(android): worktrees, approvals and alerts — and the two    [1/10 added lines on tip]
-      efd42be3 feat(agent): a worktrees reply could be grouped only by guess   [0/10 added lines on tip]
+  int-os:  tip bb2c278a fix(test): the suite gate read a comment naming a sui
+    task/followups-4
+      dd28fd3d docs(roadmap): followups-4 agent card — the two debt gates, a   [0/10 added lines on tip]
+    task/p1-053c-android-handoff
+      02e133c0 fix(agentd): a paired phone could have inject read any file t   [3/10 added lines on tip]
+      1cafad93 feat(android): push-to-talk and clipboard handoff, staged and   [1/10 added lines on tip]
+      5f3a815d fix(android): review the machine's guess where the person is,   [0/10 added lines on tip]
+      c61517b0 feat(android): the in-app guide, and a parity check against t   [0/10 added lines on tip]
+      8576b14e feat(android): a signed release pipeline, which found a live    [0/10 added lines on tip]
+      5dd69d6a test(ci): the shellcheck gate was discovering two roots, and    [0/10 added lines on tip]
+      a79b89ae feat(android): crash reports that cannot carry what this app    [1/10 added lines on tip]
+    task/p1-061-app-permissions
+      575b3c93 feat(permissions): the unmeasured revocation timing is measur   [0/10 added lines on tip]
+    task/p2-005-device-maturity
+      c8239748 test(firewall): the rules were read, never sent a packet thro   [4/10 added lines on tip]
+    task/p2-a-backup
+      2ac910c7 feat(identity): §36's [identity.agent], enforced at session s   [3/10 added lines on tip]
+      c914d569 feat(backup): the ssh target, and §36's [identity.ssh] enforc   [0/10 added lines on tip]
+      7acd3e77 test(backup): the ssh target against a real sshd on loopback   [2/10 added lines on tip]
+      5054be77 feat(secretd): an S3 provider, with a SigV4 signer pinned aga   [5/10 added lines on tip]
+      755bee24 feat(backup): the s3 target, and a snapshot id that sorts ins   [1/10 added lines on tip]
     task/p2-b-round19
-      e2bacb67 feat(a11y): a screen reader nobody can start is not a screen    [0/10 added lines on tip]
-      3c41696e fix(labwc): the shipped rc.xml seed had lost a keybind, and t   [0/10 added lines on tip]
-      af8cbdd4 test(a11y): the AT-SPI walk runs on a second machine, and the   [2/10 added lines on tip]
-      154805a3 feat(greeter): the login screen gets a session bus, so its ac   [0/10 added lines on tip]
-      f84de5d4 test(greeter): the session-bus mutants, inverted with the sui   [0/10 added lines on tip]
-      39522e92 fix(a11y): a claim this branch made about pgrep was false, an   [0/10 added lines on tip]
-      3817a53e ci(a11y): an unrelated red step had silently switched off eve   [0/10 added lines on tip]
-      821c6b9f fix(greeter): a build-time check that could not run, and buse   [0/10 added lines on tip]
-      f4dd86a9 fix(tests): two assertions CI found that were about the runne   [0/10 added lines on tip]
-      4db2cfe7 ci(a11y): a reporting loop failed the step it was reporting o   [0/6 added lines on tip]
+      1db607ab test(installer): the Tab ring was walked on one page, so a tr   [1/10 added lines on tip]
+      d12e9ef4 test(installer): two mutants for the ring walk, one of them a   [0/10 added lines on tip]
 
-  int-shell:  tip a2c66f2 ci(labwc): two greps still spelled the singleton a per
-    fix/labwc-desktop-parity  — squash-merged, safe to delete
-      landed whole as f609a6c fix(labwc): complete desktop parity (#6)
-    fix/popup-first-open-and-media-keys  — squash-merged, safe to delete
-      landed whole as b8a63a8 fix(popups): first-open rendering, dead toasts, and medi
-    fix/screenshot-off-hyprland  — squash-merged, safe to delete
-      landed whole as 4e267eb fix: screenshots and popup input regions off Hyprland (#
-    task/followups-3
-      c685176 fix(headless): the harness announced a resolution it never set   [1/10 added lines on tip]
-    task/p0-016-agent-settings  — squash-merged, safe to delete
-      landed whole as 4335e42 fix(agents): the sudo caveat was written before no_new_p
+  int-shell:  tip 0c2b7d6 ci(headless): four variables a linter cannot see being
+    task/p1-061-app-permissions
+      ce9a81d fix(privacy): the permissions page threw twice on every load,    [2/10 added lines on tip]
+      7df9c89 test(privacy): an assertion that reads an empty list is a pass   [0/8 added lines on tip]
     task/p2-b-round19
-      53adf65 feat(keybinds): SUPER+ALT+S turns the screen reader on, in all   [0/10 added lines on tip]
+      cd3b365 test(i18n): the translator gap is in the host, and src/ was th   [1/10 added lines on tip]
+      1e692e1 test(i18n): "the shell will tofu on CJK" was never run, and it   [0/10 added lines on tip]
+      08422ee ci(shell): the lint step failed files the documented local gat   [0/10 added lines on tip]
+      eb97b40 test(i18n): the font section measured the runner, and CI could   [0/10 added lines on tip]
+      2fef950 test(i18n): commit the mutation harness instead of leaving it    [1/10 added lines on tip]
+      f91b07b ci(i18n): a red step above this one switches the measurement o   [0/8 added lines on tip]
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -96,11 +90,11 @@ APEX ROADMAP — resume report — 2026-09-12 22:05 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 11s Sat 2026-09-12
+  snapshot timer: active   last 03:05:42 AWST 21s
   wip refs:
     apex-os    dd3496b  apex-os-
-    apex-os    467e970  int-os-
-    apex-os    385bc0b  roadmap-state
+    apex-os    17e6373  int-os-
+    apex-os    6fbec4e  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -108,7 +102,8 @@ APEX ROADMAP — resume report — 2026-09-12 22:05 AWST
     apex-os    2e3bbcd  wt-editors-
     apex-os    31a3d16  wt-editors2-
     apex-os    7ebac77  wt-followups-
-    apex-os    8712038  wt-followups-3-
+    apex-os    0a2f642  wt-followups-3-
+    apex-os    c0a0f3d  wt-followups-4-
     apex-os    59b7328  wt-followups-int3-
     apex-os    884b151  wt-followups2-
     apex-os    0683355  wt-greeter-os-
@@ -122,8 +117,7 @@ APEX ROADMAP — resume report — 2026-09-12 22:05 AWST
     apex-os    f30f7ca  wt-p0-011-
     apex-os    9b605a1  wt-p0-011b-
     apex-os    746639a  wt-p0-014-
-    apex-os    580c657  wt-p0-019-os-
-    apex-shell 28e7cad  apex-shell-
+    apex-shell 46d0ab1  apex-shell-
     apex-shell 02674e0  int-shell-
     apex-shell 68c971d  wt-base-shell-
     apex-shell c8f1e50  wt-editors2-shell-
@@ -152,37 +146,37 @@ APEX ROADMAP — resume report — 2026-09-12 22:05 AWST
 ────────────────────────────────────────────────────────────────────────────
   next
 ────────────────────────────────────────────────────────────────────────────
-  6 agent(s) dispatched, ceiling 6
+  5 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
-    p1-011         P1-011,P1-012,P1-013             Temporary task credentials, transparent brokered wrangler/cl
-    p1-025         P1-025,P1-026,P1-027,P1-028      Skill inventory and audit, plugin provenance and isolation, 
-    p1-053b        P1-056,P1-057,P1-058             Android Projects/Workspaces/Worktrees/Tasks/Review UX, capab
-    base-partials  BASE-002,BASE-005,BASE-009,BAS   Close the eight BASE preservation items still marked partial
+    p1-053c        P1-059,P1-060                    Android voice, screenshot, file and clipboard handoff; ship 
+    p1-061         P1-061,P1-062                    Extend APEX capabilities to normal application permissions; 
+    p2-a           P2-001,P2-002,P2-013             Encrypted backup framework, R2 backup backend, per-project i
     p2-b           P2-003,P2-004                    Accessibility baseline and internationalisation baseline
 
   READY (dependencies believed satisfied — confirm against the agent table above):
     p1-038-hardware P1-038                           The 18 labwc matrix rows that need real applications
-    p2-a           P2-001,P2-002,P2-013             Encrypted backup framework, R2 backup backend, per-project i
+    p1-053b        P1-056,P1-057,P1-058             Android Projects/Workspaces/Worktrees/Tasks/Review UX, capab
+                   conflicts with p1-053a
     p2-c           P2-005,P2-006,P2-007             Printing/scanning/network-share, networking, Bluetooth/dock/
     p2-d           P2-008,P2-009,P2-012             First-party virtualization UX, disposable VM agent execution
-    p2-f           P2-016,P2-017,P2-018,P2-019      Multi-user/guest/kiosk, APEX Online Accounts, guaranteed saf
     later          L-001,L-002,L-003                TPM and recovery qualification, then LUKS2 by default and TP
 
   HELD:
-    p1-053c        after p1-053b
-    p1-061         after p1-025
+    p2-f           after p2-a
     final          after *
 
   COMPLETE (nothing left to dispatch — not offered again).
   This says the WORK is done, not that it is landed — check the
   unlanded section above before assuming roadmap/v2.2 carries it:
-    p0-014, p1-018, p1-020, p1-023, p1-035, p1-040-per-output-scaling, p1-044, p2-e
+    p0-014, p1-018, p1-020, p1-023, p1-025, p1-035, p1-040-per-output-scaling, p1-044, p2-e
     p1-005 — CLOSED BY HAND: Landed as merge 4f80746e; the range against roadmap/v2.2 is empty. P1-006 is done. P1-005 stays partial only because the token spent is account-wide — the per-task credential IS P1-011 — and P1-007 stays partial because no elevated class exists in apex-secret-core to require, which is its own item. Nothing left to dispatch here. Closed 2026-09-12 after a dispatched agent had to be redirected.
     p1-008 — CLOSED BY HAND: Landed as merge 230ee02a; 0 unlanded. P1-008 and P1-010 done. P1-009 stays partial because the third criterion turns on a schema question the pinned schema cannot settle either way — workers-ai-post-run-model declares two path parameters and no headers. A citation problem, not effort.
+    p1-011 — CLOSED BY HAND: Landed as merge 598f6996; 0 unlanded. P1-011 and P1-012 are done. P1-013 stays partial for a structural reason: a preview health check is an UNAUTHENTICATED GET to *.workers.dev and the host pin correctly forbids spending an api.cloudflare.com credential anywhere else, so it belongs in the `apex cf` CLI rather than in a brokered operation — and the relay moved to a custom domain on andrenijman.com, so workers.dev is no longer the right target anyway. Closed 2026-09-12 after a THIRD agent in one round was dispatched onto finished work.
     p1-014 — CLOSED BY HAND: Landed as merge 514d46a3; 0 unlanded. P1-014, P1-016 and P1-017 done. P1-015 met ALL THREE of its acceptance criteria and is partial only because two of section 13.13's five named resources cannot be reached by anything in this build — a fact about the vocabulary, not about effort.
     p1-052-relay — CLOSED BY HAND: 0 unlanded; P1-052 done and the relay is deployed. P1-051's criteria 1, 3 and 5 are done and landed on apex-shell as a36f1a4. The remainder does not close until the device key lives in Android Keystore with setUserAuthenticationRequired, which is p1-053b/p1-053c territory, not a separate unit.
     p1-053a — CLOSED BY HAND: Landed as merge 4ae4cf22; 0 unlanded. P1-053 done. P1-054 is partial because the socket has no profile/projects/worktrees verb — adding them is a protocol change and p1-053b owns the decision. P1-055 is partial for want of a gemini fixture, and gemini is not installed on this machine.
+    base-partials — CLOSED BY HAND: Landed round 12 on both repos; `git merge-base --is-ancestor` confirms task/base-partials and task/base-partials-shell are both contained in roadmap/v2.2, zero unlanded commits. BASE-009 needs a disposable machine with a gaming userspace (the switch is `loginctl terminate-user`, which kills the session running the test) and katana is off-limits; BASE-010 needs non-zero spendable VRAM and this is an APU, so apexd falls to Backend::Cpu by design. Closed 2026-09-12 after a second agent was dispatched onto a finished unit.
 
 ────────────────────────────────────────────────────────────────────────────
   how to resume
