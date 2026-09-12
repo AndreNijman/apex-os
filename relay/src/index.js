@@ -79,6 +79,44 @@ export default {
   },
 };
 
+/**
+ * Is this socket still one that can be written to?
+ *
+ * `ctx.getWebSockets()` keeps returning a socket after this object has closed
+ * it, and `send()` on one of those throws. Not hypothetical: it is what
+ * `wrangler dev --local` printed the first time this file was ever executed —
+ * "Uncaught TypeError: Can't call WebSocket send() after close()", from
+ * `webSocketMessage`, when a desktop sent a frame after its guest had gone and
+ * `partnerLost` had already closed the desktop's own socket.
+ *
+ * It matters in two places beyond the throw. A closed socket that is still
+ * listed would satisfy `waiting()` and hold a room for ever — which is the
+ * exact failure the local double had and the reconnect suite caught, recorded
+ * in §2 of ROADMAP/design/P1-052-relay.md — and it would satisfy `socketFor`,
+ * so a live peer's frames would be copied into it and lost.
+ *
+ * @param {WebSocket} ws
+ */
+function isOpen(ws) {
+  return ws.readyState === WebSocket.READY_STATE_OPEN;
+}
+
+/**
+ * Tell one end that the other has gone, and close it.
+ *
+ * A no-op on a socket that is already closed, which is the whole reason it
+ * exists rather than being two lines at each call site.
+ *
+ * @param {WebSocket} ws
+ */
+function farewell(ws) {
+  if (!isOpen(ws)) {
+    return;
+  }
+  ws.send(NOTICE.peerGone);
+  ws.close(1001, "the other end has gone");
+}
+
 export class RelayRoom extends DurableObject {
   /**
    * @param {Request} request
@@ -144,6 +182,9 @@ export class RelayRoom extends DurableObject {
    */
   waiting() {
     for (const ws of this.ctx.getWebSockets()) {
+      if (!isOpen(ws)) {
+        continue;
+      }
       const state = ws.deserializeAttachment();
       if (state && state.role === "host" && state.peer === null) {
         return ws;
@@ -157,6 +198,9 @@ export class RelayRoom extends DurableObject {
    */
   socketFor(id) {
     for (const ws of this.ctx.getWebSockets()) {
+      if (!isOpen(ws)) {
+        continue;
+      }
       const state = ws.deserializeAttachment();
       if (state && state.id === id) {
         return ws;
@@ -182,8 +226,7 @@ export class RelayRoom extends DurableObject {
     }
     const peer = this.socketFor(state.peer);
     if (peer === null) {
-      ws.send(NOTICE.peerGone);
-      ws.close(1001, "the other end has gone");
+      farewell(ws);
       return;
     }
     // Verbatim. A binary message is ciphertext and a relay that inspected one
@@ -218,8 +261,7 @@ export class RelayRoom extends DurableObject {
     }
     const peer = this.socketFor(state.peer);
     if (peer !== null) {
-      peer.send(NOTICE.peerGone);
-      peer.close(1001, "the other end has gone");
+      farewell(peer);
     }
   }
 }
