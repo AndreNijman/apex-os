@@ -100,6 +100,7 @@ dependencies = [
  "anyhow",
  "apex-agent-core",
  "apex-backup-core",
+ "apex-perm-core",
  "apex-remote-core",
  "apex-secret-core",
  "apexd-core",

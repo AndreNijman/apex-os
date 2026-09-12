@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 apex-secret-core = { path = "../apex-secret-core" }
 apex-backup-core = { path = "../apex-backup-core" }
+apex-perm-core = { path = "../apex-perm-core" }
 apexd-core = { path = "../apexd-core" }
 apex-agent-core = { path = "../apex-agent-core" }
 apex-remote-core = { path = "../apex-remote-core" }
