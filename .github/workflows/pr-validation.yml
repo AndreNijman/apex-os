@@ -2703,10 +2703,17 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            labwc wlr-randr wl-clipboard grim swaybg gammastep \
+            labwc wlr-randr wl-clipboard grim swaybg swaylock swayidle gammastep \
             xdg-desktop-portal-wlr xdg-desktop-portal-gtk
-          for t in labwc wlr-randr wl-copy wl-paste grim swaybg gammastep; do
-              command -v "$t" >/dev/null || { echo "::error::$t is missing after the install"; exit 1; }
+          # Named one by one, and the list is the suite's, not a guess. Run
+          # 34717346972 installed everything except swaylock and swayidle and
+          # the step went red with `16 passed, 0 failed, 2 skipped` — the two
+          # protocol probes whose clients those are (ext-session-lock and
+          # ext-idle-notify) reported "probe client not installed". That is the
+          # step working: it refused to call a capability proven when the thing
+          # that would have proven it was absent.
+          for t in labwc wlr-randr wl-copy wl-paste grim swaybg swaylock swayidle gammastep; do
+              command -v "$t" >/dev/null || { echo "::error::$t is missing after the install; the suite would report its probe as a SKIP and the step below refuses that"; exit 1; }
           done
 
       - name: P3 labwc — the shipped session, probed headless by real clients
