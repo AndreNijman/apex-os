@@ -562,7 +562,8 @@ fn here() -> Result<String> {
     let cwd = std::env::current_dir().context("reading the current directory")?;
     let project = apex_agent_core::project::detect(&cwd).ok_or_else(|| {
         anyhow::anyhow!(
-            "this directory is not inside a git repository, and a Cloudflare              resource is owned by a project"
+            "this directory is not inside a git repository, and a Cloudflare \
+             resource is owned by a project"
         )
     })?;
     Ok(project.root)

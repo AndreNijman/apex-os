@@ -100,7 +100,16 @@ use crate::policy::{AgentPolicy, RequestOrigin};
 /// defines — so `--connectors none` would read as a session with no connectors
 /// while the cloud plane was fully reachable. The CLI refuses to send it to a
 /// daemon below [`CONNECTOR_POLICY_VERSION`].
-pub const PROTOCOL_VERSION: u32 = 7;
+/// 8 — a session may name which plugins it loads (P1-026).
+///
+/// Dimension 8, `policy.plugins`, and it fails open in exactly the direction
+/// the two above it do, which is why it is a revision of its own rather than a
+/// key a newer client may hopefully send: a daemon below this drops it, writes
+/// no `enabledPlugins` block into the settings document, and starts the agent
+/// with every plugin the machine has enabled — so `--plugins none` would read
+/// as a session with no plugins while every one of their `SessionStart` hooks
+/// ran. The CLI refuses to send it to a daemon below [`PLUGIN_POLICY_VERSION`].
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// The revision at which the credential store moved to `apex-secretd`.
 ///
@@ -178,6 +187,9 @@ const _: () = assert!(SYSTEM_GRANT_VERSION < SCOPED_GRANT_VERSION);
 // Dimension 7 is a later revision than scoped grants, so a daemon can accept
 // `--capabilities` and still drop `connectors`.
 const _: () = assert!(SCOPED_GRANT_VERSION < CONNECTOR_POLICY_VERSION);
+// And dimension 8 is later again: a daemon can confine the connectors it keeps
+// and still know nothing about which plugins the session was meant to load.
+const _: () = assert!(CONNECTOR_POLICY_VERSION < PLUGIN_POLICY_VERSION);
 
 /// The revision that first carried the six dimensions.
 ///
@@ -195,6 +207,13 @@ pub const REQUEST_ORIGIN_VERSION: u32 = 3;
 /// six arrived together in revision 2 and this one did not, so a daemon can
 /// understand `--network offline` and still ignore `--connectors`.
 pub const CONNECTOR_POLICY_VERSION: u32 = 7;
+
+/// The revision that first carried dimension 8, the plugin policy.
+///
+/// Its own number, for [`CONNECTOR_POLICY_VERSION`]'s reason one dimension
+/// over: dimension 7 arrived in revision 7 and this did not, so a daemon can
+/// honour `--connectors none` and still load every plugin's hooks.
+pub const PLUGIN_POLICY_VERSION: u32 = 8;
 
 /// What a session is doing. The five user-facing values come straight from the
 /// roadmap's agent event protocol; `Starting` and `Exited` are the lifecycle
@@ -2026,6 +2045,7 @@ mod tests {
             ("system-access grants", SYSTEM_GRANT_VERSION),
             ("scoped grants", SCOPED_GRANT_VERSION),
             ("the connector policy", CONNECTOR_POLICY_VERSION),
+            ("the plugin policy", PLUGIN_POLICY_VERSION),
         ] {
             assert!(
                 since <= PROTOCOL_VERSION,
@@ -2035,7 +2055,7 @@ mod tests {
         }
         // The newest guard is the current revision: adding a wire field
         // without bumping the version is the fail-open these exist to catch.
-        assert_eq!(CONNECTOR_POLICY_VERSION, PROTOCOL_VERSION);
+        assert_eq!(PLUGIN_POLICY_VERSION, PROTOCOL_VERSION);
         // And every older guard stays strictly behind it. `<`, not
         // `== PROTOCOL_VERSION - 1`: three of these shipped as revision 5 and
         // scoped grants as 6, and none of them is going to move again, so
@@ -2046,6 +2066,7 @@ mod tests {
             ("the mcp bridge", MCP_BRIDGE_VERSION),
             ("system-access grants", SYSTEM_GRANT_VERSION),
             ("scoped grants", SCOPED_GRANT_VERSION),
+            ("the connector policy", CONNECTOR_POLICY_VERSION),
         ] {
             assert!(
                 since < PROTOCOL_VERSION,

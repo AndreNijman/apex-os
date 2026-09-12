@@ -852,7 +852,9 @@ fn install_hook_settings(
         // plugin that ships only commands runs nothing on its own, and a
         // report that counted it would overstate the case.
         eprintln!(
-            "apex-agentd: {} plugin(s) for this session, {} removed ({} of those ran code              of their own — hooks or the scripts beside them — that no MCP confinement              would have reached)",
+            "apex-agentd: {} plugin(s) for this session, {} removed ({} of those ran \
+             code of their own — hooks or the scripts beside them — that no MCP \
+             confinement would have reached)",
             c.kept.len(),
             c.removed.len(),
             c.removed_code(&installed),
