@@ -1244,10 +1244,11 @@ RUN set -eux; \
 # together: deleting one without the other is the shape of defect this file has
 # collected six times over (a change that selects no CI job and passes).
 #
-# Two things the script is built around, both read out of the rpm rather than
-# remembered: orca 49 has NO `--quit` verb (stopping it is SIGTERM), and
-# /usr/bin/orca is `#!/usr/bin/python3`, so its comm is `python3` and
-# `pgrep -x orca` matches nothing.
+# The thing the script is built around, read out of the rpm rather than
+# remembered: orca 49 has NO `--quit` verb, so stopping it is SIGTERM. Its
+# option list is -h -v -r -s -l -e -d -p -u --speech-system --debug-file
+# --debug, and a toggle written around `orca --quit` turns the reader on and
+# never off.
 COPY --chmod=0755 files/system/libexec/apex-screen-reader /usr/libexec/apex-screen-reader
 #
 # The unit file test is not decoration: the script prefers

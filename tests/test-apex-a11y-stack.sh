@@ -231,13 +231,20 @@ section "so there has to be a way to START it"
 #     -h -v -r -s -l -e -d -p -u --speech-system --debug-file --debug. A toggle
 #     written around `orca --quit` would have been able to turn the reader on
 #     and never off, and would have looked perfectly correct in review.
-#   * /usr/bin/orca is `#!/usr/bin/python3`, so the process `comm` is `python3`
-#     and `pgrep -x orca` matches nothing at all. A probe written that way
-#     reports "not running" about a running reader, so every `toggle` starts a
-#     second one.
+#   * whether a running reader can be FOUND at all is the other half, and the
+#     first version of this note got it wrong in a way worth keeping: it said
+#     `pgrep -x orca` matches nothing because /usr/bin/orca is
+#     `#!/usr/bin/python3`. Measured instead of assumed, Linux takes `comm`
+#     from the SCRIPT's basename for a shebang script, so `comm` really is
+#     `orca` and `-x` would have worked. The switch matches the command line
+#     anyway, because that also finds a reader started as
+#     `python3 /usr/bin/orca` — a superset, for a different reason than the one
+#     first written down. The mutant for this row is that the probe stops
+#     recognising the reader it started, which is the failure either spelling
+#     can have.
 #
-# The stub below is strict about the first (it refuses any option that orca does
-# not have) and its process really is stopped by a signal, which is the second.
+# The stub below is strict about the option list (it refuses anything orca does
+# not have) and its process really is stopped by a signal.
 
 READER="$ROOT/files/system/libexec/apex-screen-reader"
 if [ -f "$READER" ]; then
