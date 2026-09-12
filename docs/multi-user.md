@@ -167,7 +167,23 @@ kiosk half is the shape of the shipped files.
 | Agent scratch and session logs | `/tmp/apex-agent-<uid>/<id>/` | `apex-agent-core::paths` |
 | Agent socket | `0600` in a `0700` per-user runtime dir | `apex-agentd` |
 | Paired remote devices, identity key | `$XDG_STATE_HOME/apex-remote/` | `apex-remote-core::device` |
+| Who may drive `apex-remoted` | its control socket checks the caller's uid on every verb | `apex-remoted::control::authorized` |
 | Who may approve a request | polkit `auth_admin`, `allow_inactive=no` | `Containerfile.base` |
+
+`apex-remoted`'s control socket is the one worth spelling out, because it used
+to be asymmetric. Only `pair` asked who was on the other end; `status`,
+`devices` and `revoke` asked nothing, on the argument that the socket lives in a
+`0700` directory inside `$XDG_RUNTIME_DIR` and another account cannot reach it.
+That argument is true, and it is the same argument the pairing check dismisses
+one line above with "checked anyway: it costs one syscall". Measured with a real
+second account — the directory and the socket mode widened by hand, so that the
+filesystem was not the thing answering — the other account got the machine key
+and LAN addresses out of `status`, the paired-device list out of `devices`, and
+reached the owner's device store through `revoke`, which answered "no paired
+device 'somebody-elses-phone'": it had looked. Every verb now checks the
+account, and `pair` additionally checks for a human at the keyboard. There is no
+`sudo` path to keep open, because `apex remote` finds the socket through
+`$XDG_RUNTIME_DIR`.
 
 The scratch root is per-uid because it was not: it used to be `/tmp/apex-agent`,
 created by whoever logged in first and owned by them, and `/tmp` is sticky — so
