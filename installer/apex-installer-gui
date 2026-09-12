@@ -36,11 +36,27 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 import threading
 
 ENGINE = "/usr/bin/apex-install"
 EDITION_FILE = "/usr/lib/apex-installer/edition"
+
+# ── keyboard ─────────────────────────────────────────────────────────────────
+# Where the chosen layout is handed back to apex-installer-session, which owns
+# the cage loop. See that script's header for why a restart is the only thing
+# that can change the keyboard under the user's hands: libxkbcommon links only
+# libc, reads no config file and answers no dbus call, so its five XKB_DEFAULT_*
+# variables are its entire configuration surface — and they are read when the
+# keymap is COMPILED, which for a wlroots compositor is once, at startup.
+XKB_RULES = "/usr/share/X11/xkb/rules/base.lst"
+TZ_TAB = "/usr/share/zoneinfo/zone1970.tab"
+SESSION_STATE = os.environ.get("APEX_INSTALLER_STATE",
+                               "/run/apex-installer/session-keymap")
+# EX_TEMPFAIL. Measured before being relied on: `cage -- sh -c 'exit 75'`
+# returns 75, so cage propagates its child's status.
+RESTART_RC = 75
 
 # ── design tokens ────────────────────────────────────────────────────────────
 # From files/branding/plymouth (background/surface/text) and docs/branding.md
@@ -371,6 +387,212 @@ def lbl(text, css=None, xalign=0.0, wrap=True, sel=False):
     return w
 
 
+def a11y(widget, label, description=None):
+    """Give a control the name a screen reader will announce.
+
+    Every text field on every page of this installer carries a
+    `placeholder-text`, and until this function existed that was the ONLY label
+    several of them had. A placeholder is painted inside the box and vanishes as
+    soon as the user types; GTK does not map it to the accessible name, so it is
+    read by nobody.
+
+    Measured page by page on the shipped GUI before this was added: TEN
+    focusable `text box` nodes on the accessibility bus with an empty name AND
+    an empty description -- the keyboard test field (1), the Wi-Fi password and
+    the hidden-network name (2), all four account fields including both
+    passwords (4), both Secure Boot enrolment passwords (2), and the "type
+    ERASE to confirm" field (1). A blind user tabbing through the account page
+    was told only "text box", four times in a row.
+
+    The captions beside the account fields are real Gtk.Labels, but a label that
+    merely sits next to a widget is not attached to it. The name is therefore
+    set explicitly, from the same string the caption uses, so the two cannot
+    drift apart.
+
+    An AT-SPI LABELLED_BY relation was tried as well and removed again:
+    PyGObject's update_relation() rejects the list-of-accessible shape and emits
+    a GLib warning instead of raising, so the guarding try/except never fired and
+    the call did nothing but print. A call that only produces a warning is worse
+    than no call -- it reads like the problem is handled.
+
+    Never allowed to be silently skipped: a caller that passes an empty label is
+    a bug in this file, not a widget that happens to have no name.
+    """
+    if not label:
+        raise ValueError("a11y() needs a non-empty label")
+    props = [Gtk.AccessibleProperty.LABEL]
+    vals = [label]
+    if description:
+        props.append(Gtk.AccessibleProperty.DESCRIPTION)
+        vals.append(description)
+    widget.update_property(props, vals)
+    return widget
+
+
+
+def xkb_layouts():
+    """Every layout xkb knows, as (code, human description), sorted by description.
+
+    Parsed out of xkeyboard-config's own base.lst rather than hardcoded, using
+    the same awk-shaped rule apex-shell-firstrun and the engine already use: the
+    `! layout` section runs until the next `!` heading, and each line is a code
+    then a description. xkeyboard-config is installed explicitly by
+    Containerfile.installer, so its absence is a build defect — but a missing
+    file must not leave the user with NO keyboard page, so we degrade to a short
+    built-in list instead of showing an empty one.
+    """
+    out = []
+    try:
+        with open(XKB_RULES, encoding="utf-8", errors="replace") as f:
+            in_section = False
+            for line in f:
+                if line.startswith("! layout"):
+                    in_section = True
+                    continue
+                if line.startswith("!"):
+                    in_section = False
+                    continue
+                if not in_section:
+                    continue
+                parts = line.split(None, 1)
+                if len(parts) == 2 and re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", parts[0]):
+                    out.append((parts[0], parts[1].strip()))
+    except OSError:
+        pass
+    if not out:
+        out = [("us", "English (US)"), ("gb", "English (UK)"), ("de", "German"),
+               ("fr", "French"), ("es", "Spanish"), ("it", "Italian"),
+               ("se", "Swedish"), ("no", "Norwegian"), ("dk", "Danish"),
+               ("fi", "Finnish"), ("pt", "Portuguese"), ("br", "Portuguese (Brazil)"),
+               ("ru", "Russian"), ("ua", "Ukrainian"), ("pl", "Polish"),
+               ("cz", "Czech"), ("hu", "Hungarian"), ("tr", "Turkish"),
+               ("gr", "Greek"), ("jp", "Japanese"), ("kr", "Korean")]
+    out.sort(key=lambda p: p[1].lower())
+    return out
+
+
+def xkb_variants(layout):
+    """Variants xkb offers for one layout, as (code, description). [] is normal.
+
+    The `! variant` section's second column names the layout the variant belongs
+    to, so a variant list is a filter over one file rather than a second lookup.
+    """
+    out = []
+    try:
+        with open(XKB_RULES, encoding="utf-8", errors="replace") as f:
+            in_section = False
+            for line in f:
+                if line.startswith("! variant"):
+                    in_section = True
+                    continue
+                if line.startswith("!"):
+                    in_section = False
+                    continue
+                if not in_section:
+                    continue
+                parts = line.split(None, 2)
+                # `nodeadkeys  de: German (no dead keys)`
+                if len(parts) >= 2 and parts[1].rstrip(":") == layout:
+                    desc = parts[2].strip() if len(parts) > 2 else parts[0]
+                    out.append((parts[0], desc))
+    except OSError:
+        pass
+    out.sort(key=lambda p: p[1].lower())
+    return out
+
+
+def timezones():
+    """Every zone tzdata ships, as (name, human hint), sorted by name.
+
+    Read from zone1970.tab — the file tzdata itself ships — rather than a
+    hardcoded list, for the same reason the layouts are read from base.lst: a
+    hardcoded list silently goes stale, and a zone the installed system does not
+    have produces an /etc/localtime pointing at nothing. The engine checks the
+    chosen zone exists in the DEPLOY root before linking it, so a zone that is
+    on the ISO but not in the image degrades loudly there rather than here.
+    """
+    out, seen = [], set()
+    try:
+        with open(TZ_TAB, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) >= 3:
+                    name = parts[2].strip()
+                    if name and name not in seen:
+                        seen.add(name)
+                        hint = parts[3].strip() if len(parts) > 3 else ""
+                        out.append((name, hint))
+    except OSError:
+        pass
+    if not out:
+        out = [(z, "") for z in (
+            "Australia/Perth", "Australia/Sydney", "UTC", "Europe/London",
+            "Europe/Berlin", "Europe/Paris", "Europe/Madrid", "Europe/Moscow",
+            "America/New_York", "America/Chicago", "America/Los_Angeles",
+            "America/Sao_Paulo", "Asia/Tokyo", "Asia/Shanghai", "Asia/Kolkata",
+            "Asia/Dubai", "Africa/Cairo", "Africa/Lagos", "Pacific/Auckland")]
+    out.sort(key=lambda p: p[0])
+    return out
+
+
+def session_state():
+    """What the previous run of this process left for the one after the restart.
+
+    The compositor restart starts a NEW apex-installer-gui, so self.answers is
+    empty in it. The layout and variant come back through XKB_DEFAULT_*, because
+    the session script exported them — but nothing carries anything else, and a
+    value the user chose that does not survive is worse than one never offered:
+    the resume page tells them to check the keyboard, so nobody looks at the
+    time zone again, and the wrong one is written to the installed system.
+
+    Parsed key=value, not sourced: the file is written by this same program on a
+    tmpfs, and a crash mid-write must not be executed.
+    """
+    out = {}
+    try:
+        with open(SESSION_STATE) as f:
+            for line in f:
+                k, _, v = line.partition("=")
+                k = k.strip()
+                if k:
+                    out[k] = v.strip()
+    except OSError:
+        pass
+    return out
+
+
+def active_timezone():
+    """The zone this live environment resolved, as the sensible default.
+
+    /etc/localtime is a symlink into zoneinfo on any systemd system. The ISO's
+    kickstart hardcodes Australia/Perth, so that is what this normally returns —
+    which is exactly the value the user is here to change, but it is the honest
+    starting point rather than a guess.
+    """
+    try:
+        tgt = os.readlink("/etc/localtime")
+        if "/zoneinfo/" in tgt:
+            return tgt.split("/zoneinfo/", 1)[1]
+    except OSError:
+        pass
+    return "Australia/Perth"
+
+
+def active_layout():
+    """The layout the RUNNING compositor compiled its keymap from.
+
+    Not `localectl`, and not the installed system's config: what a wlroots
+    compositor hands its clients comes from XKB_DEFAULT_LAYOUT in its own
+    environment, and libxkbcommon's compiled-in default when that is unset is
+    `us`. Reading anything else here would report a layout the keyboard is not
+    actually on.
+    """
+    return (os.environ.get("XKB_DEFAULT_LAYOUT", "") or "us",
+            os.environ.get("XKB_DEFAULT_VARIANT", "") or "")
+
+
 class Installer(Adw.Application):
     def __init__(self):
         super().__init__(application_id="org.apexos.Installer",
@@ -383,6 +605,9 @@ class Installer(Adw.Application):
         self.target = None
         self.esp = ""
         self.proc = None
+        # None means "whatever GTK returns". Set to RESTART_RC by the keyboard
+        # page to ask apex-installer-session for a new compositor; see there.
+        self.exit_code = None
 
     # ── shell ────────────────────────────────────────────────────────────────
     def startup(self, _app):
@@ -441,14 +666,16 @@ class Installer(Adw.Application):
                                transition_duration=200)
         self.win.set_content(self.stack)
 
-        for name, build in (("welcome", self.p_welcome), ("wifi", self.p_wifi),
+        for name, build in (("welcome", self.p_welcome),
+                            ("keyboard", self.p_keyboard), ("wifi", self.p_wifi),
                             ("disk", self.p_disk), ("mode", self.p_mode),
                             ("part", self.p_part), ("account", self.p_account),
                             ("secureboot", self.p_secureboot),
                             ("confirm", self.p_confirm), ("run", self.p_run),
                             ("done", self.p_done)):
             self.stack.add_named(Gtk.Box(), name)
-        self.builders = {"welcome": self.p_welcome, "wifi": self.p_wifi,
+        self.builders = {"welcome": self.p_welcome,
+                         "keyboard": self.p_keyboard, "wifi": self.p_wifi,
                          "disk": self.p_disk, "mode": self.p_mode,
                          "part": self.p_part, "account": self.p_account,
                          "secureboot": self.p_secureboot,
@@ -456,8 +683,15 @@ class Installer(Adw.Application):
                          "done": self.p_done}
         # Test affordance: jump straight to a page for screenshotting. Only
         # reachable by setting the env var explicitly; harmless in production.
-        start = os.environ.get("APEX_GUI_PAGE", "welcome")
-        if start != "welcome":
+        # A resumed session is one apex-installer-session restarted to apply a
+        # keyboard layout. It comes back to the keyboard page rather than the
+        # welcome page: the user's last action was choosing a layout, and the
+        # page they land on is the one with the field to test it in.
+        default_page = ("keyboard"
+                        if os.environ.get("APEX_INSTALLER_RESUMED") == "1"
+                        else "welcome")
+        start = os.environ.get("APEX_GUI_PAGE", default_page)
+        if start not in ("welcome", "keyboard"):
             self.disk = os.environ.get("APEX_GUI_DISK", "")
             self.target = os.environ.get("APEX_GUI_TARGET", "") or None
             self.esp = os.environ.get("APEX_GUI_ESP", "")
@@ -588,6 +822,7 @@ class Installer(Adw.Application):
         inner.set_margin_top(SP * 5); inner.set_margin_bottom(SP * 5)
         inner.set_margin_start(SP * 5); inner.set_margin_end(SP * 5)
         for line in (
+            "Choose your keyboard, so the password you set is the one you typed.",
             "Connect to Wi-Fi so the installed system has network on first boot.",
             "Choose a disk, or a single partition to install alongside another OS.",
             "Create your account — no locked-out first boot.",
@@ -601,13 +836,177 @@ class Installer(Adw.Application):
         body.append(card)
         body.append(lbl("Nothing on any disk is touched until the confirmation step.",
                         "apex-dim"))
-        return self.frame("STEP 1 OF 6", "Install APEX-OS",
+        return self.frame("STEP 1 OF 7", "Install APEX-OS",
                           "A guided install. You can go back at any point before confirming.",
                           body,
                           [(self.btn("Quit", "apex-ghost", lambda *_: self.quit()), False),
-                           (self.btn("Begin", "apex-go", lambda *_: self.go("wifi")), True)])
+                           (self.btn("Begin", "apex-go", lambda *_: self.go("keyboard")), True)])
 
-    # ── 2. wifi (skippable) ──────────────────────────────────────────────────
+    # ── 2. keyboard ──────────────────────────────────────────────────────────
+    # Placed here, second, for a reason that is not cosmetic: the criterion is
+    # "keyboard layout before password creation", and the account page is where
+    # the password is created. Putting the choice first also means the only
+    # state that has to survive the compositor restart is the layout itself —
+    # no Wi-Fi credentials, no disk selection, nothing to serialise.
+    def p_keyboard(self):
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        cur_l, cur_v = active_layout()
+
+        layouts = xkb_layouts()
+        codes = [c for c, _ in layouts]
+        names = [f"{d}  ({c})" for c, d in layouts]
+
+        model = Gtk.StringList.new(names)
+        self.kb_drop = Gtk.DropDown(model=model)
+        a11y(self.kb_drop, "Keyboard layout")
+        self.kb_drop.set_enable_search(True)
+        self.kb_drop.set_expression(Gtk.PropertyExpression.new(Gtk.StringObject, None, "string"))
+        want = self.answers.get("keymap") or cur_l
+        if want in codes:
+            self.kb_drop.set_selected(codes.index(want))
+
+        self.kb_var_drop = Gtk.DropDown(model=Gtk.StringList.new(["Default"]))
+        a11y(self.kb_var_drop, "Keyboard variant")
+
+        def refill_variants(*_a):
+            sel = self.kb_drop.get_selected()
+            code = codes[sel] if 0 <= sel < len(codes) else "us"
+            vs = xkb_variants(code)
+            self._kb_variants = [""] + [v for v, _ in vs]
+            self.kb_var_drop.set_model(
+                Gtk.StringList.new(["Default"] + [d for _, d in vs]))
+            pick = self.answers.get("keyvariant") or (cur_v if code == cur_l else "")
+            if pick in self._kb_variants:
+                self.kb_var_drop.set_selected(self._kb_variants.index(pick))
+            else:
+                self.kb_var_drop.set_selected(0)
+
+        self._kb_variants = [""]
+        refill_variants()
+        self.kb_drop.connect("notify::selected", refill_variants)
+
+        # Time zone. On this page rather than a page of its own because it is
+        # the other thing the live ISO hardcodes (bib-config.toml pins
+        # Australia/Perth), it needs no restart to take effect on the installed
+        # system, and a second near-empty step is a worse installer than one
+        # honest one.
+        tzs = timezones()
+        tz_names = [z for z, _ in tzs]
+        self._tz_names = tz_names
+        self.tz_drop = Gtk.DropDown(model=Gtk.StringList.new(
+            [f"{z}{('  — ' + h) if h else ''}" for z, h in tzs]))
+        a11y(self.tz_drop, "Time zone")
+        self.tz_drop.set_enable_search(True)
+        self.tz_drop.set_expression(
+            Gtk.PropertyExpression.new(Gtk.StringObject, None, "string"))
+        # On a resume the answers dict is empty, so the choice has to come back
+        # from the state file the pre-restart process wrote. Falling straight
+        # through to active_timezone() here would silently reset the user's pick
+        # to whatever the live ISO resolved.
+        resumed = os.environ.get("APEX_INSTALLER_RESUMED") == "1"
+        want_tz = (self.answers.get("timezone")
+                   or (session_state().get("timezone") if resumed else "")
+                   or active_timezone())
+        if want_tz in tz_names:
+            self.tz_drop.set_selected(tz_names.index(want_tz))
+
+        grid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+        grid.append(lbl("Keyboard layout", "apex-dim"))
+        grid.append(self.kb_drop)
+        grid.append(lbl("Variant", "apex-dim"))
+        grid.append(self.kb_var_drop)
+        grid.append(lbl("Time zone", "apex-dim"))
+        grid.append(self.tz_drop)
+        body.append(grid)
+
+        # The try-it field. This is the whole feature made visible: a layout that is
+        # merely recorded changes nothing you can feel, and a user who cannot
+        # verify the keyboard before typing a password into it is being asked to
+        # trust a dropdown. After the restart, the keys under their hands really
+        # are the ones they picked, and this is where they find that out.
+        body.append(lbl("Test it here — type the characters you expect, "
+                        "especially any in your password:", "apex-dim"))
+        self.kb_test = Gtk.Entry()
+        self.kb_test.set_property("placeholder-text",
+                                  "Type here to check your keyboard")
+        a11y(self.kb_test, "Keyboard test",
+             "Type here to check the layout before you set a password.")
+        body.append(self.kb_test)
+
+        self.kb_note = lbl("", "apex-dim")
+        body.append(self.kb_note)
+        if resumed:
+            self.kb_note.set_text(
+                f"The keyboard is now {cur_l}{('-' + cur_v) if cur_v else ''}. "
+                "Check it in the box above, then continue.")
+        else:
+            self.kb_note.set_text(
+                f"The keyboard is currently {cur_l}"
+                f"{('-' + cur_v) if cur_v else ''}. Choosing a different one "
+                "restarts the installer's display so the new keys take effect "
+                "straight away — nothing you have entered is lost, because "
+                "nothing has been entered yet.")
+
+        self.kb_err = lbl("", "apex-danger")
+        body.append(self.kb_err)
+        body.append(lbl("This layout is also written into the installed system, "
+                        "so the login screen and desktop come up on it too.",
+                        "apex-dim"))
+
+        def nxt(_b):
+            sel = self.kb_drop.get_selected()
+            if not 0 <= sel < len(codes):
+                self.kb_err.set_text("Pick a keyboard layout.")
+                return
+            code = codes[sel]
+            vsel = self.kb_var_drop.get_selected()
+            variant = (self._kb_variants[vsel]
+                       if 0 <= vsel < len(self._kb_variants) else "")
+            self.answers["keymap"] = code
+            self.answers["keyvariant"] = variant
+            tsel = self.tz_drop.get_selected()
+            if 0 <= tsel < len(self._tz_names):
+                self.answers["timezone"] = self._tz_names[tsel]
+
+            # Already on it: nothing to restart for. This is also what makes the
+            # restart terminate — after the relaunch the environment matches the
+            # choice, so the second pass through this branch simply continues.
+            if (code, variant) == (cur_l, cur_v):
+                self.go("wifi")
+                return
+
+            try:
+                os.makedirs(os.path.dirname(SESSION_STATE), exist_ok=True)
+                with open(SESSION_STATE, "w") as f:
+                    # The time zone rides along. The session script's parser
+                    # ignores keys it does not know, so this costs it nothing,
+                    # and it is the only way the choice survives the restart.
+                    f.write(f"layout={code}\nvariant={variant}\n"
+                            f"timezone={self.answers.get('timezone', '')}\n")
+                os.chmod(SESSION_STATE, 0o600)
+            except OSError as e:
+                # Not fatal to the install. The layout still reaches the
+                # INSTALLED system through the answers file; what is lost is
+                # only the live session's keyboard, so say exactly that rather
+                # than refusing to go on.
+                self.kb_err.set_text(
+                    f"Could not apply the layout to this session ({e}). "
+                    f"{code} will still be set on the installed system — but "
+                    "type carefully until then.")
+                self.go("wifi")
+                return
+
+            self.exit_code = RESTART_RC
+            self.quit()
+
+        return self.frame("STEP 2 OF 7", "Keyboard and time zone",
+                          "The password you create in a moment is typed on this "
+                          "layout, so set it now.",
+                          self.scrolled(body),
+                          [(self.btn("Back", "apex-ghost", lambda *_: self.go("welcome")), False),
+                           (self.btn("Continue", "apex-go", nxt), True)])
+
+    # ── 3. wifi (skippable) ──────────────────────────────────────────────────
     def p_wifi(self):
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
         self.wifi_status = lbl("", "apex-dim")
@@ -645,8 +1044,8 @@ class Installer(Adw.Application):
                              "apex-dim"))
             box.append(i)
             body.append(box)
-            return self.frame("STEP 2 OF 6", "Network", None, body,
-                              [(self.btn("Back", "apex-ghost", lambda *_: self.go("welcome")), False),
+            return self.frame("STEP 3 OF 7", "Network", None, body,
+                              [(self.btn("Back", "apex-ghost", lambda *_: self.go("keyboard")), False),
                                (self.btn("Continue", "apex-go", lambda *_: self.go("disk")), True)])
 
         self.net_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
@@ -662,11 +1061,14 @@ class Installer(Adw.Application):
         # this anyone on a managed network simply could not get online.
         self.wifi_user = Gtk.Entry()
         self.wifi_user.set_property("placeholder-text", "Username (enterprise networks)")
+        a11y(self.wifi_user, "Network username",
+             "Only needed on WPA-Enterprise networks such as eduroam.")
         self.wifi_user.set_visible(False)
         body.append(self.wifi_user)
 
         self.wifi_pw = Gtk.PasswordEntry(show_peek_icon=True)
         self.wifi_pw.set_property("placeholder-text", "Network password")
+        a11y(self.wifi_pw, "Network password")
         body.append(self.wifi_pw)
 
         # A hidden network never appears in a scan, so without this there is no
@@ -674,6 +1076,8 @@ class Installer(Adw.Application):
         self.wifi_hidden = Gtk.Entry()
         self.wifi_hidden.set_property("placeholder-text",
                                       "Hidden network name (leave blank if it is in the list)")
+        a11y(self.wifi_hidden, "Hidden network name",
+             "Leave blank if the network is already in the list above.")
         body.append(self.wifi_hidden)
         body.append(self.wifi_status)
 
@@ -789,12 +1193,12 @@ class Installer(Adw.Application):
             threading.Thread(target=worker, daemon=True).start()
 
         refresh()
-        acts = [(self.btn("Back", "apex-ghost", lambda *_: self.go("welcome")), False),
+        acts = [(self.btn("Back", "apex-ghost", lambda *_: self.go("keyboard")), False),
                 (self.btn("Rescan", "apex-ghost", refresh), False),
                 (self.btn("Connect", "apex-ghost", connect), False),
                 (self.btn("Skip", "apex-ghost", lambda *_: self.go("disk")), True),
                 (self.btn("Continue", "apex-go", lambda *_: self.go("disk")), False)]
-        return self.frame("STEP 2 OF 6", "Connect to Wi-Fi",
+        return self.frame("STEP 3 OF 7", "Connect to Wi-Fi",
                           "Optional. If you connect, the network is carried into the "
                           "installed system so it has Wi-Fi on first boot.",
                           body, acts)
@@ -818,7 +1222,7 @@ class Installer(Adw.Application):
                          "try again.", "apex-dim"))
             w.append(i)
             body.append(w)
-            return self.frame("STEP 3 OF 6", "Select a disk", None, body,
+            return self.frame("STEP 4 OF 7", "Select a disk", None, body,
                               [(self.btn("Back", "apex-ghost", lambda *_: self.go("wifi")), False),
                                (self.btn("Rescan", "apex-ghost", lambda *_: self.go("disk")), True)])
 
@@ -861,7 +1265,7 @@ class Installer(Adw.Application):
             self.disk = self._disks[row.get_index()]["dev"]
             self.go("mode")
 
-        return self.frame("STEP 3 OF 6", "Select a disk",
+        return self.frame("STEP 4 OF 7", "Select a disk",
                           "Where should APEX-OS go?", body,
                           [(self.btn("Back", "apex-ghost", lambda *_: self.go("wifi")), False),
                            (self.btn("Continue", "apex-go", nxt), True)])
@@ -902,7 +1306,7 @@ class Installer(Adw.Application):
             body.append(lbl(f"{self.disk} has no partitions — it looks empty.",
                             "apex-dim apex-mono"))
 
-        return self.frame("STEP 4 OF 6", "How should this disk be used?",
+        return self.frame("STEP 5 OF 7", "How should this disk be used?",
                           self.disk, body,
                           [(self.btn("Back", "apex-ghost", lambda *_: self.go("disk")), False)])
 
@@ -925,7 +1329,7 @@ class Installer(Adw.Application):
                          "apex-dim"))
             w.append(i)
             body.append(w)
-            return self.frame("STEP 4 OF 6", "Choose a partition", self.disk, body,
+            return self.frame("STEP 5 OF 7", "Choose a partition", self.disk, body,
                               [(self.btn("Back", "apex-ghost", lambda *_: self.go("mode")), False)])
 
         if not self._parts:
@@ -941,7 +1345,7 @@ class Installer(Adw.Application):
                          f"a partition with another tool first.", "apex-dim"))
             w.append(i)
             body.append(w)
-            return self.frame("STEP 4 OF 6", "Choose a partition", self.disk, body,
+            return self.frame("STEP 5 OF 7", "Choose a partition", self.disk, body,
                               [(self.btn("Back", "apex-ghost", lambda *_: self.go("mode")), False)])
 
         self.part_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
@@ -985,7 +1389,7 @@ class Installer(Adw.Application):
             self.target = p["dev"]
             self.go("account")
 
-        return self.frame("STEP 4 OF 6", "Choose a partition",
+        return self.frame("STEP 5 OF 7", "Choose a partition",
                           f"This partition will be erased. Everything else on "
                           f"{self.disk} is kept.", body,
                           [(self.btn("Back", "apex-ghost", lambda *_: self.go("mode")), False),
@@ -1008,6 +1412,10 @@ class Installer(Adw.Application):
                                 ("Repeat password", self.e_pw2),
                                 ("Computer name", self.e_host)):
             grid.append(lbl(caption, "apex-dim"))
+            # The caption is what a sighted user reads; these two lines are what
+            # everyone else gets. Both derive from the same string, so they
+            # cannot drift apart.
+            a11y(widget, caption)
             grid.append(widget)
         body.append(grid)
         self.acct_err = lbl("", "apex-danger")
@@ -1044,7 +1452,7 @@ class Installer(Adw.Application):
             self.go("secureboot" if self.sb_offer() else "confirm")
 
         back = "part" if self.answers["mode"] == "partition" else "mode"
-        return self.frame("STEP 5 OF 6", "Create your account", None,
+        return self.frame("STEP 6 OF 7", "Create your account", None,
                           self.scrolled(body),
                           [(self.btn("Back", "apex-ghost", lambda *_: self.go(back)), False),
                            (self.btn("Continue", "apex-go", nxt), True)])
@@ -1174,6 +1582,11 @@ class Installer(Adw.Application):
         self.e_mok2 = Gtk.PasswordEntry(show_peek_icon=True)
         self.e_mok1.set_property("placeholder-text", "One-time enrolment password")
         self.e_mok2.set_property("placeholder-text", "Repeat password")
+        # These two have no visible caption at all -- the page is too short for
+        # captioned rows -- so the accessible name is the ONLY label they have.
+        a11y(self.e_mok1, "One-time enrolment password",
+             "Used once at the next boot to enrol the Secure Boot key.")
+        a11y(self.e_mok2, "Repeat the enrolment password")
         body.append(self.e_mok1)
         body.append(self.e_mok2)
         self.mok_err = lbl("", "apex-danger")
@@ -1218,7 +1631,7 @@ class Installer(Adw.Application):
                "without reinstalling.")
         skip_label = ("Skip — I'll turn Secure Boot off instead" if on
                       else "Skip — I don't use Secure Boot")
-        return self.frame("STEP 5 OF 6", "Secure Boot", sub, self.scrolled(body),
+        return self.frame("STEP 6 OF 7", "Secure Boot", sub, self.scrolled(body),
                           [(self.btn("Back", "apex-ghost", lambda *_: self.go("account")), False),
                            (self.btn(skip_label, "apex-ghost", skip), True),
                            (self.btn("Enrol and continue", "apex-go", nxt), False)])
@@ -1329,6 +1742,10 @@ class Installer(Adw.Application):
         rest.append(lbl("Type ERASE to confirm:", "apex-dim"))
         self.e_erase = Gtk.Entry()
         self.e_erase.set_property("placeholder-text", "ERASE")
+        # The last thing between the user and an irreversible erase. If any
+        # field in this installer must be announceable, it is this one.
+        a11y(self.e_erase, "Type ERASE to confirm",
+             "The disk is erased only after this word is typed exactly.")
         rest.append(self.e_erase)
 
         sc = Gtk.ScrolledWindow(vexpand=True)
@@ -1344,7 +1761,7 @@ class Installer(Adw.Application):
                              lambda e: self.begin() if e.get_text().strip() == "ERASE" else None)
 
         back = "secureboot" if self.sb_offer() else "account"
-        return self.frame("STEP 6 OF 6", "Confirm",
+        return self.frame("STEP 7 OF 7", "Confirm",
                           "Nothing has been written yet. This is the last point at "
                           "which you can go back.", body,
                           [(self.btn("Back", "apex-ghost", lambda *_: self.go(back)), False),
@@ -1422,7 +1839,8 @@ class Installer(Adw.Application):
                 # Secure Boot is off — the get() guard omits it and the engine
                 # skips the MOK step with an explanation.
                 for k in ("mode", "disk", "target", "esp", "username", "password",
-                          "hostname", "rootfs", "mokpw"):
+                          "hostname", "rootfs", "mokpw",
+                          "keymap", "keyvariant", "timezone"):
                     if a.get(k):
                         f.write(f"{k}={a[k]}\n")
         except OSError as e:
@@ -1565,4 +1983,10 @@ class Installer(Adw.Application):
 
 
 if __name__ == "__main__":
-    Installer().run(None)
+    app = Installer()
+    rc = app.run(None)
+    # A restart request travels as the EXIT STATUS, because that is the only
+    # channel that survives cage: apex-installer-session reads it to decide
+    # whether to relaunch the compositor with a new XKB_DEFAULT_LAYOUT. Measured
+    # rather than assumed — `cage -- sh -c 'exit 75'` returns 75.
+    sys.exit(app.exit_code if app.exit_code is not None else rc)

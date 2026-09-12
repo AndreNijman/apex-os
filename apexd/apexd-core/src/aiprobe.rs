@@ -355,6 +355,31 @@ pub struct Located {
 /// than shipping a spawn path nobody has run. That is a stated limitation, not
 /// an oversight.
 pub fn locate(runtime: Runtime) -> Option<Located> {
+    locate_in(&Roots::default(), runtime)
+}
+
+/// [`locate`], against a [`Roots`] prefix.
+///
+/// Every other measurement in this module already resolves through
+/// [`Roots::at`], whose doc names the bug that exists for: an absolute path
+/// used directly "would silently make every read hit the real machine — the
+/// exact bug that makes a fixture-based suite pass while testing the
+/// developer's laptop". `locate` was the one function that did not honour it,
+/// and it is the function that decides WHICH BINARY GETS EXECUTED.
+///
+/// That was not only a testing problem, it was the mechanical reason the
+/// resolver's own tests asserted nothing: they built a fake `llama-server`,
+/// bound it as `_fake`, and then called `resolve` — which looked for a runtime
+/// on the real machine, did not find one, and returned `Err`, so three tests
+/// written as `if let Ok(r) = …` ran no assertions at all. The docstring on
+/// [`locate`] claimed `$APEX_AI_RUNTIME` "is what the shell suite points at a
+/// fake backend"; repo-wide, nothing set it.
+///
+/// Under a prefix the `PATH` fallback is deliberately NOT taken. `PATH` names
+/// the real filesystem, so following it would reintroduce exactly the leak
+/// `Roots::at` prevents — a fixture run on a developer's machine would find
+/// their real llama-server and plan a launch of it.
+pub fn locate_in(roots: &Roots, runtime: Runtime) -> Option<Located> {
     if let Some(p) = std::env::var_os("APEX_AI_RUNTIME") {
         if !p.is_empty() {
             let path = PathBuf::from(p);
@@ -367,9 +392,12 @@ pub fn locate(runtime: Runtime) -> Option<Located> {
             );
         }
     }
-    let sysext = PathBuf::from("/usr/bin").join(runtime.program());
+    let sysext = roots.at("/usr/bin").join(runtime.program());
     if sysext.is_file() {
         return Some(Located { runtime, path: sysext });
+    }
+    if !roots.prefix.as_os_str().is_empty() {
+        return None;
     }
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
@@ -500,7 +528,7 @@ pub fn resolve(
     let choice = select_backend(&accel, &devices, settings.backend_pref())
         .map_err(|e| e.to_string())?;
 
-    let located = locate(runtime_kind).ok_or_else(|| {
+    let located = locate_in(roots, runtime_kind).ok_or_else(|| {
         format!(
             "no {runtime_kind} runtime is installed. Install one with:\n    {}",
             runtime_kind.install_hint(choice.backend)
@@ -994,7 +1022,19 @@ mod tests {
         std::fs::write(store.manifest("tiny").unwrap(), m.to_json().unwrap()).unwrap();
         std::fs::write(store.blob(&m.digest).unwrap(), b"weights").unwrap();
 
-        let fake = root.join("llama-server");
+        // UNDER THE PREFIX, which is what makes this fixture work at all.
+        // `resolve` locates the runtime through `locate_in(roots, …)`, and
+        // `Roots { prefix: root }` is what every one of these tests passes, so
+        // a fake at `<root>/usr/bin/llama-server` is found and a fake anywhere
+        // else is not.
+        //
+        // It used to be written to `<root>/llama-server` and every caller bound
+        // it as `_fake`: nothing could ever find it, `resolve` returned Err on
+        // any machine without a real llama-server, and the three tests written
+        // as `if let Ok(r) = …` asserted nothing at all.
+        let bin = root.join("usr/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("llama-server");
         std::fs::write(&fake, b"#!/bin/sh\nexit 0\n").unwrap();
         let endpoints = Endpoints::new(&root.join("run"));
         (root, store, endpoints, fake)
@@ -1108,29 +1148,48 @@ mod tests {
     fn with_no_runtime_installed_the_refusal_carries_the_install_command() {
         // The one refusal every new machine hits first. It has to end in a
         // command, because APEX ships no runtime and never downloads one.
-        let (root, store, endpoints, _fake) = resolvable("noruntime");
-        match resolve(
+        let (root, store, endpoints, fake) = resolvable("noruntime");
+        // No runtime under this prefix, and `locate_in` does not fall back to
+        // the real PATH once a prefix is set — so this is a refusal on every
+        // machine, including one with llama-server genuinely installed. It used
+        // to be a `match` with a passing arm for either outcome, which meant
+        // the refusal it exists to test was never reached here.
+        std::fs::remove_file(&fake).unwrap();
+        let e = resolve(
             &store,
             &Roots { prefix: root.clone() },
             &Settings::default(),
             None,
             &endpoints,
             &NoSmi,
-        ) {
-            // On a machine that genuinely has llama-server on PATH the resolve
-            // succeeds, and then the assertion is about the plan instead.
-            Ok(r) => {
-                assert_eq!(r.model_id, "tiny");
-                assert!(r.launch.argv.windows(2).any(|w| w[0] == "--model"));
-            }
-            Err(e) => {
-                assert!(e.contains("no llama.cpp runtime is installed"), "{e}");
-                assert!(
-                    e.contains("apex install llama-cpp") || e.contains("apex env create"),
-                    "the refusal must name a command that exists: {e}"
-                );
-            }
-        }
+        )
+        .expect_err("no runtime is installed under this prefix");
+        assert!(e.contains("no llama.cpp runtime is installed"), "{e}");
+        assert!(
+            e.contains("apex install llama-cpp") || e.contains("apex env create"),
+            "the refusal must name a command that exists: {e}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_runtime_under_the_prefix_is_the_one_that_gets_planned() {
+        // The positive half of the same contract, and the assertion that makes
+        // every `expect` below trustworthy: the planned program is the fake in
+        // the fixture and not whatever the developer has installed.
+        let (root, store, endpoints, fake) = resolvable("prefixruntime");
+        let r = resolve(
+            &store,
+            &Roots { prefix: root.clone() },
+            &Settings::default(),
+            None,
+            &endpoints,
+            &NoSmi,
+        )
+        .expect("the fake runtime under the prefix is locatable");
+        assert_eq!(r.model_id, "tiny");
+        assert_eq!(r.located.path, fake);
+        assert!(r.launch.argv.windows(2).any(|w| w[0] == "--model"));
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1141,49 +1200,49 @@ mod tests {
         // resolver together must produce.
         let (root, store, endpoints, _fake) = resolvable("ctx");
         let settings = Settings { context: Some(131_072), ..Default::default() };
-        if let Ok(r) = resolve(
+        let r = resolve(
             &store,
             &Roots { prefix: root.clone() },
             &settings,
             None,
             &endpoints,
             &NoSmi,
-        ) {
-            assert!(
-                r.notes.iter().any(|n| n.contains("context reduced")),
-                "{:?}",
-                r.notes
-            );
-            assert!(r.fit.context <= 8192, "{}", r.fit.context);
-        }
+        )
+        .expect("the fixture has a runtime under its prefix");
+        assert!(
+            r.notes.iter().any(|n| n.contains("context reduced")),
+            "{:?}",
+            r.notes
+        );
+        assert!(r.fit.context <= 8192, "{}", r.fit.context);
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn a_machine_with_no_accelerator_resolves_to_the_cpu_and_offloads_nothing() {
         let (root, store, endpoints, _fake) = resolvable("cpuonly");
-        if let Ok(r) = resolve(
+        let r = resolve(
             &store,
             &Roots { prefix: root.clone() },
             &Settings::default(),
             None,
             &endpoints,
             &NoSmi,
-        ) {
-            assert_eq!(r.choice.backend, crate::ai::Backend::Cpu);
-            assert_eq!(r.fit.placement.gpu_layers(), 0);
-            assert!(
-                r.launch.argv.windows(2).any(|w| w == ["--n-gpu-layers", "0"]),
-                "{:?}",
-                r.launch.argv
-            );
-            // And the backend listens on a path, never a port.
-            assert!(r
-                .launch
-                .argv
-                .windows(2)
-                .any(|w| w[0] == "--host" && w[1].ends_with(".sock")));
-        }
+        )
+        .expect("the fixture has a runtime under its prefix");
+        assert_eq!(r.choice.backend, crate::ai::Backend::Cpu);
+        assert_eq!(r.fit.placement.gpu_layers(), 0);
+        assert!(
+            r.launch.argv.windows(2).any(|w| w == ["--n-gpu-layers", "0"]),
+            "{:?}",
+            r.launch.argv
+        );
+        // And the backend listens on a path, never a port.
+        assert!(r
+            .launch
+            .argv
+            .windows(2)
+            .any(|w| w[0] == "--host" && w[1].ends_with(".sock")));
         std::fs::remove_dir_all(&root).ok();
     }
 }

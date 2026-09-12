@@ -1704,6 +1704,24 @@ fn ago(then: u64) -> String {
 mod tests {
     use super::*;
 
+    /// Serialises the three cases that mutate `NO_APPLY_ENV`.
+    ///
+    /// The environment is process-wide and `cargo test` runs this module's
+    /// cases in threads of one process, so a `set_var` in one case is a
+    /// `set_var` in all of them. Three cases here touch that one name —
+    /// `a_live_converger_cannot_be_built_while_the_guard_is_set` sets it,
+    /// `the_live_constructor_still_grants_effects` and
+    /// `a_live_converger_refuses_a_step_from_the_other_privilege_domain` remove
+    /// it — and unserialised they turn each other's guard on and off. That was
+    /// a live flake, not a hazard in principle: 2 failures in 60 runs of the
+    /// whole binary on 2026-09-12, 0 in 60 with `--test-threads=1`.
+    ///
+    /// `into_inner` on a poisoned lock, matching `gaming.rs`: a case that
+    /// panicked while holding it has already failed and reported itself, and
+    /// poisoning every later case would bury that one real failure under a
+    /// dozen misleading ones.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A fixture machine laid out under one temporary directory.
     struct Fixture {
         dir: PathBuf,
@@ -2185,9 +2203,22 @@ mod tests {
         // so there is no ordering a later change could get wrong.
         //
         // `cargo test` runs tests in threads of one process, so this mutates a
-        // shared environment. It is restored immediately and no other test in
-        // this module reads the variable, which is why this is the only place
-        // it is touched.
+        // shared environment.
+        //
+        // The sentence that used to be here — "no other test in this module
+        // reads the variable, which is why this is the only place it is
+        // touched" — was false when it was written. Two more cases below,
+        // `the_live_constructor_still_grants_effects` and
+        // `a_live_converger_refuses_a_step_from_the_other_privilege_domain`,
+        // both `remove_var` the same name, and either of them landing between
+        // the `set_var` here and the `for_apply()` after it turns the guard off
+        // underneath this test. Measured on 2026-09-12: 2 failures in 60 runs
+        // of the whole binary, at both of the assertions below, and 0 in 60
+        // with `--test-threads=1`.
+        //
+        // Serialised on the module's ENV_LOCK, the shape `gaming.rs` already
+        // uses. The lock is what makes the restore below mean anything.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let restore = std::env::var(NO_APPLY_ENV).ok();
 
         std::env::set_var(NO_APPLY_ENV, "1");
@@ -2225,6 +2256,12 @@ mod tests {
         // Otherwise the guard has quietly disabled `apex apply` in production,
         // which is the failure mode of fixing this the lazy way. Constructed
         // and dropped without performing anything.
+        //
+        // Same ENV_LOCK as the two other cases that touch NO_APPLY_ENV: this
+        // `remove_var` is process-wide, and unserialised it is what turned the
+        // guard off underneath
+        // `a_live_converger_cannot_be_built_while_the_guard_is_set`.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let restore = std::env::var(NO_APPLY_ENV).ok();
         std::env::remove_var(NO_APPLY_ENV);
         let c = RealConverger::for_apply()
@@ -2247,6 +2284,10 @@ mod tests {
         // Whichever way round this test runs, it asserts a REFUSAL and
         // performs nothing: a non-root process is asked for a root step, and a
         // root one is asked for a user step.
+        //
+        // ENV_LOCK for the same reason as the two cases above: the `remove_var`
+        // below is process-wide.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let restore = std::env::var(NO_APPLY_ENV).ok();
         std::env::remove_var(NO_APPLY_ENV);
 

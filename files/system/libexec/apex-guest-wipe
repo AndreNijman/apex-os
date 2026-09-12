@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-guest-wipe — make a guest session actually disposable.
+#
+#  P2-016's second criterion is "guest sessions can be disposable". A guest
+#  account whose home is on tmpfs looks disposable and is not, on THIS system,
+#  for a reason that is specific to APEX and was introduced deliberately:
+#
+#      P0-002 moved credentials OUT of the home directory.
+#
+#  `apex-secretd` keeps them in /var/lib/apex-secretd/users/<uid>/, root-owned
+#  and 0700, precisely so that a process running as the user cannot read them.
+#  That directory is not in the home, is not on the tmpfs, and does not go away
+#  when the session ends. So a guest who stores a credential — a git token, an
+#  API key — leaves it behind for the NEXT guest, who logs in to the same uid
+#  and inherits the whole namespace: the credentials, the per-project grants
+#  and the standing approvals. The home evaporating hides that rather than
+#  fixing it.
+#
+#  The same is true of the machine-wide things that remember who was here:
+#  /var/lib/apex-greet/last-user prefills the next login with the guest's name.
+#
+#  So disposability is a root-side act at session end, and this is it. It is
+#  NOT a security boundary against the guest while the session is running —
+#  the guest is a real account with a real uid and the ordinary confinement
+#  applies. It is the guarantee that nothing of theirs is still here after.
+#
+#  ── What it will not do ─────────────────────────────────────────────────────
+#
+#  This script deletes a home directory and a credential store. The thing that
+#  matters most about it is therefore everything it REFUSES, and the refusals
+#  are checked in order, before anything is removed:
+#
+#    1. the account must be named in the allowlist. Not "looks like a guest",
+#       not a name prefix, not a uid range — an explicit line in
+#       /etc/apex/guest-accounts, which ships EMPTY. An APEX with no guest
+#       configured cannot be talked into wiping anything, whatever it is
+#       handed;
+#    2. the account must exist, and its uid must not be 0;
+#    3. its home must be the one passwd gives for that account — not a path
+#       passed in — and must not be /, /home, /var/home, /root or empty;
+#    4. the account must have no active login session. Wiping under a live
+#       session is how a "disposable guest" eats the desktop somebody is
+#       sitting in front of.
+#
+#  Modelled on the four fences apex-disposable puts on its recursive removal,
+#  for the same reason: a wrong argument here is unrecoverable.
+#
+#  ── Where it runs ───────────────────────────────────────────────────────────
+#  As root, at guest session end, and again at boot to clear what a power cut
+#  left behind. It is NOT enabled by this repo — see
+#  files/system/shared-machine/README.md for the whole recipe and for what
+#  turning it on costs.
+#
+#  ── Overrides, for the test suite ───────────────────────────────────────────
+#  Every path it touches can be repointed, so tests/test-apex-shared-machine.sh
+#  exercises the real script against a fixture tree as an ordinary user:
+#
+#      APEX_GUEST_ALLOWLIST   default /etc/apex/guest-accounts
+#      APEX_GUEST_PASSWD      a passwd(5)-format file; default: getent passwd
+#      APEX_SECRETD_STORE     default /var/lib/apex-secretd  (the daemon's own
+#                             override, same name and same meaning)
+#      APEX_GREET_STATE       default /var/lib/apex-greet
+#      APEX_GUEST_SESSIONS    a command printing active session users, one per
+#                             line; default: loginctl
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+ALLOWLIST="${APEX_GUEST_ALLOWLIST:-/etc/apex/guest-accounts}"
+STORE="${APEX_SECRETD_STORE:-/var/lib/apex-secretd}"
+GREET_STATE="${APEX_GREET_STATE:-/var/lib/apex-greet}"
+
+log()  { printf 'apex-guest-wipe: %s\n' "$*" >&2; }
+# A refusal is exit 2 and a sentence. Exit 1 is reserved for "the wipe itself
+# went wrong", so a caller can tell "I would not" from "I could not".
+deny() { log "refusing: $*"; exit 2; }
+
+account="${1:-}"
+[ -n "$account" ] || { log "usage: ${0##*/} <account|uid>"; exit 2; }
+
+# ── the argument may be a uid ────────────────────────────────────────────────
+#
+# systemd names a user slice by uid — `user-1042.slice` — so
+# apex-guest-session@.service, which hangs off that slice and runs the wipe at
+# session end, can only be instanced by uid. The allowlist stays a list of
+# NAMES: a uid is a number the system may hand to somebody else after a
+# `userdel`, a name is what an administrator wrote down. So a numeric argument
+# is resolved through passwd once, here, and every fence below works on the
+# name exactly as it did before.
+#
+# An unresolvable uid is a refusal rather than a fall-through to treating the
+# digits as an account name — otherwise an allowlist that happened to contain a
+# line of digits would authorise a wipe nobody asked for.
+#
+# The ambiguous case is an account literally NAMED "1042". getent resolves a
+# numeric argument as a uid first, so this would find the uid-1042 account and
+# not the one named "1042"; useradd(8) refuses an all-digit name for exactly
+# this class of reason, so it is not a case that can arise from a supported
+# path.
+case "$account" in
+    ''|*[!0-9]*) : ;;
+    *)
+        if [ -n "${APEX_GUEST_PASSWD:-}" ]; then
+            resolved="$(awk -F: -v u="$account" '$3 == u { print $1; exit }' "$APEX_GUEST_PASSWD")"
+        else
+            resolved="$(getent passwd "$account" 2>/dev/null | cut -d: -f1)"
+        fi
+        [ -n "$resolved" ] || deny "no account on this machine has uid $account"
+        log "uid $account is the account '$resolved'"
+        account="$resolved"
+        ;;
+esac
+
+# ── fence 1: the allowlist ───────────────────────────────────────────────────
+#
+# Read with a plain line match on a trimmed line rather than `grep -q "$account"`
+# — an unanchored grep would let the account `x` match a line reading `proxy`,
+# which is the whole allowlist defeated by a substring. Comments and blanks are
+# skipped so the shipped file can explain itself.
+allowed=no
+if [ -f "$ALLOWLIST" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"
+        # Trim leading and trailing whitespace without invoking anything.
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [ -n "$line" ] || continue
+        [ "$line" = "$account" ] && { allowed=yes; break; }
+    done < "$ALLOWLIST"
+fi
+[ "$allowed" = yes ] || deny \
+    "'$account' is not listed in $ALLOWLIST, so it is not a disposable guest account"
+
+# ── fence 2: the account exists, and is not root ─────────────────────────────
+if [ -n "${APEX_GUEST_PASSWD:-}" ]; then
+    entry="$(awk -F: -v u="$account" '$1 == u { print; exit }' "$APEX_GUEST_PASSWD")"
+else
+    entry="$(getent passwd "$account")"
+fi
+[ -n "$entry" ] || deny "'$account' is not an account on this machine"
+
+uid="$(printf '%s' "$entry" | cut -d: -f3)"
+home="$(printf '%s' "$entry" | cut -d: -f6)"
+
+case "$uid" in
+    ''|*[!0-9]*) deny "'$account' has an unreadable uid '${uid}'" ;;
+esac
+[ "$uid" -ne 0 ] || deny "'$account' is uid 0; root is never a disposable guest"
+
+# ── fence 3: the home is a real home ─────────────────────────────────────────
+#
+# The list is spelled out rather than derived. A rule like "must have more than
+# two path components" is the kind that looks general and admits /var/home —
+# which on this system IS the parent of every real account's home.
+case "$home" in
+    ''|/|/home|/home/|/var/home|/var/home/|/root|/root/|/usr|/var|/etc)
+        deny "'$account' has home '${home}', which is not a home directory" ;;
+esac
+case "$home" in
+    /*) : ;;
+    *)  deny "'$account' has a relative home '${home}'" ;;
+esac
+
+# ── fence 4: nobody is logged in as this account ─────────────────────────────
+#
+# `loginctl list-sessions` rather than `who`: utmp is advisory and a wayland
+# session need not appear in it, while logind is the thing that actually owns
+# the session this script is cleaning up after.
+sessions_cmd="${APEX_GUEST_SESSIONS:-}"
+if [ -n "$sessions_cmd" ]; then
+    live="$($sessions_cmd 2>/dev/null)"
+elif command -v loginctl >/dev/null 2>&1; then
+    live="$(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $3}')"
+else
+    # No logind to ask. Refusing is the only safe answer: "I could not check"
+    # and "nobody is logged in" are not the same, and this is the fence whose
+    # failure mode is deleting a live desktop.
+    deny "loginctl is not available, so it cannot be established that '$account' is logged out"
+fi
+if printf '%s\n' "$live" | grep -qx -- "$account"; then
+    # The detail before the refusal, because the refusal on its own has sent a
+    # reader looking for a desktop that is not there. logind lists a session in
+    # `State=closing` too, and its leader may already be gone; a STUCK one — a
+    # scope logind never reaped — holds this refusal until the next boot.
+    # Observed on the L16: a guest logged out, the session's leader died, the
+    # record stayed `closing`, and the wipe refused at every subsequent logout.
+    # That is the conservative answer and it is the right one, because "the
+    # record is stuck" and "somebody is still sitting there" look identical
+    # from here. The boot-time sweep, apex-guest-wipe@.service, is the backstop
+    # for exactly that case.
+    log "logind still lists a session for '$account'; a record in State=closing counts, and a stuck one holds this refusal until the next boot. \`loginctl list-sessions\` shows which."
+    deny "'$account' still has an active login session"
+fi
+
+# ── the wipe ─────────────────────────────────────────────────────────────────
+#
+# Everything below is best-effort per target and reports what it could not do,
+# rather than aborting half way: a guest namespace that is partly cleared is
+# worse than one that is cleared as far as possible with the remainder named.
+rc=0
+
+# The home's CONTENTS, not the directory. The directory is provisioned (a
+# tmpfs mount, or a tmpfiles.d line) and removing it would take the mount point
+# with it. Dotfiles included, which `rm -rf "$home"/*` silently misses — that
+# omission would leave ~/.config, ~/.local and ~/.ssh, i.e. everything worth
+# wiping.
+if [ -d "$home" ]; then
+    if find "$home" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null; then
+        log "cleared the home directory $home"
+    else
+        log "could not fully clear $home"; rc=1
+    fi
+else
+    log "no home directory at $home; nothing to clear there"
+fi
+
+# The credential namespace. THIS is the line the whole script exists for: the
+# home wipe above is what everybody writes and it is not enough on APEX.
+user_store="$STORE/users/$uid"
+if [ -d "$user_store" ]; then
+    if rm -rf -- "$user_store" 2>/dev/null; then
+        log "cleared the protected credential namespace $user_store"
+    else
+        log "could not clear $user_store"; rc=1
+    fi
+else
+    log "no credential namespace at $user_store; nothing to clear there"
+fi
+
+# The greeter's memory of who was here. Rewritten only when it names the guest,
+# so a wipe never disturbs the last-user of the machine's actual owner.
+last_user="$GREET_STATE/last-user"
+if [ -f "$last_user" ] && [ "$(cat "$last_user" 2>/dev/null)" = "$account" ]; then
+    if : > "$last_user" 2>/dev/null; then
+        log "cleared the greeter's last-user, which named the guest"
+    else
+        log "could not clear $last_user"; rc=1
+    fi
+fi
+
+exit "$rc"

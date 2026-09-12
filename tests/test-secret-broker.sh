@@ -210,12 +210,38 @@ printf '%s' "$out" | grep -q "$SENTINEL" \
 
 # ── the vocabulary is closed ─────────────────────────────────────────────────
 section "the vocabulary is closed"
-for evil in exec sh git.clone curl run cloudflare.dns.delete; do
+# `cloudflare.account.delete` is deliberately NOT a §13.2 name and never will
+# be: §13.2 offers `cloudflare.account.read` and nothing else on an account.
+# What this list needs is a well-formed id that no provider declares, and it
+# used to hold `cloudflare.dns.delete` -- which stopped being one the day
+# P1-008 implemented all 32 of §13.2's names. The case then rode the
+# integration tip red, asserting that the vocabulary is closed against a name
+# that had moved inside it. Taking the next id from the unimplemented end of
+# §13.2 would only set the same trap for whoever implements it next; the same
+# swap was made in the Rust half of this claim,
+# `service.rs::the_vocabulary_is_closed_at_the_grant_and_at_the_use`.
+for evil in exec sh git.clone curl run cloudflare.account.delete; do
     out="$(cd "$PROJ" && "$APEX" secret use demo "$evil" origin 2>&1)"
     printf '%s' "$out" | grep -qE "not an operation" \
         && ok "'$evil' is not an operation" \
         || { bad "'$evil' is not an operation"; printf '      %s\n' "$out"; }
 done
+
+# The other half of "closed", and the half the stale case was standing in for:
+# a name that IS in the vocabulary must not be refused BY the vocabulary.
+# `cloudflare.dns.delete` is a real operation now, so it gets past the id check
+# and is stopped by the grant instead -- a different refusal, naming the grant
+# that would allow it. Without this arm the loop above would still pass on a
+# build that had lost every operation it offers, because then every id is
+# "not an operation".
+out="$(cd "$PROJ" && "$APEX" secret use demo cloudflare.dns.delete origin -o type=A 2>&1)"
+if printf '%s' "$out" | grep -q "not granted" \
+   && ! printf '%s' "$out" | grep -q "not an operation"; then
+    ok "an id the vocabulary does hold is stopped by the grant, not by the vocabulary"
+else
+    bad "an id the vocabulary does hold is stopped by the grant, not by the vocabulary"
+    printf '      %s\n' "$out"
+fi
 
 section "a resource may not be a URL"
 # The hole this closes: with a URL accepted, a session asks the broker to push

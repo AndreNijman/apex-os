@@ -166,6 +166,32 @@ impl Verb {
         }
     }
 
+    /// This verb's name, without its arguments.
+    ///
+    /// What a system-access grant is scoped by (§4.4's "capability-scoped").
+    /// Deliberately coarser than [`Verb::grant_key`], which pins the exact
+    /// arguments: a per-project grant is a standing decision and has to name
+    /// the packages, while a session grant is a bounded window in which the
+    /// user has said "this session may install things" — pinning the argument
+    /// there would mean the grant covered nothing the user had not already
+    /// approved individually, which is a grant that buys nothing.
+    ///
+    /// Every name here is in [`Verb::names`], and a test holds the two
+    /// together, so a verb added to the vocabulary cannot arrive with a name
+    /// no grant can be written against.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Verb::Install { .. } => "install",
+            Verb::Remove { .. } => "remove",
+            Verb::PkgUpgrade => "pkg-upgrade",
+            Verb::PkgRebuild => "pkg-rebuild",
+            Verb::PkgRollback => "pkg-rollback",
+            Verb::Pin => "pin",
+            Verb::Rollback => "rollback",
+            Verb::Update => "update",
+        }
+    }
+
     /// Every verb name accepted by [`Verb::parse`], for `--help` and
     /// completion.
     pub fn names() -> &'static [&'static str] {
@@ -453,6 +479,15 @@ pub struct PrivilegeRequest {
     /// How [`PrivilegeRequest::request_origin`] was arrived at.
     #[serde(default)]
     pub origin_source: Option<OriginSource>,
+    /// Which remote actor the origin was declared for, when one was named.
+    ///
+    /// A paired device id when the request reached the daemon through APEX
+    /// Remote, `None` for everything else. `request_origin` says a remote
+    /// something filed this; this says which device, which is what a human
+    /// reading the prompt actually wants to know before handing out root.
+    /// Never a key or a token — this record is on disk and in the audit log.
+    #[serde(default)]
+    pub actor: Option<String>,
     pub decision: Decision,
     /// Milliseconds since the epoch, when filed.
     pub created_ms: u64,
@@ -466,6 +501,16 @@ pub struct PrivilegeRequest {
     /// Exit status of the operation, when it has run.
     #[serde(default)]
     pub exit_code: Option<i32>,
+    /// The §4.4 system-access grant that covered this request, when one did.
+    ///
+    /// A decided request has one of two authorities behind it, and an audit is
+    /// read to tell them apart: a standing per-project grant the human left in
+    /// `grants.json`, or a short-lived session grant that was authenticated at
+    /// the top of this session and dies with it. Recording the grant id lets
+    /// the two trails be joined — this record, and the `APEX_GRANT_ID` line
+    /// journald holds for the same grant.
+    #[serde(default)]
+    pub system_grant: Option<u32>,
 }
 
 impl PrivilegeRequest {
@@ -660,6 +705,10 @@ pub fn audit(path: &Path, event: &str, req: &PrivilegeRequest) -> std::io::Resul
         "request_origin": req.request_origin.map(|o| o.as_str()),
         "origin_source": req.origin_source.map(|s| s.as_str()),
         "decision": req.decision.as_str(),
+        // Which authority decided it. A session grant is not a standing
+        // project grant, and a line that cannot tell them apart cannot answer
+        // "what was root allowed to do while that window was open".
+        "system_grant": req.system_grant,
         "exit_code": req.exit_code,
     });
     let mut file = std::fs::OpenOptions::new()
@@ -747,6 +796,31 @@ impl Grants {
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_verb_name_is_one_a_grant_can_be_written_against() {
+        // `Verb::name` is what a system-access grant is scoped by, and
+        // `Verb::names` is what the CLI lists and what a grant is built from.
+        // A verb whose `name()` was not in `names()` would be uncoverable by
+        // any grant — silently, and only for that one operation.
+        for name in Verb::names() {
+            let args = if matches!(*name, "install" | "remove") {
+                vec!["clang".to_string()]
+            } else {
+                vec![]
+            };
+            let verb = Verb::parse(name, &args).expect("a real verb");
+            assert_eq!(verb.name(), *name, "{name} round-trips to a different name");
+            // And the coarse name is a prefix of the exact key, so the two
+            // scopes cannot be about different operations.
+            assert!(
+                verb.grant_key().starts_with(verb.name()),
+                "{name}: {} does not start with {}",
+                verb.grant_key(),
+                verb.name()
+            );
+        }
+    }
+
     fn req(verb: Verb) -> PrivilegeRequest {
         PrivilegeRequest {
             id: 1,
@@ -757,11 +831,13 @@ mod tests {
             project: Some("/home/tester/Projects/demo".into()),
             request_origin: Some(RequestOrigin::LocalTerminal),
             origin_source: Some(OriginSource::Inherited),
+            actor: None,
             decision: Decision::Pending,
             created_ms: 1_700_000_000_000,
             decided_ms: None,
             executed_ms: None,
             exit_code: None,
+            system_grant: None,
         }
     }
 
@@ -1295,6 +1371,37 @@ mod tests {
         let last: serde_json::Value =
             serde_json::from_str(text.lines().last().unwrap()).expect("JSON");
         assert!(last["request_origin"].is_null(), "{last}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn the_audit_line_names_the_system_grant_that_decided_the_request() {
+        // §4.4's audit criterion. A request decided by a session grant and one
+        // decided by a standing project grant look identical in the trail
+        // unless the line says which — and only one of them is still true five
+        // minutes later.
+        let d = tmpdir("audit-grant");
+        let log = d.join("audit.jsonl");
+        let mut r = req(Verb::Update);
+        r.decision = Decision::AllowOnce;
+        r.system_grant = Some(3);
+        audit(&log, "requested-and-covered", &r).expect("audit");
+
+        let text = std::fs::read_to_string(&log).expect("read");
+        let v: serde_json::Value = serde_json::from_str(text.trim()).expect("one JSON object");
+        assert_eq!(v["event"], "requested-and-covered");
+        assert_eq!(v["decision"], "allow_once");
+        assert_eq!(v["system_grant"], 3, "the line must join to the grant: {v}");
+
+        // A request no grant covered says so with a null, rather than leaving
+        // the key out and letting a reader assume the previous line's answer.
+        r.system_grant = None;
+        r.decision = Decision::Pending;
+        audit(&log, "requested", &r).expect("audit");
+        let text = std::fs::read_to_string(&log).expect("read");
+        let last: serde_json::Value =
+            serde_json::from_str(text.lines().last().unwrap()).expect("JSON");
+        assert!(last["system_grant"].is_null(), "{last}");
         std::fs::remove_dir_all(&d).ok();
     }
 

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      A bare shell. Everything visible is decided in Compose, by
+      `ApexRemoteTheme`, because that is where dynamic colour and the
+      dark/light choice live. This exists only so the window has a background
+      before the first frame and does not flash white on a dark device.
+    -->
+    <style name="Theme.ApexRemote" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/background_dark</item>
+    </style>
+</resources>

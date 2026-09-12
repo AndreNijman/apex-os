@@ -12,6 +12,15 @@ rust-version.workspace = true
 name = "apex_agent_core"
 path = "src/lib.rs"
 
+# `test-support` compiles `webauthn::test_support`, whose `Signer` is the only
+# thing in this repository that can mint a valid assertion. It is off by
+# default and must stay a DEV-dependency feature everywhere: the workspace is
+# on resolver 2, so a feature asked for in `[dev-dependencies]` is not unified
+# into a `cargo build` of the shipped binaries. It exposes a private key, never
+# a `SecondFactor` constructor — see the module's own doc comment.
+[features]
+test-support = []
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true

@@ -6,6 +6,7 @@
 //!     <service>.json                         0600  metadata — never a value
 //!     <service>.secret                       0600  the value, raw bytes
 //!     grants.json                            0600  which project may do what
+//!     approvals.json                         0600  what the owner approved ONCE
 //!   audit.jsonl                              0600  append-only
 //! ```
 //!
@@ -22,7 +23,7 @@
 //! another's. The daemon derives the uid from `SO_PEERCRED`, never from the
 //! request.
 //!
-//! **Grants live here too, not in `$HOME`.** In the agent-runtime broker they
+//! **Grants and approvals live here too, not in `$HOME`.** In the agent-runtime broker they
 //! were a user-writable JSON file, which meant an unconfined session could
 //! grant itself every capability and then use it. Behind the root boundary it
 //! cannot: writing a grant now needs the daemon's agreement, and the daemon
@@ -214,7 +215,8 @@ pub fn valid_service_name(name: &str) -> bool {
         && !name.starts_with('.')
 }
 
-/// Per-project capability grants: project root -> `service:capability`.
+/// Capability grants: a project root — or [`ANY_PROJECT`] — to
+/// `service:capability`.
 ///
 /// Keyed on the capability NAME rather than on its arguments. Deliberate:
 /// `git-push origin` and `git-push origin my-branch` are the same permission,
@@ -231,14 +233,40 @@ fn grant_key(service: &str, capability: &str) -> String {
     format!("{service}:{capability}")
 }
 
+/// The project key that means "wherever the agent happens to be".
+///
+/// Not a path, so it can never collide with one: [`crate`]'s callers require a
+/// project key to be absolute, and `*` is not.
+///
+/// It exists because MCP servers are global and grants are per project. A
+/// memory server is defined once in `~/.claude.json` and is therefore present
+/// in every directory, so without this every new worktree is a directory where
+/// that server is unauthorised until somebody notices and grants it again — and
+/// what the agent reports is a broken server, not a missing permission.
+///
+/// **Only for an operation that names nothing.** `mcp.request` declares no
+/// resource and no parameters, so the endpoint can only be the one pinned when
+/// the credential was stored: granting it everywhere widens *where* it may be
+/// asked for and not *what* it reaches. `git.push` acts on a resource resolved
+/// out of the repository the caller is standing in, so the same key there would
+/// be a different permission in every directory. `Service::grant` is where that
+/// is enforced, because the CLI is not the trust boundary.
+pub const ANY_PROJECT: &str = "*";
+
 impl Grants {
     /// Fails closed: no project, no grant.
+    ///
+    /// [`ANY_PROJECT`] is checked after the named project and never instead of
+    /// it: a request that carries no project at all still matches nothing,
+    /// which is the property `grants_fail_closed_without_a_project` pins.
     pub fn allows(&self, project: Option<&str>, service: &str, capability: &str) -> bool {
         let Some(project) = project else { return false };
         let key = grant_key(service, capability);
-        self.projects
-            .get(project)
-            .is_some_and(|keys| keys.contains(&key))
+        [project, ANY_PROJECT].iter().any(|scope| {
+            self.projects
+                .get(*scope)
+                .is_some_and(|keys| keys.contains(&key))
+        })
     }
 
     /// Whether any of `names` is granted. Fails closed the same way.
@@ -312,6 +340,161 @@ impl Grants {
     }
 }
 
+/// §13.8's other half: one thing the owner approved, once.
+///
+/// A [`Grants`] entry is standing permission — it says *this agent may deploy
+/// this project's workers*, and it keeps saying it. §13.8 asks for something a
+/// grant cannot express: *"production: approval required"*, where the owner
+/// decides **each time**. So this is the unit that is spent rather than
+/// consulted, and the two are deliberately different types with different
+/// files: a bug that confused them would turn "approve this one deploy" into
+/// "approve every deploy from now on", which is the exact thing §13.8 says
+/// must be written down explicitly instead.
+///
+/// ## Why it is keyed on the resource and a grant is not
+///
+/// [`Grants`]' own note argues that a grant per branch means a prompt per
+/// branch, which teaches people to approve without reading. That argument is
+/// about *standing* permission and it inverts here: an approval IS the prompt,
+/// and one that covered every worker in the project would be approving the
+/// production deploy by approving the preview one.
+///
+/// What it does **not** narrow is the operation's options. An approval for
+/// `cloudflare.worker.deploy` on `my-worker` covers whichever `version` the
+/// agent then names, because the owner approving a deploy is approving the
+/// deploy the agent is about to do, and a version id is not something a person
+/// can meaningfully check by eye. The narrowing that matters is which worker,
+/// in which project, under which credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Approval {
+    /// Absolute project root. Never [`ANY_PROJECT`]: an approval is for one
+    /// operation in one place, and `*` would make it standing permission
+    /// wearing a different name.
+    pub project: String,
+    /// The stored credential it may be spent under.
+    pub service: String,
+    /// The canonical operation id, as the registry resolved it.
+    pub operation: String,
+    /// The resource, exactly as the operation will name it. Empty for an
+    /// operation that names nothing.
+    pub resource: String,
+    /// When the owner gave it, ms since the epoch.
+    pub granted_ms: u64,
+    /// When it stops being spendable, ms since the epoch.
+    ///
+    /// Not optional. An approval that never expired would be a grant the owner
+    /// did not know they were making: they approve a deploy, the agent does
+    /// not get to it, and six weeks later a different session spends it.
+    pub expires_ms: u64,
+}
+
+/// Every approval the owner has outstanding, for one account.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Approvals {
+    #[serde(default)]
+    pub pending: Vec<Approval>,
+}
+
+/// How long an approval lives when the owner does not say.
+///
+/// Long enough to walk back to the terminal the agent is in; short enough that
+/// an approval nobody spent is gone by the time anybody has forgotten giving
+/// it.
+pub const APPROVAL_TTL_MS: u64 = 15 * 60 * 1000;
+
+/// The longest one may live, whatever was asked for.
+///
+/// A day, and refused rather than clamped above it, for [`super::project`]'s
+/// reason: somebody who wrote a week meant a week, and silently giving them a
+/// day would be this service deciding what they meant.
+pub const MAX_APPROVAL_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+
+impl Approvals {
+    /// Record one, replacing an identical one rather than stacking it.
+    ///
+    /// Replacing and not appending: an owner who runs the same command twice
+    /// because the first did not appear to work has approved one operation,
+    /// not two. Two would mean the agent got a second deploy nobody asked for.
+    pub fn approve(&mut self, approval: Approval) {
+        self.pending.retain(|a| {
+            !(a.project == approval.project
+                && a.service == approval.service
+                && a.operation == approval.operation
+                && a.resource == approval.resource)
+        });
+        self.pending.push(approval);
+    }
+
+    /// Take the one that matches, if there is one that has not expired.
+    ///
+    /// **Removes it.** The caller has to persist the result, which is why this
+    /// hands back the approval it spent rather than a bool: a spend that was
+    /// not written to disk is a spend that did not happen, and the caller that
+    /// forgot to save would otherwise look identical to one that had nothing
+    /// to spend.
+    ///
+    /// `names` is one operation's canonical id and the older spellings it
+    /// answers to, for [`Grants::allows_any`]' reason: an approval written
+    /// before a rename must not silently stop matching.
+    pub fn spend(
+        &mut self,
+        project: &str,
+        service: &str,
+        names: &[&str],
+        resource: &str,
+        now: u64,
+    ) -> Option<Approval> {
+        let at = self.pending.iter().position(|a| {
+            a.project == project
+                && a.service == service
+                && a.resource == resource
+                && a.expires_ms > now
+                && names.contains(&a.operation.as_str())
+        })?;
+        Some(self.pending.remove(at))
+    }
+
+    /// Withdraw one the owner no longer means, and say whether it was there.
+    pub fn withdraw(
+        &mut self,
+        project: &str,
+        service: &str,
+        names: &[&str],
+        resource: &str,
+    ) -> bool {
+        let before = self.pending.len();
+        self.pending.retain(|a| {
+            !(a.project == project
+                && a.service == service
+                && a.resource == resource
+                && names.contains(&a.operation.as_str()))
+        });
+        self.pending.len() != before
+    }
+
+    /// Drop everything that has expired, and say how many went.
+    ///
+    /// [`Approvals::spend`] already refuses an expired one, so this is
+    /// housekeeping rather than a check: without it the file grows by one line
+    /// per approval nobody spent, forever.
+    pub fn prune(&mut self, now: u64) -> usize {
+        let before = self.pending.len();
+        self.pending.retain(|a| a.expires_ms > now);
+        before - self.pending.len()
+    }
+
+    /// Drop every approval that names `service`, across every project.
+    ///
+    /// Called when a credential is removed, for [`Grants::forget_service`]'s
+    /// reason: re-adding a credential under the same name must not inherit an
+    /// approval somebody gave the old one.
+    pub fn forget_service(&mut self, service: &str) -> usize {
+        let before = self.pending.len();
+        self.pending.retain(|a| a.service != service);
+        before - self.pending.len()
+    }
+}
+
 /// The store, rooted at a directory.
 ///
 /// The root is a parameter rather than a constant so the daemon can be pointed
@@ -352,6 +535,15 @@ impl Store {
 
     fn grants_path(&self, uid: u32) -> PathBuf {
         self.user_dir(uid).join("grants.json")
+    }
+
+    /// Separate from `grants.json`, and not a section inside it.
+    ///
+    /// A file each, because the two have different lifetimes and one of them is
+    /// spent: a save of the grants that happened to carry a stale copy of the
+    /// approvals would put a spent approval back.
+    fn approvals_path(&self, uid: u32) -> PathBuf {
+        self.user_dir(uid).join("approvals.json")
     }
 
     /// The machine's audit log.
@@ -456,6 +648,13 @@ impl Store {
         if grants.forget_service(service) > 0 {
             self.save_grants(uid, &grants)?;
         }
+        // And §13.8's approvals, for the same reason the grants go: an
+        // approval left behind would be inherited by whatever is stored under
+        // this name next, which is a credential nobody approved anything for.
+        let mut approvals = self.approvals(uid);
+        if approvals.forget_service(service) > 0 {
+            self.save_approvals(uid, &approvals)?;
+        }
         Ok(())
     }
 
@@ -490,6 +689,26 @@ impl Store {
         let text = serde_json::to_vec_pretty(grants)
             .map_err(|e| StoreError::Io(format!("serialising: {e}")))?;
         write_private(&self.grants_path(uid), &text)
+    }
+
+    /// §13.8's outstanding approvals for one account.
+    ///
+    /// A file that cannot be parsed reads as none, like [`Store::grants`], and
+    /// that is the right direction for this one in a way it is only arguably
+    /// right for grants: an unreadable approvals file means the operation is
+    /// refused for want of an approval, not performed for want of a refusal.
+    pub fn approvals(&self, uid: u32) -> Approvals {
+        std::fs::read_to_string(self.approvals_path(uid))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_approvals(&self, uid: u32, approvals: &Approvals) -> Result<(), StoreError> {
+        ensure_private_dir(&self.user_dir(uid)).map_err(|e| StoreError::Io(e.to_string()))?;
+        let text = serde_json::to_vec_pretty(approvals)
+            .map_err(|e| StoreError::Io(format!("serialising: {e}")))?;
+        write_private(&self.approvals_path(uid), &text)
     }
 }
 
@@ -778,6 +997,46 @@ mod tests {
     }
 
     #[test]
+    fn a_grant_held_everywhere_matches_any_project_and_still_no_project() {
+        // The key that exists because MCP servers are global and grants are
+        // per project. It widens *where* an operation may be asked for.
+        let mut grants = Grants::default();
+        grants.allow(ANY_PROJECT, "memory", "mcp.request");
+        assert!(grants.allows(Some("/p"), "memory", "mcp.request"));
+        assert!(grants.allows(Some("/somewhere/else/entirely"), "memory", "mcp.request"));
+
+        // And it widens nothing else. A caller with no project at all still
+        // matches nothing — the fail-closed property the test above pins is
+        // not a special case of this one, and `*` must not become the hole in
+        // it. `mcp.request` is refused on a `Use` before this is ever reached,
+        // because the daemon requires an absolute project on the record; this
+        // is the second place that has to hold.
+        assert!(!grants.allows(None, "memory", "mcp.request"));
+        // Still per capability and per service.
+        assert!(!grants.allows(Some("/p"), "memory", "git.push"));
+        assert!(!grants.allows(Some("/p"), "other", "mcp.request"));
+
+        // Withdrawing it is withdrawing one key, and it takes the grant with
+        // it everywhere rather than in the project the revoke was run from.
+        assert!(grants.revoke(ANY_PROJECT, "memory", "mcp.request"));
+        assert!(!grants.allows(Some("/p"), "memory", "mcp.request"));
+    }
+
+    #[test]
+    fn removing_a_credential_forgets_what_it_was_allowed_everywhere_too() {
+        // `forget_service` walks every key, and `*` is a key. If it did not,
+        // re-adding a credential under the same name would silently inherit a
+        // grant that applies in every project — the widest version of the
+        // failure that function exists to prevent.
+        let mut grants = Grants::default();
+        grants.allow(ANY_PROJECT, "memory", "mcp.request");
+        grants.allow("/p", "memory", "mcp.request");
+        assert_eq!(grants.forget_service("memory"), 2);
+        assert!(!grants.allows(Some("/p"), "memory", "mcp.request"));
+        assert!(grants.projects.is_empty(), "{:?}", grants.projects);
+    }
+
+    #[test]
     fn granting_twice_does_not_duplicate_and_revoking_empties_the_project() {
         let mut grants = Grants::default();
         grants.allow("/p", "demo", "git-fetch");
@@ -809,5 +1068,127 @@ mod tests {
             serde_json::from_str(r#"{"service":"demo","host":"github.com"}"#).unwrap();
         assert_eq!(info.scheme, "https");
         assert_eq!(info.username, "x-access-token");
+    }
+
+    // ── §13.8's approvals ───────────────────────────────────────────────────
+
+    fn approval(project: &str, operation: &str, resource: &str, expires_ms: u64) -> Approval {
+        Approval {
+            project: project.to_string(),
+            service: "cf".to_string(),
+            operation: operation.to_string(),
+            resource: resource.to_string(),
+            granted_ms: 0,
+            expires_ms,
+        }
+    }
+
+    #[test]
+    fn an_approval_is_spent_once_and_is_then_gone() {
+        // The property that makes this a different thing from a grant. A
+        // `Grants` lookup answers the same way however many times it is asked.
+        let mut a = Approvals::default();
+        a.approve(approval("/p", "cf.deploy", "w", 100));
+        assert!(a.spend("/p", "cf", &["cf.deploy"], "w", 50).is_some());
+        assert!(
+            a.spend("/p", "cf", &["cf.deploy"], "w", 50).is_none(),
+            "the same approval was spent twice"
+        );
+    }
+
+    #[test]
+    fn an_approval_matches_on_all_four_of_project_service_operation_and_resource() {
+        // Every one of these is a way for an approval to authorise something
+        // the owner did not look at.
+        let mut a = Approvals::default();
+        a.approve(approval("/p", "cf.deploy", "w", 100));
+        assert!(a.spend("/other", "cf", &["cf.deploy"], "w", 1).is_none(), "project");
+        assert!(a.spend("/p", "other", &["cf.deploy"], "w", 1).is_none(), "service");
+        assert!(a.spend("/p", "cf", &["cf.rollback"], "w", 1).is_none(), "operation");
+        assert!(a.spend("/p", "cf", &["cf.deploy"], "other", 1).is_none(), "resource");
+        // And after all four near misses it is still there, so none of them
+        // consumed it on the way past.
+        assert!(a.spend("/p", "cf", &["cf.deploy"], "w", 1).is_some());
+    }
+
+    #[test]
+    fn an_approval_that_has_expired_cannot_be_spent_and_is_not_listed() {
+        let mut a = Approvals::default();
+        a.approve(approval("/p", "cf.deploy", "w", 100));
+        assert!(
+            a.spend("/p", "cf", &["cf.deploy"], "w", 100).is_none(),
+            "an approval expiring AT `now` is expired: a boundary that went the \
+             other way would make a zero-length approval spendable"
+        );
+        assert_eq!(a.prune(100), 1);
+        assert!(a.pending.is_empty());
+    }
+
+    #[test]
+    fn approving_the_same_thing_twice_approves_it_once() {
+        // An owner who runs the same command again because the first did not
+        // appear to work has approved one deployment, not two.
+        let mut a = Approvals::default();
+        a.approve(approval("/p", "cf.deploy", "w", 100));
+        a.approve(approval("/p", "cf.deploy", "w", 200));
+        assert_eq!(a.pending.len(), 1);
+        assert_eq!(a.pending[0].expires_ms, 200, "the later one replaced the earlier");
+    }
+
+    #[test]
+    fn an_approval_written_under_an_older_spelling_still_matches_and_can_be_withdrawn() {
+        // `Grants::allows_any`'s reason, one level over: an approval recorded
+        // before a rename must not silently stop matching, and a withdraw that
+        // looked only for the canonical name would report "nothing approved"
+        // while leaving one in place.
+        let mut a = Approvals::default();
+        a.approve(approval("/p", "cf-deploy", "w", 100));
+        let names = ["cf.deploy", "cf-deploy"];
+        assert!(a.spend("/p", "cf", &names, "w", 1).is_some());
+
+        a.approve(approval("/p", "cf-deploy", "w", 100));
+        assert!(a.withdraw("/p", "cf", &names, "w"));
+        assert!(a.pending.is_empty());
+        assert!(!a.withdraw("/p", "cf", &names, "w"), "withdrawing twice must say so");
+    }
+
+    #[test]
+    fn removing_a_credential_takes_its_approvals_with_it() {
+        // `Grants::forget_service`'s reason: re-adding a credential under the
+        // same name must not inherit permission somebody gave the old one —
+        // and an approval is permission that runs without being asked for
+        // again.
+        let dir = std::env::temp_dir().join(format!("apex-approvals-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let store = Store::new(dir.clone());
+        let uid = 4242;
+        let mut a = Approvals::default();
+        a.approve(approval("/p", "cf.deploy", "w", u64::MAX));
+        store.save_approvals(uid, &a).expect("save");
+        assert_eq!(store.approvals(uid).pending.len(), 1);
+
+        // `remove` needs a credential to remove, so store one first.
+        store
+            .put(
+                uid,
+                &ServiceInfo {
+                    service: "cf".into(),
+                    host: "api.cloudflare.com".into(),
+                    scheme: "https".into(),
+                    username: "x".into(),
+                    path: String::new(),
+                    auth: "bearer".into(),
+                    port: None,
+                    added: 0,
+                },
+                &SecretValue::new(b"not-a-real-token".to_vec()),
+            )
+            .expect("put");
+        store.remove(uid, "cf").expect("remove");
+        assert!(
+            store.approvals(uid).pending.is_empty(),
+            "an approval outlived the credential it was for"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

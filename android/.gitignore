@@ -1,0 +1,14 @@
+# Gradle's own caches and the build outputs. Nothing here is reproducible
+# input; everything here is derived from the sources beside it.
+.gradle/
+build/
+.kotlin/
+
+# `sdk.dir` is a path on one machine. It comes from ANDROID_HOME at build
+# time — committing it would make this tree buildable only where it was
+# written, and CI has its own SDK in a different place.
+local.properties
+
+*.iml
+.idea/
+captures/

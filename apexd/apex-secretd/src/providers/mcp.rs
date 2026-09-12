@@ -52,7 +52,7 @@ use apex_secret_core::operation::{Effect, OperationSpec, ProviderSpec, ResourceK
 use apex_secret_core::SecretValue;
 
 use crate::broker;
-use crate::provider::{Bind, Bound, Endpoint, Performed, Provider, ProviderError};
+use crate::provider::{Approval, Bind, Bound, Endpoint, Performed, Provider, ProviderError};
 
 /// The MCP vocabulary, in §13.2's shape.
 ///
@@ -72,6 +72,16 @@ pub const SPEC: ProviderSpec = ProviderSpec {
         resource: ResourceKind::None,
         params: &[],
         aliases: &["mcp-request"],
+        // The endpoint comes ENTIRELY from the stored record's own host,
+        // port and path — `bind` reads `req.service` and never `req.project`
+        // — so the directory the caller stands in contributes nothing to
+        // where this goes. That is what makes `*` safe here, and it is a
+        // fact about this module rather than about the declaration above:
+        // an operation that declared exactly the same thing and read the
+        // project in `bind` would not qualify. See
+        // `providers::tests::an_operation_that_claims_to_reach_the_same_
+        // thing_everywhere_must_bind_the_same_in_two_projects`.
+        same_everywhere: true,
     }],
 };
 
@@ -139,6 +149,13 @@ impl Provider for McpProvider {
             // audit line that carried one would invite somebody to grep the
             // trail for what a session was asking a server about.
             detail: format!("mcp request to {}", req.service.service),
+            // An MCP request answers; it does not issue a credential.
+            creates: None,
+            // §13.8 is about environments, and an MCP server has none: the
+            // endpoint is the stored record's own and the caller contributes
+            // nothing to it. There is no production half of a thing with one
+            // half.
+            approval: Approval::Standing,
         })
     }
 
@@ -166,6 +183,7 @@ impl Provider for McpProvider {
         Ok(Performed {
             code: http.out.code,
             output: http.out.text,
+            created: None,
         })
     }
 }
@@ -194,6 +212,16 @@ mod tests {
         let mut smuggled = Params::new();
         smuggled.insert("url".into(), "https://attacker.example".into());
         assert!(op.check("", &smuggled).is_err());
+
+        // The two facts above are what make the claim below *coherent* —
+        // `ProviderSpec::validate` refuses `same_everywhere` on an operation
+        // that names something — but they are not what makes it TRUE. That is
+        // this module's `bind`, which reads `req.service` and never
+        // `req.project`, and it is checked by
+        // `providers::tests::an_operation_that_claims_to_reach_the_same_thing_
+        // everywhere_binds_the_same_in_two_projects`.
+        assert!(op.names_nothing());
+        assert!(op.same_everywhere);
     }
 
     #[test]
@@ -227,6 +255,7 @@ mod tests {
             project: "/tmp",
             service: &service,
             owner: &owner,
+            audit_id: "test",
         };
         let e = McpProvider::new(std::env::temp_dir()).bind(&req).expect_err("no path, no endpoint");
         assert!(e.to_string().contains("--path"), "{e}");
@@ -257,6 +286,7 @@ mod tests {
             project: "/tmp",
             service: &service,
             owner: &owner,
+            audit_id: "test",
         };
         let provider = McpProvider::new(std::env::temp_dir());
         assert!(provider.bind(&req).is_err());

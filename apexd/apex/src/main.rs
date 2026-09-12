@@ -4,25 +4,45 @@
 //! tier planning work even when `apexd` is not running. Every D-Bus verb
 //! degrades gracefully — a clear message, a non-zero exit, never a panic.
 
+mod account;
 mod agent;
 mod ai;
+mod backup;
 mod blueprint;
+mod channel;
 mod boot;
+mod browser;
+mod cloudflare;
+mod connector;
+mod digest;
 mod dispatch;
 mod disposable;
+mod firmware;
 mod gaming;
 mod gitshim;
 mod host;
+mod lid;
 mod mcp;
 mod migrate;
 mod mode;
 mod ops;
+mod permissions;
+mod provenance;
 mod proxy;
+mod qualify;
 mod recover;
+mod remote;
+mod schema;
 mod request;
 mod secret;
+mod skill;
+mod storage;
 mod task;
 mod touchpad;
+mod trust;
+mod user;
+mod verify;
+mod vm;
 
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -96,6 +116,32 @@ enum Cmd {
     /// attached controllers. Exits non-zero when Gaming Mode would not start,
     /// so it is usable as a check.
     Gaming(gaming::GamingArgs),
+    /// Keep working with the lid shut, and say what that cost (P1-063).
+    ///
+    /// The lever is a logind `handle-lid-switch` block inhibitor held only
+    /// while there is live work, never an edit to `HandleLidSwitch=`: a machine
+    /// with nothing running must suspend in a bag exactly as it does today.
+    /// Thermal and battery guards suspend anyway and name themselves, and
+    /// `apex lid report` says what the last closed period actually did — how
+    /// long, what ran, whether the VPN held, what it cost in battery.
+    Lid {
+        #[command(subcommand)]
+        cmd: Option<lid::LidCmd>,
+    },
+    /// What applications may touch, who enforces it, and what a revocation
+    /// would actually do (P1-061).
+    ///
+    /// Read-only unless you ask for `revoke`. Every row carries the enforcer
+    /// beside the answer, because they are not the same statement: a Flatpak
+    /// whose manifest says `devices=all` opens /dev/video0 directly and is no
+    /// more restrained than a native binary, and there is no microphone portal
+    /// at all in any version of xdg-desktop-portal. `revoke` exits non-zero
+    /// with the reason where nothing can be revoked, rather than reporting a
+    /// success it did not achieve.
+    Permissions {
+        #[command(subcommand)]
+        cmd: Option<permissions::PermCmd>,
+    },
     /// What verified this boot, and what the boot counter believes (§22).
     ///
     /// Read-only. GRUB is the default bootloader for every published APEX
@@ -107,6 +153,73 @@ enum Cmd {
         #[command(subcommand)]
         cmd: boot::BootCmd,
     },
+    /// Which update channel this machine follows, and how the last update
+    /// went (§26).
+    ///
+    /// stable, candidate, beta and edge are four tags on one image. `status`
+    /// says which one this machine is on — including the answer for a machine
+    /// installed before channels existed, which is edge under an older name.
+    /// `set` moves between them; moving toward stable usually deploys an older
+    /// image, so that direction pins the current deployment first.
+    Channel {
+        #[command(subcommand)]
+        cmd: channel::ChannelCmd,
+    },
+    /// What this class of machine is known to do, and who established it (§33).
+    ///
+    /// A local database, kept only with explicit consent and sent nowhere.
+    /// Every check has three answers rather than two: a row nobody has tried
+    /// reads as not known, with the sentence saying who can settle it, because
+    /// "nobody has suspended this machine" is not "suspend is broken".
+    Qualify {
+        #[command(subcommand)]
+        cmd: qualify::QualifyCmd,
+    },
+    /// The disks in this machine, their health, and what nobody could ask
+    /// them (§48).
+    ///
+    /// Wear, temperature, TRIM, encryption, mount state and free space, with
+    /// every row carrying either a measurement or the reason there is none.
+    /// Reading needs no root except for the SMART log, which reports as
+    /// unavailable with the remedy rather than disappearing.
+    Storage {
+        #[command(subcommand)]
+        cmd: storage::StorageCmd,
+    },
+    /// Firmware: what this machine carries and what has an update waiting
+    /// (§P2-015).
+    ///
+    /// Reads fwupd's own JSON and never its exit status — measured, that
+    /// status means "nothing to do" when it is non-zero and accompanies an
+    /// explicit error document when it is zero. Secure Boot key and
+    /// revocation stores are listed apart from hardware, because most of what
+    /// fwupd calls updatable is one of those rather than a component.
+    Firmware {
+        #[command(subcommand)]
+        cmd: firmware::FirmwareCmd,
+    },
+    /// Persistent state: which schema each store is on, and what a rollback
+    /// would do to it (§25).
+    ///
+    /// `bootc rollback` puts /usr back and leaves /etc, /var and your home
+    /// exactly as the newer build left them. `status` says which files that
+    /// applies to and whether the older APEX can still read each one;
+    /// `migrate` runs the machine-written ones forward, keeping a copy of what
+    /// each was. Neither needs root, and `migrate` is a dry run without
+    /// --commit.
+    Schema {
+        #[command(subcommand)]
+        cmd: schema::SchemaCmd,
+    },
+    /// Whether the image this machine runs is the one APEX published (§27).
+    ///
+    /// Reports what was checked when the booted image was pulled, what the
+    /// signature policy will check on the next update, and — with `--verify` —
+    /// whether the registry holds a cosign signature and an SBOM attestation
+    /// for the digest running right now. The offline half reads files only, so
+    /// it needs no root and no network; a registry that cannot be reached is
+    /// reported as unavailable with the reason, never as unsigned.
+    Trust(trust::TrustArgs),
     /// Local model inference as an OS service (§14).
     ///
     /// One endpoint every application and agent client can use — a Unix socket
@@ -329,6 +442,38 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PluginCmd,
     },
+    /// Agent skills: where each came from, what it hashes to, and whether it
+    /// ships a program.
+    ///
+    /// `apex agent profile doctor` already counts skills and names the ones
+    /// with no `SKILL.md`. This is the inventory rather than the health check:
+    /// per skill, its origin, a digest of the files on disk, and whether it is
+    /// executable or reference-only — none of which anything recorded before.
+    ///
+    /// Unprivileged, and read-only: it never writes to a skill.
+    Skill {
+        #[command(subcommand)]
+        cmd: SkillCmd,
+    },
+    /// Where an agent plugin came from, and whether what is on disk is still
+    /// what arrived.
+    ///
+    /// **Not `apex plugin`**, which is apex-shell's QML plugin platform. This
+    /// is the agent's plugins — Claude Code's, under `~/.claude/plugins`,
+    /// installed from marketplaces.
+    ///
+    /// The registry already records a marketplace, a version and an install
+    /// path, and nothing has ever checked any of it against the bytes on disk:
+    /// there is no hash in it at all. This re-hashes each installed tree every
+    /// run and compares it with a recorded baseline, so a plugin edited after
+    /// it was installed is a finding rather than a green tick.
+    ///
+    /// Unprivileged. `show` is read-only; `record` writes only APEX's own
+    /// baseline store.
+    Provenance {
+        #[command(subcommand)]
+        cmd: ProvenanceCmd,
+    },
     /// The incoming firewall: what is dropped, and the exceptions you opened.
     ///
     /// APEX drops inbound traffic by default. Reading needs no privilege;
@@ -359,6 +504,20 @@ enum Cmd {
         /// Which area to report. Everything, if you do not say.
         #[arg(value_enum)]
         area: Option<DeviceArea>,
+    },
+    /// APEX Remote: pair a phone with this machine, and take it away again.
+    ///
+    /// The phone talks to `apex-remoted`, a per-user unprivileged service that
+    /// is a client of the agent runtime rather than part of it. Everything it
+    /// forwards is recorded as `claude-remote-control`, so a remote request can
+    /// edit a project, run tests and push — and cannot approve a root
+    /// operation or start a break-glass session, whichever device asks.
+    ///
+    /// Reading and revoking need no privilege. Pairing needs you: an agent
+    /// cannot pair a device on your behalf.
+    Remote {
+        #[command(subcommand)]
+        cmd: remote::RemoteCmd,
     },
     /// Projects, agent worktrees and checkpoints.
     Project {
@@ -394,6 +553,42 @@ enum Cmd {
         #[command(subcommand)]
         cmd: request::RequestCmd,
     },
+    /// Connect a Cloudflare account, and see what this project binds.
+    ///
+    /// `apex cf connect` runs OAuth by device code: it prints a URL and a short
+    /// code for you to enter on any device that has a browser, and launches
+    /// nothing here. `--token` pastes a scoped token instead, from stdin.
+    /// Either way the credential goes into `apex-secretd`'s root-owned store —
+    /// not a dotfile, which an agent could read.
+    #[command(visible_alias = "cf")]
+    Cloudflare {
+        #[command(subcommand)]
+        cmd: cloudflare::CloudflareCmd,
+    },
+
+    /// Encrypted backups: local, NAS or an R2 bucket through the broker.
+    ///
+    /// A snapshot is sealed to a public key, so taking one needs no privilege
+    /// and no secret. Only the private half opens one, and it is root-owned —
+    /// which is what stops anything running as you from reading what your
+    /// backups hold.
+    Backup {
+        #[command(subcommand)]
+        cmd: backup::BackupCmd,
+    },
+
+    /// Online accounts: Nextcloud, Google, Microsoft, WebDAV, S3/R2.
+    ///
+    /// An account is a credential in the same root-owned store `apex secret`
+    /// uses, under a reserved name, so there is no second place a cloud
+    /// credential can be. What this adds is the provider table: it knows the
+    /// endpoint, how the credential is presented, and which operation a scope
+    /// like `files.read` grants.
+    Account {
+        #[command(subcommand)]
+        cmd: account::AccountCmd,
+    },
+
     /// The secret service: let an agent USE a credential without holding it.
     ///
     /// `apex-secretd` keeps every credential in a root-owned store, performs
@@ -519,6 +714,59 @@ enum Cmd {
     Disposable {
         #[command(subcommand)]
         cmd: disposable::DisposableCmd,
+    },
+    /// Accounts on a shared machine: standard vs administrator, and guests
+    /// (P2-016).
+    ///
+    /// APEX enforced the standard/administrator distinction long before it
+    /// could make one. polkit's `auth_admin` guards both agent actions with
+    /// `allow_any=no` and `allow_inactive=no`, and that is asserted at build
+    /// time — but `installer/apex-install` puts the one account it creates in
+    /// `wheel` unconditionally and its GUI offers no choice, so every account
+    /// APEX has ever made is an administrator and a standard one could not be
+    /// reached from any APEX surface. This is that surface.
+    ///
+    /// `apex user list` needs no root. Everything that changes an account
+    /// does, and says so before it does anything.
+    User {
+        #[command(subcommand)]
+        cmd: user::UserCmd,
+    },
+    /// Virtual machines: a full guest with its own kernel (P2-008).
+    ///
+    /// Not a second `apex env`. A capsule shares this kernel and this home; a
+    /// VM shares neither, which is what makes it the right tool for booting
+    /// another operating system, testing the installer, or running something
+    /// that may take its kernel down with it.
+    ///
+    /// Rootless and session-scoped: every domain lives at `qemu:///session`,
+    /// so there is no system daemon, no polkit prompt, and no `virbr0` left
+    /// behind on the host. Headless: the console is serial, there is no
+    /// viewer.
+    ///
+    /// The stack it drives — qemu, libvirt, OVMF, swtpm, virtiofsd — is
+    /// userspace and is NOT in the image; the KVM kernel modules are, because
+    /// a kernel module cannot be added at runtime under Secure Boot and
+    /// userspace can. `apex vm doctor` prints the one command that installs
+    /// the rest.
+    Vm {
+        #[command(subcommand)]
+        cmd: vm::VmCmd,
+    },
+    /// P2-012's browser automation capsule: a browser that automates a site
+    /// without going near the one you use.
+    ///
+    /// Its own profile, its own cookie jar, its own download directory, no
+    /// route onto the network except the destinations you name, and nothing
+    /// left behind. It is not a new sandbox: a capsule is a confined,
+    /// allowlisted `apex agent` session, so the masked home and the egress
+    /// proxy have one implementation rather than two.
+    ///
+    /// Headless, and structurally so — the capsule's /run is a tmpfs, so
+    /// there is no compositor socket for a window to appear on.
+    Browser {
+        #[command(subcommand)]
+        cmd: browser::BrowserCmd,
     },
 }
 
@@ -815,6 +1063,62 @@ enum DeviceArea {
     All,
 }
 
+/// `apex skill <verb>` — P1-025's inventory.
+///
+/// Two verbs, and the split is the one `apex mcp` uses: `list` is the readout,
+/// `audit` is the same measurement reduced to what is wrong with it and an
+/// exit status a script can branch on.
+#[derive(Subcommand)]
+enum SkillCmd {
+    /// Every skill, with its origin, digest and type.
+    ///
+    /// Exits non-zero if a skills directory could not be read — an incomplete
+    /// inventory is not a successful one, because the count it prints is the
+    /// number somebody would rely on to say nothing unexpected is installed.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// What is wrong: unreadable directories, missing manifests, links out of
+    /// a skill, and every skill that ships a program.
+    ///
+    /// Exits non-zero when there is a problem.
+    Audit {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `apex provenance <verb>` — P1-026.
+///
+/// `show` measures; `record` is the only thing here that writes, and it writes
+/// nothing but APEX's own baselines. Recording is deliberately a separate verb
+/// rather than something `show` does on first sight: a check that silently
+/// adopted whatever it found as the truth could never report a change, because
+/// the change would become the new baseline before anybody read it.
+#[derive(Subcommand)]
+enum ProvenanceCmd {
+    /// Every marketplace and installed plugin: its origin, its revision, the
+    /// digest of its files, whether that digest still matches the recorded
+    /// one, and what confines each kind of executable content it ships.
+    ///
+    /// Exits non-zero when there is a finding, or when the report could not be
+    /// completed — an inventory that could not read a registry is not a
+    /// machine with no plugins.
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record the current digest of every installed plugin as the baseline
+    /// that later runs compare against.
+    ///
+    /// A tree that could not be hashed is not recorded, and a tree that had
+    /// CHANGED since the last record is named on stderr as it is overwritten —
+    /// re-recording is how a real finding gets erased, so it never happens
+    /// quietly.
+    Record,
+}
+
 #[derive(Subcommand)]
 enum PluginCmd {
     /// Installed plugins, whether each one is valid, and why not.
@@ -923,6 +1227,25 @@ struct UpdateArgs {
     /// Skip updating Flatpak applications.
     #[arg(long)]
     skip_flatpak: bool,
+    /// Update even though the last one left this machine with a regression.
+    ///
+    /// §26's rollout stop refuses a second update on a machine that came back
+    /// from the first one broken, because that is how one bad release becomes
+    /// two. This is the way past it when you know better — for instance when
+    /// the fix is in the release being held.
+    #[arg(long)]
+    force: bool,
+    /// Deploy the next image even though its signature does not verify.
+    ///
+    /// §27's gate refuses an update whose image the machine cannot verify —
+    /// see `docs/trust-enforcement.md` for what "cannot" covers and how to
+    /// change it permanently. This is the one-off way past it.
+    ///
+    /// Deliberately not `--force`: that is §26's rollout stop, for a machine
+    /// that came back from its last update broken. Working around a health
+    /// stop must not silently stop checking signatures.
+    #[arg(long)]
+    allow_unverified: bool,
     /// Keep ostree's per-object fsync on during the pull. Roughly halves update
     /// speed (measured: ~8 MiB/s with it, ~14.6 without, because 179k objects at
     /// 2.98 ms of fsync each outweighs the download itself) in exchange for
@@ -995,6 +1318,14 @@ enum ShellCmd {
     Focus,
     /// Start the screen-recorder setup strip.
     Record,
+    /// Start or stop push-to-talk.
+    ///
+    /// A toggle rather than hold-to-talk because niri has no bind that fires
+    /// on key release, so press-and-hold would work on Hyprland and labwc and
+    /// do nothing useful on niri. The shell shows a microphone indicator
+    /// naming the session the words are going to, and stops on its own after
+    /// ninety seconds.
+    Voice,
     /// List every target this wrapper knows, with the IPC call behind it.
     List,
     /// Call an arbitrary target/function, for anything not covered above.
@@ -1047,6 +1378,13 @@ fn privileged_verb(cmd: &Cmd) -> Option<&'static str> {
         Cmd::Update(_) => Some("update"),
         Cmd::Rollback => Some("rollback"),
         Cmd::Pin => Some("pin"),
+        // Only `set`. It is `bootc switch`, which rewrites the deployment
+        // origin, and on the backwards direction `ostree admin pin` as well.
+        // `status`, `list` and `report` read the origin file, /etc/machine-id
+        // and /var/lib/apex — all world-readable — so gating them would put a
+        // password in front of "which channel am I on", which is the question
+        // somebody asks when they are already in trouble.
+        Cmd::Channel { cmd: channel::ChannelCmd::Set { .. } } => Some("channel set"),
         // `--source capsule` writes nothing the system owns: it installs into
         // a rootless per-user container. Demanding root for it would be worse
         // than pointless — root has no capsules, so `sudo apex install
@@ -1115,6 +1453,9 @@ async fn main() {
         // connects to the system bus, for the reason `apex ai` is.
         Cmd::Task(args) => task::run(args),
         Cmd::Request { cmd } => request::main(cmd),
+        Cmd::Cloudflare { cmd } => cloudflare::main(cmd),
+        Cmd::Backup { cmd } => backup::main(cmd),
+        Cmd::Account { cmd } => account::main(cmd),
         Cmd::Secret { cmd } => secret::main(cmd),
         Cmd::Mcp { cmd } => mcp::main(cmd),
         Cmd::GitShim { args } => gitshim::main(args),
@@ -1175,6 +1516,24 @@ async fn main() {
         // "unavailable, and why" rather than demanding a password to answer
         // "what verified my boot".
         Cmd::Boot { cmd } => boot::boot_main(cmd),
+        Cmd::Lid { cmd } => lid::main(cmd),
+        Cmd::Permissions { cmd } => permissions::main(cmd),
+        // Same shape as `boot`, and for the same reason: the honest answer to
+        // "is my operating system signed" must not cost a password, so the
+        // offline half is file reads and `--verify` is the only path that
+        // leaves the machine.
+        // Read-only for `status`, and a dry run for `migrate` unless it is
+        // given --commit. Every path it touches is in the user's own home, so
+        // there is no root gate and nothing here can raise a prompt.
+        // `status`, `list` and `report` are read-only and root-free. `set` is
+        // `bootc switch`, which is in the privileged set below beside Update,
+        // Rollback and Pin.
+        Cmd::Channel { cmd } => channel::main(cmd),
+        Cmd::Qualify { cmd } => qualify::main(cmd),
+        Cmd::Storage { cmd } => storage::main(cmd),
+        Cmd::Firmware { cmd } => firmware::main(cmd),
+        Cmd::Schema { cmd } => schema::main(cmd),
+        Cmd::Trust(args) => trust::main(args),
         // Read-only except for `add`/`remove`/`probe`, which write only the
         // registry and the probe cache in the user's own home. Nothing here
         // touches apexd or needs root.
@@ -1201,6 +1560,8 @@ async fn main() {
             keep_fsync: args.fsync,
             skip_packages: args.skip_packages,
             skip_flatpak: args.skip_flatpak,
+            force: args.force,
+            allow_unverified: args.allow_unverified,
         }),
         Cmd::Shell { cmd } => cmd_shell(cmd),
         Cmd::Metrics(args) => cmd_metrics(args).await,
@@ -1215,6 +1576,11 @@ async fn main() {
         // Unprivileged for the same structural reason `apex env` is: a
         // disposable capsule is a rootless per-user container.
         Cmd::Disposable { cmd } => ops::disposable(&disposable::argv(cmd)),
+        // Accounts. The engine decides everything and refuses what it
+        // must; this only builds the argv, and `user::argv` pins it.
+        Cmd::User { cmd } => ops::user(&user::argv(cmd)),
+        Cmd::Vm { cmd } => ops::vm(&vm::argv(cmd)),
+        Cmd::Browser { cmd } => ops::browser(&browser::argv(cmd)),
         Cmd::Changelog => ops::changelog(),
         Cmd::Install {
             packages,
@@ -1272,7 +1638,16 @@ async fn main() {
         Cmd::Env { cmd } => ops::env(&env_argv(cmd)),
         Cmd::Firewall { cmd } => ops::firewall(&firewall_argv(cmd)),
         Cmd::Devices { area } => ops::devices(&devices_argv(area)),
+        Cmd::Remote { cmd } => remote::remote(cmd),
         Cmd::Plugin { cmd } => ops::plugin(&plugin_argv(cmd)),
+        Cmd::Skill { cmd } => match cmd {
+            SkillCmd::List { json } => skill::list(json),
+            SkillCmd::Audit { json } => skill::audit(json),
+        },
+        Cmd::Provenance { cmd } => match cmd {
+            ProvenanceCmd::Show { json } => provenance::show(json),
+            ProvenanceCmd::Record => provenance::record(),
+        },
     };
     std::process::exit(code);
 }
@@ -1447,6 +1822,19 @@ fn cmd_fingerprint() -> i32 {
 async fn cmd_status() -> i32 {
     let v = LocalView::detect();
     print!("{}", ops::render_fingerprint(&v.fingerprint, &v.selection));
+
+    // §27: "`apex status` should surface trust state clearly." Placed before
+    // the daemon section because it must appear on a machine where apexd is
+    // not running — that branch returns early, and a trust readout only the
+    // healthy machines get is the wrong way round.
+    //
+    // Offline only. Nothing here contacts the registry, so `apex status` keeps
+    // costing one set of file reads and cannot hang on a dead network.
+    println!();
+    print!(
+        "{}",
+        trust::render_block(&trust::offline_report(&trust::Roots::from_env()))
+    );
 
     let conn = connect().await;
     let running = match &conn {
@@ -1882,10 +2270,11 @@ async fn cmd_game(cmd: GameCmd) -> i32 {
                         if topo.ecore_list().is_empty() { "(none)".into() } else { topo.ecore_list() },
                         topo.source.as_str()
                     );
-                    println!(
-                        "nvidia-smi: {}",
-                        if apexd_core::gpu::nvidia_smi_available() { "present" } else { "absent" }
-                    );
+                    // The STATE, not merely whether the file exists. On a
+                    // machine that ships nvidia-smi with no driver loaded —
+                    // the L16, measured — "present" is true and tells somebody
+                    // debugging absent clock locks nothing at all.
+                    println!("nvidia-smi: {}", apexd_core::gpu::nvidia_smi_state().as_str());
                 }
             }
             0
@@ -2001,6 +2390,7 @@ fn shell_targets() -> Vec<(&'static str, &'static str, &'static str)> {
         ("network hotspot", "hotspot-toggle", "toggle"),
         ("focus", "focus-toggle", "toggle"),
         ("record", "screenrec-on", "toggle"),
+        ("voice", "voice-ptt", "toggle"),
     ]
 }
 
@@ -2210,6 +2600,7 @@ fn cmd_shell(cmd: ShellCmd) -> i32 {
         ShellCmd::Power => shell_ipc("PowerMenu-toggle", "toggle", &[]),
         ShellCmd::Focus => shell_ipc("focus-toggle", "toggle", &[]),
         ShellCmd::Record => shell_ipc("screenrec-on", "toggle", &[]),
+        ShellCmd::Voice => shell_ipc("voice-ptt", "toggle", &[]),
 
         ShellCmd::Audio { which } => {
             let target = match which.as_str() {
@@ -2444,15 +2835,65 @@ async fn cmd_doctor(json: bool) -> i32 {
     // can disagree. Everything except the metrics probe is a file read, and
     // the probe stays here because it is the one check that needs a socket.
     let mut checks = recover::doctor_checks(&v, running);
-    let metrics_up = TcpStream::connect_timeout(
+    // A refused connection and a connection nobody could attempt are different
+    // facts about this machine, and `.is_ok()` returned false for both — so
+    // the line a person read was the same sentence either way. That is this
+    // repository's "permission denied is not absence", one layer down: a
+    // machine whose networking is gone was told its metrics endpoint is not
+    // reachable, which is a claim about apexd made out of a syscall that never
+    // left the box.
+    //
+    // The boolean stays, and both remain a WARN, because neither state is a
+    // machine whose endpoint is reachable — `Check` has no third arm and
+    // inventing one here would be a judgement the other checks do not make
+    // (see `render_doctor`'s note on severity). What changes is the sentence,
+    // which is the part somebody acts on.
+    //
+    // tests/chaos/cases/network-loss.sh holds this, by running the same verb
+    // in three real network namespaces — loopback down, loopback up with
+    // nothing listening, and a listener bound — and asserting the first two do
+    // not read identically.
+    let metrics = TcpStream::connect_timeout(
         &"127.0.0.1:9723".parse::<SocketAddr>().unwrap(),
         Duration::from_millis(200),
-    )
-    .is_ok();
+    );
+    let (metrics_up, metrics_what) = match &metrics {
+        Ok(_) => (true, "metrics endpoint reachable on 127.0.0.1:9723".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => (
+            false,
+            "metrics endpoint on 127.0.0.1:9723 refused the connection — nothing \
+             is listening there, so apexd is not serving metrics"
+                .to_string(),
+        ),
+        Err(e) => (
+            false,
+            format!(
+                "metrics endpoint on 127.0.0.1:9723 could not be probed at all \
+                 ({e}) — this machine's networking did not answer, so whether \
+                 apexd is serving metrics is unknown"
+            ),
+        ),
+    };
     checks.push(recover::Check {
         ok: metrics_up,
-        what: "metrics endpoint reachable on 127.0.0.1:9723".to_string(),
+        what: metrics_what,
     });
+
+    // §48: disk-health warnings reach the doctor. Only the rows with something
+    // to do become a WARN — a row nobody could measure is printed with its
+    // reason and passes, because `apex doctor` runs unprivileged and a SMART
+    // log nobody could open must not turn every run red.
+    for (ok, what) in storage::doctor_lines(&storage::Roots::from_env()) {
+        checks.push(recover::Check { ok, what });
+    }
+
+    // §P2-015: the same rule for firmware. An update waiting is a WARN; a
+    // machine where fwupd could not be consulted at all passes with the
+    // reason on the line, because `apex doctor` runs unprivileged and
+    // measured, nothing in any Containerfile installs fwupd today.
+    for (ok, what) in firmware::doctor_lines(&firmware::Roots::from_env()) {
+        checks.push(recover::Check { ok, what });
+    }
 
     print!("{}", recover::render_doctor(&checks, json));
     0
@@ -2579,6 +3020,39 @@ mod tests {
     #[test]
     fn the_cli_definition_is_internally_consistent() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn only_the_channel_verb_that_writes_needs_root() {
+        // The whole point of the readout is that it works when the machine is
+        // in trouble. A password prompt in front of "which channel am I on"
+        // would be exactly the wrong time to ask.
+        for argv in [
+            vec!["apex", "channel", "status"],
+            vec!["apex", "channel", "list"],
+            vec!["apex", "channel", "report"],
+        ] {
+            let cli = Cli::try_parse_from(&argv).expect("parses");
+            assert_eq!(privileged_verb(&cli.command), None, "{argv:?}");
+        }
+        let cli = Cli::try_parse_from(["apex", "channel", "set", "stable"]).expect("parses");
+        assert_eq!(privileged_verb(&cli.command), Some("channel set"));
+        // A name nobody has heard of is refused by clap, BEFORE the root gate.
+        // It was the other way round, and the user was told to type sudo and
+        // then told they had made a typo.
+        let e = match Cli::try_parse_from(["apex", "channel", "set", "nightly"]) {
+            Ok(_) => panic!("an invented channel must not parse"),
+            Err(e) => e.to_string(),
+        };
+        for name in ["stable", "candidate", "beta", "edge"] {
+            assert!(e.contains(name), "the refusal must name {name}: {e}");
+        }
+        assert!(!e.contains("root"), "the refusal must not ask for a password: {e}");
+        // And a dry run still needs it: it is the same verb, and classifying
+        // by flag is how a refusal ends up depending on argument order.
+        let cli =
+            Cli::try_parse_from(["apex", "channel", "set", "stable", "--dry-run"]).expect("parses");
+        assert_eq!(privileged_verb(&cli.command), Some("channel set"));
     }
 
     #[test]

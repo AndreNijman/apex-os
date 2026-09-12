@@ -304,6 +304,14 @@ pub struct UpdateOptions {
     pub skip_packages: bool,
     /// Skip updating Flatpak applications.
     pub skip_flatpak: bool,
+    /// Ignore §26's rollout stop and update anyway.
+    pub force: bool,
+    /// Deploy an image whose signature §27's gate refused.
+    ///
+    /// Separate from `force` because the two gates answer different
+    /// questions, and a machine whose last update left it broken is not a
+    /// machine that should also stop checking who signed the next one.
+    pub allow_unverified: bool,
 }
 
 /// The system-extension package engine behind `apex install`/`remove`/`pkg`.
@@ -329,6 +337,25 @@ pub const ENV_ENGINE: &str = "/usr/libexec/apex-env";
 /// created through `apex-env`, so `apex env list` sees it and `podman ps` sees
 /// it, and APEX has not grown a second container runtime.
 pub const DISPOSABLE_ENGINE: &str = "/usr/libexec/apex-disposable";
+
+/// The account engine behind `apex user` (P2-016).
+///
+/// A constant, like every other engine path here, and this one more than most:
+/// it runs `useradd`, `userdel` and `systemctl enable` as root, so a
+/// caller-controlled variable naming it would be a way to have `sudo apex
+/// user` execute somebody else's program.
+pub const USER_ENGINE: &str = "/usr/libexec/apex-user";
+
+/// The virtualization engine behind `apex vm` (P2-008).
+///
+/// A constant, like every other engine path here, and for the same reason: a
+/// caller-controlled variable naming a program is a hole. This one defines
+/// libvirt domains and deletes disk images, so it is the last one that should
+/// be reachable through the environment.
+pub const VM_ENGINE: &str = "/usr/libexec/apex-vm";
+
+/// P2-012's browser capsule engine.
+pub const BROWSER_ENGINE: &str = "/usr/libexec/apex-browser";
 
 /// The plugin CLI behind `apex plugin` (§16).
 ///
@@ -448,6 +475,30 @@ pub fn env(args: &[String]) -> i32 {
 /// `status()` rather than `output()`: `run` gives the terminal to an
 /// interactive capsule shell, and the teardown has to happen when that shell
 /// exits.
+/// `apex user …`.
+///
+/// `status()` rather than `output()` for the same reason as the rest: the
+/// engine writes its refusals to stderr and the user needs to read them as
+/// they happen, and `apex user list` is a table that should stream.
+///
+/// Not made privileged here. `apex user list` is deliberately usable by
+/// anybody, and the engine refuses the verbs that need root with a sentence
+/// naming sudo — which is a better failure than this binary deciding on the
+/// caller's behalf that a read-only question needs a password.
+pub fn user(args: &[String]) -> i32 {
+    match Command::new(USER_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the account engine: {e}");
+            eprintln!(
+                "apex: no account engine on this system — it predates `apex user`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
 pub fn disposable(args: &[String]) -> i32 {
     match Command::new(DISPOSABLE_ENGINE).args(args).status() {
         Ok(status) => status.code().unwrap_or(-1),
@@ -455,6 +506,44 @@ pub fn disposable(args: &[String]) -> i32 {
             eprintln!("apex: cannot run the disposable engine: {e}");
             eprintln!(
                 "apex: no disposable engine on this system — it predates `apex disposable`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
+/// `apex vm …`.
+///
+/// Unprivileged, structurally: every domain is a per-user one at
+/// `qemu:///session` and every disk is under the user's own data directory.
+/// Running this as root would put the domains in libvirt's system namespace,
+/// where defining one needs polkit and where the `default` network is a host
+/// bridge — the three things `apex vm` exists to avoid.
+///
+/// `status()` rather than `output()`: `apex vm console` hands the terminal to
+/// a serial console the user detaches from with Ctrl-].
+pub fn browser(args: &[String]) -> i32 {
+    match Command::new(BROWSER_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the browser capsule engine: {e}");
+            eprintln!(
+                "apex: no browser capsule engine on this system — it predates `apex browser`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
+pub fn vm(args: &[String]) -> i32 {
+    match Command::new(VM_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the virtualization engine: {e}");
+            eprintln!(
+                "apex: no VM engine on this system — it predates `apex vm`.\n\
                  \x20      run `sudo apex update` first."
             );
             1
@@ -516,6 +605,107 @@ fn packages_pass() -> i32 {
 ///
 /// Now: refresh honours fwupd's own cache window, and the update pass runs only
 /// after `get-updates` says there is something to install.
+/// §27's enforcement pass: does the image this update would deploy actually
+/// verify, and is this machine configured to care?
+///
+/// `Some(code)` means `update` stops here with that code.
+///
+/// Roadmap §27's producer half has worked for months — every published digest
+/// is cosign-signed under a keyless GitHub identity and CI verifies its own
+/// work before moving a tag — and none of it reached the machine. P1-047
+/// landed the readout, so an APEX machine could finally say that nobody had
+/// checked. This is the half that checks.
+///
+/// Three placement decisions, each of which the obvious alternative gets
+/// wrong:
+///
+/// * **Before `record_update` and before `FsyncGuard::disable`.** Both of
+///   those write machine state. A refusal that fired after them would have
+///   recorded a health record for an update that never happened — which is
+///   exactly what §26's rollout stop then reasons about — and left ostree's
+///   per-object fsync switched off on a machine that is not updating.
+/// * **On the digest the registry would SERVE, not the booted one.** `apex
+///   trust --verify` answers "is what I am running signed"; a gate has to
+///   answer "is what I am about to run signed". Those differ for the same tag
+///   as a matter of routine here, because the four APEX tags are aliases for
+///   one digest that moves on every successful main build. Verifying the
+///   booted digest would wave an unsigned image through every time, while
+///   printing "verified".
+/// * **Not behind `--force`.** That flag is §26's escape, for a machine that
+///   came back from its last update broken. Sharing it would mean anybody
+///   working around a health stop silently stopped checking signatures too,
+///   and the two have nothing to do with each other. `--allow-unverified` is
+///   long on purpose.
+fn trust_gate(allow_unverified: bool) -> Option<i32> {
+    let roots = crate::trust::Roots::from_env();
+    let report = crate::trust::offline_report(&roots);
+    // The origin read is handed to the gate rather than unwrapped here. An
+    // early return on `image_error` is what made an unreadable /proc/cmdline
+    // deploy an image nobody checked, under `signature=enforce`, while
+    // printing a single line about it — the EACCES class this repository
+    // swept fourteen readers for, one layer up.
+    let g = crate::verify::gate(
+        &roots,
+        match (&report.image, &report.image_error) {
+            (Some(r), _) => Ok(Some(r.as_str())),
+            (None, Some(e)) => Err(e.as_str()),
+            (None, None) => Ok(None),
+        },
+    );
+    let refusal = crate::verify::refusal(
+        &g.verification,
+        &g.enforcement,
+        &g.decision,
+        "--allow-unverified",
+    );
+
+    // A fixture root means every trust fact in play is a file somebody wrote
+    // for a test. `bootc upgrade` is not run on the strength of those, in
+    // either direction — which is also what makes all three decisions
+    // exercisable through the real binary, headless, without a machine ever
+    // staging an image.
+    if roots.fixture.is_some() {
+        print!(
+            "{}",
+            crate::verify::render(&g.verification, &g.enforcement, &g.decision)
+        );
+        if let Some(why) = &refusal {
+            eprint!("{why}");
+        }
+        println!("apex: this program will not deploy on fixture facts");
+        return Some(i32::from(g.decision.refuses() && !allow_unverified));
+    }
+
+    match refusal {
+        None => {
+            // Warnings are printed even when nothing is refused: "provenance
+            // could not be established" is the normal state on every APEX
+            // machine today, and a gate that stays silent about it is a gate
+            // nobody knows is there.
+            if let crate::verify::Decision::ProceedWithWarnings(w) = &g.decision {
+                for line in w {
+                    eprintln!("apex: {line}");
+                }
+            }
+            None
+        }
+        Some(why) if allow_unverified => {
+            // Asked for, so granted — and still printed in full. Skipping the
+            // explanation would make `--allow-unverified` a way to not find
+            // out what was wrong with the image you just deployed.
+            eprint!("{why}");
+            eprintln!(
+                "apex: proceeding anyway because --allow-unverified was given."
+            );
+            None
+        }
+        Some(why) => {
+            eprint!("{why}");
+            Some(1)
+        }
+    }
+}
+
 pub fn update(opts: UpdateOptions) -> i32 {
     let started = Instant::now();
     let mut worst = 0;
@@ -542,7 +732,39 @@ pub fn update(opts: UpdateOptions) -> i32 {
         return worst;
     }
 
+    // §26's rollout stop, and the reason it lives here rather than in the
+    // channel verb: a stop nobody's update path consults is a report. The gate
+    // permits every uncertain state — an unreadable file, a digest it could not
+    // resolve, an update that has not been rebooted into — and refuses exactly
+    // one: this machine took the last update and came back with a regression
+    // an image change could have caused. Advancing it again is how one bad
+    // release becomes two, and the user is at the keyboard of the machine that
+    // would do it.
+    if !opts.firmware_only && !opts.force {
+        if let Some(why) = crate::channel::halt_reason() {
+            eprint!("{why}");
+            return 1;
+        }
+    }
+
+    // §27's signature gate. Deliberately after §26's stop, which is a local
+    // file read and costs nothing, and deliberately before `record_update`
+    // and `FsyncGuard::disable` below, which both write. See `trust_gate`.
     if !opts.firmware_only {
+        if let Some(code) = trust_gate(opts.allow_unverified) {
+            return code;
+        }
+    }
+
+    if !opts.firmware_only {
+        // What the machine is running BEFORE the pull, so the next run can tell
+        // whether this one was rebooted into. Written first: a record written
+        // after a successful upgrade would be missing for exactly the update
+        // that crashed the machine, which is the one the gate exists for.
+        match crate::channel::current_tag() {
+            Ok(tag) => crate::channel::record_update(&tag),
+            Err(e) => eprintln!("apex: the update health gate is not armed: {e}"),
+        }
         // fsync off for the pull, restored when this drops — including on the
         // error paths below. See FsyncGuard for the measurements and the trade.
         let _fsync = if opts.keep_fsync {

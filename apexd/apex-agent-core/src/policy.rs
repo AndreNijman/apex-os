@@ -65,17 +65,43 @@
 //!
 //! ## Fail closed on what is not built yet
 //!
-//! Four values in this vocabulary describe policy the runtime cannot enforce
-//! today: both system-access modes, raw secret export and remote elevation.
-//! [`AgentPolicy::validate`] refuses each one and names the task that will
-//! implement it. All four network modes are enforced.
+//! One value in this vocabulary still describes policy the runtime cannot
+//! enforce: raw secret export. [`AgentPolicy::validate`] refuses it and names
+//! why. All four network modes are enforced, and so are both system-access
+//! modes.
+//!
+//! Remote elevation used to be the second. It is not any more: P0-014 built
+//! the security key §7 requires — the verifier, the challenge round trip, and
+//! the gate in `apex-agentd`'s `privilege::decide_origin` that reads
+//! [`OriginPolicy`] — so [`OriginPolicy::RemoteElevationAllowed`] now
+//! validates. What it buys is narrow and worth stating exactly: a non-local
+//! caller may elevate **only** by presenting an assertion from an enrolled
+//! key, over a challenge this daemon issued, for this very elevation, with
+//! the user-verified bit set. Setting it grants nothing on its own.
 //!
 //! Refusing is the only honest option. A `--network allowlist` that parsed and
 //! then ran with an open network would be worse than no flag at all: it would
 //! read as a protection in `apex agent status`, in the Agent Center and in a
-//! script, and there would be nothing behind it. Defining the vocabulary now
-//! and rejecting the parts without an enforcement point is what lets P0-006,
-//! P0-007 and P0-008 land as an implementation rather than a redesign.
+//! script, and there would be nothing behind it. Defining the vocabulary and
+//! rejecting the parts without an enforcement point is what let P0-006,
+//! P0-007 and P0-008 land as implementations rather than redesigns.
+//!
+//! ## What this type does *not* decide about dimension 3
+//!
+//! [`AgentPolicy::validate`] takes no arguments and reads no files, so it
+//! cannot know whether a grant exists. It answers only the questions that are
+//! properties of the six values themselves — including one that is new here:
+//! break-glass with a confined sandbox is refused, because `bwrap` sets
+//! `PR_SET_NO_NEW_PRIVS` unconditionally and the pair would describe a
+//! boundary it had not moved.
+//!
+//! Whether a session may actually *have* [`SystemAccess::Session`] or
+//! [`SystemAccess::Unsafe`] is the daemon's question, because the answer
+//! depends on who is asking and on a live authentication. It is asked in
+//! `apex-agentd`'s `session::start`, in this order: resolve the peer from the
+//! kernel, refuse it if it belongs to a managed session, refuse it if its
+//! origin is not local, and only then authenticate. See [`crate::grant`] and
+//! [`crate::auth`].
 
 use serde::{Deserialize, Serialize};
 
@@ -142,19 +168,26 @@ impl std::fmt::Display for NativeMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemAccess {
-    /// The default, and the only value with an implementation today. No root:
-    /// a session that needs a system change files a structured request through
-    /// `apex request` and a human approves it.
+    /// The default, and the only value that needs no grant behind it. No
+    /// root: a session that needs a system change files a structured request
+    /// through `apex request` and a human approves it.
     #[default]
     None,
     /// §4.4's `--system-access`. A grant that is session-bound, capability-
     /// scoped, time-limited, authorised outside the agent's terminal, and not
-    /// renewable by the agent. P0-007 issues it; until then this is refused.
+    /// renewable by the agent. [`crate::grant::GrantKind::SystemAccess`] is
+    /// the grant; the daemon refuses to start a session in this mode without
+    /// one, and issuing one takes a local password.
+    ///
+    /// The session still runs under `no_new_privs`. What it gains is that the
+    /// privilege verbs the grant names stop needing a separate human decision
+    /// each time, for as long as the grant lasts.
     Session,
     /// §4.5's `--unsafe-everything`. Break-glass, deliberately not the same
-    /// thing as [`SystemAccess::Session`]: local authentication, a short TTL,
-    /// a red indicator, an audit record and automatic expiry. P0-006 builds
-    /// that; until then this is refused.
+    /// thing as [`SystemAccess::Session`]: local authentication, an explicit
+    /// short TTL, a red indicator, an audit record and automatic expiry. This
+    /// one does clear `no_new_privs`, so the session can genuinely become
+    /// root — see [`AgentPolicy::no_new_privs`].
     Unsafe,
 }
 
@@ -409,6 +442,230 @@ impl std::fmt::Display for OriginPolicy {
     }
 }
 
+/// Dimension 7: which MCP connectors a session is given (P1-028).
+///
+/// The dimension that did not exist, and whose absence was the whole of
+/// P1-028's second remainder. Before it, the only way to reduce the cloud
+/// plane was `--sandbox strict` removing the session's network, which takes
+/// every cloud connector at once and cannot select one; and the only way to
+/// stop a single connector was to disable the whole plugin that defined it.
+///
+/// `Copy`, like the other six, and for [`AgentPolicy`]'s stated reason. So the
+/// **names** live in [`crate::config::Config::connector_allow`] rather than
+/// here — the same shape `NetworkPolicy::Allowlist` already uses for its
+/// destinations, and for the same reason: a list the confined thing gets to
+/// write is not a boundary, so it comes from the runtime's configuration and
+/// never from the request. [`AgentPolicy::validate_for`] refuses
+/// [`ConnectorPolicy::Curated`] with an empty list exactly as it refuses an
+/// allowlisted session with nothing on its allowlist.
+///
+/// This does not change what the sandbox enforces; it changes what the agent
+/// is handed. Enforcement is `--strict-mcp-config` plus a file the runtime
+/// wrote, and only for an adapter that has such a flag —
+/// [`crate::adapter::Adapter::strict_mcp`] says which, and
+/// [`crate::mcpconf`] builds the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorPolicy {
+    /// The default. Every connector this machine defines, exactly as it is
+    /// defined — which is what a session got before this dimension existed.
+    #[default]
+    AsConfigured,
+    /// The cloud plane removed: no endpoint off this machine, every program on
+    /// it kept. Not the same as `--sandbox strict`, which removes the network
+    /// and therefore the cloud plane as a consequence; this removes the
+    /// connectors and leaves the network alone.
+    LocalOnly,
+    /// Only the connectors the runtime's configuration names, by name. The
+    /// per-connector switch.
+    Curated,
+    /// No connectors at all.
+    ///
+    /// Renamed explicitly, for the reason [`RequestOrigin::RemoteControl`] is:
+    /// snake_case would put `no_connectors` on the wire while [`as_str`] and
+    /// the flag both say `none`, and two spellings of one value is how a
+    /// record written by the daemon stops matching a policy written by a human.
+    /// `the_wire_spelling_of_every_dimension_is_the_one_people_type` asserts
+    /// the pair.
+    ///
+    /// [`as_str`]: ConnectorPolicy::as_str
+    #[serde(rename = "none")]
+    NoConnectors,
+}
+
+impl ConnectorPolicy {
+    pub const ALL: &'static [ConnectorPolicy] = &[
+        ConnectorPolicy::AsConfigured,
+        ConnectorPolicy::LocalOnly,
+        ConnectorPolicy::Curated,
+        ConnectorPolicy::NoConnectors,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConnectorPolicy::AsConfigured => "as_configured",
+            ConnectorPolicy::LocalOnly => "local_only",
+            ConnectorPolicy::Curated => "curated",
+            ConnectorPolicy::NoConnectors => "none",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ConnectorPolicy> {
+        match s {
+            "as_configured" | "as-configured" | "all" => Some(ConnectorPolicy::AsConfigured),
+            "local_only" | "local-only" | "local" => Some(ConnectorPolicy::LocalOnly),
+            "curated" => Some(ConnectorPolicy::Curated),
+            "none" | "no_connectors" | "no-connectors" => Some(ConnectorPolicy::NoConnectors),
+            _ => None,
+        }
+    }
+
+    /// Whether this value removes anything at all.
+    ///
+    /// What decides whether a session needs a curated configuration written
+    /// for it when nothing else would have asked for one.
+    pub fn reduces(&self) -> bool {
+        !matches!(self, ConnectorPolicy::AsConfigured)
+    }
+
+    /// Whether a cloud endpoint can reach the session under this value alone.
+    ///
+    /// `Curated` is `true` here and that is deliberate: it *may* keep a cloud
+    /// connector, and which ones it keeps is a question about the names, not
+    /// about the dimension. A method that answered "no" would let a report
+    /// claim the cloud plane was gone when one endpoint was still on the list.
+    pub fn keeps_any_cloud(&self) -> bool {
+        matches!(
+            self,
+            ConnectorPolicy::AsConfigured | ConnectorPolicy::Curated
+        )
+    }
+
+    pub fn describe(&self) -> &'static str {
+        match self {
+            ConnectorPolicy::AsConfigured => {
+                "every connector this machine defines, as it is defined"
+            }
+            ConnectorPolicy::LocalOnly => {
+                "programs on this machine only — every cloud endpoint removed"
+            }
+            ConnectorPolicy::Curated => {
+                "only the connectors named in the runtime's configuration"
+            }
+            ConnectorPolicy::NoConnectors => "no connectors at all",
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectorPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// Dimension 8: which plugins a session loads at all (P1-026).
+///
+/// Dimension 7 decides which MCP servers reach the session, and
+/// [`crate::mcpconf`] confines the ones it keeps. Neither reaches a plugin's
+/// **hooks** — commands Claude spawns itself from the plugin's
+/// `hooks/hooks.json`, outside the tool permission system, before the session
+/// has done anything. That was measured, not reasoned: with round 1's curated
+/// `--strict-mcp-config` document in place, a fixture plugin's MCP server was
+/// dropped and its `SessionStart` hook still ran. [`crate::pluginconf`] has the
+/// table.
+///
+/// So this dimension **removes** where dimension 7 confines, and the asymmetry
+/// is not an oversight. APEX does not own the agent's process, so it cannot put
+/// a sandbox around a process the agent spawns; what it can do is decide which
+/// plugins are loaded. The mechanism is `enabledPlugins` in the `--settings`
+/// document APEX already writes — the one mechanism of four measured that
+/// removes the plugin's code while leaving APEX's own hook bridge and the
+/// curated MCP document running. `--safe-mode` and `--bare` each take both of
+/// those with them.
+///
+/// `Copy`, like the other seven, so the **names** live in
+/// [`crate::config::Config::plugin_allow`] rather than here — the same shape
+/// and the same reason as [`ConnectorPolicy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginPolicy {
+    /// The default. Every plugin this machine has enabled, which is what a
+    /// session got before this dimension existed. It removes nothing, and the
+    /// readouts say so rather than implying a confinement that is not there: a
+    /// kept plugin's hooks run inside whatever the session is confined to, and
+    /// under `--sandbox unrestricted` that is nothing.
+    #[default]
+    AsConfigured,
+    /// Only the plugins the runtime's configuration names, by name.
+    Curated,
+    /// No plugins at all.
+    ///
+    /// Renamed on the wire for the reason [`ConnectorPolicy::NoConnectors`] is:
+    /// snake_case would put `no_plugins` in a record while [`as_str`] and the
+    /// flag both say `none`.
+    ///
+    /// [`as_str`]: PluginPolicy::as_str
+    #[serde(rename = "none")]
+    NoPlugins,
+}
+
+impl PluginPolicy {
+    pub const ALL: &'static [PluginPolicy] = &[
+        PluginPolicy::AsConfigured,
+        PluginPolicy::Curated,
+        PluginPolicy::NoPlugins,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PluginPolicy::AsConfigured => "as_configured",
+            PluginPolicy::Curated => "curated",
+            PluginPolicy::NoPlugins => "none",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<PluginPolicy> {
+        match s {
+            "as_configured" | "as-configured" | "all" => Some(PluginPolicy::AsConfigured),
+            "curated" => Some(PluginPolicy::Curated),
+            "none" | "no_plugins" | "no-plugins" => Some(PluginPolicy::NoPlugins),
+            _ => None,
+        }
+    }
+
+    /// Whether this value removes anything at all.
+    ///
+    /// What decides whether an `enabledPlugins` block is written into the
+    /// settings document. `AsConfigured` writes none, so a session that asked
+    /// for nothing keeps the user's own object untouched.
+    pub fn reduces(&self) -> bool {
+        !matches!(self, PluginPolicy::AsConfigured)
+    }
+
+    /// Whether a plugin's own hooks can still run under this value alone.
+    ///
+    /// `Curated` is `true` here for [`ConnectorPolicy::keeps_any_cloud`]'s
+    /// reason: it *may* keep a plugin that ships hooks, and which ones it
+    /// keeps is a question about the names rather than about the dimension.
+    pub fn keeps_any_plugin(&self) -> bool {
+        matches!(self, PluginPolicy::AsConfigured | PluginPolicy::Curated)
+    }
+
+    pub fn describe(&self) -> &'static str {
+        match self {
+            PluginPolicy::AsConfigured => "every plugin this machine has enabled",
+            PluginPolicy::Curated => "only the plugins named in the runtime's configuration",
+            PluginPolicy::NoPlugins => "no plugins at all",
+        }
+    }
+}
+
+impl std::fmt::Display for PluginPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
 /// Where a privileged or capability request came from (§7's `request_origin`).
 ///
 /// The vocabulary only. P0-013 attaches it to requests and records it in the
@@ -501,11 +758,16 @@ impl std::fmt::Display for RequestOrigin {
     }
 }
 
-/// The six dimensions of §3.1, as six independent fields.
+/// §3.1's dimensions, as independent fields. Six when the split landed; seven
+/// since P1-028 added the connector policy.
 ///
 /// `Copy`, because it is passed through the daemon, the protocol, the sandbox
 /// builder and the CLI, and a policy that has to be cloned invites a call site
-/// that mutates a copy and enforces the original.
+/// that mutates a copy and enforces the original. That is also why
+/// [`ConnectorPolicy`] names no connectors itself: a `Vec` here would end the
+/// `Copy`, so the names live in the runtime's configuration beside
+/// `network_allow`, which is where a list the confined thing must not write
+/// belongs anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AgentPolicy {
     /// Dimension 1. Set with `--native` / `--agent-bypass`.
@@ -527,6 +789,20 @@ pub struct AgentPolicy {
     /// Dimension 6. Set with `--origin-policy`.
     #[serde(default)]
     pub origin: OriginPolicy,
+    /// Dimension 7. Set with `--connectors`.
+    ///
+    /// `#[serde(default)]` like the rest, so a client that predates it sends
+    /// six keys and gets the value a session has always had.
+    #[serde(default)]
+    pub connectors: ConnectorPolicy,
+    /// Dimension 8. Set with `--plugins`.
+    ///
+    /// `#[serde(default)]` for the same reason, and it matters more here than
+    /// for dimension 7: a client that predates this sends seven keys, and the
+    /// value it gets is the one that removes nothing, so an older client can
+    /// never accidentally start a session with a plugin missing.
+    #[serde(default)]
+    pub plugins: PluginPolicy,
 }
 
 impl AgentPolicy {
@@ -550,13 +826,27 @@ impl AgentPolicy {
     /// it", and the tighter reading is taken: a capability-scoped session grant
     /// is brokered, so it has no need of a setuid binary inside the session,
     /// and handing one back would reinstate exactly the general-purpose root
-    /// shell `request.rs` refuses to offer. P0-007 may loosen this, with a
-    /// reason written down.
+    /// shell `request.rs` refuses to offer. P0-007 kept it that way, and that
+    /// is what makes §4.4's grant a different thing from §4.5's rather than a
+    /// shorter spelling of it.
     ///
     /// A confined session gets this from `bwrap` already. It is the unconfined
     /// ones that need it set explicitly, and they are the ones §4.3 is about.
+    /// The same fact is why [`AgentPolicy::validate`] refuses a *confined*
+    /// break-glass session: `bwrap` sets the flag unconditionally, so a policy
+    /// asking for both would report a boundary it had not moved.
     pub fn no_new_privs(&self) -> bool {
         !matches!(self.system, SystemAccess::Unsafe)
+    }
+
+    /// The grant this policy cannot start without, if any.
+    ///
+    /// The one place dimension 3 is turned into a grant kind, so the CLI, the
+    /// daemon and the reaper cannot disagree about which value needs what.
+    /// `None` for the default, which is the whole of "root is delegated, not
+    /// inherited": there is no path that arrives at a grant by omission.
+    pub fn needs_grant(&self) -> Option<crate::grant::GrantKind> {
+        crate::grant::GrantKind::for_system_access(self.system)
     }
 
     /// The policy with every derivation applied, ready to be stored.
@@ -594,15 +884,35 @@ impl AgentPolicy {
         if network.needs_broker() && !self.secrets.may_use_broker() {
             return Err(PolicyError::BrokeredNetworkNeedsBroker);
         }
-        if self.system != SystemAccess::None {
-            return Err(PolicyError::SystemAccessUnavailable(self.system));
+        // `bwrap` sets `PR_SET_NO_NEW_PRIVS` for every session it wraps, and
+        // no process can clear it afterwards. So a confined break-glass
+        // session would run with the flag on whatever this policy said, and
+        // `no_new_privs()` — which the sandbox, the hook bridge and the
+        // Agent Center all read — would be describing a boundary that had not
+        // moved. Refused rather than silently corrected in either direction:
+        // dropping the confinement would be a bigger grant than was asked
+        // for, and keeping it would be a mode that lies.
+        if self.system == SystemAccess::Unsafe && self.sandbox.is_confined() {
+            return Err(PolicyError::BreakGlassCannotBeConfined(self.sandbox));
         }
         if self.secrets == SecretPolicy::Export {
             return Err(PolicyError::SecretExportUnavailable);
         }
-        if self.origin == OriginPolicy::RemoteElevationAllowed {
-            return Err(PolicyError::RemoteElevationUnavailable);
-        }
+        // `OriginPolicy::RemoteElevationAllowed` was refused here until
+        // P0-014's last commit, because §7 allows remote elevation only behind
+        // a security key and nothing in the build could ask for one. All of it
+        // now exists — the verifier, the challenge round trip, and the gate in
+        // `privilege::decide_origin` that consults this very value — so the
+        // refusal has become the only thing standing between the owner and a
+        // feature that works.
+        //
+        // The order mattered and is worth recording: relaxing this FIRST would
+        // have produced what `validate`'s own design calls a mode that lies.
+        // `config.rs`'s self-repair resets the whole policy to default when
+        // `validate` errors, so a stored `origin = remote_elevation_allowed`
+        // was silently erased; and `apex agent status` would have printed the
+        // setting as live while `may_be_granted` still hard-refused on
+        // `is_local()`. Enforcement landed first, and this is last.
         Ok(())
     }
 
@@ -623,21 +933,38 @@ impl AgentPolicy {
     pub fn validate_for(
         &self,
         allowlist: &crate::destination::Allowlist,
+        connectors: &[String],
+        plugins: &[String],
     ) -> Result<(), PolicyError> {
         self.validate()?;
         if self.effective_network() == NetworkPolicy::Allowlist && allowlist.is_empty() {
             return Err(PolicyError::AllowlistEmpty);
         }
+        // Exactly the allowlist rule, one dimension over: a curated session
+        // with nothing on its list is refused rather than started with
+        // everything removed. The two readings of an empty list — "no
+        // connectors" and "nobody has filled this in" — are not the same
+        // thing, and `--connectors none` already says the first one.
+        if self.connectors == ConnectorPolicy::Curated && connectors.is_empty() {
+            return Err(PolicyError::ConnectorListEmpty);
+        }
+        // And the same rule again for dimension 8, because the mistake is the
+        // same one: `--plugins curated` with an empty `plugin_allow` is
+        // `--plugins none` wearing a name that says otherwise, and a person
+        // reading `curated` in `apex agent status` would have no way to tell.
+        if self.plugins == PluginPolicy::Curated && plugins.is_empty() {
+            return Err(PolicyError::PluginListEmpty);
+        }
         Ok(())
     }
 
-    /// The six dimensions as label and value, in §3.1's order.
+    /// The dimensions as label and value, in §3.1's order.
     ///
     /// One place builds this, so `apex agent status`, the session listing and
     /// whatever the Agent Center grows cannot disagree about which dimensions
     /// exist or what they are called. `network` reports the effective value,
     /// which is what the session actually has.
-    pub fn dimensions(&self) -> [(&'static str, &'static str); 6] {
+    pub fn dimensions(&self) -> [(&'static str, &'static str); 8] {
         [
             ("native", self.native.as_str()),
             ("sandbox", self.sandbox.as_str()),
@@ -645,6 +972,8 @@ impl AgentPolicy {
             ("secrets", self.secrets.as_str()),
             ("network", self.effective_network().as_str()),
             ("origin", self.origin.as_str()),
+            ("connectors", self.connectors.as_str()),
+            ("plugins", self.plugins.as_str()),
         ]
     }
 }
@@ -662,12 +991,14 @@ pub enum PolicyError {
     BrokeredNetworkNeedsBroker,
     /// An allowlisted session with nothing on its allowlist.
     AllowlistEmpty,
-    /// A system-access mode whose grant machinery does not exist.
-    SystemAccessUnavailable(SystemAccess),
+    /// A curated-connector session with nothing on its connector list.
+    ConnectorListEmpty,
+    /// `--plugins curated` with nothing in `plugin_allow`.
+    PluginListEmpty,
+    /// Break-glass inside a sandbox that would keep `no_new_privs` on anyway.
+    BreakGlassCannotBeConfined(SandboxPolicy),
     /// Raw secret values in the session environment.
     SecretExportUnavailable,
-    /// Elevation authorised from a remote origin.
-    RemoteElevationUnavailable,
 }
 
 impl std::fmt::Display for PolicyError {
@@ -699,32 +1030,39 @@ impl std::fmt::Display for PolicyError {
                  under another name; add a destination with `apex agent allow <host>`, or \
                  use `--network offline` if reaching nothing is what you meant"
             ),
+            PolicyError::ConnectorListEmpty => write!(
+                f,
+                "`--connectors curated` with nothing on the connector list is a session with \
+                 no connectors under another name; name them in `connector_allow` in the \
+                 runtime's configuration, or use `--connectors none` if reaching none of \
+                 them is what you meant"
+            ),
+            PolicyError::PluginListEmpty => write!(
+                f,
+                "`--plugins curated` with nothing on the plugin list is a session with no \
+                 plugins under another name; name them in `plugin_allow` in the runtime's \
+                 configuration, or use `--plugins none` if loading none of them is what you \
+                 meant"
+            ),
             PolicyError::BrokeredNetworkNeedsBroker => write!(
                 f,
                 "`--network brokered` means the broker is the session's only way out, so it \
                  cannot be combined with `--secrets none`, which is what shuts the broker; \
                  use `--network offline` if a session with no way out is what you meant"
             ),
-            PolicyError::SystemAccessUnavailable(mode) => write!(
+            PolicyError::BreakGlassCannotBeConfined(sandbox) => write!(
                 f,
-                "`--system-access {mode}` has no grant behind it in this build: the \
-                 authentication, the time limit and the audit record it depends on are not \
-                 written yet, and a session that reported system access without them would be \
-                 claiming a boundary it does not have. Ask for the operation with \
-                 `apex request` instead"
+                "`--unsafe-everything` takes no_new_privs off, and `--sandbox {sandbox}` puts \
+                 it back: bwrap sets it for every session it wraps and nothing can clear it \
+                 afterwards, so this pair would report a boundary it had not moved. Break-glass \
+                 is `--sandbox unrestricted`; if the confinement is what you want, ask for the \
+                 operation with `apex request` instead"
             ),
             PolicyError::SecretExportUnavailable => write!(
                 f,
                 "raw secret values are never placed in a session's environment: the broker \
                  performs the operation and returns its result. Use `apex secret grant` to \
                  allow a capability"
-            ),
-            PolicyError::RemoteElevationUnavailable => write!(
-                f,
-                "§7 allows remote elevation only behind a WebAuthn/FIDO2 security key, and \
-                 nothing in this build can ask for one. This setting would drop the \
-                 local-approval rule and put nothing in its place. Approve the operation \
-                 locally instead"
             ),
         }
     }
@@ -788,11 +1126,19 @@ impl PolicyPreset {
         }
     }
 
-    /// The six coordinates of this mode.
+    /// The coordinates of this mode, one per dimension.
     ///
     /// Written out per preset rather than built by mutating the one above it,
     /// so a change to one mode cannot silently move another and so each line
     /// can be read against §4.
+    ///
+    /// Every preset names `AsConfigured` for dimensions 7 and 8, and that is a
+    /// statement rather than an omission: none of §4's named modes reduces the
+    /// connector set or the plugin set, because every one of them is a
+    /// *widening* of the default. A preset that quietly curated connectors
+    /// would be `--unrestricted` taking something away, and one that quietly
+    /// dropped plugins would break the user's own commands in the mode they
+    /// reached for to get MORE freedom.
     pub fn policy(&self) -> AgentPolicy {
         match self {
             PolicyPreset::Default => AgentPolicy::default(),
@@ -803,6 +1149,8 @@ impl PolicyPreset {
                 secrets: SecretPolicy::Brokered,
                 network: NetworkPolicy::Open,
                 origin: OriginPolicy::LocalElevationOnly,
+                connectors: ConnectorPolicy::AsConfigured,
+                plugins: PluginPolicy::AsConfigured,
             },
             PolicyPreset::Unrestricted => AgentPolicy {
                 native: NativeMode::Inherit,
@@ -811,6 +1159,8 @@ impl PolicyPreset {
                 secrets: SecretPolicy::Brokered,
                 network: NetworkPolicy::Open,
                 origin: OriginPolicy::LocalElevationOnly,
+                connectors: ConnectorPolicy::AsConfigured,
+                plugins: PluginPolicy::AsConfigured,
             },
             PolicyPreset::UnsafeSystemAccess => AgentPolicy {
                 native: NativeMode::Bypass,
@@ -819,6 +1169,8 @@ impl PolicyPreset {
                 secrets: SecretPolicy::Brokered,
                 network: NetworkPolicy::Open,
                 origin: OriginPolicy::LocalElevationOnly,
+                connectors: ConnectorPolicy::AsConfigured,
+                plugins: PluginPolicy::AsConfigured,
             },
             PolicyPreset::UnsafeEverything => AgentPolicy {
                 native: NativeMode::Bypass,
@@ -834,6 +1186,8 @@ impl PolicyPreset {
                 // "local approval required" from Remote Control. Break-glass
                 // does not become remotely authorisable by being break-glass.
                 origin: OriginPolicy::LocalElevationOnly,
+                connectors: ConnectorPolicy::AsConfigured,
+                plugins: PluginPolicy::AsConfigured,
             },
         }
     }
@@ -912,7 +1266,16 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["native", "sandbox", "system", "secrets", "network", "origin"]
+            vec![
+                "native",
+                "sandbox",
+                "system",
+                "secrets",
+                "network",
+                "origin",
+                "connectors",
+                "plugins"
+            ]
         );
     }
 
@@ -925,12 +1288,23 @@ mod tests {
             secrets: SecretPolicy::None,
             network: NetworkPolicy::Allowlist,
             origin: OriginPolicy::RemoteElevationAllowed,
+            connectors: ConnectorPolicy::Curated,
+            plugins: PluginPolicy::Curated,
         };
         let text = serde_json::to_string(&p).expect("serialise");
         assert_eq!(serde_json::from_str::<AgentPolicy>(&text).unwrap(), p);
         // And the keys are the ones the CLI and the shell read.
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-        for key in ["native", "sandbox", "system", "secrets", "network", "origin"] {
+        for key in [
+            "native",
+            "sandbox",
+            "system",
+            "secrets",
+            "network",
+            "origin",
+            "connectors",
+            "plugins",
+        ] {
             assert!(v.get(key).is_some(), "{key} missing from {text}");
         }
     }
@@ -942,6 +1316,14 @@ mod tests {
         // the parse and not come back loose.
         let p: AgentPolicy = serde_json::from_str(r#"{"sandbox":"strict"}"#).expect("parse");
         assert_eq!(p.sandbox, SandboxPolicy::Strict);
+        // Dimension 7 above all: a record written before it existed must come
+        // back as the connector set a session has always had, and never as a
+        // curated one with an empty list.
+        assert_eq!(p.connectors, ConnectorPolicy::AsConfigured);
+        // And dimension 8 the same, where the cost of getting it wrong is a
+        // session that quietly lost a plugin because an older writer said
+        // nothing about one.
+        assert_eq!(p.plugins, PluginPolicy::AsConfigured);
         assert_eq!(p, AgentPolicy { sandbox: SandboxPolicy::Strict, ..AgentPolicy::default() });
 
         let empty: AgentPolicy = serde_json::from_str("{}").expect("parse");
@@ -1072,11 +1454,11 @@ mod tests {
         assert_eq!(p.validate(), Ok(()));
         // What is refused is the pair of an allowlist mode and no allowlist.
         assert_eq!(
-            p.validate_for(&Allowlist::default()),
+            p.validate_for(&Allowlist::default(), &[], &[]),
             Err(PolicyError::AllowlistEmpty)
         );
         let allow = Allowlist::parse(&["api.example.com"]).expect("parse");
-        assert_eq!(p.validate_for(&allow), Ok(()));
+        assert_eq!(p.validate_for(&allow, &[], &[]), Ok(()));
 
         // No other mode cares whether the list is empty: `open` was never
         // going to consult it, and the two offline modes are not supposed to
@@ -1087,7 +1469,73 @@ mod tests {
             NetworkPolicy::Brokered,
         ] {
             let p = AgentPolicy { network, ..p };
-            assert_eq!(p.validate_for(&Allowlist::default()), Ok(()), "{network}");
+            assert_eq!(
+                p.validate_for(&Allowlist::default(), &[], &[]),
+                Ok(()),
+                "{network}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_wire_spelling_of_every_dimension_is_the_one_people_type() {
+        // Found by a real failure rather than reasoned about: the daemon
+        // refused `{"connectors":"none"}` with "unknown variant `none`,
+        // expected one of … `no_connectors`", because the derive's snake_case
+        // and `as_str` had drifted apart on one value. Nothing else would have
+        // caught it — every unit test used the Rust value, and the CLI and the
+        // daemon only meet over the wire.
+        for value in ConnectorPolicy::ALL {
+            let text = serde_json::to_string(value).expect("serialise");
+            assert_eq!(
+                text,
+                format!("\"{}\"", value.as_str()),
+                "{value} is spelled one way on the wire and another in the flag"
+            );
+            assert_eq!(
+                ConnectorPolicy::parse(value.as_str()),
+                Some(*value),
+                "{value} does not parse back from its own name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_curated_session_with_nothing_on_its_connector_list_is_refused() {
+        use crate::destination::Allowlist;
+
+        // Dimension 7's half of the rule the allowlist already has, and the
+        // reason it is a refusal rather than a default: an empty list would
+        // start a session with every connector removed while the user believed
+        // they had named some, and `--connectors none` already spells that.
+        let p = AgentPolicy {
+            connectors: ConnectorPolicy::Curated,
+            ..AgentPolicy::default()
+        };
+        assert_eq!(p.validate(), Ok(()));
+        assert_eq!(
+            p.validate_for(&Allowlist::default(), &[], &[]),
+            Err(PolicyError::ConnectorListEmpty)
+        );
+        assert_eq!(
+            p.validate_for(&Allowlist::default(), &["memory".to_string()], &[]),
+            Ok(())
+        );
+        // And no other value consults the list at all.
+        for connectors in [
+            ConnectorPolicy::AsConfigured,
+            ConnectorPolicy::LocalOnly,
+            ConnectorPolicy::NoConnectors,
+        ] {
+            let p = AgentPolicy {
+                connectors,
+                ..AgentPolicy::default()
+            };
+            assert_eq!(
+                p.validate_for(&Allowlist::default(), &[], &[]),
+                Ok(()),
+                "{connectors}"
+            );
         }
     }
 
@@ -1117,26 +1565,76 @@ mod tests {
     fn unbuilt_dimension_values_are_refused_and_name_their_remedy() {
         let cases: Vec<(AgentPolicy, PolicyError)> = vec![
             (
-                AgentPolicy { system: SystemAccess::Session, ..Default::default() },
-                PolicyError::SystemAccessUnavailable(SystemAccess::Session),
-            ),
-            (
-                AgentPolicy { system: SystemAccess::Unsafe, ..Default::default() },
-                PolicyError::SystemAccessUnavailable(SystemAccess::Unsafe),
-            ),
-            (
                 AgentPolicy { secrets: SecretPolicy::Export, ..Default::default() },
                 PolicyError::SecretExportUnavailable,
-            ),
-            (
-                AgentPolicy { origin: OriginPolicy::RemoteElevationAllowed, ..Default::default() },
-                PolicyError::RemoteElevationUnavailable,
             ),
         ];
         for (policy, want) in cases {
             assert_eq!(policy.validate(), Err(want), "{policy:?}");
             let msg = want.to_string();
             assert!(msg.len() > 40, "unhelpful refusal: {msg}");
+        }
+    }
+
+    #[test]
+    fn break_glass_inside_a_sandbox_is_refused_rather_than_reported() {
+        // `bwrap` sets PR_SET_NO_NEW_PRIVS for everything it wraps and no
+        // process can clear it, so `--unsafe-everything --sandbox project`
+        // would run with the flag ON while `no_new_privs()` said otherwise —
+        // a policy describing a boundary it had not moved. Refused in both
+        // confined spellings.
+        for sandbox in [SandboxPolicy::Project, SandboxPolicy::Strict] {
+            let p = AgentPolicy {
+                system: SystemAccess::Unsafe,
+                sandbox,
+                ..AgentPolicy::default()
+            };
+            assert_eq!(
+                p.validate(),
+                Err(PolicyError::BreakGlassCannotBeConfined(sandbox)),
+                "{sandbox}"
+            );
+            assert!(p.validate().unwrap_err().to_string().contains("no_new_privs"));
+        }
+        // The unconfined form — which is what the preset is — passes.
+        assert_eq!(PolicyPreset::UnsafeEverything.policy().validate(), Ok(()));
+        // And the session grant is unaffected: it keeps no_new_privs, so it
+        // is at home in any sandbox.
+        for sandbox in SandboxPolicy::ALL {
+            let p = AgentPolicy {
+                system: SystemAccess::Session,
+                sandbox: *sandbox,
+                ..AgentPolicy::default()
+            };
+            assert_eq!(p.validate(), Ok(()), "{sandbox}");
+        }
+    }
+
+    #[test]
+    fn a_dimension_three_value_names_the_grant_it_cannot_start_without() {
+        // The default is the only value that arrives without one, which is
+        // §3.3's "root is delegated, not inherited" as a property of the type.
+        assert_eq!(AgentPolicy::default().needs_grant(), None);
+        assert_eq!(
+            AgentPolicy { system: SystemAccess::Session, ..Default::default() }.needs_grant(),
+            Some(crate::grant::GrantKind::SystemAccess)
+        );
+        assert_eq!(
+            PolicyPreset::UnsafeEverything.policy().needs_grant(),
+            Some(crate::grant::GrantKind::BreakGlass)
+        );
+        // No other dimension can reach it: a bypassing, unconfined, offline,
+        // broker-less session still needs no grant.
+        for sandbox in SandboxPolicy::ALL {
+            for native in NativeMode::ALL {
+                let p = AgentPolicy {
+                    sandbox: *sandbox,
+                    native: *native,
+                    secrets: SecretPolicy::None,
+                    ..AgentPolicy::default()
+                };
+                assert_eq!(p.needs_grant(), None, "{sandbox} {native}");
+            }
         }
     }
 
@@ -1154,9 +1652,49 @@ mod tests {
             AgentPolicy { network: NetworkPolicy::Offline, ..Default::default() },
             AgentPolicy { network: NetworkPolicy::Brokered, ..Default::default() },
             AgentPolicy { network: NetworkPolicy::Allowlist, ..Default::default() },
+            // P0-014's last commit. Refused by this function until the
+            // security key §7 requires actually existed; accepted now that
+            // `privilege::decide_origin` reads it and refuses every non-local
+            // caller who cannot present a verified assertion for the exact
+            // elevation being asked for.
+            AgentPolicy { origin: OriginPolicy::RemoteElevationAllowed, ..Default::default() },
         ] {
             assert_eq!(p.validate(), Ok(()), "{p:?}");
         }
+    }
+
+    #[test]
+    fn opting_in_to_remote_elevation_changes_nothing_but_the_origin_dimension() {
+        // The relaxation is one value in one dimension, and the risk of
+        // relaxing a validator is that it stops refusing something else at the
+        // same time. Asserted rather than assumed: the five other dimensions
+        // keep their own refusals while the origin dimension is permissive.
+        let permissive = OriginPolicy::RemoteElevationAllowed;
+        assert_eq!(
+            AgentPolicy { origin: permissive, secrets: SecretPolicy::Export, ..Default::default() }
+                .validate(),
+            Err(PolicyError::SecretExportUnavailable)
+        );
+        assert_eq!(
+            AgentPolicy {
+                origin: permissive,
+                system: SystemAccess::Unsafe,
+                sandbox: SandboxPolicy::Strict,
+                ..Default::default()
+            }
+            .validate(),
+            Err(PolicyError::BreakGlassCannotBeConfined(SandboxPolicy::Strict))
+        );
+        assert_eq!(
+            AgentPolicy {
+                origin: permissive,
+                network: NetworkPolicy::Brokered,
+                secrets: SecretPolicy::None,
+                ..Default::default()
+            }
+            .validate(),
+            Err(PolicyError::BrokeredNetworkNeedsBroker)
+        );
     }
 
     #[test]
@@ -1191,6 +1729,8 @@ mod tests {
         assert_eq!(sys.sandbox, SandboxPolicy::Unrestricted);
         assert_eq!(sys.system, SystemAccess::Session);
         assert_eq!(sys.secrets, SecretPolicy::Brokered);
+        // §4.4 does not lift no_new_privs; §4.5 is the only mode that does.
+        assert!(sys.no_new_privs());
 
         // §4.5, and §3.4's last requirement.
         let breakglass = PolicyPreset::UnsafeEverything.policy();
@@ -1206,9 +1746,14 @@ mod tests {
             "§7: unsafe-everything requires local approval"
         );
 
-        // The two elevated presets are refused until P0-006 and P0-007 land.
-        assert!(sys.validate().is_err());
-        assert!(breakglass.validate().is_err());
+        // Both elevated presets are expressible now. What they are not is
+        // free: each names a grant, and the daemon will not start a session
+        // in either mode without one that a human authenticated.
+        assert_eq!(sys.validate(), Ok(()));
+        assert_eq!(breakglass.validate(), Ok(()));
+        assert!(sys.needs_grant().is_some());
+        assert!(breakglass.needs_grant().is_some());
+        assert_ne!(sys.needs_grant(), breakglass.needs_grant());
     }
 
     #[test]

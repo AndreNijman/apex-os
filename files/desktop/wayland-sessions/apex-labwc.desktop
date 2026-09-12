@@ -1,6 +1,16 @@
 [Desktop Entry]
-Name=labwc (APEX)
-Comment=Stacking Wayland compositor with APEX Shell
+Name=APEX Floating
+Comment=Traditional overlapping windows you drag, resize and stack (labwc)
+# NAME IS A PRODUCT NAME, NOT THE COMPOSITOR'S. The greeter renders `Name=`
+# verbatim to every user at every login, so this line is the one place the
+# session picker's wording is decided. ROADMAP.md:1031 — "Treat labwc as
+# user-facing `Floating` mode, not a fallback compositor" — and rc.xml:86-88
+# say the same thing about the window decorations. The implementation stays in
+# `Comment=`, where a user who wants to know can find it and a tooltip-showing
+# picker will show it, and in the file name and `DesktopNames=`, which are ids
+# and are load-bearing. Do not put `labwc` back in `Name=`:
+# tests/test-apex-greet-sessions.sh fails if any shipped session name carries
+# an implementation token.
 # Deliberately NOT `labwc -C /usr/share/apex/labwc`: the config is seeded into
 # ~/.config/labwc by apex-shell-firstrun so it is the user's own file and stays
 # editable, exactly as the Hyprland and niri sessions work. Bare `labwc` reads

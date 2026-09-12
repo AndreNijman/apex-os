@@ -180,9 +180,20 @@ pub enum HostError {
 impl std::fmt::Display for HostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // Names the direction and the remedy, which is what §25 asks of a
+            // version refusal. A registry from a newer APEX is what a
+            // `bootc rollback` leaves behind -- hosts.toml lives under
+            // $XDG_CONFIG_HOME and does not roll back with the image -- and
+            // "understands up to 1" on its own leaves the user holding a file
+            // they cannot open, with no hint that booting the other deployment
+            // gets it back. `tasks.toml` got this treatment in P1-045; this is
+            // the same message for the same file shape.
             Self::UnsupportedVersion(v) => write!(
                 f,
-                "hosts.toml is version {v}, but this apex understands up to {SCHEMA_VERSION}"
+                "hosts.toml is version {v}, and this build of APEX reads version \
+                 {SCHEMA_VERSION}. It was written by a newer APEX, which usually means a \
+                 rollback: a host registry does not roll back with the image. Boot the \
+                 newer deployment again to use it."
             ),
             Self::BadName(n) => write!(
                 f,
@@ -667,7 +678,15 @@ mod tests {
     #[test]
     fn a_future_version_is_refused_rather_than_guessed_at() {
         let e = Hosts::parse(&format!("version = {}\n", SCHEMA_VERSION + 1)).unwrap_err();
-        assert!(e.to_string().contains("understands up to"), "got {e}");
+        let m = format!("{e}");
+        // All four parts, the way `task.rs` asserts the same claim. The
+        // refusal itself was never wrong; §25 is about what it tells the user
+        // to do, so a message that names the mismatch and drops the remedy has
+        // to fail here -- that is the whole change.
+        assert!(m.contains(&format!("version {}", SCHEMA_VERSION + 1)), "{m}");
+        assert!(m.contains(&format!("reads version {SCHEMA_VERSION}")), "{m}");
+        assert!(m.contains("rollback"), "{m}");
+        assert!(m.contains("Boot the newer deployment"), "{m}");
     }
 
     #[test]

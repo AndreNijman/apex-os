@@ -122,6 +122,16 @@ pub struct ProjectLayout {
     /// Unix seconds the layout was captured.
     #[serde(default)]
     pub saved: u64,
+    /// The terminal template last opened for this project, if any — see
+    /// [`crate::mux`]. Kept in the SAME record as the captured windows rather
+    /// than in a second store: a project has one layout, and half of it is
+    /// desktop windows somebody had open while the other half is the shape
+    /// their terminal work takes. Two stores would mean two things to forget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// The multiplexer that template was opened in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mux: Option<String>,
 }
 
 impl ProjectLayout {
@@ -271,6 +281,7 @@ pub fn capture(
     ProjectLayout {
         entries,
         saved: now_secs(),
+        ..Default::default()
     }
 }
 
@@ -485,6 +496,7 @@ mod tests {
                 LayoutEntry { argv: vec!["d".into()], cwd: "/p".into(), workspace: "".into(),  app_id: "x".into(), terminal: false },
             ],
             saved: 1,
+            ..Default::default()
         };
         assert_eq!(layout.workspaces(), vec!["2".to_string(), "1".to_string()]);
     }
@@ -645,6 +657,7 @@ mod tests {
                 terminal: true,
             }],
             saved: 1_700_000_000,
+            ..Default::default()
         };
         save(&slug, &layout).expect("save");
         let back = load(&slug).expect("load");

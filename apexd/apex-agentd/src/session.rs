@@ -9,8 +9,10 @@ use anyhow::{bail, Context, Result};
 use apex_agent_core::adapter;
 use apex_agent_core::checkpoint;
 use apex_agent_core::hook;
+use apex_agent_core::mcpconf;
 use apex_agent_core::client::SESSION_ENV;
 use apex_agent_core::paths;
+use apex_agent_core::pluginconf;
 use apex_agent_core::config;
 use apex_agent_core::policy::{NetworkPolicy, PolicyError};
 use apex_agent_core::profile;
@@ -21,7 +23,7 @@ use apex_agent_core::session as logic;
 use apex_agent_core::term::WinSize;
 
 use crate::egress;
-use crate::peer::Peer;
+use crate::privilege::Caller;
 use crate::pty;
 use crate::registry::{self, now_secs, Handle};
 use crate::Daemon;
@@ -39,7 +41,7 @@ const POLL_INTERVAL_MS: i32 = 1000;
 /// reason the privilege verbs take it: the origin has to come from the
 /// kernel's view of who connected, and a handler that could reach for the
 /// request instead would eventually do so.
-pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Result<SessionInfo> {
+pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<SessionInfo> {
     let cwd = PathBuf::from(&req.cwd);
     if !cwd.is_absolute() {
         bail!("working directory {} must be absolute", cwd.display());
@@ -74,7 +76,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         );
     }
 
-    // Resolve the six permission dimensions before anything is created.
+    // Resolve the permission dimensions before anything is created.
     //
     // Normalised first, so the record and the enforcement agree about what the
     // session has — a `strict` request carries the client's default `open`
@@ -87,8 +89,15 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     // configuration. A destination policy that only changed on a daemon
     // restart is one people widen once and never narrow again, and this is the
     // daemon reading its own user's file — nothing the session can write.
-    let allowlist = config::Config::load().allowlist();
-    policy.validate_for(&allowlist).map_err(PolicyRefused)?;
+    let runtime_config = config::Config::load();
+    let allowlist = runtime_config.allowlist();
+    policy
+        .validate_for(
+            &allowlist,
+            &runtime_config.connector_allow,
+            &runtime_config.plugin_allow,
+        )
+        .map_err(PolicyRefused)?;
 
     // Dimension 1 is the agent's own, and only the adapter knows whether this
     // one can express it. Refused rather than dropped: a `--agent-bypass` that
@@ -112,9 +121,95 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     //
     // Refused rather than defaulted when it cannot be established: the default
     // is `local-terminal`, which is what §7 reserves root for.
-    let who = crate::privilege::origin(daemon, peer);
+    let who = crate::privilege::origin(daemon, caller);
     let session_origin = crate::privilege::for_new_session(&who, req.request_origin)
         .map_err(OriginRefused)?;
+
+    // ── dimension 3: the grant, before anything exists to clean up ─────────
+    //
+    // §3.3: root is delegated, not inherited. A session that asks for either
+    // elevated mode gets one only after a human at this machine has said so,
+    // and the whole of that decision happens here — before the worktree, the
+    // checkpoint, the reserved id and the PTY, so a refused password leaves
+    // nothing behind and a refused ORIGIN never reaches the password at all.
+    //
+    // The order inside `authorise_grant` is the security property; it is
+    // written out there. The TTL is checked first, so a typo in `--ttl` fails
+    // in front of the user instead of after a password dialog they then find
+    // out was pointless.
+    // §P1-037. Checked here, with the TTL, and for the same reason: a caller
+    // who asked for two mechanisms that cannot both apply should find that out
+    // in front of their own terminal, not after a capsule has been created.
+    crate::disposable::check(
+        req.disposable,
+        policy.sandbox.is_confined(),
+        req.copy_out.as_deref(),
+        req.worktree.is_some(),
+        req.checkpoint,
+    )?;
+
+    let wanted_grant = policy.needs_grant();
+    if wanted_grant.is_none() && req.ttl_ms.is_some() {
+        // A `--ttl` with nothing to bound is a user who believes they asked
+        // for something they did not. Refused rather than ignored.
+        bail!(
+            "--ttl bounds a system-access grant, and this session is not asking for one; add \
+             `--system-access session` or `--unsafe-everything`, or drop the --ttl"
+        );
+    }
+    if wanted_grant.is_none() && req.capabilities.is_some() {
+        // The same refusal as a `--ttl` with nothing to bound, and for the
+        // same reason: a caller who narrowed a grant they did not ask for
+        // believes they asked for something they did not.
+        bail!(
+            "--capabilities narrows a system-access grant, and this session is not asking for \
+             one; add `--system-access session`, or drop the --capabilities"
+        );
+    }
+    let authorised = match wanted_grant {
+        None => None,
+        Some(kind) => {
+            let ttl_ms = apex_agent_core::grant::ttl_for(kind, req.ttl_ms)
+                .map_err(|e| TtlRefused(e.to_string()))?;
+            // Ahead of `authorise_grant` for the reason the TTL is: a typo in
+            // `--capabilities` should fail in front of the person who typed
+            // it, not after a password dialog they then find out was
+            // pointless.
+            let capabilities =
+                apex_agent_core::grant::capabilities_for(kind, req.capabilities.as_deref())
+                    .map_err(|e| CapabilitiesRefused(e.to_string()))?;
+            let (grant_origin, proof) = crate::privilege::authorise_grant(
+                daemon,
+                &who,
+                caller,
+                kind,
+                "ask for a system-access grant",
+                // §7's second column, for the session being started (P0-014).
+                //
+                // The policy is THIS request's dimension 6 — normalised and
+                // validated above — and not the daemon's configured default,
+                // which `Config::policy()` only assembles for a session
+                // started without the flags. A session started with
+                // `--origin-policy remote` overrides it, and reading the
+                // config here would mean the per-session dimension governs
+                // nothing.
+                //
+                // `scope: None` is not an oversight: this call is deliberately
+                // ahead of `registry.allocate()`, so that a refused password
+                // leaves no reserved id behind, and there is therefore no id
+                // for the key to have signed over. `Challenge.session` is
+                // `Option<u32>` for exactly this caller.
+                &crate::privilege::Elevating {
+                    policy: policy.origin,
+                    scope: None,
+                    ttl_ms,
+                    factor: req.second_factor.as_ref(),
+                },
+            )
+            .map_err(|e| GrantRefused(e.to_string()))?;
+            Some((kind, ttl_ms, capabilities, grant_origin, proof))
+        }
+    };
 
     // Resolve the project, then the worktree, then the working directory. Each
     // step can change where the session actually runs.
@@ -180,7 +275,13 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     // by design — a session whose hooks could not be installed reports its
     // state from the PTY scanner, which is the fallback §6.1 keeps and not a
     // reason to refuse to start. `hook_settings` says what went wrong, once.
-    let hook_settings = install_hook_settings(adapter, &scratch);
+    let hook_settings = install_hook_settings(
+        adapter,
+        &scratch,
+        detected.as_ref().map(|p| std::path::Path::new(&p.root)),
+        &policy,
+        &runtime_config.plugin_allow,
+    );
 
     // §12: the shim's directory goes first on the session's PATH, so a skill's
     // own `git push` reaches the broker without the skill knowing there is one.
@@ -191,7 +292,27 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         .is_confined()
         .then(|| install_git_shim(&scratch))
         .flatten();
+    // §10.2 and P1-026/P1-028: the connectors this session gets, decided by the
+    // runtime and handed over as a file, rather than whatever the agent finds
+    // on the machine. Best-effort in the same sense the hook settings are — a
+    // session whose configuration could not be written starts with the
+    // connectors it would have had — but not silently: `install_mcp_config`
+    // says what went wrong and the session record says the configuration is
+    // absent, so nothing downstream reports a confinement that did not happen.
+    let mcp_config = install_mcp_config(
+        adapter,
+        &scratch,
+        &workdir,
+        &policy,
+        &runtime_config.connector_allow,
+    );
+
     let mut extra = extra;
+    if let Some(path) = mcp_config.as_ref() {
+        let mut with_mcp = adapter.mcp_config_args(path);
+        with_mcp.append(&mut extra);
+        extra = with_mcp;
+    }
     if let Some(path) = hook_settings.as_ref() {
         let mut with_hooks = adapter.hook_settings_args(path);
         with_hooks.append(&mut extra);
@@ -232,6 +353,13 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
     // agent's own writable `~/.claude` all still silence it — which is why
     // nothing downstream is allowed to depend on the hook having run.
     if let Some(path) = hook_settings.as_ref() {
+        spec.ro.push(path.clone());
+    }
+    // Read-only for the reason the hook settings are, and here it is the whole
+    // point rather than tidiness: the scratch is bound writable, so a curated
+    // MCP configuration the session could rewrite is one it could put its own
+    // unwrapped definitions back into — which is the hole this closes.
+    if let Some(path) = mcp_config.as_ref() {
         spec.ro.push(path.clone());
     }
     // Read-only for the same reason the hook settings are: the scratch is
@@ -388,7 +516,56 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         *at = sandbox::real_target(at);
     }
 
-    let argv = sandbox::build_argv(&spec, &program, &args).map_err(SandboxRefused)?;
+    // The grant is minted now that the session has an id to be bound to, and
+    // before the process starts: §3.3 wants the grant "bound to a concrete
+    // agent session", and a grant issued after the agent was already running
+    // would have a window in which the session existed and the record did not.
+    let issued = authorised.map(|(kind, ttl_ms, capabilities, grant_origin, proof)| {
+        daemon.grants.issue(
+            proof,
+            kind,
+            id,
+            adapter.id,
+            detected.as_ref().map(|p| p.root.as_str()),
+            ttl_ms,
+            capabilities,
+            grant_origin,
+            apex_agent_core::request::now_ms(),
+        )
+    });
+
+    // §P1-037. A disposable session's PTY child is the disposable ENGINE, and
+    // the adapter runs inside the capsule it creates. `build_argv` is not in
+    // that path at all: the policy is `unrestricted` here — `disposable::
+    // check` refused any other above — so bwrap would add nothing, and if it
+    // were added it would confine the container client rather than the agent.
+    //
+    // The engine's own EXIT/INT/TERM traps are what remove the environment,
+    // so there is no teardown here to get wrong: killing this child tears the
+    // capsule down, which is exactly the behaviour `apex agent kill` should
+    // have.
+    let capsule = req.disposable.then(|| crate::disposable::name_for(id));
+    let argv = if req.disposable {
+        // The engine's own overrides, set EXPLICITLY rather than relied on to
+        // arrive by inheritance. They decide which directory it removes
+        // recursively and which program it drives, and the inheritance that
+        // carries them today is a bug elsewhere that a correct fix would take
+        // away — see `disposable::engine_env`.
+        for pair in crate::disposable::engine_env(|n| std::env::var(n).ok()) {
+            spec.env_set.push(pair);
+        }
+        crate::disposable::argv(id, &workdir, req.copy_out.as_deref(), &program, &args)?
+    } else {
+        sandbox::build_argv(&spec, &program, &args).map_err(SandboxRefused)?
+    };
+    // §P2-011. A pure exec-chain prefix when a budget is configured, and the
+    // identity function when one is not — which is the default, so an
+    // unbudgeted session's argv is byte-identical to what it was before this
+    // line existed. `spec.runtime_dir` and not the daemon's own: the child's
+    // `XDG_RUNTIME_DIR` is what decides whether systemd-run can reach a user
+    // manager, and they are not always the same directory.
+    let argv = crate::budget::wrap(argv, id, req.disposable, &spec.runtime_dir, &cfg)
+        .map_err(BudgetRefused)?;
     let env = sandbox::resolved_env(&spec);
 
     // A confined session gets its environment from bwrap's --setenv, so the
@@ -411,6 +588,23 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         policy,
         request_origin: Some(session_origin.origin),
         origin_source: Some(session_origin.source),
+        // Which remote device asked for this session, when the connection
+        // that asked named one. Carried from the connection rather than from
+        // the `Run` request: a session that could name its own actor could
+        // name somebody else's phone.
+        actor: who.actor.clone(),
+        capsule: capsule.clone(),
+        grant: issued.as_ref().map(|g| g.id),
+        grant_expires_ms: issued.as_ref().map(|g| g.expires_ms),
+        // Nothing has been heard from the agent yet. Claude fills this in on
+        // its first hook event; an agent that never publishes one leaves it
+        // absent, which reads as "not reported" rather than as a mode.
+        native_observed: None,
+        // Empty, not absent: this daemon has the graph, and a session that has
+        // delegated nothing yet must be distinguishable from one whose runtime
+        // cannot tell. See `SessionInfo::children`.
+        telemetry: None,
+        children: Vec::new(),
         pid: spawned.pid,
         started: now_secs(),
         last_activity: now_secs(),
@@ -420,6 +614,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, peer: Option<Peer>) -> Resul
         checkpoint: checkpoint_id,
         cols: size.cols,
         rows: size.rows,
+        injected: 0,
     };
 
     let handle = {
@@ -507,7 +702,16 @@ fn install_redacted_settings(
 /// a private remote fails to authenticate the way it does today. Nothing is
 /// less safe: the shim holds no credential and enforces nothing.
 fn install_git_shim(scratch: &Path) -> Option<PathBuf> {
-    let apex = apex_program()?;
+    install_session_bin(scratch, &apex_program()?, Path::new(TOOL_SHIM_DIR))
+}
+
+/// The half of [`install_git_shim`] that names what it installs FROM.
+///
+/// Split out so a test can drive the real wiring: which shims end up in the
+/// one directory that goes first on a session's `PATH` is the property, and a
+/// test that called each installer separately would prove each works and not
+/// that either is reached.
+fn install_session_bin(scratch: &Path, apex: &Path, tools: &Path) -> Option<PathBuf> {
     let bin = scratch.join(SESSION_BIN);
     if let Err(e) = std::fs::create_dir_all(&bin) {
         eprintln!(
@@ -536,7 +740,57 @@ fn install_git_shim(scratch: &Path) -> Option<PathBuf> {
         eprintln!("apex-agentd: could not make {} executable ({e})", shim.display());
         return None;
     }
+    install_tool_shims_from(&bin, tools);
     Some(bin)
+}
+
+/// Where the image installs P1-012's `wrangler` and `terraform` shim.
+///
+/// A directory rather than the script, because what goes in a session's `bin`
+/// is one symlink per tool: the shim reads `argv[0]` to decide which tool it is
+/// standing in for.
+pub const TOOL_SHIM_DIR: &str = "/usr/libexec/apex/tools";
+
+/// §13.4's tool half, put where a session's own `wrangler` will find it.
+///
+/// ## Why here and not in `/etc/profile.d`
+///
+/// There is a profile.d drop-in that does the same thing, and it is **not what
+/// makes this work for an agent**. `/etc/profile.d/*.sh` is read by a *login*
+/// shell. An agent's tool calls are `bash -c '…'` — non-login,
+/// non-interactive — and never read it. The drop-in is for a person who opens
+/// a terminal inside a managed session; this is for the agent, and this is the
+/// one that matters for P1-012's "existing skills can continue invoking normal
+/// tools".
+///
+/// Symlinks into the same `bin` the git shim uses, so there is one directory
+/// at the front of the session's `PATH` rather than two, and so an unconfined
+/// session gets neither — for the reason the git shim gives: an unconfined
+/// session has the user's own tools and the user's own credentials, and no
+/// reason to be routed anywhere.
+///
+/// Best-effort, like the hook settings and for the same reason: a session
+/// whose tool shims could not be installed is a session where `wrangler`
+/// reaches the real binary with no credential and says so. That is a worse
+/// experience, not a hole — nothing here is a boundary, and the note in the
+/// shim itself says so.
+fn install_tool_shims_from(bin: &Path, source: &Path) {
+    for tool in ["wrangler", "terraform"] {
+        let from = source.join(tool);
+        if !from.exists() {
+            // The image did not install it. Not an error: a development build
+            // running from a checkout has no /usr/libexec/apex.
+            continue;
+        }
+        let link = bin.join(tool);
+        let _ = std::fs::remove_file(&link);
+        if let Err(e) = std::os::unix::fs::symlink(&from, &link) {
+            eprintln!(
+                "apex-agentd: could not link {} ({e}), so {tool} is not brokered in this session",
+                link.display()
+            );
+        }
+    }
 }
 
 /// The directory inside the session scratch that goes first on its `PATH`.
@@ -559,7 +813,13 @@ const REDACTED_SETTINGS_FILE: &str = "claude-settings-redacted.json";
 /// the PTY scanner decides state, exactly as it does for an agent nobody has
 /// integrated. The failures are logged because a silently unintegrated Claude
 /// looks identical to a working one until somebody measures the state.
-fn install_hook_settings(adapter: &adapter::Adapter, scratch: &Path) -> Option<PathBuf> {
+fn install_hook_settings(
+    adapter: &adapter::Adapter,
+    scratch: &Path,
+    project: Option<&Path>,
+    policy: &apex_agent_core::policy::AgentPolicy,
+    plugin_allow: &[String],
+) -> Option<PathBuf> {
     if !adapter.hooks {
         return None;
     }
@@ -574,13 +834,110 @@ fn install_hook_settings(adapter: &adapter::Adapter, scratch: &Path) -> Option<P
             return None;
         }
     };
+    // The user's own status line, read here rather than inside the settings
+    // document, because `hook::settings_json` is pure and this is a filesystem
+    // question. See `statusline::overlay` for why the presentation keys have
+    // to travel with it and why the command must not.
+    let status = apex_agent_core::statusline::user_status_line(&paths::home(), project);
+
+    // Dimension 8. Read here rather than inside the document builder for the
+    // same reason the status line is: `hook::settings_json` is pure, and which
+    // plugins this machine has enabled is a filesystem question.
+    let installed = pluginconf::read(&paths::home());
+    let curated = pluginconf::curate(&installed, policy.plugins, plugin_allow);
+    if let Some(c) = &curated {
+        // Said out loud, because the quiet version of this is a session that
+        // silently lost the plugin whose command the user was about to type.
+        // `removed_code` is the number that says what the removal bought: a
+        // plugin that ships only commands runs nothing on its own, and a
+        // report that counted it would overstate the case.
+        eprintln!(
+            "apex-agentd: {} plugin(s) for this session, {} removed ({} of those ran \
+             code of their own — hooks or the scripts beside them — that no MCP \
+             confinement would have reached)",
+            c.kept.len(),
+            c.removed.len(),
+            c.removed_code(&installed),
+        );
+    }
+
     let path = hook::settings_path(scratch);
-    let document = hook::settings_json(&apex).to_string();
+    let document = hook::settings_json(&apex, status.as_ref(), curated.as_ref()).to_string();
     match std::fs::write(&path, document) {
         Ok(()) => Some(path),
         Err(e) => {
             eprintln!(
                 "apex-agentd: writing {} failed ({e}), so {} runs without its hook bridge",
+                path.display(),
+                adapter.id
+            );
+            None
+        }
+    }
+}
+
+/// Write the curated MCP configuration for a session, and say where it went.
+///
+/// `None` when this adapter cannot be told to use one configuration and ignore
+/// the rest, when the write failed, and — the case worth naming — when the
+/// session asked for nothing to be reduced and nothing needed confining. All
+/// three end the same way downstream: the agent loads the definitions it finds,
+/// exactly as it did before this existed.
+///
+/// That last skip is not laziness. A curated document is `--strict-mcp-config`,
+/// and strict means the session's own later edits to `~/.claude.json` stop
+/// reaching the agent. Paying that for a session with nothing to confine and
+/// nothing to remove would be a behaviour change bought for nothing — so the
+/// file is written when the policy reduces something, or when there is
+/// third-party executable content to wrap, and not otherwise.
+fn install_mcp_config(
+    adapter: &adapter::Adapter,
+    scratch: &Path,
+    workdir: &Path,
+    policy: &apex_agent_core::policy::AgentPolicy,
+    allow: &[String],
+) -> Option<PathBuf> {
+    if !adapter.strict_mcp {
+        return None;
+    }
+    let home = paths::home();
+    let defs = mcpconf::read(&home, Some(workdir));
+    let approval = mcpconf::approvals(&home, Some(workdir));
+    // The same resolver the hook bridge uses, and deliberately not a second
+    // one: a wrapper that pointed at a different build from the daemon it
+    // reports to is the one pairing guaranteed to be wrong.
+    let apex = apex_program();
+    let curated = mcpconf::curate(&defs, &approval, policy.connectors, allow, apex.as_deref());
+
+    let wraps = curated.confined() > 0;
+    if !policy.connectors.reduces() && !wraps {
+        return None;
+    }
+
+    let path = mcpconf::config_path(scratch);
+    let document = curated.document.to_string();
+    match std::fs::write(&path, document) {
+        Ok(()) => {
+            if curated.dropped() > 0 || wraps {
+                eprintln!(
+                    "apex-agentd: {} connector(s) for this session, {} of them sandboxed \
+                     ({} of those by their own definition, so only by this file for the rest), \
+                     {} removed",
+                    curated.kept(),
+                    curated.confined(),
+                    curated.confined_everywhere(),
+                    curated.dropped()
+                );
+            }
+            Some(path)
+        }
+        Err(e) => {
+            // Loud, because the quiet version of this is a session that looks
+            // curated and is not. Every connector the policy meant to remove
+            // is reachable after this line.
+            eprintln!(
+                "apex-agentd: writing {} failed ({e}), so {} starts with the connectors it \
+                 finds and NOT the ones this session asked for",
                 path.display(),
                 adapter.id
             );
@@ -723,6 +1080,79 @@ impl std::fmt::Display for OriginRefused {
 
 impl std::error::Error for OriginRefused {}
 
+/// A system-access grant that was refused, or a TTL that was not issuable.
+///
+/// Its own type for the same reason as the three above: the remedies are
+/// different and specific. A grant refused because the connection came from
+/// inside a session is answered by asking from a terminal; one refused because
+/// the origin was remote is answered by approving locally; one refused because
+/// polkit said no is answered by getting the password right. None of them is
+/// answered by changing the sandbox, which is what a shared error type would
+/// eventually suggest.
+#[derive(Debug)]
+pub struct GrantRefused(pub String);
+
+impl std::fmt::Display for GrantRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for GrantRefused {}
+
+/// A dimension refusal that is a sentence rather than a [`PolicyError`].
+///
+/// The TTL bounds live in `grant.rs`, which knows nothing about `PolicyError`
+/// and should not: a TTL is not one of the six dimensions, it is a parameter
+/// of a grant.
+#[derive(Debug)]
+pub struct TtlRefused(pub String);
+
+impl std::fmt::Display for TtlRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for TtlRefused {}
+
+/// A `--capabilities` list this build will not issue a grant for (P0-007).
+///
+/// Its own type rather than folded into [`TtlRefused`], following the same
+/// rule the four above follow: the remedies are different and specific. A
+/// refused TTL is answered by asking for a shorter window; a refused
+/// capability list is answered by spelling the verb correctly, or by not
+/// narrowing a break-glass grant that has no verbs to narrow.
+#[derive(Debug)]
+pub struct CapabilitiesRefused(pub String);
+
+impl std::fmt::Display for CapabilitiesRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for CapabilitiesRefused {}
+
+/// A resource budget that cannot be delivered (§P2-011).
+///
+/// Its own type rather than a bare `anyhow!` because the kind is the point: a
+/// budget refusal is never fixed by authorising anything, and it is never the
+/// caller's request that is wrong — it is the machine or the configuration —
+/// so `BadRequest` would send the user to look in the wrong place. The rule
+/// behind every one of these is the same: a budget that is silently not
+/// applied is worse than a session that did not start.
+#[derive(Debug)]
+pub struct BudgetRefused(pub String);
+
+impl std::fmt::Display for BudgetRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for BudgetRefused {}
+
 /// Map a `start` failure to a response, keeping the distinctions the client
 /// needs in order to explain what to do next.
 pub fn run_error(e: anyhow::Error) -> Response {
@@ -737,6 +1167,21 @@ pub fn run_error(e: anyhow::Error) -> Response {
     }
     if e.downcast_ref::<OriginRefused>().is_some() {
         return Response::error(ErrorKind::PermissionDenied, format!("{e:#}"));
+    }
+    // A refused grant is a permission answer, so it gets the kind a client
+    // branches on for one. A refused TTL is the user asking for something
+    // out of bounds, which is a bad request.
+    if e.downcast_ref::<GrantRefused>().is_some() {
+        return Response::error(ErrorKind::PermissionDenied, format!("{e:#}"));
+    }
+    if e.downcast_ref::<TtlRefused>().is_some() {
+        return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
+    }
+    if e.downcast_ref::<CapabilitiesRefused>().is_some() {
+        return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
+    }
+    if e.downcast_ref::<BudgetRefused>().is_some() {
+        return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
     }
     Response::error(ErrorKind::BadRequest, format!("{e:#}"))
 }
@@ -961,6 +1406,54 @@ pub fn handle_attach(
     Ok(())
 }
 
+/// What came of writing into a session's terminal.
+///
+/// Three outcomes and not a `Result`, because two of the three are ordinary
+/// answers a client acts on differently: an exited session means "pick another
+/// target", an I/O failure means "the terminal is broken".
+pub enum Input {
+    Written,
+    Exited,
+    Failed(String),
+}
+
+/// Write bytes into a live session's terminal.
+///
+/// This is the input pump of [`handle_attach`] with the loop taken off: the
+/// daemon owns the PTY master, so a client with nothing to display does not
+/// need to become the terminal to be heard. `Request::Input` is the caller.
+///
+/// The master descriptor is copied out and the lock RELEASED before the write,
+/// which is the whole reason this is a function rather than four lines in the
+/// dispatch arm. `pty::write_all` blocks when the agent is not draining its
+/// input: it waits for writability rather than spinning, so a TUI that has
+/// paused its reader can hold the write open indefinitely. Holding the session
+/// lock across that would freeze every other verb for the session, including
+/// the `Signal` a user reaches for precisely when an agent has stopped
+/// reading — the deadlock would be worst at the only moment it mattered. The
+/// pump above takes the lock the same way for the same reason; `Resize` is the
+/// one that holds it across the syscall, and `pty::resize` cannot block.
+pub fn write_input(handle: &Handle, data: &[u8]) -> Input {
+    let master = {
+        let s = handle.lock().expect("session lock");
+        if !s.info.is_live() {
+            return Input::Exited;
+        }
+        s.master
+    };
+    // A live session with a closed master is a race, not a state: the reaper
+    // sets the fd to -1 as the child goes away. Writing to -1 would be an
+    // EBADF reported as a broken terminal, when the truth is the same as the
+    // check above.
+    if master < 0 {
+        return Input::Exited;
+    }
+    match pty::write_all(master, data) {
+        Ok(()) => Input::Written,
+        Err(e) => Input::Failed(e.to_string()),
+    }
+}
+
 /// Remove one attached client from a session.
 fn detach(handle: &Handle, stream: &UnixStream) {
     use std::os::unix::io::AsRawFd;
@@ -1003,6 +1496,9 @@ fn write_response(writer: &mut UnixStream, response: &Response) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::io::RawFd;
+    use std::path::PathBuf;
 
     #[test]
     fn a_sandbox_refusal_keeps_its_error_kind() {
@@ -1025,16 +1521,35 @@ mod tests {
     #[test]
     fn a_policy_refusal_is_not_reported_as_a_sandbox_problem() {
         // The remedy differs. `SandboxUnavailable` means "re-run with
-        // --sandbox unrestricted", which for a denied system grant would be
-        // advice that fails and leaves the user less confined for nothing.
-        let e = anyhow::Error::new(PolicyRefused(PolicyError::SystemAccessUnavailable(
-            apex_agent_core::policy::SystemAccess::Session,
+        // --sandbox unrestricted", which for a confined break-glass request
+        // is the opposite of what the user should do.
+        let e = anyhow::Error::new(PolicyRefused(PolicyError::BreakGlassCannotBeConfined(
+            apex_agent_core::protocol::SandboxPolicy::Project,
         )));
         let resp = run_error(e);
         assert_eq!(resp.as_error().map(|(k, _)| k), Some(ErrorKind::PolicyRefused));
         let (_, message) = resp.as_error().expect("error");
-        assert!(message.contains("apex request"), "{message}");
-        assert!(!message.contains("--sandbox unrestricted"), "{message}");
+        assert!(message.contains("no_new_privs"), "{message}");
+    }
+
+    #[test]
+    fn a_refused_grant_is_a_permission_answer_and_a_refused_ttl_is_not() {
+        // The two failures a `--unsafe-everything` run can hit, and a client
+        // branches on the kind: `PermissionDenied` means somebody has to
+        // authorise this, `PolicyRefused` means the request itself was out of
+        // bounds and no amount of authorising will help.
+        let denied = run_error(anyhow::Error::new(GrantRefused(
+            "this connection belongs to session 3".into(),
+        )));
+        assert_eq!(
+            denied.as_error().map(|(k, _)| k),
+            Some(ErrorKind::PermissionDenied)
+        );
+
+        let ttl = run_error(anyhow::Error::new(TtlRefused(
+            "break-glass caps at 1h".into(),
+        )));
+        assert_eq!(ttl.as_error().map(|(k, _)| k), Some(ErrorKind::PolicyRefused));
     }
 
     #[test]
@@ -1042,6 +1557,193 @@ mod tests {
         let e = anyhow::anyhow!("working directory /nope does not exist");
         let resp = run_error(e);
         assert_eq!(resp.as_error().map(|(k, _)| k), Some(ErrorKind::BadRequest));
+    }
+
+    /// A real session on a real PTY, running a shell that reads one line and
+    /// says what it got.
+    ///
+    /// Deliberately not a mock and not a socket pair. What `Request::Input`
+    /// has to be right about is the LINE DISCIPLINE — whether the byte it
+    /// appends for `--submit` is the byte that ends a line — and a socket
+    /// carries every byte equally, so it would prove the plumbing and hide the
+    /// only interesting question. `pty::spawn` is the same call a session is
+    /// started with, so the terminal modes are the shipped ones.
+    fn a_session_reading_one_line() -> Option<(registry::Handle, pty::Spawned, PathBuf)> {
+        let script = "read line; echo \"got:[$line]\"; sleep 30";
+        let argv = vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()];
+        let spawned = pty::spawn(
+            &argv,
+            std::path::Path::new("/tmp"),
+            &[],
+            false,
+            true,
+            apex_agent_core::term::WinSize { cols: 80, rows: 24 },
+        )
+        .ok()?;
+
+        let dir = std::env::temp_dir().join(format!(
+            "apex-agentd-input-{}-{}",
+            std::process::id(),
+            spawned.pid
+        ));
+        let mut reg = registry::Registry::with_store(dir.clone());
+        let mut info = sample_live_info(1);
+        info.pid = spawned.pid;
+        let handle = reg.insert(info, spawned.master, spawned.pid, spawned.pgid);
+        Some((handle, spawned, dir))
+    }
+
+    fn sample_live_info(id: u32) -> apex_agent_core::protocol::SessionInfo {
+        use apex_agent_core::protocol::{AgentState, SessionInfo};
+        SessionInfo {
+            id,
+            agent: "generic".into(),
+            program: "sh".into(),
+            args: vec![],
+            cwd: "/tmp".into(),
+            project: None,
+            project_name: None,
+            worktree: None,
+            state: AgentState::Working,
+            detail: None,
+            paused: false,
+            policy: apex_agent_core::AgentPolicy::default(),
+            request_origin: Some(apex_agent_core::policy::RequestOrigin::LocalTerminal),
+            origin_source: Some(apex_agent_core::origin::OriginSource::Observed),
+            grant: None,
+            grant_expires_ms: None,
+            native_observed: None,
+            pid: 0,
+            started: 0,
+            last_activity: 0,
+            exit_code: None,
+            exit_signal: None,
+            checkpoint: None,
+            cols: 80,
+            rows: 24,
+            attached: 0,
+            actor: None,
+            telemetry: None,
+            children: vec![],
+            injected: 0,
+            capsule: None,
+        }
+    }
+
+    /// Drain the master for up to `ms`, stopping early once `marker` is seen.
+    fn read_until(master: RawFd, marker: &str, ms: u64) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        let mut seen = Vec::new();
+        while std::time::Instant::now() < deadline {
+            if !pty::wait_readable(master, 50) {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            match pty::read_nonblocking(master, &mut buf) {
+                Ok(Some(n)) if n > 0 => seen.extend_from_slice(&buf[..n]),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            if String::from_utf8_lossy(&seen).contains(marker) {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&seen).to_string()
+    }
+
+    #[test]
+    fn text_written_into_a_session_arrives_and_only_submit_ends_the_line() {
+        let Some((handle, spawned, dir)) = a_session_reading_one_line() else {
+            // No PTY available (a container without /dev/pts). Skipping is
+            // correct here and a false pass is not, so it says so.
+            eprintln!("skipping: pty::spawn failed on this machine");
+            return;
+        };
+
+        // Let the shell reach `read` before anything is typed, or the bytes
+        // land before there is a reader and the test proves the timing rather
+        // than the write.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Phase 1: the words, with no terminator. This is what `apex agent
+        // input` does WITHOUT --submit, and what the shell's push-to-talk
+        // route does today.
+        match write_input(&handle, b"run the tests") {
+            Input::Written => {}
+            Input::Exited => panic!("the session was reported as exited"),
+            Input::Failed(e) => panic!("the write failed: {e}"),
+        }
+        let echoed = read_until(spawned.master, "run the tests", 2000);
+        assert!(
+            echoed.contains("run the tests"),
+            "the text never reached the terminal: {echoed:?}"
+        );
+        assert!(
+            !echoed.contains("got:["),
+            "the line was submitted without --submit: {echoed:?}"
+        );
+
+        // Phase 2: the carriage return alone. What this proves is that the
+        // terminator is what turns written bytes into a line the agent acts
+        // on, which is the property `--submit` sells. What it does NOT prove
+        // is that CR is the only byte that would: measured on this machine,
+        // CR and LF both end the line here, because ICRNL is on by default in
+        // cooked mode. The CR is chosen for raw-mode TUIs, and that case is
+        // out of reach of this fixture. Said plainly rather than left to be
+        // inferred from a passing assertion.
+        match write_input(&handle, b"\r") {
+            Input::Written => {}
+            other => panic!(
+                "the submit write failed: {}",
+                match other {
+                    Input::Failed(e) => e,
+                    _ => "session reported exited".to_string(),
+                }
+            ),
+        }
+        let after = read_until(spawned.master, "got:[", 3000);
+        assert!(
+            after.contains("got:[run the tests]"),
+            "the carriage return did not end the line: {after:?}"
+        );
+
+        // Tidy: the fixture sleeps 30s, so it is killed rather than waited on.
+        pty::signal_group(spawned.pgid, libc::SIGKILL).ok();
+        pty::close(spawned.master);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_exited_session_is_reported_as_exited_and_not_as_a_broken_terminal() {
+        // The two failures a caller branches on differently: "pick another
+        // target" against "the terminal is broken". A dead session that came
+        // back as an I/O error would send the shell's push-to-talk route
+        // looking for a fault in the PTY layer.
+        let dir = std::env::temp_dir().join(format!("apex-agentd-input-dead-{}", std::process::id()));
+        let mut reg = registry::Registry::with_store(dir.clone());
+        let mut info = sample_live_info(2);
+        info.exit_code = Some(0);
+        assert!(!info.is_live());
+        // A VALID descriptor, so a write would genuinely succeed if the live
+        // check were dropped. With -1 here the test would pass on the fd guard
+        // and prove nothing about the state check.
+        let (a, _b) = UnixStream::pair().unwrap();
+        let handle = reg.insert(info, a.as_raw_fd(), 0, 0);
+        assert!(matches!(write_input(&handle, b"x"), Input::Exited));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_live_session_whose_master_is_already_closed_is_exited_too() {
+        // The reaper sets `master` to -1 as the child goes away, so a session
+        // can be marked live for the moment between the two. Writing to -1
+        // would be EBADF surfaced as `Internal`, which reads as a bug in the
+        // runtime rather than as a session that has gone.
+        let dir = std::env::temp_dir().join(format!("apex-agentd-input-fd-{}", std::process::id()));
+        let mut reg = registry::Registry::with_store(dir.clone());
+        let handle = reg.insert(sample_live_info(3), -1, 0, 0);
+        assert!(matches!(write_input(&handle, b"x"), Input::Exited));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1054,5 +1756,88 @@ mod tests {
 
         let (c, _d) = UnixStream::pair().unwrap();
         assert!(!same_peer(a.as_raw_fd(), c.as_raw_fd()));
+    }
+
+    /// P1-012's first criterion, at the only place that can deliver it.
+    ///
+    /// There is an `/etc/profile.d` drop-in that puts the tool shims on PATH,
+    /// and it is NOT what makes this work for an agent: profile.d is read by a
+    /// login shell, and an agent's tool calls are `bash -c '…'`. The session's
+    /// `bin` directory is what goes first on its `PATH`, so this is where a
+    /// skill's own `wrangler deploy` either finds the broker or does not.
+    ///
+    /// Mutation: drop the `install_tool_shims` call from `install_git_shim`.
+    /// Red.
+    #[test]
+    fn a_session_gets_the_tool_shims_on_the_path_its_own_commands_use() {
+        let root = std::env::temp_dir().join(format!(
+            "apex-toolshim-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("image");
+        std::fs::create_dir_all(&source).expect("source");
+        for tool in ["wrangler", "terraform"] {
+            std::fs::write(source.join(tool), "#!/bin/sh\nexit 0\n").expect("shim");
+        }
+        // A test that installed from an empty directory would pass without
+        // linking anything, so the fixture has to be real first.
+        assert!(source.join("wrangler").exists());
+
+        // The REAL wiring, not the installer on its own: what a session gets
+        // is whatever ends up in the one directory that goes first on its
+        // PATH, and a test that called each installer separately would prove
+        // each works rather than that either is reached.
+        let scratch = root.join("scratch");
+        std::fs::create_dir_all(&scratch).expect("scratch");
+        let apex = root.join("apex");
+        std::fs::write(&apex, "#!/bin/sh\nexit 0\n").expect("apex");
+        let bin = install_session_bin(&scratch, &apex, &source).expect("a session bin");
+
+        // git first, because that is what this directory has always been for
+        // and a regression there would be the louder failure.
+        assert!(bin.join("git").exists(), "the git shim is gone");
+
+        for tool in ["wrangler", "terraform"] {
+            let link = bin.join(tool);
+            assert!(
+                link.exists(),
+                "{tool} is not on the session's own PATH, so a skill's \
+                 `{tool} deploy` reaches the real tool with no credential"
+            );
+            assert_eq!(
+                std::fs::read_link(&link).expect("a link"),
+                source.join(tool),
+                "{tool} does not point at the shim"
+            );
+        }
+
+        // Installing again is not an error: a session is set up once, but a
+        // link left behind by anything else must not stop this.
+        install_session_bin(&scratch, &apex, &source).expect("again");
+        assert!(bin.join("wrangler").exists());
+
+        // An image that never installed them leaves nothing behind and does
+        // not fail — a development build running from a checkout has no
+        // /usr/libexec/apex, and a session must still start.
+        let empty = root.join("no-image");
+        let bare_scratch = root.join("bare");
+        std::fs::create_dir_all(&bare_scratch).expect("bare");
+        let bare = install_session_bin(&bare_scratch, &apex, &empty).expect("still a bin");
+        assert!(!bare.join("wrangler").exists());
+        assert!(bare.join("git").exists(), "git must still be brokered");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The constant the image installs to and the one a session links from are
+    /// the same string, and the Containerfile is the other half of it.
+    #[test]
+    fn the_tool_shim_directory_is_the_one_the_image_writes() {
+        assert_eq!(TOOL_SHIM_DIR, "/usr/libexec/apex/tools");
+        assert!(Path::new(TOOL_SHIM_DIR).is_absolute());
     }
 }

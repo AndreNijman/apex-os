@@ -160,7 +160,10 @@ const MAX_AGENTS: usize = 8;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tasks {
-    /// File-format version. Absent means [`SCHEMA_VERSION`].
+    /// File-format version. Absent means **1**, the version that existed when
+    /// this key was introduced — never "whatever this build writes". See
+    /// [`crate::migrate::Store::unversioned`] for why the difference is only
+    /// visible once, and by then it is on somebody's machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
     /// Tasks by id.
@@ -259,9 +262,17 @@ pub enum TaskError {
 impl std::fmt::Display for TaskError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // Named the direction and the remedy since §25. A task list from
+            // a newer APEX is what a `bootc rollback` leaves behind — the file
+            // does not roll back with the image — and "understands up to 1" on
+            // its own leaves the user with a file they cannot open and no idea
+            // that booting the other deployment gets it back.
             Self::UnsupportedVersion(v) => write!(
                 f,
-                "tasks.toml is version {v}, but this apex understands up to {SCHEMA_VERSION}"
+                "tasks.toml is version {v}, and this build of APEX reads version \
+                 {SCHEMA_VERSION}. It was written by a newer APEX, which usually means a \
+                 rollback: a task list does not roll back with the image. Boot the newer \
+                 deployment again to use it."
             ),
             Self::BadId(id) => write!(
                 f,
@@ -596,18 +607,41 @@ pub fn valid_agent_id(name: &str) -> bool {
 
 // ── the generated half ───────────────────────────────────────────────────────
 
+/// Schema version of a task's state record.
+///
+/// Version 0 is the shape every record on disk today has: no `schema` key at
+/// all. It is a real version, not a missing one, which is why
+/// [`crate::migrate`] declares `unversioned: 0` for this store rather than
+/// treating an absent key as "current".
+pub const STATE_SCHEMA_VERSION: u32 = 1;
+
 /// `~/.local/state/apex/tasks/<id>.json` — what has been observed about a task.
 ///
 /// Not `deny_unknown_fields`, unlike [`Tasks`], and the reason is the same one
 /// [`crate::host::HostCaps`] gives inverted: nobody hand-edits this file, so an
 /// unrecognised key is not a typo somebody can act on, and refusing to read a
-/// measurement costs more than ignoring a field. Unknown keys are not preserved
-/// either — there is no second writer whose fields would be lost.
+/// measurement costs more than ignoring a field.
+///
+/// ── Why unknown keys are kept, which they were not ──────────────────────────
+///
+/// The previous version of this comment said they need not be, because "there
+/// is no second writer whose fields would be lost". On an atomic OS there is:
+/// the second writer is a newer build of this same program, on the other side
+/// of a `bootc rollback`. A newer APEX writes a field, the user rolls back, the
+/// older build reads the record, ignores the field, and rewrites it on the next
+/// `apex task resume` — and the field is gone before the user rolls forward
+/// again. `/usr` rolls back; `/var` does not. So the record keeps what it does
+/// not recognise, which is what makes this store's declared rollback answer
+/// (`ReadableByOlder`) true rather than hopeful.
 ///
 /// A file that cannot be parsed is treated as absent, for the same reason a
 /// corrupt probe cache is: it can be produced again.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TaskState {
+    /// File-format version. Absent means 0 — the shape before this key existed,
+    /// never "whatever this build writes".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<u32>,
     /// Unix seconds the task was created.
     #[serde(default)]
     pub created: u64,
@@ -617,6 +651,13 @@ pub struct TaskState {
     /// The checkpoint `apex task checkpoint` last took, by engine id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<String>,
+
+    /// Anything a newer APEX recorded that this build does not know.
+    ///
+    /// Carried through the read-modify-write untouched, so a rollback costs the
+    /// user nothing they cannot get back by rolling forward.
+    #[serde(flatten)]
+    pub unknown: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 // ── the resume planner ───────────────────────────────────────────────────────
@@ -931,6 +972,63 @@ pub fn choose_attach(sessions: Option<&[u32]>, opted_out: bool, interactive: boo
     }
 }
 
+/// Which session `apex task handoff` would hand off, or why it will not.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HandoffTarget {
+    /// Write the packet for this session.
+    Session(u32),
+    /// Refuse, and say why. The string is printed as-is.
+    No(String),
+}
+
+/// Which of a task's sessions a handoff packet would describe.
+///
+/// Pure and separate for the same reason `choose_attach` is: it is a **guard**,
+/// and the two cases that matter — nothing to hand off, and too many things to
+/// hand off — are the two a developer with one session open never sees.
+///
+/// A handoff packet is a record OF A SESSION: its transcript tail, the files it
+/// changed, the grants it holds, the worktree the daemon attributes to it. A
+/// task is a binding, and none of those things can be read off one. So this
+/// resolves the task to its session and refuses when it cannot, rather than
+/// writing a thinner packet from the task record and letting the receiving
+/// agent believe it got the same document.
+///
+/// The refusals, and why each is a refusal rather than a choice:
+///
+/// * the runtime could not be asked — there is no session list to resolve, and
+///   "no sessions" and "nobody answered" are different facts;
+/// * no session is running in the task's root — a packet written from nothing
+///   would carry an empty transcript and a grant list that means nothing;
+/// * more than one — picking one would be a guess about which work the user
+///   meant to hand over, and the packet names a session in its own filename, so
+///   the wrong guess is a document that looks right.
+pub fn choose_handoff(sessions: Option<&[u32]>) -> HandoffTarget {
+    match sessions {
+        None => HandoffTarget::No(
+            "cannot hand off: the agent runtime is not running, so it cannot say which \
+             session is working in this task's root"
+                .to_string(),
+        ),
+        Some([]) => HandoffTarget::No(
+            "cannot hand off: no agent session is running in this task's root. A handoff \
+             packet is the record of a session — its transcript, the files it changed and \
+             the grants it holds — so there is nothing here to write one from"
+                .to_string(),
+        ),
+        Some([one]) => HandoffTarget::Session(*one),
+        Some(many) => HandoffTarget::No(format!(
+            "cannot hand off: {} sessions are running in this task's root ({}), so which one \
+             is your choice — `apex agent handoff <id> --to <agent>`",
+            many.len(),
+            many.iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1027,7 +1125,33 @@ mod tests {
     #[test]
     fn a_future_version_is_refused_rather_than_guessed_at() {
         let e = Tasks::parse(&format!("version = {}\n", SCHEMA_VERSION + 1)).unwrap_err();
-        assert!(format!("{e}").contains("understands up to"), "{e}");
+        let m = format!("{e}");
+        // The refusal was already correct; §25 gave it something to do about
+        // it. All four parts are asserted, because a message that names the
+        // problem and no remedy leaves a user with a file they cannot open.
+        assert!(m.contains(&format!("version {}", SCHEMA_VERSION + 1)), "{m}");
+        assert!(m.contains(&format!("reads version {SCHEMA_VERSION}")), "{m}");
+        assert!(m.contains("rollback"), "{m}");
+        assert!(m.contains("Boot the newer deployment"), "{m}");
+    }
+
+    #[test]
+    fn an_older_task_list_is_not_refused_the_way_a_newer_one_is() {
+        // The direction that has to stay open. `Tasks::validate` refuses only
+        // ABOVE its own version — a file from an older APEX is readable, which
+        // is what lets `migrate` have somewhere to go. The blueprint used `!=`
+        // here and would have refused every existing file the day its schema
+        // moved.
+        let store = crate::migrate::store("tasks").unwrap();
+        assert_eq!(store.current, SCHEMA_VERSION);
+        assert!(matches!(
+            crate::migrate::plan(store, SCHEMA_VERSION + 1),
+            crate::migrate::Plan::TooNew { .. }
+        ));
+        assert_eq!(
+            crate::migrate::plan(store, SCHEMA_VERSION),
+            crate::migrate::Plan::UpToDate
+        );
     }
 
     // ── the keys that exist only to be refused ───────────────────────────────
@@ -1576,14 +1700,71 @@ mod tests {
         assert_ne!(none, absent);
     }
 
+    // ── handing a task's session to another agent ────────────────────────────
+
+    #[test]
+    fn a_task_with_exactly_one_session_hands_that_one_off() {
+        assert_eq!(choose_handoff(Some(&[7])), HandoffTarget::Session(7));
+    }
+
+    #[test]
+    fn a_handoff_is_refused_rather_than_guessed_when_several_sessions_qualify() {
+        // And the ids are NAMED. A refusal that says "2 sessions" leaves the
+        // user to go and find out which, when the caller already knows: the
+        // next command they type is `apex agent handoff <id>`, so the id is
+        // the one thing the message has to carry.
+        let h = choose_handoff(Some(&[7, 9]));
+        assert!(matches!(h, HandoffTarget::No(ref w) if w.contains("2 sessions")), "{h:?}");
+        assert!(matches!(h, HandoffTarget::No(ref w) if w.contains("7, 9")), "{h:?}");
+        assert!(
+            matches!(h, HandoffTarget::No(ref w) if w.contains("apex agent handoff")),
+            "the refusal should name the command that resolves it: {h:?}"
+        );
+    }
+
+    #[test]
+    fn no_session_and_no_runtime_are_different_refusals() {
+        // The same distinction `choose_attach` makes, for the same reason:
+        // "nobody is working in this task" and "nobody answered when we asked"
+        // are different facts, and collapsing them would tell a user with a
+        // stopped daemon that their session does not exist.
+        let none = choose_handoff(Some(&[]));
+        let absent = choose_handoff(None);
+        assert!(
+            matches!(none, HandoffTarget::No(ref w) if w.contains("no agent session")),
+            "{none:?}"
+        );
+        assert!(
+            matches!(absent, HandoffTarget::No(ref w) if w.contains("not running")),
+            "{absent:?}"
+        );
+        assert_ne!(none, absent);
+    }
+
+    #[test]
+    fn the_empty_refusal_says_what_a_packet_is_made_of() {
+        // Otherwise the user reads "no session" as a missing flag and goes
+        // looking for one, rather than understanding that the document is a
+        // record of a running session and there is none.
+        let h = choose_handoff(Some(&[]));
+        let why = match h {
+            HandoffTarget::No(w) => w,
+            other => panic!("{other:?}"),
+        };
+        assert!(why.contains("transcript"), "{why}");
+        assert!(why.contains("grants"), "{why}");
+    }
+
     // ── the state file ───────────────────────────────────────────────────────
 
     #[test]
     fn state_round_trips_and_tolerates_a_key_it_does_not_know() {
         let s = TaskState {
+            schema: Some(STATE_SCHEMA_VERSION),
             created: 100,
             last_opened: 200,
             checkpoint: Some("1788439662000-a1b2c3d".into()),
+            unknown: Default::default(),
         };
         let back: TaskState = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
@@ -1593,6 +1774,35 @@ mod tests {
             serde_json::from_str(r#"{"last_opened":5,"invented_later":true}"#).unwrap();
         assert_eq!(tolerant.last_opened, 5);
         assert_eq!(tolerant.checkpoint, None);
+    }
+
+    #[test]
+    fn a_key_a_newer_apex_wrote_survives_this_build_rewriting_the_record() {
+        // The rollback case, end to end at the type level. A newer APEX records
+        // `focus_mode`; the user rolls back; this build reads the file and
+        // saves it again. If the key does not come back out, rolling forward
+        // finds it gone — and `/var` is the half that does not roll back, so
+        // there is nothing to restore it from.
+        let raw = r#"{"schema":1,"last_opened":5,"focus_mode":"deep","nested":{"a":1}}"#;
+        let s: TaskState = serde_json::from_str(raw).unwrap();
+        assert_eq!(s.last_opened, 5);
+        let out = serde_json::to_string(&s).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(back["focus_mode"], serde_json::json!("deep"));
+        assert_eq!(back["nested"], serde_json::json!({"a": 1}));
+    }
+
+    #[test]
+    fn a_record_with_no_schema_key_is_version_zero_not_the_current_one() {
+        // `unversioned: 0` in the migrate registry has to agree with what the
+        // type says an absent key means, or the framework migrates records
+        // that need no migration and skips ones that do.
+        let s: TaskState = serde_json::from_str(r#"{"last_opened":5}"#).unwrap();
+        assert_eq!(s.schema, None);
+        let store = crate::migrate::store("task-state").unwrap();
+        assert_eq!(store.unversioned, 0);
+        assert_eq!(crate::migrate::peek(store, r#"{"last_opened":5}"#).unwrap(), 0);
+        assert_eq!(store.current, STATE_SCHEMA_VERSION);
     }
 
     #[test]

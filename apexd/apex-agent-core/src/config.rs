@@ -12,14 +12,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::adapter;
 use crate::paths;
-use crate::policy::{AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, SecretPolicy, SystemAccess};
+use crate::lock::LockPolicy;
+use crate::policy::{
+    AgentPolicy, ConnectorPolicy, NativeMode, NetworkPolicy, OriginPolicy, PluginPolicy,
+    SecretPolicy,
+    SystemAccess,
+};
 use crate::protocol::SandboxPolicy;
 use crate::term::DEFAULT_DETACH_KEY;
 
 /// The runtime's user configuration.
 ///
-/// The six permission dimensions are six sibling keys here rather than one
-/// nested `policy` object. `sandbox` has been a top-level key since before the
+/// The permission dimensions are sibling keys here rather than one nested
+/// `policy` object. `sandbox` has been a top-level key since before the
 /// split, and `extra` swallows anything this build does not recognise — so
 /// nesting it would have moved a security setting into the catch-all and
 /// silently downgraded every configuration file that already sets it. Six
@@ -48,6 +53,12 @@ pub struct Config {
     /// Dimension 6: applied when `--origin-policy` is not given.
     #[serde(default)]
     pub origin: OriginPolicy,
+    /// Dimension 7: applied when `--connectors` is not given.
+    #[serde(default)]
+    pub connectors: ConnectorPolicy,
+    /// Dimension 8: applied when `--plugins` is not given.
+    #[serde(default)]
+    pub plugins: PluginPolicy,
     /// Destinations an `allowlist` session may reach, one `host` or
     /// `host:port` per entry.
     ///
@@ -58,6 +69,37 @@ pub struct Config {
     /// session is refused rather than started with nothing it can reach.
     #[serde(default)]
     pub network_allow: Vec<String>,
+    /// Connectors a `curated` session may be given, by the name the agent
+    /// addresses them with — `memory`, `plugin:github:github`.
+    ///
+    /// Here and not in the request, for the reason `network_allow` is here:
+    /// a list the confined thing gets to write is not a boundary. Empty by
+    /// default, and [`AgentPolicy::validate_for`] refuses a `curated` session
+    /// against an empty one rather than starting it with everything removed —
+    /// "nobody filled this in" and "reach nothing" are different statements
+    /// and `--connectors none` already makes the second.
+    #[serde(default)]
+    pub connector_allow: Vec<String>,
+    /// Dimension 8's names: the plugins a `--plugins curated` session loads.
+    ///
+    /// Here rather than in the request for `connector_allow`'s reason, and
+    /// spelled the way `enabledPlugins` spells them — `name@marketplace`,
+    /// which is also what a person types. No repair pass filters this one:
+    /// unlike a connector name there is no shape a plugin name cannot have,
+    /// and a name that matches nothing installed simply keeps nothing, which
+    /// `pluginconf::curate` reports as the empty keep-list it is.
+    #[serde(default)]
+    pub plugin_allow: Vec<String>,
+    /// §7's lock rules: what happens to running sessions, and to grants in
+    /// force, when the screen locks.
+    ///
+    /// Nested rather than three sibling keys, because unlike the
+    /// permission dimensions these have no history to preserve — nothing has
+    /// ever written them — and they are one subject. The struct carries
+    /// `#[serde(default)]` itself, so setting one of the three keeps §7's
+    /// answer for the other two.
+    #[serde(default)]
+    pub lock: LockPolicy,
     /// Key that detaches from an attached session.
     #[serde(default = "default_detach_key")]
     pub detach_key: String,
@@ -87,7 +129,12 @@ impl Default for Config {
             secrets: SecretPolicy::default(),
             network: NetworkPolicy::default(),
             origin: OriginPolicy::default(),
+            connectors: ConnectorPolicy::default(),
+            plugins: PluginPolicy::default(),
             network_allow: Vec::new(),
+            connector_allow: Vec::new(),
+            plugin_allow: Vec::new(),
+            lock: LockPolicy::default(),
             detach_key: default_detach_key(),
             auto_checkpoint: false,
             extra: serde_json::Map::new(),
@@ -118,10 +165,12 @@ impl Config {
             secrets: self.secrets,
             network: self.network,
             origin: self.origin,
+            connectors: self.connectors,
+            plugins: self.plugins,
         }
     }
 
-    /// Store a policy back as the six defaults.
+    /// Store a policy back as the per-dimension defaults.
     pub fn set_policy(&mut self, p: AgentPolicy) {
         self.native = p.native;
         self.sandbox = p.sandbox;
@@ -129,6 +178,8 @@ impl Config {
         self.secrets = p.secrets;
         self.network = p.network;
         self.origin = p.origin;
+        self.connectors = p.connectors;
+        self.plugins = p.plugins;
     }
 
     /// Load the user's configuration.
@@ -163,6 +214,24 @@ impl Config {
             ));
             self.detach_key = default_detach_key();
         }
+        // §3.4: no "remember forever". Dimension 3 is the one dimension that
+        // must not have a stored default at all, because a configuration file
+        // saying `"system": "unsafe"` is precisely a remembered elevation —
+        // every later `apex agent run` would arrive already asking for
+        // break-glass, and the grant machinery would dutifully prompt for it.
+        // The other five dimensions are settings; this one is a grant, and a
+        // grant is issued per session, to a session, after somebody is asked.
+        //
+        // Corrected rather than refused, and named, for the reason below.
+        if self.system != SystemAccess::None {
+            fixed.push(format!(
+                "system-access cannot be a stored default ({} was set); §3.4 allows no \
+                 remembered elevation, so ask for it per session with `apex agent run \
+                 --system-access session` or `--unsafe-everything --ttl 15m`",
+                self.system
+            ));
+            self.system = SystemAccess::None;
+        }
         // A stored default this build cannot enforce is corrected here rather
         // than refused at every `apex agent run`. Refusing would be the safe
         // reflex, but the failure lands on a command the user did not connect
@@ -182,6 +251,21 @@ impl Config {
         if let Err(e) = crate::destination::Allowlist::parse(&self.network_allow) {
             fixed.push(format!("{e}; the network allowlist is empty until it is fixed"));
             self.network_allow.clear();
+        }
+        // A connector name that cannot be one is dropped and named. Unlike the
+        // allowlist this does NOT empty the list: a bad entry here can only
+        // ever fail to match a real connector, so keeping the rest tightens
+        // nothing and loses nothing — where an unparsed destination line could
+        // have been the one that mattered.
+        let before = self.connector_allow.len();
+        self.connector_allow
+            .retain(|name| crate::mcpconf::usable_as_connector_name(name));
+        if self.connector_allow.len() != before {
+            fixed.push(format!(
+                "{} connector name(s) in connector_allow are not names an MCP server can \
+                 have, and were dropped",
+                before - self.connector_allow.len()
+            ));
         }
         fixed
     }
@@ -333,14 +417,80 @@ mod tests {
         // `apex agent run` with the same error is a worse outcome than
         // correcting toward the default, which is the stricter value.
         let mut cfg = Config {
-            system: SystemAccess::Unsafe,
+            secrets: crate::policy::SecretPolicy::Export,
             ..Config::default()
         };
         let notes = cfg.normalise();
-        assert_eq!(cfg.system, SystemAccess::None);
+        assert_eq!(cfg.secrets, crate::policy::SecretPolicy::Brokered);
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains("system-access"), "{notes:?}");
+        assert!(notes[0].contains("secret"), "{notes:?}");
         assert_eq!(cfg.policy().validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_stored_remote_elevation_policy_now_survives_the_self_repair_that_used_to_erase_it() {
+        // This is the observable half of P0-014's last commit, and the reason
+        // the relaxation had to land last rather than first.
+        //
+        // `normalise` resets the WHOLE policy to default when `validate`
+        // errors — not just the offending key. So while `validate` refused
+        // `remote_elevation_allowed`, an owner who wrote it into the config
+        // file lost that line *and* every other dimension they had set, with
+        // one note to explain it. The setting was therefore unreachable no
+        // matter what the daemon did with it, which is why relaxing `validate`
+        // first would have shipped a mode that lies in the other direction.
+        let mut cfg = Config {
+            origin: OriginPolicy::RemoteElevationAllowed,
+            // A second non-default dimension, because the failure mode being
+            // guarded against is a blanket reset: if the origin value were
+            // still refused, this would come back `Project` and the test would
+            // catch the erasure rather than only the setting.
+            sandbox: SandboxPolicy::Unrestricted,
+            ..Config::default()
+        };
+        assert_eq!(cfg.policy().validate(), Ok(()));
+        let notes = cfg.normalise();
+        assert!(notes.is_empty(), "nothing should have been corrected: {notes:?}");
+        assert_eq!(cfg.origin, OriginPolicy::RemoteElevationAllowed);
+        assert_eq!(cfg.sandbox, SandboxPolicy::Unrestricted);
+    }
+
+    #[test]
+    fn elevation_is_never_a_stored_default_whatever_the_file_says() {
+        // §3.4: "no remember forever". Dimension 3 is a grant, not a setting.
+        // A configuration file that named an elevated default would make
+        // every later `apex agent run` arrive asking for it — a remembered
+        // elevation with a password prompt bolted on, which is the shape §3.4
+        // exists to forbid. Over both values, and the correction is named so
+        // the user can see the file was not obeyed.
+        for stored in [SystemAccess::Session, SystemAccess::Unsafe] {
+            let mut cfg = Config {
+                system: stored,
+                // Unrestricted, so `validate` would have accepted break-glass
+                // and could not have been what corrected it.
+                sandbox: SandboxPolicy::Unrestricted,
+                ..Config::default()
+            };
+            assert_eq!(cfg.policy().validate(), Ok(()), "{stored}");
+            let notes = cfg.normalise();
+            assert_eq!(cfg.system, SystemAccess::None, "{stored} survived");
+            assert_eq!(notes.len(), 1, "{notes:?}");
+            assert!(notes[0].contains("no remembered elevation"), "{notes:?}");
+            assert!(notes[0].contains("--ttl"), "{notes:?}");
+            // The other five dimensions are untouched: this is a correction
+            // to one key, not a reset.
+            assert_eq!(cfg.sandbox, SandboxPolicy::Unrestricted, "{stored}");
+        }
+
+        // And it applies to the file, not only to the struct. The key still
+        // parses — a file APEX Shell or a newer build wrote must not fail to
+        // load — and `from_str`, which every caller goes through, corrects it.
+        let raw: Config =
+            serde_json::from_str(r#"{"system":"unsafe","sandbox":"unrestricted"}"#).expect("parse");
+        assert_eq!(raw.system, SystemAccess::Unsafe, "the key must still parse");
+        let loaded = from_str(r#"{"system":"unsafe","sandbox":"unrestricted"}"#).expect("load");
+        assert_eq!(loaded.system, SystemAccess::None);
+        assert_eq!(loaded.policy().needs_grant(), None);
     }
 
     #[test]

@@ -32,7 +32,7 @@
 
 use std::io::Read;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use apex_agent_core::protocol::{
     Request as AgentRequest, Response as AgentResponse, BROKERED_SECRET_SERVICE_VERSION,
     GENERIC_CAPABILITY_VERSION,
@@ -40,7 +40,7 @@ use apex_agent_core::protocol::{
 use apex_secret_core::client::Client;
 use apex_secret_core::operation::{self, OperationInfo};
 use apex_secret_core::protocol::{Request, Response};
-use apex_secret_core::store::valid_service_name;
+use apex_secret_core::store::{valid_service_name, ANY_PROJECT};
 use apex_secret_core::SecretValue;
 use clap::Subcommand;
 
@@ -96,11 +96,68 @@ pub enum SecretCmd {
     /// The operations an agent can be granted, as the service offers them.
     Capabilities,
     /// Allow an operation for the current project.
-    Grant { service: String, operation: String },
+    Grant {
+        service: String,
+        operation: String,
+        /// Allow it in every project instead of this one.
+        ///
+        /// Only for an operation whose provider declares that it reaches the
+        /// same thing in every project — `mcp.request` is the one there is.
+        /// Such an operation reaches only the endpoint pinned when its
+        /// credential was stored, so this widens *where* it may be asked for
+        /// and not *what* it reaches. An MCP server is defined once and is
+        /// therefore present in every directory; without this, every new
+        /// worktree is one where it is unauthorised until somebody notices.
+        ///
+        /// Naming nothing is not enough on its own: `cloudflare.account.read`
+        /// takes no resource and no options and still resolves its account out
+        /// of the project's own `apex.toml`, so it is refused here and granted
+        /// per project.
+        #[arg(long)]
+        everywhere: bool,
+    },
     /// Withdraw one.
-    Revoke { service: String, operation: String },
+    Revoke {
+        service: String,
+        operation: String,
+        /// Withdraw the grant made with `--everywhere`, not this project's.
+        #[arg(long)]
+        everywhere: bool,
+    },
     /// What is allowed, per project.
     Grants {
+        #[arg(long)]
+        json: bool,
+    },
+    /// §13.8: approve ONE operation on ONE resource, once.
+    ///
+    /// Not a grant. A grant says an agent may deploy this project's workers
+    /// and keeps saying it; this is spent by the first deployment that matches
+    /// and expires on its own. It is what a production deployment needs when
+    /// the project has not written `unattended = true` under its environment.
+    ///
+    /// `apex secret approve cloudflare cloudflare.worker.deploy my-worker`
+    Approve {
+        service: String,
+        operation: String,
+        /// Exactly what the operation will name — the worker, the bucket.
+        ///
+        /// `allow_hyphen_values` for `Use`'s reason: `-f` has to reach the
+        /// service's validator and be refused as "not a resource this
+        /// operation can act on", rather than being rejected here as an
+        /// unknown option.
+        #[arg(default_value = "", allow_hyphen_values = true)]
+        resource: String,
+        /// How long it may be spent for, in minutes. The default is 15 and the
+        /// most is 1440; longer is refused rather than shortened.
+        #[arg(long, value_name = "MINUTES")]
+        minutes: Option<u64>,
+        /// Take an approval back instead of giving one.
+        #[arg(long)]
+        withdraw: bool,
+    },
+    /// Every approval outstanding, soonest to expire first.
+    Approvals {
         #[arg(long)]
         json: bool,
     },
@@ -161,9 +218,25 @@ pub fn main(cmd: SecretCmd) -> i32 {
         SecretCmd::List { json } => list(json),
         SecretCmd::Remove { service } => remove(&service),
         SecretCmd::Capabilities => capabilities(),
-        SecretCmd::Grant { service, operation } => grant(&service, &operation, false),
-        SecretCmd::Revoke { service, operation } => grant(&service, &operation, true),
+        SecretCmd::Grant {
+            service,
+            operation,
+            everywhere,
+        } => grant(&service, &operation, false, everywhere),
+        SecretCmd::Revoke {
+            service,
+            operation,
+            everywhere,
+        } => grant(&service, &operation, true, everywhere),
         SecretCmd::Grants { json } => grants(json),
+        SecretCmd::Approve {
+            service,
+            operation,
+            resource,
+            minutes,
+            withdraw,
+        } => approve(&service, &operation, &resource, minutes, withdraw),
+        SecretCmd::Approvals { json } => approvals(json),
         SecretCmd::Use {
             service,
             operation,
@@ -379,20 +452,143 @@ fn parse_option(text: &str) -> Result<(String, String)> {
     }
 }
 
-fn grant(service: &str, operation: &str, revoke: bool) -> Result<i32> {
-    let project = current_project_root()?;
+fn grant(service: &str, operation: &str, revoke: bool, everywhere: bool) -> Result<i32> {
+    // `--everywhere` does not need to be standing in a project, and requiring
+    // one would be a strange thing to insist on for a grant that is not about
+    // where you are.
+    let project = if everywhere {
+        ANY_PROJECT.to_string()
+    } else {
+        current_project_root()?
+    };
     Client::connect()?.call(&Request::Grant {
         project: project.clone(),
         service: service.to_string(),
         capability: operation.to_string(),
         revoke,
     })?;
+    let scope = describe_scope(&project);
     if revoke {
-        println!("withdrew {service}:{operation} for {project}");
+        println!("withdrew {service}:{operation} {scope}");
     } else {
-        println!("allowed {service}:{operation} for {project}");
+        println!("allowed {service}:{operation} {scope}");
     }
     Ok(0)
+}
+
+/// A grant's project key, in words.
+///
+/// `*` is not a path, and printing it raw would read as a directory called `*`
+/// — which is a thing a shell can produce, so the ambiguity is not theoretical.
+fn describe_scope(project: &str) -> String {
+    if project == ANY_PROJECT {
+        "in every project".to_string()
+    } else {
+        format!("for {project}")
+    }
+}
+
+/// §13.8's verb. Always for the project you are standing in.
+///
+/// There is no `--everywhere`, and there will not be one: an approval that
+/// applied wherever the agent happened to be standing would be standing
+/// permission with a shorter life, which is the thing §13.8 says has to be
+/// written down in the project file instead.
+fn approve(
+    service: &str,
+    operation: &str,
+    resource: &str,
+    minutes: Option<u64>,
+    withdraw: bool,
+) -> Result<i32> {
+    let project = current_project_root()?;
+    // Minutes here, milliseconds on the wire. The unit a person types is not
+    // the unit a clock compares, and converting at the edge keeps the
+    // service's bound expressible in one unit rather than two.
+    let ttl_ms = match minutes {
+        Some(m) => Some(
+            m.checked_mul(60_000)
+                .ok_or_else(|| anyhow!("{m} minutes is longer than this can express"))?,
+        ),
+        None => None,
+    };
+    let reply = Client::connect()?.call(&Request::Approve {
+        project: project.clone(),
+        service: service.to_string(),
+        operation: operation.to_string(),
+        resource: resource.to_string(),
+        ttl_ms,
+        withdraw,
+    })?;
+    let pending = match reply {
+        Response::Approvals { pending } => pending,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
+    let named = if resource.is_empty() {
+        operation.to_string()
+    } else {
+        format!("{operation} {resource}")
+    };
+    if withdraw {
+        println!("withdrew the approval for {named} in {project}");
+        return Ok(0);
+    }
+    // The expiry, because an approval nobody spends is gone and the person who
+    // gave it is the only one who can give another.
+    let mine = pending
+        .iter()
+        .find(|a| a.operation == operation || a.resource == resource);
+    match mine {
+        Some(a) => println!(
+            "approved {named} in {project}, once, for the next {}",
+            roughly_ms(a.expires_ms.saturating_sub(a.granted_ms))
+        ),
+        None => println!("approved {named} in {project}, once"),
+    }
+    println!("it is spent by the next matching operation, whether that operation succeeds or not");
+    Ok(0)
+}
+
+fn approvals(json: bool) -> Result<i32> {
+    let pending = match Client::connect()?.call(&Request::Approvals)? {
+        Response::Approvals { pending } => pending,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&pending)?);
+        return Ok(0);
+    }
+    if pending.is_empty() {
+        println!("nothing is approved; an operation that needs one will be refused");
+        return Ok(0);
+    }
+    let now = apex_secret_core::store::now_ms();
+    for a in &pending {
+        println!(
+            "{}:{}{} in {} — {} left",
+            a.service,
+            a.operation,
+            if a.resource.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", a.resource)
+            },
+            a.project,
+            roughly_ms(a.expires_ms.saturating_sub(now))
+        );
+    }
+    Ok(0)
+}
+
+/// A duration in milliseconds, in the largest unit that does not lie.
+fn roughly_ms(ms: u64) -> String {
+    let seconds = ms / 1000;
+    let (n, unit) = match seconds {
+        0..=90 => (seconds, "second"),
+        91..=3599 => (seconds / 60, "minute"),
+        _ => (seconds / 3600, "hour"),
+    };
+    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
 fn grants(json: bool) -> Result<i32> {
@@ -409,7 +605,11 @@ fn grants(json: bool) -> Result<i32> {
         return Ok(0);
     }
     for (project, keys) in &projects {
-        println!("{project}");
+        if project == ANY_PROJECT {
+            println!("every project");
+        } else {
+            println!("{project}");
+        }
         for k in keys {
             println!("    {k}");
         }
@@ -519,7 +719,7 @@ fn require_a_runtime_that_forwards(agent: &mut apex_agent_core::client::Client) 
 }
 
 fn audit(lines: usize) -> Result<i32> {
-    let entries = match Client::connect()?.call(&Request::Audit { lines })? {
+    let entries = match Client::connect()?.call(&Request::Audit { lines, project: None })? {
         Response::Audit { entries } => entries,
         other => bail!("unexpected reply: {}", other.variant()),
     };
@@ -546,7 +746,14 @@ fn audit(lines: usize) -> Result<i32> {
     Ok(0)
 }
 
-fn current_project_root() -> Result<String> {
+/// `pub(crate)` so `apex account` keys a grant exactly the way this file does.
+///
+/// Not a convenience. A grant is keyed on a project ROOT, and `apex-agentd`
+/// forwards a session's root when it uses one — so a second derivation that
+/// stored the current directory would write a key that nothing ever matches,
+/// from any subdirectory of a project. Same store, two key derivations, and the
+/// symptom is a capability that was granted and silently never applies.
+pub(crate) fn current_project_root() -> Result<String> {
     let cwd = std::env::current_dir()?;
     apex_agent_core::project::detect(&cwd)
         .map(|p| p.root)
@@ -604,13 +811,43 @@ mod tests {
     #[test]
     fn the_version_guard_names_the_revision_the_wire_changed_in() {
         // The one guard that is NOT just a fact about two constants, so it
-        // stays a test: it says the newest named revision IS the current one,
-        // which is a claim about what a future edit must remember to do. The
-        // store guard beside it is a floor and is checked at compile time.
-        assert_eq!(
-            GENERIC_CAPABILITY_VERSION,
-            apex_agent_core::protocol::PROTOCOL_VERSION,
-            "the guard must name the current revision, or it can never fire"
+        // stays a test. The store guard beside it is a floor and is checked at
+        // compile time.
+        //
+        // It used to assert equality with `PROTOCOL_VERSION`, standing in for
+        // "the newest named revision IS the current one". That held only while
+        // the secret service happened to be the last thing to change the wire.
+        // P0-007 added `RunRequest::capabilities` — an agent-runtime field the
+        // secret CLI never sends — and bumped the protocol to 6, at which
+        // point the equality failed for a change that has nothing to do with
+        // this guard, and the only ways to make it pass again were to bump a
+        // secret-service revision that did not move or to delete the
+        // assertion.
+        //
+        // So it now says the two things that are actually true and actually
+        // protective: this guard names a revision that exists (a guard above
+        // the current version refuses every daemon), and it is not zero (a
+        // guard at zero can never fire). The "newest named revision is the
+        // current one" ratchet is kept, once, beside the constants themselves
+        // — `protocol.rs`'s `every_version_guard_names_a_revision_that_exists`
+        // asserts `SCOPED_GRANT_VERSION == PROTOCOL_VERSION` — which is where
+        // a reader adding a wire field will actually look.
+        let current = apex_agent_core::protocol::PROTOCOL_VERSION;
+        assert!(
+            GENERIC_CAPABILITY_VERSION <= current,
+            "this guard names protocol {GENERIC_CAPABILITY_VERSION}, which is ahead of \
+             {current}, so it would refuse every daemon"
+        );
+        // Compile-time, not runtime. The value is a constant, so there is no
+        // run in which it could differ, and `const _` fails the BUILD instead
+        // of one test — which is what a guard whose whole job is to be
+        // impossible to leave wrong should do. Clippy's
+        // `assertions_on_constants` asks for exactly this, and it is a
+        // strengthening rather than a concession: a `cargo test` nobody ran
+        // cannot miss it.
+        const _: () = assert!(
+            GENERIC_CAPABILITY_VERSION > 0,
+            "a guard at zero can never fire"
         );
     }
 

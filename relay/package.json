@@ -1,0 +1,14 @@
+{
+  "name": "apex-remote-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Rendezvous relay for APEX Remote: pairs two outbound WebSockets and copies ciphertext between them",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "wrangler": "^4.131.1"
+  }
+}

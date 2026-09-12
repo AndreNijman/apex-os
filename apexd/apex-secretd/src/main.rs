@@ -293,7 +293,12 @@ fn dispatch(
         Request::Hello => service.hello(),
         Request::List => service.list(peer),
         Request::Grants => service.grants(peer),
-        Request::Audit { lines } => service.audit(peer, lines),
+        Request::Approvals => service.approvals(peer),
+        Request::Audit { lines, project } => service.audit(peer, lines, project.as_deref()),
+        // Read-only, like the four above it: it reports what the trail already
+        // holds and changes nothing, so a managed session may ask. An agent
+        // being able to see the budget it is running under is the point.
+        Request::Usage { project } => service.usage(peer, &project),
 
         // Mutating verbs. A session may not change what it is allowed to do.
         Request::Add {
@@ -345,6 +350,34 @@ fn dispatch(
                 return refusal;
             }
             service.grant(peer, &project, &name, &capability, revoke)
+        }
+        // §13.8. A session that could approve its own production deployment
+        // would have been made to type one more line rather than made to ask,
+        // so this is refused from inside one exactly like `Grant` is — and the
+        // refusal is what makes "production approval is default" mean anything
+        // at all when the thing being approved is the agent's own request.
+        Request::Approve {
+            project,
+            service: name,
+            operation,
+            resource,
+            ttl_ms,
+            withdraw,
+        } => {
+            if let Some(refusal) = refuse_a_session(handle, "approve its own operations") {
+                return refusal;
+            }
+            service.approve(
+                peer,
+                service::NewApproval {
+                    project: &project,
+                    service: &name,
+                    operation: &operation,
+                    resource: &resource,
+                    ttl_ms,
+                    withdraw,
+                },
+            )
         }
 
         // The broker. Sessions are exactly who this is for.
@@ -510,7 +543,30 @@ mod tests {
         // The file survives the listener being dropped, and connecting to it
         // now fails — which is what makes it stale rather than live.
         assert!(socket.exists());
-        assert!(UnixStream::connect(&socket).is_err());
+
+        // Reported rather than merely asserted, because this failed once on a
+        // GitHub runner and passed 52 times here — 40 in isolation and 12 full
+        // parallel runs of all 180 — so the next failure has to arrive with
+        // enough to diagnose it instead of the bare word `false`. `bind()`'s
+        // staleness rule is exactly this connect, so a machine where it
+        // succeeds would silently refuse to start a daemon whose predecessor
+        // had died.
+        if let Ok(live) = UnixStream::connect(&socket) {
+            let meta = std::fs::symlink_metadata(&socket);
+            panic!(
+                "connecting to a socket whose only listener was dropped SUCCEEDED.\n\
+                 \x20 path:      {}\n\
+                 \x20 file type: {:?}\n\
+                 \x20 peer:      {:?}\n\
+                 \x20 tmpdir:    {:?}\n\
+                 If this is reproducible, `bind()`'s staleness probe cannot tell a \
+                 dead daemon from a live one on this system.",
+                socket.display(),
+                meta.as_ref().map(|m| m.file_type()),
+                live.peer_addr(),
+                std::env::temp_dir(),
+            );
+        }
         let _listener = bind(&socket).expect("rebind over a stale socket");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -553,5 +609,64 @@ mod tests {
         assert!(USAGE.contains("reply this service sends contains one"));
         assert!(USAGE.contains("--socket"));
         assert!(USAGE.contains("--store"));
+    }
+
+    #[test]
+    fn approving_is_a_mutating_verb_and_goes_through_the_session_gate() {
+        // §13.8 means nothing if the thing being asked for approval can
+        // approve itself. `Approve` has to be routed exactly like `Grant`, and
+        // the cheapest honest proof is the arm of the gate that needs no
+        // session: a caller whose `/proc` entry could not be pinned is refused,
+        // and it is refused by `dispatch` rather than by `Service::approve` —
+        // which is the whole point, because `Service::approve` cannot see the
+        // peer's placement at all.
+        let dir = temp_dir("approve-gate");
+        let store = Store::new(dir.clone());
+        let registry = providers::default_registry(store.run_dir()).expect("registry");
+        let service = Service::new(store, false, registry);
+        let (a, b) = UnixStream::pair().unwrap();
+        let mut reader = BufReader::new(a.try_clone().unwrap());
+        let peer = Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+
+        for request in [
+            Request::Approve {
+                project: "/tmp/p".into(),
+                service: "demo".into(),
+                operation: "git.push".into(),
+                resource: "origin".into(),
+                ttl_ms: None,
+                withdraw: false,
+            },
+            Request::Grant {
+                project: "/tmp/p".into(),
+                service: "demo".into(),
+                capability: "git.push".into(),
+                revoke: false,
+            },
+        ] {
+            let name = request.clone();
+            let reply = dispatch(&service, peer, None, request, &mut reader, &a);
+            let (kind, message) = reply
+                .as_error()
+                .unwrap_or_else(|| panic!("{name:?} was allowed without an identifiable caller"));
+            assert_eq!(kind, ErrorKind::PermissionDenied, "{message}");
+            assert!(message.contains("cannot be identified"), "{message}");
+        }
+
+        // And reading what is approved is NOT gated, for the reason `list` and
+        // `grants` are not: seeing what is allowed changes nothing, and an
+        // agent that could not see it would report a refusal it cannot explain.
+        let reply = dispatch(&service, peer, None, Request::Approvals, &mut reader, &a);
+        assert!(
+            matches!(reply, Response::Approvals { .. }),
+            "reading approvals must not need the session gate: {reply:?}"
+        );
+
+        drop(b);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

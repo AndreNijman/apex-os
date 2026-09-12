@@ -3,6 +3,19 @@ name: PR validation
 on:
   pull_request:
     branches: [main]
+  # The roadmap v2.2 program integrates onto `roadmap/v2.2` and is forbidden
+  # from opening a PR until the final integration, so for the whole of that
+  # program NOTHING here ever ran: `pull_request` was the only trigger, and
+  # sixty landed roadmap items were verified entirely on one laptop. That is
+  # one machine's kernel, one cgroup layout, one set of installed packages.
+  #
+  # `push` on the integration branch gives every landing a second environment
+  # for free, and `workflow_dispatch` lets a task branch be checked BEFORE it
+  # lands rather than after — `gh workflow run pr-validation.yml --ref <branch>`.
+  # Neither changes what a pull request does.
+  push:
+    branches: [roadmap/v2.2]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,6 +28,7 @@ jobs:
       rust: ${{ steps.paths.outputs.rust }}
       installer: ${{ steps.paths.outputs.installer }}
       engine: ${{ steps.paths.outputs.engine }}
+      android: ${{ steps.paths.outputs.android }}
     steps:
       - name: Checkout history
         uses: actions/checkout@v4
@@ -24,16 +38,50 @@ jobs:
       - name: Classify changed paths
         id: paths
         env:
+          EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          # The range depends on the event, and until now only one event could
+          # produce one. `github.event.pull_request.*` is EMPTY on a push, so
+          # the first push-triggered run of this workflow died here with
+          # `git diff --name-only "" ""` and exit 128 before a single test ran.
+          #
+          # Whatever cannot be determined selects EVERYTHING. This file already
+          # records three separate bugs where a selector picked nothing, the
+          # job was skipped, and a skipped job counted as success — so the
+          # unknown case fails towards running too much, never too little.
+          case "$EVENT" in
+            pull_request)
+              base="$BASE_SHA"; head="$HEAD_SHA" ;;
+            push)
+              head="$SHA"; base="$PUSH_BEFORE"
+              # All-zeros on a branch's first push, and unreachable after a
+              # force-push; both mean "no usable predecessor".
+              if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+                 || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+                base="$(git merge-base origin/main "$head" 2>/dev/null || true)"
+              fi ;;
+            *)
+              head="$SHA"; base="$(git merge-base origin/main "$head" 2>/dev/null || true)" ;;
+          esac
+
+          if [ -n "${base:-}" ] && [ -n "${head:-}" ]; then
+            files="$(git diff --name-only "$base" "$head")"
+            echo "::notice::classified $EVENT over ${base}..${head}"
+          else
+            files=""
+            echo "::notice::$EVENT gave no usable diff range; selecting every suite"
+          fi
           printf '%s\n' "$files"
 
           rust=false
           installer=false
           engine=false
+          android=false
           # `tests/` is in the Rust selector as well as the engine one because
           # test-apex-blueprint.sh and test-apex-modes.sh both drive the built
           # `apex` binary and therefore live in the `rust` job, the only one
@@ -49,16 +97,65 @@ jobs:
           # exactly the change most likely to introduce an id `apex ai pull`
           # would refuse. `config/` is small and every file in it is read by the
           # binary this job builds.
-          grep -Eq '^(apexd/|config/|tests/)' <<<"$files" && rust=true
+          # files/desktop/{fish,nushell,shell}/ and the multiplexer adapter are
+          # in the RUST selector as well as the engine one, because the suites
+          # that assert them (test-shell-agent.sh, test-mux-layouts.sh) run in
+          # the rust job — it is the only one with a toolchain to build `apex`.
+          # A PR touching only one of those files would otherwise set
+          # engine=true, rust=false, skip the job, and pass: a skipped job counts
+          # as success. Fourth instance of this bug in this file.
+          # docs/ and README.md are in the RUST selector, and only because the
+          # job that checks them is the one with a toolchain: check-doc-verbs.sh
+          # asks the built `apex` binary what it can do, in both directions. A
+          # docs-only PR — deleting the line that documents `apex remote pair`,
+          # say — set every selector false, skipped the job, and passed, which
+          # is exactly the change that checker exists to catch. Fifth instance
+          # of this bug in this file; the four above it are the same shape.
+          # Containerfile* is in the RUST selector for the same reason docs/ is:
+          # the job that checks them lives here. check-containerfile-assertions.sh
+          # runs the image build's own grep assertions against this repo, and a
+          # PR touching only a Containerfile set every selector false, skipped
+          # this job, and passed -- on exactly the change that checker exists to
+          # catch. Sixth instance of this bug in this file, and it was introduced
+          # by adding the checker without reading the selector first.
+          # `android/core/src/test/resources/` is in the RUST selector as well
+          # as the android one, and the reason is the same shape as every other
+          # note in this block. `noise-vectors.json` is generated by
+          # apex-remote-core's `vectors.rs` and checked by its
+          # `the_committed_android_vectors_are_what_snow_produces` test — which
+          # lives in the `rust` job. A PR that edited only that file would
+          # otherwise never run the check that the file is still what `snow`
+          # produces, and hand-editing it is precisely how the Kotlin suite
+          # stops being evidence about the protocol the desktop speaks.
+          grep -Eq '^(apexd/|config/|Containerfile|docs/|README\.md|tests/|files/desktop/(fish|nushell|shell)/|files/system/libexec/apex-mux|android/core/src/test/resources/)' <<<"$files" && rust=true
           grep -Eq '^installer/' <<<"$files" && installer=true
           # files/** is the whole runtime payload of the image — the package
           # engine, session launchers, guards. A PR touching only that used to
           # run nothing but a syntax check that did not even reach it.
-          grep -Eq '^(files/|tests/)' <<<"$files" && engine=true
+          # Containerfile* is in the ENGINE selector as well as the rust one,
+          # and it is another instance of the bug above rather than a new idea.
+          # tests/test-apex-a11y-stack.sh asserts what Containerfile.core
+          # installs — the screen reader P2-003 names — so a PR that deleted
+          # `orca` from that file and touched nothing else set every selector
+          # false, skipped every job, and passed, because a skipped job counts
+          # as success. The file an assertion is ABOUT has to select the job
+          # that runs it.
+          grep -Eq '^(files/|tests/|Containerfile)' <<<"$files" && engine=true
+          # The Android client. Its own job, because none of the three above can
+          # build it — and because without this rule an Android-only change
+          # matches nothing, every selector stays false, every job is skipped,
+          # and a skipped job counts as success at the `result` gate.
+          grep -Eq '^android/' <<<"$files" && android=true
+
+          # The fail-towards-running rule, applied.
+          if [ -z "${base:-}" ] || [ -z "${head:-}" ]; then
+            rust=true; installer=true; engine=true; android=true
+          fi
 
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
           echo "installer=$installer" >> "$GITHUB_OUTPUT"
           echo "engine=$engine" >> "$GITHUB_OUTPUT"
+          echo "android=$android" >> "$GITHUB_OUTPUT"
 
   static:
     name: Static validation
@@ -149,8 +246,29 @@ jobs:
           # apex-shell is a separate repository, so it is checked out here. The
           # checker exits 77 (skip) when it is absent, which keeps this from
           # failing for a reason that is nothing to do with the change.
-          git clone --depth 1 -q https://github.com/AndreNijman/apex-shell \
-            /tmp/apex-shell-parity || true
+          # Clone the MATCHING branch where one exists, and say which one was
+          # used. This job's first ever run compared apex-os `roadmap/v2.2`
+          # against apex-shell `main` and failed on two touchpad defaults —
+          # while the two INTEGRATION branches agreed perfectly (22 settings,
+          # identical keys and defaults). A parity check that silently compares
+          # a branch against someone else's default branch reports drift that
+          # is not there and hides drift that is.
+          #
+          # The real drift it exposed is between the two MAINS, and it is kept
+          # rather than papered over: apex-shell main has drag_lock=true and
+          # click_method=clickfinger where apex-os main's generator has false
+          # and buttonAreas. Whoever performs the final integration must land
+          # both sides together, or opening the Input page silently changes a
+          # user's touchpad behaviour.
+          ref="${GITHUB_REF_NAME:-}"
+          if [ -n "$ref" ] && git clone --depth 1 -q --branch "$ref" \
+               https://github.com/AndreNijman/apex-shell /tmp/apex-shell-parity 2>/dev/null; then
+            echo "input parity: comparing against apex-shell branch '$ref'"
+          else
+            git clone --depth 1 -q https://github.com/AndreNijman/apex-shell \
+              /tmp/apex-shell-parity || true
+            echo "input parity: no matching apex-shell branch; comparing against its default branch"
+          fi
           set +e
           python3 files/scripts/check-input-parity \
             --service /tmp/apex-shell-parity/src/services/config_tab/InputService.qml
@@ -423,6 +541,91 @@ jobs:
       - name: §22 boot v2 — the opt-in is structural, and nothing shipped touches a boot path
         run: ./tests/test-boot-v2.sh
 
+      # §27's trust readout, structural half. In `static` because the check
+      # that matters most here compares two files in DIFFERENT selectors: the
+      # cosign identity in .github/workflows/build-image.yml against the one
+      # `apex trust` expects in apexd/apex/src/trust.rs. A PR touching only the
+      # workflow sets rust=false, and the drift would ship — with every machine
+      # reporting a good image as signed by the wrong party.
+      - name: §27 trust — the readout is wired into apex status, and expects the identity CI signs under
+        run: ./tests/test-apex-trust.sh
+
+      # §13.4's tool half, the part an agent actually types. In `static`
+      # because the thing being asserted is a command line: which subcommands
+      # reach the broker and which reach the real tool unchanged. It needs no
+      # toolchain, no wrangler, no terraform and no daemon — the suite refuses
+      # to run if `apex` resolves to anything but its own stub, so it cannot
+      # quietly start measuring the runner's machine.
+      - name: §13.4 tool broker — a brokered subcommand reaches apex, and everything else reaches the tool
+        run: ./tests/test-apex-tool-broker.sh
+
+      # §25's persistent-state migration, structural half. In `static` because
+      # the thing most likely to rot here is a doc comment — a version key that
+      # goes back to saying "absent means the current version" is a one-line
+      # change whose consequence lands the day the schema moves, on somebody
+      # else's machine.
+      - name: §25 schema — every store declares its rollback answer, and no version key defaults to current
+        run: ./tests/test-apex-schema.sh
+
+      # §48's Storage Manager, structural half. Three one-line changes away
+      # from being actively harmful: a comparison against smartctl's exit
+      # status turns a failing disk grey, a free-space check pointed at / fires
+      # forever on every bootc machine, and a trust in blkid reports an
+      # encrypted disk as unencrypted.
+      - name: §48 storage — a failing disk is red not grey, and the composefs root is not a full disk
+        run: ./tests/test-apex-storage.sh
+
+      # §P2-015's firmware readout, structural half. fwupdmgr's exit status
+      # means "nothing to do" when non-zero and accompanies an explicit error
+      # document when zero, so a caller that trusts it reads a current machine
+      # as a broken one. And `updatable` is a momentary condition: on battery
+      # this machine drops the flag from seven devices including the System
+      # Firmware, so printing it as a capability is a lie about the hardware.
+      - name: §P2-015 firmware — the document is the only truth, and updatable is not a property
+        run: ./tests/test-apex-firmware.sh
+
+      # §33's qualification database, structural half. The two properties it
+      # guards are both one-line changes away: a consent gate that reads
+      # "not declined" instead of "granted" starts recording on a machine
+      # nobody asked, and a verdict collapsed to a bool turns every row nobody
+      # has tried into a fault report about working hardware.
+      - name: §33 qualify — nothing is recorded without consent, and a check nobody tried is not a check that failed
+        run: ./tests/test-apex-qualify.sh
+
+      # P1-025/026/027/028, structural half, and it belongs in `static` for the
+      # usual reason: its subject is the shape of the source, and a PR that
+      # changed only a doc would skip the job that guards it. What it holds is
+      # that no reader in these modules turns a refused read into a fact — the
+      # defect this repository has now found in about fifteen places — and that
+      # the dead code which kept this branch out of the tree was fixed by
+      # giving it callers rather than by `#[allow(dead_code)]`. The second one
+      # cannot be caught by clippy: silencing the lint is what makes clippy
+      # green.
+      - name: §P1-025 skills & provenance — a refused read is never an absence, and dead code was called rather than silenced
+        run: ./tests/test-apex-skill.sh
+
+      # §P1-061 application permissions. In `static` because the subject is a
+      # runtime behaviour of xdg-desktop-portal, not of anything in apexd/ —
+      # a PR that changed only docs/app-permissions.md would skip a `rust` job
+      # and ship a page that claims a revocation nothing enforces.
+      #
+      # On a runner with no xdg-desktop-portal it skips the portal half and
+      # says so. That is deliberate: the alternative is a green tick for a
+      # revocation that was never exercised, which is the exact failure the
+      # test exists to catch. The half that matters runs on any machine with
+      # the desktop stack, which is every machine this feature ships to.
+      - name: §P1-061 app permissions — a revoked grant is refused, and the native one cannot be
+        run: ./tests/test-apex-permissions.sh
+
+      # §26's channels, structural half, and this one has to be in `static`:
+      # every assertion compares .github/workflows against apexd/, which are
+      # different path selectors. A PR touching only build-image.yml sets
+      # rust=false, and the drift that ships is `stable` quietly advancing on
+      # every build — a user who chose it would be taking edge's risk while
+      # believing they had opted out.
+      - name: §26 channels — edge moves with every build, the slower ones do not, and a promotion cannot skip a channel
+        run: ./tests/test-apex-channel.sh
+
       # §19's disposable engine, and the structural rules its teardown depends
       # on. In `static` for the reason boot-v2's structural half is: the
       # `engine` selector is ^(files/|tests/) and the `rust` selector is
@@ -452,6 +655,25 @@ jobs:
       # mentioning the forbidden token does NOT trip it — the inverse mutant.
       # This repository has shipped four checks satisfied by their own comments;
       # this one proves it is not a fifth.
+      # P1-062's chaos harness, tested. `tests/chaos/` is what decides whether
+      # APEX survives a fault, so "what decides whether the decider is right?"
+      # needs an answer that is not "somebody read it".
+      #
+      # In `static` because it needs no binary and because the `rust` selector
+      # (^(apexd/|config/|tests/)) would in fact catch it — but the boot-path
+      # half is a rule about FILE CONTENT under tests/chaos/, and a rule that
+      # can be skipped is a rule that gets broken on the PR that skips it.
+      # `static` has no path filter and can never be skipped.
+      #
+      # It carries its own inverse mutants, the way `check-ai-parity
+      # --self-test` does: a COMMENT naming bootctl must not trip the check,
+      # and neither must a fixture FILE named rpm-ostree-status.json, while a
+      # real `sudo rpm-ostree status` must. Without both directions the check
+      # would be satisfiable by its own prose, which is the defect this
+      # repository has shipped four times.
+      - name: P1-062 the chaos harness — the boot-path rule, and every verdict arm
+        run: ./tests/test-apex-chaos.sh
+
       - name: §14 the daemon, the CLI and the unit agree
         run: |
           set -euo pipefail
@@ -473,6 +695,39 @@ jobs:
 
       - name: Toolchain
         run: rustup component add clippy
+
+      # bubblewrap is not on the GitHub runner, and six assertions in
+      # apex/tests/mcp_sidecar_live.rs depend on it: they confine a real MCP
+      # server and then check that the confinement actually holds — no network
+      # where none was asked for, no reach into the agent's HOME, no inherited
+      # variables, the broker socket opened only on request. Without bwrap each
+      # one fails on `apex mcp run: this MCP server cannot be confined`.
+      #
+      # Installed rather than skipped, deliberately. The alternative pattern in
+      # this repository is to skip when a tool is missing, and that is right for
+      # a suite needing a compositor or a GPU — but these six are the assertions
+      # that the sandbox IS a sandbox, and a security boundary that quietly does
+      # not get checked in CI is the one you least want quiet. This file already
+      # records four occasions where something skipped and the workflow passed.
+      - name: Sandbox tooling the confinement assertions need
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          command -v bwrap
+          bwrap --version
+          # Ubuntu 24.04 ships kernel.apparmor_restrict_unprivileged_userns=1,
+          # which denies an unprivileged user namespace — so bwrap installs
+          # fine and then fails with "setting up uid map: Permission denied"
+          # and "loopback: Failed RTM_NEWADDR". The runner is ephemeral and
+          # unshared, so relaxing it here affects nothing else.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Proven, not assumed: a sandbox that cannot start must fail HERE,
+          # naming the reason, rather than three steps later as five confusing
+          # assertion failures about MCP servers.
+          bwrap --dev-bind / / --unshare-net --unshare-user true \
+            || { echo "FATAL: bwrap cannot create a user namespace on this runner"; exit 1; }
+          echo "bwrap can create a user namespace"
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -498,10 +753,48 @@ jobs:
       # APEX_REQUIRE_APEX_CLI turns that skip into a failure. Same shape as
       # APEX_REQUIRE_NIRI in tests/test-apex-input.sh: a developer running one
       # crate's tests still gets a skip, CI does not.
+      # Through tests/in-login-session.sh, which is what makes §7's LOCAL
+      # column reachable. `apex-agentd` decides whether a human is at this
+      # machine from the connecting peer's cgroup, and a GitHub runner's
+      # processes are in neither a login session nor a user service — so
+      # `origin::observe` cannot classify them at all, and every assertion
+      # about approving a root operation or holding a system-access grant is
+      # refused before it reaches the behaviour it is testing.
+      # `system_grants.rs`'s `renewing_a_grant_that_does_not_exist_…` is the
+      # one that shows it. The helper enters a real logind session first, or
+      # says out loud why it could not and runs the tests exactly as before.
       - name: Tests
-        run: cargo test --locked
+        run: ../tests/in-login-session.sh cargo test --locked
         env:
           APEX_REQUIRE_APEX_CLI: "1"
+
+      # §7's table has two columns and they live in two different
+      # environments, so no single `cargo test` run can cover both: inside a
+      # login session the origin is local, and outside one it is not. The step
+      # above buys the local column, which had never executed in CI. This step
+      # keeps the other one instead of trading it away.
+      #
+      # `request_origin.rs` asserts the RULE rather than a fixed answer, so it
+      # is green either way and is simply run again here. `system_grants.rs`
+      # is filtered to the single test that needs a non-local placement — the
+      # rest of that file needs a local one and is covered above — and the
+      # count is then checked, because a `cargo test` whose filter matches
+      # nothing exits 0 having run nothing, which is the green-tick-over-
+      # nothing-asserted shape docs/p1-progress.md records this repository
+      # being bitten by three times. Here it would fire the day somebody
+      # renames the test.
+      - name: The non-local column, from the runner's own placement
+        run: |
+          set -euo pipefail
+          cargo test --locked -p apex-agentd --test request_origin
+          out="$(cargo test --locked -p apex-agentd --test system_grants \
+                 a_non_local_caller_is_refused_a_grant_before_polkit_is_asked \
+                 -- --exact --nocapture 2>&1)"
+          printf '%s\n' "$out"
+          printf '%s' "$out" | grep -q '1 passed' || {
+              echo "::error::a_non_local_caller_is_refused_a_grant_before_polkit_is_asked did not run; has it been renamed?"
+              exit 1
+          }
 
       # §10's blueprint suite drives the COMPILED binary, so it belongs here
       # rather than in the `engine` job: this is where the toolchain and the
@@ -591,6 +884,137 @@ jobs:
           test -x "$APEX_BIN"
           ./tests/test-boot-v2.sh --with-binary
 
+      # §27's binary half: `apex trust` and `apex status` against fixture
+      # machines — an unverified pull on a permissive policy (what every APEX
+      # machine has today), a signed pull on a strict one, and the two reads
+      # that must report as unavailable rather than as an answer. `--verify`
+      # refuses to run under a fixture root, so this step never leaves the
+      # runner and cannot go red because ghcr.io is having a bad day.
+      - name: §27 trust — apex trust against unverified, signed and unreadable fixtures
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-trust.sh --with-binary
+
+      # §25's binary half: `apex schema` against real state trees — a record
+      # from before the version key existed migrated with a copy kept, a record
+      # from a newer APEX left byte-identical, and a blueprint from a newer
+      # APEX refused by name rather than by serde. The suite exports
+      # XDG_STATE_HOME and XDG_CONFIG_HOME at its own mktemp tree and hard-exits
+      # if any store path resolves outside it: this is the suite that drives the
+      # code which REWRITES persistent state.
+      - name: §25 schema — apex schema against records older and newer than this build
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-schema.sh --with-binary
+
+      # §48's binary half: `apex storage` and the notifier against a whole
+      # fixture machine — sysfs, mountinfo, udev records and captured smartctl
+      # output for a healthy disk, a failing one and a refused read. Nothing
+      # touches a real block device: under $APEX_STORAGE_ROOT no subprocess is
+      # spawned at all, and the notifier's notify-send is a shim that writes to
+      # a file.
+      - name: §48 storage — apex storage against a healthy disk, a failing one and a refused read
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-storage.sh --with-binary
+
+      # §P2-015's binary half: `apex firmware` against captured fwupd
+      # documents — the on-battery one, an Error object that arrived with exit
+      # zero, a document with no Devices list at all, and prose where JSON was
+      # asked for. No fwupdmgr is spawned; every answer is a file the script
+      # writes, so this runs on a machine with no fwupd and no system bus.
+      - name: §P2-015 firmware — apex firmware against fwupd's own oddest answers
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-firmware.sh --with-binary
+
+      # §33's binary half: `apex qualify` against a whole fixture machine —
+      # DMI, PCI, cpuinfo, cmdline and an EFI variable — including a serial
+      # number sitting in DMI next to the model, which must not reach the
+      # database, and a sealed SecureBoot variable, which must read as not
+      # checked rather than as a firmware that fails.
+      - name: §33 qualify — apex qualify against a fixture machine, consent gate and all
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-qualify.sh --with-binary
+
+      # P1-061's binary half. The three refusals `apex permissions revoke` owes
+      # — a native subject, a Flatpak carrying `devices=all`, and a capability
+      # this session has no portal for — must each exit NON-ZERO with its own
+      # sentence, against a shimmed `flatpak` and `busctl` so no real store is
+      # touched. The control case, a capability that genuinely can be revoked,
+      # runs beside them: a suite where every case refuses would pass on a
+      # binary that refused everything.
+      - name: §P1-061 app permissions — revoke refuses what it cannot do, and names what it can
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-permissions.sh --with-binary
+
+      # P1-025/026/027/028's binary half: the four verbs against fixture HOMEs,
+      # including a skills directory that exists and is refused (which must
+      # never read as a machine with no skills), a plugin edited after it was
+      # recorded, a baseline store that cannot be parsed (could-not-run, not
+      # first-sight — the latter is what a DELETED store looks like), and a
+      # documentation-only plugin, which must not come out "sandboxed" on a
+      # vacuously true field.
+      #
+      # Each fixture gets its own XDG_STATE_HOME as well as its own HOME:
+      # `apex provenance record` writes a baseline store and `store_path`
+      # prefers XDG_STATE_HOME, so a suite setting only HOME would write over
+      # the runner's real one.
+      - name: §P1-025 skills & provenance — apex skill / provenance / mcp planes against fixture homes
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-skill.sh --with-binary
+
+      # §26's binary half: `apex channel` against fixture machines on each of
+      # the four channel tags and on the legacy alias every installed machine
+      # actually follows.
+      - name: §26 channels — apex channel against a machine on each tag
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          ./tests/test-apex-channel.sh --with-binary
+
       # §19's binary half: the recovery surface against whole fixture machines,
       # `apex doctor --json`, and the factory reset.
       #
@@ -642,9 +1066,57 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-verbs.sh
 
+      # tests/check-doc-verbs.sh existed since the `apex request install clang`
+      # defect and ran NOWHERE — not in this workflow, not from any suite — so
+      # it was a checker somebody had to remember to type. Both directions run
+      # here now. Forward: every `apex …` a doc shows parses. Reverse: every
+      # command the binary offers is named by some doc, or is declared in
+      # tests/doc-verbs-undocumented, which is a debt list that can only
+      # shrink. The reverse direction is the one that found `apex remote
+      # pair|devices|revoke|status|enable` documented nowhere; the forward one
+      # structurally cannot, because a verb no doc mentions produces no line.
+      # It asks the binary this job already built, not the installed apex,
+      # which on a runner does not exist.
+      - name: Docs and the CLI agree, in both directions
+        working-directory: ${{ github.workspace }}
+        run: ./tests/check-doc-verbs.sh
+
+      # A Containerfile assertion is the one test the test suite cannot run,
+      # because it only exists inside a build. Five of them on this branch could
+      # never pass or never run, and each was found by a `base` job failing at a
+      # later step than the last. This resolves them back to the files in this
+      # repo that become them and runs them here.
+      - name: Containerfile assertions can actually pass
+        working-directory: ${{ github.workspace }}
+        run: ./tests/check-containerfile-assertions.sh
+
       - name: Run trusted-device assertions
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-host.sh
+
+      # The editors APEX ships have to be launchable, not merely present. Zed
+      # shipped on every image with no desktop entry at all — the install read a
+      # filename the tarball has never used and `|| true` swallowed the failure —
+      # so the binary worked from a shell and the editor was invisible in every
+      # launcher. This runs the structural half here; the live half needs the
+      # unpacked zed.app and skips in CI.
+      - name: The shipped editors are launchable
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-apex-editors.sh
+
+      # The desktop AI apps are part of the product, not add-ons: ChatGPT and
+      # Claude Desktop ship in the image, arrive with `apex update`, and must
+      # bring no updater of their own. Both vendors package for mutable
+      # distributions and therefore subscribe the machine to their own
+      # repository on install — OpenAI's rpm ships an enabled
+      # /etc/yum.repos.d/chatgpt.repo, Anthropic's deb writes an apt source
+      # from its maintainer script. On APEX that is a live hazard rather than
+      # dead weight, because apex-pkg builds user extensions with dnf against
+      # the host's repos. This runs the structural half here; the live half
+      # needs the installed apps and skips in CI.
+      - name: The desktop AI apps ship with the system and bring no updater
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-apex-ai-apps.sh
 
       # §20's remote compute and handoff. The largest group of cases in it is
       # about one refusal: `apex build --on` has to decide which directory on
@@ -714,6 +1186,59 @@ jobs:
           test -x "$APEX_BIN"
           ./tests/test-apex-task.sh
 
+      # ── LAST IN THIS JOB, DELIBERATELY ──────────────────────────────────
+      # A failed step skips every step BELOW it in the same job, and this
+      # repository has already been bitten by that: a known-red step placed
+      # mid-job silently switched off the four suites under it. The chaos run
+      # is expected green, but it is also the step most likely to go red for an
+      # environmental reason on a runner this repository does not control —
+      # a kernel that refuses a namespace turns two cases into could-not-inject
+      # and fails the run by design. Nothing else should be disabled by that.
+      # P1-062's chaos cases, for real, against the built binary.
+      #
+      # THIS JOB AND NOT ANOTHER: two of the four cases need an unprivileged
+      # user namespace — `network-loss` puts `apex doctor` in a network
+      # namespace, `full-disk` mounts a size-limited tmpfs in a mount
+      # namespace — and Ubuntu 24.04 ships
+      # kernel.apparmor_restrict_unprivileged_userns=1. The bubblewrap step
+      # near the top of this job already turns it off. In any other job those
+      # two cases report could-not-inject, which fails the run by design and
+      # with no opt-out, so there is no version of this that quietly skips.
+      #
+      # A chaos run is green only when every requested case both INJECTED its
+      # fault (proven by an observation the injector did not make) and the
+      # subject survived it. could-not-inject fails the run. That is the whole
+      # point of the unit and it has no override.
+      #
+      # The bundles are uploaded on failure AND on success, because criterion 3
+      # is "failures produce reproducible diagnostics" and a diagnostic that
+      # only exists inside a finished runner is not one. Each bundle carries
+      # the seed, the git revision, the binary's own sha256, the environment
+      # probe, both the faulted and the no-fault runs, and sha256 snapshots of
+      # the fixture tree before and after — enough for
+      # `run-chaos --replay <bundle>` on another machine.
+      - name: P1-062 chaos — four faults injected, proven, and survived
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --bin apex --manifest-path apexd/Cargo.toml
+          # A missing binary must be a hard failure, not a skip. Without this
+          # every case reports could-not-inject for the least interesting
+          # possible reason.
+          test -x "$APEX_BIN"
+          ./tests/chaos/run-chaos --out "$RUNNER_TEMP/chaos" --seed "$GITHUB_RUN_ID"
+
+      - name: Chaos diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-bundles
+          path: ${{ runner.temp }}/chaos
+          if-no-files-found: warn
+          retention-days: 14
+
   installer:
     name: Installer safety and UI
     needs: changes
@@ -729,6 +1254,63 @@ jobs:
       - name: Run installer safety suite
         working-directory: installer
         run: ./test-installer.sh
+
+      # The keyboard/locale/timezone half. Kept as its own step so a failure
+      # names which half broke rather than being buried in the big suite.
+      #
+      # Both degrade honestly on this runner rather than lying: the engine cases
+      # SKIP when no APEX-OS image can be put where preflight looks, and the
+      # end-to-end keymap measurement SKIPs without Xvfb, cage and python3-gi.
+      # Installing them here is what makes the criterion actually measured in CI
+      # instead of skipped on every run.
+      - name: Install the compositor and X server the keymap suite measures with
+        run: |
+          sudo apt-get update -qq
+          # One package at a time. `apt-get install a b c` aborts the WHOLE
+          # command if any single name is unavailable, so one bad name would
+          # silently cost Xvfb as well — and the suite would then SKIP the
+          # assertion that carries the criterion while the step still reported
+          # success.
+          # xdotool, at-spi2-core, dbus-x11 and libglib2.0-bin are the
+          # accessibility audit's half: real X key events into the real toolkit,
+          # a private accessibility bus, and gdbus to read the tree back. Without
+          # them test-installer-a11y.sh SKIPs, and a skip there means the
+          # criterion is unmeasured rather than met.
+          for p in xvfb cage python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 \
+                   libxkbcommon0 xkb-data binutils \
+                   xdotool at-spi2-core dbus-x11 libglib2.0-bin; do
+            sudo apt-get install -y -qq "$p" || echo "note: $p unavailable"
+          done
+          # Say what actually arrived, so a SKIP below can be traced without
+          # guessing.
+          for b in Xvfb cage; do
+            command -v "$b" >/dev/null && echo "have: $b" || echo "MISSING: $b"
+          done
+          python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1"); from gi.repository import Gtk, Adw; print("have: python3-gi with Gtk4 + Adw")' \
+            || echo "MISSING: python3-gi Gtk4/Adw"
+
+      - name: Run installer locale/timezone suite
+        working-directory: installer
+        run: ./test-installer-locale.sh
+
+      - name: Run installer keyboard suite
+        working-directory: installer
+        run: ./test-installer-keymap.sh
+
+      # P2-003's acceptance line ends "keyboard-only installer validated", and
+      # this is the step that validates it. Not a sweep for missing labels: the
+      # shipped GUI runs on a private Xvfb, xdotool delivers real X key events
+      # into the real GTK4 toolkit, and the resulting focus and names are read
+      # back over AT-SPI -- the protocol Orca speaks. It is what found TEN
+      # focusable fields whose only label was a placeholder GTK never maps to an
+      # accessible name.
+      #
+      # Second machine, not this laptop, is the point of running it here: the
+      # last round's CI dispatch is what found the Etc/UTC engine gap that a
+      # laptop in Perth could not see.
+      - name: Run installer accessibility audit
+        working-directory: installer
+        run: ./test-installer-a11y.sh
 
   engine:
     name: Package engine
@@ -775,6 +1357,375 @@ jobs:
       # is downloaded.
       - name: Run capsule assertions
         run: ./tests/test-apex-env.sh
+
+      # P2-008's virtualization engine. Same trade as the capsule suite above
+      # and for a sharper reason: `apex vm create` defines a libvirt domain and
+      # `apex vm rm` deletes disk images, so it can never run for real here and
+      # must never run for real on a developer's machine during a test. $PATH
+      # is reduced to recording stubs for virsh, qemu-img, mcopy and friends,
+      # and the suite HARD-EXITS if `command -v virsh` does not resolve to the
+      # stub.
+      #
+      # What that buys is the domain XML, which is where five of P2-008's six
+      # flows actually live — and in particular the three elements that look
+      # optional and are not: <smm state='on'/>, the memfd/shared memory
+      # backing virtiofs cannot start without, and an xHCI controller with
+      # ports. Dropping any one produces a domain that DEFINES and then refuses
+      # to START, which no live run on a KVM-less runner could ever catch.
+      #
+      # The live half — real guests booted through this engine against a real
+      # virtqemud — is tests/vmlab/run-vmlab. It cannot verify anything here:
+      # these runners have no /dev/kvm. The step below runs it anyway, and
+      # that is the point.
+      - name: Run virtualization assertions
+        run: ./tests/test-apex-vm.sh
+
+      # ── the could-not-run arm, EXERCISED rather than asserted by comment ───
+      #
+      # A lab whose third verdict arm is broken does not announce itself: it
+      # reports "all six flows work" from a machine that booted no guest, which
+      # is this repository's "permission denied is not absence" defect with a
+      # reliability claim on top. The arm only ever fires where there is no
+      # KVM — which is exactly here — so here is where it has to be checked.
+      #
+      # The assertion does NOT require the runner to lack KVM, and that is the
+      # correction rather than a relaxation: GitHub's ubuntu images expose a
+      # /dev/kvm node that is root:kvm 0660 and unusable by the job — present
+      # and not usable, the exact distinction the lab's own `-r -w` check makes
+      # and that a `[ -e /dev/kvm ]` guard would get wrong. So the rule here is
+      # the one that holds on every runner: a flow that could not run must say
+      # why, and no flow may come back `failed`. A runner that CAN boot guests
+      # verifies them instead, which is also a pass.
+      #
+      # tests/test-apex-vm.sh drives both could-not-run branches directly (the
+      # --no-kvm flag and an unusable KVM node), so the arm is proven there on
+      # every runner. This step is the end-to-end shape: the lab, invoked the
+      # way a person invokes it, writing a bundle.
+      - name: P2-008 the vmlab, and its verdicts wherever this runs
+        run: |
+          set -euo pipefail
+          ./tests/vmlab/run-vmlab --out "$RUNNER_TEMP/vmlab"
+          bad=0
+          for f in $(./tests/vmlab/run-vmlab --list); do
+            v="$RUNNER_TEMP/vmlab/$f/verdict.json"
+            if [ ! -f "$v" ]; then echo "no verdict for $f"; bad=1; continue; fi
+            state=$(sed -n 's/.*"state": "\([^"]*\)".*/\1/p' "$v")
+            reason=$(sed -n 's/.*"reason": "\([^"]*\)".*/\1/p' "$v")
+            echo "$f: $state — $reason"
+            case "$state" in
+              failed) echo "  ^ a flow FAILED"; bad=1 ;;
+              could-not-run|verified) ;;
+              *) echo "  ^ unknown verdict state"; bad=1 ;;
+            esac
+            if [ -z "$reason" ]; then echo "  ^ no reason given"; bad=1; fi
+          done
+          exit $bad
+
+      - name: Keep the vmlab bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmlab-bundles
+          path: ${{ runner.temp }}/vmlab
+          if-no-files-found: ignore
+
+      # ── P2-012's browser capsule ──────────────────────────────────────────
+      #
+      # The everywhere half. A recording stub for `apex` on $APEX_BROWSER_APEX,
+      # and assertions on the two argvs and the one file that decide anything:
+      # the SESSION argv, where the confinement is asked for (a dropped word
+      # there is a capsule whose home is not masked or whose network is not
+      # filtered, reported as neither, and it is not a compile error); the
+      # BROWSER argv, for --headless, --no-remote and the capsule's own
+      # --profile; and user.js, which is the only thing pointing Firefox at the
+      # egress bridge because Firefox does not read $HTTP_PROXY.
+      - name: Run browser capsule assertions
+        run: ./tests/test-apex-browser.sh
+
+      # ── and its live lab, wherever this runs ──────────────────────────────
+      #
+      # tests/browserlab/run-browserlab boots real capsules through the shipped
+      # engine against a real apex-agentd, a real bwrap namespace and a real
+      # browser. On a runner it will almost always report could-not-run, and
+      # that is the point rather than a shortfall: it needs a runtime built
+      # from THIS branch, and session.rs::bridge_program refuses a bridge under
+      # /tmp or $HOME — a checkout on a runner is under $HOME, so the lab says
+      # so and names it.
+      #
+      # The rule enforced here is the vmlab's and not "it passed": a flow that
+      # could not run must say WHY, and no flow may come back `failed`. A
+      # runner that can run them verifies them instead, which is also a pass.
+      - name: P2-012 the browserlab, and its verdicts wherever this runs
+        run: |
+          set -euo pipefail
+          ./tests/browserlab/run-browserlab --out "$RUNNER_TEMP/browserlab"
+          bad=0
+          for f in $(./tests/browserlab/run-browserlab --list); do
+            v="$RUNNER_TEMP/browserlab/$f/verdict.json"
+            if [ ! -f "$v" ]; then echo "no verdict for $f"; bad=1; continue; fi
+            state=$(sed -n 's/.*"state": "\([^"]*\)".*/\1/p' "$v")
+            reason=$(sed -n 's/.*"reason": "\([^"]*\)".*/\1/p' "$v")
+            echo "$f: $state — $reason"
+            case "$state" in
+              failed) echo "  ^ a flow FAILED"; bad=1 ;;
+              could-not-run|verified) ;;
+              *) echo "  ^ unknown verdict state"; bad=1 ;;
+            esac
+            if [ -z "$reason" ]; then echo "  ^ no reason given"; bad=1; fi
+          done
+          exit $bad
+
+      - name: Keep the browserlab bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browserlab-bundles
+          path: ${{ runner.temp }}/browserlab
+          if-no-files-found: ignore
+
+      # The half the suite above deliberately cannot answer. Its device-profile
+      # coverage is argv-PINNED — it proves the engine emits the flags its
+      # author intended, with a stubbed container manager. It cannot prove
+      # those flags reach a device, which is the entire purpose of the `amd`
+      # and `hw` profiles, and §BASE-005 carried that as its outstanding
+      # qualification.
+      #
+      # This suite asks the shipped engine what a profile adds (it sources
+      # apex-env and calls gpu_flags, so a change to a profile changes the
+      # test) and hands exactly those flags to real rootless podman on an
+      # image that is ALREADY local, then reads back what is reachable inside.
+      # It never calls `apex env create`, never pulls, and every container is
+      # --rm.
+      #
+      # On this runner there is no AMD device and probably no podman, so the
+      # hardware half skips with status 0 — the same trade test-apex-hypr-lua
+      # and test-apex-input-live already make. The profile-SHAPE assertions run
+      # everywhere and fail rather than skip if gpu_flags stops emitting
+      # `--additional-flags` plus one argument, which is the way this file
+      # could otherwise have gone quietly vacuous.
+      - name: Run capsule device-profile assertions (live where the hardware is)
+        run: ./tests/test-apex-env-devices-live.sh
+
+      # What the login session picker calls the three desktops. BASE-013's
+      # third criterion — compositor names stay implementation details for
+      # normal users — failed on the one surface every user sees at every
+      # login: the greeter rendered `Name=` verbatim, so the carousel read
+      # "labwc (APEX) / niri / Hyprland".
+      #
+      # This runs here rather than only in an image build because two of the
+      # three things it checks are build rules: Containerfile.base's rename of
+      # the Hyprland package's own entry, and Containerfile.apex's sweep over
+      # the finished directory. Both are LIFTED OUT of the Containerfiles and
+      # run against a staging tree, so the gate that normally costs a
+      # multi-hour image build is exercised on every PR in under a second, and
+      # the greeter's enumeration is lifted out of GreetContext.qml and run
+      # rather than re-implemented — this tree already carries three copies of
+      # that loop. It starts no compositor and opens no window.
+      - name: Run session-picker wording assertions
+        run: ./tests/test-apex-greet-sessions.sh
+
+      # P2-016's guest and kiosk halves. Two claims, tested two ways.
+      #
+      # Criterion 3 -- "kiosk/shared-device policy is possible WITHOUT
+      # weakening ordinary desktop use" -- is an assertion about an ABSENCE:
+      # the shipped greetd config must carry no auto-login stanza, or APEX
+      # would have stopped asking who you are and would still boot. The suite
+      # also feeds the same check a config that HAS one, because an absence
+      # assertion that never sees a presence cannot fail.
+      #
+      # Criterion 2 runs the real /usr/libexec/apex-guest-wipe against a
+      # fixture passwd, a fixture secretd store and a fixture greeter state
+      # dir, as an ordinary user. It creates no account and touches nothing
+      # outside its temp directory -- and asserts that redirection worked
+      # before it asserts anything about wiping. It starts no compositor and
+      # opens no window.
+      - name: Run shared-machine (guest, kiosk) assertions
+        run: ./tests/test-apex-shared-machine.sh
+
+      # P2-016 criterion 1. One assertion carries it: `apex user add` without
+      # --admin must not put the account in wheel, because wheel is what
+      # polkit's auth_admin and sudo both resolve to on APEX. A dropped
+      # condition there is not a compile error and not a visible failure -- it
+      # is every account APEX creates able to approve a root operation, which
+      # is the state installer/apex-install is in today.
+      #
+      # It runs the real /usr/libexec/apex-user against a fixture passwd and
+      # group file, with every privileged tool (useradd, userdel, gpasswd,
+      # systemctl) replaced by a stub that records its argv. So the decisions
+      # go through the production path while no account is created, removed or
+      # changed, and nothing is written outside its temp directory.
+      - name: Run account (standard vs administrator) assertions
+        run: ./tests/test-apex-user.sh
+
+      # What a screen reader and a keyboard-only user get from the login
+      # screen. P2-003's "accessible login" and P2-004's "keyboard layout
+      # before password" both land on the same surface, so they are measured
+      # on the same one.
+      #
+      # This is NOT a grep for Accessible.name. The shipped GreetSurface.qml is
+      # built under qmltestrunner on the offscreen platform, the accessible
+      # name and role are READ OFF THE LIVE OBJECTS — the same attached objects
+      # QAccessible publishes to AT-SPI — and the focus order is measured by
+      # posting real Qt.Key_Tab events through the window's delivery agent. The
+      # difference is not academic: `KeyNavigation.tab: passwordInput` reads
+      # like a complete tab chain and was in fact a two-element ring that could
+      # not reach the session picker at all.
+      #
+      # It opens no window and starts no compositor; WAYLAND_DISPLAY is removed
+      # from the environment before the runner is invoked. It skips with
+      # status 0 where qmltestrunner is not installed.
+      # ubuntu-24.04 ships Qt 6.4, and the greeter imports QtQuick.Effects for
+      # its wallpaper blur — MultiEffect is Qt 6.5 and later. So this suite can
+      # never run on the runner itself: apt has no qml6-module-qtquick-effects
+      # to install, the surface would fail to build, and the suite would skip on
+      # every PR for ever. A skip nobody notices is how a suite goes quietly
+      # vacuous, which is the failure this whole unit exists to measure.
+      #
+      # So it runs in a Fedora container, which is what APEX is built from
+      # anyway — the Qt the greeter actually ships against rather than the one
+      # the runner happens to carry. Verified by running it: 22 assertions, same
+      # result as on a Fedora workstation.
+      #
+      # A container that cannot be pulled or a dnf that cannot resolve leaves
+      # the suite unrun and says so, rather than reddening the job over a
+      # network hiccup — the same trade the labwc step above makes.
+      # ── the four accessibility steps run even after an earlier failure ────
+      # Not `continue-on-error`: these steps still fail the job. `!cancelled()`
+      # only stops an UNRELATED red step earlier in this job from hiding them.
+      #
+      # That is not hypothetical. `Run virtualization assertions` is red on
+      # roadmap/v2.2 itself, a hundred lines above these, and GitHub stops a job
+      # at its first failing step — so on 2026-09-12 all four accessibility
+      # suites silently stopped running in CI while reporting nothing at all.
+      # A job that halts at step N is evidence about steps 1..N and about
+      # nothing after it, and a unit whose whole argument is "a second machine
+      # finds what a laptop cannot" cannot afford to lose the second machine to
+      # somebody else's red step.
+      - name: Run greeter accessibility assertions
+        if: ${{ !cancelled() }}
+        run: |
+          if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
+                dnf -y install --setopt=install_weak_deps=False \
+                    qt6-qtdeclarative-devel >/dev/null 2>&1 || exit 97
+                ./tests/test-apex-greet-a11y.sh'; then
+              rc=$?
+              if [ "$rc" -eq 97 ]; then
+                  echo "could not install Qt in the container; the greeter a11y suite did not run"
+              else
+                  exit "$rc"
+              fi
+          fi
+
+      # The AT-SPI walk: the greeter in a real window on a private wlroots
+      # compositor, read back over D-Bus exactly as Orca reads it. This was the
+      # last accessibility suite in this unit verified on ONE laptop, and the
+      # round-18b dispatch is the argument for not leaving it there — CI found
+      # two false greens in the installer audit that a laptop could not.
+      #
+      # Same Fedora container as the step above, for the same reason (the
+      # greeter imports QtQuick.Effects, which is Qt 6.5+, and the runner ships
+      # 6.4), plus four things that step does not need:
+      #
+      #   labwc                     a wlroots compositor. The suite refuses the
+      #                             offscreen QPA deliberately: offscreen
+      #                             provides no platform accessibility, so the
+      #                             bridge publishes nothing and every assertion
+      #                             would read an empty tree and have to be
+      #                             written to expect one.
+      #   xorg-x11-server-Xwayland  labwc exits at startup without it ("cannot
+      #                             create xwayland server"). Nothing in the
+      #                             suite is an X client; labwc simply will not
+      #                             start.
+      #   mesa-dri-drivers          llvmpipe. Without it the Qt client cannot
+      #                             make an EGL context in a container with no
+      #                             /dev/dri, and it fails in the most confusing
+      #                             possible way: the process stays alive, its
+      #                             stderr is empty, and it registers nothing.
+      #   at-spi2-core, python3-gobject, dbus-daemon, glib2
+      #                             the bus, the registry, and the walker.
+      #
+      # Verified by running it in this exact container before it was written
+      # here, not dispatched blind: 31 passed, 0 failed, identical to the
+      # laptop's 31. That run is also what corrected tests/lib/atspi.sh — see
+      # its "the flag a screen reader sets" note. On a bare container
+      # org.a11y.Status starts FALSE, Qt publishes nothing, and the suite reads
+      # as "the greeter has no accessibility tree"; on a developer machine the
+      # flags are already true, which is why the old finding said Qt ignored
+      # them.
+      #
+      # exit 97 = the container could not resolve its packages: reported as
+      # "did not run" rather than reddening the job, the same trade the greeter
+      # a11y step makes.
+      - name: Run greeter AT-SPI assertions
+        if: ${{ !cancelled() }}
+        run: |
+          if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
+                dnf -y install --setopt=install_weak_deps=False \
+                    qt6-qtdeclarative-devel qt6-qtwayland labwc \
+                    xorg-x11-server-Xwayland mesa-dri-drivers \
+                    at-spi2-core python3-gobject dbus-daemon glib2 \
+                    >/dev/null 2>&1 || exit 97
+                ./tests/test-apex-greet-atspi.sh'; then
+              rc=$?
+              if [ "$rc" -eq 97 ]; then
+                  echo "could not install the accessibility stack in the container; the AT-SPI walk did not run"
+              else
+                  exit "$rc"
+              fi
+          fi
+
+      - name: Run greeter keyboard-layout assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-greet-layout.sh
+
+      # The other half of the same finding, and the more important one: the
+      # greeter's markup is right and a screen reader still receives nothing,
+      # because the greet session has no D-Bus session bus for Qt's
+      # accessibility bridge to publish on. greetd's own command string is
+      # parsed out of the shipped TOML and RUN, with the compositor and
+      # quickshell replaced by stubs on a private PATH.
+      #
+      # It asserts ABSENCE, so it goes RED when somebody fixes the greeter --
+      # which is the intended behaviour, and its failure messages say so.
+      #
+      # dbus-daemon and gdbus are what it needs; without them it SKIPs and says
+      # nothing was measured.
+      - name: Install the bus tools the greeter session-bus suite measures with
+        if: ${{ !cancelled() }}
+        run: |
+          sudo apt-get update -qq
+          for p in dbus dbus-x11 libglib2.0-bin at-spi2-core; do
+            sudo apt-get install -y -qq "$p" || echo "note: $p unavailable"
+          done
+          for b in dbus-daemon dbus-run-session gdbus; do
+            command -v "$b" >/dev/null && echo "have: $b" || echo "MISSING: $b"
+          done
+          # at-spi2-core is what the wrapper execs. Without it the two
+          # accessibility-bus assertions SKIP with a reason rather than being
+          # measured, which is a runner that says nothing about the half of the
+          # change that matters most.
+          # `|| true` is load-bearing, not decoration: this step runs under
+          # `bash -e`, a for-loop exits with its last command's status, and a
+          # final `[ -x ]` that is false therefore FAILED THE WHOLE STEP on the
+          # first dispatch — while the packages it was reporting on had
+          # installed perfectly.
+          for f in /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher; do
+            [ -x "$f" ] && echo "have: $f" || true
+          done
+          true
+
+      - name: Run greeter session-bus assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-greet-session-bus.sh
+
+      # The image ships a screen reader, and nothing starts it. Reads
+      # Containerfile.core by parsing its dnf5 invocations rather than grepping
+      # for the word -- "orca" is in that stanza's prose as well as its install
+      # line. The rpmdb section SKIPs on a runner, which has no ostree
+      # deployment to ask; the two sections that gate the change do run.
+      - name: Run accessibility-stack assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-a11y-stack.sh
 
       # §9's resolver, which is the same engine as the package suite above and
       # a separate file because it is a separate claim: that engine INSTALLS,
@@ -863,6 +1814,57 @@ jobs:
           APEX_REQUIRE_SHELL_TREE: "1"
         run: ./tests/test-labwc-keybinds.sh
 
+      # The half of the reported bug the suite above cannot reach. It passes
+      # --no-reload to every `apply` on purpose, so it never starts labwc and
+      # never presses a key; test-labwc-session.sh starts labwc and reloads it
+      # but never presses a key either. So "the XML is correct" and "the
+      # compositor survived" were both proven and "the key the user just bound
+      # now does something" was proven by neither — which is the entire
+      # complaint: rebind the launcher, watch the UI confirm it, press the key,
+      # nothing happens.
+      #
+      # This starts labwc under WLR_BACKENDS=headless in a private
+      # XDG_RUNTIME_DIR with WAYLAND_DISPLAY unset, so it draws nothing and has
+      # no parent session to leak a keystroke into, and synthesises the
+      # keypresses with wtype over virtual-keyboard-unstable-v1. It asserts
+      # that isolation as three hard failures before the first key, and unsets
+      # the inherited LABWC_PID — `labwc --reconfigure` SIGHUPs whatever that
+      # names, and inheriting it would reload a developer's own session.
+      #
+      # It reuses the apex-shell tree vendored above, and skips with status 0
+      # where labwc or wtype will not run, so a runner that cannot host a
+      # compositor reports a skip rather than a false green or a false red.
+      - name: Install a compositor and a synthetic keyboard
+        run: |
+          # Tolerant on purpose. The suite below skips with status 0 where labwc
+          # or wtype will not run, so a runner that cannot host a compositor
+          # reports a skip — but that safety net protects the SUITE, not this
+          # step. `apt-get install` of a package the image's enabled components
+          # do not carry exits non-zero and would redden the whole job over a
+          # missing test dependency, which is a worse outcome than not running
+          # the test. So a failed install is reported and the suite is left to
+          # skip.
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq labwc wtype \
+            || echo "labwc/wtype unavailable on this runner; the reload suite will skip"
+
+      - name: Run the keybind reload assertions
+        run: ./tests/test-labwc-keybind-reload.sh
+
+      # P2-018's recovery session, in the same job for the same reason: it
+      # starts a real labwc under WLR_BACKENDS=headless, so it needs the
+      # compositor this step just installed and nothing else. Its own
+      # structural half runs anywhere and its live half skips cleanly where
+      # labwc will not start, so a runner that cannot host a compositor
+      # reports a skip rather than a false green.
+      #
+      # The assertion that matters here is the one no structural check can
+      # make: an unparseable rc.xml is planted exactly where the user's lives
+      # and the session has to come up anyway, which is what `labwc -C` buys
+      # and what its absence would silently cost.
+      - name: Run the safe-graphics recovery assertions
+        run: ./tests/test-apex-safe-graphics.sh
+
       # End-to-end, against a real daemon on an isolated socket: that the
       # daemon resolves the asking session from the connection's PEER
       # CREDENTIALS and not from anything the client sent. The negative control
@@ -908,6 +1910,57 @@ jobs:
       - name: Run privilege-request assertions
         run: ./tests/test-privilege-requests.sh
 
+      # P1-035's three claims, none of which a unit test can reach: the typed
+      # path arrives at the session it was addressed to and at no other; nothing
+      # that arrives can submit the line; and a managed session may not use the
+      # verb at all. All three need a real daemon, a real PTY and a real socket,
+      # and the suite builds its own — its own XDG_RUNTIME_DIR, its own state,
+      # killed by pid.
+      - name: Run file-injection assertions
+        run: ./tests/test-agent-inject.sh
+
+      # P1-036's named guarantee, which is the whole reason the conflict answer
+      # comes from `merge-tree` and not from a real merge: after a status call
+      # on a GENUINELY CONFLICTED worktree, MERGE_HEAD is absent, the staged
+      # entries are unchanged, `git status --porcelain` is byte-identical and
+      # no ref has moved. A unit test cannot reach any of it — it needs a real
+      # repository with a real conflict, and the suite builds one, along with
+      # its own daemon on its own socket and its own project store.
+      - name: Run worktree-status assertions
+        run: ./tests/test-agent-worktrees.sh
+
+      # P1-037's acceptance line — an agent session that runs in a disposable
+      # capsule and discards its state — against the REAL disposable engine
+      # from this checkout, a real daemon and a real PTY. Only the capsule
+      # engine is faked, through the override the engine already documents, and
+      # the fake logs every call: a fake that merely exited 0 would let every
+      # assertion pass with the agent running on the host. So this needs no
+      # podman, no distrobox and no image pull, and it cannot fail here for a
+      # reason unrelated to this code.
+      - name: Run disposable-capsule assertions
+        run: ./tests/test-agent-disposable.sh
+      # §7's other half, and the one the privilege suite deliberately does not
+      # touch: approving a request WITHOUT --no-run performs the operation and
+      # is gated on being root. That was argued from the code rather than run,
+      # on the grounds that testing it needs a real sudo prompt. It does not —
+      # `unshare -r` gives a process a real effective uid 0, established by the
+      # kernel and read the way ops::effective_uid reads it, and asks nobody
+      # for a password. Nothing in this suite can raise a prompt: no sudo, no
+      # pkexec, no pkcheck.
+      #
+      # The operation that then runs is contained by a mount namespace, with a
+      # stub bound over the absolute path `apex install` execs, so the real
+      # package engine is never reached. The two steps that genuinely need a
+      # person — sudo's own authentication, and capability over the real
+      # machine — are named at the end of the run with the commands to check
+      # them by hand.
+      #
+      # The apparmor knob two steps up is what makes `unshare -r` work on a
+      # 24.04 runner at all; without it this suite skips out loud rather than
+      # passing.
+      - name: Run root-approval assertions
+        run: ./tests/test-root-approval.sh
+
       # §5's two claims, neither of which the unit tests can reach: a portable
       # bundle carries no credential and no conversation, from a profile on a
       # real filesystem; and a confined session cannot rewrite the instructions
@@ -924,6 +1977,64 @@ jobs:
       # the suite cannot start a window.
       - name: Run project-layout assertions
         run: ./tests/test-project-layout.sh
+
+      # fish and nushell cannot source the POSIX agent.sh, so each has its own
+      # integration file — and the only way to know the three agree is to run
+      # all three. fish is in Ubuntu's archive; nushell is not, so it comes from
+      # the pinned upstream release the image also ships. A failed download
+      # degrades that section to a LOUD SKIP rather than a red build, and the
+      # suite refuses to report success if every section skipped.
+      - name: Install fish and nushell
+        run: |
+          set -uo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fish
+          fish --version
+          nu_ver=0.99.1
+          url="https://github.com/nushell/nushell/releases/download/${nu_ver}/nu-${nu_ver}-x86_64-unknown-linux-musl.tar.gz"
+          # The whole fetch is the `if` condition, not just the curl: a step runs
+          # under `bash -e`, so an extraction that failed after a successful
+          # download would be a red build rather than the skip promised above.
+          # The member path is `nu-<ver>-x86_64-unknown-linux-musl/nu`, checked
+          # with `tar tzf` against the real asset.
+          if curl -fsSL --retry 2 "$url" -o /tmp/nu.tgz \
+             && tar xzf /tmp/nu.tgz -C /tmp \
+             && sudo install -m0755 "/tmp/nu-${nu_ver}-x86_64-unknown-linux-musl/nu" /usr/local/bin/nu; then
+            nu --version
+          else
+            echo "note: nushell ${nu_ver} is unavailable; its section will skip out loud"
+          fi
+
+      - name: Run fish and nushell agent-integration assertions
+        run: ./tests/test-shell-agent.sh
+
+      # The layout templates open panes in a real multiplexer, so a real one has
+      # to be here. tmux is in Ubuntu's archive; zellij is not in any distro, so
+      # it comes from the same pinned upstream release Containerfile.core does —
+      # the version is kept in step by hand, and a failed download degrades that
+      # section to a LOUD SKIP rather than a red build.
+      - name: Install tmux and zellij
+        run: |
+          set -uo pipefail
+          sudo apt-get install -y -qq tmux
+          tmux -V
+          zj=v0.45.1
+          url="https://github.com/zellij-org/zellij/releases/download/${zj}/zellij-x86_64-unknown-linux-musl.tar.gz"
+          if curl -fsSL --retry 2 "$url" -o /tmp/zellij.tgz \
+             && sudo tar xzf /tmp/zellij.tgz -C /usr/local/bin zellij \
+             && sudo chmod 0755 /usr/local/bin/zellij; then
+            zellij --version
+          else
+            echo "note: zellij ${zj} is unavailable; its section will skip out loud"
+          fi
+
+      # Both multiplexers run on an isolated socket (TMUX_TMPDIR,
+      # ZELLIJ_SOCKET_DIR under the suite's own temp dir), and XDG_RUNTIME_DIR
+      # is a fixture with no control socket — so this cannot reach an agent
+      # runtime, and every agent pane resolves to `apex agent run` against a
+      # stub on PATH.
+      - name: Run terminal layout template assertions
+        run: ./tests/test-mux-layouts.sh
 
       # §4's whole claim is "agents use credentials without receiving the raw
       # secret". This stores a sentinel token, uses a capability from inside a
@@ -951,6 +2062,25 @@ jobs:
       - name: Run credential-migration assertions
         run: ./tests/test-secret-migrate.sh
 
+      # P2-001/P2-002's backup framework, end to end through the real CLI. Two
+      # things it MEASURES rather than asserts: that a canary planted in the
+      # source appears in no byte written to the target — chunks, manifest,
+      # head and the object names — and that a private key written by REAL
+      # root cannot be opened by the account that owns the backups. The second
+      # half uses `sudo -n`, which this runner has, and the suite says which
+      # assertions it did not make when that is missing rather than passing
+      # vacuously. Everything it touches is under one `mktemp -d -p /var/tmp`;
+      # APEX_BACKUP_KEYS keeps it out of /var/lib.
+      #
+      # There is no R2 section in it, and that is not an omission: `Api::loopback`
+      # is `#[cfg(test)]`, so a shipped apex-secretd always addresses
+      # api.cloudflare.com and the store's host pin would refuse a credential
+      # stored for anywhere else. The backup framework's own R2 call sequence is
+      # proven in the `rust` job instead, against the same loopback double that
+      # 401s an unauthenticated request.
+      - name: §13.5 backup — encrypted at rest, versioned restore, and the four verdicts
+        run: ./tests/test-apex-backup.sh
+
       - name: ShellCheck the privileged helpers
         run: |
           set -euo pipefail
@@ -961,17 +2091,46 @@ jobs:
           # review — unquoted expansions and recursive deletes that an empty
           # variable turns into a path on the live system. The file is clean at
           # this level today, so any finding is one this PR introduced.
+          # tests/in-login-session.sh is here for the same reason the four
+          # libexec helpers are: it is the only thing under tests/ that
+          # invokes `sudo`, so an unquoted expansion in it is an unquoted
+          # expansion in a command that runs as root.
           shellcheck -S warning files/system/libexec/apex-pkg \
+            tests/in-login-session.sh \
             files/system/libexec/apex-env \
             files/system/libexec/apex-plugin \
             files/system/libexec/apex-disposable \
+            files/system/libexec/apex-vm \
+            files/system/libexec/apex-screen-reader \
             tests/test-apex-recover.sh \
             tests/test-apex-pkg.sh tests/test-apex-firstrun.sh \
             tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
             tests/test-apex-resolve.sh tests/test-apex-blueprint.sh \
             tests/test-apex-modes.sh tests/test-apex-plugin.sh \
             tests/test-apex-host.sh tests/test-apex-dispatch.sh \
-            tests/test-apex-ai.sh
+            tests/test-apex-ai.sh tests/test-apex-env-devices-live.sh \
+            tests/test-apex-greet-sessions.sh \
+            tests/test-apex-greet-a11y.sh tests/test-apex-greet-layout.sh \
+            tests/test-apex-greet-session-bus.sh tests/test-apex-a11y-stack.sh \
+            tests/test-labwc-keybind-reload.sh \
+            tests/test-apex-safe-graphics.sh \
+            files/system/libexec/apex-safe-graphics \
+            files/system/libexec/apex-safe-graphics-terminal \
+            tests/test-apex-chaos.sh tests/test-apex-vm.sh
+          # The chaos harness separately, with -x so the driver's `. lib.sh`
+          # is followed, and the cases as bash fragments because they are
+          # sourced rather than executed and have no shebang of their own.
+          # It belongs under a HARD gate for the same reason the libexec
+          # helpers do: these scripts run `mount`, `chmod 0000` and `rm` with
+          # expansions, and an empty variable in one of those is a path on the
+          # machine running it.
+          shellcheck -S warning -x tests/chaos/run-chaos tests/chaos/chaos-loop \
+            tests/chaos/lib.sh
+          shellcheck -S warning -x tests/chaos/cases/*.sh
+          # The VM lab, with -x for the same reason: it sources the chaos
+          # library for the verdict record, and it runs `rm -rf` and `chown -R`
+          # on paths built from variables inside a container it starts itself.
+          shellcheck -S warning -x tests/vmlab/run-vmlab tests/vmlab/mk-guest
 
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
       # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict
@@ -1003,14 +2162,165 @@ jobs:
       # "a skipped check counts as success" shape this repository has been
       # bitten by, and it would have switched off the shellcheck gate on the
       # very files this branch adds. Anything expected to be red belongs at the
+      - name: Every suite is actually run by CI
+        run: |
+          # The harder half of the same defect. CI invokes suites BY NAME, so
+          # writing tests/test-foo.sh, landing it, and never adding a workflow
+          # line leaves a file that looks like coverage and gates nothing.
+          # Measured 2026-09-12: 70 suites, 13 named in no workflow at all —
+          # including tests/test-apex-lid.sh, sixty assertions for a feature the
+          # owner asked for by name, which no CI run had ever executed.
+          ./tests/check-suites-run-in-ci.sh
+
+      - name: Every shell script is linted, by discovery
+        run: |
+          # The step above lints a hand-written LIST. A list cannot cover a file
+          # nobody remembered to add, and on 2026-09-12 it did not: 140 shell
+          # scripts under tests/ and files/, 38 named, 102 not — including four
+          # suites landed in the previous two days and both of the checkers
+          # written to catch exactly this species of gap. That is the same
+          # defect as a path selector naming nothing: the step runs, reports
+          # success, and inspects nothing.
+          #
+          # This one FINDS the scripts. It lives in the engine job because the
+          # engine selector is `^(files/|tests/|Containerfile)`, which is
+          # precisely the set it walks — putting it anywhere else would make it
+          # the sixth instance of the bug the comments above it describe.
+          ./tests/check-shellcheck-coverage.sh
       # bottom of its job.
       - name: Run plugin CLI assertions
         run: ./tests/test-apex-plugin.sh
 
+  android:
+    name: Android client
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 21, not the runner's default and not the newest. AGP refuses anything
+      # above 21, and this laptop's `/usr/bin/java` is OpenJDK 27-ea — which is
+      # exactly why the local build sets JAVA_HOME explicitly and why CI pins it
+      # here rather than inheriting whatever the image happens to ship.
+      - name: JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/gradle/libs.versions.toml', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      # The platform AGP compiles against, installed rather than assumed. The
+      # runner image ships several, and which ones move between image releases;
+      # a compileSdk the image happens not to carry fails the job at
+      # `assembleDebug`, minutes in.
+      #
+      # The `android.jar` check is not belt and braces. On the laptop this app
+      # was written on, `platforms;android-35` installed BROKEN: the unzip died
+      # with a DirectoryNotEmptyException and left a directory containing only
+      # `package.xml`, which every tool then reported as "installed" and AGP
+      # rejected with "Build properties not found". A present directory is not
+      # a present platform.
+      - name: Android platform 36
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:?no Android SDK on this runner}}"
+          "$sdk/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" >/dev/null
+          jar="$sdk/platforms/android-36/android.jar"
+          test -f "$jar" || { echo "::error::$jar is missing; the platform unpacked badly"; exit 1; }
+          echo "android-36: $(stat -c%s "$jar") bytes"
+
+      # The protocol suite first, and on its own. `:core` is a plain Kotlin/JVM
+      # module with no Android plugin in it, so this step needs no SDK, no
+      # device and no emulator — which is the property that makes the protocol
+      # testable at all under the project's headless rule. If the SDK half of
+      # this job ever breaks, this step still reports.
+      - name: Protocol tests
+        run: ./gradlew --no-daemon --stacktrace :core:test
+
+      # Gradle's `test` task exits 0 when it runs NOTHING — a misconfigured
+      # source set, a renamed package, a JUnit platform that failed to load —
+      # and this workflow already records four occasions where something
+      # skipped and the run went green. So the count is asserted, not assumed.
+      - name: The protocol suite actually ran
+        run: |
+          set -euo pipefail
+          total=0
+          for xml in core/build/test-results/test/*.xml; do
+            n="$(sed -n 's/.*<testsuite [^>]*tests="\([0-9]*\)".*/\1/p' "$xml" | head -1)"
+            total=$((total + ${n:-0}))
+          done
+          echo "core: $total tests"
+          # The figure at the time this job was written. A drop means tests
+          # stopped running, which is the failure this step exists to catch; a
+          # rise is fine and the floor moves with it.
+          #
+          # Moved from 87 to 295 when P1-054 and P1-055 landed the terminal,
+          # the Agent Center model and the low-bandwidth suite. A floor left
+          # behind is a floor that no longer floors anything: at 87, two
+          # hundred tests could have stopped running and this step would still
+          # have passed, which is precisely the quiet pass it exists to stop.
+          test "$total" -ge 295 \
+            || { echo "::error::only $total protocol tests ran; expected at least 295"; exit 1; }
+
+      # The rule InsecureStorageTest rests on. That test walks a directory and
+      # accounts for every byte in it, which is evidence about app storage only
+      # while AppStorage really is the only thing that writes there. A
+      # preferences file or a scrollback cache would be a second place for a key
+      # to land and one the walk never looks at.
+      - name: App storage has exactly one writer
+        run: ./tools/no-second-write-path.sh
+
+      # The Android half. `assembleDebug` is as far as a machine with no device
+      # can go: it proves the app compiles, links against `:core`, resolves
+      # every AndroidX dependency and packages. It proves nothing about how the
+      # app behaves, and this job does not pretend otherwise.
+      - name: Assemble the debug APK
+        run: ./gradlew --no-daemon --stacktrace :app:assembleDebug
+
+      - name: An APK exists
+        run: |
+          set -euo pipefail
+          # `assembleDebug` succeeding without producing an artefact is the same
+          # class of quiet pass as a suite that ran nothing.
+          ls -l app/build/outputs/apk/debug/app-debug.apk
+
+      # The JVM-testable part of `:app`. Small, and it is where the address
+      # parser lives — the one piece of the Android module whose bugs are
+      # invisible on a network where IPv4 happens to work.
+      - name: App unit tests
+        run: ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest
+
+      - name: The app suite actually ran
+        run: |
+          set -euo pipefail
+          total=0
+          for xml in app/build/test-results/testDebugUnitTest/*.xml; do
+            n="$(sed -n 's/.*<testsuite [^>]*tests="\([0-9]*\)".*/\1/p' "$xml" | head -1)"
+            total=$((total + ${n:-0}))
+          done
+          echo "app: $total tests"
+          # 6 -> 10 with P1-054's start screen. Same reasoning as the core
+          # floor above: a floor that has been overtaken stops being one.
+          test "$total" -ge 10 \
+            || { echo "::error::only $total app tests ran; expected at least 10"; exit 1; }
+
   result:
     name: PR validation
     if: always()
-    needs: [changes, static, rust, installer, engine]
+    needs: [changes, static, rust, installer, engine, android]
     runs-on: ubuntu-24.04
     steps:
       # `skipped` counts as success HERE and only here, and the distinction is
@@ -1018,7 +2328,7 @@ jobs:
       # thing.
       #
       # A job result of `skipped` comes from this workflow's own path filters:
-      # `rust`, `installer` and `engine` each carry
+      # `rust`, `installer`, `engine` and `android` each carry
       # `if: needs.changes.outputs.X == 'true'`, so a documentation-only PR
       # legitimately does not run them and must not be blocked by them.
       # `changes` itself is in `needs`, so a FAILURE there is caught rather than

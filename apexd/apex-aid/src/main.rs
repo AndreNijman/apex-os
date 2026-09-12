@@ -673,6 +673,10 @@ fn status(daemon: &Arc<Daemon>) -> Status {
             st.gpu_layers = Some(p.fit.placement.gpu_layers());
             st.total_layers = match p.fit.placement {
                 ai::Placement::Split { total, .. } => Some(total),
+                // See the same match in apex/src/ai.rs: an undeclared layer
+                // count is not a total, and the sentinel must not be reported
+                // as one.
+                ai::Placement::Gpu { layers } if layers == ai::ALL_LAYERS_UNKNOWN => None,
                 ai::Placement::Gpu { layers } => Some(layers),
                 ai::Placement::Cpu => None,
             };

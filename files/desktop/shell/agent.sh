@@ -166,6 +166,13 @@ _apex_request_ids() {
         | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p'
 }
 
+# Terminal layout templates, asked of the CLI. A hardcoded list here would go
+# stale the moment a template is added, and offering one that does not exist is
+# how a completion teaches somebody a command that fails.
+_apex_layout_templates() {
+    apex project layout templates 2>/dev/null | awk 'NR>1 {print $1}'
+}
+
 # The requestable verbs, asked of the CLI rather than duplicated here. The
 # vocabulary is a security boundary, so a completion list that drifts out of
 # step with it would offer operations the daemon refuses — or, worse, stop
@@ -184,17 +191,18 @@ if [ -n "${BASH_VERSION}" ]; then
 
         case "$prev" in
             --agent|-a) COMPREPLY=($(compgen -W "$(_apex_agent_names)" -- "$cur")); return ;;
+            --to|-t) COMPREPLY=($(compgen -W "$(_apex_agent_names)" -- "$cur")); return ;;
             --sandbox|-s) COMPREPLY=($(compgen -W "strict project unrestricted" -- "$cur")); return ;;
         esac
 
         if [ "$COMP_CWORD" -eq 2 ]; then
-            COMPREPLY=($(compgen -W "run list attach pause resume kill logs status \
+            COMPREPLY=($(compgen -W "run list attach input handoff pause resume kill logs status \
                 default adapters diff undo checkpoint event rm prune enable" -- "$cur"))
             return
         fi
 
         case "$verb" in
-            attach|pause|resume|kill|logs|rm|status|diff|undo)
+            attach|input|handoff|pause|resume|kill|logs|rm|status|diff|undo)
                 COMPREPLY=($(compgen -W "$(_apex_session_ids)" -- "$cur")) ;;
             default)
                 COMPREPLY=($(compgen -W "$(_apex_agent_names)" -- "$cur")) ;;
@@ -222,11 +230,17 @@ if [ -n "${BASH_VERSION}" ]; then
         local cur="${COMP_WORDS[COMP_CWORD]}" verb="${COMP_WORDS[2]}"
         if [ "$COMP_CWORD" -eq 2 ]; then
             COMPREPLY=($(compgen -W "list info worktrees checkpoints remove \
-                forget layout switch" -- "$cur"))
+                forget env layout switch" -- "$cur"))
             return
         fi
         case "$verb" in
-            layout) COMPREPLY=($(compgen -W "save show restore forget" -- "$cur")) ;;
+            layout)
+                if [ "$COMP_CWORD" -eq 3 ]; then
+                    COMPREPLY=($(compgen -W "save show restore forget \
+                        templates open" -- "$cur"))
+                elif [ "${COMP_WORDS[3]}" = "open" ]; then
+                    COMPREPLY=($(compgen -W "$(_apex_layout_templates)" -- "$cur"))
+                fi ;;
         esac
     }
 
@@ -300,14 +314,14 @@ fi
 if [ -n "${ZSH_VERSION}" ]; then
     _apex_agent_zsh() {
         local -a verbs
-        verbs=(run list attach pause resume kill logs status default adapters
+        verbs=(run list attach input handoff pause resume kill logs status default adapters
                diff undo checkpoint event rm prune enable)
         if (( CURRENT == 3 )); then
             _describe 'agent verb' verbs
             return
         fi
         case "${words[3]}" in
-            attach|pause|resume|kill|logs|rm|status|diff|undo)
+            attach|input|handoff|pause|resume|kill|logs|rm|status|diff|undo)
                 local -a ids
                 ids=(${(f)"$(_apex_session_ids)"})
                 _describe 'session' ids ;;
@@ -364,15 +378,21 @@ if [ -n "${ZSH_VERSION}" ]; then
 
     _apex_project_zsh() {
         local -a verbs
-        verbs=(list info worktrees checkpoints remove forget layout switch)
+        verbs=(list info worktrees checkpoints remove forget env layout switch)
         if (( CURRENT == 3 )); then
             _describe 'project verb' verbs
             return
         fi
         if [[ "${words[3]}" == layout ]]; then
-            local -a acts
-            acts=(save show restore forget)
-            _describe 'layout verb' acts
+            if (( CURRENT == 4 )); then
+                local -a acts
+                acts=(save show restore forget templates open)
+                _describe 'layout verb' acts
+            elif [[ "${words[4]}" == open ]]; then
+                local -a tpl
+                tpl=(${(f)"$(_apex_layout_templates)"})
+                _describe 'template' tpl
+            fi
         fi
     }
     if whence compdef >/dev/null 2>&1; then

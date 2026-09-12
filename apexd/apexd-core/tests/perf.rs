@@ -176,7 +176,7 @@ fn gpu_readings_skip_the_drm_connector_symlinks() {
         .write("sys/class/drm/card1-eDP-1/status", "connected\n")
         .write("sys/class/drm/card1-HDMI-A-1/status", "disconnected\n");
     assert_eq!(read_gpu_clock(&f.sys(), &no_gpu()).value(), Some(&2700));
-    assert_eq!(read_gpu_busy(&f.sys()).value(), Some(&42.0));
+    assert_eq!(read_gpu_busy(&f.sys(), &no_gpu()).value(), Some(&42.0));
 }
 
 #[test]

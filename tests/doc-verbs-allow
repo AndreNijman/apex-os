@@ -15,3 +15,14 @@ apex recover previous
 # `apex reset --keep-home` shipped in M3. It never did; the verb above is what
 # exists." Naming the retired claim is how a reader who saw the old doc knows.
 apex reset
+
+# docs/fleet.md is a DESIGN, and it says so in its first two sentences: "No code
+# here exists. There is no `apex fleet` verb, no enrolment record, no server."
+# The verb names are the shape being proposed, and a checker that demanded they
+# be removed would turn a design document into a document that cannot describe
+# what it is designing. They leave this file on the day the verb ships.
+apex fleet
+apex fleet join
+apex fleet leave
+apex fleet status
+

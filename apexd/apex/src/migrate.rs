@@ -269,7 +269,7 @@ fn remove_original(f: &Found) -> Result<()> {
 /// one, and never half of either. The mode is copied from the original, because
 /// `~/.claude.json` is `0600` and a migration that widened it would be a
 /// migration that made things worse.
-fn edit_json(file: &Path, change: impl FnOnce(&mut Value)) -> Result<()> {
+pub(crate) fn edit_json(file: &Path, change: impl FnOnce(&mut Value)) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let raw = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
     let mut doc: Value =
@@ -387,6 +387,21 @@ fn from_claude_settings(home: &Path, skipped: &mut Vec<String>) -> Vec<Found> {
         if !apex_agent_core::profile::credential_name(name) {
             continue;
         }
+        // An MCP server may interpolate this variable — `"Authorization":
+        // "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"` is how the github plugin's
+        // `.mcp.json` is written on this machine. Removing the entry removes
+        // that server's credential, and the bridge cannot take its place
+        // because a plugin's definition is replaced on every update. So the
+        // value is left where it is, and the server is named.
+        if let Some(server) = crate::mcp::connect::interpolated_by_an_mcp_server(home, name) {
+            skipped.push(format!(
+                "{name} in {} is the credential the MCP server '{server}' interpolates, and \
+                 that server's definition is not one this may rewrite; removing it here \
+                 would break the server with nothing to say why",
+                file.display()
+            ));
+            continue;
+        }
         let Some((service, host)) = provider_for(name) else {
             skipped.push(format!(
                 "{name} in {} is a credential, and nothing here knows which host it is \
@@ -471,6 +486,19 @@ fn from_claude_mcp(home: &Path, skipped: &mut Vec<String>) -> Vec<Found> {
         let Some(url) = server.get("url").and_then(Value::as_str) else {
             continue;
         };
+        // `Bearer ${GITHUB_TOKEN}` is a reference the agent expands, not a
+        // credential. Storing the text of it would put `${GITHUB_TOKEN}` in the
+        // store under this server's name — replacing any real credential
+        // already there — and the verify step would then fail for a reason that
+        // names the server rather than the header.
+        if authorization.contains('$') {
+            skipped.push(format!(
+                "the MCP server '{name}' takes its credential from an environment variable \
+                 rather than holding one; store the value itself with \
+                 `apex mcp connect {name}`"
+            ));
+            continue;
+        }
         let Some((scheme, host, port, path)) = split_url(url) else {
             skipped.push(format!("the MCP server '{name}' has a url this cannot read: {url}"));
             continue;
@@ -571,7 +599,7 @@ pub fn sanitise(name: &str) -> String {
 /// nothing about what happens — it changes what the person reads. "An agent
 /// session cannot store a credential" is true and unhelpful when the command
 /// they typed was `migrate`.
-fn refuse_from_inside_a_session() -> Result<()> {
+pub(crate) fn refuse_from_inside_a_session() -> Result<()> {
     if std::env::var_os(apex_agent_core::client::SESSION_ENV).is_some() {
         bail!(
             "this is running inside a managed agent session, and a session may not change \
@@ -595,7 +623,7 @@ fn refuse_from_inside_a_session() -> Result<()> {
 /// using Claude — or in a fixture, which is the same problem wearing a hat. A
 /// process whose environment cannot be read belongs to another account and
 /// therefore to another home.
-fn refuse_while_an_agent_is_running() -> Result<()> {
+pub(crate) fn refuse_while_an_agent_is_running() -> Result<()> {
     let home = home();
     for pid in running_claude() {
         if process_home(pid).as_deref() == Some(home.as_path()) {

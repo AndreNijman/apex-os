@@ -28,6 +28,35 @@ fn unknown() -> String {
     "unknown".to_string()
 }
 
+/// What [`AuditLine::narrowing`] says on a line that never got as far as
+/// looking for a short-lived credential — every refusal before the value is
+/// read, and every administrative event.
+///
+/// Distinct from `unknown`, which is what an older line deserializes to: a
+/// line that did not attempt narrowing and a line written before the field
+/// existed are different, and a reader that could not tell them apart would
+/// be reading a `default` as a fact.
+pub const NOT_ATTEMPTED: &str = "not-attempted";
+
+/// What [`AuditLine::spend`] says on a line that never reached §13.14's budget
+/// check — every refusal before it, and every administrative event.
+///
+/// Distinct from `no-budget`, which is the answer for a project that was
+/// checked and had no budget to cross, and distinct again from `unknown`, which
+/// is what a line written before this field existed deserializes to. Three
+/// different facts: the check did not happen, the check happened and found
+/// nothing to enforce, and nobody knows. Collapsing any two of them would make
+/// `apex task audit` report a budget as satisfied on a request that was refused
+/// before anybody looked at it.
+pub const NOT_CHECKED: &str = "not-checked";
+
+/// What [`AuditLine::spend`] says for a project that has no `[agent.budget]`.
+///
+/// Its own word rather than `within`, because "there is no cap" and "there is a
+/// cap and this fits inside it" are the two things somebody reading a budget
+/// report most needs to tell apart.
+pub const NO_BUDGET: &str = "no-budget";
+
 /// What happened.
 ///
 /// A closed set, so `apex secret audit` can colour it and a reader can grep it.
@@ -42,6 +71,15 @@ pub enum AuditEvent {
     Granted,
     /// A capability was withdrawn.
     Revoked,
+    /// §13.8: the owner approved ONE operation, once. Distinct from `Granted`
+    /// because it is a different kind of permission and is read as one: a
+    /// grant keeps standing, an approval is spent by the next matching
+    /// operation and expires on its own. A trail that spelled both `granted`
+    /// would make "the owner allows this" and "the owner allowed this once"
+    /// the same sentence.
+    Approved,
+    /// An approval was taken back before anything spent it.
+    Withdrawn,
     /// A capability ran. `exit_code` says how it ended.
     Used,
     /// A capability was refused. `reason` says why.
@@ -55,6 +93,8 @@ impl AuditEvent {
             AuditEvent::Removed => "removed",
             AuditEvent::Granted => "granted",
             AuditEvent::Revoked => "revoked",
+            AuditEvent::Approved => "approved",
+            AuditEvent::Withdrawn => "withdrawn",
             AuditEvent::Used => "used",
             AuditEvent::Refused => "refused",
         }
@@ -119,6 +159,39 @@ pub struct AuditLine {
     /// How the operation ended.
     #[serde(default)]
     pub exit_code: Option<i32>,
+    /// §13.4: which of the four things happened when this operation looked for
+    /// a short-lived credential narrower than the stored one.
+    ///
+    /// `narrowed`, `no-narrower-form`, `denied`, `could-not-run` — or
+    /// `not-attempted` for the events that never reach that step, and
+    /// `unknown` for a line written before this field existed. The four must
+    /// stay distinct in the trail for the same reason they are distinct in
+    /// [`crate::audit`]'s caller: *"the far side would not issue one"* and
+    /// *"there is no narrower one to issue"* are different facts about the
+    /// owner's account, and only one of them is worth acting on.
+    #[serde(default = "unknown")]
+    pub narrowing: String,
+    /// Why, for the three arms that have a why, and what the revoke did if it
+    /// could not be done. Never a credential: the handle a lease carries is a
+    /// token id, not a token.
+    #[serde(default)]
+    pub narrowing_detail: Option<String>,
+    /// §13.14: what the project's budget said about this operation.
+    ///
+    /// `within`, `over`, `unmeasurable` — [`crate::budget::Spend`]'s three
+    /// answers — or [`NO_BUDGET`] when the project declared none, or
+    /// [`NOT_CHECKED`] on a line that never got that far, or `unknown` on a
+    /// line written before this field existed.
+    ///
+    /// This field is what makes §13.14's *"usage visible in the task audit"*
+    /// a reading of the trail rather than a re-derivation: every operation
+    /// says what the budget thought of it at the moment it ran, so a budget
+    /// that was added, removed or changed later does not rewrite history.
+    #[serde(default = "unknown")]
+    pub spend: String,
+    /// Why, for the two arms that refuse. Never set for `within`.
+    #[serde(default)]
+    pub spend_detail: Option<String>,
 }
 
 impl AuditLine {
@@ -149,6 +222,10 @@ impl AuditLine {
             constraints: record.constraints.clone(),
             reason: None,
             exit_code: None,
+            narrowing: NOT_ATTEMPTED.to_string(),
+            narrowing_detail: None,
+            spend: NOT_CHECKED.to_string(),
+            spend_detail: None,
         }
     }
 
@@ -182,6 +259,10 @@ impl AuditLine {
             constraints: Vec::new(),
             reason: None,
             exit_code: None,
+            narrowing: NOT_ATTEMPTED.to_string(),
+            narrowing_detail: None,
+            spend: NOT_CHECKED.to_string(),
+            spend_detail: None,
         }
     }
 }
