@@ -14,7 +14,8 @@
 #  same mistake with a virbr0 attached.
 #
 #  So libvirt is FAKED. $PATH is reduced to a directory holding recording stubs
-#  for `virsh`, `qemu-img`, `mkfs.vfat`, `mcopy` and `lsusb`, and the suite
+#  for `virsh`, `qemu-img`, `mkfs.vfat`, `mcopy`, `lsusb`, `swtpm` and
+#  `swtpm_setup`, and the suite
 #  REFUSES TO RUN if `command -v virsh` does not resolve to the stub.
 #
 #  ── The thing this suite is really about ────────────────────────────────────
@@ -109,6 +110,13 @@ cat > "$BIN/virsh" <<EOF
 # is also the stronger assertion: it is what the hypervisor received, not what
 # the engine left lying around.
 if [ "\$3" = define ] && [ -f "\$4" ]; then cp -- "\$4" "$WORK/defined.xml"; fi
+# `start` writes the serial file the domain names, because qemu does: the
+# <serial type='file'> source appears the moment the domain runs. Without it
+# --console-to would have nothing to copy and would pass for the wrong reason.
+if [ "\$3" = start ]; then
+    ser=\$(sed -n "s/.*<source path='\\(.*console\\.log\\)'\\/>.*/\\1/p" "$WORK/defined.xml" 2>/dev/null | head -1)
+    [ -n "\$ser" ] && printf 'FAKE GUEST SERIAL OUTPUT\\n' > "\$ser"
+fi
 for a in "\$@"; do
     case "\$a" in
         version)  echo "Using library: libvirt 11.6.0"; exit 0 ;;
@@ -138,7 +146,7 @@ esac
 exit \${FAKE_QEMUIMG_RC:-0}
 EOF
 
-for t in mkfs.vfat mcopy lsusb swtpm; do
+for t in mkfs.vfat mcopy lsusb swtpm swtpm_setup; do
     cat > "$BIN/$t" <<EOF
 #!/usr/bin/env bash
 { printf '$t'; printf ' <%s>' "\$@"; printf '\n'; } >> "$CALLS"
@@ -500,6 +508,77 @@ has "doctor: prints the one install command" "sudo apex install" "$out"
 out=$(PATH="/usr/bin:/bin" APEX_VM_VIRSH="$WORK/nope-virsh" bash "$ENGINE" create x 2>&1); rc=$?
 is "create refuses before creating anything when libvirt is absent" 1 "$rc"
 has "create names the package set" "apex install qemu-kvm" "$out"
+
+echo
+echo "── the three defects the live lab found, each asserted here ──"
+#
+# tests/vmlab/run-vmlab booted real guests through this engine and produced
+# these. Each is a check that could not be PERFORMED being reported as a check
+# that PASSED, or a package the install line does not name. They are unit tests
+# rather than lab-only findings because a lab runs where there is KVM and this
+# suite runs everywhere.
+
+# 1. swtpm_setup. libvirt creates a domain's TPM state by running it, and it is
+#    in swtpm-tools — which `swtpm` neither Requires nor Recommends on Fedora
+#    43. Without this the doctor said "Every flow is available" on a machine
+#    where every --tpm domain defines and then fails to start.
+out=$(APEX_VM_SWTPM_SETUP="$WORK/nope-swtpm-setup" bash "$ENGINE" doctor 2>&1); rc=$?
+has "doctor: probes swtpm_setup separately from swtpm" "swtpm_setup" "$out"
+is  "doctor: and fails when only swtpm is there" 1 "$rc"
+out=$(APEX_VM_SWTPM_SETUP="$WORK/nope-swtpm-setup" bash "$ENGINE" create needs-setup 2>&1); rc=$?
+is  "create --tpm refuses when swtpm_setup is missing" 1 "$rc"
+has "and says which PACKAGE it is in" "swtpm-tools" "$out"
+has "the install line names swtpm-tools" "swtpm-tools" \
+    "$(bash "$ENGINE" doctor 2>&1; APEX_VM_VIRTIOFSD="$WORK/nope" bash "$ENGINE" doctor 2>&1)"
+has "the install line names mtools and dosfstools too" "mtools dosfstools" \
+    "$(APEX_VM_VIRTIOFSD="$WORK/nope" bash "$ENGINE" doctor 2>&1)"
+
+# 2. lsusb absent is not "the device is present". The guard was written as
+#    `command -v lsusb && ! lsusb -d ID && die`, which SKIPS the check entirely
+#    on a machine without usbutils and hands libvirt a <hostdev> for a device
+#    that may not be there. The lab's container has no lsusb and found it.
+bash "$ENGINE" create usb-vm >/dev/null 2>&1
+reset_calls
+out=$(APEX_VM_LSUSB="$WORK/no-lsusb-here" bash "$ENGINE" usb attach usb-vm 046d:c52b 2>&1); rc=$?
+is  "usb attach refuses when lsusb cannot be run at all" 1 "$rc"
+has "and says the question could not be asked" "lsusb is not installed" "$out"
+has "and names the package that answers it" "usbutils" "$out"
+hasnt "and no hostdev reached libvirt" "attach-device" "$(calls)"
+
+# 3. `create --usb` did not make the check `usb attach` made: the same
+#    <hostdev>, reached by a different verb, with a different answer.
+reset_calls
+out=$(FAKE_lsusb_RC=1 bash "$ENGINE" create usb-absent --usb dead:beef 2>&1); rc=$?
+is  "create --usb refuses a device the host does not have" 1 "$rc"
+has "and names the id the user typed" "dead:beef" "$out"
+hasnt "and defines nothing" "define" "$(calls)"
+if [ -e "$VMHOME/usb-absent" ]; then
+    bad "create --usb leaves no directory behind" "$VMHOME/usb-absent exists"
+else ok "create --usb leaves no directory behind"; fi
+
+echo
+echo "── --console-to: the disposable run's only diagnostic ──"
+#
+# `apex vm run` deletes the VM's directory on the way out, serial log included,
+# so the documented outcome for a guest that never ran the task — "an empty
+# egress and a timeout warning" — came with no way to find out why. The log is
+# a nomination like any other: it leaves only where the caller named a file.
+reset_calls
+CDEST="$WORK/console-out/serial.log"
+out=$(bash "$ENGINE" run --image "$GUEST" --name run-console --console-to "$CDEST" \
+      -- true 2>&1)
+if [ -f "$CDEST" ]; then ok "--console-to writes the guest's serial log outside the VM root"
+else bad "--console-to writes the guest's serial log outside the VM root" "no $CDEST"; fi
+has "and says where it went" "serial output ->" "$out"
+
+out=$(bash "$ENGINE" run --image "$GUEST" --name run-console2 --console-to "$CDEST" -- true 2>&1); rc=$?
+has "a second run will not silently overwrite it" "not overwriting" "$out"
+is  "and the run reports that as a failure" 1 "$rc"
+
+out=$(bash "$ENGINE" run --image "$GUEST" --name run-console3 \
+      --console-to "$VMHOME/inside.log" -- true 2>&1); rc=$?
+is "--console-to inside the VM root is refused" 1 "$rc"
+has "and says why" "teardown deletes that tree" "$out"
 
 echo
 echo "── nothing escaped the sandbox ──"
