@@ -1906,3 +1906,308 @@ fn the_body_a_session_writes_cannot_choose_where_the_credential_goes() {
         other => panic!("a resource was accepted on an operation with none: {other:?}"),
     }
 }
+
+// ── the WebDAV fixture (P2-017) ─────────────────────────────────────────────
+
+/// A WebDAV server that records what it was asked and how it was authenticated.
+///
+/// The same argument `FakeGit` makes, for the online-accounts transport: a
+/// provider whose far side is faked *away* proves nothing, because an operation
+/// that never presented a credential exits zero too. This one records the
+/// method, the request target and the `Authorization` header, so the test can
+/// say the app password reached the server, reached it as Basic, and reached
+/// the path the caller named under the base path the credential was pinned to.
+struct FakeDav {
+    port: u16,
+    seen: Arc<Mutex<Vec<String>>>,
+    bodies: Arc<Mutex<Vec<String>>>,
+}
+
+impl FakeDav {
+    fn start() -> FakeDav {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let (h, b) = (Arc::clone(&seen), Arc::clone(&bodies));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let (h, b) = (Arc::clone(&h), Arc::clone(&b));
+                std::thread::spawn(move || serve_dav(stream, &h, &b));
+            }
+        });
+        FakeDav { port, seen, bodies }
+    }
+
+    /// `"<METHOD> <target> <authorization>"`, one per request.
+    fn requests(&self) -> Vec<String> {
+        self.seen.lock().expect("lock").clone()
+    }
+
+    fn bodies(&self) -> Vec<String> {
+        self.bodies.lock().expect("lock").clone()
+    }
+}
+
+fn serve_dav(mut stream: TcpStream, seen: &Arc<Mutex<Vec<String>>>, bodies: &Arc<Mutex<Vec<String>>>) {
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+    let mut first = String::new();
+    if reader.read_line(&mut first).is_err() || first.is_empty() {
+        return;
+    }
+    let mut parts = first.split_whitespace();
+    let method = parts.next().unwrap_or("").to_string();
+    let target = parts.next().unwrap_or("").to_string();
+
+    let mut authorization = String::new();
+    let mut length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("authorization") {
+                authorization = value.trim().to_string();
+            }
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    let mut body = vec![0u8; length];
+    if length > 0 && reader.read_exact(&mut body).is_err() {
+        return;
+    }
+    seen.lock()
+        .expect("lock")
+        .push(format!("{method} {target} {authorization}"));
+    bodies
+        .lock()
+        .expect("lock")
+        .push(String::from_utf8_lossy(&body).into_owned());
+
+    // A credential is demanded, so an operation that sent none cannot pass.
+    if authorization.is_empty() {
+        let refusal = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"dav\"\r\n\
+                       Content-Length: 0\r\n\r\n";
+        stream.write_all(refusal.as_bytes()).ok();
+        return;
+    }
+
+    let (status, payload) = match method.as_str() {
+        "GET" => ("200 OK", "the file body".to_string()),
+        "PUT" => ("201 Created", String::new()),
+        "PROPFIND" => (
+            "207 Multi-Status",
+            "<?xml version=\"1.0\"?><d:multistatus xmlns:d=\"DAV:\"><d:response>\
+             <d:href>/dav/documents/notes.md</d:href></d:response></d:multistatus>"
+                .to_string(),
+        ),
+        _ => ("405 Method Not Allowed", String::new()),
+    };
+    let reply = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/xml\r\nContent-Length: {}\r\n\r\n{payload}",
+        payload.len()
+    );
+    stream.write_all(reply.as_bytes()).ok();
+}
+
+/// Store an online account against the fixture and allow one scope in a project.
+fn arrange_account(daemon: &Daemon, port: u16, project: &Path, capability: &str) {
+    let mut client = daemon.client();
+    client
+        .add(
+            "account.webdav.fixture",
+            "127.0.0.1",
+            "http",
+            Some("me"),
+            "/dav",
+            // `Presentation::Basic.service_auth()`, which is what
+            // `apex account add` stores for a WebDAV provider.
+            "raw",
+            Some(port),
+            &SecretValue::new(SENTINEL.into()),
+        )
+        .expect("add");
+    client
+        .call(&Request::Grant {
+            project: project.to_string_lossy().into_owned(),
+            service: "account.webdav.fixture".into(),
+            capability: capability.into(),
+            revoke: false,
+        })
+        .expect("grant");
+}
+
+#[test]
+fn an_online_account_brokers_a_file_read_and_the_app_password_stays_here() {
+    // P2-017's second criterion end to end: an app password stored as an online
+    // account is spent by the daemon, the caller gets the file and not the
+    // credential, and the request went to the path it named UNDER the base path
+    // the credential was pinned to.
+    let dav = FakeDav::start();
+    let daemon = Daemon::start("webdav");
+    let project = daemon.dir.join("proj");
+    std::fs::create_dir_all(&project).expect("project dir");
+    arrange_account(&daemon, dav.port, &project, "webdav.file.read");
+
+    let mut rec = CapabilityRecord::new("account.webdav.fixture", "webdav.file.read", "documents/notes.md");
+    rec.project = Some(project.to_string_lossy().into_owned());
+    let reply = daemon.client().call(&Request::Use {
+        record: Box::new(rec),
+        body_len: 0,
+    });
+    let reply = reply.expect("use webdav.file.read");
+    let (endpoint, exit_code, output) = match &reply {
+        Response::Performed {
+            endpoint,
+            exit_code,
+            output,
+            ..
+        } => (endpoint.clone(), *exit_code, output.clone()),
+        other => panic!("expected a performed reply, got {other:?}"),
+    };
+    assert_eq!(exit_code, 0, "{output}");
+    assert_eq!(endpoint, "http://127.0.0.1", "{endpoint}");
+    assert!(output.contains("the file body"), "{output}");
+
+    // The credential reached the server, as Basic built from the username
+    // stored beside it. Not "an Authorization header arrived" — the exact one,
+    // because a bearer-shaped header would also be non-empty and the fixture
+    // would also have answered it.
+    let expected = format!("Basic {}", base64(format!("me:{SENTINEL}").as_bytes()));
+    assert_eq!(
+        dav.requests(),
+        vec![format!("GET /dav/documents/notes.md {expected}")],
+        "the app password did not reach the server as Basic, at the path named"
+    );
+
+    // ...and reached nothing else.
+    assert!(!output.contains(SENTINEL), "{output}");
+    let serialised = serde_json::to_string(&reply).expect("serialise");
+    assert!(!serialised.contains(SENTINEL), "the reply carried it");
+    let trail = std::fs::read_to_string(daemon.store.join("audit.jsonl")).unwrap_or_default();
+    assert!(trail.contains("webdav.file.read"), "{trail}");
+    assert!(!trail.contains(SENTINEL), "the audit trail carried it");
+}
+
+#[test]
+fn a_scope_that_was_not_granted_is_refused_before_the_server_is_contacted() {
+    // A grant is per operation, not per account. Reading was allowed; writing
+    // was not, and the proof that the refusal happened HERE is that the fixture
+    // recorded nothing at all.
+    let dav = FakeDav::start();
+    let daemon = Daemon::start("webdav-ungranted");
+    let project = daemon.dir.join("proj");
+    std::fs::create_dir_all(&project).expect("project dir");
+    arrange_account(&daemon, dav.port, &project, "webdav.file.read");
+
+    let mut rec = CapabilityRecord::new("account.webdav.fixture", "webdav.file.write", "documents/notes.md");
+    rec.project = Some(project.to_string_lossy().into_owned());
+    // `use_with_body` hands back the reply rather than turning an `Error`
+    // variant into an `Err`, so the refusal is read out of the response — and
+    // reading it that way is what proves the daemon refused rather than the
+    // transport failing.
+    let reply = daemon
+        .client()
+        .use_with_body(rec, b"replacement bytes")
+        .expect("the daemon answered");
+    let (kind, message) = reply
+        .as_error()
+        .unwrap_or_else(|| panic!("an ungranted scope must be refused, got {reply:?}"));
+    assert_eq!(kind, apex_secret_core::protocol::ErrorKind::PermissionDenied);
+    assert!(
+        message.contains("webdav.file.write"),
+        "the refusal does not say what was refused: {message}"
+    );
+    assert!(
+        dav.requests().is_empty(),
+        "the server was contacted for an operation that was not granted: {:?}",
+        dav.requests()
+    );
+    assert!(dav.bodies().is_empty());
+}
+
+#[test]
+fn removing_an_account_takes_its_grants_with_it_and_the_same_call_then_fails() {
+    // P2-017's THIRD criterion, measured rather than asserted: the same request
+    // that worked a moment ago must stop working, and the account's grant must
+    // be gone from the table rather than merely unmatched.
+    let dav = FakeDav::start();
+    let daemon = Daemon::start("webdav-removal");
+    let project = daemon.dir.join("proj");
+    std::fs::create_dir_all(&project).expect("project dir");
+    arrange_account(&daemon, dav.port, &project, "webdav.file.read");
+
+    let record = || {
+        let mut rec =
+            CapabilityRecord::new("account.webdav.fixture", "webdav.file.read", "documents/notes.md");
+        rec.project = Some(project.to_string_lossy().into_owned());
+        rec
+    };
+
+    // It works first, so the failure afterwards is the removal and not the
+    // fixture.
+    daemon
+        .client()
+        .call(&Request::Use {
+            record: Box::new(record()),
+            body_len: 0,
+        })
+        .expect("the granted read works before removal");
+
+    let grants = daemon.client().call(&Request::Grants).expect("grants");
+    let before = match &grants {
+        Response::Grants { projects } => serde_json::to_string(projects).expect("json"),
+        other => panic!("expected grants, got {other:?}"),
+    };
+    assert!(
+        before.contains("account.webdav.fixture:webdav.file.read"),
+        "the grant was not there to begin with: {before}"
+    );
+
+    daemon
+        .client()
+        .call(&Request::Remove {
+            service: "account.webdav.fixture".into(),
+        })
+        .expect("remove");
+
+    // The grant is gone from the table...
+    let after = match daemon.client().call(&Request::Grants).expect("grants") {
+        Response::Grants { projects } => serde_json::to_string(&projects).expect("json"),
+        other => panic!("expected grants, got {other:?}"),
+    };
+    assert!(
+        !after.contains("account.webdav.fixture"),
+        "a grant survived the account it named: {after}"
+    );
+    // ...and the credential with it, so the same call is refused.
+    let refusal = daemon
+        .client()
+        .call(&Request::Use {
+            record: Box::new(record()),
+            body_len: 0,
+        })
+        .expect_err("a removed account must not still work");
+    assert!(
+        refusal.to_string().contains("account.webdav.fixture"),
+        "the refusal does not name the account: {refusal}"
+    );
+    // And nothing on disk still holds the app password.
+    let mut found = Vec::new();
+    walk(&daemon.store, &mut found);
+    for path in &found {
+        let bytes = std::fs::read(path).unwrap_or_default();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(SENTINEL),
+            "{} still holds the credential after removal",
+            path.display()
+        );
+    }
+}
