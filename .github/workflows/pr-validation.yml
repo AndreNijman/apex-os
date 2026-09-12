@@ -132,13 +132,19 @@ jobs:
           # files/** is the whole runtime payload of the image — the package
           # engine, session launchers, guards. A PR touching only that used to
           # run nothing but a syntax check that did not even reach it.
-          grep -Eq '^(files/|tests/)' <<<"$files" && engine=true
+          # Containerfile* is in the ENGINE selector as well as the rust one,
+          # and it is another instance of the bug above rather than a new idea.
+          # tests/test-apex-a11y-stack.sh asserts what Containerfile.core
+          # installs — the screen reader P2-003 names — so a PR that deleted
+          # `orca` from that file and touched nothing else set every selector
+          # false, skipped every job, and passed, because a skipped job counts
+          # as success. The file an assertion is ABOUT has to select the job
+          # that runs it.
+          grep -Eq '^(files/|tests/|Containerfile)' <<<"$files" && engine=true
           # The Android client. Its own job, because none of the three above can
           # build it — and because without this rule an Android-only change
           # matches nothing, every selector stays false, every job is skipped,
-          # and a skipped job counts as success at the `result` gate. That is
-          # the bug this file already records four times; this is the rule that
-          # keeps it from being five.
+          # and a skipped job counts as success at the `result` gate.
           grep -Eq '^android/' <<<"$files" && android=true
 
           # The fail-towards-running rule, applied.
@@ -1235,8 +1241,14 @@ jobs:
           # silently cost Xvfb as well — and the suite would then SKIP the
           # assertion that carries the criterion while the step still reported
           # success.
+          # xdotool, at-spi2-core, dbus-x11 and libglib2.0-bin are the
+          # accessibility audit's half: real X key events into the real toolkit,
+          # a private accessibility bus, and gdbus to read the tree back. Without
+          # them test-installer-a11y.sh SKIPs, and a skip there means the
+          # criterion is unmeasured rather than met.
           for p in xvfb cage python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 \
-                   libxkbcommon0 xkb-data binutils; do
+                   libxkbcommon0 xkb-data binutils \
+                   xdotool at-spi2-core dbus-x11 libglib2.0-bin; do
             sudo apt-get install -y -qq "$p" || echo "note: $p unavailable"
           done
           # Say what actually arrived, so a SKIP below can be traced without
@@ -1254,6 +1266,21 @@ jobs:
       - name: Run installer keyboard suite
         working-directory: installer
         run: ./test-installer-keymap.sh
+
+      # P2-003's acceptance line ends "keyboard-only installer validated", and
+      # this is the step that validates it. Not a sweep for missing labels: the
+      # shipped GUI runs on a private Xvfb, xdotool delivers real X key events
+      # into the real GTK4 toolkit, and the resulting focus and names are read
+      # back over AT-SPI -- the protocol Orca speaks. It is what found TEN
+      # focusable fields whose only label was a placeholder GTK never maps to an
+      # accessible name.
+      #
+      # Second machine, not this laptop, is the point of running it here: the
+      # last round's CI dispatch is what found the Etc/UTC engine gap that a
+      # laptop in Perth could not see.
+      - name: Run installer accessibility audit
+        working-directory: installer
+        run: ./test-installer-a11y.sh
 
   engine:
     name: Package engine
@@ -1390,6 +1417,39 @@ jobs:
 
       - name: Run greeter keyboard-layout assertions
         run: ./tests/test-apex-greet-layout.sh
+
+      # The other half of the same finding, and the more important one: the
+      # greeter's markup is right and a screen reader still receives nothing,
+      # because the greet session has no D-Bus session bus for Qt's
+      # accessibility bridge to publish on. greetd's own command string is
+      # parsed out of the shipped TOML and RUN, with the compositor and
+      # quickshell replaced by stubs on a private PATH.
+      #
+      # It asserts ABSENCE, so it goes RED when somebody fixes the greeter --
+      # which is the intended behaviour, and its failure messages say so.
+      #
+      # dbus-daemon and gdbus are what it needs; without them it SKIPs and says
+      # nothing was measured.
+      - name: Install the bus tools the greeter session-bus suite measures with
+        run: |
+          sudo apt-get update -qq
+          for p in dbus dbus-x11 libglib2.0-bin; do
+            sudo apt-get install -y -qq "$p" || echo "note: $p unavailable"
+          done
+          for b in dbus-daemon dbus-run-session gdbus; do
+            command -v "$b" >/dev/null && echo "have: $b" || echo "MISSING: $b"
+          done
+
+      - name: Run greeter session-bus assertions
+        run: ./tests/test-apex-greet-session-bus.sh
+
+      # The image ships a screen reader, and nothing starts it. Reads
+      # Containerfile.core by parsing its dnf5 invocations rather than grepping
+      # for the word -- "orca" is in that stanza's prose as well as its install
+      # line. The rpmdb section SKIPs on a runner, which has no ostree
+      # deployment to ask; the two sections that gate the change do run.
+      - name: Run accessibility-stack assertions
+        run: ./tests/test-apex-a11y-stack.sh
 
       # §9's resolver, which is the same engine as the package suite above and
       # a separate file because it is a separate claim: that engine INSTALLS,
@@ -1759,6 +1819,7 @@ jobs:
             tests/test-apex-ai.sh tests/test-apex-env-devices-live.sh \
             tests/test-apex-greet-sessions.sh \
             tests/test-apex-greet-a11y.sh tests/test-apex-greet-layout.sh \
+            tests/test-apex-greet-session-bus.sh tests/test-apex-a11y-stack.sh \
             tests/test-labwc-keybind-reload.sh \
             tests/test-apex-chaos.sh
           # The chaos harness separately, with -x so the driver's `. lib.sh`

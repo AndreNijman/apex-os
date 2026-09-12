@@ -106,6 +106,33 @@ vendors' own release cadence. Pushing them up a tier to make bumps cheaper is
 not available — a `dnf` transaction above `core` puts an rpmdb-sized layer into
 every user's next update, which is the problem this whole document is about.
 
+### What the screen reader added
+
+The other end of the same scale, and worth recording next to the AI apps
+precisely because it is the opposite case. P2-003's acceptance line names a
+screen reader, and until `Containerfile.core`'s `5a-a11y` stanza there was none
+in the image. Measured the same way — `dnf5 install --assumeno orca` inside
+`ghcr.io/andrenijman/apex-os:daily`:
+
+    Installing:            orca              21.3 MiB
+    Installing dependencies:
+                           brlapi            594.9 KiB
+                           python3-brlapi    324.7 KiB
+                           python3-louis      43.4 KiB
+                           python3-pyatspi   414.5 KiB
+    Total download 4 MiB · 23 MiB installed
+
+**23 MiB against the AI apps' 1.9 GB**, in the same tier, for the component
+without which a blind user cannot use the machine at all. Nothing in that
+transaction pulls `speech-dispatcher` or `espeak-ng`, which is the image's own
+rpmdb confirming they were already present as transitive dependencies of gtk4
+and Qt — so the delta really is just the reader.
+
+The rule this illustrates: the tier argument is about DOWNLOAD SIZE PER UPDATE,
+not about whether a thing is worth shipping. A 23 MiB addition to core costs the
+fleet nothing measurable; a 1.3 GB one is what makes the tension above worth
+writing down.
+
 ### The weekly rebuild
 
 The cron used to rebuild unconditionally. That would now be the dominant cost:

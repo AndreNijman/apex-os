@@ -387,6 +387,49 @@ def lbl(text, css=None, xalign=0.0, wrap=True, sel=False):
     return w
 
 
+def a11y(widget, label, description=None):
+    """Give a control the name a screen reader will announce.
+
+    Every text field on every page of this installer carries a
+    `placeholder-text`, and until this function existed that was the ONLY label
+    several of them had. A placeholder is painted inside the box and vanishes as
+    soon as the user types; GTK does not map it to the accessible name, so it is
+    read by nobody.
+
+    Measured page by page on the shipped GUI before this was added: TEN
+    focusable `text box` nodes on the accessibility bus with an empty name AND
+    an empty description -- the keyboard test field (1), the Wi-Fi password and
+    the hidden-network name (2), all four account fields including both
+    passwords (4), both Secure Boot enrolment passwords (2), and the "type
+    ERASE to confirm" field (1). A blind user tabbing through the account page
+    was told only "text box", four times in a row.
+
+    The captions beside the account fields are real Gtk.Labels, but a label that
+    merely sits next to a widget is not attached to it. The name is therefore
+    set explicitly, from the same string the caption uses, so the two cannot
+    drift apart.
+
+    An AT-SPI LABELLED_BY relation was tried as well and removed again:
+    PyGObject's update_relation() rejects the list-of-accessible shape and emits
+    a GLib warning instead of raising, so the guarding try/except never fired and
+    the call did nothing but print. A call that only produces a warning is worse
+    than no call -- it reads like the problem is handled.
+
+    Never allowed to be silently skipped: a caller that passes an empty label is
+    a bug in this file, not a widget that happens to have no name.
+    """
+    if not label:
+        raise ValueError("a11y() needs a non-empty label")
+    props = [Gtk.AccessibleProperty.LABEL]
+    vals = [label]
+    if description:
+        props.append(Gtk.AccessibleProperty.DESCRIPTION)
+        vals.append(description)
+    widget.update_property(props, vals)
+    return widget
+
+
+
 def xkb_layouts():
     """Every layout xkb knows, as (code, human description), sorted by description.
 
@@ -815,6 +858,7 @@ class Installer(Adw.Application):
 
         model = Gtk.StringList.new(names)
         self.kb_drop = Gtk.DropDown(model=model)
+        a11y(self.kb_drop, "Keyboard layout")
         self.kb_drop.set_enable_search(True)
         self.kb_drop.set_expression(Gtk.PropertyExpression.new(Gtk.StringObject, None, "string"))
         want = self.answers.get("keymap") or cur_l
@@ -822,6 +866,7 @@ class Installer(Adw.Application):
             self.kb_drop.set_selected(codes.index(want))
 
         self.kb_var_drop = Gtk.DropDown(model=Gtk.StringList.new(["Default"]))
+        a11y(self.kb_var_drop, "Keyboard variant")
 
         def refill_variants(*_a):
             sel = self.kb_drop.get_selected()
@@ -850,6 +895,7 @@ class Installer(Adw.Application):
         self._tz_names = tz_names
         self.tz_drop = Gtk.DropDown(model=Gtk.StringList.new(
             [f"{z}{('  — ' + h) if h else ''}" for z, h in tzs]))
+        a11y(self.tz_drop, "Time zone")
         self.tz_drop.set_enable_search(True)
         self.tz_drop.set_expression(
             Gtk.PropertyExpression.new(Gtk.StringObject, None, "string"))
@@ -883,6 +929,8 @@ class Installer(Adw.Application):
         self.kb_test = Gtk.Entry()
         self.kb_test.set_property("placeholder-text",
                                   "Type here to check your keyboard")
+        a11y(self.kb_test, "Keyboard test",
+             "Type here to check the layout before you set a password.")
         body.append(self.kb_test)
 
         self.kb_note = lbl("", "apex-dim")
@@ -1013,11 +1061,14 @@ class Installer(Adw.Application):
         # this anyone on a managed network simply could not get online.
         self.wifi_user = Gtk.Entry()
         self.wifi_user.set_property("placeholder-text", "Username (enterprise networks)")
+        a11y(self.wifi_user, "Network username",
+             "Only needed on WPA-Enterprise networks such as eduroam.")
         self.wifi_user.set_visible(False)
         body.append(self.wifi_user)
 
         self.wifi_pw = Gtk.PasswordEntry(show_peek_icon=True)
         self.wifi_pw.set_property("placeholder-text", "Network password")
+        a11y(self.wifi_pw, "Network password")
         body.append(self.wifi_pw)
 
         # A hidden network never appears in a scan, so without this there is no
@@ -1025,6 +1076,8 @@ class Installer(Adw.Application):
         self.wifi_hidden = Gtk.Entry()
         self.wifi_hidden.set_property("placeholder-text",
                                       "Hidden network name (leave blank if it is in the list)")
+        a11y(self.wifi_hidden, "Hidden network name",
+             "Leave blank if the network is already in the list above.")
         body.append(self.wifi_hidden)
         body.append(self.wifi_status)
 
@@ -1359,6 +1412,10 @@ class Installer(Adw.Application):
                                 ("Repeat password", self.e_pw2),
                                 ("Computer name", self.e_host)):
             grid.append(lbl(caption, "apex-dim"))
+            # The caption is what a sighted user reads; these two lines are what
+            # everyone else gets. Both derive from the same string, so they
+            # cannot drift apart.
+            a11y(widget, caption)
             grid.append(widget)
         body.append(grid)
         self.acct_err = lbl("", "apex-danger")
@@ -1525,6 +1582,11 @@ class Installer(Adw.Application):
         self.e_mok2 = Gtk.PasswordEntry(show_peek_icon=True)
         self.e_mok1.set_property("placeholder-text", "One-time enrolment password")
         self.e_mok2.set_property("placeholder-text", "Repeat password")
+        # These two have no visible caption at all -- the page is too short for
+        # captioned rows -- so the accessible name is the ONLY label they have.
+        a11y(self.e_mok1, "One-time enrolment password",
+             "Used once at the next boot to enrol the Secure Boot key.")
+        a11y(self.e_mok2, "Repeat the enrolment password")
         body.append(self.e_mok1)
         body.append(self.e_mok2)
         self.mok_err = lbl("", "apex-danger")
@@ -1680,6 +1742,10 @@ class Installer(Adw.Application):
         rest.append(lbl("Type ERASE to confirm:", "apex-dim"))
         self.e_erase = Gtk.Entry()
         self.e_erase.set_property("placeholder-text", "ERASE")
+        # The last thing between the user and an irreversible erase. If any
+        # field in this installer must be announceable, it is this one.
+        a11y(self.e_erase, "Type ERASE to confirm",
+             "The disk is erased only after this word is typed exactly.")
         rest.append(self.e_erase)
 
         sc = Gtk.ScrolledWindow(vexpand=True)
