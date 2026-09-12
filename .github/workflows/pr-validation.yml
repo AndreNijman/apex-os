@@ -2108,6 +2108,21 @@ jobs:
       # "a skipped check counts as success" shape this repository has been
       # bitten by, and it would have switched off the shellcheck gate on the
       # very files this branch adds. Anything expected to be red belongs at the
+      - name: Every shell script is linted, by discovery
+        run: |
+          # The step above lints a hand-written LIST. A list cannot cover a file
+          # nobody remembered to add, and on 2026-09-12 it did not: 140 shell
+          # scripts under tests/ and files/, 38 named, 102 not — including four
+          # suites landed in the previous two days and both of the checkers
+          # written to catch exactly this species of gap. That is the same
+          # defect as a path selector naming nothing: the step runs, reports
+          # success, and inspects nothing.
+          #
+          # This one FINDS the scripts. It lives in the engine job because the
+          # engine selector is `^(files/|tests/|Containerfile)`, which is
+          # precisely the set it walks — putting it anywhere else would make it
+          # the sixth instance of the bug the comments above it describe.
+          ./tests/check-shellcheck-coverage.sh
       # bottom of its job.
       - name: Run plugin CLI assertions
         run: ./tests/test-apex-plugin.sh
