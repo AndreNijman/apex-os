@@ -152,15 +152,35 @@ impl Scope {
     }
 }
 
-/// What one operation needs in a token, in names.
-pub struct Policy {
-    /// One entry per permission group the operation needs, each holding the
-    /// spellings this build will accept for it. The first that the account's
-    /// own list carries is the one used.
-    pub groups: &'static [&'static [&'static str]],
-    /// Whether the policy is scoped to the project's zone rather than its
-    /// account.
-    pub zone_scoped: bool,
+/// The narrowest credential that carries one operation.
+///
+/// [`Narrowest::Nothing`] is a row and not a missing row, deliberately. An
+/// operation with no entry at all would go on spending the stored credential
+/// because nobody had thought about it; an operation with a `Nothing` row has
+/// been thought about and the answer written down, and
+/// `every_declared_operation_can_name_the_narrowest_token_that_carries_it`
+/// cannot tell the difference between the two unless both exist.
+pub enum Narrowest {
+    /// A token carrying these permission groups at this scope.
+    Token {
+        /// One entry per permission group the operation needs, each holding
+        /// the spellings this build will accept for it. The first that the
+        /// account's own list carries is the one used.
+        groups: &'static [&'static [&'static str]],
+        /// Whether the policy is scoped to the project's zone rather than its
+        /// account.
+        zone_scoped: bool,
+    },
+    /// There is no narrower credential for this operation, and this is why.
+    Nothing(&'static str),
+}
+
+impl Narrowest {
+    /// Whether the policy is zone-scoped, which decides what the caller has to
+    /// resolve before minting.
+    pub fn zone_scoped(&self) -> bool {
+        matches!(self, Narrowest::Token { zone_scoped: true, .. })
+    }
 }
 
 /// Read-only and write spellings, as Cloudflare's permission-group list gives
@@ -200,62 +220,100 @@ const SECRETS_STORE_WRITE: &[&str] = &["Secrets Store Edit", "Secrets Store Writ
 /// silently, so `every_operation_can_name_the_narrowest_token_that_carries_it`
 /// walks [`super::SPEC`] and fails on a missing row rather than letting one be
 /// forgotten. Adding an operation means adding a row.
-pub const POLICY: &[(&str, Policy)] = &[
-    ("cloudflare.account.read", Policy { groups: &[ACCOUNT_READ], zone_scoped: false }),
-    ("cloudflare.worker.read", Policy { groups: &[WORKERS_READ], zone_scoped: false }),
-    ("cloudflare.worker.upload-version", Policy { groups: &[WORKERS_WRITE], zone_scoped: false }),
-    ("cloudflare.worker.deploy", Policy { groups: &[WORKERS_WRITE], zone_scoped: false }),
-    ("cloudflare.worker.rollback", Policy { groups: &[WORKERS_WRITE], zone_scoped: false }),
-    ("cloudflare.worker.tail", Policy { groups: &[WORKERS_WRITE], zone_scoped: false }),
+pub const POLICY: &[(&str, Narrowest)] = &[
+    ("cloudflare.account.read", Narrowest::Token { groups: &[ACCOUNT_READ], zone_scoped: false }),
+    ("cloudflare.worker.read", Narrowest::Token { groups: &[WORKERS_READ], zone_scoped: false }),
+    ("cloudflare.worker.upload-version", Narrowest::Token { groups: &[WORKERS_WRITE], zone_scoped: false }),
+    ("cloudflare.worker.deploy", Narrowest::Token { groups: &[WORKERS_WRITE], zone_scoped: false }),
+    ("cloudflare.worker.rollback", Narrowest::Token { groups: &[WORKERS_WRITE], zone_scoped: false }),
+    ("cloudflare.worker.tail", Narrowest::Token { groups: &[WORKERS_WRITE], zone_scoped: false }),
     // A route lives in a zone, not in the account, and is the one Workers name
     // whose token can therefore be narrowed past the product.
-    ("cloudflare.worker.route.read", Policy { groups: &[ROUTES_READ], zone_scoped: true }),
-    ("cloudflare.dns.read", Policy { groups: &[DNS_READ], zone_scoped: true }),
-    ("cloudflare.dns.create", Policy { groups: &[DNS_WRITE], zone_scoped: true }),
+    ("cloudflare.worker.route.read", Narrowest::Token { groups: &[ROUTES_READ], zone_scoped: true }),
+    ("cloudflare.dns.read", Narrowest::Token { groups: &[DNS_READ], zone_scoped: true }),
+    ("cloudflare.dns.create", Narrowest::Token { groups: &[DNS_WRITE], zone_scoped: true }),
     // Update and delete look the record up first, with the same token, so a
     // read is not needed alongside the write: the lookup is a GET on the same
     // zone the write goes to, and DNS Write covers it.
-    ("cloudflare.dns.update", Policy { groups: &[DNS_WRITE], zone_scoped: true }),
-    ("cloudflare.dns.delete", Policy { groups: &[DNS_WRITE], zone_scoped: true }),
-    ("cloudflare.r2.object.read", Policy { groups: &[R2_READ], zone_scoped: false }),
-    ("cloudflare.r2.object.write", Policy { groups: &[R2_WRITE], zone_scoped: false }),
-    ("cloudflare.r2.bucket.create", Policy { groups: &[R2_WRITE], zone_scoped: false }),
-    ("cloudflare.d1.read", Policy { groups: &[D1_READ], zone_scoped: false }),
-    ("cloudflare.d1.query", Policy { groups: &[D1_WRITE], zone_scoped: false }),
-    ("cloudflare.d1.migrate", Policy { groups: &[D1_WRITE], zone_scoped: false }),
-    ("cloudflare.kv.read", Policy { groups: &[KV_READ], zone_scoped: false }),
-    ("cloudflare.kv.write", Policy { groups: &[KV_WRITE], zone_scoped: false }),
+    ("cloudflare.dns.update", Narrowest::Token { groups: &[DNS_WRITE], zone_scoped: true }),
+    ("cloudflare.dns.delete", Narrowest::Token { groups: &[DNS_WRITE], zone_scoped: true }),
+    ("cloudflare.r2.object.read", Narrowest::Token { groups: &[R2_READ], zone_scoped: false }),
+    ("cloudflare.r2.object.write", Narrowest::Token { groups: &[R2_WRITE], zone_scoped: false }),
+    ("cloudflare.r2.bucket.create", Narrowest::Token { groups: &[R2_WRITE], zone_scoped: false }),
+    ("cloudflare.d1.read", Narrowest::Token { groups: &[D1_READ], zone_scoped: false }),
+    ("cloudflare.d1.query", Narrowest::Token { groups: &[D1_WRITE], zone_scoped: false }),
+    ("cloudflare.d1.migrate", Narrowest::Token { groups: &[D1_WRITE], zone_scoped: false }),
+    ("cloudflare.kv.read", Narrowest::Token { groups: &[KV_READ], zone_scoped: false }),
+    ("cloudflare.kv.write", Narrowest::Token { groups: &[KV_WRITE], zone_scoped: false }),
     // Publishing to a queue is a write to it; Cloudflare has no separate
     // publish permission group.
-    ("cloudflare.queue.publish", Policy { groups: &[QUEUES_WRITE], zone_scoped: false }),
-    ("cloudflare.queue.manage", Policy { groups: &[QUEUES_WRITE], zone_scoped: false }),
-    ("cloudflare.hyperdrive.read", Policy { groups: &[HYPERDRIVE_READ], zone_scoped: false }),
-    ("cloudflare.hyperdrive.edit", Policy { groups: &[HYPERDRIVE_WRITE], zone_scoped: false }),
-    ("cloudflare.secret.create", Policy { groups: &[SECRETS_STORE_WRITE], zone_scoped: false }),
-    ("cloudflare.secret.rotate", Policy { groups: &[SECRETS_STORE_WRITE], zone_scoped: false }),
+    ("cloudflare.queue.publish", Narrowest::Token { groups: &[QUEUES_WRITE], zone_scoped: false }),
+    ("cloudflare.queue.manage", Narrowest::Token { groups: &[QUEUES_WRITE], zone_scoped: false }),
+    ("cloudflare.hyperdrive.read", Narrowest::Token { groups: &[HYPERDRIVE_READ], zone_scoped: false }),
+    ("cloudflare.hyperdrive.edit", Narrowest::Token { groups: &[HYPERDRIVE_WRITE], zone_scoped: false }),
+    ("cloudflare.secret.create", Narrowest::Token { groups: &[SECRETS_STORE_WRITE], zone_scoped: false }),
+    ("cloudflare.secret.rotate", Narrowest::Token { groups: &[SECRETS_STORE_WRITE], zone_scoped: false }),
     // Binding changes the WORKER as well as reading the store, so the token
     // needs both groups. A policy with only one of them would mint a token
     // that fails halfway through.
     (
         "cloudflare.secret.bind",
-        Policy { groups: &[SECRETS_STORE_WRITE, WORKERS_WRITE], zone_scoped: false },
+        Narrowest::Token { groups: &[SECRETS_STORE_WRITE, WORKERS_WRITE], zone_scoped: false },
     ),
-    ("cloudflare.access.read", Policy { groups: &[ACCESS_READ], zone_scoped: false }),
-    ("cloudflare.access.edit", Policy { groups: &[ACCESS_WRITE], zone_scoped: false }),
+    ("cloudflare.access.read", Narrowest::Token { groups: &[ACCESS_READ], zone_scoped: false }),
+    ("cloudflare.access.edit", Narrowest::Token { groups: &[ACCESS_WRITE], zone_scoped: false }),
     (
         "cloudflare.access.service-token.create",
-        Policy { groups: &[SERVICE_TOKENS_WRITE], zone_scoped: false },
+        Narrowest::Token { groups: &[SERVICE_TOKENS_WRITE], zone_scoped: false },
     ),
-    ("cloudflare.tunnel.read", Policy { groups: &[TUNNEL_READ], zone_scoped: false }),
-    ("cloudflare.tunnel.edit", Policy { groups: &[TUNNEL_WRITE], zone_scoped: false }),
-    ("cloudflare.workers-ai.run", Policy { groups: &[WORKERS_AI_RUN], zone_scoped: false }),
-    ("cloudflare.ai-gateway.run", Policy { groups: &[AI_GATEWAY_RUN], zone_scoped: false }),
-    ("cloudflare.ai-gateway.edit", Policy { groups: &[AI_GATEWAY_WRITE], zone_scoped: false }),
+    ("cloudflare.tunnel.read", Narrowest::Token { groups: &[TUNNEL_READ], zone_scoped: false }),
+    ("cloudflare.tunnel.edit", Narrowest::Token { groups: &[TUNNEL_WRITE], zone_scoped: false }),
+    ("cloudflare.workers-ai.run", Narrowest::Token { groups: &[WORKERS_AI_RUN], zone_scoped: false }),
+    ("cloudflare.ai-gateway.run", Narrowest::Token { groups: &[AI_GATEWAY_RUN], zone_scoped: false }),
+    ("cloudflare.ai-gateway.edit", Narrowest::Token { groups: &[AI_GATEWAY_WRITE], zone_scoped: false }),
+    // P1-012's four. `wrangler deploy` is the Workers API with a build step in
+    // front of it, so it takes the same token the REST deploy does.
+    (
+        "cloudflare.wrangler.deploy",
+        Narrowest::Token { groups: &[WORKERS_WRITE], zone_scoped: false },
+    ),
+    (
+        "cloudflare.wrangler.versions-upload",
+        Narrowest::Token { groups: &[WORKERS_WRITE], zone_scoped: false },
+    ),
+    // Terraform is the honest `Nothing`. What permissions a plan or an apply
+    // needs is decided by the project's own `.tf` files — which product, which
+    // resource, read or write — and this build does not read them. It could
+    // guess broad, and a token minted broad "because we could not tell" is
+    // worse than the stored one: it would look like narrowing in the trail
+    // while granting the same reach. So it says there is nothing narrower, in
+    // those words, and the stored credential is used with `narrowing` reading
+    // `no-narrower-form`.
+    //
+    // A project that wants terraform on a narrow credential can store a narrow
+    // one: §13.1 binds a credential per project, and that is the mechanism
+    // that already exists for this.
+    (
+        "cloudflare.terraform.plan",
+        Narrowest::Nothing(
+            "what permissions a terraform plan needs is decided by this \
+             project's own .tf files, which this build does not read, so it \
+             cannot describe a narrower token than the stored one",
+        ),
+    ),
+    (
+        "cloudflare.terraform.apply",
+        Narrowest::Nothing(
+            "what permissions a terraform apply needs is decided by this \
+             project's own .tf files, which this build does not read, so it \
+             cannot describe a narrower token than the stored one",
+        ),
+    ),
 ];
 
 /// The narrowest token that carries `operation`, or nothing if this build has
 /// no row for it.
-pub fn policy_for(operation: &str) -> Option<&'static Policy> {
+pub fn policy_for(operation: &str) -> Option<&'static Narrowest> {
     POLICY.iter().find(|(id, _)| *id == operation).map(|(_, p)| p)
 }
 
@@ -271,7 +329,7 @@ pub fn policy_for(operation: &str) -> Option<&'static Policy> {
 fn group_ids(
     api: &Api,
     account: &str,
-    policy: &Policy,
+    wanted: &'static [&'static [&'static str]],
     value: &SecretValue,
     owner: &Owner,
 ) -> Result<Vec<String>, Minted> {
@@ -324,8 +382,8 @@ fn group_ids(
         ));
     };
 
-    let mut ids = Vec::with_capacity(policy.groups.len());
-    for slot in policy.groups {
+    let mut ids = Vec::with_capacity(wanted.len());
+    for slot in wanted {
         let found = slot.iter().find_map(|wanted| {
             groups.iter().find_map(|group| {
                 let name = group.get("name").and_then(|n| n.as_str())?;
@@ -364,10 +422,14 @@ pub fn mint(
     value: &SecretValue,
     owner: &Owner,
 ) -> Minted {
-    let Some(policy) = policy_for(operation) else {
-        return Minted::NoNarrowerForm(format!(
-            "this build has no narrower token for '{operation}'"
-        ));
+    let policy = match policy_for(operation) {
+        Some(Narrowest::Token { groups, .. }) => groups,
+        Some(Narrowest::Nothing(why)) => return Minted::NoNarrowerForm((*why).to_string()),
+        None => {
+            return Minted::NoNarrowerForm(format!(
+                "this build has no narrower token for '{operation}'"
+            ))
+        }
     };
     let ids = match group_ids(api, account, policy, value, owner) {
         Ok(ids) => ids,

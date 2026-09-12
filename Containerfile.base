@@ -218,6 +218,27 @@ COPY files/system/units/apex-remoted.service /usr/lib/systemd/user/apex-remoted.
 COPY files/system/units/apex-secretd.service /usr/lib/systemd/system/apex-secretd.service
 RUN systemctl enable apex-secretd.service
 
+# P1-012, §13.4's tool half: `wrangler` and `terraform` run by the broker, so
+# an agent's normal command works without the agent ever holding a credential.
+#
+# The shim is installed once and symlinked under each tool's own name. The
+# names are what matter: it reads argv[0] to decide which tool it is standing
+# in for, so a third tool is a third symlink and nothing else. The profile.d
+# drop-in puts that directory on PATH inside an agent session and nowhere else
+# — see the file for why the owner's own shell is left alone.
+COPY --chmod=0755 files/system/libexec/apex-tool-broker /usr/libexec/apex-tool-broker
+COPY files/system/profile.d/apex-tool-broker.sh /etc/profile.d/apex-tool-broker.sh
+RUN set -eux; \
+    mkdir -p /usr/libexec/apex/tools; \
+    ln -sf /usr/libexec/apex-tool-broker /usr/libexec/apex/tools/wrangler; \
+    ln -sf /usr/libexec/apex-tool-broker /usr/libexec/apex/tools/terraform; \
+    bash -n /usr/libexec/apex-tool-broker; \
+    bash -n /etc/profile.d/apex-tool-broker.sh; \
+    # A shim that resolves to itself would loop until the process table gave
+    # out, so the directory it is installed in must not be the one it searches.
+    test "$(readlink -f /usr/libexec/apex/tools/wrangler)" = /usr/libexec/apex-tool-broker; \
+    grep -q APEX_AGENT_SESSION /etc/profile.d/apex-tool-broker.sh
+
 # ── local inference service (apex-aid, §14) ─────────────────────────────────
 # A USER unit, and — exactly like apex-agentd — deliberately NOT
 # `systemctl --global enable`d. A per-user daemon that will hold gigabytes of
