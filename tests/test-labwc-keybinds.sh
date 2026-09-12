@@ -64,7 +64,7 @@ if [ -z "$SHELL_TREE" ]; then
     # can run.
     if [ "${APEX_REQUIRE_SHELL_TREE:-0}" = "1" ]; then
         printf 'FAIL  an apex-shell tree is required here and none was found\n' >&2
-        printf '      looked in: %s/../apex-shell and /usr/share/apex-shell\n' "$ROOT" >&2
+        printf '      looked in: $APEX_SHELL_TREE, %s/../apex-shell and /usr/share/apex-shell\n' "$ROOT" >&2
         printf '\npassed=0 failed=1\n'
         exit 1
     fi
@@ -80,6 +80,30 @@ fi
 # while integrating the P1 branches: three assertions failed in a git worktree
 # purely because the worktree has no sibling apex-shell, and the fallback was
 # silent about it.
+#
+# And the NOTE was not enough. It is printed once, at the top, and the FAIL
+# lines are forty lines below it; on 2026-09-13 a reader who had just fixed the
+# CI half of this same problem ran the suite in a worktree with no sibling
+# checkout, read three failures, and reported a screen-reader hole in the
+# product. The three failures were real about /usr/share/apex-shell and false
+# about both repositories at roadmap/v2.2, where the same suite is 39/0.
+#
+# So: under APEX_REQUIRE_SHELL_TREE=1 the installed shell is REFUSED rather than
+# quietly measured. That flag means "measure the tree under test", and the
+# installed shell is by definition not it — CI vendors a checkout to a sibling
+# path, so nothing that sets the flag is relying on this fallback. Locally it
+# turns three failures that read as a product defect into one line naming the
+# variable to set.
+if [ "$SHELL_TREE" = /usr/share/apex-shell ] \
+   && [ "${APEX_REQUIRE_SHELL_TREE:-0}" = "1" ]; then
+    printf 'FAIL  APEX_REQUIRE_SHELL_TREE=1 and the only shell tree found is the INSTALLED\n' >&2
+    printf '      one at /usr/share/apex-shell — whatever the LAST IMAGE shipped, which on a\n' >&2
+    printf '      roadmap machine lags both repositories by weeks. Measuring it would produce\n' >&2
+    printf '      failures about staleness that read exactly like regressions.\n' >&2
+    printf '      Set APEX_SHELL_TREE=<the apex-shell checkout under test>.\n' >&2
+    printf '\npassed=0 failed=1\n'
+    exit 1
+fi
 case "$SHELL_TREE" in
     /usr/share/apex-shell)
         printf 'NOTE  no apex-shell checkout beside this repo; testing against the
@@ -92,6 +116,16 @@ case "$SHELL_TREE" in
         ;;
     *)  printf 'using apex-shell tree: %s\n\n' "$SHELL_TREE" ;;
 esac
+
+# The provenance of the thing being measured, on the line people quote. The
+# summary is what gets pasted into a handoff, and `passed=36 failed=3` carries
+# no hint that the three failures are about a shell tree from three weeks ago.
+SHELL_TREE_ID="$SHELL_TREE"
+if [ -d "$SHELL_TREE/.git" ] || git -C "$SHELL_TREE" rev-parse --git-dir >/dev/null 2>&1; then
+    SHELL_TREE_ID="$SHELL_TREE @ $(git -C "$SHELL_TREE" log -1 --format=%h 2>/dev/null || echo unknown)"
+elif [ "$SHELL_TREE" = /usr/share/apex-shell ]; then
+    SHELL_TREE_ID="$SHELL_TREE (INSTALLED — whatever the last image shipped)"
+fi
 
 # What root._shellDir resolves to on a booted system. Fixed even though the
 # model is read from a checkout — the seeded rc.xml is written for the installed
@@ -175,7 +209,11 @@ PYEOF
 if printf '%s\n' "$block" | grep -q 'apex-screen-reader'; then
     ok "the screen-reader binding survives the labwc generator"
 else
-    bad "the screen-reader binding survives the labwc generator — on Floating there is no way to start a reader"
+    # The provenance goes IN the failure, not only in the header. This is the
+    # one assertion in the suite that reads as an accessibility hole in the
+    # product, so it must never be quotable without saying which shell tree
+    # produced it.
+    bad "the screen-reader binding survives the labwc generator — on Floating there is no way to start a reader (model read from $SHELL_TREE_ID)"
 fi
 # The <action> sits on the line AFTER its <keybind>, so the key is read by
 # matching the whole element rather than by assuming the two share a line.
@@ -192,7 +230,7 @@ PYEOF
 )"
 [ "$sr_key" = "W-A-s" ] \
     && ok "on the combination a screen-reader user already knows (W-A-s = SUPER+ALT+S)" \
-    || bad "the screen-reader binding is on [$sr_key], not W-A-s"
+    || bad "the screen-reader binding is on [$sr_key], not W-A-s (model read from $SHELL_TREE_ID)"
 
 # A duplicate key is two bindings fighting over one shortcut, and labwc resolves
 # that by taking one of them silently.
@@ -431,5 +469,6 @@ else
     skp "no KeybindService.qml to check"
 fi
 
-printf '\npassed=%d failed=%d\n' "$pass" "$fail"
+printf '\npassed=%d failed=%d  (apex-shell model read from %s)\n' \
+    "$pass" "$fail" "$SHELL_TREE_ID"
 [ "$fail" -eq 0 ]
