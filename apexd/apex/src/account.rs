@@ -44,7 +44,7 @@
 use std::io::Read;
 
 use anyhow::{bail, Result};
-use apex_secret_core::account::{self, AccountError, AccountRef, Provider};
+use apex_secret_core::account::{self, AccountError, AccountRef, Presentation, Provider};
 use apex_secret_core::client::Client;
 use apex_secret_core::protocol::{Request, Response};
 use apex_secret_core::store::ServiceInfo;
@@ -236,6 +236,20 @@ fn add(
     let provider = account.provider;
     let host = provider.resolve_host(host.map(str::trim))?.to_ascii_lowercase();
 
+    // Basic auth is a PAIR. Stored without the username half, the provider
+    // falls back to sending the value as a bare `Authorization:` — which the
+    // server answers with 401, so a forgotten flag reads back as a wrong
+    // password and sends the user to reset a credential that was fine. Refused
+    // before stdin is read, so nothing is stored and nothing is half-stored.
+    if provider.presentation == Presentation::Basic && username.trim().is_empty() {
+        bail!(
+            "a {} account signs in with a name and a password, so --username is \
+             required; without it APEX would send the password on its own and \
+             the server would answer 401",
+            provider.label
+        );
+    }
+
     // Said BEFORE the credential is read, not after: a user who is about to
     // paste a token that APEX cannot renew should find that out while they
     // still have the provider's page open.
@@ -345,7 +359,7 @@ fn grant(reference: &str, scope: &str, revoke: bool) -> Result<i32> {
     // for an operation whose provider declares it reaches the same thing
     // wherever it is asked, and no file operation does.
     Client::connect()?.call(&Request::Grant {
-        project: project_root()?,
+        project: crate::secret::current_project_root()?,
         service: account.service(),
         capability: operation.to_string(),
         revoke,
@@ -353,15 +367,6 @@ fn grant(reference: &str, scope: &str, revoke: bool) -> Result<i32> {
     let verb = if revoke { "withdrew" } else { "allowed" };
     println!("{verb} {scope} ({operation}) for {reference} in this project");
     Ok(0)
-}
-
-/// The project this command is being run in.
-///
-/// A grant is per project, so a command run outside one has nothing to key on
-/// and says so rather than silently granting somewhere.
-fn project_root() -> Result<String> {
-    let cwd = std::env::current_dir()?;
-    Ok(cwd.to_string_lossy().to_string())
 }
 
 fn rm(reference: &str) -> Result<i32> {
@@ -465,6 +470,51 @@ mod tests {
             .filter_map(|i| AccountRef::parse(&i.service).map(|_| i.service))
             .collect();
         assert_eq!(kept, vec!["account.webdav.home".to_string()]);
+    }
+
+    #[test]
+    fn a_grant_is_keyed_the_way_apex_secret_keys_one() {
+        // The defect this rules out: `apex secret grant` keys on the project
+        // ROOT (apex_agent_core::project::detect), and apex-agentd forwards a
+        // session's root when it uses a capability. A second derivation here
+        // that stored the current DIRECTORY would write a key that nothing
+        // matches from any subdirectory — a grant that was made, reported, and
+        // silently never applies. One function, called from both.
+        let source = include_str!("account.rs");
+        let shipped = source.split("#[cfg(test)]").next().expect("source");
+        assert!(
+            shipped.contains("crate::secret::current_project_root()"),
+            "apex account derives a project key of its own"
+        );
+        assert!(
+            !shipped.contains("current_dir"),
+            "apex account reads the current directory rather than the project root"
+        );
+    }
+
+    #[test]
+    fn a_basic_provider_is_the_pair_or_it_is_nothing() {
+        // Which providers this rule binds, asserted over the table rather than
+        // over the two it was written for.
+        for p in account::PROVIDERS {
+            if p.presentation == Presentation::Basic {
+                assert!(
+                    matches!(p.flow, apex_secret_core::account::Flow::AppPassword),
+                    "{} presents Basic without an app-password flow",
+                    p.id
+                );
+            }
+        }
+        // And the refusal is in the shipped half of this file, before stdin.
+        let shipped = include_str!("account.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("source");
+        let refusal = shipped
+            .find("Presentation::Basic && username.trim().is_empty()")
+            .expect("the username refusal is gone");
+        let stdin = shipped.find("read_to_string").expect("stdin read");
+        assert!(refusal < stdin, "the username is checked after the credential is read");
     }
 
     fn fixture(service: &str) -> ServiceInfo {

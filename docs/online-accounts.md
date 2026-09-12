@@ -76,6 +76,10 @@ printf %s "$APP_PASSWORD" | apex account add nextcloud.home \
     --host cloud.example --username me
 ```
 
+`--username` is required for a provider that signs in with Basic — WebDAV and
+Nextcloud. Without it APEX would send the password on its own, the server would
+answer 401, and a forgotten flag would read back as a wrong password.
+
 `apex account add` knows the endpoint path and how the credential is presented,
 which is the difference between it and `apex secret add`. The same account
 stored by hand would be:
