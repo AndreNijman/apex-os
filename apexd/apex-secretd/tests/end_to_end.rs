@@ -1393,33 +1393,58 @@ fn a_budget_that_cannot_be_read_refuses_instead_of_counting_as_no_budget() {
         Response::Performed { .. }
     ));
 
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(
-        project.join("apex.toml"),
-        std::fs::Permissions::from_mode(0o000),
-    )
-    .expect("chmod");
-
-    match mcp_call(&daemon, &project) {
+    let refused = |what: &str| match mcp_call(&daemon, &project) {
         Response::Error { message, .. } => {
-            assert!(message.contains("could not be read"), "{message}");
-            assert!(message.contains("has not run"), "{message}");
+            assert!(message.contains("could not be read"), "{what}: {message}");
+            assert!(message.contains("has not run"), "{what}: {message}");
+            assert_eq!(
+                spend_lines(&daemon).last().cloned(),
+                Some(("refused".to_string(), "unmeasurable".to_string())),
+                "{what}"
+            );
         }
-        other => panic!("an unreadable budget was treated as no budget: {other:?}"),
-    }
-    assert_eq!(
-        spend_lines(&daemon).last().cloned(),
-        Some(("refused".to_string(), "unmeasurable".to_string()))
-    );
-    // The provider saw the first call and not the second.
-    assert_eq!(provider.authorizations().len(), 1);
+        other => panic!("{what} was treated as no budget: {other:?}"),
+    };
 
-    // Restored, so `Daemon::drop` can remove the directory.
-    std::fs::set_permissions(
+    // A file that is there and does not parse. Refused whatever account runs
+    // this, which is why it comes first: the mode-bit case below cannot be
+    // measured as root, and a test whose only arm is unreachable for root
+    // would pass vacuously in a container.
+    std::fs::write(
         project.join("apex.toml"),
-        std::fs::Permissions::from_mode(0o600),
+        "[agent.budget\noperations_daily = 5\n",
     )
-    .expect("chmod back");
+    .expect("write");
+    refused("a budget that does not parse");
+    assert!(provider.authorizations().len() == 1, "it ran anyway");
+
+    // And the case somebody actually causes: an agent making its own budget
+    // unreadable. Mode bits mean nothing to root, so this arm runs only when
+    // the test is not root — skipping it there is honest, because for root
+    // the file IS readable and there is no refusal to measure.
+    // Safe: getuid cannot fail.
+    if unsafe { libc::getuid() } != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(
+            project.join("apex.toml"),
+            "[agent.budget.operations]\n\"mcp.request\" = 5\n",
+        )
+        .expect("rewrite");
+        std::fs::set_permissions(
+            project.join("apex.toml"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .expect("chmod");
+        refused("a budget that cannot be opened");
+        // Restored, so `Daemon::drop` can remove the directory.
+        std::fs::set_permissions(
+            project.join("apex.toml"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("chmod back");
+    }
+    // The provider saw the first call and none of the refused ones.
+    assert_eq!(provider.authorizations().len(), 1);
 }
 
 #[test]
@@ -1572,14 +1597,19 @@ fn two_operations_at_the_same_instant_cannot_both_spend_the_last_one_of_a_cap() 
     // Measured at the provider too, because the reply and the request are two
     // different claims about whether the operation happened.
     assert_eq!(provider.authorizations().len(), 1);
+    // Counted, not ordered. The refusal is written when it is decided and the
+    // use when it ends, so on this machine the refused line lands first — but
+    // that is a fact about how long the two threads took, and asserting it
+    // would make a loaded runner fail the one test that guards the
+    // reservation. What is under test is that the cap was spent once.
+    let mut lines = spend_lines(&daemon);
+    lines.sort();
     assert_eq!(
-        spend_lines(&daemon),
+        lines,
         vec![
             ("refused".to_string(), "over".to_string()),
             ("used".to_string(), "within".to_string()),
-        ],
-        "the refusal is written when it is decided and the use when it ends, \
-         so the refused line lands first"
+        ]
     );
 }
 
