@@ -581,6 +581,41 @@ is "--console-to inside the VM root is refused" 1 "$rc"
 has "and says why" "teardown deletes that tree" "$out"
 
 echo
+echo "── the vmlab's third verdict arm, from a suite that runs everywhere ──"
+#
+# tests/vmlab/run-vmlab boots real guests and can only do that where there is
+# KVM. The arm that matters everywhere else is the one that reports
+# could-not-run WITH A REASON — and an arm nobody exercises is an arm that
+# reports "all six flows work" from a machine that booted nothing, the moment
+# it breaks. Both of its could-not-run branches are driven here: the flag, and
+# the real "the KVM node is not usable" test, which is why that node is a
+# variable rather than a literal.
+LAB=../tests/vmlab/run-vmlab
+LABOUT="$WORK/vmlab"
+
+flows=$(bash "$LAB" --list | tr '\n' ' ')
+is "the lab names seven flows: P2-008's six plus P2-009's egress" \
+   "create secure-boot tpm snapshot share usb egress " "$flows"
+
+for probe in "APEX_VMLAB_KVM=$WORK/no-such-kvm" "NOFLAG=1"; do
+    if [ "$probe" = "NOFLAG=1" ]; then
+        out=$(env NOFLAG=1 bash "$LAB" --no-kvm --out "$LABOUT" 2>&1); label="--no-kvm"
+    else
+        out=$(env "$probe" bash "$LAB" --out "$LABOUT" 2>&1); label="an unusable KVM node"
+    fi
+    hasnt "$label: nothing is reported verified" " verified " "$out"
+    has   "$label: everything is could-not-run" "0 verified, 7 could-not-run, 0 failed" "$out"
+    n_reasons=0
+    for f in $(bash "$LAB" --list); do
+        v="$LABOUT/$f/verdict.json"
+        grep -q '"state": "could-not-run"' "$v" 2>/dev/null || continue
+        r=$(sed -n 's/.*"reason": "\([^"]*\)".*/\1/p' "$v")
+        case "$r" in *kvm*) n_reasons=$((n_reasons+1)) ;; esac
+    done
+    is "$label: every verdict names the KVM node it could not use" 7 "$n_reasons"
+done
+
+echo
 echo "── nothing escaped the sandbox ──"
 
 stray=$(find "$FAKEHOME" -mindepth 1 2>/dev/null | head -5)
