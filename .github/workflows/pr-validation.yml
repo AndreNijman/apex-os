@@ -109,7 +109,14 @@ jobs:
           # say — set every selector false, skipped the job, and passed, which
           # is exactly the change that checker exists to catch. Fifth instance
           # of this bug in this file; the four above it are the same shape.
-          grep -Eq '^(apexd/|config/|docs/|README\.md|tests/|files/desktop/(fish|nushell|shell)/|files/system/libexec/apex-mux)' <<<"$files" && rust=true
+          # Containerfile* is in the RUST selector for the same reason docs/ is:
+          # the job that checks them lives here. check-containerfile-assertions.sh
+          # runs the image build's own grep assertions against this repo, and a
+          # PR touching only a Containerfile set every selector false, skipped
+          # this job, and passed -- on exactly the change that checker exists to
+          # catch. Sixth instance of this bug in this file, and it was introduced
+          # by adding the checker without reading the selector first.
+          grep -Eq '^(apexd/|config/|Containerfile|docs/|README\.md|tests/|files/desktop/(fish|nushell|shell)/|files/system/libexec/apex-mux)' <<<"$files" && rust=true
           grep -Eq '^installer/' <<<"$files" && installer=true
           # files/** is the whole runtime payload of the image — the package
           # engine, session launchers, guards. A PR touching only that used to
