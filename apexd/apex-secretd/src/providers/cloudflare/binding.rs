@@ -508,7 +508,7 @@ pub struct Bucket {
 /// Written out rather than pulled in as a dependency, and strict about case
 /// for the same reason [`valid_id`] is: this goes into a URL path, and the set
 /// of characters that cannot appear there is the point.
-fn valid_uuid(id: &str) -> bool {
+pub(crate) fn valid_uuid(id: &str) -> bool {
     let groups: Vec<&str> = id.split('-').collect();
     if groups.len() != 5 {
         return false;
