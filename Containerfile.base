@@ -1517,6 +1517,13 @@ COPY files/system/nftables/apex.nft /usr/share/apex/nftables/apex.nft
 COPY files/system/firewall/services /usr/share/apex/firewall/services
 COPY --chmod=0755 files/system/libexec/apex-firewall /usr/libexec/apex-firewall
 COPY files/system/units/apex-firewall.service /usr/lib/systemd/system/apex-firewall.service
+# A hotspot inverts who answers: the phone that joined broadcasts a DHCP
+# DISCOVER at us and then asks us to resolve names, both inbound on ports the
+# policy shuts. The exception is scoped to the shared link rather than to the
+# port — a `dns` entry in the service catalogue would open a resolver on the
+# cafÃ© Wi-Fi too — so NetworkManager has to say which link that is.
+COPY --chmod=0755 files/system/NetworkManager/dispatcher.d/50-apex-hotspot-firewall \
+     /usr/lib/NetworkManager/dispatcher.d/50-apex-hotspot-firewall
 RUN set -eux; \
     bash -n /usr/libexec/apex-firewall; \
     # nft arrives as a dependency rather than a named package, so assert it: a
@@ -1585,6 +1592,37 @@ RUN set -eux; \
     grep -q '^apex-remote  *tcp  *7717 ' /usr/share/apex/firewall/services; \
     if grep -q 'apex-remote' /usr/share/apex/nftables/apex.nft \
         ; then echo "FATAL: the image opened the apex-remote port; the owner must choose it"; exit 1; fi; \
+    # ── the hotspot exception ───────────────────────────────────────────
+    # Three separate things have to be true, and any one of them missing is a
+    # hotspot that hands out no addresses with nothing saying why.
+    #
+    # The set, so the rules below have somewhere to look.
+    grep -qE '^\s*set hotspot_ifaces \{$' /usr/share/apex/nftables/apex.nft; \
+    # The rules. DHCP first: the policy's other DHCP line is `udp sport 67 udp
+    # dport 68`, a reply arriving for a client we are, and it cannot match a
+    # client's request to us.
+    grep -qE '^\s*iifname @hotspot_ifaces udp dport \{ 53, 67 \} accept$' \
+        /usr/share/apex/nftables/apex.nft; \
+    grep -qE '^\s*iifname @hotspot_ifaces tcp dport 53 accept$' \
+        /usr/share/apex/nftables/apex.nft; \
+    # And the part that keeps this an exception rather than a hole: nothing may
+    # accept 53 or 67 without naming the link. An unscoped version of either
+    # rule passes every assertion above and turns each of these machines into
+    # an open resolver on whatever network it joins.
+    if grep -nE '^\s*(udp|tcp) dport \{? ?(53|67)\b' \
+        /usr/share/apex/nftables/apex.nft; then \
+        echo "FATAL: the policy accepts DNS or DHCP on every interface, not just a shared link"; \
+        exit 1; \
+    fi; \
+    # The dispatcher, without which the set stays empty and the rules never
+    # match anything.
+    test -x /usr/lib/NetworkManager/dispatcher.d/50-apex-hotspot-firewall; \
+    bash -n /usr/lib/NetworkManager/dispatcher.d/50-apex-hotspot-firewall; \
+    grep -q 'hotspot remove' /usr/lib/NetworkManager/dispatcher.d/50-apex-hotspot-firewall; \
+    grep -q 'hotspot add' /usr/lib/NetworkManager/dispatcher.d/50-apex-hotspot-firewall; \
+    # A dispatcher script NetworkManager never runs is a file. The service is
+    # D-Bus activated rather than enabled, so its presence is what to assert.
+    test -f /usr/lib/systemd/system/NetworkManager-dispatcher.service; \
     # Enabled by default. A firewall that ships disabled is documentation.
     systemctl enable apex-firewall.service; \
     test -L /etc/systemd/system/multi-user.target.wants/apex-firewall.service; \

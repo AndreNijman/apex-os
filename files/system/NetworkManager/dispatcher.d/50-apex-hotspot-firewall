@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  50-apex-hotspot-firewall — open DHCP and DNS on a link while it is shared.
+#
+#  APEX drops inbound by default. Turning this machine into a hotspot inverts
+#  who asks and who answers: the phone that joined broadcasts a DHCP DISCOVER at
+#  us from port 68 to port 67, and then asks us to resolve names on port 53.
+#  Both are new inbound flows on ports the policy shuts, so conntrack cannot
+#  rescue them and NetworkManager's dnsmasq never hears a word. Measured in a
+#  namespace, not inferred: tests/test-device-services-netns.sh.
+#
+#  The exception has to be scoped to the link. A `dns` entry in the service
+#  catalogue would open a resolver on every network this machine joins,
+#  including the café Wi-Fi — which is why this is not `apex firewall allow`.
+#
+#  NetworkManager runs this with $1 = interface, $2 = action.
+#
+#  ── Which way each path fails ───────────────────────────────────────────────
+#  `up` opens the link only after nmcli confirms the connection is `shared`. If
+#  nmcli is missing, times out, or answers anything else, nothing is opened: the
+#  hotspot stays broken and the firewall stays shut, which is the safe half.
+#  `down` closes the link WITHOUT asking anything — the profile may already be
+#  gone by then, and "I could not check" must not leave a link open.
+# ─────────────────────────────────────────────────────────────────────────────
+set -u
+
+IFACE="${1:-}"
+ACTION="${2:-}"
+FW=/usr/libexec/apex-firewall
+
+[ -n "$IFACE" ] || exit 0
+[ -x "$FW" ] || exit 0
+
+# The interface NM addressed, which for a shared connection is the device
+# itself. DEVICE_IP_IFACE is the one the rules have to name.
+IFACE="${DEVICE_IP_IFACE:-$IFACE}"
+
+case "$ACTION" in
+    down|pre-down|vpn-down)
+        # Unconditional and idempotent. Removing an interface that was never
+        # added is not an error, and this is the path that must never be
+        # skipped because a lookup failed.
+        "$FW" hotspot remove "$IFACE" >/dev/null 2>&1
+        ;;
+    up|vpn-up|dhcp4-change)
+        command -v nmcli >/dev/null 2>&1 || exit 0
+        [ -n "${CONNECTION_UUID:-}" ] || exit 0
+        # Timed out because this runs inside NetworkManager's own dispatcher:
+        # a query that hangs holds a slot for every later script on the queue.
+        method="$(timeout 5 nmcli -g ipv4.method connection show uuid "$CONNECTION_UUID" 2>/dev/null)"
+        [ "$method" = shared ] || exit 0
+        "$FW" hotspot add "$IFACE" >/dev/null 2>&1
+        ;;
+esac
+
+exit 0
