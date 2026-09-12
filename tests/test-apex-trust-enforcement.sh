@@ -311,6 +311,9 @@ if grep -q 'FULCIO_ROOT: &str = "/usr/share/apex-os/trust/fulcio-root.pem"' "$VE
 else
     bad "verify.rs's FULCIO_ROOT is not the path the image installs"
 fi
+# shellcheck disable=SC2043  # one Containerfile installs the root today. The
+# editions converged onto Containerfile.apex in September and may diverge again;
+# this reads as a list so a second one is a line, not a rewrite.
 for cf in Containerfile.base; do
     if grep -q 'files/system/trust/fulcio-root.pem  */usr/share/apex-os/trust/fulcio-root.pem' "$REPO/$cf"; then
         ok "$cf installs it there"

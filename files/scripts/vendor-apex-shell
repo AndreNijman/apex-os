@@ -36,12 +36,27 @@ sed -i "s|output_path = '@SRCDIR@/src/config/colors.conf'|output_path = '@HOME@/
     "${dest}/src/config/matugen.toml.in"
 grep -q "output_path = '@HOME@/.config/hypr/apex-shell-hyprlock-colors.conf'" \
     "${dest}/src/config/matugen.toml.in"
+# shellcheck disable=SC2088  # a literal `~/` inside a sed PATTERN and its
+# replacement, matching the two characters apex-shell ships in its own config.
+# Expanding it to $HOME is exactly what must not happen here: the text being
+# rewritten is the tilde, not the home directory of whoever runs the vendoring.
 sed -i 's|^source = ~/.local/src/apex-shell/src/config/colors.conf|source = ~/.config/hypr/apex-shell-hyprlock-colors.conf|' \
     "${dest}/src/config/hyprlock.conf"
+# shellcheck disable=SC2088  # the same literal `~/`, this time as a grep pattern.
 { grep -rl '~/\.local/src/apex-shell' "${dest}" 2>/dev/null || true; } | while read -r file; do
     sed -i 's|~/\.local/src/apex-shell|/usr/share/apex-shell|g' "${file}"
 done
-! grep -rn '~/\.local/src/apex-shell' "${dest}" 2>/dev/null
+# `if ... exit 1`, not `! grep`. This file runs under `set -euo pipefail`, and
+# bash exempts a command whose status is inverted with `!` from errexit — so as
+# a bare `! grep` this refusal returned 1 and the script carried on and exited
+# 0. It could not refuse anything. Same defect class as the 46 build refusals
+# the Containerfile checker was written for; this one is in a script that
+# vendors the shell into the image.
+# shellcheck disable=SC2088  # a literal `~/` again, as a grep pattern.
+if grep -rn '~/\.local/src/apex-shell' "${dest}" 2>/dev/null; then
+    echo "FATAL: paths above still point at the developer tree, not /usr/share/apex-shell" >&2
+    exit 1
+fi
 grep -q 'lock_cmd = qs -c /usr/share/apex-shell ipc call lockscreen lock' \
     "${dest}/src/config/hypridle.conf"
 
@@ -52,7 +67,12 @@ if grep -vE '^[[:space:]]*#' "${power}" | grep -q 'caelestia-boot-windows'; then
     pre_probe=1
 fi
 sed -i '/^[[:space:]]*#/!s|/usr/local/bin/caelestia-boot-windows|/usr/libexec/apex-boot-windows|g' "${power}"
-! grep -vE '^[[:space:]]*#' "${power}" | grep -q 'caelestia-boot-windows'
+# The same defect: `! pipeline` is exempt from errexit too, so this line could
+# not fail a vendoring that had left the upstream path in place.
+if grep -vE '^[[:space:]]*#' "${power}" | grep -q 'caelestia-boot-windows'; then
+    echo "FATAL: ${power} still calls caelestia-boot-windows outside a comment" >&2
+    exit 1
+fi
 grep -q '/usr/libexec/apex-boot-windows' "${power}"
 if ! grep -q 'windows-check' "${power}"; then
     if [[ "${pre_probe}" = 1 && "${strict}" = 0 ]]; then

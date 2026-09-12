@@ -100,8 +100,9 @@ case_silent() {  # the opposite: it must NOT say this
 
 reset_world() {
     chmod -R u+rwX "$WORK/sys" "$WORK/dev" "$WORK/media" 2>/dev/null
-    rm -rf "$WORK/sys" "$WORK/etc" "$WORK/spa" "$WORK/nmvpn" "$WORK/libexec" \
-           "$WORK/dev" "$WORK/media" "$WORK/nmlib" "$WORK/nmconfd" "$STATE"
+    rm -rf "${WORK:?}/sys" "${WORK:?}/etc" "${WORK:?}/spa" "${WORK:?}/nmvpn" \
+           "${WORK:?}/libexec" "${WORK:?}/dev" "${WORK:?}/media" \
+           "${WORK:?}/nmlib" "${WORK:?}/nmconfd" "${STATE:?}"
     mkdir -p "$WORK/sys/class" "$WORK/sys/bus" "$WORK/etc" "$WORK/spa" "$WORK/nmvpn" \
              "$WORK/libexec" "$WORK/dev" "$WORK/media" "$WORK/nmlib/1.54.3" \
              "$WORK/nmconfd" "$STATE"

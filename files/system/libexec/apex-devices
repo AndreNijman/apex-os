@@ -322,7 +322,7 @@ do_share() {
     # Thunar can open smb://server/share and a terminal in the same session
     # cannot see it, which reads as "the share did not mount" and is not that.
     if [ -x "$LIBEXEC/gvfsd-fuse" ]; then
-        local mnt="/run/user/$(id -u)/gvfs"
+        local mnt; mnt="/run/user/$(id -u)/gvfs"
         if grep -qs " $mnt " /proc/self/mountinfo; then
             item "GIO mounts on disk" "yes, at $mnt"
         else

@@ -1,5 +1,11 @@
 # APEX-OS — agent shell integration. Sourced by both bash and zsh.
 #
+# shellcheck shell=bash
+# There is no shebang because nothing executes this file — both shells source
+# it. shellcheck has to be told which dialect to read it as, and bash is the
+# only one of the two it can read at all. The zsh half is guarded by
+# $ZSH_VERSION and carries its own directive where that guard begins.
+#
 # Provides the universal `a` command and its siblings, plus completion for the
 # things that are worth completing: session ids and agent names.
 #
@@ -182,6 +188,12 @@ _apex_request_verbs() {
 }
 
 # ── bash completion ─────────────────────────────────────────────────────────
+# shellcheck disable=SC2207  # `COMPREPLY=($(compgen …))` is THE bash-completion
+# idiom, and the split on IFS is the point: COMPREPLY is an array of candidate
+# words. Quoting it, which is what SC2207 asks for, would make every completion
+# offer one candidate that is all the candidates joined by spaces. `mapfile`,
+# the other suggestion, cannot be used in a function that must also work under
+# `set -u` in every bash the image ships. 21 occurrences, all the same shape.
 if [ -n "${BASH_VERSION}" ]; then
     _apex_agent_complete() {
         local cur prev verb
@@ -311,6 +323,14 @@ fi
 # ── zsh completion ──────────────────────────────────────────────────────────
 # Plain `compctl`-free completion using compdef, which the seeded zshrc has
 # already initialised by the time this file is sourced.
+# shellcheck disable=SC2296,SC2206,SC2154,SC2034  # zsh, which shellcheck cannot
+# parse. `${(f)…}` is zsh's split-on-newline flag and reads to a bash parser as
+# a parameter expansion starting with `(`; `$words` is zsh's completion-state
+# array, set by the completion system rather than by this file; and the `local
+# -a` arrays here are consumed by `_describe`, which a bash parser does not know
+# passes them by NAME. Everything in this block is guarded by $ZSH_VERSION, so
+# bash never reaches it. The alternative — a second file — would split one
+# completion model across two, which is the thing this file exists to avoid.
 if [ -n "${ZSH_VERSION}" ]; then
     _apex_agent_zsh() {
         local -a verbs

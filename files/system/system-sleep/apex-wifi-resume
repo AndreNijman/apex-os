@@ -26,7 +26,16 @@ set -u
 
 log() { logger -t apex-wifi-resume -- "$*"; }
 
-dev="$(ls /sys/class/net | grep -m1 '^wl')" || exit 0
+# A glob, not `ls | grep`. This runs as root out of the system-sleep directory,
+# and an interface name is attacker-influenced in the sense that matters: a USB
+# adapter names itself. `ls` would hand a name containing a newline to the
+# capture as two names.
+dev=""
+for _d in /sys/class/net/wl*; do
+    [ -e "$_d" ] || continue          # the unmatched glob itself
+    dev="${_d##*/}"
+    break
+done
 [ -n "${dev:-}" ] || exit 0
 
 # Only this driver. The images run on more than one machine, and cycling the

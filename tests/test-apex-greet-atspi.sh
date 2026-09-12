@@ -206,6 +206,7 @@ atspi_run_app "$QMLRUN" -platform wayland "$STAGE/app.qml" >"$ATSPI_W/app.out" 2
 APP_PID=$!
 
 registered=0
+# shellcheck disable=SC2034  # a bounded wait; nothing reads the counter.
 for i in $(seq 1 80); do
     n="$(python3 "$WALK" --count 2>/dev/null || echo 0)"
     [ "$n" != "0" ] && { registered=1; break; }
@@ -372,6 +373,8 @@ done
 
 # Focusable is what decides whether a reader can put the caret in a field at
 # all. A named node that is not focusable is a label, not a control.
+# shellcheck disable=SC2043  # one field today. The greeter grows a password
+# field and a session picker, and both belong in this list when they do.
 for n in "Username"; do
     if printf '%s' "$(line_of "$n")" | grep -q 'focusable'; then
         ok "'$n' is focusable, so a reader can reach it"

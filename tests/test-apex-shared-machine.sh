@@ -207,7 +207,7 @@ chmod +x "$FIX/nobody" "$FIX/guest-in"
 # Rebuild the fixture state before each behavioural assertion, so one wipe
 # never sets up the next one's result.
 seed() {
-    rm -rf "$FIX/home" "$STORE" "$GREET_STATE"
+    rm -rf "${FIX:?}/home" "${STORE:?}" "${GREET_STATE:?}"
     mkdir -p "$GUEST_HOME/.config" "$GUEST_HOME/Documents" "$OWNER_HOME/.config"
     printf 'guest secret\n' > "$GUEST_HOME/.config/token"
     printf 'guest doc\n'    > "$GUEST_HOME/Documents/notes.txt"

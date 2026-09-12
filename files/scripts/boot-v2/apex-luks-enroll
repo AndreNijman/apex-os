@@ -100,6 +100,7 @@ stop_swtpm() {
         # half-written state file loses the sealed object, and the symptom is
         # an unlock failure in the guest that reads as a broken PCR policy.
         local i
+        # shellcheck disable=SC2034  # a bounded wait; nothing reads the counter.
         for i in $(seq 1 200); do
             kill -0 "$(cat "$TPM_STATE/swtpm-enroll.pid" 2>/dev/null || echo 0)" 2>/dev/null || break
             sleep 0.05

@@ -220,6 +220,31 @@ EOF
         printf 'FATAL: the a11y bus is the ambient one this shell started with.\n' >&2
         return 1
     fi
+    # The other two values captured at the top of this file. The comment there
+    # says they are taken "so a leak can be recognised rather than merely
+    # avoided" — and until now only the a11y one was ever read, so two thirds of
+    # that sentence was untrue and shellcheck was right that they were dead.
+    #
+    # Neither can fire spuriously, which is why they are assertions and not
+    # warnings: XDG_RUNTIME_DIR is set to "$ATSPI_W/run" under a mktemp dir, and
+    # DBUS_SESSION_BUS_ADDRESS is read from the address file the private
+    # dbus-daemon writes. Equalling the ambient value means the private one did
+    # not come up and the caller's real session leaked through, which is exactly
+    # the "somebody's real desktop" case the block above refuses.
+    if [ -n "$ATSPI_AMBIENT_SESSION" ] \
+       && [ "${DBUS_SESSION_BUS_ADDRESS:-}" = "$ATSPI_AMBIENT_SESSION" ]; then
+        printf 'FATAL: the session bus is the ambient one this shell started with.\n' >&2
+        printf '       got: %s\n' "${DBUS_SESSION_BUS_ADDRESS:-}" >&2
+        printf '       Refusing to walk a bus that may belong to a live session.\n' >&2
+        return 1
+    fi
+    if [ -n "$ATSPI_AMBIENT_RUNTIME" ] \
+       && [ "$ATSPI_RUNTIME" = "$ATSPI_AMBIENT_RUNTIME" ]; then
+        printf 'FATAL: the private runtime dir IS the ambient XDG_RUNTIME_DIR.\n' >&2
+        printf '       got: %s\n' "$ATSPI_RUNTIME" >&2
+        printf '       Refusing to write into a live session\047s runtime dir.\n' >&2
+        return 1
+    fi
     # ── the flag a screen reader sets ───────────────────────────────────────
     # Set because a screen reader sets it: Orca's first act on connecting is to
     # put org.a11y.Status.ScreenReaderEnabled true, and toolkits watch that
@@ -293,6 +318,7 @@ EOF
     # ── the registry ────────────────────────────────────────────────────────
     "$ATSPI_REGISTRYD" >"$ATSPI_W/registry.out" 2>"$ATSPI_W/registry.err" &
     ATSPI_REGISTRY_PID=$!
+    # shellcheck disable=SC2034  # a bounded wait; nothing reads the counter.
     for i in $(seq 1 60); do
         gdbus call --address "$ATSPI_BUS" -d org.freedesktop.DBus \
               -o /org/freedesktop/DBus -m org.freedesktop.DBus.ListNames 2>/dev/null \

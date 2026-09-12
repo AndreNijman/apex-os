@@ -676,6 +676,9 @@ out4="$(colour_nocolord Hyprland color-assign eDP-1 icc-with 2>&1)"; rc4=$?
 { [ "$rc4" -eq 1 ] && printf '%s' "$out4" | grep -q "colord is not answering"; } \
     && ok "assignment without colord fails loudly" \
     || bad "assignment without colord fails loudly (rc=$rc4)"
+# shellcheck disable=SC2034  # unlike out1..out4 this one is never grepped: the
+# assertion below is about the exit status alone. The capture stays because it
+# is what keeps the usage message out of the suite's output.
 out5="$(colour Hyprland color-assign eDP-1 2>&1)"; rc5=$?
 [ "$rc5" -eq 2 ] && ok "color-assign with one argument is a usage error" \
                  || bad "color-assign with one argument is a usage error (rc=$rc5)"
