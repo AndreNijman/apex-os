@@ -205,6 +205,7 @@
 pub mod api;
 pub mod binding;
 pub mod dns;
+pub mod temporary;
 
 use apex_secret_core::operation::{
     self, Effect, OperationSpec, ParamSpec, ProviderSpec, ResourceKind, Syntax,
@@ -212,11 +213,12 @@ use apex_secret_core::operation::{
 use apex_secret_core::project::{self, MAX_PAYLOAD};
 use apex_secret_core::SecretValue;
 
-use crate::provider::{Bind, Bound, Endpoint, Performed, Provider, ProviderError};
+use crate::provider::{Bind, Bound, Endpoint, Lease, Minted, Performed, Provider, ProviderError};
 
 use api::{Api, Body, Call, Multipart};
 use binding::{Account, Binding, BindingError, Bucket, Resource, Worker, Zone};
 use dns::{Lookup, Record};
+use temporary::Scope;
 
 /// The worker, zone or bucket a caller names.
 const NAMED: ResourceKind = ResourceKind::Name;
@@ -1143,6 +1145,69 @@ impl CloudflareProvider {
     /// reason the account and zone **ids** are in the project file at all: the
     /// name-to-id lookup is an authenticated request, so it is an operation of
     /// its own rather than a hidden step inside every other one.
+    /// The account a minted token is created in, and the resource its single
+    /// policy names.
+    ///
+    /// Reads the project file a third time — `bind` read it, `perform` reads
+    /// it again, and this is between them. The module note explains why
+    /// re-reading is the shape this provider is in: `Bound` carries an
+    /// endpoint and a sentence and nothing a provider defines, so there is no
+    /// way to hand a resolution forward. `perform` already refuses if the file
+    /// moved under it, which is the check that matters; a mint that read a
+    /// file the operation then refuses to act on has cost a round trip and
+    /// nothing else.
+    fn narrowing(&self, req: &Bind<'_>, zone_scoped: bool) -> Result<(String, Scope), Minted> {
+        let binding = match Binding::read(
+            std::path::Path::new(req.project),
+            req.owner.uid,
+            &req.owner.name,
+        ) {
+            Ok(binding) => binding,
+            Err(e) => {
+                return Err(Minted::CouldNotRun(format!(
+                    "this project's cloudflare binding could not be read, so no \
+                     short-lived token was asked for: {e}"
+                )))
+            }
+        };
+        // Without an account id there is no endpoint to create a token at.
+        // `cloudflare.account.read` is the operation that exists to find the
+        // id out, and it necessarily runs before there is one — so this is a
+        // could-not-run and not a refusal.
+        let account = match binding.account() {
+            Ok(account) => account,
+            Err(e) => {
+                return Err(Minted::CouldNotRun(format!(
+                    "this project does not bind a cloudflare account id, so \
+                     there is no account to create a short-lived token in: {e}"
+                )))
+            }
+        };
+        if !zone_scoped {
+            return Ok((account.id.clone(), Scope::Account(account.id.clone())));
+        }
+        let target = match self.resolve(req) {
+            Ok(target) => target,
+            Err(e) => return Err(Minted::CouldNotRun(e.to_string())),
+        };
+        let zone = match &target {
+            Target::Record(record) => record.zone.id.clone(),
+            Target::Route { zone, .. } => zone.id.clone(),
+            // A zone-scoped row in `POLICY` whose operation does not resolve
+            // to something with a zone is this build disagreeing with itself.
+            // It is not a refusal and it is not an absence.
+            _ => {
+                return Err(Minted::CouldNotRun(format!(
+                    "'{}' is recorded as needing a zone-scoped token but does \
+                     not resolve to a zone, so no short-lived token was asked \
+                     for",
+                    req.operation.id
+                )))
+            }
+        };
+        Ok((account.id.clone(), Scope::Zone(zone)))
+    }
+
     fn resolve(&self, req: &Bind<'_>) -> Result<Target, ProviderError> {
         let binding = Binding::read(
             std::path::Path::new(req.project),
@@ -3410,6 +3475,57 @@ impl Provider for CloudflareProvider {
             output,
             created,
         })
+    }
+
+    /// §13.4, and P1-005's second acceptance criterion.
+    ///
+    /// The stored token is exchanged for one Cloudflare issued for this
+    /// operation alone, at the narrowest scope the REST API can express, and
+    /// [`Provider::revoke`] ends it as soon as the operation returns. The four
+    /// answers and what each of them costs are in [`temporary`].
+    fn mint(
+        &self,
+        req: &Bind<'_>,
+        _bound: &Bound,
+        value: &SecretValue,
+    ) -> Result<Minted, ProviderError> {
+        let Some(policy) = temporary::policy_for(req.operation.id) else {
+            return Ok(Minted::NoNarrowerForm(format!(
+                "this build knows no permission group that carries '{}', so it \
+                 cannot describe a token narrower than the stored one",
+                req.operation.id
+            )));
+        };
+        let (account, scope) = match self.narrowing(req, policy.zone_scoped) {
+            Ok(narrowing) => narrowing,
+            Err(answer) => return Ok(answer),
+        };
+        Ok(temporary::mint(
+            &self.api,
+            req.operation.id,
+            req.audit_id,
+            &account,
+            &scope,
+            value,
+            req.owner,
+        ))
+    }
+
+    fn revoke(
+        &self,
+        req: &Bind<'_>,
+        _bound: &Bound,
+        stored: &SecretValue,
+        lease: &Lease,
+    ) -> Result<(), String> {
+        // Whether the policy was zone-scoped does not change which account the
+        // token was created in, and the revoke addresses it by account. So the
+        // `false` here is not a guess: a zone-scoped token and an
+        // account-scoped one are deleted at the same path.
+        let (account, _) = self
+            .narrowing(req, false)
+            .map_err(|answer| answer.reason().unwrap_or("no account").to_string())?;
+        temporary::revoke(&self.api, &account, lease, stored, req.owner)
     }
 }
 

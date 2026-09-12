@@ -563,6 +563,15 @@ impl Service {
         // The minted value is used INSTEAD of the stored one and scrubbed
         // alongside it — a temporary token is still a credential, and §13.4 is
         // explicit that it is not handed to the agent either.
+        //
+        // Four answers, not two, and the framework takes a different branch for
+        // each. Three of them come back here as a *reason* and the stored
+        // credential is used, which is what this service did before any of this
+        // existed — the change is that the trail now says which of the three it
+        // was. "The far side would not issue a narrower credential" and "there
+        // is no narrower credential to issue" are different facts about the
+        // owner's account, and an operator who cannot tell them apart cannot
+        // act on either.
         let minted = match backend.mint(&req, &bound, &stored) {
             Ok(minted) => minted,
             // Scrubbed, like every refusal from here on. See the note below.
@@ -571,9 +580,37 @@ impl Service {
                 return refuse(&record, reason, kind_of(&e));
             }
         };
-        let presented = minted.as_ref().unwrap_or(&stored);
+        let narrowing = minted.as_str().to_string();
+        let mut narrowing_detail = minted.reason().map(str::to_string);
+        let (presented, lease) = match &minted {
+            provider::Minted::Narrowed { value, lease } => (value, Some(lease.clone())),
+            provider::Minted::NoNarrowerForm(_)
+            | provider::Minted::Denied(_)
+            | provider::Minted::CouldNotRun(_) => (&stored, None),
+        };
 
-        let out = match backend.perform(&req, &bound, presented) {
+        let performed = backend.perform(&req, &bound, presented);
+
+        // The lease ends here, and it ends on BOTH paths out of `perform`.
+        //
+        // A minted credential that outlives a failed operation is the one this
+        // whole section exists to avoid: the failure is often exactly the case
+        // where something went wrong enough to be worth not leaving a spendable
+        // credential behind. So the revoke happens before the error is even
+        // looked at, and a revoke that could not be done is recorded rather
+        // than dropped — an expiry is a backstop, and between here and it the
+        // credential is still good.
+        if let Some(lease) = &lease {
+            if let Err(why) = backend.revoke(&req, &bound, &stored, lease) {
+                let why = scrub_all(&why, &[Some(&stored), Some(presented)]);
+                narrowing_detail = Some(format!(
+                    "the short-lived credential was used but could not be \
+                     revoked, so it stands until it expires: {why}"
+                ));
+            }
+        }
+
+        let out = match performed {
             Ok(out) => out,
             // A provider is not supposed to put a credential in an error, and
             // one that does is not hypothetical: the natural way to write
@@ -586,8 +623,24 @@ impl Service {
             // above put the credential in the reply AND in the audit trail.
             // Refusals before that point cannot: there is nothing read yet.
             Err(e) => {
-                let reason = scrub_all(&e.to_string(), &[Some(&stored), minted.as_ref()]);
-                return refuse(&record, reason, kind_of(&e));
+                let reason = scrub_all(&e.to_string(), &[Some(&stored), minted.value()]);
+                // Not `refuse`: an operation that failed after a credential was
+                // presented is the one refusal that has a §13.4 outcome to
+                // report, and reporting it only on the successful path would
+                // leave the trail silent about exactly the runs worth reading.
+                self.record(AuditLine {
+                    reason: Some(reason.clone()),
+                    narrowing: narrowing.clone(),
+                    narrowing_detail: narrowing_detail.clone(),
+                    ..AuditLine::from_record(
+                        &audit_id,
+                        AuditEvent::Refused,
+                        peer.uid,
+                        peer.pid,
+                        &record,
+                    )
+                });
+                return Response::error(kind_of(&e), reason);
             }
         };
         // Three credentials in play now, not two: the stored one, a minted one,
@@ -600,7 +653,7 @@ impl Service {
             &out.output,
             &[
                 Some(&stored),
-                minted.as_ref(),
+                minted.value(),
                 out.created.as_ref().map(|c| &c.value),
             ],
         );
@@ -609,6 +662,8 @@ impl Service {
             endpoint: Some(endpoint.clone()),
             exit_code: Some(out.code),
             detail: bound.detail.clone(),
+            narrowing: narrowing.clone(),
+            narrowing_detail: narrowing_detail.clone(),
             ..AuditLine::from_record(&audit_id, AuditEvent::Used, peer.uid, peer.pid, &record)
         });
 
