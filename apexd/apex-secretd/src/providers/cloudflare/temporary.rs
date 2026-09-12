@@ -82,18 +82,41 @@
 //! generator's artefact, not a field a creation sends, and this module omits
 //! it.
 //!
-//! **Nothing here has ever run against `api.cloudflare.com`.** There is no
-//! Cloudflare account and no token on the machine this was built on. Every
-//! test runs against the loopback double in [`super::tests`], which answers
-//! nothing at all to a request with no `Authorization` header. Two things are
-//! therefore stated rather than measured, and both are in the agent card: the
-//! minimum `expires_on` Cloudflare will accept — [`LIFETIME_SECS`] is this
-//! build's choice and no documentation gives a floor — and whether a given
-//! account's stored token carries the permission to create tokens at all,
-//! which Cloudflare documents as requiring Super Administrator on the account.
-//! The second is the reason [`Minted::Denied`] is expected to be the common
-//! live answer rather than a rare one, and the reason a denial falls back to
-//! the stored token instead of refusing the operation.
+//! ## Run against `api.cloudflare.com` on 2026-09-12, and what that settled
+//!
+//! Every test still runs against the loopback double in [`super::tests`],
+//! which answers nothing at all to a request with no `Authorization` header.
+//! But the shipped path — this daemon, a token in its store, `curl` — was put
+//! against the real API once, through `Request::Use` on a private instance,
+//! and three things that had been *stated* are now *measured*. They are
+//! recorded here rather than in a plan because the next person to doubt them
+//! should not have to spend an account to find out.
+//!
+//! * **The permission-group names in [`POLICY`] are real.** The account
+//!   answered 391 groups in one page — no pagination to get wrong — including
+//!   `Account Settings Read`, `Workers Scripts Read`, `D1 Read` and
+//!   `D1 Write`, every one of them scoped `com.cloudflare.api.account`.
+//! * **`expires_on` five minutes out is accepted.** [`LIFETIME_SECS`] does not
+//!   sit under a floor Cloudflare enforces, and the token came back with a
+//!   `result.id` that the revoke then accepted. No revoke failed, so no
+//!   `narrowing_detail` was ever written for one.
+//! * **A stored token that is a Super Administrator's does mint**, so
+//!   [`Minted::Denied`] is not the only live answer. It remains the expected
+//!   one for an owner whose token is scoped, and the fallback stands.
+//!
+//! And one thing that had not been considered at all, which the live run found
+//! in its third request:
+//!
+//! * **A minted token is not usable the instant Cloudflare hands it back, and
+//!   which API you ask decides how long that lasts.** `cloudflare.account.read`
+//!   and `cloudflare.worker.read` succeeded on a token seconds old, every time.
+//!   `cloudflare.d1.read` and `cloudflare.d1.query` answered **HTTP 401 with
+//!   code 10000** on the same token, reproducibly — four attempts out of four —
+//!   while the same operation on the stored credential succeeded. Pausing
+//!   between the mint and the operation fixed it: three seconds, five and
+//!   twenty each succeeded twice out of two. The narrowing was turning a
+//!   working operation into an authentication failure — a `prefer` that made
+//!   things worse.
 
 use apex_secret_core::SecretValue;
 
@@ -110,10 +133,12 @@ use super::api::{self, Api, Body, Call};
 /// [`super::api::TIMEOUT_SECS`] leaves room for a slow upload without leaving
 /// a spendable credential lying around for an hour.
 ///
-/// **Not verified against Cloudflare.** No documentation this build could find
-/// states a minimum `expires_on`, and there is no account here to discover one
-/// against. If Cloudflare refuses a five-minute token, the refusal arrives as
-/// a 400 and this module answers [`Minted::CouldNotRun`] — the operation still
+/// **Measured against Cloudflare on 2026-09-12**, after being a guess for a
+/// day: a five-minute `expires_on` was accepted, on every one of the ten
+/// tokens that live run minted. No documentation states a floor and this build
+/// still does not know where one is; what it knows is that 300 is above it. If
+/// a later Cloudflare refuses a five-minute token, the refusal arrives as a
+/// 400 and this module answers [`Minted::CouldNotRun`] — the operation still
 /// runs, on the stored credential, and the trail says why.
 pub const LIFETIME_SECS: u64 = 300;
 
