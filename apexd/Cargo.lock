@@ -172,6 +172,8 @@ dependencies = [
  "apex-agent-core",
  "apex-remote-core",
  "libc",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
 ]
