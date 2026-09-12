@@ -13,10 +13,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 
@@ -143,3 +146,22 @@ fun ApexRemoteTheme(
     }
     MaterialTheme(colorScheme = scheme, typography = ApexTypography, content = content)
 }
+
+/**
+ * The width of the label column in a key/value row.
+ *
+ * Three screens lay a label beside a value in a `Row`: the session's telemetry
+ * gauges, its detail fields, and the guide's definition blocks. Each wrote the
+ * column as `Modifier.width(110.dp)`, and that is the commonest way a screen
+ * fails at large text. `dp` is a density unit; it does not move when the owner
+ * of the phone raises the system font scale. The label inside the column grows
+ * — the box holding it does not — so at a font scale of 2.0 the word "Context"
+ * wraps to two lines inside a column sized for one, while the gauge beside it
+ * sits where it always did.
+ *
+ * Scaling the column by the same `fontScale` the text obeys keeps the two
+ * growing together. At the default scale of 1.0 this is 110.dp exactly, so
+ * nothing moves for a user who has not asked for larger text.
+ */
+@Composable
+fun labelColumnWidth(base: Dp = 110.dp): Dp = base * LocalDensity.current.fontScale
