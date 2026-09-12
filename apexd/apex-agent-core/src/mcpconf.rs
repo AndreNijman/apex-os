@@ -514,18 +514,6 @@ impl Wrap {
             Wrap::NoProcess => "no_process",
         }
     }
-
-    /// The clause that keeps a "sandboxed" line from over-claiming.
-    ///
-    /// Empty for the values where there is nothing to qualify.
-    pub fn qualifier(&self) -> &'static str {
-        match self {
-            Wrap::InDefinition => "however the agent is started",
-            Wrap::AtLaunch => "in a session started through `apex agent`, and NOT when you run \
-                               the agent yourself",
-            Wrap::Not | Wrap::NoProcess => "",
-        }
-    }
 }
 
 /// Whether a connector reached the session, and what happened to it.
