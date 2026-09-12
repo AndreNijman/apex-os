@@ -12,10 +12,8 @@ tests/test-apex-lid-live.sh          needs a real SW_LID device and a logind ses
 #
 # ── DEBT: these can run headless and simply were never wired in ─────────────
 tests/test-apex-lid.sh               60 assertions for P1-063; no CI run has ever executed it
-tests/test-apex-firewall.sh          parses the shipped ruleset in a private netns via unshare
 tests/test-apex-firewall-ssh.sh      asserts the ssh allowance in the shipped ruleset
 tests/test-apex-devices.sh           55 assertions over six device areas
-tests/test-device-image.sh           41 assertions over the shipped device packages
 tests/test-device-services-netns.sh  12 assertions; sends real packets in a private netns
 tests/test-apex-trust-enforcement.sh the signature/provenance enforcement policy
 tests/test-secret-at-rest.sh         the at-rest property P0-002 earned
