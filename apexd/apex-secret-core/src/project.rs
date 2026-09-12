@@ -460,6 +460,25 @@ impl ProjectConfig {
         }
     }
 
+    /// A `true`/`false` at a dotted key, or nothing.
+    ///
+    /// **Only a TOML boolean.** `unattended = "true"` is refused rather than
+    /// read as true, and that is the whole point of the method existing: this
+    /// is the reader P1-014's environment protection is switched off with, so
+    /// the failure that matters is a file the owner believes says one thing
+    /// while the daemon reads another. A string that happens to spell `true`
+    /// is somebody configuring this and getting it wrong; reporting it as
+    /// absent would silently leave production protected while the file says it
+    /// is not, and — far worse in the other direction — a lenient reader that
+    /// accepted `"false"` as a boolean would have to decide what `"no"` means.
+    pub fn boolean(&self, keys: &[&str]) -> Result<Option<bool>, ProjectError> {
+        match self.at(keys) {
+            None => Ok(None),
+            Some(toml::Value::Boolean(b)) => Ok(Some(*b)),
+            Some(_) => Err(self.bad(keys, "true or false, unquoted")),
+        }
+    }
+
     /// A list of strings at a dotted key, or nothing.
     pub fn strings(&self, keys: &[&str]) -> Result<Vec<String>, ProjectError> {
         match self.at(keys) {
@@ -824,5 +843,43 @@ mod tests {
         .expect("parses");
         let err = wrong.pairs(&["cloudflare", "kv"]).unwrap_err();
         assert!(err.to_string().contains("cloudflare.kv.cache"), "{err}");
+    }
+
+    #[test]
+    fn a_boolean_is_only_a_boolean_and_a_quoted_one_is_refused() {
+        // §13.8's opt-out is read with this, and the failure that matters is a
+        // file whose owner believes it says one thing while the daemon reads
+        // another. `unattended = "true"` is somebody switching production
+        // protection off; reading it as absent would leave the environment
+        // protected while the file says it is not, and the person would go
+        // looking for the reason in the wrong place.
+        let cfg = ProjectConfig::parse(
+            Path::new("/p/apex.toml"),
+            "[cloudflare.production]\nunattended = true\n\n\
+             [cloudflare.staging]\nunattended = false\n\n\
+             [cloudflare.preview]\nworker = \"w\"\n",
+        )
+        .expect("parses");
+        assert_eq!(cfg.boolean(&["cloudflare", "production", "unattended"]), Ok(Some(true)));
+        assert_eq!(cfg.boolean(&["cloudflare", "staging", "unattended"]), Ok(Some(false)));
+        // Absent is `None` and not `Some(false)`: one is a default the owner
+        // may not know about, the other is a sentence they wrote.
+        assert_eq!(cfg.boolean(&["cloudflare", "preview", "unattended"]), Ok(None));
+
+        for quoted in [
+            "[cloudflare.production]\nunattended = \"true\"\n",
+            "[cloudflare.production]\nunattended = 1\n",
+            "[cloudflare.production]\nunattended = [\"true\"]\n",
+        ] {
+            let cfg = ProjectConfig::parse(Path::new("/p/apex.toml"), quoted).expect("parses");
+            let err = cfg
+                .boolean(&["cloudflare", "production", "unattended"])
+                .expect_err(quoted);
+            assert!(err.to_string().contains("true or false"), "{err}");
+            assert!(
+                err.to_string().contains("cloudflare.production.unattended"),
+                "the message has to name the key somebody has to fix: {err}"
+            );
+        }
     }
 }

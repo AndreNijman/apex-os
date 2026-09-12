@@ -347,7 +347,7 @@ fn a_credential_backed_operation_runs_and_the_credential_never_comes_back() {
     // The trail records the use, names where it went, and holds no credential.
     let entries = match daemon
         .client()
-        .call(&Request::Audit { lines: 50 })
+        .call(&Request::Audit { lines: 50, project: None })
         .expect("audit")
     {
         Response::Audit { entries } => entries,
@@ -409,7 +409,7 @@ fn nothing_the_socket_can_answer_contains_the_credential() {
         Request::Hello,
         Request::List,
         Request::Grants,
-        Request::Audit { lines: 100 },
+        Request::Audit { lines: 100, project: None },
         // A use that succeeds, and three that are refused at different steps.
         Request::Use {
             body_len: 0,
@@ -600,7 +600,7 @@ fn a_capability_that_was_not_granted_is_refused_and_recorded() {
 
     let entries = match daemon
         .client()
-        .call(&Request::Audit { lines: 50 })
+        .call(&Request::Audit { lines: 50, project: None })
         .expect("audit")
     {
         Response::Audit { entries } => entries,

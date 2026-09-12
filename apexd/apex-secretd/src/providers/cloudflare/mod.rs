@@ -227,10 +227,10 @@ use apex_secret_core::operation::{
 use apex_secret_core::project::{self, MAX_PAYLOAD};
 use apex_secret_core::SecretValue;
 
-use crate::provider::{Bind, Bound, Endpoint, Lease, Minted, Performed, Provider, ProviderError};
+use crate::provider::{Approval, Bind, Bound, Endpoint, Lease, Minted, Performed, Provider, ProviderError};
 
 use api::{Api, Body, Call, Multipart};
-use binding::{Account, Binding, BindingError, Bucket, Narrowing, Resource, Worker, Zone};
+use binding::{Account, Binding, BindingError, Bucket, Narrowing, Protection, Resource, Worker, Zone};
 use dns::{Lookup, Record};
 use tools::Tools;
 use temporary::Scope;
@@ -1184,6 +1184,71 @@ enum Target {
     /// §13.9 uses. A project that narrowed itself to some names cannot pin a
     /// credential to a different one.
     ServiceToken { account: Account, host: String },
+}
+
+/// The operations §13.8 protects: the ones that change what a worker **serves**.
+///
+/// ## Why this list is three names and not "every write"
+///
+/// §13.7's flow is `upload version -> preview -> health check -> staged traffic
+/// -> full deployment`, and §13.8's table sits on the last two steps of it. A
+/// build that asked for approval on every `Effect::Write` would ask for it at
+/// step one — before anything had been previewed, before anything had been
+/// health-checked, at the point where the agent has the least to show the
+/// person being asked. That is the worst possible moment to interrupt somebody,
+/// and it is how approval prompts get approved without being read.
+///
+/// So an upload to a protected environment is unattended. It puts a version on
+/// Cloudflare and changes nothing anybody is using; §13.7 separated the two
+/// halves precisely so this could be true.
+///
+/// **`cloudflare.secret.bind` is deliberately not here**, and it is the one
+/// that took a decision rather than a reading. It changes a live worker's
+/// bindings, which sounds like it belongs — but its RESOURCE is a secret in a
+/// store, and the worker arrives as an *option*. An approval is keyed on the
+/// operation and the resource, so protecting it would mean the owner approving
+/// `store/secret` and the agent choosing the worker. That is an approval for a
+/// thing the owner did not read, which is worse than no approval. Binding a
+/// secret is also not a deployment: the worker keeps serving the same code
+/// until something in this list runs.
+const PROTECTED_OPERATIONS: &[&str] = &[
+    "cloudflare.worker.deploy",
+    "cloudflare.worker.rollback",
+    "cloudflare.wrangler.deploy",
+];
+
+/// §13.8 for one resolved request.
+///
+/// Two things have to be true for the owner to be asked: the operation is one
+/// that changes what is served, and the worker it names is in an environment
+/// the project has not declared unattended.
+fn protection(op: &OperationSpec, target: &Target) -> Approval {
+    if !PROTECTED_OPERATIONS.contains(&op.id) {
+        return Approval::Standing;
+    }
+    // `Target::Worker` and nothing else. `Route` also carries a worker, but
+    // reading which routes a zone sends where changes nothing, and the day an
+    // operation writes a route is the day it is added to the list above with
+    // its own sentence.
+    let Target::Worker(worker) = target else {
+        return Approval::Standing;
+    };
+    match worker.protection {
+        Protection::Unattended => Approval::Standing,
+        Protection::ApprovalRequired => Approval::Required(format!(
+            "'{}' is this project's {} worker, and {} is not an environment an \
+             agent may deploy to on its own. Approve this one deployment with \
+             `apex secret approve cloudflare {} {}`, or let every deployment to \
+             it through by adding `unattended = true` under \
+             [cloudflare.{}] in apex.toml",
+            worker.name,
+            worker.environment,
+            worker.environment,
+            op.id,
+            worker.name,
+            worker.environment,
+        )),
+    }
 }
 
 impl From<BindingError> for ProviderError {
@@ -3455,6 +3520,9 @@ impl Provider for CloudflareProvider {
             },
             detail: CloudflareProvider::detail(req.operation, &target, req.params),
             creates,
+            // §13.8. The environment is in the binding, and this is the one
+            // place that knows it.
+            approval: protection(req.operation, &target),
         })
     }
 
