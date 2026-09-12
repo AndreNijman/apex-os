@@ -1066,6 +1066,11 @@ pub fn restore(
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
+                if let Err(why) = clear_the_way(&path, Kind::Symlink) {
+                    problems.push(why);
+                    consumed += entry.size;
+                    continue;
+                }
                 // A link is recreated exactly as it was, including one that
                 // points outside the tree. It is data, not a path this program
                 // follows.
@@ -1100,6 +1105,11 @@ pub fn restore(
                         path: parent.to_path_buf(),
                         why: e.to_string(),
                     })?;
+                }
+                if let Err(why) = clear_the_way(&path, Kind::File) {
+                    problems.push(why);
+                    consumed += entry.size;
+                    continue;
                 }
                 write_file(&path, &raw, entry.mode).map_err(|e| SessionError::Destination {
                     path: path.clone(),
@@ -1156,6 +1166,44 @@ pub fn restore(
     })
 }
 
+/// Make room for one restored entry, or say why there is none.
+///
+/// Only reachable with `--into-non-empty`, since an empty destination has
+/// nothing in the way. It exists because the suite found `apex backup restore`
+/// failing with `EEXIST` on a symlink that a previous restore had made — and
+/// looking at why turned up the worse half:
+///
+/// > if something at the path is a **symlink** and the entry is a regular
+/// > file, `File::create` FOLLOWS it. A destination that already holds
+/// > `etc/passwd -> /etc/passwd` would have this program — running as root,
+/// > because restoring needs the key — write the snapshot's bytes straight
+/// > through it, outside the destination entirely.
+///
+/// So anything in the way that is a symlink or a file is removed first, and the
+/// write itself is `O_NOFOLLOW` as well, so the guarantee does not depend on
+/// this function having run. A **directory** in the way is never removed: a
+/// restore may overwrite a file, and quietly deleting a tree because a snapshot
+/// has a file of that name is a different and much larger thing to do.
+fn clear_the_way(path: &Path, want: Kind) -> Result<(), String> {
+    let Ok(existing) = std::fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if existing.is_dir() {
+        return Err(format!(
+            "{} is a directory and the snapshot has a {} of that name. This \
+             build will not delete a directory to make room for one",
+            path.display(),
+            match want {
+                Kind::File => "file",
+                Kind::Symlink => "symbolic link",
+                Kind::Directory => "directory",
+            }
+        ));
+    }
+    std::fs::remove_file(path)
+        .map_err(|e| format!("{} could not be replaced: {e}", path.display()))
+}
+
 fn write_file(path: &Path, bytes: &[u8], mode: u32) -> Result<(), std::io::Error> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = std::fs::OpenOptions::new()
@@ -1165,6 +1213,10 @@ fn write_file(path: &Path, bytes: &[u8], mode: u32) -> Result<(), std::io::Error
         // The mode goes on the open, so a private file is never briefly
         // world-readable while its contents are written.
         .mode(mode)
+        // O_NOFOLLOW, so this can never write THROUGH a symbolic link that is
+        // already at the path. `clear_the_way` removes one first; this is what
+        // makes that a defence in depth rather than the only defence.
+        .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
     file.write_all(bytes)?;
     Ok(())

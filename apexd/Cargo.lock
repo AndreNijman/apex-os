@@ -99,6 +99,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "apex-agent-core",
+ "apex-backup-core",
  "apex-remote-core",
  "apex-secret-core",
  "apexd-core",

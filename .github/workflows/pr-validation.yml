@@ -1489,6 +1489,25 @@ jobs:
       - name: Run credential-migration assertions
         run: ./tests/test-secret-migrate.sh
 
+      # P2-001/P2-002's backup framework, end to end through the real CLI. Two
+      # things it MEASURES rather than asserts: that a canary planted in the
+      # source appears in no byte written to the target — chunks, manifest,
+      # head and the object names — and that a private key written by REAL
+      # root cannot be opened by the account that owns the backups. The second
+      # half uses `sudo -n`, which this runner has, and the suite says which
+      # assertions it did not make when that is missing rather than passing
+      # vacuously. Everything it touches is under one `mktemp -d -p /var/tmp`;
+      # APEX_BACKUP_KEYS keeps it out of /var/lib.
+      #
+      # There is no R2 section in it, and that is not an omission: `Api::loopback`
+      # is `#[cfg(test)]`, so a shipped apex-secretd always addresses
+      # api.cloudflare.com and the store's host pin would refuse a credential
+      # stored for anywhere else. The backup framework's own R2 call sequence is
+      # proven in the `rust` job instead, against the same loopback double that
+      # 401s an unauthenticated request.
+      - name: §13.5 backup — encrypted at rest, versioned restore, and the four verdicts
+        run: ./tests/test-apex-backup.sh
+
       - name: ShellCheck the privileged helpers
         run: |
           set -euo pipefail

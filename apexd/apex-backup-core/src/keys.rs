@@ -79,9 +79,11 @@ impl std::fmt::Display for KeyError {
             ),
             KeyError::Denied { path, why } => write!(
                 f,
-                "{} could not be read: {why}. That is a refusal and not an \
-                 absence — the key is almost certainly there, and restoring \
-                 needs root because the private half is root-owned on purpose",
+                "{} could not be opened: {why}. That is a refusal and not an \
+                 absence — the backup key directory is root-owned on purpose, \
+                 which is what stops anything running as you from reading or \
+                 replacing what your backups are sealed with. Try the same \
+                 command with sudo",
                 path.display()
             ),
             KeyError::Unavailable { path, why } => {

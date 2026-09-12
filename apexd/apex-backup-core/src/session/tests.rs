@@ -762,6 +762,126 @@ fn a_restore_refuses_a_destination_that_already_holds_something() {
     assert!(into.join("README.md").exists());
 }
 
+/// Found by `tests/test-apex-backup.sh`: a second restore into the same
+/// directory failed with EEXIST on the symlink the first one made.
+///
+/// The fix is not only about EEXIST. A symlink already at an entry's path is
+/// something `File::create` FOLLOWS — so a destination holding
+/// `etc/passwd -> /etc/passwd` would have had a root restore write the
+/// snapshot's bytes outside the destination entirely.
+#[test]
+fn restoring_again_over_an_existing_tree_replaces_it_rather_than_failing() {
+    let f = Fixture::new();
+    let written = f.run();
+    let into = f.target_root.parent().expect("parent").join("restored");
+    let first = restore(
+        &f.target(),
+        &written.id,
+        &f.identity,
+        &into,
+        &RestoreOptions::default(),
+    )
+    .expect("restores");
+    assert!(first.verdict.is_intact(), "{}", first.verdict);
+
+    let again = restore(
+        &f.target(),
+        &written.id,
+        &f.identity,
+        &into,
+        &RestoreOptions {
+            into_non_empty: true,
+        },
+    )
+    .expect("restores a second time");
+    assert!(
+        again.verdict.is_intact(),
+        "a second restore over the same tree did not verify: {}",
+        again.verdict
+    );
+    assert_eq!(again.symlinks, first.symlinks);
+    assert_eq!(
+        std::fs::read_link(into.join("link-to-main")).expect("reads"),
+        PathBuf::from("src/main.rs")
+    );
+}
+
+/// The dangerous half, on its own: a symlink planted where a file goes must not
+/// be written through.
+#[test]
+fn a_symlink_in_the_way_is_replaced_and_never_written_through() {
+    let f = Fixture::new();
+    let written = f.run();
+    let into = f.target_root.parent().expect("parent").join("restored");
+    let outside = f.target_root.parent().expect("parent").join("outside.txt");
+    std::fs::write(&outside, b"not the snapshot's business").expect("writes");
+
+    std::fs::create_dir_all(&into).expect("mkdir");
+    // Exactly what a previous run, or anything else that can write here, could
+    // leave behind.
+    std::os::unix::fs::symlink(&outside, into.join("README.md")).expect("symlink");
+
+    let restored = restore(
+        &f.target(),
+        &written.id,
+        &f.identity,
+        &into,
+        &RestoreOptions {
+            into_non_empty: true,
+        },
+    )
+    .expect("restores");
+    assert!(restored.verdict.is_intact(), "{}", restored.verdict);
+
+    assert_eq!(
+        std::fs::read(&outside).expect("reads"),
+        b"not the snapshot's business",
+        "the restore wrote THROUGH a symlink, outside its destination"
+    );
+    assert_eq!(
+        std::fs::read(into.join("README.md")).expect("reads"),
+        b"# a project\n"
+    );
+    assert!(
+        !std::fs::symlink_metadata(into.join("README.md"))
+            .expect("stats")
+            .file_type()
+            .is_symlink(),
+        "the symlink is still there"
+    );
+}
+
+/// Overwriting a file is one thing; deleting a directory to make room for a
+/// file of the same name is another, and this build does not do it.
+#[test]
+fn a_directory_in_the_way_is_reported_and_never_deleted() {
+    let f = Fixture::new();
+    let written = f.run();
+    let into = f.target_root.parent().expect("parent").join("restored");
+    std::fs::create_dir_all(into.join("README.md")).expect("mkdir");
+    std::fs::write(into.join("README.md/precious.txt"), b"do not lose me").expect("writes");
+
+    let restored = restore(
+        &f.target(),
+        &written.id,
+        &f.identity,
+        &into,
+        &RestoreOptions {
+            into_non_empty: true,
+        },
+    )
+    .expect("returns a report");
+    assert_eq!(restored.verdict.as_str(), "failed", "{}", restored.verdict);
+    assert!(restored
+        .verdict
+        .reason()
+        .is_some_and(|r| r.contains("will not delete a directory")));
+    assert_eq!(
+        std::fs::read(into.join("README.md/precious.txt")).expect("reads"),
+        b"do not lose me"
+    );
+}
+
 /// A manifest comes back from storage. A storage that can put `../../x` in one
 /// can have this program write it — as root, during a restore.
 #[test]
