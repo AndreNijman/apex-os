@@ -39,6 +39,7 @@ use apex_backup_core::keys::KeyStore;
 use apex_backup_core::session::{self, RestoreOptions, RunOptions};
 use apex_backup_core::target::fs::{FsTarget, Marker};
 use apex_backup_core::target::r2::{R2Target, SecretdBroker};
+use apex_backup_core::target::ssh::{SshCommand, SshTarget};
 use apex_backup_core::target::{Kind, Target};
 use clap::Subcommand;
 
@@ -338,11 +339,43 @@ fn open_target(setup: &Setup) -> Result<Box<dyn Target>> {
             &setup.config.prefix,
             &setup.project,
         ))),
+        Where::Remote { endpoint, root } => Ok(Box::new(SshTarget::new(
+            SshCommand,
+            endpoint.clone(),
+            root,
+            &setup.config.prefix,
+        ))),
     }
 }
 
 fn init(project: Option<&Path>) -> Result<i32> {
     let setup = setup(project)?;
+    // An ssh target has no marker to write — `apex backup init` on one is a
+    // connection test, which is the thing an operator actually wants before
+    // the first run: it proves the key is accepted, the host key matches the
+    // pinned one, and the remote directory can be created. A failure here is
+    // the ssh refusal in full, which is where the useful message is.
+    if let Where::Remote { endpoint, root } = &setup.config.where_to {
+        let target = SshTarget::new(
+            SshCommand,
+            endpoint.clone(),
+            root,
+            &setup.config.prefix,
+        );
+        target.prepare().map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("{} is ready.\n", target.describe());
+        println!(
+            "The host key was the pinned one, the key was accepted, and \
+             {root}/{} exists.",
+            setup.config.prefix
+        );
+        println!(
+            "\nThere is no marker file on an ssh target, so nothing catches a \
+             path typo the way it does on a directory target: the host key pin \
+             says WHICH MACHINE, and the path is taken as written."
+        );
+        return Ok(0);
+    }
     let Where::Directory { path, marker } = &setup.config.where_to else {
         bail!(
             "`apex backup init` marks a directory target so that an unmounted \
