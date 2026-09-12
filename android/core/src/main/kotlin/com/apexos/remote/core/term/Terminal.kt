@@ -185,15 +185,42 @@ class Terminal(
     // Feeding
     // ====================================================================
 
+    /**
+     * The lock every mutation takes and every reader must take.
+     *
+     * `Screen` moves whole lines between its grid and its scrollback, so a
+     * renderer walking the rows while bytes arrive does not read a slightly
+     * stale screen — it reads a torn one, or an index that stopped existing
+     * between the bounds check and the read. On a phone the reader is the
+     * main thread and the writer is a socket pump, so the two genuinely run
+     * at once.
+     *
+     * Held for a whole draw pass rather than per cell: a frame that is
+     * internally inconsistent is worse than a frame that is one pump-read
+     * old. [read] is the way to take it.
+     */
+    val lock: Any = Any()
+
+    /**
+     * Look at the screen under [lock].
+     *
+     * Every renderer, every search and every selection goes through this.
+     * The block should not be slow: the pump is blocked behind it, and a
+     * blocked pump is back-pressure onto somebody's terminal.
+     */
+    fun <T> read(block: (Screen) -> T): T = synchronized(lock) { block(screen) }
+
     fun feed(text: String) = feed(text.toByteArray(Charsets.UTF_8))
 
     fun feed(bytes: ByteArray) = feed(bytes, 0, bytes.size)
 
     fun feed(bytes: ByteArray, offset: Int, length: Int) {
-        for (i in offset until offset + length) {
-            step(bytes[i].toInt() and 0xFF)
+        synchronized(lock) {
+            for (i in offset until offset + length) {
+                step(bytes[i].toInt() and 0xFF)
+            }
+            revision++
         }
-        revision++
     }
 
     /**
@@ -952,9 +979,9 @@ class Terminal(
      * program is a terminal whose next repaint is the wrong shape. The two
      * are separate because only one of them can fail.
      */
-    fun resize(newCols: Int, newRows: Int) {
-        if (newCols <= 0 || newRows <= 0) return
-        if (newCols == cols && newRows == rows) return
+    fun resize(newCols: Int, newRows: Int) = synchronized(lock) {
+        if (newCols <= 0 || newRows <= 0) return@synchronized
+        if (newCols == cols && newRows == rows) return@synchronized
         normal.resize(newCols, newRows, bg)
         alternate.resize(newCols, newRows, bg)
         tabs = BooleanArray(newCols) { it % TAB_WIDTH == 0 }
@@ -974,7 +1001,7 @@ class Terminal(
      * so a terminal that still held the previous attachment's screen would
      * show the last few hundred lines twice.
      */
-    fun reset() {
+    fun reset() = synchronized(lock) {
         normal.clearGrid(Colour.DEFAULT)
         normal.clearScrollback()
         alternate.clearGrid(Colour.DEFAULT)

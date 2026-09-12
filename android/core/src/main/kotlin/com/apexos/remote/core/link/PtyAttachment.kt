@@ -22,6 +22,14 @@ sealed class AttachmentEvent {
     /** The connection dropped and another attempt is coming in [inMs]. */
     data class Lost(val cause: Throwable?, val inMs: Long) : AttachmentEvent()
 
+    /**
+     * The session on the machine ended, so there is nothing to re-attach to.
+     *
+     * Distinct from [Lost] on purpose: a connection that dropped comes back,
+     * and a session that exited does not. The screen should say which.
+     */
+    data class Ended(val reason: String) : AttachmentEvent()
+
     /** [PtyAttachment.stop] was called, or the loop gave up. */
     data object Stopped : AttachmentEvent()
 }
@@ -103,8 +111,11 @@ class PtyAttachment(
         override fun onClose(channel: UInt, reason: String) {
             if (channel != channelId) return
             // The session on the far side has exited. Not a reconnect: there
-            // is nothing left to attach to.
+            // is nothing left to attach to. The reason is carried out rather
+            // than swallowed — "session 4 exited" is a thing to say, and a
+            // terminal that simply stopped would look like a network fault.
             stopped = true
+            onEvent(AttachmentEvent.Ended(reason))
             runCatching { mux?.close() }
         }
 
@@ -156,7 +167,7 @@ class PtyAttachment(
                 pump.join(JOIN_MS)
                 return Outcome.Lost(e)
             }
-            if (!isAttached(reply)) {
+            if (!attachAccepted(reply.toByteArray(Charsets.UTF_8))) {
                 // The daemon answered something that is not `attached`: no
                 // such session, or one that has already exited. Its words go
                 // to the screen and the loop stops, because retrying a session
@@ -235,13 +246,6 @@ class PtyAttachment(
          * place to be.
          */
         const val RESIZE_TIMEOUT_MS: Long = 15_000
-
-        fun isAttached(reply: String): Boolean =
-            // Read out of the text rather than parsed, because this is `:core`
-            // and the reply's full shape belongs to the layer that renders it.
-            // Key order is not fixed on the wire, so the two halves are looked
-            // for independently.
-            reply.contains("\"reply\"") && reply.contains("\"attached\"")
     }
 }
 

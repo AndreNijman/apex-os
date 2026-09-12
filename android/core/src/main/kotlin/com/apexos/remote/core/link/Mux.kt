@@ -44,7 +44,19 @@ import java.util.concurrent.TimeoutException
  * Everything else it touches is either a concurrent structure or guarded by
  * [lock]. Sending is safe from any thread because the channel serialises it.
  */
-class Mux(private val channel: FrameChannel, private val listener: Listener) : Closeable {
+class Mux(
+    private val channel: FrameChannel,
+    private val listener: Listener,
+    /**
+     * Whether a reply to an `Open` means the channel is now carrying a PTY.
+     *
+     * A parameter because the daemon answers an `Open` with either
+     * `{"reply":"attached",…}` or an error, and a channel recorded as open on
+     * an error is a channel whose trailing `Close("")` would then be reported
+     * as "the session ended" — a refusal dressed up as a bereavement.
+     */
+    private val accepted: (ByteArray) -> Boolean = ::attachAccepted,
+) : Closeable {
     /** What the owner of a [Mux] is told about the channels on it. */
     interface Listener {
         /** Terminal bytes for an open channel. */
@@ -135,7 +147,10 @@ class Mux(private val channel: FrameChannel, private val listener: Listener) : C
             val head = pending.firstOrNull() ?: return false
             if (close != null && head.channel != close.channel) return false
             pending.removeFirst()
-            if (reply != null && head.channel != null) open.add(head.channel)
+            // Recorded on the pump thread and not by the caller, because the
+            // desktop sends the scrollback immediately after the reply: the
+            // first `Data` frame can arrive before the caller has woken up.
+            if (reply != null && head.channel != null && accepted(reply)) open.add(head.channel)
             head
         }
         if (reply != null) {
@@ -267,6 +282,18 @@ class Mux(private val channel: FrameChannel, private val listener: Listener) : C
          */
         const val CONTROL_TIMEOUT_MS: Long = 300_000
     }
+}
+
+/**
+ * `apex-agentd` said `attached`, and therefore this channel is a PTY.
+ *
+ * Read out of the text rather than parsed: key order is not fixed on the wire,
+ * so the two halves are looked for independently, and `:core` has no business
+ * knowing the reply's full shape.
+ */
+fun attachAccepted(reply: ByteArray): Boolean {
+    val text = reply.toString(Charsets.UTF_8)
+    return text.contains("\"reply\"") && text.contains("\"attached\"")
 }
 
 /** The connection ended, with or without a reason. */
