@@ -192,11 +192,38 @@ impl Work {
     }
 }
 
-/// The hottest temperature the machine will admit to, in degrees Celsius.
+/// The hottest temperature the machine will admit to, and what the hardware
+/// itself calls critical for that same sensor.
+///
+/// ── Why `critical_c` exists, and what happened without it ────────────────────
+///
+/// The first version of this guard fired at a fixed 85 °C. Measured on the L16
+/// on 2026-09-12, the hottest sensor the kernel exposes is `acpitz`, which
+/// reads **76 °C with the lid open, the fans running and the machine barely
+/// loaded** — and whose own `critical` trip point is **128 °C**. An absolute
+/// ceiling of 85 would therefore have suspended that machine within minutes of
+/// every lid close, for a sensor sitting 52 degrees below the level its
+/// firmware considers dangerous. A safety guard that fires constantly is not a
+/// safety guard; it is a feature nobody can use, and it would have been
+/// discovered by Andre in a lecture theatre rather than here.
+///
+/// So the primary rule is **headroom to the limit the hardware declares**, and
+/// the absolute ceiling is a backstop for sensors that declare no limit at all.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "thermal", rename_all = "kebab-case")]
 pub enum Thermal {
-    Celsius { c: f64 },
+    Celsius {
+        c: f64,
+        /// The `critical` trip point of the sensor that produced `c`, when that
+        /// sensor declares one. One sensor, its reading, its own limit —
+        /// comparing one chip's temperature against another chip's trip point
+        /// would be worse than having no trip points at all.
+        #[serde(default)]
+        critical_c: Option<f64>,
+        /// Which sensor. Named so the report can say what got hot.
+        #[serde(default)]
+        sensor: String,
+    },
     /// There is no temperature sensor at all. Absence, not failure — and still
     /// not safe: see [`LidPolicy::require_thermal`].
     NoSensor,
@@ -207,31 +234,104 @@ pub enum Thermal {
 impl Thermal {
     pub fn celsius(&self) -> Option<f64> {
         match self {
-            Thermal::Celsius { c } => Some(*c),
+            Thermal::Celsius { c, .. } => Some(*c),
             _ => None,
         }
     }
 
-    /// Read the live machine's hottest sensor under `sys_root`.
-    ///
-    /// Reuses [`crate::fan::read_curve_temp`], which already knows the sensor
-    /// ladder (preferred package chips, then any hwmon, then the thermal
-    /// zones). The one thing it cannot express is the difference between "this
-    /// machine has no sensors" and "the sensors are there and would not read",
-    /// which is exactly the distinction this policy turns on — so the two are
-    /// separated here by asking whether the class directories exist at all.
-    pub fn read(sys_root: &Path) -> Thermal {
-        if let Some(c) = crate::fan::read_curve_temp(sys_root) {
-            return Thermal::Celsius { c };
+    /// Degrees between the current reading and the limit the hardware declares
+    /// for that same sensor. `None` when the sensor declares no limit.
+    pub fn headroom_c(&self) -> Option<f64> {
+        match self {
+            Thermal::Celsius { c, critical_c: Some(crit), .. } => Some(crit - c),
+            _ => None,
         }
+    }
+
+    /// Read the live machine's hottest sensor under `sys_root`, together with
+    /// that sensor's own critical trip point.
+    ///
+    /// Two sources, walked together because neither is universal:
+    ///
+    /// * `class/hwmon/*/tempN_input`, whose limit is `tempN_crit` (a few
+    ///   drivers spell it `tempN_max` and nothing else, so that is the
+    ///   fallback);
+    /// * `class/thermal/thermal_zone*/temp`, whose limit is the lowest
+    ///   `trip_point_*_temp` whose `_type` reads `critical`.
+    ///
+    /// Readings outside 0-150 °C are discarded: a sensor reporting -274 or
+    /// 3276.7 is a driver fault, and feeding it to a guard would either suspend
+    /// the machine instantly or never.
+    ///
+    /// The difference between "this machine has no sensors" and "the sensors
+    /// are there and would not read" is the distinction this policy turns on,
+    /// so the two are separated by asking whether the class directories exist.
+    pub fn read(sys_root: &Path) -> Thermal {
+        let mut best: Option<(f64, Option<f64>, String)> = None;
+        let mut consider = |c: f64, crit: Option<f64>, name: String| {
+            if !(0.0..=150.0).contains(&c) {
+                return;
+            }
+            if best.as_ref().map(|(b, _, _)| c > *b).unwrap_or(true) {
+                best = Some((c, crit, name));
+            }
+        };
+
         let hwmon = sys_root.join("class/hwmon");
         let thermal = sys_root.join("class/thermal");
+
+        if let Ok(entries) = std::fs::read_dir(&hwmon) {
+            for e in entries.flatten() {
+                let dir = e.path();
+                let chip = read_trim(&dir.join("name")).unwrap_or_else(|| {
+                    dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+                });
+                for n in 1..=32u32 {
+                    let Some(milli) = read_num(&dir.join(format!("temp{n}_input"))) else {
+                        continue;
+                    };
+                    let crit = read_num(&dir.join(format!("temp{n}_crit")))
+                        .or_else(|| read_num(&dir.join(format!("temp{n}_max"))))
+                        .map(|m| m / 1000.0);
+                    let label = read_trim(&dir.join(format!("temp{n}_label")))
+                        .unwrap_or_else(|| format!("temp{n}"));
+                    consider(milli / 1000.0, crit, format!("{chip}/{label}"));
+                }
+            }
+        }
+
+        if let Ok(entries) = std::fs::read_dir(&thermal) {
+            for e in entries.flatten() {
+                let dir = e.path();
+                let Some(milli) = read_num(&dir.join("temp")) else { continue };
+                let kind = read_trim(&dir.join("type")).unwrap_or_else(|| {
+                    dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+                });
+                let mut crit: Option<f64> = None;
+                for i in 0..16u32 {
+                    let t = dir.join(format!("trip_point_{i}_type"));
+                    if read_trim(&t).as_deref() != Some("critical") {
+                        continue;
+                    }
+                    if let Some(v) = read_num(&dir.join(format!("trip_point_{i}_temp"))) {
+                        let c = v / 1000.0;
+                        crit = Some(crit.map_or(c, |b: f64| b.min(c)));
+                    }
+                }
+                consider(milli / 1000.0, crit, kind);
+            }
+        }
+
+        if let Some((c, critical_c, sensor)) = best {
+            return Thermal::Celsius { c, critical_c, sensor };
+        }
+
         let hwmon_there = hwmon.is_dir();
         let thermal_there = thermal.is_dir();
         if !hwmon_there && !thermal_there {
             return Thermal::NoSensor;
         }
-        // Directories are present but nothing in them yielded a plausible
+        // Directories are present and nothing in them yielded a plausible
         // reading. That is a failed read, and it is reported as one: an empty
         // `class/hwmon` on a laptop means a driver did not bind, not that the
         // machine runs cold.
@@ -243,7 +343,10 @@ impl Thermal {
             match std::fs::read_dir(dir) {
                 Ok(entries) => {
                     let n = entries.count();
-                    seen.push(format!("{} has {n} entries and none reported a usable temperature", dir.display()));
+                    seen.push(format!(
+                        "{} has {n} entries and none reported a usable temperature",
+                        dir.display()
+                    ));
                 }
                 Err(e) => seen.push(format!("{} could not be listed: {e}", dir.display())),
             }
@@ -478,12 +581,24 @@ pub struct LidPolicy {
     /// with enough left to resume and finish, not to squeeze the last watt out
     /// and hand the owner a dead laptop and a half-written file.
     pub battery_floor_pct: u8,
-    /// Temperature at or above which the thermal guard fires, in Celsius.
+    /// How close to the hardware's own `critical` trip the hottest sensor may
+    /// get before the thermal guard fires, in degrees.
     ///
-    /// 85 is below every `Critical` trip point on the hardware APEX has been
-    /// measured on and above any sustained load temperature a closed,
-    /// mostly-idle machine should reach. A lid-closed machine in a bag has no
-    /// airflow, so this is a *lower* ceiling than an open machine would use.
+    /// **The primary thermal rule.** A machine's firmware already knows what
+    /// temperature is dangerous for its own silicon, and it publishes that
+    /// number; inventing a different one in software is how a guard ends up
+    /// either useless or permanently on. 15 degrees is enough warning to
+    /// checkpoint and suspend before a firmware thermal trip takes the decision
+    /// away.
+    pub thermal_headroom_c: f64,
+    /// The backstop, for a sensor that declares no critical trip at all.
+    ///
+    /// Only consulted when `critical_c` is `None`. 95 rather than 85: an
+    /// absolute ceiling applied to whichever chip happens to be hottest is a
+    /// blunt instrument, and it was measured to be the wrong one — the L16's
+    /// hottest exposed sensor reads 76 °C with the lid open and the fans
+    /// running, which an 85 °C ceiling would have turned into a suspend a few
+    /// minutes into every lid close.
     pub thermal_ceiling_c: f64,
     /// Whether a machine with no temperature sensor at all may stay awake.
     ///
@@ -507,7 +622,8 @@ impl Default for LidPolicy {
             enabled: true,
             pin: Pin::Auto,
             battery_floor_pct: 20,
-            thermal_ceiling_c: 85.0,
+            thermal_headroom_c: 15.0,
+            thermal_ceiling_c: 95.0,
             require_thermal: true,
             poll_secs: 30,
             powerdown: PowerDown::default(),
@@ -658,13 +774,33 @@ impl LidPolicy {
         // Thermal first: it is the guard whose failure damages hardware, where
         // the battery guard's failure loses a session's work.
         match &inputs.thermal {
-            Thermal::Celsius { c } if *c >= self.thermal_ceiling_c => {
+            // Primary rule: headroom to the limit the hardware itself declares.
+            Thermal::Celsius { c, critical_c: Some(crit), sensor }
+                if crit - c <= self.thermal_headroom_c =>
+            {
                 return LidDecision::GuardSuspend {
                     guard: Guard::Thermal,
                     why: format!(
-                        "{closed_as} and the hottest sensor reads {c:.1} °C, at or above the \
-                         {:.1} °C lid-closed ceiling — a shut lid has no airflow, so the \
-                         machine suspends rather than cook ({want} checkpointed first)",
+                        "{closed_as} and {sensor} reads {c:.1} °C, within {:.1} °C of the \
+                         {crit:.1} °C its own firmware calls critical (the limit is {:.1} °C \
+                         of headroom) — a shut lid has no airflow, so the machine suspends \
+                         rather than cook ({want} checkpointed first)",
+                        crit - c,
+                        self.thermal_headroom_c
+                    ),
+                }
+            }
+            // Backstop, for a sensor that declares no critical trip.
+            Thermal::Celsius { c, critical_c: None, sensor }
+                if *c >= self.thermal_ceiling_c =>
+            {
+                return LidDecision::GuardSuspend {
+                    guard: Guard::Thermal,
+                    why: format!(
+                        "{closed_as} and {sensor} reads {c:.1} °C, at or above the {:.1} °C \
+                         backstop — that sensor declares no critical trip, so there is no \
+                         hardware limit to measure headroom against ({want} checkpointed \
+                         first)",
                         self.thermal_ceiling_c
                     ),
                 }
@@ -985,6 +1121,10 @@ impl ClosedPeriod {
     }
 }
 
+fn read_num(path: &Path) -> Option<f64> {
+    read_trim(path).and_then(|s| s.parse::<f64>().ok())
+}
+
 fn read_trim(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
@@ -997,8 +1137,20 @@ mod tests {
         LidInputs { lid, work, thermal, charge }
     }
 
+    /// A sensor that declares no critical trip, so the absolute backstop is
+    /// the rule that applies.
+    fn bare(c: f64) -> Thermal {
+        Thermal::Celsius { c, critical_c: None, sensor: "acpitz".to_string() }
+    }
+
+    /// A sensor that declares its own limit, which is the normal case and the
+    /// primary rule.
+    fn with_crit(c: f64, crit: f64) -> Thermal {
+        Thermal::Celsius { c, critical_c: Some(crit), sensor: "k10temp/Tctl".to_string() }
+    }
+
     fn cool() -> Thermal {
-        Thermal::Celsius { c: 45.0 }
+        with_crit(45.0, 110.0)
     }
 
     fn busy() -> Work {
@@ -1069,7 +1221,7 @@ mod tests {
         let d = p.decide(&inputs(
             LidState::Open,
             busy(),
-            Thermal::Celsius { c: 99.0 },
+            bare(99.0),
             Charge::Battery { percent: 3 },
         ));
         assert_eq!(d.guard(), None, "an open lid must not suspend the machine: {d:?}");
@@ -1079,31 +1231,48 @@ mod tests {
     // ── criterion 5: guards fire and name themselves ─────────────────────────
 
     #[test]
-    fn the_thermal_guard_fires_at_the_ceiling_and_names_itself() {
+    fn the_thermal_guard_fires_on_headroom_to_the_hardwares_own_limit() {
+        // 96 against a 110 critical is 14 degrees of headroom, inside the
+        // default 15.
         let p = LidPolicy::default();
-        let d = p.decide(&inputs(
-            LidState::Closed,
-            busy(),
-            Thermal::Celsius { c: 85.0 },
-            Charge::Ac,
-        ));
+        let d = p.decide(&inputs(LidState::Closed, busy(), with_crit(96.0, 110.0), Charge::Ac));
         assert_eq!(d.guard(), Some(Guard::Thermal), "{d:?}");
         assert!(d.suspends_now());
-        assert!(d.why().contains("85.0 °C"), "{}", d.why());
+        assert!(d.why().contains("110.0 °C its own firmware calls critical"), "{}", d.why());
+        assert!(d.why().contains("k10temp/Tctl"), "the sensor must be named: {}", d.why());
     }
 
     #[test]
-    fn one_degree_below_the_ceiling_keeps_working() {
-        // The boundary in both directions, so `>=` cannot silently become `>`.
+    fn one_degree_more_headroom_keeps_working() {
+        // The boundary in both directions, so `<=` cannot silently become `<`.
         let p = LidPolicy::default();
-        let d = p.decide(&inputs(
-            LidState::Closed,
-            busy(),
-            Thermal::Celsius { c: 84.9 },
-            Charge::Ac,
-        ));
+        let d = p.decide(&inputs(LidState::Closed, busy(), with_crit(94.9, 110.0), Charge::Ac));
         assert_eq!(d.guard(), None, "{d:?}");
         assert!(d.holds_inhibitor());
+    }
+
+    #[test]
+    fn a_hot_sensor_with_a_generous_limit_is_not_an_emergency() {
+        // Measured on the L16 on 2026-09-12: acpitz reads 76 °C with the lid
+        // OPEN and the fans running, and its own critical trip is 128 °C. The
+        // first version of this guard used a flat 85 °C ceiling and would have
+        // suspended that machine minutes into every lid close. This test is the
+        // reason the rule changed.
+        let p = LidPolicy::default();
+        let d = p.decide(&inputs(LidState::Closed, busy(), with_crit(76.0, 128.0), Charge::Ac));
+        assert_eq!(d.guard(), None, "52 degrees of headroom is not an emergency: {d:?}");
+        assert!(d.holds_inhibitor());
+    }
+
+    #[test]
+    fn a_sensor_with_no_declared_limit_falls_back_to_the_backstop() {
+        let p = LidPolicy::default();
+        let d = p.decide(&inputs(LidState::Closed, busy(), bare(95.0), Charge::Ac));
+        assert_eq!(d.guard(), Some(Guard::Thermal), "{d:?}");
+        assert!(d.why().contains("declares no critical trip"), "{}", d.why());
+
+        let d = p.decide(&inputs(LidState::Closed, busy(), bare(94.9), Charge::Ac));
+        assert_eq!(d.guard(), None, "{d:?}");
     }
 
     #[test]
@@ -1186,7 +1355,7 @@ mod tests {
         let d = p.decide(&inputs(
             LidState::Closed,
             busy(),
-            Thermal::Celsius { c: 95.0 },
+            with_crit(105.0, 110.0),
             Charge::Battery { percent: 2 },
         ));
         assert_eq!(d.guard(), Some(Guard::Thermal), "{d:?}");
@@ -1210,7 +1379,7 @@ mod tests {
         let d = p.decide(&inputs(
             LidState::Closed,
             quiet(),
-            Thermal::Celsius { c: 90.0 },
+            with_crit(100.0, 110.0),
             Charge::Ac,
         ));
         assert_eq!(d.guard(), Some(Guard::Thermal), "a pin must not disable a guard: {d:?}");
@@ -1247,7 +1416,7 @@ mod tests {
         let d = p.decide(&inputs(
             LidState::Unreadable { why: "UPower did not answer".to_string() },
             busy(),
-            Thermal::Celsius { c: 90.0 },
+            with_crit(100.0, 110.0),
             Charge::Ac,
         ));
         assert_eq!(d.guard(), Some(Guard::Thermal), "{d:?}");
@@ -1270,8 +1439,10 @@ mod tests {
             Work::Unreadable { why: "y".into() },
         ];
         let thermals = [
-            Thermal::Celsius { c: 40.0 },
-            Thermal::Celsius { c: 90.0 },
+            with_crit(40.0, 110.0),
+            with_crit(100.0, 110.0),
+            bare(40.0),
+            bare(100.0),
             Thermal::NoSensor,
             Thermal::Unreadable { why: "z".into() },
         ];
@@ -1306,9 +1477,16 @@ mod tests {
                             // closed machine.
                             if d.holds_inhibitor() && lid.treat_as_closed() {
                                 match thermal {
-                                    Thermal::Celsius { c } => assert!(
+                                    Thermal::Celsius { c, critical_c: Some(crit), .. } => {
+                                        assert!(
+                                            crit - c > p.thermal_headroom_c,
+                                            "held the lid open {:.1} °C from critical: {i:?}",
+                                            crit - c
+                                        )
+                                    }
+                                    Thermal::Celsius { c, critical_c: None, .. } => assert!(
                                         *c < p.thermal_ceiling_c,
-                                        "held the lid open at {c} °C: {i:?}"
+                                        "held the lid open at {c} °C with no declared limit: {i:?}"
                                     ),
                                     Thermal::NoSensor => assert!(
                                         !p.require_thermal,
@@ -1343,7 +1521,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(n, 4 * 3 * 4 * 5 * 3, "the matrix shrank");
+        assert_eq!(n, 4 * 3 * 6 * 5 * 3, "the matrix shrank");
     }
 
     // ── the power-down plan ──────────────────────────────────────────────────
@@ -1536,7 +1714,54 @@ mod tests {
         let t3 = Tmp::new("hot");
         t3.write("class/hwmon/hwmon0/name", "coretemp\n");
         t3.write("class/hwmon/hwmon0/temp1_input", "73500\n");
-        assert_eq!(Thermal::read(&t3.0), Thermal::Celsius { c: 73.5 });
+        assert_eq!(
+            Thermal::read(&t3.0),
+            Thermal::Celsius { c: 73.5, critical_c: None, sensor: "coretemp/temp1".to_string() },
+            "a chip with no tempN_crit must report no limit, not a guessed one"
+        );
+
+        // The same chip, now declaring its own limit.
+        let t4 = Tmp::new("crit");
+        t4.write("class/hwmon/hwmon0/name", "k10temp\n");
+        t4.write("class/hwmon/hwmon0/temp1_label", "Tctl\n");
+        t4.write("class/hwmon/hwmon0/temp1_input", "73500\n");
+        t4.write("class/hwmon/hwmon0/temp1_crit", "110000\n");
+        assert_eq!(
+            Thermal::read(&t4.0),
+            Thermal::Celsius {
+                c: 73.5,
+                critical_c: Some(110.0),
+                sensor: "k10temp/Tctl".to_string()
+            }
+        );
+
+        // A thermal zone takes its limit from the LOWEST `critical` trip, and
+        // ignores `hot`/`passive` trips, which are not the same thing.
+        let t5 = Tmp::new("zone");
+        t5.write("class/thermal/thermal_zone0/type", "acpitz\n");
+        t5.write("class/thermal/thermal_zone0/temp", "76000\n");
+        t5.write("class/thermal/thermal_zone0/trip_point_0_type", "critical\n");
+        t5.write("class/thermal/thermal_zone0/trip_point_0_temp", "128000\n");
+        t5.write("class/thermal/thermal_zone0/trip_point_1_type", "hot\n");
+        t5.write("class/thermal/thermal_zone0/trip_point_1_temp", "127000\n");
+        assert_eq!(
+            Thermal::read(&t5.0),
+            Thermal::Celsius {
+                c: 76.0,
+                critical_c: Some(128.0),
+                sensor: "acpitz".to_string()
+            },
+            "the `hot` trip is not the critical one"
+        );
+
+        // A driver reporting nonsense must not become a guard input.
+        let t6 = Tmp::new("nonsense");
+        t6.write("class/thermal/thermal_zone0/type", "broken\n");
+        t6.write("class/thermal/thermal_zone0/temp", "-274000\n");
+        match Thermal::read(&t6.0) {
+            Thermal::Unreadable { .. } => {}
+            other => panic!("a -274 °C reading must not be believed: {other:?}"),
+        }
     }
 
     #[test]
@@ -1592,7 +1817,8 @@ mod tests {
         assert_eq!(p.battery_floor_pct, 35);
         assert!(p.enabled, "enabled was silently turned off");
         assert!(p.require_thermal, "require_thermal was silently turned off");
-        assert_eq!(p.thermal_ceiling_c, 85.0);
+        assert_eq!(p.thermal_ceiling_c, 95.0);
+        assert_eq!(p.thermal_headroom_c, 15.0);
         assert_eq!(p.pin, Pin::Auto);
         assert!(p.powerdown.display, "the powerdown block was zeroed");
         assert!(
