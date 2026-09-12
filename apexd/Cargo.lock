@@ -200,6 +200,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tempfile",
  "toml",
 ]
 
@@ -212,6 +213,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

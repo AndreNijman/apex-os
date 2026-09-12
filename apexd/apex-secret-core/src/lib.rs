@@ -57,6 +57,7 @@
 pub mod audit;
 pub mod capability;
 pub mod client;
+pub mod identity;
 pub mod operation;
 pub mod paths;
 pub mod project;
