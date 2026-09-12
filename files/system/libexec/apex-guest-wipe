@@ -76,7 +76,40 @@ log()  { printf 'apex-guest-wipe: %s\n' "$*" >&2; }
 deny() { log "refusing: $*"; exit 2; }
 
 account="${1:-}"
-[ -n "$account" ] || { log "usage: ${0##*/} <account>"; exit 2; }
+[ -n "$account" ] || { log "usage: ${0##*/} <account|uid>"; exit 2; }
+
+# ── the argument may be a uid ────────────────────────────────────────────────
+#
+# systemd names a user slice by uid — `user-1042.slice` — so
+# apex-guest-session@.service, which hangs off that slice and runs the wipe at
+# session end, can only be instanced by uid. The allowlist stays a list of
+# NAMES: a uid is a number the system may hand to somebody else after a
+# `userdel`, a name is what an administrator wrote down. So a numeric argument
+# is resolved through passwd once, here, and every fence below works on the
+# name exactly as it did before.
+#
+# An unresolvable uid is a refusal rather than a fall-through to treating the
+# digits as an account name — otherwise an allowlist that happened to contain a
+# line of digits would authorise a wipe nobody asked for.
+#
+# The ambiguous case is an account literally NAMED "1042". getent resolves a
+# numeric argument as a uid first, so this would find the uid-1042 account and
+# not the one named "1042"; useradd(8) refuses an all-digit name for exactly
+# this class of reason, so it is not a case that can arise from a supported
+# path.
+case "$account" in
+    ''|*[!0-9]*) : ;;
+    *)
+        if [ -n "${APEX_GUEST_PASSWD:-}" ]; then
+            resolved="$(awk -F: -v u="$account" '$3 == u { print $1; exit }' "$APEX_GUEST_PASSWD")"
+        else
+            resolved="$(getent passwd "$account" 2>/dev/null | cut -d: -f1)"
+        fi
+        [ -n "$resolved" ] || deny "no account on this machine has uid $account"
+        log "uid $account is the account '$resolved'"
+        account="$resolved"
+        ;;
+esac
 
 # ── fence 1: the allowlist ───────────────────────────────────────────────────
 #
