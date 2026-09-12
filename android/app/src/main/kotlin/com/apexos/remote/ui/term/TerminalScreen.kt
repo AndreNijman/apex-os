@@ -17,7 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
@@ -515,12 +515,14 @@ private fun AccessoryRow(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp),
         ) {
-            items(keys, key = { it.label + it.action }) { key ->
+            // Indexed, because a configurable row may legitimately hold two
+            // identical buttons and a duplicate key crashes a LazyRow.
+            itemsIndexed(keys) { _, key ->
                 // A stored action this build does not understand is not shown
                 // rather than crashing the row: `AccessoryKeys.parse` answers
                 // null, and a row written by a newer version must not stop the
                 // app opening.
-                val action = AccessoryKeys.parse(key.action) ?: return@items
+                val action = AccessoryKeys.parse(key.action) ?: return@itemsIndexed
                 val lit = action is AccessoryAction.Modifier &&
                     ((action.ctrl && armed.ctrl) || (action.alt && armed.alt))
                 AccessoryButton(key.label, lit) { onAction(action) }

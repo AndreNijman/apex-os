@@ -175,19 +175,44 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         poll = null
         terminal?.close()
         terminal = null
-        links.values.forEach { runCatching { it.close() } }
+        // Closing a `MachineLink` writes to and shuts a socket, and Android
+        // kills a process that touches a socket on the main thread —
+        // `StrictMode.enableDeathOnNetwork()` is on for every app targeting
+        // API 11 or later and a debug build does not relax it. The keys and
+        // the visible state go immediately, on this thread, because those are
+        // what "locked" means; the sockets follow.
+        val closing = links.values.toList()
         links.clear()
         identities.clear()
         _state.update {
             it.copy(unlocked = false, connection = null, agents = AgentUiState())
         }
+        viewModelScope.launch(Dispatchers.IO) {
+            closing.forEach { runCatching { it.close() } }
+        }
+    }
+
+    /** Stop polling. Called when the Agent Center is no longer on screen. */
+    fun leaveAgents() {
+        poll?.cancel()
+        poll = null
     }
 
     override fun onCleared() {
         super.onCleared()
         terminal?.close()
-        links.values.forEach { runCatching { it.close() } }
+        val closing = links.values.toList()
+        links.clear()
         identities.clear()
+        // `viewModelScope` is cancelled by the time this runs, so the closes
+        // go to a plain thread rather than a coroutine that would never start.
+        // Daemon, because a process on its way out must not be held open by a
+        // socket close that is waiting on a machine that has gone.
+        if (closing.isNotEmpty()) {
+            Thread({ closing.forEach { runCatching { it.close() } } }, "apex-link-close").apply {
+                isDaemon = true
+            }.start()
+        }
     }
 
     /**
@@ -420,6 +445,12 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         return controller
     }
 
+    /**
+     * Leave the terminal. The session goes on running on the machine.
+     *
+     * `close()` is safe to call from here: `TerminalController` puts its own
+     * socket work on its io thread, for the same reason [lock] does.
+     */
     fun detach() {
         terminal?.close()
         terminal = null

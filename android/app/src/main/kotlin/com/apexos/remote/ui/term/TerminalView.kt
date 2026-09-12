@@ -156,27 +156,41 @@ private fun DrawScope.drawRow(
     val y = row * metrics.height
     var col = 0
     while (col < line.cols) {
-        val cell = line.cellAt(col)
-        if (cell.code == Cell.WIDE_TAIL) {
+        if (line.code[col] == Cell.WIDE_TAIL) {
             col++
             continue
         }
-        val ink = Palette.render(cell, TerminalDefaults.Foreground, TerminalDefaults.Background)
-        val attrs = cell.attrs
+        // The run is found by comparing the three RAW ints, not by rendering
+        // each cell and comparing the result. At 80x40 and sixty frames a
+        // second, a `Cell` and an `Ink` per cell is about four hundred
+        // thousand short-lived objects a second for the collector to walk —
+        // on the device in this system with the least memory. Raw comparison
+        // is also stricter than comparing rendered ink, which can only split
+        // a run that would have drawn identically; never merge two that would
+        // not.
+        val fgRaw = line.fg[col]
+        val bgRaw = line.bg[col]
+        val attrs = line.attrs[col]
         val span = line.spanAt(col)
-        // Gather every following cell that would be drawn identically.
         var end = col + 1
         while (end < line.cols) {
-            val next = line.cellAt(end)
-            if (next.code == Cell.WIDE_TAIL) {
+            if (line.code[end] == Cell.WIDE_TAIL) {
                 end++
                 continue
             }
-            if (next.attrs != attrs) break
+            if (line.attrs[end] != attrs) break
+            if (line.fg[end] != fgRaw) break
+            if (line.bg[end] != bgRaw) break
             if (line.spanAt(end) != span) break
-            if (Palette.render(next, TerminalDefaults.Foreground, TerminalDefaults.Background) != ink) break
             end++
         }
+        // One `Cell` and one `Ink` per RUN, which is what the whole loop above
+        // is for.
+        val ink = Palette.render(
+            Cell(line.code[col], fgRaw, bgRaw, attrs),
+            TerminalDefaults.Foreground,
+            TerminalDefaults.Background,
+        )
         val x = col * metrics.width
         val width = (end - col) * metrics.width
 
