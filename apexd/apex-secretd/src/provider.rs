@@ -276,19 +276,138 @@ pub trait Provider: Send + Sync {
     /// §13.4: exchange the stored credential for a short-lived one scoped to
     /// this operation, if the provider can.
     ///
-    /// Returning `Ok(None)` — the default — means it cannot, and the stored
-    /// credential is used directly. When it returns a value, that value is what
-    /// [`Provider::perform`] is given, and the framework scrubs **both** out of
-    /// the output: a minted token is still a credential, and §13.4 is explicit
-    /// that even a temporary one is not handed to the agent.
+    /// ## Why this is a verdict and not an `Option`
+    ///
+    /// It used to be `Result<Option<SecretValue>, ProviderError>`, and `None`
+    /// had to mean three different things at once: *this provider has no
+    /// narrower form for this operation*, *the far side refused to issue one*,
+    /// and *the attempt did not run to a conclusion*. Those are not the same
+    /// answer. A credential service that could not reach the far side has not
+    /// established that no narrower credential exists, and reporting it as
+    /// though it had is this repository's own recurring defect — the one the
+    /// `permission denied is not absence` note is about.
+    ///
+    /// So it is modelled on [`apex::verify::Verdict`], which separates failed
+    /// from absent from could-not-run and treats could-not-run as neither. The
+    /// framework takes a different branch per arm and records which one
+    /// happened, so `apex secret audit` can answer "was this operation carried
+    /// out with a narrowed credential, and if not, why not" — a question that
+    /// had no answer at all while every no was spelled `None`.
+    ///
+    /// The default is [`Minted::NoNarrowerForm`]: a provider that says nothing
+    /// says "I have no narrower form", which is the honest reading of silence
+    /// and is what git and MCP mean.
+    /// An `Err` is the one case the four arms cannot express: not *what*
+    /// happened, but that what happened is not acceptable here. A project that
+    /// has declared it will only run against a narrowed credential refuses the
+    /// operation that way, because falling back to the stored one would be
+    /// doing the exact thing the owner wrote down that they did not want.
     fn mint(
         &self,
         _req: &Bind<'_>,
         _bound: &Bound,
         _value: &SecretValue,
-    ) -> Result<Option<SecretValue>, ProviderError> {
-        Ok(None)
+    ) -> Result<Minted, ProviderError> {
+        Ok(Minted::NoNarrowerForm(
+            "this provider has no short-lived form of its credential".to_string(),
+        ))
     }
+
+    /// End the life of a credential [`Provider::mint`] issued.
+    ///
+    /// Called by the framework after [`Provider::perform`] has returned,
+    /// **whether it succeeded or failed**, and given the *stored* credential
+    /// rather than the minted one: the narrow credential is narrow precisely
+    /// because it cannot create or destroy tokens, so the only thing that can
+    /// revoke it is the one that issued it.
+    ///
+    /// A minted credential that outlives the operation it was minted for is
+    /// the thing §13.4 exists to avoid, and an expiry is a backstop rather
+    /// than a revocation: between the operation ending and the expiry passing,
+    /// the credential is still spendable by anyone who got hold of it.
+    ///
+    /// An `Err` here does not fail the operation — the operation already
+    /// happened — but it is recorded, because a revoke that silently did not
+    /// happen leaves exactly the credential this method exists to remove.
+    fn revoke(
+        &self,
+        _req: &Bind<'_>,
+        _bound: &Bound,
+        _stored: &SecretValue,
+        _lease: &Lease,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// What a provider can do about §13.4's short-lived credential, and the four
+/// answers that are not the same answer.
+///
+/// The shape is [`apex::verify::Verdict`]'s, one level down: a conclusion, an
+/// absence, a refusal, and a did-not-run that is none of the other three.
+#[derive(Debug)]
+pub enum Minted {
+    /// A short-lived credential scoped to this operation, and the handle that
+    /// ends its life.
+    Narrowed { value: SecretValue, lease: Lease },
+    /// This provider has no narrower form of this credential for this
+    /// operation. A conclusion, reached without needing the far side.
+    NoNarrowerForm(String),
+    /// The far side was asked and said no — most often because the stored
+    /// credential is not permitted to issue credentials. **Not** an absence:
+    /// a narrower credential may well be possible for someone else's token,
+    /// and the reason says so.
+    Denied(String),
+    /// The attempt did not reach a conclusion. Never an absence and never a
+    /// refusal: nothing was established about whether a narrower credential
+    /// exists.
+    CouldNotRun(String),
+}
+
+impl Minted {
+    /// The word the audit line carries. One per arm, and they must stay
+    /// distinct: collapsing two of them is the defect this enum exists to
+    /// prevent, and a test asserts that no two are equal.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Minted::Narrowed { .. } => "narrowed",
+            Minted::NoNarrowerForm(_) => "no-narrower-form",
+            Minted::Denied(_) => "denied",
+            Minted::CouldNotRun(_) => "could-not-run",
+        }
+    }
+
+    /// The credential itself, for the one arm that has one.
+    pub fn value(&self) -> Option<&SecretValue> {
+        match self {
+            Minted::Narrowed { value, .. } => Some(value),
+            Minted::NoNarrowerForm(_) | Minted::Denied(_) | Minted::CouldNotRun(_) => None,
+        }
+    }
+
+    /// Why, for the three arms that have a why.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Minted::Narrowed { .. } => None,
+            Minted::NoNarrowerForm(why) | Minted::Denied(why) | Minted::CouldNotRun(why) => {
+                Some(why)
+            }
+        }
+    }
+}
+
+/// What it takes to end a minted credential's life, and when it ends anyway.
+///
+/// `handle` is opaque to the framework: it is whatever the provider that
+/// minted the credential needs in order to revoke it — for Cloudflare, the
+/// token id. The framework never interprets it, and it is not a credential,
+/// which is why it may appear in an audit line where the value may not.
+#[derive(Debug, Clone)]
+pub struct Lease {
+    pub handle: String,
+    /// When the credential stops being accepted regardless, in milliseconds
+    /// since the epoch. A backstop, not a revocation.
+    pub expires_ms: u64,
 }
 
 /// The providers this daemon serves.
@@ -575,6 +694,10 @@ mod tests {
         let minted = Stub(&ONE)
             .mint(&req, &bound, &SecretValue::new(b"not-a-real-token".to_vec()))
             .expect("the default must not be an error");
-        assert!(minted.is_none());
+        // "no narrower form" and not "could not run": a provider that never
+        // reached for one has concluded there is none, which is a different
+        // sentence from a provider whose attempt failed.
+        assert_eq!(minted.as_str(), "no-narrower-form", "{minted:?}");
+        assert!(minted.value().is_none());
     }
 }

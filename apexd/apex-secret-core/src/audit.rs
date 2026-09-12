@@ -28,6 +28,16 @@ fn unknown() -> String {
     "unknown".to_string()
 }
 
+/// What [`AuditLine::narrowing`] says on a line that never got as far as
+/// looking for a short-lived credential — every refusal before the value is
+/// read, and every administrative event.
+///
+/// Distinct from `unknown`, which is what an older line deserializes to: a
+/// line that did not attempt narrowing and a line written before the field
+/// existed are different, and a reader that could not tell them apart would
+/// be reading a `default` as a fact.
+pub const NOT_ATTEMPTED: &str = "not-attempted";
+
 /// What happened.
 ///
 /// A closed set, so `apex secret audit` can colour it and a reader can grep it.
@@ -119,6 +129,23 @@ pub struct AuditLine {
     /// How the operation ended.
     #[serde(default)]
     pub exit_code: Option<i32>,
+    /// §13.4: which of the four things happened when this operation looked for
+    /// a short-lived credential narrower than the stored one.
+    ///
+    /// `narrowed`, `no-narrower-form`, `denied`, `could-not-run` — or
+    /// `not-attempted` for the events that never reach that step, and
+    /// `unknown` for a line written before this field existed. The four must
+    /// stay distinct in the trail for the same reason they are distinct in
+    /// [`crate::audit`]'s caller: *"the far side would not issue one"* and
+    /// *"there is no narrower one to issue"* are different facts about the
+    /// owner's account, and only one of them is worth acting on.
+    #[serde(default = "unknown")]
+    pub narrowing: String,
+    /// Why, for the three arms that have a why, and what the revoke did if it
+    /// could not be done. Never a credential: the handle a lease carries is a
+    /// token id, not a token.
+    #[serde(default)]
+    pub narrowing_detail: Option<String>,
 }
 
 impl AuditLine {
@@ -149,6 +176,8 @@ impl AuditLine {
             constraints: record.constraints.clone(),
             reason: None,
             exit_code: None,
+            narrowing: NOT_ATTEMPTED.to_string(),
+            narrowing_detail: None,
         }
     }
 
@@ -182,6 +211,8 @@ impl AuditLine {
             constraints: Vec::new(),
             reason: None,
             exit_code: None,
+            narrowing: NOT_ATTEMPTED.to_string(),
+            narrowing_detail: None,
         }
     }
 }

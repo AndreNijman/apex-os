@@ -190,6 +190,49 @@ struct Fake {
 enum Mode {
     Normal,
     EchoUnauthorized,
+    /// An account whose stored credential may create account-owned tokens, so
+    /// §13.4's exchange succeeds and the operation spends a token that did not
+    /// exist a moment ago.
+    ///
+    /// A mode rather than the default, because it is a property of the
+    /// *account* and not of this build: Cloudflare requires Super
+    /// Administrator to create an account-owned token, so most stored
+    /// credentials cannot, and [`Mode::Normal`] is the ordinary case where the
+    /// exchange is attempted and comes back with nothing.
+    Minting,
+    /// An account that answers the permission-group list but refuses to create
+    /// a token. The shape that separates "would not issue one" from "there is
+    /// not one".
+    MintingDenied,
+    /// An account that issues a token and then will not take the revoke back.
+    /// The credential stands until it expires, and the trail has to say so.
+    RevokeFails,
+}
+
+impl Mode {
+    /// Whether the double knows about account-owned tokens at all.
+    fn mints(self) -> bool {
+        matches!(self, Mode::Minting | Mode::MintingDenied | Mode::RevokeFails)
+    }
+}
+
+/// The token the double issues, and the id it issues it under. Distinct from
+/// the stored credential so a test can say which of the two reached an
+/// operation.
+const MINTED: &str = "apex-minted-cf-6b31d0a4-do-not-leak";
+const MINTED_ID: &str = "abcdef0123456789abcdef0123456789";
+
+/// Whether a path is the credential exchange rather than an operation.
+///
+/// [`Fake::seen`] hides these and [`Fake::minting`] shows them, because they
+/// answer different questions: *what did this operation do* and *what did it
+/// cost to narrow the credential first*. A test about `dns.create` should not
+/// have to know that the request before it asked which permission groups the
+/// account has.
+fn is_credential_exchange(path: &str) -> bool {
+    let path = path.strip_prefix("/client/v4").unwrap_or(path);
+    let path = path.split('?').next().unwrap_or(path);
+    path.starts_with(&format!("/accounts/{ACCOUNT}/tokens"))
 }
 
 impl Fake {
@@ -207,7 +250,27 @@ impl Fake {
         Fake { port, seen }
     }
 
+    /// What the OPERATION did — every request except §13.4's credential
+    /// exchange. See [`is_credential_exchange`] for why the two are apart.
     fn seen(&self) -> Vec<Seen> {
+        self.everything()
+            .into_iter()
+            .filter(|s| !is_credential_exchange(&s.path))
+            .collect()
+    }
+
+    /// What narrowing the credential cost: the permission-group list, the
+    /// token creation, and the revoke.
+    fn minting(&self) -> Vec<Seen> {
+        self.everything()
+            .into_iter()
+            .filter(|s| is_credential_exchange(&s.path))
+            .collect()
+    }
+
+    /// Both, in the order they happened. Only the tests that care about the
+    /// ordering of one against the other use this.
+    fn everything(&self) -> Vec<Seen> {
         self.seen.lock().expect("lock").clone()
     }
 
@@ -285,7 +348,11 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
         return reply(&mut stream, 401, &body);
     }
 
-    let (status, body) = answer(&method, &path);
+    let (status, body) = if is_credential_exchange(&path) {
+        tokens(&method, &path, mode)
+    } else {
+        answer(&method, &path)
+    };
     // Every success carries the credential back too, in a `messages` entry.
     // Cloudflare does not do this; the point is that it would not matter if it
     // did, and a test where the token never comes back cannot tell a working
@@ -301,6 +368,95 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
     // JSON.
     let body = body.replace("{{authorization}}", &authorization);
     reply(&mut stream, status, &body);
+}
+
+/// §13.4's three endpoints, as the pinned schema documents them.
+///
+/// Kept apart from [`answer`] so that the ordinary surface and the credential
+/// exchange cannot be confused for one another, and so the permission-group
+/// list can be wrong in one specific way — see
+/// `a_permission_group_this_build_does_not_recognise_is_not_a_refusal`.
+fn tokens(method: &str, target: &str, mode: Mode) -> (u16, String) {
+    let target = target.strip_prefix("/client/v4").unwrap_or(target);
+    let path = target.split('?').next().unwrap_or(target);
+    let base = format!("/accounts/{ACCOUNT}/tokens");
+    let ok = |result: &str| {
+        (
+            200u16,
+            format!(r#"{{"success":true,"errors":[],"messages":[],"result":{result}}}"#),
+        )
+    };
+    // An account that cannot create tokens does not have a permission-group
+    // list to show either: both are the same permission at Cloudflare.
+    if !mode.mints() {
+        return (
+            404,
+            r#"{"success":false,"errors":[{"code":7003,"message":"No route for that URI"}],"messages":[],"result":null}"#
+                .to_string(),
+        );
+    }
+    match (method, path) {
+        ("GET", p) if p == format!("{base}/permission_groups") => ok(&permission_groups()),
+        ("POST", p) if p == base => {
+            if mode == Mode::MintingDenied {
+                return (
+                    403,
+                    r#"{"success":false,"errors":[{"code":10000,"message":"Authentication error"}],"messages":[],"result":null}"#
+                        .to_string(),
+                );
+            }
+            ok(&format!(
+                r#"{{"id":"{MINTED_ID}","name":"apex","status":"active","value":"{MINTED}"}}"#
+            ))
+        }
+        ("DELETE", p) if p == format!("{base}/{MINTED_ID}") => {
+            if mode == Mode::RevokeFails {
+                return (
+                    500,
+                    r#"{"success":false,"errors":[{"code":1000,"message":"internal"}],"messages":[],"result":null}"#
+                        .to_string(),
+                );
+            }
+            ok(&format!(r#"{{"id":"{MINTED_ID}"}}"#))
+        }
+        _ => (
+            404,
+            r#"{"success":false,"errors":[{"code":7003,"message":"No route for that URI"}],"messages":[],"result":null}"#
+                .to_string(),
+        ),
+    }
+}
+
+/// The account's permission groups, as `GET .../permission_groups` answers.
+///
+/// Every name [`super::temporary::POLICY`] can ask for, so that the tests
+/// measure the exchange rather than a gap in the fixture — except one, which
+/// is deliberately spelled the way this build does *not* expect, so there is a
+/// row whose absence is a real absence. See
+/// `a_permission_group_this_build_does_not_recognise_is_not_a_refusal`.
+fn permission_groups() -> String {
+    let mut groups: Vec<String> = Vec::new();
+    let mut id = 0u32;
+    let mut push = |name: &str, groups: &mut Vec<String>, id: &mut u32| {
+        *id += 1;
+        groups.push(format!(
+            r#"{{"id":"{:032x}","name":"{name}","scopes":["com.cloudflare.api.account"]}}"#,
+            0xcf00_0000u32 + *id
+        ));
+    };
+    for name in super::temporary::POLICY
+        .iter()
+        .flat_map(|(_, policy)| policy.groups.iter())
+        .map(|slot| slot[0])
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        // The one gap: an account that does not offer Hyperdrive at all.
+        if name == "Hyperdrive Read" {
+            continue;
+        }
+        push(name, &mut groups, &mut id);
+    }
+    format!("[{}]", groups.join(","))
 }
 
 /// The documented paths, with the documented shapes.
