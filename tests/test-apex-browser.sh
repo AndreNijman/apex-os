@@ -152,11 +152,36 @@ case "\$1 \$2" in
         printf 'FAKE CAPSULE TRANSCRIPT\n'; exit 0 ;;
     "agent kill"|"agent rm") exit 0 ;;
     "secret list")
-        # Three answers, and the suite picks which one by setting these.
+        # Four answers, and the suite picks which one by setting these.
+        #
+        # THE SHAPE HERE IS THE ONE THE REAL CLI PRINTS, and that is the point
+        # of this arm rather than a detail of it. It used to print a bare host
+        # in the second column, which agreed with the engine and with nothing
+        # else. The real "apex secret list" prints scheme://host in that column
+        # and has no port column at all, so a capability could not pin anything
+        # against a real apex-secretd while all 85 assertions here passed. Both
+        # spellings are emitted now: the table on stdout, the JSON under
+        # --json, and the not-running-as-root banner on stderr where the CLI
+        # puts it.
+        #
+        # NO BACKTICKS ANYWHERE IN THIS HEREDOC. Its delimiter is unquoted on
+        # purpose, so that $WORK and $CALLS interpolate — which means a backtick
+        # in a comment is a command substitution that runs while the stub is
+        # being written. The first draft of this note had three of them.
         [ "\${FAKE_SECRETD_DOWN:-0}" = 1 ] && {
             printf 'apex secret: the secret service is not running.\n' >&2
             exit 1; }
-        cat "$WORK/secrets" 2>/dev/null
+        [ "\${FAKE_SECRETD_GIBBERISH:-0}" = 1 ] && {
+            printf 'not json at all\n'
+            exit 0; }
+        printf 'apex secret: this secret service is not running as root, so its store is\n' >&2
+        printf '  readable by your own account. That is a test instance, not a boundary.\n' >&2
+        if [ "\$2" = "--json" ] || [ "\$3" = "--json" ]; then
+            cat "$WORK/secrets.json" 2>/dev/null
+        else
+            printf '%-16s %-28s %s\n' SERVICE ENDPOINT USERNAME
+            cat "$WORK/secrets" 2>/dev/null
+        fi
         exit 0 ;;
 esac
 printf 'stub apex: unhandled %s\n' "\$*" >&2
@@ -175,7 +200,16 @@ export APEX_BROWSER_APEX="$BIN/apex"
 export APEX_BROWSER_BIN="$BIN/browser"
 
 printf 'e.example:443\n127.0.0.1:9443\nintranet.example\n' > "$WORK/allowlist"
-printf 'intranet intranet.example\n' > "$WORK/secrets"
+# The table, spelled the way the real CLI spells it: `scheme://host`, no port.
+printf '%-16s %-28s %s\n' intranet https://intranet.example x-access-token > "$WORK/secrets"
+printf '%-16s %-28s %s\n' labsrv   http://127.0.0.1          x-access-token >> "$WORK/secrets"
+# And the JSON, which is the only spelling that carries the port.
+cat > "$WORK/secrets.json" <<'JSON'
+[
+  {"service":"intranet","host":"intranet.example","scheme":"https","username":"x-access-token","path":"","auth":"bearer","port":null,"added":1},
+  {"service":"labsrv","host":"127.0.0.1","scheme":"http","username":"x-access-token","path":"","auth":"bearer","port":9443,"added":2}
+]
+JSON
 
 reset_calls() { : > "$CALLS"; rm -rf "${ROOT:?}"/* 2>/dev/null; }
 
@@ -392,7 +426,7 @@ has   "a runtime that cannot be asked is not read as an empty allowlist" 'could 
 has   "and the advice is to start it"                                    'apex-agentd' "$out"
 hasnt "rather than to add the destination"                               'apex agent allow e.example:443' "$out"
 
-echo "── the capability lookup has three answers, not two ────────────────────"
+echo "── the capability lookup has four answers, not two ─────────────────────"
 
 reset_calls
 out=$(FAKE_SECRETD_DOWN=1 "$ENGINE" run --capability intranet -- https://intranet.example/ 2>&1)
@@ -414,6 +448,55 @@ else bad "and the capsule actually started" "no session argv was recorded"; fi
 out=$("$ENGINE" run --capability intranet --allow somewhere.else -- https://x/ 2>&1); rc=$?
 has   "widening a pinned capsule at the call site is refused" 'is pinned to' "$out"
 exits "and that is a REFUSAL"                                 2 "$rc"
+
+# ── what the table could not carry ──────────────────────────────────────────
+#
+# `apex secret list`'s ENDPOINT column is `scheme://host` and has no port in
+# it. Reading the table gave a pin of `https://intranet.example` — not a
+# destination — so every capsule naming a capability was refused against a real
+# apex-secretd while this file was green. These four assertions are the ones
+# that would have caught it.
+
+reset_calls
+out=$("$ENGINE" run --name cap-scheme --capability intranet -- https://intranet.example/ 2>&1)
+has   "a pin is a destination"                  'pins this capsule to intranet.example' "$out"
+hasnt "and carries no scheme"                   'pins this capsule to https://' "$out"
+
+reset_calls
+out=$("$ENGINE" run --name cap-port --capability labsrv -- https://x/ 2>&1)
+argv=$(session_argv)
+has "a pinned PORT reaches the destination"     'pins this capsule to 127.0.0.1:9443' "$out"
+# And it reached the runtime allowlist check with the port still on it, which
+# is the half a reader cannot see in the announcement. The fixture allowlist
+# holds `127.0.0.1:9443` and NOT `127.0.0.1`, so a pin that lost its port is
+# refused here rather than starting a capsule aimed at the wrong endpoint.
+# (There is no `--allow` on the session's own command line to assert against:
+# the daemon snapshots the runtime allowlist when a session starts and there is
+# no per-session allowlist on the wire at all. That is gap 3 on this unit's
+# card, and it is a protocol change rather than an omission here.)
+if [ -n "$argv" ]; then ok "and the runtime allowlist accepted it with the port on"
+else bad "and the runtime allowlist accepted it with the port on" "no session argv was recorded"; fi
+
+reset_calls
+out=$("$ENGINE" run --name cap-same --capability labsrv --allow 127.0.0.1:9443 -- https://x/ 2>&1); rc=$?
+has   "repeating the pin exactly is not widening it" 'pins this capsule to 127.0.0.1:9443' "$out"
+exits "and the capsule is allowed to run"            0 "$rc"
+
+out=$("$ENGINE" run --capability labsrv --allow 127.0.0.1:443 -- https://x/ 2>&1); rc=$?
+has   "the same host on a DIFFERENT port is refused" 'A different port is a different endpoint' "$out"
+exits "and that is a refusal too"                    2 "$rc"
+
+# ── the fourth answer ───────────────────────────────────────────────────────
+#
+# "the service answered with something this engine cannot read" is neither "it
+# is stopped" nor "there is no such credential", and it has a third fix: the
+# CLI and this engine disagree about `--json`. Folded into either of the other
+# two it would send a reader to `systemctl start` or to `apex secret add`, and
+# neither would do anything.
+out=$(FAKE_SECRETD_GIBBERISH=1 "$ENGINE" run --capability intranet -- https://x/ 2>&1)
+has   "an unreadable answer says exactly that"        'could not read the answer' "$out"
+hasnt "and does not blame a stopped service"          'could not be asked' "$out"
+hasnt "and does not claim the credential is absent"   'has no credential named' "$out"
 
 echo "── teardown, and the fences on it ──────────────────────────────────────"
 
