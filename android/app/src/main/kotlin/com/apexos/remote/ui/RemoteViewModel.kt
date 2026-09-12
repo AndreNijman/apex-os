@@ -17,6 +17,7 @@ import com.apexos.remote.core.agent.GrantState
 import com.apexos.remote.core.agent.Grants
 import com.apexos.remote.core.agent.PrivilegeRequest
 import com.apexos.remote.core.agent.Project
+import com.apexos.remote.core.agent.Reply
 import com.apexos.remote.core.agent.SystemGrant
 import com.apexos.remote.core.agent.WorktreeStatus
 import com.apexos.remote.core.agent.Hello
@@ -63,6 +64,16 @@ data class UiState(
     val message: String? = null,
     val failure: String? = null,
     val connection: ConnectionReport? = null,
+    /**
+     * Whether this phone will actually show a notification.
+     *
+     * On screen rather than assumed, because the failure is silent: the poll
+     * keeps raising alerts, `Notifier.post` keeps declining to show them, and
+     * the user concludes the feature does not work.
+     */
+    val notificationsEnabled: Boolean = true,
+    /** True while `POST_NOTIFICATIONS` has never been asked for (API 33+). */
+    val notificationsUnasked: Boolean = false,
     val agents: AgentUiState = AgentUiState(),
 )
 
@@ -152,6 +163,24 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      * than a second fetch of its own.
      */
     private val alerts = AlertWatcher()
+
+    /**
+     * Posts what the watcher raises.
+     *
+     * Called **from the poll loop itself**, not from a collector of
+     * [AgentUiState.alerts], and that is the whole reason it is a field here
+     * rather than a `LaunchedEffect` in the UI. A lifecycle-aware collector
+     * stops at STOPPED — so alerts would pile up in the state while the app
+     * was in the background and appear the moment the user opened it, which is
+     * a notification that only arrives when you are already looking. The poll
+     * runs in `viewModelScope`, which outlives the UI going away, so posting
+     * from there is the only placement that notifies a phone in a pocket.
+     *
+     * The queue in the state is kept anyway: it is what an in-app surface
+     * reads, and it is a value a test can look at, where a
+     * `NotificationManager` call is not.
+     */
+    private val notifier = Notifier(application)
 
     /** Poll iterations, so a slower cadence can ride the same loop. */
     private var ticks: Long = 0
@@ -448,7 +477,14 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                         worktrees = _state.value.agents.worktrees.rows,
                         requests = requests ?: _state.value.agents.approvals.requests,
                         nowMs = System.currentTimeMillis(),
-                    )
+                    ).also { raised ->
+                        // Posted here and not from a collector: see the note
+                        // on `notifier`. `NotificationManagerCompat.notify` is
+                        // a binder call, not a socket write, so it does not
+                        // belong on `Dispatchers.IO` and StrictMode has no
+                        // objection to it here.
+                        for (alert in raised) notifier.post(alert, machine.machine)
+                    }
                 }
 
                 _state.update {
@@ -736,7 +772,67 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun startAgent(cwd: String, agent: String?, worktree: String?, prompt: String?) =
+    // ---- replying to a waiting agent (P1-058) ---------------------------
+
+    /**
+     * Type a reply into a session, without attaching a terminal.
+     *
+     * Checked against the live list BEFORE it is sent: `SessionInfo.id` is
+     * reused after a prune (`registry.rs:441`), so a reply composed from a
+     * notification can arrive at a number that now belongs to a different
+     * agent. `Reply.check` is what refuses that, and it refuses rather than
+     * guesses — see `Reply.kt`.
+     *
+     * `withContext(Dispatchers.IO)` is mandatory and not stylistic:
+     * `StrictMode.enableDeathOnNetwork()` is installed for every app targeting
+     * API 11 or later and a debug build does not relax it, so this on the main
+     * thread kills the process on the first send.
+     */
+    fun replyToSession(session: AgentSession, text: String) = viewModelScope.launch {
+        val machine = _state.value.agents.machine ?: return@launch
+        val link = links[machine.deviceId] ?: return@launch
+        val target = Reply.Target(machine.deviceId, session.id, session.started)
+        Reply.check(target, machine.deviceId, _state.value.agents.sessions)?.let { refusal ->
+            updateAgents(machine) { it.copy(failure = refusal.message) }
+            return@launch
+        }
+        updateAgents(machine) { it.copy(busy = "Sending…", failure = null) }
+        try {
+            withContext(Dispatchers.IO) { link.input(session.id, Reply.bytes(text)) }
+            updateAgents(machine) { it.copy(busy = null) }
+            // Asked for immediately: the agent's state changes the moment it
+            // reads the line, and waiting up to four seconds to see it makes a
+            // reply feel as though it went nowhere.
+            refreshAgents()
+        } catch (e: Exception) {
+            // Never retried, and the message says so. A lost reply to `input`
+            // means the bytes ARE on the terminal; a retry would type the
+            // user's sentence a second time into an agent that has already
+            // acted on the first.
+            updateAgents(machine) {
+                it.copy(
+                    busy = null,
+                    failure = "The reply may already have been delivered: ${describe(e)}. " +
+                        "Check the session before sending it again.",
+                )
+            }
+        }
+    }
+
+    // ---- notifications --------------------------------------------------
+
+    /** Create the channel and record whether anything will be shown. */
+    fun refreshNotificationState() {
+        notifier.ensureChannel()
+        _state.update {
+            it.copy(
+                notificationsEnabled = notifier.enabled,
+                notificationsUnasked = notifier.permissionNeeded,
+            )
+        }
+    }
+
+    fun startAgent(cwd: String, agent: String?, worktree: String?, prompt: String?, checkpoint: Boolean = false) =
         viewModelScope.launch {
             val machine = _state.value.agents.machine ?: return@launch
             val link = links[machine.deviceId] ?: return@launch
@@ -745,7 +841,15 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 val session = withContext(Dispatchers.IO) {
                     // 80x24 because nothing has been laid out yet; the terminal
                     // screen sends a real resize the moment it measures itself.
-                    link.run(cwd = cwd, cols = 80, rows = 24, agent = agent, prompt = prompt, worktree = worktree)
+                    link.run(
+                        cwd = cwd,
+                        cols = 80,
+                        rows = 24,
+                        agent = agent,
+                        prompt = prompt,
+                        worktree = worktree,
+                        checkpoint = checkpoint,
+                    )
                 }
                 _state.update {
                     it.copy(
