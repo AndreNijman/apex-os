@@ -113,6 +113,11 @@ mutate B1 "$GUI" \
 #      grepping for a sentence the failure does not contain. Same mistake as I2
 #      in the i18n round. The name check is the assertion that actually carries
 #      this mutant, so it is the one named.
+#
+#      REQUIRES a Wi-Fi adapter on the machine running it. Without one the
+#      installer builds its no-adapter page, the field does not exist, and the
+#      suite SKIPs that assertion -- so this mutant would report SURVIVED for a
+#      reason that has nothing to do with the code.
 mutate B2 "$GUI" \
     'a11y(self.wifi_pw, "Network password")' \
     'pass  # a11y(self.wifi_pw, "Network password")' \

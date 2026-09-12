@@ -43,6 +43,12 @@
 #  passwords; the keyboard-only page advance is measured on welcome → keyboard,
 #  where the button is gated on nothing.
 #
+#  The `wifi` page has two shapes and the one the installer builds depends on
+#  the machine: with no Wi-Fi adapter it returns an explanation and two buttons,
+#  with no password field on it at all. Both shapes are audited; the two wifi
+#  field-name checks SKIP with the reason on a machine with no adapter, because
+#  a field that is not built is not a field that is unnamed.
+#
 #  Not audited, and named rather than left to look covered: `disk`, `mode` and
 #  `part` enumerate real block devices and would assert about this machine's
 #  hardware; `run` starts an install; `done` follows one. `confirm` IS audited,
@@ -283,7 +289,43 @@ audit_page welcome    "Begin"                          2
 kill "$GPID" 2>/dev/null
 audit_page keyboard   "Keyboard test"                  6
 kill "$GPID" 2>/dev/null
-audit_page wifi       "Network password"               4
+# The wifi page has TWO shapes, and which one the installer builds depends on
+# the MACHINE rather than on the code. `wifi_available()` asks
+# `nmcli -t -f TYPE device` for a line reading exactly `wifi`; with no adapter --
+# which is every CI runner -- the page it returns is a different page: an
+# explanation and two buttons, with no password field and no hidden-network
+# field on it at all.
+#
+# CI found this, and the way it failed is the reason it is worth fixing rather
+# than pinning. The audit waited the full 40 seconds for a sentinel that could
+# never appear and then reported `page 'wifi' builds and reaches the
+# accessibility bus` as FAILED -- which reads as a defect in the installer, on a
+# page that was working perfectly. Wrong in the most expensive direction.
+#
+# The same probe the GUI uses is asked here, and the shape that was audited is
+# then CONFIRMED against the tree rather than assumed, so a wrong probe cannot
+# silently downgrade the audit to a page with almost nothing on it.
+WIFI_SHAPE=no-adapter
+if command -v nmcli >/dev/null 2>&1 \
+   && nmcli -t -f TYPE device 2>/dev/null | grep -qx 'wifi'; then
+    WIFI_SHAPE=adapter
+fi
+if [ "$WIFI_SHAPE" = adapter ]; then
+    audit_page wifi   "Network password"               4
+else
+    audit_page wifi   "Continue"                       2
+fi
+if [ "$WIFI_SHAPE" = no-adapter ]; then
+    if grep -qE '\| name=(No Wi-Fi adapter detected\.|Wi-Fi is switched off by a hardware switch\.) \|' \
+            "$ATSPI_W/dump-wifi.txt" 2>/dev/null; then
+        ok "the wifi page built its no-adapter shape, and that is the shape audited"
+    else
+        bad "the wifi page built its no-adapter shape, and that is the shape audited" \
+            "nmcli reported no wifi device, but the page says otherwise — the audit measured an unknown shape"
+    fi
+else
+    ok "the wifi page built its adapter shape, and that is the shape audited"
+fi
 kill "$GPID" 2>/dev/null
 audit_page secureboot "Repeat the enrolment password"  4
 kill "$GPID" 2>/dev/null
@@ -316,8 +358,15 @@ named_has "the password field announces itself"                 "Password"
 named_has "the repeat-password field announces itself"          "Repeat password"
 named_has "the computer-name field announces itself"            "Computer name"
 named_has "the keyboard test field announces itself"            "Keyboard test"
-named_has "the Wi-Fi password field announces itself"           "Network password"
-named_has "the hidden-network field announces itself"           "Hidden network name"
+if [ "$WIFI_SHAPE" = adapter ]; then
+    named_has "the Wi-Fi password field announces itself"       "Network password"
+    named_has "the hidden-network field announces itself"       "Hidden network name"
+else
+    skp "the Wi-Fi password field announces itself" \
+        "this machine has no Wi-Fi adapter, so the installer builds its no-adapter page and that field does not exist here — COULD-NOT-RUN, not a pass"
+    skp "the hidden-network field announces itself" \
+        "same: the no-adapter page does not build it"
+fi
 named_has "the Secure Boot enrolment password announces itself" "One-time enrolment password"
 named_has "the ERASE confirmation field announces itself"       "Type ERASE to confirm"
 
@@ -417,7 +466,10 @@ section "the keyboard alone can fill the page in"
 type_into() {   # type_into <accessible name> <text>
     for _ in $(seq 1 30); do
         f="$(focused_name)"
-        [ "${f#*|}" = "$1" ] && { xdotool type --window "$WID" --clearmodifiers "$2" >/dev/null 2>&1; return 0; }
+        # --delay: xdotool's 12 ms default dropped characters on a loaded CI
+        # runner, where the field read back EMPTY after a type that reported
+        # success.
+        [ "${f#*|}" = "$1" ] && { xdotool type --window "$WID" --clearmodifiers --delay 40 "$2" >/dev/null 2>&1; return 0; }
         xdotool key --window "$WID" --clearmodifiers Tab >/dev/null 2>&1
         sleep 0.3
     done
@@ -437,22 +489,42 @@ fi
 
 # And the values really landed -- typing that goes nowhere would otherwise look
 # identical to typing that works.
-python3 "$WALK" --json >"$ATSPI_W/tree2.json" 2>/dev/null
-uname_text="$(python3 "$WALK" --get-text "Username" 2>/dev/null)"
+# Bounded retry, not a single read: the toolkit commits typed text on its own
+# schedule and a runner under load is slower than this laptop. An unbounded wait
+# would hang; a single read reported EMPTY on CI for text that had gone in.
+uname_text=""
+for _ in $(seq 1 20); do
+    uname_text="$(python3 "$WALK" --get-text "Username" 2>/dev/null)"
+    [ "$uname_text" = "tester" ] && break
+    sleep 0.3
+done
+TYPING_LANDED=0
 if [ "$uname_text" = "tester" ]; then
     ok "what was typed on the keyboard is what the field now contains"
+    TYPING_LANDED=1
 else
     bad "what was typed on the keyboard is what the field now contains" \
-        "the username field reads '$uname_text'"
+        "the username field reads '$uname_text' — the keystrokes did not reach the toolkit"
 fi
 
 # The password must STILL be masked on the bus after being typed there.
-pw_text="$(python3 "$WALK" --get-text "Password" 2>/dev/null)"
-if printf '%s' "$pw_text" | grep -qF "s3cret-pw"; then
-    bad "the password the user typed never crosses the accessibility bus" \
-        "GetText returned it"
+#
+# Gated on the assertion above, and that gate is the point. If nothing was ever
+# typed, "the bus does not hand out the password" is true of an empty field and
+# says nothing at all -- and that is exactly the state CI was in when it found
+# the read-back defect: this assertion passed while the username field was
+# empty. An unmeasurable result is said out loud, never counted as a pass.
+if [ "$TYPING_LANDED" = 1 ]; then
+    pw_text="$(python3 "$WALK" --get-text "Password" 2>/dev/null)"
+    if printf '%s' "$pw_text" | grep -qF "s3cret-pw"; then
+        bad "the password the user typed never crosses the accessibility bus" \
+            "GetText returned it"
+    else
+        ok "the password the user typed never crosses the accessibility bus"
+    fi
 else
-    ok "the password the user typed never crosses the accessibility bus"
+    skp "the password the user typed never crosses the accessibility bus" \
+        "nothing was typed, so an empty field would satisfy this — COULD-NOT-RUN, not a pass"
 fi
 
 # ── the keyboard alone can LEAVE a page ─────────────────────────────────────
