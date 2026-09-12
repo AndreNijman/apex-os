@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-12 07:52 AWST
+APEX ROADMAP — resume report — 2026-09-12 08:11 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,24 +16,24 @@ APEX ROADMAP — resume report — 2026-09-12 07:52 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p1-008     dead 25m   P1-008,P1-009,P1-010               task/p1-008-cloudflare-one
+  p1-008     dead 44m   P1-008,P1-009,P1-010               task/p1-008-cloudflare-one
              head 5eda17e0 docs(cloudflare): name apexd-core's Backend without l
-             dirty 0 file(s), 0 unpushed, card 26m
+             dirty 0 file(s), 0 unpushed, card 45m
              NEXT **The unit is DONE and pushed** — tip `5eda17e0`, five commits, no
 
   p2-b       ALIVE      (see queue.json p2-b)              task/p2-b-accessibility-i18n
-             head 7ba196e test(a11y): measure how far Reduce Motion actually rea
-             dirty 0 file(s), 0 unpushed, card 2m
+             head eed578b test(i18n): prove strings extract, compile and substit
+             dirty 0 file(s), 0 unpushed, card 0m
              NEXT 0. **DESIGN FORK to settle before writing the installer page** (fr
 
-  p1-052     ALIVE      P1-051,P1-052                      task/p1-052-relay
+  p1-052     dead 21m   P1-051,P1-052                      task/p1-052-relay
              head 373e833c style(remote): three clippy lints in the relay's own 
-             dirty 0 file(s), 0 unpushed, card 3m
+             dirty 0 file(s), 0 unpushed, card 22m
              NEXT **Everything dispatched to this unit is done.** P1-052 is complete
 
-  p0-finish  ALIVE      P0-001,P0-002,P0-007,P0-015,P0-021 task/p0-finish
+  p0-finish  dead 22m   P0-001,P0-002,P0-007,P0-015,P0-021 task/p0-finish
              head 392108e5 ci(image): the rust job needs a login session, and wi
-             dirty 0 file(s), 0 unpushed, card 3m
+             dirty 0 file(s), 0 unpushed, card 22m
              NEXT Round 13 finished its code work. Branch tip `392108e5`, 7 commits,
 
 
@@ -41,6 +41,8 @@ APEX ROADMAP — resume report — 2026-09-12 07:52 AWST
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
   int-os:  tip b79838a4 Merge task/p1-052-relay into roadmap/v2.2 (P1-052 don
+    task/p1-011-temp-credentials
+      a6691b50 feat(secret): P1-011, a narrowing request has four answers an   [2/10 added lines on tip]
     task/p1-050-remote-protocol
       09c977d9 fix(clippy): the integration tip was not clean, and two of th   [2/10 added lines on tip]
     task/p2-b-accessibility-i18n
@@ -50,6 +52,9 @@ APEX ROADMAP — resume report — 2026-09-12 07:52 AWST
       fc4dbd2d feat(installer): the engine honours an operator's keyboard, v   [2/10 added lines on tip]
       28f59fac feat(installer): choose a keyboard before creating a password   [2/10 added lines on tip]
       fcd3b904 fix(tests): revive test-installer.sh's engine half, which has   [0/10 added lines on tip]
+      3431376f fix(installer): ship the session script, and close two assert   [0/10 added lines on tip]
+      5670eedf feat(installer): offer a time zone, and drive the keyboard pa   [0/10 added lines on tip]
+      4308461d fix(tests): the GUI render container could never build on a n   [0/10 added lines on tip]
 
   int-shell:  tip 4dbe8ba test(hypr): the shellcheck gate was red for every unit
     fix/labwc-desktop-parity  — squash-merged, safe to delete
@@ -63,6 +68,7 @@ APEX ROADMAP — resume report — 2026-09-12 07:52 AWST
     task/p2-b-accessibility-i18n
       83775dc feat(a11y): the shared settings controls name themselves and a   [2/10 added lines on tip]
       7ba196e test(a11y): measure how far Reduce Motion actually reaches, an   [2/10 added lines on tip]
+      eed578b test(i18n): prove strings extract, compile and substitute — an   [0/10 added lines on tip]
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -72,11 +78,11 @@ APEX ROADMAP — resume report — 2026-09-12 07:52 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 1s Sat 2026-09-12
+  snapshot timer: active   last 1min 46s Sat
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    73dd699  int-os-
-    apex-os    2cc4bec  roadmap-state
+    apex-os    b960e2e  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    55f08ae  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -99,7 +105,7 @@ APEX ROADMAP — resume report — 2026-09-12 07:52 AWST
     apex-os    00c1973  wt-p0-025-os-
     apex-os    2c9c560  wt-p0-finish-
     apex-os    eda5ef8  wt-p1-001-
-    apex-shell 229cd32  apex-shell-
+    apex-shell 7020f1f  apex-shell-
     apex-shell df979e1  int-shell-
     apex-shell 68c971d  wt-base-shell-
     apex-shell c8f1e50  wt-editors2-shell-
@@ -123,7 +129,7 @@ APEX ROADMAP — resume report — 2026-09-12 07:52 AWST
     apex-shell 086727e  wt-p1-044-shell-
     apex-shell fb019fa  wt-p1-048-
     apex-shell 8b2c759  wt-p1-052-shell-
-    apex-shell 7cbd7fa  wt-p2-b-
+    apex-shell 307db51  wt-p2-b-
 
 ────────────────────────────────────────────────────────────────────────────
   next

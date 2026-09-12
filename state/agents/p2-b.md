@@ -70,17 +70,17 @@ suite and a mutation pair.
 
 | sub-feature | state | assertion |
 | --- | --- | --- |
-| keyboard layout before password | **DONE — greeter and installer** | Greeter: `tests/test-apex-greet-a11y.sh` test_030-034 + `tests/test-apex-greet-layout.sh`. Installer (round 2): `installer/test-installer-keymap.sh` **30 assertions** and `installer/test-installer-locale.sh` **22**. The criterion itself is measured, not inferred — cage started with `XKB_DEFAULT_LAYOUT=de` hands a GTK4 client a keymap where the physical Y key gives `z`, Z gives `y`, `;` gives `ö`. The layout is applied to the RUNNING session by restarting the compositor, which is the only thing that can work (see the design fork). |
+| keyboard layout before password | **DONE — greeter and installer** | Greeter: `tests/test-apex-greet-a11y.sh` test_030-034 + `tests/test-apex-greet-layout.sh`. Installer (round 2): `installer/test-installer-keymap.sh` **35 assertions** and `installer/test-installer-locale.sh` **22**. The criterion itself is measured, not inferred — cage started with `XKB_DEFAULT_LAYOUT=de` hands a GTK4 client a keymap where the physical Y key gives `z`, Z gives `y`, `;` gives `ö`. The layout is applied to the RUNNING session by restarting the compositor, which is the only thing that can work (see the design fork). |
 | timezone choice | **DONE (installer)** | Engine: `test-installer-locale.sh` — an explicit timezone becomes `/etc/localtime`; an explicitly chosen UTC is **not** overruled by the pre-existing Perth fallback, while an absent choice still keeps it. GUI: a searchable picker on the keyboard page fed from tzdata's own `zone1970.tab` (312 zones), asserted at runtime by `test-installer-keymap.sh` §6 — the real page is driven, Continue is pressed, and the recorded zone must be one that exists on the system. **This row was briefly written as DONE while the GUI had no timezone widget at all** — the engine honoured a key nothing set, so the override path was unreachable from the installer. Caught in review; the fix was to add the picker rather than soften the claim. |
 | multiple layouts | **greeter DONE** | `test-apex-greet-layout.sh` "both configured layouts survive extraction" / "a three-layout machine reports all three in order". Nothing in the desktop shell switches layouts yet. |
 | IME / fcitx5 | present in image, untested | `Containerfile.core:1182-1189` installs fcitx5 + chinese-addons/hangul/anthy/m17n; autostarted in 3 places. `QT_IM_MODULE`/`GTK_IM_MODULE` deliberately unset (Wayland text-input-v3). No suite asserts any of it. |
 | CJK | fonts present, shell will tofu | `Containerfile.core:1319-1329` ships Noto CJK sans+serif. But apex-shell hardcodes `font.family: "JetBrains Mono"` at ~45 sites, which has no CJK coverage. |
 | RTL | **absent, and the image cannot render it** | apex-shell: 0 `LayoutMirroring`, 0 `layoutDirection`. apex-os: **no `google-noto-sans-arabic/hebrew/thai/devanagari` package** — only DejaVu's partial coverage. Asymmetry worth noting: `fcitx5-m17n` provides INPUT for Arabic/Hebrew/Thai that the image cannot RENDER. |
 | locales / timezones | **keyboard + timezone DONE, LOCALE still not offered** | The installer now collects keyboard and timezone and the engine honours both (above). **Locale is deliberately still not offered**, and this is a decision, not an omission: `Containerfile.core:809` installs **`glibc-langpack-en` only**, so a free locale picker would let a user choose one that silently degrades to `C.UTF-8` on the installed system — a worse failure than not asking, because it looks like it worked. Closing this row means adding langpacks to `Containerfile.core` first, then a picker restricted to what the target actually ships. Named, not faked. |
-| translated installer | **not present** | 0 `qsTr`/gettext in `installer/` |
-| translated shell | **not present** | 0 `qsTr`, 0 `.ts`/`.qm`, no lupdate/lrelease step. ~671 direct + 85 secondary hardcoded user-facing literals; 56% of them in `src/services/config_tab/` |
+| translated installer | **not present** | 0 `qsTr`/gettext in `installer/`. The installer is GTK4/Python, so its route is gettext, not Qt — a separate pipeline from the one proven below. |
+| translated shell | **pipeline PROVEN, 5 of ~650 strings** | `tests/run-i18n-test.sh` — **12 assertions**. All four links run with the real tools on a shipped file: `qsTr()` marks 5 strings in `AgentHelpContent.qml`; `lupdate-qt6` extracts exactly 5 into the right context; `lrelease-qt6` compiles `translations/apex-shell_de.ts`; and a **running QML engine under `qmltestrunner -translation`** reads the German back off the live singleton. The load-bearing assertion is the sensitivity one — the SAME fixture runs with and without `-translation` and the two must DISAGREE; three independent strings are sampled so one lucky match cannot carry it. **Named gap, asserted so it cannot quietly stop being true: nothing in `src/` installs a `QTranslator`**, so the pipeline works and no user sees a translated word yet. |
 | per-user language | not present | nothing per-user anywhere |
-| non-US recovery / install flows | not present | engine only COPIES whatever the live ISO resolved; `bib-config.toml:70-72` hardcodes `us`/`en_US.UTF-8`/`Australia/Perth` |
+| non-US recovery / install flows | **install flow DONE, recovery not** | The "engine only COPIES whatever the live ISO resolved" finding is **no longer true for install**: the engine now prefers an operator's `keymap`/`keyvariant`/`timezone` over every inference, and the installer collects them before the password. `bib-config.toml:70-72` still hardcodes `us`/`en_US.UTF-8`/`Australia/Perth`, but those are now the FALLBACK rather than the only outcome. **Recovery is untouched** — nothing in the recovery flow asks for or applies a layout, so a non-US user recovering a machine still types on `us`. Not measured, and named as the remaining half. |
 
 ## What could not be measured here, precisely
 
@@ -129,7 +129,22 @@ Full script: `scratchpad/mutate-greet.sh`.
 | N7 | a segmented pill's `Accessible.name` → `""` | `test_022_each_pill_names_its_option` |
 | N8 | `CfgRow` slot `enabled: !unavailable` → `true` | `test_045_a_disabled_control_ignores_the_keyboard` |
 
-### Round 2 — the installer keyboard work (13 pairs, all CAUGHT)
+### Round 2b — internationalisation (4 pairs, all CAUGHT)
+
+| # | mutant | caught by |
+| --- | --- | --- |
+| I1 | a string loses its `qsTr()` | `marks exactly 5 strings with qsTr()` + the extraction count |
+| I2 | the `.ts` carries a stale source string | `every string … is one lupdate still extracts` (+2 more) |
+| I3 | the `.ts` uses the wrong translation context | `the same fixture gives DIFFERENT text with and without -translation` |
+| I4 | a "translation" identical to the English source | `translated, entryLabel reads the German` |
+
+I3 and I4 are the two failures that are invisible to any check short of running
+the engine: both produce a `.qm` that compiles and loads perfectly, and both
+leave every word English. I2 was first recorded as SURVIVED — that was the
+mutation harness grepping for a word the failure message does not contain, not a
+survival; the three FAIL lines it produced name exactly the right assertions.
+
+### Round 2 — the installer keyboard work (16 pairs, all CAUGHT)
 
 Restores are `git checkout --` (authoritative content, fresh mtime), and the
 whole file set is re-compared against HEAD after every mutate and every restore.
@@ -149,6 +164,14 @@ whole file set is re-compared against HEAD after every mutate and every restore.
 | K11 | keyboard page leaves the forward flow | `the welcome page's primary button leads straight to the keyboard page` |
 | K12 | Containerfile stops installing the session script | `the launcher's exec target … is installed` |
 | K13 | ISO build stops installing the session script | same |
+| K14 | `Continue` stops setting `exit_code` | `…and the process exits 75` |
+| K15 | the page stops recording the time zone | `records a real time zone in the answers` |
+| K16 | the state file is written with the wrong key | `writes the chosen layout to the session state file` |
+
+K14–K16 exist because §5 read the GUI's SOURCE — a grep for the constant, a
+regex for the writer — and the `Continue` button had never been pressed by
+anything. All three are invisible to a grep and caught only by §6, which runs
+the shipped GUI under cage and clicks it.
 
 **Two survived the first pass, and both were the SUITE's fault, not bad mutants:**
 
@@ -424,41 +447,67 @@ The third line is `test-installer.sh`'s own dead case, alive. Note `sudo`'s
 `env_reset` strips `APEX_*` from the caller's environment, so it must be passed
 as `sudo -n APEX_IMAGE=… ./apex-install`, not exported beforehand.
 
+## Landed in round 2
+
+Both repos on `task/p2-b-accessibility-i18n`, pushed, not rebased.
+
+**apex-os** — `fc4dbd2d`, `28f59fac`, `fcd3b904`, `3431376f`, `5670eedf`, and the
+render-context fix.
+
+- `installer/apex-installer-session` — owns the cage loop so a chosen layout can
+  reach the running session. Bounded at 3 restarts; refuses a layout xkb does not
+  know; clears a stale state file before the first launch.
+- `installer/apex-installer-gui` — `p_keyboard` at step 2, before the account
+  page, with a layout picker, a variant picker, a time-zone picker (312 zones
+  from tzdata's `zone1970.tab`) and a field to TYPE IN and check.
+- `installer/apex-install` — accepts `keymap`/`keyvariant`/`timezone`, prefers
+  them over every inference, validates the layout against xkb's own `base.lst`
+  before anything is erased.
+- `installer/test-installer-keymap.sh` — **35 assertions**.
+- `installer/test-installer-locale.sh` — **22 assertions**.
+- `installer/test-installer.sh` — **44**, of which 11 engine cases had been dead
+  since July and 2 GUI render rows are the new page.
+
+**apex-shell** — `eed578b`.
+
+- `tests/run-i18n-test.sh` — **12 assertions**; `translations/apex-shell_de.ts`;
+  five `qsTr()` call sites in `AgentHelpContent.qml`.
+
+**Three defects found that nothing was looking for**, all pre-existing except the
+first, which this branch introduced and caught before it shipped:
+
+1. `apex-installer-launch` was repointed at `/usr/bin/apex-installer-session`
+   while **nothing installed that file into the image** — the ISO would have
+   booted with no installer at all. Every assertion passed while it was true,
+   because they all read the source tree.
+2. `test-installer.sh`'s engine half had been dead since 2026-07-28 — on every
+   machine that is not the ISO build box, and in CI.
+3. The GUI render container's build context was `/var/empty`, which does not
+   exist on an ubuntu runner, and the build's error output went to `/dev/null`.
+
 ## NEXT
 
-0. **DESIGN FORK to settle before writing the installer page** (from a full
-   read of `installer/`): the criterion is "keyboard layout before password
-   CREATION", and the point is that the user can *type* their password on their
-   own layout. Recording the choice in the answers file does not achieve that —
-   the layout must be applied to the RUNNING cage session. Nothing in
-   `apex-installer-launch` touches XKB today (it exports `LIBSEAT_BACKEND`,
-   `WLR_RENDERER`, `GDK_BACKEND`, … but no `XKB_DEFAULT_LAYOUT`), and GTK4 on
-   Wayland takes its keymap from the compositor. Three options: (a)
-   `localectl set-x11-keymap` in the live session — zero engine changes, since
-   `set_locale_keymap_in()` already reads `localectl status` first, but depends
-   on `systemd-localed` answering over dbus, which the engine's own comment
-   doubts; (b) re-exec cage with `XKB_DEFAULT_LAYOUT` after the pick — reliable
-   for the running session, fights the launcher's retry logic; (c) answers-file
-   only — records the choice correctly and does NOT deliver the criterion.
-
-1. **The installer's missing keyboard/locale/timezone step.** This is P2-004's
-   acceptance criterion read literally — "keyboard layout before password
-   CREATION" — and the installer creates the password on its `account` page.
-   `apex-installer-gui:444-456` lists ten pages, `welcome → wifi → disk → mode →
-   part → account → secureboot → confirm → run → done`, and none of them is a
-   locale/keyboard/timezone page. The engine's `set_locale_keymap_in()`
-   (`installer/apex-install:424-510`) already writes all three into the deploy
-   root — it just copies whatever the live ISO resolved, and the ISO hardcodes
-   `us`/`en_US.UTF-8`/`Australia/Perth` (`bib-config.toml:70-72`). So the
-   plumbing exists and the UI to collect a choice does not. Measurable: page
-   order (keyboard before account), the engine honouring explicit overrides, and
-   a non-US layout reaching the deploy root.
-2. **DONE** — see Landed. Remaining in apex-shell: the bespoke widgets in
-   `src/popups/` (WifiTab, BluetoothTab, VPNTab) and `src/nexus/NavPane.qml`,
-   which use their own Rectangle+MouseArea rather than the shared controls and
-   are therefore still mouse-only and unnamed.
-3. **Reduce-motion has no test at all** and reaches 11% of animations. Cheapest
-   honest measurement in the unit: instantiate a real component, toggle the
-   setting, read `duration` back at runtime, and report the covered/total count.
-4. Image packages: no `at-spi2-core`/`orca` means the markup reaches nothing;
-   no Arabic/Hebrew fonts means RTL cannot render.
+1. **The `sections` array in `AgentHelpContent.qml`** (~200 prose strings) is the
+   obvious next i18n increment: the pipeline is proven, so this is now mechanical.
+   One caution measured the hard way — `tests/check-agent-help.sh` greps for the
+   exact shape `{ k: "kv", t: "$m"`, so wrapping those `t:` values in `qsTr()`
+   breaks it; that suite and this conversion have to move together.
+2. **Nothing installs a `QTranslator`.** Until something does, the shell's
+   translation pipeline reaches no user. `run-i18n-test.sh` asserts the absence,
+   so the row flips itself when somebody wires it up.
+3. **Locale is still not offered by the installer, deliberately.** The image
+   installs `glibc-langpack-en` ONLY (`Containerfile.core:809`), so a free picker
+   would let a user choose a locale that silently degrades to `C.UTF-8`. Add
+   langpacks first, then a picker restricted to what the target ships.
+4. **The installer is GTK4/Python**, so its translation route is gettext, not the
+   Qt pipeline proven here. Separate work.
+5. Remaining accessibility gaps, unchanged from round 1: the end-to-end AT-SPI
+   walk (needs a private a11y bus that would not activate here); `src/popups/`
+   and `src/nexus/NavPane.qml` still use bespoke Rectangle+MouseArea and are
+   mouse-only and unnamed; the image ships **zero** accessibility packages, so
+   the markup reaches no screen reader; and no Arabic/Hebrew/Thai fonts, so RTL
+   input from `fcitx5-m17n` cannot be rendered.
+6. **`Xvfb` is now the tool that makes the compositor-keymap criterion
+   measurable.** If a future runner lacks it, `test-installer-keymap.sh` §3 SKIPs
+   rather than lying — but a skip there means the criterion is unmeasured, not
+   met.
