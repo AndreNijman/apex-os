@@ -586,6 +586,62 @@ pub enum Request {
     /// daemon that predates this answers "unknown request" and the CLI says so.
     /// The failure loses a feature, never a restriction.
     Inject { id: u32, source: String },
+    /// Hand a file to a running session whose bytes are **not on this
+    /// machine** (P1-059 criterion 2).
+    ///
+    /// The second takeover verb. Like [`Request::Attach`], the response line
+    /// is followed by raw bytes rather than by another request: the daemon
+    /// answers [`Response::Receiving`] and then reads exactly `len` bytes from
+    /// the same connection, after which it answers a second time with the
+    /// [`Response::Injected`] that [`Request::Inject`] would have produced.
+    /// `apex-agentd/src/main.rs` routes it out of the request loop beside
+    /// `Attach`, and `apex-remoted` opens a channel for it the way it opens
+    /// one for a terminal.
+    ///
+    /// ## Why it is a separate verb and not a field on `Inject`
+    ///
+    /// `Inject`'s `source` is a path on the host and the daemon reads it with
+    /// the daemon's own access, outside every sandbox. That is the point of
+    /// that verb and the reason it is refused to a session and to a non-local
+    /// origin. This verb reads **no host path at all** — the bytes arrive on
+    /// the connection — so the refusal that protects `Inject` would refuse the
+    /// only caller this one exists for. Sharing a verb would have meant one
+    /// gate answering two different questions, which is how a gate ends up
+    /// answering neither.
+    ///
+    /// ## What the caller may decide, which is almost nothing
+    ///
+    /// `name` is a *name*, never a path: [`crate::inject::safe_name`] reduces
+    /// it to an alphabet with no `/`, no space, no quote and no `$`, so a
+    /// caller that sends `../../.ssh/authorized_keys` gets a file called
+    /// `.._.._.ssh_authorized_keys` in the session's inbox. The directory, the
+    /// sequence number and the typed text are the daemon's, exactly as they
+    /// are for `Inject`.
+    ///
+    /// `len` is the number of bytes that follow. It is **checked before the
+    /// takeover reply** against the same cap `Inject` applies to a file, so an
+    /// oversize upload is refused before any of it crosses the wire, and
+    /// bounded again while reading, because a declared length is a claim.
+    ///
+    /// ## Who is refused
+    ///
+    /// A caller that resolves to a managed session, and one that cannot be
+    /// classified — `refuse_input`'s predicate, not `Inject`'s. This verb ends
+    /// by typing a path into another session's terminal, which is precisely
+    /// what [`Request::Input`] does, and an agent that could do it could ask a
+    /// sibling to spend a grant the caller was not given.
+    ///
+    /// Not a protocol bump, by the criterion on [`Request::Event`]: a daemon
+    /// that predates this answers "unparseable request", the client reports
+    /// that it could not deliver, and no bytes have been sent. The failure
+    /// loses a feature, never a restriction.
+    Receive {
+        id: u32,
+        /// What the file should be called. Reduced, never used verbatim.
+        name: String,
+        /// How many bytes follow the takeover reply.
+        len: u64,
+    },
     /// Write text into a live session's terminal.
     ///
     /// The same write [`Request::Attach`] already performs, without the read
@@ -1173,6 +1229,15 @@ pub enum Response {
     Sessions { sessions: Vec<SessionInfo> },
     /// Attach accepted; the connection is now a raw PTY pipe.
     Attached { id: u32 },
+    /// [`Request::Receive`] accepted; the connection is now a byte sink.
+    ///
+    /// `len` is echoed rather than assumed: it is the number of bytes the
+    /// daemon has committed to read next, and a client that reads this line
+    /// knows the cap was not exceeded and that the count it declared is the
+    /// count the daemon agreed to. Everything refusable about the upload — the
+    /// caller, the name, the length, the session — has already been decided
+    /// when this is written, so a client that sees it may start sending.
+    Receiving { id: u32, len: u64 },
     /// A file was handed to a session.
     ///
     /// `path` is both where the copy landed and, verbatim, the text written to
@@ -1566,6 +1631,7 @@ mod tests {
                 sessions: vec![sample_session(), sample_session()],
             },
             Response::Attached { id: 3 },
+            Response::Receiving { id: 3, len: 4096 },
             Response::Injected {
                 id: 3,
                 path: "/tmp/apex-agent/3/inbox/001-shot.png".into(),
