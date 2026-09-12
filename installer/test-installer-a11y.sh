@@ -280,7 +280,209 @@ PYAUDIT
     cat "$ATSPI_W/audit-$page.txt" >>"$ATSPI_W/audit-all.txt"
 }
 
-section "every control the installer builds announces itself, page by page"
+# ── the Tab ring, on whichever page is up ───────────────────────────────────
+#
+# Rounds 18/18b walked the ring on `account` only. Every other page was
+# name-audited, which answers "can a reader say what this is" and not "can a
+# keyboard user get to it" — so a focus trap on any other page was invisible
+# to the whole suite. The walk is a function now and runs on four pages.
+focused_name() {
+    python3 "$WALK" --json 2>/dev/null | python3 -c '
+import json,sys
+def flat(n,o=None):
+    o=[] if o is None else o
+    o.append(n)
+    for c in n["children"]: flat(c,o)
+    return o
+for r in json.load(sys.stdin):
+    for n in flat(r):
+        if "focused" in n["states"]:
+            print("%s|%s" % (n["role"], n["name"] or n["description"] or ""))
+            sys.exit(0)
+'
+}
+
+walk_ring() {   # walk_ring <page> <wid> <taps> <distinct floor> [required name ...]
+    local page="$1" wid="$2" taps="$3" floor="$4"
+    shift 4
+    local first ring f moved blank firstname want
+
+    xdotool windowactivate --sync "$wid" >/dev/null 2>&1
+    xdotool windowfocus "$wid" >/dev/null 2>&1
+
+    first="$(focused_name)"
+    if [ -n "$first" ]; then
+        ok "page '$page': something has keyboard focus when it opens (${first#*|})"
+    else
+        bad "page '$page': something has keyboard focus when it opens" \
+            "nothing reports the focused state — a keyboard user starts nowhere"
+    fi
+
+    # Bounded: an unbounded walk on a page with a focus trap never returns.
+    ring=""
+    local _i
+    for _i in $(seq 1 "$taps"); do
+        xdotool key --window "$wid" --clearmodifiers Tab >/dev/null 2>&1
+        sleep 0.35
+        f="$(focused_name)"
+        ring="$ring
+$f"
+    done
+    printf '%s\n' "$ring" | grep -v '^$' | sed "s/^/      $page tab → /"
+
+    RING_OUT="$ring"
+    moved="$(printf '%s\n' "$ring" | grep -v '^$' | sort -u | wc -l)"
+    if [ "$moved" -ge "$floor" ]; then
+        ok "page '$page': Tab really moves focus around it ($moved distinct controls)"
+    else
+        bad "page '$page': Tab really moves focus around it" \
+            "only $moved distinct control(s) were ever focused, wanted $floor — a keyboard trap"
+    fi
+
+    # The join between the two halves of the criterion: reachable AND
+    # announceable. A page can pass the audit and still tab into an unnamed
+    # GTK internal.
+    blank="$(printf '%s\n' "$ring" | grep -v '^$' | grep -c '|$')"
+    if [ "$blank" -eq 0 ]; then
+        ok "page '$page': every control the Tab ring reaches has a name"
+    else
+        bad "page '$page': every control the Tab ring reaches has a name" \
+            "$blank of $taps stops announced nothing"
+    fi
+
+    for want in "$@"; do
+        if printf '%s\n' "$ring" | grep -qF "|$want"; then
+            ok "page '$page': Tab reaches '$want'"
+        else
+            bad "page '$page': Tab reaches '$want'" "not in $taps Tab presses"
+        fi
+    done
+
+    # The ring must close. One that never returns to its first member is one a
+    # keyboard user can fall out of.
+    firstname="${first#*|}"
+    if [ -n "$firstname" ] && printf '%s\n' "$ring" | grep -qF "|$firstname"; then
+        ok "page '$page': the Tab ring comes back round to where it started"
+    else
+        bad "page '$page': the Tab ring comes back round to where it started" \
+            "'$firstname' never returned within $taps presses"
+    fi
+}
+
+ring_now() {   # ring_now <page> <a name the ring must reach> — walk the page that is up
+    local page="$1" sentinel="$2" wid
+    if ! kill -0 "$GPID" 2>/dev/null; then
+        skp "page '$page': its Tab ring can be walked" \
+            "the page's process is not running — see the audit above"
+        return
+    fi
+    wid="$(xdotool search --name "APEX-OS Installer" 2>/dev/null | head -1)"
+    if [ -z "$wid" ]; then
+        skp "page '$page': its Tab ring can be walked" \
+            "no installer window on the private display to send Tab to"
+        return
+    fi
+    walk_ring "$page" "$wid" 12 3 "$sentinel"
+}
+
+# Typing, reaching and reading back. Defined here rather than beside the
+# account page that used to own them, because the confirmation page's walk
+# needs them too and a function must exist before the first call.
+type_text() {   # type_text <text> — returns 0 if either mechanism was attempted
+    xdotool windowfocus "$WID" >/dev/null 2>&1
+    xdotool type --clearmodifiers --delay 40 "$1" >/dev/null 2>&1
+}
+type_text_fallback() {
+    xdotool type --window "$WID" --clearmodifiers --delay 40 "$1" >/dev/null 2>&1
+}
+
+reach() {   # reach <accessible name> — leave focus on it, bounded
+    for _ in $(seq 1 30); do
+        f="$(focused_name)"
+        [ "${f#*|}" = "$1" ] && return 0
+        xdotool key --window "$WID" --clearmodifiers Tab >/dev/null 2>&1
+        sleep 0.3
+    done
+    return 1
+}
+
+type_into() {   # type_into <accessible name> <text>
+    reach "$1" || return 1
+    type_text "$2"
+    return 0
+}
+
+# The confirmation page needs its own walk, and the reason is the finding that
+# produced it. A generic "Tab reaches at least three controls" went RED here:
+# the ring has exactly two stops, Back and the ERASE field. That is not a
+# keyboard trap, it is the page working as designed — `go` is built with
+# sensitive=False and only `e_erase`'s changed handler turns it on, when the
+# text is exactly ERASE. An insensitive button is not a tab stop in GTK.
+#
+# So the floor was the wrong assertion and the right one is stronger, in both
+# directions: the destructive button must NOT be reachable before the words are
+# typed, and it MUST be reachable after. That is the whole keyboard-only path
+# through the last screen before an irreversible erase.
+ring_confirm() {
+    local wid found
+    if ! kill -0 "$GPID" 2>/dev/null; then
+        skp "page 'confirm': its Tab ring can be walked" \
+            "the page's process is not running — see the audit above"
+        return
+    fi
+    wid="$(xdotool search --name "APEX-OS Installer" 2>/dev/null | head -1)"
+    if [ -z "$wid" ]; then
+        skp "page 'confirm': its Tab ring can be walked" \
+            "no installer window on the private display to send Tab to"
+        return
+    fi
+    WID="$wid"
+
+    walk_ring confirm "$wid" 12 2 "Type ERASE to confirm"
+
+    if printf '%s\n' "$RING_OUT" | grep -qF "|Erase and install"; then
+        bad "page 'confirm': the erase button is out of reach until ERASE is typed" \
+            "it is already a tab stop with the field empty — a keyboard user can reach an irreversible action without confirming it"
+    else
+        ok "page 'confirm': the erase button is out of reach until ERASE is typed"
+    fi
+
+    if ! reach "Type ERASE to confirm"; then
+        skp "page 'confirm': typing ERASE puts the erase button in the Tab ring" \
+            "Tab never returned to the confirmation field"
+        return
+    fi
+    type_text "ERASE"
+    local got=""
+    for _ in $(seq 1 12); do
+        got="$(python3 "$WALK" --get-text "Type ERASE to confirm" 2>/dev/null)"
+        [ "$got" = "ERASE" ] && break
+        sleep 0.3
+    done
+    if [ "$got" != "ERASE" ]; then
+        # CI has already shown one X server that accepts Tab and Return and
+        # drops synthesised text. A COULD-NOT-RUN, not a pass and not a defect.
+        skp "page 'confirm': typing ERASE puts the erase button in the Tab ring" \
+            "the field reads [$got] after typing, so no text was delivered on this display"
+        return
+    fi
+
+    found=0
+    for _ in $(seq 1 12); do
+        xdotool key --window "$wid" --clearmodifiers Tab >/dev/null 2>&1
+        sleep 0.35
+        f="$(focused_name)"
+        [ "${f#*|}" = "Erase and install" ] && { found=1; break; }
+    done
+    if [ "$found" = 1 ]; then
+        ok "page 'confirm': typing ERASE puts the erase button in the Tab ring, so the whole page can be completed with the keyboard"
+    else
+        bad "page 'confirm': typing ERASE puts the erase button in the Tab ring" \
+            "the field reads ERASE and 12 more Tab presses never reached 'Erase and install'"
+    fi
+}
+
+section "every control the installer builds announces itself, and Tab can reach it"
 : >"$ATSPI_W/audit-all.txt"
 
 # Sentinel + floor per page. The floors are what each page actually builds, so a
@@ -288,6 +490,7 @@ section "every control the installer builds announces itself, page by page"
 audit_page welcome    "Begin"                          2
 kill "$GPID" 2>/dev/null
 audit_page keyboard   "Keyboard test"                  6
+ring_now keyboard "Keyboard test"
 kill "$GPID" 2>/dev/null
 # The wifi page has TWO shapes, and which one the installer builds depends on
 # the MACHINE rather than on the code. `wifi_available()` asks
@@ -328,6 +531,7 @@ else
 fi
 kill "$GPID" 2>/dev/null
 audit_page secureboot "Repeat the enrolment password"  4
+ring_now secureboot "Repeat the enrolment password"
 kill "$GPID" 2>/dev/null
 # The confirmation page is the one that matters most and it was not audited at
 # all until now: its single text field is the last thing between the user and an
@@ -336,6 +540,7 @@ kill "$GPID" 2>/dev/null
 # the page builds and nothing real is ever named as a target.
 audit_page confirm    "Type ERASE to confirm"         3 \
     APEX_GUI_DISK=/dev/zzz-not-a-disk APEX_GUI_MODE=disk
+ring_confirm
 kill "$GPID" 2>/dev/null
 # account goes LAST and is deliberately left running: the keyboard-only section
 # below drives it.
@@ -381,84 +586,9 @@ if [ -z "$WID" ]; then
     finish; exit 1
 fi
 ok "the installer window can be found on the private display"
-xdotool windowactivate --sync "$WID" >/dev/null 2>&1
-xdotool windowfocus "$WID" >/dev/null 2>&1
+walk_ring account "$WID" 14 4 \
+    "Username" "Password" "Repeat password" "Computer name" "Continue"
 
-focused_name() {
-    python3 "$WALK" --json 2>/dev/null | python3 -c '
-import json,sys
-def flat(n,o=None):
-    o=[] if o is None else o
-    o.append(n)
-    for c in n["children"]: flat(c,o)
-    return o
-for r in json.load(sys.stdin):
-    for n in flat(r):
-        if "focused" in n["states"]:
-            print("%s|%s" % (n["role"], n["name"] or n["description"] or ""))
-            sys.exit(0)
-'
-}
-
-first="$(focused_name)"
-if [ -n "$first" ]; then
-    ok "something has keyboard focus when the page opens (${first#*|})"
-else
-    bad "something has keyboard focus when the page opens" \
-        "nothing reports the focused state — a keyboard user starts nowhere"
-fi
-
-# Walk the ring with real Tab presses. Bounded: an unbounded walk on a page with
-# a focus trap never returns.
-RING=""
-TAPS=14
-for _ in $(seq 1 "$TAPS"); do
-    xdotool key --window "$WID" --clearmodifiers Tab >/dev/null 2>&1
-    sleep 0.35
-    f="$(focused_name)"
-    RING="$RING
-$f"
-done
-printf '%s\n' "$RING" | grep -v '^$' | sed 's/^/      tab → /'
-
-moved="$(printf '%s\n' "$RING" | grep -v '^$' | sort -u | wc -l)"
-if [ "$moved" -ge 4 ]; then
-    ok "Tab really moves focus around the page ($moved distinct controls)"
-else
-    bad "Tab really moves focus around the page" \
-        "only $moved distinct control(s) were ever focused — a keyboard trap"
-fi
-
-# Every control the Tab ring visits must be one a reader can name. This is the
-# join between the two halves of the criterion: reachable AND announceable. A
-# page can pass the audit above and still tab into an unnamed GTK internal.
-blank="$(printf '%s\n' "$RING" | grep -v '^$' | grep -c '|$')"
-if [ "$blank" -eq 0 ]; then
-    ok "every control the Tab ring reaches has a name"
-else
-    bad "every control the Tab ring reaches has a name" \
-        "$blank of $TAPS stops announced nothing"
-fi
-
-for want in "Username" "Password" "Repeat password" "Computer name" "Continue"; do
-    if printf '%s\n' "$RING" | grep -qF "|$want"; then
-        ok "Tab reaches '$want'"
-    else
-        bad "Tab reaches '$want'" "not in $TAPS Tab presses"
-    fi
-done
-
-# The ring must close. A ring that never returns to its first member is one a
-# keyboard user can fall out of.
-firstname="${first#*|}"
-if [ -n "$firstname" ] && printf '%s\n' "$RING" | grep -qF "|$firstname"; then
-    ok "the Tab ring comes back round to where it started"
-else
-    bad "the Tab ring comes back round to where it started" \
-        "'$firstname' never returned within $TAPS presses"
-fi
-
-# ── the keyboard alone can fill the page in ─────────────────────────────────
 section "the keyboard alone can fill the page in"
 
 # Typed, not set. xdotool delivers real X key events to the real toolkit, so
@@ -471,30 +601,6 @@ section "the keyboard alone can fill the page in"
 # that reported success. `type` has to remap scratch keycodes for characters the
 # server's keymap lacks, and a remap followed by XSendEvent races the client's
 # own keymap cache. So text goes through XTEST first and falls back.
-type_text() {   # type_text <text> — returns 0 if either mechanism was attempted
-    xdotool windowfocus "$WID" >/dev/null 2>&1
-    xdotool type --clearmodifiers --delay 40 "$1" >/dev/null 2>&1
-}
-type_text_fallback() {
-    xdotool type --window "$WID" --clearmodifiers --delay 40 "$1" >/dev/null 2>&1
-}
-
-reach() {   # reach <accessible name> — leave focus on it, bounded
-    for _ in $(seq 1 30); do
-        f="$(focused_name)"
-        [ "${f#*|}" = "$1" ] && return 0
-        xdotool key --window "$WID" --clearmodifiers Tab >/dev/null 2>&1
-        sleep 0.3
-    done
-    return 1
-}
-
-type_into() {   # type_into <accessible name> <text>
-    reach "$1" || return 1
-    type_text "$2"
-    return 0
-}
-
 typed=0
 type_into "Username"        "tester"   && typed=$((typed+1))
 type_into "Password"        "s3cret-pw" && typed=$((typed+1))
