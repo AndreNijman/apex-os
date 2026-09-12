@@ -3041,7 +3041,7 @@ tasks:
 - id: P1-062
   title: Build destructive chaos/torture reliability test infrastructure
   priority: P1
-  status: todo
+  status: done
   area: testing
   depends_on:
   - P0-001
@@ -3053,6 +3053,32 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Destructive chaos/torture reliability test infrastructure. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge
+    a0341a50 (six commits) plus 23783fb7, the schedule criterion 2 actually needed. FIVE CASES, NO STUBS, each
+    running its subject against a fault proven present by an observation the injector did not make: power-loss-
+    during-update truncates the update record at a seeded byte and proves the remainder is a strict prefix AND
+    that a JSON parser refuses it; failed-rollback chmods the deploy dir 0000 and, as root, correctly reports
+    COULD-NOT-INJECT rather than passing, because the mode is ignored and the read succeeds; network-loss uses a
+    netns with a DOWN loopback and requires connect() to get ENETUNREACH specifically rather than merely fail;
+    full-disk fills a tmpfs to the last byte in a mount namespace after verifying the mountpoint IS a tmpfs;
+    reboot-loop stages a +3-0 entry nothing can bless, boots five OVMF guests, and reads the ESP out of the FAT to
+    find a pair only a staged-and-never-blessed deployment makes. THE VERDICT HAS A COULD-NOT-INJECT ARM AND IT
+    FIRES: three mutations land on it rather than on a pass, including one that empties the serial log so the
+    failure is caught at EXPOSURE rather than at injection. That arm is the point: a harness reporting no
+    corruption when it never injected the fault is the worst version of permission-denied-is-not-absence. THREE
+    SOURCE DEFECTS, each caught red by a case before it was fixed: channel.rs read_record returned Option, so a
+    torn record printed nothing-recorded-yet for a machine that had just updated; apex doctor collapsed
+    ENETUNREACH and ECONNREFUSED into one sentence, a claim about apexd from a syscall that never left the box;
+    and qualify::save left a 0644 temp file on a full disk because the chmod sits between the create and the
+    rename. DIAGNOSTICS per case: verdict.json, seed, env.txt with probed capabilities and the binary sha256,
+    inject/prove/observe/exposed/baseline, expectations, state before/after/diff; run-chaos --replay reproduces
+    from seed plus revision and chaos-loop keeps every iteration's bundle with a cursor. CRITERION 2 is met by a
+    weekly schedule (Sunday 18:00 UTC, three iterations) rather than the dispatch input defaulting to 0 that was
+    landed: GitHub runs schedule from the default branch only, so it begins firing when roadmap/v2.2 reaches main,
+    and the step's condition names the schedule event explicitly because a scheduled run carries no inputs and a
+    skipped step counts as success. GATES: clippy clean, cargo test 2888 passed 0 failed, chaos self-test 63/0,
+    the harness itself 4 survived 0 failed 0 could not inject, shellcheck clean, project-layout 23/0.
 - id: P2-001
   title: Encrypted backup framework
   priority: P2
