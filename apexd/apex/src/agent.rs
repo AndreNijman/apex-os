@@ -14,12 +14,13 @@ use anyhow::{anyhow, bail, Context, Result};
 use apex_agent_core::client::{self, Client};
 use apex_agent_core::grant::{GrantKind, SystemGrant};
 use apex_agent_core::policy::{
-    AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyPreset, RequestOrigin, SecretPolicy,
-    SystemAccess,
+    AgentPolicy, ConnectorPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyPreset,
+    RequestOrigin, SecretPolicy, SystemAccess,
 };
 use apex_agent_core::protocol::{
     AgentState, Request, Response, RunRequest, SandboxPolicy, SessionInfo,
-    POLICY_DIMENSIONS_VERSION, REQUEST_ORIGIN_VERSION, SCOPED_GRANT_VERSION, SYSTEM_GRANT_VERSION,
+    CONNECTOR_POLICY_VERSION, POLICY_DIMENSIONS_VERSION, REQUEST_ORIGIN_VERSION,
+    SCOPED_GRANT_VERSION, SYSTEM_GRANT_VERSION,
 };
 use apex_agent_core::hook::{self as hook_core, HookEvent};
 use apex_agent_core::paths;
@@ -523,6 +524,15 @@ pub struct RunArgs {
     /// local | remote. Which origins may authorise elevation (dimension 6).
     #[arg(long, value_parser = parse_origin_policy)]
     pub origin_policy: Option<OriginPolicy>,
+    /// all | local | curated | none. Which MCP connectors the session gets
+    /// (dimension 7).
+    ///
+    /// `curated` takes its names from `connector_allow` in the runtime's
+    /// configuration and not from this command line, for the reason
+    /// `--network allowlist` takes its destinations from there: a list the
+    /// confined thing can write is not a boundary.
+    #[arg(long, value_parser = parse_connectors)]
+    pub connectors: Option<ConnectorPolicy>,
 
     // ── §7: where the session is driven from ────────────────────────────────
     /// Declare where this session is driven from (§7's request_origin).
@@ -666,6 +676,7 @@ impl RunArgs {
             ("--secrets", self.secrets.map(|v| v.as_str())),
             ("--network", self.network.map(|v| v.as_str())),
             ("--origin-policy", self.origin_policy.map(|v| v.as_str())),
+            ("--connectors", self.connectors.map(|v| v.as_str())),
             ("--origin", self.origin.map(|v| v.as_str())),
         ] {
             if let Some(v) = value {
@@ -991,6 +1002,11 @@ dimension_parser!(parse_system_access, SystemAccess, "none, session or unsafe");
 dimension_parser!(parse_secrets, SecretPolicy, "brokered, none or export");
 dimension_parser!(parse_network, NetworkPolicy, "open, allowlist, brokered or offline");
 dimension_parser!(parse_origin_policy, OriginPolicy, "local or remote");
+dimension_parser!(
+    parse_connectors,
+    ConnectorPolicy,
+    "all, local, curated or none"
+);
 
 /// `--agents` and `--remote` on `apex agent lock`.
 ///
@@ -1106,13 +1122,16 @@ pub fn resolve_policy(cfg: &config::Config, args: &RunArgs) -> Result<AgentPolic
     if let Some(v) = args.origin_policy {
         policy.origin = v;
     }
+    if let Some(v) = args.connectors {
+        policy.connectors = v;
+    }
 
     // Refuse anything this build cannot enforce, here as well as in the
     // daemon: the message is better in front of the user who typed the flag.
     // The allowlist goes in because `--network allowlist` with nothing on it
     // is a refusal too, and the user who typed the flag is the one who can
     // fix it.
-    policy.validate_for(&cfg.allowlist())?;
+    policy.validate_for(&cfg.allowlist(), &cfg.connector_allow)?;
     Ok(policy.normalised())
 }
 
@@ -1265,9 +1284,20 @@ fn check_daemon_understands(
     let mut needs: Vec<(&str, u32)> = moved
         .iter()
         .map(|(name, _)| *name)
-        .filter(|name| *name != "sandbox")
+        // `sandbox` predates the split, and `connectors` postdates it by four
+        // revisions — mapping the seventh dimension onto the version the first
+        // six arrived in would tell a protocol-6 daemon it understood a key it
+        // drops, which is the exact fail-open this function exists for.
+        .filter(|name| *name != "sandbox" && *name != "connectors")
         .map(|name| (name, POLICY_DIMENSIONS_VERSION))
         .collect();
+    // Dimension 7, and its dropped key is a WIDENING like `--capabilities`:
+    // a daemon below this writes no curated configuration at all, so
+    // `--connectors none` comes back as a session holding every connector on
+    // the machine.
+    if policy.connectors != ConnectorPolicy::default() {
+        needs.push(("--connectors", CONNECTOR_POLICY_VERSION));
+    }
     // A declared origin is the same failure and a worse one. A daemon that
     // predates it drops the key and records whatever it observed, which for
     // Remote Control is the local origin §7 reserves root for.
@@ -4274,6 +4304,7 @@ mod tests {
             secrets: None,
             network: None,
             origin_policy: None,
+            connectors: None,
             origin: None,
             unsafe_everything: false,
             ttl: None,

@@ -13,14 +13,17 @@ use serde::{Deserialize, Serialize};
 use crate::adapter;
 use crate::paths;
 use crate::lock::LockPolicy;
-use crate::policy::{AgentPolicy, NativeMode, NetworkPolicy, OriginPolicy, SecretPolicy, SystemAccess};
+use crate::policy::{
+    AgentPolicy, ConnectorPolicy, NativeMode, NetworkPolicy, OriginPolicy, SecretPolicy,
+    SystemAccess,
+};
 use crate::protocol::SandboxPolicy;
 use crate::term::DEFAULT_DETACH_KEY;
 
 /// The runtime's user configuration.
 ///
-/// The six permission dimensions are six sibling keys here rather than one
-/// nested `policy` object. `sandbox` has been a top-level key since before the
+/// The permission dimensions are sibling keys here rather than one nested
+/// `policy` object. `sandbox` has been a top-level key since before the
 /// split, and `extra` swallows anything this build does not recognise — so
 /// nesting it would have moved a security setting into the catch-all and
 /// silently downgraded every configuration file that already sets it. Six
@@ -49,6 +52,9 @@ pub struct Config {
     /// Dimension 6: applied when `--origin-policy` is not given.
     #[serde(default)]
     pub origin: OriginPolicy,
+    /// Dimension 7: applied when `--connectors` is not given.
+    #[serde(default)]
+    pub connectors: ConnectorPolicy,
     /// Destinations an `allowlist` session may reach, one `host` or
     /// `host:port` per entry.
     ///
@@ -59,10 +65,21 @@ pub struct Config {
     /// session is refused rather than started with nothing it can reach.
     #[serde(default)]
     pub network_allow: Vec<String>,
+    /// Connectors a `curated` session may be given, by the name the agent
+    /// addresses them with — `memory`, `plugin:github:github`.
+    ///
+    /// Here and not in the request, for the reason `network_allow` is here:
+    /// a list the confined thing gets to write is not a boundary. Empty by
+    /// default, and [`AgentPolicy::validate_for`] refuses a `curated` session
+    /// against an empty one rather than starting it with everything removed —
+    /// "nobody filled this in" and "reach nothing" are different statements
+    /// and `--connectors none` already makes the second.
+    #[serde(default)]
+    pub connector_allow: Vec<String>,
     /// §7's lock rules: what happens to running sessions, and to grants in
     /// force, when the screen locks.
     ///
-    /// Nested rather than three sibling keys, because unlike the six
+    /// Nested rather than three sibling keys, because unlike the
     /// permission dimensions these have no history to preserve — nothing has
     /// ever written them — and they are one subject. The struct carries
     /// `#[serde(default)]` itself, so setting one of the three keeps §7's
@@ -98,7 +115,9 @@ impl Default for Config {
             secrets: SecretPolicy::default(),
             network: NetworkPolicy::default(),
             origin: OriginPolicy::default(),
+            connectors: ConnectorPolicy::default(),
             network_allow: Vec::new(),
+            connector_allow: Vec::new(),
             lock: LockPolicy::default(),
             detach_key: default_detach_key(),
             auto_checkpoint: false,
@@ -130,10 +149,11 @@ impl Config {
             secrets: self.secrets,
             network: self.network,
             origin: self.origin,
+            connectors: self.connectors,
         }
     }
 
-    /// Store a policy back as the six defaults.
+    /// Store a policy back as the per-dimension defaults.
     pub fn set_policy(&mut self, p: AgentPolicy) {
         self.native = p.native;
         self.sandbox = p.sandbox;
@@ -141,6 +161,7 @@ impl Config {
         self.secrets = p.secrets;
         self.network = p.network;
         self.origin = p.origin;
+        self.connectors = p.connectors;
     }
 
     /// Load the user's configuration.
@@ -212,6 +233,20 @@ impl Config {
         if let Err(e) = crate::destination::Allowlist::parse(&self.network_allow) {
             fixed.push(format!("{e}; the network allowlist is empty until it is fixed"));
             self.network_allow.clear();
+        }
+        // A connector name that cannot be one is dropped and named. Unlike the
+        // allowlist this does NOT empty the list: a bad entry here can only
+        // ever fail to match a real connector, so keeping the rest tightens
+        // nothing and loses nothing — where an unparsed destination line could
+        // have been the one that mattered.
+        let before = self.connector_allow.len();
+        self.connector_allow
+            .retain(|name| crate::mcpconf::usable_as_connector_name(name));
+        if self.connector_allow.len() != before {
+            fixed.push(format!(
+                "{} connector name(s) in connector_allow are not names an MCP server can                  have, and were dropped",
+                before - self.connector_allow.len()
+            ));
         }
         fixed
     }

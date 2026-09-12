@@ -38,6 +38,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use apex_agent_core::mcpconf;
 use serde_json::Value;
 
 /// Where a server definition was read from.
@@ -55,6 +56,21 @@ pub enum Surface {
 }
 
 impl Surface {
+    /// The runtime's name for the same four surfaces.
+    ///
+    /// One direction only. [`apex_agent_core::mcpconf::Origin`] is what the
+    /// session launcher decides against and this is what a report prints, and
+    /// keeping the conversion here means a fifth surface added upstream fails
+    /// to compile rather than arriving as a silent fifth case.
+    pub fn from_origin(origin: mcpconf::Origin) -> Surface {
+        match origin {
+            mcpconf::Origin::User => Surface::User,
+            mcpconf::Origin::Directory(dir) => Surface::Directory(dir),
+            mcpconf::Origin::Repository(file) => Surface::Repository(file),
+            mcpconf::Origin::Plugin { plugin, file } => Surface::Plugin { plugin, file },
+        }
+    }
+
     /// Whether `apex mcp connect` may rewrite this definition in place.
     ///
     /// Only the user's own file. A repository's `.mcp.json` is under version
@@ -310,135 +326,48 @@ pub fn read_json(path: &Path) -> Option<Value> {
 ///
 /// `cwd` decides which directory-scoped and repository-scoped definitions
 /// apply; pass the directory the person is asking about.
+///
+/// The four surfaces are walked by [`apex_agent_core::mcpconf::read`] and not
+/// here. This adds what a *report* needs and a launcher does not — where the
+/// credential is, and what shape it has — over definitions the session
+/// launcher reads from the same function, so `apex mcp list` and the file a
+/// session is actually started with cannot disagree about which servers exist.
 pub fn discover(home: &Path, cwd: Option<&Path>) -> Vec<Server> {
     let env = Environment::read(home);
-    let mut out = Vec::new();
-
-    let sidecar = read_json(&home.join(".claude.json"));
-    if let Some(doc) = &sidecar {
-        collect(
-            doc.get("mcpServers"),
-            Surface::User,
-            |k| k.to_string(),
-            &env,
-            &mut out,
-        );
-        if let Some(cwd) = cwd {
-            let dir = cwd.to_string_lossy().into_owned();
-            let scoped = doc
-                .get("projects")
-                .and_then(|p| p.get(&dir))
-                .and_then(|p| p.get("mcpServers"));
-            collect(
-                scoped,
-                Surface::Directory(dir),
-                |k| k.to_string(),
-                &env,
-                &mut out,
-            );
-        }
-    }
-
-    if let Some(cwd) = cwd {
-        let file = cwd.join(".mcp.json");
-        if let Some(doc) = read_json(&file) {
-            collect(
-                doc.get("mcpServers").or(Some(&doc)),
-                Surface::Repository(file),
-                |k| k.to_string(),
-                &env,
-                &mut out,
-            );
-        }
-    }
-
-    for (plugin, file) in enabled_plugin_configs(home) {
-        let Some(doc) = read_json(&file) else { continue };
-        let named = plugin.clone();
-        collect(
-            doc.get("mcpServers").or(Some(&doc)),
-            Surface::Plugin {
-                plugin: plugin.clone(),
-                file,
-            },
-            move |k| format!("plugin:{named}:{k}"),
-            &env,
-            &mut out,
-        );
-    }
-
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    mcpconf::read(home, cwd)
+        .into_iter()
+        .map(|d| {
+            let transport = transport_of_value(&d.def);
+            Server {
+                name: d.name,
+                key: d.key,
+                credential: credential_of_value(&d.def, &transport, &env),
+                surface: Surface::from_origin(d.origin),
+                transport,
+            }
+        })
+        .collect()
 }
 
 /// Each enabled plugin's `.mcp.json`, when it has one.
 ///
-/// Enabled is read from `settings.json`, because a plugin that is installed and
-/// switched off defines no server the agent will start — and reporting one
-/// would send somebody to fix a file nothing reads.
+/// One line, for the reason [`confined`] is one line: the launcher and the
+/// listing must not read different files.
 pub fn enabled_plugin_configs(home: &Path) -> Vec<(String, PathBuf)> {
-    let Some(settings) = read_json(&home.join(".claude/settings.json")) else {
-        return Vec::new();
-    };
-    let enabled: Vec<String> = settings
-        .get("enabledPlugins")
-        .and_then(Value::as_object)
-        .map(|m| {
-            m.iter()
-                .filter(|(_, v)| v.as_bool() == Some(true))
-                .map(|(k, _)| k.clone())
-                .collect()
-        })
-        .unwrap_or_default();
-    let Some(installed) = read_json(&home.join(".claude/plugins/installed_plugins.json")) else {
-        return Vec::new();
-    };
-    let Some(plugins) = installed.get("plugins").and_then(Value::as_object) else {
-        return Vec::new();
-    };
-
-    let mut out = Vec::new();
-    for full in enabled {
-        let Some(entries) = plugins.get(&full).and_then(Value::as_array) else {
-            continue;
-        };
-        // The name the agent uses is the part before the marketplace, which is
-        // the spelling in `plugin:github:github`.
-        let short = full.split('@').next().unwrap_or(&full).to_string();
-        for entry in entries {
-            let Some(dir) = entry.get("installPath").and_then(Value::as_str) else {
-                continue;
-            };
-            let file = Path::new(dir).join(".mcp.json");
-            if file.is_file() {
-                out.push((short.clone(), file));
-            }
-        }
-    }
-    out
+    mcpconf::enabled_plugin_configs(home)
 }
 
-/// Turn one `mcpServers` object into [`Server`]s.
-fn collect(
-    node: Option<&Value>,
-    surface: Surface,
-    name_of: impl Fn(&str) -> String,
-    env: &Environment,
-    out: &mut Vec<Server>,
-) {
-    let Some(servers) = node.and_then(Value::as_object) else {
-        return;
-    };
-    for (key, def) in servers {
-        let Some(def) = def.as_object() else { continue };
-        let transport = transport_of(def);
-        out.push(Server {
-            name: name_of(key),
-            key: key.clone(),
-            credential: credential_of(def, &transport, env),
-            surface: surface.clone(),
-            transport,
-        });
+fn transport_of_value(def: &Value) -> Transport {
+    match def.as_object() {
+        Some(map) => transport_of(map),
+        None => Transport::Other("not an object".to_string()),
+    }
+}
+
+fn credential_of_value(def: &Value, transport: &Transport, env: &Environment) -> Credential {
+    match def.as_object() {
+        Some(map) => credential_of(map, transport, env),
+        None => Credential::None,
     }
 }
 
@@ -624,27 +553,14 @@ pub fn as_json(found: &[Server]) -> Value {
 /// The counterpart to [`bridged_service`], and matched the same way: on the
 /// argument vector, so a program that merely has `apex` in its name is not
 /// mistaken for the wrapper.
+///
+/// One line, because the argv shape belongs to
+/// [`apex_agent_core::mcpconf`] now: `mcp/confine.rs` writes that shape into a
+/// definition, the session launcher writes it into a curated configuration,
+/// and this recognises it. Three writers and one reader agreeing by
+/// coincidence is how a wrapper stops being seen.
 pub fn confined(command: &str, args: &[String]) -> Option<(String, Vec<String>)> {
-    let program = Path::new(command).file_name()?.to_str()?;
-    if program != "apex" {
-        return None;
-    }
-    let mut rest = args.iter();
-    if rest.next().map(String::as_str) != Some("mcp") {
-        return None;
-    }
-    if rest.next().map(String::as_str) != Some("run") {
-        return None;
-    }
-    let name = rest.next()?.clone();
-    if rest.next().map(String::as_str) != Some("--") {
-        return None;
-    }
-    let inner: Vec<String> = rest.cloned().collect();
-    if inner.is_empty() {
-        return None;
-    }
-    Some((name, inner))
+    apex_agent_core::mcpconf::unwrap_wrapped(command, args)
 }
 
 /// Just the name, for a caller that only wants to know whether it is wrapped.
