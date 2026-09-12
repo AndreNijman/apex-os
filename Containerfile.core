@@ -1233,6 +1233,35 @@ RUN set -eux; \
     rpm -q orca at-spi2-core speech-dispatcher espeak-ng >/dev/null; \
     dnf5 clean all
 
+# Shipping a reader nobody can start is not shipping a reader. orca has no
+# keybinding of its own, no tray entry and no toggle, and the one thing a user
+# who needs it cannot do is open a terminal and type `orca`. This is the switch:
+# APEX Shell binds SUPER+ALT+S to it on all three sessions (Hyprland, niri and
+# labwc, from the one KeybindService default), which is GNOME's combination for
+# the same action.
+#
+# It goes in this stage, beside the package, so the reader and its switch move
+# together: deleting one without the other is the shape of defect this file has
+# collected six times over (a change that selects no CI job and passes).
+#
+# Two things the script is built around, both read out of the rpm rather than
+# remembered: orca 49 has NO `--quit` verb (stopping it is SIGTERM), and
+# /usr/bin/orca is `#!/usr/bin/python3`, so its comm is `python3` and
+# `pgrep -x orca` matches nothing.
+COPY --chmod=0755 files/system/libexec/apex-screen-reader /usr/libexec/apex-screen-reader
+#
+# The unit file test is not decoration: the script prefers
+# `systemctl --user start orca.service` over exec'ing orca, so an orca that
+# stopped shipping that unit would quietly move every user onto the fallback
+# path. That it is NOT enabled is asserted in tests/test-apex-a11y-stack.sh,
+# where a systemctl that cannot answer SKIPs with a reason instead of passing.
+RUN set -eux; \
+    bash -n /usr/libexec/apex-screen-reader; \
+    test -x /usr/libexec/apex-screen-reader; \
+    rc=0; /usr/libexec/apex-screen-reader status >/dev/null || rc=$?; \
+    test "$rc" -le 1; \
+    test -f /usr/lib/systemd/user/orca.service
+
 # ── Stage 5a-laptop: ordinary laptop hardware every vendor ships ───────────
 # Gaps found by diffing the built image against Fedora's @hardware-support and
 # the things a normal laptop owner expects to just work:
