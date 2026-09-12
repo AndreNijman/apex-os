@@ -103,11 +103,26 @@ impl Relay {
         // to what it was before this hook existed.
         if let Ok(url) = std::env::var("APEX_RELAY_URL") {
             let endpoint = Endpoint::parse(&url).expect("APEX_RELAY_URL is not a relay address");
+            // `wss://` is refused BY DEFAULT and allowed with
+            // `APEX_RELAY_TLS=1`, because the two TLS endpoints this suite can
+            // meet are not the same thing.
+            //
+            // Against `wrangler dev --local` the certificate is self-signed, so
+            // a run would only re-prove the refusal that apex-remote-core's tls
+            // suite already proves against a minted CA — noise, not evidence.
+            //
+            // Against a DEPLOYED relay the certificate is real, and then this
+            // is the only test anywhere that drives the whole stack end to end:
+            // rustls, the machine's own root store, Cloudflare's edge, and the
+            // Worker's Durable Object. Nothing else covers that seam, so it is
+            // reachable rather than forbidden — behind a flag, so a default run
+            // is unchanged and nobody points it at production by accident.
             assert!(
-                !endpoint.secure,
-                "this suite drives a relay over ws://. What TLS refuses is proved in \
-                 apex-remote-core's tls suite against a minted CA; pointing it at \
-                 wrangler's self-signed certificate would only re-test that refusal."
+                !endpoint.secure || std::env::var_os("APEX_RELAY_TLS").is_some(),
+                "this suite drives a relay over ws://. Set APEX_RELAY_TLS=1 to allow \
+                 wss://, which is worth doing against a DEPLOYED relay with a real \
+                 certificate and pointless against wrangler's self-signed one — what \
+                 TLS refuses is already proved in apex-remote-core's tls suite."
             );
             return Relay {
                 host: endpoint.host.clone(),
@@ -1032,6 +1047,25 @@ fn a_relayed_session_is_recorded_as_relayed_and_a_direct_one_is_not() {
 
 #[test]
 fn a_guest_that_arrives_with_no_desktop_waiting_is_refused_by_status_not_by_silence() {
+    // Plaintext-only BY CONSTRUCTION: this test dials a raw TcpStream and
+    // speaks the WebSocket handshake itself, so a `wss://` endpoint can only
+    // reject it — which it does in 0.01 s, long before any room logic runs.
+    // Skipped rather than made to fail, and skipped on the SCHEME rather than
+    // on "is it external", because against `wrangler dev --local` over ws://
+    // it still tests exactly what it was written to test.
+    {
+        let probe = Relay::start();
+        let ep = Endpoint::parse(&probe.url()).expect("endpoint");
+        if ep.secure {
+            println!(
+                "SKIP-EXTERNAL: {}: this assertion is made over a raw TCP socket, \
+                 which cannot reach a TLS relay. It runs against the double and \
+                 against a ws:// relay.",
+                "a_guest_that_arrives_with_no_desktop_waiting_is_refused_by_status_not_by_silence"
+            );
+            return;
+        }
+    }
     // The relay's own refusal, checked through the shipped client: a device
     // whose desktop is off should be told so, not left holding a socket.
     let relay = Relay::start();
@@ -1054,6 +1088,25 @@ fn a_guest_that_arrives_with_no_desktop_waiting_is_refused_by_status_not_by_sile
 
 #[test]
 fn two_desktops_cannot_hold_one_rendezvous() {
+    // Plaintext-only BY CONSTRUCTION: this test dials a raw TcpStream and
+    // speaks the WebSocket handshake itself, so a `wss://` endpoint can only
+    // reject it — which it does in 0.01 s, long before any room logic runs.
+    // Skipped rather than made to fail, and skipped on the SCHEME rather than
+    // on "is it external", because against `wrangler dev --local` over ws://
+    // it still tests exactly what it was written to test.
+    {
+        let probe = Relay::start();
+        let ep = Endpoint::parse(&probe.url()).expect("endpoint");
+        if ep.secure {
+            println!(
+                "SKIP-EXTERNAL: {}: this assertion is made over a raw TCP socket, \
+                 which cannot reach a TLS relay. It runs against the double and \
+                 against a ws:// relay.",
+                "two_desktops_cannot_hold_one_rendezvous"
+            );
+            return;
+        }
+    }
     // Whoever has seen the QR code knows the rendezvous id and can dial as a
     // host. They cannot impersonate the desktop — they have no static private
     // key, so Noise_IK fails for them — but a relay that let a second host
