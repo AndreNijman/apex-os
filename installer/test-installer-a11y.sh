@@ -631,7 +631,7 @@ advance_with() {   # advance_with <xdotool key name>
     done
     [ "$ADV_REACHED" = 1 ] || return 0
 
-    xdotool key --window "$wid" --clearmodifiers "$key" >/dev/null 2>&1
+    xdotool key --window "$wid" --clearmodifiers shift >/dev/null 2>&1
     for _ in $(seq 1 40); do
         python3 "$WALK" --dump >"$ATSPI_W/dump-adv-$key.txt" 2>/dev/null
         grep -q '| name=Keyboard test |' "$ATSPI_W/dump-adv-$key.txt" && { ADV_MOVED=1; break; }
