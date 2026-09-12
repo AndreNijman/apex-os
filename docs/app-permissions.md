@@ -188,11 +188,48 @@ and `client/access-portal.lua` (`script.client.access-portal`), and the virtual
 profile does not inherit, so in a user session they are active: WirePlumber asks
 the permission store whether a client may see camera nodes.
 
-**Not verified.** Whether changing `devices`/`camera` in the store affects an
-*already running* PipeWire client, and how fast, was not measured. Doing so
-would have meant taking a camera grant away on Andre's live machine. The model
-therefore records camera revocation timing as `NextRequest`, which is the
-conservative true statement, and not `Immediate`.
+That last sentence used to be read off the config file. It is now read off the
+running process: on the L16, 2026-09-12,
+`grep libwireplumber-module /proc/<wireplumber>/maps` lists
+`libwireplumber-module-portal-permissionstore.so` among the session
+WirePlumber's mapped modules. The module is loaded on this machine, right now,
+and not merely enabled on paper.
+
+**Measured, 2026-09-12: it does NOT.** Changing `devices`/`camera` in the store
+does not affect a PipeWire client that is already connected.
+`tests/measure-permission-store-reach.sh` reproduces it on a private session
+bus, a private PipeWire, a private WirePlumber and a private `XDG_DATA_HOME`, so
+the store it writes belongs to an application id that does not exist and the
+machine's own grants are never touched. Nothing here needed a camera taken away
+from anybody.
+
+The negative is only worth something because every other link was verified
+working in the same run:
+
+* The client really is a portal client. The server records
+  `pipewire.access = portal`, on socket `pipewire-0`, with
+  `pipewire.access.portal.app_id` and `media_roles = Camera`.
+* WirePlumber really did grant it. `pw-cli get-permissions` shows `rwxm-` on
+  the client's own object and on the `media.role=Camera` node, and
+  `client/access-portal.lua:87` logged `setting permissions: true`.
+* The store really did change. `Lookup devices camera` reads back `['no']`.
+* The `Changed` signal really was on the bus. `gdbus monitor` caught
+  `Changed('devices','camera',false,<byte 0x00>,{app:['no']})`.
+* The module really is talking to the store. Its `lookup` calls answer, logged
+  by `m-portal-permissionstore`.
+
+Six seconds after the write, the running client still had `rwxm-` on every
+object, and `access-portal.lua` logged nothing at all. It acts on `object-added`
+— when a client connects — and did not act on the store change.
+
+Where the chain breaks, between the store's `Changed` signal and the handler at
+`client/access-portal.lua:123`, is **not** established. This is a measurement of
+the outcome, not a diagnosis, and inventing the cause would be the kind of claim
+the rest of this document exists to avoid.
+
+So the model records camera revocation timing as `NextRequest`, which is now the
+*correct* statement rather than the merely conservative one, and `Timing::Immediate`
+stays unreachable — held so by `nothing_claims_a_revocation_is_immediate`.
 
 ---
 
@@ -324,7 +361,9 @@ what the machine controls sits above what it only observes.
   in §1, one layer deeper. Every write this makes goes through
   `org.freedesktop.impl.portal.PermissionStore` or `flatpak override`, which are
   the things a request is checked against.
-* **It does not claim revocation is immediate.** See §2.4.
+* **It does not claim revocation is immediate**, and §2.4 now says so on a
+  measurement rather than on caution: a store change does not reach a PipeWire
+  client that is already running.
 
 ---
 
