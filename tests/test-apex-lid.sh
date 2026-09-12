@@ -265,6 +265,24 @@ section "criterion 3 (the other half) — the power-down cannot kill the VPN"
 # copy of them, because a future edit to that list is precisely the accident
 # this guards.
 F="$(fx vpnsafe 'pin = "on"')"
+# Every forbidden unit is RUNNING on this fixture's machine. Without that the
+# assertion below could not fail for the thing it guards: a unit only reaches
+# the plan if it is in the shipped stop list AND active, so a mutant that added
+# NetworkManager.service to `stop_system_units` would never appear in the plan
+# and the check would stay green over the defect it exists to catch.
+cat >> "$F/var/lib/apex/lid/active-units" <<'EOF'
+NetworkManager.service
+wpa_supplicant.service
+sing-box.service
+systemd-resolved.service
+iwd.service
+tailscaled.service
+apex-agentd.service
+apex-remoted.service
+sshd.service
+systemd-networkd.service
+dbus.service
+EOF
 plan="$(drive "$F" plan --json)"
 
 python3 - "$plan" <<'PY' && ok "no shipped power-down action blocks Wi-Fi" \
@@ -273,9 +291,13 @@ import json,sys
 p=json.loads(sys.argv[1])["plan"]["actions"]
 # rfkill takes a type argument. `bluetooth` is the only one this may ever be:
 # `wifi`, `wlan` or `all` would take the tunnel down with the radio.
-bad=[a for a in p if a["action"]=="bluetooth" and not a.get("blocked") is True]
+bad=[a for a in p if a["action"]=="bluetooth" and a.get("blocked") is not True]
 assert not bad, bad
-assert all(a["action"]!="rfkill-wifi" for a in p)
+# The rfkill invocation the driver builds takes its type from this action and
+# from nowhere else, so `bluetooth` being the only radio action in the plan is
+# what makes "the Wi-Fi radio is never blocked" true.
+radios=[a["action"] for a in p if a["action"] in ("bluetooth","wifi-power-save")]
+assert radios.count("bluetooth") <= 1, radios
 sys.exit(0)
 PY
 
@@ -457,6 +479,49 @@ grep -q '^ProtectKernelTunables=yes$' "$UNIT" \
 grep -q 'CAP_NET_ADMIN' "$UNIT" \
     && ok "CAP_NET_ADMIN is granted, which is what rfkill and iw need" \
     || bad "CAP_NET_ADMIN is granted, which is what rfkill and iw need"
+# Measured on the L16 with systemd-run carrying exactly this unit's settings:
+# ProtectHome=yes makes /run/user inaccessible AND EMPTY, and /run/user is
+# where the driver finds every live session and every owner's home. Under it
+# the driver sees zero sessions for ever, `pin = "auto"` never activates, and
+# ~/.config/apex/lid.toml is never read — the silent-pin defect that was fixed
+# in the code, reintroduced by a unit file.
+grep -q '^ProtectHome=no$' "$UNIT" \
+    && ok "ProtectHome=no, because ProtectHome=yes empties /run/user" \
+    || bad "ProtectHome=no, because ProtectHome=yes empties /run/user"
+grep -q '^ProtectHome=yes$' "$UNIT" \
+    && bad "ProtectHome is not yes" || ok "ProtectHome is not yes"
+grep -q '^PrivateTmp=yes$' "$UNIT" \
+    && bad "PrivateTmp is not yes, because a worktree may live under /tmp" \
+    || ok "PrivateTmp is not yes, because a worktree may live under /tmp"
+# Without CAP_SYS_RESOURCE, `runuser -u <owner> -- apex agent checkpoint` fails
+# with "cannot open session: Permission denied" — pam_limits cannot raise
+# rlimits — and the checkpoint dies at exactly the moment a guard is about to
+# take the machine down with a session's work unsaved. Found by bisection:
+# CAP_AUDIT_WRITE, CAP_CHOWN, CAP_FOWNER and CAP_SYS_ADMIN each fail alone.
+grep -q '^CapabilityBoundingSet=.*CAP_SYS_RESOURCE' "$UNIT" \
+    && ok "CAP_SYS_RESOURCE is granted, which is what runuser's PAM stack needs" \
+    || bad "CAP_SYS_RESOURCE is granted, which is what runuser's PAM stack needs"
+
+# ── the build's own refusals must be able to fail the build ─────────────────
+# bash does not apply errexit to a pipeline inverted with `!`:
+#   set -e; ! grep -q x <<<x; echo REACHED    →  prints REACHED
+# So `! grep -q '^KillMode='` inside a `RUN set -eux` stanza is decoration. Four
+# assertions on this branch have already been found that could never pass or
+# never run, each costing a 50-minute build; this is the fifth species, and it
+# is checked here because a Containerfile assertion cannot be run by running
+# the suite.
+lid_stanza="$(awk '/^# ── Lid-closed continuous operation/,/^# ── What is attached/' \
+                "$ROOT/Containerfile.base")"
+[ -n "$lid_stanza" ] || bad "the lid stanza was found in Containerfile.base" "no match"
+if printf '%s' "$lid_stanza" | grep -q '^ *! *grep'; then
+    bad "no refusal in the lid build stanza is written as '! grep'" \
+        "$(printf '%s' "$lid_stanza" | grep -n '^ *! *grep' | head -3)"
+else
+    ok "no refusal in the lid build stanza is written as '! grep'"
+fi
+printf '%s' "$lid_stanza" | grep -q 'echo "FATAL' \
+    && ok "its refusals say FATAL and exit 1, which does fail a build" \
+    || bad "its refusals say FATAL and exit 1, which does fail a build"
 
 # The image must never acquire a static logind lid policy behind this unit's
 # back: `HandleLidSwitch=ignore` applies to a machine with nothing running as

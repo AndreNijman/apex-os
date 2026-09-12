@@ -76,6 +76,11 @@ fi
 
 WORK="$(mktemp -d)"
 cleanup() {
+    # The ping lives INSIDE a namespace, so killing it first is not tidiness:
+    # `ip netns del` on a namespace with a process still in it leaves the
+    # namespace alive until that process exits, and an abnormal exit here would
+    # otherwise leave one behind on Andre's machine.
+    [ -n "${PING:-}" ] && kill "$PING" >/dev/null 2>&1
     ip netns del "$NS_A" >/dev/null 2>&1
     ip netns del "$NS_B" >/dev/null 2>&1
     rm -rf "$WORK"

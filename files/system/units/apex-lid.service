@@ -69,8 +69,24 @@ ProtectSystem=full
 # For the same reason ProtectKernelTunables is NOT set: it remounts /sys
 # read-only, and the first thing the owner would notice is a keyboard backlight
 # that never dims and a journal line saying "Read-only file system".
-ProtectHome=yes
-PrivateTmp=yes
+
+# ProtectHome=no, and it CANNOT be anything else. `ProtectHome=yes` makes
+# /home, /root **and /run/user** inaccessible and empty (systemd.exec(5)) — and
+# /run/user is where this driver discovers everything it exists for. Measured
+# rather than reasoned about, with `systemd-run` carrying exactly these
+# settings on 2026-09-12: `ls /run/user` returned NOTHING under
+# ProtectHome=yes, and `0 1000 1042` with it off. Under the strict form the
+# driver sees zero sessions, `pin = "auto"` therefore never activates, and
+# `owner_configs` finds no uid to resolve a home for — so the owner's
+# ~/.config/apex/lid.toml is never read and their pin is silently ignored.
+# That is the defect 2aa9ed45 fixed in the code, reintroduced by a unit file.
+ProtectHome=no
+# PrivateTmp=no, for the reason apex-secretd.service gives: a project may be a
+# git worktree under /tmp or /var/tmp, and the guards' checkpoint runs `apex
+# agent checkpoint` inside it. Under PrivateTmp=yes that directory does not
+# exist for this service — measured the same way: `ls /var/tmp | wc -l` gave 0
+# private versus 407 real.
+PrivateTmp=no
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
@@ -83,7 +99,15 @@ LockPersonality=yes
 # are the `runuser` drop that checkpoints a live session as its owner rather
 # than leaving root-owned git objects in a repository the user has to keep
 # using. CAP_DAC_OVERRIDE is the sysfs writes.
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_SYS_ADMIN
+#
+# CAP_SYS_RESOURCE is `runuser`'s, and it was found by bisection rather than
+# guessed: with the other four alone, `runuser -u andre -- true` fails with
+# "cannot open session: Permission denied", because pam_limits cannot raise
+# rlimits without it. CAP_AUDIT_WRITE, CAP_CHOWN, CAP_FOWNER and CAP_SYS_ADMIN
+# were each tried on their own and each still failed; CAP_SYS_RESOURCE alone
+# succeeds. Without it the checkpoint is dead at exactly the moment a guard is
+# about to take the machine down with a session's work unsaved.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_SYS_RESOURCE
 # NO SystemCallFilter, for the reason apex-secretd.service gives: the filter
 # would apply to the `runuser … apex agent checkpoint` child, whose syscall use
 # is git's, and a wrong filter kills the checkpoint with SIGSYS at exactly the
