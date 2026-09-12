@@ -1703,7 +1703,13 @@ RUN set -eux; \
     # directory and apex/session.lua reads os.getenv("HOME"), so there is no
     # absolute path left to substitute. Asserting its ABSENCE is what stops one
     # creeping back in and seeding a config that only works for one home.
-    ! grep -rq '@HOME@' /usr/share/apex/hypr/; \
+    # Executable Lua only: two comment lines in this tree explain that @HOME@ is
+    # gone and name the token while doing it, so a plain `grep -r` matched the
+    # explanation and this assertion could only ever fail. Same shape as the
+    # `mouse = true` one two stanzas down, found by
+    # tests/check-containerfile-assertions.sh rather than by a fifth 50-minute
+    # build.
+    ! grep -rqE '^[[:space:]]*[^-[:space:]].*@HOME@' /usr/share/apex/hypr/; \
     # No hyprlang left anywhere in the tree.
     ! grep -rqE '^[[:space:]]*(source|exec-once|bind[a-z]*|windowrule|monitor|env)[[:space:]]*=' \
         /usr/share/apex/hypr/; \

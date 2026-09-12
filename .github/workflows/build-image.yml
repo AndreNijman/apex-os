@@ -198,6 +198,14 @@ jobs:
         with:
           fetch-depth: 2
 
+      # Five assertions in the Containerfiles could never pass or never run, and
+      # each was found by a `base` job dying at a later step than the last -- 50
+      # minutes of core build apiece, and the branch produced no image for five
+      # days. This resolves those assertions back to the files in this repo that
+      # become them and runs them here, in seconds, before anything is built.
+      - name: Containerfile assertions
+        run: ./tests/check-containerfile-assertions.sh
+
       - name: Pin apex-shell
         id: shell
         run: |

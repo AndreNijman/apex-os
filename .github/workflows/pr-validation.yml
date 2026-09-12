@@ -1000,6 +1000,15 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/check-doc-verbs.sh
 
+      # A Containerfile assertion is the one test the test suite cannot run,
+      # because it only exists inside a build. Five of them on this branch could
+      # never pass or never run, and each was found by a `base` job failing at a
+      # later step than the last. This resolves them back to the files in this
+      # repo that become them and runs them here.
+      - name: Containerfile assertions can actually pass
+        working-directory: ${{ github.workspace }}
+        run: ./tests/check-containerfile-assertions.sh
+
       - name: Run trusted-device assertions
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-host.sh
