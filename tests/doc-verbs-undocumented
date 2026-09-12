@@ -135,7 +135,6 @@ apex skill
 apex skill list
 apex skill audit
 
-apex provenance
 apex provenance show
 apex provenance record
 
@@ -144,7 +143,6 @@ apex firewall list
 apex firewall deny
 apex firewall reload
 
-apex devices
 
 apex project worktrees
 apex project checkpoints
@@ -166,8 +164,6 @@ apex request list
 apex request show
 apex request grants
 
-apex cloudflare
-apex cloudflare connect
 apex cloudflare status
 apex cloudflare preview
 
@@ -189,9 +185,7 @@ apex secret approvals
 apex mcp planes
 apex mcp memory
 
-apex blueprint
 apex blueprint show
-apex blueprint diff
 apex blueprint init
 apex blueprint set
 

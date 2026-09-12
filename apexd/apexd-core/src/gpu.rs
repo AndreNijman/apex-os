@@ -817,7 +817,8 @@ pub fn plan_sysfs_enter(
             }
         } else {
             notes.push(format!(
-                "{}: this GPU does not publish gt_RPn_freq_mhz and gt_RP0_freq_mhz,                  so there is nothing to clamp a floor against and none was set",
+                "{}: this GPU does not publish gt_RPn_freq_mhz and gt_RP0_freq_mhz, \
+                 so there is nothing to clamp a floor against and none was set",
                 dev.card
             ));
         }

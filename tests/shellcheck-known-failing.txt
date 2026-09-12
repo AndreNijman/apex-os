@@ -1,0 +1,32 @@
+# Scripts that do not yet pass `shellcheck -S warning -x`.
+# Generated 2026-09-12 from the exact invocation the gate uses.
+# This list must only ever SHRINK — check-shellcheck-coverage.sh fails if an
+# entry here starts passing, so a fixed script cannot sit here for ever.
+files/desktop/bash/apex-starship.sh
+files/desktop/shell/agent.sh
+files/desktop/shell/apex-greeting.sh
+files/scripts/boot-v2/apex-luks-enroll
+files/scripts/boot-v2/lib.sh
+files/scripts/spike-e/30-run-vm.sh
+files/scripts/vendor-apex-shell
+files/system/libexec/apex-boot-health
+files/system/libexec/apex-devices
+files/system/libexec/apex-shell-firstrun
+files/system/profile.d/apex-tool-broker.sh
+files/system/system-sleep/apex-wifi-resume
+tests/lib/atspi.sh
+tests/mutate-greet-atspi.sh
+tests/test-apex-ai-apps.sh
+tests/test-apex-backup.sh
+tests/test-apex-devices.sh
+tests/test-apex-display.sh
+tests/test-apex-firewall-live.sh
+tests/test-apex-firewall-ssh.sh
+tests/test-apex-greet-atspi.sh
+tests/test-apex-input-live.sh
+tests/test-apex-lid-live.sh
+tests/test-apex-shared-machine.sh
+tests/test-apex-storage.sh
+tests/test-apex-trust-enforcement.sh
+tests/test-secret-at-rest.sh
+tests/test-shell-agent.sh

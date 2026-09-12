@@ -746,7 +746,14 @@ fn audit(lines: usize) -> Result<i32> {
     Ok(0)
 }
 
-fn current_project_root() -> Result<String> {
+/// `pub(crate)` so `apex account` keys a grant exactly the way this file does.
+///
+/// Not a convenience. A grant is keyed on a project ROOT, and `apex-agentd`
+/// forwards a session's root when it uses one — so a second derivation that
+/// stored the current directory would write a key that nothing ever matches,
+/// from any subdirectory of a project. Same store, two key derivations, and the
+/// symptom is a capability that was granted and silently never applies.
+pub(crate) fn current_project_root() -> Result<String> {
     let cwd = std::env::current_dir()?;
     apex_agent_core::project::detect(&cwd)
         .map(|p| p.root)

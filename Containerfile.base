@@ -2387,6 +2387,70 @@ RUN set -eux; \
     grep -q 'style="thumbnail"' /usr/share/apex/labwc/rc.xml; \
     echo "APEX Floating: chrome theme, proportional font and thumbnail switcher verified"
 
+# ── APEX Safe Graphics: the recovery session (roadmap P2-018) ───────────────
+# A second labwc session with a BAKED config directory. `labwc -C` is what
+# makes it a recovery session rather than a second desktop: the compositor
+# reads rc.xml, autostart, environment and menu.xml from /usr/share/apex/
+# safe-graphics and never opens ~/.config/labwc — the file apex-input-apply
+# splices into and apex-labwc-keybinds generates into, and therefore the file
+# that can be the reason the ordinary session did not paint.
+COPY --chmod=0755 files/system/libexec/apex-safe-graphics \
+     /usr/libexec/apex-safe-graphics
+COPY --chmod=0755 files/system/libexec/apex-safe-graphics-terminal \
+     /usr/libexec/apex-safe-graphics-terminal
+COPY files/desktop/safe-graphics/ /usr/share/apex/safe-graphics/
+COPY files/desktop/wayland-sessions/apex-safe-graphics.desktop \
+     /usr/share/wayland-sessions/apex-safe-graphics.desktop
+RUN set -eux; \
+    for f in rc.xml menu.xml autostart environment; do \
+        if ! test -s "/usr/share/apex/safe-graphics/$f"; then \
+            echo "FATAL: the safe-graphics config is missing $f"; exit 1; fi; \
+    done; \
+    xmllint --noout /usr/share/apex/safe-graphics/rc.xml; \
+    xmllint --noout /usr/share/apex/safe-graphics/menu.xml; \
+    # THE criterion, as a build refusal. Without `-C <dir>` this session reads
+    # the user's own labwc configuration, which is the configuration it exists
+    # to be independent of — and labwc falls back to its defaults SILENTLY on a
+    # malformed one, so the regression would ship looking like it worked.
+    if ! grep -q 'exec labwc -C "\$CONFIG_DIR"' /usr/libexec/apex-safe-graphics; then \
+        echo "FATAL: apex-safe-graphics does not exec labwc with a config directory of its own"; \
+        exit 1; fi; \
+    # Software rendering, because "the GPU does not work" is the case this
+    # session exists for.
+    for v in WLR_RENDERER=pixman LIBGL_ALWAYS_SOFTWARE=1 WLR_NO_HARDWARE_CURSORS=1; do \
+        if ! grep -q "$v" /usr/libexec/apex-safe-graphics; then \
+            echo "FATAL: apex-safe-graphics does not force $v"; exit 1; fi; \
+    done; \
+    # WLR_BACKENDS pinned here would mean this session could only ever be
+    # exercised by taking a display away from whoever is testing it, and on a
+    # real machine `headless` would be a session with no screen.
+    if grep -qE "^ *(export +)?WLR_BACKENDS=" /usr/libexec/apex-safe-graphics; then \
+        echo "FATAL: apex-safe-graphics pins WLR_BACKENDS"; exit 1; fi; \
+    # APEX Shell is one of the things that can be broken; a recovery session
+    # that started it would fail the way the session the user just left failed.
+    # Comments are stripped first, because the autostart SAYS it deliberately
+    # does not do this and the sentence is the useful part.
+    if grep -vE "^[[:space:]]*(#|<!--)" /usr/share/apex/safe-graphics/autostart \
+        | grep -qE "apex-shell-autostart|qs -p"; then \
+        echo "FATAL: the safe-graphics autostart starts APEX Shell"; exit 1; fi; \
+    # The remedies P2-018's second criterion asks for, each named on the menu.
+    for needle in "apex recover status" "apex doctor" "apex-safe-graphics diagnose" \
+                  "apex rollback" "thunar" "nmtui"; do \
+        if ! grep -qF "$needle" /usr/share/apex/safe-graphics/menu.xml; then \
+            echo "FATAL: the safe-graphics menu offers no way to: $needle"; exit 1; fi; \
+    done; \
+    # The terminals the helper will look for, in its own order. foot and
+    # alacritty both come from core; asserting it here is what keeps a session
+    # whose only client is a terminal from shipping without one.
+    command -v foot >/dev/null || command -v alacritty >/dev/null; \
+    test -x /usr/libexec/apex-safe-graphics-terminal; \
+    test -f /usr/share/wayland-sessions/apex-safe-graphics.desktop; \
+    grep -qx "Exec=/usr/libexec/apex-safe-graphics" \
+        /usr/share/wayland-sessions/apex-safe-graphics.desktop; \
+    grep -qx "TryExec=/usr/libexec/apex-safe-graphics" \
+        /usr/share/wayland-sessions/apex-safe-graphics.desktop; \
+    echo "APEX Safe Graphics: baked config, software rendering, recovery menu verified"
+
 # The labwc bindings are maintained by hand — the shell's keybind editor emits
 # Hyprland .conf/.lua and niri .kdl, and labwc has neither an IPC to push
 # bindings over nor an include mechanism to append a generated file to. So they

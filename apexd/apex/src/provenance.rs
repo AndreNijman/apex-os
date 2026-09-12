@@ -621,6 +621,26 @@ impl Confinement {
                 self.executables.len()
             ));
         }
+        // The control APEX does have over the two lines above, said where the
+        // reader is looking at the shortfall rather than left to be found.
+        //
+        // Round 2 of this unit had to delete five sentences telling the reader
+        // that a control did not exist on a tip that had built it, and a
+        // readout that understates what is available is worse than one that
+        // never raised the subject. This is the same defect caught before it
+        // shipped: dimension 8 exists, it is the only thing that reaches this
+        // content, and it REMOVES rather than confines — so the sentence says
+        // removes.
+        if self.removable_content() {
+            out.push(
+                "  ↳ APEX does not own the agent's process, so it cannot put a sandbox \
+                 around something the agent spawns. What it can do is not load the \
+                 plugin: `apex agent run --plugins none`, or `--plugins curated` with \
+                 the names in `plugin_allow`, starts the session without it and none of \
+                 the above runs"
+                    .to_string(),
+            );
+        }
         if self.skills > 0 {
             out.push(format!(
                 "{} skill(s) — content the model reads; `apex skill list` reports them",
@@ -683,7 +703,23 @@ impl Confinement {
             "unconfinedExecutableContent":
                 self.hooks || !self.executables.is_empty()
                 || self.mcp.iter().any(|(_, c)| c.and_then(|w| w.confined()) == Some(false)),
+            // Dimension 8. Beside the field above rather than instead of it,
+            // because they are different claims: `unconfinedExecutableContent`
+            // says a sandbox does not reach this, and this says the session
+            // can be started without it. A consumer that read only the first
+            // would report a shortfall with no remedy, which is the readout
+            // defect round 2 of this unit had to go back and fix.
+            "removableByPluginPolicy": self.removable_content(),
         })
+    }
+
+    /// Whether this plugin ships content that only removal can deal with.
+    ///
+    /// Hooks and loose executables, not MCP servers: dimension 7 already
+    /// confines those, and naming them here would make the removal sound
+    /// necessary for content that is already handled.
+    fn removable_content(&self) -> bool {
+        self.hooks || !self.executables.is_empty()
     }
 }
 
@@ -1717,6 +1753,65 @@ mod tests {
             Value::Bool(true)
         );
         assert_eq!(j["mcpServers"][0]["sandboxSurvivesAHandRun"], Value::Bool(true));
+    }
+
+    /// The shortfall names its own remedy, and only where there is one.
+    ///
+    /// Round 2 of this unit deleted five sentences that told a reader a
+    /// control did not exist on a tip that had built it. This is the same
+    /// defect in the other direction — a shortfall reported with no remedy —
+    /// and it is the one that was live until dimension 8 got a flag.
+    #[test]
+    fn content_no_sandbox_reaches_is_reported_with_the_thing_that_does_reach_it() {
+        let c = Confinement {
+            hooks: true,
+            ..Default::default()
+        };
+        let lines = c.lines().join("\n");
+        assert!(
+            lines.contains("--plugins none"),
+            "a reader told their hooks are unconfined must be told what removes them:\n{lines}"
+        );
+        assert!(
+            lines.contains("--plugins curated"),
+            "and that keeping some is a choice, not all-or-nothing:\n{lines}"
+        );
+        // REMOVES, not confines. The asymmetry is the honest part: APEX does
+        // not own the agent's process. A line that said "sandboxes" here would
+        // be the third time this repository spent that word wrongly.
+        assert!(
+            !lines.contains("--plugins none` sandboxes"),
+            "dimension 8 removes; it must never be described as confining:\n{lines}"
+        );
+        assert_eq!(c.to_json()["removableByPluginPolicy"], Value::Bool(true));
+
+        // Loose executables are the same case and get the same clause.
+        let c = Confinement {
+            executables: vec!["scripts/go.sh".into()],
+            ..Default::default()
+        };
+        assert!(c.lines().join("\n").contains("--plugins none"));
+        assert_eq!(c.to_json()["removableByPluginPolicy"], Value::Bool(true));
+
+        // And a plugin whose only content is an MCP server does NOT get it.
+        // Dimension 7 already confines that, and offering removal as the
+        // remedy would overstate the shortfall — the mirror of the defect this
+        // test exists for.
+        let c = Confinement {
+            mcp: vec![("plugin:p:srv".into(), Some(Wrap::AtLaunch))],
+            ..Default::default()
+        };
+        let lines = c.lines().join("\n");
+        assert!(
+            !lines.contains("--plugins"),
+            "content dimension 7 confines must not be advertised as needing removal:\n{lines}"
+        );
+        assert_eq!(c.to_json()["removableByPluginPolicy"], Value::Bool(false));
+
+        // Nor does a plugin that ships nothing executable at all.
+        let c = Confinement::default();
+        assert!(!c.lines().join("\n").contains("--plugins"));
+        assert_eq!(c.to_json()["removableByPluginPolicy"], Value::Bool(false));
     }
 
     #[test]
