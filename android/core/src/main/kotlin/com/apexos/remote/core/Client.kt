@@ -140,11 +140,11 @@ class SessionRefused(message: String, cause: Throwable? = null) : Exception(mess
  * single `Sealer` for exactly this reason, and a client must do the same.
  */
 class Session internal constructor(
-    val machine: String,
+    override val machine: String,
     private val channel: NoiseChannel,
     private val input: InputStream,
     private val output: OutputStream,
-) : java.io.Closeable {
+) : FrameChannel {
     private val writeLock = Any()
     private val outstanding = java.util.concurrent.ConcurrentHashMap<Long, Long>()
     private val nextToken = java.util.concurrent.atomic.AtomicLong(0)
@@ -163,7 +163,7 @@ class Session internal constructor(
         private set
 
     /** Send one frame. Safe to call from several threads; serialised here. */
-    fun send(frame: Frame) {
+    override fun send(frame: Frame) {
         val plaintext = frame.encode()
         synchronized(writeLock) {
             Transport.writeMessage(output, channel.seal(plaintext))
@@ -171,7 +171,7 @@ class Session internal constructor(
     }
 
     /** Send a run of terminal bytes, split into as many frames as it needs. */
-    fun sendData(channelId: UInt, bytes: ByteArray) {
+    override fun sendData(channelId: UInt, bytes: ByteArray) {
         for (frame in Frame.dataFrames(channelId, bytes)) send(frame)
     }
 
@@ -197,7 +197,7 @@ class Session internal constructor(
      * One reader only. The receiving nonce is a counter too, and two readers
      * would each advance it past the other's message.
      */
-    fun receive(): Frame {
+    override fun receive(): Frame {
         while (true) {
             val frame = readFrame()
             when (frame) {
