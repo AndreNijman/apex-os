@@ -40,6 +40,19 @@ a test nobody will believe when it matters.
 Round 18 agent live in `/var/tmp/apex-work/wt-followups` (branch
 `task/followups-r18`, from `origin/roadmap/v2.2` @ `cafd3635`).
 
+**ITEM 3 IS CLOSED — apex-os `060058d8`, pushed.** The harness waited on the
+socket connecting; apex-agentd binds BEFORE `sweep_previous_lives` and only
+answers AFTER it, so readiness is now one `{"cmd":"requests"}` round-trip
+(`wait_until_answering`), and the audit reads are direct again. The bigger find:
+`the_ending_is_recorded_once_however_many_daemons_see_it` was asserting
+nothing — its `audit_lines_once_written(first.len())` returned instantly and it
+read the trail while daemon two had only reached `bind`. Counts: tip-as-found
+0/50 idle; fixed 0/50 idle and 0/50 under 16 spinners on 16 cores; with a 300ms
+sleep wedged between bind and the sweep the PRE-98a7c248 test failed 20/20
+(the flake, executed deterministically) while the fixed suite passed 20/20; and
+against a daemon mutated to write the ending twice the once-only test went
+30/30 PASS before this commit and 30/30 FAIL after. Clippy clean.
+
 **ITEM 1 IS CLOSED — apex-os `5a1a5390`, pushed.** `tests/test-apex-task.sh`
 is 71 passed, 0 failed. Mutation proved: dropped the remedy sentence from
 `TaskError::UnsupportedVersion`, rebuilt, the named case went red with
@@ -82,4 +95,4 @@ assertion a no-wait one that passes vacuously. Next step is to read where
 `sweep_previous_lives()` runs relative to the socket bind in
 `apex-agentd/src/main.rs`: if the sweep is after the bind, it is the PRODUCT.
 
-Order: 1 (done), then 3, then 2.
+Order: 1 (done), 3 (done). ITEM 2 IS ALL THAT REMAINS.
