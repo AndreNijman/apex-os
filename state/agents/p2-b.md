@@ -7,9 +7,11 @@ apex-os `4b1e797f` and apex-shell `111ed75`). apex-os tip `d12e9ef4`, apex-shell
 tip `eb97b40`. Worktrees unchanged: `/var/tmp/apex-work/wt-p2-b4` and `wt-p2-b4-sh`.
 
 **This card was truncated by a bad edit on 2026-09-12 and rebuilt from the
-session transcript.** `s.index("## NEXT")` matched the phrase `## NEXT` written
-inline in the round-19 prose sixteen lines in, not the section at the bottom, so
-the file was cut there. Nothing else holds a copy: `ROADMAP/` is not a git repo
+session transcript.** A splice anchored on the final section's heading text with
+`str.index`, and that same text appeared inside the round-19 prose sixteen lines
+in, so the match landed there and the file was cut at it. The prose mentions are
+now spelled without the hashes and the heading is the only place the literal
+string occurs — keep it that way. Nothing else holds a copy: `ROADMAP/` is not a git repo
 and the WIP snapshot ref only covers the two code repositories. Everything below
 is faithful in substance; exact wording of the older sections may differ by a
 word. **Anchor on a heading, never on a phrase that also appears in prose.**
@@ -22,10 +24,10 @@ word. **Anchor on a heading, never on a phrase that also appears in prose.**
   it carries a REAL commit (the screen-reader keybind default), not just a name
   for the parity check.
 
-**Round 19 closed the previous `## NEXT` items 1, 2 and 3.** The greeter has a
+**Round 19 closed the previous NEXT items 1, 2 and 3.** The greeter has a
 session bus and an accessibility bus; orca has a way to be started, on all three
 desktop sessions and at the login screen itself; and the AT-SPI walk runs in CI.
-What remains is in the new `## NEXT` at the bottom.
+What remains is in the new NEXT section at the bottom.
 
 Earlier: **round 18b** — branch `task/p2-b-round18b`, landed as merge `b6920252`:
 
@@ -107,7 +109,7 @@ suite and a mutation pair.
 | keyboard-only installer | **MEASURED (rounds 18 / 18b / 20)** | `installer/test-installer-a11y.sh` — **68 assertions** (51 before round 20, 38 before 18b). **Round 20 walks the Tab ring on FOUR pages** — keyboard, secureboot, confirm and account — where every round before it walked `account` only and name-audited the rest, so a focus trap anywhere else was invisible. On `confirm`, the last screen before an irreversible erase, the walk is two-sided and is the strongest assertion in the suite: the destructive button must NOT be in the ring while the field is empty, and MUST join it once ERASE is typed with the keyboard alone and read back over the bus. Earlier detail: mutation verdicts in the ROUND 18b table below, never quoted from here. The shipped GTK4 GUI runs on a private Xvfb; `xdotool` delivers real X key events into the real toolkit and the resulting focus, names and text are read back over AT-SPI. SIX of the installer's eleven pages are name-audited (welcome, keyboard, wifi, secureboot, **confirm**, account); the fields are typed into with the keyboard alone and read back, with the password still masked on the bus; and **the keyboard alone advances the flow** — Tab to `Begin`, then Return, then Space, each in its own process, each required to produce the next page's sentinel AND to leave the old page's primary button gone. NOT audited, and named: `disk`/`mode`/`part` enumerate real block devices, `run` starts an install, `done` follows one. |
 | keyboard-only DESKTOP | **DONE for the shared controls** | `tests/run-a11y-controls-test.sh` — 21 runtime assertions. Every shared `Cfg*` control is now a tab stop and operates on Space/Enter, proved by posting real `QKeyEvent`s and counting the signal the pages listen to. Pages that use only these controls are covered; bespoke widgets in `popups/` are NOT. |
 | screen-reader markup, desktop | **DONE for the shared controls** | same suite: `CfgRow` hands its label, description, disabled-reason and live readback to whatever control it holds; names and roles read back off the live attached objects. |
-| accessible login/lock/recovery | **login DONE three ways over, and the production gap is closed** | QML side: `tests/test-apex-greet-a11y.sh` — 22 assertions on live objects. Bus side: `tests/test-apex-greet-atspi.sh` — 31 assertions on what the BRIDGE publishes, on three machines, including that the password never crosses the bus and that a reader can operate the session picker and the layout pill with `DoAction`. Config side (round 19): `tests/test-apex-greet-session-bus.sh` — 37 assertions, 13/13 mutants — the greet session now HAS a session bus, an accessibility bus and a registry on both hosts, and SUPER+ALT+S starts a reader. What is still unproven is the reader itself running as the `greetd` user (HOME, audio, SELinux exec) — see `## NEXT` item 1. **Lock and recovery NOT done.** |
+| accessible login/lock/recovery | **login DONE three ways over, and the production gap is closed** | QML side: `tests/test-apex-greet-a11y.sh` — 22 assertions on live objects. Bus side: `tests/test-apex-greet-atspi.sh` — 31 assertions on what the BRIDGE publishes, on three machines, including that the password never crosses the bus and that a reader can operate the session picker and the layout pill with `DoAction`. Config side (round 19): `tests/test-apex-greet-session-bus.sh` — 37 assertions, 13/13 mutants — the greet session now HAS a session bus, an accessibility bus and a registry on both hosts, and SUPER+ALT+S starts a reader. What is still unproven is the reader itself running as the `greetd` user (HOME, audio, SELinux exec) — see the NEXT section, item 1. **Lock and recovery NOT done.** |
 
 ### P2-004 — internationalisation
 
@@ -1178,15 +1180,17 @@ rather than the exit code.
 | apex-shell | `eb97b40` | the font section measured the runner, and CI could not run it at all |
 | apex-os | `1db607ab` | the Tab ring was walked on one page, so a trap on any other was invisible |
 | apex-os | `d12e9ef4` | two mutants for the ring walk, one of them a safety property |
+| apex-shell | `2fef950` | the i18n mutation harness, committed instead of left in a scratchpad |
+| apex-shell | `f91b07b` | a red step above the i18n step switches the measurement off |
 
 | suite | assertions | mutants |
 | --- | --- | --- |
 | `installer/test-installer-a11y.sh` | **68** (was 51) | B1-B10, **10 applied, 0 failed-to-apply, 10 CAUGHT, 0 survived**, tree matches HEAD |
-| apex-shell `tests/run-i18n-test.sh` | **23** (was 12) | T1-T4 host probe **4/4 CAUGHT**; F1-F5 fonts **5/5 CAUGHT** |
+| apex-shell `tests/run-i18n-test.sh` | **23** (was 12) | `tests/mutate-i18n.sh` — T1-T4 host probe, F1-F5 fonts, **9 applied, 0 failed-to-apply, 9 CAUGHT, 0 survived** from the committed path, tree matches HEAD |
 
 **The installer set was re-taken twice**, which is the point of doing it first:
 once at the round's start against the suite as round 19 left it (8 mutants, 8
-caught — the debt `## NEXT` item 4 opened with), and again at the end with
+caught — the debt NEXT item 4 opened with), and again at the end with
 B9 and B10 added for the new ring walk. **B9 is the one worth knowing about**:
 it makes the erase button sensitive from the start, which the page audit cannot
 see — the button is named either way — and which a ring walk that only counts
@@ -1291,8 +1295,19 @@ measured and is now item 3, with a different answer than the one it implied.**
      totals line, never its tick — every suite here exits 0 on a tool SKIP.
    - **apex-shell `roadmap/v2.2` is red until this branch merges.** Its
      `Lint test harness scripts` step ran shellcheck without `-x` and failed
-     `tests/test-headless-lib.sh`; the fix is on this branch. Until it lands,
-     that step hides the i18n and accessibility steps under it.
+     `tests/test-headless-lib.sh`; the fix is on this branch, and so is the
+     `if: ${{ !cancelled() }}` that stops a red step above the i18n step from
+     switching it off again. Until both land, that step hides the suites under
+     it on `roadmap/v2.2` itself.
+   - **One latent fragility in the font section, not worth fixing blind.**
+     `covering()` takes `head -4` of the alphabetically-sorted families that
+     cover a codepoint, and the assertion requires the fallback's advance to
+     match one of them. If Qt ever picks a covering font outside those four
+     whose advance differs, the row goes red about the machine rather than the
+     product. It held on both machines because every CJK family advances 32 at
+     that size and the Arabic set is exactly four — that is luck holding, not a
+     guarantee. Widen the slice or match on the resolved family if it ever
+     fires.
 10. Remaining accessibility gaps, unchanged: `src/popups/` and
     `src/nexus/NavPane.qml` still use bespoke Rectangle+MouseArea and are
     mouse-only and unnamed. No magnifier, sticky keys, slow keys, mouse keys or
