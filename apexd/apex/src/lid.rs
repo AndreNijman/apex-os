@@ -96,6 +96,28 @@ impl Roots {
         std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))
     }
 
+    /// The inverse of [`Roots::path`]: the absolute path as the *machine*
+    /// spells it, given one that has already been re-rooted.
+    ///
+    /// Anything the driver discovers by walking a directory comes back rooted,
+    /// and anything it later hands to a function that roots again is rooted
+    /// twice. That is not a theoretical worry — it happened here, to the
+    /// keyboard backlight: `kbd_backlights` returned
+    /// `$FIXTURE/sys/class/leds/…/brightness`, `apply_sysfs` re-rooted it to
+    /// `$FIXTURE/$FIXTURE/sys/…`, and the write reported `ok` having zeroed
+    /// nothing. Every path that leaves a directory walk and enters a
+    /// `PowerAction` goes through here, so what is recorded, described and
+    /// applied is the machine's own spelling in every case.
+    fn unpath(&self, rooted: &Path) -> String {
+        match &self.fixture {
+            Some(root) => match rooted.strip_prefix(root) {
+                Ok(rest) => format!("/{}", rest.display()),
+                Err(_) => rooted.display().to_string(),
+            },
+            None => rooted.display().to_string(),
+        }
+    }
+
     fn read_optional(&self, absolute: &str) -> Result<Option<String>, String> {
         match std::fs::read_to_string(self.path(absolute)) {
             Ok(s) => Ok(Some(s)),
@@ -737,7 +759,10 @@ fn kbd_backlights(roots: &Roots) -> Result<Vec<(String, u32)>, String> {
         match std::fs::read_to_string(&p) {
             Ok(s) => {
                 let v = s.trim().parse::<u32>().unwrap_or(0);
-                out.push((p.to_string_lossy().to_string(), v));
+                // `unpath`, not `to_string_lossy`. This path is about to be
+                // stored in a `PowerAction` that `apply_sysfs` re-roots, and a
+                // rooted path stored here is a rooted path rooted twice.
+                out.push((roots.unpath(&p), v));
             }
             // Present and unreadable is reported by the caller as a skip with
             // this reason, not silently dropped.
@@ -895,10 +920,15 @@ fn apply_sysfs(roots: &Roots, path: &str, value: &str) -> String {
     format!("{path} <- {value}: {}", write_abs(&roots.path(path), value))
 }
 
+/// Write a sysfs attribute that is supposed to already exist.
+///
+/// There is deliberately no `create_dir_all` here, and there used to be. A
+/// sysfs attribute never needs its parent directory created: if the parent is
+/// missing, the path is wrong. Creating it turned a wrong path into a reported
+/// `ok` — which is exactly how the double-rooted keyboard-backlight write above
+/// went unnoticed, materialising `$FIXTURE/$FIXTURE/sys/class/leds/…` and
+/// calling it a success.
 fn write_abs(path: &Path, value: &str) -> String {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
     match std::fs::write(path, value) {
         Ok(()) => "ok".to_string(),
         // "Permission denied is not absence": a sysfs write that was refused is
@@ -1332,11 +1362,36 @@ fn watch(roots: &Roots, once: bool, dry_run: bool, interval: Option<u64>) -> i32
 
         // ── a guard ─────────────────────────────────────────────────────────
         if let Some(guard) = decision.guard() {
-            if let Some(p) = period.as_mut() {
-                p.ended_by = Some(guard);
-                p.last_seen = now();
-                let _ = save_period(roots, LAST, p);
-            }
+            // `get_or_insert_with`, not `as_mut`. A guard can fire on the very
+            // first evaluation after the lid shuts — a laptop put away hot
+            // reaches its limit in no time at all, and a `GuardSuspend`
+            // decision does not hold the inhibitor, so the block above never
+            // opened a period to write into. Recording the guard only when a
+            // period happened to exist is how "say which guard fired" becomes
+            // "say which guard fired, sometimes": the owner reopens, runs
+            // `apex lid report`, and is shown the PREVIOUS close with
+            // `ended_by: null` — a true record of the wrong period, which is
+            // worse than no record at all. Measured, not reasoned about: over
+            // a fixture whose first poll was already at the thermal limit, the
+            // suspend happened and `last.json` kept `ended_by: null`.
+            let (vpn_name, vpn) = read_vpn(&runner);
+            let p = period.get_or_insert_with(|| ClosedPeriod {
+                closed_at: now(),
+                last_seen: now(),
+                opened_at: None,
+                sessions_at_close: inputs.work.live_count(),
+                why: decision.why().to_string(),
+                ended_by: None,
+                charge_at_close: inputs.charge.percent(),
+                charge_last: inputs.charge.percent(),
+                peak_c: inputs.thermal.celsius(),
+                powered_down: Vec::new(),
+                skipped: Vec::new(),
+                vpn: vec![VpnSample { at: now(), name: vpn_name, state: vpn }],
+            });
+            p.ended_by = Some(guard);
+            p.last_seen = now();
+            let _ = save_period(roots, LAST, p);
             eprintln!("apex lid: the {guard} guard fired — {}", decision.why());
             if guard.checkpoint_first() {
                 for line in checkpoint_live_work(roots, &runner, guard) {
@@ -1796,6 +1851,65 @@ mod tests {
             matches!(state, VpnState::Unreadable { .. }),
             "an unrun probe must not read as `no VPN`: {state:?}"
         );
+    }
+
+    #[test]
+    fn powering_down_the_keyboard_backlight_zeroes_the_led_it_named() {
+        // The defect this exists for: `kbd_backlights` returned the path it had
+        // walked, which under a fixture root is already re-rooted, and
+        // `apply_sysfs` re-rooted it again. The write went to
+        // $FIXTURE/$FIXTURE/sys/class/leds/…, `write_abs` created the whole
+        // tree on the way, and the driver printed `ok` for a keyboard backlight
+        // it had not touched. Planning and describing were both correct; only
+        // the one thing that matters was wrong, which is why this assertion is
+        // on the LED file and not on the plan.
+        let t = Tmp::new("kbd");
+        t.write("sys/class/leds/platform::kbd_backlight/brightness", "5\n");
+        let roots = t.roots();
+        let runner = Runner::new(&roots, false);
+
+        let pd = PowerDown {
+            display: false,
+            keyboard_backlight: true,
+            bluetooth: false,
+            wifi_powersave_off: false,
+            stop_user_units: Vec::new(),
+            stop_system_units: Vec::new(),
+        };
+        let plan = plan_powerdown(&roots, &pd, &runner);
+        assert_eq!(plan.actions.len(), 1, "{plan:?}");
+        match &plan.actions[0] {
+            PowerAction::KeyboardBacklight { path, value, prior } => {
+                assert_eq!(*prior, 5, "the plan must save the value it is replacing");
+                assert_eq!(*value, 0);
+                assert_eq!(
+                    path, "/sys/class/leds/platform::kbd_backlight/brightness",
+                    "the action must carry the MACHINE's spelling of the path, not the \
+                     fixture's — anything else is re-rooted a second time on the way in"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+
+        apply(&roots, &runner, &plan);
+        let led = t.0.join("sys/class/leds/platform::kbd_backlight/brightness");
+        assert_eq!(
+            std::fs::read_to_string(&led).unwrap().trim(),
+            "0",
+            "the LED the plan named must be the LED that was written"
+        );
+        // And nothing was conjured: a sysfs attribute never needs its parent
+        // created, so a path that does not exist must fail loudly rather than
+        // materialise a directory tree and report success.
+        assert!(
+            !t.0.join("tmp").exists(),
+            "a second, doubled path was created under the fixture: {:?}",
+            std::fs::read_dir(&t.0).map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>())
+        );
+
+        // The restore puts back 5, the value that was there.
+        apply(&roots, &runner, &plan.restore());
+        assert_eq!(std::fs::read_to_string(&led).unwrap().trim(), "5");
     }
 
     #[test]
