@@ -543,6 +543,21 @@ apex-os's `pr-validation.yml` accepts `workflow_dispatch`, so this branch was
 dispatched rather than guessed at (`gh workflow run pr-validation.yml --ref
 task/p2-b-accessibility-i18n`).
 
+**Final run 34661483871 — all four installer steps green on the runner**, and the
+criterion is measured there rather than skipped:
+
+    have: Xvfb / have: cage / have: python3-gi with Gtk4 + Adw
+    PASS  the X11 backend really does put a keyboard on the seat
+    PASS  cage started de: the same physical keys now produce the GERMAN letters
+    installer-locale: 26 passed, 0 failed, 0 skipped
+    installer-keymap: 42 passed, 0 failed, 0 skipped
+
+That last-but-one line is the acceptance criterion running on a **second
+machine**, not this laptop. Three earlier dispatches were needed to get there
+and each failed for a different real reason — the `/var/empty` build context,
+the `Etc/UTC` engine gap, and an apt line that would have skipped the
+measurement while reporting success.
+
 **The `Installer safety and UI` job had never run for this program at all** — it
 is gated on `changes.outputs.installer`, and no roadmap branch had touched
 `installer/` until this one. Turning it on surfaced two latent defects rather
