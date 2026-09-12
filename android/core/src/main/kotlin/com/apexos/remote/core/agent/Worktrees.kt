@@ -45,6 +45,16 @@ import kotlinx.serialization.Serializable
 data class WorktreeStatus(
     /** The worktree's directory name. The main tree's is the project's. */
     val name: String = "",
+    /**
+     * The slug of the project this worktree belongs to.
+     *
+     * Empty against a daemon that predates the field — it is `#[serde(default)]`
+     * on the Rust side — and an empty string is not a slug and cannot be
+     * mistaken for one. [Project.group] falls back to the emission-order rule
+     * when it is absent, so a listing from an older runtime groups exactly as
+     * it did before.
+     */
+    val slug: String = "",
     val path: String = "",
     val branch: String? = null,
     val head: String? = null,
@@ -202,6 +212,9 @@ data class Project(
     /** The project's own name: its main tree's, or a placeholder. */
     val name: String get() = main?.name ?: UNGROUPED
 
+    /** The project slug, when the daemon was new enough to state it. */
+    val slug: String get() = main?.slug ?: worktrees.firstOrNull()?.slug ?: ""
+
     val path: String? get() = main?.path
 
     /** Every row, main tree first — what a flat list for this project shows. */
@@ -231,6 +244,32 @@ data class Project(
          * groups it oddly, because the user cannot see that it is missing.
          */
         fun group(rows: List<WorktreeStatus>): List<Project> {
+            // The daemon states the grouping when it is new enough to
+            // (`WorktreeStatus.slug`), and then no inference is needed. Rows
+            // keep their arrival order within a project and projects keep
+            // theirs, because that order is `project::list()`'s and a screen
+            // that re-sorted would disagree with `apex project list`.
+            if (rows.any { it.slug.isNotEmpty() }) {
+                val bySlug = LinkedHashMap<String, MutableList<WorktreeStatus>>()
+                for (row in rows) bySlug.getOrPut(row.slug) { mutableListOf() } += row
+                return bySlug.map { (_, group) ->
+                    Project(
+                        main = group.firstOrNull { !it.isAgent },
+                        // Everything that is not the main tree, including a
+                        // SECOND non-agent row should one ever appear: losing
+                        // a worktree is worse than an odd grouping.
+                        worktrees = group.filterIndexed { i, w ->
+                            w.isAgent || i != group.indexOfFirst { !it.isAgent }
+                        },
+                    )
+                }
+            }
+
+            // A daemon older than the slug field. Rows arrive main-tree-first
+            // per project, so a non-agent row opens a project — a derivation
+            // from an emission order rather than from a stated fact, which is
+            // why rows with no main tree before them are not attributed to
+            // whatever project comes next.
             val out = mutableListOf<Project>()
             var main: WorktreeStatus? = null
             var kids = mutableListOf<WorktreeStatus>()

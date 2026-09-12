@@ -284,13 +284,55 @@ class WorktreesTest {
     }
 
     @Test
+    fun `the slug the daemon states is what groups the listing`() {
+        val projects = Project.group(rows())
+        assertEquals(listOf("apex-os", "apex-shell"), projects.map { it.slug })
+        // And the slug is what `worktrees(slug)` takes, so listing everything
+        // and then asking about one project is now a reachable pair of calls.
+        // Before the field existed there was nothing in the reply to put here.
+        assertEquals(
+            """{"cmd":"worktrees","project":"apex-os"}""",
+            Agentd.worktrees(projects[0].slug),
+        )
+    }
+
+    @Test
+    fun `a daemon too old to send a slug still groups by emission order`() {
+        // `slug` is `#[serde(default)]`, so an older runtime sends nothing and
+        // the rows arrive with an empty one. The fallback is the rule that was
+        // there before: a non-agent row opens a project.
+        val old = rows().map { it.copy(slug = "") }
+        val projects = Project.group(old)
+        assertEquals(listOf("apex-os", "apex-shell"), projects.map { it.name })
+        assertEquals(3, projects[0].worktrees.size)
+        assertEquals("", projects[0].slug)
+    }
+
+    @Test
+    fun `a project out of order is still grouped when the slug is stated`() {
+        // The emission-order rule cannot survive this and the slug rule does.
+        // Not a shape the daemon produces today — it appends project by
+        // project — which is exactly why the client should stop depending on
+        // that being true for ever.
+        val shuffled = listOf(rows()[1], rows()[4], rows()[0], rows()[2], rows()[3])
+        val projects = Project.group(shuffled)
+        assertEquals(setOf("apex-os", "apex-shell"), projects.map { it.slug }.toSet())
+        val os = projects.first { it.slug == "apex-os" }
+        assertEquals("apex-os", os.main?.name)
+        assertEquals(3, os.worktrees.size)
+        assertEquals(shuffled.size, projects.sumOf { it.rows.size })
+    }
+
+    @Test
     fun `agent rows with no project row before them are shown as ungrouped`() {
         // `Response::Worktrees` carries no project slug, so the grouping is
         // derived from the daemon's emission order (main tree first, per
         // project). A listing that does not start with a main tree — a project
         // whose own tree could not be statted — must not have its worktrees
         // attributed to whatever project comes next.
-        val orphans = rows().filter { it.isAgent }
+        // With the slug cleared, so this exercises the fallback path that a
+        // daemon older than the slug field puts the client on.
+        val orphans = rows().filter { it.isAgent }.map { it.copy(slug = "") }
         val projects = Project.group(orphans)
         assertEquals(1, projects.size)
         assertNull(projects[0].main)
