@@ -144,6 +144,33 @@ pub struct Budget {
 }
 
 impl Budget {
+    /// Read `[agent.budget]` out of `<root>/apex.toml`, with "there is no such
+    /// file" folded into "there is no budget".
+    ///
+    /// **Only `Absent` is folded**, and the reason is the one
+    /// [`crate::identity::Identities::read_or_unbound`] gives for the same
+    /// shape: a project whose `apex.toml` is unreadable, malformed, owned by
+    /// somebody else or reached through a symlink comes back as an error,
+    /// because proceeding as though it had no budget is how an agent that can
+    /// `chmod 000 apex.toml` would remove the cap it is running under. A
+    /// permission denial is not an absence, and here the difference is a
+    /// budget that stops enforcing.
+    ///
+    /// Most projects have no `apex.toml` at all, and every one of them must
+    /// keep working — folding `Absent` is what makes `git.push` in a plain
+    /// repository cost nothing.
+    pub fn read_or_unbudgeted(
+        root: &std::path::Path,
+        owner_uid: u32,
+        owner_name: &str,
+    ) -> Result<Budget, BudgetError> {
+        match ProjectConfig::read(root, owner_uid, owner_name) {
+            Ok(config) => Budget::of(&config),
+            Err(ProjectError::Absent { .. }) => Ok(Budget::default()),
+            Err(other) => Err(BudgetError::Project(other)),
+        }
+    }
+
     /// Read `[agent.budget]` out of a project file.
     pub fn of(config: &ProjectConfig) -> Result<Budget, BudgetError> {
         let mut budget = Budget {
@@ -282,12 +309,23 @@ pub fn day_start(ms: u64) -> u64 {
 impl Usage {
     /// Count today out of the trail.
     ///
-    /// `lines` must be the trail as the daemon holds it — every line, for this
-    /// account. Only a completed, successful operation counts: a refusal never
-    /// reached a provider, and a failure is a request the far side did not act
-    /// on. Counting either would make a broken credential exhaust a budget.
+    /// `lines` must be the trail as the daemon holds it — **every** line, not a
+    /// window of the last few hundred. A budget counted from a window is a
+    /// budget a busy machine can hide an operation from, and undercounting here
+    /// lets an operation through rather than refusing one, which is the
+    /// direction that matters.
+    ///
+    /// Only a completed, successful operation counts: a refusal never reached a
+    /// provider, and a failure is a request the far side did not act on.
+    /// Counting either would make a broken credential exhaust a budget.
+    ///
+    /// `uid` filters the trail to one account, because the store, the grants
+    /// and `apex secret audit` are all per-account and a budget that is not
+    /// would let one user's work refuse another's — in the one direction a
+    /// budget must never be wrong.
     pub fn of<'a>(
         lines: impl IntoIterator<Item = &'a crate::audit::AuditLine>,
+        uid: u32,
         project: &str,
         now_ms: u64,
     ) -> Usage {
@@ -300,7 +338,14 @@ impl Usage {
             if line.event != crate::audit::AuditEvent::Used || line.exit_code != Some(0) {
                 continue;
             }
-            if line.ms < day_start_ms || line.project.as_deref() != Some(project) {
+            if line.uid != uid || line.ms < day_start_ms {
+                continue;
+            }
+            // An exact match on the root, never a prefix — the rule P1-015's
+            // destroy plan established. A worktree lives under the project, so
+            // a prefix match would charge every worktree's work to the
+            // project's budget and to its own.
+            if line.project.as_deref() != Some(project) {
                 continue;
             }
             usage.operations += 1;
@@ -373,12 +418,27 @@ pub enum Spend {
     Unmeasurable(String),
 }
 
+/// [`Spend::Within`]'s word, as it appears in [`crate::audit::AuditLine::spend`].
+pub const WITHIN: &str = "within";
+
+/// [`Spend::Over`]'s word.
+pub const OVER: &str = "over";
+
+/// [`Spend::Unmeasurable`]'s word.
+///
+/// A constant because the daemon writes it on refusals that never reach
+/// [`check`] — a budget file that could not be read, a cap on an operation no
+/// provider implements — and those have to land in the trail under the same
+/// word as the ones that do, or a reader grepping for budget refusals would
+/// miss exactly the cases where a budget stopped working.
+pub const UNMEASURABLE: &str = "unmeasurable";
+
 impl Spend {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Spend::Within => "within",
-            Spend::Over(_) => "over",
-            Spend::Unmeasurable(_) => "unmeasurable",
+            Spend::Within => WITHIN,
+            Spend::Over(_) => OVER,
+            Spend::Unmeasurable(_) => UNMEASURABLE,
         }
     }
 
@@ -687,7 +747,7 @@ mod tests {
             used("cloudflare.worker.deploy", today - 1),
             line("cloudflare", "cloudflare.worker.deploy", "/other", Some(0), AuditEvent::Used, today + 4),
         ];
-        let usage = Usage::of(&trail, "/p", now);
+        let usage = Usage::of(&trail, 1000, "/p", now);
         assert_eq!(usage.operations, 1, "{usage:#?}");
         assert_eq!(usage.day_start_ms, today);
         assert_eq!(usage.per_operation["cloudflare.worker.deploy"], 1);
@@ -695,6 +755,43 @@ mod tests {
         assert_eq!(
             usage.per_service_operation
                 [&("cloudflare".to_string(), "cloudflare.worker.deploy".to_string())],
+            1
+        );
+    }
+
+    #[test]
+    fn another_accounts_work_is_not_counted_against_this_ones_budget() {
+        // The store is per-account, the grants are per-account, and `apex
+        // secret audit` shows an account its own lines. A budget that summed
+        // the machine would let one user exhaust another's cap in the same
+        // shared checkout — refusing work that was never theirs, which is the
+        // one direction a budget must not be wrong in.
+        let now = DAY_MS * 20_000 + 5;
+        let today = day_start(now);
+        let mut theirs = used("cloudflare.worker.deploy", today + 1);
+        theirs.uid = 1001;
+        let trail = vec![used("cloudflare.worker.deploy", today + 2), theirs];
+
+        assert_eq!(Usage::of(&trail, 1000, "/p", now).operations, 1);
+        assert_eq!(Usage::of(&trail, 1001, "/p", now).operations, 1);
+        assert_eq!(Usage::of(&trail, 1002, "/p", now).operations, 0);
+    }
+
+    #[test]
+    fn a_worktree_under_a_project_is_not_the_project() {
+        // Exact match, never a prefix — P1-015's rule, which a budget needs for
+        // its own reason: a worktree at `<project>/.apex/worktrees/x` doing its
+        // own deployments must not spend the parent's cap as well as its own,
+        // and a project's cap must not be exhausted by work nobody did in it.
+        let now = DAY_MS * 20_000 + 5;
+        let today = day_start(now);
+        let mut inner = used("cloudflare.worker.deploy", today + 1);
+        inner.project = Some("/p/.apex/worktrees/x".to_string());
+        let trail = vec![used("cloudflare.worker.deploy", today + 2), inner];
+
+        assert_eq!(Usage::of(&trail, 1000, "/p", now).operations, 1);
+        assert_eq!(
+            Usage::of(&trail, 1000, "/p/.apex/worktrees/x", now).operations,
             1
         );
     }
