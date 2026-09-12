@@ -179,36 +179,87 @@ fn mint_leaf(
         &csr.display().to_string(),
     ]);
 
-    let mut args: Vec<String> = vec![
-        "x509".into(),
-        "-req".into(),
-        "-in".into(),
-        csr.display().to_string(),
-        "-CA".into(),
-        ca.1.display().to_string(),
-        "-CAkey".into(),
-        ca.0.display().to_string(),
-        "-CAcreateserial".into(),
-        "-sha256".into(),
-        "-extfile".into(),
-        ext.display().to_string(),
-        "-out".into(),
-        cert.display().to_string(),
-    ];
     match validity {
+        // `openssl x509 -req` only learned `-not_before`/`-not_after` in
+        // OpenSSL 3.5. This laptop has 3.5.7 and the CI runner does not, and
+        // the flags are not rejected in a way anyone would read as a version
+        // problem: x509 prints "Use -help for summary" and exits non-zero. So
+        // this case passed here and failed there, and because the image build
+        // needs the rust job green, it took the whole image down with it.
+        //
+        // `openssl ca` has taken `-startdate`/`-enddate` for decades. It wants
+        // a config file, a certificate database and a serial file, which is
+        // three more scratch files and no dependency on the openssl version.
         Some((from, to)) => {
-            args.push("-not_before".into());
-            args.push(from.into());
-            args.push("-not_after".into());
-            args.push(to.into());
+            let db = scratch.at(&format!("{stem}.index"));
+            let serial = scratch.at(&format!("{stem}.serial"));
+            let cfg = scratch.at(&format!("{stem}.ca.cnf"));
+            std::fs::write(&db, "").expect("write ca database");
+            std::fs::write(&serial, "01\n").expect("write ca serial");
+            std::fs::write(
+                &cfg,
+                format!(
+                    "[ca]\n\
+                     default_ca = t\n\
+                     [t]\n\
+                     database = {db}\n\
+                     serial = {serial}\n\
+                     new_certs_dir = {dir}\n\
+                     certificate = {ca_cert}\n\
+                     private_key = {ca_key}\n\
+                     default_md = sha256\n\
+                     policy = pol\n\
+                     email_in_dn = no\n\
+                     unique_subject = no\n\
+                     [pol]\n\
+                     commonName = supplied\n",
+                    db = db.display(),
+                    serial = serial.display(),
+                    dir = scratch.0.display(),
+                    ca_cert = ca.1.display(),
+                    ca_key = ca.0.display(),
+                ),
+            )
+            .expect("write ca config");
+            openssl(&[
+                "ca",
+                "-batch",
+                "-notext",
+                "-config",
+                &cfg.display().to_string(),
+                "-in",
+                &csr.display().to_string(),
+                "-out",
+                &cert.display().to_string(),
+                "-extfile",
+                &ext.display().to_string(),
+                "-startdate",
+                from,
+                "-enddate",
+                to,
+            ]);
         }
         None => {
-            args.push("-days".into());
-            args.push("365".into());
+            openssl(&[
+                "x509",
+                "-req",
+                "-in",
+                &csr.display().to_string(),
+                "-CA",
+                &ca.1.display().to_string(),
+                "-CAkey",
+                &ca.0.display().to_string(),
+                "-CAcreateserial",
+                "-sha256",
+                "-extfile",
+                &ext.display().to_string(),
+                "-out",
+                &cert.display().to_string(),
+                "-days",
+                "365",
+            ]);
         }
     }
-    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-    openssl(&borrowed);
     (key, cert)
 }
 
