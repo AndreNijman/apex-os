@@ -21,7 +21,6 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
-ROOT="$(pwd)"
 
 SURFACE="files/desktop/apex-greet/GreetSurface.qml"
 FIXTURE="tests/greet-atspi-app.qml"

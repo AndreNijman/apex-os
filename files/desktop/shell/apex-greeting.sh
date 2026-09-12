@@ -1,5 +1,11 @@
 # APEX-OS — fastfetch greeting for interactive terminals (apex-logs 33, 14)
 #
+# shellcheck shell=bash
+# No shebang because this is sourced, by /etc/bashrc for bash and by the seeded
+# ~/.zshrc for zsh. bash is declared because it is the only one of the two that
+# the linter can read, and the two dialects agree on everything in this file:
+# there is no $ZSH_VERSION branch here, unlike agent.sh next door.
+#
 # ONE file, sourced by BOTH shells: /etc/bashrc for bash and the seeded ~/.zshrc
 # for zsh. It used to be an inline block appended only to /etc/bashrc — but zsh is
 # the DEFAULT LOGIN SHELL on APEX-OS (see /etc/default/useradd), so in practice no

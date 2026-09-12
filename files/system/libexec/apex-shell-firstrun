@@ -1032,6 +1032,10 @@ if [ -f "${_idle_conf}" ]; then
     # path named "~" and failed for every tilde-spelled lock_cmd — reporting a broken
     # lock screen on machines whose lock screen was fine, while the genuinely stale
     # path went unnoticed underneath the noise.
+    # shellcheck disable=SC2088  # these are `case` PATTERNS, matching the two
+    # literal characters `~/` at the start of a path read out of hypridle.conf.
+    # This is the code that expands the tilde; if the pattern expanded to $HOME
+    # first there would be nothing left to match and the branch would be dead.
     case "${_lock_target}" in
         "~")   _lock_target="${HOME}" ;;
         "~/"*) _lock_target="${HOME}/${_lock_target#\~/}" ;;
@@ -1044,11 +1048,16 @@ fi
 # hypridle ignores -c (see the long note above), so a config under $HOME is the
 # only thing that makes idle lock, DPMS blank and auto-suspend run at all. Its
 # absence is silent and security-relevant, so it is a hard failure.
+# shellcheck disable=SC2088  # the `~` is inside the message a HUMAN reads. The
+# path this actually tests is "${HOME}/..." on the line above; writing $HOME in
+# the sentence too would print /var/home/andre at somebody else's machine.
 [ -s "${HOME}/.config/hypr/hypridle.conf" ] \
     || fail_check "no ~/.config/hypr/hypridle.conf — hypridle ignores -c, so idle lock, display blank and suspend will not run"
 
 # The APEX zsh config must have actually landed. Skipped when the user clearly owns
 # the file, so a deliberately hand-written ~/.zshrc never turns the unit red.
+# shellcheck disable=SC2088  # three more tildes inside messages a human reads;
+# every path actually touched in this block is "${HOME}/.zshrc".
 if is_stock_zshrc "${HOME}/.zshrc"; then
     fail_check "~/.zshrc is still the distro skeleton — the APEX zsh config did not seed (no starship, no completion setup)"
 elif [ -f "${HOME}/.zshrc" ] && grep -q 'APEX-OS — default zsh configuration' "${HOME}/.zshrc"; then

@@ -79,7 +79,7 @@ counting_in_effect() { [[ -e "$EFIVARS_DIR/LoaderBootCountPath-$LOADER_GUID" ]];
 # `tr -d '\0'` after dropping the prefix is correct for the ASCII values sd-boot
 # and sd-stub write, and avoids depending on iconv in an early-boot unit.
 efivar_str() {
-    local name="$1" f="$EFIVARS_DIR/$1-$LOADER_GUID"
+    local f="$EFIVARS_DIR/$1-$LOADER_GUID"
     [[ -r "$f" ]] || return 1
     tail -c +5 "$f" | tr -d '\0'
 }

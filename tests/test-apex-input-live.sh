@@ -132,6 +132,10 @@ hc() {
     env -i HOME="$H" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$RT" \
         HYPRLAND_INSTANCE_SIGNATURE="$SIG" hyprctl "$@" 2>&1
 }
+# shellcheck disable=SC2120  # `apply` mirrors `hc` above it and forwards "$@"
+# to the generator. No case needs a generator flag today, which is the true half
+# of the warning; the forward is what lets one be added without editing the
+# helper, and dropping it would make the two helpers differ for no reason.
 apply() {
     env -i HOME="$H" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$RT" \
         HYPRLAND_INSTANCE_SIGNATURE="$SIG" XDG_CURRENT_DESKTOP=Hyprland \

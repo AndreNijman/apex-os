@@ -1,31 +1,24 @@
 # Scripts that do not yet pass `shellcheck -S warning -x`.
-# Generated 2026-09-12 from the exact invocation the gate uses.
-# This list must only ever SHRINK — check-shellcheck-coverage.sh fails if an
-# entry here starts passing, so a fixed script cannot sit here for ever.
-files/desktop/bash/apex-starship.sh
-files/desktop/shell/agent.sh
-files/desktop/shell/apex-greeting.sh
-files/scripts/boot-v2/apex-luks-enroll
-files/scripts/boot-v2/lib.sh
-files/scripts/spike-e/30-run-vm.sh
-files/scripts/vendor-apex-shell
-files/system/libexec/apex-boot-health
-files/system/libexec/apex-devices
-files/system/libexec/apex-shell-firstrun
-files/system/profile.d/apex-tool-broker.sh
-files/system/system-sleep/apex-wifi-resume
-tests/lib/atspi.sh
-tests/mutate-greet-atspi.sh
-tests/test-apex-ai-apps.sh
-tests/test-apex-devices.sh
-tests/test-apex-display.sh
-tests/test-apex-firewall-live.sh
-tests/test-apex-firewall-ssh.sh
-tests/test-apex-greet-atspi.sh
-tests/test-apex-input-live.sh
-tests/test-apex-lid-live.sh
-tests/test-apex-shared-machine.sh
-tests/test-apex-storage.sh
-tests/test-apex-trust-enforcement.sh
-tests/test-secret-at-rest.sh
-tests/test-shell-agent.sh
+#
+# THIS LIST IS EMPTY, and that is the state it is meant to be kept in.
+# check-shellcheck-coverage.sh fails both ways — a discovered script that is
+# not listed and does not pass, and a listed script that has started passing —
+# so the file cannot rot into a permanent exemption in either direction. An
+# empty list means every shell script under tests/, files/ and android/tools/
+# passes at warning severity, which is the point; it does not mean the check
+# has nothing to do.
+#
+# Measured 2026-09-13, after the 27 entries this file was created with were
+# fixed: 150 scripts discovered, 0 failing.
+#
+# Check a new entry against the RUNNER's shellcheck, not only your own. They
+# disagree: ubuntu-24.04 ships 0.9.0 and a Fedora 43 workstation has 0.11.0,
+# and files/system/libexec/apex-pkg passed on 0.11.0 while 0.9.0 reported
+# SC2120 on it. The gate runs on the runner, so 0.9.0 is the one that decides.
+#
+#   podman run --rm -v "$PWD":/m:ro,Z -w /m \
+#       docker.io/koalaman/shellcheck-alpine:v0.9.0 \
+#       shellcheck -S warning -x <path>
+#
+# If you must add a line: one path, then nothing. A reason belongs in the
+# commit message, and a fix belongs in the script.

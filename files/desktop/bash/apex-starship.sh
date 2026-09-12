@@ -1,5 +1,10 @@
 # APEX-OS — starship prompt for interactive bash (apex-logs 14)
 #
+# shellcheck shell=bash
+# No shebang because this is sourced from /etc/bashrc, never executed. bash is
+# not a guess here: the first line of this file says the file is for bash, and
+# zsh gets starship from the seeded ~/.zshrc instead.
+#
 # zsh gets starship from the seeded ~/.zshrc. bash had nothing at all, so every
 # bash shell fell back to the stock "[user@host dir]$": a `bash` started inside a
 # zsh session, a root shell, a TTY login, a `podman exec`, a rescue shell. The

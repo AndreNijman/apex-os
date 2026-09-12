@@ -45,6 +45,12 @@
 #  and every filesystem's size come from files this script writes, and the
 #  erase path returns before `wipefs` on a fixture root unconditionally.
 # ─────────────────────────────────────────────────────────────────────────────
+# shellcheck disable=SC2024  # `sudo cmd > "$out"` six times below. SC2024 is
+# about a redirect that needs root to CREATE the file — the shell opens it, not
+# sudo. Every target here is "$TMPD/out", and $TMPD is this suite's own
+# `mktemp -d`, owned by whoever is running the tests. The non-root shell opening
+# it is the intent: `sudo tee` would put the log under root ownership and the
+# cleanup could then not remove it.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
