@@ -172,7 +172,7 @@ pub struct Entry {
 }
 
 /// What a manifest entry is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Kind {
     File,
@@ -189,6 +189,16 @@ pub struct Manifest {
     /// Total plaintext bytes in the data stream. Checked against what the
     /// chunks actually decrypt to.
     pub data_bytes: u64,
+    /// What was in the source tree and is not in this snapshot, with the reason
+    /// for each.
+    ///
+    /// In the manifest — encrypted, like everything that describes the tree —
+    /// and not in the head, so that a list of paths this machine could not read
+    /// is not readable by whoever can read the target. It is here at all
+    /// because a restore years later has to be able to say "this tree was
+    /// already incomplete when it was taken" rather than looking complete.
+    #[serde(default)]
+    pub skipped: Vec<crate::session::Skipped>,
 }
 
 /// Why a snapshot's own bytes were not the shape this build reads.
