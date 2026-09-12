@@ -1052,7 +1052,7 @@ tasks:
 - id: P0-021
   title: Fix Agent Center and embedded agent terminal color rendering
   priority: P0
-  status: partial
+  status: done
   area: agent-ui
   depends_on: []
   acceptance:
@@ -1066,24 +1066,25 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Agent Center and embedded agent terminal colour rendering. THE TWO-BRANCH CONFLICT IS RESOLVED, AND IT WAS NOT
-    A CONFLICT: task/p0-018-display-finish and task/p0-021-agent-colors were reported as independently claiming
-    this item, so the p0-finish agent correctly declined to commit to either rather than pick a winner by side
-    effect. Content-checked by the orchestrator 2026-09-12: the diff of every file EACH branch touches against
-    apex-shell roadmap/v2.2 (b195195) is EMPTY for both. Both are already landed by content and are stale only in
-    the sense that they sit far behind the tip; both are safe to delete. They were never competing -
-    p0-018-display-finish carries the palette mechanism (4419e89 the light palette was correct and unreachable,
-    ae61e9a light mode is reachable and must not be offered yet, plus the display guard and keybind work) and
-    p0-021-agent-colors carries the agent-state tokens that depend on it (37fa439 status tokens had one value
-    picked on a dark surface, 9200d3f FOUR OF SEVEN AGENT STATES RENDERED AS THE PALETTE'S FOREGROUND, 68c4280 the
-    request card measured its badge with the font scaler). Two halves of one item, landed in order. CRITERIA 1, 2,
-    3 AND 5 ARE CLOSED OR NOT APPLICABLE, and the remainder recorded previously was WRONG: the '212 sites' figure
-    is misfiled - ZERO of them are in agent files - and criterion 3 is vacuous by its own 'If', because no PTY is
-    embedded, by documented design. THE ONE REAL GAP IS CRITERION 4: agent identity reaches only a label string,
-    so 'Claude, OpenCode, Codex, Gemini and generic PTY sessions render consistently' is structural but
-    UNASSERTED. The missing test is specified exactly in ROADMAP/evidence/P0-021-agent-colour.md - it needs an
-    assertion that the same state renders the same token across all five session kinds, driven from agentstate.js
-    rather than from a screenshot.
+    Agent Center and embedded agent terminal colour rendering. ALL FIVE CRITERIA NOW CLOSED. Criteria 1, 2 and 5
+    were closed by the two branches that turned out to be two halves of one item, both landed by content on apex-
+    shell roadmap/v2.2 (p0-018-display-finish carries the palette mechanism, p0-021-agent-colors the agent-state
+    tokens that depend on it, including 9200d3f where four of seven agent states rendered as the palette's own
+    foreground). Criterion 3 is N/A by its own 'If PTY/TUI output is embedded': no PTY is embedded, by documented
+    design, so there is no code path that could flatten agent bytes to white. CRITERION 4 IS NOW ASSERTED, which
+    was the one real gap: landed 2026-09-12 on apex-shell roadmap/v2.2 as merge 34fef17 (8fe8341). Agent identity
+    reaches exactly one thing in the shell - AGENT_NAMES in agentstate.js, a display-name map - and StateBadge
+    takes no agent parameter, so the five kinds rendered alike by construction while all 17 existing render cases
+    were a state x palette matrix whose fixture hardcoded agent claude for every one. Four new cases build five
+    REAL SessionRows under the headless harness differing only in agent (claude, opencode, codex, gemini, generic)
+    at permission_request, a solid badge so fill geometry is exercised too, and assert an identical toneColor and
+    identical badge geometry - preceded by an anti-vacuity case that requires the five rows to have rendered five
+    DIFFERENT names, read back out of the built rows, before the sameness comparisons are allowed to mean
+    anything. Mutation-proved three ways, each restored byte-identical: a per-agent tone (codex) reddens the
+    colour case #d0bcff vs #f87171; a per-agent badge size (gemini) reddens the geometry case solid/22/22/6.6 vs
+    solid/34/34/10.2; and removing the fixture's agent parameter reddens the anti-vacuity case with ["Claude"].
+    agent-state-render 17 passed/0 failed -> 21 passed/0 failed. REMAINING, and it is not an acceptance criterion:
+    no human has looked at the badge weights on a real panel. That needs Andre, not an agent.
 - id: P0-022
   title: Add Agents and Workspaces help/onboarding inside the Agents tab
   priority: P0

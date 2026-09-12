@@ -38,10 +38,16 @@ a test nobody will believe when it matters.
 ## NEXT
 
 Round 18 agent live in `/var/tmp/apex-work/wt-followups` (branch
-`task/followups-r18`, from `origin/roadmap/v2.2` @ `cafd3635`). Nothing
-committed yet. What is already MEASURED, so a fresh agent need not re-derive it:
+`task/followups-r18`, from `origin/roadmap/v2.2` @ `cafd3635`).
 
-**Item 1 — the TEST is wrong, not the product.** `tests/test-apex-task.sh:562`
+**ITEM 1 IS CLOSED — apex-os `5a1a5390`, pushed.** `tests/test-apex-task.sh`
+is 71 passed, 0 failed. Mutation proved: dropped the remedy sentence from
+`TaskError::UnsupportedVersion`, rebuilt, the named case went red with
+`missing: [rollback] [Boot the newer deployment]`; restored byte-identical.
+
+What is MEASURED, so a fresh agent need not re-derive it:
+
+**Item 1 — the TEST was wrong, not the product.** `tests/test-apex-task.sh:562`
 greps for `understands up to`. Commit `5c1a9795` (P1-045, 2026-09-07) rewrote
 `TaskError::UnsupportedVersion`'s message to the §25 form ("tasks.toml is
 version 99, and this build of APEX reads version 1 … Boot the newer deployment
@@ -76,4 +82,4 @@ assertion a no-wait one that passes vacuously. Next step is to read where
 `sweep_previous_lives()` runs relative to the socket bind in
 `apex-agentd/src/main.rs`: if the sweep is after the bind, it is the PRODUCT.
 
-Order: 1, then 3, then 2.
+Order: 1 (done), then 3, then 2.
