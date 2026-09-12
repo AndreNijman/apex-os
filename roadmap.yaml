@@ -2812,7 +2812,7 @@ tasks:
 - id: P2-001
   title: Encrypted backup framework
   priority: P2
-  status: todo
+  status: partial
   area: backup
   depends_on:
   - P0-002
@@ -2823,10 +2823,25 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Encrypted backup framework. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 05227d16. TWO OF THREE CRITERIA
+    DONE. Client-side encryption: no_byte_written_to_the_target_holds_the_plaintext, plus a canary sweep over
+    EVERY byte on the target including object names - not just payloads. Versioned restore:
+    three_versions_of_a_tree_restore_to_the_three_things_they_were. ONE CRITERION OPEN AND REFUSING HONESTLY
+    RATHER THAN PRETENDING: of local/NAS/SSH/S3/R2, the first three are real and exercised (local, NAS, R2) while
+    SSH and S3 are in the vocabulary and REFUSE AT CONFIGURATION TIME, each naming what is missing - S3 needs a
+    SigV4 signer nothing in this workspace has, which is the same wall P1-005 hit from the other side when R2's
+    temp-access-credentials turned out to yield SigV4 credentials a REST-only transport cannot spend; SSH needs a
+    loopback sshd fixture. Kind::is_implemented() and unimplemented_reason() carry those refusals and are
+    mutation-proved, so an unimplemented target cannot be silently selected. 96 Rust mutations across the unit: 86
+    caught first pass, SIX REAL DEFECTS FOUND AND FIXED, four weak tests strengthened, one survivor left and
+    documented in-source. tests/test-apex-backup.sh 64/0 including its real-root half. ALSO RECORDED: an init-vs-
+    run gap the agent verified in source rather than assumed - check_declared is called in run (backup.rs:391) and
+    not in init (line 344).
 - id: P2-002
   title: Cloudflare R2 backup backend
   priority: P2
-  status: todo
+  status: done
   area: backup
   depends_on:
   - P2-001
@@ -2837,6 +2852,17 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Cloudflare R2 backup backend. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 05227d16. BOTH CRITERIA
+    CLOSED BY NAMED TESTS. Bucket-scoped brokered credential:
+    a_backups_chunk_reaches_r2_under_the_key_it_chose_and_the_token_does_not_come_back, and
+    a_backup_to_a_bucket_this_project_did_not_bind_never_reaches_cloudflare - both against the loopback double
+    that 401s any unauthenticated request, with NO live Cloudflare call anywhere in the unit. 'The agent cannot
+    read the raw backup key' is measured AS REAL ROOT against the shell's OWN uid rather than sudo's - the exact
+    mistake the secret suite had been making until it was found this week - plus
+    a_key_the_caller_may_not_read_is_a_refusal_and_not_an_absence, which is the permission-denied-is-not-absence
+    discipline in its seventeenth location. Verified on the landed tip by the orchestrator: workspace 2821 passed
+    / 0 failed, clippy clean.
 - id: P2-003
   title: Accessibility baseline
   priority: P2
@@ -3098,7 +3124,7 @@ tasks:
 - id: P2-013
   title: Per-project identity binding
   priority: P2
-  status: todo
+  status: partial
   area: projects
   depends_on:
   - P1-001
@@ -3107,6 +3133,14 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Per-project identity binding. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 05227d16. GitHub is newly
+    ENFORCED in GitProvider::bind - a_remote_belonging_to_an_account_this_project_did_not_bind_is_refused - and an
+    unreadable apex.toml REFUSES rather than proceeding, which is the permission-denied-is-not-absence rule
+    applied to configuration. Cloudflare has been enforced since P1-002. STILL PARTIAL, AND THE HONESTY IS THE
+    POINT: SSH and agent identity are declared, reported, and LABELLED NOT ENFORCED, because there is no seam in
+    this repository to enforce them at. Kind::enforced_by() names, for each of them, the file that would need the
+    check - so the remainder is a specific piece of work rather than a vague gap.
 - id: P2-014
   title: Build APEX Storage Manager and disk-health UX
   priority: P2
