@@ -1282,6 +1282,28 @@ jobs:
       - name: Run capsule assertions
         run: ./tests/test-apex-env.sh
 
+      # P2-008's virtualization engine. Same trade as the capsule suite above
+      # and for a sharper reason: `apex vm create` defines a libvirt domain and
+      # `apex vm rm` deletes disk images, so it can never run for real here and
+      # must never run for real on a developer's machine during a test. $PATH
+      # is reduced to recording stubs for virsh, qemu-img, mcopy and friends,
+      # and the suite HARD-EXITS if `command -v virsh` does not resolve to the
+      # stub.
+      #
+      # What that buys is the domain XML, which is where five of P2-008's six
+      # flows actually live — and in particular the three elements that look
+      # optional and are not: <smm state='on'/>, the memfd/shared memory
+      # backing virtiofs cannot start without, and an xHCI controller with
+      # ports. Dropping any one produces a domain that DEFINES and then refuses
+      # to START, which no live run on a KVM-less runner could ever catch.
+      #
+      # The live half — real guests booted through this engine against a real
+      # virtqemud — is tests/vmlab/run-vmlab, which is not run here: these
+      # runners have no /dev/kvm, and it reports could-not-run with that
+      # reason rather than passing.
+      - name: Run virtualization assertions
+        run: ./tests/test-apex-vm.sh
+
       # The half the suite above deliberately cannot answer. Its device-profile
       # coverage is argv-PINNED — it proves the engine emits the flags its
       # author intended, with a stubbed container manager. It cannot prove
@@ -1731,6 +1753,7 @@ jobs:
             files/system/libexec/apex-env \
             files/system/libexec/apex-plugin \
             files/system/libexec/apex-disposable \
+            files/system/libexec/apex-vm \
             tests/test-apex-recover.sh \
             tests/test-apex-pkg.sh tests/test-apex-firstrun.sh \
             tests/test-labwc-keybinds.sh tests/test-apex-env.sh \
@@ -1741,7 +1764,7 @@ jobs:
             tests/test-apex-greet-sessions.sh \
             tests/test-apex-greet-a11y.sh tests/test-apex-greet-layout.sh \
             tests/test-labwc-keybind-reload.sh \
-            tests/test-apex-chaos.sh
+            tests/test-apex-chaos.sh tests/test-apex-vm.sh
           # The chaos harness separately, with -x so the driver's `. lib.sh`
           # is followed, and the cases as bash fragments because they are
           # sourced rather than executed and have no shebang of their own.
