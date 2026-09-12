@@ -719,7 +719,7 @@ fn require_a_runtime_that_forwards(agent: &mut apex_agent_core::client::Client) 
 }
 
 fn audit(lines: usize) -> Result<i32> {
-    let entries = match Client::connect()?.call(&Request::Audit { lines })? {
+    let entries = match Client::connect()?.call(&Request::Audit { lines, project: None })? {
         Response::Audit { entries } => entries,
         other => bail!("unexpected reply: {}", other.variant()),
     };

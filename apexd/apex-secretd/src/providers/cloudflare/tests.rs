@@ -1261,7 +1261,7 @@ fn the_agent_side_holds_no_credential_even_when_it_holds_every_operation() {
         f.service.hello(),
         f.service.list(peer),
         f.service.grants(peer),
-        f.service.audit(peer, 100),
+        f.service.audit(peer, 100, None),
     ];
     for (operation, resource, options, _) in every_operation() {
         let mut rec = f.record(operation, resource);

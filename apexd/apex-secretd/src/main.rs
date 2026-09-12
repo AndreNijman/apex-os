@@ -294,7 +294,7 @@ fn dispatch(
         Request::List => service.list(peer),
         Request::Grants => service.grants(peer),
         Request::Approvals => service.approvals(peer),
-        Request::Audit { lines } => service.audit(peer, lines),
+        Request::Audit { lines, project } => service.audit(peer, lines, project.as_deref()),
 
         // Mutating verbs. A session may not change what it is allowed to do.
         Request::Add {

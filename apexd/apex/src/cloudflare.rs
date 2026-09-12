@@ -105,6 +105,8 @@ const SCOPES: &[&str] = &[
     "offline_access",
 ];
 
+pub mod preview;
+
 /// `apex cloudflare <verb>`.
 #[derive(Subcommand)]
 pub enum CloudflareCmd {
@@ -129,6 +131,38 @@ pub enum CloudflareCmd {
         #[arg(long)]
         json: bool,
     },
+    /// §13.13: what this worktree owns at Cloudflare, and how to let it go.
+    ///
+    /// Ownership is read out of the audit trail rather than a manifest, so it
+    /// describes what this worktree actually did. `apex cf preview plan` shows
+    /// it; `apex cf preview destroy` shows the same plan and destroys nothing
+    /// until you add `--yes`.
+    Preview {
+        #[command(subcommand)]
+        cmd: PreviewCmd,
+    },
+}
+
+/// `apex cloudflare preview <verb>`.
+#[derive(Subcommand)]
+pub enum PreviewCmd {
+    /// What this worktree owns, and what destroying it would and would not do.
+    Plan {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Destroy what this build can destroy, after printing the plan.
+    ///
+    /// Prints the plan and stops unless `--yes` is given. That is the whole of
+    /// §13.13's *"after showing a clear destroy plan"*, and it is a flag rather
+    /// than a prompt because this has to work in a session nobody is watching.
+    Destroy {
+        /// Actually destroy. Without it nothing is touched.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub fn main(cmd: CloudflareCmd) -> i32 {
@@ -145,6 +179,10 @@ pub fn main(cmd: CloudflareCmd) -> i32 {
             }
         }
         CloudflareCmd::Status { json } => status(json),
+        CloudflareCmd::Preview { cmd } => match cmd {
+            PreviewCmd::Plan { json } => preview_plan(json),
+            PreviewCmd::Destroy { yes, json } => preview_destroy(yes, json),
+        },
     };
     match result {
         Ok(code) => code,
@@ -513,6 +551,58 @@ fn describe(status: u16, body: &str) -> String {
 }
 
 // ── status ──────────────────────────────────────────────────────────────────
+
+/// The project this command acts for: the worktree you are standing in.
+///
+/// `git rev-parse --show-toplevel` inside a worktree answers the worktree, not
+/// the main tree — which is what makes "this worktree's resources" a question
+/// the audit trail can answer at all, and is also why grants are already
+/// per-worktree.
+fn here() -> Result<String> {
+    let cwd = std::env::current_dir().context("reading the current directory")?;
+    let project = apex_agent_core::project::detect(&cwd).ok_or_else(|| {
+        anyhow::anyhow!(
+            "this directory is not inside a git repository, and a Cloudflare              resource is owned by a project"
+        )
+    })?;
+    Ok(project.root)
+}
+
+fn preview_plan(json: bool) -> Result<i32> {
+    let plan = preview::plan(&here()?)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&preview::to_json(&plan))?);
+    } else {
+        preview::print(&plan);
+    }
+    Ok(0)
+}
+
+fn preview_destroy(yes: bool, json: bool) -> Result<i32> {
+    let plan = preview::plan(&here()?)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&preview::to_json(&plan))?);
+    } else {
+        preview::print(&plan);
+    }
+    if !yes {
+        if !json {
+            println!();
+            println!("Nothing was destroyed. Run the same command with --yes to do it.");
+        }
+        return Ok(0);
+    }
+    let failed = preview::destroy(&plan)?;
+    if failed > 0 {
+        eprintln!(
+            "apex cf preview: {failed} thing{} could not be destroyed and {} still there",
+            if failed == 1 { "" } else { "s" },
+            if failed == 1 { "is" } else { "are" }
+        );
+        return Ok(1);
+    }
+    Ok(0)
+}
 
 fn status(json: bool) -> Result<i32> {
     let services = match Client::connect()
