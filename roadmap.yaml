@@ -1596,7 +1596,7 @@ tasks:
 - id: P1-016
   title: Cloudflare cost guardrails
   priority: P1
-  status: todo
+  status: done
   area: cloudflare
   depends_on:
   - P1-002
@@ -1607,6 +1607,33 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Cloudflare cost guardrails, landed from task/p1-014-cf-guardrails (tip 32b96c8). Section 13.14 is now a
+    reader, an enforcement point and a report, none of them Cloudflare-specific: the keys read cloudflare_daily
+    because 13.14 spells them that way, but the prefix is the stored credential's own name. PER-TASK/PROJECT
+    BUDGET: [agent.budget] in a project's apex.toml, read by Budget::read_or_unbudgeted. A task bound to a
+    worktree spends the worktree's apex.toml, because the trail records the directory the agents ran in and the
+    daemon matches a root exactly, never as a prefix — so a worktree's budget IS the per-task budget and no second
+    mechanism in tasks.toml was invented. OPERATION CAPS: operations_daily across all credentials,
+    [agent.budget.operations] per operation id, and [agent.budget.price] with a <credential>_daily money cap.
+    Enforced at step 7 of use_capability, before the provider touches the caller's machine and before the section
+    13.8 approval can be spent — an over-budget request must not burn an approval given for a deployment. USAGE
+    VISIBLE IN TASK AUDIT: apex task audit <id> (section 15's own verb) over a new read-only daemon verb
+    Request::Usage, plus a spend field on every audit line (within/over/unmeasurable/no-budget/not-checked). Five
+    words because 'no cap', 'inside the cap' and 'nobody looked' are three different facts. TWO HONEST LIMITS,
+    both in the code's docs and not only here: (1) section 13.14 names 'R2 upload volume' and nothing in this
+    build measures bytes, so r2_bytes_daily is REFUSED when the file is read rather than accepted and ignored; (2)
+    this build cannot price a Cloudflare operation — prices are not in the API and depend on a plan the machine
+    cannot see — so a money budget with no price for something that ran is Spend::Unmeasurable and REFUSES. 'I
+    cannot tell what this costs' is not 'it is within budget'. Also refused: a cap on an operation no provider
+    implements, including one spelled as a grant alias, which names the canonical spelling. Usage is counted from
+    the WHOLE trail, never audit::tail's window — a budget counted from the last N lines is one a busy machine can
+    hide an operation from. A reservation held from the check until the trail line is written closes the TOCTOU
+    that one-thread-per-connection opens: without it a cap of one is spent twice, measured by a named test with
+    two concurrent sockets and a slow far side. An unreadable apex.toml refuses rather than counting as no budget
+    — an agent that can chmod 000 its own budget file must not thereby lift its own cap. Twelve mutations, each
+    biting a named test, listed in the four commit messages. Workspace 2880 -> 2906 passed, 0 failed. Clippy
+    --locked --workspace --all-targets -D warnings clean.
 - id: P1-017
   title: Cloudflare MCP through APEX broker
   priority: P1
@@ -1859,22 +1886,52 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Plugin and marketplace provenance and isolation. LANDED on apex-os roadmap/v2.2 2026-09-11 as merge ba105394;
-    apexd/apex/src/provenance.rs plus apex provenance show/record. CRITERION 1 DONE: marketplace origin and
-    commit/hash are tracked, and provenance means the hash of what RUNS rather than a recorded URL nobody re-
-    checks - the in-repo model is verify.rs's trust gate, and the same three-state discipline applies here. Two
-    mutation pairs prove the parts that matter, both of the permission-denied-is-not-absence class:
+    Plugin and marketplace provenance and isolation. CRITERION 1 DONE, unchanged since the 2026-09-11 landing
+    (merge ba105394, apexd/apex/src/provenance.rs plus apex provenance show/record): marketplace origin and
+    commit/hash are tracked, and provenance here means the hash of what RUNS rather than a recorded URL nobody re-
+    checks. Two mutation pairs prove the parts that matter, both of the permission-denied-is-not-absence class:
     provenance.rs's 'git status could not run' arm flipped to Some(false) takes 522/0 -> 521/1 on
     a_git_status_that_could_not_run_is_not_a_clean_working_tree, and the EACCES arm collapsed to None takes 522/0
-    -> 521/1 on a_registry_that_is_there_and_refused_is_not_a_registry_that_is_absent (unreadable.len() 0 vs 1).
-    Both were checked for VACUITY rather than assumed: the EACCES mutant's root-skip branch never fired (uid 1000,
-    no skip line under --nocapture), and the Attest mutant makes the store unreadable with invalid JSON rather
-    than a mode bit so it has no privilege-dependent skip. CRITERION 2 IS PARTIAL BY ARCHITECTURE, NOT BY EFFORT,
-    and the evidence says so rather than letting the word 'sandbox' carry more than the mechanism does: QML
-    plugins run IN-PROCESS in apex-shell and cannot be confined without an apex-shell change; MCP servers are
-    confinable only if wrapped; hooks and scripts are reported unconfined. That is the honest state, and on APEX
-    'isolation' already means the read-only OS layer rather than a security sandbox - a capsule shares the real
-    HOME and gets /run/host read-write as the user.
+    -> 521/1 on a_registry_that_is_there_and_refused_is_not_a_registry_that_is_absent. Both were checked for
+    VACUITY rather than assumed. The baseline is trust-on-first-use and is labelled as that everywhere, because
+    nobody signs a Claude Code plugin. CRITERION 2 ADVANCED TWICE AND IS STILL PARTIAL, and the remainder has
+    MOVED, so the old wording no longer describes it. Round 1 (merge 564fffd5) built the mechanism: apex-agentd
+    writes a curated MCP configuration and starts the agent with --strict-mcp-config, so every third-party
+    definition - a plugin's or a repository's - is rewritten to start through apex mcp run and bubblewrap confines
+    it. That is proved by a plugin server OBSERVED failing to escape, not by a grep: apex/tests/mcp_launch_live.rs
+    runs the real wrapped argv and the probe fails to read a file in the real home that is definitely there and
+    fails to reach a listener that is definitely listening, while the same probes run as the bare command SUCCEED
+    - without that inverse a typo would report a sandbox. Round 2 (cbcacfc3, 93ea60f4, 4ac67153, 7f0038d3) found
+    that all three of APEX's own readouts still answered the pre-round-1 question - they asked whether the
+    definition ON DISK names the wrapper - and so printed 'NOT sandboxed' about servers every APEX-started session
+    confines. mcpconf::Wrap now has four values and the two ways of being sandboxed are never merged: InDefinition
+    survives anybody starting the agent, AtLaunch holds only where the launch file is read. apex mcp list, apex
+    mcp planes and apex provenance show read their verdict out of one function, connector::launch_verdicts, so
+    they cannot disagree. A live defect fixed with it: the github plugin's CLOUD endpoint was printed 'NOT
+    sandboxed, though it could be: apex mcp confine would wrap it' - advice for an action apex mcp confine
+    explicitly refuses, about a program that does not exist. WHAT IS STILL SHORT, stated rather than implied. (a)
+    The confinement exists only where APEX starts the session: through apex agent, on an adapter that can be told
+    to ignore every other MCP configuration, which is claude alone today (Adapter::strict_mcp). Type the agent's
+    own name in a terminal and every plugin server starts from the definition the plugin wrote. APEX cannot close
+    that without owning the binary, and the readouts say so in the same sentence as the word sandbox rather than
+    in a footnote. (b) A plugin's HOOKS and shipped executables are run by the agent itself, so APEX adds them no
+    sandbox of its own - they are inside whatever the SESSION is confined to, a real boundary under --sandbox
+    project or strict and none at all under unrestricted. That is now the honest wording, replacing 'nothing in
+    APEX confines them', which understated it. The unbuilt route for (b) is measured and named: claude 2.1.260 has
+    --safe-mode (every customization off, plugins and hooks included) and --bare (skip hooks and plugin sync), so
+    a hardened profile could REMOVE that content rather than confine it - deliberately not wired this round
+    because it is another policy dimension, therefore another protocol version bump, and it would need a live
+    hook-escape test to be more than a grep. NOTE for whoever takes it: the old evidence blamed 'QML plugins run
+    in-process in apex-shell'. That belongs to a different subject - P1-026 is area agent-profile, depends on
+    P0-009/P0-010 which are both about the AGENT's profile, and provenance.rs's own header keeps apex plugin (the
+    shell's QML platform) and apex provenance (Claude Code's marketplace plugins) deliberately apart. It is
+    dropped from this evidence rather than carried forward. Counts: apexd workspace 2880 -> 2888 passed, 0 failed;
+    clippy --locked --workspace --all-targets -D warnings clean. Five mutation pairs this round, each watched red
+    on a NAMED test and restored byte-identical with plain cp: curate's AtLaunch->InDefinition (agent-core 669/0
+    -> 668/1, confined_everywhere 2 not 1), decide's Curated arm made unconditional (connector 12/0 -> 11/1),
+    confinement_line's AtLaunch arm returning the InDefinition sentence (12/0 -> 11/1), build_at reverted to the
+    definition-only reading (provenance 15/0 -> 14/1), describe_sandbox's AtLaunch arm made unreachable (apex bin
+    551/0 -> 550/1). Branch task/p1-025-plugin-trust-2, pushed, unmerged at the time of writing.
 - id: P1-027
   title: Memory provider interface
   priority: P1
@@ -1899,7 +1956,7 @@ tasks:
 - id: P1-028
   title: Separate local and cloud-side connector trust planes
   priority: P1
-  status: partial
+  status: done
   area: agent-security
   depends_on:
   - P0-004
@@ -1910,14 +1967,51 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Separate local and cloud-side connector trust planes. LANDED on apex-os roadmap/v2.2 2026-09-11 as merge
-    ba105394 (5917833). CRITERION 1 DONE: the security surface distinguishes local from remote connectors,
-    measured live at 1 local plane and 2 cloud planes. CRITERION 2 IS REAL BUT NARROWER THAN THE WORDING, and is
-    recorded that way instead of being claimed: 'hardened profiles can reduce cloud-side tools/connectors' is
-    satisfied only in the coarse sense - --sandbox strict removes the WHOLE cloud plane - because there is no per-
-    server switch anywhere in APEX, and the readout says so rather than implying a granularity that does not
-    exist. Whoever takes the remainder is implementing per-connector selection, not wiring up something that is
-    already there.
+    Separate local and cloud-side connector trust planes. Both criteria met. CRITERION 1 DONE: the security
+    surface distinguishes local from remote connectors, measured live on this laptop at 1 local and 2 cloud.
+    apexd/apex/src/connector.rs's Plane is three-valued - Local, Cloud, and Unknown for a definition with neither
+    a command nor a url, because calling that local would say something specific and false about what confines it
+    - and apex mcp list prints the plane beside every server, apex mcp planes groups by it, and the two get
+    different mitigations named in the same breath: a local program is confined by bubblewrap via apex mcp run, a
+    cloud endpoint has no local process at all and its credential is the boundary. ROUND 2 IS WHAT MAKES THAT
+    STAND UP RATHER THAN JUST EXIST. The readout was written when the per-connector switch was a remainder and
+    still said so in five places on a tip that had built it - 'there is no per-server switch', 'the only way to
+    stop a single one today is to disable the whole plugin that defines it', perConnectorSwitch: false, and a
+    closing sentence naming sidecar.rs's unbuilt --strict-mcp-config path. A security readout that tells a person
+    a control does not exist is worse than one that never mentioned it, so 93ea60f4 replaced the prose with
+    measurement. CRITERION 2 DONE, and no longer in the coarse sense the previous evidence correctly refused to
+    overclaim. ConnectorPolicy (dimension 7, protocol 7, landed round 1 as 564fffd5) is as_configured | local_only
+    | curated | none: local_only removes the cloud plane WITHOUT removing the network, which the sandbox route
+    cannot do, and curated keeps only the connectors named in connector_allow - in the RUNTIME's configuration,
+    not in the request, for the reason network_allow lives there: a list the confined thing gets to write is not a
+    boundary. validate_for refuses a curated session against an empty list rather than starting it with everything
+    removed, because 'nobody filled this in' and 'reach nothing' are different statements and --connectors none
+    already makes the second. The table in apex mcp planes is RUN, not written: Launch::measure calls the real
+    mcpconf::curate once per ConnectorPolicy value over this machine's real definitions, with the same approvals
+    and the same connector_allow apex-agentd reads in install_mcp_config, so a row that started describing a
+    policy the launcher no longer applies fails a named test instead of being printed to somebody making a
+    security decision. Measured live here: 1 local (memory, the user's own definition, not sandboxed), 2 cloud
+    (claude-memory, plugin:github:github, both with agent-readable credentials); connector_allow is EMPTY so
+    --connectors curated is REFUSED rather than run and the report says that instead of printing a row of zeroes;
+    --connectors local_only would drop 2 of the 3. THE QUALIFIER, recorded rather than buried: every one of those
+    numbers is about a session started through apex agent, on an adapter that can be told to ignore every other
+    MCP configuration - claude alone today, read off Adapter::strict_mcp rather than hard-coded. Start the agent
+    yourself and you get every connector on the machine, unreduced. The readout says that in words and the JSON
+    carries it as appliesOnlyToSessionsStartedBy, because the consumer most likely to over-claim is the one that
+    never reads the prose. ON THE WORD 'UI': the security surface here is the CLI, which is where every other APEX
+    security readout lives - apex mcp policy, apex provenance show, apex verify. apex-shell has NO connector
+    surface of any kind: grep -rl mcp over apex-shell/src returns nothing, and AgentCenter.qml answers 'what is
+    running, what needs me, and take me to it' rather than anything about trust. A dashboard section would be the
+    shell's FIRST security surface, which is a shell feature rather than the unmet half of this criterion; if it
+    is wanted it goes on task/p1-025-plugin-trust-shell in an apex-shell worktree, reading apex mcp planes --json,
+    beside AgentCenter.qml. That is stated here so nobody has to infer it from silence. Counts: apexd workspace
+    2880 -> 2888 passed, 0 failed; clippy --locked --workspace --all-targets -D warnings clean. Mutations for this
+    item, each watched red on a NAMED test and restored byte-identical with plain cp: decide's Curated arm made
+    unconditional takes apex 12/0 -> 11/1 on a_connector_policy_row_is_the_curators_own_answer with (2,1,0) not
+    (0,1,2), proving the table is the curator's answer and not a copy of it; confinement_line's AtLaunch arm
+    returning the InDefinition sentence takes 12/0 -> 11/1 on
+    the_report_says_where_the_reduction_applies_and_where_it_stops. Branch task/p1-025-plugin-trust-2 (cbcacfc3,
+    93ea60f4, 4ac67153, 7f0038d3), pushed, unmerged at the time of writing; round 1 is merged as 564fffd5.
 - id: P1-029
   title: Represent local/remote/scheduled/cloud agent lifecycle types
   priority: P1

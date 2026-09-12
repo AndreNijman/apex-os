@@ -785,6 +785,30 @@ the sway host config the way `tests/lib/atspi.sh` does, and "a session bus alone
 is not enough: the greeter chain starts no accessibility bus" goes red. So the
 suite really is a statement of current state and not a constant.
 
+### CI, round 18b
+
+Dispatched rather than guessed at: `gh workflow run pr-validation.yml --ref
+task/p2-b-round18b`, run **34673525673**.
+
+- **`Package engine` — both new suites GREEN on the runner.** `Run greeter
+  session-bus assertions` and `Run accessibility-stack assertions` both pass on
+  ubuntu-24.04. That job's red is `Run file-injection assertions`
+  (`tests/test-agent-inject.sh`), the KNOWN cgroup failure this card already
+  records: the hosted runner's connection sits in
+  `system.slice/hosted-compute-agent.service`, which is neither a login session
+  nor a user service, so origin detection cannot classify it. Red on
+  `roadmap/v2.2` itself (run 34672131214) before this branch existed.
+- **`Static validation` failed for a reason that is purely the branch NAME**,
+  and it is worth knowing about because it will bite every future task branch.
+  `Input page and generator agree` clones **the apex-shell branch with the same
+  name**, and falls back to apex-shell's DEFAULT branch when there is none — and
+  the step's own comment records that the two `main`s have known touchpad drift
+  (`drag_lock`, `click_method`). So any apex-os task branch without a
+  same-named apex-shell branch fails that step on drift that is not its own. The
+  fix taken here: create `task/p2-b-round18b` in apex-shell too, off
+  `origin/roadmap/v2.2`, carrying no commits. **That branch exists only to make
+  the parity check compare like with like; merging it is a no-op.**
+
 ### Two things found that nothing was looking for
 
 1. **The page-advance hole.** The installer audit's section titled "the keyboard
