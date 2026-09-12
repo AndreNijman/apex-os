@@ -412,7 +412,7 @@ fn live_sessions(roots: &Roots) -> Vec<apex_agent_core::protocol::SessionInfo> {
 /// probe that reads as "there was never one" would hide exactly that.
 pub fn read_vpn(runner: &Runner) -> (Option<String>, VpnState) {
     let nm = runner.probe("nmcli", &["-t", "-f", "TYPE,NAME", "con", "show", "--active"]);
-    match &nm {
+    let nm_unreadable = match &nm {
         Ran::Ok(text) => {
             for line in text.lines() {
                 let Some((kind, name)) = line.split_once(':') else { continue };
@@ -420,27 +420,59 @@ pub fn read_vpn(runner: &Runner) -> (Option<String>, VpnState) {
                     return (Some(name.to_string()), VpnState::Up);
                 }
             }
+            None
         }
-        Ran::Failed(why) => {
-            return (None, VpnState::Unreadable { why: why.clone() });
-        }
+        Ran::Failed(why) => Some(why.clone()),
         Ran::NotRun(_) => {
-            return (
-                None,
-                VpnState::Unreadable {
-                    why: "NetworkManager was not queried (fixture root or dry run)".to_string(),
-                },
-            );
+            Some("NetworkManager was not queried (fixture root or dry run)".to_string())
         }
-    }
+    };
 
+    // sing-box is asked even when NetworkManager could not be, and that order
+    // is deliberate. APEX ships `sing-box.service`, and APEX Shell's VPN tab
+    // starts it; that tunnel is a tun device NetworkManager does not own and
+    // never lists. Returning `Unreadable` the moment nmcli is unavailable
+    // would have made the shipped VPN invisible on exactly the machines where
+    // NetworkManager is not the thing carrying it.
     let sb = runner.probe("systemctl", &["is-active", "sing-box.service"]);
     if let Ran::Ok(text) = &sb {
         if text.trim() == "active" {
             return (Some("sing-box".to_string()), VpnState::Up);
         }
     }
-    (None, VpnState::None)
+
+    // Only now is "there is no tunnel" a safe thing to say, and only if both
+    // were actually asked. A reading nobody finished is not a reading of none.
+    match nm_unreadable {
+        Some(why) => (None, VpnState::Unreadable { why }),
+        None => (None, VpnState::None),
+    }
+}
+
+/// A tunnel that was up earlier in this period and is not up now is **down**,
+/// not absent.
+///
+/// [`read_vpn`] has no memory. It asks NetworkManager and sing-box what is
+/// active at this instant, so a tunnel that has gone away answers exactly like
+/// a machine that never had one: `VpnState::None`. The period does have a
+/// memory, and this is where it is used — without it the timeline of a dropped
+/// VPN reads Up, Up, None, None, and the report says "the VPN held" about the
+/// criterion the whole request rests on.
+///
+/// The name is carried over from the last `Up` sample, so the report can say
+/// *which* tunnel went rather than announcing an anonymous drop.
+fn note_vpn(
+    period: &ClosedPeriod,
+    name: Option<String>,
+    state: VpnState,
+) -> (Option<String>, VpnState) {
+    if !matches!(state, VpnState::None) {
+        return (name, state);
+    }
+    match period.vpn.iter().rev().find(|s| matches!(s.state, VpnState::Up)) {
+        Some(was) => (was.name.clone(), VpnState::Down),
+        None => (name, state),
+    }
 }
 
 // ── policy loading ───────────────────────────────────────────────────────────
@@ -1284,6 +1316,7 @@ fn watch(roots: &Roots, once: bool, dry_run: bool, interval: Option<u64>) -> i32
             if let Some(c) = inputs.thermal.celsius() {
                 p.peak_c = Some(p.peak_c.map_or(c, |b: f64| b.max(c)));
             }
+            let (vpn_name, vpn) = note_vpn(p, vpn_name, vpn);
             p.vpn.push(VpnSample { at: now(), name: vpn_name, state: vpn });
             let _ = save_period(roots, STATE, p);
         } else if !closed {
@@ -1763,5 +1796,97 @@ mod tests {
             matches!(state, VpnState::Unreadable { .. }),
             "an unrun probe must not read as `no VPN`: {state:?}"
         );
+    }
+
+    #[test]
+    fn sing_box_is_asked_even_when_networkmanager_could_not_be() {
+        // APEX ships sing-box.service and the shell's VPN tab starts it. That
+        // tunnel is a tun device NetworkManager does not own and never lists,
+        // so a `read_vpn` that returned the moment nmcli was unavailable made
+        // the shipped VPN invisible on exactly the machines carrying it
+        // outside NetworkManager. The fixture cannot run either program, which
+        // is the point: what is asserted is that BOTH were reached for.
+        let t = Tmp::new("vpn-singbox");
+        let roots = t.roots();
+        let runner = Runner::new(&roots, false);
+        let _ = read_vpn(&runner);
+        let log = std::fs::read_to_string(t.0.join("var/lib/apex/lid/commands.log"))
+            .expect("the fixture records every probe it refused to run");
+        assert!(log.contains("probe nmcli"), "NetworkManager must still be asked first: {log}");
+        assert!(
+            log.contains("probe systemctl is-active sing-box.service"),
+            "sing-box must be asked even when nmcli could not be: {log}"
+        );
+    }
+
+    #[test]
+    fn a_tunnel_that_goes_away_mid_period_is_recorded_as_a_drop_and_named() {
+        // `read_vpn` answers `None` both for "there is no VPN" and for "the
+        // VPN you had is gone", because it asks what is active now and nothing
+        // else. The period remembers, and this is where that memory is spent:
+        // without it the timeline reads Up, Up, None and `vpn_held` scored it
+        // as held.
+        let mut p = ClosedPeriod {
+            closed_at: 1_000,
+            last_seen: 1_030,
+            opened_at: None,
+            sessions_at_close: 1,
+            why: "one live agent session".into(),
+            ended_by: None,
+            charge_at_close: Some(80),
+            charge_last: Some(78),
+            peak_c: Some(50.0),
+            powered_down: Vec::new(),
+            skipped: Vec::new(),
+            vpn: vec![VpnSample {
+                at: 1_000,
+                name: Some("school-wg".into()),
+                state: VpnState::Up,
+            }],
+        };
+
+        let (name, state) = note_vpn(&p, None, VpnState::None);
+        assert_eq!(state, VpnState::Down, "a tunnel that was up and is not now has dropped");
+        assert_eq!(
+            name.as_deref(),
+            Some("school-wg"),
+            "the report must say WHICH tunnel went, not announce an anonymous drop"
+        );
+
+        p.vpn.push(VpnSample { at: 1_030, name, state });
+        assert_eq!(p.vpn_held(), Some(false));
+        assert!(p.summary().contains("the VPN DROPPED"), "{}", p.summary());
+    }
+
+    #[test]
+    fn a_period_that_never_had_a_tunnel_is_not_given_a_drop() {
+        // The guard on the rule above. A machine with no VPN at all must keep
+        // reporting that there was nothing to report — turning every laptop
+        // without a tunnel into a permanent "the VPN DROPPED" would make the
+        // one line that matters worthless.
+        let p = ClosedPeriod {
+            closed_at: 1_000,
+            last_seen: 1_000,
+            opened_at: None,
+            sessions_at_close: 1,
+            why: "one live agent session".into(),
+            ended_by: None,
+            charge_at_close: None,
+            charge_last: None,
+            peak_c: None,
+            powered_down: Vec::new(),
+            skipped: Vec::new(),
+            vpn: vec![VpnSample { at: 1_000, name: None, state: VpnState::None }],
+        };
+        let (name, state) = note_vpn(&p, None, VpnState::None);
+        assert_eq!(state, VpnState::None);
+        assert_eq!(name, None);
+
+        // And an unreadable sample is passed through untouched: "could not
+        // ask" is not "it went away", and promoting it to a drop would be the
+        // same class of lie in the other direction.
+        let unreadable = VpnState::Unreadable { why: "nmcli exited 1".into() };
+        let (_n, s) = note_vpn(&p, None, unreadable.clone());
+        assert_eq!(s, unreadable);
     }
 }
