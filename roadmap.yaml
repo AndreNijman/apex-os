@@ -3082,7 +3082,7 @@ tasks:
 - id: P1-061
   title: Extend APEX capabilities to normal application permissions
   priority: P1
-  status: todo
+  status: partial
   area: app-security
   depends_on:
   - P1-001
@@ -3095,6 +3095,36 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Both halves pushed: apex-os task/p1-061-app-permissions @16a37751, apex-shell @d1f5a6f. C1 DESIGN docs/app-
+    permissions.md, measured on l16 not assumed: portal interface set is a property of the SESSION
+    (Usb/Secret/RemoteDesktop absent under Hyprland's default=hyprland;gtk, present under niri's gtk;gnome); no
+    microphone portal exists in any xdg-desktop-portal; no devices table in the store (nothing ever asked about
+    the camera); /dev/video0 is root:video 0660 with a logind uaccess ACL and the user in neither group. Brokers
+    camera/location/notifications/files/secrets where primitives permit; USB and RemoteDesktop stay NoPrimitive on
+    the default session by a documented decision not to add gnome to Hyprland's list. C2 DONE apex-perm-core: four
+    independent fields (state granted/denied/never-asked/no-primitive, enforcer portal-store/portal-
+    prompt/document-portal/sandbox-context/logind-acl/nothing, origin, revocation) with revocation derived so it
+    can never exceed its enforcer, asserted over the whole enforcer x state product. The axis is per-capability,
+    not Flatpak-vs-native: io.github.cosmic_utils.camera carries devices=all and lands on the same logind ACL as a
+    native binary, com.spotify.Client is the control and is portal-brokered. 22 unit tests on real manifests. C3
+    PARTIAL Settings page exists and is wired (PageRegistry, qmldir, IPC, popup-smoke list) and renders
+    state+enforcer+origin+timing per row with NO control where nothing can be revoked - but it has never been
+    instantiated under a compositor; qmllint proved syntax with a broken copy as negative control, node proved
+    logic 31/31, check-privacy-ui.sh proved wiring 35 checks + 7 mutants each watched to go red. C4 DONE-WITH-ONE-
+    GAP tests/test-apex-permissions.sh 17/17 runs the real xdg-desktop-portal and xdg-permission-store on a
+    private D-Bus session and calls AccessCamera from a bwrap caller with a /.flatpak-info: store=no is refused
+    WITHOUT reaching the dialog, no-entry reaches it, and the same harness still grants - so the refusal is the
+    store's, not the dialog's. Two mutants watched to fail. Native counter-test opens /dev/video0 and asserts it
+    SUCCEEDS. apex permissions revoke exits non-zero with three distinct sentences for three reasons. GAP: whether
+    a store change reaches an already-RUNNING PipeWire client was not measured (would mean revoking on the live
+    machine), so Timing::Immediate is unreachable and a test holds it so. ALSO fixed: Hyprland, the default
+    session, had no Secret portal; naming a backend overrides UseIn= was proven on a private bus before shipping
+    the pin. Gates: clippy --locked --workspace --all-targets -D warnings clean; cargo test --locked --workspace
+    3022 passed 0 failed (tip 2998); shellcheck clean; check-doc-verbs.sh clear for apex permissions (7 apex lid
+    verbs remain, pre-existing P1-063); stop_slop 41 slopcheck hits/1000 words vs 33.3 recovery.md and 45.6
+    update-cost.md, shell files below their landed equivalents; check-color-tokens/check-scale-tokens/check-
+    headless-runners/check-containerfile-assertions all green.
 - id: P1-062
   title: Build destructive chaos/torture reliability test infrastructure
   priority: P1
