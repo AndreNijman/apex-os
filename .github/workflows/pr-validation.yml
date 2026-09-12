@@ -1012,6 +1012,49 @@ jobs:
               exit 1
           fi
 
+      # P0-002's first criterion has two halves, and only one of them was ever
+      # measured anywhere. The PATH half — the store is /var/lib/apex-secretd
+      # and not $HOME — is a unit test and has been true since the crate landed.
+      # The AT-REST half is not a property of the path at all: it is whether a
+      # process running as the owner's own uid can open the file. That needs
+      # real root and a real uid boundary, so it is a shell suite, and it sat in
+      # tests/suites-not-in-ci.txt as DEBT — the property P0-002 earned, checked
+      # by nobody.
+      #
+      # In the rust job because it builds apex-secretd itself with cargo, and
+      # this is the only job with a toolchain.
+      #
+      # It uses `sudo -n`, which by definition cannot prompt, and touches
+      # nothing outside a fresh mktemp tree: --store and --socket point the
+      # daemon there, and the real /var/lib/apex-secretd and the shipped unit
+      # are never started, stopped or read. A GitHub runner's passwordless sudo
+      # is what makes it meaningful here — without it the suite abstains, and
+      # the step below refuses the abstention rather than banking its exit 0.
+      - name: P0-002 secrets at rest — the owner's own uid is refused by the kernel
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          rc=0; out="$(./tests/test-secret-at-rest.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the secret-at-rest suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^secret-at-rest: [0-9]+ passed, [0-9]+ failed$' || true)"
+          [ -n "$summary" ] || {
+              echo "::error::no summary line. Both of this suite's abstentions print 'secret-at-rest: 0 passed, 0 failed, SKIPPED' and exit 0 — no passwordless sudo, or running AS root — and either would otherwise be a green tick over the whole at-rest property"
+              exit 1
+          }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^secret-at-rest: //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed at-rest assertions failed"; exit 1; }
+          [ "$passed" -ge 19 ] || { echo "::error::only $passed at-rest assertions ran; 19 ran on 2026-09-13, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the secret-at-rest suite printed a SKIP; it has no skip counter, so one appearing means an assertion stopped being made"
+              exit 1
+          fi
+
       # ── P1-063 lid, and the reason this step exists at all ─────────────────
       # tests/test-apex-lid.sh is sixty assertions for the behaviour Andre
       # asked for by name — close the lid at school and the agents keep
