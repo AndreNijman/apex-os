@@ -328,8 +328,10 @@ Graphics, with a line above the password box saying *Your desktop did not start
 Everything about that sentence is a suggestion, not a decision:
 
 - It **preselects**. Cycle the picker to your normal desktop and the machine
-  stops arguing — for that login and for the rest of the session list's life,
-  because touching the picker settles the question.
+  stops arguing for that login: touching the picker settles the question for
+  the greeter you are looking at. If the desktop bounces again, the next
+  greeter will preselect again — which is the right behaviour, because by then
+  it has failed a fourth time.
 - The recovery session is **never remembered** as your default. Your previous
   choice survives the visit, so once the machine is fixed you land back on the
   desktop you were actually using rather than on the rescue one.
