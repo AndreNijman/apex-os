@@ -3505,7 +3505,89 @@ tasks:
     no_such_session - downstream of the gate, which proves it was passed rather than absent. Two mutations, both
     red, restored byte-identical. test-agent-inject.sh 48/0 after the change: nothing that works today pays for
     it. Counts on the branch tip: 421 :core tests, 33 :app, 684 apex-agent-core unit tests plus its six
-    integration suites, apex-agentd green, all three android gates.
+    integration suites, apex-agentd green, all three android gates. ROUND 2 (2026-09-13,
+    task/p1-053c-android-handoff, four commits, PUSHED): CRITERION 2 IS NOW MET, AND ROUND 1'S REFUSAL OF IT WAS
+    WRONG IN A WAY WORTH RECORDING. The arithmetic above is correct and the conclusion does not follow, because
+    every number in it measures a Frame::Control. apex-remote-core's wire has four more variants and
+    Open/Data/Close IS begin/chunk/end - wire.rs:66 says so in its own words, "a Data frame is split by the writer
+    and reassembled by the reader as an ordinary byte stream, so the limit is invisible above this layer", and
+    Frame::data_frames is bytes.chunks(MAX_PAYLOAD), in the tree, carrying every PTY byte the phone has ever
+    received. So the missing piece was never a chunking protocol; it was ONE daemon verb that turns a channel into
+    a byte sink the way attach turns one into a PTY. The next unit that reads "refused with arithmetic" should
+    take this as the warning: the arithmetic can be right and the thing it measures the wrong thing. SECOND
+    CORRECTION TO THE RECORD: the sentence above saying the follow-up "is recorded as one" was not true. It was in
+    no queue.json unit, no roadmap.yaml item and no design note - grepped, not assumed. A refusal that points at a
+    unit which does not exist is a refusal with nowhere to go. WHAT LANDED. bfb21f6f: Request::Receive { id, name,
+    len }, the SECOND verb that does not return to agentd's request loop, routed in main.rs beside Attach - the
+    daemon answers Receiving { id, len }, reads exactly len bytes off the connection, and answers again with the
+    Injected that Inject would have produced. THE GATE IS refuse_input's, NOT Inject's, and the difference is the
+    verb: Inject refuses a managed session AND a non-local origin because its source is a host path read outside
+    every sandbox, and neither applies to bytes that arrive on the wire - refusing a remote origin would refuse
+    the only caller this verb exists for. What survives is the rule about the DESTINATION, which is identical,
+    because this ends by typing a path into somebody's terminal exactly as Input does; so privilege::refuse_input
+    itself is called rather than paraphrased. Steps 3 to 6 of inject::handle became deliver, shared rather than
+    copied, split exactly where the difference stops - a second copy would be a second place to forget the session
+    lock, the sequence number, the payload check, or the removal of a file nobody was told about. EVERYTHING
+    REFUSABLE IS REFUSED BEFORE THE TAKEOVER REPLY - caller, name, length, session - so a phone told anything but
+    receiving has sent nothing; that matters most for the cap, because learning a file is too big after 32 MiB has
+    crossed a mobile link is a bill somebody pays for a decision that was makeable at the start. NO STAGING FILE
+    AND NOTHING TO CLEAN UP, and that is the cap's doing rather than a shortcut: Inject already reads a whole file
+    into one Vec bounded by MAX_BYTES, so an upload that dies half-way leaves no partial file and no reaper to
+    write. TWO CLOCKS, because one is not a bound: STALL_SECS (30) bounds one read, and MAX_UPLOAD_SECS (300)
+    bounds the whole upload - a client sending one byte just inside every stall window satisfies a per-read
+    timeout indefinitely and holds a daemon thread for days. THE CALLER CHOOSES NO PART OF THE PATH: name is a
+    name, safe_name has no slash in its alphabet, so ../../.ssh/authorized_keys becomes .._.._.ssh_authorized_keys
+    in the session's inbox. fe70092c: apex-remoted learns a second takeover reply - is_attach became
+    takes_over_the_channel (and refuses BOTH verbs on channel zero, where receive wedges harder than attach
+    because the daemon blocks reading an upload that never comes while the proxy blocks reading a reply that never
+    comes), PtyChannel became DaemonChannel, the accepted reply became the pair TAKEOVER_REPLIES, and NotAttached
+    became NotTakenOver. ea90a2a4: the phone's half. Upload takes a connection OF ITS OWN, and the reason is Mux's
+    strict FIFO - two megabytes of Data frames ahead of a list is a session list that arrives when the photo
+    finishes; PtyAttachment already takes a connection per terminal. THE PHONE DOES NOT SANITISE THE NAME:
+    safe_name is the daemon's and a mirror drifts, and the one case where the two differ is the case where the
+    user is shown a filename that is not the one on disk - so the picker's name crosses verbatim and
+    Handoff.Files.preview shows the reduction without performing it.
+    android/core/src/test/resources/safe-names.json is the SECOND two-sided fixture, in the shape requests.json
+    established: 18 names asserted by HandoffTest against preview and by
+    apex-agent-core/tests/android_safe_names.rs against safe_name itself. Writing it found three divergences in a
+    mirror that looked obviously right: `..` was REPAIRED to file.. where the daemon refuses it outright, e-acute
+    was guessed as two underscores and is one, and an emoji really is TWO replacements in a Kotlin loop over Char
+    and ONE in a Rust loop over chars() - so preview walks code points and returns null for a name the daemon will
+    refuse. e0e0ab9b: PickVisualMedia and OpenDocument, neither asking a permission, plus a SECOND queries entry
+    read out of activity-1.12.4's own bytecode with javap - PickVisualMedia finds its system fallback with
+    PackageManager.resolveActivity on androidx.activity.result.contract.action.PICK_IMAGES, package visibility
+    filters that on API 30+, and a null answer sends the contract down ACTION_OPEN_DOCUMENT so the user presses
+    Photo and gets a file browser. That is round 1's NO_RECOGNISER defect in a second costume, and quiet rather
+    than loud. The recycled-id guard is Reply.check's, applied for the reason it guards a typed reply and with a
+    worse consequence: an id reused after a prune means a file lands in a different agent's inbox and that agent
+    is handed a path to somebody else's photo. VERIFIED END TO END AGAINST REAL DAEMONS, which is available here
+    even though the live L16 daemon is not: apex-remoted/tests/end_to_end.rs starts a real apex-agentd and a real
+    apex-remoted built from the worktree, pairs a real device, opens a real Noise channel, uploads 200_000 bytes
+    in four frames, reads the file back off the disk and compares every byte, checks it landed under the session's
+    inbox, and reads the typed path off the attached terminal on ANOTHER channel of the same connection; a second
+    upload names itself ../../.ssh/authorized_keys and lands as one flat file. A second test covers the three
+    refusals a phone can provoke and asserts the channel is CLOSED rather than left open onto nothing. NOT
+    VERIFIED AGAINST THE MACHINE ANDRE IS SITTING AT: Receive is now the THIRD unreachable happy path on the live
+    L16 daemon beside Input and Worktrees - rpm-ostree still reports the 2026-09-05 image and only a base- stage
+    image exists. ONE UNVERIFIED ASSUMPTION WITH ITS CONSEQUENCE NAMED: describe() refuses any URI whose provider
+    does not answer OpenableColumns.SIZE, because the daemon commits to a length before a byte is sent and reading
+    the whole file to measure it would be the phone paying for the cap twice. If the photo picker's
+    content://media/picker URIs do not expose SIZE, every photo is refused and the Photo button is a quiet total
+    failure - the NO_RECOGNISER shape again. Refusing rather than guessing is the right call and it is an
+    assumption, not a settled fact. EVERY COMPOSE PATH IS UNVERIFIABLE HERE: the two launchers, the notice
+    rendering and selectSession clearing it are assembleDebug-only, and assembleDebug compiles code it never runs.
+    DISCIPLINE: 20 mutations across three languages, each red alone and by name, every source restored
+    byte-identical with plain cp - six on read_body (one of which does not fail, it HANGS: timeout 75 exits 124
+    and cargo prints "has been running for over 60 seconds", which is the defect), six on the Rust daemon and
+    proxy, eight on Kotlin. A DEFECT IN THE TEST HARNESS ITSELF, found by that mutation testing: cargo test -p
+    apex-remoted does NOT rebuild apex-agentd, so three mutations of inject.rs came back GREEN against a binary
+    compiled before they existed; refuse_if_stale now compares each sibling binary against the newest source of
+    the crates IT is built from, and the e2e harness also fixtures APEX_AGENT_SCRATCH_ROOT. CRITERION 3 IS STILL
+    HALF-MET AND THAT IS WHY THIS IS partial: send is done, RECEIVE HAS NO VERB, and this round put "read the
+    computer's clipboard" into HelpParityTest's forbidden-claims list so the guide cannot quietly start offering
+    it. Counts on the tip: 447 :core, 38 :app, assembleDebug green; cargo test --workspace green; clippy clean at
+    the workspace MSRV; test-agent-inject.sh 48/0; check-agent-state.sh, no-second-write-path.sh and
+    check-help-prose.sh (1595 words, TOTAL 0, no allowlist) all pass.
 - id: P1-060
   title: Ship APEX Remote Android as a production-quality application
   priority: P1
@@ -3584,7 +3666,48 @@ tasks:
     (5dd69d6a): check-shellcheck-coverage.sh discovers from roots 'tests' and 'files', so android/tools' three
     gate scripts were linted by nobody - a root nobody listed is the same hole as a script nobody listed, one
     level up. 140 scripts discovered, now 143; all three already clean at -S warning -x, so the known-failing list
-    did not grow.
+    did not grow. TWO CORRECTIONS TO THE PARAGRAPHS ABOVE, both of which were true when written and are not now.
+    (1) C2's "an in-progress AccessibilityStaticsTest.kt in the worktree" LANDED as c23217b9 on roadmap/v2.2,
+    together with the defect it found: three Modifier.width(110.dp) label columns that clip at any font scale
+    above 1.0, now labelColumnWidth() in ui/theme/Theme.kt. Four rules, each mutated red alone and by name,
+    sources restored byte-identical. It still offers itself as the narrow part a SOURCE SCAN can decide and not as
+    the criterion: nothing here observes TalkBack reading a screen, a rotation surviving, a foldable's hinge or
+    Doze. (2) C5's guide was ASSERTING THAT A FEATURE THIS PROJECT NOW HAS DOES NOT EXIST. P1-059's criterion 2
+    closed on 2026-09-13 (see that item), and the guide's keys section said sending a photo "needs a way to carry
+    file content over this connection, which this build does not have" - with HelpParityTest asserting that it
+    said so, in TWO places, one of them the inverse test that forbids claiming a capability this build lacks. Both
+    moved rather than being deleted: "upload a photo" and "attach a file" came OUT of the forbidden list and "read
+    the computer's clipboard" and "notify you when the app is closed" went in, which are the parts of P1-059 and
+    P1-058 that genuinely are still not met. That list is not a list of forbidden words; it is a list of claims
+    the code cannot back, and it has to move when the code does - a guide is written once and read after the code
+    has moved, which is why the inverse assertion is the cheaper one to get wrong. The keys section now explains
+    both pickers, where the file goes, that the path arrives typed and unsubmitted, that the name changes on the
+    way with the example a user will actually hit, and that the 32 MB limit belongs to the computer rather than to
+    the app. check-help-prose.sh: 1595 words, TOTAL 0, STILL NO ALLOWLIST - reached by rewriting the new
+    paragraphs in active voice after the first draft cost five hits, not by exempting them. C3 and C4 are
+    unchanged and still met. C1 IS STILL PARTIAL AND C2 IS STILL NOT MET, for the same reason as before and with
+    the emulator question now answered as far as this machine can answer it: an emulator WAS obtained (emulator
+    37.1.11 + system-images;android-36;aosp_atd;x86_64, SDK at /var/tmp/android-sdk) and it CRASHES - four
+    launches, four SIGSEGVs in qemu-system-x86_64-headless, each 20-40 seconds in and after adb get-state already
+    answered device, with gdb on attempt 4's core naming frames 1-5 inside
+    emulator/lib64/gles_swiftshader/libGLESv2.so and frame 0 at an address in no module, which is SwiftShader's
+    own JIT-generated code. -gpu off and -gpu guest do not avoid it; KVM is fine (emulator -accel-check says so).
+    That is a COULD-NOT-RUN on a 7.2.3-cachyos2.fc43.x86_64 kernel with SELinux Enforcing on an AMD Ryzen 7 PRO
+    250, not an impossibility, and the difference is the next person's: a different kernel, a permissive SELinux,
+    or an emulator build whose SwiftShader is not JIT would each be worth one attempt. Logs and all four cores
+    kept (/var/tmp/apex-work/scratch/p1-053c/emu{,2,3,4}.log, coredumpctl). WHAT WOULD ACTUALLY CLOSE THIS ITEM,
+    stated rather than left implied, because it cannot close while its dependencies are partial for structural
+    reasons: C1's end-to-end half and the whole of C2 need a device or a working emulator, and nothing else does.
+    Of the dependencies, P1-056's checkpoint consequences need a wire surface that does not exist -
+    checkpoint::list and checkpoint::restore have only CLI callers on the local filesystem, and
+    RunRequest.checkpoint plus SessionInfo.checkpoint are the entire wire surface; P1-057's criterion 4 needs
+    RenewSystemGrant plus a hardware-enrolled FIDO2 credential and is a separate unit; P1-058's "notify when the
+    app is closed" needs push infrastructure that APEX does not have anywhere - no FCM, no UnifiedPush, no ntfy,
+    no subscribe verb - so the notifications this app raises come from polling a connection the phone opened and
+    arrive only while that poll is alive; and P1-059's criterion 3 needs a verb that reads the machine's
+    clipboard. Counts on the tip: 447 :core tests, 38 :app, assembleDebug green; cargo test --workspace green;
+    clippy clean at the workspace MSRV; check-agent-state.sh, no-second-write-path.sh and check-help-prose.sh all
+    pass.
 - id: P1-061
   title: Extend APEX capabilities to normal application permissions
   priority: P1
