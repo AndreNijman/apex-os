@@ -204,6 +204,7 @@
 
 pub mod api;
 pub mod binding;
+pub mod deploy;
 pub mod dns;
 pub mod temporary;
 pub mod tools;
@@ -241,6 +242,24 @@ const VERSION: ParamSpec = ParamSpec {
     syntax: Syntax::Name,
     required: true,
     summary: "the version id to put in front of traffic",
+};
+
+/// `percentage`, §13.7's staged rollout.
+///
+/// Optional, and absent means all of it — which is what this operation did
+/// before there was a choice, so a caller who never names it sees no change.
+///
+/// `Syntax::Name` because a share is digits and at most one `.`, and `Name`
+/// already refuses a leading `-`: a negative share would otherwise reach the
+/// parser as a number the far side would have to reject. The range is checked
+/// in [`deploy::share`] against the one the schema documents, and a value
+/// outside it is refused rather than clamped.
+const SHARE: ParamSpec = ParamSpec {
+    name: "percentage",
+    syntax: Syntax::Name,
+    required: false,
+    summary: "how much traffic this version takes, 0.01 to 100; the rest stays \
+              on the version that has it now",
 };
 
 /// The bucket, database, namespace or object a caller names as a path within
@@ -447,10 +466,10 @@ pub const SPEC: ProviderSpec = ProviderSpec {
         OperationSpec {
             id: "cloudflare.worker.deploy",
             summary: "put an uploaded version of one of this project's workers \
-                      in front of all its traffic",
+                      in front of its traffic, all of it or a share",
             effect: Effect::Write,
             resource: NAMED,
-            params: &[VERSION, MESSAGE],
+            params: &[VERSION, SHARE, MESSAGE],
             aliases: &[],
             same_everywhere: false,
         },
@@ -1710,7 +1729,17 @@ impl CloudflareProvider {
                     "cloudflare.worker.upload-version" => {
                         format!("upload a new version of {where_}")
                     }
-                    "cloudflare.worker.deploy" => format!("deploy version {version} of {where_}"),
+                    // The share is in the sentence, so a staged rollout and a
+                    // full deployment do not read the same in the trail — and
+                    // so `perform`'s re-resolution check refuses if the two
+                    // disagree about which of them was authorised.
+                    "cloudflare.worker.deploy" => match params.get("percentage") {
+                        Some(share) => format!(
+                            "deploy version {version} of {where_} to {share}% of \
+                             its traffic"
+                        ),
+                        None => format!("deploy version {version} of {where_}"),
+                    },
                     "cloudflare.worker.rollback" => {
                         format!("roll {where_} back to version {version}")
                     }
@@ -2277,6 +2306,42 @@ impl CloudflareProvider {
     ///
     /// A split between two versions is §13.7's staged rollout and belongs to
     /// P1-013, which needs a health check to decide whether to widen it.
+    /// §13.7's staged rollout body: two versions, adding to a hundred.
+    ///
+    /// The remainder is computed rather than taken from the caller, because a
+    /// caller who could name both halves could name a pair that does not add
+    /// up — and cloudflare's refusal of that would arrive as a validation
+    /// error about a body this build composed.
+    fn split_body(
+        &self,
+        req: &Bind<'_>,
+        version: &str,
+        share: f64,
+        keeping: &str,
+    ) -> Result<Body, ProviderError> {
+        let entry = |id: &str, percentage: f64| {
+            let mut entry = serde_json::Map::new();
+            entry.insert("version_id".into(), id.into());
+            entry.insert("percentage".into(), serde_json::json!(percentage));
+            serde_json::Value::Object(entry)
+        };
+        let mut body = serde_json::Map::new();
+        body.insert("strategy".into(), "percentage".into());
+        body.insert(
+            "versions".into(),
+            serde_json::json!([
+                entry(version, share),
+                entry(keeping, deploy::remainder(share))
+            ]),
+        );
+        if let Some(message) = req.params.get("message") {
+            let mut annotations = serde_json::Map::new();
+            annotations.insert("workers/message".into(), message.clone().into());
+            body.insert("annotations".into(), annotations.into());
+        }
+        Ok(Body::Json(serde_json::Value::Object(body).to_string()))
+    }
+
     fn deployment_body(&self, req: &Bind<'_>) -> Result<Body, ProviderError> {
         let Some(version) = req.params.get("version") else {
             return Err(ProviderError::Refused(
@@ -3414,6 +3479,88 @@ impl Provider for CloudflareProvider {
         }
 
         let call = match (req.operation.id, &target) {
+            // §13.7's staged rollout. Cloudflare's payload is the WHOLE split
+            // every time, so "send 30% here" cannot be expressed without also
+            // saying where the other 70% goes — and the only honest answer to
+            // that is the version that has it now. Asking costs a credential,
+            // so it happens here and not in `bind`. See [`deploy`] for why
+            // three of the five answers are refusals.
+            ("cloudflare.worker.deploy", Target::Worker(worker))
+                if req.params.get("percentage").is_some() =>
+            {
+                let raw = req.params.get("percentage").expect("checked by the guard");
+                let share = deploy::share(raw).map_err(ProviderError::Refused)?;
+                let Some(version) = req.params.get("version") else {
+                    return Err(ProviderError::Refused(
+                        "this operation needs a 'version' option naming the \
+                         version to put in front of traffic"
+                            .to_string(),
+                    ));
+                };
+                if share >= deploy::MAX_SHARE {
+                    // Not a rollout, just a deployment. Fall through to the
+                    // one-request path rather than making a lookup whose
+                    // answer cannot change anything.
+                    self.build(req, &target)?
+                } else {
+                    let keeping = match deploy::current(&self.api, worker, value, req.owner) {
+                        deploy::Current::One(id) if id == *version => {
+                            return Err(ProviderError::Refused(format!(
+                                "version {version} already has all of {}'s \
+                                 traffic, so there is nothing to send {share}% \
+                                 of it to",
+                                worker.name
+                            )))
+                        }
+                        deploy::Current::One(id) => id,
+                        deploy::Current::None => {
+                            return Err(ProviderError::Refused(format!(
+                                "{} has never been deployed, so there is no \
+                                 traffic to keep on an older version and a \
+                                 share of it cannot be assigned. Deploy this \
+                                 version without a 'percentage' option first",
+                                worker.name
+                            )))
+                        }
+                        deploy::Current::Split(ids) => {
+                            return Err(ProviderError::Refused(format!(
+                                "{}'s traffic is already split between {}, so \
+                                 there is no single version to give the \
+                                 remaining {}% to. Finish or undo that rollout \
+                                 first — this build will not decide which of \
+                                 them to retire",
+                                worker.name,
+                                ids.join(" and "),
+                                deploy::remainder(share)
+                            )))
+                        }
+                        deploy::Current::Denied(status) => {
+                            return Err(ProviderError::Refused(format!(
+                                "cloudflare answered HTTP {status} when this \
+                                 asked which version is serving {}'s traffic. \
+                                 That is the credential being refused, which is \
+                                 not the same as the worker having no \
+                                 deployments — so nothing was changed",
+                                worker.name
+                            )))
+                        }
+                        deploy::Current::CouldNotRun(why) => {
+                            return Err(ProviderError::Failed(format!(
+                                "this could not find out which version is \
+                                 serving {}'s traffic, so it did not change \
+                                 the split: {why}",
+                                worker.name
+                            )))
+                        }
+                    };
+                    Call {
+                        method: "POST",
+                        path: format!("{}/deployments", script(worker)),
+                        body: self.split_body(req, version, share, &keeping)?,
+                        headers: Vec::new(),
+                    }
+                }
+            }
             (id @ ("cloudflare.dns.update" | "cloudflare.dns.delete"), Target::Record(record)) => {
                 let Some(kind) = record.kind.clone() else {
                     return Err(ProviderError::Refused(

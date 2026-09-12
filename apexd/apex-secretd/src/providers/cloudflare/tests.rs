@@ -156,12 +156,26 @@ fast = "@cf/meta/llama-3.1-8b-instruct"
 [cloudflare.tunnels]
 office = "f70ff985-a4ef-4643-bbbc-4a0ed4fc8415"
 
+# §13.7 needs three workers, because the lookup that a staged rollout depends
+# on has three shapes and each of them has to be reachable: one version
+# serving, none, and two already sharing.
+[cloudflare.staging]
+worker = "never-deployed"
+
+[cloudflare.canary]
+worker = "already-split"
+
 [cloudflare.preview]
 worker = "project-preview"
 
 [cloudflare.production]
 worker = "project"
 "#;
+
+/// The version serving traffic in the double, and the one being rolled out.
+/// Both are uuids because a Worker version id is one.
+const OLD_VERSION: &str = "1c4dd6be-0000-4000-8000-abcdefabcdef";
+const NEW_VERSION: &str = "2d5ee7cf-1111-4111-9111-bcdefabcdef0";
 
 /// A stand-in for `wrangler` and for `terraform`.
 ///
@@ -556,6 +570,26 @@ fn answer(method: &str, target: &str) -> (u16, String) {
             ok(
                 r#"{"bindings":[{"type":"plain_text","name":"GREETING","text":"hi"},{"type":"secret_text","name":"OLD_SECRET"}],"compatibility_date":"2026-09-01","usage_model":"standard"}"#,
             )
+        }
+        // §13.7: which version is in front of traffic. The worker named
+        // `never-deployed` has an empty list and `already-split` has two
+        // versions sharing, so the three shapes the lookup has to tell apart
+        // are all reachable without a second double.
+        ("GET", p) if p.ends_with("/deployments") => {
+            if p.contains("/never-deployed/") {
+                return ok(r#"{"deployments":[]}"#);
+            }
+            if p.contains("/already-split/") {
+                return ok(&format!(
+                    r#"{{"deployments":[{{"id":"d1","strategy":"percentage","versions":[
+                        {{"version_id":"{OLD_VERSION}","percentage":80}},
+                        {{"version_id":"{NEW_VERSION}","percentage":20}}]}}]}}"#
+                ));
+            }
+            ok(&format!(
+                r#"{{"deployments":[{{"id":"d1","strategy":"percentage","versions":[
+                    {{"version_id":"{OLD_VERSION}","percentage":100}}]}}]}}"#
+            ))
         }
         ("POST", p) if p.ends_with("/versions") => {
             ok(r#"{"id":"1c4dd6be-0000-4000-8000-abcdefabcdef","number":7}"#)
@@ -4550,5 +4584,259 @@ fn terraform_says_there_is_nothing_narrower_rather_than_minting_a_token_it_canno
     assert!(
         line["narrowing_detail"].as_str().expect("a reason").contains(".tf files"),
         "the reason must say why there is nothing narrower: {line}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §13.7 — the transactional deployment flow (P1-013)
+// ---------------------------------------------------------------------------
+
+/// §13.7's first line: *upload Worker version -> preview -> health check ->
+/// staged traffic -> full deployment*. The first arrow is the one that makes
+/// the rest possible, and it is a property of the vocabulary rather than of a
+/// flow: uploading a version must not put it in front of anything.
+///
+/// Mutation: point `worker.upload-version` at `/deployments`. Red.
+#[test]
+fn uploading_a_version_puts_it_in_front_of_nothing() {
+    let f = Fixture::new("upload", Mode::Normal, &["cloudflare.worker.upload-version"]);
+    with_files(&f);
+    let reply = f.use_it(
+        f.record("cloudflare.worker.upload-version", "project")
+            .param("script", "dist/worker.js")
+            .param("compatibility-date", "2026-09-01"),
+    );
+    assert!(reply.as_error().is_none(), "{reply:?}");
+    let seen = f.fake.seen();
+    assert_eq!(seen.len(), 1, "{seen:#?}");
+    assert!(seen[0].path.ends_with("/versions"), "{}", seen[0].path);
+    assert!(
+        !seen[0].path.contains("deployments"),
+        "uploading a version moved traffic: {}",
+        seen[0].path
+    );
+
+    // And the grant for one does not carry the other, so a project that lets
+    // an agent build cannot thereby let it release.
+    let reply = f.use_it(
+        f.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION),
+    );
+    assert_eq!(
+        reply.as_error().map(|(kind, _)| kind),
+        Some(ErrorKind::PermissionDenied),
+        "the upload grant reached the deploy: {reply:?}"
+    );
+}
+
+/// §13.7's staged traffic. Cloudflare's payload is the whole split every time,
+/// so the remaining share has to go somewhere — and the only honest somewhere
+/// is the version that has it now, which costs a credentialled lookup to find.
+///
+/// Mutations: send the remainder to the version being deployed; drop the
+/// lookup and send 100. Both red.
+#[test]
+fn a_staged_rollout_leaves_the_rest_of_the_traffic_where_it_was() {
+    let f = Fixture::new("staged", Mode::Normal, &["cloudflare.worker.deploy"]);
+    let reply = f.use_it(
+        f.record("cloudflare.worker.deploy", "project")
+            .param("version", NEW_VERSION)
+            .param("percentage", "30"),
+    );
+    assert!(reply.as_error().is_none(), "{reply:?}");
+
+    let seen = f.fake.seen();
+    assert_eq!(seen.len(), 2, "a staged rollout is a lookup and a change: {seen:#?}");
+    assert_eq!(seen[0].method, "GET");
+    assert!(seen[0].path.ends_with("/deployments"), "{}", seen[0].path);
+    assert_eq!(seen[1].method, "POST");
+
+    let body: serde_json::Value = serde_json::from_str(&seen[1].body).expect("json");
+    assert_eq!(body["strategy"], "percentage");
+    let versions = body["versions"].as_array().expect("versions");
+    assert_eq!(
+        versions.len(),
+        2,
+        "a partial rollout that names one version is a full one: {body}"
+    );
+    assert_eq!(versions[0]["version_id"], NEW_VERSION);
+    assert_eq!(versions[0]["percentage"], 30.0);
+    assert_eq!(
+        versions[1]["version_id"], OLD_VERSION,
+        "the rest of the traffic went to the wrong version: {body}"
+    );
+    assert_eq!(versions[1]["percentage"], 70.0);
+    let total: f64 = versions
+        .iter()
+        .map(|v| v["percentage"].as_f64().expect("a number"))
+        .sum();
+    assert!((total - 100.0).abs() < f64::EPSILON, "the split does not add up: {body}");
+}
+
+/// A rollout onto a worker with nothing serving, and one onto a worker already
+/// split, are both refused — and neither refusal is the other's.
+///
+/// The alternative is a build that reads the first version out of the first
+/// deployment and hopes. That build works until somebody runs a canary, and
+/// then it ends the canary without mentioning it.
+///
+/// Mutation: take `serving[0]` whatever the length. Red.
+#[test]
+fn a_rollout_with_no_single_version_to_keep_the_rest_is_refused_rather_than_guessed() {
+    let f = Fixture::new("nosplit", Mode::Normal, &["cloudflare.worker.deploy"]);
+
+    let reply = f.use_it(
+        f.record("cloudflare.worker.deploy", "never-deployed")
+            .param("version", NEW_VERSION)
+            .param("percentage", "25"),
+    );
+    let (_, message) = reply.as_error().expect("nothing to keep");
+    assert!(message.contains("never been deployed"), "{message}");
+
+    let reply = f.use_it(
+        f.record("cloudflare.worker.deploy", "already-split")
+            .param("version", NEW_VERSION)
+            .param("percentage", "25"),
+    );
+    let (_, message) = reply.as_error().expect("no single version to keep");
+    assert!(message.contains("already split"), "{message}");
+    assert!(
+        message.contains(OLD_VERSION) && message.contains(NEW_VERSION),
+        "the refusal must name both, or the reader cannot act on it: {message}"
+    );
+
+    // Neither changed anything: two lookups, no deployment.
+    let seen = f.fake.seen();
+    assert_eq!(seen.len(), 2, "{seen:#?}");
+    assert!(seen.iter().all(|s| s.method == "GET"), "{seen:#?}");
+}
+
+/// "Permission denied is not absence", in §13.7's lookup.
+///
+/// A worker whose deployments this credential may not read is not a worker
+/// with no deployments — and treating it as one would deploy a version to
+/// 100% of traffic while the caller asked for 25.
+#[test]
+fn a_deployments_lookup_that_was_refused_is_not_a_worker_that_was_never_deployed() {
+    let f = Fixture::new("denied-lookup", Mode::EchoUnauthorized, &["cloudflare.worker.deploy"]);
+    let reply = f.use_it(
+        f.record("cloudflare.worker.deploy", "project")
+            .param("version", NEW_VERSION)
+            .param("percentage", "25"),
+    );
+    let (kind, message) = reply.as_error().expect("a refused lookup is not a success");
+    assert_eq!(kind, ErrorKind::PermissionDenied);
+    assert!(message.contains("401"), "{message}");
+    assert!(
+        message.contains("not the same as"),
+        "the refusal does not distinguish the two: {message}"
+    );
+    assert!(!message.contains(TOKEN), "the refusal carries the credential: {message}");
+    // Nothing was deployed.
+    assert!(
+        f.fake.seen().iter().all(|s| s.method == "GET"),
+        "{:#?}",
+        f.fake.seen()
+    );
+}
+
+/// A share that is not one is refused rather than clamped. A caller who wrote
+/// `150` meant something, and deploying at 100 because 150 is out of range is
+/// this service deciding what they meant.
+#[test]
+fn a_share_of_traffic_outside_the_range_cloudflare_documents_is_refused_not_clamped() {
+    let f = Fixture::new("share", Mode::Normal, &["cloudflare.worker.deploy"]);
+    for bad in ["0", "150", "-5", "half", "1e3"] {
+        let reply = f.use_it(
+            f.record("cloudflare.worker.deploy", "project")
+                .param("version", NEW_VERSION)
+                .param("percentage", bad),
+        );
+        assert!(
+            reply.as_error().is_some(),
+            "'{bad}' was accepted as a share of traffic: {reply:?}"
+        );
+    }
+    assert!(f.fake.seen().is_empty(), "one of them reached cloudflare");
+
+    // …and a hundred is a full deployment, not a split: one request, no
+    // lookup, because the answer could not change anything.
+    let reply = f.use_it(
+        f.record("cloudflare.worker.deploy", "project")
+            .param("version", NEW_VERSION)
+            .param("percentage", "100"),
+    );
+    assert!(reply.as_error().is_none(), "{reply:?}");
+    let seen = f.fake.seen();
+    assert_eq!(seen.len(), 1, "a full deployment asked a question it did not need");
+    let body: serde_json::Value = serde_json::from_str(&seen[0].body).expect("json");
+    assert_eq!(body["versions"].as_array().expect("versions").len(), 1);
+}
+
+/// §13.7's last line: *with rollback if health checks fail*. The rollback path
+/// is its own operation with its own grant, and it is what tells Cloudflare
+/// that going back to an older version is deliberate rather than a deployment
+/// that lost a race.
+#[test]
+fn the_rollback_path_puts_an_older_version_back_and_says_it_meant_to() {
+    let f = Fixture::new("rollback", Mode::Normal, &["cloudflare.worker.rollback"]);
+    let reply = f.use_it(
+        f.record("cloudflare.worker.rollback", "project")
+            .param("version", OLD_VERSION)
+            .param("message", "the health check failed"),
+    );
+    assert!(reply.as_error().is_none(), "{reply:?}");
+    let seen = f.fake.seen();
+    assert_eq!(seen.len(), 1, "{seen:#?}");
+    assert!(
+        seen[0].path.contains("/deployments?force=true"),
+        "without force, cloudflare reads this as a deployment that lost a \
+         race rather than a deliberate return: {}",
+        seen[0].path
+    );
+    let body: serde_json::Value = serde_json::from_str(&seen[0].body).expect("json");
+    assert_eq!(body["versions"][0]["version_id"], OLD_VERSION);
+    assert_eq!(body["versions"][0]["percentage"], 100);
+    assert_eq!(body["annotations"]["workers/message"], "the health check failed");
+
+    // And a deploy grant does not carry it: going back is not going forward.
+    let f = Fixture::new("rollback2", Mode::Normal, &["cloudflare.worker.deploy"]);
+    let reply = f.use_it(
+        f.record("cloudflare.worker.rollback", "project").param("version", OLD_VERSION),
+    );
+    assert_eq!(
+        reply.as_error().map(|(kind, _)| kind),
+        Some(ErrorKind::PermissionDenied),
+        "{reply:?}"
+    );
+}
+
+/// The trail has to tell a staged rollout from a full deployment, because they
+/// are the same operation with the same version id and very different
+/// consequences.
+#[test]
+fn a_staged_rollout_and_a_full_deployment_do_not_read_the_same_in_the_trail() {
+    let f = Fixture::new("trail-share", Mode::Normal, &["cloudflare.worker.deploy"]);
+    assert!(f
+        .use_it(
+            f.record("cloudflare.worker.deploy", "project")
+                .param("version", NEW_VERSION)
+                .param("percentage", "30")
+        )
+        .as_error()
+        .is_none());
+    assert!(f
+        .use_it(f.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION))
+        .as_error()
+        .is_none());
+    let trail = f.trail();
+    assert!(trail.contains("to 30% of its traffic"), "{trail}");
+    let details: Vec<&str> = trail
+        .lines()
+        .filter(|l| l.contains("\"used\""))
+        .collect();
+    assert_eq!(details.len(), 2);
+    assert_ne!(
+        details[0], details[1],
+        "the two runs are indistinguishable in the trail"
     );
 }
