@@ -1168,6 +1168,56 @@ keyboard alone — only 0 of 3 were reachable`, which reads exactly like a
 regression in the installer. Caught by reading the totals line and the diff
 rather than the exit code.
 
+### ROUND 20 — what landed, and the verdicts
+
+| repo | commit | what |
+| --- | --- | --- |
+| apex-shell | `cd3b365` | the translator gap is in the host, and `src/` was the wrong place to look |
+| apex-shell | `1e692e1` | "the shell will tofu on CJK" was never run, and it is false |
+| apex-shell | `08422ee` | the lint step failed files the documented local gate passes |
+| apex-shell | `eb97b40` | the font section measured the runner, and CI could not run it at all |
+| apex-os | `1db607ab` | the Tab ring was walked on one page, so a trap on any other was invisible |
+| apex-os | `d12e9ef4` | two mutants for the ring walk, one of them a safety property |
+
+| suite | assertions | mutants |
+| --- | --- | --- |
+| `installer/test-installer-a11y.sh` | **68** (was 51) | B1-B10, **10 applied, 0 failed-to-apply, 10 CAUGHT, 0 survived**, tree matches HEAD |
+| apex-shell `tests/run-i18n-test.sh` | **23** (was 12) | T1-T4 host probe **4/4 CAUGHT**; F1-F5 fonts **5/5 CAUGHT** |
+
+**The installer set was re-taken twice**, which is the point of doing it first:
+once at the round's start against the suite as round 19 left it (8 mutants, 8
+caught — the debt `## NEXT` item 4 opened with), and again at the end with
+B9 and B10 added for the new ring walk. **B9 is the one worth knowing about**:
+it makes the erase button sensitive from the start, which the page audit cannot
+see — the button is named either way — and which a ring walk that only counts
+stops cannot see either. It takes exactly the assertion that the button must be
+OUT of the ring until the word is typed. **B10 is the ring walk's own vacuity
+floor**: press a key that moves nothing and every stop recorded is the same
+control, which is what a focus trap looks like from outside.
+
+F3, F4 and F5 were first reported SURVIVED, and none of them were. The harness
+was grepping for `FAIL is drawn by a font that covers it` where the suite prints
+`FAIL CJK is drawn by a font that covers it` — the label is part of the
+sentence. Same shape as I2 in round 2 and B2 in round 18b: **the expectation was
+corrected, not the mutant.**
+
+### CI, round 20
+
+| run | result |
+| --- | --- |
+| apex-shell **34700588997** | **green.** `run-i18n-test: passed=15 failed=0 skipped=5` on the Arch runner. The CJK row measured on a second machine — Noto Sans CJK HK, advance **32**, the same number as this laptop. Section 4 and the four non-CJK scripts SKIP with their reasons. |
+| apex-shell 34699960479 | red, and it is the finding above: `Lint test harness scripts` on `tests/test-headless-lib.sh`, which stops the job before the i18n step ever runs. |
+| apex-os **34701797842** | `Installer safety and UI` **green** — `installer-a11y: 63 passed, 0 failed, 5 skipped`, `installer-keymap: 43`, `installer-locale: 26`. **The ring walks pass on a second machine.** The fifth skip is the new one and it behaved exactly as designed: `page 'confirm': typing ERASE puts the erase button in the Tab ring — the field reads [] after typing, so no text was delivered on this display`. That runner's X server takes Tab and Return and drops synthesised text, which round 18b already measured; the assertion says COULD-NOT-RUN instead of passing about an empty field. |
+
+**Red jobs in 34701797842 that are not this branch's, checked rather than
+asserted:** `Static validation`, `Package engine` and `Rust validation` are all
+red on `roadmap/v2.2`'s own run **34701445343**, at `b6c4ef33`, with
+`Static validation` failing in the same 8 seconds at the same step. Against its
+merge base (`4b1e797f`) this branch changes **two files**, both under
+`installer/`, both test harnesses. Diffing against `origin/roadmap/v2.2`
+directly says 60 files and is misleading — that is the base moving, the same
+trap round 2 recorded.
+
 ## NEXT
 
 Ordered, and rewritten after round 20. Items 1-2 are unchanged and still need

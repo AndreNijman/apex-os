@@ -3489,7 +3489,7 @@ tasks:
 - id: P1-061
   title: Extend APEX capabilities to normal application permissions
   priority: P1
-  status: partial
+  status: done
   area: app-security
   depends_on:
   - P1-001
@@ -3503,37 +3503,68 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 5ba789a5, and on apex-shell roadmap/v2.2 as merge bdfb056.
-    Both halves pushed: apex-os task/p1-061-app-permissions @16a37751, apex-shell @d1f5a6f. C1 DESIGN
-    docs/app-permissions.md, measured on l16 not assumed: portal interface set is a property of the SESSION
-    (Usb/Secret/RemoteDesktop absent under Hyprland's default=hyprland;gtk, present under niri's gtk;gnome); no
-    microphone portal exists in any xdg-desktop-portal; no devices table in the store (nothing ever asked about
-    the camera); /dev/video0 is root:video 0660 with a logind uaccess ACL and the user in neither group. Brokers
-    camera/location/notifications/files/secrets where primitives permit; USB and RemoteDesktop stay NoPrimitive on
-    the default session by a documented decision not to add gnome to Hyprland's list. C2 DONE apex-perm-core: four
-    independent fields (state granted/denied/never-asked/no-primitive, enforcer
-    portal-store/portal-prompt/document-portal/sandbox-context/logind-acl/nothing, origin, revocation) with
-    revocation derived so it can never exceed its enforcer, asserted over the whole enforcer x state product. The
-    axis is per-capability, not Flatpak-vs-native: io.github.cosmic_utils.camera carries devices=all and lands on
-    the same logind ACL as a native binary, com.spotify.Client is the control and is portal-brokered. 22 unit
-    tests on real manifests. C3 PARTIAL Settings page exists and is wired (PageRegistry, qmldir, IPC, popup-smoke
-    list) and renders state+enforcer+origin+timing per row with NO control where nothing can be revoked - but it
-    has never been instantiated under a compositor; qmllint proved syntax with a broken copy as negative control,
-    node proved logic 31/31, check-privacy-ui.sh proved wiring 35 checks + 7 mutants each watched to go red. C4
-    DONE-WITH-ONE-GAP tests/test-apex-permissions.sh 17/17 runs the real xdg-desktop-portal and
-    xdg-permission-store on a private D-Bus session and calls AccessCamera from a bwrap caller with a
-    /.flatpak-info: store=no is refused WITHOUT reaching the dialog, no-entry reaches it, and the same harness
-    still grants - so the refusal is the store's, not the dialog's. Two mutants watched to fail. Native
-    counter-test opens /dev/video0 and asserts it SUCCEEDS. apex permissions revoke exits non-zero with three
-    distinct sentences for three reasons. GAP: whether a store change reaches an already-RUNNING PipeWire client
-    was not measured (would mean revoking on the live machine), so Timing::Immediate is unreachable and a test
-    holds it so. ALSO fixed: Hyprland, the default session, had no Secret portal; naming a backend overrides
-    UseIn= was proven on a private bus before shipping the pin. Gates: clippy --locked --workspace --all-targets
-    -D warnings clean; cargo test --locked --workspace 3022 passed 0 failed (tip 2998); shellcheck clean;
-    check-doc-verbs.sh clear for apex permissions (7 apex lid verbs remain, pre-existing P1-063); stop_slop 41
-    slopcheck hits/1000 words vs 33.3 recovery.md and 45.6 update-cost.md, shell files below their landed
-    equivalents; check-color-tokens/check-scale-tokens/check-headless-runners/check-containerfile-assertions all
-    green.
+    ROUND 2 2026-09-12 closed both criteria round 1 left open. Pushed: apex-os task/p1-061-app-permissions
+    @44503bfb, apex-shell @a47bc25, both merged up from roadmap/v2.2 first. apex-shell CI GREEN on the branch (run
+    34703203629). ROUND 1 (landed as apex-os merge 5ba789a5, apex-shell bdfb056) stands unchanged for C1 and C2.
+    C1 DESIGN docs/app-permissions.md, measured on l16 not assumed: the portal interface set is a property of the
+    SESSION (Usb/Secret/RemoteDesktop absent under Hyprland's default=hyprland;gtk, present under niri's
+    gtk;gnome); no microphone portal exists in any xdg-desktop-portal; /dev/video0 is root:video 0660 with a
+    logind uaccess ACL and the user in neither group. Brokers camera/location/notifications/files/secrets where
+    primitives permit; USB and RemoteDesktop stay NoPrimitive on the default session by a documented decision not
+    to add gnome to Hyprland's list, which is what 'where primitives permit' scopes. C2 DONE apex-perm-core: four
+    independent fields (state, enforcer, origin, revocation) with revocation derived so it can never exceed its
+    enforcer, asserted over the whole enforcer x state product; the axis is per-capability, not Flatpak-vs-native
+    - io.github.cosmic_utils.camera carries devices=all and lands on the same logind ACL as a native binary,
+    com.spotify.Client is the portal-brokered control. C3 NOW DONE - the page has been instantiated, laid out and
+    RASTERISED under a compositor, which round 1 said plainly it had not. Running it found, in the first second, a
+    defect qmllint, node and check-privacy-ui.sh had all missed: parseList returned session:null for an unreadable
+    report, PrivacyPage binds session.desktop at line 122 and session.brokered at line 176, and a binding inside a
+    section whose visible is false is still evaluated, so the page threw TWICE ON EVERY LOAD (report is seeded
+    with parseList('',0)). Fixed in the model - the failure branch returns sessionView(null) so the report has one
+    shape on every path - not by a guard in the page. New tests/run-privacy-page-test.sh +
+    tests/privacy-page-test.qml: the page built through PageRegistry inside a FloatingWindow on a headless labwc
+    with a stub apex answering from the fixture, 73 assertions in three phases. fixture: 3 apps, 30 rows, origin
+    line AND enforcer line each counted 30 times (the criterion is 'and origin', so per-row not per-page), 15
+    controls in three labels and ZERO on the native program's ten rows, the devices=all Flatpak reads identically
+    to the native binary while the portal-brokered one differs, pressing Never runs exactly 'apex permissions
+    revoke com.spotify.Client camera', revoke on an unrevokable row returns false and runs nothing. unreadable:
+    apex fails, the page must say nothing could be READ and must not throw - the phase the defect went red on.
+    pixels: grabToImage through the scene graph, 980x692 PNG, 14536 distinct pixel values, read back by
+    tests/lib/png-ink.py. A TypeError in any phase log is a hard failure because that defect class leaves no other
+    trace. Mutant: session:sessionView(null) -> session:null turns 4 new node assertions and all 4 render-phase
+    TypeError assertions red; restored byte-identical with cp. C4 NOW DONE - the one unmeasured timing is measured
+    and the answer is NO. A permission-store change does NOT reach an already-running PipeWire client.
+    tests/measure-permission-store-reach.sh + tests/permission-store-client.c: private session bus, private
+    PipeWire, private WirePlumber on a no-hardware profile, private XDG_DATA_HOME, so the grant taken away belongs
+    to an application id that does not exist - round 1 believed measuring this meant revoking on Andre's live
+    machine and it does not. The negative is worth something because every other link was verified working in the
+    same run: the client is recorded pipewire.access=portal on socket pipewire-0 with app_id and
+    media_roles=Camera; WirePlumber granted it (pw-cli get-permissions shows rwxm- on the client and the Camera
+    node, access-portal.lua:87 logged 'setting permissions: true'); the store reads back ['no']; gdbus monitor
+    caught Changed('devices','camera',false,<byte 0x00>,{app:['no']}); and the module answers lookup calls. Six
+    seconds after the write the client still held rwxm- on every object and access-portal.lua logged nothing.
+    Where the chain breaks, between the store's Changed and access-portal.lua:123, is deliberately NOT claimed. So
+    Timing::NextRequest is the correct statement rather than the merely cautious one, Timing::Immediate stays
+    unreachable, and nothing_claims_a_revocation_is_immediate is now backed by evidence; docs/app-permissions.md
+    2.4 and 6 and the Timing doc comment all changed from 'not verified' to what was found. Also now read off the
+    running process rather than a config file: libwireplumber-module-portal-permissionstore.so is in the L16
+    session WirePlumber's mapped modules. C4's original half unchanged: tests/test-apex-permissions.sh 10/10 (+1
+    needs --with-binary) runs the real xdg-desktop-portal and xdg-permission-store on a private bus and calls
+    AccessCamera from a bwrap caller with a /.flatpak-info - store=no is refused WITHOUT reaching the dialog,
+    no-entry reaches it, the same harness still grants, and the native counter-test opens /dev/video0 and asserts
+    it SUCCEEDS. LIMITS OF EVIDENCE, stated rather than buried: the render evidence is from ONE machine, this L16
+    - CI has no quickshell or labwc so run-privacy-page-test.sh SKIPs there (confirmed in run 34703203629), and
+    the same is true of measure-permission-store-reach.sh, which needs pipewire-utils and pipewire-devel that are
+    not in the image (its header says how to run it without installing them). The rasterised page is washed out
+    because the private HOME has no colors.json, so nobody has yet seen this page in the palette a user gets. And
+    the store-change finding is an outcome, not a diagnosis. Gates: clippy --locked --workspace --all-targets -D
+    warnings clean; cargo test --locked --workspace all green; shellcheck -S warning -x clean on both new scripts
+    and tests/check-shellcheck-coverage.sh 141 discovered 0 newly failing; check-doc-verbs.sh 208 valid 0
+    undocumented-undeclared; check-containerfile-assertions.sh and check-no-conflict-markers.sh green; apex-shell
+    check-privacy-ui.sh 35/35 with 7/7 mutants, permissions-test.js 35/35, check-headless-runners.sh 28/28,
+    run-popup-smoke.sh clean (it is the suite that first reported the TypeError), run-privacy-page-test.sh 73/73;
+    stop_slop docs/app-permissions.md 44.0 slopcheck hits per 1000 words, between recovery.md 32.0 and
+    update-cost.md 45.6.
 - id: P1-062
   title: Build destructive chaos/torture reliability test infrastructure
   priority: P1
@@ -3714,47 +3745,57 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Accessibility baseline. ROUND 19 on apex-os+apex-shell task/p2-b-round19, pushed, not yet merged (round 3
-    landed as merge b6920252; this branch carries a merge of the moved v2.2 as 3541603d). THREE THINGS THAT WERE
-    ASSERTIONS OF ABSENCE ARE NOW ASSERTIONS OF PRESENCE. (1) THE GREETER HAD NO SESSION BUS, so its correct
-    accessibility markup reached nobody - Qt's AT-SPI bridge resolves org.a11y.Bus on the SESSION bus and the
-    greet session had none, so a login screen a reader can read AND operate under test published ZERO nodes in
-    production. greetd now runs /usr/libexec/apex-greet-session: a session bus with an EMPTY service directory,
-    at-spi-bus-launcher and at-spi2-registryd execed beside it (activation is refused by SELinux here, measured
-    again), then EXEC of the compositor so greetd still holds the compositor's own pid. Every step is optional and
-    the only unconditional line is the exec, asserted by taking each piece away - no dbus-daemon, no writable
-    runtime dir, no runtime dir at all - and requiring the greeter to start anyway. (2) ORCA COULD NOT BE STARTED:
-    /usr/libexec/apex-screen-reader plus SUPER+ALT+S on all three desktop sessions, generated into Hyprland Lua,
-    niri KDL and labwc XML from one apex-shell KeybindService default and proved by RUNNING each generator, and on
-    BOTH greeter hosts - the one key a user who cannot see the screen can press. (3) THE AT-SPI WALK RAN ON ONE
-    LAPTOP: apex-greet-atspi 31 passed 0 failed on this laptop, in a bare fedora:43 container, and ON THE GITHUB
-    RUNNER. SUITES: tests/test-apex-greet-atspi.sh 31 (8/8 mutants), tests/test-apex-greet-session-bus.sh 37
-    (13/13 mutants), tests/test-apex-a11y-stack.sh 24 (8/8 mutants), tests/test-apex-greet-a11y.sh 22,
-    tests/test-apex-greet-layout.sh 25, tests/test-labwc-keybinds.sh 39, installer/test-installer-a11y.sh 51 local
-    and 47 in CI (8/8 mutants), plus apex-shell run-a11y-controls-test.sh 21, check-reduce-motion.sh 12,
-    run-niri-keybinds-test.sh 5+14, run-hypr-configerrors-test.sh 17, check-push-to-talk.sh 42. FOUR FINDINGS
-    NOTHING WAS LOOKING FOR: Qt DOES gate on org.a11y.Status and this laptop could not show it (a live desktop has
-    both flags already true, so 'the property cannot be pushed false' and 'Qt does not consult it' were artefacts
-    of one machine; in a bare container both start false and Qt publishes nothing); a pgrep claim THIS BRANCH made
-    was false and its own mutant found it by surviving (Linux takes comm from the SCRIPT basename, so pgrep -x
-    orca works after all - corrected in three places rather than the mutant softened); the shipped labwc rc.xml
-    seed had lost push-to-talk's W-A-v since P1-023 and the suite could not see it because it silently measured
-    the INSTALLED shell whenever the repos are not siblings; and an unrelated red step (Run virtualization
-    assertions, red on roadmap/v2.2 itself) had silently switched off ALL FOUR accessibility suites in CI, since
-    GitHub stops a job at its first failure - fixed with if-not-cancelled, which still fails the job. TWO CAUGHT
-    IN REVIEW BEFORE SHIPPING: sway -C cannot run inside an image build at all (rc=126, cap_sys_nice=ep outside
-    the bounding set, same code for a good config and a broken one) so that build-time check was removed and lives
-    in the suite; and the wrapper execs, so nothing was left to clean up after it - a watcher now kills exactly
-    the pids it recorded. TWO MORE CI FOUND: the pid assertion was measuring which /bin/sh the runner has rather
-    than the wrapper, and the installer page-advance check read the accessibility bus one frame too early. STAYS
-    PARTIAL, named not implied: nothing has run orca AS THE greetd USER (writable HOME, speech-dispatcher with no
-    audio session) and whether SELinux permits that context to exec gnome_atspi_exec_t is unproven here - if
-    refused the wrapper degrades safely, so it is a silent no-reader rather than a broken login; greeter audio is
-    unconfigured; the Tab ring is walked on one installer page; the text-entry pair is measured on this laptop
-    only; magnifier, sticky keys, slow keys, mouse keys and the on-screen keyboard are absent; high-contrast is a
-    Hyprland shader rather than an accessibility feature. Production note for the next measurer: nothing at the
-    greeter sets ScreenReaderEnabled until a reader connects, and Qt gates on it, so a fresh greeter publishes an
-    empty tree until the key is pressed - correct, not a regression.
+    Accessibility baseline. ROUND 20 on apex-os task/p2-b-round19 (tip d12e9ef4), pushed, not yet merged; round 19
+    landed as merge 4b1e797f. ROUND 20 CLOSED THE TWO THINGS THE CARD'S ## NEXT ITEM 4 ASKED FOR. (1) THE
+    INSTALLER MUTATION SET WAS RE-TAKEN, which round 19's settle-window change had invalidated:
+    installer/mutate-installer-a11y.sh, 8 applied, 8 CAUGHT, 0 survived, tree matches HEAD - then re-taken AGAIN
+    at the end of the round with two new mutants, 10 applied, 0 failed-to-apply, 10 CAUGHT, 0 survived. (2) THE
+    TAB RING WAS WALKED ON ONE PAGE AND NOW RUNS ON FOUR - keyboard, secureboot, confirm and account. Every round
+    before this name-audited the other pages, which answers "can a reader say what this is" and not "can a
+    keyboard user get to it", so a focus trap on any page but account was invisible to the whole suite.
+    installer/test-installer-a11y.sh is 68 assertions (was 51), 0 failed, 0 skipped here, and 63 passed 0 failed 5
+    skipped on the GitHub runner (run 34701797842, Installer safety and UI green). THE RING WALK FOUND SOMETHING
+    ON ITS FIRST RUN AND THE FINDING WAS THAT THE ASSERTION WAS WRONG, NOT THE INSTALLER. A generic "Tab reaches
+    at least three controls" went RED on confirm: the ring has exactly two stops, Back and the ERASE field, where
+    the audit counts three named controls. That is the page working as designed - go = self.btn("Erase and
+    install", ..., False) and only e_erase's changed handler turns it on, when the text is exactly ERASE; an
+    insensitive GTK button is not a tab stop. The floor was replaced by the assertion the criterion actually
+    needs, in both directions: the destructive button must NOT be in the ring while the field is empty - a
+    keyboard user must not be able to land on an irreversible action without having confirmed it - and it MUST
+    join the ring once ERASE is typed with the keyboard alone and read back over the bus. Mutant B9 makes the
+    button sensitive from the start and that assertion is the only thing in the suite that catches it: the page
+    audit cannot, because the button is named either way, and a ring walk that only counts stops cannot either.
+    B10 is the walk's own vacuity floor - press a key that moves nothing and every stop recorded is the same
+    control, which is what a focus trap looks like from outside. On the runner the typed-ERASE half correctly says
+    COULD-NOT-RUN ("the field reads [] after typing"), because that X server takes Tab and Return and drops
+    synthesised text; it does not pass about an empty field. STILL PARTIAL, and the reasons are products and
+    hardware rather than harness. THE READER AT THE LOGIN SCREEN IS UNPROVEN END TO END: everything around it is
+    asserted - greetd runs /usr/libexec/apex-greet-session which starts a session bus with an empty service
+    directory, execs at-spi-bus-launcher and at-spi2-registryd, then EXECS the compositor
+    (test-apex-greet-session-bus.sh 37 assertions, 13/13 mutants); SUPER+ALT+S starts orca on all three desktop
+    sessions and both greeter hosts; the tree is readable AND operable over AT-SPI on three machines
+    (test-apex-greet-atspi.sh 31 assertions, 8/8 mutants, identical totals on this laptop, in a bare fedora:43
+    container and on the GitHub runner), and the password never crosses the bus. What has NOT been shown is orca
+    running as the greetd system user - a writable HOME, and speech-dispatcher with no audio session - or whether
+    SELinux permits the greetd session context to exec gnome_atspi_exec_t. If that exec is refused the wrapper
+    degrades safely, which IS asserted, so the failure mode is a silent no-reader rather than a broken login.
+    NEEDS SOMEONE WHO CAN BOOT AN ISO AND LISTEN. Greeter audio is a second, separate gap: nothing in this
+    repository configures a sound path for the greetd user. OTHER SUB-FEATURES, unchanged and named rather than
+    implied: no magnifier, no sticky keys, no slow keys, no mouse keys, no on-screen keyboard anywhere in either
+    repo. High contrast ships as six shaders applied through Hyprland only, as a visual effect and not an a11y
+    feature. Reduce Motion reaches 39 of 450 animation durations (8.7%), pinned exactly in both directions by
+    check-reduce-motion.sh; 402 are bare int literals no switch can touch. Lock and recovery screens are not
+    measured - only login is. apex-shell src/popups/ and src/nexus/NavPane.qml are still bespoke
+    Rectangle+MouseArea, mouse-only and unnamed. The installer's disk, mode, part, run and done pages are not
+    audited, because they enumerate real block devices and start real installs; wifi is audited but its Tab ring
+    is not walked, because it has two shapes and which one builds depends on the machine. SUITES:
+    installer/test-installer-a11y.sh 68 (B1-B10, 10/10), tests/test-apex-greet-atspi.sh 31 (8/8),
+    tests/test-apex-greet-session-bus.sh 37 (13/13), tests/test-apex-a11y-stack.sh 24 (8/8),
+    tests/test-apex-greet-a11y.sh 22, tests/test-apex-greet-layout.sh 25, tests/test-labwc-keybinds.sh 39,
+    apex-shell tests/run-a11y-controls-test.sh 21, apex-shell tests/check-reduce-motion.sh 12. Red jobs in run
+    34701797842 are not this branch's: Static validation, Package engine and Rust validation are all red on
+    roadmap/v2.2's own run 34701445343 at b6c4ef33, and against its merge base this branch changes two files, both
+    installer test harnesses.
 - id: P2-004
   title: Internationalisation baseline
   priority: P2
