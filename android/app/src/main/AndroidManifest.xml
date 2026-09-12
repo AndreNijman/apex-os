@@ -52,6 +52,28 @@
         <intent>
             <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
         </intent>
+        <!-- The photo picker's backport, for P1-059's file handoff.
+
+             `ActivityResultContracts.PickVisualMedia` prefers
+             `MediaStore.ACTION_PICK_IMAGES` where the platform has it and
+             otherwise looks for a system fallback picker, which it finds with
+             `PackageManager.resolveActivity` on this action — read out of
+             activity-1.12.4's own bytecode, not assumed. Package visibility
+             filters that call on API 30 and later, and a null answer sends the
+             contract down the `ACTION_OPEN_DOCUMENT` path instead: not broken,
+             but not the camera roll a person expects when they press Photo.
+
+             Declaring it costs nothing and is the same fix the recogniser
+             above needed. NOT VERIFIED ON A DEVICE — there is no device and no
+             emulator here, so what is asserted is that the declaration is
+             present, and `ManifestTest` is where that assertion lives. -->
+        <intent>
+            <action android:name="androidx.activity.result.contract.action.PICK_IMAGES" />
+        </intent>
+        <!-- Opening any other file goes through the Storage Access Framework,
+             which needs no <queries> entry: `startActivity` is not filtered by
+             package visibility and the contract resolves nothing. Said here so
+             the absence is a decision and not an oversight. -->
     </queries>
 
     <application

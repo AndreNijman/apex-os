@@ -61,7 +61,80 @@ fn bin(name: &str) -> PathBuf {
          `cargo test --workspace` (or `cargo build -p apex-agentd` first).",
         path.display()
     );
+    refuse_if_stale(&path, name);
     path
+}
+
+/// Refuse a sibling binary that is older than the sources it was built from.
+///
+/// Found while mutation-testing the upload path, and it is the same class of
+/// defect this file already panics about one line up. `cargo test -p
+/// apex-remoted` does **not** rebuild `apex-agentd`: cargo builds the package
+/// under test and its dependencies, and this suite's second daemon is neither.
+/// Three mutations of `apex-agentd/src/inject.rs` — the size cap deleted, the
+/// echoed length zeroed, the file written empty — all came back GREEN on a
+/// targeted run, because the harness had started a binary compiled before any
+/// of them existed. The same three are red the moment `cargo build -p
+/// apex-agentd` runs first.
+///
+/// So the existence check was necessary and not sufficient: a stale binary is
+/// a test that ran, reported success, and asserted nothing about the code in
+/// the tree. `apex-agent-core` is checked too, because `apex-agentd` is built
+/// from it and a change there leaves the same stale binary behind.
+///
+/// Each binary is compared only against the crates IT is built from, which is
+/// the correction this check needed after its first version failed everything:
+/// cargo does not relink a binary whose own inputs are unchanged, so
+/// `apex-remoted` is legitimately older than a change to `apex-agentd` and
+/// saying otherwise made a true guard cry wolf on every run.
+///
+/// A refusal rather than a rebuild: a test that shells out to cargo while
+/// cargo is running it is a deadlock waiting for a lock it already holds.
+fn refuse_if_stale(path: &std::path::Path, name: &str) {
+    let built = match std::fs::metadata(path).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        // A filesystem with no mtime is not a reason to fail a suite; the
+        // existence check above is still in force.
+        Err(_) => return,
+    };
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the workspace root");
+    let sources: &[&str] = match name {
+        "apex-agentd" => &["apex-agentd", "apex-agent-core"],
+        "apex-remoted" => &["apex-remoted", "apex-remote-core"],
+        _ => return,
+    };
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for c in sources {
+        let mut stack = vec![crates.join(c).join("src")];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    if let Ok(t) = e.metadata().and_then(|m| m.modified()) {
+                        if newest.as_ref().map_or(true, |(best, _)| t > *best) {
+                            newest = Some((t, p));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some((t, source)) = newest {
+        assert!(
+            t <= built,
+            "{name} was built before {} was last changed, so this suite would run a daemon \
+             that predates the code under test and report success for it. Run \
+             `cargo build --workspace` (or `cargo test --workspace`) first.",
+            source.display()
+        );
+    }
 }
 
 struct Harness {
@@ -98,6 +171,13 @@ impl Harness {
         let agentd = Command::new(bin("apex-agentd"))
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
+            // The last path no XDG variable reaches. Without it this fixture's
+            // sessions share `/tmp/apex-agent-<uid>` with the user's real
+            // daemon — and both number their sessions from 1, while a session
+            // reap runs `remove_dir_all` on its own id's directory. See
+            // `paths::SCRATCH_ROOT_ENV`. It is also what lets the upload test
+            // below read back the file the daemon wrote.
+            .env("APEX_AGENT_SCRATCH_ROOT", root.join("scratch"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -732,6 +812,292 @@ fn a_terminal_streams_both_ways_over_one_channel() {
     let after = session.call(&format!(r#"{{"cmd":"info","id":{id}}}"#));
     assert_eq!(after["reply"], "session", "{after}");
     assert!(after["exit_code"].is_null(), "closing a channel killed the session: {after}");
+}
+
+/// The bytes a phone hands over: far past one frame, and not compressible
+/// into a pattern a truncation would still satisfy.
+///
+/// 200_000 bytes against `MAX_PAYLOAD`'s 65514 is four frames, which is the
+/// whole point — the criterion was refused on the arithmetic of ONE frame, and
+/// a test that uploaded 40 KB would pass without touching the thing that was
+/// said to be impossible. Every byte is a function of its index, so a dropped
+/// frame, a duplicated one and a reordered one are all visible in the
+/// comparison rather than only a short read.
+fn upload_body() -> Vec<u8> {
+    let mut body = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut x: u32 = 0x5eed;
+    while body.len() < 200_000 {
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        body.push((x >> 16) as u8);
+    }
+    body
+}
+
+/// Read frames until `want` says it has what it needs, parking everything else
+/// in `pending` the way `call` does.
+fn drain_until(session: &mut Session, what: &str, mut want: impl FnMut(&Frame) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        let frame = session.recv();
+        let done = want(&frame);
+        session.pending.push(frame);
+        if done {
+            return;
+        }
+    }
+    panic!("never saw {what}; frames seen: {:?}", session.pending.len());
+}
+
+#[test]
+fn a_file_from_the_phone_crosses_in_frames_and_its_path_is_typed_into_the_session() {
+    // P1-059's second criterion, end to end: a photo on a phone reaching a
+    // permitted path on the machine with a safe path typed into the agent.
+    //
+    // It was recorded as impossible with arithmetic about `Frame::Control`'s
+    // 65514-byte payload. This uploads 200 KB — which that arithmetic says
+    // cannot be done — through `Open`/`Data`/`Close`, the same three frames a
+    // terminal has always used, and then reads the file back off the disk and
+    // compares every byte.
+    let h = harness!("receive");
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
+    let mut session = device.connect(&h).expect("a session");
+
+    let started = session.call(
+        r#"{"cmd":"run","agent":"generic","cwd":"/tmp","sandbox":"unrestricted","cols":80,"rows":24,"args":["/bin/cat"]}"#,
+    );
+    assert_eq!(started["reply"], "session", "{started}");
+    let id = started["id"].as_u64().expect("an id");
+
+    // A terminal on channel 1, so the typed path can be seen arriving rather
+    // than inferred from the reply that claims it was sent. `cat` echoes, so
+    // what comes back on this channel is what the agent was given.
+    session.send(Frame::Open {
+        channel: 1,
+        request: format!(r#"{{"cmd":"attach","id":{id},"cols":80,"rows":24,"replay":0}}"#)
+            .into_bytes(),
+    });
+    match session.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["reply"], "attached", "{v}");
+        }
+        other => panic!("expected the attach reply, got {other:?}"),
+    }
+
+    // The upload, on a channel of its own and on the same connection.
+    let body = upload_body();
+    session.send(Frame::Open {
+        channel: 2,
+        request: format!(
+            r#"{{"cmd":"receive","id":{id},"name":"shot.png","len":{}}}"#,
+            body.len()
+        )
+        .into_bytes(),
+    });
+    // Everything refusable was decided before this line, and the length is
+    // echoed: a device that reads `receiving` knows the cap was not exceeded
+    // and knows the count the daemon agreed to read.
+    match session.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["reply"], "receiving", "{v}");
+            assert_eq!(v["id"], id, "{v}");
+            assert_eq!(v["len"], body.len() as u64, "{v}");
+        }
+        other => panic!("expected the takeover reply, got {other:?}"),
+    }
+
+    let frames = Frame::data_frames(2, &body);
+    assert!(
+        frames.len() > 1,
+        "this test is about a body that does not fit in one frame; it sent {} \
+         frame(s) for {} bytes",
+        frames.len(),
+        body.len()
+    );
+    for f in frames {
+        session.send(f);
+    }
+
+    // The daemon answers a second time when the last byte is in, and that
+    // answer comes back as `Data` on the upload's own channel — the pump in
+    // `apex-remoted` does not know whether it is carrying a terminal or a
+    // reply, which is why one channel type serves both.
+    let mut tail: Vec<u8> = Vec::new();
+    drain_until(&mut session, "the injected reply", |f| match f {
+        Frame::Data { channel: 2, bytes } => {
+            tail.extend_from_slice(bytes);
+            serde_json::from_slice::<serde_json::Value>(&tail).is_ok()
+        }
+        Frame::Close { channel: 2, reason } => {
+            panic!("the upload channel closed before answering: {reason}")
+        }
+        _ => false,
+    });
+    let done: serde_json::Value = serde_json::from_slice(&tail).expect("the daemon's answer");
+    assert_eq!(done["reply"], "injected", "{done}");
+    assert_eq!(done["id"], id, "{done}");
+    let path = done["path"].as_str().expect("a path").to_string();
+
+    // Where it landed: the session's inbox, under a name the daemon chose.
+    assert!(
+        path.contains("/inbox/") && path.ends_with("-shot.png"),
+        "the copy did not land in the session's inbox: {path}"
+    );
+
+    // THE assertion. Not "an upload was accepted" — the bytes, all of them, in
+    // order, on the disk the agent reads from.
+    let landed = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
+    assert_eq!(
+        landed.len(),
+        body.len(),
+        "the file is {} bytes and {} were sent",
+        landed.len(),
+        body.len()
+    );
+    assert!(landed == body, "the file that landed is not the file that was sent");
+
+    // And the path reached the agent's terminal, which is the half of the
+    // criterion that is about the agent rather than about the filesystem.
+    let mut typed: Vec<u8> = Vec::new();
+    for f in &session.pending {
+        if let Frame::Data { channel: 1, bytes } = f {
+            typed.extend_from_slice(bytes);
+        }
+    }
+    if !String::from_utf8_lossy(&typed).contains(&path) {
+        drain_until(&mut session, "the typed path", |f| match f {
+            Frame::Data { channel: 1, bytes } => {
+                typed.extend_from_slice(bytes);
+                String::from_utf8_lossy(&typed).contains(&path)
+            }
+            _ => false,
+        });
+    }
+    assert!(
+        String::from_utf8_lossy(&typed).contains(&path),
+        "the path never reached the agent's terminal: {:?}",
+        String::from_utf8_lossy(&typed)
+    );
+
+    // A second upload, with a name that is a traversal rather than a name. The
+    // caller chooses no part of the path: `safe_name`'s alphabet has no `/`,
+    // so this becomes one flat file in the same inbox.
+    session.send(Frame::Open {
+        channel: 3,
+        request: format!(
+            r#"{{"cmd":"receive","id":{id},"name":"../../.ssh/authorized_keys","len":5}}"#
+        )
+        .into_bytes(),
+    });
+    drain_until(&mut session, "the second takeover reply", |f| {
+        matches!(f, Frame::Control(_))
+    });
+    for f in Frame::data_frames(3, b"key\n\n") {
+        session.send(f);
+    }
+    let mut tail3: Vec<u8> = Vec::new();
+    drain_until(&mut session, "the second injected reply", |f| match f {
+        Frame::Data { channel: 3, bytes } => {
+            tail3.extend_from_slice(bytes);
+            serde_json::from_slice::<serde_json::Value>(&tail3).is_ok()
+        }
+        _ => false,
+    });
+    let done3: serde_json::Value = serde_json::from_slice(&tail3).expect("the daemon's answer");
+    assert_eq!(done3["reply"], "injected", "{done3}");
+    let hostile = done3["path"].as_str().expect("a path");
+    assert!(
+        hostile.ends_with(".._.._.ssh_authorized_keys"),
+        "a name that was a path was not reduced to a name: {hostile}"
+    );
+    assert!(
+        hostile.contains("/inbox/"),
+        "a traversal escaped the inbox: {hostile}"
+    );
+}
+
+#[test]
+fn an_upload_is_refused_before_a_byte_of_it_is_sent() {
+    // The three refusals a phone can provoke, and the one thing they have in
+    // common: every one of them is answered BEFORE the device starts sending.
+    // A cap enforced after 32 MiB has crossed a mobile connection is a bill
+    // somebody pays for a decision that was makeable at the start.
+    let h = harness!("receive-refused");
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
+    let mut session = device.connect(&h).expect("a session");
+
+    // 1. A takeover verb on channel zero. `attach` there wedges with the
+    //    device's terminal bytes going nowhere; `receive` wedges harder,
+    //    because the daemon would then block reading an upload that never
+    //    comes while the proxy blocks reading a reply that never comes. The
+    //    proxy refuses it itself rather than forwarding it.
+    let wedge = session.call(r#"{"cmd":"receive","id":1,"name":"a.png","len":10}"#);
+    assert_eq!(wedge["reply"], "error", "{wedge}");
+    assert_eq!(wedge["kind"], "bad_request", "{wedge}");
+    assert!(
+        wedge["message"].as_str().unwrap_or("").contains("channel"),
+        "the refusal does not say what to do instead: {wedge}"
+    );
+
+    // 2. Past the size cap. The number in the request is a claim, and it is
+    //    checked against the cap before the takeover reply — so this comes
+    //    back as the daemon's own refusal and the channel is closed rather
+    //    than opened onto a sink that would read 33 MiB to discard it.
+    session.send(Frame::Open {
+        channel: 5,
+        request: br#"{"cmd":"receive","id":1,"name":"huge.bin","len":34000000}"#.to_vec(),
+    });
+    match session.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["reply"], "error", "{v}");
+            assert!(
+                v["message"].as_str().unwrap_or("").contains("33554432"),
+                "the refusal does not name the limit: {v}"
+            );
+        }
+        other => panic!("expected the daemon's refusal, got {other:?}"),
+    }
+    assert_eq!(
+        session.recv(),
+        Frame::Close {
+            channel: 5,
+            reason: String::new()
+        },
+        "a refused upload left its channel open"
+    );
+
+    // 3. No such session. Same shape, and it is the assertion that proves the
+    //    proxy reads the daemon's answer rather than assuming a takeover
+    //    succeeded: a channel opened here would have a pump thread delivering
+    //    reply lines to the phone as if they were file contents.
+    session.send(Frame::Open {
+        channel: 6,
+        request: br#"{"cmd":"receive","id":9999,"name":"a.png","len":10}"#.to_vec(),
+    });
+    match session.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["reply"], "error", "{v}");
+            assert_eq!(v["kind"], "no_such_session", "{v}");
+        }
+        other => panic!("expected the daemon's refusal, got {other:?}"),
+    }
+    assert_eq!(
+        session.recv(),
+        Frame::Close {
+            channel: 6,
+            reason: String::new()
+        }
+    );
+
+    // The connection survives all three: a refused upload is not fatal.
+    assert_eq!(session.call(r#"{"cmd":"list"}"#)["reply"], "sessions");
 }
 
 #[test]

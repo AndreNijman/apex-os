@@ -287,7 +287,7 @@ fn frames(
         channel,
         socket: outbound,
     }));
-    let mut ptys: Vec<PtyChannel> = Vec::new();
+    let mut ptys: Vec<DaemonChannel> = Vec::new();
     let _ = device_name;
 
     // The desktop measures its own connections. Answering a device's pings,
@@ -353,7 +353,7 @@ fn frames(
                 send(&sealer, Frame::Control(reply))?;
             }
             Frame::Open { channel, request } => {
-                match PtyChannel::open(agentd, device_id, channel, &request, &sealer) {
+                match DaemonChannel::open(agentd, device_id, channel, &request, &sealer) {
                     Ok((pty, reply, buffered)) => {
                         send(&sealer, Frame::Control(reply))?;
                         for f in Frame::data_frames(channel, &buffered) {
@@ -361,10 +361,11 @@ fn frames(
                         }
                         ptys.push(pty);
                     }
-                    // A refused attach comes back as the daemon's own reply
-                    // where possible, so the device renders "no session 4"
-                    // rather than a channel that closed for no stated reason.
-                    Err(crate::proxy::ProxyError::NotAttached(reply)) => {
+                    // A refused takeover comes back as the daemon's own reply
+                    // where possible, so the device renders "no session 4" or
+                    // the size cap rather than a channel that closed for no
+                    // stated reason.
+                    Err(crate::proxy::ProxyError::NotTakenOver(reply)) => {
                         send(&sealer, Frame::Control(reply))?;
                         send(
                             &sealer,
@@ -466,15 +467,18 @@ struct Sealer {
 /// loses its terminal because the runtime was restarted is a worse experience
 /// than one that is told the runtime was restarted.
 fn control(agentd: &std::path::Path, device_id: &str, line: &[u8]) -> Vec<u8> {
-    // An `attach` on the control channel would leave the daemon connection
-    // half in PTY mode with this side still expecting reply lines, and the
-    // device's terminal bytes would go nowhere. Refused with the verb that
-    // does work, rather than by wedging.
-    if crate::proxy::is_attach(line) {
+    // A takeover verb on the control channel would leave the daemon connection
+    // half out of control mode with this side still expecting reply lines.
+    // `attach` wedges with the device's terminal bytes going nowhere;
+    // `receive` wedges harder, because the daemon is then blocked reading an
+    // upload that will never arrive and this loop is blocked reading a reply
+    // that will never come. Refused with the thing that does work, rather than
+    // by wedging.
+    if crate::proxy::takes_over_the_channel(line) {
         return serde_json::json!({
             "reply": "error",
             "kind": "bad_request",
-            "message": "attach does not travel on the control channel; open a channel for it",
+            "message": "attach and receive do not travel on the control channel; open a channel for them",
         })
         .to_string()
         .into_bytes();
@@ -491,34 +495,47 @@ fn control(agentd: &std::path::Path, device_id: &str, line: &[u8]) -> Vec<u8> {
     }
 }
 
-/// A PTY the device has open.
-struct PtyChannel {
+/// A connection to the daemon that the device has open as a channel.
+///
+/// Two verbs produce one. `attach` makes it the session's PTY, in both
+/// directions and for as long as the terminal lives. `receive` makes it a sink
+/// for one file: the device's `Frame::Data` becomes the upload, and the single
+/// line the daemon writes back when it is done — the `injected` reply, or the
+/// refusal — comes back as `Frame::Data` too, because the pump below does not
+/// know or need to know which of the two it is carrying.
+struct DaemonChannel {
     channel: u32,
     stream: std::os::unix::net::UnixStream,
     _pump: std::thread::JoinHandle<()>,
 }
 
-impl PtyChannel {
+impl DaemonChannel {
     fn open(
         agentd: &std::path::Path,
         device_id: &str,
         channel: u32,
         request: &[u8],
         sealer: &Arc<Mutex<Sealer>>,
-    ) -> Result<(PtyChannel, Vec<u8>, Vec<u8>), crate::proxy::ProxyError> {
+    ) -> Result<(DaemonChannel, Vec<u8>, Vec<u8>), crate::proxy::ProxyError> {
         let (stream, reply, buffered) =
-            crate::proxy::Agentd::open(agentd, device_id)?.attach(request)?;
-        // The daemon turns a connection into a PTY only when it answers
-        // `attached`. Anything else — no such session, one that has exited,
-        // a malformed request — leaves the connection in control mode, and a
-        // pump thread reading THAT would deliver reply lines to the device as
-        // terminal output and leave a channel open onto nothing. The reply
-        // goes back either way; what changes is whether a channel is opened.
-        let attached = serde_json::from_slice::<serde_json::Value>(&reply)
-            .map(|v| v["reply"] == "attached")
+            crate::proxy::Agentd::open(agentd, device_id)?.take_over(request)?;
+        // The daemon stops treating a connection as control only when it says
+        // so, and there are exactly two words for it: `attached` for a PTY,
+        // `receiving` for an upload. Anything else — no such session, one that
+        // has exited, an upload past the size cap, a malformed request —
+        // leaves the connection in control mode, and a pump thread reading
+        // THAT would deliver reply lines to the device as terminal output and
+        // leave a channel open onto nothing. The reply goes back either way;
+        // what changes is whether a channel is opened.
+        let taken = serde_json::from_slice::<serde_json::Value>(&reply)
+            .map(|v| {
+                crate::proxy::TAKEOVER_REPLIES
+                    .iter()
+                    .any(|word| v["reply"] == *word)
+            })
             .unwrap_or(false);
-        if !attached {
-            return Err(crate::proxy::ProxyError::NotAttached(reply));
+        if !taken {
+            return Err(crate::proxy::ProxyError::NotTakenOver(reply));
         }
         let mut read_half = stream.try_clone()?;
         let sealer = Arc::clone(sealer);
@@ -547,7 +564,7 @@ impl PtyChannel {
             }
         });
         Ok((
-            PtyChannel {
+            DaemonChannel {
                 channel,
                 stream,
                 _pump: pump,
@@ -563,7 +580,7 @@ impl PtyChannel {
     }
 }
 
-impl Drop for PtyChannel {
+impl Drop for DaemonChannel {
     fn drop(&mut self) {
         // Closing the daemon connection detaches; the session goes on running
         // in the daemon, which is the whole point of a viewport.
