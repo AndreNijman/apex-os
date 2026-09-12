@@ -1,5 +1,8 @@
 # Shared-machine recipes — guest and kiosk (roadmap P2-016)
 
+`docs/multi-user.md` is the surface above this: `apex user`, what
+"standard" and "administrator" mean on APEX, and what is not built.
+
 Everything in this directory is **inert on a stock APEX**. No guest account is
 created, no kiosk config is installed, no unit is enabled. That is deliberate
 and it is the criterion:
@@ -57,26 +60,35 @@ It is the guarantee that nothing of theirs is still here afterwards.
 Three steps, none of which this repo performs:
 
 ```sh
-# 1. the account. NOT in wheel, and a home the wipe is allowed to empty.
-sudo useradd -m -d /home/apex-guest -s /bin/bash apex-guest
+# 1. the account. `apex user add` makes a STANDARD one -- not in wheel --
+#    which is what a guest has to be.
+sudo apex user add apex-guest
 sudo passwd -d apex-guest          # no password, if that is the intent
 
-# 2. allow the wipe to act on it
-echo apex-guest | sudo tee -a /etc/apex/guest-accounts
+# 2. the allowlist and the session hook, together
+sudo apex user guest enable apex-guest
 
-# 3. run the wipe when the guest's session ends. BY UID, not by name --
-#    every unit logind makes per user is named by uid, so the hook can only
-#    be instanced by one. The engine resolves it back to the name.
-sudo systemctl enable apex-guest-session@"$(id -u apex-guest)".service
-
-# 4. optional: also sweep at boot, for what a power cut left behind. THIS one
-#    is by name.
+# 3. optional: also sweep at boot, for what a power cut left behind. This one
+#    is by NAME, and it is a different unit -- see below.
 sudo systemctl enable apex-guest-wipe@apex-guest.service
 ```
 
-Step 3 is the one that makes a guest disposable in the ordinary case, and step
-4 is the backstop. They are separate units because a refusal means opposite
-things in the two places — see below.
+`apex user guest enable` is the whole of step 2: it writes the name to
+`/etc/apex/guest-accounts` and enables `apex-guest-session@<uid>.service` — by
+uid, because every unit logind creates per user is named by uid, and the wipe
+engine resolves it back to the name. It refuses an administrator, the account
+you are running as, uid 0, a system account, and a home the wipe would not
+clear. `sudo apex user guest disable apex-guest` undoes it; `apex user guest
+status` says who is configured. By hand, if you would rather:
+
+```sh
+echo apex-guest | sudo tee -a /etc/apex/guest-accounts
+sudo systemctl enable apex-guest-session@"$(id -u apex-guest)".service
+```
+
+Step 2 is what makes a guest disposable in the ordinary case and step 3 is the
+backstop. They are separate units because a refusal means opposite things in
+the two places — see below.
 
 The engine refuses every account that is not in that file. It also refuses uid
 0, a home of `/`, `/home`, `/var/home`, `/root` or empty, an account that does

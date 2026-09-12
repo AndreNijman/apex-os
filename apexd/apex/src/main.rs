@@ -37,6 +37,7 @@ mod storage;
 mod task;
 mod touchpad;
 mod trust;
+mod user;
 mod verify;
 mod vm;
 
@@ -684,6 +685,23 @@ enum Cmd {
     Disposable {
         #[command(subcommand)]
         cmd: disposable::DisposableCmd,
+    },
+    /// Accounts on a shared machine: standard vs administrator, and guests
+    /// (P2-016).
+    ///
+    /// APEX enforced the standard/administrator distinction long before it
+    /// could make one. polkit's `auth_admin` guards both agent actions with
+    /// `allow_any=no` and `allow_inactive=no`, and that is asserted at build
+    /// time — but `installer/apex-install` puts the one account it creates in
+    /// `wheel` unconditionally and its GUI offers no choice, so every account
+    /// APEX has ever made is an administrator and a standard one could not be
+    /// reached from any APEX surface. This is that surface.
+    ///
+    /// `apex user list` needs no root. Everything that changes an account
+    /// does, and says so before it does anything.
+    User {
+        #[command(subcommand)]
+        cmd: user::UserCmd,
     },
     /// Virtual machines: a full guest with its own kernel (P2-008).
     ///
@@ -1512,6 +1530,9 @@ async fn main() {
         // Unprivileged for the same structural reason `apex env` is: a
         // disposable capsule is a rootless per-user container.
         Cmd::Disposable { cmd } => ops::disposable(&disposable::argv(cmd)),
+        // Accounts. The engine decides everything and refuses what it
+        // must; this only builds the argv, and `user::argv` pins it.
+        Cmd::User { cmd } => ops::user(&user::argv(cmd)),
         Cmd::Vm { cmd } => ops::vm(&vm::argv(cmd)),
         Cmd::Changelog => ops::changelog(),
         Cmd::Install {

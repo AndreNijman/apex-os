@@ -1,0 +1,477 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-user — accounts on a shared APEX machine.
+#
+#  P2-016's first criterion is "standard vs administrator accounts … work". On
+#  APEX the DISTINCTION already worked and was already enforced — polkit's
+#  `auth_admin` on both agent actions, `allow_any=no`, `allow_inactive=no`,
+#  asserted at build time in Containerfile.base — but it was not REACHABLE:
+#
+#      installer/apex-install:570   useradd --root "$deploy" -m -G wheel …
+#
+#  unconditionally, and the installer GUI offers no choice. So every account
+#  APEX has ever created is an administrator, there is no second account on a
+#  machine unless somebody reaches for `useradd(8)` by hand, and a "standard
+#  account" was a thing the system could refuse but could not make.
+#
+#  This is the surface that makes one. `add` creates a STANDARD account; the
+#  administrator is the opt-in, spelled `--admin`, because the default on a
+#  shared machine should be the one that cannot approve a root operation.
+#
+#      apex user list
+#      sudo apex user add alice                 # standard
+#      sudo apex user add alice --admin         # in wheel
+#      sudo apex user rm alice
+#      sudo apex user guest enable apex-guest   # disposable: see apex-guest-wipe
+#      sudo apex user guest disable apex-guest
+#
+#  ── What "administrator" means here, measured rather than assumed ───────────
+#
+#  Membership of `wheel`, and it is `wheel` for two independent reasons on this
+#  system, both read off the running machine:
+#
+#      /usr/share/polkit-1/rules.d/50-default.rules
+#          polkit.addAdminRule(…) { return ["unix-group:wheel"]; }
+#      /etc/sudoers
+#          %wheel ALL=(ALL) ALL
+#
+#  So `wheel` is what `auth_admin` resolves to AND what sudo asks for. An
+#  account outside it can use the desktop, hold its own credentials and run its
+#  own agent; it cannot approve an APEX privilege request or become root.
+#
+#  ── What this does NOT do ───────────────────────────────────────────────────
+#
+#  It does not set a password. `useradd` leaves the account locked, and this
+#  prints the `passwd` line to run rather than prompting: a script that reads a
+#  password from a terminal cannot be tested without a terminal, and an
+#  unattended caller would hang on it. An account created here cannot be logged
+#  into until somebody sets one, which is the safe direction.
+#
+#  It does not touch the account you are running as, it will not remove the
+#  last administrator, and it will not remove a system account. Those three are
+#  fences, checked before anything runs — see `rm`.
+#
+#  ── Overrides, for the test suite ───────────────────────────────────────────
+#
+#      APEX_USER_PASSWD     a passwd(5)-format file; default: getent passwd
+#      APEX_USER_GROUP      a group(5)-format file;  default: getent group
+#      APEX_USER_LOGIN_DEFS default /etc/login.defs (for UID_MIN/UID_MAX)
+#      APEX_GUEST_ALLOWLIST default /etc/apex/guest-accounts — the SAME name
+#                           and meaning apex-guest-wipe uses, deliberately
+#      APEX_USER_CALLER     who "you" are; default: $SUDO_USER, else `id -un`
+#      APEX_USER_TOOLS      a directory of stand-ins for every privileged tool
+#                           this runs (useradd, userdel, gpasswd, systemctl).
+#
+#  `APEX_USER_TOOLS` is the one that also turns off the root check, and that is
+#  safe rather than a hole: with every privileged tool replaced there is
+#  nothing left that needs root, and the engine REFUSES to honour the variable
+#  when it is actually running as root — so it cannot be used to talk a real
+#  `sudo apex user` run into calling somebody else's binaries.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+PROG="${0##*/}"
+ALLOWLIST="${APEX_GUEST_ALLOWLIST:-/etc/apex/guest-accounts}"
+LOGIN_DEFS="${APEX_USER_LOGIN_DEFS:-/etc/login.defs}"
+# Not configurable. See the header: this is what polkit's admin rule and
+# sudoers both resolve to on APEX, and an override would let a caller redefine
+# "administrator" for the one command whose job is to report it.
+ADMIN_GROUP=wheel
+
+log()  { printf '%s: %s\n' "$PROG" "$*" >&2; }
+# A refusal is exit 2 and a sentence, as in apex-guest-wipe. Exit 1 is "the
+# thing I was asked to do went wrong", so a caller can tell "I would not" from
+# "I could not".
+deny() { log "refusing: $*"; exit 2; }
+die()  { log "$*"; exit 1; }
+
+usage() {
+    cat >&2 <<USAGE
+usage: $PROG list [--json]
+       $PROG add <name> [--admin] [--comment TEXT] [--plan]
+       $PROG rm <name> [--keep-home] [--plan]
+       $PROG guest enable|disable|status [<name>]
+
+An account added here is STANDARD unless --admin is given: it can use the
+desktop, hold its own credentials and run its own agent, and it cannot approve
+an APEX privilege request or become root.
+USAGE
+    exit 2
+}
+
+# ── reading the machine ──────────────────────────────────────────────────────
+
+passwd_lines() {
+    if [ -n "${APEX_USER_PASSWD:-}" ]; then cat -- "$APEX_USER_PASSWD"
+    else getent passwd; fi
+}
+group_lines() {
+    if [ -n "${APEX_USER_GROUP:-}" ]; then cat -- "$APEX_USER_GROUP"
+    else getent group; fi
+}
+passwd_entry() { passwd_lines | awk -F: -v u="$1" '$1 == u { print; exit }'; }
+
+uid_min() {
+    local v=""
+    [ -f "$LOGIN_DEFS" ] && v="$(awk '$1 == "UID_MIN" { print $2; exit }' "$LOGIN_DEFS")"
+    case "$v" in ''|*[!0-9]*) echo 1000 ;; *) echo "$v" ;; esac
+}
+uid_max() {
+    local v=""
+    [ -f "$LOGIN_DEFS" ] && v="$(awk '$1 == "UID_MAX" { print $2; exit }' "$LOGIN_DEFS")"
+    case "$v" in ''|*[!0-9]*) echo 60000 ;; *) echo "$v" ;; esac
+}
+
+# Administrator = in ADMIN_GROUP, by primary gid OR by membership. Both halves
+# matter: `useradd -g wheel` would make an administrator that a members-only
+# check reads as standard, which is the direction that gets somebody's
+# privileges wrong in the quiet way.
+admin_gid() { group_lines | awk -F: -v g="$ADMIN_GROUP" '$1 == g { print $3; exit }'; }
+is_admin() {  # $1 = name
+    local name=$1 gid entry ugid
+    gid="$(admin_gid)"
+    entry="$(passwd_entry "$name")"
+    [ -n "$entry" ] || return 1
+    ugid="$(printf '%s' "$entry" | cut -d: -f4)"
+    [ -n "$gid" ] && [ "$ugid" = "$gid" ] && return 0
+    group_lines | awk -F: -v g="$ADMIN_GROUP" -v u="$name" '
+        $1 == g {
+            n = split($4, m, ",")
+            for (i = 1; i <= n; i++) if (m[i] == u) { found = 1 }
+        }
+        END { exit found ? 0 : 1 }'
+}
+
+# The allowlist read exactly as apex-guest-wipe reads it: a trimmed, comment-
+# stripped, WHOLE-line match. An unanchored grep would let the account `x`
+# match a line reading `proxy`.
+is_guest() {  # $1 = name
+    local line
+    [ -f "$ALLOWLIST" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [ -n "$line" ] || continue
+        [ "$line" = "$1" ] && return 0
+    done < "$ALLOWLIST"
+    return 1
+}
+
+caller_name() {
+    if [ -n "${APEX_USER_CALLER:-}" ]; then printf '%s\n' "$APEX_USER_CALLER"
+    elif [ -n "${SUDO_USER:-}" ]; then printf '%s\n' "$SUDO_USER"
+    else id -un; fi
+}
+
+# ── running the privileged tools ─────────────────────────────────────────────
+#
+# Every one goes through here, so `--plan` can print exactly what a run would
+# do and the suite can capture the same argv without creating an account.
+PLAN=0
+tool() {  # $1 = tool name, rest = argv
+    local name=$1; shift
+    local path="$name"
+    [ -n "${APEX_USER_TOOLS:-}" ] && path="$APEX_USER_TOOLS/$name"
+    if [ "$PLAN" = 1 ]; then
+        printf 'would run: %s' "$path"
+        printf ' %q' "$@"
+        printf '\n'
+        return 0
+    fi
+    "$path" "$@"
+}
+
+require_root() {
+    if [ -n "${APEX_USER_TOOLS:-}" ]; then
+        # The variable exists so the suite can exercise the real decision path
+        # with nothing privileged behind it. As root there is something
+        # privileged behind it, so it is refused rather than honoured.
+        [ "$(id -u)" -eq 0 ] && deny \
+            "APEX_USER_TOOLS is set and this is running as root; it is a test override and not a way to redirect a privileged run"
+        return 0
+    fi
+    [ "$(id -u)" -eq 0 ] || deny "$1 needs root — run it with sudo"
+}
+
+# A login shell chosen the way installer/apex-install chooses one: zsh is the
+# APEX default, bash if the image somehow lacks it. A user with a nonexistent
+# login shell cannot log in at all.
+default_shell() {
+    if [ -x /bin/zsh ] || [ -x /usr/bin/zsh ]; then echo /bin/zsh; else echo /bin/bash; fi
+}
+
+# ── list ─────────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    local json=0 a
+    for a in "$@"; do
+        case "$a" in
+            --json) json=1 ;;
+            *) usage ;;
+        esac
+    done
+    local lo hi first=1
+    lo="$(uid_min)"; hi="$(uid_max)"
+    [ "$json" = 1 ] && printf '[\n'
+    [ "$json" = 0 ] && printf '%-18s %-7s %-14s %-6s %s\n' NAME UID ROLE GUEST HOME
+    local line name uid home role guest
+    while IFS= read -r line; do
+        name="$(printf '%s' "$line" | cut -d: -f1)"
+        uid="$(printf '%s' "$line" | cut -d: -f3)"
+        home="$(printf '%s' "$line" | cut -d: -f6)"
+        case "$uid" in ''|*[!0-9]*) continue ;; esac
+        [ "$uid" -ge "$lo" ] && [ "$uid" -le "$hi" ] || continue
+        if is_admin "$name"; then role=administrator; else role=standard; fi
+        if is_guest "$name"; then guest=yes; else guest=no; fi
+        if [ "$json" = 1 ]; then
+            [ "$first" = 1 ] || printf ',\n'
+            first=0
+            printf '  {"name":"%s","uid":%s,"role":"%s","guest":%s,"home":"%s"}' \
+                "$name" "$uid" "$role" "$([ "$guest" = yes ] && echo true || echo false)" "$home"
+        else
+            printf '%-18s %-7s %-14s %-6s %s\n' "$name" "$uid" "$role" "$guest" "$home"
+        fi
+    done < <(passwd_lines)
+    if [ "$json" = 1 ]; then
+        [ "$first" = 1 ] || printf '\n'
+        printf ']\n'
+    fi
+}
+
+# ── add ──────────────────────────────────────────────────────────────────────
+
+cmd_add() {
+    local name="" admin=0 comment=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --admin)   admin=1 ;;
+            --plan)    PLAN=1 ;;
+            --comment) shift; comment="${1:-}" ;;
+            --comment=*) comment="${1#--comment=}" ;;
+            -*)        usage ;;
+            *)         [ -n "$name" ] && usage; name="$1" ;;
+        esac
+        shift
+    done
+    [ -n "$name" ] || usage
+    [ "$PLAN" = 1 ] || require_root "adding an account"
+
+    # useradd(8)'s own rule, restated so the refusal is ours and legible. The
+    # all-digits case is not pedantry: a name that is a number makes every
+    # "is this a uid or a name" decision on this machine ambiguous, and
+    # apex-guest-wipe has one of those.
+    case "$name" in
+        *[!a-z0-9_-]*|-*|'') deny "'$name' is not a usable account name (lowercase letters, digits, '_' and '-', not starting with '-')" ;;
+    esac
+    case "$name" in
+        ''|*[!0-9]*) : ;;
+        *) deny "'$name' is all digits, which cannot be told from a uid" ;;
+    esac
+    [ "${#name}" -le 32 ] || deny "'$name' is longer than 32 characters"
+    [ -z "$(passwd_entry "$name")" ] || deny "'$name' is already an account on this machine"
+
+    local shell; shell="$(default_shell)"
+    local -a argv=(-m -s "$shell")
+    [ -n "$comment" ] && argv+=(-c "$comment")
+    # THE line this file exists for. wheel is added only on --admin; the
+    # default account is standard, which is the opposite of what the installer
+    # does and is deliberate. See the header.
+    [ "$admin" = 1 ] && argv+=(-G "$ADMIN_GROUP")
+    argv+=("$name")
+
+    tool useradd "${argv[@]}" || die "useradd failed for '$name'"
+    if [ "$PLAN" = 1 ]; then
+        printf 'would create %s as %s\n' "$name" \
+            "$([ "$admin" = 1 ] && echo "an administrator (in $ADMIN_GROUP)" || echo "a standard account")"
+        return 0
+    fi
+    if [ "$admin" = 1 ]; then
+        log "created '$name' as an ADMINISTRATOR: in $ADMIN_GROUP, so it can use sudo and answer polkit's auth_admin"
+    else
+        log "created '$name' as a STANDARD account: not in $ADMIN_GROUP, so it cannot become root or approve an APEX privilege request"
+    fi
+    log "the account has no password yet and cannot be logged into. Set one with: passwd $name"
+}
+
+# ── rm ───────────────────────────────────────────────────────────────────────
+
+cmd_rm() {
+    local name="" keep=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --keep-home) keep=1 ;;
+            --plan)      PLAN=1 ;;
+            -*)          usage ;;
+            *)           [ -n "$name" ] && usage; name="$1" ;;
+        esac
+        shift
+    done
+    [ -n "$name" ] || usage
+    [ "$PLAN" = 1 ] || require_root "removing an account"
+
+    local entry uid lo
+    entry="$(passwd_entry "$name")"
+    [ -n "$entry" ] || deny "'$name' is not an account on this machine"
+    uid="$(printf '%s' "$entry" | cut -d: -f3)"
+    lo="$(uid_min)"
+    case "$uid" in ''|*[!0-9]*) deny "'$name' has an unreadable uid" ;; esac
+
+    # fence 1: never root, never a system account. userdel would do either.
+    [ "$uid" -ne 0 ] || deny "'$name' is uid 0"
+    [ "$uid" -ge "$lo" ] || deny "'$name' is uid $uid, below UID_MIN ($lo) — it is a system account, not a person"
+
+    # fence 2: not the account you are using. Removing it takes the home out
+    # from under a live session, and on a one-account machine takes the machine.
+    local me; me="$(caller_name)"
+    [ "$name" != "$me" ] || deny "'$name' is the account you are running as"
+
+    # fence 3: not the last administrator. This is the one that turns a
+    # recoverable mistake into a machine nobody can administer: polkit's
+    # auth_admin and sudo both resolve to $ADMIN_GROUP, so an APEX with no
+    # member of it left cannot approve anything or become root again.
+    if is_admin "$name"; then
+        local others=0 line n u hi
+        hi="$(uid_max)"
+        while IFS= read -r line; do
+            n="$(printf '%s' "$line" | cut -d: -f1)"
+            u="$(printf '%s' "$line" | cut -d: -f3)"
+            case "$u" in ''|*[!0-9]*) continue ;; esac
+            [ "$u" -ge "$lo" ] && [ "$u" -le "$hi" ] || continue
+            [ "$n" = "$name" ] && continue
+            is_admin "$n" && others=$((others + 1))
+        done < <(passwd_lines)
+        [ "$others" -gt 0 ] || deny \
+            "'$name' is the only administrator on this machine; removing it would leave nobody who can use sudo or answer polkit's auth_admin"
+    fi
+
+    local -a argv=()
+    [ "$keep" = 1 ] || argv+=(-r)
+    argv+=("$name")
+    tool userdel "${argv[@]}" || die "userdel failed for '$name'"
+    [ "$PLAN" = 1 ] && { printf 'would remove %s (uid %s)%s\n' "$name" "$uid" \
+        "$([ "$keep" = 1 ] && echo ", keeping its home" || echo " and its home")"; return 0; }
+    log "removed '$name' (uid $uid)"
+    # The credential namespace is NOT in the home — P0-002 put it in
+    # /var/lib/apex-secretd/users/<uid>/, root-owned, so that the account
+    # could not read it. userdel -r does not know about it, and a uid is
+    # reusable, so saying nothing here would hand the next account at this uid
+    # the last one's credentials. Same reasoning as apex-guest-wipe.
+    log "its credentials are NOT in the home: if /var/lib/apex-secretd/users/$uid exists, remove it too"
+}
+
+# ── guest ────────────────────────────────────────────────────────────────────
+#
+# The wiring the README spells out by hand, as one command. It is here rather
+# than in apex-guest-wipe because the wipe engine must stay a thing that only
+# ever REMOVES what it is told to and never changes what it is allowed to.
+
+guest_unit() { printf 'apex-guest-session@%s.service\n' "$1"; }
+
+cmd_guest() {
+    local verb="${1:-}"; shift 2>/dev/null || true
+    case "$verb" in
+        status) cmd_guest_status "$@" ;;
+        enable|disable) cmd_guest_toggle "$verb" "$@" ;;
+        *) usage ;;
+    esac
+}
+
+cmd_guest_status() {
+    local line name
+    printf 'allowlist: %s\n' "$ALLOWLIST"
+    if [ ! -f "$ALLOWLIST" ]; then
+        printf 'no guest account is configured (the allowlist does not exist)\n'
+        return 0
+    fi
+    local any=0
+    while IFS= read -r line; do
+        name="${line%%#*}"
+        name="${name#"${name%%[![:space:]]*}"}"
+        name="${name%"${name##*[![:space:]]}"}"
+        [ -n "$name" ] || continue
+        any=1
+        printf 'guest: %s\n' "$name"
+    done < "$ALLOWLIST"
+    [ "$any" = 1 ] || printf 'no guest account is configured (the allowlist is empty)\n'
+}
+
+cmd_guest_toggle() {
+    local verb=$1 name="${2:-}"
+    [ -n "$name" ] || usage
+    case "${3:-}" in --plan) PLAN=1 ;; '') : ;; *) usage ;; esac
+    [ "$PLAN" = 1 ] || require_root "changing the guest configuration"
+
+    local entry uid home lo
+    entry="$(passwd_entry "$name")"
+    [ -n "$entry" ] || deny "'$name' is not an account on this machine"
+    uid="$(printf '%s' "$entry" | cut -d: -f3)"
+    home="$(printf '%s' "$entry" | cut -d: -f6)"
+    lo="$(uid_min)"
+    case "$uid" in ''|*[!0-9]*) deny "'$name' has an unreadable uid" ;; esac
+    [ "$uid" -ne 0 ] || deny "'$name' is uid 0; root is never a disposable guest"
+    [ "$uid" -ge "$lo" ] || deny "'$name' is a system account (uid $uid < $lo)"
+
+    if [ "$verb" = enable ]; then
+        # Fences on ENABLING, which are not the same as the wipe's fences on
+        # ACTING. The wipe refuses a bad target; these refuse a bad decision,
+        # while there is still somebody reading the message.
+        [ "$name" != "$(caller_name)" ] \
+            || deny "'$name' is the account you are running as; a disposable guest would erase it at every logout"
+        is_admin "$name" \
+            && deny "'$name' is an administrator (in $ADMIN_GROUP); a guest account must not be one — see files/system/shared-machine/README.md"
+        case "$home" in
+            ''|/|/home|/home/|/var/home|/var/home/|/root|/root/|/usr|/var|/etc)
+                deny "'$name' has home '$home', which the wipe refuses to clear" ;;
+        esac
+
+        if is_guest "$name"; then
+            log "'$name' is already in $ALLOWLIST"
+        elif [ "$PLAN" = 1 ]; then
+            printf 'would add %s to %s\n' "$name" "$ALLOWLIST"
+        else
+            mkdir -p -- "$(dirname -- "$ALLOWLIST")" 2>/dev/null
+            printf '%s\n' "$name" >> "$ALLOWLIST" || die "could not write $ALLOWLIST"
+            log "added '$name' to $ALLOWLIST"
+        fi
+        tool systemctl enable "$(guest_unit "$uid")" || die "could not enable $(guest_unit "$uid")"
+        [ "$PLAN" = 1 ] && return 0
+        log "'$name' is now a disposable guest. At every logout APEX will clear its home ($home), its credential namespace (/var/lib/apex-secretd/users/$uid) and the greeter's last-user when it names it."
+        log "this is destructive by design and there is no undo. Turn it off with: $PROG guest disable $name"
+    else
+        if is_guest "$name"; then
+            if [ "$PLAN" = 1 ]; then
+                printf 'would remove %s from %s\n' "$name" "$ALLOWLIST"
+            else
+                local tmp; tmp="$(mktemp)" || die "could not write a temporary file"
+                awk -v u="$name" '{
+                    line = $0; sub(/#.*/, "", line)
+                    gsub(/^[ \t]+|[ \t]+$/, "", line)
+                    if (line == u) next
+                    print
+                }' "$ALLOWLIST" > "$tmp" && cat "$tmp" > "$ALLOWLIST" \
+                    || { rm -f "$tmp"; die "could not rewrite $ALLOWLIST"; }
+                rm -f "$tmp"
+                log "removed '$name' from $ALLOWLIST"
+            fi
+        else
+            log "'$name' was not in $ALLOWLIST"
+        fi
+        tool systemctl disable "$(guest_unit "$uid")" || die "could not disable $(guest_unit "$uid")"
+        [ "$PLAN" = 1 ] && return 0
+        log "'$name' is no longer a disposable guest. Nothing of its is removed by this — the last wipe already happened."
+    fi
+}
+
+# ── dispatch ─────────────────────────────────────────────────────────────────
+
+verb="${1:-}"
+shift 2>/dev/null || true
+case "$verb" in
+    list)  cmd_list  "$@" ;;
+    add)   cmd_add   "$@" ;;
+    rm)    cmd_rm    "$@" ;;
+    guest) cmd_guest "$@" ;;
+    ''|-h|--help|help) usage ;;
+    *) log "unknown verb '$verb'"; usage ;;
+esac
