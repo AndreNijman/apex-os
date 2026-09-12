@@ -43,6 +43,21 @@ on:
       - "apexd/apex/src/boot.rs"
       - "tests/test-boot-v2.sh"
       - ".github/workflows/boot-v2.yml"
+  # P1-062's second criterion is "boot/update/install/rollback loops run
+  # CONTINUOUSLY in VMs", and a dispatch input defaulting to 0 does not do that:
+  # it is a loop nobody runs. Weekly is what "continuously" means for a lab that
+  # boots five OVMF guests per iteration.
+  #
+  # Two things about this trigger are worth knowing rather than rediscovering.
+  # GitHub runs `schedule:` from the DEFAULT branch only, so this fires nothing
+  # until roadmap/v2.2 reaches main — which is correct: it arrives with the work
+  # it exercises. And Actions minutes are free on this repository because it is
+  # public, so the cost here is runner time and attention, not money; the weekly
+  # cadence is chosen against attention, since a nightly red on a branch nobody
+  # is watching teaches people to ignore it.
+  schedule:
+    - cron: "0 18 * * 0"   # Sunday 18:00 UTC = Monday 02:00 AWST
+
   workflow_dispatch:
     inputs:
       scenarios:
@@ -199,9 +214,14 @@ jobs:
       # lab is absent or no guest booted cannot come out green. That is the
       # entire point of the unit.
       - name: P1-062 chaos — bounded boot/rollback series
-        if: ${{ inputs.chaos_iterations != '' && inputs.chaos_iterations != '0' }}
+        # On a schedule there is no input at all, so the dispatch condition
+        # would skip the step and the weekly run would prove nothing. Named
+        # explicitly rather than relying on a default, because a skipped step
+        # counts as success and that is how six gates in this repository came to
+        # be silently not running.
+        if: ${{ github.event_name == 'schedule' || (inputs.chaos_iterations != '' && inputs.chaos_iterations != '0') }}
         env:
-          ITERATIONS: ${{ inputs.chaos_iterations }}
+          ITERATIONS: ${{ github.event_name == 'schedule' && '3' || inputs.chaos_iterations }}
         run: |
           set -euo pipefail
           # Numeric, checked here rather than interpolated into a command line:
