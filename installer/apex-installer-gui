@@ -51,6 +51,7 @@ EDITION_FILE = "/usr/lib/apex-installer/edition"
 # variables are its entire configuration surface — and they are read when the
 # keymap is COMPILED, which for a wlroots compositor is once, at startup.
 XKB_RULES = "/usr/share/X11/xkb/rules/base.lst"
+TZ_TAB = "/usr/share/zoneinfo/zone1970.tab"
 SESSION_STATE = os.environ.get("APEX_INSTALLER_STATE",
                                "/run/apex-installer/session-keymap")
 # EX_TEMPFAIL. Measured before being relied on: `cage -- sh -c 'exit 75'`
@@ -457,6 +458,59 @@ def xkb_variants(layout):
     return out
 
 
+def timezones():
+    """Every zone tzdata ships, as (name, human hint), sorted by name.
+
+    Read from zone1970.tab — the file tzdata itself ships — rather than a
+    hardcoded list, for the same reason the layouts are read from base.lst: a
+    hardcoded list silently goes stale, and a zone the installed system does not
+    have produces an /etc/localtime pointing at nothing. The engine checks the
+    chosen zone exists in the DEPLOY root before linking it, so a zone that is
+    on the ISO but not in the image degrades loudly there rather than here.
+    """
+    out, seen = [], set()
+    try:
+        with open(TZ_TAB, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) >= 3:
+                    name = parts[2].strip()
+                    if name and name not in seen:
+                        seen.add(name)
+                        hint = parts[3].strip() if len(parts) > 3 else ""
+                        out.append((name, hint))
+    except OSError:
+        pass
+    if not out:
+        out = [(z, "") for z in (
+            "Australia/Perth", "Australia/Sydney", "UTC", "Europe/London",
+            "Europe/Berlin", "Europe/Paris", "Europe/Madrid", "Europe/Moscow",
+            "America/New_York", "America/Chicago", "America/Los_Angeles",
+            "America/Sao_Paulo", "Asia/Tokyo", "Asia/Shanghai", "Asia/Kolkata",
+            "Asia/Dubai", "Africa/Cairo", "Africa/Lagos", "Pacific/Auckland")]
+    out.sort(key=lambda p: p[0])
+    return out
+
+
+def active_timezone():
+    """The zone this live environment resolved, as the sensible default.
+
+    /etc/localtime is a symlink into zoneinfo on any systemd system. The ISO's
+    kickstart hardcodes Australia/Perth, so that is what this normally returns —
+    which is exactly the value the user is here to change, but it is the honest
+    starting point rather than a guess.
+    """
+    try:
+        tgt = os.readlink("/etc/localtime")
+        if "/zoneinfo/" in tgt:
+            return tgt.split("/zoneinfo/", 1)[1]
+    except OSError:
+        pass
+    return "Australia/Perth"
+
+
 def active_layout():
     """The layout the RUNNING compositor compiled its keymap from.
 
@@ -760,11 +814,30 @@ class Installer(Adw.Application):
         refill_variants()
         self.kb_drop.connect("notify::selected", refill_variants)
 
+        # Time zone. On this page rather than a page of its own because it is
+        # the other thing the live ISO hardcodes (bib-config.toml pins
+        # Australia/Perth), it needs no restart to take effect on the installed
+        # system, and a second near-empty step is a worse installer than one
+        # honest one.
+        tzs = timezones()
+        tz_names = [z for z, _ in tzs]
+        self._tz_names = tz_names
+        self.tz_drop = Gtk.DropDown(model=Gtk.StringList.new(
+            [f"{z}{('  — ' + h) if h else ''}" for z, h in tzs]))
+        self.tz_drop.set_enable_search(True)
+        self.tz_drop.set_expression(
+            Gtk.PropertyExpression.new(Gtk.StringObject, None, "string"))
+        want_tz = self.answers.get("timezone") or active_timezone()
+        if want_tz in tz_names:
+            self.tz_drop.set_selected(tz_names.index(want_tz))
+
         grid = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
         grid.append(lbl("Keyboard layout", "apex-dim"))
         grid.append(self.kb_drop)
         grid.append(lbl("Variant", "apex-dim"))
         grid.append(self.kb_var_drop)
+        grid.append(lbl("Time zone", "apex-dim"))
+        grid.append(self.tz_drop)
         body.append(grid)
 
         # The try-it field. This is the whole feature made visible: a layout that is
@@ -810,6 +883,9 @@ class Installer(Adw.Application):
                        if 0 <= vsel < len(self._kb_variants) else "")
             self.answers["keymap"] = code
             self.answers["keyvariant"] = variant
+            tsel = self.tz_drop.get_selected()
+            if 0 <= tsel < len(self._tz_names):
+                self.answers["timezone"] = self._tz_names[tsel]
 
             # Already on it: nothing to restart for. This is also what makes the
             # restart terminate — after the relaunch the environment matches the
@@ -838,7 +914,7 @@ class Installer(Adw.Application):
             self.exit_code = RESTART_RC
             self.quit()
 
-        return self.frame("STEP 2 OF 7", "Choose your keyboard",
+        return self.frame("STEP 2 OF 7", "Keyboard and time zone",
                           "The password you create in a moment is typed on this "
                           "layout, so set it now.",
                           self.scrolled(body),

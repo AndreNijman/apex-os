@@ -609,4 +609,128 @@ else
     fi
 fi
 
+# ═════════════════════════════════════════════════════════════════════════════
+section "6. the GUI page itself, driven for real"
+# ═════════════════════════════════════════════════════════════════════════════
+# Everything in section 5 reads the GUI's SOURCE — a grep for the exit code, a
+# regex for the line it writes. That is the "greps a stanza that also names the
+# thing" trap in another costume: the page could build, the constant could be
+# right, the writer could be spelled correctly, and Continue could still do
+# nothing at all. The one path that matters — pick a layout, press Continue,
+# write the state file, exit 75 — had never been executed by anything.
+#
+# So run the SHIPPED apex-installer-gui under cage, on the keyboard page, and
+# press its button. APEX_GUI_PAGE is the test affordance the GUI already carries.
+
+if [ "$have_gtk" -ne 1 ] || ! command -v cage >/dev/null 2>&1; then
+    skp "pressing Continue writes the layout and asks for a restart" "needs cage + python3-gi"
+else
+    cat > "$W/drive.py" <<'PY2'
+# Driver: import the shipped GUI as a module, let it build, then operate the
+# keyboard page the way a person would. Imported rather than re-implemented so
+# that what is measured is the file that ships.
+import importlib.util, os, sys, gi
+gi.require_version('Gtk', '4.0'); gi.require_version('Adw', '1')
+from gi.repository import GLib
+
+spec = importlib.util.spec_from_loader(
+    "apexgui", importlib.machinery.SourceFileLoader("apexgui", sys.argv[1]))
+mod = importlib.util.module_from_spec(spec)
+mod.__name__ = "apexgui"          # so its `if __name__ == "__main__"` stays quiet
+spec.loader.exec_module(mod)
+
+app = mod.Installer()
+result = {"rc": None}
+
+def drive():
+    # Find the layout dropdown the page built, select `de`, and click the
+    # primary button. Nothing here reaches into internals the page does not
+    # already expose to itself.
+    try:
+        codes = [c for c, _ in mod.xkb_layouts()]
+        idx = codes.index("de")
+        app.kb_drop.set_selected(idx)
+        # The action row is the last child of the page; find the apex-go button.
+        page = app.stack.get_visible_child()
+        def walk(w, out):
+            c = w.get_first_child()
+            while c is not None:
+                if isinstance(c, mod.Gtk.Button):
+                    out.append(c)
+                walk(c, out)
+                c = c.get_next_sibling()
+        btns = []
+        walk(page, btns)
+        go = [b for b in btns if b.has_css_class("apex-go")]
+        if not go:
+            print("DRIVE no-primary-button", flush=True); app.quit(); return False
+        go[0].emit("clicked")
+        # Print what the page actually RECORDED, not merely that it did not
+        # raise. An assertion that a driver survived is not an assertion about
+        # the value it was supposed to collect.
+        print("DRIVE clicked exit_code=%s keymap=%s variant=%s timezone=%s" % (
+            app.exit_code, app.answers.get("keymap"),
+            app.answers.get("keyvariant"), app.answers.get("timezone")), flush=True)
+    except Exception as e:
+        print("DRIVE error %s" % e, flush=True)
+        app.quit()
+    return False
+
+def on_act(_a):
+    GLib.timeout_add(900, drive)
+app.connect("activate", on_act)
+rc = app.run([])
+print("DRIVE rc=%s" % (app.exit_code if app.exit_code is not None else rc), flush=True)
+sys.exit(app.exit_code if app.exit_code is not None else rc)
+PY2
+
+    rm -f "$W/gui-state"
+    drive_out="$(env WLR_BACKENDS=headless WLR_RENDERER=pixman GSK_RENDERER=cairo \
+        GDK_BACKEND=wayland LIBGL_ALWAYS_SOFTWARE=1 \
+        APEX_GUI_PAGE=keyboard APEX_INSTALLER_STATE="$W/gui-state" \
+        XKB_DEFAULT_LAYOUT=us \
+        timeout 90 cage -- python3 "$W/drive.py" "$GUI" 2>&1)"
+    drive_rc=$?
+
+    if printf '%s' "$drive_out" | grep -q 'DRIVE clicked'; then
+        ok "the shipped keyboard page builds and its Continue button is reachable"
+    else
+        bad "the shipped keyboard page builds and its Continue button is reachable" \
+            "$(printf '%s' "$drive_out" | grep -E '^DRIVE' | head -2 | tr '\n' ' ')"
+    fi
+
+    # THE UNTESTED PATH. Pressing Continue on a layout that is not the active one
+    # must write the state file the session reads, and must ask for a restart by
+    # exiting 75. Neither had ever run.
+    if [ -s "$W/gui-state" ] && grep -q '^layout=de$' "$W/gui-state"; then
+        ok "pressing Continue writes the chosen layout to the session state file"
+    else
+        bad "pressing Continue writes the chosen layout to the session state file" \
+            "state file: [$(cat "$W/gui-state" 2>/dev/null | tr '\n' ' ')]"
+    fi
+
+    if printf '%s' "$drive_out" | grep -q 'DRIVE rc=75'; then
+        ok "…and the process exits 75, which is what asks for the restart"
+    else
+        bad "…and the process exits 75, which is what asks for the restart" \
+            "got rc=$drive_rc, driver said: $(printf '%s' "$drive_out" | grep -m1 'DRIVE rc=')"
+    fi
+
+    # The timezone travels in the ANSWERS file, not the state file, so it is
+    # asserted on its own rather than inferred from the layout having worked.
+    # The value is read back out of the live app, and it has to be a zone that
+    # actually exists — "it did not crash" is not a measurement.
+    got_tz="$(printf '%s' "$drive_out" | sed -n 's/.*timezone=\([^ ]*\).*/\1/p' | head -1)"
+    if [ -n "$got_tz" ] && [ "$got_tz" != "None" ] \
+       && [ -e "/usr/share/zoneinfo/$got_tz" ]; then
+        ok "pressing Continue records a real time zone in the answers ($got_tz)"
+    else
+        bad "pressing Continue records a real time zone in the answers" \
+            "got [${got_tz:-<nothing>}], which is not a zone this system has"
+    fi
+
+    got_km="$(printf '%s' "$drive_out" | sed -n 's/.*keymap=\([^ ]*\).*/\1/p' | head -1)"
+    is "…and the layout the dropdown was set to, not some default" "de" "$got_km"
+fi
+
 finish
