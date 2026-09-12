@@ -11,6 +11,7 @@ mod backup;
 mod blueprint;
 mod channel;
 mod boot;
+mod browser;
 mod cloudflare;
 mod connector;
 mod digest;
@@ -751,6 +752,21 @@ enum Cmd {
     Vm {
         #[command(subcommand)]
         cmd: vm::VmCmd,
+    },
+    /// P2-012's browser automation capsule: a browser that automates a site
+    /// without going near the one you use.
+    ///
+    /// Its own profile, its own cookie jar, its own download directory, no
+    /// route onto the network except the destinations you name, and nothing
+    /// left behind. It is not a new sandbox: a capsule is a confined,
+    /// allowlisted `apex agent` session, so the masked home and the egress
+    /// proxy have one implementation rather than two.
+    ///
+    /// Headless, and structurally so — the capsule's /run is a tmpfs, so
+    /// there is no compositor socket for a window to appear on.
+    Browser {
+        #[command(subcommand)]
+        cmd: browser::BrowserCmd,
     },
 }
 
@@ -1564,6 +1580,7 @@ async fn main() {
         // must; this only builds the argv, and `user::argv` pins it.
         Cmd::User { cmd } => ops::user(&user::argv(cmd)),
         Cmd::Vm { cmd } => ops::vm(&vm::argv(cmd)),
+        Cmd::Browser { cmd } => ops::browser(&browser::argv(cmd)),
         Cmd::Changelog => ops::changelog(),
         Cmd::Install {
             packages,

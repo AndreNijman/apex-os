@@ -1816,6 +1816,101 @@ RUN set -eux; \
     /usr/libexec/apex-vm --help | grep -q 'no viewer'; \
     echo "apex-vm: engine present, stack deliberately absent, doctor names it"
 
+# ── P2-012's browser automation capsule ─────────────────────────────────────
+# `apex browser` runs a browser that automates a site without going near the
+# one the user browses with. Unlike `apex vm`, EVERYTHING it needs is already
+# in this image: bubblewrap is asserted above, apex-agentd is the agent
+# runtime, and Firefox is installed with APEX's own policies. So there is no
+# "the stack arrives on demand" half here — the whole capsule works on a
+# stock machine.
+#
+# The engine enforces nothing itself. It asks `apex agent` for a confined,
+# allowlisted session, so the masked home and the egress proxy have ONE
+# implementation. That is what most of the checks below are about: a dropped
+# word in the session argv is not a compile error and is not visible in the
+# output, it is a capsule whose home is not masked or whose network is not
+# filtered, reported by the command as though it were neither.
+COPY --chmod=0755 files/system/libexec/apex-browser /usr/libexec/apex-browser
+RUN set -eux; \
+    bash -n /usr/libexec/apex-browser; \
+    # The confinement it asks for. Anchored to EXECUTABLE lines (`^[^#]*`),
+    # because this file's own comments discuss all of it at length and a check
+    # its comments can satisfy proves nothing.
+    grep -qE "^[^#]*--sandbox project" /usr/libexec/apex-browser; \
+    grep -qE "^[^#]*--network allowlist" /usr/libexec/apex-browser; \
+    # And the ones it must never ask for. `project` is the confined policy
+    # that keeps a network; `strict` is the same thing offline, which the CLI
+    # refuses alongside an allowlist. Either of these two would be a capsule
+    # with no boundary at all.
+    if grep -qE "^[^#]*--network open" /usr/libexec/apex-browser \
+        ; then echo "FATAL: apex-browser asks for an open network; a capsule is allowlisted"; exit 1; fi; \
+    if grep -qE "^[^#]*--sandbox unrestricted" /usr/libexec/apex-browser \
+        ; then echo "FATAL: apex-browser asks for an unconfined session; a capsule masks the home"; exit 1; fi; \
+    # It must not grow a sandbox of its own. Two implementations of one
+    # confinement drift, and the one that drifts is the one nobody tests.
+    if grep -qE "^[^#]*bwrap" /usr/libexec/apex-browser \
+        ; then echo "FATAL: apex-browser invokes bwrap; confinement belongs to apex agent, not to this engine"; exit 1; fi; \
+    # Headless is a product rule. --no-remote is not cosmetic either: without
+    # it a capsule's browser can find the user's RUNNING browser and open a
+    # tab in their window, which is the exact thing this verb must never do.
+    grep -qE "^[^#]*--headless" /usr/libexec/apex-browser; \
+    grep -qE "^[^#]*--no-remote" /usr/libexec/apex-browser; \
+    # The two arguments it refuses among the browser's own. Found by a test:
+    # clap's trailing var-arg absorbs an unrecognised option into the
+    # browser's arguments, and a second --profile WINS on a Firefox command
+    # line — so the refusal has to live in the engine, after the separator.
+    grep -qE "^[^#]*--profile\|-profile\|-P" /usr/libexec/apex-browser; \
+    grep -qE "^[^#]*--display\|-display" /usr/libexec/apex-browser; \
+    # {capsule} is not a convenience. Firefox's --screenshot writes nothing at
+    # all when given a relative filename — the run exits 0 and produces no
+    # file — and a caller cannot type the path of a capsule this engine names
+    # for them, so without the substitution nothing the browser writes by path
+    # can ever be nominated.
+    grep -qE '^[^#]*\{capsule\}' /usr/libexec/apex-browser; \
+    # The copy loop runs over the NOMINATIONS. Iterating the capsule and
+    # copying what matched would let the page decide what leaves by choosing a
+    # filename, which is the one property this verb exists to have.
+    grep -qE '^[^#]*for n in "\$\{download\[@\]\}"' /usr/libexec/apex-browser; \
+    if grep -qE '^[^#]*for n in \$\(' /usr/libexec/apex-browser \
+        ; then echo "FATAL: apex-browser iterates a directory to decide what leaves"; exit 1; fi; \
+    # The profile is the ONLY thing pointing Firefox at the egress bridge:
+    # Firefox does not read \$HTTP_PROXY, and its default is to bypass a proxy
+    # for loopback — which inside the namespace is where the bridge is.
+    grep -qE '^[^#]*network\.proxy\.type", 1' /usr/libexec/apex-browser; \
+    grep -qE '^[^#]*allow_hijacking_localhost", true' /usr/libexec/apex-browser; \
+    # And the browser's own vendor traffic is turned off in the profile rather
+    # than left for the allowlist to refuse. Measured by the live lab: without
+    # these the daemon logged a capsule being denied Mozilla's settings,
+    # update and geolocation services over and over, and the retries cost the
+    # run most of its wall clock. An allowlist that does not describe what the
+    # capsule talks to is an allowlist doing the profile's job.
+    grep -qE '^[^#]*services\.settings\.server", ""' /usr/libexec/apex-browser; \
+    grep -qE '^[^#]*geo\.enabled", false' /usr/libexec/apex-browser; \
+    # Removal is a recursive `rm -rf` driven by a name, so the four fences are
+    # build-time facts — the same four apex-vm and apex-disposable carry.
+    grep -qE '^[^#]*\[\[ "\$1" =~ \^\[a-z0-9\]\[a-z0-9-\]\{0,47\}\$ \]\]' /usr/libexec/apex-browser; \
+    grep -qE '^[^#]*\[ -L "\$dir" \]' /usr/libexec/apex-browser; \
+    grep -qE '^[^#]*realpath -e -- "\$dir"' /usr/libexec/apex-browser; \
+    grep -qE '^[^#]*\[ "\$real" = "\$\{root_real\}/\$\{name\}" \]' /usr/libexec/apex-browser; \
+    # Unprivileged, asserted because "a capsule runs as you and nothing more"
+    # is a security claim rather than a preference.
+    test ! -u /usr/libexec/apex-browser; \
+    test ! -g /usr/libexec/apex-browser; \
+    # Three answers, not two. A capability that could not be looked up is a
+    # different fact from one that is absent, and the difference decides
+    # whether the fix is starting a service or storing a credential.
+    grep -qE "^[^#]*return 3" /usr/libexec/apex-browser; \
+    # There is no agent runtime answering inside a build, so doctor must FAIL
+    # and must name what is missing. A doctor that reported success here would
+    # be the "permission denied is not absence" defect with a green tick.
+    if /usr/libexec/apex-browser doctor >/dev/null 2>&1 \
+        ; then echo "FATAL: apex-browser doctor reported success with no agent runtime"; exit 1; fi; \
+    /usr/libexec/apex-browser doctor 2>&1 | grep -q 'apex-agentd'; \
+    # STDOUT. `apex vm --help` wrote to stderr once, and `--help | grep` then
+    # read an empty stream and a build assertion passed against nothing.
+    /usr/libexec/apex-browser --help | grep -q 'headless'; \
+    echo "apex-browser: engine present, confinement delegated, doctor names what is missing"
+
 # ── The plugin CLI (§16) ────────────────────────────────────────────────────
 # apex-shell's plugin platform ships the manifest, the permission model and the
 # loader; this is the OS-side CLI it deliberately left out.
