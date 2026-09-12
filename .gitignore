@@ -3,6 +3,12 @@
 target/
 node_modules/
 
+# wrangler's local state and build scratch. `wrangler dev --local` writes
+# miniflare's sqlite files and a bundled copy of the Worker under here; they
+# are a cache of a local run, not source, and they name Durable Object
+# instances from whatever last ran on somebody's laptop.
+.wrangler/
+
 # Build artifacts — disk and installer images (large, never versioned)
 *.img
 *.iso
