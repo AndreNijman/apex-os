@@ -2675,6 +2675,70 @@ jobs:
               exit 1
           fi
 
+      # tests/test-labwc-session.sh — the APEX Floating session, probed by real
+      # clients against a real labwc running the SHIPPED config. It was the last
+      # DEBT line in tests/suites-not-in-ci.txt, and its note asked the right
+      # question: "check whether the harness now allows it".
+      #
+      # It does, because the suite gained a second way to render. Until today it
+      # could only nest inside a parent display, which on the only machine that
+      # ever ran it meant real windows on a developer's active workspace — a
+      # blanket `tests/*.sh` sweep once launched compositors over somebody's
+      # work, which is why the APEX_LABWC_SESSION_TESTS opt-in exists. wlroots'
+      # headless backend needs no screen at all, and nobody had wired it up.
+      #
+      # The suite does not merely set WLR_BACKENDS=headless; it STRIPS
+      # WAYLAND_DISPLAY and DISPLAY from the compositor's environment, because
+      # with a parent still visible wlroots can pick the wayland backend anyway
+      # and the first anyone would know is a window appearing. With no parent in
+      # the environment there is nothing to nest into.
+      #
+      # The tools below are not optional and the install is not tolerant. A
+      # missing wl-copy makes the clipboard probe report `fail`, not `skip` —
+      # this suite turns a could-not-run into a failure by design — so a runner
+      # that cannot host them should say so here rather than five minutes later
+      # as a wrong-looking assertion.
+      - name: Install the clients the labwc session matrix probes with
+        if: ${{ !cancelled() }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            labwc wlr-randr wl-clipboard grim swaybg gammastep \
+            xdg-desktop-portal-wlr xdg-desktop-portal-gtk
+          for t in labwc wlr-randr wl-copy wl-paste grim swaybg gammastep; do
+              command -v "$t" >/dev/null || { echo "::error::$t is missing after the install"; exit 1; }
+          done
+
+      - name: P3 labwc — the shipped session, probed headless by real clients
+        if: ${{ !cancelled() }}
+        env:
+          APEX_LABWC_SESSION_TESTS: "1"
+          WLR_BACKENDS: headless
+          WLR_LIBINPUT_NO_DEVICES: "1"
+        run: |
+          set -euo pipefail
+          rc=0; out="$(./tests/test-labwc-session.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the labwc session suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^labwc-session: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::the labwc session suite printed no summary line"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^labwc-session: //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          skipped="$(printf '%s' "$counts" | awk '{print $5}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed labwc session assertions failed"; exit 1; }
+          [ "$skipped" = 0 ] || {
+              echo "::error::$skipped labwc session assertions could not run ($summary). Both of this suite's skip paths — the APEX_LABWC_SESSION_TESTS opt-in and 'nowhere to render' — exit 0, so without this line a step that started no compositor at all would show a green tick"
+              exit 1
+          }
+          [ "$passed" -ge 18 ] || { echo "::error::only $passed labwc session assertions ran; 18 ran on 2026-09-13, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the labwc session suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
+              exit 1
+          fi
+
       - name: Every suite is actually run by CI
         # `if: !cancelled()` for the reason the comment block below gives
         # about placement, read in its other direction. That block is about a
