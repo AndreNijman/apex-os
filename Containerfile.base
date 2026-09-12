@@ -1543,6 +1543,67 @@ RUN set -eux; \
     /usr/libexec/apex-disposable --help | grep -q 'not a security boundary'; \
     /usr/libexec/apex-disposable --help | grep -q -- '--copy-out'
 
+# ── The virtualization engine (P2-008) ──────────────────────────────────────
+# `apex vm`'s engine. It defines libvirt domains and removes disk images, so
+# the checks below are about the two properties that make it safe to ship
+# rather than about it working: it is rootless and session-scoped, and it never
+# opens a window.
+#
+# The STACK it drives is deliberately absent from this image. qemu, libvirt,
+# OVMF, swtpm and virtiofsd are userspace; AGENTS.md's line is that an
+# out-of-tree kernel module must be baked in and userspace must not be, and KVM
+# needs no out-of-tree module at all — kvm_intel/kvm_amd are in-tree in the
+# signed kernel. So the engine ships, the stack arrives through `apex install`,
+# and `apex vm doctor` is what tells the user which command to run. Asserted
+# below, because "the engine is present and the stack is not" is a design
+# decision and would otherwise read as a packaging mistake.
+COPY --chmod=0755 files/system/libexec/apex-vm /usr/libexec/apex-vm
+RUN set -eux; \
+    bash -n /usr/libexec/apex-vm; \
+    # Session mode, structurally. A default of qemu:///system would need a root
+    # daemon and would bring libvirt's `default` network — a host bridge and a
+    # dnsmasq that outlive the VM that asked for them — onto every APEX
+    # machine that ever ran `apex vm create`.
+    grep -qE '^VM_URI="\$\{APEX_VM_URI:-qemu:///session\}"$' /usr/libexec/apex-vm; \
+    # Headless is a product rule, not a default. There is no code path to a
+    # viewer, so there is no <graphics> element and no --graphics flag: a
+    # single occurrence of either would be a window opening on somebody's
+    # desktop from a command whose whole contract is that it does not.
+    ! grep -qE '^[^#]*<graphics' /usr/libexec/apex-vm; \
+    ! grep -qE '^[^#]*(spice|vnc|virt-viewer)' /usr/libexec/apex-vm; \
+    # The three elements that look optional in the XML and are not. Each one,
+    # dropped, produces a domain that DEFINES and then refuses to start — the
+    # worst failure shape available, because the user gets a success and then
+    # an error unrelated to what they typed. Anchored to EXECUTABLE lines
+    # (`^[^#]*`), because this file's own comments discuss all three at length
+    # and a check its comments can satisfy proves nothing.
+    grep -qE "^[^#]*<smm state=" /usr/libexec/apex-vm; \
+    grep -qE "^[^#]*<access mode='shared'/>" /usr/libexec/apex-vm; \
+    grep -qE "^[^#]*model='qemu-xhci'" /usr/libexec/apex-vm; \
+    # Removal is a recursive `rm -rf` driven by a name, so the four fences that
+    # make it safe are build-time facts — the same four apex-disposable carries
+    # and for the same reason.
+    grep -qE '^[^#]*\[\[ "\$1" =~ \^\[a-z0-9\]\[a-z0-9-\]\{0,31\}\$ \]\]' /usr/libexec/apex-vm; \
+    grep -qE '^[^#]*\[ -L "\$dir" \]' /usr/libexec/apex-vm; \
+    grep -qE '^[^#]*realpath -e -- "\$dir"' /usr/libexec/apex-vm; \
+    grep -qE '^[^#]*\[ "\$real" = "\$\{root_real\}/\$\{name\}" \]' /usr/libexec/apex-vm; \
+    # Unprivileged, asserted because "every VM is a per-user domain" is a
+    # security claim rather than a preference.
+    test ! -u /usr/libexec/apex-vm; \
+    test ! -g /usr/libexec/apex-vm; \
+    # The stack is NOT here, and that is the decision. If a later change layers
+    # qemu or libvirt into the image, this fails and whoever did it has to say
+    # why in the diff rather than in a commit message nobody reads.
+    ! command -v qemu-system-x86_64 >/dev/null 2>&1; \
+    ! command -v virsh >/dev/null 2>&1; \
+    # And the engine says so, with the command that fixes it, instead of
+    # failing halfway through defining a domain.
+    ! /usr/libexec/apex-vm doctor >/dev/null 2>&1; \
+    /usr/libexec/apex-vm doctor 2>&1 | grep -q 'sudo apex install'; \
+    /usr/libexec/apex-vm doctor 2>&1 | grep -q 'MISSING'; \
+    /usr/libexec/apex-vm --help | grep -q 'no viewer'; \
+    echo "apex-vm: engine present, stack deliberately absent, doctor names it"
+
 # ── The plugin CLI (§16) ────────────────────────────────────────────────────
 # apex-shell's plugin platform ships the manifest, the permission model and the
 # loader; this is the OS-side CLI it deliberately left out.
@@ -2279,6 +2340,20 @@ RUN set -eux; \
     # against the path that was actually installed.
     grep -qa '/usr/libexec/apex-disposable' /usr/bin/apex; \
     test -x /usr/libexec/apex-disposable; \
+    # Same rule for the VM engine, and the same reason: the CLI holds the path
+    # as a constant so a caller-controlled variable cannot name the program
+    # that deletes disk images.
+    grep -qa '/usr/libexec/apex-vm' /usr/bin/apex; \
+    test -x /usr/libexec/apex-vm; \
+    for v in doctor create list info start stop console snapshot share usb rm; do \
+        /usr/bin/apex vm "$v" --help >/dev/null \
+            || { echo "FATAL: apex vm $v is gone"; exit 1; }; \
+    done; \
+    # `apex vm create` must not grow a way to weaken a VM by accident. These
+    # two flags are the security posture of the guest, and clap refusing both
+    # at once is what stops argument order deciding it.
+    ! /usr/bin/apex vm create box --secure-boot --no-secure-boot >/dev/null 2>&1; \
+    ! /usr/bin/apex vm create box --graphics spice >/dev/null 2>&1; \
     # §19's "expose apex doctor results graphically" is this flag and nothing
     # else on the OS side. Losing it silently turns the settings page into a
     # screen that renders no diagnostics.

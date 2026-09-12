@@ -1,0 +1,1456 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# apex-vm — P2-008's first-party virtualization UX: full machines, headless,
+# rootless, and authored rather than clicked.
+#
+# WHY A VM AT ALL, WHEN `apex env` EXISTS
+# `apex env` gives an ecosystem its own userspace and hands it the user's home,
+# the user's devices and /run/host. That is the right tool for "pip install
+# wants a mutable /usr" and the wrong one for "boot another operating system",
+# "test the installer", "give a task a kernel it can crash" or "run something I
+# do not trust with my files". A VM is a different kernel behind a different
+# page table; a capsule is a namespace. This file does not replace `apex env`
+# and shares no state with it.
+#
+# ROOTLESS, SESSION MODE, AND NOTHING ON THE HOST NETWORK
+# Every domain here lives at qemu:///session — libvirt's per-user URI, served
+# by a `virtqemud` that systemd autospawns for the calling user. That is a
+# structural decision, not a preference:
+#
+#   * qemu:///system needs a root daemon, a polkit prompt to reach it, and
+#     puts every user's domains in one namespace.
+#   * the system daemon's `default` network is `virbr0` — a host bridge, a
+#     dnsmasq, and a set of forwarding rules that outlive the VM that asked for
+#     them. Creating one is a change to the HOST's networking, and this file
+#     refuses to be the thing that makes it. Session mode has no `default`
+#     network to start, so the refusal is a property of the URI rather than of
+#     this file's care.
+#
+# So networking is qemu's user-mode stack (`<interface type='user'/>`, SLIRP)
+# or nothing at all, and `--network bridge` is refused with the reason. A user
+# who genuinely wants a bridged VM wants `virsh -c qemu:///system`, and is told
+# so rather than silently given a NAT.
+#
+# THE STACK IS NOT IN THE IMAGE, AND THAT IS DELIBERATE
+# qemu, libvirt, OVMF, swtpm and virtiofsd are userspace, and AGENTS.md's line
+# is that a kernel module must be in the image and userspace must not be. KVM
+# itself IS in the image — `kvm_intel`/`kvm_amd` are in-tree modules in the
+# signed kernel — so the only thing `apex install` has to add is the userspace,
+# exactly as it does for Steam. `apex vm doctor` names what is missing and the
+# one command that installs it; every other verb refuses with that same text
+# rather than failing halfway through creating a domain.
+#
+# HEADLESS, ALWAYS
+# No SPICE, no VNC, no `virt-viewer`. `<graphics>` is never emitted. A domain
+# gets a serial console on a file plus a pty, and `apex vm console` attaches to
+# it. A viewer is a second product (a GUI, a clipboard channel, a USB
+# redirection path, a remote protocol) and shipping half of one is worse than
+# shipping none.
+#
+# THE SIX FLOWS P2-008 NAMES, AND WHERE EACH ONE LIVES IN THIS FILE
+#   create       cmd_create      → domain_xml(), `virsh define` + `virsh start`
+#   snapshot     cmd_snapshot    → `virsh snapshot-create-as` and friends
+#   share        cmd_share       → xml_filesystem(), virtiofs + shared memory
+#   USB          cmd_usb         → xml_hostdev(), qemu-xhci + <hostdev>
+#   TPM          domain_xml      → xml_tpm(), swtpm via <backend type='emulator'>
+#   Secure Boot  domain_xml      → xml_os(), <loader secure='yes'> + SMM
+#
+# Three of those six have a gotcha that turns them into a domain that DEFINES
+# and then will not START, which is the worst failure shape available: the user
+# gets a success, then an error with no relation to what they typed.
+#
+#   Secure Boot needs `<smm state='on'/>` and q35. Without SMM the varstore is
+#   writable from the guest and libvirt refuses `<loader secure='yes'>`; with
+#   i440fx there is no SMM at all.
+#   virtiofs needs `<memoryBacking><source type='memfd'/><access mode='shared'/>`
+#   or the vhost-user device has no shared memory to map and qemu exits.
+#   USB passthrough needs a USB controller that has ports — q35's default is a
+#   single UHCI companion set, so `qemu-xhci` is emitted explicitly.
+#
+# Each of the three is asserted by name in tests/test-apex-vm.sh, because each
+# is an element that looks optional in the XML and is not.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+# ── paths and overrides ─────────────────────────────────────────────────────
+# APEX_VM_HOME exists so the suite can point the whole tool at a throwaway
+# directory. Read once, here, and never re-derived: a helper that recomputed it
+# from $HOME would quietly operate on the real one. Same device apex-env uses
+# for APEX_ENV_HOME and apex-disposable for APEX_DISPOSABLE_ROOT.
+DATA_HOME="${XDG_DATA_HOME:-${HOME:-/nonexistent}/.local/share}"
+VM_ROOT="${APEX_VM_HOME:-${DATA_HOME}/apex/vm}"
+
+# The libvirt URI. Session, always, and overridable only so the suite and the
+# lab can point at the same daemon they just started. A caller who exports
+# LIBVIRT_DEFAULT_URI=qemu:///system does NOT get it: the variable below is
+# read, the environment one is not, and `virsh` is always invoked with an
+# explicit `-c`. Handing a root URI to a file that creates and deletes disks is
+# not a configuration option.
+VM_URI="${APEX_VM_URI:-qemu:///session}"
+
+# The tools, invoked by name so $PATH decides which one runs. That is what
+# makes this file testable without libvirt: the suite puts recording stubs
+# first on $PATH and asserts the exact argv, instead of asserting a string this
+# file also produced.
+VIRSH="${APEX_VM_VIRSH:-virsh}"
+QEMU_IMG="${APEX_VM_QEMU_IMG:-qemu-img}"
+
+# The pieces that are files rather than commands. Probed at the point of use
+# and never hardcoded into the XML without checking: OVMF's layout changed
+# between Fedora releases twice, and a domain naming a firmware that is not
+# there fails at start with "failed to open file".
+VIRTIOFSD="${APEX_VM_VIRTIOFSD:-/usr/libexec/virtiofsd}"
+SWTPM="${APEX_VM_SWTPM:-swtpm}"
+
+# ── output ──────────────────────────────────────────────────────────────────
+msg()  { printf 'apex-vm: %s\n' "$*" >&2; }
+warn() { printf 'apex-vm: warning: %s\n' "$*" >&2; }
+die()  { printf 'apex-vm: error: %s\n' "$*" >&2; exit 1; }
+
+# A refusal that must never be a warning. Used only where continuing would mean
+# removing something this program cannot prove it owns, or widening a boundary
+# the caller asked for.
+refuse() {
+    printf 'apex-vm: REFUSED: %s\n' "$*" >&2
+    printf 'apex-vm: this is a safety check failing, not a transient error.\n' >&2
+    exit 2
+}
+
+# ── names ───────────────────────────────────────────────────────────────────
+# A VM name becomes a libvirt domain name AND the final component of a path
+# that is removed recursively, so this is a security check and is written as
+# one. Narrow on purpose: every character outside the set is a character that
+# cannot appear in a path this file deletes or in an XML attribute it writes
+# without escaping.
+valid_vm_name() {
+    [ -n "${1:-}" ] || return 1
+    [ "${#1}" -le 32 ] || return 1
+    [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || return 1
+    return 0
+}
+
+# A virtiofs tag and a snapshot name reach the same places. Same rule.
+valid_tag() {
+    [ -n "${1:-}" ] || return 1
+    [ "${#1}" -le 32 ] || return 1
+    [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}$ ]] || return 1
+    return 0
+}
+
+# A USB device, as vendor:product in hex. Validated here rather than passed
+# through, because it lands in XML attributes and because `0x` prefixes,
+# upper/lower case and 3-digit ids are all things people type.
+valid_usb_id() {
+    [[ "${1:-}" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]
+}
+
+# ── layout ──────────────────────────────────────────────────────────────────
+# One directory per VM. Everything a domain needs is inside it, so `rm` is one
+# tree and a backup is one `tar`.
+vm_dir()     { printf '%s/%s' "$VM_ROOT" "$1"; }
+vm_disk()    { printf '%s/%s/disk.qcow2' "$VM_ROOT" "$1"; }
+vm_nvram()   { printf '%s/%s/nvram.qcow2' "$VM_ROOT" "$1"; }
+vm_xml()     { printf '%s/%s/domain.xml' "$VM_ROOT" "$1"; }
+vm_record()  { printf '%s/%s/record.json' "$VM_ROOT" "$1"; }
+vm_console() { printf '%s/%s/console.log' "$VM_ROOT" "$1"; }
+vm_tpm()     { printf '%s/%s/tpm' "$VM_ROOT" "$1"; }
+
+# ── removal, and its four fences ────────────────────────────────────────────
+# Read this whole function before changing any of it. It removes a directory
+# tree chosen by a name, and removing the wrong tree is not recoverable. The
+# fences are the same four apex-disposable uses, for the same reason, and are
+# asserted individually in Containerfile.base against EXECUTABLE lines.
+remove_vm_dir() {
+    local name="$1" dir root_real real
+    valid_vm_name "$name" || refuse "'$name' is not a valid VM name"
+    dir="$(vm_dir "$name")"
+    [ -e "$dir" ] || return 0
+    # Fence 2: never follow a symlink at the final component.
+    [ -L "$dir" ] && refuse "$dir is a symlink"
+    [ -d "$dir" ] || refuse "$dir is not a directory"
+    root_real="$(realpath -e -- "$VM_ROOT" 2>/dev/null)" \
+        || refuse "$VM_ROOT does not resolve"
+    # Fence 3: resolve, and compare against the resolved root.
+    real="$(realpath -e -- "$dir" 2>/dev/null)" || refuse "$dir does not resolve"
+    # Fence 4: the resolved path must be exactly one component under the root.
+    [ "$real" = "${root_real}/${name}" ] \
+        || refuse "$dir resolves to $real, which is not ${root_real}/${name}"
+    rm -rf -- "$real"
+}
+
+# ── the stack, probed rather than assumed ───────────────────────────────────
+#
+# "Permission denied is not absence" applies twice over here. /dev/kvm existing
+# is not the same claim as /dev/kvm being usable by this user, and `command -v
+# virsh` is not the same claim as a session daemon that answers. Each probe
+# below observes the capability, and each returns its own sentence so that a
+# refusal names the ONE thing that is missing instead of printing a checklist.
+
+have_kvm() { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }
+
+have_virsh() { command -v "$VIRSH" >/dev/null 2>&1; }
+
+# The daemon, not the client. `virsh -c qemu:///session version` round-trips to
+# virtqemud and fails if it cannot be autospawned — which is the real question,
+# and is a different question from whether the binary is installed.
+have_libvirt_session() {
+    have_virsh || return 1
+    "$VIRSH" -c "$VM_URI" version >/dev/null 2>&1
+}
+
+have_ovmf() { ovmf_secboot_descriptor >/dev/null; }
+
+have_swtpm() { command -v "$SWTPM" >/dev/null 2>&1; }
+
+have_virtiofsd() { [ -x "$VIRTIOFSD" ]; }
+
+# A Secure-Boot-enforcing OVMF, asked of the FIRMWARE DESCRIPTORS rather than
+# by guessing filenames.
+#
+# This is the second design here, and the first one was a real defect worth
+# recording. It searched for `OVMF_CODE_4M.secboot.qcow2` and then derived the
+# variable store from that name by stripping `_CODE` — which on Fedora 43
+# yields `OVMF_VARS_4M.qcow2`. That file is the EMPTY varstore: no PK, no KEK,
+# no db, so the firmware comes up in SETUP MODE and enforces nothing. The
+# domain would have said `secure='yes'`, the record would have said
+# `"secure_boot": true`, and the guest would have booted anything. The enrolled
+# one is `OVMF_VARS_4M.secboot.qcow2`, one word away.
+#
+# Guessing paths is what produced that, so this asks instead. qemu ships a
+# directory of JSON descriptors, each naming a firmware build and the features
+# it has; libvirt reads the same directory to do `firmware='efi'` autoselection
+# and will pick the descriptor whose features match what the domain asked for.
+# So the domain declares FEATURES and libvirt resolves the paths — one source
+# of truth, and it is the one that is right on a distribution nobody here has
+# tested on.
+#
+# What is left for this function is the availability question, which libvirt
+# answers only by refusing a domain: is there a descriptor with both
+# `secure-boot` and `enrolled-keys`? `apex vm doctor` needs that before a VM
+# exists, so it is read directly.
+FIRMWARE_DIRS="${APEX_VM_FIRMWARE_DIRS:-/usr/share/qemu/firmware:/etc/qemu/firmware}"
+
+ovmf_secboot_descriptor() {
+    local dir f
+    local IFS=:
+    for dir in $FIRMWARE_DIRS; do
+        [ -d "$dir" ] || continue
+        for f in "$dir"/*.json; do
+            [ -f "$f" ] || continue
+            # Both features, in the same descriptor. A build with `secure-boot`
+            # and no `enrolled-keys` is one whose varstore has no keys in it,
+            # which is the setup-mode trap above.
+            grep -q '"secure-boot"' "$f" || continue
+            grep -q '"enrolled-keys"' "$f" || continue
+            printf '%s' "$f"
+            return 0
+        done
+    done
+    return 1
+}
+
+# The one sentence every refusal shares. It names the package set, not a
+# generic "install virtualization", because a user who has to guess the package
+# names is a user who installs the wrong ones.
+INSTALL_HINT='sudo apex install qemu-kvm libvirt-daemon-kvm libvirt-client edk2-ovmf swtpm virtiofsd'
+
+# require_stack — refuse BEFORE anything is created, naming the missing piece.
+#
+# Ordered from "nothing will work" to "one flow will not work", and it stops at
+# the first failure so the message is one sentence. The optional pieces (swtpm,
+# virtiofsd) are NOT required here: a VM with no TPM and no share is a useful
+# VM, and the flows that need them refuse individually.
+require_stack() {
+    have_virsh || die "libvirt is not installed on this system.
+  The virtualization stack is userspace, so it is not in the image — KVM
+  itself is (the kernel modules are in the signed kernel). Install it with:
+    $INSTALL_HINT"
+    have_kvm || die "/dev/kvm is not readable and writable by this user.
+  Either this machine has no hardware virtualization enabled in firmware, or
+  this user is not in a group that can open it. \`ls -l /dev/kvm\` says which."
+    have_libvirt_session || die "libvirt is installed but $VM_URI does not answer.
+  That URI is served by a per-user virtqemud that systemd autospawns; it
+  failing usually means there is no user session bus. \`$VIRSH -c $VM_URI
+  version\` prints the real error."
+}
+
+# ── XML, built one element at a time ────────────────────────────────────────
+#
+# Authored here rather than by `virt-install --print-xml`, and that is a
+# deliberate trade. virt-install would be less code and would be a SECOND
+# opinion about what a domain should look like — one that changes between
+# releases, that emits `<graphics>` unless told not to, and whose output this
+# file would then have to edit. Every element below is a decision P2-008 names,
+# and each is asserted by name in the suite. An element that is generated is an
+# element a test can pin.
+#
+# Values reaching XML are validated by the `valid_*` functions above before
+# they get here, so the only escaping needed is for paths, which are the one
+# caller-supplied string that may legitimately contain `&` or `<`.
+xml_escape() {
+    local s="$1"
+    s="${s//&/&amp;}"
+    s="${s//</&lt;}"
+    s="${s//>/&gt;}"
+    s="${s//\"/&quot;}"
+    s="${s//\'/&apos;}"
+    printf '%s' "$s"
+}
+
+# `<os>` — the Secure Boot half of P2-008.
+#
+# `firmware='efi'` asks libvirt to select a firmware build that satisfies the
+# declared FEATURES, and no path is written here at all. The two features are
+# what make the selection mean something: `secure-boot` picks an enforcing
+# build, `enrolled-keys` picks a variable store that already carries a PK, a
+# KEK and Microsoft's db — without which the firmware is in setup mode and
+# enforces nothing while still reporting `secure='yes'`.
+#
+# `<loader secure='yes'/>` is the enforcement, and libvirt REFUSES it unless
+# SMM is on — see xml_features.
+#
+# Without --secure-boot the same domain is emitted with the features disabled
+# rather than with the firmware block dropped, so the difference between a
+# secure and an insecure VM is one attribute in the record instead of a
+# different shape of domain.
+#
+# The nvram element names the VM's own copy and nothing else. libvirt creates
+# it from the selected descriptor's template the first time the domain starts —
+# which is also why `--uefi-vars` works by putting a file at that path before
+# then: libvirt leaves an existing variable store alone.
+xml_os() {
+    local secure="$1" nvram="$2" onoff
+    onoff=$([ "$secure" = 1 ] && echo yes || echo no)
+    cat <<EOF
+  <os firmware='efi'>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <firmware>
+      <feature enabled='${onoff}' name='enrolled-keys'/>
+      <feature enabled='${onoff}' name='secure-boot'/>
+    </firmware>
+    <loader secure='${onoff}'/>
+    <nvram format='qcow2'>$(xml_escape "$nvram")</nvram>
+    <boot dev='hd'/>
+  </os>
+EOF
+}
+
+# `<features>` — where SMM lives.
+#
+# SMM is not an optimisation. The OVMF varstore holds PK/KEK/db, and without
+# System Management Mode the guest kernel can write it, which means a guest can
+# enrol its own key and Secure Boot enforces nothing. libvirt knows this and
+# refuses `<loader secure='yes'>` on a domain without `<smm state='on'/>`, so
+# dropping this element does not produce an insecure VM — it produces a define
+# that fails, which is the correct failure but an opaque one. The suite asserts
+# the element by name so that the reason survives.
+xml_features() {
+    local secure="$1"
+    if [ "$secure" = 1 ]; then
+        printf '  <features><acpi/><apic/><smm state=%s/></features>\n' "'on'"
+    else
+        printf '  <features><acpi/><apic/></features>\n'
+    fi
+}
+
+# `<memoryBacking>` — the element virtiofs does not work without.
+#
+# A vhost-user filesystem device maps the guest's memory into virtiofsd. If the
+# guest's memory is anonymous and private, there is nothing to map: qemu exits
+# with "unable to map backing store for guest RAM" and the user reads it as a
+# memory problem. memfd + shared is the fix, and it is emitted ONLY when a
+# share is configured, because shared memory backing costs a real page-cache
+# behaviour change on a VM that does not need it.
+xml_memory_backing() {
+    [ "$1" -gt 0 ] || return 0
+    cat <<'EOF'
+  <memoryBacking>
+    <source type='memfd'/>
+    <access mode='shared'/>
+  </memoryBacking>
+EOF
+}
+
+# `<tpm>` — the vTPM half of P2-008.
+#
+# `tpm-crb` rather than `tpm-tis`: CRB is the interface a modern UEFI guest
+# expects and is what Windows 11's requirement check looks for. The backend is
+# swtpm, which libvirt starts and stops with the domain; version 2.0 because
+# 1.2 cannot do the PCR policies anything here would bind to.
+xml_tpm() {
+    [ "$1" = 1 ] || return 0
+    cat <<'EOF'
+    <tpm model='tpm-crb'>
+      <backend type='emulator' version='2.0'/>
+    </tpm>
+EOF
+}
+
+# `<filesystem>` — the share half of P2-008, as virtiofs.
+#
+# virtiofs rather than 9p: 9p is slower by an order of magnitude, does not
+# honour a shared page cache, and is the reason "shared folders are slow" is
+# folklore. `accessmode='passthrough'` keeps the host's uid/gid on the files,
+# which is what makes a shared source tree usable rather than root-owned.
+#
+# The `<binary>` path is emitted explicitly because libvirt's compiled-in
+# default has moved between /usr/libexec and /usr/bin across distributions, and
+# a domain that names the wrong one fails at start.
+xml_filesystem() {
+    local src="$1" tag="$2" ro="$3"
+    cat <<EOF
+    <filesystem type='mount' accessmode='passthrough'>
+      <driver type='virtiofs' queue='1024'/>
+      <binary path='$(xml_escape "$VIRTIOFSD")'/>
+      <source dir='$(xml_escape "$src")'/>
+      <target dir='$(xml_escape "$tag")'/>$([ "$ro" = 1 ] && printf '\n      <readonly/>')
+    </filesystem>
+EOF
+}
+
+# `<hostdev>` — the USB half of P2-008.
+#
+# `managed='yes'` makes libvirt detach the device from the host driver on start
+# and give it back on stop. Without it the host keeps the device and the guest
+# gets an error; with it, the device disappears from the host for the life of
+# the domain, which is what passthrough means and why `apex vm usb attach`
+# prints the host-side consequence before doing it.
+xml_hostdev() {
+    local vendor="${1%%:*}" product="${1##*:}"
+    cat <<EOF
+    <hostdev mode='subsystem' type='usb' managed='yes'>
+      <source>
+        <vendor id='0x${vendor}'/>
+        <product id='0x${product}'/>
+      </source>
+    </hostdev>
+EOF
+}
+
+# The whole domain.
+#
+# `<graphics>` is absent and there is no code path that emits one. The console
+# is a serial port on a file plus a pty: the file is what `apex vm console
+# --log` reads and what a test asserts against, the pty is what `virsh console`
+# attaches to. Both, because a log that only exists while somebody is attached
+# is not a log.
+domain_xml() {
+    local name="$1" memory="$2" cpus="$3" secure="$4" tpm="$5" network="$6"
+    local nvram disk shares_n
+    nvram="$(vm_nvram "$name")"
+    disk="$(vm_disk "$name")"
+    shares_n="${#SHARE_SRC[@]}"
+
+    printf "<domain type='kvm'>\n"
+    printf '  <name>%s</name>\n' "$name"
+    printf '  <memory unit=%s>%s</memory>\n' "'MiB'" "$memory"
+    printf '  <vcpu>%s</vcpu>\n' "$cpus"
+    xml_os "$secure" "$nvram"
+    xml_features "$secure"
+    xml_memory_backing "$shares_n"
+    printf "  <cpu mode='host-passthrough'/>\n"
+    printf '  <on_poweroff>destroy</on_poweroff>\n'
+    printf '  <on_reboot>restart</on_reboot>\n'
+    printf '  <on_crash>destroy</on_crash>\n'
+    printf '  <devices>\n'
+    printf "    <emulator>%s</emulator>\n" "$(xml_escape "${APEX_VM_EMULATOR:-/usr/bin/qemu-system-x86_64}")"
+    cat <<EOF
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='$(xml_escape "$disk")'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+EOF
+    # A USB controller with ports, always. q35's implicit controller is a UHCI
+    # companion set with no free port for a hostdev, so `usb attach` on a
+    # domain without this element fails with "no free USB ports" — a message
+    # about the guest's topology that reads as a message about the device.
+    printf "    <controller type='usb' model='qemu-xhci' ports='15'/>\n"
+    xml_tpm "$tpm"
+    local i
+    for (( i = 0; i < shares_n; i++ )); do
+        xml_filesystem "${SHARE_SRC[$i]}" "${SHARE_TAG[$i]}" "${SHARE_RO[$i]}"
+    done
+    for (( i = 0; i < ${#USB_IDS[@]}; i++ )); do
+        xml_hostdev "${USB_IDS[$i]}"
+    done
+    case "$network" in
+        none) ;;
+        user)
+            # SLIRP. No host bridge, no dnsmasq, no forwarding rule, nothing
+            # that outlives the domain. The guest gets outbound IPv4 and no
+            # inbound anything, which is the correct default for a machine
+            # whose whole point is that it might be hostile.
+            printf "    <interface type='user'><model type='virtio'/></interface>\n"
+            ;;
+    esac
+    cat <<EOF
+    <serial type='file'>
+      <source path='$(xml_escape "$(vm_console "$name")")'/>
+      <target port='0'/>
+    </serial>
+    <console type='pty'><target type='serial' port='1'/></console>
+    <memballoon model='none'/>
+  </devices>
+</domain>
+EOF
+}
+
+# ── the record ──────────────────────────────────────────────────────────────
+# One JSON file per VM, holding what the domain was made from. The same reason
+# apex-env keeps one: "does this VM enforce Secure Boot" is the question asked
+# six months later, and `virsh dumpxml` answers it only while the domain is
+# still defined.
+write_record() {
+    local name="$1" memory="$2" cpus="$3" secure="$4" tpm="$5" network="$6" size="$7"
+    local i shares="" usbs=""
+    for (( i = 0; i < ${#SHARE_SRC[@]}; i++ )); do
+        [ -n "$shares" ] && shares="${shares},"
+        shares="${shares}{\"source\":\"${SHARE_SRC[$i]}\",\"tag\":\"${SHARE_TAG[$i]}\",\"readonly\":$([ "${SHARE_RO[$i]}" = 1 ] && echo true || echo false)}"
+    done
+    for (( i = 0; i < ${#USB_IDS[@]}; i++ )); do
+        [ -n "$usbs" ] && usbs="${usbs},"
+        usbs="${usbs}\"${USB_IDS[$i]}\""
+    done
+    cat > "$(vm_record "$name")" <<EOF
+{
+  "name": "${name}",
+  "created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "uri": "${VM_URI}",
+  "memory_mib": ${memory},
+  "vcpus": ${cpus},
+  "disk_size": "${size}",
+  "secure_boot": $([ "$secure" = 1 ] && echo true || echo false),
+  "tpm": $([ "$tpm" = 1 ] && echo true || echo false),
+  "network": "${network}",
+  "shares": [${shares}],
+  "usb": [${usbs}]
+}
+EOF
+}
+
+# ── argument parsing for create ─────────────────────────────────────────────
+# The share and USB lists are globals because bash cannot return an array, and
+# they are reset here rather than at declaration so that a second call in one
+# process (which the suite does) does not inherit the first call's shares.
+SHARE_SRC=(); SHARE_TAG=(); SHARE_RO=(); USB_IDS=()
+
+parse_create_args() {
+    NAME=""; MEMORY=2048; CPUS=2; DISK_SIZE="20G"
+    SECURE=1; TPM=1; NETWORK="user"; IMPORT_DISK=""; UEFI_VARS=""
+    SHARE_SRC=(); SHARE_TAG=(); SHARE_RO=(); USB_IDS=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --memory)     shift; MEMORY="${1:-}" ;;
+            --cpus)       shift; CPUS="${1:-}" ;;
+            --disk)       shift; DISK_SIZE="${1:-}" ;;
+            --import)     shift; IMPORT_DISK="${1:-}" ;;
+            --uefi-vars)  shift; UEFI_VARS="${1:-}" ;;
+            --secure-boot)    SECURE=1 ;;
+            --no-secure-boot) SECURE=0 ;;
+            --tpm)        TPM=1 ;;
+            --no-tpm)     TPM=0 ;;
+            --network)    shift; NETWORK="${1:-}" ;;
+            --share)      shift; add_share "${1:-}" 0 ;;
+            --share-ro)   shift; add_share "${1:-}" 1 ;;
+            --usb)        shift; add_usb "${1:-}" ;;
+            --) shift; break ;;
+            -*) die "unknown option '$1' (apex vm create --help)" ;;
+            *)  [ -z "$NAME" ] || die "give one name, not two ('$NAME' and '$1')"
+                NAME="$1" ;;
+        esac
+        shift
+    done
+    [ -n "$NAME" ] || die "name the VM: apex vm create NAME"
+    valid_vm_name "$NAME" || die "'$NAME' is not a valid VM name (lowercase letters, digits and '-', up to 32)"
+    [[ "$MEMORY" =~ ^[0-9]+$ ]] || die "--memory takes MiB as a number"
+    [[ "$CPUS" =~ ^[0-9]+$ ]] || die "--cpus takes a number"
+    [[ "$DISK_SIZE" =~ ^[0-9]+[GMgm]$ ]] || die "--disk takes a size like 20G"
+    case "$NETWORK" in
+        none|user) ;;
+        bridge|default)
+            # The refusal this whole file's URI choice exists to make
+            # structural. Spelled out because a user who asked for a bridge has
+            # a real need, and "not supported" without the alternative is how
+            # somebody ends up running `virsh net-start default` on their
+            # laptop and leaving a virbr0 behind.
+            refuse "--network $NETWORK would need libvirt's system daemon and its
+  'default' network — a host bridge and a dnsmasq that outlive this VM. apex vm
+  is rootless and session-scoped and will not create one. Use --network user
+  for outbound NAT, or drive qemu:///system with virsh directly if you need a
+  guest that is reachable from the LAN." ;;
+        *) die "--network takes 'none' or 'user' (got '$NETWORK')" ;;
+    esac
+}
+
+add_share() {
+    local spec="$1" ro="$2" src tag
+    case "$spec" in
+        *:*) src="${spec%%:*}"; tag="${spec##*:}" ;;
+        *)   die "--share takes HOSTPATH:TAG (got '$spec')" ;;
+    esac
+    case "$src" in /*) ;; *) die "--share needs an absolute host path (got '$src')" ;; esac
+    [ -d "$src" ] || die "--share source '$src' is not a directory"
+    valid_tag "$tag" || die "'$tag' is not a valid share tag"
+    SHARE_SRC+=("$src"); SHARE_TAG+=("$tag"); SHARE_RO+=("$ro")
+}
+
+add_usb() {
+    valid_usb_id "${1:-}" || die "--usb takes VENDOR:PRODUCT in hex, like 046d:c52b (got '${1:-}')"
+    USB_IDS+=("$(printf '%s' "$1" | tr 'A-F' 'a-f')")
+}
+
+# ── verbs ───────────────────────────────────────────────────────────────────
+
+cmd_doctor() {
+    local fail=0
+    printf 'apex vm — virtualization stack\n\n'
+    probe_line "hardware KVM (/dev/kvm readable and writable)" have_kvm || fail=1
+    probe_line "libvirt client (virsh)" have_virsh || fail=1
+    probe_line "libvirt session daemon ($VM_URI answers)" have_libvirt_session || fail=1
+    probe_line "Secure-Boot-enforcing OVMF firmware" have_ovmf || fail=1
+    probe_line "software TPM (swtpm)" have_swtpm || fail=1
+    probe_line "virtiofs daemon ($VIRTIOFSD)" have_virtiofsd || fail=1
+    printf '\n'
+    if [ "$fail" = 0 ]; then
+        printf 'Every flow is available.\n'
+        return 0
+    fi
+    printf 'Missing pieces are userspace, and userspace is not in the APEX image\n'
+    printf 'by design — the KVM kernel modules are. Install the rest with:\n\n'
+    printf '  %s\n' "$INSTALL_HINT"
+    return 1
+}
+
+probe_line() {
+    local label="$1" fn="$2"
+    if "$fn"; then
+        printf '  [ ok ] %s\n' "$label"
+        return 0
+    fi
+    printf '  [MISSING] %s\n' "$label"
+    return 1
+}
+
+cmd_create() {
+    parse_create_args "$@"
+    require_stack
+    [ "$TPM" = 1 ] && ! have_swtpm && die "--tpm needs swtpm, which is not installed.
+  Create it with --no-tpm, or install the stack:
+    $INSTALL_HINT"
+    [ "${#SHARE_SRC[@]}" -gt 0 ] && ! have_virtiofsd && die "--share needs virtiofsd at $VIRTIOFSD, which is not there.
+  Create it without a share, or install the stack:
+    $INSTALL_HINT"
+
+    local dir; dir="$(vm_dir "$NAME")"
+    [ -e "$dir" ] && die "a VM called '$NAME' already exists at $dir (apex vm rm $NAME to replace it)"
+    # Asked of libvirt as well as of the filesystem: a domain defined by hand
+    # with this name would otherwise be silently redefined by `define` below.
+    if "$VIRSH" -c "$VM_URI" dominfo "$NAME" >/dev/null 2>&1; then
+        die "libvirt already has a domain called '$NAME' that apex did not create.
+  Remove it with 'virsh -c $VM_URI undefine $NAME' first, or pick another name."
+    fi
+
+    mkdir -p "$dir" || die "cannot create $dir"
+    # 0700: the disk holds a whole guest filesystem, and on a multi-user
+    # machine that is every secret the guest ever wrote.
+    chmod 0700 "$dir" 2>/dev/null
+
+    if [ -n "$IMPORT_DISK" ]; then
+        [ -f "$IMPORT_DISK" ] || { remove_vm_dir "$NAME"; die "--import: no file at $IMPORT_DISK"; }
+        # A copy rather than a backing file. A backing file means the VM's disk
+        # is a delta over a path the user may move or delete, and the failure
+        # then arrives months later as a domain that will not start.
+        cp -- "$IMPORT_DISK" "$(vm_disk "$NAME")" \
+            || { remove_vm_dir "$NAME"; die "--import: cannot copy $IMPORT_DISK"; }
+    else
+        "$QEMU_IMG" create -f qcow2 "$(vm_disk "$NAME")" "$DISK_SIZE" >/dev/null \
+            || { remove_vm_dir "$NAME"; die "qemu-img could not create the disk"; }
+    fi
+
+    # The UEFI variable store. Normally NOT created here: libvirt creates it
+    # from the firmware descriptor it selected, the first time the domain
+    # starts, which is the only way to get a store that matches the firmware
+    # build without naming either of them.
+    #
+    # --uefi-vars is the exception, and it is a real flag rather than test
+    # plumbing. A variable store is where enrolled keys live, so "boot this VM
+    # against MY db instead of Microsoft's" is the same operation as "test a
+    # kernel signed with the APEX MOK before it is published" — and it is the
+    # only way to get a guest that enforces Secure Boot against a certificate
+    # that is not in the stock varstore. libvirt leaves an existing file alone,
+    # so putting one at the nvram path before first start is how it is done.
+    #
+    # qcow2, always. libvirt refuses an INTERNAL snapshot of a domain whose
+    # nvram is raw pflash — there is nowhere in a raw image to put one — so a
+    # raw varstore here is a VM whose `apex vm snapshot` fails for a reason
+    # that has nothing to do with snapshots. See cmd_snapshot.
+    if [ -n "$UEFI_VARS" ]; then
+        [ -f "$UEFI_VARS" ] || { remove_vm_dir "$NAME"; die "--uefi-vars: no file at $UEFI_VARS"; }
+        "$QEMU_IMG" convert -O qcow2 "$UEFI_VARS" "$(vm_nvram "$NAME")" >/dev/null 2>&1 \
+            || { remove_vm_dir "$NAME"; die "--uefi-vars: $UEFI_VARS is not a variable store qemu-img can read"; }
+    elif [ "$SECURE" = 1 ] && ! have_ovmf; then
+        remove_vm_dir "$NAME"
+        die "no Secure-Boot-enforcing UEFI firmware with enrolled keys on this system.
+  Looked for a qemu firmware descriptor carrying both 'secure-boot' and
+  'enrolled-keys' under ${FIRMWARE_DIRS//:/ and }. Install it with:
+    $INSTALL_HINT
+  or create the VM with --no-secure-boot."
+    fi
+
+    domain_xml "$NAME" "$MEMORY" "$CPUS" "$SECURE" "$TPM" "$NETWORK" > "$(vm_xml "$NAME")" \
+        || { remove_vm_dir "$NAME"; die "cannot write the domain definition"; }
+    write_record "$NAME" "$MEMORY" "$CPUS" "$SECURE" "$TPM" "$NETWORK" "$DISK_SIZE"
+
+    if ! "$VIRSH" -c "$VM_URI" define "$(vm_xml "$NAME")" >/dev/null; then
+        # Teardown on failure, because a half-created VM is a directory the
+        # user has to find out about from an error message.
+        remove_vm_dir "$NAME"
+        die "libvirt refused the domain definition (the error is above). Nothing was kept."
+    fi
+
+    msg "created '$NAME': ${CPUS} vCPU, ${MEMORY} MiB, ${DISK_SIZE} disk"
+    msg "  Secure Boot: $([ "$SECURE" = 1 ] && echo enforcing || echo off)   TPM: $([ "$TPM" = 1 ] && echo 'emulated 2.0' || echo none)   network: ${NETWORK}"
+    msg "  start it with: apex vm start $NAME     console: apex vm console $NAME"
+    return 0
+}
+
+cmd_start() {
+    local name="${1:-}"
+    valid_vm_name "$name" || die "name the VM: apex vm start NAME"
+    require_stack
+    known_vm "$name"
+    "$VIRSH" -c "$VM_URI" start "$name" || die "libvirt could not start '$name'"
+    msg "'$name' is running. Attach with: apex vm console $name"
+}
+
+cmd_stop() {
+    local name="" force=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --force) force=1 ;;
+            -*) die "unknown option '$1'" ;;
+            *) name="$1" ;;
+        esac
+        shift
+    done
+    valid_vm_name "$name" || die "name the VM: apex vm stop NAME"
+    require_stack
+    known_vm "$name"
+    if [ "$force" = 1 ]; then
+        # `destroy` is libvirt's word for pulling the plug. Named --force here
+        # because "destroy" reads like it deletes the VM, which it does not.
+        "$VIRSH" -c "$VM_URI" destroy "$name" || die "could not stop '$name'"
+        warn "'$name' was powered off without a clean shutdown; its filesystem may need a check"
+    else
+        "$VIRSH" -c "$VM_URI" shutdown "$name" || die "could not ask '$name' to shut down"
+        msg "asked '$name' to shut down (a guest with no ACPI handler will ignore it; --force pulls the plug)"
+    fi
+}
+
+cmd_console() {
+    local name="" log=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --log) log=1 ;;
+            -*) die "unknown option '$1'" ;;
+            *) name="$1" ;;
+        esac
+        shift
+    done
+    valid_vm_name "$name" || die "name the VM: apex vm console NAME"
+    known_vm "$name"
+    if [ "$log" = 1 ]; then
+        local f; f="$(vm_console "$name")"
+        [ -f "$f" ] || die "'$name' has written no console output yet ($f does not exist)"
+        cat -- "$f"
+        return 0
+    fi
+    require_stack
+    # Serial, and only serial. There is no viewer and no --graphics path to
+    # reach: see the header.
+    msg "attaching to '$name' serial console — Ctrl-] to detach"
+    "$VIRSH" -c "$VM_URI" console "$name"
+}
+
+cmd_list() {
+    local json=0
+    [ "${1:-}" = "--json" ] && json=1
+    if [ ! -d "$VM_ROOT" ]; then
+        [ "$json" = 1 ] && { printf '[]\n'; return 0; }
+        msg "no VMs yet (apex vm create NAME)"
+        return 0
+    fi
+    local first=1 d name
+    [ "$json" = 1 ] && printf '['
+    [ "$json" = 0 ] && printf '%-20s %-10s %-12s %-6s %s\n' NAME STATE "SECURE BOOT" TPM NETWORK
+    for d in "$VM_ROOT"/*/; do
+        [ -d "$d" ] || continue
+        name="$(basename -- "${d%/}")"
+        valid_vm_name "$name" || continue
+        local state secure tpm network
+        state="$(vm_state "$name")"
+        secure="$(record_field "$name" secure_boot)"
+        tpm="$(record_field "$name" tpm)"
+        network="$(record_field "$name" network)"
+        if [ "$json" = 1 ]; then
+            [ "$first" = 1 ] || printf ','
+            first=0
+            printf '{"name":"%s","state":"%s","secure_boot":%s,"tpm":%s,"network":"%s"}' \
+                "$name" "$state" "${secure:-null}" "${tpm:-null}" "${network:-unknown}"
+        else
+            printf '%-20s %-10s %-12s %-6s %s\n' "$name" "$state" \
+                "$([ "$secure" = true ] && echo enforcing || echo off)" \
+                "$([ "$tpm" = true ] && echo 2.0 || echo none)" "${network:-unknown}"
+        fi
+    done
+    [ "$json" = 1 ] && printf ']\n'
+    return 0
+}
+
+# The domain's state, asked of libvirt and NOT inferred from the presence of a
+# directory. A VM whose daemon is not running reads as `unknown`, never as
+# `shut off`: "the question could not be asked" and "the answer is no" are
+# different answers, and this repository has shipped the confusion before.
+vm_state() {
+    have_libvirt_session || { printf 'unknown'; return 0; }
+    local s
+    s="$("$VIRSH" -c "$VM_URI" domstate "$1" 2>/dev/null | head -1)"
+    [ -n "$s" ] || { printf 'undefined'; return 0; }
+    printf '%s' "$s"
+}
+
+record_field() {
+    local f; f="$(vm_record "$1")"
+    [ -r "$f" ] || return 0
+    sed -n "s/.*\"$2\": *\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}.*/\1/p" "$f" | head -1
+}
+
+known_vm() {
+    local name="$1"
+    [ -d "$(vm_dir "$name")" ] \
+        || die "apex has no record of a VM called '$name' (apex vm list)"
+}
+
+cmd_info() {
+    local name="${1:-}"
+    valid_vm_name "$name" || die "name the VM: apex vm info NAME"
+    known_vm "$name"
+    local r; r="$(vm_record "$name")"
+    [ -r "$r" ] && cat -- "$r"
+    printf '\nstate: %s\n' "$(vm_state "$name")"
+    printf 'directory: %s\n' "$(vm_dir "$name")"
+}
+
+# ── snapshot ────────────────────────────────────────────────────────────────
+#
+# Internal qcow2 snapshots, taken of the disk AND the nvram together. Both, and
+# that is the part a snapshot implementation usually gets wrong: the varstore
+# holds the guest's boot entries and its enrolled keys, so a revert that
+# restores the disk and not the varstore produces a guest whose firmware points
+# at a boot entry the disk no longer has.
+#
+# libvirt refuses an internal snapshot of a domain whose nvram is RAW pflash —
+# there is nowhere in a raw image to put one. cmd_create writes a qcow2
+# varstore for exactly this reason, and a VM created before that was true will
+# be refused here with libvirt's own words rather than a guess.
+cmd_snapshot() {
+    local sub="${1:-}"; shift || true
+    case "$sub" in
+        create) snapshot_create "$@" ;;
+        list)   snapshot_list "$@" ;;
+        revert) snapshot_revert "$@" ;;
+        delete) snapshot_delete "$@" ;;
+        ""|-h|--help) snapshot_usage ;;
+        *) die "unknown snapshot verb '$sub' (create, list, revert, delete)" ;;
+    esac
+}
+
+snapshot_usage() {
+    cat >&2 <<'EOF'
+apex vm snapshot create NAME SNAPSHOT [--description TEXT]
+apex vm snapshot list   NAME
+apex vm snapshot revert NAME SNAPSHOT
+apex vm snapshot delete NAME SNAPSHOT
+
+A snapshot covers the disk and the UEFI variable store together. Reverting
+one restores both, so a guest comes back with the boot entries it had.
+EOF
+}
+
+snapshot_create() {
+    local name="${1:-}" snap="${2:-}"; shift 2 2>/dev/null || true
+    local description=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --description) shift; description="${1:-}" ;;
+            *) die "unknown option '$1'" ;;
+        esac
+        shift
+    done
+    valid_vm_name "$name" || die "name the VM: apex vm snapshot create NAME SNAPSHOT"
+    valid_tag "$snap" || die "name the snapshot: apex vm snapshot create $name SNAPSHOT"
+    require_stack
+    known_vm "$name"
+    local args=(-c "$VM_URI" snapshot-create-as --domain "$name" --name "$snap" --atomic)
+    [ -n "$description" ] && args+=(--description "$description")
+    "$VIRSH" "${args[@]}" \
+        || die "libvirt refused the snapshot (its reason is above).
+  The usual cause on an older VM is a raw UEFI variable store, which has
+  nowhere to keep one. 'apex vm info $name' shows when it was created."
+    msg "snapshot '$snap' of '$name' taken (disk and UEFI variables together)"
+}
+
+snapshot_list() {
+    local name="${1:-}"
+    valid_vm_name "$name" || die "name the VM: apex vm snapshot list NAME"
+    require_stack
+    known_vm "$name"
+    "$VIRSH" -c "$VM_URI" snapshot-list --domain "$name"
+}
+
+snapshot_revert() {
+    local name="${1:-}" snap="${2:-}"
+    valid_vm_name "$name" || die "name the VM: apex vm snapshot revert NAME SNAPSHOT"
+    valid_tag "$snap" || die "name the snapshot"
+    require_stack
+    known_vm "$name"
+    "$VIRSH" -c "$VM_URI" snapshot-revert --domain "$name" --snapshotname "$snap" \
+        || die "libvirt could not revert '$name' to '$snap'"
+    msg "'$name' is back at '$snap'"
+}
+
+snapshot_delete() {
+    local name="${1:-}" snap="${2:-}"
+    valid_vm_name "$name" || die "name the VM: apex vm snapshot delete NAME SNAPSHOT"
+    valid_tag "$snap" || die "name the snapshot"
+    require_stack
+    known_vm "$name"
+    "$VIRSH" -c "$VM_URI" snapshot-delete --domain "$name" --snapshotname "$snap" \
+        || die "libvirt could not delete snapshot '$snap'"
+}
+
+# ── share ───────────────────────────────────────────────────────────────────
+#
+# Adding a share to a defined domain, rather than only at create time, because
+# "I need to get this directory into the VM" arrives after the VM exists. The
+# edit goes through `virsh attach-device --config`, so it is persistent and
+# takes effect at next boot; a live attach of a vhost-user filesystem needs the
+# shared memory backing to have been there since start, which it cannot be if
+# the domain started without a share. That is stated rather than attempted:
+# a live attach that silently does nothing is worse than a refusal.
+cmd_share() {
+    local sub="${1:-}"; shift || true
+    case "$sub" in
+        add)    share_add "$@" ;;
+        remove) share_remove "$@" ;;
+        list)   share_list "$@" ;;
+        ""|-h|--help)
+            cat >&2 <<'EOF'
+apex vm share add NAME HOSTPATH:TAG [--readonly]
+apex vm share remove NAME TAG
+apex vm share list NAME
+
+The share appears in the guest as a virtiofs filesystem with that tag:
+    mount -t virtiofs TAG /mnt
+Takes effect at the VM's next start.
+EOF
+            ;;
+        *) die "unknown share verb '$sub' (add, remove, list)" ;;
+    esac
+}
+
+share_add() {
+    local name="${1:-}" spec="${2:-}"; shift 2 2>/dev/null || true
+    local ro=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --readonly) ro=1 ;;
+            *) die "unknown option '$1'" ;;
+        esac
+        shift
+    done
+    valid_vm_name "$name" || die "name the VM: apex vm share add NAME HOSTPATH:TAG"
+    require_stack
+    known_vm "$name"
+    have_virtiofsd || die "virtiofsd is not installed at $VIRTIOFSD.
+    $INSTALL_HINT"
+    SHARE_SRC=(); SHARE_TAG=(); SHARE_RO=()
+    add_share "$spec" "$ro"
+
+    # The shared-memory backing has to be on the domain or the device cannot
+    # start. Checked against the DEFINED domain rather than the file this tool
+    # wrote, because a user may have edited it with `virsh edit`.
+    if ! "$VIRSH" -c "$VM_URI" dumpxml "$name" 2>/dev/null | grep -q "access mode='shared'"; then
+        die "'$name' was created without a share and has no shared memory backing.
+  A virtiofs device cannot map the guest's memory without it, so attaching one
+  would define a domain that then fails to start. Recreate the VM with
+  --share, or add <memoryBacking><source type='memfd'/><access mode='shared'/>
+  with 'virsh -c $VM_URI edit $name' first."
+    fi
+
+    local tmp; tmp="$(mktemp)" || die "no temp file"
+    { printf '<devices>\n'; xml_filesystem "${SHARE_SRC[0]}" "${SHARE_TAG[0]}" "${SHARE_RO[0]}"; printf '</devices>\n'; } > "$tmp"
+    # The device file is a <filesystem> element, and virsh wants it alone; the
+    # <devices> wrapper above is stripped here so the file holds exactly one.
+    sed -i -e '1d' -e '$d' "$tmp"
+    "$VIRSH" -c "$VM_URI" attach-device "$name" "$tmp" --config \
+        || { rm -f "$tmp"; die "libvirt refused the share"; }
+    rm -f "$tmp"
+    msg "share added to '$name': ${SHARE_SRC[0]} as tag '${SHARE_TAG[0]}'$([ "${SHARE_RO[0]}" = 1 ] && echo ' (read-only)')"
+    msg "  it appears at the VM's next start; mount it with: mount -t virtiofs ${SHARE_TAG[0]} /mnt"
+}
+
+share_remove() {
+    local name="${1:-}" tag="${2:-}"
+    valid_vm_name "$name" || die "name the VM: apex vm share remove NAME TAG"
+    valid_tag "$tag" || die "name the share tag"
+    require_stack
+    known_vm "$name"
+    local src tmp
+    src="$("$VIRSH" -c "$VM_URI" dumpxml "$name" 2>/dev/null \
+        | sed -n "/<target dir='${tag}'/,/^\$/p" >/dev/null; printf '')"
+    tmp="$(mktemp)" || die "no temp file"
+    # Rebuilt from the defined domain rather than from this tool's record, so a
+    # share added by hand can also be removed.
+    "$VIRSH" -c "$VM_URI" dumpxml "$name" 2>/dev/null \
+        | awk -v tag="$tag" '
+            /<filesystem/ { buf=$0"\n"; inside=1; found=0; next }
+            inside { buf=buf$0"\n"; if ($0 ~ "<target dir=.\""tag"\"" || $0 ~ "<target dir=.'\''"tag"'\''") found=1 }
+            inside && /<\/filesystem>/ { if (found) printf "%s", buf; inside=0; next }
+            { }
+        ' > "$tmp"
+    [ -s "$tmp" ] || { rm -f "$tmp"; die "'$name' has no share tagged '$tag' (apex vm share list $name)"; }
+    "$VIRSH" -c "$VM_URI" detach-device "$name" "$tmp" --config \
+        || { rm -f "$tmp"; die "libvirt refused to remove the share"; }
+    rm -f "$tmp"
+    msg "share '$tag' removed from '$name' (takes effect at its next start)"
+}
+
+share_list() {
+    local name="${1:-}"
+    valid_vm_name "$name" || die "name the VM: apex vm share list NAME"
+    require_stack
+    known_vm "$name"
+    "$VIRSH" -c "$VM_URI" dumpxml "$name" 2>/dev/null \
+        | grep -E "<source dir=|<target dir=" \
+        | sed -e "s/^ *//" \
+        || msg "'$name' has no shares"
+}
+
+# ── USB ─────────────────────────────────────────────────────────────────────
+#
+# Passthrough, not redirection. `managed='yes'` makes libvirt take the device
+# away from the host driver while the domain holds it, which is what the user
+# wants for a YubiKey or a programmer and is a surprise for anything else — so
+# the host-side consequence is printed before it happens, and `--config` is the
+# default so the change survives a reboot of the guest but is visible in
+# `apex vm info`.
+cmd_usb() {
+    local sub="${1:-}"; shift || true
+    case "$sub" in
+        attach) usb_attach "$@" ;;
+        detach) usb_detach "$@" ;;
+        list)   usb_list "$@" ;;
+        ""|-h|--help)
+            cat >&2 <<'EOF'
+apex vm usb attach NAME VENDOR:PRODUCT [--live]
+apex vm usb detach NAME VENDOR:PRODUCT
+apex vm usb list   NAME
+
+VENDOR:PRODUCT is what `lsusb` prints, e.g. 046d:c52b. While the VM holds
+the device the HOST cannot use it.
+EOF
+            ;;
+        *) die "unknown usb verb '$sub' (attach, detach, list)" ;;
+    esac
+}
+
+usb_attach() {
+    local name="${1:-}" id="${2:-}"; shift 2 2>/dev/null || true
+    local live=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --live) live=1 ;;
+            *) die "unknown option '$1'" ;;
+        esac
+        shift
+    done
+    valid_vm_name "$name" || die "name the VM: apex vm usb attach NAME VENDOR:PRODUCT"
+    valid_usb_id "$id" || die "VENDOR:PRODUCT in hex, like 046d:c52b (got '$id')"
+    require_stack
+    known_vm "$name"
+    id="$(printf '%s' "$id" | tr 'A-F' 'a-f')"
+
+    # Asked of the host before libvirt is: "no such device" from libvirt names
+    # a bus and a device number the user never typed.
+    if command -v lsusb >/dev/null 2>&1 && ! lsusb -d "$id" >/dev/null 2>&1; then
+        die "no USB device $id is plugged into this machine (\`lsusb\` lists what is)"
+    fi
+
+    local tmp; tmp="$(mktemp)" || die "no temp file"
+    USB_IDS=("$id"); xml_hostdev "$id" > "$tmp"
+    local args=(-c "$VM_URI" attach-device "$name" "$tmp" --config)
+    [ "$live" = 1 ] && args+=(--live)
+    "$VIRSH" "${args[@]}" || { rm -f "$tmp"; die "libvirt refused the device"; }
+    rm -f "$tmp"
+    warn "the HOST can no longer use USB device $id while '$name' holds it"
+    msg "USB $id attached to '$name'$([ "$live" = 1 ] || echo ' (at its next start)')"
+}
+
+usb_detach() {
+    local name="${1:-}" id="${2:-}"
+    valid_vm_name "$name" || die "name the VM: apex vm usb detach NAME VENDOR:PRODUCT"
+    valid_usb_id "$id" || die "VENDOR:PRODUCT in hex, like 046d:c52b"
+    require_stack
+    known_vm "$name"
+    id="$(printf '%s' "$id" | tr 'A-F' 'a-f')"
+    local tmp; tmp="$(mktemp)" || die "no temp file"
+    xml_hostdev "$id" > "$tmp"
+    "$VIRSH" -c "$VM_URI" detach-device "$name" "$tmp" --config \
+        || { rm -f "$tmp"; die "libvirt refused to detach $id"; }
+    rm -f "$tmp"
+    msg "USB $id detached from '$name'; the host gets it back"
+}
+
+usb_list() {
+    local name="${1:-}"
+    valid_vm_name "$name" || die "name the VM: apex vm usb list NAME"
+    require_stack
+    known_vm "$name"
+    "$VIRSH" -c "$VM_URI" dumpxml "$name" 2>/dev/null \
+        | grep -E "<vendor id=|<product id=" | sed -e 's/^ *//' \
+        || msg "'$name' has no USB devices attached"
+}
+
+# ── removal ─────────────────────────────────────────────────────────────────
+cmd_rm() {
+    local name="" keep_disk=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --keep-disk) keep_disk=1 ;;
+            -*) die "unknown option '$1'" ;;
+            *) name="$1" ;;
+        esac
+        shift
+    done
+    valid_vm_name "$name" || die "name the VM: apex vm rm NAME"
+    known_vm "$name"
+    if have_libvirt_session; then
+        # Powered off first. Undefining a running domain leaves a transient one
+        # with no definition to come back to.
+        "$VIRSH" -c "$VM_URI" destroy "$name" >/dev/null 2>&1
+        # --nvram, because otherwise libvirt keeps the variable store and a VM
+        # recreated with the same name inherits the old one's enrolled keys.
+        "$VIRSH" -c "$VM_URI" undefine "$name" --nvram --snapshots-metadata >/dev/null 2>&1 \
+            || warn "libvirt did not undefine '$name'; its files are still removed"
+    else
+        warn "$VM_URI does not answer, so libvirt's copy of '$name' was left alone"
+    fi
+    if [ "$keep_disk" = 1 ]; then
+        msg "kept $(vm_disk "$name")"
+        return 0
+    fi
+    remove_vm_dir "$name"
+    msg "removed '$name' and its disk"
+}
+
+# ── apex vm run: P2-009's disposable VM, and its file egress ────────────────
+#
+# A VM that is created, runs one task, and is deleted — with an EXPLICIT,
+# name-by-name list of the files allowed to come back out.
+#
+# WHY THIS IS NOT `apex disposable --vm`
+# `apex disposable` says of itself, at length and correctly, that it is not a
+# security boundary: distrobox mounts the host's root filesystem at /run/host
+# inside every capsule and the process runs as the user's own uid. That
+# sentence is the reason this exists separately. Here the guest is a different
+# kernel with no view of the host filesystem at all, so the boundary is the
+# thing being offered rather than a caveat.
+#
+# THE TWO VOLUMES, AND WHY THEY ARE FAT IMAGES
+# Nothing is bind-mounted and no virtiofs share is used, because a share is a
+# live window into a host directory and this design wants a boundary that can
+# be inspected AFTER the fact:
+#
+#   in.img   built on the host from --copy-in paths plus the task script,
+#            attached READ-ONLY, labelled APEXIN.
+#   out.img  blank, attached read-write, labelled APEXOUT. The guest writes
+#            whatever it likes here.
+#
+# After the guest powers off, the host reads out.img with `mcopy` — a userspace
+# FAT reader, no mount, no loop device, no root — and copies out EXACTLY the
+# filenames the caller nominated with --egress. Everything else the guest wrote
+# stays in the image, and the image is deleted with the VM.
+#
+# That asymmetry is the whole point, and it is what makes the property
+# testable hostilely: the question is not "did the nominated file arrive", it
+# is "can a file the task did NOT nominate leave". tests/vmlab/run-vmlab has
+# the guest write both and asserts the second does not appear on the host.
+#
+# DEFAULT-DENY AT BOTH ENDS
+# Without --copy-in, the guest gets only the task script. Without --egress-to,
+# NOTHING leaves at all, whatever --egress says. Without --egress, --egress-to
+# receives nothing. Both halves have to be typed.
+#
+# NO NETWORK, AND NO FLAG TO TURN IT ON
+# `--network` is not accepted here. A disposable VM exists to run something the
+# user does not trust, and an outbound SLIRP interface is an exfiltration path
+# that makes the file-egress boundary decorative. A task that needs the network
+# is a task for `apex vm create --network user`, where the user typed it.
+#
+# THE GUEST CONTRACT, WRITTEN DOWN RATHER THAN IMPLIED
+# This engine does not build a guest image and does not install anything into
+# one. It defines the volumes and their labels; the guest must do the rest:
+#
+#   * mount the filesystem labelled APEXIN and run `task.sh` from it
+#   * write anything it wants to hand back to the filesystem labelled APEXOUT
+#   * power off
+#
+# A guest that does none of that produces an empty egress and a `timed out`
+# verdict, which is the correct outcome and not a silent success.
+
+RUN_PREFIX="run-"
+
+new_run_name() {
+    local suffix
+    suffix="$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 8)"
+    [ "${#suffix}" -eq 8 ] || die "cannot generate a name (no usable /dev/urandom)"
+    printf '%s%s' "$RUN_PREFIX" "$suffix"
+}
+
+# An egress nomination. It becomes an argument to `mcopy` naming a path inside
+# a FAT image, so it is a bare filename and nothing else: no directory
+# component, no `..`, no wildcard. A wildcard would turn "explicit file egress"
+# into "whatever matched", which is the property this whole verb is about.
+valid_egress_name() {
+    [ -n "${1:-}" ] || return 1
+    [ "${#1}" -le 64 ] || return 1
+    case "$1" in
+        */*|*'*'*|*'?'*|*'['*|.|..|.*) return 1 ;;
+    esac
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || return 1
+    return 0
+}
+
+cmd_run() {
+    local name="" memory=2048 cpus=2 timeout=600 image="" egress_to=""
+    local -a copy_in=() egress=() command=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name)      shift; name="${1:-}" ;;
+            --memory)    shift; memory="${1:-}" ;;
+            --cpus)      shift; cpus="${1:-}" ;;
+            --timeout)   shift; timeout="${1:-}" ;;
+            --image)     shift; image="${1:-}" ;;
+            --copy-in)   shift; copy_in+=("${1:-}") ;;
+            --egress)    shift; egress+=("${1:-}") ;;
+            --egress-to) shift; egress_to="${1:-}" ;;
+            --network)
+                refuse "--network is not accepted by \`apex vm run\`.
+  A disposable VM exists to run something you do not trust; an outbound
+  interface is an exfiltration path that would make the file-egress boundary
+  decorative. If the task needs the network, it is not a disposable-VM task:
+  use 'apex vm create --network user' and say so." ;;
+            --) shift; command=("$@"); break ;;
+            -*) die "unknown option '$1' (apex vm run --help)" ;;
+            *)  command=("$@"); break ;;
+        esac
+        shift
+    done
+
+    [ "${#command[@]}" -gt 0 ] || die "give the task a command: apex vm run -- COMMAND"
+    [[ "$memory" =~ ^[0-9]+$ ]] || die "--memory takes MiB as a number"
+    [[ "$cpus" =~ ^[0-9]+$ ]] || die "--cpus takes a number"
+    [[ "$timeout" =~ ^[0-9]+$ ]] || die "--timeout takes seconds as a number"
+    [ -n "$image" ] || die "--image names the guest disk to run the task in.
+  \`apex vm run\` does not build a guest: the image must already carry whatever
+  the task needs, and must mount the filesystem labelled APEXIN and run
+  task.sh from it. docs/virtualization.md states the contract."
+    [ -f "$image" ] || die "--image: no file at $image"
+
+    local n
+    for n in "${copy_in[@]}"; do
+        case "$n" in /*) ;; *) die "--copy-in needs an absolute path (got '$n')" ;; esac
+        [ -e "$n" ] || die "--copy-in: nothing at $n"
+    done
+    for n in "${egress[@]}"; do
+        valid_egress_name "$n" \
+            || die "--egress takes a plain filename, no directories and no wildcards (got '$n')"
+    done
+    if [ -n "$egress_to" ]; then
+        case "$egress_to" in /*) ;; *) die "--egress-to needs an absolute directory" ;; esac
+        [ "${#egress[@]}" -gt 0 ] \
+            || die "--egress-to was given but nothing was nominated with --egress, so nothing would leave"
+    fi
+
+    [ -n "$name" ] || name="$(new_run_name)"
+    valid_vm_name "$name" || die "'$name' is not a valid VM name"
+    require_stack
+    command -v mcopy >/dev/null 2>&1 \
+        || die "mtools is not installed; it is what reads the egress volume without mounting it.
+    $INSTALL_HINT mtools"
+    command -v mkfs.vfat >/dev/null 2>&1 || die "dosfstools is not installed (mkfs.vfat)"
+
+    local dir; dir="$(vm_dir "$name")"
+    [ -e "$dir" ] && die "'$name' already exists at $dir"
+    mkdir -p "$dir" || die "cannot create $dir"
+    chmod 0700 "$dir" 2>/dev/null
+
+    # Teardown on EVERY exit path including Ctrl-C, the same rule
+    # apex-disposable applies. A disposable VM that survives its run is not
+    # disposable, and a half-removed one is a domain libvirt still has.
+    # shellcheck disable=SC2317
+    run_teardown() {
+        "$VIRSH" -c "$VM_URI" destroy "$name" >/dev/null 2>&1
+        "$VIRSH" -c "$VM_URI" undefine "$name" --nvram --snapshots-metadata >/dev/null 2>&1
+        remove_vm_dir "$name"
+    }
+    trap 'run_teardown' EXIT INT TERM
+
+    # ── the copy-in volume ──────────────────────────────────────────────────
+    local in_img="$dir/in.img" out_img="$dir/out.img"
+    truncate -s 64M "$in_img" || die "cannot create the copy-in volume"
+    mkfs.vfat -F 32 -n APEXIN "$in_img" >/dev/null || die "cannot format the copy-in volume"
+    { printf '#!/bin/sh\n'; printf '%s\n' "${command[*]}"; } > "$dir/task.sh"
+    mcopy -i "$in_img" "$dir/task.sh" ::/task.sh || die "cannot stage the task"
+    for n in "${copy_in[@]}"; do
+        mcopy -s -i "$in_img" "$n" "::/$(basename -- "$n")" \
+            || die "cannot copy $n into the copy-in volume"
+    done
+
+    # ── the egress volume ───────────────────────────────────────────────────
+    truncate -s 256M "$out_img" || die "cannot create the egress volume"
+    mkfs.vfat -F 32 -n APEXOUT "$out_img" >/dev/null || die "cannot format the egress volume"
+
+    # ── the domain ──────────────────────────────────────────────────────────
+    # Built from the same generator every other VM uses, so a disposable VM is
+    # not a second idea of what a domain looks like. Network `none` is passed
+    # positionally and there is no path by which it can be anything else.
+    SHARE_SRC=(); SHARE_TAG=(); SHARE_RO=(); USB_IDS=()
+    cp -- "$image" "$(vm_disk "$name")" || die "cannot copy the guest image"
+    {
+        domain_xml "$name" "$memory" "$cpus" 0 0 none \
+            | sed "/<\/devices>/i\\
+    <disk type='file' device='disk'><driver name='qemu' type='raw'/><source file='$in_img'/><target dev='vdb' bus='virtio'/><readonly/></disk>\\
+    <disk type='file' device='disk'><driver name='qemu' type='raw'/><source file='$out_img'/><target dev='vdc' bus='virtio'/></disk>"
+    } > "$(vm_xml "$name")" || die "cannot write the domain definition"
+
+    "$VIRSH" -c "$VM_URI" define "$(vm_xml "$name")" >/dev/null \
+        || die "libvirt refused the disposable domain"
+    "$VIRSH" -c "$VM_URI" start "$name" >/dev/null \
+        || die "libvirt could not start the disposable VM"
+    msg "'$name' is running the task; console log: $(vm_console "$name")"
+
+    # ── wait for the guest to finish ────────────────────────────────────────
+    local waited=0 state
+    while [ "$waited" -lt "$timeout" ]; do
+        state="$("$VIRSH" -c "$VM_URI" domstate "$name" 2>/dev/null | head -1)"
+        [ "$state" = "shut off" ] && break
+        sleep 2
+        waited=$((waited + 2))
+    done
+    if [ "$waited" -ge "$timeout" ]; then
+        warn "'$name' did not power off within ${timeout}s; pulling the plug"
+        "$VIRSH" -c "$VM_URI" destroy "$name" >/dev/null 2>&1
+        # NOT a reason to skip egress: a task that produced its file and then
+        # hung has still produced its file, and the caller can tell which
+        # happened from this warning.
+    fi
+
+    # ── egress: exactly the nominated names, and nothing else ───────────────
+    #
+    # The loop is over the NOMINATIONS, never over the contents of the volume.
+    # That direction is the security property: iterating the image and copying
+    # what matches would let the guest decide what leaves by choosing filenames,
+    # which is the defect this verb exists to not have.
+    local copied=0 missing=0
+    if [ -n "$egress_to" ]; then
+        mkdir -p "$egress_to" || die "cannot create $egress_to"
+        for n in "${egress[@]}"; do
+            if mcopy -n -i "$out_img" "::/$n" "$egress_to/$n" 2>/dev/null; then
+                copied=$((copied + 1))
+                msg "egress: $n -> $egress_to/$n"
+            else
+                missing=$((missing + 1))
+                warn "egress: the task did not produce '$n'"
+            fi
+        done
+        msg "egress: ${copied} of ${#egress[@]} nominated files left the VM; everything else stayed in it"
+    else
+        msg "nothing left the VM: --egress-to was not given"
+    fi
+
+    [ "$missing" -eq 0 ]
+}
+
+# ── usage ───────────────────────────────────────────────────────────────────
+usage() {
+    cat >&2 <<EOF
+apex vm — full virtual machines, headless and rootless.
+
+  apex vm doctor                       what the stack has and what it needs
+  apex vm create NAME [options]        define a VM and its disk
+  apex vm list [--json]                what exists and what state it is in
+  apex vm info NAME                    what it was made from
+  apex vm start|stop NAME              power
+  apex vm console NAME [--log]         serial console, or the log it wrote
+  apex vm snapshot ...                 disk + UEFI variables, together
+  apex vm share ...                    a host directory, over virtiofs
+  apex vm usb ...                      pass a host USB device through
+  apex vm rm NAME [--keep-disk]        undefine and delete
+  apex vm run --image DISK -- CMD      one task in a throwaway VM (P2-009)
+
+create options:
+  --memory MiB (2048)   --cpus N (2)   --disk SIZE (20G)
+  --import FILE         start from an existing qcow2 instead of a blank disk
+  --uefi-vars FILE      start from this UEFI variable store, so the guest
+                        enforces Secure Boot against the keys IT carries
+  --secure-boot         enforcing UEFI Secure Boot (the default)
+  --no-secure-boot      for a guest whose kernel is not signed
+  --tpm / --no-tpm      an emulated TPM 2.0 (the default is --tpm)
+  --network user|none   user-mode NAT (the default), or no network at all
+  --share PATH:TAG      a host directory over virtiofs; --share-ro for read-only
+  --usb VENDOR:PRODUCT  pass a host USB device through, as \`lsusb\` prints it
+
+run options:
+  --copy-in PATH        copied into the read-only APEXIN volume. Repeatable.
+  --egress NAME         a filename the task may hand back. Repeatable.
+  --egress-to DIR       where those files land. WITHOUT IT, NOTHING LEAVES.
+  --timeout SECS (600)  how long to wait for the guest to power off
+
+  The VM has NO network and no flag to give it one. Only the names given to
+  --egress are read back out of the egress volume; anything else the guest
+  wrote is deleted with the VM.
+
+Every VM here is a per-user domain at ${VM_URI}. There is no viewer:
+the console is serial. --network bridge is refused — it would need libvirt's
+system daemon and a host bridge that outlives the VM.
+
+The stack is userspace and is NOT in the APEX image; the KVM kernel modules
+are. \`apex vm doctor\` prints the one command that installs the rest.
+EOF
+}
+
+# ── main ────────────────────────────────────────────────────────────────────
+main() {
+    local cmd="${1:-}"; shift || true
+    case "$cmd" in
+        doctor)   cmd_doctor "$@" ;;
+        create)   cmd_create "$@" ;;
+        list)     cmd_list "$@" ;;
+        info)     cmd_info "$@" ;;
+        start)    cmd_start "$@" ;;
+        stop)     cmd_stop "$@" ;;
+        console)  cmd_console "$@" ;;
+        snapshot) cmd_snapshot "$@" ;;
+        share)    cmd_share "$@" ;;
+        usb)      cmd_usb "$@" ;;
+        rm)       cmd_rm "$@" ;;
+        run)      cmd_run "$@" ;;
+        ""|-h|--help|help) usage ;;
+        *) die "unknown command '$cmd' (apex vm --help)" ;;
+    esac
+}
+
+main "$@"

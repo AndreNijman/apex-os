@@ -37,6 +37,7 @@ mod task;
 mod touchpad;
 mod trust;
 mod verify;
+mod vm;
 
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -670,6 +671,27 @@ enum Cmd {
     Disposable {
         #[command(subcommand)]
         cmd: disposable::DisposableCmd,
+    },
+    /// Virtual machines: a full guest with its own kernel (P2-008).
+    ///
+    /// Not a second `apex env`. A capsule shares this kernel and this home; a
+    /// VM shares neither, which is what makes it the right tool for booting
+    /// another operating system, testing the installer, or running something
+    /// that may take its kernel down with it.
+    ///
+    /// Rootless and session-scoped: every domain lives at `qemu:///session`,
+    /// so there is no system daemon, no polkit prompt, and no `virbr0` left
+    /// behind on the host. Headless: the console is serial, there is no
+    /// viewer.
+    ///
+    /// The stack it drives — qemu, libvirt, OVMF, swtpm, virtiofsd — is
+    /// userspace and is NOT in the image; the KVM kernel modules are, because
+    /// a kernel module cannot be added at runtime under Secure Boot and
+    /// userspace can. `apex vm doctor` prints the one command that installs
+    /// the rest.
+    Vm {
+        #[command(subcommand)]
+        cmd: vm::VmCmd,
     },
 }
 
@@ -1476,6 +1498,7 @@ async fn main() {
         // Unprivileged for the same structural reason `apex env` is: a
         // disposable capsule is a rootless per-user container.
         Cmd::Disposable { cmd } => ops::disposable(&disposable::argv(cmd)),
+        Cmd::Vm { cmd } => ops::vm(&vm::argv(cmd)),
         Cmd::Changelog => ops::changelog(),
         Cmd::Install {
             packages,
