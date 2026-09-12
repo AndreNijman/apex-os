@@ -3300,7 +3300,7 @@ tasks:
 - id: P1-058
   title: Android push notifications and input-needed workflow
   priority: P1
-  status: todo
+  status: partial
   area: android
   depends_on:
   - P1-053
@@ -3314,6 +3314,82 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    LANDED on apex-os task/p1-053b-android-ux 2026-09-12 (abf76451, fdf31ace, a5f1d459, 183b6a34, e6f60563).
+    PARTIAL, and the unmet parts are named: the encryption criterion is VACUOUS on this runtime and is stated as
+    such rather than claimed as built, deployment notifications have nothing on the wire to fire from, and the
+    whole feature works only while a poll loop is alive. Verified headless, NO device and NO emulator: 383 core
+    JVM tests, 27 app JVM tests, a debug APK, 746 apex-agent-core Rust tests; both android gates pass. THERE IS NO
+    PUSH TRANSPORT ANYWHERE IN APEX, measured not assumed: no FCM, Firebase, UnifiedPush or ntfy reference in this
+    repository, android/ included; no subscribe, watch or follow verb on apex-agentd's socket (attach is the only
+    long-lived one and it streams raw PTY bytes, not typed state); the relay is a stateless byte-copier that has
+    NEVER BEEN DEPLOYED (relay/README.md:11), both ends dial out to it, and apex-remote-core's Frame enum has no
+    notification tag. So an alert is derived from POLLING A CONNECTION THE PHONE OPENED, and every claim below is
+    bounded by that. MET: working-complete, failed, input-needed, permission/capability-request and test-failure
+    notifications. The vocabulary is Alert.Kind with six members. One of them carries a runtime fact worth
+    recording: 'working complete' is effectively UNREACHABLE for an interactive agent — AgentState::Complete comes
+    only from the process exiting 0 (session.rs:493) and the claude adapter runs claude interactively, so the end
+    of a turn publishes waiting_for_user via the stop hook. A separate 'finished' alert would never fire, and
+    WAITING carries both. NOT MET: deployment notifications. Nothing in this build performs a deployment reachable
+    from this socket (see P1-057: Capability never appears on the wire, and apex-remoted never connects to
+    apex-secretd), so there is no event to raise one from. MET WITH A NARROW WINDOW, stated plainly: test-failure
+    alerts are raised from a worktrees poll, but worktrees is deliberately NOT on the four-second timer (answering
+    it runs git in every remembered project with merge-tree --write-tree), so the watcher is handed the last
+    explicitly-fetched list each poll and sees no transition between polls. A TEST_FAILED alert therefore fires
+    only across two Projects-screen refreshes that straddle the change. True, but the delivery window is that
+    narrow and nobody should read 'supported' as 'timely'. CRITERION 2 IS VACUOUS AND IS SAID TO BE: 'notification
+    content is encrypted/minimized so push infrastructure does not receive sensitive prompt/code content' — NO
+    PUSH INFRASTRUCTURE RECEIVES ANYTHING, BECAUSE THERE IS NONE. What survives of the criterion is 'minimized',
+    which is real and is enforced: a phone on a table shows its lock screen to whoever is in the room.
+    NotificationContent (in :core, where a test can reach it) renders from fixed strings, an adapter name and a
+    machine name and from nothing else. SessionInfo.detail never reaches it — hook::detail_for (hook.rs:437)
+    copies Bash command lines, file paths, grep patterns, fetched URLs, task descriptions and Claude's own
+    notification text VERBATIM, clipped to 120 characters, and it is the field a notification would most naturally
+    want. Nor do cwd, project, worktree, args or telemetry.branch. NotificationsTest drives the assertion through
+    the WHOLE path — a session record carrying a password in detail, a project name, a worktree name, a path and a
+    prompt argument, through AlertWatcher, through NotificationContent.of — and asserts none of it appears;
+    against a hand-built Alert the assertion would be VACUOUS, since Alert has no field to put a secret in. The
+    mutation that proves it load-bearing (AlertWatcher putting s.detail in the alert) turns that named test red.
+    MET: tapping a notification opens the exact task/session. The intent carries (machine, session) and NOT just a
+    number, because SessionInfo.id is a per-daemon counter that is REUSED after a prune (registry.rs:441) and is
+    not unique across machines either — two paired laptops both have a session 1. When the session is gone the tap
+    lands on the Agent Center rather than on whatever now holds that number. MET: duplicates are deduplicated, and
+    the duplicate is NOT Claude-versus-APEX as the criterion assumes — it is INTERNAL TO APEX. Four independent
+    paths publish waiting_for_user for one turn (the notification hook, the stop hook, the PTY BEL/OSC scanner,
+    and the ten-second idle rule) and Session::set_state (registry.rs:163) has NO same-state early return, so a
+    poller keying on 'saw waiting_for_user' fires up to four times seconds apart. SessionInfo carries no field
+    naming the hook event, so the four are not distinguishable at the client even in principle. Dedup is therefore
+    on the TRANSITION EDGE, which is the only rule available and happens to be the right one; the notification id
+    is derived from (machine, session, kind) via String.hashCode, which the JVM SPECIFIES, so a re-raised alert
+    REPLACES rather than stacks even across an app restart. Two further rules are tested: the first poll of a
+    machine raises nothing (six sessions waiting since yesterday are not six things that just happened, and an
+    empty map is also the state after a process restart, which is when the burst would be worst), and a pruned
+    session is dropped from the map so a recycled id is not diffed against a stranger's state. BEYOND THE CRITERIA
+    — THE INPUT-NEEDED WORKFLOW IS NOW ACTIONABLE. Request::Input { id, data } exists (protocol.rs, dispatched at
+    apex-agentd/src/main.rs:710) and A PHONE MAY USE IT: privilege::refuse_input (privilege.rs:326) refuses
+    exactly two callers, a connection that IS a managed session and one whose origin could not be classified, and
+    apex-remoted is neither. Unlike decide this is not a verb a phone is refused, and the asymmetry is the
+    daemon's own reasoning — section 7 reserves AUTHORISING ROOT for a human at the machine, and typing a sentence
+    at an agent is not that; what the gate prevents is an agent typing at another agent. So a notification can now
+    be answered without attaching a PTY. Two rules carry it, both tested and mutation-checked: the daemon appends
+    NOTHING (session::write_input writes raw bytes), so a reply sent as typed sits unsubmitted on the agent's
+    input line looking exactly like nothing having happened — Reply.bytes appends CR, which is what a terminal
+    delivers for the return key, and strips the newline Android's IME adds, which would otherwise submit the reply
+    AND a bare return that many agents read as accepting the default; and a session id is NOT an identity, so
+    Reply.Target carries started (written once at spawn) and check compares it BEFORE liveness, because a reply
+    composed from a notification and sent after the id was recycled would type the user's sentence into a
+    different agent's terminal. DEFECT FOUND AND FIXED IN REVIEW: replyToSession caught every exception with 'The
+    reply may already have been delivered', which is the opposite of what protocol.rs guarantees and the worst
+    possible message here — told it might have landed, the user does not resend and the agent waits for ever. An
+    AgentError means the daemon ANSWERED and nothing was typed; only a transport failure is genuinely ambiguous.
+    The catches are split, and Agentd.isTooOld gets its own sentence. NOT VERIFIED: every Compose behaviour; the
+    POST_NOTIFICATIONS permission dialog; whether a notification is actually posted, grouped or replaced by
+    Android; notification tap routing; and the input happy path against a real daemon — Request::Input landed
+    2026-09-08 (8c3958df), the same day as Worktrees, and the L16's image is 2026-09-05, so this machine takes the
+    too-old path every time. No relay leg either, so LAN only. Mutation-checked: eleven mutations across Reply,
+    Notifications, Alerts, Agentd and protocol.rs each turn a NAMED test red, including a Rust one (renaming
+    Request::Input's data field on the wire turns android_requests_wire red); every file restored byte-identical
+    with plain cp, the Rust restore confirmed by an empty git diff.
 - id: P1-059
   title: Android voice, screenshot, file and clipboard handoff
   priority: P1
