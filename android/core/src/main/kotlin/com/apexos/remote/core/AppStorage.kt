@@ -90,8 +90,62 @@ class AppStorage(private val directory: File) {
     fun update(block: (MachineStore) -> MachineStore): MachineStore =
         block(load()).also { save(it) }
 
+    // ── the crash report (P1-060) ───────────────────────────────────────────
+    //
+    // Here rather than in `:app` for the reason everything else is: `:app` does
+    // not open files, `no-second-write-path.sh` enforces that, and
+    // `InsecureStorageTest` walks this directory and accounts for every byte.
+    // A crash report written by an uncaught-exception handler of its own would
+    // be a second write path AND a file created at the worst moment — when the
+    // process is dying and nobody is watching what goes into it.
+    //
+    // It is one file, overwritten, never appended. A log that grows is a log
+    // that eventually holds a year of crashes on a phone somebody loses.
+
+    /** Public so the storage walk can name it. There is nothing secret in the path. */
+    val crashFile: File = File(directory, CRASH_NAME)
+
+    /**
+     * Keep a report, or refuse to.
+     *
+     * Refuses when consent is off and refuses a malformed report, and does
+     * both HERE rather than at the call site. The call site is an uncaught
+     * exception handler: it runs while the process is being torn down, it is
+     * the least tested code in any app, and a consent check that lived there
+     * would be one `if` away from writing anyway.
+     *
+     * @return whether anything was written.
+     */
+    fun saveCrash(report: String, consented: Boolean): Boolean {
+        if (!consented) return false
+        if (!CrashReport.isWellFormed(report)) return false
+        return try {
+            directory.mkdirs()
+            crashFile.writeText(report)
+            true
+        } catch (_: Exception) {
+            // A crash inside crash handling loses the report and nothing else.
+            false
+        }
+    }
+
+    /** The last report, if there is one and it still looks like one. */
+    fun loadCrash(): String? = try {
+        crashFile.takeIf { it.exists() }?.readText()?.takeIf { CrashReport.isWellFormed(it) }
+    } catch (_: Exception) {
+        null
+    }
+
+    /** Forget it. Called once the user has read it or turned consent off. */
+    fun clearCrash() {
+        crashFile.delete()
+    }
+
     companion object {
         /** One file, named for what it holds rather than for the app. */
         const val STORE_NAME = "machines.json"
+
+        /** The last crash, if consent allowed one to be kept. */
+        const val CRASH_NAME = "last-crash.txt"
     }
 }

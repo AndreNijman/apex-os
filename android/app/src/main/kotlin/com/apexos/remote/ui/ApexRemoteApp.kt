@@ -25,6 +25,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.apexos.remote.ui.agent.AgentCenterScreen
+import com.apexos.remote.ui.agent.HelpScreen
 import com.apexos.remote.ui.agent.ApprovalsScreen
 import com.apexos.remote.ui.agent.SessionScreen
 import com.apexos.remote.ui.agent.WorktreesScreen
@@ -32,6 +33,8 @@ import com.apexos.remote.ui.agent.StartAgentScreen
 import com.apexos.remote.ui.agent.knownDirectories
 import com.apexos.remote.ui.term.TerminalScreen
 import com.apexos.remote.ui.theme.ApexRemoteTheme
+import android.content.Intent
+import androidx.compose.ui.platform.LocalContext
 
 /**
  * The whole app, above the screens.
@@ -62,6 +65,9 @@ object Destinations {
 
     /** Privileged operations waiting at the machine, and standing grants. */
     const val APPROVALS = "approvals"
+
+    /** The guide (P1-060), whose words live in `:core`. */
+    const val HELP = "help"
 }
 
 @Composable
@@ -107,6 +113,13 @@ fun ApexRemoteApp(
 
         NavHost(navigation, startDestination = Destinations.MACHINES) {
             composable(Destinations.MACHINES) {
+                val context = LocalContext.current
+                // Read on arrival. A report written by the handler during the
+                // PREVIOUS process is on disk before this one starts, so
+                // nothing else would ever notice it.
+                LaunchedEffect(state.settings.crashReports) {
+                    if (state.settings.crashReports) viewModel.refreshCrash()
+                }
                 MachinesScreen(
                     state = state,
                     onPair = { navigation.navigate(Destinations.PAIRING) },
@@ -117,6 +130,19 @@ fun ApexRemoteApp(
                     onPing = { viewModel.ping(activity, it) },
                     onForget = { viewModel.forget(it) },
                     onDynamicColour = { viewModel.setDynamicColour(it) },
+                    onCrashReports = { viewModel.setCrashReports(it) },
+                    onShareCrash = { report ->
+                        // ACTION_SEND with the text in the intent, so the user
+                        // picks where it goes. No upload, no reporting SDK,
+                        // and no destination this app chose for them.
+                        val send = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "APEX Remote crash report")
+                            putExtra(Intent.EXTRA_TEXT, report)
+                        }
+                        runCatching { context.startActivity(Intent.createChooser(send, null)) }
+                    },
+                    onClearCrash = { viewModel.clearCrash() },
                     onLock = { viewModel.lock() },
                     onDismiss = { viewModel.dismiss() },
                 )
@@ -175,6 +201,7 @@ fun ApexRemoteApp(
                     onStart = { navigation.navigate(Destinations.START) },
                     onProjects = { navigation.navigate(Destinations.WORKTREES) },
                     onApprovals = { navigation.navigate(Destinations.APPROVALS) },
+                    onHelp = { navigation.navigate(Destinations.HELP) },
                     pendingApprovals = state.agents.approvals.pending.size,
                     notificationsEnabled = state.notificationsEnabled,
                     notificationsUnasked = state.notificationsUnasked,
@@ -201,6 +228,7 @@ fun ApexRemoteApp(
                     SessionScreen(
                         session = session,
                         machine = state.agents.machine?.machine ?: "",
+                        liveSessions = state.agents.sessions,
                         nowSeconds = state.agents.nowSeconds,
                         busy = state.agents.busy,
                         failure = state.agents.failure,
@@ -269,6 +297,10 @@ fun ApexRemoteApp(
                     onRevokeSystemGrant = { viewModel.revokeSystemGrant(it) },
                     onBack = { navigation.popBackStack() },
                 )
+            }
+
+            composable(Destinations.HELP) {
+                HelpScreen(onBack = { navigation.popBackStack() })
             }
 
             composable(Destinations.START) {

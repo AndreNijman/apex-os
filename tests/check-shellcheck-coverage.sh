@@ -30,11 +30,19 @@ FLAGS=(-S warning -x)
 
 command -v shellcheck >/dev/null || { echo "FATAL: shellcheck is not installed"; exit 1; }
 
-# Every shell script under tests/ and files/. A shebang naming zsh or fish is
-# NOT a shell shellcheck can read, and counting one as a failure would park it
-# on the known-failing list for ever.
+# Every shell script under tests/, files/ and android/tools/. A shebang naming
+# zsh or fish is NOT a shell shellcheck can read, and counting one as a failure
+# would park it on the known-failing list for ever.
+#
+# `android/tools` was added after the same reasoning as this file's own: the
+# discovery roots were the two directories somebody thought of, and the Android
+# client's three gate scripts — the two that enforce its storage and colour
+# rules, and the one that runs the stop-slop checker over its guide — were
+# linted by nobody at all. All three were already clean at this severity, so
+# the gap cost nothing this time. A root nobody listed is the same hole as a
+# script nobody listed.
 mapfile -t scripts < <(
-    find tests files -type f \
+    find tests files android/tools -type f \
         \( -name '*.sh' -o -perm -u+x \) 2>/dev/null \
     | while IFS= read -r f; do
         case "$f" in */__pycache__/*|*/.git/*) continue ;; esac

@@ -1,0 +1,305 @@
+package com.apexos.remote.core.agent
+
+/**
+ * The in-app guide (P1-060), and its agreement with the desktop's.
+ *
+ * ## Why the words live in `:core`
+ *
+ * For the reason `AgentHelpContent.qml` exists on the desktop: prose in one
+ * file can be read start to finish, and a test can hold it to the stop-slop
+ * rules without scanning UI code around it. It also means `HelpParityTest` can
+ * compare this against a vendored copy of the desktop's file, which is the only
+ * way "equivalent to desktop Agents/Workspaces help" is a claim anybody can
+ * check rather than a claim somebody made.
+ *
+ * ## Equivalent is not identical, and the difference is written down
+ *
+ * The two clients do not have the same powers. A phone cannot approve a root
+ * operation, cannot restore a checkpoint, and cannot turn the agent runtime on.
+ * Help that repeated the desktop's instructions would be telling somebody
+ * holding a phone to do things they cannot do from it, which is worse than
+ * saying less.
+ *
+ * So the SECTIONS match one for one — that is what the parity test asserts —
+ * and where a section's content differs it says what this device can do and
+ * names what it cannot. [Section.desktopId] is the link between the two, and
+ * a desktop section with no counterpart has to be listed in the parity test's
+ * allowlist with a reason, so dropping one is a decision somebody writes down
+ * rather than a gap nobody notices.
+ */
+object Help {
+
+    /**
+     * One block of the guide.
+     *
+     * The kinds are the desktop's, deliberately: `h` a sub-heading, `p` a
+     * paragraph, `cmd` a command printed verbatim, `kv` a term and its meaning,
+     * `note` a paragraph with a rule down its edge, `todo` something the
+     * roadmap asks for that this build does not have. Two vocabularies for one
+     * document is how the two ends stop looking like one product.
+     */
+    data class Block(val kind: Kind, val text: String, val term: String = "")
+
+    enum class Kind { H, P, CMD, KV, NOTE, TODO }
+
+    data class Section(
+        /** The desktop section this answers to. */
+        val desktopId: String,
+        val title: String,
+        val blocks: List<Block>,
+    )
+
+    private fun h(t: String) = Block(Kind.H, t)
+    private fun p(t: String) = Block(Kind.P, t)
+    private fun cmd(t: String) = Block(Kind.CMD, t)
+    private fun kv(term: String, t: String) = Block(Kind.KV, t, term)
+    private fun note(t: String) = Block(Kind.NOTE, t)
+    private fun todo(t: String) = Block(Kind.TODO, t)
+
+    /** What the help entry is called where it is offered. */
+    const val ENTRY_LABEL: String = "How agents and workspaces work"
+
+    val sections: List<Section> = listOf(
+        Section(
+            desktopId = "start",
+            title = "Start here",
+            blocks = listOf(
+                h("An APEX agent is an ordinary agent in a terminal APEX owns"),
+                p(
+                    "An agent is a coding assistant that runs in a terminal: Claude Code, " +
+                        "OpenCode, Codex or Gemini. APEX does not replace it. APEX opens the " +
+                        "terminal and runs the same binary you would have typed yourself, so " +
+                        "the agent behaves the way it does outside APEX.",
+                ),
+                p(
+                    "The shell on the machine does not own that terminal. The agent runtime " +
+                        "does, which is why closing a window there does not stop the work and " +
+                        "why this phone can pick the session up from anywhere at all.",
+                ),
+                h("What this app is"),
+                p(
+                    "A second window onto agents running on a computer you have paired with. " +
+                        "The phone read all of this from that computer, over a connection it " +
+                        "opened. Nothing runs on the phone.",
+                ),
+                h("Starting an agent from here"),
+                p(
+                    "Agent Center lists what is running. New starts one. It asks for a " +
+                        "directory and an agent, and takes an opening instruction when you " +
+                        "have one. The directory is a path on the computer, not on the phone.",
+                ),
+                note(
+                    "The agent runtime has to be switched on at the computer before any of " +
+                        "this answers. It is a per-user service that stays off until asked, " +
+                        "and it cannot be switched on from a phone, because turning on the " +
+                        "thing that runs commands as you is a decision APEX keeps at the " +
+                        "keyboard. Run this there once:",
+                ),
+                cmd("apex agent enable"),
+            ),
+        ),
+        Section(
+            desktopId = "projects",
+            title = "Projects and worktrees",
+            blocks = listOf(
+                h("A worktree is a second checkout of the same repository"),
+                p(
+                    "Git can have several working directories sharing one history. APEX uses " +
+                        "that to let an agent work on a branch without touching the files you " +
+                        "have open, so a review and a rewrite can happen at the same time.",
+                ),
+                h("What the Projects screen shows"),
+                p(
+                    "Each project the computer remembers, with its worktrees underneath. A row " +
+                        "that arrived before APEX knew which project owned it goes in a " +
+                        "bucket of its own rather than under the wrong heading.",
+                ),
+                kv("Changed", "Files that differ from the base, plus the lines added and removed."),
+                kv("Ahead / behind", "Commits this worktree has that the base does not, and the reverse."),
+                kv("Merge state", "The result APEX got when it tried the merge. Unknown stands until it has tried, and unknown is not clean."),
+                kv("Tests", "The last run APEX saw. Not observed, running, passed and failed are four answers, and no two of them mean the same thing."),
+                kv("Ready to propose", "A judgement the computer made from local facts. Nothing here asked GitHub anything."),
+                note(
+                    "This list stays off the four-second timer the session list uses. To " +
+                        "answer it the computer runs git in each remembered project, and the " +
+                        "trial merge writes objects. The phone therefore asks for this list " +
+                        "when you open the screen, not behind your back.",
+                ),
+            ),
+        ),
+        Section(
+            desktopId = "review",
+            title = "Review, checkpoints and undo",
+            blocks = listOf(
+                h("The summary, not the diff"),
+                p(
+                    "Per worktree: how many files changed, how many lines, what the last test " +
+                        "run did, whether a merge would conflict, and whether the work looks " +
+                        "finished. The computer sends counts and no file names, so a list of " +
+                        "changed files on this screen would be a list the app invented.",
+                ),
+                h("Checkpoints"),
+                p(
+                    "A checkpoint is a snapshot of the tree taken before an agent starts, so " +
+                        "there is something to go back to. The toggle on the New screen asks for " +
+                        "one. A session that has one shows its id.",
+                ),
+                note(
+                    "A checkpoint cannot be restored from this phone, and caution is not the " +
+                        "reason. No verb on this connection reads a checkpoint or reverses " +
+                        "one. The computer works out what a restore would change from the " +
+                        "snapshot's own tree, and none of that crosses the wire. A list of " +
+                        "consequences on this screen would therefore describe a destructive " +
+                        "operation from the wrong data. Run it there:",
+                ),
+                cmd("apex agent undo --checkpoint <id>"),
+                todo(
+                    "Showing what an undo would change, before it runs, is on the roadmap. " +
+                        "It needs a checkpoint verb on the connection this app uses, which " +
+                        "this build does not have.",
+                ),
+            ),
+        ),
+        Section(
+            desktopId = "sandbox",
+            title = "Sandbox and permissions",
+            blocks = listOf(
+                h("Five questions, kept apart"),
+                p(
+                    "A session carries what APEX decided about it, and each line answers a " +
+                        "different question. One word covering all five would hide the one " +
+                        "that matters on the day it matters.",
+                ),
+                kv("Sandbox", "The parts of the filesystem the agent can see."),
+                kv("Network", "Whether it can reach the network, and how much of it."),
+                kv("System", "Whether it holds a grant to do anything as root, and for how long."),
+                kv("Secrets", "Whether the secret broker will hand it credentials."),
+                kv("Agent", "The agent's own account of its permission mode. Its report, not APEX's decision."),
+                h("Approving things"),
+                p(
+                    "Approvals lists what agents asked for and how it went, the standing " +
+                        "grants each project holds, and any live system access.",
+                ),
+                note(
+                    "This app cannot approve anything, and no setting changes that. Each " +
+                        "operation in the vocabulary is a root operation, and APEX reserves " +
+                        "approving one for a person at that computer. A paired device cannot " +
+                        "even deny: the refusal lands before the daemon looks the request up. " +
+                        "Hence no Approve button here, rather than a button that refuses " +
+                        "whenever you press it.",
+                ),
+                p(
+                    "Revoking is different and it works from here. Taking authority away only " +
+                        "ever removes it, so a device that cannot grant anything can still " +
+                        "take it back.",
+                ),
+            ),
+        ),
+        Section(
+            desktopId = "remote",
+            title = "This phone and the computer",
+            blocks = listOf(
+                h("Pairing"),
+                p(
+                    "Scan the code the computer shows. Both ends work out a shared key from " +
+                        "it and remember each other's public key. Later connections answer to the " +
+                        "key from that first meeting, not to a name.",
+                ),
+                h("Where the connection goes"),
+                kv("On the same network", "A direct connection to the computer. Nothing in the middle."),
+                kv("Away from it", "A relay, which forwards bytes it cannot read. The key stays at the two ends."),
+                note(
+                    "The relay has no deployment yet. Off the computer's network, this app " +
+                        "reaches nothing.",
+                ),
+                h("Taking this phone's access away"),
+                p(
+                    "Forget the computer here, or remove this device at the computer. Either " +
+                        "way the key is gone and the other end stops answering it.",
+                ),
+                h("App lock"),
+                p(
+                    "The lock on this app is the phone's own biometric or device credential, " +
+                        "and it guards the key stored on this phone. It is not an " +
+                        "authenticator the computer knows about, so unlocking here does not " +
+                        "authorise anything there.",
+                ),
+            ),
+        ),
+        Section(
+            desktopId = "keys",
+            title = "The terminal, gestures and the key row",
+            blocks = listOf(
+                h("The terminal is the real one"),
+                p(
+                    "Attach and you get the session's actual terminal, the same bytes the " +
+                        "computer's screen would show. Detaching leaves the agent running.",
+                ),
+                kv("Scroll", "Drag. Scrollback is kept, and the buffer is searchable."),
+                kv("Select", "Long-press and drag, then copy."),
+                kv("Paste", "Long-press in the terminal or the reply box."),
+                h("The key row"),
+                p(
+                    "A soft keyboard has no Escape, no Control and no arrows. A terminal " +
+                        "leans on all three. The row above the keyboard supplies them, and " +
+                        "settings decides which keys it holds.",
+                ),
+                h("Text size"),
+                p(
+                    "Terminal text size is a setting because it decides how many columns fit, " +
+                        "and eighty columns is what these programs lay out for. It is the " +
+                        "difference between reading the output and reading a smear of it.",
+                ),
+                h("Answering without attaching"),
+                p(
+                    "A session that is waiting for you has a reply box. Speak fills it from " +
+                        "the phone's own speech recognition, Paste fills it from the " +
+                        "clipboard, and Send types it into the terminal on the computer.",
+                ),
+                note(
+                    "Text with a line break in it gets a warning before you send it. On a " +
+                        "terminal a line break is the return key, so three lines run the " +
+                        "first and type the other two into whatever the agent asks next.",
+                ),
+                todo(
+                    "Sending a photo or a file from this phone is on the roadmap. It needs a " +
+                        "way to carry file content over this connection, which this build " +
+                        "does not have.",
+                ),
+            ),
+        ),
+        Section(
+            desktopId = "stuck",
+            title = "When a session is stuck",
+            blocks = listOf(
+                h("Waiting for you is not stuck"),
+                p(
+                    "An agent that stops and asks something is working as intended. It shows " +
+                        "as waiting, and the reply box on the session is how to answer it " +
+                        "without attaching a terminal.",
+                ),
+                h("The four controls"),
+                kv("Pause", "Stops the process where it is. It stays paused until resumed, and anything sent to it waits unread."),
+                kv("Resume", "Starts it again from where it stopped."),
+                kv("Interrupt", "The same as pressing Ctrl+C at the terminal. Ends what it is doing, not the session."),
+                kv("Stop", "Asks it to shut down, and lets it clean up first."),
+                h("Nothing answers at all"),
+                p(
+                    "Check that the connection is up on Machines. If it is, the agent runtime " +
+                        "on the computer may have stopped; it is a service there and this " +
+                        "phone cannot restart it.",
+                ),
+                h("It says this computer's APEX is too old"),
+                p(
+                    "That is not a refusal and not an empty answer. The computer is running a " +
+                        "build from before the thing you asked for existed, and this app tells " +
+                        "the two apart rather than showing you an empty list. Update it there:",
+                ),
+                cmd("sudo apex update"),
+            ),
+        ),
+    )
+
+    /** Every desktop section this guide answers to. */
+    val covered: Set<String> get() = sections.map { it.desktopId }.toSet()
+}
