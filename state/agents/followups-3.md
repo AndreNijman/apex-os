@@ -73,12 +73,24 @@ Branch `task/followups-3` pushed in both repos, merged up to
 apex-os `4b1e797f` / apex-shell `111ed75`.
 
 ### 1 — `apex remote` documented   DONE (by `f9dff3b7`, verified here)
-Forward pass on `docs/remote.md`: **8 valid, 0 not-a-command**. Reverse pass
-over the canonical docs: **166 documented, 121 declared undocumented, 0
-undocumented and undeclared, 0 stale**. No `remote` line in
-`tests/doc-verbs-undocumented`. The two together are airtight rather than
-suggestive: an undocumented `apex remote` verb would have to appear in the
-debt file or in the undeclared count, and it is in neither.
+Forward pass on `docs/remote.md`: **8 valid, 0 not-a-command**. Whole gate at
+this tip: **208 valid, 3 deliberate, 0 not a command**, and reverse **171
+documented, 121 declared undocumented, 0 undocumented and undeclared, 0
+stale**. No `remote` line in `tests/doc-verbs-undocumented`. Those two are
+airtight rather than suggestive: an undocumented `apex remote` verb would have
+to appear in the debt file or in the undeclared count, and it is in neither.
+
+**Rebuild `apexd/target/debug/apex` before believing any reverse-pass number.**
+The first run this round said 166 documented, because `check-doc-verbs.sh`
+reuses whatever is already at that path and `ensure_built` skips when the file
+exists — the binary there was three hours and one `roadmap/v2.2` merge old, so
+it did not have the five `apex user` verbs the multi-user landing added. The
+header of that script warns about exactly this ("a copy of APEX from before the
+branch would pass a verb the branch just added") and it is easy to walk into,
+because `cargo test --bins --no-run` builds `target/debug/deps/apex-<hash>` and
+never refreshes `target/debug/apex`. `cd apexd && cargo build --locked --bin
+apex` first; it is 15s incremental. The count went 166 -> 171 and the verdict
+did not change, but it could have.
 
 ### 2 — `tests/test-apex-task.sh`   DONE (by `5a1a5390`, verified here)
 **71 passed, 0 failed** at this tip. The question the card asked — which side
@@ -100,8 +112,9 @@ Measured by deleting the call and running both builds through one harness:
       guarded      0 failures / 1200 runs   (200 + 1000)
 
 Every failure was `provenance::tests::a_git_status_that_could_not_run_is_not_a
-_clean_working_tree` and no other test, each panicking `git could not be run:
-Text file busy (os error 26)`. At 4% a clean 1000 has probability 1.6e-18.
+_clean_working_tree` and no other test. Counted, not spot-checked: all 40
+panicked at the same site, `provenance.rs:1839`, and all 40 said `Text file
+busy (os error 26)`. At 4% a clean 1000 has probability 1.6e-18.
 
 Two things worth keeping: the guarded arm ran alongside four concurrent cargo
 workspace builds and the unguarded arm did not, so the comparison is biased
@@ -153,7 +166,11 @@ the tip SUPERSEDED the design: `service.rs:1445` says in so many words that
 work found necessary but not sufficient and replaced with `same_everywhere`.
 The missing lines are that older wording, the test renamed to
 `the_everywhere_gate_reads_the_operations_own_declaration`, and one private
-helper (`fn collect`) refactored away. Nothing is stranded.
+helper (`fn collect`) refactored away — and that last one is evidence, not
+inference: `git log -S'fn collect(' origin/roadmap/v2.2 -- .../mcp/servers.rs`
+returns two commits, `023f08ca` (the branch's own `e605e6a8`, landing it) and
+`074989ae` (later work removing it). Added by this branch, then deliberately
+refactored out. Nothing is stranded.
 
 Local branches and worktrees for all seven still exist on this machine; only
 the remote refs were deleted. `CLAUDE.md`'s 2026-09-06 note still says
@@ -167,3 +184,5 @@ now deleted, and that line is stale but harmless.
   tip. Nobody rebuilt or re-tested them.
 - `apex remote`'s documented verbs were checked for PARSING, not for whether
   what `docs/remote.md` says about them is true.
+- The 121 commands still on the debt list were not looked at. That number is
+  unchanged this round and remains the real documentation gap.

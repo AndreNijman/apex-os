@@ -53,6 +53,34 @@ off `origin/roadmap/v2.2` @ `4b1e797f`.
   never `qs -p`, greetd is boot-critical.
 - P2-019 is a written architecture. Do not build a fleet daemon.
 
+## Round 1 — P2-017 landed on the branch
+
+`task/p2-f`, pushed, four commits off `origin/roadmap/v2.2` @ `4b1e797f`:
+
+* `dea4a18f` the account model in `apex-secret-core/src/account.rs`
+* `e4827864` `apex account` + `docs/online-accounts.md`
+* `f748edf0` the `webdav` provider in `apex-secretd`
+* `6890cf8d` three end-to-end tests against a loopback WebDAV server
+
+**The decision:** an online account is a `ServiceInfo` in the store
+`apex-secretd` already owns, named `account.<provider>.<name>`. No accounts
+daemon, no second store, no second write path. Removal is `Request::Remove`,
+which already deletes every grant that named the service — criterion 3 was
+already built and is now measured.
+
+Five providers over three transports (nextcloud and webdav both route into
+`webdav`, because P1-001 routes on an operation id's first segment and two
+spellings would drift).
+
+**Found on the way in, worth reusing:** `apex/src/cloudflare.rs` already has a
+complete RFC 8628 device-code flow, and it stores the refresh token under a
+SEPARATE service pinned to a different host so the endpoint pin makes it
+unspendable as an API token. That is the shape P2-017's OAuth half should take.
+Nothing refreshes anything, for Cloudflare either.
+
+Also fixed: `tests/test-apex-verbs.sh` had been failing its own reverse pass
+59/1 (`lid`, `permissions`, `user`, `vm` unlisted). 64/0 now.
+
 ## STATUS
 
-Round 1 in progress. See `## NEXT` at the end of this file.
+P2-017 done bar the OAuth half. P2-018 next. See `## NEXT`.
