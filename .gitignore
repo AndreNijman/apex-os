@@ -1,7 +1,22 @@
 # Compiled / generated
 *.qmlc
-target/
 node_modules/
+
+# Cargo build directories, ANCHORED. This was a bare `target/` for the life of
+# the repository, and an unanchored directory pattern matches at every depth —
+# so `apexd/apex-backup-core/src/target/`, a SOURCE module holding the backup
+# backends, was invisible to git. The crate declared `pub mod target;`, the
+# whole module was untracked, and the branch that added it could not compile on
+# any machine but the one that wrote it: about 40 KB of implementation, the
+# filesystem and R2 targets, plus their tests.
+#
+# It is the same shape as `*.pem` swallowing the pinned Sigstore root in
+# September — a rule written for build output that also matched something the
+# build needs. Anchored here, so only a real cargo directory at a known path is
+# ignored and a module named `target` is a normal source file again.
+/target/
+apexd/target/
+installer/target/
 
 # Build artifacts — disk and installer images (large, never versioned)
 *.img
