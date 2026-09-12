@@ -798,6 +798,38 @@ task/p2-b-round18b`, run **34673525673**.
   `system.slice/hosted-compute-agent.service`, which is neither a login session
   nor a user service, so origin detection cannot classify it. Red on
   `roadmap/v2.2` itself (run 34672131214) before this branch existed.
+- **The installer audit ran on the runner and went RED, and both reds were real
+  defects in the SUITE that this laptop could not show.** `44 passed, 4 failed`.
+  This is the second time in this unit that CI has earned its keep.
+  1. **The `wifi` page has TWO shapes and the audit knew one.** `wifi_available()`
+     asks `nmcli -t -f TYPE device` for a line reading exactly `wifi`; with no
+     adapter — every CI runner — the installer builds a different page: an
+     explanation and two buttons, no password field, no hidden-network field.
+     The audit waited the full 40 s for a sentinel that could never appear and
+     then reported `page 'wifi' builds and reaches the accessibility bus` as
+     FAILED, which reads as a defect in the installer on a page that was working
+     perfectly. Wrong in the most expensive direction. Both shapes are now
+     audited, the shape that was measured is CONFIRMED against the tree rather
+     than assumed, and the two field-name checks SKIP with the reason where the
+     fields are not built — a field that does not exist is not a field that is
+     unnamed.
+  2. **`xdotool type` dropped every character on the runner, and the password
+     assertion passed anyway.** The username field read back EMPTY after a type
+     that reported success. The masking assertion — "the password the user typed
+     never crosses the accessibility bus" — then passed about an EMPTY FIELD.
+     That is a false green of exactly the N8 shape, and only a second machine
+     could produce it. Fixed in both halves: `--delay 40` and a bounded
+     read-back retry, and the masking assertion is now GATED on the read-back
+     having proved the typing landed, skipping with the reason if it did not.
+- **The page-advance section passed on the runner** — 8 of 8, both Return and
+  space — so the newest work is measured on two machines, not one.
+- **`tests/test-apex-greet-atspi.sh` is STILL local-only** — this unit has
+  produced four accessibility suites and three of them now run in CI. The AT-SPI
+  walk needs a wlroots compositor (`labwc`/`sway`) as well as a qml runtime and
+  the at-spi stack, so wiring it into the Fedora-container step is a real piece
+  of work rather than one more line, and it was not attempted blind. Its 30
+  assertions have been verified on ONE laptop. Do not read "CI green" as
+  covering it.
 - **`Static validation` failed for a reason that is purely the branch NAME**,
   and it is worth knowing about because it will bite every future task branch.
   `Input page and generator agree` clones **the apex-shell branch with the same
@@ -807,7 +839,9 @@ task/p2-b-round18b`, run **34673525673**.
   same-named apex-shell branch fails that step on drift that is not its own. The
   fix taken here: create `task/p2-b-round18b` in apex-shell too, off
   `origin/roadmap/v2.2`, carrying no commits. **That branch exists only to make
-  the parity check compare like with like; merging it is a no-op.**
+  the parity check compare like with like; merging it is a no-op.** Proved
+  rather than argued: the next dispatch, run **34673943974**, has `Static
+  validation` GREEN with no change to any file that step reads.
 
 ### Two things found that nothing was looking for
 
@@ -850,8 +884,10 @@ session-bus hole is closed.
 
 ## NEXT
 
-Ordered. 1-3 are this unit's remaining plan; 4 onward are inherited and still
-true. Rounds 18 and 18b closed the previous items 1-3.
+Ordered. 1-4 are accessibility (P2-003) and are what this unit should do next;
+5 onward are internationalisation (P2-004) and are inherited unchanged — **round
+18b did no P2-004 work at all**, because its three plan items were all P2-003.
+Rounds 18 and 18b closed the previous items 1-3.
 
 1. **Give the greeter a session bus, and exec the a11y launcher beside it.**
    This is now the single largest thing standing between APEX and "screen reader
@@ -874,39 +910,48 @@ true. Rounds 18 and 18b closed the previous items 1-3.
    `/usr/share/apex/hypr/apex/keybindings.lua`; `tests/test-apex-a11y-stack.sh`
    is where the assertion belongs, beside the "nothing autostarts it" one.
 
-3. **The Tab ring is walked on ONE page.** `installer/test-installer-a11y.sh`
+3. **`tests/test-apex-greet-atspi.sh` into CI.** The only accessibility suite in
+   this unit still verified on one machine. It needs `labwc` or `sway` plus a
+   qml runtime and the at-spi stack in the Fedora container the greeter a11y
+   step already uses; follow that step's `exit 97` pattern so a container that
+   cannot resolve the packages reports "did not run" rather than reddening the
+   job. Worth doing before anything else in this list: the round-18b CI dispatch
+   found two false greens in the installer audit that a laptop could not, and
+   this suite has never had that treatment.
+
+4. **The Tab ring is walked on ONE page.** `installer/test-installer-a11y.sh`
    walks `account` (most fields, both passwords) and advances welcome →
    keyboard. Every other audited page is name-audited only, so a focus trap on
    `wifi`, `secureboot` or `confirm` would not be seen. `advance_with` and the
    ring walk are both parameterised enough to extend; the cost is runtime, about
    a minute per page.
 
-4. **The `sections` array in `AgentHelpContent.qml`** (~200 prose strings) is the
+5. **The `sections` array in `AgentHelpContent.qml`** (~200 prose strings) is the
    obvious next i18n increment; the pipeline is proven. One caution measured the
    hard way — `tests/check-agent-help.sh` greps for the exact shape
    `{ k: "kv", t: "$m"`, so wrapping those `t:` values in `qsTr()` breaks it;
    that suite and this conversion must move together.
-5. **Nothing installs a `QTranslator`**, so the shell's translation pipeline
+6. **Nothing installs a `QTranslator`**, so the shell's translation pipeline
    reaches no user. `run-i18n-test.sh` asserts the absence, so the row flips
-   itself when somebody wires it up. Worth doing BEFORE item 4: 200 translated
+   itself when somebody wires it up. Worth doing BEFORE item 5: 200 translated
    strings nobody can see is the weaker increment.
-6. **Locale is still not offered by the installer, deliberately.** The image
+7. **Locale is still not offered by the installer, deliberately.** The image
    installs `glibc-langpack-en` ONLY (`Containerfile.core:809`), so a free picker
    would let a user choose a locale that silently degrades to `C.UTF-8`. Add
    langpacks first, then a picker restricted to what the target ships.
-7. **The installer is GTK4/Python**, so its translation route is gettext, not the
+8. **The installer is GTK4/Python**, so its translation route is gettext, not the
    Qt pipeline proven here. Separate work.
-8. **CJK: measure before fixing.** The card claims apex-shell "will tofu"
+9. **CJK: measure before fixing.** The card claims apex-shell "will tofu"
    because ~45 sites hardcode `font.family: "JetBrains Mono"`. That was never
    run. Qt does fontconfig fallback at the QFont level, so the claim may be
    false; a `TextMetrics`/`FontMetrics` probe under the headless harness settles
    it in minutes.
-9. Remaining accessibility gaps, unchanged: `src/popups/` and
+10. Remaining accessibility gaps, unchanged: `src/popups/` and
    `src/nexus/NavPane.qml` still use bespoke Rectangle+MouseArea and are
    mouse-only and unnamed; no Arabic/Hebrew/Thai fonts, so RTL input from
    `fcitx5-m17n` cannot be rendered. The `disk`/`mode`/`part` installer pages
    are not audited either, because they enumerate real block devices.
-10. **`Xvfb` and `xdotool` are the tools that make the installer criterion
+11. **`Xvfb` and `xdotool` are the tools that make the installer criterion
     measurable.** Both are now installed in CI's installer job as well as on this
     laptop. If a future runner lacks them the suite SKIPs rather than lying — but
     a skip there means the criterion is unmeasured, not met.

@@ -1931,7 +1931,14 @@ tasks:
     -> 668/1, confined_everywhere 2 not 1), decide's Curated arm made unconditional (connector 12/0 -> 11/1),
     confinement_line's AtLaunch arm returning the InDefinition sentence (12/0 -> 11/1), build_at reverted to the
     definition-only reading (provenance 15/0 -> 14/1), describe_sandbox's AtLaunch arm made unreachable (apex bin
-    551/0 -> 550/1). Branch task/p1-025-plugin-trust-2, pushed, unmerged at the time of writing.
+    551/0 -> 550/1). A FIFTH commit, e48234fb, covers the shell suite: tests/test-apex-skill.sh guards this
+    criterion by grepping provenance.rs for the words it may and may not print, and required 'Nothing here
+    confines them' about a plugin's hooks - the wording this round replaced because it understates the case. Left
+    alone it was the one thing on the branch CI would have caught and the cargo tests could not: 73 passed, 1
+    failed. The assertion was replaced by four that are harder to satisfy vacuously rather than deleted - the at-
+    launch sentence, the clause saying where it stops, the hooks wording, and the named case where the session has
+    no sandbox either. tests/test-apex-skill.sh --with-binary: 73/0 on the tip -> 82/0 on this branch. Branch
+    task/p1-025-plugin-trust-2, pushed, unmerged at the time of writing.
 - id: P1-027
   title: Memory provider interface
   priority: P1
@@ -2010,8 +2017,15 @@ tasks:
     unconditional takes apex 12/0 -> 11/1 on a_connector_policy_row_is_the_curators_own_answer with (2,1,0) not
     (0,1,2), proving the table is the curator's answer and not a copy of it; confinement_line's AtLaunch arm
     returning the InDefinition sentence takes 12/0 -> 11/1 on
-    the_report_says_where_the_reduction_applies_and_where_it_stops. Branch task/p1-025-plugin-trust-2 (cbcacfc3,
-    93ea60f4, 4ac67153, 7f0038d3), pushed, unmerged at the time of writing; round 1 is merged as 564fffd5.
+    the_report_says_where_the_reduction_applies_and_where_it_stops. A FIFTH commit, e48234fb, gives this criterion
+    its first shell-level guard: tests/test-apex-skill.sh had nothing at all about the per-connector switch. Six
+    assertions added - that the --connectors table is printed, that it names local_only, that the readout says
+    where the selection applies and where it stops, that the JSON carries perConnectorSwitch with its scope and a
+    row per policy value, and that an empty connector_allow prints a refusal rather than a row of zeroes. Fixture-
+    driven: the suite's run() sets XDG_CONFIG_HOME into the fixture, so the empty list asserted is the fixture's
+    and not this machine's. tests/test-apex-skill.sh --with-binary: 73/0 on the tip -> 82/0 on this branch. Branch
+    task/p1-025-plugin-trust-2 (cbcacfc3, 93ea60f4, 4ac67153, 7f0038d3), pushed, unmerged at the time of writing;
+    round 1 is merged as 564fffd5.
 - id: P1-029
   title: Represent local/remote/scheduled/cloud agent lifecycle types
   priority: P1
