@@ -261,10 +261,28 @@ object Help {
                         "terminal a line break is the return key, so three lines run the " +
                         "first and type the other two into whatever the agent asks next.",
                 ),
+                h("Sending a photo or a file"),
+                p(
+                    "Photo opens the phone's picker and File opens the document picker. " +
+                        "Neither asks for a storage permission, because neither needs one: " +
+                        "the picker hands this app the one item you chose and nothing else.",
+                ),
+                p(
+                    "The computer drops your file into that session's own inbox, gives it a " +
+                        "name of its own choosing, and types the path into the agent's " +
+                        "terminal without pressing return. You see the same path. It touches " +
+                        "nothing else on the computer, and no other session can reach it.",
+                ),
+                note(
+                    "The name changes on the way. Spaces, accents and anything a terminal " +
+                        "would act on become underscores, so a screenshot called `Screenshot " +
+                        "2026-09-13 at 14.02.11.png` arrives as " +
+                        "`Screenshot_2026-09-13_at_14.02.11.png`. The screen shows you the " +
+                        "new name before you send it.",
+                ),
                 todo(
-                    "Sending a photo or a file from this phone is on the roadmap. It needs a " +
-                        "way to carry file content over this connection, which this build " +
-                        "does not have.",
+                    "The 32 MB limit belongs to the computer, not to this app. This app " +
+                        "checks it first so that you spend no data finding out.",
                 ),
             ),
         ),

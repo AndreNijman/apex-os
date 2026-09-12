@@ -3,6 +3,11 @@ package com.apexos.remote.ui
 import android.app.Application
 import androidx.biometric.BiometricManager
 import androidx.fragment.app.FragmentActivity
+import android.content.ContentResolver
+import android.net.Uri
+import android.provider.OpenableColumns
+import com.apexos.remote.core.agent.Handoff
+import com.apexos.remote.core.link.Upload
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.apexos.remote.core.Device
@@ -104,6 +109,17 @@ data class AgentUiState(
     val selected: AgentSession? = null,
     val busy: String? = null,
     val failure: String? = null,
+    /**
+     * Something that WORKED and that the user has to be told about anyway.
+     *
+     * Distinct from [failure], and distinct from nothing at all: a file handed
+     * to an agent lands at a path the machine chose, and that path is also the
+     * text typed into the agent's terminal. A person who sent a photo needs to
+     * see it — it is what they will refer to when they type the rest of their
+     * sentence — and showing it as a failure or not showing it would each be
+     * wrong in a different direction.
+     */
+    val notice: String? = null,
     /** Refreshed on every poll, so elapsed times move without recomputing per row. */
     val nowSeconds: Long = System.currentTimeMillis() / 1000,
     val worktrees: WorktreesUiState = WorktreesUiState(),
@@ -749,7 +765,12 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun selectSession(session: AgentSession?) =
-        _state.update { it.copy(agents = it.agents.copy(selected = session)) }
+        // The notice goes with the session it was about. "The agent has
+        // /tmp/.../001-shot.png" is true of ONE agent, and leaving it on screen
+        // while a different one is open says the wrong thing about the wrong
+        // machine — which is the same class of mistake `Handoff.Voice.landsOn`
+        // exists to prevent, one screen further out.
+        _state.update { it.copy(agents = it.agents.copy(selected = session, notice = null)) }
 
     /**
      * Signal a session.
@@ -780,6 +801,144 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    // ---- handing a file to a waiting agent (P1-059 criterion 2) ---------
+
+    /**
+     * Send a photo, a screenshot or a file the user picked to a session.
+     *
+     * The name and the size come from the `ContentResolver`, which is where a
+     * picker's URI keeps them; the bytes come from `openInputStream`. NOTHING
+     * here asks for a storage permission, and that is the fourth criterion of
+     * P1-059 rather than a nicety — `PickVisualMedia` and `OpenDocument` both
+     * return a URI this app may read and nothing else, where
+     * `READ_MEDIA_IMAGES` would hand it the whole library for the life of the
+     * grant. `Handoff.Files.FORBIDDEN_PERMISSIONS` and `ManifestTest` are what
+     * keep that true when somebody reaches for the easier way.
+     *
+     * The recycled-id guard is `Reply.check`'s, and it applies for the same
+     * reason it applies to a typed reply, with a worse consequence:
+     * `SessionInfo.id` is reused after a prune, so a file addressed from a
+     * screen that has gone stale can land in a different agent's inbox — and
+     * that agent is then handed a path to somebody else's photo and told to
+     * look at it.
+     *
+     * `withContext(Dispatchers.IO)` is mandatory and not stylistic:
+     * `StrictMode.enableDeathOnNetwork()` is installed for every app targeting
+     * API 11 or later and a debug build does not relax it, so any of this on
+     * the main thread kills the process on the first frame. The
+     * `ContentResolver` query is inside it too — not for StrictMode's sake, but
+     * because a document provider's `query` is a binder call into another
+     * process that can be slow for reasons this app does not control.
+     */
+    fun sendFileToSession(session: AgentSession, uri: Uri) = viewModelScope.launch {
+        val machine = _state.value.agents.machine ?: return@launch
+        val link = links[machine.deviceId] ?: return@launch
+        val target = Reply.Target(machine.deviceId, session.id, session.started)
+        Reply.check(target, machine.deviceId, _state.value.agents.sessions)?.let { refusal ->
+            updateAgents(machine) { it.copy(failure = refusal.message, notice = null) }
+            return@launch
+        }
+
+        val resolver = getApplication<Application>().contentResolver
+        val details = runCatching {
+            withContext(Dispatchers.IO) { describe(resolver, uri) }
+        }.getOrNull()
+        if (details == null) {
+            updateAgents(machine) {
+                it.copy(notice = null, failure = "That file could not be read. Nothing was sent.")
+            }
+            return@launch
+        }
+        val (name, size) = details
+        if (Handoff.Files.preview(name) == null) {
+            updateAgents(machine) { it.copy(notice = null, failure = Handoff.Files.UNUSABLE_NAME) }
+            return@launch
+        }
+        if (size <= 0L) {
+            updateAgents(machine) {
+                it.copy(notice = null, failure = "That file is empty, and an empty file is not a handover.")
+            }
+            return@launch
+        }
+        if (size > Handoff.Files.MAX_BYTES) {
+            updateAgents(machine) { it.copy(notice = null, failure = Handoff.Files.tooBig(size)) }
+            return@launch
+        }
+
+        updateAgents(machine) { it.copy(busy = "Sending $name…", failure = null, notice = null) }
+        try {
+            val landed = withContext(Dispatchers.IO) {
+                link.upload(
+                    id = session.id,
+                    name = name,
+                    len = size,
+                    source = {
+                        resolver.openInputStream(uri)
+                            ?: throw java.io.IOException("$name could not be opened")
+                    },
+                )
+            }
+            updateAgents(machine) {
+                it.copy(
+                    busy = null,
+                    // The machine's own path, which is also the text typed into
+                    // the agent's terminal. One string because the daemon sends
+                    // one: telling the user a different path from the one the
+                    // agent was given is the whole reason `Response::Injected`
+                    // has a single field.
+                    notice = "Sent. The agent has ${landed.path}, typed but not submitted.",
+                )
+            }
+            refreshAgents()
+        } catch (e: Upload.Refused) {
+            // The machine ANSWERED, so nothing was handed over, and the message
+            // is its own sentence — the session that exited, the limit with its
+            // number in it, the permission it refused.
+            updateAgents(machine) { it.copy(busy = null, failure = e.message) }
+        } catch (e: AgentError) {
+            val message = if (Agentd.isTooOld(e)) {
+                "This machine's APEX is too old to take a file from a phone. Nothing was sent."
+            } else {
+                e.toString()
+            }
+            updateAgents(machine) { it.copy(busy = null, failure = message) }
+        } catch (e: Exception) {
+            // Everything else is a connection that went, and the difference
+            // matters: a refusal above means nothing was written, and this
+            // means nobody knows. Said plainly rather than reassuringly.
+            updateAgents(machine) {
+                it.copy(
+                    busy = null,
+                    failure = "The connection ended while the file was going over " +
+                        "(${e.message}). Check the agent before sending it again.",
+                )
+            }
+        }
+    }
+
+    /**
+     * A picked URI's display name and size.
+     *
+     * `OpenableColumns` is the contract every document provider and the photo
+     * picker implement. A provider that answers neither is a file this app
+     * cannot describe — and the daemon needs the length UP FRONT, because it
+     * commits to reading exactly that many bytes before a single one is sent.
+     * So an unknown size is a refusal here rather than a guess, and reading
+     * the whole file into memory to measure it would be the phone paying for
+     * the daemon's cap twice.
+     */
+    private fun describe(resolver: ContentResolver, uri: Uri): Pair<String, Long>? {
+        resolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (!cursor.moveToFirst()) return null
+            val nameAt = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            val sizeAt = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (nameAt < 0 || sizeAt < 0 || cursor.isNull(sizeAt)) return null
+            val name = cursor.getString(nameAt) ?: return null
+            return name to cursor.getLong(sizeAt)
+        }
+        return null
+    }
+
     // ---- replying to a waiting agent (P1-058) ---------------------------
 
     /**
@@ -804,7 +963,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             updateAgents(machine) { it.copy(failure = refusal.message) }
             return@launch
         }
-        updateAgents(machine) { it.copy(busy = "Sending…", failure = null) }
+        updateAgents(machine) { it.copy(busy = "Sending…", failure = null, notice = null) }
         try {
             withContext(Dispatchers.IO) { link.input(session.id, Reply.bytes(text)) }
             updateAgents(machine) { it.copy(busy = null) }

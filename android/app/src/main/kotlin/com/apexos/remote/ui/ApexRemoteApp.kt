@@ -243,6 +243,8 @@ fun ApexRemoteApp(
                         onStop = { viewModel.signal(session, "term") },
                         onRefresh = { viewModel.refreshAgents() },
                         onReply = { viewModel.replyToSession(session, it) },
+                        onSendFile = { viewModel.sendFileToSession(session, it) },
+                        notice = state.agents.notice,
                         onBack = { navigation.popBackStack() },
                         onDismiss = { viewModel.dismiss() },
                     )
