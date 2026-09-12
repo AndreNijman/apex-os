@@ -273,9 +273,14 @@ app.connect('activate', on_activate)
 sys.exit(app.run([]))
 PY
 
+# Adw as well as Gtk: section 6 imports the shipped GUI as a module, and that
+# file calls gi.require_version("Adw", "1") at import time. A gate that checks
+# only Gtk turns a missing gir1.2-adw-1 into a traceback and five failures
+# instead of a skip that names the missing package.
 have_gtk=0
-python3 -c 'import gi; gi.require_version("Gtk","4.0"); from gi.repository import Gtk, Gdk' \
-    >/dev/null 2>&1 && have_gtk=1
+python3 -c 'import gi
+gi.require_version("Gtk","4.0"); gi.require_version("Adw","1")
+from gi.repository import Gtk, Gdk, Adw' >/dev/null 2>&1 && have_gtk=1
 
 if [ "$have_gtk" -ne 1 ] || ! command -v cage >/dev/null 2>&1; then
     skp "cage hands a GTK client the layout it was started with" \
@@ -525,9 +530,22 @@ fi
 python3 - "$GUI" "$W/gui-format" <<'PY' 2>/dev/null
 import re, sys
 src = open(sys.argv[1]).read()
-m = re.search(r'f\.write\(f"(layout=[^"]*)"\)', src)
-open(sys.argv[2], "w").write(m.group(1).replace("{code}", "de").replace("{variant}", "")
-                             .replace("\\n", "\n") if m else "")
+# The writer is an f-string that may be split across several adjacent literals.
+# Take the whole f.write(...) call and join every fragment in it, rather than
+# assuming a single literal — assuming one is what broke this check when a
+# third key was added to the file.
+call = re.search(r'f\.write\((.*?)\)\n', src, re.S)
+out = ""
+if call:
+    frags = re.findall(r'f"([^"]*)"', call.group(1))
+    out = "".join(frags)
+    if "layout=" not in out:
+        out = ""
+out = (out.replace("{code}", "de")
+          .replace("{variant}", "")
+          .replace("{self.answers.get('timezone', '')}", "Europe/Berlin")
+          .replace("\\n", "\n"))
+open(sys.argv[2], "w").write(out)
 PY
 if [ -s "$W/gui-format" ]; then
     : > "$W/stub.log"; printf '0' > "$W/stub.count"
@@ -557,6 +575,16 @@ STUB
     else
         bad "the exact line the GUI writes is the line the session parses" \
             "second start was: $(sed -n '2p' "$W/stub.log")"
+    fi
+    # The GUI writes `timezone=` into the same file so the choice survives the
+    # restart. The session has no use for it — but its parser must IGNORE an
+    # unknown key rather than refuse the restart over it, or carrying the time
+    # zone would break the layout it rode along with.
+    if grep -q 'timezone=' "$W/gui-format"; then
+        ok "the GUI's state file carries the time zone across the restart"
+    else
+        bad "the GUI's state file carries the time zone across the restart" \
+            "no timezone= in what the writer produces"
     fi
 else
     bad "the exact line the GUI writes is the line the session parses" \
@@ -623,7 +651,8 @@ section "6. the GUI page itself, driven for real"
 # press its button. APEX_GUI_PAGE is the test affordance the GUI already carries.
 
 if [ "$have_gtk" -ne 1 ] || ! command -v cage >/dev/null 2>&1; then
-    skp "pressing Continue writes the layout and asks for a restart" "needs cage + python3-gi"
+    skp "pressing Continue writes the layout and asks for a restart" \
+        "needs cage + python3-gi with Gtk 4.0 AND Adw 1"
 else
     cat > "$W/drive.py" <<'PY2'
 # Driver: import the shipped GUI as a module, let it build, then operate the
@@ -731,6 +760,112 @@ PY2
 
     got_km="$(printf '%s' "$drive_out" | sed -n 's/.*keymap=\([^ ]*\).*/\1/p' | head -1)"
     is "…and the layout the dropdown was set to, not some default" "de" "$got_km"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "6b. the resume path — the branch that stops the restart repeating"
+# ═════════════════════════════════════════════════════════════════════════════
+# After a restart the GUI is a NEW process: self.answers is empty and only
+# XKB_DEFAULT_* and APEX_INSTALLER_RESUMED crossed. Two things depend on that
+# and neither had a test.
+#
+# The first is a silent data loss. The time zone is not an environment variable,
+# so nothing carried it; the dropdown reset to whatever the live ISO resolved,
+# and the resume note tells the user to check the KEYBOARD, so nobody looks at
+# the time zone again and the wrong one reaches the installed system. A choice
+# that does not survive is worse than one never offered.
+#
+# The second is the loop guard. On resume the chosen layout EQUALS the active
+# one, and that equality is the only thing that makes `nxt` continue to wifi
+# instead of asking for another restart. Delete it and the GUI exits 75 forever;
+# the session's "already in force" check then exits 0 and the launcher reports a
+# clean session end — so the installer simply quits after the keyboard page,
+# with every log line looking normal.
+
+if [ "$have_gtk" -ne 1 ] || ! command -v cage >/dev/null 2>&1; then
+    skp "a resumed session restores the time zone and continues" "needs cage + python3-gi"
+else
+    cat > "$W/drive-resume.py" <<'PY2'
+import importlib.util, os, sys, gi
+gi.require_version('Gtk', '4.0'); gi.require_version('Adw', '1')
+from gi.repository import GLib
+
+spec = importlib.util.spec_from_loader(
+    "apexgui", importlib.machinery.SourceFileLoader("apexgui", sys.argv[1]))
+mod = importlib.util.module_from_spec(spec)
+mod.__name__ = "apexgui"
+spec.loader.exec_module(mod)
+
+app = mod.Installer()
+
+def drive():
+    try:
+        codes = [c for c, _ in mod.xkb_layouts()]
+        sel = app.kb_drop.get_selected()
+        picked = codes[sel] if 0 <= sel < len(codes) else "?"
+        tsel = app.tz_drop.get_selected()
+        tz = app._tz_names[tsel] if 0 <= tsel < len(app._tz_names) else "?"
+        print("RESUME preselect layout=%s timezone=%s" % (picked, tz), flush=True)
+        page = app.stack.get_visible_child()
+        btns = []
+        def walk(w):
+            c = w.get_first_child()
+            while c is not None:
+                if isinstance(c, mod.Gtk.Button):
+                    btns.append(c)
+                walk(c); c = c.get_next_sibling()
+        walk(page)
+        go = [b for b in btns if b.has_css_class("apex-go")]
+        if not go:
+            print("RESUME no-primary-button", flush=True); app.quit(); return False
+        go[0].emit("clicked")
+        print("RESUME after-click page=%s exit_code=%s timezone=%s" % (
+            app.stack.get_visible_child_name(), app.exit_code,
+            app.answers.get("timezone")), flush=True)
+    except Exception as e:
+        print("RESUME error %s" % e, flush=True)
+    app.quit()
+    return False
+
+app.connect("activate", lambda _a: GLib.timeout_add(900, drive))
+rc = app.run([])
+sys.exit(app.exit_code if app.exit_code is not None else rc)
+PY2
+
+    # The state file the pre-restart process would have left behind.
+    printf 'layout=de\nvariant=\ntimezone=Europe/Berlin\n' > "$W/resume-state"
+
+    r_out="$(env WLR_BACKENDS=headless WLR_RENDERER=pixman GSK_RENDERER=cairo \
+        GDK_BACKEND=wayland LIBGL_ALWAYS_SOFTWARE=1 \
+        APEX_INSTALLER_RESUMED=1 APEX_INSTALLER_STATE="$W/resume-state" \
+        XKB_DEFAULT_LAYOUT=de \
+        timeout 90 cage -- python3 "$W/drive-resume.py" "$GUI" 2>&1)"
+    r_rc=$?
+
+    if printf '%s' "$r_out" | grep -q 'RESUME preselect'; then
+        ok "a resumed session rebuilds the keyboard page"
+    else
+        bad "a resumed session rebuilds the keyboard page" \
+            "$(printf '%s' "$r_out" | grep -E '^RESUME' | head -2 | tr '\n' ' ')"
+    fi
+
+    pre_l="$(printf '%s' "$r_out" | sed -n 's/.*RESUME preselect layout=\([^ ]*\).*/\1/p' | head -1)"
+    pre_tz="$(printf '%s' "$r_out" | sed -n 's/.*RESUME preselect .*timezone=\([^ ]*\).*/\1/p' | head -1)"
+    is "…with the layout that is now in force preselected" "de" "$pre_l"
+    # THE DATA-LOSS ASSERTION. Nothing in the environment carries this; it comes
+    # back only because nxt wrote it to the state file and the page reads it.
+    is "…and the time zone the user picked BEFORE the restart, not the ISO's" \
+       "Europe/Berlin" "$pre_tz"
+
+    post_page="$(printf '%s' "$r_out" | sed -n 's/.*after-click page=\([^ ]*\).*/\1/p' | head -1)"
+    post_ec="$(printf '%s' "$r_out" | sed -n 's/.*after-click.*exit_code=\([^ ]*\).*/\1/p' | head -1)"
+    post_tz="$(printf '%s' "$r_out" | sed -n 's/.*after-click.*timezone=\([^ ]*\).*/\1/p' | head -1)"
+
+    # THE LOOP GUARD. Continuing to wifi, rather than asking for another restart,
+    # is the whole reason the restart terminates.
+    is "pressing Continue on a resumed session moves ON to wifi" "wifi" "$post_page"
+    is "…and does NOT ask for another restart" "None" "$post_ec"
+    is "…carrying the pre-restart time zone into the answers" "Europe/Berlin" "$post_tz"
 fi
 
 finish

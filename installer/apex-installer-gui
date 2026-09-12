@@ -494,6 +494,32 @@ def timezones():
     return out
 
 
+def session_state():
+    """What the previous run of this process left for the one after the restart.
+
+    The compositor restart starts a NEW apex-installer-gui, so self.answers is
+    empty in it. The layout and variant come back through XKB_DEFAULT_*, because
+    the session script exported them — but nothing carries anything else, and a
+    value the user chose that does not survive is worse than one never offered:
+    the resume page tells them to check the keyboard, so nobody looks at the
+    time zone again, and the wrong one is written to the installed system.
+
+    Parsed key=value, not sourced: the file is written by this same program on a
+    tmpfs, and a crash mid-write must not be executed.
+    """
+    out = {}
+    try:
+        with open(SESSION_STATE) as f:
+            for line in f:
+                k, _, v = line.partition("=")
+                k = k.strip()
+                if k:
+                    out[k] = v.strip()
+    except OSError:
+        pass
+    return out
+
+
 def active_timezone():
     """The zone this live environment resolved, as the sensible default.
 
@@ -827,7 +853,14 @@ class Installer(Adw.Application):
         self.tz_drop.set_enable_search(True)
         self.tz_drop.set_expression(
             Gtk.PropertyExpression.new(Gtk.StringObject, None, "string"))
-        want_tz = self.answers.get("timezone") or active_timezone()
+        # On a resume the answers dict is empty, so the choice has to come back
+        # from the state file the pre-restart process wrote. Falling straight
+        # through to active_timezone() here would silently reset the user's pick
+        # to whatever the live ISO resolved.
+        resumed = os.environ.get("APEX_INSTALLER_RESUMED") == "1"
+        want_tz = (self.answers.get("timezone")
+                   or (session_state().get("timezone") if resumed else "")
+                   or active_timezone())
         if want_tz in tz_names:
             self.tz_drop.set_selected(tz_names.index(want_tz))
 
@@ -854,7 +887,7 @@ class Installer(Adw.Application):
 
         self.kb_note = lbl("", "apex-dim")
         body.append(self.kb_note)
-        if os.environ.get("APEX_INSTALLER_RESUMED") == "1":
+        if resumed:
             self.kb_note.set_text(
                 f"The keyboard is now {cur_l}{('-' + cur_v) if cur_v else ''}. "
                 "Check it in the box above, then continue.")
@@ -897,7 +930,11 @@ class Installer(Adw.Application):
             try:
                 os.makedirs(os.path.dirname(SESSION_STATE), exist_ok=True)
                 with open(SESSION_STATE, "w") as f:
-                    f.write(f"layout={code}\nvariant={variant}\n")
+                    # The time zone rides along. The session script's parser
+                    # ignores keys it does not know, so this costs it nothing,
+                    # and it is the only way the choice survives the restart.
+                    f.write(f"layout={code}\nvariant={variant}\n"
+                            f"timezone={self.answers.get('timezone', '')}\n")
                 os.chmod(SESSION_STATE, 0o600)
             except OSError as e:
                 # Not fatal to the install. The layout still reaches the
