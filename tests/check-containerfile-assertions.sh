@@ -204,13 +204,26 @@ for path in sys.argv[1:]:
                 continue
             inert += 1
             inert_examples.append(f"{path}:{lineno} {body[:96]}")
-        for lineno, raw in stanza:
-            s = raw.strip()
+        # Resolve from the JOINED segments, not from physical lines. A grep
+        # whose pattern and file sit on two lines -- which is how this file
+        # writes any long one -- looked like a grep with no file at all, and
+        # a resolver that reads one line can neither check it nor tell it
+        # apart from the tail of a pipe.
+        for lineno, seg in segs:
+            s = seg.strip()
             if s.startswith('RUN '):
                 s = s[4:].strip()
-            s = s.rstrip('\\').strip()
             if s.startswith('#') or not s:
                 continue
+            for kw in ('do ', 'then ', 'else '):
+                if s.startswith(kw):
+                    s = s[len(kw):].lstrip()
+            # `cmd | grep PATTERN` really does read stdin.
+            piped = False
+            if '|' in s:
+                tail = s.rsplit('|', 1)[1].strip()
+                if re.match(r'^(!\s*)?grep\s', tail):
+                    piped, s = True, tail
 
             # VAR=/usr/... or VAR="/usr/..."   (one per physical line, which is
             # how this file writes them)
@@ -243,7 +256,18 @@ for path in sys.argv[1:]:
 
             flags = [t for t in toks if t.startswith('-') and len(t) > 1]
             rest = [t for t in toks if t not in flags]
-            if len(rest) < 2:
+            if piped or len(rest) < 2:
+                # A grep at the tail of a pipe reads the command's output, which
+                # only the build can produce. This used to `continue` SILENTLY --
+                # the worst of the three outcomes: not checked, and not counted
+                # as unchecked either. `apex-vm --help | grep -q 'no viewer'`
+                # could never pass, because that help went to stderr so the pipe
+                # carried nothing, and it cost a 50-minute build to find out
+                # while this file reported "0 failed" throughout.
+                unresolved += 1
+                what = rest[0] if rest else '?'
+                unresolved_examples.append(
+                    f"{path}:{lineno} grep {what!r} reads a pipe -- only the build can check it")
                 continue
             pattern, target = rest[0], rest[-1].rstrip(';')
 
