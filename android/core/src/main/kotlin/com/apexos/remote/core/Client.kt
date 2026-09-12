@@ -1,0 +1,168 @@
+package com.apexos.remote.core
+
+import java.io.InputStream
+import java.io.OutputStream
+
+/**
+ * The two conversations a device has with an APEX machine, over any pair of
+ * streams.
+ *
+ * Streams and not a socket, deliberately. The LAN leg is a TCP connection and
+ * the relay leg is a WebSocket carrying the same byte stream; `apex-remoted`
+ * makes exactly this separation (`relay.rs`: "nothing above the transport
+ * knows which leg it is on") and copying it here means the same code, and the
+ * same tests, cover both. It is also what lets a test drive a full pairing
+ * against a recorded transcript with no network at all.
+ */
+object Client {
+    /**
+     * Pair with the machine whose QR code produced [offer].
+     *
+     * Returns the desktop's answer, which arrives **inside** the finished
+     * handshake whether it is a yes or a no — a plaintext refusal would tell
+     * anybody watching that the machine is not currently pairing. A refusal is
+     * therefore a [PairingException] raised after a handshake that completed,
+     * not a connection that failed.
+     */
+    fun pair(
+        input: InputStream,
+        output: OutputStream,
+        offer: PairingOffer,
+        identity: StaticKey,
+        deviceName: String,
+        userVerification: Boolean,
+        version: Int = REMOTE_PROTOCOL_VERSION,
+        ephemerals: EphemeralSource = EphemeralSource.Secure,
+    ): PairingAnswer {
+        if (offer.v != version) {
+            throw PairingException(
+                PairingError.Malformed(
+                    "that machine speaks APEX Remote v${offer.v} and this app speaks v$version",
+                ),
+            )
+        }
+        // Refused here rather than by the desktop. Sending a name the desktop
+        // will reject would burn the owner's pairing offer — `pairing::complete`
+        // redeems the token before it validates the device — and cost them a
+        // walk back to the machine for a new code.
+        val name = Device.checkName(deviceName)
+        val handshake = Noise.pairingInitiator(offer.desktopPublicKey(), version, ephemerals)
+        val request = PairingRequest(
+            key = identity.publicKeyText(),
+            name = name,
+            token = offer.token,
+            userVerification = userVerification,
+        )
+        output.write(byteArrayOf(Transport.HELLO_PAIR))
+        Transport.writeMessage(
+            output,
+            handshake.write(
+                Pairing.json.encodeToString(PairingRequest.serializer(), request)
+                    .toByteArray(Charsets.UTF_8),
+            ),
+        )
+        val payload = try {
+            handshake.read(Transport.readMessage(input))
+        } catch (e: NoiseException) {
+            // The handshake failing here is the QR code's whole purpose: the
+            // machine on the other end does not hold the key that was on the
+            // screen.
+            throw PairingException(
+                PairingError.BadDevice(
+                    "that machine did not prove it holds the key from the QR code (${e.message})",
+                ),
+            )
+        }
+        val answer = try {
+            Pairing.json.decodeFromString(PairingAnswer.serializer(), payload.toString(Charsets.UTF_8))
+        } catch (e: Exception) {
+            throw PairingException(PairingError.Malformed(e.message ?: "the answer did not parse"))
+        }
+        if (!answer.ok) {
+            throw PairingException(PairingError.Refused(answer.error ?: PairingError.BadToken.message))
+        }
+        return answer
+    }
+
+    /**
+     * Open a session with a machine this device is already paired with.
+     *
+     * Returns the machine's name and the encrypted channel. An unpaired or
+     * revoked key gets **no second handshake message at all** — the desktop
+     * closes the connection instead, because completing the handshake and then
+     * refusing would confirm to a scanner that this machine's key is what they
+     * think it is. So end-of-stream here is "not paired, or revoked", and the
+     * two are deliberately not distinguishable.
+     */
+    fun openSession(
+        input: InputStream,
+        output: OutputStream,
+        identity: StaticKey,
+        desktopPublic: ByteArray,
+        version: Int = REMOTE_PROTOCOL_VERSION,
+        ephemerals: EphemeralSource = EphemeralSource.Secure,
+    ): Session {
+        val handshake = Noise.sessionInitiator(identity, desktopPublic, version, ephemerals)
+        output.write(byteArrayOf(Transport.HELLO_SESSION))
+        Transport.writeMessage(output, handshake.write(ByteArray(0)))
+        val machine = try {
+            handshake.read(Transport.readMessage(input)).toString(Charsets.UTF_8)
+        } catch (e: java.io.EOFException) {
+            throw SessionRefused(
+                "this machine does not accept this device: it is not paired, or it has been revoked",
+                e,
+            )
+        }
+        return Session(machine, handshake.intoTransport(), input, output)
+    }
+}
+
+/** The desktop hung up during the session handshake. */
+class SessionRefused(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+/**
+ * An open session: the machine's name, and frames over an encrypted channel.
+ *
+ * Not thread-safe for writing, and that is a property of the protocol rather
+ * than an omission. The Noise nonce is a message counter and neither end
+ * chooses it, so two threads sealing concurrently would produce two messages
+ * claiming the same one — `apex-remoted` funnels everything it sends through a
+ * single `Sealer` for exactly this reason, and a client must do the same.
+ */
+class Session internal constructor(
+    val machine: String,
+    private val channel: NoiseChannel,
+    private val input: InputStream,
+    private val output: OutputStream,
+) {
+    private val writeLock = Any()
+
+    /** Send one frame. Safe to call from several threads; serialised here. */
+    fun send(frame: Frame) {
+        val plaintext = frame.encode()
+        synchronized(writeLock) {
+            Transport.writeMessage(output, channel.seal(plaintext))
+        }
+    }
+
+    /** Send a run of terminal bytes, split into as many frames as it needs. */
+    fun sendData(channelId: UInt, bytes: ByteArray) {
+        for (frame in Frame.dataFrames(channelId, bytes)) send(frame)
+    }
+
+    /**
+     * Read one frame. One reader only: the receiving nonce is a counter too,
+     * and two readers would each advance it past the other's message.
+     */
+    fun receive(): Frame = Frame.decode(channel.open(Transport.readMessage(input)))
+}
+
+/**
+ * The protocol revision this build speaks.
+ *
+ * Exchanged in the pairing payload and again in the handshake prologue, so a
+ * device and a desktop that disagree find out before either has sent a frame
+ * the other would misread. Separate from `apex-agentd`'s own protocol version,
+ * which versions what travels *inside* a control frame.
+ */
+const val REMOTE_PROTOCOL_VERSION: Int = 1

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The APEX mark: a chevron over a horizon line. Drawn as a vector rather than
+  shipped as five PNG densities because it is two paths, and because the
+  `monochrome` layer in the adaptive icon needs the same shape again — one
+  source is one shape that cannot drift from itself.
+
+  The 108dp canvas is Android's adaptive-icon size; the safe zone is the middle
+  66dp, and everything here sits inside it.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#94E2D5"
+        android:pathData="M54,30 L74,66 L64,66 L54,48 L44,66 L34,66 Z" />
+    <path
+        android:fillColor="#94E2D5"
+        android:pathData="M36,72 L72,72 L72,78 L36,78 Z" />
+</vector>

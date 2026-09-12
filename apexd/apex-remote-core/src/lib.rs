@@ -44,6 +44,14 @@ pub mod rendezvous;
 pub mod tls;
 pub mod wire;
 
+/// Test-only: the byte vectors the Android client is checked against.
+///
+/// Compiled only under `cfg(test)` — the module's own attribute — so nothing
+/// it contains reaches a shipped binary. See the module documentation for why
+/// a second implementation of a hand-rolled protocol needs them.
+#[cfg(test)]
+mod vectors;
+
 /// The protocol revision this build speaks.
 ///
 /// Exchanged in the pairing payload and again in the handshake prologue, so a
