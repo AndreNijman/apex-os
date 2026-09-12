@@ -81,6 +81,77 @@ Nothing refreshes anything, for Cloudflare either.
 Also fixed: `tests/test-apex-verbs.sh` had been failing its own reverse pass
 59/1 (`lid`, `permissions`, `user`, `vm` unlisted). 64/0 now.
 
-## STATUS
+## Round 1 — P2-018 landed on the branch
 
-P2-017 done bar the OAuth half. P2-018 next. See `## NEXT`.
+* `45f5c0ef` APEX Safe Graphics: the session, the terminal helper, the baked
+  config directory, the session entry, `tests/test-apex-safe-graphics.sh`
+* `33e88ab4` the Containerfile stage, the two greet-session counts, and the
+  `docs/recovery.md` section
+
+The load-bearing thing is `labwc -C /usr/share/apex/safe-graphics`. A config
+DIRECTORY, so the compositor never opens `~/.config/labwc` — the file
+`apex-input-apply` splices into and `apex-labwc-keybinds` generates into, and
+the file labwc falls back from SILENTLY when it will not parse. `-C` and not
+`XDG_CONFIG_HOME`, because the clients must keep their own config.
+
+`WLR_BACKENDS` is the variable deliberately NOT set: unset it is DRM for a
+person and `headless` for a test, which is the only way this gets exercised
+without taking Andre's display away.
+
+Two routes shipped (greeter entry, virtual console) and the third named as
+refused: no recovery BOOT entry, because a shipped helper may not write the ESP
+and `tests/test-boot-v2.sh` scans for exactly that.
+
+## Round 1 — P2-019 landed on the branch
+
+* `9779e443` `docs/fleet.md`. A design, marked built / partly built / not built
+  per section, with a "must never be built" list and a "does not settle" list.
+
+## Round 1 — P2-019 gaps that matter
+
+The design does not settle the transport and has no server-side design at all,
+which is why it is recorded `partial` and not `done`.
+
+## NEXT
+
+Ordered by what a second round would gain most from.
+
+1. **P2-018's automatic entry is not built, and it is the criterion's verb.**
+   "A graphics/compositor/shell failure CAN ENTER a conservative recovery
+   desktop" — today a person enters it; nothing detects a loop. Measured facts
+   for whoever does it: greetd is a stock Fedora unit with NO `Restart=`, no
+   `StartLimitBurst`, no `OnFailure=` and no drop-in anywhere in the repo; the
+   only wiring points are `apex-greet-session` (boot-critical) and
+   `apex-shell-autostart`; and `files/system/units/apex-boot-health.*` is INERT
+   on every published image because both units carry
+   `ConditionPathExists=…LoaderBootCountPath…` and every APEX image boots GRUB.
+   Build it as a pure counter script with a state-dir override, tested in
+   isolation with a mutation, and make the greet hook two lines that FAIL OPEN
+   to the normal session. A counter that can strand somebody at a login screen
+   is worse than no counter.
+2. **`last-session` stickiness.** `GreetContext.qml:185` writes the chosen
+   session on every launch, so picking Safe Graphics once makes it the
+   preselected default forever. That is an apex-shell QML change and could not
+   be run from here.
+3. **P2-017's OAuth half.** `apex/src/cloudflare.rs` already has a complete RFC
+   8628 device-code implementation — `Endpoints`, `connect_by_device_code`,
+   `poll_interval` honouring `slow_down`. Wire Google and Microsoft to it,
+   keeping its best idea: the refresh token goes under a SEPARATE service
+   pinned to a different host, so the framework's endpoint pin makes it
+   unspendable as an API token. Nothing refreshes anything today, Cloudflare
+   included — that is one refresher for three providers.
+4. **S3/R2 is a name and not a signer.** `broker::perform_webdav` sends headers
+   it is given; SigV4 needs a request signer. P1-011's `temporary.rs` header
+   records hitting the same wall with R2's `temp-access-credentials`.
+5. **No file-manager integration.** gvfs with `gvfsd-dav` ships and `apex
+   devices share` reports it, but nothing mounts an account. Doing it honestly
+   needs a short-lived credential minted per mount (`Provider::mint` exists),
+   not a copy of the stored one in the session.
+6. **P2-019's server side and transport.** `relay/` is an undeployed Noise_IK
+   rendezvous; whether a fleet client polls, holds a connection or is pushed to
+   changes the threat model, and the operator side is unwritten.
+7. **Not asserted at build time:** `thunar` and `nmtui` are named on the safe
+   graphics menu and are present on the L16, but no Containerfile refusal
+   checks them, because this branch could not run an image build and therefore
+   could not confirm which layer installs them. `tests/test-apex-safe-graphics.sh`
+   checks them and SKIPs where they are absent.

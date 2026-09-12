@@ -33,24 +33,6 @@
       "at_dispatch": "Re-dispatched off its card; its ten commits are landed. Told about both CI fixes made while it was dead, and that its 12-assertion i18n suite had never run on a second machine because of the apt-get-in-Arch defect. Told a fresh apex-shell CI run is in flight and to expect more assertions written against a tree that has moved."
     },
     {
-      "slug": "p1-025",
-      "items": [
-        "P1-025",
-        "P1-026",
-        "P1-027",
-        "P1-028"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p1-025",
-      "branch": "task/p1-025-plugin-trust-3",
-      "agent_id": "aca19b146ae5e7ed7",
-      "dispatched": "2026-09-12T22:35+08:00",
-      "session": "round 22 orchestrator",
-      "queue_id": "p1-025",
-      "card": "ROADMAP/state/agents/p1-025.md",
-      "at_dispatch": "Re-dispatched off its card; d02528d3 is landed. Re-told the original abort reason (uncalled private fns + clippy -D warnings, callers live in P1-026) and told again NOT to reach for #[allow(dead_code)]. Warned that followups-3 also landed in provenance.rs, so merge roadmap/v2.2 first."
-    },
-    {
       "slug": "p2-f",
       "items": [
         "P2-017",
@@ -114,6 +96,22 @@
       "queue_id": "p1-053c",
       "card": "ROADMAP/state/agents/p1-053c.md",
       "at_dispatch": "Took p1-053b's slot when its round landed as 69a2f51e. Given the three measured facts that shape it: Input exists on the wire and a phone MAY use it (refuse_input only refuses a caller that IS a session or is unclassifiable, and apex-remoted is neither); there is NO checkpoint verb on the socket; and Input and Worktrees both landed 2026-09-08 while the L16 boots a 2026-09-05 image, so both happy paths are unreachable against this machine's daemon. Warned that P1-060 probably cannot close while P1-056/057/058 are structurally partial, and not to fold P1-057's FIDO2 criterion into an Android round. Told never to capture Andre's screen or touch his clipboard."
+    },
+    {
+      "slug": "p1-061",
+      "items": [
+        "P1-061",
+        "P1-062"
+      ],
+      "repo": "both",
+      "worktree": "/var/tmp/apex-work/wt-p1-061",
+      "branch": "task/p1-061-app-permissions",
+      "agent_id": "a6b3cb2a1c3f70581",
+      "dispatched": "2026-09-13T00:10+08:00",
+      "session": "round 22 orchestrator",
+      "queue_id": "p1-061",
+      "card": "ROADMAP/state/agents/p1-061.md",
+      "at_dispatch": "Unblocked when p1-025 finished. ONE criterion is genuinely open: the Settings permissions page has never been instantiated under a compositor \u2014 qmllint, node and check-privacy-ui proved syntax, logic and wiring, and none of that is pixels. The predecessor stopped because the only harness opened a window on Andre's desktop; since then p2-b built a nested-labwc harness and apex-shell CI is green on roadmap/v2.2 for the first time, so it was told to look for a nested/offscreen path before concluding it cannot be done, and to report a could-not-run with what it tried rather than bank a pass. Told explicitly never to revoke a permission on Andre's live session, and not to widen scope onto criterion 1's documented USB/RemoteDesktop decision."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -149,7 +147,9 @@
     "the provenance flake was ETXTBSY, and it is now measured rather than assumed": "I had guessed it was the same `set_var` shape as the agentd flake. It was not. followups-3 separated the guard from the reporting fix (they had landed in one commit, so nothing had ever distinguished 'the panic names ETXTBSY' from 'the retry stops it') and ran both builds through one harness: unguarded 40 failures / 1000 runs (4.0%), guarded 0 / 1200. All 40 were the same test at provenance.rs:1839, all 'Text file busy (os error 26)' \u2014 counted, not spot-checked. The guarded arm ran alongside four concurrent cargo builds and the unguarded one did not, so the comparison is biased AGAINST the guard. Not run on CI, where a runner forks differently and the rate is unknown.",
     "check-doc-verbs.sh --reverse silently reads a stale binary": "`cargo test --bins --no-run` builds deps/apex-<hash> and never refreshes target/debug/apex, and `ensure_built` skips when the file exists. A first run reported 166 documented verbs; rebuilding target/debug/apex gave 171 \u2014 the new `apex user` verbs. The verdict did not change this time, but it could have. Run `cargo build --locked --bin apex` before trusting it. Every agent brief now carries this.",
     "the L16 boots an image older than the verbs the Android app needs": "Input (8c3958df) and Worktrees both landed 2026-09-08; the booted deployment was built 2026-09-05. So the worktrees and input happy paths CANNOT be exercised against this machine's daemon at all \u2014 a could-not-run, not a failure, and it will stay that way until an image build lands. Verified by the orchestrator from the commit date and rpm-ostree status rather than taken on report. This is a second reason the image build matters beyond the lid feature.",
-    "the Android unit has been wrong about the protocol vocabulary three times": "Once fatally \u2014 correct worktrees code was deleted over a claim read off a validation-error enum. p1-053b closed the class by construction rather than by care: android/core/src/test/resources/requests.json is every request the app builds, asserted by Kotlin against the builders AND by apexd/apex-agent-core/tests/android_requests_wire.rs against Request's own serde. A verb that does not exist now fails to deserialize instead of being argued about. Two real defects also fixed: connecting to a second machine kept the first one's worktrees, grants and pending approvals; and replyToSession reported every failure as 'may already have been delivered', the opposite of what protocol.rs guarantees \u2014 told it might have landed, a user does not resend and the agent waits forever."
+    "the Android unit has been wrong about the protocol vocabulary three times": "Once fatally \u2014 correct worktrees code was deleted over a claim read off a validation-error enum. p1-053b closed the class by construction rather than by care: android/core/src/test/resources/requests.json is every request the app builds, asserted by Kotlin against the builders AND by apexd/apex-agent-core/tests/android_requests_wire.rs against Request's own serde. A verb that does not exist now fails to deserialize instead of being argued about. Two real defects also fixed: connecting to a second machine kept the first one's worktrees, grants and pending approvals; and replyToSession reported every failure as 'may already have been delivered', the opposite of what protocol.rs guarantees \u2014 told it might have landed, a user does not resend and the agent waits forever.",
+    "a fail-open in the plugin policy, caught before any image shipped it": "Round 3 shipped `plugins` in AgentPolicy::dimensions() but NOT in the version table, and check_daemon_understands maps an unrecognised name onto POLICY_DIMENSIONS_VERSION. Config::policy copies the field straight through, so `plugins = \"none\"` in agent.toml reached that path WITH NO CLI FLAG AT ALL: the check passed, the daemon dropped the key, and the session loaded every plugin and ran every SessionStart hook. Fixed in 6d3ce356 \u2014 PROTOCOL_VERSION 7->8, PLUGIN_POLICY_VERSION = 8, and the table split out as settings_a_daemon_could_drop so it can be asserted without a socket. ORCHESTRATOR CHECKED THE BLAST RADIUS: the L16's shipped /usr/bin/apex has NO plugin policy at all (0 `--plugins` flags in help, 0 string matches in the binary) and there is no agent.toml on the machine, so the fail-open lived only in unreleased branch code and never reached Andre. The live daemon answers protocol 1 and refuses --plugins outright, which is fail-closed and correct.",
+    "--plugins has never gone through the daemon end to end": "The L16's daemon answers protocol 1, so `apex agent run --plugins none` is refused with 'speaks protocol 1 and would ignore --plugins' and no session starts \u2014 correct behaviour, but it means session.rs -> document wiring is unit-tested only. Closing it needs a daemon built from the tip, i.e. restarting apex-agentd or an image. THAT IS ANDRE'S CALL, not an agent's, and the standing rule forbids `pkill apex-agentd`. Also: the live plugin-removal test is #[ignore]d and ran on the L16 only \u2014 CI installs no `claude`, so CI has never held that check; the suite prints a '----' could-not-run line counted separately from PASS rather than passing vacuously."
   },
   "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt \u2014 the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
   "_orchestrator": {

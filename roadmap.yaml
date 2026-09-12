@@ -4218,7 +4218,7 @@ tasks:
 - id: P2-017
   title: APEX Online Accounts and brokered cloud identity layer
   priority: P2
-  status: todo
+  status: partial
   area: online-accounts
   depends_on:
   - P1-001
@@ -4231,10 +4231,41 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    APEX Online Accounts. Landed on task/p2-f (9 commits off roadmap/v2.2 4b1e797f), NOT yet merged. The decision:
+    an online account is a ServiceInfo in the store apex-secretd already owns, named account.<provider>.<name> —
+    no accounts daemon, no second store, no second write path, because P0-002 already put credentials in
+    /var/lib/apex-secretd/users/<uid>/ root-owned 0700 where the user's own uid cannot read one at rest, and
+    P2-016 measured what a second write path costs. Five providers over THREE transports in
+    apex-secret-core/src/account.rs (nextcloud and webdav both route into webdav: P1-001 routes on an operation
+    id's first segment, so two spellings would need two registry entries that drift). apex account
+    providers/scopes/add/list/grant/revoke/rm in apexd/apex/src/account.rs; docs/online-accounts.md. CRITERION 2
+    IS MEASURED FOR WEBDAV ONLY: a new webdav provider (list/read/write) in apex-secretd, proven end to end
+    against a loopback server that 401s a request carrying no credential — the app password arrives as Basic
+    base64(me:<token>) at /dav/documents/notes.md, i.e. the caller's path UNDER the pinned base path, the caller
+    gets the body, and the token is in no reply, no output and no audit line. CRITERION 3 IS MEASURED: removing
+    the account makes the same Use that succeeded a moment earlier fail, the grant is gone from the table rather
+    than merely unmatched, and a walk of the whole store finds the sentinel nowhere. CRITERION 1 IS NOT MET FOR
+    THREE OF THE FIVE PROVIDERS NAMED IN IT: the RFC 8628 device-code flow is not wired to Google or Microsoft
+    (apex/src/cloudflare.rs has a complete implementation to reuse, including its best idea — the refresh token
+    under a SEPARATE service pinned to a different host so the endpoint pin makes it unspendable as an API token),
+    nothing refreshes any token including Cloudflare's, and S3/R2 has no SigV4 signer, which is the wall P1-011's
+    temporary.rs already hit. Also not built: no gvfs/file-manager integration. Gates: cargo clippy --locked
+    --workspace --all-targets -D warnings clean; cargo test --locked --workspace 40 suites 0 failed;
+    tests/test-secret-broker.sh 66/0; tests/check-doc-verbs.sh 221 valid 0 undocumented-and-undeclared 0 stale;
+    tests/test-apex-verbs.sh 64/0 (it had been failing its own reverse pass 59/1 before this branch — lid,
+    permissions, user and vm were unlisted). TWO MUTATIONS BOTH BIT: presentation() always returning
+    HttpAuth::Header sent the raw sentinel where Basic belonged and reddened both the unit test and the end-to-end
+    one; broker::webdav_url's valid_path guard deleted took apex-secretd from 252/0 to 250/2. Both restored with
+    plain cp, cmp silent. TWO DEFECTS FOUND AND FIXED IN THE FRONT-END ITSELF, both the second-derivation class:
+    apex account grant keyed on the CURRENT DIRECTORY where apex secret grant keys on the project ROOT, so a grant
+    made from any subdirectory was allowed, reported and silently inert; and add took an empty --username for a
+    Basic provider, which would have sent the password as a bare Authorization header and read back as a wrong
+    password.
 - id: P2-018
   title: Guaranteed Safe Graphics / desktop failover mode
   priority: P2
-  status: todo
+  status: partial
   area: recovery-graphics
   depends_on:
   - BASE-015
@@ -4246,10 +4277,50 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Guaranteed Safe Graphics. Landed on task/p2-f, NOT yet merged. APEX Safe Graphics is a labwc session started
+    as 'labwc -C /usr/share/apex/safe-graphics' — a config DIRECTORY, which is the whole of criterion 3: the
+    compositor never opens ~/.config/labwc, the file apex-input-apply splices a libinput element into with
+    ElementTree and apex-labwc-keybinds generates into, and the file labwc falls back from SILENTLY when it will
+    not parse. -C rather than XDG_CONFIG_HOME on purpose, so the CLIENTS keep their own config; a file manager
+    with no config directory cannot save a bookmark. Software rendering forced (pixman, llvmpipe,
+    LIBGL_ALWAYS_SOFTWARE, no hardware cursors) and __GLX_VENDOR_LIBRARY_NAME / GBM_BACKEND /
+    MESA_LOADER_DRIVER_OVERRIDE actively UNSET, because a broken GPU setup is often a broken vendor selection.
+    WLR_BACKENDS is deliberately not set: unset it is DRM for a person and headless for a test, which is the only
+    way this is exercised without taking the live display away. CRITERION 3 IS MEASURED, NOT INSPECTED:
+    tests/test-apex-safe-graphics.sh plants an unparseable rc.xml plus an autostart that would exit the compositor
+    exactly where the user's live, starts the real session under WLR_BACKENDS=headless in a private
+    XDG_RUNTIME_DIR, and requires a wayland socket and a live compositor afterwards. 59 passed, 0 failed.
+    MUTATION: deleting -C from the exec line takes it to 42/2, failing both the structural check and 'the recovery
+    session came up over a broken user configuration', because the compositor then read the planted config and
+    went away. Restored with plain cp, cmp silent. CRITERION 2 IS STRUCTURAL, NOT EXERCISED: the menu names apex
+    recover status, apex doctor, apex-safe-graphics diagnose, sudo apex rollback (which IS the driver rollback
+    here, since a driver is image content), thunar and nmtui, and the build refuses if any is missing from it —
+    but none was RUN from inside the session. diagnose is exercised: it writes a tar.gz in which no file is ever
+    empty, because a step that could not run writes could-not-run into its own file. CRITERION 1 IS THE HALF-MET
+    ONE AND THE VERB IS THE PROBLEM: two routes ship, the greeter entry and a virtual console (Ctrl+Alt+F2,
+    documented in docs/recovery.md, which nothing in either repo said anywhere before — it matters because the
+    greeter is itself a wlroots compositor on VT 1 and a machine with no working GL may never paint the picker).
+    But NOTHING DETECTS A FAILURE: greetd is a stock Fedora unit with no Restart=, no StartLimitBurst, no
+    OnFailure= and no drop-in in the repo, apex-boot-health's two units are inert on every published image because
+    both carry ConditionPathExists on LoaderBootCountPath and every APEX image boots GRUB, and no failure counter
+    was built — deliberately, because the only wiring points are the boot-critical apex-greet-session and
+    apex-shell-autostart and a counter that can strand somebody at a login screen is worse than none. A user
+    enters this session; a failure does not. Also not done: GreetContext.qml:185 writes last-session on every
+    launch, so picking Safe Graphics once makes it the preselected default forever — an apex-shell QML change that
+    could not be run from here. NO recovery boot entry, deliberately and stated in the doc: AGENTS.md boot-path
+    rule 1 forbids a shipped helper writing the ESP or an EFI variable and tests/test-boot-v2.sh scans for exactly
+    that. Containerfile.base carries the build refusals (the -C flag, the three render variables, WLR_BACKENDS not
+    pinned, an autostart that does not start APEX Shell, each menu remedy) written as if-then-echo FATAL-exit 1;
+    tests/check-containerfile-assertions.sh is still 106 checked / 0 failed / 0 inert.
+    tests/test-apex-greet-sessions.sh 41/0 after moving two counts that are equalities on purpose (3 to 4 owned
+    entries, 4 to 5 swept). shellcheck -S warning -x clean on every shell file touched. NOT VERIFIED: no image was
+    built, so nothing here has run on a real boot; and the session was never started on real hardware or on a real
+    GPU failure — only headless.
 - id: P2-019
   title: Design APEX Fleet / managed-device architecture
   priority: P2
-  status: todo
+  status: partial
   area: fleet
   depends_on:
   - BASE-007
@@ -4262,6 +4333,32 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    APEX Fleet architecture. docs/fleet.md on task/p2-f (commit 9779e443), NOT yet merged. A DESIGN item and a
+    design is what landed: no fleet daemon, no apex fleet verb, no server, and the document says so in its first
+    two sentences with every section marked built, partly built or not built. Criterion 2's list is covered
+    section by section: enrolment (one root-owned record under /var/lib/apex-fleet/, the existing Noise pairing
+    exchange rather than a second device identity, refused from inside a managed agent session the way
+    apex-secretd already refuses Add/Remove/Grant/Approve, and authorisation as a match over EVERY verb with a
+    table-driven test because that is the defect P2-016 found in apex-remoted), inventory, compliance, update
+    rings, managed secrets and certificates, app policy, remote health and recovery. Criterion 3 is the FIRST
+    section rather than the last, because it constrains everything else: an unenrolled machine has no fleet code
+    path to disable, and leaving works from the keyboard. The one genuinely new contribution is where the
+    staged-rollout pointer lives — docs/update-channels.md records that a ramp needs a number that changes between
+    builds and an OCI label is baked once, so a ring is (channel, slot ceiling) served by a fleet endpoint, with
+    an unenrolled machine keeping today's behaviour exactly. Two sections exist because leaving them out is how
+    this gets built wrong: five things that must never be built (remote exec, a fleet that can approve a privilege
+    request, silent enrolment, telemetry from unenrolled machines, fleet-owned user accounts) and five the design
+    does not settle. PARTIAL AND NOT DONE because two of those five are criterion 1's own subject matter: the
+    TRANSPORT is undecided (relay/ is an undeployed Noise_IK rendezvous, and whether a client polls, holds a
+    connection or is pushed to changes the threat model) and THERE IS NO SERVER-SIDE DESIGN AT ALL — everything is
+    written from the machine's point of view, and the operator's own access control is where a fleet's
+    multi-tenancy lives. Also unsettled: what a ring ceiling costs to serve against docs/update-cost.md, whether
+    the fleet-assigned machine id can be rotated, and the evidence standard for compliance, which really wants
+    attestation and therefore depends on L-001's TPM work being partial. Gates: tests/check-doc-verbs.sh 235
+    valid, 7 deliberate, 0 not a command, 0 undocumented and undeclared, 0 stale — the four apex fleet verbs went
+    into tests/doc-verbs-allow, which is the file for commands a doc names on purpose because they do not exist,
+    and three entries left tests/doc-verbs-undocumented because this document names them.
 - id: L-001
   title: Real TPM and recovery qualification
   priority: Later
