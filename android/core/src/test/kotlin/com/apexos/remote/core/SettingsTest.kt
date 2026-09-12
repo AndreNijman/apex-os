@@ -1,0 +1,84 @@
+package com.apexos.remote.core
+
+import com.apexos.remote.core.term.AccessoryKey
+import com.apexos.remote.core.term.AccessoryKeys
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.nio.file.Path
+
+/**
+ * P1-055: "…and a **configurable** accessory row."
+ *
+ * The configuration is a field on [MachineStore] rather than a preferences
+ * file, and that is not tidiness: `AppStorage` being the only writer to app
+ * storage is what lets `InsecureStorageTest` walk the whole directory and
+ * account for every byte in it. A `DataStore` for the accessory row would be a
+ * second write path, and one the walk never looks at —
+ * `tools/no-second-write-path.sh` fails the build if one appears.
+ *
+ * So these are the tests that the row survives a save, and that an empty one
+ * means "whatever ships" rather than "no keys at all".
+ */
+class SettingsTest {
+    @Test
+    fun `an accessory row survives a save and a reload`(@TempDir dir: Path) {
+        val storage = AppStorage(dir.toFile())
+        val mine = listOf(
+            AccessoryKey("Esc", "key:ESCAPE"),
+            AccessoryKey(":", "text::"),
+            AccessoryKey("Ctrl", "ctrl"),
+        )
+        storage.save(MachineStore(settings = Settings(accessory = mine, terminalTextSp = 15f)))
+        val back = storage.load()
+        assertEquals(mine, back.settings.accessory)
+        assertEquals(15f, back.settings.terminalTextSp)
+        assertEquals(mine, back.settings.accessoryRow)
+    }
+
+    @Test
+    fun `an empty row means what this build ships, not a row with no keys`() {
+        // A stored empty list and an absent key are indistinguishable after a
+        // kotlinx.serialization default, so the two must mean the same thing —
+        // and the safe meaning is "the shipped row". A phone whose accessory
+        // row vanished because a migration dropped a field is a phone you
+        // cannot press Escape on.
+        assertTrue(Settings().accessory.isEmpty())
+        assertEquals(AccessoryKeys.DEFAULT, Settings().accessoryRow)
+        assertTrue(Settings().accessoryRow.isNotEmpty())
+    }
+
+    @Test
+    fun `a store written by an older build still opens, with the shipped row`(@TempDir dir: Path) {
+        // The migration that will actually happen: a device that paired before
+        // P1-055 has a settings object with neither key in it.
+        val file = dir.resolve("machines.json").toFile()
+        file.parentFile.mkdirs()
+        file.writeText("""{"v":1,"machines":[],"settings":{"dynamic_colour":true}}""")
+        val store = AppStorage(dir.toFile()).load()
+        assertTrue(store.settings.dynamicColour)
+        assertEquals(AccessoryKeys.DEFAULT, store.settings.accessoryRow)
+        assertEquals(Settings.DEFAULT_TERMINAL_TEXT_SP, store.settings.terminalTextSp)
+    }
+
+    @Test
+    fun `every key in the shipped row is one this build can act on`() {
+        for (key in Settings().accessoryRow) {
+            assertTrue(
+                AccessoryKeys.parse(key.action) != null,
+                "the shipped row has `${key.label}` with an action this build cannot parse: ${key.action}",
+            )
+            assertFalse(key.label.isEmpty(), "a button with no label is a button nobody can aim at")
+        }
+    }
+
+    @Test
+    fun `the text size is a number of columns, not a matter of taste`() {
+        // Documented as measured: eighty columns at 0.6 em advance is 576 px,
+        // inside the short edge of every phone this supports. The default is
+        // pinned so a change to it is a change somebody made on purpose.
+        assertEquals(12f, Settings.DEFAULT_TERMINAL_TEXT_SP)
+    }
+}
