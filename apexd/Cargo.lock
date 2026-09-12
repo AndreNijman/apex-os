@@ -100,6 +100,7 @@ dependencies = [
  "anyhow",
  "apex-agent-core",
  "apex-backup-core",
+ "apex-perm-core",
  "apex-remote-core",
  "apex-secret-core",
  "apexd-core",
@@ -163,6 +164,14 @@ dependencies = [
  "toml",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "apex-perm-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
