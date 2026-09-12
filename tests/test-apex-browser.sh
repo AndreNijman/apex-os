@@ -46,7 +46,8 @@
 #    * refusals: no destination, a traversing nomination, a destination inside
 #      the capsule root, --profile or -display among the browser's arguments,
 #      and a destination the runtime has not allowed
-#    * the three answers a capability lookup can give, which are not two
+#    * the four answers a capability lookup can give, which are not two, and
+#      the destination it yields — host AND port, with no scheme on it
 #    * the removal fences, including that a name pointing outside the root is
 #      refused rather than removed
 #
