@@ -178,6 +178,17 @@ else
     deny "loginctl is not available, so it cannot be established that '$account' is logged out"
 fi
 if printf '%s\n' "$live" | grep -qx -- "$account"; then
+    # The detail before the refusal, because the refusal on its own has sent a
+    # reader looking for a desktop that is not there. logind lists a session in
+    # `State=closing` too, and its leader may already be gone; a STUCK one — a
+    # scope logind never reaped — holds this refusal until the next boot.
+    # Observed on the L16: a guest logged out, the session's leader died, the
+    # record stayed `closing`, and the wipe refused at every subsequent logout.
+    # That is the conservative answer and it is the right one, because "the
+    # record is stuck" and "somebody is still sitting there" look identical
+    # from here. The boot-time sweep, apex-guest-wipe@.service, is the backstop
+    # for exactly that case.
+    log "logind still lists a session for '$account'; a record in State=closing counts, and a stuck one holds this refusal until the next boot. \`loginctl list-sessions\` shows which."
     deny "'$account' still has an active login session"
 fi
 
