@@ -338,6 +338,14 @@ pub const ENV_ENGINE: &str = "/usr/libexec/apex-env";
 /// it, and APEX has not grown a second container runtime.
 pub const DISPOSABLE_ENGINE: &str = "/usr/libexec/apex-disposable";
 
+/// The virtualization engine behind `apex vm` (P2-008).
+///
+/// A constant, like every other engine path here, and for the same reason: a
+/// caller-controlled variable naming a program is a hole. This one defines
+/// libvirt domains and deletes disk images, so it is the last one that should
+/// be reachable through the environment.
+pub const VM_ENGINE: &str = "/usr/libexec/apex-vm";
+
 /// The plugin CLI behind `apex plugin` (§16).
 ///
 /// A constant, not an overridable variable — the same rule as [`PKG_ENGINE`]
@@ -463,6 +471,30 @@ pub fn disposable(args: &[String]) -> i32 {
             eprintln!("apex: cannot run the disposable engine: {e}");
             eprintln!(
                 "apex: no disposable engine on this system — it predates `apex disposable`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
+/// `apex vm …`.
+///
+/// Unprivileged, structurally: every domain is a per-user one at
+/// `qemu:///session` and every disk is under the user's own data directory.
+/// Running this as root would put the domains in libvirt's system namespace,
+/// where defining one needs polkit and where the `default` network is a host
+/// bridge — the three things `apex vm` exists to avoid.
+///
+/// `status()` rather than `output()`: `apex vm console` hands the terminal to
+/// a serial console the user detaches from with Ctrl-].
+pub fn vm(args: &[String]) -> i32 {
+    match Command::new(VM_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the virtualization engine: {e}");
+            eprintln!(
+                "apex: no VM engine on this system — it predates `apex vm`.\n\
                  \x20      run `sudo apex update` first."
             );
             1
