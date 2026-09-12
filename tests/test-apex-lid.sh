@@ -511,6 +511,131 @@ grep -q 'no VPN state to report' <<<"$rep" \
     && ok "a period whose VPN could not be read says so, and does not claim it held" \
     || bad "a period whose VPN could not be read says so, and does not claim it held" "$rep"
 
+# Nothing half-written is left behind. `save_period` writes a sibling and
+# renames, because a bare `std::fs::write` truncates first and the machine this
+# runs on is a laptop a guard is deliberately suspending — precisely when a
+# write gets interrupted.
+[ -e "$F/var/lib/apex/lid/last.json.new" ] \
+    && bad "no half-written sibling is left behind" "a .new sibling was left behind" \
+    || ok "no half-written sibling is left behind"
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' \
+        "$F/var/lib/apex/lid/last.json" \
+    && ok "and what it left is a whole document" \
+    || bad "and what it left is a whole document"
+
+# THE assertion that tells a rename from a write, and it has to discriminate:
+# "no .new sibling was left" is equally true of a bare `std::fs::write`, which
+# is how that mutant survived the first version of this check. So the write of
+# the sibling is made to FAIL — a directory where the temp file goes — and the
+# previous record is required to still be there afterwards. `std::fs::write`
+# truncates before it writes, so in-place the known-good record becomes rubble
+# and the owner reopens to nothing; writing a sibling and renaming means a
+# failed write costs the NEW record and keeps the last good one.
+G="$(fx atomic 'pin = "on"')"
+printf '%s' '{"closed_at":11,"last_seen":12,"opened_at":null,"sessions_at_close":7,\
+"why":"the known-good record","ended_by":null,"charge_at_close":null,"charge_last":null,\
+"peak_c":null,"powered_down":[],"skipped":[],"vpn":[]}' \
+    | tr -d '\\\n' > "$G/var/lib/apex/lid/last.json"
+mkdir -p "$G/var/lib/apex/lid/last.json.new"
+echo closed > "$G/proc/acpi/button/lid/LID/state"
+echo open   > "$G/proc/acpi/button/lid/LID/state.pending"
+drive "$G" watch --once >/dev/null 2>&1
+echo open > "$G/proc/acpi/button/lid/LID/state"
+drive "$G" watch --once >/dev/null 2>&1
+python3 - "$G/var/lib/apex/lid/last.json" \
+    <<'PY' && ok "a record whose write fails leaves the last good one intact" \
+           || bad "a record whose write fails leaves the last good one intact"
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["why"] == "the known-good record", d
+assert d["sessions_at_close"] == 7, d
+sys.exit(0)
+PY
+rmdir "$G/var/lib/apex/lid/last.json.new" 2>/dev/null
+
+# ─────────────────────────────────────────────────────────────────────────────
+section "a record that could not be read is not a machine that never slept"
+# ─────────────────────────────────────────────────────────────────────────────
+# Three answers where there used to be two. `load_period` was
+# `read_optional(...).ok().flatten()?` then `from_str(...).ok()`, and both
+# `.ok()`s threw a reason away — so a record that EXISTED and could not be read
+# printed "no lid-closed period has been recorded on this machine yet", and so
+# did one truncated by a crash. That is "permission denied is not absence"
+# inside the one verb that delivers the owner's readout after they reopen.
+#
+# Reachable rather than hypothetical: apex-lid.service sets
+# `StateDirectory=apex/lid` with no StateDirectoryMode and no UMask, so the
+# record is 0644 and the shell tile can read it — and adding `UMask=0077` later
+# would turn every unprivileged `apex lid report` into "nothing has happened"
+# with nothing going red.
+#
+# The unreadable record here is a DIRECTORY where the file should be, not a
+# chmod: `read_to_string` answers EISDIR, which is the same `Err` arm as EACCES,
+# and unlike a mode it means the same thing when the suite runs as root — which
+# a GitHub Actions `container:` job does.
+F="$(fx record 'pin = "auto"')"
+rm -f "$F/var/lib/apex/lid/last.json"
+mkdir -p "$F/var/lib/apex/lid/last.json"
+rj="$(drive "$F" report --json)"; rc=$?
+[ "$rc" -ne 0 ] \
+    && ok "a record that cannot be read exits non-zero" \
+    || bad "a record that cannot be read exits non-zero" "rc=$rc"
+python3 - "$rj" <<'PY' && ok "…and says so in the JSON, rather than reporting no period" \
+                       || bad "…and says so in the JSON, rather than reporting no period"
+import json,sys
+d=json.loads(sys.argv[1])
+assert d.get("period") is None, d
+assert d.get("error"), "an unreadable record must carry the reason it could not be read"
+sys.exit(0)
+PY
+drive "$F" report >/dev/null 2>&1
+[ $? -ne 0 ] \
+    && ok "…and the plain-text form fails too, instead of printing 'nothing yet'" \
+    || bad "…and the plain-text form fails too, instead of printing 'nothing yet'"
+rmdir "$F/var/lib/apex/lid/last.json"
+
+# A crash between the truncate and the last byte. Same three-way answer.
+printf '{"closed_at":1,"last_' > "$F/var/lib/apex/lid/last.json"
+rj="$(drive "$F" report --json)"; rc=$?
+[ "$rc" -ne 0 ] \
+    && ok "a truncated record is unreadable, not absent" \
+    || bad "a truncated record is unreadable, not absent" "rc=$rc  $rj"
+python3 - "$rj" <<'PY' && ok "…and names the file and the parse error" \
+                       || bad "…and names the file and the parse error"
+import json,sys
+d=json.loads(sys.argv[1])
+assert d.get("period") is None, d
+assert "last.json" in (d.get("error") or ""), d
+sys.exit(0)
+PY
+
+# And the one case that IS good news, which must stay exit 0 and carry no
+# error key at all — a shell tile is entitled to say "nothing yet" only here.
+rm -f "$F/var/lib/apex/lid/last.json"
+rj="$(drive "$F" report --json)"; rc=$?
+[ "$rc" -eq 0 ] \
+    && ok "a record that has genuinely never been written is not an error" \
+    || bad "a record that has genuinely never been written is not an error" "rc=$rc  $rj"
+python3 - "$rj" <<'PY' && ok "…and carries no error key for a surface to misread" \
+                       || bad "…and carries no error key for a surface to misread"
+import json,sys
+d=json.loads(sys.argv[1])
+assert d.get("period") is None, d
+assert "error" not in d, d
+sys.exit(0)
+PY
+
+# The watch loop's own read of the in-progress record. It cannot refuse to run —
+# a driver that stopped because one file was unreadable would leave the lid
+# unguarded — so it says what it lost and carries on.
+mkdir -p "$F/var/lib/apex/lid/state.json"
+echo closed > "$F/proc/acpi/button/lid/LID/state"
+out="$(drive "$F" watch --once)"
+grep -q 'in-progress record could not be read' <<<"$out" \
+    && ok "an unreadable in-progress record is announced, not silently discarded" \
+    || bad "an unreadable in-progress record is announced, not silently discarded" "$out"
+rmdir "$F/var/lib/apex/lid/state.json" 2>/dev/null
+
 # `status` is what the shell tile will read. Its JSON must carry the decision,
 # every input that produced it, and the file the policy came from.
 js="$(drive "$F" status --json)"
