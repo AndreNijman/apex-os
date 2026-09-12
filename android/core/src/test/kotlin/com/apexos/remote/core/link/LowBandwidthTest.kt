@@ -212,6 +212,41 @@ class LowBandwidthTest {
 
     @Test
     @Timeout(60)
+    fun `a screen left while connecting does not leave a connection behind`() {
+        // `connect()` is a socket and a Noise handshake and takes seconds on a
+        // bad link. A `stop()` during it had nothing to close — `wire` is null
+        // until the Mux exists — so the attempt went on to attach and then sat
+        // in `pump.join()` holding a connection the user had walked away from,
+        // until the far end dropped it.
+        val machine = FakeMachine(scrollback = "late\r\n".toByteArray(Charsets.UTF_8))
+        val connecting = java.util.concurrent.CountDownLatch(1)
+        val attachment = PtyAttachment(
+            connect = {
+                connecting.countDown()
+                Thread.sleep(300)
+                machine.open()
+            },
+            attachRequest = { """{"cmd":"attach","id":1,"cols":80,"rows":24}""" },
+            terminal = Terminal(80, 24),
+            maxAttempts = 1,
+            silenceTimeoutMs = 0,
+        )
+        val thread = Thread({ attachment.run() }, "left-while-connecting")
+        thread.isDaemon = true
+        thread.start()
+        assertTrue(connecting.await(10, TimeUnit.SECONDS), "the connect never started")
+        attachment.stop()
+
+        // The run loop must come back promptly rather than settling in for the
+        // session it was told not to want.
+        thread.join(10_000)
+        assertFalse(thread.isAlive, "the attachment stayed attached after it was stopped")
+        assertEquals(0, attachment.attachments, "a stopped attachment attached anyway")
+        assertFalse(attachment.attached)
+    }
+
+    @Test
+    @Timeout(60)
     fun `a connection that goes quiet without closing is noticed and re-attached`() {
         // The lift. The first connection attaches and then says nothing at
         // all — no data, no close, no ping — and the second one behaves. A
