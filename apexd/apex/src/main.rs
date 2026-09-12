@@ -24,6 +24,7 @@ mod mcp;
 mod migrate;
 mod mode;
 mod ops;
+mod permissions;
 mod provenance;
 mod proxy;
 mod qualify;
@@ -123,6 +124,20 @@ enum Cmd {
     Lid {
         #[command(subcommand)]
         cmd: Option<lid::LidCmd>,
+    },
+    /// What applications may touch, who enforces it, and what a revocation
+    /// would actually do (P1-061).
+    ///
+    /// Read-only unless you ask for `revoke`. Every row carries the enforcer
+    /// beside the answer, because they are not the same statement: a Flatpak
+    /// whose manifest says `devices=all` opens /dev/video0 directly and is no
+    /// more restrained than a native binary, and there is no microphone portal
+    /// at all in any version of xdg-desktop-portal. `revoke` exits non-zero
+    /// with the reason where nothing can be revoked, rather than reporting a
+    /// success it did not achieve.
+    Permissions {
+        #[command(subcommand)]
+        cmd: Option<permissions::PermCmd>,
     },
     /// What verified this boot, and what the boot counter believes (§22).
     ///
@@ -1454,6 +1469,7 @@ async fn main() {
         // "what verified my boot".
         Cmd::Boot { cmd } => boot::boot_main(cmd),
         Cmd::Lid { cmd } => lid::main(cmd),
+        Cmd::Permissions { cmd } => permissions::main(cmd),
         // Same shape as `boot`, and for the same reason: the honest answer to
         // "is my operating system signed" must not cost a password, so the
         // offline half is file reads and `--verify` is the only path that
