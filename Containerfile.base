@@ -1620,6 +1620,12 @@ RUN set -eux; \
     bash -n /usr/lib/NetworkManager/dispatcher.d/50-apex-hotspot-firewall; \
     grep -q 'hotspot remove' /usr/lib/NetworkManager/dispatcher.d/50-apex-hotspot-firewall; \
     grep -q 'hotspot add' /usr/lib/NetworkManager/dispatcher.d/50-apex-hotspot-firewall; \
+    # The helper it reaches for is overridable so the suite can watch which verb
+    # it calls. The shipped default must stay the real path: an override that
+    # became the default would be a dispatcher that opens nothing, on every
+    # machine, with NetworkManager discarding the error.
+    grep -qF 'FW="${APEX_HOTSPOT_FW:-/usr/libexec/apex-firewall}"' \
+        /usr/lib/NetworkManager/dispatcher.d/50-apex-hotspot-firewall; \
     # A dispatcher script NetworkManager never runs is a file. The service is
     # D-Bus activated rather than enabled, so its presence is what to assert.
     test -f /usr/lib/systemd/system/NetworkManager-dispatcher.service; \

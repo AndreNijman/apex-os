@@ -26,7 +26,11 @@ set -u
 
 IFACE="${1:-}"
 ACTION="${2:-}"
-FW=/usr/libexec/apex-firewall
+# The default is the shipped path and the build asserts that it still is; the
+# override exists so tests/test-apex-firewall.sh can watch which verb this
+# reaches for without a firewall on the machine running it. NetworkManager
+# never sets it.
+FW="${APEX_HOTSPOT_FW:-/usr/libexec/apex-firewall}"
 
 [ -n "$IFACE" ] || exit 0
 [ -x "$FW" ] || exit 0
@@ -42,7 +46,7 @@ case "$ACTION" in
         # skipped because a lookup failed.
         "$FW" hotspot remove "$IFACE" >/dev/null 2>&1
         ;;
-    up|vpn-up|dhcp4-change)
+    *)
         command -v nmcli >/dev/null 2>&1 || exit 0
         [ -n "${CONNECTION_UUID:-}" ] || exit 0
         # Timed out because this runs inside NetworkManager's own dispatcher:

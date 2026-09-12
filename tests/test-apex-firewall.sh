@@ -240,5 +240,113 @@ else
 fi
 
 echo
+echo "── the NetworkManager dispatcher, which decides when a link opens ──────"
+# Everything above reads a file. This runs the dispatcher, because its security
+# property is not visible in the policy: `up` must open a link ONLY after nmcli
+# confirms the connection is `shared`, and `down` must close one WITHOUT asking
+# anything. Getting the first wrong opens DHCP and a resolver on every network
+# this machine joins; getting the second wrong leaves them open after sharing
+# stops, on a link the user thinks is a normal Wi-Fi connection.
+#
+# No firewall runs here. APEX_HOTSPOT_FW points the script at a shim that logs
+# what it was asked to do, so each case is a verdict about the call that was
+# made rather than about a rule.
+DISPATCH=files/system/NetworkManager/dispatcher.d/50-apex-hotspot-firewall
+if [ ! -f "$DISPATCH" ]; then
+    bad "the hotspot dispatcher is present" "$DISPATCH is missing, so nothing fills the set"
+else
+    bash -n "$DISPATCH" && ok "the hotspot dispatcher parses" \
+                        || bad "the hotspot dispatcher parses" "syntax error"
+
+    DWORK="$WORK/dispatch"; mkdir -p "$DWORK/bin"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/fw.log"\n' "$DWORK" > "$DWORK/fw"
+    chmod +x "$DWORK/fw"
+    # Logs the query as well as answering it, so "down never asked" can be
+    # asserted rather than assumed.
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/nmcli.log"\nif [ -e "%s/hang" ]; then sleep 60; fi\ncat "%s/method" 2>/dev/null\n' \
+        "$DWORK" "$DWORK" "$DWORK" > "$DWORK/bin/nmcli"
+    chmod +x "$DWORK/bin/nmcli"
+
+    dispatch() {  # $1 = iface, $2 = action, rest = env assignments
+        local iface=$1 action=$2; shift 2
+        rm -f "$DWORK/fw.log" "$DWORK/nmcli.log"
+        env PATH="$DWORK/bin:$PATH" APEX_HOTSPOT_FW="$DWORK/fw" \
+            CONNECTION_UUID=11111111-2222-3333-4444-555555555555 \
+            "$@" bash "$DISPATCH" "$iface" "$action" >/dev/null 2>&1
+    }
+    fwlog()    { cat "$DWORK/fw.log" 2>/dev/null; }
+    nmclilog() { cat "$DWORK/nmcli.log" 2>/dev/null; }
+
+    echo shared > "$DWORK/method"
+    dispatch wlan0 up
+    [ "$(fwlog)" = "hotspot add wlan0" ] \
+        && ok "up on a shared connection opens that link" \
+        || bad "up on a shared connection opens that link" "called: [$(fwlog)]"
+
+    # The one that matters. Every normal Wi-Fi connection coming up runs this.
+    echo auto > "$DWORK/method"
+    dispatch wlan0 up
+    [ -z "$(fwlog)" ] \
+        && ok "up on an ordinary connection opens nothing" \
+        || bad "up on an ordinary connection opens nothing" \
+               "a café Wi-Fi would open DHCP and a resolver: [$(fwlog)]"
+
+    # nmcli answering nothing is not nmcli answering `shared`.
+    : > "$DWORK/method"
+    dispatch wlan0 up
+    [ -z "$(fwlog)" ] \
+        && ok "up opens nothing when nmcli answers nothing" \
+        || bad "up opens nothing when nmcli answers nothing" "[$(fwlog)]"
+
+    # A dispatcher script that blocks holds a slot for every later one on
+    # NetworkManager's queue, so the query is capped — and a cap that expires
+    # must not be read as `shared`.
+    echo shared > "$DWORK/method"; : > "$DWORK/hang"
+    start=$SECONDS
+    dispatch wlan0 up
+    elapsed=$(( SECONDS - start ))
+    rm -f "$DWORK/hang"
+    if [ -z "$(fwlog)" ] && [ "$elapsed" -lt 30 ]; then
+        ok "an nmcli that hangs neither opens the link nor blocks NM"
+    else
+        bad "an nmcli that hangs neither opens the link nor blocks NM" \
+            "${elapsed}s, called: [$(fwlog)]"
+    fi
+
+    # down closes without asking. The profile may already be gone by then, and
+    # "I could not check" must never be the reason a link stays open.
+    echo auto > "$DWORK/method"
+    dispatch wlan0 down
+    [ "$(fwlog)" = "hotspot remove wlan0" ] \
+        && ok "down closes the link whatever nmcli would have said" \
+        || bad "down closes the link whatever nmcli would have said" "called: [$(fwlog)]"
+    [ -z "$(nmclilog)" ] \
+        && ok "and down does not ask nmcli anything at all" \
+        || bad "and down does not ask nmcli anything at all" \
+               "a lookup that fails would skip the close: [$(nmclilog)]"
+
+    # NM hands the device name in $1 and the addressed interface in the
+    # environment; the rules have to name the second.
+    echo shared > "$DWORK/method"
+    dispatch wlan0 up DEVICE_IP_IFACE=ap0
+    [ "$(fwlog)" = "hotspot add ap0" ] \
+        && ok "the interface the rules name is the one NM addressed" \
+        || bad "the interface the rules name is the one NM addressed" "called: [$(fwlog)]"
+
+    # No interface, nothing to do, and nothing said to a firewall about it.
+    dispatch "" up
+    [ -z "$(fwlog)" ] \
+        && ok "an empty interface name reaches no firewall command" \
+        || bad "an empty interface name reaches no firewall command" "[$(fwlog)]"
+
+    # An action the script does not handle must fall through silently rather
+    # than through whichever branch happens to be last.
+    dispatch wlan0 connectivity-change
+    [ -z "$(fwlog)" ] \
+        && ok "an unhandled NM action changes nothing" \
+        || bad "an unhandled NM action changes nothing" "[$(fwlog)]"
+fi
+
+echo
 printf 'apex-firewall: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]
