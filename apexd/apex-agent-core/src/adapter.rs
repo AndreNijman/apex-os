@@ -150,6 +150,18 @@ pub struct Adapter {
     /// because the sandbox and argv code that reads it should not have to know
     /// which agent it is looking at.
     pub hooks: bool,
+    /// Whether this agent can be told to use one MCP configuration and ignore
+    /// every other (§10.2, P1-026/P1-028), and can therefore be handed the
+    /// curated document [`crate::mcpconf`] builds.
+    ///
+    /// One adapter today, for the same reason `hooks` is a field: the flag was
+    /// read from the installed binary's `--help` and then measured — with
+    /// `--strict-mcp-config`, a sentinel server defined by an enabled plugin
+    /// does not start, and only the ones in the handed file do. An adapter
+    /// where that has not been measured gets `false`, and a session on it is
+    /// reported as having whatever connectors its own configuration gives it
+    /// rather than as curated.
+    pub strict_mcp: bool,
 }
 
 /// Every adapter the runtime knows, in listing order.
@@ -180,6 +192,7 @@ pub const ADAPTERS: &[Adapter] = &[
         native_ask: &["--permission-mode", "manual"],
         native_bypass_refused_as_root: true,
         hooks: true,
+        strict_mcp: true,
     },
     Adapter {
         id: "opencode",
@@ -197,6 +210,7 @@ pub const ADAPTERS: &[Adapter] = &[
         native_ask: &[],
         native_bypass_refused_as_root: false,
         hooks: false,
+        strict_mcp: false,
     },
     Adapter {
         id: "codex",
@@ -211,6 +225,7 @@ pub const ADAPTERS: &[Adapter] = &[
         native_ask: &["-a", "on-request"],
         native_bypass_refused_as_root: false,
         hooks: false,
+        strict_mcp: false,
     },
     Adapter {
         id: "gemini",
@@ -226,6 +241,7 @@ pub const ADAPTERS: &[Adapter] = &[
         native_ask: &[],
         native_bypass_refused_as_root: false,
         hooks: false,
+        strict_mcp: false,
     },
     Adapter {
         id: "kimi",
@@ -239,6 +255,7 @@ pub const ADAPTERS: &[Adapter] = &[
         native_ask: &[],
         native_bypass_refused_as_root: false,
         hooks: false,
+        strict_mcp: false,
     },
     Adapter {
         id: "generic",
@@ -251,6 +268,7 @@ pub const ADAPTERS: &[Adapter] = &[
         native_ask: &[],
         native_bypass_refused_as_root: false,
         hooks: false,
+        strict_mcp: false,
     },
 ];
 
@@ -380,6 +398,27 @@ impl Adapter {
         vec![
             "--settings".to_string(),
             settings.to_string_lossy().into_owned(),
+        ]
+    }
+
+    /// The arguments that point this agent at a curated MCP configuration and
+    /// nothing else.
+    ///
+    /// Empty for an adapter that cannot be told, so a caller can append the
+    /// result unconditionally — and empty is the honest answer there rather
+    /// than a `--mcp-config` on its own, which for Claude *adds* a source
+    /// instead of replacing them. The two flags travel together for exactly
+    /// that reason: `--mcp-config` alone would leave every other surface in
+    /// place and the session would get the plugin's unwrapped definition
+    /// beside APEX's wrapped one.
+    pub fn mcp_config_args(&self, config: &std::path::Path) -> Vec<String> {
+        if !self.strict_mcp {
+            return Vec::new();
+        }
+        vec![
+            "--strict-mcp-config".to_string(),
+            "--mcp-config".to_string(),
+            config.to_string_lossy().into_owned(),
         ]
     }
 
