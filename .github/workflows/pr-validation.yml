@@ -604,6 +604,19 @@ jobs:
       - name: §P1-025 skills & provenance — a refused read is never an absence, and dead code was called rather than silenced
         run: ./tests/test-apex-skill.sh
 
+      # §P1-061 application permissions. In `static` because the subject is a
+      # runtime behaviour of xdg-desktop-portal, not of anything in apexd/ —
+      # a PR that changed only docs/app-permissions.md would skip a `rust` job
+      # and ship a page that claims a revocation nothing enforces.
+      #
+      # On a runner with no xdg-desktop-portal it skips the portal half and
+      # says so. That is deliberate: the alternative is a green tick for a
+      # revocation that was never exercised, which is the exact failure the
+      # test exists to catch. The half that matters runs on any machine with
+      # the desktop stack, which is every machine this feature ships to.
+      - name: §P1-061 app permissions — a revoked grant is refused, and the native one cannot be
+        run: ./tests/test-apex-permissions.sh
+
       # §26's channels, structural half, and this one has to be in `static`:
       # every assertion compares .github/workflows against apexd/, which are
       # different path selectors. A PR touching only build-image.yml sets
