@@ -2469,6 +2469,92 @@ jobs:
           # on paths built from variables inside a container it starts itself.
           shellcheck -S warning -x tests/vmlab/run-vmlab tests/vmlab/mk-guest
 
+      # tests/test-device-services-netns.sh — 12 assertions about whether a
+      # printer, a Windows share and an NFS export can actually be reached
+      # through the shipped policy, and whether `apex firewall allow <name>`
+      # opens the port the catalogue says it does. It asserts no RULE; P1-044
+      # owns those. It was DEBT in tests/suites-not-in-ci.txt.
+      #
+      # It sends REAL packets, and it can do that here because it sends them
+      # inside `unshare -rmn`: a private user, mount and network namespace with
+      # a veth pair and a peer that is a sleeping process addressed by pid. The
+      # machine running it has no interface added, no rule loaded and no port
+      # opened. It needs unshare, nsenter, ip, nft and python3, and it needs the
+      # apparmor userns knob the nftables step above already clears — that is
+      # why it is placed after it and not earlier.
+      #
+      # Its own report() exits 0 when everything was SKIPPED, because it exits
+      # on the failure count alone. So a runner that refused the namespace would
+      # hand this step a green tick over nothing measured at all. The skipped
+      # counter is read back and required to be zero for exactly that reason.
+      - name: P1 device services — a printer, a share and an export through the real policy
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          rc=0; out="$(./tests/test-device-services-netns.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the device-services netns suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^device services \(netns\): [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::the device-services netns suite printed no summary line"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^device services (netns): //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          skipped="$(printf '%s' "$counts" | awk '{print $5}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed device-services assertions failed"; exit 1; }
+          [ "$skipped" = 0 ] || {
+              echo "::error::$skipped device-services assertions could not run ($summary). This suite's own report() exits 0 on a skip-only run, so without this line a runner that refused the namespace would show a green tick over nothing measured at all"
+              exit 1
+          }
+          [ "$passed" -ge 12 ] || { echo "::error::only $passed device-services assertions ran; 12 ran on 2026-09-13, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the device-services netns suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
+              exit 1
+          fi
+
+      # tests/test-apex-multilib.sh — the engine's multilib DECISIONS, judged
+      # against packages Fedora actually ships. test-apex-pkg.sh asserts the
+      # argv the engine builds, which is the right level for most of it and was
+      # not enough here: `apex install steam` was broken by six defects and the
+      # one that reached a user's screen produced correct argv and a wrong
+      # result. It was DEBT in tests/suites-not-in-ci.txt, with the note "drives
+      # apex-pkg; needs care about what it installs".
+      #
+      # That care is already in the suite's shape, and it was checked rather
+      # than assumed: every rpm is downloaded and every decision is taken INSIDE
+      # `podman run --rm`, against a Fedora image, with this repository mounted
+      # read-only. The engine is sourced there and only `guard_rpms` is called —
+      # a function that decides and deletes from a scratch destdir. Nothing is
+      # installed on the runner, no sysext is built, and /var/lib/extensions is
+      # never opened. (`source apex-pkg` does reach `main` with no arguments,
+      # which prints usage.)
+      #
+      # This step also fails if podman is missing: the suite prints SKIP and
+      # exits 0 in that case, and so does its "no repository reachable" path.
+      # Either would otherwise be a green tick over three decisions nobody made.
+      - name: P1 multilib — the engine's decisions over a real Fedora package set
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          command -v podman >/dev/null || { echo "::error::podman is not on this runner; the multilib suite would SKIP and exit 0, and a could-not-run is not a pass"; exit 1; }
+          rc=0; out="$(./tests/test-apex-multilib.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the multilib suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex-multilib: [0-9]+ passed, [0-9]+ failed$' || true)"
+          [ -n "$summary" ] || { echo "::error::the multilib suite printed no summary line, which is what it does when podman is absent or no repository was reachable — it then exits 0, so this line is the only thing between that and a green tick"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^apex-multilib: //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed multilib decisions were wrong"; exit 1; }
+          [ "$passed" -ge 3 ] || { echo "::error::only $passed multilib decisions were judged; 3 ran on 2026-09-13, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the multilib suite printed a SKIP; every one of its abstentions is now a failure by design, so a SKIP means a new one was added"
+              exit 1
+          fi
+
       - name: Every suite is actually run by CI
         # `if: !cancelled()` for the reason the comment block below gives
         # about placement, read in its other direction. That block is about a
