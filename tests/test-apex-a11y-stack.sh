@@ -189,8 +189,15 @@ else
 fi
 # The positive control for the same read: fcitx5 IS autostarted in these files,
 # so a grep that finds nothing at all is a broken grep rather than a clean bill.
-if grep -lq 'fcitx5' $(printf '%s' "$AUTOSTARTS" | tr '\n' ' ') 2>/dev/null; then
-    ok "the same read does find the thing this image DOES autostart (fcitx5)"
+control=0
+while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    grep -q 'fcitx5' "$f" && control=$((control + 1))
+done <<EOF
+$AUTOSTARTS
+EOF
+if [ "$control" -gt 0 ]; then
+    ok "the same read does find the thing this image DOES autostart (fcitx5, in $control of them)"
 else
     bad "the same read does find the thing this image DOES autostart (fcitx5)" \
         "if fcitx5 cannot be found here, 'orca is absent' means nothing"
