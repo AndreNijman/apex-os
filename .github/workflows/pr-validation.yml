@@ -2034,6 +2034,21 @@ jobs:
           sudo apt-get install -y -qq openssh-server
           ./tests/test-apex-backup-ssh.sh
 
+      # P2-001's s3 target, through a REAL apex-secretd, against a loopback
+      # double that recomputes the SigV4 signature with nothing but Python's
+      # `hmac` and `hashlib` and answers 403 when it does not match.
+      #
+      # Three implementations of the signature and that is the point: the one
+      # under test, botocore's numbers pinned as known-answer tests beside it,
+      # and the double's. A signer compared only with itself is a signer that
+      # will be consistently wrong and fail only at a real S3.
+      #
+      # NO AWS ACCOUNT AND NO OUTBOUND CONNECTION. The endpoint is 127.0.0.1 on
+      # a kernel-chosen port and the access key id is AWS's own documentation
+      # example, which authorises nothing.
+      - name: §13.5 backup to S3 — SigV4 against an independent verifier
+        run: ./tests/test-apex-backup-s3.sh
+
       - name: ShellCheck the privileged helpers
         run: |
           set -euo pipefail

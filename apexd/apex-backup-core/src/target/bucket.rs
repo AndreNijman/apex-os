@@ -1,4 +1,19 @@
-//! R2, through the `apex-secretd` broker. P2-002.
+//! A bucket, through the `apex-secretd` broker: R2 (P2-002) and S3 (P2-001).
+//!
+//! One target and not two. R2 and S3 differ here in exactly three things — the
+//! two operation ids this spends and the word it calls itself — so an [`Ops`]
+//! carries them and everything below is shared. The alternative was a second
+//! module that was this one with two strings changed, which is the kind of
+//! duplication that agrees with itself until one of the two is fixed.
+//!
+//! The `s3` provider renders a bucket listing as the **same** envelope the R2
+//! operation answers with, deliberately, so that even the listing parser below
+//! is one parser and not two. See `apex-secretd/src/providers/s3/mod.rs`.
+//!
+//! Everything below was written for R2 and every constraint it documents is
+//! equally true of the S3 path: the same 3 MiB brokered reply cap, the same
+//! `String::from_utf8_lossy`, the same `valid_name` rule on the staging
+//! directory.
 //!
 //! This target holds no credential and cannot. It asks `apex-secretd` to
 //! perform `cloudflare.r2.object.read` and `cloudflare.r2.object.write`, and
@@ -52,10 +67,10 @@
 //! zero or one, plus the body. A 404, a 403, a 500 and a proxy's HTML error
 //! page arrive identically.
 //!
-//! So [`R2Target::get`] cannot tell "there is no such object" from "the
+//! So [`BucketTarget::get`] cannot tell "there is no such object" from "the
 //! credential was refused", and it does not try. Every failed fetch is
 //! [`TargetError::Unavailable`], which becomes `CouldNotRun`. Absence is
-//! established by [`R2Target::list`] instead, which is a *successful* call
+//! established by [`BucketTarget::list`] instead, which is a *successful* call
 //! whose answer is the set of keys that exist — a real answer from the far
 //! side, and the only one available here.
 //!
@@ -94,16 +109,61 @@ pub trait Broker {
 }
 
 /// An R2 bucket as a backup target.
-pub struct R2Target<B: Broker> {
+/// The two operation ids a brokered target spends, and what it calls itself.
+///
+/// A struct rather than a generic parameter or an enum: the only thing that
+/// varies between R2 and S3 here is three strings, and a type that made the
+/// difference look larger than it is would invite the two paths to drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ops {
+    pub read: &'static str,
+    pub write: &'static str,
+    /// The word an operator sees in `apex backup list` and in a refusal.
+    pub label: &'static str,
+}
+
+/// Cloudflare R2, through `cloudflare.r2.object.*`. P2-002.
+pub const R2: Ops = Ops {
+    read: "cloudflare.r2.object.read",
+    write: "cloudflare.r2.object.write",
+    label: "r2",
+};
+
+/// S3, and every S3-compatible endpoint, through `s3.object.*`. P2-001.
+pub const S3: Ops = Ops {
+    read: "s3.object.read",
+    write: "s3.object.write",
+    label: "s3",
+};
+
+pub struct BucketTarget<B: Broker> {
+    ops: Ops,
     broker: RefCell<B>,
     bucket: String,
     prefix: String,
     project: PathBuf,
 }
 
-impl<B: Broker> R2Target<B> {
-    pub fn new(broker: B, bucket: &str, prefix: &str, project: &Path) -> R2Target<B> {
-        R2Target {
+impl<B: Broker> BucketTarget<B> {
+    /// An R2 bucket.
+    pub fn r2(broker: B, bucket: &str, prefix: &str, project: &Path) -> BucketTarget<B> {
+        BucketTarget::new(R2, broker, bucket, prefix, project)
+    }
+
+    /// An S3 bucket, at whatever endpoint the credential was stored for.
+    pub fn s3(broker: B, bucket: &str, prefix: &str, project: &Path) -> BucketTarget<B> {
+        BucketTarget::new(S3, broker, bucket, prefix, project)
+    }
+
+    pub fn new(
+        ops: Ops,
+        broker: B,
+        bucket: &str,
+        prefix: &str,
+        project: &Path,
+    ) -> BucketTarget<B> {
+        BucketTarget {
+            ops,
             broker: RefCell::new(broker),
             bucket: bucket.to_string(),
             prefix: prefix.to_string(),
@@ -177,11 +237,11 @@ impl<B: Broker> R2Target<B> {
     }
 }
 
-impl<B: Broker> Target for R2Target<B> {
+impl<B: Broker> Target for BucketTarget<B> {
     fn describe(&self) -> String {
         // The bucket and the prefix. Not the account id, which is the
         // project's business, and not the credential's name.
-        format!("r2 bucket {} under {}/", self.bucket, self.prefix)
+        format!("{} bucket {} under {}/", self.ops.label, self.bucket, self.prefix)
     }
 
     fn prepare(&self) -> Result<(), TargetError> {
@@ -192,7 +252,7 @@ impl<B: Broker> Target for R2Target<B> {
         // chunk is sealed rather than a half-written snapshot.
         self.broker
             .borrow_mut()
-            .perform("cloudflare.r2.object.read", &self.bucket, &[])?;
+            .perform(self.ops.read, &self.bucket, &[])?;
 
         let staging = self.project.join(STAGING_DIR);
         std::fs::create_dir_all(&staging)
@@ -212,7 +272,7 @@ impl<B: Broker> Target for R2Target<B> {
 
         let relative = self.staged_relative(snapshot, object);
         let outcome = self.broker.borrow_mut().perform(
-            "cloudflare.r2.object.write",
+            self.ops.write,
             &self.resource(snapshot, object),
             &[("file", &relative)],
         );
@@ -234,7 +294,7 @@ impl<B: Broker> Target for R2Target<B> {
 
     fn get(&self, snapshot: &str, object: &str) -> Result<Vec<u8>, TargetError> {
         let body = self.broker.borrow_mut().perform(
-            "cloudflare.r2.object.read",
+            self.ops.read,
             &self.resource(snapshot, object),
             &[],
         )?;
@@ -255,8 +315,8 @@ impl<B: Broker> Target for R2Target<B> {
         let body = self
             .broker
             .borrow_mut()
-            .perform("cloudflare.r2.object.read", &self.bucket, &[])?;
-        let keys = R2Target::<B>::keys_from_listing(&body)?;
+            .perform(self.ops.read, &self.bucket, &[])?;
+        let keys = BucketTarget::<B>::keys_from_listing(&body)?;
         Ok(self.ids_from_keys(&keys))
     }
 }

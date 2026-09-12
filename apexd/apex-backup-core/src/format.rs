@@ -31,7 +31,7 @@
 //!   3 MiB, and that is the binding one, because reading a chunk back is a
 //!   reply;
 //! * a brokered reply is `String::from_utf8_lossy` of curl's stdout, so an R2
-//!   chunk is base64 rather than raw bytes — see [`crate::target::r2`] — and
+//!   chunk is base64 rather than raw bytes — see [`crate::target::bucket`] — and
 //!   base64 costs four bytes for every three.
 //!
 //! A mebibyte of plaintext seals to 1 MiB + 40 bytes and base64s to about
@@ -278,13 +278,48 @@ pub struct SnapshotId(String);
 
 impl SnapshotId {
     /// A new id for now.
+    ///
+    /// # The tail is three digits of milliseconds and five of randomness
+    ///
+    /// It was eight random digits, and that was a defect this crate's own
+    /// suite found rather than one anybody reasoned to. `tests/
+    /// test-apex-backup-s3.sh` writes two snapshots a fraction of a second
+    /// apart — which is what a script, a test or a retry does — and then
+    /// restores `latest`. About one run in three it restored the FIRST of the
+    /// two, because the stamp is only accurate to the second and the order
+    /// inside one second was the order of two random numbers.
+    ///
+    /// That is the whole reason the lexical order exists: a target that can
+    /// only list names has to be able to answer "the most recent" without
+    /// opening anything, and an order that is right to the second and a coin
+    /// toss below it is not an order.
+    ///
+    /// So the first three hex digits of the tail are the millisecond within
+    /// the second — 0 to 999, which is `0x000` to `0x3e7`, three digits
+    /// exactly — and the remaining five are random. Two consequences, both
+    /// wanted:
+    ///
+    /// * ids inside one second now sort by when they were made;
+    /// * the shape does not change. Still `<16>-<8 lowercase hex>`, so
+    ///   [`SnapshotId::parse`] is untouched, ids already on a target still
+    ///   parse and still sort against new ones, and the key is still one
+    ///   `valid_name` segment.
+    ///
+    /// 20 bits of randomness is left, which is what stops two snapshots in the
+    /// same millisecond colliding. That is a far smaller window than the one
+    /// second this replaces, and a collision there is two runs of the same
+    /// project at once — which the target's own atomic write handles.
     pub fn new(now_ms: u64) -> Result<SnapshotId, std::io::Error> {
-        let mut tail = [0u8; 4];
-        getrandom::getrandom(&mut tail).map_err(std::io::Error::other)?;
+        let mut random = [0u8; 3];
+        getrandom::getrandom(&mut random).map_err(std::io::Error::other)?;
+        let millis = (now_ms % 1000) as u16;
         Ok(SnapshotId(format!(
-            "{}-{}",
+            "{}-{millis:03x}{}",
             stamp(now_ms),
-            data_encoding::HEXLOWER.encode(&tail)
+            // Five digits, so the whole tail is eight. `HEXLOWER` of three
+            // bytes is six; the first is dropped rather than the last so that
+            // the bytes that survive are whole.
+            &data_encoding::HEXLOWER.encode(&random)[1..]
         )))
     }
 

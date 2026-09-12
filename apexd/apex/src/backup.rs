@@ -38,7 +38,7 @@ use apex_backup_core::format::SnapshotId;
 use apex_backup_core::keys::KeyStore;
 use apex_backup_core::session::{self, RestoreOptions, RunOptions};
 use apex_backup_core::target::fs::{FsTarget, Marker};
-use apex_backup_core::target::r2::{R2Target, SecretdBroker};
+use apex_backup_core::target::bucket::{BucketTarget, SecretdBroker};
 use apex_backup_core::target::ssh::{SshCommand, SshTarget};
 use apex_backup_core::target::{Kind, Target};
 use clap::Subcommand;
@@ -333,12 +333,15 @@ fn open_target(setup: &Setup) -> Result<Box<dyn Target>> {
             };
             Ok(Box::new(target))
         }
-        Where::Bucket { bucket, service } => Ok(Box::new(R2Target::new(
-            SecretdBroker::new(service, &setup.project.to_string_lossy()),
-            bucket,
-            &setup.config.prefix,
-            &setup.project,
-        ))),
+        Where::Bucket { bucket, service } => {
+            let broker = SecretdBroker::new(service, &setup.project.to_string_lossy());
+            let target = if setup.config.kind == Kind::S3 {
+                BucketTarget::s3(broker, bucket, &setup.config.prefix, &setup.project)
+            } else {
+                BucketTarget::r2(broker, bucket, &setup.config.prefix, &setup.project)
+            };
+            Ok(Box::new(target))
+        }
         Where::Remote { endpoint, root } => Ok(Box::new(SshTarget::new(
             SshCommand,
             endpoint.clone(),

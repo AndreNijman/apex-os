@@ -57,7 +57,7 @@
 //!
 //! # Bytes, not base64
 //!
-//! Unlike [`super::r2`], nothing here passes through
+//! Unlike [`super::bucket`], nothing here passes through
 //! `String::from_utf8_lossy`: `ssh` gives a clean binary stream in both
 //! directions and [`Transport::run`] hands back `Vec<u8>`. A chunk of
 //! ciphertext goes up and comes back byte for byte, which
@@ -108,7 +108,7 @@ pub struct Output {
 
 /// Running one `ssh` invocation.
 ///
-/// A trait for the same reason [`super::r2::Broker`] is one: the argument list,
+/// A trait for the same reason [`super::bucket::Broker`] is one: the argument list,
 /// the remote script construction and the exit-code mapping can then be
 /// exercised exactly, with no daemon and no network, and the shell suite can
 /// spend its time proving the thing a double cannot — that a real `sshd` on the
