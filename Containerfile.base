@@ -1758,7 +1758,14 @@ RUN set -eux; \
 # edit would copy in. `{ drag = true }` is what makes SUPER+drag move a window.
 RUN set -eux; \
     grep -q 'drag = true' /usr/share/apex/hypr/apex/keybindings.lua; \
-    ! grep -rq 'mouse = true' /usr/share/apex/hypr/
+    # Executable Lua only, never a comment. The three lines that document WHY
+    # `{ mouse = true }` is wrong live in keybindings.lua and contain the exact
+    # string this forbids, so a plain `grep -r` matched the stanza's own
+    # explanation and the step could only ever fail. That is the third
+    # assertion of this shape on this branch -- 706489ec was the polkit one --
+    # and it is what stopped `base` at step 113 of 151 after the nft fix got it
+    # that far. A comment line is one whose first non-blank character is `-`.
+    ! grep -rqE '^[[:space:]]*[^-[:space:]].*mouse = true' /usr/share/apex/hypr/
 
 # The same guard for niri, which had none because it has no APEX template to
 # grep: niri's config is seeded from niri's OWN default and the APEX additions
