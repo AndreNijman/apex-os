@@ -1983,8 +1983,14 @@ jobs:
           # The figure at the time this job was written. A drop means tests
           # stopped running, which is the failure this step exists to catch; a
           # rise is fine and the floor moves with it.
-          test "$total" -ge 87 \
-            || { echo "::error::only $total protocol tests ran; expected at least 87"; exit 1; }
+          #
+          # Moved from 87 to 295 when P1-054 and P1-055 landed the terminal,
+          # the Agent Center model and the low-bandwidth suite. A floor left
+          # behind is a floor that no longer floors anything: at 87, two
+          # hundred tests could have stopped running and this step would still
+          # have passed, which is precisely the quiet pass it exists to stop.
+          test "$total" -ge 295 \
+            || { echo "::error::only $total protocol tests ran; expected at least 295"; exit 1; }
 
       # The rule InsecureStorageTest rests on. That test walks a directory and
       # accounts for every byte in it, which is evidence about app storage only
@@ -2023,8 +2029,10 @@ jobs:
             total=$((total + ${n:-0}))
           done
           echo "app: $total tests"
-          test "$total" -ge 6 \
-            || { echo "::error::only $total app tests ran; expected at least 6"; exit 1; }
+          # 6 -> 10 with P1-054's start screen. Same reasoning as the core
+          # floor above: a floor that has been overtaken stops being one.
+          test "$total" -ge 10 \
+            || { echo "::error::only $total app tests ran; expected at least 10"; exit 1; }
 
   result:
     name: PR validation
