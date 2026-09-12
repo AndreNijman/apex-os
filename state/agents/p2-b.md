@@ -1,10 +1,14 @@
 # p2-b — accessibility baseline (P2-003) and internationalisation baseline (P2-004)
 
-**ROUND 20 IS THE LIVE ONE, on the SAME branch.** `task/p2-b-round19` in BOTH
-repos, pushed — round 20 continued on it rather than renaming, and merged
-`origin/roadmap/v2.2` into it first (both fast-forwards; round 19 had landed as
-apex-os `4b1e797f` and apex-shell `111ed75`). apex-os tip `d12e9ef4`, apex-shell
-tip `eb97b40`. Worktrees unchanged: `/var/tmp/apex-work/wt-p2-b4` and `wt-p2-b4-sh`.
+**ROUND 22 IS THE LIVE ONE, on a FRESH branch in BOTH repos:
+`task/p2-b-round22`.** Round 21's work landed on `roadmap/v2.2` (apex-os merge
+`7ea639d2`, apex-shell merge `bfb24ed`), so the round-19-named branch had served
+its purpose and round 22 cut new ones off the new tips — apex-os `cd4a799e`,
+apex-shell `bfb24ed`, both merges fast-forwards. Worktrees unchanged:
+`/var/tmp/apex-work/wt-p2-b4` (apex-os) and `wt-p2-b4-sh` (apex-shell).
+**Both branch names must exist and be pushed even if one repo gets no commits** —
+apex-shell's `pr-validation.yml` "Input page and generator agree" step looks for
+a matching branch name, which is why round 18b kept an empty apex-shell branch.
 
 **This card was truncated by a bad edit on 2026-09-12 and rebuilt from the
 session transcript.** A splice anchored on the final section's heading text with
@@ -1223,6 +1227,16 @@ directly says 60 files and is misleading — that is the base moving, the same
 trap round 2 recorded.
 
 ## NEXT
+
+**One line, and it is the load-bearing part of this card:** in
+`/var/tmp/apex-work/wt-p2-b4` on `task/p2-b-round22`, do a throwaway 30-tap Tab
+walk of the installer's `wifi` page (adapter shape — this laptop HAS a wifi
+device, `nmcli -t -f TYPE device` says `wifi`) and read the printed
+`wifi tab →` lines, to find out whether `Gtk.ListBoxRow` network rows are Tab
+stops and whether they announce anything, BEFORE choosing tap counts and floors
+for a `ring_wifi()` in `installer/test-installer-a11y.sh`.
+
+### The standing queue
 
 Ordered, and rewritten after round 20. Items 1-2 are unchanged and still need
 hardware. **The old item 6 — "nothing installs a QTranslator" — has been

@@ -239,3 +239,34 @@ reason); point a capsule's browser at the lab's HTTPS server expecting a page
 `files/system/libexec/apex-browser` while the lab is running — that cost one
 whole run on 2026-09-12.
 
+
+---
+
+## 2026-09-13 — dispatched and stopped in the same round, by the orchestrator's error
+
+Round 23 dispatched a round-2 agent on this unit and then stopped it a few
+minutes later: seven agents had been started against a ceiling of six, and this
+was the one given back. Nothing was lost from the repository — it created the
+branch `task/p2-d-2` off `roadmap/v2.2` @ `cd4a799e` and wrote no commits, and
+the worktree `/var/tmp/apex-work/wt-p2-d` is clean.
+
+**One thing WAS lost and is recorded rather than glossed over.** Its closing
+line was *"Three defects measured in one run"* — it had found three things
+before it was stopped, it had not yet written them to this card, and a stopped
+agent's transcript is not read back (that is the whole reason this card system
+exists). So those three measurements are gone. A round-2 agent should expect to
+find them again rather than assume the ground is clear.
+
+The brief it was given, which stands for whoever picks this up:
+
+* Gap 1 — a capsule cannot authenticate to a site — is P2-012's unmet criterion
+  and needs a written decision before code, because both routes (a driver inside
+  the capsule handed a minted token for one request, or a provider that performs
+  a login and hands back a session) are more than a flag.
+* Gap 2 — the pin-binding half is stub-tested only — deserves a second look
+  rather than inheriting round 1's refusal to start `apex-secretd`.
+  `tests/test-apex-backup-s3.sh` (landed 2026-09-13) drives a REAL `apex-secretd`
+  against a loopback double that recomputes the SigV4 signature from what arrives
+  and 403s a mismatch, and `tests/test-apex-backup-ssh.sh` starts a real
+  unprivileged `sshd` from a fixture config and kills it by pid, never by name.
+  Both are worked examples of exercising a root-ish service hermetically.
