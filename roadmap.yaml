@@ -1683,11 +1683,22 @@ tasks:
     two concurrent sockets and a slow far side. An unreadable apex.toml refuses rather than counting as no budget
     — an agent that can chmod 000 its own budget file must not thereby lift its own cap. Twelve mutations, each
     biting a named test, listed in the four commit messages. Workspace 2880 -> 2906 passed, 0 failed. Clippy
-    --locked --workspace --all-targets -D warnings clean. The branch was then merged with roadmap/v2.2 @ 882a7176,
-    whose as_json grew a second argument; on the merged tree (tip 3c4f6a24) the workspace is 2918 passed, 0
-    failed, clippy clean. One shell assertion in tests/test-secret-broker.sh fails and is PRE-EXISTING and stale
-    rather than a regression: it asserts 'cloudflare.dns.delete' is not an operation, which P1-008 made false, and
-    it fails identically on 4ed092b8, this branch's base.
+    --locked --workspace --all-targets -D warnings clean. A THIRD LIMIT, found in review and named here rather
+    than left to be discovered: a budget is per ROOT, and a worktree is its own root. A worktree is a checkout of
+    the same repository, so it carries the same checked-in apex.toml — which means operations_daily = 200 gives
+    the project root 200 a day AND each worktree its own 200. Per-task is genuinely met, because a worktree is its
+    own pool, which is the shape 13.14 asks for; a cap over a project INCLUDING its worktrees is not implemented,
+    and an agent that can start a session per worktree escapes the project's cap by the number of worktrees.
+    Summing them would reverse P1-015's exact-match rule for one reader, so it is a design decision rather than an
+    oversight and is recorded on the agent card as its own task. The branch was then merged with roadmap/v2.2 @
+    882a7176, whose as_json grew a second argument; on the merged tree (tip 92e937cd) the workspace is 2918
+    passed, 0 failed, clippy clean, and tests/test-apex-task.sh is 71/0 with the new apex task audit verb. Two
+    test assertions that measured this laptop rather than the code were corrected before landing: the race test
+    asserted the trail's ORDER, which is a fact about thread timing and would fail on a loaded runner, and the
+    unreadable-budget test relied on mode bits, which mean nothing to root, so it now leads with a budget that
+    does not parse and guards the permission arm on getuid. MEASURED rather than inferred: tests/test-secret-
+    broker.sh is 63 passed / 2 failed on 4ed092b8, this branch's base, and 64 / 1 here; the shared failure asserts
+    'cloudflare.dns.delete' is not an operation, which P1-008 made false. Neither failure is this branch's.
 - id: P1-017
   title: Cloudflare MCP through APEX broker
   priority: P1
@@ -1743,10 +1754,10 @@ tasks:
     Nine mutations (M13b, M13c, M14, M18, M19, M20, M21 and the budget ones that gate mcp.request), each biting a
     named test. Workspace 2906 -> 2910 passed, 0 failed. Clippy --locked --workspace --all-targets -D warnings
     clean. The branch was then merged with roadmap/v2.2 @ 882a7176, whose as_json grew a second argument; on the
-    merged tree (tip 3c4f6a24) the workspace is 2918 passed, 0 failed, clippy clean. One shell assertion in
-    tests/test-secret-broker.sh fails and is PRE-EXISTING and stale rather than a regression: it asserts
-    'cloudflare.dns.delete' is not an operation, which P1-008 made false, and it fails identically on 4ed092b8,
-    this branch's base.
+    merged tree (tip 92e937cd) the workspace is 2918 passed, 0 failed, clippy clean. MEASURED rather than
+    inferred: tests/test-secret-broker.sh is 63 passed / 2 failed on 4ed092b8, this branch's base, and 64 / 1
+    here; the shared failure asserts 'cloudflare.dns.delete' is not an operation, which P1-008 made false. Neither
+    failure is this branch's.
 - id: P1-018
   title: MCP auth helper integration
   priority: P1
@@ -2882,7 +2893,7 @@ tasks:
 - id: P1-053
   title: Create polished first-party APEX Remote Android app foundation
   priority: P1
-  status: todo
+  status: done
   area: android
   depends_on:
   - P1-050
@@ -2897,6 +2908,32 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    APEX Remote Android app foundation. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge a1420b01
+    (task/p1-053a-android-2, five commits plus a merge). The app lives in android/ inside apex-os by orchestrator
+    decision: apex-android does not exist as a repository and creating one would mean a new main, which this
+    program forbids until final integration. BUILDS HEADLESS, no device and no emulator: 87 core JVM tests, 6 app
+    JVM tests, a 42 MB debug APK. THE LAST CRITERION - no secrets, private keys or session plaintext in insecure
+    app storage - is tested HOSTILELY rather than asserted: the suite pairs for real against a live Noise
+    responder on a thread, saves, reloads, unseals, opens a session with the PINNED desktop key, pushes distinct
+    plaintext both ways, writes again, then walks every file in the storage directory hunting the device secret,
+    the pairing token and both strings in every encoding. Six mutations each turn a NAMED test red (raw secret
+    stored; save copying instead of renaming; the scan's raw-byte window deleted; Session.close made a flush; the
+    naive last-colon split restored; the session run against an unpinned key), and two of them found bugs in the
+    test itself - an assertion held up by the rename rather than the cleanup, and an unpinned-key mutation that
+    hung for ten minutes reporting no test name until a timeout and a bounded join made it a 70-second named
+    failure. THREE DEFECTS SETTLED FROM PRIMARY SOURCES, each already coded wrong: KeyGenParameterSpec's user-
+    authentication gate applies to secret keys too, so sealing is gated and seal() would have thrown on a real
+    phone at the end of pairing after the token was burnt; androidx.biometric refuses crypto-based device-
+    credential auth before API 30; and the biometric prompt ran AFTER the handshake, so a cancelled prompt left
+    the desktop paired to a phone whose key had just died. Also fixed: a socket leak on failed handshakes, an
+    unlock prompt firing before the phone's capability was known, invalidated-key errors surfacing as AEAD tag
+    mismatches, an IPv6 parse bug turning 2001:db8::1 into host 2001:db8: port 1, and a deep link that crashed on
+    cold launch and lost its payload. The CI path classifier was RUN rather than read: android/app/** selects
+    android alone, noise-vectors.json selects rust AND android, docs/android/notes.md selects neither. NOT
+    VERIFIED and recorded rather than glossed: every keystore and BiometricPrompt behaviour is unverified on a
+    device; the CI android job had never executed before this landing; there is no relay leg, so a phone off the
+    LAN reaches nothing; all UI strings are hardcoded.
 - id: P1-054
   title: Android Agent Center parity
   priority: P1
