@@ -485,6 +485,38 @@ first, which this branch introduced and caught before it shipped:
 3. The GUI render container's build context was `/var/empty`, which does not
    exist on an ubuntu runner, and the build's error output went to `/dev/null`.
 
+## CI, round 2
+
+apex-os's `pr-validation.yml` accepts `workflow_dispatch`, so this branch was
+dispatched rather than guessed at (`gh workflow run pr-validation.yml --ref
+task/p2-b-accessibility-i18n`).
+
+**The `Installer safety and UI` job had never run for this program at all** — it
+is gated on `changes.outputs.installer`, and no roadmap branch had touched
+`installer/` until this one. Turning it on surfaced two latent defects rather
+than introducing them (the July-dead engine half, and the `/var/empty` build
+context). The engine cases now PASS on the ubuntu runner, which is the first time
+they have run anywhere but the ISO build box.
+
+**Red jobs that are not this branch's**, checked rather than assumed: `Rust
+validation` and `Package engine`. Against its true branch point
+(`git merge-base` = `4f80746e`, not `origin/roadmap/v2.2`, which has moved ahead)
+this branch changes **15 files, +3337/−48, and not one `.rs` file, nothing under
+`apex-agentd/`, and no package engine**. The Rust failure is the known cgroup
+one: `/proc/<pid>/cgroup` places the hosted runner in
+`system.slice/hosted-compute-agent.service`, which is neither a login session nor
+a user service, so origin detection cannot classify it. Diffing against
+`origin/roadmap/v2.2` directly is misleading here and says 45 files — that is the
+base moving, not this branch.
+
+**apex-shell CI cannot verify the i18n suite on this branch.** Its `ci.yml` had
+only `push`/`pull_request` on `main` and `dev`, so no roadmap task branch has
+ever been tested by it — every suite in that repository has been verified on one
+laptop. `workflow_dispatch` is added on this branch for the next person, with the
+caveat in the comment: GitHub only offers a dispatch once the file is on the
+DEFAULT branch, so it does nothing for the branch that adds it. The 12 i18n
+assertions are local-only until this lands.
+
 ## NEXT
 
 1. **The `sections` array in `AgentHelpContent.qml`** (~200 prose strings) is the
