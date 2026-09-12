@@ -147,6 +147,32 @@ only place it exists:
 journalctl -t apex-lid
 ```
 
+### Three answers, and "nothing yet" is only one of them
+
+`apex lid report` distinguishes a machine whose lid has never been shut from a
+record it could not read, and the exit status says which:
+
+| what happened | `--json` | exit |
+| --- | --- | --- |
+| nothing has ever been recorded | `{"period":null}` | 0 |
+| a real period | `{"period":{…},"summary":…,"vpn_held":…}` | 0 |
+| the record is there and could not be read | `{"period":null,"error":"…"}` | 1 |
+
+The third used to print *"no lid-closed period has been recorded on this machine
+yet"* — the same sentence as the first — for a file that was unreadable, and for
+one truncated by a crash mid-write. Anything reading this (the shell's Closing
+the Lid page does) may say "nothing yet" only for exit 0 with no `error` key.
+
+That third case is reachable rather than theoretical. `apex-lid.service` sets
+`StateDirectory=apex/lid` with no `StateDirectoryMode` and no `UMask`, so
+`/var/lib/apex/lid/last.json` is 0644 and an ordinary user can read it. **Adding
+`UMask=0077` to that unit would make every unprivileged `apex lid report` answer
+"could not be read"** — which is at least honest now, where before it would have
+answered "nothing has happened".
+
+The record is written to a sibling and renamed, so an interrupted write costs
+the new record rather than truncating the last good one.
+
 ## Configuration
 
 `~/.config/apex/lid.toml` for you, `/etc/apex/lid.toml` for the machine. Yours
@@ -215,6 +241,41 @@ the command log is the only thing that moved.
 
 That is stronger than putting fakes first on `$PATH`, which an absolute-path
 invocation walks straight past.
+
+## What has NOT been measured: that it draws less
+
+The acceptance criterion says the machine *"draws measurably less than it does
+with the lid open"*, and that number does not exist yet. No fixture can produce
+it: what a panel, a keyboard backlight and a Bluetooth radio draw is a physical
+measurement, and the only way to take it is to apply the real power-down to a
+real machine somebody is using.
+
+Two preconditions, not one, and the second is the one that gets forgotten:
+
+1. **Undocked.** With an external display connected, logind consults
+   `HandleLidSwitchDocked` (default `ignore`) before any inhibitor, so the lid
+   close being measured is not the one this feature controls.
+2. **On battery.** `/sys/class/power_supply/BAT*/power_now` reads CHARGING power
+   while the machine is on mains, so a run on AC measures the charger.
+
+The procedure that would close it, on a machine nobody is using:
+
+```
+# lid open, on battery, idle, pinned so the driver is the only variable
+sudo apex lid pin on
+a=$(cat /sys/class/power_supply/BAT0/energy_now); sleep 600
+b=$(cat /sys/class/power_supply/BAT0/energy_now)   # open baseline: a - b
+
+# same window with the lid shut, which runs the power-down
+c=$(cat /sys/class/power_supply/BAT0/energy_now); sleep 600
+d=$(cat /sys/class/power_supply/BAT0/energy_now)   # closed: c - d
+```
+
+`energy_now` deltas over a fixed window rather than instantaneous `power_now`,
+because `power_now` swings with whatever the CPU happened to be doing in the
+second it was sampled. `apex lid report` already records the charge at close and
+the charge last seen, so the closed half of that measurement is taken by the
+driver itself — what is missing is the open-lid baseline to compare it against.
 
 ## See also
 
