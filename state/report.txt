@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-12 09:16 AWST
+APEX ROADMAP — resume report — 2026-09-12 12:03 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -6,154 +6,52 @@ APEX ROADMAP — resume report — 2026-09-12 09:16 AWST
               done   partial      todo   blocked
   BASE          16         2         -         -
   L              -         1         -         2
-  P0            23         2         -         -
-  P1            32        13        17         -
+  P0            24         1         -         -
+  P1            34        14        14         -
   P2             5         7         7         -
-  ALL           76        25        24         2   of 127
+  ALL           79        25        21         2   of 127
 
-  P0 not done: P0-001(part), P0-021(part)
+  P0 not done: P0-001(part)
 
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p1-008     dead 109m  P1-008,P1-009,P1-010               task/p1-008-cloudflare-one
-             head 5eda17e0 docs(cloudflare): name apexd-core's Backend without l
-             dirty 0 file(s), 0 unpushed, card 110m
-             NEXT **The unit is DONE and pushed** — tip `5eda17e0`, five commits, no
+  p1-014     dead 94m   P1-014,P1-015,P1-016,P1-017        task/p1-014-cf-environments
+             head 7f4475dd feat(cf): section 13.13 worktree previews, with owner
+             dirty 3 file(s), 0 unpushed, card 98m
+             NEXT **P1-014 is DONE and pushed** — two commits on `task/p1-014-cf-env
 
-  p2-b       dead 44m   (see queue.json p2-b)              task/p2-b-accessibility-i18n
-             head 08f81ad ci(shell): allow a task branch to be validated before 
-             dirty 0 file(s), 0 unpushed, card 44m
-             NEXT 1. **The `sections` array in `AgentHelpContent.qml`** (~200 prose 
+  p1-025     dead 94m   P1-026,P1-028                      task/p1-025-plugin-trust
+             head be1e1780 test(provenance): the two arms nothing reached, and a
+             dirty 0 file(s), 0 unpushed, card 120m
+             NEXT Implementing now, on `task/p1-025-plugin-trust` in `/var/tmp/apex-
 
-  p1-052     dead 86m   P1-051,P1-052                      task/p1-052-relay
-             head 373e833c style(remote): three clippy lints in the relay's own 
-             dirty 0 file(s), 0 unpushed, card 87m
-             NEXT **Everything dispatched to this unit is done.** P1-052 is complete
+  followups  dead 114m                                     task/followups-r18
+             head 431ef97f ci: a docs-only PR skipped the job that checks the do
+             dirty 0 file(s), 0 unpushed, card 115m
+             NEXT **ALL THREE ARE CLOSED.** Round 18, apex-os branch `task/followups
 
-  p0-finish  dead 87m   P0-001,P0-002,P0-007,P0-015,P0-021 task/p0-finish
-             head 392108e5 ci(image): the rust job needs a login session, and wi
-             dirty 0 file(s), 0 unpushed, card 87m
-             NEXT Round 13 finished its code work. Branch tip `392108e5`, 7 commits,
+  p1-053a    dead 94m   P1-053,P1-054,P1-055               task/p1-053a-android
+             head 74ecba13 build(android): an Android app module that assembles,
+             dirty 7 file(s), 0 unpushed, card 103m
+             NEXT Round 1 landed `android/core` (the protocol, pure JVM, 79 tests) a
+
+  p1-040     dead 94m   P1-040                             task/p1-040-scaling-migration
+             head f5787d3 fix(shell): a popup is sized by the output it is ancho
+             dirty 0 file(s), 0 unpushed, card 95m
+             NEXT (no card)
+
+  p2-b       dead 94m   P2-003,P2-004                      task/p2-b-round18
+             head 1417402 Merge task/p2-b-accessibility-i18n into roadmap/v2.2 (
+             dirty 0 file(s), ? unpushed, card 115m
+             NEXT Ordered. Items 1-3 are this round's remaining plan; 4 onward are i
+
+  p1-062     dead 94m   P1-062                             task/p1-062-chaos
+             head 481fc579 Merge task/followups-r18 into roadmap/v2.2
+             dirty 2 file(s), ? unpushed, card 113m
+             NEXT Nothing done yet. Start with criterion 3 — reproducible diagnostic
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 577425e9 fix(tests): two literals clippy refuses, in the skip 
-    task/p1-050-remote-protocol
-      09c977d9 fix(clippy): the integration tip was not clean, and two of th   [2/10 added lines on tip]
-
-  int-shell:  tip 1417402 Merge task/p2-b-accessibility-i18n into roadmap/v2.2 (
-    fix/labwc-desktop-parity  — squash-merged, safe to delete
-      landed whole as f609a6c fix(labwc): complete desktop parity (#6)
-    fix/popup-first-open-and-media-keys  — squash-merged, safe to delete
-      landed whole as b8a63a8 fix(popups): first-open rendering, dead toasts, and medi
-    fix/screenshot-off-hyprland  — squash-merged, safe to delete
-      landed whole as 4e267eb fix: screenshots and popup input regions off Hyprland (#
-    task/p0-016-agent-settings  — squash-merged, safe to delete
-      landed whole as 4335e42 fix(agents): the sudo caveat was written before no_new_p
-    (nothing — every task branch's content is on the integration tip)
-
-  The per-commit lines above are a HEURISTIC: a low count can also mean
-  landed-then-rewritten. Settle any one of them with
-  `git diff <integration> <branch> -- $(git show --name-only --format= <commit>)`
-  before spending an agent on it.
-
-────────────────────────────────────────────────────────────────────────────
-  durability
-────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 2min 10s Sat
-  wip refs:
-    apex-os    dd3496b  apex-os-
-    apex-os    c4b883d  int-os-
-    apex-os    1f39c5e  roadmap-state
-    apex-os    4d32e35  wt-ai-apps-
-    apex-os    55f08ae  wt-base-os-
-    apex-os    6c9c17f  wt-clippy-
-    apex-os    1951fdc  wt-disposable-
-    apex-os    2e3bbcd  wt-editors-
-    apex-os    31a3d16  wt-editors2-
-    apex-os    59b7328  wt-followups-int3-
-    apex-os    0683355  wt-greeter-os-
-    apex-os    c74f38d  wt-multilib2-
-    apex-os    0fd2d78  wt-p0-002-
-    apex-os    e63b0e3  wt-p0-003-
-    apex-os    cb17b4e  wt-p0-004-
-    apex-os    1a4b5f2  wt-p0-005-
-    apex-os    162d6fa  wt-p0-009-
-    apex-os    d4787a4  wt-p0-009b-
-    apex-os    f30f7ca  wt-p0-011-
-    apex-os    9b605a1  wt-p0-011b-
-    apex-os    746639a  wt-p0-014-
-    apex-os    580c657  wt-p0-019-os-
-    apex-os    00c1973  wt-p0-025-os-
-    apex-os    2c9c560  wt-p0-finish-
-    apex-os    eda5ef8  wt-p1-001-
-    apex-shell 9403150  apex-shell-
-    apex-shell df979e1  int-shell-
-    apex-shell 68c971d  wt-base-shell-
-    apex-shell c8f1e50  wt-editors2-shell-
-    apex-shell 75049cf  wt-greeter-shell-
-    apex-shell ed92eaa  wt-lockhint-
-    apex-shell ad2d89d  wt-p0-005-shell-
-    apex-shell 6282c29  wt-p0-015-shell-
-    apex-shell 2afecfc  wt-p0-016-
-    apex-shell 5cf1789  wt-p0-017-
-    apex-shell e1d8a82  wt-p0-017b-
-    apex-shell 763c26e  wt-p0-018-prefix-
-    apex-shell 5b2a749  wt-p0-018b-
-    apex-shell 4eb5711  wt-p0-019-shell-
-    apex-shell a006b8c  wt-p0-023-
-    apex-shell b1621de  wt-p1-020-
-    apex-shell 3c297fc  wt-p1-023-
-    apex-shell ad337cd  wt-p1-029-
-    apex-shell 3db5952  wt-p1-038-
-    apex-shell f10daa7  wt-p1-039-
-    apex-shell 589d611  wt-p1-040-
-    apex-shell 086727e  wt-p1-044-shell-
-    apex-shell fb019fa  wt-p1-048-
-    apex-shell 8b2c759  wt-p1-052-shell-
-    apex-shell 307db51  wt-p2-b-
-
-────────────────────────────────────────────────────────────────────────────
-  next
-────────────────────────────────────────────────────────────────────────────
-  4 agent(s) dispatched, ceiling 6
-
-  IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
-    p1-008         P1-008,P1-009,P1-010             Cloudflare One, Workers AI and AI Gateway, Secrets Store
-    p2-b           P2-003,P2-004                    Accessibility baseline and internationalisation baseline
-
-  READY (dependencies believed satisfied — confirm against the agent table above):
-    p1-038-hardware P1-038                           The 18 labwc matrix rows that need real applications
-    p1-005         P1-005,P1-006,P1-007             Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets
-                   conflicts with p1-002
-    p1-011         P1-011,P1-012,P1-013             Temporary task credentials, transparent brokered wrangler/cl
-                   conflicts with p1-005, p1-008
-    p1-014         P1-014,P1-015,P1-016,P1-017      Cloudflare environment protection, worktree preview environm
-                   conflicts with p1-011
-    p1-025         P1-025,P1-026,P1-027,P1-028      Skill inventory and audit, plugin provenance and isolation, 
-    p1-040-per-output-scaling P1-040                           Per-output scaling: two densities, two sizes, one shell
-    p1-052-relay   P1-051,P1-052                    The APEX Remote remainder: relay, reconnect, mDNS, connectio
-    p1-053a        P1-053,P1-054,P1-055             Android app foundation, Agent Center parity, full PTY/TUI re
-
-  HELD:
-    final          after *
-
-  COMPLETE (every roadmap item done — not offered again).
-  This says the WORK is done, not that it is landed — check the
-  unlanded section above before assuming roadmap/v2.2 carries it:
-    p0-014, p1-018, p1-020, p1-023, p1-035, p1-044, p2-e
-
-────────────────────────────────────────────────────────────────────────────
-  how to resume
-────────────────────────────────────────────────────────────────────────────
-  1. This page IS the resume. Do not re-derive it with git commands.
-  2. A dead agent is NOT resumed with SendMessage — that replays its whole
-     transcript through the model and cost 10% of a usage window on 2026-09-06.
-     Dispatch a FRESH agent and paste it ROADMAP/state/agents/<slug>.md.
-     Its worktree is intact; its branch is pushed; its card says what is next.
-  3. Land finished branches onto roadmap/v2.2, record them with set-status.py,
-     then dispatch from READY up to the ceiling.
-  4. Full context, if you need more than this page: ROADMAP/PROGRESS.md.
