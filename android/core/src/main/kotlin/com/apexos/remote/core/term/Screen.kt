@@ -110,13 +110,43 @@ class Line(cols: Int) {
     }
 
     /** The printable text of this line, with a wide character's tail skipped. */
-    fun text(): String {
+    fun text(): String = textOf(0, cols - 1)
+
+    /**
+     * The text of a run of **columns**, which is not the same as a run of
+     * characters.
+     *
+     * A wide character occupies two columns and contributes one code point; an
+     * astral one occupies one column and contributes two UTF-16 units. So a
+     * caller holding a selection in grid coordinates — which is the only
+     * coordinate a finger on a screen produces — cannot index into [text].
+     * Every caller that means columns comes through here.
+     */
+    fun textOf(fromCol: Int, toCol: Int): String {
         val sb = StringBuilder(cols)
-        for (i in 0 until cols) {
+        for (i in maxOf(0, fromCol)..minOf(cols - 1, toCol)) {
             if (code[i] == Cell.WIDE_TAIL) continue
             sb.appendCodePoint(code[i])
         }
         return sb.toString()
+    }
+
+    /**
+     * For each column, the index into [text] where that column's character
+     * starts; `-1` for a wide character's tail.
+     *
+     * Search works on the text a reader sees and reports where it is on the
+     * grid, and this is the join between the two.
+     */
+    fun columnOfTextIndex(): IntArray {
+        val map = IntArray(cols) { -1 }
+        var at = 0
+        for (i in 0 until cols) {
+            if (code[i] == Cell.WIDE_TAIL) continue
+            map[i] = at
+            at += Character.charCount(code[i])
+        }
+        return map
     }
 
     override fun toString(): String = "Line(\"${text().trimEnd()}\"${if (wrapped) ", wrapped" else ""})"
@@ -292,11 +322,18 @@ class Screen(cols: Int, rows: Int, val scrollbackLimit: Int = DEFAULT_SCROLLBACK
         for (index in 0 until totalLines) {
             val line = lineAt(index) ?: continue
             val text = line.text()
+            if (text.length < needle.length) continue
+            // Text index -> column, built once per line that could match. The
+            // two differ wherever a wide character or an astral one appears,
+            // and a highlight drawn at the text index would sit in the wrong
+            // column for every line after the first CJK character on it.
+            val map = line.columnOfTextIndex()
             var from = 0
             while (from <= text.length - needle.length) {
                 val at = text.indexOf(needle, from, ignoreCase)
                 if (at < 0) break
-                out.add(Match(index, at, needle.length))
+                val col = map.indexOfFirst { it == at }
+                out.add(Match(index, if (col >= 0) col else at, needle.length))
                 if (out.size >= limit) return out
                 from = at + 1
             }
@@ -322,17 +359,19 @@ class Screen(cols: Int, rows: Int, val scrollbackLimit: Int = DEFAULT_SCROLLBACK
         val sb = StringBuilder()
         for (index in maxOf(0, from.line)..minOf(totalLines - 1, to.line)) {
             val line = lineAt(index) ?: continue
-            val text = line.text()
-            val first = if (index == from.line) from.col.coerceIn(0, text.length) else 0
-            val last = if (index == to.line) (to.col + 1).coerceIn(0, text.length) else text.length
-            if (first >= last) {
+            // Columns, not character indices: see [Line.textOf].
+            val first = if (index == from.line) from.col.coerceIn(0, line.cols - 1) else 0
+            val last = if (index == to.line) to.col.coerceIn(0, line.cols - 1) else line.cols - 1
+            if (first > last) {
                 if (index != to.line && !line.wrapped) sb.append('\n')
                 continue
             }
-            var piece = text.substring(first, last)
-            // Only the tail of the selection on a line is trimmed — a
-            // selection that starts mid-line keeps its interior spacing.
-            if (last >= text.length) piece = piece.trimEnd(' ')
+            var piece = line.textOf(first, last)
+            // Only a selection that reaches the right-hand edge is trimmed. A
+            // terminal line is always [cols] cells wide and the blanks after
+            // the last character were never typed; a selection that stops
+            // mid-line keeps its interior spacing exactly.
+            if (last >= line.cols - 1) piece = piece.trimEnd(' ')
             sb.append(piece)
             if (index != to.line && !line.wrapped) sb.append('\n')
         }
