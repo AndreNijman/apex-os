@@ -42,7 +42,7 @@ visible from the page a reader of `apex vm` would be on.
   one implementation rather than two. `Containerfile.base` makes that a build
   refusal.
 * `apexd/apex/src/browser.rs` — the clap surface, wired as `Cmd::Browser`.
-* `tests/test-apex-browser.sh` — 81 assertions against a recording `apex` stub.
+* `tests/test-apex-browser.sh` — 83 assertions against a recording `apex` stub.
 * `tests/browserlab/run-browserlab` — the live lab.
 * `docs/browser-capsule.md` — the composition table and the not-built list.
 
@@ -85,19 +85,30 @@ pretending they combine. Both mask `$HOME`, `/run` and `$XDG_RUNTIME_DIR`.
    Firefox command line. A capsule would have run against a directory it
    neither created nor deletes. The engine now refuses `--profile`, `-P`,
    `-ProfileManager` and `-display` among the browser's arguments, by name.
-2. **The download directory was unreachable to a caller.** Downloads lived in
-   `<capsule>/downloads`, but the session's working directory is the capsule
-   root, so `--screenshot shot.png` wrote to the root and the nomination loop
-   reported the capsule "did not produce" a file it was standing next to. The
-   capsule directory is now the download directory and the profile moved to
-   `.profile` — the leading dot is what makes it unnominatable by
-   construction, because a nomination may not start with one.
+2. **Nothing the browser wrote by path could be nominated, and the first
+   explanation was wrong.** Downloads lived in `<capsule>/downloads` while the
+   session's working directory is the capsule root, so `--screenshot shot.png`
+   and the nomination loop were looking in different places. That was fixed —
+   the capsule directory is now the download directory, and the profile moved
+   to `.profile`, whose leading dot makes it unnominatable by construction
+   since a nomination may not start with one — **and the screenshot still did
+   not appear.** Measured directly afterwards: Firefox's `--screenshot` writes
+   nothing at all when given a relative filename, anywhere, while the run
+   still exits 0. An absolute path works, and a caller cannot type the path of
+   a capsule this engine names for them, so `{capsule}` in any browser
+   argument now expands to the capsule directory. A token rather than a
+   rewrite of `--screenshot`, because the engine does not know which of a
+   browser's flags take paths.
 3. **The browser phoned home and the allowlist was carrying it.** The lab's
    daemon log showed a capsule being denied `firefox.settings.services.
    mozilla.com`, `aus5.mozilla.org` and `location.services.mozilla.com`, over
-   and over, for the rest of its run. The allowlist did its job; the profile
-   now turns those off, so the allowlist is the backstop rather than the only
-   thing stopping it.
+   and over, for the rest of its run. The allowlist did its job. The profile
+   now turns those services off — **and that reduces it rather than stopping
+   it**: with every preference applied the daemon still logs occasional
+   denials for the settings and update services. Stated in the engine and in
+   the docs rather than left to be rediscovered, because the conclusion is the
+   one that matters: the allowlist is the boundary and the preferences are
+   hygiene in front of it.
 4. **Three answers, three times.** The capability lookup, the wait loop and the
    allowlist probe each collapsed "could not ask" into "the answer is no". The
    wait loop's version was the dangerous one: an unanswered `agent status` read
@@ -116,19 +127,93 @@ pretending they combine. Both mask `$HOME`, `/run` and `$XDG_RUNTIME_DIR`.
    capability flow came out "verified" with the unexercised half demoted to a
    clause in the reason. The vmlab's precedence is restored.
 
-## PLACEHOLDER-LAB-TABLE
+## The live lab's verdicts, last full run on the L16
+
+`tests/browserlab/run-browserlab`, on the machine rather than in a container
+(the vmlab needs qemu and libvirt, which are deliberately absent from the
+image; a capsule needs bwrap, agentd and a browser, which are all present, so a
+container would test a stack that is not the shipped one).
+
+| flow | verdict | what the capsule or the daemon observed |
+|---|---|---|
+| profile | verified (7) | from inside: `~/.mozilla` absent, the host's profile directory unreachable, no `.mozilla` in the home listing, the capsule's own profile present and pinning the proxy. From outside: no capsule directory survived, and no new file appeared in the host's own Firefox profile |
+| headless | verified (3) | no compositor socket in the namespace, the interface list is `lo` and nothing else, and the browser rendered a page and wrote a PNG anyway |
+| network | verified (8) | the address the rule wrote down answers; the SAME server by a name is refused (`accepts_address`); the daemon logged that denial itself; unproxied, an address outside loopback connects to nothing and a name cannot be resolved at all; and the BROWSER's own request produced `apex-agentd: session 2 denied browser-only.test:8443` — which nothing but a proxied request could have made |
+| downloads | verified (6) | the capsule's own log says it created an unnominated `leak.txt`; `leak.txt` did not reach the host and the nominated file did; **an engine whose copy loop runs over the directory instead of the nominations DOES hand it over**; and without `--download-to` nothing leaves and no destination is invented |
+| capability | **could-not-run** | `apex-secretd` is a root service this lab does not start. What ran live is the three-answer refusal: a lookup that could not be made says so, names `apex-secretd`, and does not claim the credential is absent |
+| teardown | verified (3) | no capsule directory, no session left running, and the user's own agent runtime socket still there |
+
+**5 verified, 1 could-not-run, 0 failed.** 27 observations.
+
+Each of the four failures along the way was a defect in this unit's own work,
+found by the lab and fixed: the relative `--screenshot`, the lab deleting its
+own evidence, an assertion expecting a string curl does not print, and the
+browser-proxy flow calling the engine wrong.
 
 ## Gates
 
-* `tests/test-apex-browser.sh` — 81 passed, 0 failed. Every new assertion was
+* `tests/test-apex-browser.sh` — **83 passed, 0 failed**. Every new assertion was
   watched going RED against a mutated engine and the engine restored
   byte-identical with plain `cp` (sha256 compared, `git diff` clean).
 * `tests/check-containerfile-assertions.sh` — 106 checked / 0 failed / 0 inert
-  before, **126 checked / 0 failed / 0 inert** after. Measured both ways
+  before, **127 checked / 0 failed / 0 inert** after. Measured both ways
   against `origin/roadmap/v2.2`'s own copy of the file rather than assumed.
 * `shellcheck -S warning -x` clean on the engine, the suite and the lab.
-* PLACEHOLDER-RUST-GATES
+* `cargo clippy --locked --workspace --all-targets -- -D warnings` — clean.
+* `cargo test --locked --workspace` — **3063 passed, 0 failed**.
 
 ## NEXT
 
-PLACEHOLDER-NEXT
+**This round is complete and pushed. Do not re-derive any of the above.**
+Read `docs/browser-capsule.md` first: it carries the composition table, the
+pivot rationale, the capability section that says what is and is not decided,
+and a "what is not built" list that is accurate.
+
+If a round 2 is dispatched, these are the gaps, in order of how much they are
+worth:
+
+1. **A capsule cannot authenticate to a site.** This is P2-012's unmet
+   criterion and the reason it is `partial`. `--capability` binds the
+   capsule's destination to a stored credential's pin and the capsule never
+   holds the value — but the framework's model is that the DAEMON performs the
+   operation, and agentd's proxy tunnels CONNECT, so a TLS tunnel has nowhere
+   to put a header. Closing it needs either a driver inside the capsule that
+   can be handed a minted token for one request, or a provider that performs a
+   login and hands back a session. Both are more than a flag.
+
+2. **The pin-binding half is stub-tested only.** `apex-secretd` is a root
+   service and the lab does not start one, so the `capability` flow reports
+   `could-not-run` with that reason. What IS exercised live is the refusal and
+   its three answers. A round that wants the pin proven live has to decide
+   whether starting secretd on the L16 is acceptable; this round decided it
+   was not.
+
+3. **Per-run narrowing of the allowlist.** `--allow` is checked against the
+   runtime's allowlist and cannot widen it, which is enforced. It also cannot
+   NARROW below it: the daemon snapshots `runtime_config.allowlist()` when the
+   session starts and there is no per-session allowlist on the wire. Adding one
+   is a protocol change and a protocol BUMP, because a field that narrows is a
+   restriction and an old daemon ignoring it fails open — `protocol.rs` says so
+   about `--network offline` in as many words.
+
+4. **`--console-to` is argv-tested only.** The stub proves the engine asks
+   `apex agent logs` and writes the file under the no-clobber rule; no live
+   flow reads a real transcript back.
+
+5. **A CA a capsule could be told to trust.** A fresh profile trusts the system
+   store and nothing else, so an intranet site behind a private CA cannot be
+   automated at all. It is a real flag with a real argument behind it, not an
+   oversight.
+
+6. **Chromium.** The sandbox, the allowlist and the nomination loop are
+   browser-agnostic; the profile writer is not.
+
+Do **not**: run the lab against the user's own `apex-agentd` (it starts its
+own, on a private `XDG_RUNTIME_DIR`, and kills it by pid); put the lab or a
+build under `/tmp` or `$HOME` (`session.rs::bridge_program` refuses a bridge
+there, and every allowlisted flow would report could-not-run for the wrong
+reason); point a capsule's browser at the lab's HTTPS server expecting a page
+(the certificate is self-signed and a fresh profile refuses it); or edit
+`files/system/libexec/apex-browser` while the lab is running — that cost one
+whole run on 2026-09-12.
+

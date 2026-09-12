@@ -4062,7 +4062,7 @@ tasks:
 - id: P2-012
   title: Secure browser automation capsule
   priority: P2
-  status: todo
+  status: partial
   area: browser-agent
   depends_on:
   - P1-001
@@ -4071,6 +4071,63 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    PARTIAL on apex-os branch task/p2-d-browser-capsule (tip a71d785f, 9 commits, all pushed; NOT merged). apex
+    browser is a capsule that is a confined allowlisted 'apex agent' session: files/system/libexec/apex-browser
+    contains NO confinement of its own and never invokes bwrap (Containerfile.base makes that a build refusal), so
+    the masked home and the egress proxy have one implementation. It rests on apex-agent-core/src/sandbox.rs
+    (tmpfs $HOME, /run and $XDG_RUNTIME_DIR, --proc /proc, --unshare-net), apex-agentd/src/egress.rs
+    (NetworkPolicy::Allowlist, a CONNECT proxy the daemon serves), and apex-vm cmd_run's rules (copy loop over the
+    NOMINATIONS not the directory, default-deny at both ends, no-clobber, destination fenced outside the teardown
+    tree, four-way fence on the recursive removal). Everything it needs is in the image; nothing is installed on
+    demand. LIVE: tests/browserlab/run-browserlab, on the machine rather than in a container because bwrap, agentd
+    and Firefox are all shipped and a container would test a different stack, using its OWN apex-agentd on a
+    private XDG_RUNTIME_DIR under /var/tmp (session.rs::bridge_program refuses a bridge under /tmp or $HOME) and
+    never touching the live runtime. 5 verified / 1 could-not-run / 0 FAILED, 27 observations, each made BY THE
+    CAPSULE ABOUT ITSELF from inside the namespace and leaving through the nomination boundary under test, or by
+    the daemon. profile verified 7: ~/.mozilla absent inside while it exists on the host, the host profile
+    directory unreachable, no .mozilla in the home listing, the capsule's own profile present and pinning the
+    proxy, no capsule directory survived, no new file in the host's own Firefox profile. headless verified 3: no
+    compositor socket in the namespace, interface list is lo and nothing else, and the browser rendered a page and
+    wrote a PNG anyway. network verified 8: the address the rule wrote down answers, the SAME server by a name is
+    refused by accepts_address, the daemon logged that denial itself, unproxied an address outside loopback
+    connects to nothing and a name cannot be resolved at all, and the BROWSER's own request produced 'apex-agentd:
+    session 2 denied browser-only.test:8443' which nothing but a proxied request could have made. downloads
+    verified 6: the capsule's own log says it created an unnominated leak.txt, leak.txt did not reach the host,
+    the nominated file did, AND AN ENGINE WHOSE COPY LOOP RUNS OVER THE DIRECTORY INSTEAD OF THE NOMINATIONS DOES
+    HAND IT OVER - the falsifying control is inside the flow, as P2-009's is. teardown verified 3: no capsule, no
+    session, the user's own runtime untouched. WHAT IS NOT VERIFIED, PLAINLY. (1) CAPABILITY AUTH IS THE UNMET
+    CRITERION AND IS WHY THIS IS PARTIAL: a capsule CANNOT AUTHENTICATE TO A SITE. --capability binds the
+    capsule's destination to a stored credential's pin and the capsule is never given the value, but the
+    framework's model is that the DAEMON performs the operation, and agentd's proxy tunnels CONNECT, so a TLS
+    tunnel has nowhere to put a header. (2) Even the pin-binding half is stub-tested only: apex-secretd is a root
+    service the lab does not start, so the capability flow is COULD-NOT-RUN with that reason; what ran live is the
+    three-answer refusal. (3) Per-run NARROWING below the runtime allowlist is not built - the daemon snapshots
+    runtime_config.allowlist() and a per-session field would be a protocol BUMP because a field that narrows is a
+    restriction an old daemon would ignore. (4) --console-to is argv-tested only. (5) A fresh profile trusts the
+    system CA store and nothing else, so a site behind a private CA cannot be automated - measured, the lab's own
+    self-signed server produced no page. (6) No VM-tier capsule (no guest carries a browser, apex vm run refuses
+    --network by design, the virt stack is deliberately absent) - recorded in docs/virtualization.md's not-built
+    list. (7) Firefox only; no WebDriver/CDP surface; the proxy is CONNECT-only so plain http cannot be automated.
+    (8) The profile's vendor-traffic preferences REDUCE the browser's phone-home and do not stop it - the daemon
+    still logs occasional denials for Mozilla's settings and update services; the allowlist is the boundary, the
+    preferences are hygiene. SEVEN DEFECTS FOUND BY RUNNING, all in this unit's own work and all fixed: clap's
+    trailing var-arg absorbs --profile into the browser's arguments where a second --profile WINS on a Firefox
+    command line (the engine now refuses it, and -P, -ProfileManager and -display, by name after the separator);
+    Firefox's --screenshot writes NOTHING for a relative filename while exiting 0, and a caller cannot type a
+    generated capsule's path, so {capsule} expands in browser arguments; the wait loop waited on 'killed', which
+    is not an AgentState and could never fire, and omitted 'exited', which is; that loop and the allowlist probe
+    each read 'could not ask' as 'the answer is no', the wait loop's version copying files out of a directory the
+    browser may still be writing into; the lab deleted its own evidence by putting $OUT inside the tree its
+    teardown removes, the exact rule --download-to enforces on a caller; the lab's ENETUNREACH assertion expected
+    a string curl does not print and its earlier version probed loopback, which exists in the namespace; and
+    could-not-run did not beat verified in the lab's driver, so the capability flow read as 'verified'. GATES:
+    tests/test-apex-browser.sh 83 passed 0 failed, every new assertion watched going RED against a mutated engine
+    and the engine restored byte-identical with plain cp (sha256 compared, git diff clean);
+    tests/check-containerfile-assertions.sh 106 checked / 0 failed / 0 inert before and 127 / 0 / 0 after,
+    measured both ways against origin/roadmap/v2.2's own copy; cargo clippy --locked --workspace --all-targets -D
+    warnings clean; cargo test --locked --workspace 3063 passed 0 failed; shellcheck -S warning -x clean. Card:
+    ROADMAP/state/agents/p2-d.md. Docs: docs/browser-capsule.md.
 - id: P2-013
   title: Per-project identity binding
   priority: P2
