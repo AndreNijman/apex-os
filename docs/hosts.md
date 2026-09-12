@@ -113,8 +113,14 @@ says so and names the command that adds one.
 
 ## `apex host show`
 
-One device in full — destination, port, note, the capability line, the GPU
-list, free space on `/var`.
+One device in full — destination, port, note, the capability line and the GPU
+list.
+
+Free space on `/var` is printed **only when the probe reported it**, which
+today means only the shell-probe path: `describe_self` does not report
+`free_mib`, so an APEX peer — the *better* of the two probe paths — is the one
+that shows no free-space line. Worth knowing before you read its absence as a
+full disk.
 
 It also prints any field a **newer** peer reported that this build does not
 understand, marked as such, rather than dropping it. That line is usually the
