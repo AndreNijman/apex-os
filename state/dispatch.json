@@ -1,10 +1,10 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-12T12:20+08:00",
- "_round": "Round 19. The 12pm session limit killed all six round-18 agents within a minute of each other at ~11:05. Four had pushed real work and it is all landed; two (p2-b, p1-062) had pushed nothing and lost their round entirely. Every unit was re-dispatched FRESH off its card, never by messaging the dead agent, and every new brief now says to commit the first real thing within twenty minutes.",
+ "updated": "2026-09-12T17:20+08:00",
+ "_round": "Round 20. The 5pm limit killed all six round-19 agents within a minute. FOUR had pushed and all of it is landed (14 commits); two (p1-061, p2-b) had pushed nothing and lost their round, both dispatched minutes before the limit. All six re-dispatched fresh off their cards. THE IMAGE BUILDS: base succeeded for the first time since 2026-09-07; the image job then died on a runner shutdown signal mid-push, which is infrastructure, and was re-run.",
  "_landed_this_round": {
-  "apex-os": "roadmap/v2.2 481fc579 -> 4ed092b8. 43d98f10 (the keybindings forbid-check matched the comment that explains what it forbids), then three round-18 branches: 514d46a3 p1-014 (section 13.8 environment protection as a one-shot owner approval, an approval-race test that could not fail rewritten, section 13.13 worktree previews), 564fffd5 p1-025 (MCP configuration curated at launch; a plugin's server proved confined by making it try to escape), 4ed092b8 p1-053a (the APEX Remote protocol as a pure-JVM module, 79 JVM tests, an Android app module that assembles). Verified together before pushing: cargo test --workspace 2880 passed / 0 failed, clippy clean. Then 2e33c1a6 (the fourth assertion), 882a7176 (p1-025 round 2: P1-028 done, apexd 2888/0), and 26ea6a02 (the assertion checker + the fifth defect it found).",
-  "apex-shell": "roadmap/v2.2 34fef17 -> 207a045: p1-040's per-output scaling migration, 118 files. One shared ThemeSet per factor derived from the breakpoint table, every surface sized from the output it is drawn on, each surface building its own token set, the shared registry deliberately reverted, and popups resolving from their anchor because PopupWindow.screen does not track it. Verified: scale-tokens 49/0, color-tokens 22/0, scaling 86/0, facade 60/0, agent-state-render 21/0. nav-geometry is 4334/16 IDENTICALLY before and after the merge - pre-existing, not a regression, and now handed to the p1-040 successor as its own item."
+  "apex-os": "roadmap/v2.2 c8586195 -> 2aa9ed45. Four rescued branches: 4ec70d70 p1-063 (the lid-closed policy as a total function over measured inputs, and the apex lid driver with a thermal guard measured against the hardware's own limit), bece32d3 p2-virt (apex vm - rootless, headless, Secure-Boot-enforcing - 94 assertions against the shipped engine and three defects a review found first), 1d1c6fb3 p2-016 (three product fixes, including that THE SECOND ACCOUNT ON A MACHINE COULD NOT START AN AGENT AT ALL, plus guest disposability and a kiosk recipe inert by default), 3be1146d p1-053a (an Android terminal emulator that answers the questions TUIs ask, a multiplexer whose reconnect is re-attaching rather than restarting, and the agent model checked against the desktop's own table). Plus 2aa9ed45, written by the orchestrator - see _findings.",
+  "apex-shell": "nothing new; 6e74101 stands."
  },
  "_status_recorded_this_round": "79 done / 25 partial / 21 todo / 2 blocked of 127. Statuses for the round-19 work are the successors' to record.",
  "_deliberately_held": {
@@ -20,106 +20,19 @@
  },
  "agents": [
   {
-   "slug": "p1-014",
-   "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-p1-014b",
-   "branch": "task/p1-014-cf-guardrails",
-   "agent_id": "ab642f0ac0453859e",
-   "dispatched": "2026-09-12T12:20+08:00",
-   "session": "round 19 orchestrator",
-   "queue_id": "p1-014",
-   "card": "ROADMAP/state/agents/p1-014.md",
-   "at_dispatch": "Round 2. P1-014 and most of P1-015 are landed; P1-016 (budgets, operation caps, usage in the task audit) and P1-017 (MCP through the broker) remain. Still the only Cloudflare agent, by the conflict graph.",
+   "slug": "p1-063",
    "items": [
-    "P1-014",
-    "P1-015",
-    "P1-016",
-    "P1-017"
-   ]
-  },
-  {
-   "slug": "p1-025",
-   "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-p1-025b",
-   "branch": "task/p1-025-plugin-trust-2",
-   "agent_id": "a29757214dbdc5979",
-   "dispatched": "2026-09-12T12:20+08:00",
-   "session": "round 19 orchestrator",
-   "queue_id": "p1-025",
-   "card": "ROADMAP/state/agents/p1-025.md",
-   "at_dispatch": "Round 2. Two commits landed. P1-026 and P1-028 both still partial.",
-   "items": [
-    "P1-025",
-    "P1-026",
-    "P1-027",
-    "P1-028"
+    "P1-063"
    ],
-   "completed": "2026-09-12T14:05+08:00"
-  },
-  {
-   "slug": "p1-053a",
    "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-p1-053a2",
-   "branch": "task/p1-053a-android-2",
-   "agent_id": "a9422edb2a312d66c",
-   "dispatched": "2026-09-12T12:20+08:00",
-   "session": "round 19 orchestrator",
-   "queue_id": "p1-053a",
-   "card": "ROADMAP/state/agents/p1-053a.md",
-   "at_dispatch": "Round 2. android/core (the protocol, 79 JVM tests) and an assembling app module are landed; the real Android sources - keystore, app lock, theme, pairing - are this round. Predecessor left 7 dirty files in the old worktree, told to look before overwriting.",
-   "items": [
-    "P1-053",
-    "P1-054",
-    "P1-055"
-   ],
-   "completed": "2026-09-12T14:05+08:00"
-  },
-  {
-   "slug": "p1-040",
-   "repo": "apex-shell",
-   "worktree": "/var/tmp/apex-work/wt-p1-040c",
-   "branch": "task/p1-040-scaling-finish",
-   "agent_id": "ac789453afa5b0063",
-   "dispatched": "2026-09-12T12:20+08:00",
-   "session": "round 19 orchestrator",
-   "queue_id": "p1-040",
-   "card": "ROADMAP/state/agents/p1-040.md",
-   "at_dispatch": "Round 3. The migration is landed; the sweep comparison, the remaining mutation pairs, the evidence field, and the 16 nav-geometry failures at the 0.85 bucket are this round.",
-   "items": [
-    "P1-040"
-   ],
-   "completed": "2026-09-12T15:05+08:00",
-   "result": "P1-040 done; nav-geometry 4334/16 -> 4366/0; merged 6e74101."
-  },
-  {
-   "slug": "p2-b",
-   "repo": "both",
-   "worktree": "/var/tmp/apex-work/wt-p2-b3",
-   "branch": "task/p2-b-round18b",
-   "agent_id": "a74429ab8282d8ca4",
-   "dispatched": "2026-09-12T12:20+08:00",
-   "session": "round 19 orchestrator",
-   "queue_id": "p2-b",
-   "card": "ROADMAP/state/agents/p2-b.md",
-   "at_dispatch": "Round 3, and the second round this unit has lost with nothing pushed. Told explicitly to commit the first real thing within twenty minutes.",
-   "items": [
-    "P2-003",
-    "P2-004"
-   ]
-  },
-  {
-   "slug": "p1-062",
-   "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-p1-062b",
-   "branch": "task/p1-062-chaos-2",
-   "agent_id": "a5c2d04e8d90ca359",
-   "dispatched": "2026-09-12T12:20+08:00",
-   "session": "round 19 orchestrator",
-   "queue_id": "p1-062",
-   "card": "ROADMAP/state/agents/p1-062.md",
-   "at_dispatch": "Round 2, nothing pushed by the predecessor - it reached the third case and lost all of it. Told to commit the first working case before starting the second.",
-   "items": [],
-   "completed": "2026-09-12T14:05+08:00"
+   "worktree": "/var/tmp/apex-work/wt-p1-063b",
+   "branch": "task/p1-063-lid-2",
+   "agent_id": "aa01efc499f3cd2c0",
+   "dispatched": "2026-09-12T17:20+08:00",
+   "session": "round 20 orchestrator",
+   "queue_id": "p1-063",
+   "card": "ROADMAP/state/agents/p1-063.md",
+   "at_dispatch": "Round 20, re-dispatched fresh off the card after the 5pm limit. Told to commit the first real thing within twenty minutes and to name its commit-message file after the unit, because the scratchpad is shared."
   },
   {
    "slug": "p2-virt",
@@ -128,14 +41,14 @@
     "P2-009"
    ],
    "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-p2-virt",
-   "branch": "task/p2-virt",
-   "agent_id": "a1580835c423971dc",
-   "dispatched": "2026-09-12T14:05+08:00",
-   "session": "round 19 orchestrator",
-   "queue_id": null,
+   "worktree": "/var/tmp/apex-work/wt-p2-virt2",
+   "branch": "task/p2-virt-2",
+   "agent_id": "a0b5c2547aa5ac6ed",
+   "dispatched": "2026-09-12T17:20+08:00",
+   "session": "round 20 orchestrator",
+   "queue_id": "p2-virt",
    "card": "ROADMAP/state/agents/p2-virt.md",
-   "at_dispatch": "Told to build on P1-062's VM lab, which landed hours earlier: bootlab/ already boots guests under Secure-Boot-enforcing OVMF with a software TPM, already probes for KVM, and already carries the could-not-inject verdict. P2-008 names six flows and a unit that builds three and claims six is the failure this program keeps catching."
+   "at_dispatch": "Round 20, re-dispatched fresh off the card after the 5pm limit. Told to commit the first real thing within twenty minutes and to name its commit-message file after the unit, because the scratchpad is shared."
   },
   {
    "slug": "p2-016",
@@ -143,45 +56,61 @@
     "P2-016"
    ],
    "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-p2-016",
-   "branch": "task/p2-016-multiuser",
-   "agent_id": "abdfcb385f60b607a",
-   "dispatched": "2026-09-12T14:05+08:00",
-   "session": "round 19 orchestrator",
-   "queue_id": null,
+   "worktree": "/var/tmp/apex-work/wt-p2-016b",
+   "branch": "task/p2-016-multiuser-2",
+   "agent_id": "af6aa0fbeeb8f484f",
+   "dispatched": "2026-09-12T17:20+08:00",
+   "session": "round 20 orchestrator",
+   "queue_id": "p2-016",
    "card": "ROADMAP/state/agents/p2-016.md",
-   "at_dispatch": "Criterion 4 (remote agent permissions bound to the owning user/session) is origin::classify seen from the user axis rather than the device axis; tests/in-login-session.sh is how a second user is tested without a second human. Warned that criterion 3 fails if kiosk policy is bought by locking down every desktop."
+   "at_dispatch": "Round 20, re-dispatched fresh off the card after the 5pm limit. Told to commit the first real thing within twenty minutes and to name its commit-message file after the unit, because the scratchpad is shared."
   },
   {
-   "slug": "p1-053a-r3",
+   "slug": "p1-053a-r4",
    "items": [
     "P1-054",
     "P1-055"
    ],
    "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-p1-053a3",
-   "branch": "task/p1-053a-android-3",
-   "agent_id": "a780ac1bdfdb01780",
-   "dispatched": "2026-09-12T14:05+08:00",
-   "session": "round 19 orchestrator",
-   "queue_id": "p1-053a",
+   "worktree": "/var/tmp/apex-work/wt-p1-053a4",
+   "branch": "task/p1-053a-android-4",
+   "agent_id": "aaa17997c12f4aff8",
+   "dispatched": "2026-09-12T17:20+08:00",
+   "session": "round 20 orchestrator",
+   "queue_id": "p1-053a-r4",
    "card": "ROADMAP/state/agents/p1-053a.md",
-   "at_dispatch": "P1-053 is done and landed (a1420b01). Told to take P1-055 first if the two compete, and to read apex-shell's agentstate.js mapping rather than invent a second state->colour table."
+   "at_dispatch": "Round 20, re-dispatched fresh off the card after the 5pm limit. Told to commit the first real thing within twenty minutes and to name its commit-message file after the unit, because the scratchpad is shared."
   },
   {
-   "slug": "p1-063",
+   "slug": "p1-061",
    "items": [
-    "P1-063"
+    "P1-061"
    ],
-   "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-p1-063",
-   "branch": "task/p1-063-lid",
-   "agent_id": "a1b291ffd92d8c74a",
-   "dispatched": "2026-09-12T14:30+08:00",
-   "session": "round 19 orchestrator",
-   "queue_id": null,
-   "card": "ROADMAP/state/agents/p1-063.md (written at dispatch)",
-   "at_dispatch": "NEW ITEM, from Andre directly this round: closing the lid must not stop agent work or drop the VPN. Seventh concurrent agent, over the ceiling of six on purpose - a direct request from the owner outranks the queue. Design decided at dispatch rather than left open: the primitive is a handle-lid-switch BLOCK inhibitor, not an edit to HandleLidSwitch=, so a machine with no live work still suspends exactly as it does today and a static ignore never turns a laptop bag into an oven."
+   "repo": "both",
+   "worktree": "/var/tmp/apex-work/wt-p1-061",
+   "branch": "task/p1-061-app-permissions",
+   "agent_id": "ac1a1a968fd183d47",
+   "dispatched": "2026-09-12T17:20+08:00",
+   "session": "round 20 orchestrator",
+   "queue_id": "p1-061",
+   "card": "ROADMAP/state/agents/p1-061.md",
+   "at_dispatch": "Round 20, re-dispatched fresh off the card after the 5pm limit. Told to commit the first real thing within twenty minutes and to name its commit-message file after the unit, because the scratchpad is shared."
+  },
+  {
+   "slug": "p2-b",
+   "items": [
+    "P2-003",
+    "P2-004"
+   ],
+   "repo": "both",
+   "worktree": "/var/tmp/apex-work/wt-p2-b4",
+   "branch": "task/p2-b-round19",
+   "agent_id": "a1ea2515908d0a1ab",
+   "dispatched": "2026-09-12T17:20+08:00",
+   "session": "round 20 orchestrator",
+   "queue_id": "p2-b",
+   "card": "ROADMAP/state/agents/p2-b.md",
+   "at_dispatch": "Round 20, re-dispatched fresh off the card after the 5pm limit. Told to commit the first real thing within twenty minutes and to name its commit-message file after the unit, because the scratchpad is shared."
   }
  ],
  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -200,7 +129,9 @@
   "tests/test-apex-secret-broker.sh carries a stale assertion": "64 passed / 1 failed on the merged tree versus 63/2 on the base, measured rather than inferred. The shared failure asserts that 'cloudflare.dns.delete' is not an operation, which P1-008 made false. Unowned.",
   "the session scratchpad is shared between concurrent agents": "A p1-040 commit in apex-shell was written with `git commit -F $SCRATCHPAD/msg2.txt` and came out carrying the p1-025 agent's message about connector.rs in apex-os. msg1.txt/msg2.txt are what every agent reaches for and the scratchpad is one directory for the whole session. The agent amended it; both repos were checked afterwards and every commit's subject matches its content, so nothing mislabelled reached either tip. Every future brief should say: name the message file after your unit.",
   "tests/lib/headless.sh sets an output mode by calling its own stub": "Found while fixing nav-geometry: the runner stubs wlr-randr on PATH and then sets the output mode by CALLING wlr-randr, so it finds the stub. labwc kept its measured 1280x720 default while the runner printed 'at 1920x1080' -- both numbers in every log it ever wrote, which is why nobody noticed. NAV_GEOMETRY_MODE has never worked under labwc, and tests/lib/headless.sh has the same hole under 13 runners WITH A COMMENT DENYING IT. Fixed in run-nav-geometry-test.sh only; headless.sh left alone deliberately and unowned.",
-  "THE IMAGE BUILDS \u2014 base succeeded 2026-09-12T05:47Z": "run 34674085696 -> 34674350798: changes OK, rust OK, core OK 35m, BASE OK 14m. First successful base build from roadmap/v2.2 since 2026-09-07. Five assertions had to be fixed to get here, in this order: 706489ec (polkit grep matched the policy file's own comment), e24cd244 + cafd3635 (nft could not reach netlink, and unshare's own refusal was being misread as nft rejecting the ruleset), 9f352724 (openssl x509 -not_before does not exist on the runner's 3.0.13), 43d98f10 (the mouse forbid-check matched the comment explaining the ban), 2e33c1a6 (a draft variable spelling in no file it greps), and 26ea6a02's checker, which found the fifth (@HOME@) before it could cost a sixth build. P0-001's first criterion - 'Daily and Gaming images build cleanly' - is reachable for the first time."
+  "THE IMAGE BUILDS \u2014 base succeeded 2026-09-12T05:47Z": "run 34674085696 -> 34674350798: changes OK, rust OK, core OK 35m, BASE OK 14m. First successful base build from roadmap/v2.2 since 2026-09-07. Five assertions had to be fixed to get here, in this order: 706489ec (polkit grep matched the policy file's own comment), e24cd244 + cafd3635 (nft could not reach netlink, and unshare's own refusal was being misread as nft rejecting the ruleset), 9f352724 (openssl x509 -not_before does not exist on the runner's 3.0.13), 43d98f10 (the mouse forbid-check matched the comment explaining the ban), 2e33c1a6 (a draft variable spelling in no file it greps), and 26ea6a02's checker, which found the fifth (@HOME@) before it could cost a sixth build. P0-001's first criterion - 'Daily and Gaming images build cleanly' - is reachable for the first time.",
+  "root looked for every user's lid config in root's own XDG directory": "Merging the four rescued branches took the workspace to 588 passed / 1 failed, and the failure was a PRODUCT defect. owner_configs resolved another user's config path through the INVOKING process's XDG_CONFIG_HOME, so the uid scan - which is the path the root driver takes - looked for every user's lid config inside root's own XDG directory, and on any machine where that variable is set the owner's pin would have been ignored silently. It is also why the test passed alone and failed in a full run: a gaming.rs test sets XDG_CONFIG_HOME in the same process. Split into invoker_config_path and config_path_for_home; 2998 passed, 0 failed; restoring the single function reddens the test by name.",
+  "the image job died on a runner shutdown, not a defect": "34674350798: changes OK, rust OK, core OK, BASE OK in 14m - then image failed with 'The runner has received a shutdown signal' at 06:03, twelve minutes into the push step, with every build step green and no ::error:: emitted. Re-run with gh run rerun --failed rather than rebuilding core and base again."
  },
  "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt \u2014 the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
  "_orchestrator": {
