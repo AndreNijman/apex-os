@@ -1220,6 +1220,17 @@ fn watch(roots: &Roots, once: bool, dry_run: bool, interval: Option<u64>) -> i32
         let decision = loaded.policy.decide(&inputs);
         let closed = inputs.lid.treat_as_closed() && !inputs.lid.is_absent();
 
+        // A machine with no lid has nothing for this driver to watch, and
+        // `apex-lid.service` is enabled on every APEX install including
+        // desktops. Exiting says so once; looping would re-ask a question with
+        // no answer every `poll_secs` for the life of the machine. `--once`
+        // still prints its line below, because a suite asking "what would you
+        // do" deserves the same answer on a desktop as anywhere else.
+        if inputs.lid.is_absent() && !once {
+            eprintln!("apex lid: {}", decision.why());
+            return 0;
+        }
+
         // ── the inhibitor ───────────────────────────────────────────────────
         if decision.holds_inhibitor() {
             if held.is_none() {
