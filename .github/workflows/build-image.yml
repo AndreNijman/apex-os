@@ -210,10 +210,36 @@ jobs:
         id: shell
         run: |
           set -euo pipefail
-          sha="$(git ls-remote https://github.com/AndreNijman/apex-shell refs/heads/main | awk '{print $1}')"
-          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not resolve apex-shell/main"; exit 1; }
+          # Pin the MATCHING branch, not main.
+          #
+          # This program develops both repos on roadmap/v2.2 and is forbidden
+          # from pushing main until the final integration, so pinning main
+          # vendored an apex-shell months behind the apex-os being built. The
+          # two halves then drift, and `base` dies in check-labwc-keybinds the
+          # moment this repo's rc.xml gains a keybind the old shell's defaults
+          # do not generate: W-A-s (the screen reader) and W-A-v (voice), both
+          # added on roadmap/v2.2 by the accessibility round. The image was
+          # being assembled from two repos at different ages and nothing said
+          # so.
+          #
+          # pr-validation.yml learned exactly this once already — its parity
+          # check cloned apex-shell's DEFAULT branch and reported drift between
+          # apex-os roadmap/v2.2 and apex-shell main while the two INTEGRATION
+          # branches agreed perfectly. It now clones the matching branch and
+          # PRINTS which one it used; so does this.
+          want="${GITHUB_REF_NAME}"
+          sha="$(git ls-remote https://github.com/AndreNijman/apex-shell \
+                   "refs/heads/${want}" | awk '{print $1}')"
+          if [ -n "$sha" ]; then
+            used="$want"
+          else
+            sha="$(git ls-remote https://github.com/AndreNijman/apex-shell \
+                     refs/heads/main | awk '{print $1}')"
+            used="main (apex-shell has no branch named ${want})"
+          fi
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not resolve apex-shell ${used}"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "Pinned apex-shell: $sha"
+          echo "Pinned apex-shell ${used}: $sha"
 
       - name: Path filter
         id: filter
