@@ -83,6 +83,15 @@ fun PairingScreen(
     onPayload: (String) -> Unit,
     onBack: () -> Unit,
     onDismiss: () -> Unit,
+    /**
+     * A code the app was opened with, from an `apex-remote:` link.
+     *
+     * It fills the box and does nothing else. The person who opened the link
+     * reads what pairing would establish and then presses Pair, which is the
+     * same deliberate act as scanning — a link that paired on arrival would be
+     * a link worth sending somebody.
+     */
+    initialPayload: String? = null,
 ) {
     val context = LocalContext.current
     var granted by remember {
@@ -91,8 +100,8 @@ fun PairingScreen(
                 PackageManager.PERMISSION_GRANTED,
         )
     }
-    var typing by remember { mutableStateOf(false) }
-    var typed by remember { mutableStateOf("") }
+    var typing by remember { mutableStateOf(initialPayload != null) }
+    var typed by remember { mutableStateOf(initialPayload.orEmpty()) }
     val asker = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted = it }
@@ -100,7 +109,7 @@ fun PairingScreen(
     // Asked at the moment the camera is wanted, which is the only moment it
     // means anything to the person answering.
     LaunchedEffect(Unit) {
-        if (!granted) asker.launch(Manifest.permission.CAMERA)
+        if (!granted && initialPayload == null) asker.launch(Manifest.permission.CAMERA)
     }
 
     Scaffold(

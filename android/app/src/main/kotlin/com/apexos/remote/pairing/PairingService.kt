@@ -1,6 +1,7 @@
 package com.apexos.remote.pairing
 
 import com.apexos.remote.core.Client
+import com.apexos.remote.core.Device
 import com.apexos.remote.core.InMemoryStaticKey
 import com.apexos.remote.core.MachineStore
 import com.apexos.remote.core.PairedMachine
@@ -37,8 +38,7 @@ class PairingService {
     suspend fun pair(
         offer: PairingOffer,
         deviceName: String,
-        boxFor: suspend (deviceId: String) -> SecretBox,
-        userVerification: Boolean,
+        boxFor: suspend (deviceId: String) -> GatedBox,
         nowMs: Long,
     ): PairedMachine {
         // The identity is generated here and not by the caller, because "a
@@ -50,8 +50,26 @@ class PairingService {
         // Hence a function of the id rather than a value — and hence a `suspend`
         // one.
         val identity = InMemoryStaticKey.generate()
-        val answer = handshake(offer, identity, deviceName, userVerification)
-        return MachineStore.record(identity, offer, answer, boxFor(identity.deviceId()), nowMs)
+
+        // The box FIRST, and the ordering is the whole point rather than a
+        // style. Obtaining it raises the biometric prompt, and a prompt the
+        // user cancels throws. If that happened after the handshake, the
+        // desktop would already have redeemed the token and written a device
+        // row whose private key had just died with the exception — a machine
+        // paired with a phone that can never connect, cleared only by hand with
+        // `apex remote revoke`. Cancelling here costs nothing at all.
+        //
+        // It is also what makes `user_verification` honest. The flag says a
+        // second factor exists on this device, the desktop stores it against
+        // the device and consults it when an approval needs one, and it is
+        // taken from the box that was just unlocked rather than from a question
+        // asked of the system beforehand.
+        val gated = boxFor(identity.deviceId())
+        val answer = handshake(offer, identity, deviceName, gated.userVerification)
+        // The authorised cipher is still good here: a per-use keystore key
+        // authorises an *operation*, not a span of time, so the seconds the
+        // handshake took do not expire it.
+        return MachineStore.record(identity, offer, answer, gated.box, nowMs)
     }
 
     private suspend fun handshake(
@@ -105,13 +123,21 @@ class PairingService {
                 }
                 // NOT `use`: the session owns the socket for as long as it
                 // lives, and closing it here would end the session the moment
-                // this function returned.
-                return@withContext Client.openSession(
-                    input = socket.getInputStream(),
-                    output = socket.getOutputStream(),
-                    identity = identity,
-                    desktopPublic = machine.let { com.apexos.remote.core.Device.checkKey(it.desktopKey) },
-                )
+                // this function returned. But a handshake that *fails* owns
+                // nothing, and leaving that socket open would leak one file
+                // descriptor per refused connection — on a revoked phone that
+                // keeps trying, which is exactly the phone this path is for.
+                return@withContext try {
+                    Client.openSession(
+                        input = socket.getInputStream(),
+                        output = socket.getOutputStream(),
+                        identity = identity,
+                        desktopPublic = Device.checkKey(machine.desktopKey),
+                    )
+                } catch (e: Exception) {
+                    runCatching { socket.close() }
+                    throw e
+                }
             }
             throw NoRouteToMachine("${machine.machine} did not answer on any known address", lastFailure)
         }
@@ -120,10 +146,15 @@ class PairingService {
         val (host, port) = splitHostPort(address)
         val socket = Socket()
         socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-        // The desktop drops an unauthenticated peer after thirty seconds. This
-        // end sets its own deadline for the handshake and takes it off once a
-        // session is open, because a PTY may sit idle for hours and a read
-        // deadline on one would end the terminal.
+        // The desktop drops an unauthenticated peer after thirty seconds, so
+        // this end sets a deadline of its own rather than waiting forever on a
+        // machine that has already given up.
+        //
+        // It stays on after the handshake, which is right for everything this
+        // app does today — the longest read is `measureRoundTrip`, which is a
+        // frame away. P1-055 must CLEAR it before attaching a PTY: a terminal
+        // may sit idle for hours, and a read deadline on one would end the
+        // session every twenty seconds of silence.
         socket.soTimeout = HANDSHAKE_TIMEOUT_MS
         socket.tcpNoDelay = true
         return socket
@@ -169,3 +200,15 @@ class PairingService {
 
 /** Nothing the pairing code named could be reached. */
 class NoRouteToMachine(message: String, cause: Throwable?) : Exception(message, cause)
+
+/**
+ * A box for a new device key, and whether it is really gated.
+ *
+ * The two travel together because the second is a property of the first and not
+ * of the phone. "This device can authenticate" is a question asked of
+ * `BiometricManager`; "the key protecting this pairing needs authentication" is
+ * read off the key with `KeyInfo`, and they can differ — an alias created by an
+ * older build, a screen lock removed and re-added. The desktop is told the
+ * second, because that is the one that is true.
+ */
+class GatedBox(val box: SecretBox, val userVerification: Boolean)
