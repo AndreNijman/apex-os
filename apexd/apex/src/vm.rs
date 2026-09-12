@@ -212,6 +212,17 @@ pub struct RunArgs {
     /// whatever `--egress` says.
     #[arg(long, value_name = "DIR")]
     pub egress_to: Option<String>,
+    /// Save the guest's serial output to this file before the VM is deleted.
+    ///
+    /// A disposable run removes the whole VM on the way out — disks, volumes
+    /// and the serial log with them — so without this a guest that never
+    /// mounted APEXIN produces an empty egress and nothing that says why.
+    ///
+    /// Opt-in rather than a default, and that is the argument rather than
+    /// caution: the serial log is bytes the guest chose to write, so it leaves
+    /// only where you named a destination, exactly like every other file.
+    #[arg(long, value_name = "FILE")]
+    pub console_to: Option<String>,
     /// Let egress overwrite a file that is already at the destination.
     ///
     /// Without it an existing file is left alone and the run reports which one
@@ -453,6 +464,10 @@ fn run_argv(a: RunArgs) -> Vec<String> {
         v.push("--egress-to".to_string());
         v.push(d);
     }
+    if let Some(c) = a.console_to {
+        v.push("--console-to".to_string());
+        v.push(c);
+    }
     if a.force {
         v.push("--force".to_string());
     }
@@ -675,6 +690,24 @@ mod tests {
         assert!(a.contains(&"log.txt".to_string()));
         let i = a.iter().position(|x| x == "--egress-to").expect("--egress-to");
         assert_eq!(a[i + 1], "/home/u/out");
+    }
+
+    #[test]
+    fn the_console_log_reaches_the_engine_and_is_not_assumed() {
+        // A clap surface that enumerates its flags rejects one it does not
+        // know, so a flag added to the shipped engine and not here is a flag
+        // the documentation advertises and `apex vm run` refuses. This is that
+        // test for --console-to; it was added to the engine first and this
+        // case is what makes the two agree.
+        let a = build(&[
+            "run", "--image", "/g.qcow2", "--console-to", "/home/u/serial.log", "--", "make",
+        ]);
+        let i = a.iter().position(|x| x == "--console-to").expect("--console-to");
+        assert_eq!(a[i + 1], "/home/u/serial.log");
+        // And it is opt-in: a run that did not ask for it must not grow one,
+        // because the serial log is bytes the guest chose to write.
+        let b = build(&["run", "--image", "/g.qcow2", "--", "make"]);
+        assert!(!b.iter().any(|x| x == "--console-to"));
     }
 
     #[test]
