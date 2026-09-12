@@ -1,5 +1,5 @@
 {
-  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
+  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap \u2014 do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
   "updated": "2026-09-11T22:08+08:00",
   "concurrency_ceiling": 6,
   "units": [
@@ -12,7 +12,7 @@
       "title": "The 18 labwc matrix rows that need real applications",
       "after": [],
       "conflicts": [],
-      "note": "Automated already: screenshots, multi-monitor, lock and idle, scaling. The remainder needs real programs on a real session and is written out step by step in state/agents/p1-038.md: portals, Firefox and Chromium screen sharing, OBS, Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling, rotation, refresh rate, VRR, suspend and resume, dock hotplug. This one cannot be done headless and cannot be done on the L16 while Andre is using it — it is a katana job, or a job for Andre with a checklist. Do not pretend otherwise."
+      "note": "Automated already: screenshots, multi-monitor, lock and idle, scaling. The remainder needs real programs on a real session and is written out step by step in state/agents/p1-038.md: portals, Firefox and Chromium screen sharing, OBS, Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling, rotation, refresh rate, VRR, suspend and resume, dock hotplug. This one cannot be done headless and cannot be done on the L16 while Andre is using it \u2014 it is a katana job, or a job for Andre with a checklist. Do not pretend otherwise."
     },
     {
       "id": "p0-014",
@@ -26,7 +26,7 @@
         "integrate-3"
       ],
       "conflicts": [],
-      "note": "Both are already implemented on task/p0-013-request-origin and land as `partial`. P0-014's remainder is a real FIDO/WebAuthn path behind --origin-policy remote. P0-015's remainder is that nothing reports lock state: APEX Shell locks with ext-session-lock and never calls SetLockedHint, so logind reports LockedHint=no on a session locked for an hour. The shell half was recovered from a WIP snapshot and pushed as fix/locked-hint at 87c84f3 (LockedHintService.qml, qmldir, Lockscreen.qml wiring) — integrate that first. P0-015 criterion 2 also needs P0-007's session grants to exist. P0-005's agent also produced an apex-shell branch, task/p0-005-agent-center-modes (the row shows the mode an agent is in) — integrate it alongside the apex-os side."
+      "note": "Both are already implemented on task/p0-013-request-origin and land as `partial`. P0-014's remainder is a real FIDO/WebAuthn path behind --origin-policy remote. P0-015's remainder is that nothing reports lock state: APEX Shell locks with ext-session-lock and never calls SetLockedHint, so logind reports LockedHint=no on a session locked for an hour. The shell half was recovered from a WIP snapshot and pushed as fix/locked-hint at 87c84f3 (LockedHintService.qml, qmldir, Lockscreen.qml wiring) \u2014 integrate that first. P0-015 criterion 2 also needs P0-007's session grants to exist. P0-005's agent also produced an apex-shell branch, task/p0-005-agent-center-modes (the row shows the mode an agent is in) \u2014 integrate it alongside the apex-os side."
     },
     {
       "id": "p1-018",
@@ -59,7 +59,8 @@
       "conflicts": [
         "p1-002"
       ],
-      "note": "26 of section 13.2's 32 operations remain after P1-002 took seven. Two framework gaps the Cloudflare author hit and worked around locally, which P1-005 should fix generally rather than repeat: Bound carries no provider payload, so bind cannot hand what it resolved to perform — Cloudflare re-resolves and refuses on mismatch, but git does NOT, which makes git's host pin a TOCTOU rather than a guarantee; and mint cannot reach a companion service, which is why OAuth refresh could not be expressed as mint and why P1-011 will hit the same wall."
+      "note": "26 of section 13.2's 32 operations remain after P1-002 took seven. Two framework gaps the Cloudflare author hit and worked around locally, which P1-005 should fix generally rather than repeat: Bound carries no provider payload, so bind cannot hand what it resolved to perform \u2014 Cloudflare re-resolves and refuses on mismatch, but git does NOT, which makes git's host pin a TOCTOU rather than a guarantee; and mint cannot reach a companion service, which is why OAuth refresh could not be expressed as mint and why P1-011 will hit the same wall.",
+      "closed": "Landed as merge 4f80746e; the range against roadmap/v2.2 is empty. P1-006 is done. P1-005 stays partial only because the token spent is account-wide \u2014 the per-task credential IS P1-011 \u2014 and P1-007 stays partial because no elevated class exists in apex-secret-core to require, which is its own item. Nothing left to dispatch here. Closed 2026-09-12 after a dispatched agent had to be redirected."
     },
     {
       "id": "p1-008",
@@ -76,7 +77,8 @@
       "conflicts": [
         "p1-002",
         "p1-005"
-      ]
+      ],
+      "closed": "Landed as merge 230ee02a; 0 unlanded. P1-008 and P1-010 done. P1-009 stays partial because the third criterion turns on a schema question the pinned schema cannot settle either way \u2014 workers-ai-post-run-model declares two path parameters and no headers. A citation problem, not effort."
     },
     {
       "id": "p1-011",
@@ -93,7 +95,8 @@
       "conflicts": [
         "p1-005",
         "p1-008"
-      ]
+      ],
+      "closed": "Landed as merge 598f6996; 0 unlanded. P1-011 and P1-012 are done. P1-013 stays partial for a structural reason: a preview health check is an UNAUTHENTICATED GET to *.workers.dev and the host pin correctly forbids spending an api.cloudflare.com credential anywhere else, so it belongs in the `apex cf` CLI rather than in a brokered operation \u2014 and the relay moved to a custom domain on andrenijman.com, so workers.dev is no longer the right target anyway. Closed 2026-09-12 after a THIRD agent in one round was dispatched onto finished work."
     },
     {
       "id": "p1-014",
@@ -111,7 +114,8 @@
       ],
       "conflicts": [
         "p1-011"
-      ]
+      ],
+      "closed": "Landed as merge 514d46a3; 0 unlanded. P1-014, P1-016 and P1-017 done. P1-015 met ALL THREE of its acceptance criteria and is partial only because two of section 13.13's five named resources cannot be reached by anything in this build \u2014 a fact about the vocabulary, not about effort."
     },
     {
       "id": "p1-020",
@@ -215,7 +219,8 @@
       "conflicts": [],
       "title": "The APEX Remote remainder: relay, reconnect, mDNS, connection quality, and the two shell pages",
       "note": "REPLACES the old p1-050 unit, which was landed on apex-os roadmap/v2.2 as 1ab542c on 2026-09-07 (P1-050 done). Keeping p1-050 in the queue would have offered finished work again -- it read as HELD 'after p0-014' in the report, one dependency away from being dispatched twice. What is actually left, and it is a unit of its own: (1) no Cloudflare Worker or Durable Object relay is deployed -- the client exists in apex-remote-core, the server side does not; (2) no reconnect across network changes; (3) no mDNS discovery; (4) connection quality is not rendered; (5) apex-shell owes a QR pairing page and a paired-device page. P1-051 also stays partial for a reason NOT in this unit: --origin-policy remote stays refused until the device key lives in Android Keystore with setUserAuthenticationRequired, with a per-approval challenge and attestation -- that is p1-053a's work, and p0-014's CTAP2 verifier is the desktop half of it. Do not close P1-051 from here alone.",
-      "landed_predecessor": "apex-os roadmap/v2.2 1ab542c on 2026-09-07. P1-050 done. P1-051 and P1-052 stay partial and their remainders do NOT belong to this unit: P1-051 needs the key in Android Keystore with setUserAuthenticationRequired plus a per-approval challenge and attestation (that is p1-053a), and apex-shell owes it a QR page and a paired-device page. P1-052 needs a deployed Cloudflare Worker + Durable Object relay, reconnect across network changes, mDNS discovery and rendered connection quality -- a unit of its own. Do NOT re-dispatch p1-050; carve those two out instead."
+      "landed_predecessor": "apex-os roadmap/v2.2 1ab542c on 2026-09-07. P1-050 done. P1-051 and P1-052 stay partial and their remainders do NOT belong to this unit: P1-051 needs the key in Android Keystore with setUserAuthenticationRequired plus a per-approval challenge and attestation (that is p1-053a), and apex-shell owes it a QR page and a paired-device page. P1-052 needs a deployed Cloudflare Worker + Durable Object relay, reconnect across network changes, mDNS discovery and rendered connection quality -- a unit of its own. Do NOT re-dispatch p1-050; carve those two out instead.",
+      "closed": "0 unlanded; P1-052 done and the relay is deployed. P1-051's criteria 1, 3 and 5 are done and landed on apex-shell as a36f1a4. The remainder does not close until the device key lives in Android Keystore with setUserAuthenticationRequired, which is p1-053b/p1-053c territory, not a separate unit."
     },
     {
       "id": "p1-053a",
@@ -228,7 +233,8 @@
       "title": "Android app foundation, Agent Center parity, full PTY/TUI remote terminal",
       "after": [],
       "conflicts": [],
-      "note": "Its `after: p1-050` was dropped when p1-050 landed. Also owns the real second factor for P1-051 (Android Keystore with setUserAuthenticationRequired, per-approval challenge, attestation); p0-014 is building the desktop CTAP2 verifier it pairs with."
+      "note": "Its `after: p1-050` was dropped when p1-050 landed. Also owns the real second factor for P1-051 (Android Keystore with setUserAuthenticationRequired, per-approval challenge, attestation); p0-014 is building the desktop CTAP2 verifier it pairs with.",
+      "closed": "Landed as merge 4ae4cf22; 0 unlanded. P1-053 done. P1-054 is partial because the socket has no profile/projects/worktrees verb \u2014 adding them is a protocol change and p1-053b owns the decision. P1-055 is partial for want of a gemini fixture, and gemini is not installed on this machine."
     },
     {
       "id": "p1-053b",
@@ -293,7 +299,8 @@
         "p1-039"
       ],
       "conflicts": [],
-      "note": "These assert that v2.2 did not regress what v2.1 shipped. Each needs an actual check that the preserved thing still works, not a reading of the code."
+      "note": "These assert that v2.2 did not regress what v2.1 shipped. Each needs an actual check that the preserved thing still works, not a reading of the code.",
+      "closed": "Landed round 12 on both repos; `git merge-base --is-ancestor` confirms task/base-partials and task/base-partials-shell are both contained in roadmap/v2.2, zero unlanded commits. BASE-009 needs a disposable machine with a gaming userspace (the switch is `loginctl terminate-user`, which kills the session running the test) and katana is off-limits; BASE-010 needs non-zero spendable VRAM and this is an APU, so apexd falls to Backend::Cpu by design. Closed 2026-09-12 after a second agent was dispatched onto a finished unit."
     },
     {
       "id": "p2-a",

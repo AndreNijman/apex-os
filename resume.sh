@@ -160,6 +160,17 @@ except Exception:
     pass
 
 def finished(u):
+    # `closed` is the hand-set escape hatch, and it exists because deriving
+    # this from roadmap.yaml alone is not enough. An item stays `partial` when
+    # its remaining criterion belongs to a DIFFERENT item (P1-005's per-task
+    # credential is P1-011's work) or needs hardware nobody here has
+    # (BASE-010 wants non-zero spendable VRAM on an APU). The unit is finished;
+    # the item honestly is not. Without this, `all(status == 'done')` re-offers
+    # such a unit for ever -- on 2026-09-12 that cost two dispatched agents in
+    # one round, both of which opened a worktree on work already landed.
+    # Set it with a reason; it is printed, not silent.
+    if u.get('closed'):
+        return True
     ids = [i for i in u['items'] if i in status]
     return bool(ids) and len(ids) == len(u['items']) and all(status[i] == 'done' for i in ids)
 
@@ -186,10 +197,15 @@ for u, b in held[:10]:
     print(f"    {u['id']:14} after {', '.join(b)[:44]}")
 if done_units:
     print()
-    print("  COMPLETE (every roadmap item done — not offered again).")
+    print("  COMPLETE (nothing left to dispatch — not offered again).")
     print("  This says the WORK is done, not that it is landed — check the")
     print("  unlanded section above before assuming roadmap/v2.2 carries it:")
-    print("   ", ", ".join(u['id'] for u in done_units))
+    auto = [u for u in done_units if not u.get('closed')]
+    shut = [u for u in done_units if u.get('closed')]
+    if auto:
+        print("   ", ", ".join(u['id'] for u in auto))
+    for u in shut:
+        print(f"    {u['id']} — CLOSED BY HAND: {u['closed']}")
 PY
 
 sec "how to resume"
