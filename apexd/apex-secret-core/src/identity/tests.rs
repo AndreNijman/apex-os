@@ -33,7 +33,16 @@ default = "claude"
         })
     );
     assert_eq!(identities.cloudflare.as_deref(), Some("example"));
-    assert_eq!(identities.ssh_host_group.as_deref(), Some("robotics"));
+    assert_eq!(
+        identities.ssh,
+        Some(SshIdentity {
+            host_group: "robotics".to_string(),
+            // §36's example names the group and not its members, so a file
+            // with no `[ssh.host_groups]` binds a group with none — and that
+            // refuses every host rather than allowing any.
+            hosts: Vec::new(),
+        })
+    );
     assert_eq!(
         identities.agent,
         Some(AgentIdentity {
@@ -188,9 +197,19 @@ host_group = "robotics"
     assert!(github.enforced_by.contains("git provider"));
 
     let ssh = &report[&Kind::Ssh];
-    assert_eq!(ssh.binds.as_deref(), Some("host_group = robotics"));
-    assert!(!ssh.enforced, "nothing in this build checks an ssh host group");
-    assert!(ssh.enforced_by.contains("nothing yet"), "{}", ssh.enforced_by);
+    // The row names the group AND its members, because a group with no members
+    // refuses every host and an operator reading "host_group = robotics" alone
+    // would have no way to see that.
+    assert_eq!(
+        ssh.binds.as_deref(),
+        Some("host_group = robotics (no hosts — every ssh host is refused)")
+    );
+    assert!(ssh.enforced, "P2-013 round 2 made this true");
+    assert!(
+        ssh.enforced_by.contains("apex-backup-core/src/config.rs"),
+        "the row has to name the file: {}",
+        ssh.enforced_by
+    );
 
     // A section the project does not have is still reported, so the surface is
     // the same four every time.
@@ -265,20 +284,22 @@ fn an_agent_whose_name_merely_begins_with_the_bound_one_is_refused() {
     agent("claude").check("").expect_err("nothing is not claude");
 }
 
-/// Exactly three of §36's four are checked by this build. Pinned, so that
-/// adding an enforcement point without saying so fails a test, and so that
-/// claiming one that does not exist does too.
+/// All four of §36's sections are checked by this build. Pinned, so that
+/// claiming an enforcement point that does not exist fails a test — which is
+/// the direction that matters, since "enforced" is what an operator reads
+/// `apex project identity` for.
 ///
-/// It was two until P2-013's second round: `agent` is enforced by
-/// `apex-agentd`'s session start, and `ssh` is the one left.
+/// It was two until P2-013's second round, which added the agent check in
+/// `apex-agentd`'s session start and the ssh one in the backup target's
+/// configuration.
 #[test]
-fn exactly_github_cloudflare_and_agent_are_enforced() {
+fn all_four_of_section_thirty_sixs_bindings_are_enforced() {
     let enforced: Vec<&str> = Kind::ALL
         .into_iter()
         .filter(|k| k.is_enforced())
         .map(Kind::as_str)
         .collect();
-    assert_eq!(enforced, vec!["github", "cloudflare", "agent"]);
+    assert_eq!(enforced, vec!["github", "cloudflare", "ssh", "agent"]);
 
     for kind in Kind::ALL {
         let where_ = kind.enforced_by();
@@ -287,6 +308,13 @@ fn exactly_github_cloudflare_and_agent_are_enforced() {
             assert!(
                 !where_.starts_with("nothing"),
                 "{kind:?} claims enforcement and names nowhere"
+            );
+            // A file path, so the claim can be checked by opening it. This is
+            // the assertion that would have caught a label flipped ahead of
+            // the check it describes.
+            assert!(
+                where_.contains(".rs"),
+                "{kind:?} claims enforcement and names no file: {where_}"
             );
         } else {
             assert!(

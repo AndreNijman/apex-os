@@ -12,11 +12,11 @@
 //! | `local` | a directory on this machine. Real. |
 //! | `nas` | a directory on a mounted filesystem, with the mount's identity checked. Real. |
 //! | `r2` | an R2 bucket, through the `apex-secretd` broker. Real. |
-//! | `ssh` | **declared and refused**, naming what is missing. |
+//! | `ssh` | a directory on another machine, over a real `ssh`. Real. |
 //! | `s3` | **declared and refused**, naming what is missing. |
 //!
-//! The two refusals are deliberate and are not stubs: each returns a
-//! [`TargetError`] that says what it would take, and neither has a code path
+//! The one refusal is deliberate and is not a stub: it returns a
+//! [`TargetError`] that says what it would take, and has no code path
 //! that could report success. A backup target that silently does nothing is the
 //! worst defect this subsystem could ship, so the unimplemented ones refuse at
 //! the moment the project names them — at configuration time, not at run time.
@@ -35,9 +35,11 @@ use crate::verdict::Verdict;
 
 pub mod fs;
 pub mod r2;
+pub mod ssh;
 
 pub use fs::FsTarget;
 pub use r2::R2Target;
+pub use ssh::SshTarget;
 
 /// Why a target could not do what was asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,23 +177,15 @@ impl Kind {
 
     /// Whether this build can actually carry a snapshot there.
     pub fn is_implemented(self) -> bool {
-        matches!(self, Kind::Local | Kind::Nas | Kind::R2)
+        matches!(self, Kind::Local | Kind::Nas | Kind::R2 | Kind::Ssh)
     }
 
-    /// Why not, for the two that are not, in the words the operator needs.
+    /// Why not, for the one that is not, in the words the operator needs.
     ///
     /// Returned at configuration time. A target kind that parsed and then did
     /// nothing at run time would be the worst thing this subsystem could do.
     pub fn unimplemented_reason(self) -> Option<&'static str> {
         match self {
-            Kind::Ssh => Some(
-                "this build has no ssh transport. The work it needs is a \
-                 loopback sshd fixture to prove the command construction and \
-                 the framing against, because a transport proven only against \
-                 a fake `ssh` on PATH is a test of the argument list and not \
-                 of a backup. Until then `ssh` is a name this build refuses \
-                 rather than one it silently mishandles",
-            ),
             Kind::S3 => Some(
                 "this build cannot sign an S3 request. S3 needs SigV4, and \
                  nothing in this workspace has a signer — the Cloudflare \

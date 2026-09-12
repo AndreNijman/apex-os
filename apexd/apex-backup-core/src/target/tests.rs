@@ -1,11 +1,13 @@
 use super::*;
 
-/// P2-001 criterion 1 names five kinds. This build carries three and refuses
-/// two, and the refusals are part of the vocabulary rather than gaps in it —
-/// an operator who writes `target = "ssh"` must be told this build will not do
-/// it, not told that `ssh` is not a word.
+/// P2-001 criterion 1 names five kinds. This build carries four and refuses
+/// one, and the refusal is part of the vocabulary rather than a gap in it —
+/// an operator who writes `target = "s3"` must be told this build will not do
+/// it, not told that `s3` is not a word.
+///
+/// It was three and two until P2-001's second round added the ssh transport.
 #[test]
-fn all_five_kinds_parse_and_exactly_two_refuse() {
+fn all_five_kinds_parse_and_exactly_one_refuses() {
     for kind in Kind::ALL {
         assert_eq!(Kind::parse(kind.as_str()), Some(kind));
     }
@@ -14,14 +16,14 @@ fn all_five_kinds_parse_and_exactly_two_refuse() {
         .filter(|k| k.is_implemented())
         .map(Kind::as_str)
         .collect();
-    assert_eq!(implemented, vec!["local", "nas", "r2"]);
+    assert_eq!(implemented, vec!["local", "nas", "ssh", "r2"]);
 
     let refusing: Vec<&str> = Kind::ALL
         .into_iter()
         .filter(|k| !k.is_implemented())
         .map(Kind::as_str)
         .collect();
-    assert_eq!(refusing, vec!["ssh", "s3"]);
+    assert_eq!(refusing, vec!["s3"]);
 }
 
 /// A kind that is not implemented must say what it would take. "Not
@@ -38,7 +40,11 @@ fn every_unimplemented_kind_says_what_is_missing_and_every_implemented_one_says_
         }
     }
     assert!(Kind::S3.unimplemented_reason().is_some_and(|w| w.contains("SigV4")));
-    assert!(Kind::Ssh.unimplemented_reason().is_some_and(|w| w.contains("sshd")));
+    assert!(
+        Kind::Ssh.unimplemented_reason().is_none(),
+        "ssh is carried now; a stale reason would tell an operator to give up \
+         on a target that works"
+    );
 }
 
 #[test]
