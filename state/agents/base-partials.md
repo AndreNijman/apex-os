@@ -71,6 +71,24 @@ attempted.
 - A stray 2.4 MB ImageMagick PostScript file named `os` (created 05:23Z by
   another agent) was sitting untracked and un-ignored at the root of
   `wt-base-os`. Moved to the session scratchpad, not deleted; worktree is clean.
+- **FIXED THIS ROUND: `set-status.py` was silently corrupting evidence.**
+  `block()` called `textwrap.wrap(flat, 110)`, and textwrap defaults
+  `break_on_hyphens=True` — so it split `llama-server` across two lines, and a
+  `>-` folded scalar rejoins lines with a SPACE. The stored evidence therefore
+  read `llama- server`. It hits precisely the tokens evidence is made of:
+  file names, crate names, test names, item ids. **114 occurrences across 64 of
+  the 128 tasks** before anyone looked — `apexd- core`, `test-agent- inject`,
+  `with- binary`, `no- op`, `one- image`, `hardware- verified`. Fixed with
+  `break_on_hyphens=False, break_long_words=False`. MUTATION-PROVED rather than
+  argued, and the first control was too weak to count: a short sample
+  round-tripped under BOTH wrappers because it never reached the wrap column.
+  Padding the sample so the break lands on the hyphen, the old wrapper corrupts
+  **7 of 32** pad positions and the fixed one **0 of 32**. All four of this
+  unit's evidence strings were then re-recorded and now round-trip EXACTLY
+  against their source text; the corpus count went 114 -> 110, which is the four
+  this unit owns and no others. The remaining 110 are other units' evidence,
+  written before the fix, and are deliberately left alone — rewriting every
+  task's evidence is a bigger and riskier edit than stopping the recurrence.
 
 ### Round-13 re-verification on the current tip (nothing drifted)
 apex-os `4ae4cf22`, apex-shell `bdfb056` — several unrelated merges after the
@@ -87,6 +105,28 @@ progress is possible"; both of these have every reachable half closed, landed
 and tested, with only a hardware-bound remainder. `partial` plus an exact
 unblock condition is the more truthful record, and downgrading would have hidden
 work that is done.
+
+**AND THE STATUS WORD WOULD NOT HAVE HELPED ANYWAY — THIS IS THE ORCHESTRATOR'S
+TO FIX, NOT AN AGENT'S.** The suspicion was that `partial` is what keeps this
+unit sitting in resume.sh's READY list and causes a fresh agent to be dispatched
+onto a finished unit — which is exactly what happened to round 13. Checked in
+the code rather than guessed, and the suspicion is WRONG in a way that matters:
+`resume.sh:163` is
+
+    def finished(u):
+        ids = [i for i in u['items'] if i in status]
+        return bool(ids) and len(ids) == len(u['items']) and all(status[i] == 'done' for i in ids)
+
+A unit leaves READY only when EVERY item is `done`. `blocked`, `partial` and
+`todo` are identical to that predicate — the status words are used nowhere else
+except the counts at line 60-62. So **`base-partials` will be offered in READY
+on every future resume, forever**, because two of its eight items cannot reach
+`done` without hardware that is off-limits, and no status an agent can write
+changes that. The next dispatcher will waste another round exactly as this one
+did unless the fix is made where it belongs: either teach `finished()` that
+`blocked` also retires a unit, or retire the unit in `queue.json`. Flagging it
+rather than doing it, because resume.sh and queue.json are program-wide
+machinery shared with every other live unit.
 
 ## NEXT (round 12, superseded)
 

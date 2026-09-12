@@ -3432,32 +3432,47 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Accessibility baseline. ROUND 3 LANDED on apex-os roadmap/v2.2 2026-09-12 as merge b6920252
-    (task/p2-b-round18b, which carries round 18's own branch via 2d4d0d26 - that round had never reached the
-    integration tip). ASSERTED, not swept for, and the suites are: tests/test-apex-greet-a11y.sh 22, tests/test-
-    apex-greet-layout.sh 25, tests/test-apex-greet-atspi.sh 30 (LOCAL ONLY, not in CI), tests/test-apex-greet-
-    session-bus.sh 16 (new, 6/6 mutants), installer/test-installer-a11y.sh 51 local and 47 plus 4 skipped in CI
-    (8/8 mutants, run twice), tests/test-apex-a11y-stack.sh 13 (new, 4/4 mutants), plus apex-shell
-    tests/run-a11y-controls-test.sh 21 and tests/check-reduce-motion.sh 12. THREE DEFECTS NOTHING WAS LOOKING FOR:
-    (1) the keyboard could not leave a page - the audit's own section titled 'fill the page in AND MOVE ON' never
-    moved on, so a primary button could be reachable, named, announced and inert; now Tab to Begin then Return
-    then Space, each in its own process, each required to produce the next page's sentinel AND to leave the old
-    one's button gone. (2) The wifi page has two shapes: with no adapter the installer builds a different page
-    entirely, and the audit waited 40s for an impossible sentinel and then blamed the installer. (3) A masking
-    assertion passing about an empty field - CI's xdotool type delivered nothing and 'the password never crosses
-    the bus' passed anyway, which is true of a field nobody typed into; now gated on the read-back, text via
-    XTEST, and where no mechanism delivers it the result is a named could-not-run rather than a red line blaming
-    the installer. STAYS PARTIAL, and each reason is named rather than implied: the greeter is unreadable in
-    production and that is now ASSERTED rather than fixed - it has no D-Bus session bus and a dbus-run-session
-    one-liner is not the fix, because a11y-bus activation is refused here (SELinux on this machine, no .service
-    file on the runner), and it was deliberately not attempted because greetd is boot-critical and cannot be
-    exercised headlessly here; orca ships but nothing can start it, with no keybinding and no toggle; greet-atspi
-    still runs on one laptop only, needing a wlroots compositor in the Fedora container; the Tab ring is walked on
-    one installer page; the text-entry pair is measured on this laptop only; magnifier, sticky keys, slow keys,
-    mouse keys and the on-screen keyboard are absent; and high-contrast is a Hyprland shader rather than an
-    accessibility feature. orca's cost, measured rather than estimated: 5 packages, 4 MiB down, 23 MiB installed,
-    recorded in docs/update-cost.md beside the AI apps' 1.9 GB because the pair is what makes the tier rule
-    legible.
+    Accessibility baseline. ROUND 19 on apex-os+apex-shell task/p2-b-round19, pushed, not yet merged (round 3
+    landed as merge b6920252; this branch carries a merge of the moved v2.2 as 3541603d). THREE THINGS THAT WERE
+    ASSERTIONS OF ABSENCE ARE NOW ASSERTIONS OF PRESENCE. (1) THE GREETER HAD NO SESSION BUS, so its correct
+    accessibility markup reached nobody - Qt's AT-SPI bridge resolves org.a11y.Bus on the SESSION bus and the
+    greet session had none, so a login screen a reader can read AND operate under test published ZERO nodes in
+    production. greetd now runs /usr/libexec/apex-greet-session: a session bus with an EMPTY service directory,
+    at-spi-bus-launcher and at-spi2-registryd execed beside it (activation is refused by SELinux here, measured
+    again), then EXEC of the compositor so greetd still holds the compositor's own pid. Every step is optional and
+    the only unconditional line is the exec, asserted by taking each piece away - no dbus-daemon, no writable
+    runtime dir, no runtime dir at all - and requiring the greeter to start anyway. (2) ORCA COULD NOT BE STARTED:
+    /usr/libexec/apex-screen-reader plus SUPER+ALT+S on all three desktop sessions, generated into Hyprland Lua,
+    niri KDL and labwc XML from one apex-shell KeybindService default and proved by RUNNING each generator, and on
+    BOTH greeter hosts - the one key a user who cannot see the screen can press. (3) THE AT-SPI WALK RAN ON ONE
+    LAPTOP: apex-greet-atspi 31 passed 0 failed on this laptop, in a bare fedora:43 container, and ON THE GITHUB
+    RUNNER. SUITES: tests/test-apex-greet-atspi.sh 31 (8/8 mutants), tests/test-apex-greet-session-bus.sh 37
+    (13/13 mutants), tests/test-apex-a11y-stack.sh 24 (8/8 mutants), tests/test-apex-greet-a11y.sh 22,
+    tests/test-apex-greet-layout.sh 25, tests/test-labwc-keybinds.sh 39, installer/test-installer-a11y.sh 51 local
+    and 47 in CI (8/8 mutants), plus apex-shell run-a11y-controls-test.sh 21, check-reduce-motion.sh 12,
+    run-niri-keybinds-test.sh 5+14, run-hypr-configerrors-test.sh 17, check-push-to-talk.sh 42. FOUR FINDINGS
+    NOTHING WAS LOOKING FOR: Qt DOES gate on org.a11y.Status and this laptop could not show it (a live desktop has
+    both flags already true, so 'the property cannot be pushed false' and 'Qt does not consult it' were artefacts
+    of one machine; in a bare container both start false and Qt publishes nothing); a pgrep claim THIS BRANCH made
+    was false and its own mutant found it by surviving (Linux takes comm from the SCRIPT basename, so pgrep -x
+    orca works after all - corrected in three places rather than the mutant softened); the shipped labwc rc.xml
+    seed had lost push-to-talk's W-A-v since P1-023 and the suite could not see it because it silently measured
+    the INSTALLED shell whenever the repos are not siblings; and an unrelated red step (Run virtualization
+    assertions, red on roadmap/v2.2 itself) had silently switched off ALL FOUR accessibility suites in CI, since
+    GitHub stops a job at its first failure - fixed with if-not-cancelled, which still fails the job. TWO CAUGHT
+    IN REVIEW BEFORE SHIPPING: sway -C cannot run inside an image build at all (rc=126, cap_sys_nice=ep outside
+    the bounding set, same code for a good config and a broken one) so that build-time check was removed and lives
+    in the suite; and the wrapper execs, so nothing was left to clean up after it - a watcher now kills exactly
+    the pids it recorded. TWO MORE CI FOUND: the pid assertion was measuring which /bin/sh the runner has rather
+    than the wrapper, and the installer page-advance check read the accessibility bus one frame too early. STAYS
+    PARTIAL, named not implied: nothing has run orca AS THE greetd USER (writable HOME, speech-dispatcher with no
+    audio session) and whether SELinux permits that context to exec gnome_atspi_exec_t is unproven here - if
+    refused the wrapper degrades safely, so it is a silent no-reader rather than a broken login; greeter audio is
+    unconfigured; the Tab ring is walked on one installer page; the text-entry pair is measured on this laptop
+    only; magnifier, sticky keys, slow keys, mouse keys and the on-screen keyboard are absent; high-contrast is a
+    Hyprland shader rather than an accessibility feature. Production note for the next measurer: nothing at the
+    greeter sets ScreenReaderEnabled until a reader connects, and Qt gates on it, so a fresh greeter publishes an
+    empty tree until the key is pressed - correct, not a regression.
 - id: P2-004
   title: Internationalisation baseline
   priority: P2
