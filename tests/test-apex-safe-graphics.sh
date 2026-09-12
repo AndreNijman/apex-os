@@ -173,6 +173,21 @@ nmtui|reaching the network
 Exit|leaving the session
 ENTRIES
 
+# A menu entry pointing at a binary the image does not ship is an entry that
+# prints an error and does nothing, on the one screen where that matters most.
+# Checked here rather than in Containerfile.base, and the reason is honest
+# rather than tidy: this branch could not run an image build, so which LAYER
+# provides thunar and NetworkManager-tui is unverified, and a build refusal
+# placed before the layer that installs them would fail the build for the wrong
+# reason. Both are present on the reference machine.
+for bin in thunar nmtui; do
+    if command -v "$bin" >/dev/null 2>&1; then
+        ok "$bin, which the menu offers, is installed here"
+    else
+        skp "$bin is not installed here, so the menu entry naming it is unproven"
+    fi
+done
+
 # The menu is on a plain right-click. The desktop session reserves that for
 # APEX Shell's context menu and puts its emergency menu behind SUPER; there is
 # no shell here, and a recovery menu reachable only by a chord is one somebody
