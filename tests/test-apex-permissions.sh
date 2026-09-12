@@ -492,7 +492,22 @@ esac
 EOF
   chmod +x "$CBIN/busctl" "$CBIN/flatpak"
 
-  cli() { PATH="$CBIN:$PATH" HOME="$CWORK" "$APEX" permissions "$@" 2>&1; }
+  # A fixture /dev. Without it the native camera row is NoPrimitive on any
+  # machine with no webcam — every CI runner — and the assertion below would
+  # pass or fail on whether the developer's laptop has a camera rather than on
+  # what the binary does. access(R_OK) on a readable regular file returns 0, so
+  # the row lands on the logind-ACL enforcer exactly as it does on real
+  # hardware. Overridable so the machine-dependence can be demonstrated: point
+  # APEX_PERM_DEV_ROOT at an empty directory and the ACL assertion goes red.
+  mkdir -p "$CWORK/dev/snd"
+  : > "$CWORK/dev/video0"
+  : > "$CWORK/dev/snd/pcmC0D0c"
+
+  cli() {
+      PATH="$CBIN:$PATH" HOME="$CWORK" \
+      APEX_PERM_DEV_ROOT="${APEX_PERM_DEV_ROOT_OVERRIDE:-$CWORK/dev}" \
+      "$APEX" permissions "$@" 2>&1
+  }
   refuses() {
     local label=$1 want=$2; shift 2
     local out rc

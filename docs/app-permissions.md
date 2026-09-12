@@ -25,7 +25,7 @@ statement that unticking it would stop the camera, and it would not.
 
 The second-most-obvious page fixes that by splitting the world in two —
 Flatpaks are sandboxed, native applications are not — and that is also wrong,
-just less obviously. Two applications installed on this machine prove it.
+less visibly so. Two applications installed on this machine prove it.
 
 `io.github.cosmic_utils.camera` is a Flatpak. Its manifest context is:
 
@@ -189,7 +189,7 @@ profile does not inherit, so in a user session they are active: WirePlumber asks
 the permission store whether a client may see camera nodes.
 
 **Not verified.** Whether changing `devices`/`camera` in the store affects an
-*already running* PipeWire client, and how quickly, was not measured — doing so
+*already running* PipeWire client, and how fast, was not measured. Doing so
 would have meant taking a camera grant away on Andre's live machine. The model
 therefore records camera revocation timing as `NextRequest`, which is the
 conservative true statement, and not `Immediate`.
@@ -309,7 +309,7 @@ carries state *and* enforcer, and the enforcer decides what the control is:
   can do what they are asking for.
 
 The section ordering is by enforcer strength, not alphabetical, so that
-everything the machine actually controls is above everything it merely observes.
+what the machine controls sits above what it only observes.
 
 ---
 
@@ -323,7 +323,7 @@ everything the machine actually controls is above everything it merely observes.
   database of intentions that the portal never reads is precisely the failure
   in §1, one layer deeper. Every write this makes goes through
   `org.freedesktop.impl.portal.PermissionStore` or `flatpak override`, which are
-  the things that are actually consulted.
+  the things a request is checked against.
 * **It does not claim revocation is immediate.** See §2.4.
 
 ---
@@ -360,4 +360,37 @@ Lockdown — which is why the niri session has them — but it starts
 interfaces whose backends talk to Mutter, and whether those answer usefully
 there was not measured. An interface that exists and cannot answer is worse
 than one that is honestly absent: the model reports the second as
-`NoPrimitive`, and would report the first as a broker that is really there.
+`NoPrimitive`, and would report the first as a broker that is there.
+
+---
+
+## 8. Using it
+
+`apex permissions list` prints every application, every capability, and the
+enforcer beside each answer. `--json` is the same report for Settings, and adds
+the session's exported portal interfaces so a consumer can see what is
+brokerable at all rather than inferring it.
+
+`apex permissions show <app>` narrows that to one application. A Flatpak is
+named by its application id; anything else is `native:<name>`, and the prefix is
+the whole distinction the command can make — there is no list of native
+applications to enumerate, because there is nothing per-application to
+enumerate it from.
+
+`apex permissions revoke <app> <capability>` writes `no` into the portal
+permission store, or writes a `flatpak override`, depending on which one
+enforces the capability. `--forget` deletes the stored answer instead,
+so the application is asked again next time rather than silently refused —
+"never" and "ask me again" being two different intentions. `--dry-run` prints
+the command it would run and when the change would take effect.
+
+Where nothing can be revoked, `revoke` **exits non-zero and says why**, in three
+different sentences for three different reasons: a native subject's permission
+belongs to the login session, a Flatpak with `devices=all` cannot be brokered
+for a device it opens directly, and a capability this session has no portal for
+is not being refused by anything. That is the answer, not an error in producing
+one — and a command that printed success for something it had not done would be
+the tick from §1 in another form.
+
+Nothing on either path needs root, and nothing raises an authentication prompt:
+the permission store and the override files are the user's own.
