@@ -354,6 +354,9 @@ pub const USER_ENGINE: &str = "/usr/libexec/apex-user";
 /// be reachable through the environment.
 pub const VM_ENGINE: &str = "/usr/libexec/apex-vm";
 
+/// P2-012's browser capsule engine.
+pub const BROWSER_ENGINE: &str = "/usr/libexec/apex-browser";
+
 /// The plugin CLI behind `apex plugin` (§16).
 ///
 /// A constant, not an overridable variable — the same rule as [`PKG_ENGINE`]
@@ -520,6 +523,20 @@ pub fn disposable(args: &[String]) -> i32 {
 ///
 /// `status()` rather than `output()`: `apex vm console` hands the terminal to
 /// a serial console the user detaches from with Ctrl-].
+pub fn browser(args: &[String]) -> i32 {
+    match Command::new(BROWSER_ENGINE).args(args).status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(e) => {
+            eprintln!("apex: cannot run the browser capsule engine: {e}");
+            eprintln!(
+                "apex: no browser capsule engine on this system — it predates `apex browser`.\n\
+                 \x20      run `sudo apex update` first."
+            );
+            1
+        }
+    }
+}
+
 pub fn vm(args: &[String]) -> i32 {
     match Command::new(VM_ENGINE).args(args).status() {
         Ok(status) => status.code().unwrap_or(-1),

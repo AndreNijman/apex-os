@@ -21,6 +21,7 @@ pub mod cloudflare;
 pub mod git;
 pub mod mcp;
 pub mod s3;
+pub mod webdav;
 
 /// Every provider, registered.
 ///
@@ -36,8 +37,9 @@ pub fn default_registry(run_dir: std::path::PathBuf) -> Result<Registry, String>
     let mut registry = Registry::new();
     registry.register(Box::new(git::GitProvider))?;
     registry.register(Box::new(cloudflare::CloudflareProvider::new()))?;
-    registry.register(Box::new(mcp::McpProvider::new(run_dir)))?;
+    registry.register(Box::new(mcp::McpProvider::new(run_dir.clone())))?;
     registry.register(Box::new(s3::S3Provider))?;
+    registry.register(Box::new(webdav::WebdavProvider::new(run_dir)))?;
     Ok(registry)
 }
 
@@ -96,6 +98,9 @@ mod tests {
                 "mcp.request",
                 "s3.object.read",
                 "s3.object.write",
+                "webdav.file.list",
+                "webdav.file.read",
+                "webdav.file.write",
             ]
         );
     }

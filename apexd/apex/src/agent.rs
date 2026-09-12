@@ -14,13 +14,13 @@ use anyhow::{anyhow, bail, Context, Result};
 use apex_agent_core::client::{self, Client};
 use apex_agent_core::grant::{GrantKind, SystemGrant};
 use apex_agent_core::policy::{
-    AgentPolicy, ConnectorPolicy, NativeMode, NetworkPolicy, OriginPolicy, PolicyPreset,
-    RequestOrigin, SecretPolicy, SystemAccess,
+    AgentPolicy, ConnectorPolicy, NativeMode, NetworkPolicy, OriginPolicy, PluginPolicy,
+    PolicyPreset, RequestOrigin, SecretPolicy, SystemAccess,
 };
 use apex_agent_core::protocol::{
     AgentState, Request, Response, RunRequest, SandboxPolicy, SessionInfo,
-    CONNECTOR_POLICY_VERSION, POLICY_DIMENSIONS_VERSION, REQUEST_ORIGIN_VERSION,
-    SCOPED_GRANT_VERSION, SYSTEM_GRANT_VERSION,
+    CONNECTOR_POLICY_VERSION, PLUGIN_POLICY_VERSION, POLICY_DIMENSIONS_VERSION,
+    REQUEST_ORIGIN_VERSION, SCOPED_GRANT_VERSION, SYSTEM_GRANT_VERSION,
 };
 use apex_agent_core::hook::{self as hook_core, HookEvent};
 use apex_agent_core::paths;
@@ -533,6 +533,20 @@ pub struct RunArgs {
     /// confined thing can write is not a boundary.
     #[arg(long, value_parser = parse_connectors)]
     pub connectors: Option<ConnectorPolicy>,
+    /// all | curated | none. Which plugins the session loads (dimension 8).
+    ///
+    /// A plugin's hooks and the scripts beside them are spawned by the agent
+    /// itself, before the session has done anything, and no MCP configuration
+    /// of any kind is involved — so dimension 7 cannot reach them and this
+    /// dimension REMOVES where that one confines. APEX does not own the
+    /// agent's process and cannot put a sandbox around a process the agent
+    /// spawns; what it can decide is which plugins are loaded at all.
+    ///
+    /// `curated` takes its names from `plugin_allow` in the runtime's
+    /// configuration and not from this command line, for the reason
+    /// `--connectors curated` takes its names from there.
+    #[arg(long, value_parser = parse_plugins)]
+    pub plugins: Option<PluginPolicy>,
 
     // ── §7: where the session is driven from ────────────────────────────────
     /// Declare where this session is driven from (§7's request_origin).
@@ -677,6 +691,7 @@ impl RunArgs {
             ("--network", self.network.map(|v| v.as_str())),
             ("--origin-policy", self.origin_policy.map(|v| v.as_str())),
             ("--connectors", self.connectors.map(|v| v.as_str())),
+            ("--plugins", self.plugins.map(|v| v.as_str())),
             ("--origin", self.origin.map(|v| v.as_str())),
         ] {
             if let Some(v) = value {
@@ -1007,6 +1022,7 @@ dimension_parser!(
     ConnectorPolicy,
     "all, local, curated or none"
 );
+dimension_parser!(parse_plugins, PluginPolicy, "all, curated or none");
 
 /// `--agents` and `--remote` on `apex agent lock`.
 ///
@@ -1124,6 +1140,9 @@ pub fn resolve_policy(cfg: &config::Config, args: &RunArgs) -> Result<AgentPolic
     }
     if let Some(v) = args.connectors {
         policy.connectors = v;
+    }
+    if let Some(v) = args.plugins {
+        policy.plugins = v;
     }
 
     // Refuse anything this build cannot enforce, here as well as in the
@@ -1269,26 +1288,69 @@ fn describe_policy(policy: &AgentPolicy) -> String {
 
 /// Refuse to send a dimension a daemon that old would drop.
 ///
-/// A daemon predating the split reads `sandbox` and ignores the other five
+/// A daemon predating the split reads `sandbox` and ignores the other seven
 /// keys, so `--network offline` would come back as a session with a network
 /// and nothing anywhere would say so. That is the fail-open a protocol version
 /// exists to catch, and the check is skipped entirely when every dimension is
 /// at its default, so an all-defaults run still works against an old daemon.
+///
+/// The table of what could be dropped is [`settings_a_daemon_could_drop`];
+/// this is the half that needs a socket.
 fn check_daemon_understands(
     c: &mut Client,
     policy: &AgentPolicy,
     origin: Option<RequestOrigin>,
     scoped: bool,
 ) -> Result<()> {
+    let needs = settings_a_daemon_could_drop(policy, origin, scoped);
+    if needs.is_empty() {
+        return Ok(());
+    }
+    let Response::Hello { version, .. } = c.call(&Request::Hello)? else {
+        // A daemon that cannot answer Hello is one this cannot reason about,
+        // and guessing in the permissive direction is the whole failure mode.
+        bail!("the agent runtime did not answer the protocol handshake");
+    };
+    let ignored: Vec<&str> = needs
+        .iter()
+        .filter(|(_, since)| version < *since)
+        .map(|(name, _)| *name)
+        .collect();
+    if !ignored.is_empty() {
+        bail!(
+            "the running agent runtime speaks protocol {version} and would ignore {}; \
+             restart it with `systemctl --user restart apex-agentd` so the setting takes \
+             effect",
+            ignored.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Every setting this invocation asked for, paired with the protocol revision
+/// that first carried it.
+///
+/// Split out of [`check_daemon_understands`] so the mapping can be asserted
+/// without a daemon: the function around it needs a live socket, and a rule
+/// that can only be exercised against a running runtime is a rule nobody
+/// checks. A missing entry here is silent by construction — the setting is
+/// sent, the old daemon drops it, and the session runs wider than was asked
+/// for — so the table is the thing worth testing.
+fn settings_a_daemon_could_drop(
+    policy: &AgentPolicy,
+    origin: Option<RequestOrigin>,
+    scoped: bool,
+) -> Vec<(&'static str, u32)> {
     let moved = non_default_dimensions(policy);
-    let mut needs: Vec<(&str, u32)> = moved
+    let mut needs: Vec<(&'static str, u32)> = moved
         .iter()
         .map(|(name, _)| *name)
-        // `sandbox` predates the split, and `connectors` postdates it by four
-        // revisions — mapping the seventh dimension onto the version the first
-        // six arrived in would tell a protocol-6 daemon it understood a key it
-        // drops, which is the exact fail-open this function exists for.
-        .filter(|name| *name != "sandbox" && *name != "connectors")
+        // `sandbox` predates the split; `connectors` postdates it by four
+        // revisions and `plugins` by five — mapping either onto the version
+        // the first six arrived in would tell a protocol-6 daemon it
+        // understood a key it drops, which is the exact fail-open this
+        // function exists for. Both are pushed below with their own revision.
+        .filter(|name| !matches!(*name, "sandbox" | "connectors" | "plugins"))
         .map(|name| (name, POLICY_DIMENSIONS_VERSION))
         .collect();
     // Dimension 7, and its dropped key is a WIDENING like `--capabilities`:
@@ -1297,6 +1359,14 @@ fn check_daemon_understands(
     // the machine.
     if policy.connectors != ConnectorPolicy::default() {
         needs.push(("--connectors", CONNECTOR_POLICY_VERSION));
+    }
+    // Dimension 8, one revision later again and the same kind of widening,
+    // but quieter: a daemon below this writes no `enabledPlugins` block, so
+    // `--plugins none` comes back as a session that loaded every plugin the
+    // machine has enabled and ran each one's `SessionStart` hook before the
+    // first prompt. Nothing in the transcript would say so.
+    if policy.plugins != PluginPolicy::default() {
+        needs.push(("--plugins", PLUGIN_POLICY_VERSION));
     }
     // A declared origin is the same failure and a worse one. A daemon that
     // predates it drops the key and records whatever it observed, which for
@@ -1322,28 +1392,7 @@ fn check_daemon_understands(
     if scoped {
         needs.push(("--capabilities", SCOPED_GRANT_VERSION));
     }
-    if needs.is_empty() {
-        return Ok(());
-    }
-    let Response::Hello { version, .. } = c.call(&Request::Hello)? else {
-        // A daemon that cannot answer Hello is one this cannot reason about,
-        // and guessing in the permissive direction is the whole failure mode.
-        bail!("the agent runtime did not answer the protocol handshake");
-    };
-    let ignored: Vec<&str> = needs
-        .iter()
-        .filter(|(_, since)| version < *since)
-        .map(|(name, _)| *name)
-        .collect();
-    if !ignored.is_empty() {
-        bail!(
-            "the running agent runtime speaks protocol {version} and would ignore {}; \
-             restart it with `systemctl --user restart apex-agentd` so the setting takes \
-             effect",
-            ignored.join(", ")
-        );
-    }
-    Ok(())
+    needs
 }
 
 fn list(all: bool, json: bool) -> Result<i32> {
@@ -4079,7 +4128,10 @@ fn project_remove(name: String, delete_branch: bool, destroy_preview: bool) -> R
         let failed = crate::cloudflare::preview::destroy(&plan)?;
         if failed > 0 {
             eprintln!(
-                "apex project: {failed} of this worktree's Cloudflare resources                  could not be destroyed, so the worktree has been LEFT IN PLACE.                  Removing it now would leave them up with nothing that knows how                  to take them down."
+                "apex project: {failed} of this worktree's Cloudflare resources \
+                 could not be destroyed, so the worktree has been LEFT IN PLACE. \
+                 Removing it now would leave them up with nothing that knows how \
+                 to take them down."
             );
             return Ok(1);
         }
@@ -4090,7 +4142,9 @@ fn project_remove(name: String, delete_branch: bool, destroy_preview: bool) -> R
             .count();
         if left > 0 {
             println!(
-                "{left} thing{} in the plan above {} not something this build can                  destroy. The worktree is being removed anyway; the list stays                  true.",
+                "{left} thing{} in the plan above {} not something this build can \
+                 destroy. The worktree is being removed anyway; the list stays \
+                 true.",
                 if left == 1 { "" } else { "s" },
                 if left == 1 { "is" } else { "are" }
             );
@@ -4305,6 +4359,7 @@ mod tests {
             network: None,
             origin_policy: None,
             connectors: None,
+            plugins: None,
             origin: None,
             unsafe_everything: false,
             ttl: None,
@@ -4555,6 +4610,67 @@ mod tests {
         assert_eq!(p.secrets, SecretPolicy::Brokered);
     }
 
+    /// Dimension 8 reaches a session from the command line, and a `curated`
+    /// run with nothing curated is refused rather than started empty.
+    ///
+    /// Built in `d02528d3`, wired to the wire in the commit before this one,
+    /// and until now reachable only by editing the runtime's configuration
+    /// file — which is to say, not by the person typing the command.
+    #[test]
+    fn the_plugin_dimension_is_reachable_from_the_command_line() {
+        let cfg = config::Config::default();
+
+        // The default is untouched: a run that says nothing about plugins gets
+        // every plugin the machine has enabled, exactly as before the
+        // dimension existed.
+        assert_eq!(
+            resolve_policy(&cfg, &run_args()).expect("resolve").plugins,
+            PluginPolicy::AsConfigured,
+        );
+
+        let removed = RunArgs {
+            plugins: Some(PluginPolicy::NoPlugins),
+            ..run_args()
+        };
+        assert_eq!(
+            resolve_policy(&cfg, &removed).expect("resolve").plugins,
+            PluginPolicy::NoPlugins,
+            "--plugins none must reach the policy, or the flag is decoration"
+        );
+
+        // `curated` with an empty `plugin_allow` is refused HERE, in front of
+        // the person who typed it, rather than starting a session with every
+        // plugin removed. "Nobody filled this in" and "load nothing" are two
+        // different requests; the daemon refuses it too, and this is the copy
+        // whose message names the flag.
+        let curated = RunArgs {
+            plugins: Some(PluginPolicy::Curated),
+            ..run_args()
+        };
+        let err = resolve_policy(&cfg, &curated).expect_err("an empty curated list");
+        assert!(
+            err.to_string().contains("plugin"),
+            "the refusal does not name the dimension: {err}"
+        );
+        // And with names in the runtime's configuration — never in the request
+        // — the same run resolves.
+        let filled = config::Config {
+            plugin_allow: vec!["apex".to_string()],
+            ..config::Config::default()
+        };
+        assert_eq!(
+            resolve_policy(&filled, &curated).expect("resolve").plugins,
+            PluginPolicy::Curated,
+        );
+
+        // A typo is refused by the argument parser with the real values, so
+        // nothing downstream is handed a value that was never checked.
+        let err = parse_plugins("some").expect_err("a typo");
+        assert!(err.contains("curated"), "{err}");
+        assert!(err.contains("none"), "{err}");
+        assert_eq!(parse_plugins("none"), Ok(PluginPolicy::NoPlugins));
+    }
+
     #[test]
     fn a_misspelled_dimension_value_names_the_ones_that_exist() {
         // Refused by the argument parser, so nothing downstream is ever handed
@@ -4579,6 +4695,8 @@ mod tests {
             secrets: Some(SecretPolicy::None),
             network: Some(NetworkPolicy::Offline),
             origin_policy: Some(OriginPolicy::LocalElevationOnly),
+            connectors: Some(ConnectorPolicy::NoConnectors),
+            plugins: Some(PluginPolicy::NoPlugins),
             host: Some("katana".into()),
             ..run_args()
         };
@@ -4589,6 +4707,12 @@ mod tests {
             "--secrets none",
             "--network offline",
             "--origin-policy local_elevation_only",
+            // Dimensions 7 and 8. Both are removals, so losing one in transit
+            // gives the remote session MORE than was asked for — the far end
+            // would load every plugin on it, hooks included, and reach every
+            // connector it defines.
+            "--connectors none",
+            "--plugins none",
             "--agent-bypass",
         ] {
             assert!(forwarded.contains(flag), "{flag} was not forwarded: {forwarded}");
@@ -4699,6 +4823,79 @@ mod tests {
         );
         assert!(non_default_dimensions(&AgentPolicy::default()).is_empty());
         assert_eq!(describe_policy(&p), "sandbox project, native bypass");
+    }
+
+    /// Every dimension that arrived after the split is checked against ITS OWN
+    /// revision, not the one the first six shipped in.
+    ///
+    /// This is the fail-open the version check exists for, and it is silent:
+    /// a dimension mapped onto `POLICY_DIMENSIONS_VERSION` passes the check
+    /// against a protocol-2 daemon, which then drops the key and runs the
+    /// session wider than was asked for. `plugins` was in `dimensions()`
+    /// before it was in this table, so for one revision `plugins = "none"` in
+    /// the runtime configuration did exactly that.
+    #[test]
+    fn a_late_dimension_is_checked_against_its_own_revision() {
+        let with = |f: fn(&mut AgentPolicy)| {
+            let mut p = AgentPolicy::default();
+            f(&mut p);
+            settings_a_daemon_could_drop(&p, None, false)
+        };
+
+        // Dimension 8. The flag name is what the refusal prints, so it is part
+        // of the assertion: "would ignore plugins" names nothing the user can
+        // type.
+        assert_eq!(
+            with(|p| p.plugins = PluginPolicy::NoPlugins),
+            vec![("--plugins", PLUGIN_POLICY_VERSION)],
+            "--plugins must carry the plugin policy's own revision"
+        );
+        // Dimension 7, the same rule one revision down, kept here so a change
+        // that fixes one by breaking the other cannot pass.
+        assert_eq!(
+            with(|p| p.connectors = ConnectorPolicy::NoConnectors),
+            vec![("--connectors", CONNECTOR_POLICY_VERSION)],
+        );
+        // The revisions are genuinely three different numbers, in the order
+        // the dimensions arrived: an assertion that happened to read the same
+        // constant twice would hold with the table wrong.
+        let revisions = vec![
+            POLICY_DIMENSIONS_VERSION,
+            CONNECTOR_POLICY_VERSION,
+            PLUGIN_POLICY_VERSION,
+        ];
+        let mut distinct = revisions.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct, revisions,
+            "the three revisions must be distinct and ascending, or the assertions \
+             above could pass with two dimensions sharing a guard"
+        );
+
+        // A dimension that DID arrive with the split still maps onto it.
+        assert_eq!(
+            with(|p| p.network = NetworkPolicy::Offline),
+            vec![("network", POLICY_DIMENSIONS_VERSION)],
+        );
+        // `sandbox` predates every revision here and is never checked, so an
+        // all-defaults run against an old daemon still starts.
+        assert!(settings_a_daemon_could_drop(&AgentPolicy::default(), None, false).is_empty());
+
+        // And the two dimensions travel independently: asking for both names
+        // both, at two revisions.
+        let both = AgentPolicy {
+            connectors: ConnectorPolicy::NoConnectors,
+            plugins: PluginPolicy::NoPlugins,
+            ..AgentPolicy::default()
+        };
+        assert_eq!(
+            settings_a_daemon_could_drop(&both, None, false),
+            vec![
+                ("--connectors", CONNECTOR_POLICY_VERSION),
+                ("--plugins", PLUGIN_POLICY_VERSION),
+            ],
+        );
     }
 
     #[test]

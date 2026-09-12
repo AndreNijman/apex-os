@@ -285,6 +285,108 @@ sudo grub2-mkconfig -o /boot/grub2/grub.cfg
 Nothing in this repository runs those commands for you, and that is checked
 rather than promised.
 
+## APEX Safe Graphics
+
+Roadmap P2-018. When the desktop does not paint — a GPU driver that stopped
+working after an update, a compositor configuration that will not parse, APEX
+Shell dying on startup — Safe Graphics is a minimal desktop that comes up
+anyway, on the CPU, with the tools to find out what happened.
+
+It is a labwc session started as:
+
+```
+labwc -C /usr/share/apex/safe-graphics
+```
+
+A config **directory**, not a config file, and that flag is the whole of the
+thing. labwc reads `rc.xml`, `autostart`, `environment` and `menu.xml` from
+there and never opens `~/.config/labwc` — which matters on this system more
+than it would elsewhere, because APEX itself writes into the user's copy:
+`apex-input-apply` splices a `<libinput>` element into `rc.xml` with
+ElementTree, and `apex-labwc-keybinds` generates the keybind block. labwc falls
+back to its built-in defaults **silently** on a malformed `rc.xml`, so a
+recovery session that read the user's copy would inherit whatever broke the
+last one and say nothing about it.
+
+`-C` rather than pointing `XDG_CONFIG_HOME` somewhere else, deliberately: the
+compositor has to be isolated from the user's configuration, and the clients
+must not be. A file manager with no config directory cannot save a bookmark,
+and somebody in recovery still has a home directory they came here to reach.
+
+### Getting into it
+
+**From the greeter.** "APEX Safe Graphics" is in the session list.
+
+**From a virtual console.** `Ctrl+Alt+F2`, log in, and run:
+
+```sh
+apex-safe-graphics
+```
+
+The second route is not a convenience. The greeter is itself a wlroots
+compositor on VT 1, so a machine with no working GL may never paint the session
+picker at all — and a recovery desktop reachable only through a screen that
+does not come up is not a recovery desktop. Nothing else in APEX advertises the
+virtual consoles; this is the document that does.
+
+There is no third route through a recovery boot entry, for the reason the
+section above gives at length: a shipped helper may not write the ESP or an EFI
+variable, and `tests/test-boot-v2.sh` fails the build if one tries.
+
+### What it does differently
+
+| | normal session | safe graphics |
+| --- | --- | --- |
+| configuration | `~/.config/labwc`, seeded and then yours | `/usr/share/apex/safe-graphics`, read-only |
+| renderer | GPU | `WLR_RENDERER=pixman`, `LIBGL_ALWAYS_SOFTWARE=1`, llvmpipe |
+| driver selection | whatever the environment says | `__GLX_VENDOR_LIBRARY_NAME`, `GBM_BACKEND`, `MESA_LOADER_DRIVER_OVERRIDE` **unset** |
+| clients | APEX Shell, your autostart | one terminal |
+| menu | APEX Shell's, plain right-click | the recovery menu, plain right-click |
+
+`WLR_BACKENDS` is the one variable the session does **not** set. Unset, wlroots
+picks DRM for a person at a keyboard, and a test can ask for `headless` and be
+honoured — which is the only way this session gets exercised without taking
+somebody's display away.
+
+The autostart deliberately does not start APEX Shell. The shell is one of the
+things that can be broken, and a recovery session that started it would fail in
+the same way the session the user just left failed.
+
+### What you can do from in there
+
+Right-click anywhere:
+
+* **What is wrong** — `apex recover status`, the eight-row report above.
+* **Full health report** — `apex doctor`.
+* **Collect diagnostics** — `apex-safe-graphics diagnose`, which writes
+  `apex-diagnostics-<date>.tar.gz` into your home directory and prints the
+  path. It carries the boot journal at warning and above, the user journal,
+  `apex recover status --json`, `apex doctor --json`, `lspci -k` and
+  `/proc/modules`. **No file in it is ever empty**: a step that could not run
+  writes `could-not-run: …` into its own file, because an empty file and a
+  refused command read the same and only one of them means there was nothing to
+  report.
+* **Roll back to the previous deployment** — `sudo apex rollback`. This is also
+  the driver rollback: a graphics driver on APEX is image content, so the
+  previous deployment *is* the previous driver.
+* **Files** and **Network** — Thunar and `nmtui`.
+* **Log out**, back to the greeter.
+
+`Super+Return` opens a terminal, `Super+q` closes a window, `Alt+Tab` switches.
+There is nothing else, on purpose: a recovery desktop that grew a desktop's
+features would be a second desktop to keep working.
+
+### Checking it without starting it
+
+```sh
+apex-safe-graphics check
+```
+
+Prints the config directory, the compositor, the terminal it would open and the
+renderer, or fails naming what is missing. A session that cannot start exits
+non-zero rather than showing a black screen, and greetd then re-displays the
+greeter — the same fail-safe `apex-gaming-session` takes.
+
 ## Disposable environments
 
 `apex disposable` is a **mode of APEX Capsules**, not a second environment

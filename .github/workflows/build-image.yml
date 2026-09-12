@@ -432,8 +432,30 @@ jobs:
           # `sudo podman login` created ROOT-OWNED in this job's runtime dir —
           # the same rootful/rootless split the cosign login step above exists
           # for. It has nothing to log in to here anyway.
-          D="$(skopeo inspect --no-creds --format '{{.Digest}}' "docker://$UPSTREAM_BASE")"
-          test -n "$D"
+          # Retried, because this one call decides whether an hour of build
+          # happens. On 2026-09-12 it failed on a fatal from quay's CDN —
+          # cdn01.quay.io returning an error for the blob behind the manifest —
+          # and took `core`, and therefore `base`, `image` and `qcow2`, with it.
+          # Nothing was wrong with the tree: the previous run had built `core`
+          # from the same base minutes earlier. A single transient read is not a
+          # reason to discard a build.
+          #
+          # Five attempts with a widening gap, and the LAST failure is still
+          # fatal: a genuinely unreachable base must stop the build, not be
+          # retried into a silent skip. The attempt number is printed so a log
+          # says whether it was flaky or dead.
+          D=""
+          for _try in 1 2 3 4 5; do
+              if D="$(skopeo inspect --no-creds --format '{{.Digest}}' \
+                        "docker://$UPSTREAM_BASE" 2>&1)" && [ -n "$D" ]; then
+                  echo "resolved on attempt $_try"
+                  break
+              fi
+              echo "attempt $_try failed: $D"
+              D=""
+              [ "$_try" -lt 5 ] && sleep $(( _try * 10 ))
+          done
+          test -n "$D" || { echo "::error::could not resolve $UPSTREAM_BASE after 5 attempts"; exit 1; }
           echo "digest=$D" >> "$GITHUB_OUTPUT"
           echo "fedora-bootc digest: $D"
 
@@ -1359,15 +1381,37 @@ jobs:
           # Under `timeout` so a hang is reported as a hang. A bare 143 from a
           # killed process reads as "something went wrong somewhere", which is
           # exactly how this cost two builds.
-          timeout 900 syft "registry:$REF" -o spdx-json > /tmp/sbom.spdx.json || {
+          # 45 minutes, raised from 15 on 2026-09-12 after a run that was NOT
+          # short of resources: 86 GB free and 14.8 GB of memory available at
+          # the prune, and syft still ran the full fifteen and was killed. The
+          # image is simply large — `core` carries ChatGPT at 1.3 GB and Claude
+          # Desktop at 548 MB — and syft pulls the whole thing out of the
+          # registry before it catalogues a byte.
+          #
+          # Restricting the cataloguers would be faster and would make the
+          # artefact worse: the two Electron trees are precisely where a CVE
+          # question lands, and an RPM-only SBOM would answer it with silence
+          # while looking authoritative. Time is the cheaper thing to spend.
+          #
+          # SYFT_PARALLELISM because the default is one worker; this image has
+          # thousands of packages across two app bundles.
+          #
+          # The elapsed time is printed on SUCCESS too. Fifteen minutes was
+          # picked without measurement and cost three builds to disprove; the
+          # next person changing this number should have the real figure.
+          _t0=$(date +%s)
+          SYFT_PARALLELISM=4 timeout 2700 syft "registry:$REF" -o spdx-json \
+            > /tmp/sbom.spdx.json || {
             rc=$?
+            _el=$(( $(date +%s) - _t0 ))
             if [ "$rc" = 124 ]; then
-              echo "::error::syft did not finish cataloguing the image in 15 minutes"
+              echo "::error::syft did not finish cataloguing the image in 45 minutes (${_el}s)"
             else
-              echo "::error::syft exited $rc (143 = killed; check the disk and memory figures above)"
+              echo "::error::syft exited $rc after ${_el}s (143 = killed; check the disk and memory figures above)"
             fi
             exit 1
           }
+          echo "syft catalogued the image in $(( $(date +%s) - _t0 ))s"
 
           # An SBOM that describes nothing is worse than none: it answers the
           # CVE question with silence and looks authoritative doing it. The

@@ -4,12 +4,14 @@
 //! tier planning work even when `apexd` is not running. Every D-Bus verb
 //! degrades gracefully — a clear message, a non-zero exit, never a panic.
 
+mod account;
 mod agent;
 mod ai;
 mod backup;
 mod blueprint;
 mod channel;
 mod boot;
+mod browser;
 mod cloudflare;
 mod connector;
 mod digest;
@@ -575,6 +577,18 @@ enum Cmd {
         cmd: backup::BackupCmd,
     },
 
+    /// Online accounts: Nextcloud, Google, Microsoft, WebDAV, S3/R2.
+    ///
+    /// An account is a credential in the same root-owned store `apex secret`
+    /// uses, under a reserved name, so there is no second place a cloud
+    /// credential can be. What this adds is the provider table: it knows the
+    /// endpoint, how the credential is presented, and which operation a scope
+    /// like `files.read` grants.
+    Account {
+        #[command(subcommand)]
+        cmd: account::AccountCmd,
+    },
+
     /// The secret service: let an agent USE a credential without holding it.
     ///
     /// `apex-secretd` keeps every credential in a root-owned store, performs
@@ -738,6 +752,21 @@ enum Cmd {
     Vm {
         #[command(subcommand)]
         cmd: vm::VmCmd,
+    },
+    /// P2-012's browser automation capsule: a browser that automates a site
+    /// without going near the one you use.
+    ///
+    /// Its own profile, its own cookie jar, its own download directory, no
+    /// route onto the network except the destinations you name, and nothing
+    /// left behind. It is not a new sandbox: a capsule is a confined,
+    /// allowlisted `apex agent` session, so the masked home and the egress
+    /// proxy have one implementation rather than two.
+    ///
+    /// Headless, and structurally so — the capsule's /run is a tmpfs, so
+    /// there is no compositor socket for a window to appear on.
+    Browser {
+        #[command(subcommand)]
+        cmd: browser::BrowserCmd,
     },
 }
 
@@ -1426,6 +1455,7 @@ async fn main() {
         Cmd::Request { cmd } => request::main(cmd),
         Cmd::Cloudflare { cmd } => cloudflare::main(cmd),
         Cmd::Backup { cmd } => backup::main(cmd),
+        Cmd::Account { cmd } => account::main(cmd),
         Cmd::Secret { cmd } => secret::main(cmd),
         Cmd::Mcp { cmd } => mcp::main(cmd),
         Cmd::GitShim { args } => gitshim::main(args),
@@ -1550,6 +1580,7 @@ async fn main() {
         // must; this only builds the argv, and `user::argv` pins it.
         Cmd::User { cmd } => ops::user(&user::argv(cmd)),
         Cmd::Vm { cmd } => ops::vm(&vm::argv(cmd)),
+        Cmd::Browser { cmd } => ops::browser(&browser::argv(cmd)),
         Cmd::Changelog => ops::changelog(),
         Cmd::Install {
             packages,
