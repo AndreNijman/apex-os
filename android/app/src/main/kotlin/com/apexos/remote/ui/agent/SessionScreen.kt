@@ -35,6 +35,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.apexos.remote.core.agent.AgentGraph
+import com.apexos.remote.core.agent.AgentStates
 import com.apexos.remote.core.agent.AgentSession
 import com.apexos.remote.core.agent.Elapsed
 import com.apexos.remote.core.agent.Gauge
@@ -118,7 +119,7 @@ fun SessionScreen(
                         // minutes is not a session waiting two hours.
                         buildString {
                             append("running ").append(Elapsed.of(session, nowSeconds))
-                            if (!session.live || session.state != "working") {
+                            if (!session.live || session.state != AgentStates.WORKING) {
                                 append(" · quiet ").append(Elapsed.formatMs(session.idleMs(nowSeconds * 1000)))
                             }
                         },

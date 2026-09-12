@@ -140,7 +140,13 @@ fun ApexRemoteApp(
                         navigation.navigate(Destinations.SESSION)
                     },
                     onStart = { navigation.navigate(Destinations.START) },
-                    onBack = { navigation.popBackStack() },
+                    onBack = {
+                        // Stop the four-second poll. Leaving it running would
+                        // keep a control round trip going to a machine nobody
+                        // is looking at, for as long as the app is open.
+                        viewModel.leaveAgents()
+                        navigation.popBackStack()
+                    },
                     onDismiss = { viewModel.dismiss() },
                 )
             }
