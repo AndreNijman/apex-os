@@ -1,8 +1,22 @@
 use super::*;
 
+/// The paragraph `apex backup targets` would print for a kind this build did
+/// not carry.
+///
+/// A literal, and it used to be `Kind::S3.unimplemented_reason()`. That stopped
+/// working the moment S3 became real — every kind now answers `None` — and the
+/// interesting part is which way it broke: `.expect("s3 refuses")` PANICKED,
+/// loudly, rather than wrapping an empty string and passing. A test whose
+/// subject disappears should fail, and this one did.
+const A_REFUSAL: &str = "this build cannot sign an S3 request. S3 needs SigV4, \
+                         and nothing in this workspace has a signer — the \
+                         Cloudflare broker spends a bearer token inside a curl \
+                         it owns and speaks no TLS of its own. Use r2, which is \
+                         brokered and bucket-scoped";
+
 #[test]
 fn a_paragraph_is_wrapped_at_word_boundaries_and_never_mid_word() {
-    let text = Kind::S3.unimplemented_reason().expect("s3 refuses");
+    let text = A_REFUSAL;
     let lines = wrap(text, 68);
     assert!(lines.len() > 2, "a whole paragraph on {} line(s)", lines.len());
     for line in &lines {
@@ -15,6 +29,25 @@ fn a_paragraph_is_wrapped_at_word_boundaries_and_never_mid_word() {
         lines.join(" ").split_whitespace().collect::<Vec<_>>(),
         text.split_whitespace().collect::<Vec<_>>()
     );
+}
+
+/// Every one of §13.5's five is carried, and none of them still prints a
+/// reason it is not.
+///
+/// The pair of assertions, not one: a build that flipped `is_implemented`
+/// without clearing the reason would tell an operator to give up on a target
+/// that works, and one that cleared the reason without implementing it would
+/// print nothing at all where an explanation belongs.
+#[test]
+fn every_target_kind_this_build_names_is_carried_and_none_still_refuses() {
+    for kind in Kind::ALL {
+        assert!(kind.is_implemented(), "{kind} is not carried");
+        assert!(
+            kind.unimplemented_reason().is_none(),
+            "{kind} is carried and still prints a refusal"
+        );
+    }
+    assert_eq!(Kind::ALL.len(), 5, "§13.5 names five");
 }
 
 #[test]
