@@ -308,6 +308,18 @@ fn session_json(session: &Session) -> serde_json::Value {
 fn grant_json(g: &Grant) -> serde_json::Value {
     let mut v = serde_json::json!({
         "app": g.subject.id(),
+        // Whether the subject is a Flatpak is NOT how enforcement is decided —
+        // see apex-perm-core's model docs — but the page still has to know,
+        // because the token `revoke` takes differs and because a reader is
+        // entitled to see which kind of application a row is about. Sniffing
+        // it out of the display id in the consumer is how that becomes wrong
+        // the first time somebody installs something called `native:thing`.
+        "native": matches!(g.subject, Subject::Native { .. }),
+        // Exactly what to pass back as `apex permissions revoke <this> …`.
+        "revoke_id": match &g.subject {
+            Subject::Flatpak { app_id } => app_id.clone(),
+            Subject::Native { id } => format!("native:{id}"),
+        },
         "subject": g.subject,
         "capability": g.capability.tag(),
         "capability_label": g.capability.label(),
