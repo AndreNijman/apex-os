@@ -1030,6 +1030,35 @@ Complete and verify:
 
 Treat labwc as user-facing `Floating` mode, not a fallback compositor.
 
+**Ratified 2026-09-12 — the other two names, decided rather than left open.**
+`Floating` (labwc) was ratified here and shipped; the greeter and Settings now
+present all three compositors by what they DO, so the remaining two needed the
+same decision and have it:
+
+| compositor | user-facing name |
+|---|---|
+| labwc | **Floating** |
+| Hyprland | **Tiling** |
+| niri | **Scrolling** |
+
+The reasoning is the one already made for `Floating`: a person choosing a
+session is choosing a way of arranging windows, not a software project, and the
+project names leak an implementation detail that changes under them. `Tiling`
+and `Scrolling` are also what the two upstreams call themselves in their own
+first sentences, so nothing is invented here — niri is "a scrollable-tiling
+Wayland compositor" and Hyprland "a dynamic tiling Wayland compositor", and the
+shorter word is the distinguishing half of each.
+
+`Scrolling` rather than `Scrollable tiling` because the pair has to be readable
+in a session picker at a glance and the two names must not share a prefix; the
+full phrase is for documentation, not for a carousel.
+
+Enforced, not merely written down: `tests/check-compositor-naming.sh` (42/0)
+asserts the mapping at source level and eight engine assertions in
+`compositor-facade-test.qml` (60/0) assert it under a real headless labwc — the
+pair exists because a grep checker alone stays green and blind when the
+argument, rather than the string, is what breaks.
+
 Required production validation:
 
 - Firefox sharing;
