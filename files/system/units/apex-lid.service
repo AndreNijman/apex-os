@@ -1,0 +1,99 @@
+# APEX lid-closed continuous operation (P1-063).
+#
+# The driver holds a logind `handle-lid-switch` **block** inhibitor for exactly
+# as long as the policy in apexd_core::lid says to, and drops it the moment it
+# does not. Nothing here edits HandleLidSwitch=: a static `ignore` would apply
+# to a machine with nothing running as readily as to one mid-build, and it
+# would survive a crash of whatever set it. This inhibitor is a child of this
+# unit and dies with it, so a machine whose driver crashed suspends on a lid
+# close exactly as a stock install does — the failure direction that does not
+# cook a laptop in a schoolbag.
+[Unit]
+Description=APEX lid-closed continuous operation
+Documentation=man:logind.conf(5)
+# logind owns the lid, and an inhibitor taken before logind is listening is an
+# inhibitor against nothing.
+Requires=systemd-logind.service
+After=systemd-logind.service
+# NetworkManager is queried for the VPN timeline the reopen report is built
+# from. Wanted rather than Required: a machine with no NetworkManager still has
+# a lid, and the timeline then says the tunnel could not be read rather than
+# silently claiming one held.
+Wants=NetworkManager.service
+After=NetworkManager.service
+
+# [Unit] directives, not [Service] ones (systemd.unit(5)) — the trap
+# apex-secretd.service and apex-agentd.service both document.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/apex lid watch
+# `on-failure`, never `always`. A desktop has no lid: `apex lid watch` says so
+# on stderr and exits 0, and restarting that would poll a question with no
+# answer every 30 seconds for the life of the machine.
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+# KillMode is left at its default, `control-group`, on purpose: the inhibitor
+# is a `systemd-inhibit … sleep infinity` child, and stopping this unit must
+# take it down too. `KillMode=process` would leave a lock with no keeper, which
+# is the one state this whole design exists to make impossible.
+TimeoutStopSec=15
+
+# Where the closed-period record lives, so `apex lid report` can answer "what
+# did the machine do while it was shut" after a reopen — and so that a period
+# ended by a guard still leaves the record behind.
+StateDirectory=apex/lid
+
+# ── why this runs as root ───────────────────────────────────────────────────
+#
+# Not for the inhibitor. `org.freedesktop.login1.inhibit-handle-lid-switch` is
+# allow_active=yes and an ordinary session takes it with no prompt (measured on
+# the L16, 2026-09-12). Root is for the other half: writing
+# /sys/class/backlight/*/bl_power and /sys/class/leds/*/brightness, driving
+# rfkill, stopping system units, and calling logind's Suspend() when a guard
+# fires — which for a caller that is not the active session degrades from
+# allow_active=yes to auth_admin_keep, i.e. a password prompt inside a closed
+# laptop that nobody can answer.
+NoNewPrivileges=yes
+
+# ── hardening, chosen against what the power-down half actually writes ───────
+#
+# ProtectSystem is `full` and NOT `strict`: strict makes the whole hierarchy
+# read-only and this unit's entire power-down half is sysfs writes. ReadWritePaths
+# does not rescue that, because /sys/class/backlight/N and /sys/class/leds/N are
+# symlinks into /sys/devices and the write lands on the resolved path.
+ProtectSystem=full
+# For the same reason ProtectKernelTunables is NOT set: it remounts /sys
+# read-only, and the first thing the owner would notice is a keyboard backlight
+# that never dims and a journal line saying "Read-only file system".
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# CAP_NET_ADMIN is rfkill and `iw dev … set power_save`. CAP_SETUID/CAP_SETGID
+# are the `runuser` drop that checkpoints a live session as its owner rather
+# than leaving root-owned git objects in a repository the user has to keep
+# using. CAP_DAC_OVERRIDE is the sysfs writes.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE CAP_SYS_ADMIN
+# NO SystemCallFilter, for the reason apex-secretd.service gives: the filter
+# would apply to the `runuser … apex agent checkpoint` child, whose syscall use
+# is git's, and a wrong filter kills the checkpoint with SIGSYS at exactly the
+# moment the work was meant to be saved.
+
+# The reopen summary is the sixth acceptance criterion. It goes to the journal
+# so that `apex lid report` is not the only place it exists.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=apex-lid
+
+[Install]
+WantedBy=multi-user.target
