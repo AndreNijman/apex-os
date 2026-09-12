@@ -204,9 +204,16 @@ mutate B10 "$SUITE_F" \
 #       GTK creates around a plain Gtk.Box, and the SSID label lives inside it.
 #       Invisible to the page audit, which does not consider `list item`
 #       interactive, and invisible to any grep, because the name IS in the tree.
+#
+#       The mutant is an EMPTY name rather than a commented-out call: `a11y(row,
+#       …)` is a four-line expression, so commenting its first line alone leaves
+#       three orphaned continuation lines and the GUI stops parsing. The suite
+#       then fails on every page, which is a Python error being caught and not
+#       this assertion. An empty name is also the exact shape of the defect that
+#       was there: the node existed and announced nothing.
 mutate B11 "$GUI" \
-    '                        a11y(row, n["ssid"],' \
-    '                        pass  # a11y(row, n["ssid"],' \
+    'a11y(row, n["ssid"],' \
+    'a11y(row, "",' \
     "every network in the list announces its name"
 
 # B12 — the signal bars go back into the accessibility tree, where a reader
@@ -219,17 +226,28 @@ mutate B12 "$GUI" \
     '                        r.append(lbl(bars, "apex-accent apex-mono", wrap=False))' \
     "the signal bars are out of the accessibility tree"
 
-# B13 — the ScrolledWindow around the network list is focusable again. GTK makes
-#       it so it can be scrolled from the keyboard, and it is a `generic` with no
-#       name: a stop in the ring that announces nothing. The page still opens
-#       with focus on the named list, because the explicit grab_focus below
-#       survives this mutant -- so the assertion that carries it is the one that
-#       requires every stop the ring reaches to have a name, not the one about
-#       the opening focus.
+# B13 — the page opens with the focus on a nameless scroll container, which is
+#       the defect as it was found: `role=generic | name= | states=focusable,
+#       focused`.
+#
+#       BOTH guards go, and that is a measured statement about the code rather
+#       than a weaker mutant. Removing `set_focusable(False)` alone SURVIVES —
+#       run and checked, not assumed: the explicit grab still lands the focus on
+#       the named list, and GTK does not tab out to an ancestor the focus is
+#       already inside, so the re-focusable container is reachable by neither
+#       assertion. Removing the grab alone is B14. They are two guards against
+#       one defect and only removing both reproduces it; a mutant for either on
+#       its own would be asserting that defence in depth is redundant.
+#
+#       One substitution, both guards: the line that grabs the focus becomes a
+#       line that makes the container focusable again, and since it runs AFTER
+#       `sc.set_focusable(False)` it overrides it. The alternative -- a `from`
+#       spanning seven lines of source including the comments between them --
+#       is an anchor that breaks the next time somebody rewords a comment.
 mutate B13 "$GUI" \
-    '        sc.set_focusable(False)' \
-    '        pass  # sc.set_focusable(False)' \
-    "page 'wifi': every control the Tab ring reaches has a name"
+    '        GLib.idle_add(lambda: (self.net_list.grab_focus(), False)[1])' \
+    '        sc.set_focusable(True)' \
+    "page 'wifi': the control focused when the page opens says what it is"
 
 # B14 — nothing claims the keyboard when the page opens. With the scroll
 #       container out of the ring and no explicit grab, a keyboard user starts
