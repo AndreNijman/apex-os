@@ -798,6 +798,18 @@ jobs:
         run: ../tests/in-login-session.sh cargo test --locked
         env:
           APEX_REQUIRE_APEX_CLI: "1"
+          # The same shape, for the other thing this step buys. `apex-remoted`'s
+          # relay and end-to-end suites cannot pair a device unless §7 observes
+          # a human at this machine, so outside a login session they SKIP with
+          # the placement named — the honest answer, and a silent pass if it
+          # happens HERE, because in-login-session.sh falls back to running the
+          # tests unchanged when PAM refuses rather than failing. This step is
+          # the one place the session is supposed to exist, so here a skip is a
+          # failure. Measured on the runner 2026-09-12: the helper reported
+          # `logind session 3, 0::/user.slice/user-1001.slice/session-3.scope`,
+          # so this knob asserts a fact that already held rather than asking
+          # for a new one.
+          APEX_REQUIRE_LOCAL_ORIGIN: "1"
 
       # §7's table has two columns and they live in two different
       # environments, so no single `cargo test` run can cover both: inside a
