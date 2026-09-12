@@ -14,20 +14,25 @@ branch: roadmap/v2.2
   apex-shell roadmap/v2.2 = 690014a   (was 8d081ff)   33/17/22/5/27, markers PASS
   *the 1 is the cgroup/origin artifact described under FOUND, not a regression.
 Remaining, in order:
- 1. per-commit build check for the 4 apex-os p1-020os commits:
-    /var/tmp/apex-int4-logs/percommit.sh p1-020os bf9a5fb e77695a 5685418 4ab5f75
-    (p2-005's 8-commit run is going; watch /var/tmp/apex-int4-logs/percommit-p2-005.txt)
- 2. run the now-guarded nested suites once on the final shell tip:
+ 1. **DONE 2026-09-12 by followups-3.** Per-commit build check, all four
+    p1-020os commits, `cargo build --locked --workspace --all-targets` each in
+    its own detached worktree with a fresh CARGO_TARGET_DIR:
+    bf9a5fb rc=0, e77695a rc=0, 5685418 rc=0, 4ab5f75 rc=0. Bisectable.
+ 2. STILL OWED: run the now-guarded nested suites once on the final shell tip:
     tests/run-nested-labwc.sh, run-labwc-matrix-test.sh, run-nexus-smoke.sh,
     run-agent-center-smoke.sh — all from the repo ROOT with XDG_* pointed at
     /var/tmp/apex-shell-xdg.
- 3. branch cleanup: for each of fix/labwc-desktop-parity,
-    fix/popup-first-open-and-media-keys, fix/screenshot-off-hyprland,
-    task/p0-016-agent-settings compare
-    `git merge-tree --write-tree roadmap/v2.2 origin/<b>` to
-    `git rev-parse roadmap/v2.2^{tree}`; delete the remote ref ONLY if equal.
-    (The brief's `git diff roadmap/v2.2 <branch>` CANNOT be empty — the tip is
-    dozens of commits ahead, so that diff is the tip's later work, not theirs.)
+ 3. **DONE 2026-09-12 by followups-3 — but NOT by the method written here.**
+    `git merge-tree --write-tree` can never equal the tip's tree for any of
+    these: they exit 1 with a CONFLICT in `.github/workflows/ci.yml`, which
+    every branch appends to, and the "extra" content in the merged tree is
+    conflict markers that read like stranded work. Use the exact content test
+    in `ROADMAP/state/unlanded.py::squashed_at` instead — a commit on the
+    integration branch where every file the branch touched is byte-identical
+    to the branch tip. All four shell branches passed it and their remote refs
+    are deleted (f609a6c, b8a63a8, 4e267eb, 4335e42 respectively), along with
+    apex-os fix/pkg-multilib, fix/pkg-multilib-2 and task/p1-018-mcp-auth.
+    See ROADMAP/state/agents/followups-3.md for the p1-018 reasoning.
 
 ## DONE
 - **apex-os task/p1-020-agent-graph-daemon LANDED AND PUSHED: roadmap/v2.2 =
