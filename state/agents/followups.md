@@ -37,5 +37,43 @@ a test nobody will believe when it matters.
 
 ## NEXT
 
-Nothing done yet. Do them in the order above; 1 and 3 are correctness, 2 is the
-one that keeps coming back.
+Round 18 agent live in `/var/tmp/apex-work/wt-followups` (branch
+`task/followups-r18`, from `origin/roadmap/v2.2` @ `cafd3635`). Nothing
+committed yet. What is already MEASURED, so a fresh agent need not re-derive it:
+
+**Item 1 — the TEST is wrong, not the product.** `tests/test-apex-task.sh:562`
+greps for `understands up to`. Commit `5c1a9795` (P1-045, 2026-09-07) rewrote
+`TaskError::UnsupportedVersion`'s message to the §25 form ("tasks.toml is
+version 99, and this build of APEX reads version 1 … Boot the newer deployment
+again to use it"), updated the Rust unit test
+(`task.rs::a_future_version_is_refused_rather_than_guessed_at`) and did NOT
+update the shell test, which was written 2026-09-04 by `874de9aa`. The product
+refuses correctly with rc=2. Fix = assert the same four parts the Rust test
+does. Also: the ok/bad labels for that case disagree with each other.
+Observation, NOT this unit: `apexd/apexd-core/src/host.rs:185` still says
+"understands up to" with no remedy — same §25 family, untouched.
+
+**Item 2 — measured gap.** 56 top-level verbs, 227 verb+subverb commands.
+Against the non-historical doc set (docs/*.md minus m*-notes/m0-results/
+p*-progress, plus README.md): 98 of 227 commands documented, 129 not; 34 of 56
+top-level verbs documented, 22 not (profile battery fan gaming qualify storage
+firmware build send open fingerprint resolve plugin skill provenance firewall
+devices remote cloudflare backup blueprint sync). So the reverse direction
+CANNOT land green — it lands with a dated debt file plus a ratchet (an entry
+that has since been documented must fail as a stale waiver). `docs/remote.md`
+is a new file; no branch anywhere has a remote doc, so no merge conflict.
+`tests/check-doc-verbs.sh` is invoked by NOTHING — not CI, not any suite.
+
+**Item 3 — p2-010 already measured it (state/agents/p2-010.md:805).** Whole
+`system_grants` target, 20 runs → 1 failure (~5%); the two tests that alternate
+are `a_grant_from_another_boot_is_reported_as_ended_on_the_next_start` and
+`the_ending_is_recorded_once_however_many_daemons_see_it`; neither fails alone
+in 25 runs. Both count lines in `privilege-audit.jsonl`.
+`audit_lines_once_written(want)` waits on a COUNT, not on the predicate, so any
+other startup line satisfies `want=1` early; and in the second test
+`audit_lines_once_written(first.len())` returns instantly, making its negative
+assertion a no-wait one that passes vacuously. Next step is to read where
+`sweep_previous_lives()` runs relative to the socket bind in
+`apex-agentd/src/main.rs`: if the sweep is after the bind, it is the PRODUCT.
+
+Order: 1, then 3, then 2.
