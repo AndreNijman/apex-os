@@ -98,9 +98,18 @@ pub enum TlsError {
     Name(String),
     /// The TLS client could not be constructed at all.
     Setup(rustls::Error),
-    /// The handshake failed. A certificate that does not verify — wrong
-    /// issuer, wrong name, out of date — arrives here.
+    /// The relay's **certificate** did not verify — wrong issuer, wrong name,
+    /// out of date.
     Refused(rustls::Error),
+    /// The handshake failed for a reason that is not about a certificate.
+    ///
+    /// Separate from [`TlsError::Refused`] because the two send an operator to
+    /// different places, and saying "certificate" about a server that
+    /// presented none is worse than saying nothing. The case that proves the
+    /// split is worth its two lines is in this tree: dialling `wss://` at
+    /// something speaking plain HTTP produces a record-decode error, and the
+    /// log would otherwise blame a certificate that never existed.
+    Handshake(rustls::Error),
     Io(io::Error),
 }
 
@@ -138,6 +147,7 @@ impl std::fmt::Display for TlsError {
             TlsError::Refused(e) => {
                 write!(f, "the relay's TLS certificate was refused: {e}")
             }
+            TlsError::Handshake(e) => write!(f, "the TLS handshake with the relay failed: {e}"),
             TlsError::Io(e) => write!(f, "the relay's TLS connection failed: {e}"),
         }
     }
@@ -306,7 +316,15 @@ fn handshake(
                 }
             }
             let _ = writing.flush();
-            return Err(TlsError::Refused(e));
+            // Only a certificate complaint is called a refusal. Everything
+            // else — a record this client could not decode, a version or a
+            // cipher with no overlap — is a handshake failure, and calling it
+            // a certificate problem would send somebody to their CA store
+            // over a server that speaks no TLS at all.
+            return Err(match e {
+                rustls::Error::InvalidCertificate(_) => TlsError::Refused(e),
+                _ => TlsError::Handshake(e),
+            });
         }
     }
 }
