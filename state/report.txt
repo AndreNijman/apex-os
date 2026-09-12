@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-12 08:11 AWST
+APEX ROADMAP — resume report — 2026-09-12 08:35 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -8,55 +8,53 @@ APEX ROADMAP — resume report — 2026-09-12 08:11 AWST
   L              -         1         -         2
   P0            23         2         -         -
   P1            32        13        17         -
-  P2             4         3        12         -
-  ALL           75        21        29         2   of 127
+  P2             4         5        10         -
+  ALL           75        23        27         2   of 127
 
   P0 not done: P0-001(part), P0-021(part)
 
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p1-008     dead 44m   P1-008,P1-009,P1-010               task/p1-008-cloudflare-one
+  p1-008     dead 68m   P1-008,P1-009,P1-010               task/p1-008-cloudflare-one
              head 5eda17e0 docs(cloudflare): name apexd-core's Backend without l
-             dirty 0 file(s), 0 unpushed, card 45m
+             dirty 0 file(s), 0 unpushed, card 69m
              NEXT **The unit is DONE and pushed** — tip `5eda17e0`, five commits, no
 
   p2-b       ALIVE      (see queue.json p2-b)              task/p2-b-accessibility-i18n
-             head eed578b test(i18n): prove strings extract, compile and substit
-             dirty 0 file(s), 0 unpushed, card 0m
-             NEXT 0. **DESIGN FORK to settle before writing the installer page** (fr
+             head 08f81ad ci(shell): allow a task branch to be validated before 
+             dirty 0 file(s), 0 unpushed, card 4m
+             NEXT 1. **The `sections` array in `AgentHelpContent.qml`** (~200 prose 
 
-  p1-052     dead 21m   P1-051,P1-052                      task/p1-052-relay
+  p1-052     dead 45m   P1-051,P1-052                      task/p1-052-relay
              head 373e833c style(remote): three clippy lints in the relay's own 
-             dirty 0 file(s), 0 unpushed, card 22m
+             dirty 0 file(s), 0 unpushed, card 46m
              NEXT **Everything dispatched to this unit is done.** P1-052 is complete
 
-  p0-finish  dead 22m   P0-001,P0-002,P0-007,P0-015,P0-021 task/p0-finish
+  p0-finish  dead 46m   P0-001,P0-002,P0-007,P0-015,P0-021 task/p0-finish
              head 392108e5 ci(image): the rust job needs a login session, and wi
-             dirty 0 file(s), 0 unpushed, card 22m
+             dirty 0 file(s), 0 unpushed, card 46m
              NEXT Round 13 finished its code work. Branch tip `392108e5`, 7 commits,
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip b79838a4 Merge task/p1-052-relay into roadmap/v2.2 (P1-052 don
+  int-os:  tip f6eefd0d Merge task/p2-b-accessibility-i18n into roadmap/v2.2 
     task/p1-011-temp-credentials
       a6691b50 feat(secret): P1-011, a narrowing request has four answers an   [2/10 added lines on tip]
+      bef9d63d test(secret): P1-011, the token that did the work did not exi   [1/10 added lines on tip]
+      d6cea847 feat(cloudflare): a project can say it will not run on the br   [0/10 added lines on tip]
+      75df89b1 feat(cloudflare): P1-012, wrangler and terraform run by the b   [1/10 added lines on tip]
     task/p1-050-remote-protocol
       09c977d9 fix(clippy): the integration tip was not clean, and two of th   [2/10 added lines on tip]
-    task/p2-b-accessibility-i18n
-      a0dd1999 feat(greet): accessible login screen and a keyboard-layout re   [0/10 added lines on tip]
-      e5d049ad test(greet): parse the greeter, self-test the mutants, instal   [0/10 added lines on tip]
-      69f59cb0 fix(ci): actually run the greeter accessibility suite, and ma   [0/10 added lines on tip]
-      fc4dbd2d feat(installer): the engine honours an operator's keyboard, v   [2/10 added lines on tip]
-      28f59fac feat(installer): choose a keyboard before creating a password   [2/10 added lines on tip]
-      fcd3b904 fix(tests): revive test-installer.sh's engine half, which has   [0/10 added lines on tip]
-      3431376f fix(installer): ship the session script, and close two assert   [0/10 added lines on tip]
-      5670eedf feat(installer): offer a time zone, and drive the keyboard pa   [0/10 added lines on tip]
-      4308461d fix(tests): the GUI render container could never build on a n   [0/10 added lines on tip]
+    task/p2-a-backup
+      f79254e3 feat(backup): the snapshot format, the sealed box and the fou   [0/10 added lines on tip]
+      70fd7384 feat(backup): targets — local, NAS with the mount checked, an   [0/2 added lines on tip]
+    task/relay-tls
+      f4e854f0 feat(remote): dial a wss:// relay with rustls and the machine   [2/10 added lines on tip]
 
-  int-shell:  tip 4dbe8ba test(hypr): the shellcheck gate was red for every unit
+  int-shell:  tip 1417402 Merge task/p2-b-accessibility-i18n into roadmap/v2.2 (
     fix/labwc-desktop-parity  — squash-merged, safe to delete
       landed whole as f609a6c fix(labwc): complete desktop parity (#6)
     fix/popup-first-open-and-media-keys  — squash-merged, safe to delete
@@ -65,10 +63,7 @@ APEX ROADMAP — resume report — 2026-09-12 08:11 AWST
       landed whole as 4e267eb fix: screenshots and popup input regions off Hyprland (#
     task/p0-016-agent-settings  — squash-merged, safe to delete
       landed whole as 4335e42 fix(agents): the sudo caveat was written before no_new_p
-    task/p2-b-accessibility-i18n
-      83775dc feat(a11y): the shared settings controls name themselves and a   [2/10 added lines on tip]
-      7ba196e test(a11y): measure how far Reduce Motion actually reaches, an   [2/10 added lines on tip]
-      eed578b test(i18n): prove strings extract, compile and substitute — an   [0/10 added lines on tip]
+    (nothing — every task branch's content is on the integration tip)
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -78,11 +73,11 @@ APEX ROADMAP — resume report — 2026-09-12 08:11 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 1min 46s Sat
+  snapshot timer: active   last 1min 20s Sat
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    73dd699  int-os-
-    apex-os    b960e2e  roadmap-state
+    apex-os    c3a88d5  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    55f08ae  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -105,7 +100,7 @@ APEX ROADMAP — resume report — 2026-09-12 08:11 AWST
     apex-os    00c1973  wt-p0-025-os-
     apex-os    2c9c560  wt-p0-finish-
     apex-os    eda5ef8  wt-p1-001-
-    apex-shell 7020f1f  apex-shell-
+    apex-shell d3c11c1  apex-shell-
     apex-shell df979e1  int-shell-
     apex-shell 68c971d  wt-base-shell-
     apex-shell c8f1e50  wt-editors2-shell-

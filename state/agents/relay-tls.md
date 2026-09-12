@@ -81,9 +81,79 @@ Round 1, in progress.
 - `Cargo.lock` before: **178 packages**, `cc` absent
   (snapshot: scratchpad `Cargo.lock.before`).
 
+### RESULTS — round 1
+
+**Landed: `f4e854f0` on `task/relay-tls`, pushed.**
+`feat(remote): dial a wss:// relay with rustls and the machine's root store`
+
+- New `apexd/apex-remote-core/src/tls.rs`: `Trust` (root store + client
+  config), `TlsReader` / `TlsWriter` (the split), `TlsError`.
+- `apexd/apex-remoted/src/relay.rs`: `DialError::NeedsTls` becomes
+  `DialError::Tls(TlsError)`; `Joined`'s halves become boxed trait objects;
+  `dial` takes the root store; `supervise` reads the store ONCE at startup and
+  refuses to run rather than failing every two seconds for ever.
+- New `apexd/apex-remote-core/tests/tls.rs`: 5 tests. Plus 3 unit tests in
+  `tls.rs` and 2 new ones in `apex-remoted`'s `relay.rs`.
+
+**Crate cost, measured not estimated: 178 -> 193 = 15 crates.** §5.1 predicted
+"roughly 15". Only **9** compile on Linux — `cc`, `openssl-probe`, `ring`,
+`rustls`, `rustls-native-certs`, `rustls-pki-types`, `rustls-webpki`, `shlex`,
+`untrusted`. The other 6 (`core-foundation{,-sys}`, `find-msvc-tools`,
+`schannel`, `security-framework{,-sys}`) are macOS/Windows entries
+`rustls-native-certs` carries in its manifest and which never build on this
+target.
+
+### What the refusal tests assert
+
+Each by **variant** and by **message**, because a client that accepted any
+certificate would also connect and would pass every happy-path assertion:
+
+| test | asserts |
+| --- | --- |
+| `a_certificate_from_an_untrusted_ca_is_refused_and_the_error_says_so` | `CertificateError::UnknownIssuer`; message contains `UnknownIssuer` |
+| `a_certificate_for_another_host_is_refused_and_the_error_says_so` | `NotValidForName{,Context}`; message names **both** `relay.test` and `other.test` |
+| `an_expired_certificate_is_refused_and_the_error_says_so` | `Expired{,Context}`; message says `certificate expired` and `not valid after` |
+| `a_certificate_that_verifies_carries_a_stream_in_both_directions_at_once` | a write and a read overlap on two threads; a deadlock is a red test, not a hang, because the result is collected through `recv_timeout` |
+| `the_name_checked_is_the_relays_name_and_not_the_address_that_was_dialled` | the same loopback destination, accepted as `relay.test` and refused as `127.0.0.1` |
+
+Built against a CA minted per test with the **`openssl` CLI** — an independent
+implementation, so "expired" is expired by somebody else's definition — served
+from a `rustls` listener bound on loopback before the dial, so there is no port
+race and no child process. Nothing reaches the network.
+
+### Mutation proofs — five, all with `Compiling` printed and plain-`cp` restores
+
+Each mutant makes one refusal **accept**; restores verified by md5 against a
+pristine copy (`cp`, never `mv`, never `cp -p`).
+
+| mutant | what it does | what went red |
+| --- | --- | --- |
+| **A** | `handshake` swallows `InvalidCertificate(UnknownIssuer)` and returns Ok | `a_certificate_from_an_untrusted_ca_is_refused_and_the_error_says_so` **only** (4 passed, 1 failed) |
+| **B** | same for `NotValidForName{,Context}` | `a_certificate_for_another_host_is_refused_and_the_error_says_so` **and** `the_name_checked_is_the_relays_name_and_not_the_address_that_was_dialled` (3 passed, 2 failed) — the second is correct coupling: its refusal half asks for `127.0.0.1` against a `relay.test` certificate |
+| **C** | same for `Expired{,Context}` | `an_expired_certificate_is_refused_and_the_error_says_so` **only** (4 passed, 1 failed) |
+| **D** | `TlsError::Refused`'s `Display` drops `{e}`, so it says "refused" and not why | all **three** `_the_error_says_so` tests red, and the two variant-only tests stayed green — which is what makes "the error says so rather than being swallowed" a proven claim and not a description |
+| **E** | `dial`'s `if endpoint.secure` becomes `if false`, so `wss://` falls through to plaintext | `a_wss_relay_that_cannot_be_verified_is_refused_and_never_downgraded` **and** `a_wss_relay_with_no_root_store_is_refused_rather_than_dialled_in_the_clear` (2 passed, 2 failed) |
+
+Mutant A's restore checked at `c3ecaa2c4fc0fa8afce803d429edcf44`, the same md5
+as the pristine copy, before B ran; the same check after C, D and E. `git
+status` clean after the last restore.
+
+### Gates
+
+- `cargo clippy --locked --workspace --all-targets -- -D warnings` — **clean**.
+- `tests/in-login-session.sh cargo test --locked` — everything green except
+  **one pre-existing flake in a crate this branch does not touch**:
+  `apex-secretd`'s `tests::a_stale_socket_from_a_dead_daemon_is_replaced`
+  (`apex-secretd/src/main.rs:513`, `assert!(UnixStream::connect(&socket)
+  .is_err())`). It passed **180/180 six consecutive times** when run on its
+  own; it failed once under the full parallel workspace run. Not caused by this
+  branch — nothing here can make a connect to a dead unix socket succeed — and
+  recorded rather than fixed or ignored.
+- `tests/check-doc-verbs.sh`, `tests/check-no-conflict-markers.sh` — pass.
+
 ### NEXT
 
-See RESULTS below as they land.
+`wrangler dev --local` against the real Worker — see below.
 
 ## The implementation shape, and the trap in it
 

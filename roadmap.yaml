@@ -2818,7 +2818,7 @@ tasks:
 - id: P2-003
   title: Accessibility baseline
   priority: P2
-  status: todo
+  status: partial
   area: accessibility
   depends_on: []
   acceptance:
@@ -2826,10 +2826,23 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Accessibility baseline. LANDED 2026-09-12 (apex-shell merge 1417402, apex-os merge f6eefd0d). MEASURED RATHER
+    THAN GREPPED, which is what this item's earlier rounds lacked: the shared settings controls name themselves
+    and answer the keyboard (a11y-controls 21), the greeter is asserted for accessibility and layout (greet-a11y
+    22, greet-layout 25), and Reduce Motion is measured for HOW FAR IT ACTUALLY REACHES rather than being read off
+    a property (reduce-motion 12). 69f59cb0 also fixed CI to actually RUN the greeter accessibility suite and made
+    its staging portable - it had been present and not executed. STILL PARTIAL, with each gap named as an
+    assertion rather than a topic: the AT-SPI walk cannot be performed because at-spi registryd will not activate
+    in the harness, so 'screen reader validated' is unproven; popups/ and NavPane use bespoke widgets that the
+    shared-control work does not cover; the image ships ZERO accessibility packages, so magnifier and high-
+    contrast have nothing to validate; and no RTL fonts are present. The keyboard-only path is covered by the
+    controls work; screen reader, magnifier and high contrast are not, and closing them needs packages in the
+    image first - which is a decision about what APEX ships, not a test to write.
 - id: P2-004
   title: Internationalisation baseline
   priority: P2
-  status: todo
+  status: partial
   area: i18n
   depends_on: []
   acceptance:
@@ -2837,6 +2850,31 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Internationalisation baseline. LANDED 2026-09-12 (apex-os merge f6eefd0d, apex-shell merge 1417402). KEYBOARD
+    LAYOUT BEFORE PASSWORD IS DONE AND MEASURED ON A SECOND MACHINE, which is the point of the criterion: CI run
+    34661483871 shows 'cage started de: the same physical keys now produce the GERMAN letters', all four installer
+    steps green. test-installer-keymap.sh 43, test-installer-locale.sh 26, test-installer.sh 44. THE DESIGN FORK
+    WAS SETTLED BY MEASUREMENT BEFORE ANY CODE: the criterion is that a user can TYPE their password on their own
+    layout, so recording the choice in the answers file does not achieve it - the layout must reach the RUNNING
+    cage session. Option (a), localectl set-x11-keymap, is DEAD rather than doubted: libxkbcommon.so.0 links only
+    libc and contains no locale1, localectl or xorg.conf string, so its whole configuration surface is five
+    environment variables read at keymap COMPILE time, and the compositor must restart. TIMEZONES DONE, including
+    survival across the compositor restart. TRANSLATED SHELL - PIPELINE PROVEN, not declared: run-i18n-test.sh 12
+    assertions run a real lupdate, a real lrelease, then a running QML engine reading German back, over 5 of
+    roughly 650 strings, with the ratio reported rather than rounded up; THE GAP IS NAMED AND ASSERTED - nothing
+    in src/ installs a QTranslator. STILL PARTIAL, each with its assertion named: the locale picker is BLOCKED
+    because the image ships glibc-langpack-en only, so a free picker degrades silently to C.UTF-8; the recovery
+    flow is untouched (install is done); the translated installer is GTK4/Python so it needs gettext rather than
+    Qt; and IME, CJK and RTL are unchanged. FOUR DEFECTS FIXED, THREE PRE-EXISTING: test-installer.sh's engine
+    half had been DEAD SINCE JULY (11 assertions that ran on every box except the ISO builder, and in CI); the GUI
+    render container could never build on a non-Fedora runner; Etc/UTC - systemd's own canonical name - slipped a
+    guard that only matched empty-or-UTC, so an installed system could end up with NO /etc/localtime at all, found
+    BY CI and invisible on the developer's laptop because it is set to Australia/Perth, the exact value the
+    assertion expected; and the agent's own, a launcher that execced a session script nothing installed into the
+    image, so the ISO would have booted with no installer. 25 of 25 mutants caught; two survivors were vacuous
+    assertions and one was a page graph that followed Back buttons as forward edges. Xvfb and qt6-qttools-devel
+    were installed to make criteria measurable rather than assumed - qt6-qttools alone does not ship lupdate.
 - id: P2-005
   title: Printing/scanning/network-share maturity
   priority: P2
