@@ -1092,9 +1092,22 @@ jobs:
       - name: Install the compositor and X server the keymap suite measures with
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb cage python3-gi gir1.2-gtk-4.0 \
-                                      libxkbcommon0 xkb-data binutils \
-            || echo "note: some packages unavailable; the suite will SKIP those sections"
+          # One package at a time. `apt-get install a b c` aborts the WHOLE
+          # command if any single name is unavailable, so one bad name would
+          # silently cost Xvfb as well — and the suite would then SKIP the
+          # assertion that carries the criterion while the step still reported
+          # success.
+          for p in xvfb cage python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 \
+                   libxkbcommon0 xkb-data binutils; do
+            sudo apt-get install -y -qq "$p" || echo "note: $p unavailable"
+          done
+          # Say what actually arrived, so a SKIP below can be traced without
+          # guessing.
+          for b in Xvfb cage; do
+            command -v "$b" >/dev/null && echo "have: $b" || echo "MISSING: $b"
+          done
+          python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1"); from gi.repository import Gtk, Adw; print("have: python3-gi with Gtk4 + Adw")' \
+            || echo "MISSING: python3-gi Gtk4/Adw"
 
       - name: Run installer locale/timezone suite
         working-directory: installer
