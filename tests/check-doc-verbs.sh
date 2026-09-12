@@ -85,9 +85,19 @@ ALLOW=${ALLOW:-tests/doc-verbs-allow}
 DEBT=${DEBT:-tests/doc-verbs-undocumented}
 
 ensure_built() {
-    [ -x "$APEX_BUILT" ] && return 0
-    echo "building the apex binary (not found at $APEX_BUILT)…"
-    ( cd apexd && cargo build --locked --bin apex )
+    # ALWAYS build, never just check for the file. `[ -x "$APEX_BUILT" ] &&
+    # return 0` asked the wrong question: it proves a binary exists, not that
+    # it matches the source. `cargo test --bins --no-run` builds
+    # deps/apex-<hash> and never refreshes target/debug/apex, so this gate
+    # would answer about a binary from an earlier commit and say nothing about
+    # it. Measured 2026-09-12: a first run reported 166 documented verbs, a
+    # rebuild gave 171 -- the `apex user` verbs P2-016 had just landed. The
+    # verdict happened not to change; a gate that reads a stale binary is one
+    # that can report a clean surface for code nobody compiled.
+    #
+    # cargo is incremental, so this is a no-op when it is already current.
+    ( cd apexd && cargo build --locked --bin apex ) || return 1
+    [ -x "$APEX_BUILT" ]
 }
 
 if [ -z "${APEX:-}" ]; then

@@ -170,7 +170,11 @@ for f in "$SESSIONS_SRC"/*.desktop; do
     [ -f "$f" ] || continue
     cp "$f" "$STAGE/" && copied=$((copied + 1))
 done
-is "the three session entries this repo owns are stageable" "3" "$copied"
+# Four since P2-018 added APEX Safe Graphics. A COUNT rather than a list,
+# because the number is what a build can measure and a missing entry is what a
+# user meets at the picker — but it has to be kept in step deliberately, which
+# is the point of it being an equality and not a floor.
+is "the four session entries this repo owns are stageable" "4" "$copied"
 
 # hyprland.desktop is NOT in this repo — it comes from the Hyprland package. The
 # upstream shape is reproduced here so the rename below has something real to
@@ -330,7 +334,9 @@ if [ "$gate_rc" -eq 0 ]; then
     gate_out="$(sh "$GATE" 2>&1)"; gate_status=$?
     is "…and the staged sessions directory passes it" "0" "$gate_status"
     # A gate that prints one line per session is a gate that looked at them all.
-    is "…having looked at every entry" "4" \
+    # Five: the four this repo owns plus the upstream hyprland.desktop staged
+    # above, which is the entry the rename acts on.
+    is "…having looked at every entry" "5" \
        "$(printf '%s\n' "$gate_out" | grep -c 'session wording:')"
 
     # MUTATION. Put the upstream name back on one entry and require a refusal —

@@ -55,11 +55,12 @@ VERBS="
 status tier profile battery fan game mode workload perf gaming
 fingerprint pin rollback update shell metrics doctor changelog
 install remove resolve search repo pkg env devices firewall remote
-agent project request secret mcp skill provenance backup
+agent project request secret account mcp skill provenance backup
 blueprint apply sync plugin cloudflare
 ai host build send open
 task recover disposable boot
 trust storage qualify firmware channel schema
+lid permissions user vm
 "
 
 for v in $VERBS; do

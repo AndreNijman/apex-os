@@ -1117,7 +1117,8 @@ mod tests {
         a.approve(approval("/p", "cf.deploy", "w", 100));
         assert!(
             a.spend("/p", "cf", &["cf.deploy"], "w", 100).is_none(),
-            "an approval expiring AT `now` is expired: a boundary that went the              other way would make a zero-length approval spendable"
+            "an approval expiring AT `now` is expired: a boundary that went the \
+             other way would make a zero-length approval spendable"
         );
         assert_eq!(a.prune(100), 1);
         assert!(a.pending.is_empty());
