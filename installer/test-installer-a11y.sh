@@ -310,11 +310,20 @@ walk_ring() {   # walk_ring <page> <wid> <taps> <distinct floor> [required name 
     xdotool windowactivate --sync "$wid" >/dev/null 2>&1
     xdotool windowfocus "$wid" >/dev/null 2>&1
 
+    # Focused AND named. This assertion used to accept any focused node, and on
+    # the wifi page it passed while printing an empty name: focus opened on the
+    # ScrolledWindow around the network list, which GTK makes focusable so it
+    # can be scrolled from the keyboard. "Something has focus" is not the
+    # property — the property is that a reader user is told where they are.
     first="$(focused_name)"
-    if [ -n "$first" ]; then
-        ok "page '$page': something has keyboard focus when it opens (${first#*|})"
+    firstname="${first#*|}"
+    if [ -n "$firstname" ]; then
+        ok "page '$page': the control focused when the page opens says what it is ($firstname)"
+    elif [ -n "$first" ]; then
+        bad "page '$page': the control focused when the page opens says what it is" \
+            "focus is on a '${first%%|*}' with no name and no description — a reader user is told nothing about where they are"
     else
-        bad "page '$page': something has keyboard focus when it opens" \
+        bad "page '$page': the control focused when the page opens says what it is" \
             "nothing reports the focused state — a keyboard user starts nowhere"
     fi
 
