@@ -276,6 +276,31 @@ object Agentd {
         """{"cmd":"input","id":$id,"data":"${escape(data)}"}"""
 
     /**
+     * Hand a file to a session whose bytes are on this phone.
+     *
+     * `Request::Receive { id, name, len }` is the second verb that takes a
+     * connection over — `attach` is the other — so it travels as the payload
+     * of a `Frame.Open` and never as a control frame. The daemon answers
+     * `receiving`, reads exactly [len] bytes off the channel, and answers
+     * again with the `injected` reply. See [com.apexos.remote.core.link.Upload].
+     *
+     * `name` is a NAME, not a path, and this app does not sanitise it: the
+     * daemon's `inject::safe_name` reduces it to an alphabet with no `/`, no
+     * space, no quote and no `$`, and a client that pre-reduced it would be a
+     * second implementation of a rule the daemon enforces anyway — the one
+     * place a difference between the two would show is a file whose real name
+     * the user is then not told about. [Handoff.Files.preview] shows what the
+     * daemon will make of it, and does not change what is sent.
+     *
+     * [len] is checked against [Handoff.Files.MAX_BYTES] before the request is
+     * built, because the daemon refuses an oversize upload before the takeover
+     * reply and a phone that asked anyway would have spent a round trip to be
+     * told a number it already had.
+     */
+    fun receive(id: Int, name: String, len: Long): String =
+        """{"cmd":"receive","id":$id,"name":"${escape(name)}","len":$len}"""
+
+    /**
      * Per-worktree status for every remembered project, or for one slug.
      *
      * ## This verb EXISTS. The comment that used to stand here said it did not.

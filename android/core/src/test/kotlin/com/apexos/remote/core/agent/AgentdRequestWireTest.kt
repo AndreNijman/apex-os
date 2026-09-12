@@ -56,6 +56,21 @@ class AgentdRequestWireTest {
     }
 
     @Test
+    fun `receive is the second takeover verb, and it never travels as a control frame`() {
+        // It is in this fixture because the fixture is about what the daemon
+        // PARSES, not about what goes on channel zero — `apex-remoted` refuses
+        // it there by name, exactly as it refuses `attach` there.
+        expect("receive", Agentd.receive(7, "shot.png", 204_800))
+        // A name that is a path is sent as it came. The reduction is the
+        // daemon's (`inject::safe_name`), and a phone that pre-reduced it
+        // would be a second implementation of the rule — the case where the
+        // two differ is the case where the user is told a filename that is
+        // not the one on disk. `Handoff.Files.preview` shows the reduction
+        // without performing it.
+        expect("receive_hostile_name", Agentd.receive(7, "../../.ssh/authorized_keys", 5))
+    }
+
+    @Test
     fun `input is a verb, and it is the shape write_input reads`() {
         // The reply carries its own CR: `session::write_input` writes raw bytes
         // and appends nothing, so a reply without one is never submitted.
@@ -145,6 +160,7 @@ class AgentdRequestWireTest {
         assertEquals(
             setOf(
                 "hello", "list", "info", "attach", "resize", "signal", "input",
+                "receive", "receive_hostile_name",
                 "run_minimal", "run_full", "worktrees_all", "worktrees_one",
                 "requests", "grants", "system_grants",
                 "revoke_one", "revoke_all", "revoke_system_grant",
