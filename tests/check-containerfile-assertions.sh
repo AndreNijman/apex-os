@@ -95,6 +95,33 @@ for path in sys.argv[1:]:
                     best = (dst, cand)
         if best:
             return [best[1]]
+        # A COPY of a DIRECTORY whose destination carries no trailing slash:
+        #
+        #     COPY files/desktop/apex-greet /usr/share/apex-greet
+        #
+        # Docker fills the destination from the source's CONTENTS, so
+        # /usr/share/apex-greet/GreetContext.qml is a real image path — but the
+        # two branches above only match an exact destination or one spelled
+        # with a trailing slash, so every assertion against a file inside such a
+        # tree resolved to None and was written off as UNRESOLVED. The greeter
+        # is copied exactly this way, which meant the login screen's assertions
+        # — the boot-critical ones — were in the bucket this file reports as
+        # "could not check" while reading as though the file had them covered.
+        #
+        # Only when the repo source really IS a directory: a destination that
+        # happens to be a prefix of an unrelated path must not be resolved
+        # through a file.
+        best = None
+        for src, dst in copies:
+            if dst.endswith('/') or not img.startswith(dst.rstrip('/') + '/'):
+                continue
+            if not os.path.isdir(src.rstrip('/')):
+                continue
+            cand = src.rstrip('/') + img[len(dst.rstrip('/')):]
+            if best is None or len(dst) > len(best[0]):
+                best = (dst, cand)
+        if best:
+            return [best[1]]
         if img.endswith('/'):
             under = [src for src, dst in copies if dst.startswith(img)]
             if under:
