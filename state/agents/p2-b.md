@@ -766,7 +766,7 @@ harness was recovered and committed first, before anything else was attempted.
 
 | set | result |
 | --- | --- |
-| `installer/mutate-installer-a11y.sh` | B1-B8 at `db16b410`: **8 applied, 8 CAUGHT, 0 survived**, tree matches HEAD. (B2's first run at `eec6507f` reported SURVIVED; that was the harness's expectation, not the mutant — see below.) The suite has changed since, twice, for defects CI found; the B set has NOT been re-run against `73f158d2`. Nothing in those changes touches a mutated arm, but that is an argument, not a measurement. |
+| `installer/mutate-installer-a11y.sh` | **8 applied, 8 CAUGHT, 0 survived**, tree matches HEAD — run twice, at `db16b410` and again at the tip `73f158d2` after the suite changed for the defects CI found. (B2's first run at `eec6507f` reported SURVIVED; that was the harness's expectation, not the mutant — see below.) |
 | `tests/mutate-greet-session-bus.sh` | C1-C6, 6 applied, **6 CAUGHT**, 0 survived |
 | `tests/mutate-a11y-stack.sh` | D1-D4, 4 applied, **4 CAUGHT**, 0 survived |
 
