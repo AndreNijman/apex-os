@@ -92,7 +92,15 @@ use crate::policy::{AgentPolicy, RequestOrigin};
 /// vocabulary, so `--capabilities install` would silently authorise `rollback`
 /// and `update` as well. The CLI refuses to send it to a daemon below
 /// [`SCOPED_GRANT_VERSION`].
-pub const PROTOCOL_VERSION: u32 = 6;
+/// 7 — a session may name which MCP connectors it gets (§10, P1-028).
+///
+/// Dimension 7, `policy.connectors`, and it fails open in the same direction
+/// `--capabilities` does: a daemon below this drops the key, writes no curated
+/// MCP configuration and starts the agent with every connector the machine
+/// defines — so `--connectors none` would read as a session with no connectors
+/// while the cloud plane was fully reachable. The CLI refuses to send it to a
+/// daemon below [`CONNECTOR_POLICY_VERSION`].
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// The revision at which the credential store moved to `apex-secretd`.
 ///
@@ -167,6 +175,9 @@ const _: () = assert!(SYSTEM_GRANT_VERSION == GENERIC_CAPABILITY_VERSION);
 // guard claiming they are the same revision would let `--capabilities` reach a
 // daemon that drops it and grants everything.
 const _: () = assert!(SYSTEM_GRANT_VERSION < SCOPED_GRANT_VERSION);
+// Dimension 7 is a later revision than scoped grants, so a daemon can accept
+// `--capabilities` and still drop `connectors`.
+const _: () = assert!(SCOPED_GRANT_VERSION < CONNECTOR_POLICY_VERSION);
 
 /// The revision that first carried the six dimensions.
 ///
@@ -177,6 +188,13 @@ pub const POLICY_DIMENSIONS_VERSION: u32 = 2;
 
 /// The revision that first carried `request_origin`, for the same reason.
 pub const REQUEST_ORIGIN_VERSION: u32 = 3;
+
+/// The revision that first carried dimension 7, the connector policy.
+///
+/// Its own number rather than an alias of [`POLICY_DIMENSIONS_VERSION`]: the
+/// six arrived together in revision 2 and this one did not, so a daemon can
+/// understand `--network offline` and still ignore `--connectors`.
+pub const CONNECTOR_POLICY_VERSION: u32 = 7;
 
 /// What a session is doing. The five user-facing values come straight from the
 /// roadmap's agent event protocol; `Starting` and `Exited` are the lifecycle
@@ -344,8 +362,8 @@ pub struct SessionInfo {
     /// the default is "not paused", which is what an absent field meant.
     #[serde(default)]
     pub paused: bool,
-    /// The six permission dimensions this session actually runs under, already
-    /// normalised by the daemon.
+    /// The seven permission dimensions this session actually runs under,
+    /// already normalised by the daemon.
     ///
     /// Flattened, not nested: `sandbox` stays a top-level key, so APEX Shell's
     /// existing read of it keeps working and a record written before the split
@@ -1005,7 +1023,7 @@ pub struct RunRequest {
     pub args: Vec<String>,
     /// Run here. Must be absolute.
     pub cwd: String,
-    /// The six permission dimensions, flattened for the same reason as
+    /// The seven permission dimensions, flattened for the same reason as
     /// [`SessionInfo::policy`]: an older client sends `{"sandbox":"strict"}`
     /// and nothing else, and that must keep meaning what it meant.
     ///
@@ -2007,6 +2025,7 @@ mod tests {
             ("the mcp bridge", MCP_BRIDGE_VERSION),
             ("system-access grants", SYSTEM_GRANT_VERSION),
             ("scoped grants", SCOPED_GRANT_VERSION),
+            ("the connector policy", CONNECTOR_POLICY_VERSION),
         ] {
             assert!(
                 since <= PROTOCOL_VERSION,
@@ -2016,16 +2035,17 @@ mod tests {
         }
         // The newest guard is the current revision: adding a wire field
         // without bumping the version is the fail-open these exist to catch.
-        assert_eq!(SCOPED_GRANT_VERSION, PROTOCOL_VERSION);
+        assert_eq!(CONNECTOR_POLICY_VERSION, PROTOCOL_VERSION);
         // And every older guard stays strictly behind it. `<`, not
-        // `== PROTOCOL_VERSION - 1`: these three shipped as revision 5 and are
-        // not going to move again, so pinning them one below the current
-        // version would break all three on the next bump to 7 for no reason
-        // anybody could act on.
+        // `== PROTOCOL_VERSION - 1`: three of these shipped as revision 5 and
+        // scoped grants as 6, and none of them is going to move again, so
+        // pinning them one below the current version would break them all on
+        // the next bump for no reason anybody could act on.
         for (name, since) in [
             ("generic capabilities", GENERIC_CAPABILITY_VERSION),
             ("the mcp bridge", MCP_BRIDGE_VERSION),
             ("system-access grants", SYSTEM_GRANT_VERSION),
+            ("scoped grants", SCOPED_GRANT_VERSION),
         ] {
             assert!(
                 since < PROTOCOL_VERSION,
