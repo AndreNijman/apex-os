@@ -12,8 +12,10 @@
 #
 #  "Power loss during update" has two halves. The ostree half — a staged
 #  deployment discarded by a crash before clean shutdown, the machine coming
-#  back on the old image — is what `chaos-loop` exercises in a VM, because it
-#  needs a bootloader and a real reboot and cannot be faked in a fixture tree.
+#  back on the old image — is `tests/chaos/cases/reboot-loop.sh`, run in a VM
+#  under Secure-Boot-enforcing OVMF, because the counter that decides it is
+#  decremented by the BOOTLOADER before any kernel runs and cannot be faked in
+#  a fixture tree. `tests/chaos/chaos-loop` is what repeats it.
 #
 #  This is the OTHER half, and it is the half that is reachable in two seconds
 #  on any machine: `apex update` writes

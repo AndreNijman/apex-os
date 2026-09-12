@@ -371,5 +371,83 @@ env APEX_BIN=/bin/true APEX_TRUST_ROOT="$TMP/fixture" \
 is "a case with no title exits 2" "$brc" "2"
 rm -f "$CASES/broken.sh"
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  chaos-loop — criterion 2's bounded, resumable series.
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The loop's whole claim is that continuity is a property of the SERIES and not
+# of any one process, and the cursor is what makes that true. So what is tested
+# here is the cursor: that it advances, that a resume continues rather than
+# restarting, that it cannot be silently reinterpreted, and that an iteration
+# which measured nothing is counted as could-not-inject rather than as a quiet
+# zero.
+
+LOOP="$TMP/loop"
+loop() {
+    env APEX_BIN=/bin/true APEX_TRUST_ROOT="$TMP/fixture" \
+        "$CHAOS/chaos-loop" --out "$LOOP" --cases-dir "$CASES" "$@" \
+        > "$TMP/loop.log" 2>&1
+}
+cursor_val() { grep -m1 "^$1=" "$LOOP/cursor" 2>/dev/null | cut -d= -f2-; }
+
+sec "a series is bounded, and its cursor is written after every iteration"
+lrc=0; loop --iterations 2 --seed 4242 green || lrc=$?
+is "two iterations of a green case pass" "$lrc" "0"
+is "…and the cursor counted both" "$(cursor_val iterations_done)" "2"
+is "…and tallied the verdicts" "$(cursor_val survived)" "2"
+if [[ -d "$LOOP/iter-0001" && -d "$LOOP/iter-0002" ]]; then
+    ok "…and every iteration kept its own complete bundle"
+else
+    bad "an iteration bundle is missing" "$(ls "$LOOP")"
+fi
+
+sec "a resume continues the series rather than restarting it"
+lrc=0; loop --resume --iterations 1 || lrc=$?
+is "the resumed run exits 0" "$lrc" "0"
+is "…and the count went to three, not back to one" "$(cursor_val iterations_done)" "3"
+if [[ -d "$LOOP/iter-0003" ]]; then
+    ok "…and the new iteration is numbered from where the series was"
+else
+    bad "iteration 3 has no bundle" "$(ls "$LOOP")"
+fi
+# The seed sequence is derived from the SERIES seed and the iteration number,
+# so a failure at iteration 41 is reproducible without replaying the forty
+# before it. Two iterations with the same seed would break that.
+s1="$(sed -n 's/.*"seed": \([0-9]*\).*/\1/p' "$LOOP/iter-0001/green/verdict.json" 2>/dev/null)"
+s3="$(sed -n 's/.*"seed": \([0-9]*\).*/\1/p' "$LOOP/iter-0003/green/verdict.json" 2>/dev/null)"
+if [[ -n "$s1" && -n "$s3" && "$s1" != "$s3" ]]; then
+    ok "each iteration runs at its own seed ($s1 then $s3)"
+else
+    bad "iterations do not have distinct seeds" "got '$s1' and '$s3'"
+fi
+
+sec "a series cannot be silently reinterpreted"
+lrc=0; loop --resume --seed 999 --iterations 1 || lrc=$?
+is "changing the seed mid-series is refused" "$lrc" "2"
+lrc=0; loop --resume --iterations 1 red || lrc=$?
+is "changing the case list mid-series is refused" "$lrc" "2"
+is "…and neither attempt advanced the cursor" "$(cursor_val iterations_done)" "3"
+
+sec "a cursor nobody can read is not a fresh start"
+# Silently starting over is how a series that already found a failure reports a
+# clean run: the failure is in iteration 12's bundle, the cursor pointing at it
+# is gone, and iteration 1 passes.
+cp "$LOOP/cursor" "$TMP/cursor.keep"
+printf 'garbage\n' > "$LOOP/cursor"
+lrc=0; loop --resume --iterations 1 || lrc=$?
+is "an unreadable cursor is refused, not reset" "$lrc" "2"
+if grep -q "intact" "$TMP/loop.log"; then
+    ok "…and the refusal says the bundles are still there"
+else
+    bad "the refusal gives no way forward" "$(tail -2 "$TMP/loop.log")"
+fi
+cp "$TMP/cursor.keep" "$LOOP/cursor"
+
+sec "a failing case fails the series"
+LOOP="$TMP/loop-red"
+lrc=0; loop --iterations 1 --seed 7 red || lrc=$?
+is "one red iteration is a red series" "$lrc" "1"
+is "…and the cursor records it" "$(cursor_val failed)" "1"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
