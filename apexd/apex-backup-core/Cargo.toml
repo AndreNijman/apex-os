@@ -1,0 +1,30 @@
+[package]
+name = "apex-backup-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+apex-secret-core = { path = "../apex-secret-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+toml.workspace = true
+
+# The AEAD. Already in this workspace's graph through `snow`, so it is not a new
+# tree — see src/crypto.rs for why XChaCha20-Poly1305 and not AES-GCM.
+chacha20poly1305 = "0.10.1"
+# The one-step KDF over the X25519 shared secret, and the chunk digest.
+sha2 = "0.10.9"
+# The sealed box's ephemeral half.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+# Key material, out of memory when it goes out of scope.
+zeroize = "1"
+# Base64. Already in the graph through `apex-remote-core`.
+data-encoding = "2"
+# Ephemeral secrets and snapshot ids.
+getrandom = { version = "0.2", features = ["std"] }
