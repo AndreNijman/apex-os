@@ -1212,6 +1212,17 @@ cmd_rm() {
 
 RUN_PREFIX="run-"
 
+# Set by cmd_run before the trap is armed, read by run_teardown after cmd_run
+# has returned. See the comment where the trap is set.
+RUN_NAME=""
+
+run_teardown() {
+    [ -n "$RUN_NAME" ] || return 0
+    "$VIRSH" -c "$VM_URI" destroy "$RUN_NAME" >/dev/null 2>&1
+    "$VIRSH" -c "$VM_URI" undefine "$RUN_NAME" --nvram --snapshots-metadata >/dev/null 2>&1
+    remove_vm_dir "$RUN_NAME"
+}
+
 new_run_name() {
     local suffix
     suffix="$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 8)"
@@ -1300,12 +1311,13 @@ cmd_run() {
     # Teardown on EVERY exit path including Ctrl-C, the same rule
     # apex-disposable applies. A disposable VM that survives its run is not
     # disposable, and a half-removed one is a domain libvirt still has.
-    # shellcheck disable=SC2317
-    run_teardown() {
-        "$VIRSH" -c "$VM_URI" destroy "$name" >/dev/null 2>&1
-        "$VIRSH" -c "$VM_URI" undefine "$name" --nvram --snapshots-metadata >/dev/null 2>&1
-        remove_vm_dir "$name"
-    }
+    #
+    # RUN_NAME is a global and run_teardown is a top-level function, because
+    # the EXIT trap fires after cmd_run has returned and a `local name` is gone
+    # by then. Measured, not reasoned: the first version read `$name` in the
+    # trap, hit "name: unbound variable" at the moment of teardown, and left
+    # the VM's directory and its libvirt domain behind while reporting success.
+    RUN_NAME="$name"
     trap 'run_teardown' EXIT INT TERM
 
     # ── the copy-in volume ──────────────────────────────────────────────────
