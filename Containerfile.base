@@ -2305,10 +2305,17 @@ RUN set -eux; \
     grep -q 'apex-screen-reader' /usr/share/apex-greet/sway-greet.conf; \
     grep -q 'apex-screen-reader' /usr/share/apex-greet/labwc-greet/rc.xml; \
     test -x /usr/libexec/apex-screen-reader; \
-    : 'And the host config still parses. sway -C exits 1 on a config with a'; \
-    : 'bad binding and 0 on this one, checked in both directions, so a typo'; \
-    : 'in that binding fails the build rather than the login.'; \
-    sway -C -c /usr/share/apex-greet/sway-greet.conf
+    : 'The host config is NOT put through sway -C here, and that is measured'; \
+    : 'rather than an oversight. /usr/bin/sway carries the file capability'; \
+    : 'cap_sys_nice=ep, and exec of a binary with an EFFECTIVE file capability'; \
+    : 'outside the bounding set returns EPERM -- so inside an image build sway'; \
+    : 'cannot run at all: rc=126, Operation not permitted, for a good config'; \
+    : 'and a deliberately broken one alike. A check that returns 126 either'; \
+    : 'way is not a check. The parse check lives in'; \
+    : 'tests/test-apex-greet-session-bus.sh, where it runs on a real machine'; \
+    : 'and is proved in both directions, and SKIPs with a reason where sway'; \
+    : 'cannot be executed.'; \
+    echo "greeter session wrapper: installed, named by greetd, and both hosts bind the reader"
 
 # ── Greeter wallpaper: the user's own, not the shipped default ─────────────
 # THE BUG: change your wallpaper in APEX Shell and the login/lock screen kept

@@ -1546,11 +1546,18 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           sudo apt-get update -qq
-          for p in dbus dbus-x11 libglib2.0-bin; do
+          for p in dbus dbus-x11 libglib2.0-bin at-spi2-core; do
             sudo apt-get install -y -qq "$p" || echo "note: $p unavailable"
           done
           for b in dbus-daemon dbus-run-session gdbus; do
             command -v "$b" >/dev/null && echo "have: $b" || echo "MISSING: $b"
+          done
+          # at-spi2-core is what the wrapper execs. Without it the two
+          # accessibility-bus assertions SKIP with a reason rather than being
+          # measured, which is a runner that says nothing about the half of the
+          # change that matters most.
+          for f in /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher; do
+            [ -x "$f" ] && echo "have: $f"
           done
 
       - name: Run greeter session-bus assertions

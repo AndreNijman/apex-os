@@ -37,7 +37,9 @@
 #     in to. This script keeps the shallow tree: it starts the bus with
 #     `dbus-daemon --fork` and then EXECS the compositor, so the PID greetd
 #     holds is still the compositor's, exactly as before. The session-bus suite
-#     asserts that equality by printing $$ on both sides.
+#     asserts that equality by printing $$ on both sides. The cost of exec'ing
+#     is that nothing is left to clean up afterwards, which is what the watcher
+#     at the bottom of this file is for.
 #
 #  ── The rule this file is written to ────────────────────────────────────────
 #
@@ -105,10 +107,11 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null 2
 </busconfig>
 EOF
         # --print-pid alongside --print-address, into a file. This script EXECS
-        # the compositor, so it is never around to clean up after it: what it
-        # starts is reaped by the session teardown, and the pid files are how
-        # anything doing that teardown — or any test — can find exactly these
-        # processes rather than pattern-matching every dbus-daemon on the box.
+        # the compositor, so it is never around to clean up after it — the
+        # watcher at the bottom is, and it reads these files. They are also how
+        # a test, or anything else tearing a greet session down, can find
+        # exactly these processes rather than pattern-matching every
+        # dbus-daemon on the box.
         _addr="$(dbus-daemon --config-file="$_busdir/session.conf" \
                              --fork --print-address=1 --print-pid=3 \
                              3>"$_busdir/bus.pid" 2>/dev/null)"
@@ -171,6 +174,31 @@ if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
             printf '%s\n' "$!" >"$_busdir/registry.pid" 2>/dev/null
         fi
     fi
+fi
+
+# ── clean up after the compositor, since this script will not be here to ────
+# What greetd does on teardown — signal one pid, or the whole process group — is
+# a property of greetd rather than of this repository, and the honest answer is
+# that it was not measured here. Written as though the session teardown reaps
+# these, it would be a claim this file cannot support; and if it is wrong, every
+# login and every greeter restart leaves a session bus, an accessibility bus, a
+# launcher and a registry behind as orphans owned by the greetd user.
+#
+# So the cleanup is owned here. `$$` inside a subshell is the PARENT's pid,
+# which after the exec below is the compositor's, so this waits for the
+# compositor to go and then kills exactly the pids recorded above — never a
+# pattern, never anything this script did not start. If greetd does kill the
+# group, this has already gone with it and the kills never run.
+if [ -d "$_busdir" ]; then
+    (
+        while kill -0 $$ 2>/dev/null; do sleep 2; done
+        for _f in registry.pid a11y.pid bus.pid; do
+            _p="$(cat "$_busdir/$_f" 2>/dev/null)"
+            case "$_p" in ''|*[!0-9]*) continue ;; esac
+            kill -TERM "$_p" 2>/dev/null
+        done
+        rm -rf "$_busdir" 2>/dev/null
+    ) >/dev/null 2>&1 &
 fi
 
 # ── the compositor, and nothing after it ────────────────────────────────────
