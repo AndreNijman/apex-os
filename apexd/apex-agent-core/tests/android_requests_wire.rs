@@ -101,6 +101,43 @@ fn input_is_a_verb_and_carries_the_terminator_the_daemon_does_not_add() {
 
 
 #[test]
+fn receive_is_a_verb_and_the_caller_chooses_no_part_of_the_path() {
+    // The verb the note in this fixture used to say did not exist, with the
+    // arithmetic for why one could not: 65514 bytes per `Frame::Control`,
+    // base64's 4/3, so 48 KB against a screenshot's 100 KB to 2 MB. All of it
+    // measured ONE frame type. `Open`/`Data`/`Close` is begin/chunk/end and
+    // always was; what was missing was a sink, and this is it.
+    match parse("receive") {
+        Request::Receive { id, name, len } => {
+            assert_eq!(id, 7);
+            assert_eq!(name, "shot.png");
+            // Past what a single control frame could ever have carried, which
+            // is the point of the number rather than an arbitrary size.
+            assert!(
+                len > 65_514,
+                "a fixture that fits in one frame would not exercise the thing that was \
+                 said to be impossible"
+            );
+        }
+        other => panic!("`receive` parsed as {other:?}"),
+    }
+
+    // The name crosses the wire as the phone was given it, and `safe_name` is
+    // what makes it a name. Asserted HERE, against the daemon's own reducer,
+    // so the guarantee is the one the daemon actually applies rather than the
+    // one the phone believes it applies.
+    match parse("receive_hostile_name") {
+        Request::Receive { name, .. } => {
+            assert_eq!(name, "../../.ssh/authorized_keys", "the phone sanitised it itself");
+            let safe = apex_agent_core::inject::safe_name(&name).expect("a name");
+            assert_eq!(safe, ".._.._.ssh_authorized_keys");
+            assert!(!safe.contains('/'), "a name that survived with a separator in it");
+        }
+        other => panic!("`receive` with a hostile name parsed as {other:?}"),
+    }
+}
+
+#[test]
 fn run_carries_the_checkpoint_flag_and_omits_what_it_has_no_value_for() {
     match parse("run_minimal") {
         Request::Run(r) => {

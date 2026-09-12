@@ -569,12 +569,123 @@ object Handoff {
      */
     object Files {
 
-        /** Shown where the attach control would be. */
-        const val WHY: String =
-            "Sending a photo or a file from this phone needs something APEX does not have yet: " +
-                "a way to carry file content over this connection. The machine can already " +
-                "hand a file to a running agent — `apex agent send` does it — but only for a " +
-                "file that is already on the machine, and only from a terminal there."
+        /**
+         * Largest file this phone will offer to hand over.
+         *
+         * `apex-agentd`'s `inject::MAX_BYTES`, to the byte. Not a guess and
+         * not a policy of this app's: the daemon refuses anything larger
+         * BEFORE it takes the channel over, so a phone with a different number
+         * here would either refuse a file the machine would have taken, or
+         * spend a round trip carrying a file it was always going to be told
+         * was too big. It is checked on this side so the second cannot happen
+         * and stated as the daemon's so the first cannot drift.
+         */
+        const val MAX_BYTES: Long = 32L * 1024 * 1024
+
+        /** Shown where the size of the chosen file is. */
+        fun tooBig(bytes: Long): String =
+            "That file is ${bytes} bytes. A file handed to an agent has to be under " +
+                "$MAX_BYTES — the machine refuses a larger one before any of it is sent, so " +
+                "this is the same limit rather than a stricter one."
+
+        /**
+         * The characters `inject::safe_name` keeps, everything else replaced.
+         *
+         * Mirrored so the user can be shown what the file will be called
+         * before they send it, and for no other purpose: what is SENT is the
+         * name as the picker gave it. A phone that reduced the name itself
+         * would be a second implementation of a rule the daemon applies
+         * anyway, and the one case where the two differed is the case where
+         * the user is told the wrong filename.
+         */
+        const val SAFE: String =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+
+        /** `inject::MAX_NAME`. Longer names keep their tail, so the extension survives. */
+        const val MAX_NAME: Int = 48
+
+        /**
+         * What the machine will call this file, or `null` when it will refuse
+         * the name outright.
+         *
+         * "As far as it can say" is exact: the daemon also prefixes a sequence
+         * number it alone knows, so this is the name and never the path. Shown
+         * because a photo called `Screenshot 2026-09-13 at 14.02.11.png`
+         * arrives as `Screenshot_2026-09-13_at_14.02.11.png`, and a user who
+         * was not told that has to go and look.
+         *
+         * ## It mirrors `inject::safe_name`, and writing it found three places
+         * ## where the obvious mirror is not one
+         *
+         * 1. **`null` for a name the daemon refuses.** `safe_name` returns
+         *    `Err(NoFileName)` for an empty name, `.` and `..`, and
+         *    `Err(ControlByte)` for anything with a byte a terminal would act
+         *    on. A preview that dressed those up as `file..` would promise a
+         *    file the user is never going to find.
+         * 2. **Code points, not UTF-16 units.** Rust iterates `chars()`, so an
+         *    emoji is ONE replacement. A Kotlin loop over `Char` sees a
+         *    surrogate pair and produces TWO, and the user is shown a name a
+         *    character longer than the real one.
+         * 3. **The all-dots repair applies to what the reduction PRODUCED**,
+         *    not to what was typed. `...` survives the alphabet intact and
+         *    would make the destination `001-...`, which is a traversal
+         *    spelled as a filename — so the daemon prefixes it, and `..` never
+         *    reaches that line because rule 1 already refused it.
+         *
+         * None of this changes what is SENT. The name goes over the wire as
+         * the picker gave it; the reduction is the daemon's, and the only way
+         * this function can be wrong is by telling somebody the wrong
+         * filename.
+         */
+        fun preview(name: String): String? {
+            if (name.isEmpty() || name == "." || name == "..") return null
+            // `safe_name` refuses on UTF-8 bytes below 0x20 or 0x7f. Every
+            // byte of a non-ASCII character is 0x80 or above, so checking
+            // UTF-16 units for the same range is the same test — and a
+            // surrogate is 0xD800 or above, so it cannot be caught here.
+            if (name.any { it.code < 0x20 || it.code == 0x7f }) return null
+
+            val out = StringBuilder(name.length)
+            var i = 0
+            while (i < name.length) {
+                val cp = name.codePointAt(i)
+                out.append(if (cp < 128 && SAFE.indexOf(cp.toChar()) >= 0) cp.toChar() else '_')
+                i += Character.charCount(cp)
+            }
+            var reduced = out.toString()
+            if (reduced.isNotEmpty() && reduced.all { it == '.' }) reduced = "file$reduced"
+            // The tail, because the extension is the part that tells an agent
+            // what it is looking at. The reduction is pure ASCII by
+            // construction, so character length and byte length — which is
+            // what the daemon measures — are the same number here.
+            if (reduced.length > MAX_NAME) reduced = reduced.substring(reduced.length - MAX_NAME)
+            return reduced
+        }
+
+        /** Shown when [preview] is `null`. */
+        const val UNUSABLE_NAME: String =
+            "The machine will not take a file with that name. A name that is empty, that is " +
+                "just a dot or two, or that contains a character a terminal would act on is " +
+                "refused rather than repaired — a repaired name would be a different file " +
+                "from the one you chose."
+
+        /**
+         * Shown beside the picker, and it is a statement about the machine
+         * rather than about this app.
+         *
+         * The file does not go where the user chose; it goes where the DAEMON
+         * chooses — an inbox inside the session's own scratch directory, under
+         * a name it reduces — and the agent is told about it by having that
+         * path typed into its terminal, unsubmitted. Both halves matter to
+         * somebody deciding whether to send a photo: nothing of theirs is
+         * written anywhere else on the machine, and nothing happens to it
+         * until they or the agent's own operator act.
+         */
+        const val WHERE: String =
+            "The file goes into this session's own inbox on the machine, under a name the " +
+                "machine chooses, and its path is typed into the agent's terminal without " +
+                "being submitted. Nothing else on the machine is written to, and no other " +
+                "session can see it."
 
         /**
          * The rule this app follows about the phone's own storage, which is
@@ -589,10 +700,13 @@ object Handoff {
          * picker already returns what was chosen.
          *
          * So the manifest declares neither, and `ManifestPermissionsTest`
-         * asserts it. That test is worth having *before* there is a picker
-         * rather than after: the moment a transport exists, the obvious way to
-         * read the file is a permission, and the guard is what makes the
-         * cheaper right answer the one that compiles.
+         * asserts it. It was written one round before the transport existed,
+         * on the reasoning that the moment there IS one the obvious way to
+         * read a file is a permission — and that is now the live case rather
+         * than the anticipated one: [Upload] takes an `InputStream`, which is
+         * what `ContentResolver.openInputStream` on a picker's URI returns,
+         * and asking for any of these would buy nothing it does not already
+         * have.
          */
         val FORBIDDEN_PERMISSIONS: List<String> = listOf(
             "android.permission.READ_EXTERNAL_STORAGE",
