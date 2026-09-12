@@ -699,15 +699,27 @@ impl Service {
         // nothing.
         let unknown = budget.unknown_operations(&self.registry.operation_ids());
         if !unknown.is_empty() {
+            // An alias is a near miss worth naming separately. A grant may be
+            // written `memory:mcp-request`, so somebody capping the same thing
+            // reaches for the same spelling — but the trail records the
+            // canonical id, so an alias cap would match nothing. Saying which
+            // to write is the difference between a refusal and a puzzle.
+            let named: Vec<String> = unknown
+                .iter()
+                .map(|name| match self.registry.lookup(name) {
+                    Ok((_, op)) => format!("'{name}' (an alias; write '{}')", op.id),
+                    Err(_) => format!("'{name}'"),
+                })
+                .collect();
             return Err((
                 budget::UNMEASURABLE.to_string(),
                 format!(
-                "this project's [agent.budget] caps or prices {}, which no \
-                 provider on this machine implements — so the cap would never \
-                 bite, and a cap that does nothing is worse than no cap. Fix \
-                 the spelling or remove the line; `apex secret operations` \
-                 lists what can be capped",
-                    unknown.join(", ")
+                    "this project's [agent.budget] caps or prices {}, which is \
+                     not how this machine spells an operation it can count — so \
+                     the cap would never bite, and a cap that does nothing is \
+                     worse than no cap. `apex secret capabilities` lists what \
+                     can be capped",
+                    named.join(", ")
                 ),
             ));
         }

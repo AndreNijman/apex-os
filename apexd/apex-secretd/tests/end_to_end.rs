@@ -1397,6 +1397,33 @@ fn a_cap_on_an_operation_no_provider_implements_refuses_rather_than_capping_noth
         other => panic!("a cap on nothing was accepted: {other:?}"),
     }
     assert!(provider.authorizations().is_empty(), "it ran anyway");
+
+    // The near miss, which is the one somebody actually writes: a grant may be
+    // spelled `memory:mcp-request`, so a cap reaches for the same word. The
+    // trail records the canonical id, so an alias cap would match nothing —
+    // and the refusal has to say which spelling to use, or it is a puzzle
+    // rather than an answer.
+    let aliased = budgeted_project(
+        &daemon,
+        "aliased",
+        "[agent.budget.operations]\n\"mcp-request\" = 2\n",
+    );
+    daemon
+        .client()
+        .call(&Request::Grant {
+            project: aliased.to_string_lossy().into_owned(),
+            service: "memory".into(),
+            capability: "mcp-request".into(),
+            revoke: false,
+        })
+        .expect("grant");
+    match mcp_call(&daemon, &aliased) {
+        Response::Error { message, .. } => {
+            assert!(message.contains("an alias"), "{message}");
+            assert!(message.contains("write 'mcp.request'"), "{message}");
+        }
+        other => panic!("an alias cap was accepted and would cap nothing: {other:?}"),
+    }
 }
 
 #[test]
