@@ -164,6 +164,17 @@ pub enum Request {
     Audit {
         #[serde(default = "default_audit_lines")]
         lines: usize,
+        /// Only lines recorded for this project root, when given.
+        ///
+        /// Filtered by the daemon, **before** `lines` is applied, and that
+        /// ordering is the point rather than an optimisation: the trail is one
+        /// file for the machine, so a caller asking "what did this worktree
+        /// do" against a busy trail would otherwise get a thousand lines from
+        /// everywhere else and conclude the worktree had done nothing. §13.13's
+        /// destroy plan is derived from these lines, and a plan short of a
+        /// resource is a plan that says it cleaned up when it did not.
+        #[serde(default)]
+        project: Option<String>,
     },
 }
 
@@ -483,7 +494,7 @@ mod tests {
                     "origin",
                 )),
             },
-            Request::Audit { lines: 5 },
+            Request::Audit { lines: 5, project: None },
         ];
         for req in requests {
             let text = serde_json::to_string(&req).unwrap();
@@ -514,7 +525,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_str::<Request>(r#"{"op":"audit"}"#).unwrap(),
-            Request::Audit { lines: 20 }
+            Request::Audit { lines: 20, project: None }
         );
     }
 

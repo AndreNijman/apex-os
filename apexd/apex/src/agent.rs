@@ -735,6 +735,14 @@ pub enum ProjectCmd {
         /// Keep the branch.
         #[arg(long)]
         keep_branch: bool,
+        /// §13.13: destroy the Cloudflare resources this worktree owns first.
+        ///
+        /// The plan is printed before anything is destroyed, and the worktree
+        /// is removed only if every destroyable thing went. Without this the
+        /// worktree is removed and whatever it created at Cloudflare stays up —
+        /// `apex cf preview plan` inside it says what that would be.
+        #[arg(long)]
+        destroy_preview: bool,
     },
     /// Stop tracking a project. The checkout is never touched.
     Forget { slug: String },
@@ -3379,7 +3387,11 @@ pub fn project_cmd(cmd: ProjectCmd) -> i32 {
         ProjectCmd::Info => project_info(),
         ProjectCmd::Worktrees => project_worktrees(),
         ProjectCmd::Checkpoints => project_checkpoints(),
-        ProjectCmd::Remove { name, keep_branch } => project_remove(name, !keep_branch),
+        ProjectCmd::Remove {
+            name,
+            keep_branch,
+            destroy_preview,
+        } => project_remove(name, !keep_branch, destroy_preview),
         ProjectCmd::Forget { slug } => {
             project::forget(&slug).map(|()| {
                 println!("forgot {slug}");
@@ -4004,8 +4016,56 @@ fn project_checkpoints() -> Result<i32> {
     Ok(0)
 }
 
-fn project_remove(name: String, delete_branch: bool) -> Result<i32> {
+/// Remove an agent worktree, and — on request — what it owns at Cloudflare.
+///
+/// ## The order is the whole of it
+///
+/// The cloud half happens FIRST, and the worktree is removed only if it
+/// succeeded. `Provider::bind` resolves a name against `apex.toml` inside the
+/// project root, and for a worktree that root is the worktree's own directory —
+/// so once the directory is gone, no brokered operation can resolve anything
+/// for it and the preview is unreachable through the broker. A build that
+/// removed the checkout first would leave a hostname up with nothing left that
+/// knows how to take it down.
+///
+/// The same reasoning is why a partial failure stops: a worktree removed after
+/// half its resources went is a worktree nobody can finish cleaning up.
+///
+/// **What this cannot cover:** `git worktree remove` run by hand, which is a
+/// thing people do. There is no hook in git for it, so the honest statement is
+/// that this verb cleans up and that one does not — and `apex cf preview plan`
+/// still works from the project root afterwards, because the trail outlives the
+/// directory.
+fn project_remove(name: String, delete_branch: bool, destroy_preview: bool) -> Result<i32> {
     let p = current_project()?;
+    if destroy_preview {
+        let root = p.worktree_path(&name);
+        let Some(root) = root.to_str() else {
+            bail!("{} is not a path this can name to the secret service", root.display());
+        };
+        let plan = crate::cloudflare::preview::plan(root)?;
+        crate::cloudflare::preview::print(&plan);
+        println!();
+        let failed = crate::cloudflare::preview::destroy(&plan)?;
+        if failed > 0 {
+            eprintln!(
+                "apex project: {failed} of this worktree's Cloudflare resources                  could not be destroyed, so the worktree has been LEFT IN PLACE.                  Removing it now would leave them up with nothing that knows how                  to take them down."
+            );
+            return Ok(1);
+        }
+        let left = plan
+            .items
+            .iter()
+            .filter(|i| i.disposal.leaves_something())
+            .count();
+        if left > 0 {
+            println!(
+                "{left} thing{} in the plan above {} not something this build can                  destroy. The worktree is being removed anyway; the list stays                  true.",
+                if left == 1 { "" } else { "s" },
+                if left == 1 { "is" } else { "are" }
+            );
+        }
+    }
     project::remove_worktree(&p, &name, delete_branch)?;
     println!(
         "removed worktree {name}{}",

@@ -138,11 +138,25 @@ impl Service {
     /// One file for the machine, because "what happened at 14:02" should not be
     /// a join across accounts — but a caller sees only its own lines, so the
     /// trail does not become a way to learn which services another account has.
-    pub fn audit(&self, peer: Peer, lines: usize) -> Response {
+    pub fn audit(&self, peer: Peer, lines: usize, project: Option<&str>) -> Response {
         let limit = lines.clamp(1, 1000);
+        // The project filter runs BEFORE the limit is applied, which is the
+        // whole reason it exists on the wire rather than in the caller: the
+        // trail is one file for the machine, so a client filtering the last
+        // thousand lines itself would see a thousand lines from everywhere
+        // else and conclude this project had done nothing.
         let mut entries: Vec<AuditLine> = audit::tail(&self.store.audit_path(), 10_000)
             .into_iter()
             .filter(|l| l.uid == peer.uid)
+            .filter(|l| match project {
+                // An exact match on the root, never a prefix. A worktree lives
+                // at `<project>/.apex/worktrees/<name>`, so a prefix match
+                // asking about the project would sweep in every worktree's
+                // work — and a destroy plan built from that would offer to
+                // delete another worktree's preview.
+                Some(want) => l.project.as_deref() == Some(want),
+                None => true,
+            })
             .collect();
         if entries.len() > limit {
             entries.drain(..entries.len() - limit);
@@ -1354,7 +1368,7 @@ mod tests {
             svc.hello(),
             svc.list(peer),
             svc.grants(peer),
-            svc.audit(peer, 100),
+            svc.audit(peer, 100, None),
             // A use that gets as far as it can without a repository.
             svc.use_capability(peer, record("demo", "git-fetch", "origin", "/tmp/p"), Vec::new()),
             // ...and one that is refused early.
@@ -1629,7 +1643,7 @@ mod tests {
         // The trail is filtered too, so it is not a way to learn what another
         // account has stored. The refusal above is in it — that line is theirs
         // — and nothing of mine is.
-        match svc.audit(theirs, 100) {
+        match svc.audit(theirs, 100, None) {
             Response::Audit { entries } => {
                 assert!(entries.iter().all(|l| l.uid == theirs.uid), "{entries:#?}");
                 assert!(
@@ -1640,7 +1654,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
         // ...and mine still shows it.
-        match svc.audit(mine, 100) {
+        match svc.audit(mine, 100, None) {
             Response::Audit { entries } => {
                 assert!(entries.iter().any(|l| l.event == AuditEvent::Stored), "{entries:#?}")
             }
@@ -2095,5 +2109,67 @@ mod tests {
         assert_ne!(OWNER, "grant");
         assert_ne!(APPROVAL_REQUIRED, UNDECIDED);
         assert_ne!(OWNER, UNDECIDED);
+    }
+
+    // ── §13.13's reach: the audit filter a destroy plan is built from ────────
+
+    #[test]
+    fn the_audit_project_filter_is_exact_and_runs_before_the_line_limit() {
+        // Both halves matter, and each is a way for §13.13's destroy plan to
+        // be wrong.
+        //
+        // EXACT: a worktree lives at `<project>/.apex/worktrees/<name>`, so a
+        // prefix match asking about the project would sweep in every
+        // worktree's work — and a plan built from that would offer to delete
+        // another worktree's preview. The other direction is worse: a plan for
+        // the worktree that matched the project root as a prefix of nothing
+        // would still be wrong when two worktrees share a name prefix.
+        //
+        // BEFORE THE LIMIT: the trail is one file for the machine. A client
+        // that asked for the last thousand lines and filtered them itself
+        // would see a thousand lines of somebody else's work and conclude this
+        // worktree had created nothing — a plan that reports a clean worktree
+        // because the machine is busy.
+        let (svc, dir) = temp_service("audit-filter");
+        let peer = me();
+        svc.add(peer, demo_service("demo", "github.com", "https"), SecretValue::new(b"t".to_vec()));
+
+        let here = "/tmp/p";
+        let worktree = "/tmp/p/.apex/worktrees/one";
+        // The two lines that matter go FIRST, and the noise after them. That
+        // ordering is the whole of the second half: a build that took the last
+        // `limit` lines and then filtered would find nothing here, because
+        // everything it looked at happened afterwards. The other ordering
+        // passes either way and would have proved nothing — measured, not
+        // assumed.
+        svc.use_capability(peer, record("demo", "git.fetch", "origin", here), Vec::new());
+        svc.use_capability(peer, record("demo", "git.fetch", "origin", worktree), Vec::new());
+        for i in 0..60 {
+            let mut rec = record("demo", "git.fetch", "origin", "/tmp/elsewhere");
+            rec.params.insert("branch".into(), format!("b{i}"));
+            svc.use_capability(peer, rec, Vec::new());
+        }
+
+        let lines = |project: Option<&str>, limit: usize| -> Vec<AuditLine> {
+            match svc.audit(peer, limit, project) {
+                Response::Audit { entries } => entries,
+                other => panic!("not an audit reply: {other:?}"),
+            }
+        };
+
+        // A limit far below the noise still reaches this project's own line.
+        let mine = lines(Some(here), 5);
+        assert_eq!(mine.len(), 1, "{mine:#?}");
+        assert_eq!(mine[0].project.as_deref(), Some(here));
+
+        // And the worktree under it is NOT this project's.
+        let theirs = lines(Some(worktree), 5);
+        assert_eq!(theirs.len(), 1, "{theirs:#?}");
+        assert_eq!(theirs[0].project.as_deref(), Some(worktree));
+
+        // Unfiltered still sees everything, so the filter added a question
+        // rather than narrowing the verb.
+        assert!(lines(None, 1000).len() > 60);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
