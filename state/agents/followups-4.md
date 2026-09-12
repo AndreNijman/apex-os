@@ -5,23 +5,52 @@ worktree: /var/tmp/apex-work/wt-followups-4
 branch: task/followups-4
 
 ## NEXT
-Read dispatch run 34715628612 (`gh run view 34715628612 --log | grep -E "measured:|suite coverage:|shellcheck coverage:"`).
-Do NOT bank exit 0 — the run is red from THREE pre-existing failures that are
-not mine (Static "Validate Containerfile layer order"; engine "Run
-virtualization assertions"; rust "§26 channels"). The evidence is the
-`measured:` lines. What is still unconfirmed on a runner: devices,
-trust-enforcement, netns and multilib (lid is confirmed green, 60/0, run
-34715048790).
+Read dispatch run 34716774107. Grep `measured:|suite coverage:|shellcheck coverage:`
+and check SPECIFICALLY: trust-enforcement `measured: passed=77` (its openssl-3.0
+rewrite has runner evidence from a container, not from a runner yet);
+`shellcheck coverage: 150 discovered, 0 known-failing, 0 newly failing`;
+the `Run greeter AT-SPI assertions` step (two NEW guards in tests/lib/atspi.sh
+have no live evidence — a FATAL there means one fires spuriously); and
+test-apex-storage.sh / test-apex-shared-machine.sh (their `rm -rf` targets
+changed). The run will still be RED from pre-existing failures that are not
+mine: Static "Validate Containerfile layer order", engine "Run virtualization
+assertions", rust "§26 channels".
 
-Then: Job 2, the 27 shellcheck scripts — NOTE the runner has shellcheck 0.9.0
-and this laptop has 0.11.0 and they disagree; check every fix against BOTH
-(`podman run --rm -v <dir>:/m:ro,Z docker.io/koalaman/shellcheck:v0.9.0 -S warning -x /m/<f>`).
-Then the last 3 debt suites: test-apex-firewall-ssh.sh (needs a second host —
-may belong in the exempt section with that reason), test-secret-at-rest.sh
-(21 sudo calls), test-labwc-session.sh (nested compositor; engine job already
-installs one — headless backend only, NEVER a window on Andre's desktop).
+Remaining: the last 3 debt suites in tests/suites-not-in-ci.txt —
+test-apex-firewall-ssh.sh (reads as needing a SECOND host; if so move it to the
+exempt section with that reason, which is a completion not a dodge),
+test-secret-at-rest.sh (21 sudo calls; the runner has passwordless sudo, try it
+THERE not here), test-labwc-session.sh (nested compositor; the engine job already
+installs one — headless backend ONLY, never a window on Andre's desktop).
 
 ## DONE
+- (round 3) `b4f47cce` ci: an unrelated red step ABOVE the two gates switched
+  both off (run 34714159369). Both now `if: ${{ !cancelled() }}`. CONFIRMED on
+  runner 34715048790.
+- `995c6a60` test-apex-lid.sh -> RUST job. **RUNNER GREEN, 60/0** (34715048790,
+  34715628612). Plus: rust selector widened from three narrow files/ paths to
+  `files/` — SIX rust-job suites read under files/ and it reached none of them.
+- `15df7504` test-apex-devices.sh (engine, floor 55) + test-apex-trust-
+  enforcement.sh (rust, floor 77). devices **RUNNER GREEN 55/0/0**.
+- `66ca2dfb` apex-pkg SC2120 — runner-only (shellcheck 0.9.0 vs local 0.11.0).
+- `84af0b76` test-device-services-netns.sh (**RUNNER GREEN 12/0/0**) and
+  test-apex-multilib.sh (**RUNNER GREEN 3/0**). multilib's third assertion had
+  NEVER been made: `download --resolve` cannot produce a native overlap, so it
+  SKIPped on every run ever. Probe now installs `zip` first. Both its remaining
+  `echo SKIP`s are now `bad`.
+- `23a862b5` all 27 shellcheck scripts fixed; the list is EMPTY. 150 discovered,
+  0 failing under BOTH 0.11.0 and the runner's 0.9.0 (checked in a container).
+  Included two real defects: `! grep` refusals in vendor-apex-shell that errexit
+  ignores (checked against the live /usr/share/apex-shell first — both pass on
+  real data), and a backwards `>>file 2>&1` capture in test-secret-at-rest.sh.
+  Two dead atspi.sh captures WIRED UP rather than silenced.
+- `658f7aa4` the trust suite minted its CA with OpenSSL 3.5-only flags; the
+  runner has 3.0.13, so root.pem was never written and 6 assertions failed as
+  if verify.rs were broken. Now ONE path (`openssl ca -startdate/-enddate`),
+  proven identical under 3.0.13 in a container and 3.5.7 here. 77/0 unchanged.
+- Debt: 8 DEBT lines -> 3. Suites run 61 -> 66, exempt 11 -> 6.
+  shellcheck known-failing 27 -> 0.
+
 - (round 3) `b4f47cce` ci: the two gates were being switched off by an
   unrelated red step ABOVE them (run 34714159369: "Run virtualization
   assertions" failed, both gates reported `-`). Both now carry
