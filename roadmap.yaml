@@ -3555,7 +3555,7 @@ tasks:
 - id: P2-016
   title: Multi-user, guest, kiosk and shared-machine support
   priority: P2
-  status: todo
+  status: partial
   area: multi-user
   depends_on:
   - P0-002
@@ -3568,6 +3568,64 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Multi-user, guest, kiosk and shared-machine support. FIVE COMMITS on apex-os task/p2-016-multiuser, all pushed
+    (7e7111d6, b823f811, 3054f007, f1cc2578, 82984e71); no apex-shell change was needed. Workspace 2888 -> 2899
+    passed / 0 failed, clippy clean. tests/test-apex-shared-machine.sh 39/0 (new, wired into CI and into
+    Containerfile.base). tests/test-privilege-requests.sh 39/0, the recorded baseline, re-measured on this branch
+    from a real logind session. tests/check-containerfile-assertions.sh 76 checked / 0 failed. THE ROUND'S POINT
+    IS THAT THREE OF THE FOUR CRITERIA WERE ALREADY BROKEN OR UNASSERTED IN WAYS NOBODY HAD MEASURED, and each was
+    measured on the live L16 before anything was written. CRITERION 1 - PARTIAL, and it was FAILING. /tmp/apex-
+    agent was the one path in apex-agent-core::paths with no user in it; measured live it was drwxr-xr-x andre.
+    ensure_private_dir is called on the leaf, so create_dir_all made the root under the caller's umask and only
+    the leaf got 0700, and /tmp is sticky. Consequence: the SECOND account on a machine could not start an agent
+    at all (session.rs treats the scratch-dir failure as fatal, deliberately), and session ids - which restart at
+    1 per daemon - named the same directories across accounts. Now /tmp/apex-agent-<uid>/<id>, with
+    scratch_root_for(uid) split out as a pure function so the two-account claim is asserted through the production
+    path; three mutations, all caught. The rest of criterion 1 was already true and is now asserted rather than
+    assumed: per-uid secret namespaces (store, grants, approvals), the agentd socket 0600 in a 0700 per-user
+    runtime dir, and standard-vs-administrator, which is polkit auth_admin with allow_any=no and allow_inactive=no
+    on both agent actions - allow_inactive=no is the fast-switching property, since a switched-away session cannot
+    approve while another user holds the seat, and Containerfile.base:139-140 already asserts it at build time.
+    THE GAP THAT KEEPS THIS PARTIAL: nothing in APEX can CREATE a standard account. installer/apex-install:570
+    puts the single account in wheel unconditionally and the GUI offers no choice, so the distinction is enforced
+    but not reachable. CRITERION 4 - MET, after closing the hole P0-014 handed off unfixed. origin::classify
+    tested /session- + .scope BEFORE /user@ + .service, so systemd-run --user --scope --unit=session-4242.scope
+    gave any unprivileged process section 7's first column - the one root approval and break-glass are reserved
+    for. Confirmed live on the L16 as the ordinary user, no sudo, no prompt, before the fix. The user-manager arm
+    now runs first and is a segment test rather than two loose contains calls. Checked rather than assumed that
+    the reorder costs a real desktop nothing: every 0:: line of every process on the laptop, deduplicated - the
+    only /session-N.scope paths are direct children of user-<uid>.slice, and
+    user@1000.service/session.slice/pipewire.service is the near miss that stays a miss. budget.rs's forge test
+    asserted the vulnerability as documentation and now asserts the fix, its name check kept as a second fence.
+    Pairing is per-account by construction and that was unasserted; the only existing test checked 0600-in-0700,
+    which a /var/lib store would also pass. CRITERION 2 - PARTIAL, with the gap that matters CLOSED and the
+    remaining one named. A tmpfs home is not disposability on APEX, because P0-002 moved credentials OUT of the
+    home into /var/lib/apex-secretd/users/<uid>/, root-owned and 0700 - so a guest leaves credentials, per-project
+    grants and standing approvals for the next guest at the same uid, and the home evaporating hides it.
+    /usr/libexec/apex-guest-wipe clears the home contents, that namespace, and the greeter's last-user when it
+    names the guest, behind four fences checked before anything is removed (an allowlist that ships EMPTY, uid not
+    0, a passwd-given home that is not / or /home or /var/home or /root, and no active logind session). The engine
+    is run for real against fixture passwd/store/greeter trees as an ordinary user, and the suite asserts the
+    redirection worked BEFORE it asserts any wiping. Four mutations, all caught - and the uid-0 one is the lesson:
+    removing that fence left root still refused, by the home fence, and ONLY the assertion on the refusal's REASON
+    caught it. STILL OPEN: the wipe is not wired to session end (the unit is After=user-%i.slice, which orders but
+    does not fire); BindsTo + ExecStop, or pam_exec at session close, needs a real second account to verify and is
+    untested. CRITERION 3 - PARTIAL, and the trap was avoided by construction. Nothing ships enabled: no guest
+    account is created, no kiosk config is installed over the login path, the wipe unit has no WantedBy, and the
+    allowlist is empty - so ordinary desktop use is not weakened because it is not touched. That is asserted, not
+    claimed: the shipped greetd config must carry no auto-login stanza, and the same check is fed a config that
+    HAS one, because an absence assertion that never sees a presence cannot fail. The kiosk recipe uses
+    default_session, NOT initial_session, read out of greetd(5) on the shipped greetd 0.10.3 rather than recalled
+    - the initial session runs once per BOOT via a runfile, so a kiosk built on it drops to a greeter the first
+    time its app exits. The kiosk boundary is absent configuration (sway-kiosk.conf does not include
+    /etc/sway/config.d/*), so nothing is taken from anybody else's desktop. STILL OPEN: no kiosk or guest session
+    has ever been booted; everything here is shape assertions on shipped files plus a behavioural test of the wipe
+    engine, because this machine has exactly one account at or above uid 1000 and creating one was out of scope.
+    NO ACCOUNT WAS CREATED AND NOTHING WAS ENABLED ON THE L16. Follow-ups on ROADMAP/state/agents/p2-016.md:
+    ensure_private_dir does not check ownership (~40 call sites); apex-agentd's peer::is_own_user is a
+    classification branch and not a refusal, which is deliberate for the sudo approve path but is overclaimed by
+    its own doc comment, while apex-remoted and apex-aid both DO refuse.
 - id: P2-017
   title: APEX Online Accounts and brokered cloud identity layer
   priority: P2
