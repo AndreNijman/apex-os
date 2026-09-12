@@ -368,7 +368,7 @@ string the lab also produced.
 | Secure Boot | verified (8) | three boots of the same signed UKI: against the APEX variable store it boots and reports `SecureBoot=1 SetupMode=0`; against libvirt's own `enrolled-keys` store (Microsoft's db) the firmware **refuses it**; against a key-free store it boots in setup mode — which is what shows the refusal was about keys |
 | TPM | verified (5) | `/sys/class/tpm/tpm0` with `tpm_version_major=2` inside the guest, and **absent** in a `--no-tpm` guest |
 | snapshot | verified (10) | a tally the guest keeps on its own ESP: boot (1), snapshot, boot (2), revert, boot — and it is 2, not 3. `qemu-img snapshot -l` shows the snapshot in **both** `disk.qcow2` and `nvram.qcow2` |
-| share | verified (14) | two virtiofs devices; the guest mounts both tags, reads the host's file, writes through the read-write one so the file appears **on the host**, and is refused on the read-only one |
+| share | verified (16) | two virtiofs devices; the guest mounts both tags, reads the host's file, writes through the read-write one so the file appears **on the host**, and is refused on the read-only one |
 | USB | **could-not-run** | see below |
 | egress (P2-009) | verified (16) | the hostile task's unnominated file did not leave, while the guest's own log proves it existed; the guest sees only `lo`; the copy-in volume refused its write; and an engine mutated to iterate the volume instead of the nominations **does** leak it |
 
