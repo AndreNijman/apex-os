@@ -1,14 +1,16 @@
 package com.apexos.remote.security
 
+import android.os.Build
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.fragment.app.FragmentActivity
-import com.apexos.remote.core.StaticKey
 import com.apexos.remote.core.InMemoryStaticKey
+import com.apexos.remote.core.SecretBox
+import com.apexos.remote.core.StaticKey
+import javax.crypto.Cipher
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
-import javax.crypto.Cipher
 
 /**
  * P1-053's "app lock via biometrics or device credential", and P1-051's second
@@ -24,19 +26,30 @@ import javax.crypto.Cipher
  */
 object AppLock {
     /**
-     * Which authenticators this build will accept.
+     * Which authenticators this build will accept, for the API level it is on.
      *
-     * `BIOMETRIC_STRONG` and not `BIOMETRIC_WEAK`: a weak biometric cannot
+     * `BIOMETRIC_STRONG` and never `BIOMETRIC_WEAK`: a weak biometric cannot
      * release a keystore key, so accepting one would produce a prompt that
      * succeeds and then a `Cipher` that still refuses.
+     *
+     * `DEVICE_CREDENTIAL` only from API 30. Below that, `BiometricPrompt`
+     * refuses the combination with a `CryptoObject` in so many words —
+     * *"Crypto-based authentication is not supported for device credential
+     * prior to API 30."* — and every authentication this app performs carries a
+     * `CryptoObject`, because the cipher is the whole point. This branch is the
+     * mirror of the one in [KeystoreSecretBox.forDevice]; if one moves, both do.
      */
-    const val AUTHENTICATORS: Int =
-        BiometricManager.Authenticators.BIOMETRIC_STRONG or
-            BiometricManager.Authenticators.DEVICE_CREDENTIAL
+    fun authenticators(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        } else {
+            BiometricManager.Authenticators.BIOMETRIC_STRONG
+        }
 
     /** Whether this device can gate a key at all. */
     fun canAuthenticate(manager: BiometricManager): Boolean =
-        manager.canAuthenticate(AUTHENTICATORS) == BiometricManager.BIOMETRIC_SUCCESS
+        manager.canAuthenticate(authenticators()) == BiometricManager.BIOMETRIC_SUCCESS
 
     /**
      * Show the prompt, and return the device identity it unlocked.
@@ -51,22 +64,91 @@ object AppLock {
         sealed: ByteArray,
         machineName: String,
     ): StaticKey {
-        val cipher = box.beginOpen(sealed)
-        val authorised = prompt(activity, cipher, machineName)
+        if (!box.authenticationIsRequired) return InMemoryStaticKey(box.open(sealed))
+        val authorised = prompt(
+            activity,
+            box.beginOpen(sealed),
+            title = "Unlock APEX Remote",
+            subtitle = "Connecting to $machineName",
+        )
         return InMemoryStaticKey(box.finishOpen(authorised, sealed))
+    }
+
+    /**
+     * A box authorised to seal exactly once, for pairing.
+     *
+     * Sealing is gated as tightly as opening — `KeyGenParameterSpec` restricts
+     * *all* secret-key operations, and an AES key is a secret key — so the new
+     * device identity cannot be wrapped without the user being present either.
+     * That is not a tax: it is what makes `user_verification: true` in the
+     * pairing request a statement about something that just happened rather
+     * than a promise about something that might.
+     *
+     * One use, and it says so when asked for a second: a `Cipher` a per-use key
+     * authorised is spent after its `doFinal`, and a box that pretended
+     * otherwise would fail somewhere further away from the cause.
+     */
+    suspend fun authoriseSeal(
+        activity: FragmentActivity,
+        box: KeystoreSecretBox,
+        machineName: String,
+    ): SecretBox {
+        if (!box.authenticationIsRequired) return box
+        val authorised = prompt(
+            activity,
+            box.beginSeal(),
+            title = "Confirm it is you",
+            subtitle = "Pairing this phone with $machineName",
+        )
+        return OneShotSeal(box, authorised)
+    }
+
+    /**
+     * What [authoriseSeal] returns: the sealing half of a box, already through
+     * a prompt, and an unambiguous refusal for everything else.
+     */
+    private class OneShotSeal(
+        private val box: KeystoreSecretBox,
+        private val authorised: Cipher,
+    ) : SecretBox {
+        private var spent = false
+
+        override val describe: String get() = box.describe
+
+        override fun seal(plaintext: ByteArray): ByteArray {
+            check(!spent) {
+                "this box was authorised for one seal and has already been used; " +
+                    "a per-use keystore key needs a fresh prompt"
+            }
+            spent = true
+            return box.finishSeal(authorised, plaintext)
+        }
+
+        override fun open(ciphertext: ByteArray): ByteArray =
+            throw UnsupportedOperationException(
+                "this box was authorised to seal a new device key, not to open one",
+            )
     }
 
     private suspend fun prompt(
         activity: FragmentActivity,
         cipher: Cipher,
-        machineName: String,
+        title: String,
+        subtitle: String,
     ): Cipher = suspendCancellableCoroutine { continuation ->
         val info = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("Unlock APEX Remote")
+            .setTitle(title)
             // Named, because the whole point of the gate is that the person
             // holding the phone knows which machine is about to be reachable.
-            .setSubtitle("Connecting to $machineName")
-            .setAllowedAuthenticators(AUTHENTICATORS)
+            .setSubtitle(subtitle)
+            .setAllowedAuthenticators(authenticators())
+            .apply {
+                // Below API 30 the allowed set is biometric only, and a prompt
+                // with no negative button and no device credential has no way
+                // out at all. `setNegativeButtonText` is refused *with*
+                // DEVICE_CREDENTIAL, so this is the same branch again.
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) setNegativeButtonText("Cancel")
+            }
             .build()
         val prompt = BiometricPrompt(
             activity,

@@ -1,57 +1,56 @@
 package com.apexos.remote.data
 
 import android.content.Context
+import com.apexos.remote.core.AppStorage
 import com.apexos.remote.core.MachineStore
 import com.apexos.remote.core.PairedMachine
+import com.apexos.remote.core.Settings
 import com.apexos.remote.security.KeystoreSecretBox
-import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * Where the machine list lives on disk.
+ * The adapter, and deliberately nothing more.
  *
- * One JSON file in `filesDir`, which is app-private storage. Not
- * `SharedPreferences` — it has no schema, its XML is read by anything with the
- * app's uid, and it is backed up by default. Not external storage, which is
- * world-readable by design. The file holds public keys, machine names and the
- * *sealed* device secrets; `SecretStorageTest` in `:core` is the proof that
- * nothing else gets into it.
+ * The persistence itself is [AppStorage] in `:core`, over a plain directory.
+ * All this class adds is the one Android fact — *which* directory — and a move
+ * off the main thread. That split is what lets `InsecureStorageTest` drive a
+ * real pairing and a real session against a real folder and then walk every
+ * byte in it; a repository that did its own file handling here would be
+ * untestable on a machine with no device, which is every machine this project
+ * builds on.
+ *
+ * `filesDir` and not `getExternalFilesDir`: external storage is world-readable
+ * by design. Not `SharedPreferences` either, for the display settings or for
+ * anything else — [Settings] rides on [MachineStore] precisely so there is one
+ * file and one writer. `tools/no-second-write-path.sh` fails the build if a
+ * second one appears, and this file is its single exemption.
  */
 class MachineRepository(context: Context) {
-    private val file = File(context.filesDir, FILE_NAME)
+    private val storage = AppStorage(context.filesDir)
 
-    suspend fun load(): MachineStore = withContext(Dispatchers.IO) {
-        if (!file.exists()) {
-            MachineStore()
-        } else {
-            runCatching { MachineStore.decode(file.readText()) }.getOrElse {
-                // A corrupt store is not a reason to lose the app. It IS a
-                // reason to make the user re-pair, which is ten seconds and
-                // produces a fresh key — and silently starting empty is the
-                // honest outcome, because nothing in a damaged file can be
-                // trusted to name a machine correctly.
-                MachineStore()
-            }
-        }
-    }
+    suspend fun load(): MachineStore = withContext(Dispatchers.IO) { storage.load() }
 
-    suspend fun save(store: MachineStore) = withContext(Dispatchers.IO) {
-        // Written beside and renamed, so a kill mid-write leaves the previous
-        // list rather than half of the new one. A half-written store is a
-        // device that cannot connect to anything.
-        val scratch = File(file.parentFile, "$FILE_NAME.new")
-        scratch.writeText(store.encode())
-        check(scratch.renameTo(file)) { "could not replace $FILE_NAME" }
-    }
+    suspend fun save(store: MachineStore) = withContext(Dispatchers.IO) { storage.save(store) }
 
-    /** Forget a machine, and the keystore key that would have unsealed it. */
-    suspend fun forget(machine: PairedMachine) {
-        save(load().without(machine.deviceId))
-        withContext(Dispatchers.IO) { KeystoreSecretBox.forget(machine.deviceId) }
-    }
+    suspend fun remember(machine: PairedMachine): MachineStore =
+        withContext(Dispatchers.IO) { storage.update { it.with(machine) } }
 
-    private companion object {
-        const val FILE_NAME = "machines.json"
+    suspend fun settings(settings: Settings): MachineStore =
+        withContext(Dispatchers.IO) { storage.update { it.copy(settings = settings) } }
+
+    /**
+     * Forget a machine, and the keystore key that would have unsealed it.
+     *
+     * Both halves, in that order, because a record with no key is a row the
+     * user can delete again while a key with no record is invisible. The
+     * sealed bytes become noise the moment the alias is gone, which is the
+     * property that makes "forget this computer" mean something stronger than
+     * removing a line from a file.
+     */
+    suspend fun forget(machine: PairedMachine): MachineStore = withContext(Dispatchers.IO) {
+        val after = storage.update { it.without(machine.deviceId) }
+        KeystoreSecretBox.forget(machine.deviceId)
+        after
     }
 }
