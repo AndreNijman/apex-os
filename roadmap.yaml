@@ -4603,8 +4603,9 @@ tasks:
     and no failure counter was built — deliberately, because the only wiring points are the boot-critical
     apex-greet-session and apex-shell-autostart and a counter that can strand somebody at a login screen is worse
     than none. A user enters this session; a failure does not. Also not done: GreetContext.qml:185 writes
-    last-session on every launch, so picking Safe Graphics once makes it the preselected default forever — an
-    apex-shell QML change that could not be run from here. NO recovery boot entry, deliberately and stated in the
+    last-session on every launch, so picking Safe Graphics once makes it the preselected default forever — a
+    change to files/desktop/apex-greet/GreetContext.qml, which is in THIS repo — round 1's card called it an
+    apex-shell change and was wrong, and a wrong 'cannot be done from here' is how work does not get done. NO recovery boot entry, deliberately and stated in the
     doc: AGENTS.md boot-path rule 1 forbids a shipped helper writing the ESP or an EFI variable and
     tests/test-boot-v2.sh scans for exactly that. Containerfile.base carries the build refusals (the -C flag, the
     three render variables, WLR_BACKENDS not pinned, an autostart that does not start APEX Shell, each menu

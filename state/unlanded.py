@@ -28,7 +28,7 @@ branch has the same content as the branch tip across the files that branch
 touched, the branch landed, whatever its patch-ids say. Only branches that
 survive that get the line-presence heuristic, and its output says it is one.
 """
-import subprocess, sys, os
+import json, subprocess, sys, os
 
 def sh(*a):
     return subprocess.run(a, capture_output=True, text=True, timeout=180).stdout
@@ -53,6 +53,31 @@ def squashed_at(repo, branch, integration):
             return c
     return None
 
+SETTLED_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'settled.json')
+
+def load_settled():
+    """Commits an orchestrator has already settled by hand, and why.
+
+    The heuristic below cannot tell "landed in August, then four lines rewritten
+    in September" from orphaned work, so it re-flags the same commit every time
+    the report regenerates — every five hours, forever. Settling one costs a
+    `git diff`; re-settling it costs somebody reading this page and doing it
+    again. So a settled commit moves to its own section WITH ITS REASON rather
+    than disappearing: an entry with no reason would be indistinguishable from
+    a commit somebody wanted to stop seeing.
+
+    A malformed file is NOT silently ignored. A status page that quietly drops
+    a suppression list is how real unlanded work goes unreported.
+    """
+    if not os.path.exists(SETTLED_PATH):
+        return {}
+    try:
+        raw = json.load(open(SETTLED_PATH))
+    except (json.JSONDecodeError, OSError) as e:
+        sys.exit(f"unlanded.py: {SETTLED_PATH} exists and does not parse: {e}")
+    return {k: v for k, v in raw.items() if not k.startswith('_')}
+
+
 def main(integration, repos):
     # A report that degrades quietly is worse than one that fails. This script's
     # signature changed once and its caller did not; the result printed a blank
@@ -67,6 +92,9 @@ def main(integration, repos):
         if subprocess.run(['git', '-C', repo, 'rev-parse', '--verify', '--quiet', integration],
                           capture_output=True).returncode != 0:
             sys.exit(f"unlanded.py: {integration!r} does not resolve in {repo}")
+
+    settled = load_settled()
+    seen_settled = []
 
     for repo in repos:
         name = os.path.basename(repo)
@@ -103,6 +131,10 @@ def main(integration, repos):
                     capture_output=True).returncode == 0 for line in sample)
                 if hits < len(sample) * 0.8:
                     subj = sh('git', '-C', repo, 'log', '--format=%h %s', '-1', c).strip()
+                    short = subj.split(' ', 1)[0]
+                    if short in settled:
+                        seen_settled.append((short, b[len('origin/'):], settled[short]))
+                        continue
                     unlanded.append(f"{subj[:70]}   [{hits}/{len(sample)} added lines on tip]")
             if unlanded:
                 found = True
@@ -115,7 +147,24 @@ def main(integration, repos):
     print("  The per-commit lines above are a HEURISTIC: a low count can also mean")
     print("  landed-then-rewritten. Settle any one of them with")
     print("  `git diff <integration> <branch> -- $(git show --name-only --format= <commit>)`")
-    print("  before spending an agent on it.")
+    print("  before spending an agent on it, then record it in state/settled.json")
+    print("  so the next report does not ask you again.")
+
+    if seen_settled:
+        print()
+        print("  ALREADY SETTLED (state/settled.json) — do NOT spend an agent on these:")
+        for short, branch, why in seen_settled:
+            print(f"    {short}  {branch}")
+            for line in __import__('textwrap').wrap(why, 68):
+                print(f"      {line}")
+
+    stale = set(settled) - {s for s, _, _ in seen_settled}
+    if stale:
+        print()
+        print("  settled.json has entries the heuristic no longer flags — the commit")
+        print("  landed, was dropped, or the branch is gone. Safe to delete:")
+        for short in sorted(stale):
+            print(f"    {short}")
 
 if __name__ == '__main__':
     main(sys.argv[1], sys.argv[2:])

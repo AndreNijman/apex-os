@@ -381,6 +381,17 @@
    ],
    "conflicts": [],
    "note": "The last unit. Build the integrated image, boot the L16 onto it, qualify, then apex-shell roadmap/v2.2 -> main FIRST (Containerfile.base carries ARG APEX_SHELL_REF=main), then apex-os roadmap/v2.2 -> main. This is the only point at which GitHub CI is allowed to run."
+  },
+  {
+   "id": "p1-063",
+   "repo": "both",
+   "items": [
+    "P1-063"
+   ],
+   "title": "Lid-closed continuous operation \u2014 agents and the VPN keep running with the lid shut",
+   "after": [],
+   "conflicts": [],
+   "note": "Andre's own request, in his words. The primitive is a handle-lid-switch BLOCK inhibitor, not an edit to HandleLidSwitch= - it is dynamic, it reverts the moment the holder dies, and it leaves a machine with no live work suspending exactly as it does now; a static HandleLidSwitch=ignore would turn every laptop bag into an oven. Guards are not optional and must say which one fired. Round 2 owns the apex-shell half and the seven undocumented `apex lid` verbs. Two criteria need hardware or Andre's own machine and must not be faked: re-running the live suite with every external display unplugged, and measuring that a powered-down lid-closed session draws measurably less."
   }
  ],
  "_completed_units": {
