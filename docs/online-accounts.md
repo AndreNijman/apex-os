@@ -86,8 +86,16 @@ stored by hand would be:
 
 ```sh
 printf %s "$APP_PASSWORD" | apex secret add account.nextcloud.home \
-    --host cloud.example --username me --auth raw --path /remote.php/dav/files
+    --host cloud.example --username me --auth raw \
+    --path /remote.php/dav/files/me
 ```
+
+That last path is why the provider table is worth having. Nextcloud serves
+files at `/remote.php/dav/files/<username>/`, so the endpoint ends in the
+account's own name — and a credential stored at the bare prefix points at a
+collection the server answers 404 for, on every file, which reads like a wrong
+password. `apex account add` composes it. `--path` still wins, because a
+deployment behind a reverse proxy can have any prefix.
 
 Nothing is allowed yet. Storing a credential grants nothing at all.
 

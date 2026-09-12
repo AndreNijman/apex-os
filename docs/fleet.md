@@ -2,7 +2,7 @@
 
 Roadmap P2-019. This document is the deliverable: an architecture for managing
 many APEX machines that scales down to one, written against what the system
-already does rather than against what a fleet product usually looks like.
+already does rather than against the shape a fleet product usually takes.
 
 **No code here exists.** There is no `apex fleet` verb, no enrolment record, no
 server. Every mechanism named below either already ships and is cited, or is
@@ -39,8 +39,7 @@ It may not hold it.
 ## What already exists, per machine
 
 Nothing below is proposed. It is the substrate, and the design's main claim is
-that a fleet is mostly a *distribution* problem on top of it rather than a new
-agent.
+that a fleet is a distribution problem on top of it rather than a new agent.
 
 | need | what ships today | where |
 | --- | --- | --- |
@@ -56,8 +55,7 @@ agent.
 | recovery | previous deployment, rollback, doctor, Safe Graphics | `apex recover`, `docs/recovery.md`, P2-018 |
 | privilege | seven request origins, `cloud-job` among them, declared not observed | `apex-agent-core::origin`, §7 |
 
-The last row is the one a fleet design most often gets wrong, so it is worth
-stating early: APEX already has a vocabulary for "this request came from
+The last row is the one a fleet design most often gets wrong: APEX already has a vocabulary for "this request came from
 somewhere other than a human at this keyboard", and `cloud-job` is one of its
 values. A fleet is a *remote origin*. It does not need a new privilege model; it
 needs to be honest about which origin it is.
@@ -72,15 +70,15 @@ sudo apex fleet join <token>      # the one act that changes anything
 sudo apex fleet leave             # from this keyboard, always
 ```
 
-A join token carries the fleet's identity and an endpoint, and is single-use and
+A join token carries the fleet's identity and an endpoint. It is single-use and
 short-lived. The machine already has a long-lived key pair
 (`apex-remote-core::identity::Identity::load_or_create`), and the enrolment
 exchange should be the pairing exchange APEX already performs for a phone — the
 same Noise handshake, the same store, a different peer role. Inventing a second
 device-identity mechanism would mean a second place for a key to be wrong.
 
-Three properties the exchange has to have, each because of something this
-repository already learned:
+Three properties the exchange has to have, each one something this repository
+learned the hard way:
 
 * **The token proves the operator, not just the endpoint.** A token that only
   says where to connect is a token an attacker can mint by standing up a server.
@@ -127,8 +125,8 @@ Two decisions in that object:
 **The machine id sent is not `/etc/machine-id`.** The rollout slot is derived
 from it and `apex channel status` already says the slot "is derived from this
 machine's id and is never sent anywhere". A fleet needs a stable handle; it does
-not need that one, and sending it would make a value the machine currently keeps
-to itself into a fleet-wide correlator.
+not need that one, and sending it would turn a value the machine keeps to itself
+into a fleet-wide correlator.
 
 **There is no user in it.** Not the account names, not the home directory sizes,
 not what was installed by whom. An operator managing a device is not thereby
@@ -138,7 +136,7 @@ per-user facts, they get their own consent surface and their own section.
 
 ## Compliance
 
-**Partly built, and this is the section with the least new work in it.**
+**Partly built. This section has the least new work in it.**
 
 APEX already computes, on the machine, everything a compliance check would ask
 for, in a form with stable identifiers:
@@ -227,10 +225,11 @@ a machine which leaves a fleet stops trusting the fleet's anchors — which mean
 the anchors go in a directory `apex fleet leave` empties, not in the base trust
 store.
 
-The measured local fact that makes this urgent rather than theoretical:
-**both saved Wi-Fi profiles on the reference machine use 802.1X and validate no
-CA certificate.** A fleet that distributed a CA and pinned it would be fixing a
-real hole rather than adding a feature.
+This is not a theoretical need. An 802.1X profile that validates no CA
+certificate authenticates the client to the network and the network to nobody,
+and profiles in that state are ordinary on machines joined to a school or
+office network by hand. A fleet that distributed an anchor and pinned it would
+be closing a real hole rather than adding a feature.
 
 ## App policy
 
@@ -273,8 +272,8 @@ operator actually wants in the hour after a bad release.
 
 ## What must never be built
 
-Written as a list because each is a thing a fleet product normally ships and
-each would break something APEX already guarantees.
+A list, because each item is something a fleet product normally ships and each
+would break something APEX already guarantees.
 
 1. **A remote root shell, or any remote exec.** `apex-agentd` is unprivileged
    and per-user and `AGENTS.md` requires it stay that way — no polkit action, no
@@ -294,8 +293,8 @@ each would break something APEX already guarantees.
 
 ## What this design does not settle
 
-Named individually, because a design document that ends with a summary instead
-of a gap list is the one that gets built wrong.
+Named one at a time. A design document that ends with a summary instead of a gap
+list is the one that gets built wrong.
 
 * **The transport.** Pairing exists, and `relay/` is an untrusted Noise_IK
   rendezvous that has never been deployed. Whether a fleet client polls, holds a
