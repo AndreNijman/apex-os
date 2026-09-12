@@ -91,6 +91,13 @@ fun ApexRemoteApp(
                     // paste box with the explanation beside it, and pairing
                     // still takes a deliberate press.
                     initialPayload = launchPayload,
+                    // Cleared by the screen once it has captured the code, and
+                    // NOT here. `navigate` does not compose anything; it writes
+                    // state the `NavHost` reads on the next recomposition. A
+                    // consume beside the navigate would therefore run first,
+                    // and `PairingScreen` would `remember` an empty string —
+                    // which is the exact bug this parameter was added to fix.
+                    onPayloadConsumed = onPayloadConsumed,
                     onPayload = { payload ->
                         viewModel.pair(activity, payload, deviceName)
                     },
@@ -107,10 +114,11 @@ fun ApexRemoteApp(
         // the `NavHost` has composed throws.
         LaunchedEffect(launchPayload) {
             if (launchPayload != null) {
-                navigation.navigate(Destinations.PAIRING)
-                // Consumed, so that locking and unlocking again does not take
-                // the user back to a code that has since expired.
-                onPayloadConsumed()
+                // `launchSingleTop`, because `onNewIntent` delivers a second
+                // link while this screen is already open — the activity is
+                // `singleTask` — and without it the second one stacks a
+                // duplicate pairing screen on top of the first.
+                navigation.navigate(Destinations.PAIRING) { launchSingleTop = true }
             }
         }
 
