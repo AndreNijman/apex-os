@@ -1081,6 +1081,42 @@ jobs:
         working-directory: installer
         run: ./test-installer.sh
 
+      # The keyboard/locale/timezone half. Kept as its own step so a failure
+      # names which half broke rather than being buried in the big suite.
+      #
+      # Both degrade honestly on this runner rather than lying: the engine cases
+      # SKIP when no APEX-OS image can be put where preflight looks, and the
+      # end-to-end keymap measurement SKIPs without Xvfb, cage and python3-gi.
+      # Installing them here is what makes the criterion actually measured in CI
+      # instead of skipped on every run.
+      - name: Install the compositor and X server the keymap suite measures with
+        run: |
+          sudo apt-get update -qq
+          # One package at a time. `apt-get install a b c` aborts the WHOLE
+          # command if any single name is unavailable, so one bad name would
+          # silently cost Xvfb as well — and the suite would then SKIP the
+          # assertion that carries the criterion while the step still reported
+          # success.
+          for p in xvfb cage python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 \
+                   libxkbcommon0 xkb-data binutils; do
+            sudo apt-get install -y -qq "$p" || echo "note: $p unavailable"
+          done
+          # Say what actually arrived, so a SKIP below can be traced without
+          # guessing.
+          for b in Xvfb cage; do
+            command -v "$b" >/dev/null && echo "have: $b" || echo "MISSING: $b"
+          done
+          python3 -c 'import gi; gi.require_version("Gtk","4.0"); gi.require_version("Adw","1"); from gi.repository import Gtk, Adw; print("have: python3-gi with Gtk4 + Adw")' \
+            || echo "MISSING: python3-gi Gtk4/Adw"
+
+      - name: Run installer locale/timezone suite
+        working-directory: installer
+        run: ./test-installer-locale.sh
+
+      - name: Run installer keyboard suite
+        working-directory: installer
+        run: ./test-installer-keymap.sh
+
   engine:
     name: Package engine
     needs: changes
@@ -1167,6 +1203,55 @@ jobs:
       # that loop. It starts no compositor and opens no window.
       - name: Run session-picker wording assertions
         run: ./tests/test-apex-greet-sessions.sh
+
+      # What a screen reader and a keyboard-only user get from the login
+      # screen. P2-003's "accessible login" and P2-004's "keyboard layout
+      # before password" both land on the same surface, so they are measured
+      # on the same one.
+      #
+      # This is NOT a grep for Accessible.name. The shipped GreetSurface.qml is
+      # built under qmltestrunner on the offscreen platform, the accessible
+      # name and role are READ OFF THE LIVE OBJECTS — the same attached objects
+      # QAccessible publishes to AT-SPI — and the focus order is measured by
+      # posting real Qt.Key_Tab events through the window's delivery agent. The
+      # difference is not academic: `KeyNavigation.tab: passwordInput` reads
+      # like a complete tab chain and was in fact a two-element ring that could
+      # not reach the session picker at all.
+      #
+      # It opens no window and starts no compositor; WAYLAND_DISPLAY is removed
+      # from the environment before the runner is invoked. It skips with
+      # status 0 where qmltestrunner is not installed.
+      # ubuntu-24.04 ships Qt 6.4, and the greeter imports QtQuick.Effects for
+      # its wallpaper blur — MultiEffect is Qt 6.5 and later. So this suite can
+      # never run on the runner itself: apt has no qml6-module-qtquick-effects
+      # to install, the surface would fail to build, and the suite would skip on
+      # every PR for ever. A skip nobody notices is how a suite goes quietly
+      # vacuous, which is the failure this whole unit exists to measure.
+      #
+      # So it runs in a Fedora container, which is what APEX is built from
+      # anyway — the Qt the greeter actually ships against rather than the one
+      # the runner happens to carry. Verified by running it: 22 assertions, same
+      # result as on a Fedora workstation.
+      #
+      # A container that cannot be pulled or a dnf that cannot resolve leaves
+      # the suite unrun and says so, rather than reddening the job over a
+      # network hiccup — the same trade the labwc step above makes.
+      - name: Run greeter accessibility assertions
+        run: |
+          if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
+                dnf -y install --setopt=install_weak_deps=False \
+                    qt6-qtdeclarative-devel >/dev/null 2>&1 || exit 97
+                ./tests/test-apex-greet-a11y.sh'; then
+              rc=$?
+              if [ "$rc" -eq 97 ]; then
+                  echo "could not install Qt in the container; the greeter a11y suite did not run"
+              else
+                  exit "$rc"
+              fi
+          fi
+
+      - name: Run greeter keyboard-layout assertions
+        run: ./tests/test-apex-greet-layout.sh
 
       # §9's resolver, which is the same engine as the package suite above and
       # a separate file because it is a separate claim: that engine INSTALLS,
@@ -1516,6 +1601,7 @@ jobs:
             tests/test-apex-host.sh tests/test-apex-dispatch.sh \
             tests/test-apex-ai.sh tests/test-apex-env-devices-live.sh \
             tests/test-apex-greet-sessions.sh \
+            tests/test-apex-greet-a11y.sh tests/test-apex-greet-layout.sh \
             tests/test-labwc-keybind-reload.sh
 
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
