@@ -524,5 +524,164 @@ hasf "…and a screen reader gets it without the glyph" \
 hasf "…and an auth error still outranks it" \
      'text: root.ctx.hasError ? root.ctx.errorText' "$surface"
 
+# ─────────────────────────────────────────────────────────────────────────────
+section "§5 the preselection rule itself, extracted from the QML and RUN"
+# ─────────────────────────────────────────────────────────────────────────────
+# §4 greps the guards. A grep proves the line is present; it cannot prove the
+# function built out of those lines does the right thing, and this function is
+# the one that decides what a user with a broken machine is pointed at. So it is
+# lifted out of GreetContext.qml and executed, the way
+# tests/test-apex-greet-sessions.sh already executes the same function for the
+# remembered-session rules — this section is the recovery half of that harness.
+#
+# That existing harness injects a ctx with no recovery fields at all, so
+# `_recoverWanted` arrives as undefined and `undefined !== ""` is TRUE in
+# JavaScript: it walks the recovery loop, matches nothing, and falls through.
+# Which is why it stayed green through this change without exercising one line
+# of it. The ctx built below sets every field the function reads.
+
+if ! command -v node >/dev/null 2>&1; then
+    for n in "recovery is preselected when the watchdog voted and the session is installed" \
+             "recovery OUTRANKS the remembered session — which is the one that just failed" \
+             "…and the notice says which session, by the name the picker shows" \
+             "a recovery id that is NOT installed changes nothing" \
+             "…and sets no notice, because a notice for an unofferable session is a dead end" \
+             "the user having touched the picker beats the watchdog" \
+             "…and beats the remembered session too" \
+             "with no vote from the watchdog the remembered session still wins" \
+             "the harness ran the shipped recoverySession constant, not one of its own"; do
+        skp "$n" "node is not installed"
+    done
+else
+SEL_JS="$WORK/selectwanted.js"
+python3 - "$GREETER" "$SEL_JS" <<'PY'
+import re, sys
+
+src = open(sys.argv[1], encoding="utf-8").read()
+
+start = src.find("    function _selectWanted() {")
+if start < 0:
+    sys.exit("no _selectWanted in the greeter")
+end = src.find("\n    }", start)
+if end < 0:
+    sys.exit("_selectWanted is not terminated")
+body = src[start:end + len("\n    }")]
+body = body.replace("function _selectWanted() {", "function _selectWanted(ctx) {", 1)
+
+# Both constants come OUT of the greeter. A harness that hardcoded them would
+# keep agreeing with itself after somebody renamed one.
+m = re.search(r'readonly\s+property\s+string\s+defaultSession:\s*"([^"]*)"', src)
+if not m:
+    sys.exit("no defaultSession in the greeter")
+default = m.group(1)
+m = re.search(r'readonly\s+property\s+string\s+recoverySession:\s*"([^"]*)"', src)
+if not m:
+    sys.exit("no recoverySession in the greeter")
+recovery = m.group(1)
+
+harness = body + """
+
+const DEFAULT  = %r;
+const RECOVERY = %r;
+// argv[2] is {want, recover, picked, ids}. `ids` are enumerated entries; the
+// display name is derived the way the picker's is, so the notice assertion is
+// about the NAME the user reads and not about an id.
+function run(c) {
+    const ctx = {
+        _wantSession:    c.want    || "",
+        _recoverWanted:  c.recover || "",
+        _userPicked:     !!c.picked,
+        recoveryNotice:  "",
+        recoverySession: RECOVERY,
+        defaultSession:  DEFAULT,
+        sessions: c.ids.map(id => ({ id: id, name: NAMES[id] || id })),
+        sessionIndex: 0,
+    };
+    _selectWanted(ctx);
+    return {
+        id:     ctx.sessions.length ? ctx.sessions[ctx.sessionIndex].id : null,
+        notice: ctx.recoveryNotice,
+    };
+}
+const NAMES = JSON.parse(process.argv[3]);
+console.log(JSON.stringify(JSON.parse(process.argv[2]).map(run)));
+console.error(RECOVERY);
+""" % (default, recovery)
+open(sys.argv[2], "w", encoding="utf-8").write(harness)
+PY
+sel_rc=$?
+
+# The display names the picker really shows, read out of the shipped .desktop
+# entries, so "APEX Safe Graphics" in the notice assertion below is the image's
+# spelling rather than this file's.
+NAMES="$(python3 - "$SESSIONS_SRC" <<'PY'
+import json, os, sys
+out = {}
+for f in sorted(os.listdir(sys.argv[1])):
+    if not f.endswith(".desktop"):
+        continue
+    name = ""
+    for line in open(os.path.join(sys.argv[1], f), encoding="utf-8"):
+        if line.startswith("Name="):
+            name = line[5:].strip(); break
+    out[f[:-len(".desktop")]] = name
+print(json.dumps(out))
+PY
+)"
+
+sel() {   # sel <cases-json>  -> compact "id|notice" lines
+    node "$SEL_JS" "$1" "$NAMES" 2>/dev/null \
+      | python3 -c 'import json,sys; [print("%s|%s" % (r["id"], r["notice"])) for r in json.load(sys.stdin)]'
+}
+
+if [ "$sel_rc" != 0 ]; then
+    bad "the preselection rule is extractable and runnable" "extractor exited $sel_rc"
+else
+    harness_recovery="$(node "$SEL_JS" '[]' "$NAMES" 2>&1 >/dev/null)"
+    is "the harness ran the shipped recoverySession constant, not one of its own" \
+       "$RECOVERY_ID" "$harness_recovery"
+
+    # The enumeration a built image produces, recovery entry included, with
+    # apex-gaming sorting FIRST so "index 0" and "what was chosen" are never the
+    # same answer by accident.
+    IDS='["apex-gaming","apex-labwc","apex-safe-graphics","hyprland","niri"]'
+    NORECOV='["apex-gaming","apex-labwc","hyprland","niri"]'
+    SAFE_NAME="$(sed -n 's/^Name=//p' "$SESSIONS_SRC/$RECOVERY_ID.desktop" | head -n1)"
+
+    out="$(sel "[
+      {\"want\":\"\",     \"recover\":\"$RECOVERY_ID\", \"picked\":false, \"ids\":$IDS},
+      {\"want\":\"niri\", \"recover\":\"$RECOVERY_ID\", \"picked\":false, \"ids\":$IDS},
+      {\"want\":\"niri\", \"recover\":\"$RECOVERY_ID\", \"picked\":false, \"ids\":$NORECOV},
+      {\"want\":\"niri\", \"recover\":\"$RECOVERY_ID\", \"picked\":true,  \"ids\":$IDS},
+      {\"want\":\"niri\", \"recover\":\"\",             \"picked\":true,  \"ids\":$IDS},
+      {\"want\":\"niri\", \"recover\":\"\",             \"picked\":false, \"ids\":$IDS}
+    ]")"
+    r1="$(printf '%s\n' "$out" | sed -n 1p)"
+    r2="$(printf '%s\n' "$out" | sed -n 2p)"
+    r3="$(printf '%s\n' "$out" | sed -n 3p)"
+    r4="$(printf '%s\n' "$out" | sed -n 4p)"
+    r5="$(printf '%s\n' "$out" | sed -n 5p)"
+    r6="$(printf '%s\n' "$out" | sed -n 6p)"
+
+    is "recovery is preselected when the watchdog voted and the session is installed" \
+       "$RECOVERY_ID|Your desktop did not start — $SAFE_NAME selected" "$r1"
+    # THE ORDER THAT MATTERS: last-session names the desktop that has just
+    # failed to start three times running. A remembered session that outranked
+    # the watchdog would send the user straight back into the loop.
+    is "recovery OUTRANKS the remembered session — which is the one that just failed" \
+       "$RECOVERY_ID|Your desktop did not start — $SAFE_NAME selected" "$r2"
+    has "…and the notice says which session, by the name the picker shows" \
+        "$SAFE_NAME" "$r2"
+    is "a recovery id that is NOT installed changes nothing" "niri|" "$r3"
+    case "$r3" in
+        *"|") ok "…and sets no notice, because a notice for an unofferable session is a dead end" ;;
+        *) bad "…and sets no notice, because a notice for an unofferable session is a dead end" "got [$r3]" ;;
+    esac
+    is "the user having touched the picker beats the watchdog" "apex-gaming|" "$r4"
+    is "…and beats the remembered session too" "apex-gaming|" "$r5"
+    is "with no vote from the watchdog the remembered session still wins" "niri|" "$r6"
+fi
+fi
+
 printf '\nsession-watchdog: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]

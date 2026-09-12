@@ -1582,6 +1582,12 @@ jobs:
       # this runner, because CI is root and chmod 0555 does not stop root. It
       # was rewritten to make the directory uncreatable by shape instead, and
       # this line is what stops that regressing quietly.
+      #
+      # §5 also skips its nine assertions without node(1), which is the other
+      # way this suite could go quiet. A GitHub runner always has node — the
+      # actions themselves need it — so a skip there means the runner image
+      # changed under us, and that is worth failing over rather than passing
+      # with the preselection rule unexecuted.
       - name: Run session-watchdog assertions
         run: |
           set -euo pipefail
@@ -1596,8 +1602,8 @@ jobs:
               echo "::error::$skipped session-watchdog assertions could not run ($summary); a could-not-run is not a pass"
               exit 1
           }
-          [ "$passed" -ge 80 ] || {
-              echo "::error::only $passed session-watchdog assertions ran; 80 ran as both uid 0 and uid 1000 on 2026-09-13, so some no longer execute"
+          [ "$passed" -ge 89 ] || {
+              echo "::error::only $passed session-watchdog assertions ran; 89 ran as both uid 0 and uid 1000 on 2026-09-13, so some no longer execute"
               exit 1
           }
 
