@@ -755,7 +755,7 @@ flow_egress() {
     claim "--console-to saved the guest's serial output" test -s "$clog"
     says "which is the same guest, saying the same things" "APEX-VMLAB: clean-poweroff" \
         "$(tr -d '\r' < "$clog" 2>/dev/null)"
-    cp -f "$clog" /out/egress/ 2>/dev/null
+    mkdir -p /out/egress; cp -f "$clog" /out/egress/ 2>/dev/null
 
     # Nothing survives.
     claim_not "no disposable domain is left behind" \
