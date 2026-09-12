@@ -1331,10 +1331,43 @@ jobs:
           syft --version
 
           REF="$IMAGE@${{ steps.push.outputs.digest }}"
+
+          # This step died twice on the first build this branch ever completed:
+          # once as "the runner has received a shutdown signal" and once as a
+          # bare exit 143, four and a half minutes after syft printed its
+          # version and with no output of its own. Everything before it —
+          # build, Secure Boot chain, payload split, push, cosign signature —
+          # was green both times.
+          #
+          # By this point the runner holds core, base and the final image in
+          # local podman storage, and syft is about to pull the whole image out
+          # of the registry AGAIN into its own cache. The local copies are dead
+          # weight: the image is pushed and signed, and the promote step below
+          # is skopeo registry-to-registry and never reads local storage. So
+          # they go, and the numbers are printed either side — if this fails a
+          # third time, the log will say whether it was disk or memory instead
+          # of leaving the next person to guess.
+          echo "── before prune ──"; df -h / /mnt 2>/dev/null || true; free -m || true
+          sudo podman image prune -af  >/dev/null 2>&1 || true
+          sudo podman system prune -af >/dev/null 2>&1 || true
+          echo "── after prune ──";  df -h / /mnt 2>/dev/null || true; free -m || true
+
           # Read the image out of the registry rather than local storage: the
           # push above is the artefact users get, and a local-storage read could
           # describe something the registry does not have.
-          syft "registry:$REF" -o spdx-json > /tmp/sbom.spdx.json
+          #
+          # Under `timeout` so a hang is reported as a hang. A bare 143 from a
+          # killed process reads as "something went wrong somewhere", which is
+          # exactly how this cost two builds.
+          timeout 900 syft "registry:$REF" -o spdx-json > /tmp/sbom.spdx.json || {
+            rc=$?
+            if [ "$rc" = 124 ]; then
+              echo "::error::syft did not finish cataloguing the image in 15 minutes"
+            else
+              echo "::error::syft exited $rc (143 = killed; check the disk and memory figures above)"
+            fi
+            exit 1
+          }
 
           # An SBOM that describes nothing is worse than none: it answers the
           # CVE question with silence and looks authoritative doing it. The

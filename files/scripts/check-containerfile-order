@@ -131,6 +131,15 @@ def referenced_paths(line):
     saw anything to reject — turning a variable path into a confident claim
     about a fixed one. Capturing the expansion is what lets it be discarded.
     """
+    # `: 'prose'` is this repository's in-stanza documentation idiom — a shell
+    # no-op whose argument is a sentence — and those sentences name paths
+    # constantly, including the very path a stanza is explaining that it must
+    # NOT touch yet. Scanning them made this checker report an ordering problem
+    # against a comment, which is the same defect it exists to catch, one level
+    # up. Documentation is not a read.
+    line = re.sub(r":\s*'[^']*'", " ", line)
+    line = re.sub(r':\s*"[^"]*"', " ", line)
+
     found = set()
     for tok in re.findall(r"/(?:usr|etc|var|opt)[A-Za-z0-9_./@+${}-]*", line):
         tok = tok.rstrip(".,;:'\")")
