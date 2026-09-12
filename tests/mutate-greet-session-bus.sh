@@ -2,12 +2,17 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  mutate-greet-session-bus.sh — prove test-apex-greet-session-bus.sh can go red.
 #
-#  That suite asserts ABSENCE: no session bus, no accessibility bus, on either
-#  host. Absence is the easiest thing in the world to assert by accident — a
-#  probe that never runs, a chain that dies on its first line and a grep that
-#  finds nothing all look exactly like the truth. So each mutant here either
-#  SUPPLIES the missing thing (the suite must notice it is fixed) or breaks the
-#  probe (the suite must notice it can no longer tell).
+#  That suite used to assert ABSENCE — no session bus, no accessibility bus, on
+#  either host — and these mutants were written to match: each one SUPPLIED the
+#  missing thing and the suite had to notice it was fixed. The hole is closed
+#  now, so the mutants are inverted with it. Each one either TAKES A PIECE AWAY
+#  (the suite must notice the greeter is unreadable again) or breaks the probe
+#  (the suite must notice it can no longer tell).
+#
+#  Two of them are not about accessibility at all. C6 stops the wrapper exec'ing
+#  and C9 makes it die on a missing optional dependency: those are the mutants
+#  for "this change cannot stop the login screen from starting", which is the
+#  more expensive of the two things this wrapper could get wrong.
 #
 #  Restores are `git checkout --`, never `cp -p` and never `mv`: authoritative
 #  about content, and a fresh mtime. The file set is compared against HEAD after
@@ -19,8 +24,10 @@ cd "$(dirname "$0")/.." || exit 2
 TOML="files/desktop/apex-greet/greetd-config.toml"
 SWAYC="files/desktop/apex-greet/sway-greet.conf"
 AUTO="files/desktop/apex-greet/labwc-greet/autostart"
+LABWCRC="files/desktop/apex-greet/labwc-greet/rc.xml"
+WRAP="files/system/libexec/apex-greet-session"
 SUITE_F="tests/test-apex-greet-session-bus.sh"
-FILES="$TOML $SWAYC $AUTO $SUITE_F"
+FILES="$TOML $SWAYC $AUTO $LABWCRC $WRAP $SUITE_F"
 SUITE="./tests/test-apex-greet-session-bus.sh"
 
 applied=0; noapply=0; caught=0; survived=0
@@ -85,18 +92,19 @@ fi
 echo
 echo "── the mutants ──"
 
-# C1 — somebody fixes the session bus. This is the whole point of the suite:
-#      when the hole is closed the suite must say so instead of passing on.
+# C1 — the wrapper is taken out of greetd's command, which is exactly the state
+#      the greeter shipped in until this round. Everything the login screen
+#      needs for accessibility disappears at once.
 mutate C1 "$TOML" \
+    'command = "/usr/libexec/apex-greet-session sway --unsupported-gpu' \
     'command = "sway --unsupported-gpu' \
-    'command = "dbus-run-session -- sway --unsupported-gpu' \
-    "the greeter's client can reach no session bus at all"
+    "the greeter's client can reach a session bus"
 
 # C2 — the live command becomes the abandoned cage host, which is one of the two
 #      lines already sitting in this file as comments. A grep cannot tell a live
 #      line from a commented one; tomllib can.
 mutate C2 "$TOML" \
-    'command = "sway --unsupported-gpu -c /usr/share/apex-greet/sway-greet.conf"' \
+    'command = "/usr/libexec/apex-greet-session sway --unsupported-gpu -c /usr/share/apex-greet/sway-greet.conf"' \
     'command = "cage -ds -- qs -p /usr/share/apex-greet/shell.qml"' \
     "the live command is not one of the two hosts kept in comments"
 
@@ -108,38 +116,76 @@ mutate C3 "$SWAYC" \
     'exec "swaymsg exit"' \
     "the shipped chain really reaches the greeter's own client"
 
-# C4 — the fallback host is fixed and the primary one is not. A suite that only
-#      looked at sway would call the whole thing done.
-mutate C4 "$AUTO" \
-    'qs -p /usr/share/apex-greet/shell.qml' \
-    'dbus-run-session -- qs -p /usr/share/apex-greet/shell.qml' \
-    "the labwc fallback's client can reach no session bus either"
+# C4 — the sway host is fixed and the documented fallback is not. A machine that
+#      took the fallback would have a login screen no reader can hear, and
+#      nothing anywhere to say so.
+mutate C4 "$TOML" \
+    '#   command = "/usr/libexec/apex-greet-session labwc' \
+    '#   command = "labwc' \
+    "the documented labwc fallback command carries the wrapper too"
 
-# C5 — the vacuity floor, and the most important mutant here. Break the probe so
-#      it reports "no bus" whatever it is given, and every absence assertion in
-#      the suite still passes. Only the sensitivity check can see it.
+# C5 — the vacuity floor for the session-bus half. Break the probe so it reports
+#      a bus whatever it is given, and every positive assertion in the suite
+#      still passes. Only the control — the same chain with the wrapper removed
+#      — can see it.
 mutate C5 "$SUITE_F" \
-    '        printf '"'"'session_bus=yes\n'"'"'' \
-    '        printf '"'"'session_bus=no\n'"'"'' \
-    "the same probe, given a session bus, finds one"
+    "        printf 'session_bus=no\\n'" \
+    "        printf 'session_bus=yes\\n'" \
+    "with the wrapper gone, the client can reach no session bus at all"
 
-# C6 — somebody fixes the accessibility bus too: the host execs the launcher, as
-#      tests/lib/atspi.sh does. The a11y half of the finding must then flip.
-LAUNCHER=""
-for c in /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher \
-         /usr/libexec/at-spi2-core/at-spi-bus-launcher; do
-    [ -x "$c" ] && { LAUNCHER="$c"; break; }
-done
-if [ -n "$LAUNCHER" ]; then
-    mutate C6 "$SWAYC" \
-        'exec "qs -p /usr/share/apex-greet/shell.qml; swaymsg exit"' \
-        "exec \"$LAUNCHER --launch-immediately & sleep 2\"
-exec \"qs -p /usr/share/apex-greet/shell.qml; swaymsg exit\"" \
-        "a session bus alone is not enough"
-else
-    printf '%-5s NO-APPLY  at-spi-bus-launcher not found; the a11y half cannot be mutated here\n' C6
-    noapply=$((noapply + 1))
-fi
+# C6 — THE LOGIN-PATH MUTANT. The wrapper stops exec'ing and forks instead, so
+#      greetd ends up holding a shell rather than the compositor: on a
+#      successful login it signals the shell, the compositor survives holding
+#      the VT and the DRM master, and the machine cannot be logged into. Every
+#      accessibility assertion in the suite stays green while that is true.
+mutate C6 "$WRAP" \
+    'exec "$@"' \
+    '"$@"' \
+    "the pid greetd would hold is the compositor's own"
+
+# C7 — the wrapper gives the greeter a session bus and stops starting the
+#      accessibility bus on it. This is the `dbus-run-session` one-liner that
+#      looks like the fix and is not: the bridge has a bus to sit on and still
+#      nothing to publish to.
+mutate C7 "$WRAP" \
+    '        "$_launcher" >/dev/null 2>&1 &' \
+    '        : "$_launcher" >/dev/null 2>&1 &' \
+    "org.a11y.Bus resolves from inside the greeter chain"
+
+# C8 — the accessibility bus comes up and the REGISTRY does not. The most
+#      deceptive failure available here: org.a11y.Bus.GetAddress answers
+#      perfectly, everything looks configured, and a screen reader enumerates
+#      nothing at all. The original "at-spi cannot work here" report in this
+#      repository was this shape.
+mutate C8 "$WRAP" \
+    '                exec "$_registryd" >/dev/null 2>&1' \
+    '                exec true "$_registryd" >/dev/null 2>&1' \
+    "a screen reader has a registry to enumerate the tree with"
+
+# C9 — THE OTHER LOGIN-PATH MUTANT. The wrapper stops surviving a missing
+#      optional dependency and dies instead. On a machine without dbus-daemon
+#      that is a greeter that never starts — over accessibility plumbing, which
+#      is never worth a login screen.
+mutate C9 "$WRAP" \
+    'if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null 2>&1; then' \
+    'if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    command -v dbus-daemon >/dev/null 2>&1 || exit 1' \
+    "with no dbus-daemon on the machine, the greeter still starts"
+
+# C10 — the one key a user who cannot see the screen can press is deleted from
+#       the sway host. The buses are all still there and there is no way to ask
+#       for the reader that would use them.
+mutate C10 "$SWAYC" \
+    'bindsym --to-code Mod4+Mod1+s exec /usr/libexec/apex-screen-reader toggle' \
+    '# (binding removed)' \
+    "the sway host binds a key that starts the screen reader"
+
+# C11 — the same key deleted from the fallback host only.
+mutate C11 "$LABWCRC" \
+    '      <action name="Execute" command="/usr/libexec/apex-screen-reader toggle"/>' \
+    '      <action name="Execute" command="true"/>' \
+    "the labwc fallback host binds the same key"
+
 
 echo
 printf 'mutants applied=%d, failed-to-apply=%d, caught=%d, SURVIVED=%d\n' \
