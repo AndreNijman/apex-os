@@ -378,8 +378,21 @@ progressbar progress {{ background-color: {accent}; }}
 SP = 4  # base spacing unit; every gap below is a multiple
 
 
-def lbl(text, css=None, xalign=0.0, wrap=True, sel=False):
-    w = Gtk.Label(label=text, xalign=xalign, wrap=wrap, selectable=sel)
+def lbl(text, css=None, xalign=0.0, wrap=True, sel=False, pres=False):
+    """A label. `pres=True` keeps it OUT of the accessibility tree.
+
+    For text that is a picture: the Wi-Fi signal bars are drawn out of block
+    characters, and a screen reader spells them out one glyph at a time in front
+    of the network's name. The role is set at CONSTRUCTION rather than with
+    set_property afterwards -- `accessible-role` is settable at runtime on GTK
+    4.20 but has not always been, and a call that quietly does nothing on an
+    older toolkit is the failure mode this file's a11y() docstring warns about.
+    """
+    if pres:
+        w = Gtk.Label(label=text, xalign=xalign, wrap=wrap, selectable=sel,
+                      accessible_role=Gtk.AccessibleRole.PRESENTATION)
+    else:
+        w = Gtk.Label(label=text, xalign=xalign, wrap=wrap, selectable=sel)
     w.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
     if css:
         for c in css.split():
@@ -1050,9 +1063,25 @@ class Installer(Adw.Application):
 
         self.net_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.net_list.add_css_class("apex-card")
+        a11y(self.net_list, "Available Wi-Fi networks",
+             "Pick one, then type its password below.")
         sc = Gtk.ScrolledWindow(vexpand=True)
         sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         sc.set_child(self.net_list)
+        # GTK makes a ScrolledWindow focusable so it can be scrolled from the
+        # keyboard, and it is the first focusable widget on this page -- so the
+        # page opened with the focus on a nameless scroll container, and a
+        # screen reader user was told nothing at all about where they were.
+        # Measured: `role=generic | name= | states=focusable,focused`. The list
+        # inside it takes Up/Down and scrolls itself, so nothing is lost by
+        # letting the focus start on the named list instead.
+        sc.set_focusable(False)
+        # …and with the scroll container out of the way nothing at all had the
+        # focus, which is worse: a keyboard user starts nowhere. So the page
+        # says where the keyboard is, rather than leaving it to the toolkit.
+        # idle_add because the widget is not realised while the page is being
+        # built and grab_focus on an unrealised widget does nothing.
+        GLib.idle_add(lambda: (self.net_list.grab_focus(), False)[1])
         body.append(sc)
 
         # Username, shown only for WPA-Enterprise. School, university and
@@ -1114,12 +1143,35 @@ class Installer(Adw.Application):
                         r.set_margin_top(SP * 2); r.set_margin_bottom(SP * 2)
                         r.set_margin_start(SP * 4); r.set_margin_end(SP * 4)
                         bars = "▁▃▅▇"[:max(1, min(4, n["signal"] // 25 + 1))]
-                        r.append(lbl(bars, "apex-accent apex-mono", wrap=False))
+                        # The signal bars are a picture drawn out of block
+                        # characters. A reader announces them one glyph at a time
+                        # -- "lower one eighth block, lower three eighths
+                        # block" -- in front of the network's name, so they are
+                        # marked presentational and the strength is said in words
+                        # in the row's description instead.
+                        r.append(lbl(bars, "apex-accent apex-mono", wrap=False,
+                                     pres=True))
                         r.append(lbl(n["ssid"], "apex-mono"))
                         lock = lbl("locked" if n["secure"] else "open", "apex-dim", wrap=False)
                         lock.set_hexpand(True); lock.set_xalign(1.0)
                         r.append(lock)
-                        netlist.append(r)
+                        # An explicit row, because the accessible name has to go
+                        # on the thing that takes the focus. A Gtk.Box handed
+                        # straight to ListBox.append is wrapped in a
+                        # GtkListBoxRow that GTK creates and this file never
+                        # sees -- and THAT is the node the Tab ring lands on.
+                        # Measured before this existed: seven `list item` nodes
+                        # on the bus, every one of them focusable with an empty
+                        # name and an empty description. A blind user tabbing
+                        # through this page was told "list item" seven times and
+                        # never heard a single network's name.
+                        row = Gtk.ListBoxRow()
+                        row.set_child(r)
+                        a11y(row, n["ssid"],
+                             "%s network, signal %d percent."
+                             % ("Secured" if n["secure"] else "Open",
+                                max(0, min(100, n["signal"]))))
+                        netlist.append(row)
                     status.set_text(
                         f"{len(nets)} network(s) found."
                         if nets else "No networks found. Try scanning again, or "
