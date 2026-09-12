@@ -55,6 +55,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 use anyhow::{bail, Result};
+use apex_agent_core::mcpconf;
 use apex_agent_core::protocol::{
     Request as AgentRequest, Response as AgentResponse, MCP_BRIDGE_VERSION,
 };
@@ -240,8 +241,15 @@ pub fn home() -> PathBuf {
 fn list(json: bool) -> Result<i32> {
     let cwd = std::env::current_dir().ok();
     let found = servers::discover(&home(), cwd.as_deref());
+    // What a session APEX starts would actually be handed, so the `sandbox`
+    // line below is the launcher's verdict rather than a second reading of the
+    // same definition. See `connector::launch_verdicts`.
+    let launch = crate::connector::launch_verdicts(&home(), cwd.as_deref());
     if json {
-        println!("{}", serde_json::to_string_pretty(&servers::as_json(&found))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&servers::as_json(&found, &launch))?
+        );
         return Ok(0);
     }
     if found.is_empty() {
@@ -267,7 +275,19 @@ fn list(json: bool) -> Result<i32> {
             // Only for a program, because only a program is a thing to confine:
             // an endpoint's request is made by apex-secretd, in a process this
             // machine's agent never starts.
-            println!("  sandbox     {}", describe_sandbox(&server.name, command, args));
+            println!(
+                "  sandbox     {}",
+                describe_sandbox(
+                    &server.name,
+                    command,
+                    args,
+                    launch
+                        .decisions
+                        .iter()
+                        .find(|d| d.name == server.name)
+                        .and_then(|d| d.confined),
+                )
+            );
         }
         println!("  defined in  {}", server.surface.describe());
         if server.credential.agent_readable() {
@@ -346,16 +366,35 @@ fn policy(only: Option<&str>) -> Result<i32> {
 /// A line in the listing rather than only in `apex mcp policy`, because the
 /// listing is where somebody looks to find out what their machine runs — and a
 /// server that starts with everything the session has should say so there.
-fn describe_sandbox(name: &str, command: &str, args: &[String]) -> String {
-    let Some(confined) = servers::confined_server(command, args) else {
-        return format!("none — everything the session has (apex mcp confine {name})");
-    };
-    match sidecar::load(&confined) {
-        Ok(policy) => format!("its own, {}", summarise(&policy)),
+fn describe_sandbox(
+    name: &str,
+    command: &str,
+    args: &[String],
+    wrap: Option<mcpconf::Wrap>,
+) -> String {
+    let policy = |n: &str| match sidecar::load(n) {
+        Ok(policy) => summarise(&policy),
         // Not "none", and not silence: an unreadable policy is not an absent
         // one, and a listing that fell back to describing the default would
         // describe a confinement the server is not going to get.
-        Err(e) => format!("its own, but the policy could not be read: {e:#}"),
+        Err(e) => format!("but the policy could not be read: {e:#}"),
+    };
+    if let Some(confined) = servers::confined_server(command, args) {
+        return format!("its own, {}", policy(&confined));
+    }
+    // Nothing on disk wraps it — which used to settle the question, and stopped
+    // being the whole of it when the session launcher started wrapping
+    // third-party definitions at launch. "none" here is false of every session
+    // `apex agent` starts, and "its own" is false of every session anybody else
+    // starts, so neither on its own may be printed.
+    match wrap {
+        Some(mcpconf::Wrap::AtLaunch) => format!(
+            "not in this definition — `apex agent` wraps it at launch, {}. \
+             Start the agent yourself and it gets none; `apex mcp confine {name}` \
+             writes the wrapper to disk so it holds either way",
+            policy(name)
+        ),
+        _ => format!("none — everything the session has (apex mcp confine {name})"),
     }
 }
 
@@ -740,10 +779,37 @@ mod tests {
     #[test]
     fn a_server_that_starts_unconfined_says_so_and_says_what_to_run() {
         // Pure: no policy file is read for a definition that has no wrapper in
-        // it, so this branch cannot depend on the machine it runs on.
-        let line = describe_sandbox("memory", "npx", &["-y".to_string()]);
+        // it and that the launcher leaves alone, so this branch cannot depend
+        // on the machine it runs on.
+        let line = describe_sandbox(
+            "memory",
+            "npx",
+            &["-y".to_string()],
+            Some(mcpconf::Wrap::Not),
+        );
         assert!(line.starts_with("none —"), "{line}");
         assert!(line.contains("apex mcp confine memory"), "{line}");
+    }
+
+    #[test]
+    fn a_server_the_launcher_wraps_is_not_listed_as_starting_unconfined() {
+        // The same bare definition, belonging to a plugin rather than to the
+        // user. `confined_server` says nothing wraps it and that is still
+        // true of the FILE; it is false of the session, and the line that
+        // stopped at the file was telling a person their plugin's server runs
+        // with everything the session has.
+        let line = describe_sandbox(
+            "plugin:p:srv",
+            "node",
+            &["s.js".to_string()],
+            Some(mcpconf::Wrap::AtLaunch),
+        );
+        assert!(!line.starts_with("none —"), "{line}");
+        assert!(line.contains("wraps it at launch"), "{line}");
+        // And the qualifier, without which the line over-claims in the other
+        // direction.
+        assert!(line.contains("Start the agent yourself"), "{line}");
+        assert!(line.contains("apex mcp confine plugin:p:srv"), "{line}");
     }
 
     #[test]
