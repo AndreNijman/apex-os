@@ -3998,6 +3998,9 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    APEX-PROBE xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx apex-lid and check-headless-runners
+    and byte-identical yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
 - id: L-001
   title: Real TPM and recovery qualification
   priority: Later
