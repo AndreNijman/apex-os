@@ -159,6 +159,24 @@ fn run() -> Result<()> {
     // from this boot means this daemon replaced another. Losing the
     // distinction would make "does not silently persist" true only in the
     // sense that nothing says anything.
+    //
+    // ORDERING, and both halves of it are load-bearing.
+    //
+    // AFTER `bind`, because `bind` is what establishes that no other
+    // apex-agentd is already listening here. Sweeping first would mean a
+    // daemon that is about to fail to start had already closed a RUNNING
+    // daemon's grants and written their endings to the trail.
+    //
+    // BEFORE `listener.incoming()`, which is what makes the gap between the
+    // two unobservable. The socket is connectable from `bind` onwards, so a
+    // client can connect while the sweep is still running — but nothing is
+    // ANSWERED until this loop has finished, so no caller can be told about a
+    // grant from a previous boot as though it were still live. A reply is
+    // therefore proof that the sweep has run, and that is the barrier
+    // `tests/system_grants.rs` waits on; it used to wait on the connect
+    // instead and read the audit trail before this had written it, which is
+    // the flake two rounds reported. Moving the sweep below the accept loop
+    // would reopen both.
     for said in daemon.grants.sweep_previous_lives() {
         eprintln!("apex-agentd: {said}");
     }

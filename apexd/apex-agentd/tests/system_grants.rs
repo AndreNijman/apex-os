@@ -85,33 +85,20 @@ impl Harness {
             socket,
             root,
         };
-        harness.wait_for_socket().then_some(harness)
-    }
-
-    fn wait_for_socket(&self) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            if UnixStream::connect(&self.socket).is_ok() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(25));
+        // A socket that connects is not a daemon that has swept. See
+        // `wait_until_answering`: the connect is only the come-up check, and
+        // the answered request is the barrier.
+        if !wait_for_socket(&harness.socket) {
+            return None;
         }
-        false
+        wait_until_answering(&harness.socket);
+        Some(harness)
     }
 
     /// One request, one reply, on a fresh connection — so every call is
     /// attributed the way a separate `apex` invocation would be.
     fn call(&self, line: &str) -> serde_json::Value {
-        assert!(!line.contains('\n'), "one JSON object per line");
-        let mut stream = UnixStream::connect(&self.socket).expect("connect");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .expect("timeout");
-        writeln!(stream, "{line}").expect("write");
-        stream.flush().ok();
-        let mut reply = String::new();
-        BufReader::new(&stream).read_line(&mut reply).expect("read");
-        serde_json::from_str(&reply).unwrap_or_else(|e| panic!("{e}: {reply}"))
+        call_on(&self.socket, line)
     }
 
     fn state_dir(&self) -> PathBuf {
@@ -128,29 +115,72 @@ impl Harness {
             .unwrap_or_default()
     }
 
-    /// The audit trail, once it has at least `want` lines.
-    ///
-    /// `start` waits for the control socket, and the startup sweep that writes
-    /// these lines is not ordered against the socket appearing — so reading
-    /// the file the instant the daemon answers is a race. Because
-    /// `audit_lines` turns a missing file into an empty vector, losing that
-    /// race did not read as "not yet", it read as "the daemon recorded
-    /// nothing", and the assertion failed naming a trail of `[]`. Measured at
-    /// roughly one run in eight, on a tree with no change to the sweep.
-    ///
-    /// Polled to a deadline rather than slept on, and it returns whatever it
-    /// has when the deadline passes, so a genuine failure still fails — with
-    /// the real contents printed — instead of hanging or being masked.
-    fn audit_lines_once_written(&self, want: usize) -> Vec<serde_json::Value> {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let lines = self.audit_lines();
-            if lines.len() >= want || Instant::now() >= deadline {
-                return lines;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+}
+
+/// The control socket exists and accepts a connection.
+///
+/// This is the come-up check and nothing more. `main.rs` binds the socket
+/// before the startup sweep runs, so `connect` succeeding says only that the
+/// process got as far as `bind` — see [`wait_until_answering`].
+fn wait_for_socket(path: &Path) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if UnixStream::connect(path).is_ok() {
+            return true;
         }
+        std::thread::sleep(Duration::from_millis(25));
     }
+    false
+}
+
+/// Block until the daemon has answered one request — which is the barrier
+/// this whole file's audit-trail assertions need.
+///
+/// `apex-agentd`'s startup order is `bind` → `Daemon::new` →
+/// `sweep_previous_lives` (which writes the audit lines these tests read) →
+/// `listener.incoming()`. A client can therefore CONNECT while the sweep has
+/// not happened, and every test here used to treat that connect as readiness:
+/// it read `privilege-audit.jsonl` the instant the socket answered a
+/// `connect`, and `audit_lines` turns a file that is not there yet into an
+/// empty vector, so losing the race read as "the daemon recorded nothing"
+/// rather than "not yet". Measured at roughly one run in eight; it was the
+/// pre-existing flake two rounds reported and nobody owned.
+///
+/// An ANSWER is a different fact. The accept loop is strictly after the
+/// sweep, so a reply that comes back proves the sweep has already run and the
+/// trail is already written. That makes every read below ordered by
+/// construction rather than by a poll — which matters most for the negative
+/// assertion in `the_ending_is_recorded_once_…`, where a poll can only wait
+/// for a line to appear and the claim is that one does not.
+///
+/// The ordering it depends on is stated in `main.rs` beside the sweep.
+///
+/// Not a `SKIP`: the socket already answered `connect`, so the daemon is up.
+/// A daemon that is up and never answers is a failure, and is reported as
+/// one.
+fn wait_until_answering(path: &Path) {
+    let hello = call_on(path, r#"{"cmd":"requests"}"#);
+    assert_eq!(
+        hello["reply"], "requests",
+        "the daemon did not answer its first request: {hello}"
+    );
+}
+
+/// One request, one reply, on a fresh connection.
+///
+/// Free rather than a method because the second daemon in
+/// `the_ending_is_recorded_once_…` has its own socket and no `Harness`.
+fn call_on(path: &Path, line: &str) -> serde_json::Value {
+    assert!(!line.contains('\n'), "one JSON object per line");
+    let mut stream = UnixStream::connect(path).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("timeout");
+    writeln!(stream, "{line}").expect("write");
+    stream.flush().ok();
+    let mut reply = String::new();
+    BufReader::new(&stream).read_line(&mut reply).expect("read");
+    serde_json::from_str(&reply).unwrap_or_else(|e| panic!("{e}: {reply}"))
 }
 
 fn now_ms() -> u128 {
@@ -239,8 +269,10 @@ fn a_grant_from_another_boot_is_reported_as_ended_on_the_next_start() {
     };
 
     // What the machine says: an audit line naming the reboot, with the grant
-    // it was about.
-    let trail = h.audit_lines_once_written(1);
+    // it was about. Read directly, not polled for: `Harness::start_with` does
+    // not return until the daemon has answered a request, and the accept loop
+    // that answered it starts after the sweep that writes this file.
+    let trail = h.audit_lines();
     let ended: Vec<&serde_json::Value> = trail
         .iter()
         .filter(|l| l["event"] == "ended-at-reboot")
@@ -309,7 +341,7 @@ fn the_ending_is_recorded_once_however_many_daemons_see_it() {
     };
     // This one's window had already run out before the reboot, so it expired
     // on its own — the distinction the boot rule keeps rather than collapses.
-    let first = h.audit_lines_once_written(1);
+    let first = h.audit_lines();
     assert_eq!(
         first.iter().filter(|l| l["grant"] == 4).count(),
         1,
@@ -328,12 +360,22 @@ fn the_ending_is_recorded_once_however_many_daemons_see_it() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn");
-    let deadline = Instant::now() + Duration::from_secs(10);
     let sock2 = runtime2.join("apex-agentd").join("control.sock");
-    while Instant::now() < deadline && UnixStream::connect(&sock2).is_err() {
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    let after = h.audit_lines_once_written(first.len());
+    assert!(
+        wait_for_socket(&sock2),
+        "the second daemon never bound its control socket"
+    );
+    // The barrier, and the reason this assertion is worth anything. What is
+    // claimed here is that a line does NOT appear, and no amount of polling
+    // can wait for that — the only sound read is one taken after the second
+    // daemon's sweep has provably finished. Its accept loop runs after its
+    // sweep, so an answered request is that proof. Reading the trail the
+    // moment `sock2` merely connected, which is what this did before, took
+    // the measurement in the window where the second daemon had not swept
+    // yet: the assertion passed by being early rather than by being true.
+    let hello = call_on(&sock2, r#"{"cmd":"requests"}"#);
+    assert_eq!(hello["reply"], "requests", "{hello}");
+    let after = h.audit_lines();
     let _ = second.kill();
     let _ = second.wait();
     assert_eq!(after.len(), first.len(), "the ending was written twice: {after:#?}");
