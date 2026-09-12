@@ -114,7 +114,7 @@ Item {
         // The id is checked against `recoverySession` at the point it is read
         // (see the watchdog Process below), so this loop can only ever land on
         // APEX Safe Graphics — and only if it is actually in the picker.
-        if (ctx._recoverWanted !== "") {
+        if (ctx._recoverWanted) {
             for (var r = 0; r < ctx.sessions.length; r++)
                 if (ctx.sessions[r].id === ctx._recoverWanted) {
                     ctx.sessionIndex   = r

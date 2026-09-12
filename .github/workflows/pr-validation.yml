@@ -1602,8 +1602,8 @@ jobs:
               echo "::error::$skipped session-watchdog assertions could not run ($summary); a could-not-run is not a pass"
               exit 1
           }
-          [ "$passed" -ge 89 ] || {
-              echo "::error::only $passed session-watchdog assertions ran; 89 ran as both uid 0 and uid 1000 on 2026-09-13, so some no longer execute"
+          [ "$passed" -ge 91 ] || {
+              echo "::error::only $passed session-watchdog assertions ran; 91 ran as both uid 0 and uid 1000 on 2026-09-13, so some no longer execute"
               exit 1
           }
 
