@@ -276,7 +276,14 @@ EOF
 # in this picture and a screen reader is told where the bus is. The application
 # must find it.
 atspi_run_app() {
-    env -u AT_SPI_BUS_ADDRESS "$@"
+    # `exec`, and it is load-bearing. Backgrounding a shell FUNCTION runs it in a
+    # subshell, so `$!` is the subshell and the application is its child --
+    # `kill "$!"` then reaps the subshell while the application keeps running,
+    # still registered with the registry. A survey written before this line had
+    # six installer processes alive at once and reported their merged trees as
+    # one page's, which made every per-page count in it wrong.
+    # exec replaces the subshell, so `$!` really is the application.
+    exec env -u AT_SPI_BUS_ADDRESS "$@"
 }
 
 # How many applications are registered with the private registry right now.
