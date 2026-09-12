@@ -112,6 +112,33 @@ and `tests/test-boot-v2.sh` scans for exactly that.
 The design does not settle the transport and has no server-side design at all,
 which is why it is recorded `partial` and not `done`.
 
+## Round 1 — the review pass, and what it found
+
+Commit `23546d3e`. Three things the first nine commits claimed and did not have:
+
+* **Every Nextcloud account this branch could store pointed at a 404.**
+  Nextcloud serves files at `/remote.php/dav/files/<username>/`; the table
+  stored the bare prefix. `Provider::path_for` composes it now.
+* **`collect` handled two of three cases.** A command that exits 0 with no
+  output left an empty file, which reads as "nothing to report" — the one thing
+  that function exists not to say by accident.
+* **`tests/test-apex-safe-graphics.sh` was in no workflow**, which in this repo
+  means it runs on no machine unless somebody types it. Now in the job that
+  already installs labwc, and both helpers are under the hard shellcheck gate.
+
+And one correction to the evidence itself: the ~15 new Containerfile refusals
+are in `check-containerfile-assertions.sh`'s UNRESOLVED set, not its 106
+checked. The RUN body was extracted and executed locally with paths
+substituted — every assertion ran, and with `-C` removed from a copy of the
+tree it prints its FATAL and exits 1.
+
+## Merge state, measured 2026-09-12 at the end of round 1
+
+`roadmap/v2.2` moved from `4b1e797f` to `b6c4ef33` while this unit worked.
+`task/p2-f` is 10 commits, 26 files, +3837/-11 from `4b1e797f`. **No file is
+touched by both sides**, and `git merge-tree --write-tree HEAD
+origin/roadmap/v2.2` reports a clean merge.
+
 ## NEXT
 
 Ordered by what a second round would gain most from.
