@@ -12,9 +12,10 @@
 
 *(kept current — a fresh agent replaces the dead one by reading this line)*
 
-**→ P2-001 and P2-002 are done and pushed (5 commits). Now P2-013: generalise
-`[identity.*]` to github/ssh/agent, find the enforcement seam for each, and
-report honestly where there is none.**
+**→ Nothing outstanding. All three items are on `task/p2-a-backup` (5 commits,
+pushed, never rebased). P2-001 criterion 1 is PARTIAL and P2-013 is PARTIAL,
+both for reasons recorded below that are refusals rather than gaps. A fresh
+agent picking this up should read "Known gaps" before adding anything.**
 
 ---
 
@@ -181,6 +182,7 @@ Five commits on `task/p2-a-backup`, all pushed. Nothing rebased.
 * `70fd7384` targets: local, NAS with the mount checked, R2 brokered — 79 tests, 20 mutations
 * `025d2a31` keys, config, session — 129 tests, 35 mutations
 * `5aa7d58c` `apex backup`, the R2 call sequence, `tests/test-apex-backup.sh`
+* `4dd8f4fe` §36's `[identity.*]` — P2-013
 
 **Counts on the branch tip:** `apex-backup-core` 132 passed / 0 failed;
 `apex-secretd` 183 + 15 passed / 0 failed; `apex` 535 + 8 + 6 passed / 0 failed;
@@ -213,3 +215,85 @@ well, and a directory in the way is reported rather than deleted.
 per-entry `readdir` `?` in `FsTarget::list` cannot be reached from a fixture,
 because `read_dir` opens the directory once and the `chmod 000` test fails at
 the open. It needs an NFS mount losing its server mid-listing.
+
+### 2026-09-12 — round 1, P2-013 and the close
+
+`4dd8f4fe`. §36 IS in the repo, at `ROADMAP/ROADMAP.md:1414`, and it names the
+fields: `account` (github, cloudflare), `host_group` (ssh), `default` (agent),
+with the purpose in one sentence — *"This prevents deploying or pushing from
+the wrong account."* Those are the names used; nothing was invented except
+`[identity.github] host`, which is documented as an addition and exists because
+GitHub Enterprise is not github.com and because a check that could only run
+against the real github.com could not be tested at all.
+
+The prior art for the whole shape is in this unit already: `[backup] recipient`
+declared in `apex.toml` and checked against what root registered. §36's github
+binding is the same pattern with the grant table as the authority instead.
+
+**Final counts on the tip.** `cargo test --locked --workspace` **1823 passed /
+0 failed**. `tests/test-apex-backup.sh` 64 / 0 (including the real-root half).
+`tests/test-apex-verbs.sh` 59 / 0. **`tests/run-clippy.sh` PASS** — the gate of
+record, `rust:1` in a container, not the local clippy 0.1.98.
+
+**96 mutations run in total. 86 caught first time; 10 survived, 6 were real
+defects now fixed, 4 were weak tests now strengthened, and 1 is deliberately
+left and documented in the source.** Plus one shell-suite mutation (removing
+`check_declared` from `apex backup run`) which turned *a swapped recipient
+refuses the run* red and was restored with a plain `cp` — cargo printed
+`Compiling` on the restore.
+
+---
+
+## Known gaps, stated rather than left to be found
+
+1. **A local or NAS restore leaves no audit line.** The R2 path is audited by
+   `apex-secretd`, because every object goes through a capability. The local
+   path does not touch the daemon at all — the backup key is deliberately not in
+   its store — so `apex-secret-core::audit` never sees a restore that decrypted
+   a tree. Not a criterion of P2-001 or P2-002, but P0-002's criterion 4 is the
+   standard this repository holds credential use to, and this falls outside it.
+2. **Key escrow does not exist.** A private key that lives only on this machine
+   means losing the machine loses every backup. `apex backup key init` says so
+   in its output; nothing enforces it.
+3. **`mtime` is recorded and never applied.** A restored file has the right
+   contents, mode and symlink target; its timestamp is the restore's. "Versioned
+   restore" is about snapshots, not timestamps, and this is the fidelity limit.
+4. **Two snapshots in the same second sort by their random tail**, so `latest`
+   could pick the earlier of two taken inside one second. Eight hex characters
+   of tail; the odds are small and the consequence is picking a sibling.
+5. **On R2, an interrupted write reads as `CouldNotRun`, never "interrupted".**
+   The "the head is the last object, so this run was interrupted" distinction is
+   local/NAS only. It follows from `Performed` carrying one bit rather than an
+   HTTP status, which `target/r2.rs` documents at length. If the broker grows a
+   status field, that module is where to use it.
+6. **`handoff_packet`'s 8 tests failed once** in a combined
+   `cargo test -p apex-backup-core -p apex-secretd -p apex` run and passed on
+   every run since, alone and combined. Those tests exec `target/debug/apex` and
+   cargo was relinking it at the time. Recorded so the next agent does not chase
+   it as theirs.
+
+---
+
+## For whoever integrates this
+
+Branched from `24472b64` and **never rebased**; `git merge-base
+origin/roadmap/v2.2 HEAD` is exactly `24472b64`. `roadmap/v2.2` has moved on
+since (P1-011/P1-012/P1-013, the relay work, P2-004), so there is a merge to do.
+
+**31 files changed here; 3 of them the tip has also touched:**
+
+* `.github/workflows/pr-validation.yml` — one step appended immediately after
+  "Run credential-migration assertions".
+* `apexd/Cargo.lock` — two new direct edges: `x25519-dalek 2.0.1` (which
+  resolves onto the `curve25519-dalek 4.1.3` already in the graph — checked,
+  there is still only one copy) and `tempfile` as a dev-dependency. Every other
+  crypto crate used was already in the lock through `snow`.
+* `apexd/apex-secretd/src/providers/cloudflare/tests.rs` — one block inserted
+  immediately before the "§13.3's storage surfaces" banner. Nothing existing in
+  that file was edited.
+
+Everything else is new files or additive edits (`apex/src/main.rs` gains a
+`mod`, a `Cmd` variant and a dispatch arm; `apex/src/agent.rs` gains a
+`ProjectCmd` variant, a dispatch arm and one function;
+`apex-secretd/src/providers/git.rs` gains a block inside `bind` and a test
+module section; `apex-secret-core/src/lib.rs` gains one `pub mod`).
