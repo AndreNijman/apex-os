@@ -21,3 +21,10 @@ libc.workspace = true
 # string literals a test could get wrong.
 [dev-dependencies]
 apex-agent-core = { path = "../apex-agent-core" }
+
+# The TLS half of a relay dial is proved by terminating a real TLS connection
+# on loopback, so the test needs a SERVER. Already in the lock through
+# apex-remote-core, so naming it here adds no crate: `cargo tree` and the
+# package count are unchanged.
+rustls = { version = "0.23.42", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-pki-types = { version = "1", features = ["std"] }

@@ -7,5 +7,8 @@
   "license": "MIT",
   "scripts": {
     "test": "node --test"
+  },
+  "devDependencies": {
+    "wrangler": "^4.131.1"
   }
 }
