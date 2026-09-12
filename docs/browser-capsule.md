@@ -22,7 +22,7 @@ guarantee pointed at a browser:
 | downloads leave only when nominated | `apex vm run`'s egress rule — the loop runs over the **nominations**, never over the directory's contents |
 | nothing survives the run | `apex vm run`'s four-way fence on a recursive removal: narrow name pattern, final component not a symlink, `realpath`, and the resolved path equal to exactly `<root>/<name>` |
 
-So `apex browser` is a client of `apex agent`, not a second sandbox. It builds
+`apex browser` is a client of `apex agent` rather than a second sandbox. It builds
 a capsule directory and a profile, asks the runtime for a confined allowlisted
 session whose working directory is that capsule, waits for it, copies out the
 files that were nominated, and deletes the capsule.
@@ -59,7 +59,7 @@ apex browser run --allow example.com:443 \
 not a convenience: Firefox's `--screenshot` writes **nothing at all** when it
 is given a relative filename — measured, and the run still exits 0 — and a
 caller cannot type the path of a capsule this command names for them. A token
-rather than a rewrite of `--screenshot` specifically, because the engine does
+rather than a rewrite of `--screenshot`, because the engine does
 not know which of a browser's flags take paths and guessing would be a list to
 keep correct for every browser and every version.
 
@@ -192,12 +192,10 @@ safebrowsing and prefetch. That is hygiene, and it is not sufficient: with all
 of it applied, the lab's daemon still logs a capsule being denied
 `firefox.settings.services.mozilla.com` and `aus5.mozilla.org`.
 
-Which is the point worth taking away. **The allowlist is the boundary and the
-preferences are not.** A capsule reaches exactly the destinations it was
+**The allowlist is the boundary and the preferences are not.** A capsule reaches exactly the destinations it was
 allowed, whatever the browser decides it would like to contact, and the daemon
 writes down every refusal. The preferences exist so that a run's allowlist
-roughly describes what the capsule talks to, not because anything depends on
-them.
+describes what the capsule talks to, near enough. Nothing depends on them.
 
 ## Firefox keeps its own sandbox, and that needed a measurement
 
@@ -210,8 +208,8 @@ output at all while the parent exits 0 — a silent nothing.
 The agent sandbox already mounts a fresh procfs (`--proc /proc`, beside
 `--unshare-pid`), so the nesting works and the browser's own sandbox survives
 inside APEX's. The capsule therefore has two boundaries, not one, and the
-suite asserts the fresh `/proc` is there so that removing it fails a test
-instead of silently removing a layer.
+suite asserts the fresh `/proc` is there, so removing it fails a test instead
+of removing a layer with nobody noticing.
 
 ## Headless, and there is no flag to make it otherwise
 
@@ -219,7 +217,7 @@ instead of silently removing a layer.
 way `apex vm` has no `--graphics`. The absence is asserted rather than
 reviewed.
 
-More importantly the guarantee is structural: the capsule's `/run` and
+The guarantee is structural: the capsule's `/run` and
 `$XDG_RUNTIME_DIR` are tmpfs, so `$WAYLAND_DISPLAY` names a socket that does
 not exist. A browser told to open a window in there cannot find a compositor.
 `MOZ_HEADLESS` is set as well, but it is the belt and the missing socket is the
@@ -229,16 +227,15 @@ anybody's screen.
 ## Capability auth: what it decides, and what it does not
 
 `--capability NAME` names a credential already in `apex-secretd`'s root-owned
-store. What it does is bind the capsule's destination to that credential's
-**pin**:
+store. It binds the capsule's destination to that credential's **pin**:
 
 * the run is refused if no credential of that name is stored;
 * the capsule's allowed destination is the host the credential was pinned to
   when it was stored, not a host typed at the call site;
 * `--allow` naming any other host is refused, by name, rather than added.
 
-So the capability decides where the browser may go. That is the half of
-§13's model a browser can honestly use: the framework's load-bearing rule is
+The capability decides where the browser may go. That is the half of
+§13's model a browser can use without overstating it: the framework's rule is
 that a caller does not get to choose where a credential's authority is spent,
 and here the caller does not get to choose where the capsule can reach.
 
