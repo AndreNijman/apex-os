@@ -68,6 +68,17 @@ data class AgentSession(
     @SerialName("last_activity") val lastActivity: Long = 0,
     @SerialName("exit_code") val exitCode: Int? = null,
     @SerialName("exit_signal") val exitSignal: Int? = null,
+    /**
+     * The checkpoint taken before this session started, when one was asked
+     * for. Null when none was — which is the default; `auto_checkpoint` is
+     * false in `Config::default()`.
+     *
+     * An **id**, and nothing more: `Checkpoint` itself carries a label, a
+     * tree, the branch and HEAD it was taken from and the packages installed
+     * since, and none of that crosses this wire. See [undoCommand] for what a
+     * phone can honestly do with it.
+     */
+    val checkpoint: String? = null,
     /** How many clients are attached, this phone included once it attaches. */
     val attached: Int = 0,
     val cols: Int = 80,
@@ -80,6 +91,30 @@ data class AgentSession(
 
     /** Project name, project path, or working directory — the first that exists. */
     val where: String get() = projectName ?: project ?: cwd
+
+    /**
+     * The command that undoes this session's work, to be run **at the
+     * machine**.
+     *
+     * A string to read and not a button to press, and that is measured rather
+     * than a choice about caution. `checkpoint::list` and `checkpoint::restore`
+     * exist in `apex-agent-core`, but their only non-test callers are in
+     * `apexd/apex/src/agent.rs` — the CLI — operating on the local filesystem
+     * directly. **There is no checkpoint verb on the socket**: not list, not
+     * restore, not undo. `protocol.rs`'s `Request` mentions checkpoints in
+     * exactly two places, `RunRequest.checkpoint` (take one before starting)
+     * and this field (the id of the one taken), and neither reads or reverses
+     * anything.
+     *
+     * So a phone cannot perform an undo, and it also cannot show its
+     * consequences: what `restore` would change, which files it would touch,
+     * what it would unwind — all of that is computed on the machine from the
+     * checkpoint's tree, and none of it crosses this wire. Showing the command
+     * is the whole of what is available, and inventing a consequence summary
+     * from the fields that ARE here would be describing a destructive
+     * operation from the wrong data.
+     */
+    val undoCommand: String? get() = checkpoint?.let { "apex agent undo --checkpoint $it" }
 
     /**
      * How long this session has been going, in milliseconds.
@@ -224,6 +259,23 @@ object Agentd {
     fun interrupt(id: Int): String = signal(id, "int")
 
     /**
+     * Type into a live session's terminal without attaching to it.
+     *
+     * `Request::Input { id, data }` writes RAW BYTES to the PTY master
+     * (`session::write_input`) and appends nothing — no newline, no encoding.
+     * A reply sent without a terminator sits unsubmitted on the agent's input
+     * line, which looks to the user exactly like nothing having happened, so
+     * callers go through [Reply.bytes] rather than passing text straight in.
+     *
+     * A phone is allowed this verb. `privilege::refuse_input` refuses exactly
+     * two callers — a connection that IS a managed session, and one whose
+     * origin could not be classified — and a paired device is neither. See
+     * `Reply.kt` for why that is the daemon's reasoning rather than a gap.
+     */
+    fun input(id: Int, data: String): String =
+        """{"cmd":"input","id":$id,"data":"${escape(data)}"}"""
+
+    /**
      * Per-worktree status for every remembered project, or for one slug.
      *
      * ## This verb EXISTS. The comment that used to stand here said it did not.
@@ -271,6 +323,7 @@ object Agentd {
         agent: String? = null,
         prompt: String? = null,
         worktree: String? = null,
+        checkpoint: Boolean = false,
     ): String = buildString {
         append("""{"cmd":"run","cwd":"""").append(escape(cwd)).append('"')
         append(""","cols":""").append(cols)
@@ -278,6 +331,12 @@ object Agentd {
         if (!agent.isNullOrEmpty()) append(""","agent":"""").append(escape(agent)).append('"')
         if (!prompt.isNullOrEmpty()) append(""","prompt":"""").append(escape(prompt)).append('"')
         if (!worktree.isNullOrEmpty()) append(""","worktree":"""").append(escape(worktree)).append('"')
+        // Sent only when true. `RunRequest.checkpoint` is `#[serde(default)]`
+        // and false is the default, so `"checkpoint":false` and the key's
+        // absence mean the same thing to the daemon — but a daemon that
+        // predates the field would reject the key outright, and this app runs
+        // against whatever the machine has.
+        if (checkpoint) append(""","checkpoint":true""")
         append('}')
     }
 

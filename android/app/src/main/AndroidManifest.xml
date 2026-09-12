@@ -12,6 +12,19 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- An agent waiting for you is the whole point of carrying this app, so
+         the notification is not decoration. Asked at the moment the Agent
+         Center first connects rather than at install, and the app works
+         without it: the same alerts are on the Agent Center's own list.
+
+         Note what this permission does NOT buy. There is no push transport
+         anywhere in APEX — no FCM, no UnifiedPush, no ntfy, and no subscribe
+         verb on the daemon's socket — so these notifications come from polling
+         a connection this phone opened, and they arrive only while that poll
+         is alive. Granting this does not make the phone wake for an agent it
+         is not already connected to. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
