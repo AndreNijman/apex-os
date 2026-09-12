@@ -54,6 +54,7 @@
 //! is not readable at rest by the user's uid, and no reply this service can
 //! send contains one.
 
+pub mod account;
 pub mod audit;
 pub mod budget;
 pub mod capability;
@@ -66,6 +67,7 @@ pub mod protocol;
 pub mod store;
 pub mod value;
 
+pub use account::{AccountError, AccountRef, Flow, Host, Presentation, Provider, Scope};
 pub use audit::{AuditEvent, AuditLine};
 pub use budget::{Budget, BudgetError, Spend, Usage};
 pub use capability::{CapabilityRecord, EndpointError};
