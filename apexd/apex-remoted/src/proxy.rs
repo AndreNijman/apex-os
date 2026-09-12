@@ -60,11 +60,14 @@ pub struct Agentd {
 pub enum ProxyError {
     /// The daemon is not running, or would not accept a connection.
     Unreachable(String),
-    /// The daemon answered an `attach` with something other than `attached`.
+    /// The daemon answered a takeover verb with something other than the word
+    /// that means it took the connection over.
     ///
-    /// Carries the daemon's own reply, so the device is told "no session 4"
-    /// rather than being handed a channel that closes for no stated reason.
-    NotAttached(Vec<u8>),
+    /// Two verbs reach this: `attach`, answered `attached`, and `receive`,
+    /// answered `receiving`. Carries the daemon's own reply, so the device is
+    /// told "no session 4" or "32 MiB is past the limit" rather than being
+    /// handed a channel that closes for no stated reason.
+    NotTakenOver(Vec<u8>),
     /// The daemon refused the origin declaration.
     ///
     /// Fatal for the connection, and deliberately not recoverable. A daemon
@@ -87,9 +90,9 @@ impl std::fmt::Display for ProxyError {
                  was forwarded: a remote request filed under a local origin is what §7 exists to \
                  prevent"
             ),
-            ProxyError::NotAttached(reply) => write!(
+            ProxyError::NotTakenOver(reply) => write!(
                 f,
-                "the agent runtime did not attach: {}",
+                "the agent runtime did not take the channel over: {}",
                 String::from_utf8_lossy(reply)
             ),
             ProxyError::Io(e) => write!(f, "{e}"),
@@ -164,22 +167,30 @@ impl Agentd {
         Ok(reply.trim_end_matches('\n').as_bytes().to_vec())
     }
 
-    /// Send an `attach` and take the raw stream, plus whatever PTY bytes
+    /// Send a takeover request and take the raw stream, plus whatever bytes
     /// arrived alongside the reply.
     ///
-    /// The buffered bytes matter: the daemon writes the response line and
-    /// then immediately begins the scrollback replay, so a reader that
-    /// dropped its buffer would lose the first burst of a terminal the phone
-    /// asked to see.
-    pub fn attach(mut self, request: &[u8]) -> Result<(UnixStream, Vec<u8>, Vec<u8>), ProxyError> {
+    /// The buffered bytes matter: after `attached` the daemon immediately
+    /// begins the scrollback replay, so a reader that dropped its buffer would
+    /// lose the first burst of a terminal the phone asked to see. After
+    /// `receiving` there is nothing to lose — the daemon is waiting to be
+    /// written to — and the same code path returns an empty buffer, which is
+    /// why this is one function rather than two.
+    ///
+    /// The timeouts come off for both. A PTY may sit idle for hours, and a
+    /// deadline on it would end the terminal rather than the request; an
+    /// upload is bounded by the DAEMON's two clocks, which are the ones that
+    /// can see how far it has got.
+    pub fn take_over(
+        mut self,
+        request: &[u8],
+    ) -> Result<(UnixStream, Vec<u8>, Vec<u8>), ProxyError> {
         self.stream.write_all(request)?;
         self.stream.write_all(b"\n")?;
         self.stream.flush()?;
         let mut reply = String::new();
         self.reader.read_line(&mut reply)?;
         let buffered = self.reader.buffer().to_vec();
-        // A PTY may sit idle for hours; a deadline on it would end the
-        // terminal rather than the request.
         self.stream.set_read_timeout(None).ok();
         self.stream.set_write_timeout(None).ok();
         Ok((
@@ -190,33 +201,58 @@ impl Agentd {
     }
 }
 
-/// Whether a control payload is an `attach`, which needs a channel rather
-/// than a reply.
+/// Whether a control payload is a verb that takes the connection over, and so
+/// needs a channel rather than a reply.
+///
+/// Two of them. `attach` turns the daemon's connection into the session's PTY;
+/// `receive` turns it into a sink for the file being handed over. Both stop
+/// being control channels the moment the daemon answers, so both are wrong on
+/// channel zero for the same reason — the proxy would be left expecting reply
+/// lines from something that is now a byte pipe, and the device's bytes would
+/// go nowhere.
 ///
 /// Read out of the JSON rather than out of the frame tag, so a client that
-/// sends `attach` as an ordinary control frame gets the same treatment as one
-/// that opens a channel — and does not get a connection wedged half in the
-/// PTY state with the proxy still expecting reply lines.
-pub fn is_attach(payload: &[u8]) -> bool {
+/// sends one as an ordinary control frame gets the same treatment as one that
+/// opens a channel.
+pub fn takes_over_the_channel(payload: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(payload)
-        .map(|v| v["cmd"] == "attach")
+        .map(|v| v["cmd"] == "attach" || v["cmd"] == "receive")
         .unwrap_or(false)
 }
+
+/// The daemon's replies that mean "this connection is no longer control".
+///
+/// A pair rather than a single string because there are two takeover verbs,
+/// and a proxy that recognised only the older one would open a channel onto a
+/// `receive` and then treat the daemon's refusal line as the first bytes of a
+/// terminal.
+pub const TAKEOVER_REPLIES: [&str; 2] = ["attached", "receiving"];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn an_attach_is_recognised_however_the_client_sends_it() {
-        assert!(is_attach(br#"{"cmd":"attach","id":1,"cols":80,"rows":24}"#));
+    fn both_takeover_verbs_are_recognised_however_the_client_sends_them() {
+        assert!(takes_over_the_channel(
+            br#"{"cmd":"attach","id":1,"cols":80,"rows":24}"#
+        ));
+        // The second one. A proxy that knew only `attach` would answer this on
+        // channel zero and then wait for reply lines from a daemon that is
+        // waiting to be written to — both ends blocked on each other.
+        assert!(takes_over_the_channel(
+            br#"{"cmd":"receive","id":1,"name":"shot.png","len":2048}"#
+        ));
         // Key order is not fixed on the wire.
-        assert!(is_attach(br#"{"id":1,"cmd":"attach"}"#));
-        assert!(!is_attach(br#"{"cmd":"list"}"#));
-        assert!(!is_attach(br#"{"cmd":"attach_something_else"}"#));
-        // Not JSON at all: not an attach, and not a panic either.
-        assert!(!is_attach(b"attach"));
-        assert!(!is_attach(b""));
+        assert!(takes_over_the_channel(br#"{"id":1,"cmd":"attach"}"#));
+        assert!(takes_over_the_channel(br#"{"len":1,"cmd":"receive"}"#));
+        assert!(!takes_over_the_channel(br#"{"cmd":"list"}"#));
+        assert!(!takes_over_the_channel(br#"{"cmd":"inject","id":1,"source":"/x"}"#));
+        assert!(!takes_over_the_channel(br#"{"cmd":"attach_something_else"}"#));
+        assert!(!takes_over_the_channel(br#"{"cmd":"receive_something_else"}"#));
+        // Not JSON at all: not a takeover, and not a panic either.
+        assert!(!takes_over_the_channel(b"attach"));
+        assert!(!takes_over_the_channel(b""));
     }
 
     #[test]
