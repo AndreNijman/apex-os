@@ -100,6 +100,33 @@ fn input_is_a_verb_and_carries_the_terminator_the_daemon_does_not_add() {
 }
 
 #[test]
+fn a_transcript_and_a_clipboard_are_input_and_are_not_submitted() {
+    // The other half of the rule above, and the one that is easy to lose.
+    // `apex agent input` takes `--submit`; apex-shell's push-to-talk does not
+    // pass it, so a transcript is STAGED in the agent's input line and a human
+    // presses Enter. A speech recogniser's guess that submitted itself would
+    // be an instruction nobody read, and a clipboard that submitted itself
+    // would run whatever was on the first line of what somebody copied.
+    for name in ["input_voice", "input_clipboard"] {
+        match parse(name) {
+            Request::Input { id, data } => {
+                assert_eq!(id, 7);
+                assert!(
+                    !data.ends_with('\r') && !data.ends_with('\n'),
+                    "`{name}` submitted itself: {data:?}"
+                );
+                assert!(
+                    !data.contains('\r') && !data.contains('\n'),
+                    "`{name}` carries an interior line break, which IS a press of return \
+                     partway through: {data:?}"
+                );
+            }
+            other => panic!("`{name}` parsed as {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn run_carries_the_checkpoint_flag_and_omits_what_it_has_no_value_for() {
     match parse("run_minimal") {
         Request::Run(r) => {

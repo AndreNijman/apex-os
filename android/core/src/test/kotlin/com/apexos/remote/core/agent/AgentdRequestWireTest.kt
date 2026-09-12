@@ -63,6 +63,27 @@ class AgentdRequestWireTest {
     }
 
     @Test
+    fun `a transcript and a clipboard use the same verb and do NOT submit`() {
+        // One verb, three payloads, and the difference is the last byte.
+        // `apex agent input` takes --submit; the desktop's push-to-talk does
+        // not pass it (`PushToTalkService.qml` builds ["apex","agent","input",
+        // id, text]). A recogniser's guess that submitted itself would be an
+        // instruction nobody read, so both of these are staged in the agent's
+        // input line for a human to press Enter on.
+        expect("input_voice", Agentd.input(7, Handoff.Voice.payload("  rebase onto main ")))
+        expect(
+            "input_clipboard",
+            Agentd.input(
+                7,
+                Handoff.Clipboard.payload(
+                    "cargo test -p apex-agentd\nrm -rf build\n",
+                    Handoff.Clipboard.Choice.FIRST_LINE,
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun `run omits what it has no value for, rather than sending nulls`() {
         // `RunRequest`'s optional fields are `#[serde(default)]`, and a key
         // holding null is not the same as an absent key to every one of them.
@@ -144,6 +165,7 @@ class AgentdRequestWireTest {
         assertEquals(
             setOf(
                 "hello", "list", "info", "attach", "resize", "signal", "input",
+                "input_voice", "input_clipboard",
                 "run_minimal", "run_full", "worktrees_all", "worktrees_one",
                 "requests", "grants", "system_grants",
                 "revoke_one", "revoke_all", "revoke_system_grant",
