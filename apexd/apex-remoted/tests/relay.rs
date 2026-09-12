@@ -1058,10 +1058,9 @@ fn a_guest_that_arrives_with_no_desktop_waiting_is_refused_by_status_not_by_sile
         let ep = Endpoint::parse(&probe.url()).expect("endpoint");
         if ep.secure {
             println!(
-                "SKIP-EXTERNAL: {}: this assertion is made over a raw TCP socket, \
-                 which cannot reach a TLS relay. It runs against the double and \
-                 against a ws:// relay.",
-                "a_guest_that_arrives_with_no_desktop_waiting_is_refused_by_status_not_by_silence"
+                "SKIP-EXTERNAL: a_guest_that_arrives_with_no_desktop_waiting_is_refused_by_status_not_by_silence: this assertion is made \
+                 over a raw TCP socket, which cannot reach a TLS relay. It runs \
+                 against the double and against a ws:// relay."
             );
             return;
         }
@@ -1099,10 +1098,9 @@ fn two_desktops_cannot_hold_one_rendezvous() {
         let ep = Endpoint::parse(&probe.url()).expect("endpoint");
         if ep.secure {
             println!(
-                "SKIP-EXTERNAL: {}: this assertion is made over a raw TCP socket, \
-                 which cannot reach a TLS relay. It runs against the double and \
-                 against a ws:// relay.",
-                "two_desktops_cannot_hold_one_rendezvous"
+                "SKIP-EXTERNAL: two_desktops_cannot_hold_one_rendezvous: this assertion is made \
+                 over a raw TCP socket, which cannot reach a TLS relay. It runs \
+                 against the double and against a ws:// relay."
             );
             return;
         }
