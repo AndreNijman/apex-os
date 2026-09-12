@@ -30,6 +30,7 @@ set -uo pipefail
 readonly TABLE="inet apex"
 readonly CONF_DIR=/etc/apex/firewall.d
 readonly CATALOGUE=/usr/share/apex/firewall/services
+readonly HOTSPOT_SET=hotspot_ifaces
 
 msg()  { printf 'apex-firewall: %s\n' "$*"; }
 warn() { printf 'apex-firewall: warning: %s\n' "$*" >&2; }
@@ -48,6 +49,18 @@ valid_name() {
         -*)               return 1 ;;
         *)                return 0 ;;
     esac
+}
+
+# An interface name, before it becomes an nft element. The kernel's own limit
+# is IFNAMSIZ-1 = 15 characters, and the character class is what `ip link` will
+# accept; a name that reached `nft add element` unchecked would be a shell word
+# in a command built by string concatenation.
+valid_ifname() {
+    case "$1" in
+        ""|-*)             return 1 ;;
+        *[!A-Za-z0-9_.-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 15 ]
 }
 
 # tcp or udp, and a port or a port range the set's `flags interval` can hold.
@@ -114,7 +127,8 @@ cmd_list() {
 }
 
 cmd_status() {
-    case "$(ruleset_state)" in
+    local state; state="$(ruleset_state)"
+    case "$state" in
         absent)     msg "nft is not installed; no policy is being enforced" ;;
         notloaded)  msg "policy: NOT LOADED — incoming traffic is not being filtered"
                     msg "  load it with: sudo systemctl start apex-firewall" ;;
@@ -126,6 +140,15 @@ cmd_status() {
     echo "always allowed, and not removable here:"
     echo "  established replies, loopback, ICMP, DHCP, mDNS/LLMNR, ssh"
     echo
+    # Named here rather than left to `hotspot list`, because it is the one
+    # opening a user did not choose in this file and would not otherwise find.
+    # Only when the ruleset can be read: the case above has already said why
+    # not, and saying it twice in one screen is how a tool trains people to
+    # skim it.
+    if [ "$state" = loaded ]; then
+        cmd_hotspot list | sed 's/^apex-firewall: /  /'
+        echo
+    fi
     echo "exceptions you have added:"
     local any=0 f name proto port
     for f in "$CONF_DIR"/*.conf; do
@@ -173,6 +196,122 @@ apply_sets() {
     [ "$rejected" = 0 ]
 }
 
+# ── the shared link ─────────────────────────────────────────────────────────
+# A hotspot is the one case where this machine answers DHCP and DNS instead of
+# asking them, and both arrive inbound on ports the policy shuts. That is not a
+# decision the user makes once and keeps — it is true while a `method=shared`
+# connection is up and false the moment it goes down — so it is NOT recorded in
+# /etc/apex/firewall.d. It lives in a set of interface names that empties with
+# the table, and NetworkManager's dispatcher puts it back.
+#
+# Scoped to the link on purpose. The alternative, a `dns` entry in the service
+# catalogue, would open a resolver on the café Wi-Fi as well.
+
+hotspot_ifaces() {  # the shared links NetworkManager has up, one per line
+    command -v nmcli >/dev/null 2>&1 || return 1
+    local uuid dev
+    # `--active` alone, so a saved-but-down hotspot profile is not reopened.
+    nmcli -t -f UUID,DEVICE connection show --active 2>/dev/null |
+    while IFS=: read -r uuid dev; do
+        [ -n "${dev:-}" ] && [ "$dev" != "--" ] || continue
+        case "$(nmcli -g ipv4.method connection show uuid "$uuid" 2>/dev/null)" in
+            shared) printf '%s\n' "$dev" ;;
+        esac
+    done
+}
+
+hotspot_add() {  # $1 = interface name, already validated
+    nft add element $TABLE "$HOTSPOT_SET" "{ $1 }" 2>/dev/null
+}
+
+hotspot_remove() {
+    # Idempotent: the dispatcher fires `down` for links that were never shared,
+    # and deleting an element that is not there is not a failure to report.
+    nft delete element $TABLE "$HOTSPOT_SET" "{ $1 }" 2>/dev/null || true
+}
+
+# `nft -f apex.nft` deletes and rebuilds the table, so a restart of the unit
+# empties this set — and NetworkManager will not re-run its dispatcher for a
+# connection that was already up. Without this, restarting the firewall killed
+# a running hotspot until the user toggled it off and on. Silent when NM is not
+# answering: at boot this runs Before=network-pre.target, where there is no
+# NetworkManager yet and no shared link to restore.
+reapply_hotspot() {
+    local ifname n=0
+    while read -r ifname; do
+        [ -n "$ifname" ] || continue
+        valid_ifname "$ifname" || { warn "NetworkManager named a shared link '$ifname', which is not an interface name"; continue; }
+        hotspot_add "$ifname" && n=$((n + 1))
+    done < <(hotspot_ifaces)
+    [ "$n" = 0 ] || msg "reopened DHCP and DNS on $n shared link$([ "$n" = 1 ] || echo s)"
+}
+
+cmd_hotspot() {
+    local verb="${1:-}" ifname="${2:-}"
+    case "$verb" in
+        add|remove) ;;
+        list|"")    ;;
+        *) die "usage: apex firewall hotspot add|remove <interface>" ;;
+    esac
+
+    if [ "$verb" = list ] || [ -z "$verb" ]; then
+        case "$(ruleset_state)" in
+            absent)     msg "nft is not installed; no policy is being enforced" ;;
+            notloaded)  msg "the policy is not loaded, so nothing is being filtered on any link" ;;
+            unreadable) msg "cannot read the ruleset; reading it needs root"
+                        msg "  try: sudo apex firewall hotspot list" ;;
+            loaded)
+                # Flattened first, and the quotes taken off. nft prints a set's
+                # elements quoted, and wraps them one per line as soon as there
+                # is more than one:
+                #
+                #     elements = { "apexhost",
+                #                  "apexhost2" }
+                #
+                # A line-at-a-time `s/.*elements = { \(.*\) }.*/\1/` matches
+                # neither line, so with two shared links it came back EMPTY and
+                # this printed "not sharing this machine's connection on any
+                # link" while both were open — a firewall tool reporting a shut
+                # link as the answer for an open one. With one link it matched
+                # and printed the name with nft's quotes still on it. Measured
+                # in a namespace against the real `nft list set`, not guessed
+                # at; tests/test-device-services-netns.sh keeps it measured.
+                local out
+                out="$(nft list set $TABLE "$HOTSPOT_SET" 2>/dev/null |
+                       tr '\n\t' '  ' |
+                       sed -n 's/.*elements = {\([^}]*\)}.*/\1/p' |
+                       tr -d '"' | tr -s ' ' | sed 's/^ *//; s/ *$//; s/ *, */, /g')"
+                if [ -n "$out" ]; then
+                    msg "sharing this machine's connection on: $out"
+                    msg "  DHCP and DNS are open on those links only"
+                else
+                    msg "not sharing this machine's connection on any link"
+                fi ;;
+        esac
+        return 0
+    fi
+
+    [ -n "$ifname" ] || die "which interface? usage: apex firewall hotspot $verb <interface>"
+    valid_ifname "$ifname" || die "'$ifname' is not an interface name"
+    need_root "hotspot $verb"
+
+    if [ "$(ruleset_state)" != loaded ]; then
+        # Not an error. Nothing is filtering, so the hotspot already works; the
+        # dispatcher calls this on every shared link coming up and a machine
+        # with the unit stopped should not collect failures for it.
+        msg "the policy is not loaded, so nothing needs opening for '$ifname'"
+        return 0
+    fi
+
+    if [ "$verb" = add ]; then
+        hotspot_add "$ifname" || die "could not open DHCP and DNS on '$ifname'"
+        msg "opened DHCP and DNS on '$ifname' while it is shared"
+    else
+        hotspot_remove "$ifname"
+        msg "closed DHCP and DNS on '$ifname'"
+    fi
+}
+
 cmd_allow() {
     local name="${1:-}"
     [ -n "$name" ] || die "which service? see: apex firewall list"
@@ -211,6 +350,9 @@ cmd_deny() {
 # open.
 cmd_reload() {
     need_root reload
+    # Before the exception report, because a shared link that is up right now
+    # has just lost its rules to the table being rebuilt.
+    [ "$(ruleset_state)" = loaded ] && reapply_hotspot
     if apply_sets; then
         msg "exceptions reapplied"
     else
@@ -231,9 +373,14 @@ Commands:
   allow <name>    Open one, on every interface. Needs root.
   deny <name>     Close one again. Needs root.
   reload          Reapply the recorded exceptions. Needs root.
+  hotspot         Which links this machine is sharing its connection on
 
 ssh is always open: APEX remote agents and `apex host run` are ssh, and closing
 it would strand you on the machine you were driving from.
+
+Sharing this machine's connection opens DHCP and DNS on that link alone, for as
+long as it is shared. NetworkManager's dispatcher does that; `hotspot add` and
+`hotspot remove` are how, and are not something to run by hand.
 EOF
 }
 
@@ -242,6 +389,7 @@ case "${1:-}" in
     list)        cmd_list ;;
     allow)       shift; cmd_allow "$@" ;;
     deny)        shift; cmd_deny "$@" ;;
+    hotspot)     shift; cmd_hotspot "$@" ;;
     reload)      cmd_reload ;;
     -h|--help)   usage ;;
     *)           usage >&2; exit 2 ;;

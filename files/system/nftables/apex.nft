@@ -56,6 +56,27 @@ table inet apex {
         flags interval
     }
 
+    # The interfaces on which this machine is currently a hotspot, by name,
+    # empty until NetworkManager brings a `method=shared` link up.
+    #
+    # Sharing a connection is the one case where a desktop is the server on a
+    # link rather than a client: the phone that joined broadcasts a DHCP
+    # DISCOVER at us and then asks us to resolve names, and both of those are
+    # inbound on ports this policy shuts. The port-only exception catalogue
+    # cannot express it — `apex firewall allow dns` would open 53 on the café
+    # Wi-Fi too, which is a resolver anyone on that network can use.
+    #
+    # So the exception is scoped to the link instead of to the port, and it is
+    # link state rather than a decision: /etc/apex/firewall.d holds what the
+    # user chose and survives reboots, this set holds what is true right now
+    # and empties when the shared connection goes down. An empty set matches
+    # nothing, so a machine that is not sharing is filtered exactly as before.
+    set hotspot_ifaces {
+        type ifname
+        # Populated by apex-firewall hotspot add/remove, from NetworkManager's
+        # dispatcher.
+    }
+
     chain input {
         type filter hook input priority filter; policy drop;
 
@@ -109,6 +130,21 @@ table inet apex {
         # conntrack cannot recognise them as related.
         ip6 daddr fe80::/10 udp dport 546 accept
         udp sport 67 udp dport 68 accept
+
+        # The other direction of DHCP, and DNS, on a link we are sharing.
+        #
+        # The rule above is a DHCP *reply* arriving for a client we are. A
+        # hotspot client sends the opposite: a broadcast DISCOVER from port 68
+        # to port 67, which is a new flow, so `established,related` cannot
+        # rescue it and dnsmasq never hears the request. Port 53 is the same
+        # story one step later — the client gets an address and then cannot
+        # resolve a name.
+        #
+        # Scoped to @hotspot_ifaces, which is empty unless this machine is
+        # sharing a connection right now. Nothing here opens a resolver or a
+        # DHCP server on the network this machine is a guest on.
+        iifname @hotspot_ifaces udp dport { 53, 67 } accept
+        iifname @hotspot_ifaces tcp dport 53 accept
 
         # mDNS and LLMNR. Printers, Chromecasts, and `apex host` discovery all
         # depend on answering these; a desktop that cannot be resolved by name
