@@ -60,6 +60,8 @@ DEVDIR="${APEX_DEVICES_DEV:-/dev}"
 MEDIADIR="${APEX_DEVICES_MEDIA:-/run/media}"
 NMLIBDIR="${APEX_DEVICES_NMLIB:-/usr/lib64/NetworkManager}"
 NMCONFD="${APEX_DEVICES_NMCONFD:-/usr/lib/NetworkManager/conf.d}"
+NMDISPATCHD="${APEX_DEVICES_NMDISPATCH:-/usr/lib/NetworkManager/dispatcher.d}"
+FW_POLICY="${APEX_DEVICES_FWPOLICY:-/usr/share/apex/nftables/apex.nft}"
 
 readonly FW_CONF_DIR="$ETCDIR/apex/firewall.d"
 
@@ -468,10 +470,31 @@ do_network() {
     # ConnectivityCheckUri empty, `nmcli -t networking connectivity` full. That
     # is this file's own bug wearing network clothes: "I did not look" arriving
     # as a positive result.
-    local checking conn
+    local checking conn crc
     checking=$(connectivity_checking)
-    conn=$(run 10 nmcli -t networking connectivity | tail -1)
-    if [ "$conn" = portal ]; then
+    conn=$(run 10 nmcli -t networking connectivity); crc=$?
+    conn=$(tail -1 <<<"$conn")
+    # `links` above already refuses to turn an unreachable NetworkManager into
+    # an answer, and this has to refuse the same way. It did not: the rc was
+    # thrown away, so with no daemon to ask, `conn` held nmcli's error text and
+    # it was printed as the connectivity state —
+    #
+    #   connectivity   Error: Could not create NMClient object: Could not
+    #                  connect: No such file or directory.
+    #
+    # measured in a built image with no D-Bus. The `else` branch is worse than
+    # the `*)` one, because it goes on to explain that NetworkManager "answers
+    # '<that error>' for any connected link", which is a confident account of
+    # something that never happened. Neither is an observation about this
+    # network; both are this file's own bug — "I could not look" arriving as a
+    # result — which is the defect it exists to report in other tools.
+    if [ "$crc" -eq 124 ]; then
+        item "connectivity" "unavailable — nmcli did not answer in 10s"
+    elif [ "$crc" -ne 0 ]; then
+        item "connectivity" "unavailable — could not reach NetworkManager"
+        note "$conn"
+        note "whether this network holds the connection is not known from here"
+    elif [ "$conn" = portal ]; then
         item "captive portal" "YES — this network is holding the connection"
         note "open any http:// page in a browser to reach the login form"
     elif [ "$checking" = yes ]; then
@@ -525,9 +548,36 @@ do_network() {
     else
         blockers+=("dnsmasq is not installed, so there is no DHCP or DNS server for clients")
     fi
-    if firewall_enforcing; then
-        blockers+=("the firewall drops forwarded traffic, so no client packet is routed")
-        blockers+=("the firewall's DHCP rule matches replies, not a client's request on port 67")
+    # Two lines used to stand here and state the firewall's policy as fact:
+    # that it dropped forwarded traffic, and that its only DHCP rule matched
+    # replies rather than a client's request. Both were true when they were
+    # written and both are false now — P1-044 removed the forward chain, and the
+    # policy gained an `iifname @hotspot_ifaces udp dport { 53, 67 }` exception.
+    # A reader that states a policy instead of reading it reports a working
+    # hotspot as two blockers the day the policy changes, which is how these
+    # two survived being wrong. So: read the mechanism, and report only what is
+    # actually missing.
+    #
+    # Not the live set — `nft list` needs root and this command must never ask
+    # for it. What can be read without privilege is whether the two halves that
+    # make the exception possible are on the machine at all.
+    local fwstate; fwstate=$(firewall_state)
+    if [ "$fwstate" = unknown ]; then
+        caveats+=("systemd could not be asked whether the firewall is running, so whether it stands in the way of a hotspot is not known from here")
+    elif [ "$fwstate" = active ]; then
+        # The dispatcher is what puts the shared link into the set. Without it
+        # the set stays empty, the exception matches nothing, and a client's
+        # DHCP DISCOVER is dropped by a policy that has a rule for it.
+        if [ ! -e "$NMDISPATCHD/50-apex-hotspot-firewall" ]; then
+            blockers+=("the firewall shuts DHCP and DNS and nothing opens them for a shared link: $NMDISPATCHD/50-apex-hotspot-firewall is missing")
+        # And the set is what the dispatcher fills. A dispatcher calling
+        # `apex firewall hotspot add` against a policy with no set fails on
+        # every shared link coming up, quietly, because NM discards its output.
+        elif [ -r "$FW_POLICY" ] && ! grep -q 'set hotspot_ifaces' "$FW_POLICY"; then
+            blockers+=("the policy has no hotspot_ifaces set, so there is nothing for the dispatcher to open")
+        else
+            caveats+=("NetworkManager opens DHCP and DNS on a shared link as it comes up; \`sudo apex firewall hotspot list\` says which links are open right now")
+        fi
     fi
     if [ "${#blockers[@]}" -eq 0 ]; then
         item "hotspot / tethering" "nothing known is in the way"

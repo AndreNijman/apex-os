@@ -74,6 +74,37 @@ shim wg          'true'
 # `timeout` and the shell builtins have to stay reachable.
 export PATH="$BIN:/usr/bin:/bin"
 export STATE
+REAL_PATH=$PATH
+
+# A PATH in which one command genuinely is not installed.
+#
+# `have` is `command -v`, and $BIN coming first cannot hide /usr/bin/dnsmasq:
+# the machine running this suite may well have it. Deleting the shim from $BIN
+# only falls through to the real one. So this builds a directory of symlinks to
+# everything in /usr/bin and /bin except the one name, and uses that instead.
+#
+# It matters more than it looks. Before this existed, the case named "a hotspot
+# with no dnsmasq is blocked" passed on a machine WITH dnsmasq, because the
+# reader also counted two unconditional firewall blockers — so the case was
+# green and had never once exercised the reader it was named after. Removing
+# those two blockers is what exposed it.
+# It replaces the WHOLE PATH rather than prefixing it, because $BIN holds a
+# shim for some of these names and a prefixed $BIN would just supply the command
+# the case is trying to remove. $BIN is linked in last so its shims still win
+# over the real programs.
+path_without() {  # $1 = the command to hide
+    local hide=$1 d="$WORK/nopath.$1" p f
+    rm -rf "$d"; mkdir -p "$d"
+    for p in /usr/bin /bin "$BIN"; do
+        [ -d "$p" ] || continue
+        for f in "$p"/*; do
+            [ -e "$f" ] || continue
+            ln -sf "$f" "$d/${f##*/}" 2>/dev/null
+        done
+    done
+    rm -f "$d/$hide"
+    printf '%s' "$d"
+}
 
 # Run the helper in a fixture world. $1 = area, rest = env assignments.
 devices() {
@@ -87,6 +118,8 @@ devices() {
         APEX_DEVICES_MEDIA="$WORK/media" \
         APEX_DEVICES_NMLIB="$WORK/nmlib" \
         APEX_DEVICES_NMCONFD="$WORK/nmconfd" \
+        APEX_DEVICES_NMDISPATCH="$WORK/nmdispatch" \
+        APEX_DEVICES_FWPOLICY="$WORK/fwpolicy/apex.nft" \
         "$@" bash "$HELPER_ABS" "$area" 2>&1
 }
 
@@ -101,10 +134,16 @@ case_silent() {  # the opposite: it must NOT say this
 reset_world() {
     chmod -R u+rwX "$WORK/sys" "$WORK/dev" "$WORK/media" 2>/dev/null
     rm -rf "$WORK/sys" "$WORK/etc" "$WORK/spa" "$WORK/nmvpn" "$WORK/libexec" \
-           "$WORK/dev" "$WORK/media" "$WORK/nmlib" "$WORK/nmconfd" "$STATE"
+           "$WORK/dev" "$WORK/media" "$WORK/nmlib" "$WORK/nmconfd" \
+           "$WORK/nmdispatch" "$WORK/fwpolicy" "$STATE"
     mkdir -p "$WORK/sys/class" "$WORK/sys/bus" "$WORK/etc" "$WORK/spa" "$WORK/nmvpn" \
              "$WORK/libexec" "$WORK/dev" "$WORK/media" "$WORK/nmlib/1.54.3" \
-             "$WORK/nmconfd" "$STATE"
+             "$WORK/nmconfd" "$WORK/nmdispatch" "$WORK/fwpolicy" "$STATE"
+    # The hotspot mechanism as the image ships it: the dispatcher that puts a
+    # shared link into the set, and a policy that has the set to put it in.
+    # A case that wants one of them missing deletes it.
+    : > "$WORK/nmdispatch/50-apex-hotspot-firewall"
+    printf '    set hotspot_ifaces {\n        type ifname\n    }\n' > "$WORK/fwpolicy/apex.nft"
     # A Wi-Fi-capable NetworkManager unless a case says otherwise: without the
     # plugin the enterprise reader stops before anything else it checks.
     : > "$WORK/nmlib/1.54.3/libnm-device-plugin-wifi.so"
@@ -309,13 +348,99 @@ case_says "and it says why that means .ovpn cannot be imported" "$out" "cannot b
 reset_world
 printf 'wlp3s0:wifi:connected\n' > "$STATE/nmcli"
 echo active > "$STATE/active.apex-firewall.service"
-rm -f "$BIN/dnsmasq"
+PATH="$(path_without dnsmasq)"
 out=$(devices network)
-shim dnsmasq 'true'
+PATH=$REAL_PATH
 case_says "the hotspot blockers are counted, not summarised" "$out" "would stop it" \
-          "a hotspot fails for three separate reasons and a user needs all three"
-case_says "and the DHCP direction is named" "$out" "matches replies" \
-          "the policy's DHCP rule is the reply direction; a hotspot needs the request one"
+          "a hotspot fails for more than one reason and a user needs all of them"
+case_says "and a missing dnsmasq is named as one" "$out" "no DHCP or DNS server" \
+          "without it a client associates and never gets an address"
+
+# ── the hotspot exception, read rather than stated ──────────────────────────
+# Two lines here used to assert the firewall's policy as fact: that it dropped
+# forwarded traffic, and that its DHCP rule matched replies. Both were true when
+# written and are false now, and a reader that states a policy reports a working
+# hotspot as two blockers the day the policy changes. These cases exist so the
+# same thing cannot happen to their replacement.
+reset_world
+printf 'wlp3s0:wifi:connected\n' > "$STATE/nmcli"
+echo active > "$STATE/active.apex-firewall.service"
+out=$(devices network)
+case_says "an enforcing firewall with the mechanism present is not a blocker" "$out" \
+          "nothing known is in the way" \
+          "the exception exists; calling it a blocker sends a user to fix a working firewall"
+case_says "and it says where the shared link gets opened" "$out" "as it comes up" \
+          "a user whose hotspot fails otherwise has nowhere to look"
+case_silent "the removed forward-chain claim does not come back" "$out" "drops forwarded traffic" \
+            "P1-044 deleted the forward chain, and it was measured routing a client's packet"
+case_silent "nor does the DHCP-direction claim" "$out" "matches replies" \
+            "the policy gained a rule for the request direction, scoped to the shared link"
+
+# The dispatcher missing is a real blocker: the set stays empty, so the rule
+# that exists matches nothing and a client's DISCOVER is dropped anyway.
+reset_world
+printf 'wlp3s0:wifi:connected\n' > "$STATE/nmcli"
+echo active > "$STATE/active.apex-firewall.service"
+rm -f "$WORK/nmdispatch/50-apex-hotspot-firewall"
+out=$(devices network)
+case_says "a missing NM dispatcher is reported as the blocker it is" "$out" \
+          "50-apex-hotspot-firewall is missing" \
+          "the rule is in the policy and nothing ever puts a link in its set"
+
+# And the other half: a dispatcher with no set to fill.
+reset_world
+printf 'wlp3s0:wifi:connected\n' > "$STATE/nmcli"
+echo active > "$STATE/active.apex-firewall.service"
+printf '    chain input {\n    }\n' > "$WORK/fwpolicy/apex.nft"
+out=$(devices network)
+case_says "a policy with no hotspot set is reported too" "$out" "no hotspot_ifaces set" \
+          "the dispatcher would fail on every shared link and NM discards its output"
+
+# A firewall systemd cannot be asked about must not read as one that is absent.
+# Hiding systemctl outright is the only honest way to reach that branch: with
+# the real one on PATH the reader would answer about this machine's own
+# apex-firewall.service, which is not the question.
+reset_world
+printf 'wlp3s0:wifi:connected\n' > "$STATE/nmcli"
+PATH="$(path_without systemctl)"
+out=$(devices network)
+PATH=$REAL_PATH
+case_says "a firewall that could not be asked about says so" "$out" "could not be asked" \
+          "'nothing is in the way' for a machine nobody checked is the defect this file is about"
+
+# ── connectivity, when NetworkManager is not there to answer ────────────────
+# Measured in a built image with no D-Bus: nmcli's NMClient error was printed as
+# the connectivity state, and the branch below it went on to explain that NM
+# "answers '<that error>' for any connected link". `links` already refuses to do
+# this; connectivity threw the rc away.
+reset_world
+printf 'wlp3s0:wifi:connected\n' > "$STATE/nmcli"
+printf 'Error: Could not create NMClient object: Could not connect: No such file or directory.\n' \
+    > "$STATE/nmcli.-t networking connectivity"
+printf '1\n' > "$STATE/nmcli.rc"
+# The connectivity check reported as ENABLED, which is what the built image
+# answers now that 21-apex-connectivity.conf ships. It matters: with the check
+# enabled, the old code took the branch that prints `$conn` verbatim, and that
+# is where the raw NMClient error appeared as the connectivity state.
+printf 'b true\n' > "$STATE/busctl"
+out=$(devices network)
+# The assertions below read the connectivity LINE, not the whole report. Three
+# of them first read the whole thing and passed under a mutation that put the
+# defect back: with nmcli failing, `links` says "could not reach NetworkManager"
+# too, so a search of the output found those words no matter what connectivity
+# did. An assertion satisfied by a different line is one that cannot fail.
+cline=$(grep -E '^  connectivity ' <<<"$out")
+[ -n "$cline" ] \
+    && ok "an unreachable NetworkManager still gets a connectivity line" \
+    || bad "an unreachable NetworkManager still gets a connectivity line" \
+           "the reader went silent, which reads as a machine with nothing to report"
+case_says "and that line says it could not look" "$cline" "could not reach NetworkManager" \
+          "'I could not look' must not arrive as a result"
+case_silent "the raw nmcli error is never the connectivity value" "$cline" "Error:" \
+            "a daemon's error text is not a description of this network"
+case_silent "nor is it explained as NetworkManager's answer" "$out" \
+            "for any" \
+            "that branch gives a confident account of a check that never ran"
 
 # dnsmasq from a system extension is present and impermanent.
 reset_world
