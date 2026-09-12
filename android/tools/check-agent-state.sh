@@ -26,6 +26,10 @@ shell_dir="${APEX_SHELL_DIR:-/var/tmp/apex-work/int-shell}"
 pairs=(
     "agentstate.js|src/services/agentstate.js"
     "Colors.qml|src/theme/Colors.qml"
+    # P1-060's last criterion is "in-app help equivalent to desktop
+    # Agents/Workspaces help", and HelpParityTest asserts that equivalence
+    # against this file. The equivalence is with a SNAPSHOT until this runs.
+    "AgentHelpContent.qml|src/services/agents/AgentHelpContent.qml"
 )
 
 status=0

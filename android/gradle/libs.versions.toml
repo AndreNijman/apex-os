@@ -23,6 +23,23 @@ activityCompose = "1.12.4"
 composeBom = "2026.06.01"
 lifecycle = "2.10.0"
 biometric = "1.1.0"
+
+# `fragment` is pinned even though nothing in this app imports it, and the
+# reason is a DEFECT the first release build ever attempted found.
+#
+# `androidx.biometric:1.1.0` drags in `fragment:1.1.0`, which resolves up to
+# 1.2.5 and no further, because nothing else in the graph asks for more.
+# `MainActivity` is a `FragmentActivity` and uses `registerForActivityResult`,
+# and FragmentActivity did not call `super.onRequestPermissionsResult()` or use
+# valid request codes until **1.3.0**. So the permission result for
+# `POST_NOTIFICATIONS` — and every other activity result this app takes — was
+# landing on a FragmentActivity that mishandles it.
+#
+# `assembleDebug` never said so. `lintVitalRelease` runs only on a release
+# build, this project had never produced one, and the check is
+# `InvalidFragmentVersionForActivityResult`. Pinned here so the floor is stated
+# rather than inherited from whatever a transitive dependency happens to want.
+fragment = "1.8.9"
 camera = "1.5.3"
 navigationCompose = "2.9.8"
 # The QR decoder. `core` only: the `android-*` helper artifacts drag in an
@@ -53,6 +70,7 @@ androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-
 # background, and this app's flows are backed by a socket.
 androidx-lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycle" }
 androidx-biometric = { module = "androidx.biometric:biometric", version.ref = "biometric" }
+androidx-fragment = { module = "androidx.fragment:fragment-ktx", version.ref = "fragment" }
 androidx-camera-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "camera" }
 androidx-camera-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "camera" }
 androidx-camera-view = { module = "androidx.camera:camera-view", version.ref = "camera" }

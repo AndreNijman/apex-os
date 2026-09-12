@@ -597,3 +597,79 @@ fn a_remote_session_asking_for_root_is_told_to_touch_a_key_not_to_set_the_flag()
          config default instead of the policy on the request: {msg}"
     );
 }
+
+#[test]
+fn a_declared_connection_cannot_hand_a_file_to_a_session() {
+    // `Request::Inject` reads `source` — an absolute path on THIS machine —
+    // with the daemon's own access, outside every sandbox. `inject::handle`
+    // refused a caller that resolves to a managed session from the day it was
+    // written, because "a session that could ask for it could ask for anything
+    // the sandbox hides". It did not look at the ORIGIN, and a proxy is not a
+    // session: `apex-remoted`'s `control()` is a denylist of exactly one verb
+    // (`attach`), so a paired phone reached this verb and could have named
+    // `~/.ssh/id_ed25519`.
+    //
+    // Written as a comparison for the reason
+    // `a_declared_connection_cannot_approve_a_root_operation` is: "the
+    // declared connection was refused" proves nothing unless an identical
+    // undeclared connection gets PAST the origin gate. It does not need a live
+    // session to show that — a local caller naming a session that does not
+    // exist reaches `no_such_session`, which is downstream of the gate, and a
+    // refused one never gets there.
+    let h = harness!("declare-inject");
+
+    // Which origin this process actually has. Read from a filed request, the
+    // same way the decide test reads it, rather than assumed.
+    let filed = h.call(
+        r#"{"cmd":"privilege_request","verb":"pin","args":[],"reason":"to read this process's own origin"}"#,
+    );
+    if filed["reply"] == "error" {
+        return;
+    }
+    let observed = apex_agent_core::policy::RequestOrigin::parse(
+        filed["request_origin"].as_str().unwrap_or_default(),
+    )
+    .expect("a recorded origin");
+
+    let mut declared = h.conn();
+    if declared.call(r#"{"cmd":"declare_origin","origin":"claude-remote-control"}"#)["reply"]
+        == "error"
+    {
+        return;
+    }
+    let refused =
+        declared.call(r#"{"cmd":"inject","id":1,"source":"/etc/hostname"}"#);
+    assert_eq!(
+        refused["reply"], "error",
+        "a claude-remote-control connection reached inject: {refused}"
+    );
+    assert_eq!(refused["kind"], "permission_denied", "{refused}");
+    let msg = refused["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("claude-remote-control"),
+        "the refusal must name the origin that was refused: {msg}"
+    );
+    // And it must be refused for being remote, not for the session id being
+    // absent — the two are different answers and only one of them is a gate.
+    assert!(
+        !msg.contains("no session"),
+        "the origin gate must run before the session lookup, or a remote caller learns which \
+         session ids exist by probing: {msg}"
+    );
+
+    // The control arm.
+    let plain = h.call(r#"{"cmd":"inject","id":1,"source":"/etc/hostname"}"#);
+    if observed.is_local() {
+        assert_eq!(
+            plain["kind"], "no_such_session",
+            "the undeclared connection is local and must get PAST the origin gate, so the only \
+             thing left to refuse it for is the session that does not exist: {plain}"
+        );
+    } else {
+        eprintln!(
+            "NOTE: this process is {observed}, not local, so the refusal above is not \
+             attributable to the declaration"
+        );
+        assert_eq!(plain["reply"], "error", "{plain}");
+    }
+}

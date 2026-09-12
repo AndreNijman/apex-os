@@ -62,6 +62,7 @@ class AgentdRequestWireTest {
         expect("input", Agentd.input(7, Reply.bytes("yes")))
     }
 
+
     @Test
     fun `run omits what it has no value for, rather than sending nulls`() {
         // `RunRequest`'s optional fields are `#[serde(default)]`, and a key

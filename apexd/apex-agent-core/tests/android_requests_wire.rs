@@ -99,6 +99,7 @@ fn input_is_a_verb_and_carries_the_terminator_the_daemon_does_not_add() {
     }
 }
 
+
 #[test]
 fn run_carries_the_checkpoint_flag_and_omits_what_it_has_no_value_for() {
     match parse("run_minimal") {

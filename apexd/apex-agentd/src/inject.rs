@@ -20,6 +20,27 @@
 //! a managed session is refused — including a session naming *itself*, because
 //! the file it wants is one it cannot reach and the refusal is about the read,
 //! not about the destination.
+//!
+//! ## And the third caller, which arrived after this was written
+//!
+//! A *proxy* is neither of the two above. `apex-remoted` terminates a paired
+//! phone's channel and forwards what it carries, and its `control()` is a
+//! denylist of exactly one verb (`attach`) — so every other verb, this one
+//! included, reached the daemon from a device that is not at this machine. The
+//! session check does not fire, because a proxy is not a managed session.
+//!
+//! That made the escape above available to a phone rather than to an agent:
+//! `{"cmd":"inject","id":N,"source":"/home/u/.ssh/id_ed25519"}` would have had
+//! the daemon read the key and drop it where the session can read it. So the
+//! origin is checked too, with `decide`'s own predicate — local, or refused —
+//! and an origin that could not be established is refused rather than
+//! defaulted.
+//!
+//! What that costs: nothing that works today. The only caller of this verb is
+//! `apex agent send`, which is a human at a terminal. What it would cost a
+//! *future* phone handoff is nothing either, because a phone cannot name a
+//! useful host path in the first place — the file it wants to hand over is on
+//! the phone, and no verb on this socket carries bytes.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -55,6 +76,50 @@ pub fn handle(daemon: &Arc<Daemon>, caller: &privilege::Caller, id: u32, source:
                 "session {session} may not hand a file to a session. This verb reads the source \
                  with the daemon's own access, which is outside every sandbox — a session that \
                  could ask for it could ask for anything the sandbox hides"
+            ),
+        );
+    }
+
+    // 1b. Where the connection came from. The check above was written when the
+    //     only two callers imaginable were a human running `apex agent send`
+    //     and a session trying to escape, and it is exactly right about both.
+    //     It is blind to the third, which arrived later: `apex-remoted`
+    //     terminates a paired phone's channel and forwards what it carries,
+    //     and its `control()` is a DENYLIST of one verb (`attach`). A proxy is
+    //     not a managed session, so nothing above stops it — and `source` is
+    //     an absolute path on the HOST, read with the daemon's own access,
+    //     outside every sandbox.
+    //
+    //     So without this, a paired device could send
+    //     `{"cmd":"inject","id":N,"source":"/home/u/.ssh/id_ed25519"}` and
+    //     have the daemon carry that key into a session's inbox and type the
+    //     path. That is the module note's own threat model — "a session that
+    //     could ask for it could ask for anything the sandbox hides" — with
+    //     the phone standing where the session stood.
+    //
+    //     The predicate is `decide`'s, deliberately: an origin that could not
+    //     be established is refused rather than defaulted, and the message
+    //     names what could not be read.
+    let Some(asker) = who.request_origin else {
+        return Response::error(
+            ErrorKind::PermissionDenied,
+            format!(
+                "{}, so this connection cannot be shown to be at this machine — and handing over \
+                 a file read with the daemon's own access is reserved for one",
+                who.origin_unreadable
+                    .unwrap_or_else(|| "the origin could not be established".to_string())
+            ),
+        );
+    };
+    if !asker.is_local() {
+        return Response::error(
+            ErrorKind::PermissionDenied,
+            format!(
+                "a {} connection may not hand a file to a session. `source` names a path on this \
+                 machine and the daemon reads it with the daemon's own access, outside every \
+                 sandbox, so a remote caller that could ask for it could ask for any file this \
+                 user owns. Hand the file over from a terminal here with `apex agent send`",
+                asker.origin
             ),
         );
     }

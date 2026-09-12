@@ -44,6 +44,11 @@ import com.apexos.remote.core.PairedMachine
 import com.apexos.remote.ui.theme.MachineText
 import java.text.DateFormat
 import java.util.Date
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.text.font.FontFamily
+import com.apexos.remote.core.CrashReport
 
 /**
  * The list of computers this phone is paired with, which is the app's home.
@@ -64,6 +69,9 @@ fun MachinesScreen(
     onConnect: (PairedMachine) -> Unit,
     onPing: (PairedMachine) -> Unit,
     onForget: (PairedMachine) -> Unit,
+    onCrashReports: (Boolean) -> Unit,
+    onShareCrash: (String) -> Unit,
+    onClearCrash: () -> Unit,
     onDynamicColour: (Boolean) -> Unit,
     onLock: () -> Unit,
     onDismiss: () -> Unit,
@@ -184,6 +192,54 @@ fun MachinesScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+
+                    HorizontalDivider(Modifier.padding(vertical = 14.dp))
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Keep a report when this app crashes")
+                            Text(
+                                // From :core, where a test asserts it says what
+                                // is kept and what is dropped. Consent to
+                                // "crash reporting" with no statement of
+                                // contents is not consent to anything.
+                                CrashReport.CONSENT_EXPLANATION,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = state.settings.crashReports,
+                            onCheckedChange = onCrashReports,
+                        )
+                    }
+
+                    state.crash?.let { report ->
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            "A report from the last crash is on this phone.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Box(
+                            Modifier
+                                .padding(top = 6.dp)
+                                .heightIn(max = 200.dp)
+                                .verticalScroll(rememberScrollState()),
+                        ) {
+                            // Shown in full and never summarised. A report the
+                            // user cannot read before sending is a report they
+                            // are agreeing to blind.
+                            Text(
+                                report,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
+                        Row(Modifier.padding(top = 6.dp)) {
+                            TextButton(onClick = { onShareCrash(report) }) { Text("Share") }
+                            TextButton(onClick = onClearCrash) { Text("Delete") }
+                        }
+                    }
                 }
             },
             confirmButton = { TextButton(onClick = { settingsOpen = false }) { Text("Done") } },

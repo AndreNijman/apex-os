@@ -140,6 +140,25 @@ data class Settings(
      * Claude Code's output and reading a wrapped smear of it.
      */
     @SerialName("terminal_text_sp") val terminalTextSp: Float = DEFAULT_TERMINAL_TEXT_SP,
+
+    /**
+     * Keep a report on this phone when the app crashes (P1-060).
+     *
+     * **False by default, and the default is the criterion.** "Crash reporting
+     * is consent-based" is met by a switch that starts off, not by one that
+     * starts on and can be found. It gates the WRITE, not a send: with this
+     * off, a crash produces nothing on disk at all, which is a stronger
+     * position than a file kept back — a file that was never created cannot be
+     * read by whatever reaches this phone next.
+     *
+     * Nothing uploads it either way. There is no reporting SDK in this app; see
+     * [CrashReport] for why one would be the wrong shape here.
+     *
+     * On [Settings] and not in a preferences file, for the reason
+     * [dynamicColour] is: `AppStorage` is the only writer to app storage so
+     * that `InsecureStorageTest` can account for every byte in it.
+     */
+    @SerialName("crash_reports") val crashReports: Boolean = false,
 ) {
     /** The configured row, or the shipped one when nothing has been configured. */
     val accessoryRow: List<AccessoryKey> get() = accessory.ifEmpty { AccessoryKeys.DEFAULT }

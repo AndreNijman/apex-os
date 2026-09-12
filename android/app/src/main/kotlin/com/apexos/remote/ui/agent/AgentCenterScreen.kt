@@ -63,6 +63,8 @@ fun AgentCenterScreen(
     onStart: () -> Unit,
     onProjects: () -> Unit,
     onApprovals: () -> Unit,
+    /** Open the guide. */
+    onHelp: () -> Unit,
     /** How many privileged operations are waiting at the machine. */
     pendingApprovals: Int = 0,
     /** Whether this phone will show a notification at all. */
@@ -108,10 +110,13 @@ fun AgentCenterScreen(
                 )
             }
 
-            // The two other things a machine has, above the list rather than
-            // in a menu: a pending root operation is the one thing on this
-            // screen the user cannot act on from here, so it has to be
-            // visible enough to send them to the machine.
+            // The other things a machine has, above the list rather than in a
+            // menu: a pending root operation is the one thing on this screen
+            // the user cannot act on from here, so it has to be visible enough
+            // to send them to the machine. The guide sits beside them for the
+            // same reason it does on the desktop — somebody who does not know
+            // what a worktree is will not go looking in settings for a page
+            // that explains it.
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
                 TextButton(onClick = onProjects) { Text("Projects") }
                 TextButton(onClick = onApprovals) {
@@ -124,6 +129,7 @@ fun AgentCenterScreen(
                         },
                     )
                 }
+                TextButton(onClick = onHelp) { Text("Guide") }
             }
 
             if (sessions.isEmpty() && busy == null) {
