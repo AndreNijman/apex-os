@@ -144,7 +144,6 @@ apex firewall list
 apex firewall deny
 apex firewall reload
 
-apex devices
 
 apex project worktrees
 apex project checkpoints
@@ -166,8 +165,6 @@ apex request list
 apex request show
 apex request grants
 
-apex cloudflare
-apex cloudflare connect
 apex cloudflare status
 apex cloudflare preview
 
