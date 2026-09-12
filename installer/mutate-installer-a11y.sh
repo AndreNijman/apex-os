@@ -102,10 +102,21 @@ mutate B1 "$GUI" \
 
 # B2 — the Wi-Fi password, on a different page, so the audit is shown to be
 #      per-page rather than passing on one page's strength.
+#
+#      The assertion named here was WRONG on the first run and is corrected
+#      rather than softened. The mutant was reported SURVIVED while the suite
+#      had in fact gone red on THREE named assertions -- the wifi page's own
+#      sentinel wait, and both by-name field checks. The wifi page's sentinel IS
+#      the Wi-Fi password node, so unnaming it stops the page being recognised
+#      as built before the per-page audit is ever reached. That is the suite
+#      failing earlier and louder, not failing to notice; the harness was
+#      grepping for a sentence the failure does not contain. Same mistake as I2
+#      in the i18n round. The name check is the assertion that actually carries
+#      this mutant, so it is the one named.
 mutate B2 "$GUI" \
     'a11y(self.wifi_pw, "Network password")' \
     'pass  # a11y(self.wifi_pw, "Network password")' \
-    "page 'wifi': every focusable control it builds announces itself"
+    "the Wi-Fi password field announces itself"
 
 # B3 — a Secure Boot enrolment password. These two have no visible caption at
 #      all, so the accessible name is their ONLY label.
@@ -138,6 +149,24 @@ mutate B6 "$LIB" \
     '    export AT_SPI_BUS_ADDRESS="$ATSPI_BUS"
     export DBUS_SESSION_BUS_ADDRESS="unix:path=$ATSPI_W/no-such-bus"' \
     "builds and reaches the accessibility bus"
+
+# B7 — the welcome page's primary button is left reachable and named, and made
+#      INERT. This is the defect the page-advance section exists for: every
+#      assertion about names and Tab stops stays green and a keyboard-only user
+#      cannot leave step 1 of 7.
+mutate B7 "$GUI" \
+    'self.btn("Begin", "apex-go", lambda *_: self.go("keyboard"))' \
+    'self.btn("Begin", "apex-go", lambda *_: None)' \
+    "pressing it with the keyboard alone opens the next page"
+
+# B8 — the page-advance section's vacuity control, and the one that matters
+#      there. If the installer moved on for some reason other than the key this
+#      suite pressed, the assertion would be green without measuring anything.
+#      Press a key that does nothing instead, and it must go red.
+mutate B8 "$SUITE_F" \
+    'xdotool key --window "$wid" --clearmodifiers "$key"' \
+    'xdotool key --window "$wid" --clearmodifiers shift' \
+    "pressing it with the keyboard alone opens the next page"
 
 echo
 printf 'mutants applied=%d, failed-to-apply=%d, caught=%d, SURVIVED=%d\n' \

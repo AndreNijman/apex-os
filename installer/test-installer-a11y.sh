@@ -35,6 +35,21 @@
 #  missing labels would have found nothing, because the labels are all there —
 #  they are simply not attached to anything. It took asking the bus.
 #
+#  ── What is covered, and what is not ────────────────────────────────────────
+#
+#  The installer has eleven pages. SIX are audited here: welcome, keyboard,
+#  wifi, secureboot, confirm and account. The name audit runs on all six; the
+#  Tab ring is walked on `account`, which has the most fields and both
+#  passwords; the keyboard-only page advance is measured on welcome → keyboard,
+#  where the button is gated on nothing.
+#
+#  Not audited, and named rather than left to look covered: `disk`, `mode` and
+#  `part` enumerate real block devices and would assert about this machine's
+#  hardware; `run` starts an install; `done` follows one. `confirm` IS audited,
+#  using the GUI's own test affordance with a disk that does not exist, because
+#  its one text field is the last thing between a user and an irreversible
+#  erase.
+#
 #  ── Headless, and cage is deliberately NOT in this loop ─────────────────────
 #
 #  A private Xvfb on a high display number, a private session bus with an empty
@@ -150,8 +165,9 @@ fi
 # loop below waits for the registry to go back to zero before trusting a count.
 export GDK_BACKEND=x11 GSK_RENDERER=cairo
 
-audit_page() {   # audit_page <page> <sentinel accessible name> <floor>
+audit_page() {   # audit_page <page> <sentinel accessible name> <floor> [KEY=VAL ...]
     local page="$1" sentinel="$2" floor="$3" n i
+    shift 3
 
     for i in $(seq 1 40); do
         n="$(python3 "$WALK" --count 2>/dev/null || echo 0)"
@@ -164,7 +180,11 @@ audit_page() {   # audit_page <page> <sentinel accessible name> <floor>
         return
     fi
 
-    APEX_GUI_PAGE="$page" atspi_run_app python3 "$GUI" \
+    # Extra KEY=VAL arguments are the state a later page needs before it can be
+    # built at all — the disk, the install mode. They go through `env` rather
+    # than being exported, so one page's stand-in state cannot leak into the
+    # next page's process.
+    APEX_GUI_PAGE="$page" atspi_run_app env "$@" python3 "$GUI" \
         >"$ATSPI_W/gui-$page.out" 2>"$ATSPI_W/gui-$page.err" &
     GPID=$!
 
@@ -267,6 +287,14 @@ audit_page wifi       "Network password"               4
 kill "$GPID" 2>/dev/null
 audit_page secureboot "Repeat the enrolment password"  4
 kill "$GPID" 2>/dev/null
+# The confirmation page is the one that matters most and it was not audited at
+# all until now: its single text field is the last thing between the user and an
+# irreversible erase. It needs state an earlier page would have chosen, so the
+# GUI's own test affordance supplies it — with a disk that does not exist, so
+# the page builds and nothing real is ever named as a target.
+audit_page confirm    "Type ERASE to confirm"         3 \
+    APEX_GUI_DISK=/dev/zzz-not-a-disk APEX_GUI_MODE=disk
+kill "$GPID" 2>/dev/null
 # account goes LAST and is deliberately left running: the keyboard-only section
 # below drives it.
 audit_page account    "Computer name"                  6
@@ -291,6 +319,7 @@ named_has "the keyboard test field announces itself"            "Keyboard test"
 named_has "the Wi-Fi password field announces itself"           "Network password"
 named_has "the hidden-network field announces itself"           "Hidden network name"
 named_has "the Secure Boot enrolment password announces itself" "One-time enrolment password"
+named_has "the ERASE confirmation field announces itself"       "Type ERASE to confirm"
 
 # ── keyboard only ───────────────────────────────────────────────────────────
 section "the installer can be driven with the keyboard alone"
@@ -380,8 +409,8 @@ else
         "'$firstname' never returned within $TAPS presses"
 fi
 
-# ── the keyboard alone can complete the page ────────────────────────────────
-section "the keyboard alone can fill the page in and move on"
+# ── the keyboard alone can fill the page in ─────────────────────────────────
+section "the keyboard alone can fill the page in"
 
 # Typed, not set. xdotool delivers real X key events to the real toolkit, so
 # this exercises the same path a person's fingers do.
@@ -425,5 +454,112 @@ if printf '%s' "$pw_text" | grep -qF "s3cret-pw"; then
 else
     ok "the password the user typed never crosses the accessibility bus"
 fi
+
+# ── the keyboard alone can LEAVE a page ─────────────────────────────────────
+section "the keyboard alone moves the installer from one page to the next"
+
+# Everything above proves a keyboard user can REACH a control and fill it in.
+# None of it proves they can leave the page. A primary button can be reachable,
+# correctly named, announced perfectly — and completely inert to the keyboard.
+# The user is then stuck on step 1 of 7 with a mouse the criterion says they do
+# not have, and every assertion above is still green. The section this one
+# follows used to be titled "…and move on", which nothing in it did.
+#
+# This is K11 from the installer keyboard work, one layer lower. There the
+# forward edge existed in the page graph and could still have left the flow;
+# here the edge exists and the KEY PRESS may not travel it.
+#
+# The edge measured is welcome → keyboard, deliberately. `Begin` is gated on
+# nothing, so a red line here means the key did not activate the button and
+# means nothing else. `Continue` on the account page is gated on the fields
+# validating, which would make a failure ambiguous between the two.
+
+ADV_BUILT=0; ADV_REACHED=0; ADV_MOVED=0; ADV_LEFT=0
+advance_with() {   # advance_with <xdotool key name>
+    local key="$1" i f wid
+    ADV_BUILT=0; ADV_REACHED=0; ADV_MOVED=0; ADV_LEFT=0
+
+    # A fresh process on the welcome page. The account page's process has to be
+    # gone from the registry first, or the walk below reads two trees at once
+    # and `Begin` is "reachable" on a page that is not on screen.
+    kill "$GPID" 2>/dev/null
+    for i in $(seq 1 40); do
+        [ "$(python3 "$WALK" --count 2>/dev/null || echo 0)" = "0" ] && break
+        sleep 0.3
+    done
+
+    APEX_GUI_PAGE=welcome atspi_run_app python3 "$GUI" \
+        >"$ATSPI_W/gui-adv-$key.out" 2>"$ATSPI_W/gui-adv-$key.err" &
+    GPID=$!
+    for i in $(seq 1 100); do
+        python3 "$WALK" --dump >"$ATSPI_W/dump-adv-$key.txt" 2>/dev/null
+        grep -q '| name=Begin |' "$ATSPI_W/dump-adv-$key.txt" && { ADV_BUILT=1; break; }
+        kill -0 "$GPID" 2>/dev/null || break
+        sleep 0.4
+    done
+    [ "$ADV_BUILT" = 1 ] || return 0
+
+    wid="$(xdotool search --name "APEX-OS Installer" 2>/dev/null | head -1)"
+    [ -n "$wid" ] || return 0
+    xdotool windowactivate --sync "$wid" >/dev/null 2>&1
+    xdotool windowfocus "$wid" >/dev/null 2>&1
+
+    for i in $(seq 1 20); do
+        f="$(focused_name)"
+        [ "${f#*|}" = "Begin" ] && { ADV_REACHED=1; break; }
+        xdotool key --window "$wid" --clearmodifiers Tab >/dev/null 2>&1
+        sleep 0.3
+    done
+    [ "$ADV_REACHED" = 1 ] || return 0
+
+    xdotool key --window "$wid" --clearmodifiers "$key" >/dev/null 2>&1
+    for i in $(seq 1 40); do
+        python3 "$WALK" --dump >"$ATSPI_W/dump-adv-$key.txt" 2>/dev/null
+        grep -q '| name=Keyboard test |' "$ATSPI_W/dump-adv-$key.txt" && { ADV_MOVED=1; break; }
+        sleep 0.4
+    done
+    # The page must be GONE, not merely overlaid. A dialog on top of the welcome
+    # page would satisfy "the next page's sentinel appeared" on its own.
+    grep -q '| name=Begin |' "$ATSPI_W/dump-adv-$key.txt" || ADV_LEFT=1
+    return 0
+}
+
+for key in Return space; do
+    advance_with "$key"
+
+    # Floor first: each assertion below is about what a key press did, and all
+    # of them are vacuous if the page never built or the button was never
+    # focused. Those two are reported as their own failures rather than folded
+    # into a misleading "the key did not work".
+    if [ "$ADV_BUILT" = 1 ]; then
+        ok "[$key] the welcome page builds in its own process"
+    else
+        bad "[$key] the welcome page builds in its own process" \
+            "$(grep -v 'libEGL\|DRI3\|Adwaita-WARNING' "$ATSPI_W/gui-adv-$key.err" 2>/dev/null | tail -3 | tr '\n' ' ')"
+        continue
+    fi
+
+    if [ "$ADV_REACHED" = 1 ]; then
+        ok "[$key] Tab alone puts focus on the welcome page's primary button"
+    else
+        bad "[$key] Tab alone puts focus on the welcome page's primary button" \
+            "'Begin' never took focus in 20 Tab presses — a keyboard user cannot press it"
+        continue
+    fi
+
+    if [ "$ADV_MOVED" = 1 ]; then
+        ok "[$key] pressing it with the keyboard alone opens the next page"
+    else
+        bad "[$key] pressing it with the keyboard alone opens the next page" \
+            "the keyboard page never appeared; the installer is keyboard-navigable but not keyboard-COMPLETABLE"
+    fi
+
+    if [ "$ADV_LEFT" = 1 ]; then
+        ok "[$key] and the page it came from is gone, so the flow really advanced"
+    else
+        bad "[$key] and the page it came from is gone, so the flow really advanced" \
+            "'Begin' is still on the bus — the next page appeared over the old one rather than replacing it"
+    fi
+done
 
 finish
