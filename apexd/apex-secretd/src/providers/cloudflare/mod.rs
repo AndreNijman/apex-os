@@ -19,9 +19,21 @@
 //!   zone, and a name it did not bind does not resolve at all;
 //! * **how a credential is presented** — [`api`], a `curl` the broker owns,
 //!   with the token on the child's stdin and never in `argv`;
-//! * **how to mint a short-lived one** — it does not, yet. §13.4's scoped
-//!   tokens are P1-011, and [`crate::provider::Provider::mint`]'s default says
-//!   "cannot" rather than pretending.
+//! * **how to mint a short-lived one** — [`temporary`], which is §13.4: the
+//!   stored token buys a token carrying one permission group at one scope,
+//!   expiring in minutes, deleted the moment the operation returns. A request
+//!   for one has four answers and they are not the same answer —
+//!   [`crate::provider::Minted`] separates *there is nothing narrower* from
+//!   *the account refused* from *the attempt did not run* — and the trail
+//!   records which. Three of the four carry on with the stored credential,
+//!   because §13.4 says *prefer*; a project that wrote
+//!   `temporary_credentials = "require"` gets a refusal instead.
+//!
+//! And a fifth thing, which is §13.4's other sentence:
+//!
+//! * **how to run the tool instead of the API** — [`tools`], a broker-owned
+//!   `wrangler` or `terraform` with the credential in its environment and a
+//!   fixed argv this build writes.
 //!
 //! Everything else is the framework's, in the order [`crate::provider`] sets
 //! out, and this module could not skip a step if it tried: it never sees the
@@ -204,7 +216,10 @@
 
 pub mod api;
 pub mod binding;
+pub mod deploy;
 pub mod dns;
+pub mod temporary;
+pub mod tools;
 
 use apex_secret_core::operation::{
     self, Effect, OperationSpec, ParamSpec, ProviderSpec, ResourceKind, Syntax,
@@ -212,11 +227,13 @@ use apex_secret_core::operation::{
 use apex_secret_core::project::{self, MAX_PAYLOAD};
 use apex_secret_core::SecretValue;
 
-use crate::provider::{Bind, Bound, Endpoint, Performed, Provider, ProviderError};
+use crate::provider::{Bind, Bound, Endpoint, Lease, Minted, Performed, Provider, ProviderError};
 
 use api::{Api, Body, Call, Multipart};
-use binding::{Account, Binding, BindingError, Bucket, Resource, Worker, Zone};
+use binding::{Account, Binding, BindingError, Bucket, Narrowing, Resource, Worker, Zone};
 use dns::{Lookup, Record};
+use tools::Tools;
+use temporary::Scope;
 
 /// The worker, zone or bucket a caller names.
 const NAMED: ResourceKind = ResourceKind::Name;
@@ -237,6 +254,24 @@ const VERSION: ParamSpec = ParamSpec {
     syntax: Syntax::Name,
     required: true,
     summary: "the version id to put in front of traffic",
+};
+
+/// `percentage`, §13.7's staged rollout.
+///
+/// Optional, and absent means all of it — which is what this operation did
+/// before there was a choice, so a caller who never names it sees no change.
+///
+/// `Syntax::Name` because a share is digits and at most one `.`, and `Name`
+/// already refuses a leading `-`: a negative share would otherwise reach the
+/// parser as a number the far side would have to reject. The range is checked
+/// in [`deploy::share`] against the one the schema documents, and a value
+/// outside it is refused rather than clamped.
+const SHARE: ParamSpec = ParamSpec {
+    name: "percentage",
+    syntax: Syntax::Name,
+    required: false,
+    summary: "how much traffic this version takes, 0.01 to 100; the rest stays \
+              on the version that has it now",
 };
 
 /// The bucket, database, namespace or object a caller names as a path within
@@ -443,10 +478,10 @@ pub const SPEC: ProviderSpec = ProviderSpec {
         OperationSpec {
             id: "cloudflare.worker.deploy",
             summary: "put an uploaded version of one of this project's workers \
-                      in front of all its traffic",
+                      in front of its traffic, all of it or a share",
             effect: Effect::Write,
             resource: NAMED,
-            params: &[VERSION, MESSAGE],
+            params: &[VERSION, SHARE, MESSAGE],
             aliases: &[],
             same_everywhere: false,
         },
@@ -1034,6 +1069,62 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             aliases: &[],
             same_everywhere: false,
         },
+        // ---------------------------------------------------------------
+        // P1-012: the tools, not the API.
+        //
+        // These four are NOT §13.2 names, and the two that came before them —
+        // `worker.route.read` and `access.service-token.create` — set the
+        // precedent: §13.2 is a vocabulary for the API surface, and §13.4 asks
+        // for a broker-owned `wrangler` child in as many words. The membership
+        // test skips them by name, as it skips those two.
+        //
+        // Each is one subcommand with an argv this build writes. There is
+        // deliberately no `cloudflare.wrangler.run`: a grant to pass one's own
+        // argv to wrangler is a grant to do everything wrangler can do, which
+        // is the thing this provider's whole vocabulary exists not to be.
+        // ---------------------------------------------------------------
+        OperationSpec {
+            id: "cloudflare.wrangler.deploy",
+            summary: "deploy one of this project's workers with the project's \
+                      own wrangler, run by the broker",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.wrangler.versions-upload",
+            summary: "upload a new version of one of this project's workers \
+                      with the project's own wrangler, without putting it in \
+                      front of traffic",
+            effect: Effect::Write,
+            resource: NAMED,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.terraform.plan",
+            summary: "show what terraform would change in this project, \
+                      changing nothing",
+            effect: Effect::Read,
+            resource: ResourceKind::None,
+            params: &[],
+            aliases: &[],
+            // Reads the project's own `.tf` files and its own state. Two
+            // projects, two different plans, one stored credential.
+            same_everywhere: false,
+        },
+        OperationSpec {
+            id: "cloudflare.terraform.apply",
+            summary: "make the changes terraform plans for this project",
+            effect: Effect::Write,
+            resource: ResourceKind::None,
+            params: &[],
+            aliases: &[],
+            same_everywhere: false,
+        },
     ],
 };
 
@@ -1117,6 +1208,7 @@ impl From<BindingError> for ProviderError {
 /// The Cloudflare provider.
 pub struct CloudflareProvider {
     api: Api,
+    tools: Tools,
 }
 
 impl CloudflareProvider {
@@ -1124,6 +1216,7 @@ impl CloudflareProvider {
     pub fn new() -> CloudflareProvider {
         CloudflareProvider {
             api: Api::cloudflare(),
+            tools: Tools::system(),
         }
     }
 
@@ -1133,7 +1226,16 @@ impl CloudflareProvider {
     pub fn at(port: u16) -> CloudflareProvider {
         CloudflareProvider {
             api: Api::loopback(port),
+            tools: Tools::system(),
         }
+    }
+
+    /// The same, with `wrangler` and `terraform` taken from a directory a test
+    /// wrote them into. Neither is installed on the machine this was built on.
+    #[cfg(test)]
+    pub fn with_tools(mut self, dir: &std::path::Path) -> CloudflareProvider {
+        self.tools = Tools::in_dir(dir);
+        self
     }
 
     /// §13.1, applied: what did this project bind that name to?
@@ -1143,12 +1245,155 @@ impl CloudflareProvider {
     /// reason the account and zone **ids** are in the project file at all: the
     /// name-to-id lookup is an authenticated request, so it is an operation of
     /// its own rather than a hidden step inside every other one.
+    /// The account a minted token is created in, and the resource its single
+    /// policy names.
+    ///
+    /// Reads the project file a third time — `bind` read it, `perform` reads
+    /// it again, and this is between them. The module note explains why
+    /// re-reading is the shape this provider is in: `Bound` carries an
+    /// endpoint and a sentence and nothing a provider defines, so there is no
+    /// way to hand a resolution forward. `perform` already refuses if the file
+    /// moved under it, which is the check that matters; a mint that read a
+    /// file the operation then refuses to act on has cost a round trip and
+    /// nothing else.
+    /// P1-012: run one brokered subcommand with the credential in its
+    /// environment and nothing else of this daemon's in there.
+    fn run_brokered(
+        &self,
+        req: &Bind<'_>,
+        brokered: &'static tools::Brokered,
+        target: &Target,
+        value: &SecretValue,
+    ) -> Result<Performed, ProviderError> {
+        let token = value.as_str().filter(|t| api::valid_token(t)).ok_or_else(|| {
+            ProviderError::Refused(api::TransportError::BadCredential.to_string())
+        })?;
+        let Some(program) = self.tools.path(brokered.program) else {
+            // Absent, and said as absent. "`wrangler` is not installed" and
+            // "you may not run wrangler" have different fixes, and this
+            // provider does not report the first as the second.
+            return Err(ProviderError::Failed(format!(
+                "`{}` is not installed on this machine, so this operation \
+                 could not be carried out. It is not a permission this \
+                 credential lacks",
+                brokered.program.binary()
+            )));
+        };
+
+        let mut args: Vec<String> = brokered.args.iter().map(|a| (*a).to_string()).collect();
+        let mut extra: Vec<(&'static str, String)> = Vec::new();
+        match target {
+            Target::Worker(worker) => {
+                extra.push(("CLOUDFLARE_ACCOUNT_ID", worker.account.id.clone()));
+                if brokered.environment {
+                    // The one thing a caller contributes to this command line,
+                    // and it did not come from the caller: `resolve` got it out
+                    // of the project's own `apex.toml`, which is why a name the
+                    // project did not bind never reaches here.
+                    args.push("--env".to_string());
+                    args.push(worker.environment.clone());
+                }
+            }
+            Target::Account(account) => {
+                extra.push(("CLOUDFLARE_ACCOUNT_ID", account.id.clone()));
+            }
+            _ => {}
+        }
+
+        let tool = crate::broker::Tool {
+            program: &program.to_string_lossy(),
+            args: &args,
+            cwd: std::path::Path::new(req.project),
+            credential: (tools::CREDENTIAL_VARIABLE, token),
+            extra,
+        };
+        let out = crate::broker::run_tool(&tool, req.owner)
+            .map_err(ProviderError::Failed)?;
+        Ok(Performed {
+            code: out.code,
+            output: out.text,
+            created: None,
+        })
+    }
+
+    fn narrowing(
+        &self,
+        req: &Bind<'_>,
+        zone_scoped: bool,
+    ) -> Result<(String, Scope, Narrowing), Minted> {
+        let binding = match Binding::read(
+            std::path::Path::new(req.project),
+            req.owner.uid,
+            &req.owner.name,
+        ) {
+            Ok(binding) => binding,
+            Err(e) => {
+                return Err(Minted::CouldNotRun(format!(
+                    "this project's cloudflare binding could not be read, so no \
+                     short-lived token was asked for: {e}"
+                )))
+            }
+        };
+        // Without an account id there is no endpoint to create a token at.
+        // `cloudflare.account.read` is the operation that exists to find the
+        // id out, and it necessarily runs before there is one — so this is a
+        // could-not-run and not a refusal.
+        let account = match binding.account() {
+            Ok(account) => account,
+            Err(e) => {
+                return Err(Minted::CouldNotRun(format!(
+                    "this project does not bind a cloudflare account id, so \
+                     there is no account to create a short-lived token in: {e}"
+                )))
+            }
+        };
+        let strength = binding.temporary_credentials;
+        if !zone_scoped {
+            return Ok((
+                account.id.clone(),
+                Scope::Account(account.id.clone()),
+                strength,
+            ));
+        }
+        let target = match self.resolve(req) {
+            Ok(target) => target,
+            Err(e) => return Err(Minted::CouldNotRun(e.to_string())),
+        };
+        let zone = match &target {
+            Target::Record(record) => record.zone.id.clone(),
+            Target::Route { zone, .. } => zone.id.clone(),
+            // A zone-scoped row in `POLICY` whose operation does not resolve
+            // to something with a zone is this build disagreeing with itself.
+            // It is not a refusal and it is not an absence.
+            _ => {
+                return Err(Minted::CouldNotRun(format!(
+                    "'{}' is recorded as needing a zone-scoped token but does \
+                     not resolve to a zone, so no short-lived token was asked \
+                     for",
+                    req.operation.id
+                )))
+            }
+        };
+        Ok((account.id.clone(), Scope::Zone(zone), strength))
+    }
+
     fn resolve(&self, req: &Bind<'_>) -> Result<Target, ProviderError> {
         let binding = Binding::read(
             std::path::Path::new(req.project),
             req.owner.uid,
             &req.owner.name,
         );
+
+        // Terraform acts on the project's whole Cloudflare footprint, so what
+        // it resolves to is the account the project bound — the same target
+        // `cloudflare.account.read` gets, and for the same reason: the thing
+        // that decides what happens is the project's own directory.
+        if matches!(
+            req.operation.id,
+            "cloudflare.terraform.plan" | "cloudflare.terraform.apply"
+        ) {
+            return Ok(Target::Account(binding?.account()?));
+        }
 
         if req.operation.id == "cloudflare.account.read" {
             // The one that has to work before the file exists, so that there is
@@ -1311,6 +1556,29 @@ impl CloudflareProvider {
     /// let that through.
     fn detail(operation: &OperationSpec, target: &Target, params: &operation::Params) -> String {
         let version = params.get("version").map(String::as_str).unwrap_or("");
+        // P1-012's four say which tool and which subcommand, because that is
+        // the thing a person reading the trail needs: "deploy" through the
+        // REST API and "deploy" through wrangler are different operations with
+        // different blast radii, and a sentence that did not distinguish them
+        // would make the trail agree with itself and mean nothing.
+        if let Some(brokered) = tools::brokered(operation.id) {
+            let what = format!("{} {}", brokered.program.binary(), brokered.args.join(" "));
+            return match target {
+                Target::Worker(worker) => format!(
+                    "run `{what}` for {} ({}) in account {} [{}]",
+                    worker.name,
+                    worker.environment,
+                    worker.account.named(),
+                    worker.account.id
+                ),
+                Target::Account(account) => format!(
+                    "run `{what}` in this project, against account {} [{}]",
+                    account.named(),
+                    account.id
+                ),
+                _ => format!("run `{what}` in this project"),
+            };
+        }
         match target {
             Target::Accounts => "list the accounts this credential can see".to_string(),
             Target::Account(account) => {
@@ -1473,7 +1741,17 @@ impl CloudflareProvider {
                     "cloudflare.worker.upload-version" => {
                         format!("upload a new version of {where_}")
                     }
-                    "cloudflare.worker.deploy" => format!("deploy version {version} of {where_}"),
+                    // The share is in the sentence, so a staged rollout and a
+                    // full deployment do not read the same in the trail — and
+                    // so `perform`'s re-resolution check refuses if the two
+                    // disagree about which of them was authorised.
+                    "cloudflare.worker.deploy" => match params.get("percentage") {
+                        Some(share) => format!(
+                            "deploy version {version} of {where_} to {share}% of \
+                             its traffic"
+                        ),
+                        None => format!("deploy version {version} of {where_}"),
+                    },
                     "cloudflare.worker.rollback" => {
                         format!("roll {where_} back to version {version}")
                     }
@@ -2040,6 +2318,42 @@ impl CloudflareProvider {
     ///
     /// A split between two versions is §13.7's staged rollout and belongs to
     /// P1-013, which needs a health check to decide whether to widen it.
+    /// §13.7's staged rollout body: two versions, adding to a hundred.
+    ///
+    /// The remainder is computed rather than taken from the caller, because a
+    /// caller who could name both halves could name a pair that does not add
+    /// up — and cloudflare's refusal of that would arrive as a validation
+    /// error about a body this build composed.
+    fn split_body(
+        &self,
+        req: &Bind<'_>,
+        version: &str,
+        share: f64,
+        keeping: &str,
+    ) -> Result<Body, ProviderError> {
+        let entry = |id: &str, percentage: f64| {
+            let mut entry = serde_json::Map::new();
+            entry.insert("version_id".into(), id.into());
+            entry.insert("percentage".into(), serde_json::json!(percentage));
+            serde_json::Value::Object(entry)
+        };
+        let mut body = serde_json::Map::new();
+        body.insert("strategy".into(), "percentage".into());
+        body.insert(
+            "versions".into(),
+            serde_json::json!([
+                entry(version, share),
+                entry(keeping, deploy::remainder(share))
+            ]),
+        );
+        if let Some(message) = req.params.get("message") {
+            let mut annotations = serde_json::Map::new();
+            annotations.insert("workers/message".into(), message.clone().into());
+            body.insert("annotations".into(), annotations.into());
+        }
+        Ok(Body::Json(serde_json::Value::Object(body).to_string()))
+    }
+
     fn deployment_body(&self, req: &Bind<'_>) -> Result<Body, ProviderError> {
         let Some(version) = req.params.get("version") else {
             return Err(ProviderError::Refused(
@@ -3167,7 +3481,98 @@ impl Provider for CloudflareProvider {
         // the API addresses one by id — so the id is discovered here, with the
         // credential, and never taken from the caller. See [`dns`] for why an
         // id parameter would make the `records` narrowing meaningless.
+        // P1-012: the operation is a child process rather than a request, so
+        // it leaves before a `Call` is ever built. The credential reaching it
+        // is whatever the framework presented — which, when §13.4's exchange
+        // worked, is a token that expires in minutes and is deleted the moment
+        // this returns.
+        if let Some(brokered) = tools::brokered(req.operation.id) {
+            return self.run_brokered(req, brokered, &target, value);
+        }
+
         let call = match (req.operation.id, &target) {
+            // §13.7's staged rollout. Cloudflare's payload is the WHOLE split
+            // every time, so "send 30% here" cannot be expressed without also
+            // saying where the other 70% goes — and the only honest answer to
+            // that is the version that has it now. Asking costs a credential,
+            // so it happens here and not in `bind`. See [`deploy`] for why
+            // three of the five answers are refusals.
+            ("cloudflare.worker.deploy", Target::Worker(worker))
+                if req.params.get("percentage").is_some() =>
+            {
+                let raw = req.params.get("percentage").expect("checked by the guard");
+                let share = deploy::share(raw).map_err(ProviderError::Refused)?;
+                let Some(version) = req.params.get("version") else {
+                    return Err(ProviderError::Refused(
+                        "this operation needs a 'version' option naming the \
+                         version to put in front of traffic"
+                            .to_string(),
+                    ));
+                };
+                if share >= deploy::MAX_SHARE {
+                    // Not a rollout, just a deployment. Fall through to the
+                    // one-request path rather than making a lookup whose
+                    // answer cannot change anything.
+                    self.build(req, &target)?
+                } else {
+                    let keeping = match deploy::current(&self.api, worker, value, req.owner) {
+                        deploy::Current::One(id) if id == *version => {
+                            return Err(ProviderError::Refused(format!(
+                                "version {version} already has all of {}'s \
+                                 traffic, so there is nothing to send {share}% \
+                                 of it to",
+                                worker.name
+                            )))
+                        }
+                        deploy::Current::One(id) => id,
+                        deploy::Current::None => {
+                            return Err(ProviderError::Refused(format!(
+                                "{} has never been deployed, so there is no \
+                                 traffic to keep on an older version and a \
+                                 share of it cannot be assigned. Deploy this \
+                                 version without a 'percentage' option first",
+                                worker.name
+                            )))
+                        }
+                        deploy::Current::Split(ids) => {
+                            return Err(ProviderError::Refused(format!(
+                                "{}'s traffic is already split between {}, so \
+                                 there is no single version to give the \
+                                 remaining {}% to. Finish or undo that rollout \
+                                 first — this build will not decide which of \
+                                 them to retire",
+                                worker.name,
+                                ids.join(" and "),
+                                deploy::remainder(share)
+                            )))
+                        }
+                        deploy::Current::Denied(status) => {
+                            return Err(ProviderError::Refused(format!(
+                                "cloudflare answered HTTP {status} when this \
+                                 asked which version is serving {}'s traffic. \
+                                 That is the credential being refused, which is \
+                                 not the same as the worker having no \
+                                 deployments — so nothing was changed",
+                                worker.name
+                            )))
+                        }
+                        deploy::Current::CouldNotRun(why) => {
+                            return Err(ProviderError::Failed(format!(
+                                "this could not find out which version is \
+                                 serving {}'s traffic, so it did not change \
+                                 the split: {why}",
+                                worker.name
+                            )))
+                        }
+                    };
+                    Call {
+                        method: "POST",
+                        path: format!("{}/deployments", script(worker)),
+                        body: self.split_body(req, version, share, &keeping)?,
+                        headers: Vec::new(),
+                    }
+                }
+            }
             (id @ ("cloudflare.dns.update" | "cloudflare.dns.delete"), Target::Record(record)) => {
                 let Some(kind) = record.kind.clone() else {
                     return Err(ProviderError::Refused(
@@ -3410,6 +3815,80 @@ impl Provider for CloudflareProvider {
             output,
             created,
         })
+    }
+
+    /// §13.4, and P1-005's second acceptance criterion.
+    ///
+    /// The stored token is exchanged for one Cloudflare issued for this
+    /// operation alone, at the narrowest scope the REST API can express, and
+    /// [`Provider::revoke`] ends it as soon as the operation returns. The four
+    /// answers and what each of them costs are in [`temporary`].
+    fn mint(
+        &self,
+        req: &Bind<'_>,
+        _bound: &Bound,
+        value: &SecretValue,
+    ) -> Result<Minted, ProviderError> {
+        let Some(policy) = temporary::policy_for(req.operation.id) else {
+            return Ok(Minted::NoNarrowerForm(format!(
+                "this build knows no permission group that carries '{}', so it \
+                 cannot describe a token narrower than the stored one",
+                req.operation.id
+            )));
+        };
+        let (account, scope, strength) = match self.narrowing(req, policy.zone_scoped()) {
+            Ok(narrowing) => narrowing,
+            Err(answer) => return Ok(answer),
+        };
+        if strength == Narrowing::Off {
+            return Ok(Minted::NoNarrowerForm(format!(
+                "{} sets `temporary_credentials = \"off\"` under [cloudflare], \
+                 so no short-lived token was asked for",
+                req.project
+            )));
+        }
+        let answer = temporary::mint(
+            &self.api,
+            req.operation.id,
+            req.audit_id,
+            &account,
+            &scope,
+            value,
+            req.owner,
+        );
+        // §13.4 says *prefer*, so `prefer` carries on with the stored
+        // credential and the trail says why. A project that wrote `require`
+        // has said the opposite, and the whole point of saying it is that the
+        // operation does not quietly run on the broad token when the narrow
+        // one stops being available.
+        if strength == Narrowing::Require && answer.value().is_none() {
+            return Err(ProviderError::Refused(format!(
+                "{} sets `temporary_credentials = \"require\"` under \
+                 [cloudflare], and this operation could not be given a \
+                 short-lived credential, so it was not carried out with the \
+                 stored one: {}",
+                req.project,
+                answer.reason().unwrap_or("no reason given")
+            )));
+        }
+        Ok(answer)
+    }
+
+    fn revoke(
+        &self,
+        req: &Bind<'_>,
+        _bound: &Bound,
+        stored: &SecretValue,
+        lease: &Lease,
+    ) -> Result<(), String> {
+        // Whether the policy was zone-scoped does not change which account the
+        // token was created in, and the revoke addresses it by account. So the
+        // `false` here is not a guess: a zone-scoped token and an
+        // account-scoped one are deleted at the same path.
+        let (account, _, _) = self
+            .narrowing(req, false)
+            .map_err(|answer| answer.reason().unwrap_or("no account").to_string())?;
+        temporary::revoke(&self.api, &account, lease, stored, req.owner)
     }
 }
 

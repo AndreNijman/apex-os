@@ -511,6 +511,15 @@ jobs:
       - name: §27 trust — the readout is wired into apex status, and expects the identity CI signs under
         run: ./tests/test-apex-trust.sh
 
+      # §13.4's tool half, the part an agent actually types. In `static`
+      # because the thing being asserted is a command line: which subcommands
+      # reach the broker and which reach the real tool unchanged. It needs no
+      # toolchain, no wrangler, no terraform and no daemon — the suite refuses
+      # to run if `apex` resolves to anything but its own stub, so it cannot
+      # quietly start measuring the runner's machine.
+      - name: §13.4 tool broker — a brokered subcommand reaches apex, and everything else reaches the tool
+        run: ./tests/test-apex-tool-broker.sh
+
       # §25's persistent-state migration, structural half. In `static` because
       # the thing most likely to rot here is a doc comment — a version key that
       # goes back to saying "absent means the current version" is a one-line

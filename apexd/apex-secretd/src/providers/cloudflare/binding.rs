@@ -166,6 +166,19 @@ pub struct Resource {
     pub id: String,
 }
 
+/// How hard §13.4's short-lived credential is asked for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Narrowing {
+    /// Ask; carry on with the stored credential if there is not one. §13.4
+    /// says *prefer*, and this is it.
+    #[default]
+    Prefer,
+    /// Ask; refuse the operation if the answer is anything but a credential.
+    Require,
+    /// Do not ask.
+    Off,
+}
+
 /// What a project binds.
 #[derive(Debug, Clone, Default)]
 pub struct Binding {
@@ -192,6 +205,21 @@ pub struct Binding {
     /// bound zone and nothing narrower; a non-empty list means these names and
     /// no others, apex included only if it is written down.
     pub records: Vec<String>,
+    /// `[cloudflare] temporary_credentials` — §13.4's strength.
+    ///
+    /// `prefer`, the default, is what the section asks for and what the
+    /// service does: try to exchange the stored credential for a short-lived
+    /// one, and carry on with the stored one if there is not one, recording
+    /// which of the three reasons applied. `require` says the project will not
+    /// run on the stored credential at all — the operation is refused instead.
+    /// `off` does not ask.
+    ///
+    /// `require` is here because `prefer`'s fallback is not a rare path:
+    /// cloudflare requires Super Administrator on the account to create an
+    /// account-owned token, so on most accounts the exchange is refused and
+    /// the broad token is what gets spent. An owner whose credential *can*
+    /// mint has no other way to say "and if it ever stops, stop too".
+    pub temporary_credentials: Narrowing,
     /// `[cloudflare.<name>] worker`, by environment name.
     pub environments: BTreeMap<String, String>,
 }
@@ -480,7 +508,7 @@ pub struct Bucket {
 /// Written out rather than pulled in as a dependency, and strict about case
 /// for the same reason [`valid_id`] is: this goes into a URL path, and the set
 /// of characters that cannot appear there is the point.
-fn valid_uuid(id: &str) -> bool {
+pub(crate) fn valid_uuid(id: &str) -> bool {
     let groups: Vec<&str> = id.split('-').collect();
     if groups.len() != 5 {
         return false;
@@ -534,7 +562,7 @@ fn valid_model(id: &str) -> bool {
     })
 }
 
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     id.len() == ID_LEN && id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
@@ -633,6 +661,24 @@ impl Binding {
             zone_id: id(&["cloudflare", "zone_id"])?,
             buckets: config.strings(&["cloudflare", "buckets"])?,
             records: config.strings(&["cloudflare", "records"])?,
+            temporary_credentials: match config
+                .string(&["cloudflare", "temporary_credentials"])?
+            {
+                None => Narrowing::Prefer,
+                Some("prefer") => Narrowing::Prefer,
+                Some("require") => Narrowing::Require,
+                Some("off") => Narrowing::Off,
+                // Refused rather than defaulted. A file that says `required`
+                // or `strict` means to require it, and reading an unknown word
+                // as "prefer" would silently give the owner the weaker of the
+                // two things they might have meant.
+                Some(_) => {
+                    return Err(BindingError::BadId {
+                        path: path.clone(),
+                        key: "cloudflare.temporary_credentials".to_string(),
+                    })
+                }
+            },
             resources,
             environments,
             path,
@@ -649,6 +695,9 @@ impl Binding {
             && self.zone.is_none()
             && self.buckets.is_empty()
             && self.records.is_empty()
+            // Not `temporary_credentials`: it says how to spend a binding, not
+            // what is bound, and a file that carries only that has still bound
+            // nothing.
             && self.environments.is_empty()
             // Every table, or a project that binds only `[cloudflare.kv]` is
             // told to write a file it has already written.

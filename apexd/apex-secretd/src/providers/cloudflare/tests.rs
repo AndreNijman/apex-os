@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -155,11 +156,49 @@ fast = "@cf/meta/llama-3.1-8b-instruct"
 [cloudflare.tunnels]
 office = "f70ff985-a4ef-4643-bbbc-4a0ed4fc8415"
 
+# §13.7 needs three workers, because the lookup that a staged rollout depends
+# on has three shapes and each of them has to be reachable: one version
+# serving, none, and two already sharing.
+[cloudflare.staging]
+worker = "never-deployed"
+
+[cloudflare.canary]
+worker = "already-split"
+
 [cloudflare.preview]
 worker = "project-preview"
 
 [cloudflare.production]
 worker = "project"
+"#;
+
+/// The version serving traffic in the double, and the one being rolled out.
+/// Both are uuids because a Worker version id is one.
+const OLD_VERSION: &str = "1c4dd6be-0000-4000-8000-abcdefabcdef";
+const NEW_VERSION: &str = "2d5ee7cf-1111-4111-9111-bcdefabcdef0";
+
+/// A stand-in for `wrangler` and for `terraform`.
+///
+/// It prints what it was given rather than doing anything, which is the whole
+/// point: the question P1-012 has to answer is *what environment did the
+/// broker build for this child*, and that cannot be measured from outside the
+/// child. It echoes the credential deliberately — a test where the token never
+/// comes back cannot tell a working scrub from a tool that printed nothing —
+/// and it names `CARGO_PKG_NAME`, which cargo puts in the environment of the
+/// process running these tests and which nothing in [`crate::broker::run_tool`]
+/// puts in a child's, so a build that stopped clearing the environment would be
+/// caught by that line turning from `<unset>` into a value. The test that reads
+/// it refuses to run if its own environment does not carry it, because a test
+/// that measures the absence of something that was never there measures
+/// nothing.
+const STUB_TOOL: &str = r#"#!/bin/sh
+echo "apex-stub: $(basename "$0") $*"
+echo "token=${CLOUDFLARE_API_TOKEN:-<unset>}"
+echo "account=${CLOUDFLARE_ACCOUNT_ID:-<unset>}"
+echo "cwd=$(pwd)"
+echo "inherited=${CARGO_PKG_NAME:-<unset>}"
+echo "home=${HOME:-<unset>}"
+exit 0
 "#;
 
 /// One request the double saw.
@@ -190,6 +229,60 @@ struct Fake {
 enum Mode {
     Normal,
     EchoUnauthorized,
+    /// An account whose stored credential may create account-owned tokens, so
+    /// §13.4's exchange succeeds and the operation spends a token that did not
+    /// exist a moment ago.
+    ///
+    /// A mode rather than the default, because it is a property of the
+    /// *account* and not of this build: Cloudflare requires Super
+    /// Administrator to create an account-owned token, so most stored
+    /// credentials cannot, and [`Mode::Normal`] is the ordinary case where the
+    /// exchange is attempted and comes back with nothing.
+    Minting,
+    /// An account that answers the permission-group list but refuses to create
+    /// a token. The shape that separates "would not issue one" from "there is
+    /// not one".
+    MintingDenied,
+    /// An account that refuses the permission-group list itself.
+    ///
+    /// A separate mode from [`Mode::MintingDenied`] because it is a separate
+    /// refusal in a separate place: Cloudflare gates reading the list and
+    /// creating a token on the same permission, so a credential that lacks it
+    /// can be turned away at either, and a build that got one of the two right
+    /// would look correct until an account turned it away at the other.
+    ListDenied,
+    /// An account that issues a token and then will not take the revoke back.
+    /// The credential stands until it expires, and the trail has to say so.
+    RevokeFails,
+}
+
+impl Mode {
+    /// Whether the double knows about account-owned tokens at all.
+    fn mints(self) -> bool {
+        matches!(
+            self,
+            Mode::Minting | Mode::MintingDenied | Mode::ListDenied | Mode::RevokeFails
+        )
+    }
+}
+
+/// The token the double issues, and the id it issues it under. Distinct from
+/// the stored credential so a test can say which of the two reached an
+/// operation.
+const MINTED: &str = "apex-minted-cf-6b31d0a4-do-not-leak";
+const MINTED_ID: &str = "abcdef0123456789abcdef0123456789";
+
+/// Whether a path is the credential exchange rather than an operation.
+///
+/// [`Fake::seen`] hides these and [`Fake::minting`] shows them, because they
+/// answer different questions: *what did this operation do* and *what did it
+/// cost to narrow the credential first*. A test about `dns.create` should not
+/// have to know that the request before it asked which permission groups the
+/// account has.
+fn is_credential_exchange(path: &str) -> bool {
+    let path = path.strip_prefix("/client/v4").unwrap_or(path);
+    let path = path.split('?').next().unwrap_or(path);
+    path.starts_with(&format!("/accounts/{ACCOUNT}/tokens"))
 }
 
 impl Fake {
@@ -207,7 +300,27 @@ impl Fake {
         Fake { port, seen }
     }
 
+    /// What the OPERATION did — every request except §13.4's credential
+    /// exchange. See [`is_credential_exchange`] for why the two are apart.
     fn seen(&self) -> Vec<Seen> {
+        self.everything()
+            .into_iter()
+            .filter(|s| !is_credential_exchange(&s.path))
+            .collect()
+    }
+
+    /// What narrowing the credential cost: the permission-group list, the
+    /// token creation, and the revoke.
+    fn minting(&self) -> Vec<Seen> {
+        self.everything()
+            .into_iter()
+            .filter(|s| is_credential_exchange(&s.path))
+            .collect()
+    }
+
+    /// Both, in the order they happened. Only the tests that care about the
+    /// ordering of one against the other use this.
+    fn everything(&self) -> Vec<Seen> {
         self.seen.lock().expect("lock").clone()
     }
 
@@ -285,7 +398,11 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
         return reply(&mut stream, 401, &body);
     }
 
-    let (status, body) = answer(&method, &path);
+    let (status, body) = if is_credential_exchange(&path) {
+        tokens(&method, &path, mode)
+    } else {
+        answer(&method, &path)
+    };
     // Every success carries the credential back too, in a `messages` entry.
     // Cloudflare does not do this; the point is that it would not matter if it
     // did, and a test where the token never comes back cannot tell a working
@@ -301,6 +418,108 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
     // JSON.
     let body = body.replace("{{authorization}}", &authorization);
     reply(&mut stream, status, &body);
+}
+
+/// §13.4's three endpoints, as the pinned schema documents them.
+///
+/// Kept apart from [`answer`] so that the ordinary surface and the credential
+/// exchange cannot be confused for one another, and so the permission-group
+/// list can be wrong in one specific way — see
+/// `a_permission_group_this_build_does_not_recognise_is_not_a_refusal`.
+fn tokens(method: &str, target: &str, mode: Mode) -> (u16, String) {
+    let target = target.strip_prefix("/client/v4").unwrap_or(target);
+    let path = target.split('?').next().unwrap_or(target);
+    let base = format!("/accounts/{ACCOUNT}/tokens");
+    let ok = |result: &str| {
+        (
+            200u16,
+            format!(r#"{{"success":true,"errors":[],"messages":[],"result":{result}}}"#),
+        )
+    };
+    // An account that cannot create tokens does not have a permission-group
+    // list to show either: both are the same permission at Cloudflare.
+    if !mode.mints() {
+        return (
+            404,
+            r#"{"success":false,"errors":[{"code":7003,"message":"No route for that URI"}],"messages":[],"result":null}"#
+                .to_string(),
+        );
+    }
+    match (method, path) {
+        ("GET", p) if p == format!("{base}/permission_groups") => {
+            if mode == Mode::ListDenied {
+                return (
+                    403,
+                    r#"{"success":false,"errors":[{"code":10000,"message":"Authentication error"}],"messages":[],"result":null}"#
+                        .to_string(),
+                );
+            }
+            ok(&permission_groups())
+        }
+        ("POST", p) if p == base => {
+            if mode == Mode::MintingDenied {
+                return (
+                    403,
+                    r#"{"success":false,"errors":[{"code":10000,"message":"Authentication error"}],"messages":[],"result":null}"#
+                        .to_string(),
+                );
+            }
+            ok(&format!(
+                r#"{{"id":"{MINTED_ID}","name":"apex","status":"active","value":"{MINTED}"}}"#
+            ))
+        }
+        ("DELETE", p) if p == format!("{base}/{MINTED_ID}") => {
+            if mode == Mode::RevokeFails {
+                return (
+                    500,
+                    r#"{"success":false,"errors":[{"code":1000,"message":"internal"}],"messages":[],"result":null}"#
+                        .to_string(),
+                );
+            }
+            ok(&format!(r#"{{"id":"{MINTED_ID}"}}"#))
+        }
+        _ => (
+            404,
+            r#"{"success":false,"errors":[{"code":7003,"message":"No route for that URI"}],"messages":[],"result":null}"#
+                .to_string(),
+        ),
+    }
+}
+
+/// The account's permission groups, as `GET .../permission_groups` answers.
+///
+/// Every name [`super::temporary::POLICY`] can ask for, so that the tests
+/// measure the exchange rather than a gap in the fixture — except one, which
+/// is deliberately spelled the way this build does *not* expect, so there is a
+/// row whose absence is a real absence. See
+/// `a_permission_group_this_build_does_not_recognise_is_not_a_refusal`.
+fn permission_groups() -> String {
+    let mut groups: Vec<String> = Vec::new();
+    let mut id = 0u32;
+    let push = |name: &str, groups: &mut Vec<String>, id: &mut u32| {
+        *id += 1;
+        groups.push(format!(
+            r#"{{"id":"{:032x}","name":"{name}","scopes":["com.cloudflare.api.account"]}}"#,
+            0xcf00_0000u32 + *id
+        ));
+    };
+    for name in super::temporary::POLICY
+        .iter()
+        .filter_map(|(_, policy)| match policy {
+            super::temporary::Narrowest::Token { groups, .. } => Some(groups.iter()),
+            super::temporary::Narrowest::Nothing(_) => None,
+        })
+        .flatten()
+        .map(|slot| slot[0])
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        // The one gap: an account that does not offer Hyperdrive at all.
+        if name == "Hyperdrive Read" {
+            continue;
+        }
+        push(name, &mut groups, &mut id);
+    }
+    format!("[{}]", groups.join(","))
 }
 
 /// The documented paths, with the documented shapes.
@@ -351,6 +570,26 @@ fn answer(method: &str, target: &str) -> (u16, String) {
             ok(
                 r#"{"bindings":[{"type":"plain_text","name":"GREETING","text":"hi"},{"type":"secret_text","name":"OLD_SECRET"}],"compatibility_date":"2026-09-01","usage_model":"standard"}"#,
             )
+        }
+        // §13.7: which version is in front of traffic. The worker named
+        // `never-deployed` has an empty list and `already-split` has two
+        // versions sharing, so the three shapes the lookup has to tell apart
+        // are all reachable without a second double.
+        ("GET", p) if p.ends_with("/deployments") => {
+            if p.contains("/never-deployed/") {
+                return ok(r#"{"deployments":[]}"#);
+            }
+            if p.contains("/already-split/") {
+                return ok(&format!(
+                    r#"{{"deployments":[{{"id":"d1","strategy":"percentage","versions":[
+                        {{"version_id":"{OLD_VERSION}","percentage":80}},
+                        {{"version_id":"{NEW_VERSION}","percentage":20}}]}}]}}"#
+                ));
+            }
+            ok(&format!(
+                r#"{{"deployments":[{{"id":"d1","strategy":"percentage","versions":[
+                    {{"version_id":"{OLD_VERSION}","percentage":100}}]}}]}}"#
+            ))
         }
         ("POST", p) if p.ends_with("/versions") => {
             ok(r#"{"id":"1c4dd6be-0000-4000-8000-abcdefabcdef","number":7}"#)
@@ -614,12 +853,14 @@ struct Fixture {
     store: PathBuf,
     project: PathBuf,
     fake: Fake,
+    tools: PathBuf,
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.store).ok();
         std::fs::remove_dir_all(&self.project).ok();
+        std::fs::remove_dir_all(&self.tools).ok();
     }
 }
 
@@ -636,6 +877,12 @@ impl Fixture {
     /// A service serving ONLY the Cloudflare provider, with a credential
     /// stored for the double and a project bound the way §13.1 says.
     fn new(name: &str, mode: Mode, granted: &[&str]) -> Fixture {
+        Fixture::with_project(name, mode, granted, PROJECT_FILE)
+    }
+
+    /// The same, with a project file of the caller's choosing. §13.4's
+    /// strength is a line in that file, so a test of it needs a different one.
+    fn with_project(name: &str, mode: Mode, granted: &[&str], file: &str) -> Fixture {
         let fake = Fake::start(mode);
         let tag = format!("{name}-{}-{}", std::process::id(), fake.port);
         let store = std::env::temp_dir().join(format!("apex-cf-store-{tag}"));
@@ -643,11 +890,26 @@ impl Fixture {
         std::fs::remove_dir_all(&store).ok();
         std::fs::remove_dir_all(&project).ok();
         std::fs::create_dir_all(&project).expect("project");
-        std::fs::write(project.join("apex.toml"), PROJECT_FILE).expect("apex.toml");
+        std::fs::write(project.join("apex.toml"), file).expect("apex.toml");
+
+        // Neither `wrangler` nor `terraform` is installed on the machine this
+        // was built on, and a build that could only run the real ones could
+        // not be tested at all — the same reason `Api` is a field. Each stub
+        // prints what it was given, so a test can measure the environment its
+        // child was built with rather than trusting that it was.
+        let tools = std::env::temp_dir().join(format!("apex-cf-tools-{tag}"));
+        std::fs::remove_dir_all(&tools).ok();
+        std::fs::create_dir_all(&tools).expect("tools");
+        for name in ["wrangler", "terraform"] {
+            let path = tools.join(name);
+            std::fs::write(&path, STUB_TOOL).expect("stub");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
 
         let mut registry = Registry::new();
         registry
-            .register(Box::new(CloudflareProvider::at(fake.port)))
+            .register(Box::new(CloudflareProvider::at(fake.port).with_tools(&tools)))
             .expect("register");
         let service = Service::new(Store::new(store.clone()), false, registry);
 
@@ -686,6 +948,7 @@ impl Fixture {
             store,
             project,
             fake,
+            tools,
         }
     }
 
@@ -732,6 +995,15 @@ type OperationCase = (
 /// own declaration accepts.
 fn every_operation() -> Vec<OperationCase> {
     vec![
+        // P1-012's four make NO authenticated request: the operation is a
+        // child process, not a call. They are in this table anyway, and the
+        // count is 0 rather than the row being absent, because the sweep below
+        // asserts that every declared operation left a trail line — and an
+        // operation missing from here would quietly stop being swept.
+        ("cloudflare.wrangler.deploy", "project", vec![], 0),
+        ("cloudflare.wrangler.versions-upload", "project", vec![], 0),
+        ("cloudflare.terraform.plan", "", vec![], 0),
+        ("cloudflare.terraform.apply", "", vec![], 0),
         ("cloudflare.account.read", "", vec![], 1),
         ("cloudflare.worker.read", "project", vec![], 1),
         (
@@ -1503,25 +1775,47 @@ fn the_declaration_is_well_formed_and_every_name_is_one_section_thirteen_two_lis
     SPEC.validate().expect("the shipped cloudflare vocabulary must validate");
     let listed: Vec<&str> = SECTION_13_2.to_vec();
     for op in SPEC.operations {
-        // `worker.route.read` is the one addition, and it is §13.3's "Worker
-        // routes" rather than an invention.
+        // `worker.route.read` is §13.3's "Worker routes" rather than an
+        // invention, `access.service-token.create` is §13.3's "service
+        // tokens", and P1-012's four are §13.4's *"a broker-owned
+        // `wrangler`/API child process"* — the tool half of a sentence whose
+        // API half is the other thirty-two. §13.2 is a vocabulary for the API
+        // surface and says nothing about running a tool; a build that refused
+        // to name these because §13.2 does not would have nowhere to put them.
         if op.id == "cloudflare.worker.route.read"
             || op.id == "cloudflare.access.service-token.create"
+            || super::tools::brokered(op.id).is_some()
         {
             continue;
         }
         assert!(listed.contains(&op.id), "'{}' is not in §13.2", op.id);
     }
-    // Twenty-six of §13.2's thirty-two, and two additions. The arithmetic is
-    // asserted because the module note states it and a later task will read
-    // that note to work out what is left.
+    // All thirty-two of §13.2's, plus six that are not §13.2's: two from
+    // §13.3 and P1-012's four tool subcommands. The arithmetic is asserted
+    // because the module note states it and a later task will read that note
+    // to work out what is left.
     let from_13_2 = SPEC
         .operations
         .iter()
         .filter(|op| listed.contains(&op.id))
         .count();
     assert_eq!(from_13_2, 32, "every name §13.2 lists is implemented");
-    assert_eq!(SPEC.operations.len(), 34);
+    assert_eq!(SPEC.operations.len(), 38);
+    // Every operation that is not §13.2's is one this build can account for.
+    // A name that is in neither list is a name somebody added without saying
+    // where it came from.
+    let unaccounted: Vec<&str> = SPEC
+        .operations
+        .iter()
+        .map(|op| op.id)
+        .filter(|id| {
+            !listed.contains(id)
+                && *id != "cloudflare.worker.route.read"
+                && *id != "cloudflare.access.service-token.create"
+                && super::tools::brokered(id).is_none()
+        })
+        .collect();
+    assert!(unaccounted.is_empty(), "names from nowhere: {unaccounted:?}");
     assert_eq!(SECTION_13_2.len() - from_13_2, 0, "still unimplemented");
 
     // **Running a model is a write, and this is the only thing that says so.**
@@ -3578,4 +3872,1033 @@ fn a_cloudflare_operation_cannot_be_granted_in_every_project_even_though_it_name
 
     std::fs::remove_dir_all(&store).ok();
     std::fs::remove_dir_all(&project).ok();
+}
+
+// ---------------------------------------------------------------------------
+// §13.4 — temporary task credentials (P1-011)
+// ---------------------------------------------------------------------------
+
+/// P1-005's second acceptance criterion, which its own evidence left open:
+/// *"No broad token when narrower scope is possible."*
+///
+/// Half of it was already true — the agent never holds a token, and every
+/// operation is scoped to a resource the project's file names — and the other
+/// half was not: the token actually spent was the account-wide one the owner
+/// stored. This is the half that was missing, and it is one assertion: the
+/// request that did the work carried a credential that did not exist when the
+/// request arrived and does not exist by the time it is answered.
+///
+/// Three mutations, all red:
+/// * present the stored value instead of the minted one in `service.rs`
+///   (`Minted::Narrowed { value, .. } => (&stored, None)`);
+/// * drop the revoke on the success path;
+/// * make `temporary::mint` return the stored token rather than `result.value`.
+#[test]
+fn an_operation_spends_a_credential_that_did_not_exist_a_moment_ago_and_does_not_outlive_it() {
+    let f = Fixture::new("mint-r2", Mode::Minting, &["cloudflare.r2.object.read"]);
+    let reply = f.use_it(f.record("cloudflare.r2.object.read", "example-assets/backups/latest.sql"));
+    assert!(reply.as_error().is_none(), "{reply:?}");
+
+    // What the operation itself did, and with what.
+    let operation = f.fake.seen();
+    assert_eq!(operation.len(), 1, "{operation:#?}");
+    assert_eq!(
+        operation[0].authorization.as_deref(),
+        Some(format!("Bearer {MINTED}").as_str()),
+        "the operation spent the stored account-wide token, not the narrow one"
+    );
+    assert_ne!(
+        operation[0].authorization.as_deref(),
+        Some(format!("Bearer {TOKEN}").as_str())
+    );
+
+    // What narrowing it cost, and with what. The stored credential is spent on
+    // exactly these three and nowhere else.
+    let exchange = f.fake.minting();
+    assert_eq!(exchange.len(), 3, "{exchange:#?}");
+    let stored = Some(format!("Bearer {TOKEN}"));
+    assert_eq!(
+        exchange
+            .iter()
+            .map(|s| (s.method.as_str(), s.authorization.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("GET", stored.clone()),
+            ("POST", stored.clone()),
+            ("DELETE", stored),
+        ],
+        "the exchange must be asked for with the credential that can make it, \
+         and only that one"
+    );
+    assert!(
+        exchange[0].path.ends_with("/tokens/permission_groups"),
+        "{}",
+        exchange[0].path
+    );
+    assert!(
+        exchange[2].path.ends_with(&format!("/tokens/{MINTED_ID}")),
+        "the token that was spent was not the token that was revoked: {}",
+        exchange[2].path
+    );
+
+    // And the policy it was created under is one product at one scope.
+    let body: serde_json::Value =
+        serde_json::from_str(&exchange[1].body).expect("the creation body is json");
+    let policies = body["policies"].as_array().expect("policies");
+    assert_eq!(policies.len(), 1, "{body}");
+    assert_eq!(policies[0]["effect"], "allow");
+    assert_eq!(
+        policies[0]["permission_groups"]
+            .as_array()
+            .expect("groups")
+            .len(),
+        1
+    );
+    assert_eq!(
+        policies[0]["resources"],
+        serde_json::json!({ format!("com.cloudflare.api.account.{ACCOUNT}"): "*" })
+    );
+    assert!(
+        body["expires_on"].as_str().is_some_and(|e| e.ends_with('Z')),
+        "a token with no expiry is not a short-lived one: {body}"
+    );
+}
+
+/// The arm every implementation forgets, and the one that matters most.
+///
+/// A minted credential that outlives a *failed* operation is exactly the
+/// credential §13.4 says not to leave lying around — and a failure is often
+/// the case where something went wrong enough to be worth not leaving one. So
+/// the revoke happens before the error is even looked at.
+///
+/// Mutation: move the revoke inside the `Ok(out)` arm in `service.rs`. Red.
+#[test]
+fn a_short_lived_credential_is_revoked_even_when_the_operation_it_was_minted_for_failed() {
+    let f = Fixture::new("mint-fail", Mode::Minting, &["cloudflare.dns.delete"]);
+    // A name the project's zone holds no record for: the lookup runs with the
+    // minted credential, answers an absence, and `perform` returns an error —
+    // which is the path the revoke is easiest to leave off.
+    let reply = f.use_it(
+        f.record("cloudflare.dns.delete", "gone.example.com")
+            .param("type", "A"),
+    );
+    assert!(
+        reply.as_error().is_some(),
+        "this test needs an operation that failed AFTER the credential was \
+         presented: {reply:?}"
+    );
+    // It really did reach the far side with the minted credential first.
+    assert_eq!(
+        f.fake.seen()[0].authorization.as_deref(),
+        Some(format!("Bearer {MINTED}").as_str()),
+        "{:#?}",
+        f.fake.seen()
+    );
+
+    let exchange = f.fake.minting();
+    assert!(
+        exchange.iter().any(|s| s.method == "DELETE"
+            && s.path.ends_with(&format!("/tokens/{MINTED_ID}"))),
+        "the operation failed and the credential minted for it was left \
+         standing: {exchange:#?}"
+    );
+}
+
+/// "Permission denied is not absence", in the one place a credential service
+/// is most tempted to collapse the two.
+///
+/// An account whose stored credential may not create tokens has said nothing
+/// about whether a narrower token is possible — someone else's credential on
+/// the same account could make one. An account this build cannot describe a
+/// policy for has said nothing either. Neither is *"there is no narrower
+/// form"*, which is a conclusion, and the trail has to be able to tell an
+/// operator which of the three happened so they can act on it.
+///
+/// Mutation: collapse `Denied` into `NoNarrowerForm` in `Minted::as_str`, or
+/// return `NoNarrowerForm` from `temporary::group_ids`' 403 arm. Red.
+#[test]
+fn a_credential_that_may_not_narrow_itself_is_not_a_credential_with_nothing_to_narrow_to() {
+    // Cloudflare gates reading the permission groups and creating a token on
+    // the same permission, so a credential that lacks it is turned away at one
+    // of two places. Both are `Denied`, and both are measured: a build that
+    // got one right would look correct until an account refused at the other.
+    let mut refusals = Vec::new();
+    for (name, mode) in [
+        ("denied-create", Mode::MintingDenied),
+        ("denied-list", Mode::ListDenied),
+    ] {
+        let refused = Fixture::new(name, mode, &["cloudflare.worker.read"]);
+        assert!(refused
+            .use_it(refused.record("cloudflare.worker.read", "project"))
+            .as_error()
+            .is_none());
+        refusals.push(refused.trail());
+    }
+    let refused_trail = refusals[0].clone();
+
+    let silent = Fixture::new("no-tokens", Mode::Normal, &["cloudflare.worker.read"]);
+    assert!(silent
+        .use_it(silent.record("cloudflare.worker.read", "project"))
+        .as_error()
+        .is_none());
+    let silent_trail = silent.trail();
+
+    let word = |trail: &str| -> String {
+        let line: serde_json::Value = serde_json::from_str(
+            trail
+                .lines()
+                .rfind(|l| l.contains("\"used\""))
+                .expect("a used line"),
+        )
+        .expect("json");
+        line["narrowing"].as_str().expect("narrowing").to_string()
+    };
+
+    // The account refused, at either place. Not an absence.
+    for trail in &refusals {
+        assert_eq!(word(trail), "denied", "{trail}");
+    }
+    // The account could not be asked. Not an absence and not a refusal.
+    assert_eq!(word(&silent_trail), "could-not-run", "{silent_trail}");
+    assert_ne!(word(&refused_trail), word(&silent_trail));
+
+    // Both still ran, on the stored credential. §13.4 says *prefer*, and
+    // refusing an operation because its credential could not be narrowed would
+    // break every operation for an owner whose token is not a Super
+    // Administrator's — which Cloudflare documents as the requirement for
+    // creating an account-owned token, and is therefore the ordinary case.
+    for trail in refusals.iter().chain(std::iter::once(&silent_trail)) {
+        assert!(trail.contains("\"used\""), "the operation did not run");
+    }
+}
+
+/// A name this build does not recognise is this build not recognising it.
+///
+/// The fixture's account offers no `Hyperdrive Read` group. That is not the
+/// account refusing and it is not this operation having no narrow form — it is
+/// a policy this build could not assemble, and the only honest answer is that
+/// it could not run.
+///
+/// Mutation: answer `NoNarrowerForm` from the missing-group arm. Red.
+#[test]
+fn a_permission_group_this_build_cannot_find_is_not_a_refusal_and_not_an_absence() {
+    let f = Fixture::new("no-group", Mode::Minting, &["cloudflare.hyperdrive.read"]);
+    let reply = f.use_it(f.record("cloudflare.hyperdrive.read", "pg"));
+    assert!(reply.as_error().is_none(), "{reply:?}");
+
+    // It asked, and then stopped: no token was created against a policy it
+    // could not describe.
+    let exchange = f.fake.minting();
+    assert_eq!(exchange.len(), 1, "{exchange:#?}");
+    assert_eq!(exchange[0].method, "GET");
+
+    let trail = f.trail();
+    let line: serde_json::Value = serde_json::from_str(
+        trail
+            .lines()
+            .rfind(|l| l.contains("\"used\""))
+            .expect("a used line"),
+    )
+    .expect("json");
+    assert_eq!(line["narrowing"], "could-not-run", "{trail}");
+    assert!(
+        line["narrowing_detail"]
+            .as_str()
+            .expect("a reason")
+            .contains("Hyperdrive Read"),
+        "the reason must name what it looked for: {line}"
+    );
+    // And the operation ran anyway, on the stored credential.
+    assert_eq!(
+        f.fake.seen()[0].authorization.as_deref(),
+        Some(format!("Bearer {TOKEN}").as_str())
+    );
+}
+
+/// DNS is the one surface where the narrowing reaches past the product to the
+/// resource: DNS permission groups are zone-scoped, so a token minted for a
+/// DNS operation names the one zone this project bound and no other.
+///
+/// Mutation: make every policy account-scoped by dropping `zone_scoped` from
+/// the DNS rows in `POLICY`. Red.
+#[test]
+fn a_token_minted_for_dns_names_the_one_zone_this_project_bound() {
+    let f = Fixture::new("mint-dns", Mode::Minting, &["cloudflare.dns.read"]);
+    assert!(f
+        .use_it(f.record("cloudflare.dns.read", "example.com"))
+        .as_error()
+        .is_none());
+
+    let exchange = f.fake.minting();
+    let creation = exchange
+        .iter()
+        .find(|s| s.method == "POST")
+        .expect("a token was created");
+    let body: serde_json::Value = serde_json::from_str(&creation.body).expect("json");
+    assert_eq!(
+        body["policies"][0]["resources"],
+        serde_json::json!({ format!("com.cloudflare.api.account.zone.{ZONE}"): "*" }),
+        "a DNS token scoped to the whole account is broader than it needs to \
+         be, and §13.9 is about exactly that: {body}"
+    );
+}
+
+/// An operation with no row in [`super::temporary::POLICY`] goes on spending
+/// the account-wide token, silently. So adding an operation and forgetting the
+/// row has to fail here rather than in production.
+#[test]
+fn every_declared_operation_can_name_the_narrowest_token_that_carries_it() {
+    let missing: Vec<&str> = SPEC
+        .operations
+        .iter()
+        .map(|op| op.id)
+        .filter(|id| super::temporary::policy_for(id).is_none())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these operations have no §13.4 policy, so each of them would keep \
+         spending the stored account-wide credential without anything saying \
+         so: {missing:?}"
+    );
+    // …and nothing in the table names an operation that does not exist, which
+    // is how a row survives a rename.
+    let unknown: Vec<&str> = super::temporary::POLICY
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| !SPEC.operations.iter().any(|op| op.id == *id))
+        .collect();
+    assert!(unknown.is_empty(), "policy rows for nothing: {unknown:?}");
+}
+
+/// A minted token is still a credential. §13.4 says so in as many words, and
+/// the framework scrubs it for the same reason it scrubs the stored one.
+#[test]
+fn a_minted_credential_reaches_neither_the_caller_nor_the_trail() {
+    let f = Fixture::new("mint-scrub", Mode::Minting, &["cloudflare.worker.read"]);
+    let reply = f.use_it(f.record("cloudflare.worker.read", "project"));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert!(!output.contains(MINTED), "the minted token came back: {output}");
+    assert!(!output.contains(TOKEN), "the stored token came back: {output}");
+    let trail = f.trail();
+    assert!(!trail.contains(MINTED), "the trail holds the minted credential");
+    assert!(!trail.contains(TOKEN), "the trail holds the stored credential");
+    // The handle is not a credential and is the one thing worth keeping: a
+    // token that outlived its operation has to be traceable to the line that
+    // says so.
+    assert!(
+        !trail.contains(&format!("Bearer {MINTED}")),
+        "{trail}"
+    );
+}
+
+/// A revoke that did not happen leaves exactly the credential the revoke
+/// exists to remove, and an expiry is a backstop rather than a revocation. So
+/// it is recorded, and the operation still succeeds — it already happened.
+///
+/// Mutation: drop the `Err` arm of the revoke in `service.rs`. Red.
+#[test]
+fn a_revoke_that_could_not_be_done_is_recorded_rather_than_dropped() {
+    let f = Fixture::new("revoke-fails", Mode::RevokeFails, &["cloudflare.worker.read"]);
+    let reply = f.use_it(f.record("cloudflare.worker.read", "project"));
+    assert!(
+        reply.as_error().is_none(),
+        "a revoke that failed must not fail the operation that already ran: {reply:?}"
+    );
+    let trail = f.trail();
+    let line: serde_json::Value = serde_json::from_str(
+        trail
+            .lines()
+            .rfind(|l| l.contains("\"used\""))
+            .expect("a used line"),
+    )
+    .expect("json");
+    assert_eq!(line["narrowing"], "narrowed", "{trail}");
+    let detail = line["narrowing_detail"].as_str().expect("a reason");
+    assert!(
+        detail.contains("could not be") && detail.contains("revoked"),
+        "the trail does not say the credential is still standing: {detail}"
+    );
+}
+
+/// The four answers have to stay four. Collapsing any two of them is the
+/// defect the enum exists to prevent, and it would be an easy edit.
+#[test]
+fn the_four_answers_to_a_narrowing_request_are_four_different_words() {
+    use crate::provider::Minted;
+    let words = [
+        Minted::NoNarrowerForm(String::new()).as_str(),
+        Minted::Denied(String::new()).as_str(),
+        Minted::CouldNotRun(String::new()).as_str(),
+        "narrowed",
+    ];
+    let unique: std::collections::BTreeSet<&str> = words.iter().copied().collect();
+    assert_eq!(unique.len(), 4, "{words:?}");
+    // And none of them is the word an older line, or a line that never got
+    // that far, deserializes to.
+    assert!(!unique.contains("unknown"));
+    assert!(!unique.contains(apex_secret_core::audit::NOT_ATTEMPTED));
+}
+
+/// An expiry is a fixed-width instant in UTC, and a clock that cannot produce
+/// one must not produce a nonsense one.
+#[test]
+fn an_expiry_is_written_the_way_the_schema_asks_for_it() {
+    use super::temporary::rfc3339;
+    assert_eq!(rfc3339(0).as_deref(), Some("1970-01-01T00:00:00Z"));
+    assert_eq!(rfc3339(1_000_000_000).as_deref(), Some("2001-09-09T01:46:40Z"));
+    // A leap day, because the civil conversion is where that goes wrong.
+    assert_eq!(rfc3339(1_709_164_800).as_deref(), Some("2024-02-29T00:00:00Z"));
+    assert_eq!(rfc3339(253_402_300_799).as_deref(), Some("9999-12-31T23:59:59Z"));
+    // Past the end of the fixed-width format. Not a time this build will write.
+    assert_eq!(rfc3339(253_402_300_800), None);
+}
+
+/// [`PROJECT_FILE`] with §13.4's strength set, spliced into the `[cloudflare]`
+/// table it already has rather than appended — a second `[cloudflare]` header
+/// is a duplicate table and TOML refuses the whole file, which would make
+/// every test below measure a parse error instead of the setting.
+fn project_with_narrowing(word: &str) -> String {
+    PROJECT_FILE.replacen(
+        "[cloudflare]\n",
+        &format!("[cloudflare]\ntemporary_credentials = \"{word}\"\n"),
+        1,
+    )
+}
+
+/// §13.4's fallback is the ordinary case, not a rare one: cloudflare requires
+/// Super Administrator on the account to create an account-owned token, so on
+/// most accounts the exchange is refused and the stored credential is what
+/// gets spent. `prefer` is right for that, and it is the default.
+///
+/// An owner whose credential *can* mint needs a way to say "and if it ever
+/// stops, stop too" — otherwise the day the token is downgraded is the day
+/// every operation quietly goes back to spending the broad one, with nothing
+/// but a word in the trail to say so.
+///
+/// Mutations: make `require` fall through to the answer (drop the `Err`), or
+/// read an unknown word as `prefer`. Both red.
+#[test]
+fn a_project_that_requires_a_short_lived_credential_does_not_run_on_the_stored_one() {
+    let required = project_with_narrowing("require");
+    // The account refuses to issue one…
+    let f = Fixture::with_project(
+        "require",
+        Mode::MintingDenied,
+        &["cloudflare.worker.read"],
+        &required,
+    );
+    let reply = f.use_it(f.record("cloudflare.worker.read", "project"));
+    let (kind, message) = reply
+        .as_error()
+        .expect("a project that requires a narrowed credential must not use the broad one");
+    assert_eq!(kind, ErrorKind::PermissionDenied);
+    assert!(message.contains("require"), "{message}");
+    // …and nothing was carried out with the stored credential.
+    assert!(
+        f.fake.seen().is_empty(),
+        "the operation ran anyway: {:#?}",
+        f.fake.seen()
+    );
+
+    // The same project, on an account that can mint, runs.
+    let ok = Fixture::with_project(
+        "require-ok",
+        Mode::Minting,
+        &["cloudflare.worker.read"],
+        &required,
+    );
+    let reply = ok.use_it(ok.record("cloudflare.worker.read", "project"));
+    assert!(reply.as_error().is_none(), "{reply:?}");
+    assert_eq!(
+        ok.fake.seen()[0].authorization.as_deref(),
+        Some(format!("Bearer {MINTED}").as_str())
+    );
+}
+
+/// `off` is a project saying it does not want the two extra requests. It is
+/// not the project saying there is no narrower credential — but that is what
+/// the trail would say if this returned the same word as a provider with
+/// nothing to offer, so the reason names the file.
+#[test]
+fn a_project_that_turns_narrowing_off_says_so_rather_than_looking_like_it_has_none() {
+    let file = project_with_narrowing("off");
+    let f = Fixture::with_project("off", Mode::Minting, &["cloudflare.worker.read"], &file);
+    assert!(f
+        .use_it(f.record("cloudflare.worker.read", "project"))
+        .as_error()
+        .is_none());
+    // It did not ask.
+    assert!(f.fake.minting().is_empty(), "{:#?}", f.fake.minting());
+    // And it ran on the stored credential.
+    assert_eq!(
+        f.fake.seen()[0].authorization.as_deref(),
+        Some(format!("Bearer {TOKEN}").as_str())
+    );
+    let trail = f.trail();
+    let line: serde_json::Value = serde_json::from_str(
+        trail.lines().rfind(|l| l.contains("\"used\"")).expect("a used line"),
+    )
+    .expect("json");
+    assert_eq!(line["narrowing"], "no-narrower-form");
+    assert!(
+        line["narrowing_detail"].as_str().expect("a reason").contains("off"),
+        "the reason must name the setting and not look like an absence: {line}"
+    );
+}
+
+/// A word this build does not know is a file the owner meant something by.
+/// Reading it as the default would give them the weaker of the two things
+/// they might have meant, silently.
+#[test]
+fn a_narrowing_setting_this_build_does_not_know_is_refused_rather_than_defaulted() {
+    let file = project_with_narrowing("required");
+    let f = Fixture::with_project("badword", Mode::Minting, &["cloudflare.worker.read"], &file);
+    let reply = f.use_it(f.record("cloudflare.worker.read", "project"));
+    let (_, message) = reply.as_error().expect("an unknown setting must be refused");
+    assert!(message.contains("temporary_credentials"), "{message}");
+    assert!(f.fake.seen().is_empty() && f.fake.minting().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// §13.4's tool half — brokered wrangler and terraform (P1-012)
+// ---------------------------------------------------------------------------
+
+/// The line of the stub's output that starts with `key=`.
+fn stub_line<'a>(output: &'a str, key: &str) -> &'a str {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{key}=")))
+        .unwrap_or_else(|| panic!("the stub printed no '{key}' line: {output}"))
+}
+
+/// P1-012's second criterion and §13.4's sentence about it: *"Do not pass even
+/// the temporary token directly to the agent if a broker-owned `wrangler`
+/// child process can perform the operation."*
+///
+/// The tool runs believing it has credentials, because it does. The agent
+/// never had them: they were put in the child's environment by a process the
+/// agent cannot read, and the credential that went in is P1-011's — one that
+/// expires in minutes and is deleted the moment this returns.
+///
+/// Mutations: put the token in argv instead of the environment; present the
+/// stored token rather than the minted one. Both red.
+#[test]
+fn a_brokered_tool_is_given_the_credential_in_its_environment_and_never_in_its_argv() {
+    let f = Fixture::new("wrangler", Mode::Minting, &["cloudflare.wrangler.deploy"]);
+    let reply = f.use_it(f.record("cloudflare.wrangler.deploy", "project"));
+    let Response::Performed { output, exit_code, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(*exit_code, 0, "{output}");
+
+    // The tool was given a credential…
+    assert_eq!(
+        stub_line(output, "token"),
+        "«redacted»",
+        "the tool was run without a credential, or with one that was not \
+         scrubbed on the way back: {output}"
+    );
+    // …and it was the short-lived one, not the stored one. The stub echoes
+    // whatever it was given and the framework scrubs both, so the way to tell
+    // them apart is the far side: the mint happened, and the stored token was
+    // spent only on the exchange.
+    let exchange = f.fake.minting();
+    assert_eq!(exchange.len(), 3, "{exchange:#?}");
+    assert!(exchange.iter().all(|s| s.authorization.as_deref()
+        == Some(format!("Bearer {TOKEN}").as_str())));
+
+    // Not in argv. `/proc/<pid>/cmdline` is world-readable and an environment
+    // is not, which is the whole reason this is an environment variable.
+    let argv = output.lines().next().expect("the stub prints its argv first");
+    assert!(!argv.contains(TOKEN) && !argv.contains(MINTED), "{argv}");
+    assert!(!argv.contains("«redacted»"), "a credential was on the command line: {argv}");
+
+    // Not in the reply, not in the trail.
+    assert!(!output.contains(TOKEN) && !output.contains(MINTED), "{output}");
+    let trail = f.trail();
+    assert!(!trail.contains(TOKEN) && !trail.contains(MINTED), "{trail}");
+}
+
+/// The environment is built here, not inherited.
+///
+/// The daemon's own environment is root's. Passing it through would hand the
+/// child root's `HOME`, whatever systemd set, and any `CLOUDFLARE_*` variable
+/// that happened to be in it — which would make the credential the broker put
+/// there the second-most-interesting one in the room.
+///
+/// Mutation: delete `env_clear()` from `broker::run_tool`. Red.
+#[test]
+fn a_brokered_tool_gets_the_environment_this_daemon_built_and_not_the_one_it_has() {
+    // A test that measures the absence of something that was never there
+    // measures nothing, so the thing has to be there first.
+    assert!(
+        std::env::var("CARGO_PKG_NAME").is_ok(),
+        "this test needs a variable in its OWN environment to watch for in the \
+         child's; without one it would pass whatever the broker did"
+    );
+    let f = Fixture::new("env", Mode::Normal, &["cloudflare.terraform.plan"]);
+    let reply = f.use_it(f.record("cloudflare.terraform.plan", ""));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(
+        stub_line(output, "inherited"),
+        "<unset>",
+        "the child inherited this process's environment: {output}"
+    );
+    // And it got the owner's home rather than the daemon's.
+    assert_ne!(stub_line(output, "home"), "<unset>", "{output}");
+}
+
+/// The argv is this build's and the working directory is the caller's project.
+///
+/// `--env` is the one thing a caller contributes to a brokered command line,
+/// and it did not come from the caller: `resolve` took it out of the project's
+/// own `apex.toml`, which is why a worker the project did not bind cannot put
+/// anything there.
+///
+/// Mutations: drop `--env`; run in the daemon's directory instead of the
+/// project's. Both red.
+#[test]
+fn a_brokered_tool_runs_the_argv_this_build_wrote_in_the_project_that_asked() {
+    let f = Fixture::new("argv", Mode::Normal, &granted_everything());
+
+    let reply = f.use_it(f.record("cloudflare.wrangler.versions-upload", "project"));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    let argv = output.lines().next().expect("argv");
+    assert_eq!(
+        argv, "apex-stub: wrangler versions upload --env production",
+        "{output}"
+    );
+    assert_eq!(
+        stub_line(output, "cwd"),
+        f.project.to_string_lossy(),
+        "the tool ran somewhere other than the project that asked: {output}"
+    );
+    assert_eq!(stub_line(output, "account"), ACCOUNT, "{output}");
+
+    // Terraform takes no environment and must not be given one.
+    let reply = f.use_it(f.record("cloudflare.terraform.apply", ""));
+    let Response::Performed { output, .. } = &reply else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(
+        output.lines().next().expect("argv"),
+        "apex-stub: terraform apply -input=false -no-color -auto-approve",
+        "{output}"
+    );
+}
+
+/// §13.1 applies to a tool exactly as it applies to a request: a name the
+/// project did not bind does not resolve, and nothing runs.
+#[test]
+fn a_worker_this_project_did_not_bind_never_reaches_wrangler() {
+    let f = Fixture::new("unbound", Mode::Normal, &["cloudflare.wrangler.deploy"]);
+    let reply = f.use_it(f.record("cloudflare.wrangler.deploy", "somebody-elses-worker"));
+    let (kind, message) = reply.as_error().expect("an unbound name must be refused");
+    assert_eq!(kind, ErrorKind::BadRequest, "{message}");
+    assert!(message.contains("does not bind"), "{message}");
+}
+
+/// A tool that is not installed is not a permission this credential lacks.
+///
+/// The same distinction the rest of this provider keeps, in the place it is
+/// easiest to lose: both end in "the operation did not happen", and only one
+/// of them is fixed by installing something.
+#[test]
+fn a_tool_that_is_not_installed_is_not_a_permission_this_credential_lacks() {
+    let f = Fixture::new("missing", Mode::Normal, &["cloudflare.wrangler.deploy"]);
+    std::fs::remove_file(f.tools.join("wrangler")).expect("remove the stub");
+    let reply = f.use_it(f.record("cloudflare.wrangler.deploy", "project"));
+    let (kind, message) = reply.as_error().expect("it cannot have run");
+    assert_eq!(
+        kind,
+        ErrorKind::Internal,
+        "a missing tool was reported as a permission problem: {message}"
+    );
+    assert!(message.contains("not installed"), "{message}");
+    assert!(
+        message.contains("not a permission"),
+        "the message does not say which of the two this is: {message}"
+    );
+}
+
+/// No brokered subcommand takes a parameter, and that is structural rather
+/// than incidental.
+///
+/// A parameter is the only thing a caller can send that this provider composes
+/// into what it runs. An operation called `cloudflare.wrangler.run` taking the
+/// caller's own argv would be a grant to do everything wrangler can do — which
+/// is the thing the other thirty-four names exist not to be — and the way that
+/// creeps in is one `params` entry at a time.
+#[test]
+fn nothing_a_caller_sends_can_reach_a_brokered_command_line() {
+    for op in SPEC.operations {
+        let Some(brokered) = super::tools::brokered(op.id) else {
+            continue;
+        };
+        assert!(
+            op.params.is_empty(),
+            "'{}' takes a parameter, and a parameter is the one thing a caller \
+             contributes to what runs",
+            op.id
+        );
+        // And every word of the argv is a literal in this build.
+        assert!(
+            !brokered.args.is_empty()
+                && brokered.args.iter().all(|a| !a.is_empty() && !a.contains(' ')),
+            "'{}' has an argv this build did not write plainly",
+            op.id
+        );
+    }
+}
+
+/// Terraform is the honest `Nothing`: what permissions a plan needs is decided
+/// by the project's own `.tf` files, which this build does not read.
+///
+/// A token minted broad *because we could not tell* would be worse than the
+/// stored one — it would read as narrowing in the trail while granting the
+/// same reach. So it says there is nothing narrower, and the trail says that
+/// rather than `denied` or `could-not-run`.
+///
+/// Mutation: give terraform a `Narrowest::Token` row. Red.
+#[test]
+fn terraform_says_there_is_nothing_narrower_rather_than_minting_a_token_it_cannot_describe() {
+    let f = Fixture::new("tf-mint", Mode::Minting, &["cloudflare.terraform.plan"]);
+    assert!(f
+        .use_it(f.record("cloudflare.terraform.plan", ""))
+        .as_error()
+        .is_none());
+    // It did not ask for one.
+    assert!(f.fake.minting().is_empty(), "{:#?}", f.fake.minting());
+    let trail = f.trail();
+    let line: serde_json::Value = serde_json::from_str(
+        trail.lines().rfind(|l| l.contains("\"used\"")).expect("a used line"),
+    )
+    .expect("json");
+    assert_eq!(line["narrowing"], "no-narrower-form", "{trail}");
+    assert!(
+        line["narrowing_detail"].as_str().expect("a reason").contains(".tf files"),
+        "the reason must say why there is nothing narrower: {line}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §13.7 — the transactional deployment flow (P1-013)
+// ---------------------------------------------------------------------------
+
+/// §13.7's first line: *upload Worker version -> preview -> health check ->
+/// staged traffic -> full deployment*. The first arrow is the one that makes
+/// the rest possible, and it is a property of the vocabulary rather than of a
+/// flow: uploading a version must not put it in front of anything.
+///
+/// Mutation: point `worker.upload-version` at `/deployments`. Red.
+#[test]
+fn uploading_a_version_puts_it_in_front_of_nothing() {
+    let f = Fixture::new("upload", Mode::Normal, &["cloudflare.worker.upload-version"]);
+    with_files(&f);
+    let reply = f.use_it(
+        f.record("cloudflare.worker.upload-version", "project")
+            .param("script", "dist/worker.js")
+            .param("compatibility-date", "2026-09-01"),
+    );
+    assert!(reply.as_error().is_none(), "{reply:?}");
+    let seen = f.fake.seen();
+    assert_eq!(seen.len(), 1, "{seen:#?}");
+    assert!(seen[0].path.ends_with("/versions"), "{}", seen[0].path);
+    assert!(
+        !seen[0].path.contains("deployments"),
+        "uploading a version moved traffic: {}",
+        seen[0].path
+    );
+
+    // And the grant for one does not carry the other, so a project that lets
+    // an agent build cannot thereby let it release.
+    let reply = f.use_it(
+        f.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION),
+    );
+    assert_eq!(
+        reply.as_error().map(|(kind, _)| kind),
+        Some(ErrorKind::PermissionDenied),
+        "the upload grant reached the deploy: {reply:?}"
+    );
+}
+
+/// §13.7's staged traffic. Cloudflare's payload is the whole split every time,
+/// so the remaining share has to go somewhere — and the only honest somewhere
+/// is the version that has it now, which costs a credentialled lookup to find.
+///
+/// Mutations: send the remainder to the version being deployed; drop the
+/// lookup and send 100. Both red.
+#[test]
+fn a_staged_rollout_leaves_the_rest_of_the_traffic_where_it_was() {
+    let f = Fixture::new("staged", Mode::Normal, &["cloudflare.worker.deploy"]);
+    let reply = f.use_it(
+        f.record("cloudflare.worker.deploy", "project")
+            .param("version", NEW_VERSION)
+            .param("percentage", "30"),
+    );
+    assert!(reply.as_error().is_none(), "{reply:?}");
+
+    let seen = f.fake.seen();
+    assert_eq!(seen.len(), 2, "a staged rollout is a lookup and a change: {seen:#?}");
+    assert_eq!(seen[0].method, "GET");
+    assert!(seen[0].path.ends_with("/deployments"), "{}", seen[0].path);
+    assert_eq!(seen[1].method, "POST");
+
+    let body: serde_json::Value = serde_json::from_str(&seen[1].body).expect("json");
+    assert_eq!(body["strategy"], "percentage");
+    let versions = body["versions"].as_array().expect("versions");
+    assert_eq!(
+        versions.len(),
+        2,
+        "a partial rollout that names one version is a full one: {body}"
+    );
+    assert_eq!(versions[0]["version_id"], NEW_VERSION);
+    assert_eq!(versions[0]["percentage"], 30.0);
+    assert_eq!(
+        versions[1]["version_id"], OLD_VERSION,
+        "the rest of the traffic went to the wrong version: {body}"
+    );
+    assert_eq!(versions[1]["percentage"], 70.0);
+    let total: f64 = versions
+        .iter()
+        .map(|v| v["percentage"].as_f64().expect("a number"))
+        .sum();
+    assert!((total - 100.0).abs() < f64::EPSILON, "the split does not add up: {body}");
+}
+
+/// A rollout onto a worker with nothing serving, and one onto a worker already
+/// split, are both refused — and neither refusal is the other's.
+///
+/// The alternative is a build that reads the first version out of the first
+/// deployment and hopes. That build works until somebody runs a canary, and
+/// then it ends the canary without mentioning it.
+///
+/// Mutation: take `serving[0]` whatever the length. Red.
+#[test]
+fn a_rollout_with_no_single_version_to_keep_the_rest_is_refused_rather_than_guessed() {
+    let f = Fixture::new("nosplit", Mode::Normal, &["cloudflare.worker.deploy"]);
+
+    let reply = f.use_it(
+        f.record("cloudflare.worker.deploy", "never-deployed")
+            .param("version", NEW_VERSION)
+            .param("percentage", "25"),
+    );
+    let (_, message) = reply.as_error().expect("nothing to keep");
+    assert!(message.contains("never been deployed"), "{message}");
+
+    let reply = f.use_it(
+        f.record("cloudflare.worker.deploy", "already-split")
+            .param("version", NEW_VERSION)
+            .param("percentage", "25"),
+    );
+    let (_, message) = reply.as_error().expect("no single version to keep");
+    assert!(message.contains("already split"), "{message}");
+    assert!(
+        message.contains(OLD_VERSION) && message.contains(NEW_VERSION),
+        "the refusal must name both, or the reader cannot act on it: {message}"
+    );
+
+    // Neither changed anything: two lookups, no deployment.
+    let seen = f.fake.seen();
+    assert_eq!(seen.len(), 2, "{seen:#?}");
+    assert!(seen.iter().all(|s| s.method == "GET"), "{seen:#?}");
+}
+
+/// "Permission denied is not absence", in §13.7's lookup.
+///
+/// A worker whose deployments this credential may not read is not a worker
+/// with no deployments — and treating it as one would deploy a version to
+/// 100% of traffic while the caller asked for 25.
+#[test]
+fn a_deployments_lookup_that_was_refused_is_not_a_worker_that_was_never_deployed() {
+    let f = Fixture::new("denied-lookup", Mode::EchoUnauthorized, &["cloudflare.worker.deploy"]);
+    let reply = f.use_it(
+        f.record("cloudflare.worker.deploy", "project")
+            .param("version", NEW_VERSION)
+            .param("percentage", "25"),
+    );
+    let (kind, message) = reply.as_error().expect("a refused lookup is not a success");
+    assert_eq!(kind, ErrorKind::PermissionDenied);
+    assert!(message.contains("401"), "{message}");
+    assert!(
+        message.contains("not the same as"),
+        "the refusal does not distinguish the two: {message}"
+    );
+    assert!(!message.contains(TOKEN), "the refusal carries the credential: {message}");
+    // Nothing was deployed.
+    assert!(
+        f.fake.seen().iter().all(|s| s.method == "GET"),
+        "{:#?}",
+        f.fake.seen()
+    );
+}
+
+/// A share that is not one is refused rather than clamped. A caller who wrote
+/// `150` meant something, and deploying at 100 because 150 is out of range is
+/// this service deciding what they meant.
+#[test]
+fn a_share_of_traffic_outside_the_range_cloudflare_documents_is_refused_not_clamped() {
+    let f = Fixture::new("share", Mode::Normal, &["cloudflare.worker.deploy"]);
+    for bad in ["0", "150", "-5", "half", "1e3"] {
+        let reply = f.use_it(
+            f.record("cloudflare.worker.deploy", "project")
+                .param("version", NEW_VERSION)
+                .param("percentage", bad),
+        );
+        assert!(
+            reply.as_error().is_some(),
+            "'{bad}' was accepted as a share of traffic: {reply:?}"
+        );
+    }
+    assert!(f.fake.seen().is_empty(), "one of them reached cloudflare");
+
+    // …and a hundred is a full deployment, not a split: one request, no
+    // lookup, because the answer could not change anything.
+    let reply = f.use_it(
+        f.record("cloudflare.worker.deploy", "project")
+            .param("version", NEW_VERSION)
+            .param("percentage", "100"),
+    );
+    assert!(reply.as_error().is_none(), "{reply:?}");
+    let seen = f.fake.seen();
+    assert_eq!(seen.len(), 1, "a full deployment asked a question it did not need");
+    let body: serde_json::Value = serde_json::from_str(&seen[0].body).expect("json");
+    assert_eq!(body["versions"].as_array().expect("versions").len(), 1);
+}
+
+/// §13.7's last line: *with rollback if health checks fail*. The rollback path
+/// is its own operation with its own grant, and it is what tells Cloudflare
+/// that going back to an older version is deliberate rather than a deployment
+/// that lost a race.
+#[test]
+fn the_rollback_path_puts_an_older_version_back_and_says_it_meant_to() {
+    let f = Fixture::new("rollback", Mode::Normal, &["cloudflare.worker.rollback"]);
+    let reply = f.use_it(
+        f.record("cloudflare.worker.rollback", "project")
+            .param("version", OLD_VERSION)
+            .param("message", "the health check failed"),
+    );
+    assert!(reply.as_error().is_none(), "{reply:?}");
+    let seen = f.fake.seen();
+    assert_eq!(seen.len(), 1, "{seen:#?}");
+    assert!(
+        seen[0].path.contains("/deployments?force=true"),
+        "without force, cloudflare reads this as a deployment that lost a \
+         race rather than a deliberate return: {}",
+        seen[0].path
+    );
+    let body: serde_json::Value = serde_json::from_str(&seen[0].body).expect("json");
+    assert_eq!(body["versions"][0]["version_id"], OLD_VERSION);
+    assert_eq!(body["versions"][0]["percentage"], 100);
+    assert_eq!(body["annotations"]["workers/message"], "the health check failed");
+
+    // And a deploy grant does not carry it: going back is not going forward.
+    let f = Fixture::new("rollback2", Mode::Normal, &["cloudflare.worker.deploy"]);
+    let reply = f.use_it(
+        f.record("cloudflare.worker.rollback", "project").param("version", OLD_VERSION),
+    );
+    assert_eq!(
+        reply.as_error().map(|(kind, _)| kind),
+        Some(ErrorKind::PermissionDenied),
+        "{reply:?}"
+    );
+}
+
+/// The trail has to tell a staged rollout from a full deployment, because they
+/// are the same operation with the same version id and very different
+/// consequences.
+#[test]
+fn a_staged_rollout_and_a_full_deployment_do_not_read_the_same_in_the_trail() {
+    let f = Fixture::new("trail-share", Mode::Normal, &["cloudflare.worker.deploy"]);
+    assert!(f
+        .use_it(
+            f.record("cloudflare.worker.deploy", "project")
+                .param("version", NEW_VERSION)
+                .param("percentage", "30")
+        )
+        .as_error()
+        .is_none());
+    assert!(f
+        .use_it(f.record("cloudflare.worker.deploy", "project").param("version", NEW_VERSION))
+        .as_error()
+        .is_none());
+    let trail = f.trail();
+    assert!(trail.contains("to 30% of its traffic"), "{trail}");
+    let details: Vec<&str> = trail
+        .lines()
+        .filter(|l| l.contains("\"used\""))
+        .collect();
+    assert_eq!(details.len(), 2);
+    assert_ne!(
+        details[0], details[1],
+        "the two runs are indistinguishable in the trail"
+    );
+}
+
+/// "Short-lived/scoped credentials used where provider supports them" means
+/// *every* operation that has a narrow form, not the handful a test happened
+/// to pick.
+///
+/// This is the only thing that exercises `secret.bind`'s two-group policy —
+/// the one row in [`super::temporary::POLICY`] that needs more than one
+/// permission group, and therefore the only one where a build that looked up
+/// just the first slot would still look correct.
+///
+/// Mutation: take only `wanted[0]` in `temporary::group_ids`. Red.
+#[test]
+fn every_operation_with_a_narrow_form_actually_gets_one() {
+    let f = Fixture::new("sweep-mint", Mode::Minting, &granted_everything());
+    with_files(&f);
+
+    let mut narrowed = 0;
+    for (operation, resource, options, _) in every_operation() {
+        let policy = super::temporary::policy_for(operation).expect("every operation has a row");
+        let super::temporary::Narrowest::Token { groups, .. } = policy else {
+            continue;
+        };
+        // The fixture's account deliberately does not offer this one, so it is
+        // the could-not-run row rather than a narrowed one.
+        if operation == "cloudflare.hyperdrive.read" {
+            continue;
+        }
+        let before = f.fake.minting().len();
+        let mut rec = f.record(operation, resource);
+        for (name, value) in &options {
+            rec = rec.param(name, value);
+        }
+        let reply = f.use_it(rec);
+        assert!(reply.as_error().is_none(), "{operation} was refused: {reply:?}");
+
+        let exchange = &f.fake.minting()[before..];
+        assert_eq!(
+            exchange.len(),
+            3,
+            "{operation} did not ask for, spend and give back a short-lived \
+             credential: {exchange:#?}"
+        );
+        let creation = exchange
+            .iter()
+            .find(|s| s.method == "POST")
+            .unwrap_or_else(|| panic!("{operation} created no token"));
+        let body: serde_json::Value =
+            serde_json::from_str(&creation.body).expect("the creation body is json");
+        assert_eq!(
+            body["policies"][0]["permission_groups"]
+                .as_array()
+                .expect("groups")
+                .len(),
+            groups.len(),
+            "{operation} asked for a token carrying the wrong number of \
+             permission groups: {body}"
+        );
+        narrowed += 1;
+    }
+    // A sweep that swept nothing would pass.
+    assert!(narrowed >= 20, "only {narrowed} operations were measured");
 }
