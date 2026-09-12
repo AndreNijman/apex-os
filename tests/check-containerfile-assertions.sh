@@ -38,6 +38,8 @@ failures = 0
 checked = 0
 unresolved = 0
 unresolved_examples = []
+inert = 0
+inert_examples = []
 
 for path in sys.argv[1:]:
     if not os.path.exists(path):
@@ -117,6 +119,88 @@ for path in sys.argv[1:]:
         for _, raw in stanza:
             for lm in re.finditer(r'\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s', raw):
                 loopvars.add(lm.group(1))
+
+        # ── a refusal that cannot fail ───────────────────────────────────────
+        # bash does not apply errexit to a command whose status is inverted
+        # with `!`. bash(1), under `set -e`, exempts "any command in a pipeline
+        # but the last, or if the command's return value is being inverted with
+        # !". So this prints REACHED:
+        #
+        #     set -e; ! grep -q x <<<x; echo REACHED
+        #
+        # A `! grep` written as a build-time refusal therefore fails NOTHING —
+        # unless it is the last command of its RUN, where its status is what
+        # buildah reads, or it carries its own `||` handler. Every other one is
+        # a comment with a grep in it.
+        #
+        # This was the state of 43 refusals across these files on 2026-09-12,
+        # three of them added THAT DAY to repair assertions that could only
+        # fail. The class is invisible to the resolver below, which reports a
+        # refusal matching nothing as a pass — correct about the pattern, silent
+        # about the fact that nothing would have happened either way.
+        joined = []
+        for lineno, raw in stanza:
+            s = raw.strip()
+            if s.startswith('RUN '):
+                s = s[4:].strip()
+            s = s.rstrip('\\').rstrip()
+            if s.strip().startswith('#') or not s.strip():
+                continue
+            joined.append((lineno, s))
+
+        text, idx_line = '', []
+        for lineno, s in joined:
+            if text and not text.endswith(' '):
+                text += ' '
+                idx_line.append(lineno)
+            for ch in s:
+                text += ch
+                idx_line.append(lineno)
+
+        # Split into top-level commands on `;`, honouring quotes so a `;` inside
+        # a grep pattern does not invent a command boundary.
+        segs, cur, cur_line, q = [], '', None, None
+        for k, ch in enumerate(text):
+            if q:
+                cur += ch
+                if ch == q:
+                    q = None
+                continue
+            if ch in ('"', "'"):
+                q, cur = ch, cur + ch
+                if cur_line is None:
+                    cur_line = idx_line[k]
+                continue
+            if ch == ';':
+                segs.append((cur_line, cur.strip()))
+                cur, cur_line = '', None
+                continue
+            cur += ch
+            if cur_line is None and not ch.isspace():
+                cur_line = idx_line[k]
+        if cur.strip():
+            segs.append((cur_line, cur.strip()))
+        segs = [(l, s) for l, s in segs if s]
+
+        for n, (lineno, seg) in enumerate(segs):
+            body = seg
+            for kw in ('do ', 'then ', 'else '):
+                if body.startswith(kw):
+                    body = body[len(kw):].lstrip()
+            # `test ! -u f` and `[ "$x" != y ]` are operators, not an inverted
+            # exit status; only a leading `!` inverts a command.
+            if not body.startswith('!') or body.startswith('!='):
+                continue
+            # An explicit handler runs regardless of errexit.
+            if '||' in body or '&&' in body:
+                continue
+            # Effective when nothing but block terminators follows it: the
+            # status of the enclosing loop or `if` is the status of its last
+            # command, and that becomes the RUN's.
+            if all(s.strip() in ('done', 'fi', 'esac', '}') for _, s in segs[n + 1:]):
+                continue
+            inert += 1
+            inert_examples.append(f"{path}:{lineno} {body[:96]}")
         for lineno, raw in stanza:
             s = raw.strip()
             if s.startswith('RUN '):
@@ -132,12 +216,20 @@ for path in sys.argv[1:]:
                 env[m.group(1)] = m.group(3)
                 continue
 
-            m = re.match(r'^(!\s*)?grep\s+(.*)$', s)
+            # Three shapes carry a grep assertion, and the `if` one is the
+            # house form for a REFUSAL: rewriting `! grep` to
+            # `if grep ...; then echo FATAL; exit 1; fi` is what makes it fail a
+            # build at all. A resolver that only understood `grep` and `! grep`
+            # would report 13 fewer checks the moment those were repaired, and
+            # call that an improvement.
+            m = re.match(r'^(if\s+)?(!\s*)?grep\s+(.*)$', s)
             if not m:
                 continue
-            negated = bool(m.group(1))
+            is_if = bool(m.group(1))
+            negated = bool(m.group(2))
+            rhs = re.split(r';\s*then\b', m.group(3))[0]
             try:
-                toks = shlex.split('grep ' + m.group(2))
+                toks = shlex.split('grep ' + rhs)
             except ValueError:
                 unresolved += 1
                 unresolved_examples.append(f"{path}:{lineno} unparseable")
@@ -189,14 +281,17 @@ for path in sys.argv[1:]:
             matched = (r.returncode == 0)
             checked += 1
             if os.environ.get('APEX_CF_VERBOSE'):
-                print(f"  check {path}:{lineno} {'!' if negated else ' '}grep {pattern!r} -> "
+                print(f"  check {path}:{lineno} {'if ' if is_if else ''}{'!' if negated else ''}grep {pattern!r} -> "
                       f"{'match' if matched else 'no match'} in {' '.join(repos)}")
-            want = (not negated)
+            # `grep X` asserts a match; `! grep X` and `if grep X; then exit 1`
+            # both assert its absence; `if ! grep X; then exit 1` asserts a
+            # match again.
+            want = (negated == is_if)
             if matched != want:
                 failures += 1
-                if negated:
+                if not want:
                     print(f"FAIL  {path}:{lineno}")
-                    print(f"      ! grep {pattern!r} is supposed to find NOTHING, and it matches {' '.join(repos)}")
+                    print(f"      a refusal of {pattern!r} is supposed to find NOTHING, and it matches {' '.join(repos)}")
                     m2 = subprocess.run(['grep', '-n'] + [g for g in gflags if g != '-q'] + [pattern] + repos,
                                         capture_output=True, text=True)
                     for x in m2.stdout.strip().split('\n')[:3]:
@@ -208,12 +303,19 @@ for path in sys.argv[1:]:
                     print(f"      This assertion can only ever FAIL the build.")
 
 print()
-print(f"containerfile assertions: {checked} checked, {failures} failed, {unresolved} could not be resolved")
+print(f"containerfile assertions: {checked} checked, {failures} failed, {unresolved} could not be resolved, {inert} inert")
 if unresolved:
     print("  UNRESOLVED (not checked, and not a pass — these run only inside the build):")
     for e in unresolved_examples[:12]:
         print(f"    {e}")
     if len(unresolved_examples) > 12:
         print(f"    … and {len(unresolved_examples) - 12} more")
-sys.exit(1 if failures else 0)
+if inert:
+    print("  INERT (a `!` refusal errexit does not apply to — it fails nothing):")
+    for e in inert_examples[:60]:
+        print(f"    {e}")
+    if len(inert_examples) > 20:
+        print(f"    \u2026 and {len(inert_examples) - 20} more")
+    print("  Rewrite each as `if <check>; then echo \"FATAL: ...\"; exit 1; fi`.")
+sys.exit(1 if (failures or inert) else 0)
 PY

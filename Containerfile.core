@@ -862,7 +862,8 @@ RUN set -eux; \
     for b in hyprland-dialog hyprland-donate-screen hyprland-update-screen; do \
         command -v "$b" >/dev/null || { echo "FATAL: $b missing"; exit 1; }; \
     done; \
-    ! ldd /usr/bin/hyprland-dialog | grep 'not found'; \
+    if ldd /usr/bin/hyprland-dialog | grep 'not found' \
+        ; then echo "FATAL: hyprland-dialog has unresolved shared libraries"; exit 1; fi; \
     test -d /usr/lib64/qt6/qml/org/hyprland/style; \
     test ! -d /usr/usr; \
     mkdir -p /usr/lib64/apex; \
@@ -1832,7 +1833,8 @@ RUN set -eux; \
         [ -f "$f" ] || continue; \
         sed -i 's|^prefix=/usr/local$|prefix=${HOME}/.local|' "$f"; \
         grep -q '^prefix=\${HOME}/.local$' "$f"; \
-        ! grep -q '^prefix=/usr/local$' "$f"; \
+        if grep -q '^prefix=/usr/local$' "$f" \
+            ; then echo "FATAL: the npm prefix still points at root-owned /usr/local"; exit 1; fi; \
     done; \
     grep -q '^prefix=\${HOME}/.local$' /etc/npmrc; \
     echo "npm global prefix -> \${HOME}/.local (was root-owned /usr/local)"

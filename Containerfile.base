@@ -134,9 +134,11 @@ RUN set -eux; \
     # `set -eux` made that a failed image build — for prose that agrees with
     # it. It could only ever have failed, never passed, which is the same
     # defect as an assertion that can only ever pass, with the sign flipped.
-    ! grep -qE '<allow_[a-z]+>[a-z_]*_keep' \
-        /usr/share/polkit-1/actions/org.apexos.agent.policy; \
-    ! grep -q '<allow_any>yes' /usr/share/polkit-1/actions/org.apexos.agent.policy; \
+    if grep -qE '<allow_[a-z]+>[a-z_]*_keep' \
+        /usr/share/polkit-1/actions/org.apexos.agent.policy \
+        ; then echo "FATAL: a _keep authorisation caches a yes nobody was asked for"; exit 1; fi; \
+    if grep -q '<allow_any>yes' /usr/share/polkit-1/actions/org.apexos.agent.policy \
+        ; then echo "FATAL: <allow_any>yes hands the elevation action to any caller"; exit 1; fi; \
     ! grep -q '<allow_inactive>yes' /usr/share/polkit-1/actions/org.apexos.agent.policy
 
 # ── MT7925 Wi-Fi: survive a suspend ──────────────────────────────────────────
@@ -272,7 +274,8 @@ RUN set -eux; \
     # trusted: no polkit action, no system-bus name, no system unit. AGENTS.md
     # forbids all three, and a `WantedBy=multi-user.target` slipped in here is
     # exactly how a per-user daemon becomes a system one by accident.
-    ! grep -q 'multi-user.target' /usr/lib/systemd/user/apex-aid.service; \
+    if grep -q 'multi-user.target' /usr/lib/systemd/user/apex-aid.service \
+        ; then echo "FATAL: a multi-user.target want makes the per-user aid daemon a system one"; exit 1; fi; \
     test ! -e /usr/lib/systemd/system/apex-aid.service; \
     test ! -e /usr/share/polkit-1/actions/org.apexos.apex-aid.policy; \
     test ! -e /usr/share/dbus-1/system.d/org.apexos.ApexAid1.conf; \
@@ -380,7 +383,8 @@ RUN set -eux; \
     # git child needs CAP_SETUID, which a non-root unit does not have, and the
     # daemon would refuse every operation with an error nobody would connect to
     # this line.
-    ! grep -q '^User=' /usr/lib/systemd/system/apex-secretd.service; \
+    if grep -q '^User=' /usr/lib/systemd/system/apex-secretd.service \
+        ; then echo "FATAL: a User= leaves secretd without CAP_SETUID and it refuses every operation"; exit 1; fi; \
     echo "agent sandbox: bwrap functional; agentd opt-in; secretd enabled with a 0700 store"
 
 # Default browser (system-wide XDG): Firefox is the only baked browser, but set
@@ -764,7 +768,8 @@ RUN set -eux; \
         "$S/src/config/matugen.toml.in"; \
     grep -q "output_path = '@HOME@/.config/hypr/apex-shell-hyprlock-colors.conf'" \
         "$S/src/config/matugen.toml.in"; \
-    ! grep -q "output_path = '@SRCDIR@" "$S/src/config/matugen.toml.in"; \
+    if grep -q "output_path = '@SRCDIR@" "$S/src/config/matugen.toml.in" \
+        ; then echo "FATAL: matugen still writes into the source tree"; exit 1; fi; \
     # (b) hyprlock's reader of that file -> the same $HOME path. Must run BEFORE
     #     the generic rewrite in (c), or (c) would turn it into a /usr path that
     #     can never be written to.
@@ -951,7 +956,8 @@ RUN set -eux; \
     : 'guest configured cannot be talked into wiping anything, whatever'; \
     : 'it is handed, so a stray name in this file is a shipped hazard.'; \
     test -f /etc/apex/guest-accounts; \
-    ! grep -qE '^[[:space:]]*[^#[:space:]]' /etc/apex/guest-accounts; \
+    if grep -qE '^[[:space:]]*[^#[:space:]]' /etc/apex/guest-accounts \
+        ; then echo "FATAL: the guest allowlist ships non-empty, so a named account can be wiped"; exit 1; fi; \
     : '── the wipe unit is installed and NOT enabled ──'; \
     test -f /usr/lib/systemd/system/apex-guest-wipe@.service; \
     test ! -e /etc/systemd/system/multi-user.target.wants/apex-guest-wipe@.service; \
@@ -970,7 +976,8 @@ RUN set -eux; \
     : 'The recipe must at least be a kiosk: a default_session greetd will'; \
     : 'restart, not an initial_session that fires once per boot.'; \
     grep -qE '^[[:space:]]*\[default_session\]' /usr/share/apex/shared-machine/greetd-kiosk.toml; \
-    ! grep -qE '^[[:space:]]*\[initial_session\]' /usr/share/apex/shared-machine/greetd-kiosk.toml; \
+    if grep -qE '^[[:space:]]*\[initial_session\]' /usr/share/apex/shared-machine/greetd-kiosk.toml \
+        ; then echo "FATAL: the kiosk recipe fires once per boot instead of restarting"; exit 1; fi; \
     echo "shared-machine recipes installed, inert"
 
 COPY files/system/libexec/apex-boot-windows /usr/libexec/apex-boot-windows
@@ -1206,8 +1213,10 @@ RUN set -eux; \
     bash -n /usr/libexec/apex-agent-review; \
     # Both refuse a bad argument rather than guessing, and the usage text is
     # what a caller sees when the shell passes something wrong.
-    ! /usr/libexec/apex-agent-focus 2>/dev/null; \
-    ! /usr/libexec/apex-agent-review not-a-number 2>/dev/null; \
+    if /usr/libexec/apex-agent-focus 2>/dev/null \
+        ; then echo "FATAL: apex-agent-focus accepted a missing argument instead of refusing"; exit 1; fi; \
+    if /usr/libexec/apex-agent-review not-a-number 2>/dev/null \
+        ; then echo "FATAL: apex-agent-review accepted a non-numeric argument"; exit 1; fi; \
     # `ps` is how apex-agent-focus maps a session to a process; without it the
     # helper silently never finds a terminal and always opens a new one.
     command -v ps >/dev/null; \
@@ -1221,7 +1230,8 @@ RUN set -eux; \
     /usr/libexec/apex-project-windows list 2>/dev/null | python3 -c \
         'import json,sys; assert json.load(sys.stdin) == [], "expected an empty list"'; \
     /usr/libexec/apex-project-windows compositor >/dev/null; \
-    ! /usr/libexec/apex-project-windows nonsense-action 2>/dev/null; \
+    if /usr/libexec/apex-project-windows nonsense-action 2>/dev/null \
+        ; then echo "FATAL: apex-project-windows accepted an unknown action"; exit 1; fi; \
     # The multiplexer adapter. It is /bin/sh and not python3, so the parser to
     # ask is `sh -n`; and both multiplexers it drives have to be in the image,
     # because a layout template that names a program nobody installed is the
@@ -1229,8 +1239,10 @@ RUN set -eux; \
     test -x /usr/libexec/apex-mux; \
     sh -n /usr/libexec/apex-mux; \
     test "$(/usr/libexec/apex-mux backends | sort | tr '\n' ' ')" = "tmux zellij "; \
-    ! /usr/libexec/apex-mux nonsense-verb 2>/dev/null; \
-    ! /usr/libexec/apex-mux has screen x 2>/dev/null; \
+    if /usr/libexec/apex-mux nonsense-verb 2>/dev/null \
+        ; then echo "FATAL: apex-mux accepted an unknown verb"; exit 1; fi; \
+    if /usr/libexec/apex-mux has screen x 2>/dev/null \
+        ; then echo "FATAL: apex-mux claims a screen backend it does not have"; exit 1; fi; \
     # A generated zellij layout that zellij's own parser rejects is the one
     # failure mode this format has, and it would only show up at somebody's
     # first `layout open`. So both arrangements are generated here and handed
@@ -1244,12 +1256,13 @@ RUN set -eux; \
         # below. Without that it registers a session record in the build user's
         # ~/.cache and ~/.local/share, and the image would ship two dead zellij
         # sessions nobody created.
-        ! ZELLIJ_SOCKET_DIR=/tmp/apex-zcheck/sock \
+        if ZELLIJ_SOCKET_DIR=/tmp/apex-zcheck/sock \
           XDG_CACHE_HOME=/tmp/apex-zcheck/cache \
           XDG_DATA_HOME=/tmp/apex-zcheck/data \
           XDG_CONFIG_HOME=/tmp/apex-zcheck/config \
             timeout 30 zellij --layout-string "$(cat /tmp/apex-mux-check.kdl)" 2>&1 \
-            | grep -q 'Failed to parse'; \
+            | grep -q 'Failed to parse' \
+            ; then echo "FATAL: zellij could not parse the generated layout"; exit 1; fi; \
     done; \
     rm -rf /tmp/apex-mux-check.tsv /tmp/apex-mux-check.kdl /tmp/apex-zcheck; \
     test ! -e /root/.cache/zellij; \
@@ -1512,7 +1525,8 @@ RUN set -eux; \
     # path works with it shut, so opening it is a choice about speed and
     # privacy rather than a requirement.
     grep -q '^apex-remote  *tcp  *7717 ' /usr/share/apex/firewall/services; \
-    ! grep -q 'apex-remote' /usr/share/apex/nftables/apex.nft; \
+    if grep -q 'apex-remote' /usr/share/apex/nftables/apex.nft \
+        ; then echo "FATAL: the image opened the apex-remote port; the owner must choose it"; exit 1; fi; \
     # Enabled by default. A firewall that ships disabled is documentation.
     systemctl enable apex-firewall.service; \
     test -L /etc/systemd/system/multi-user.target.wants/apex-firewall.service; \
@@ -1643,7 +1657,8 @@ RUN set -eux; \
     done; \
     # An absence must never come back worded as a refusal, and this run has
     # nothing to refuse it: every root it was given does not exist.
-    ! grep -q 'could not be read' /tmp/apex-devices-all.txt; \
+    if grep -q 'could not be read' /tmp/apex-devices-all.txt \
+        ; then echo "FATAL: an absence was reported as a refusal"; exit 1; fi; \
     rm -f /tmp/apex-devices-all.txt; \
     echo "apex-devices: every area dispatches, and an absent world reads as absent"
 
@@ -1703,8 +1718,10 @@ RUN set -eux; \
     # viewer, so there is no <graphics> element and no --graphics flag: a
     # single occurrence of either would be a window opening on somebody's
     # desktop from a command whose whole contract is that it does not.
-    ! grep -qE '^[^#]*<graphics' /usr/libexec/apex-vm; \
-    ! grep -qE '^[^#]*(spice|vnc|virt-viewer)' /usr/libexec/apex-vm; \
+    if grep -qE '^[^#]*<graphics' /usr/libexec/apex-vm \
+        ; then echo "FATAL: apex-vm grew a <graphics> element and its contract is headless"; exit 1; fi; \
+    if grep -qE '^[^#]*(spice|vnc|virt-viewer)' /usr/libexec/apex-vm \
+        ; then echo "FATAL: apex-vm grew a viewer path and its contract is headless"; exit 1; fi; \
     # The three elements that look optional in the XML and are not. Each one,
     # dropped, produces a domain that DEFINES and then refuses to start — the
     # worst failure shape available, because the user gets a success and then
@@ -1728,11 +1745,14 @@ RUN set -eux; \
     # The stack is NOT here, and that is the decision. If a later change layers
     # qemu or libvirt into the image, this fails and whoever did it has to say
     # why in the diff rather than in a commit message nobody reads.
-    ! command -v qemu-system-x86_64 >/dev/null 2>&1; \
-    ! command -v virsh >/dev/null 2>&1; \
+    if command -v qemu-system-x86_64 >/dev/null 2>&1 \
+        ; then echo "FATAL: qemu was layered into the image; the stack is deliberately absent"; exit 1; fi; \
+    if command -v virsh >/dev/null 2>&1 \
+        ; then echo "FATAL: libvirt was layered into the image; the stack is deliberately absent"; exit 1; fi; \
     # And the engine says so, with the command that fixes it, instead of
     # failing halfway through defining a domain.
-    ! /usr/libexec/apex-vm doctor >/dev/null 2>&1; \
+    if /usr/libexec/apex-vm doctor >/dev/null 2>&1 \
+        ; then echo "FATAL: apex-vm doctor reported success with no stack installed"; exit 1; fi; \
     /usr/libexec/apex-vm doctor 2>&1 | grep -q 'sudo apex install'; \
     /usr/libexec/apex-vm doctor 2>&1 | grep -q 'MISSING'; \
     /usr/libexec/apex-vm --help | grep -q 'no viewer'; \
@@ -1771,7 +1791,8 @@ RUN set -eux; \
     # function" halfway through a verdict — which reads as a broken CLI rather
     # than a broken coupling.
     /usr/libexec/apex-plugin-verdict.js validid "$MJS" apex-worldclock; \
-    ! /usr/libexec/apex-plugin-verdict.js validid "$MJS" ../escape; \
+    if /usr/libexec/apex-plugin-verdict.js validid "$MJS" ../escape \
+        ; then echo "FATAL: apex-plugin-verdict.js accepted a path-traversal id"; exit 1; fi; \
     # End to end, in the image, against the shell's OWN example plugin. This is
     # the only place the coupling is exercised for real: CI vendors apex-shell
     # from remote main and cannot know what the finished image contains.
@@ -1836,7 +1857,8 @@ RUN set -eux; \
     printf 'KEYMAP=definitely-not-a-keymap\nFONT=definitely-not-a-font\n' > /etc/vconsole.conf; \
     /usr/libexec/apex-vconsole-guard; \
     grep -qx 'KEYMAP=us' /etc/vconsole.conf; \
-    ! grep -q '^FONT=' /etc/vconsole.conf; \
+    if grep -q '^FONT=' /etc/vconsole.conf \
+        ; then echo "FATAL: the vconsole guard kept the invalid FONT= instead of dropping it"; exit 1; fi; \
     test -s /etc/vconsole.conf.apex-invalid; \
     rm -f /etc/vconsole.conf.apex-invalid; \
     # ...and a good one must be left completely alone, because this runs on
@@ -1885,15 +1907,18 @@ COPY files/desktop/hypr/apex/ /usr/share/apex/hypr/apex/
 #      loads hyprland.lua and never looks at a .conf beside it.
 RUN set -eux; \
     grep -q 'exec_cmd("/usr/libexec/apex-shell-autostart")' /usr/share/apex/hypr/apex/session.lua; \
-    ! grep -rq 'local/bin/apex-shell-autostart' /usr/share/apex/hypr/; \
-    ! grep -rq '(unset)' /usr/share/apex/hypr/; \
+    if grep -rq 'local/bin/apex-shell-autostart' /usr/share/apex/hypr/ \
+        ; then echo "FATAL: a ~/.local/bin autostart path survives in the shipped hypr tree"; exit 1; fi; \
+    if grep -rq '(unset)' /usr/share/apex/hypr/ \
+        ; then echo "FATAL: an unsubstituted (unset) survives in the shipped hypr tree"; exit 1; fi; \
     # The keymap substitution moved out of hyprland.lua and into the module that
     # actually sets it. Asserted in BOTH directions so the two cannot drift: the
     # token must be where the provisioner substitutes it, and must NOT be left
     # behind in the entry point that no longer carries it.
     grep -q '@KB_LAYOUT@' /usr/share/apex/hypr/apex/input-defaults.lua; \
     grep -q '@KB_VARIANT@' /usr/share/apex/hypr/apex/input-defaults.lua; \
-    ! grep -q '@KB_LAYOUT@' /usr/share/apex/hypr/hyprland.lua; \
+    if grep -q '@KB_LAYOUT@' /usr/share/apex/hypr/hyprland.lua \
+        ; then echo "FATAL: the keymap token was left behind in the entry point"; exit 1; fi; \
     # @HOME@ is gone on purpose: `require` resolves against the config file's own
     # directory and apex/session.lua reads os.getenv("HOME"), so there is no
     # absolute path left to substitute. Asserting its ABSENCE is what stops one
@@ -1904,10 +1929,12 @@ RUN set -eux; \
     # `mouse = true` one two stanzas down, found by
     # tests/check-containerfile-assertions.sh rather than by a fifth 50-minute
     # build.
-    ! grep -rqE '^[[:space:]]*[^-[:space:]].*@HOME@' /usr/share/apex/hypr/; \
+    if grep -rqE '^[[:space:]]*[^-[:space:]].*@HOME@' /usr/share/apex/hypr/ \
+        ; then echo "FATAL: an @HOME@ token survives outside a comment in the hypr tree"; exit 1; fi; \
     # No hyprlang left anywhere in the tree.
-    ! grep -rqE '^[[:space:]]*(source|exec-once|bind[a-z]*|windowrule|monitor|env)[[:space:]]*=' \
-        /usr/share/apex/hypr/; \
+    if grep -rqE '^[[:space:]]*(source|exec-once|bind[a-z]*|windowrule|monitor|env)[[:space:]]*=' \
+        /usr/share/apex/hypr/ \
+        ; then echo "FATAL: hyprlang syntax survives in a tree 0.56.2 loads as Lua"; exit 1; fi; \
     # Each generated module must actually be required — a generator whose output
     # nothing reads is worse than no generator, because the settings page appears
     # to work. These three are the write targets of apex-display-apply,
@@ -1947,7 +1974,8 @@ RUN set -eux; \
         sed -e 's|@KB_LAYOUT@|us|g' -e 's|@KB_VARIANT@||g' \
             "$f" > "$cfg/apex/$(basename "$f")"; \
     done; \
-    ! grep -rq '@KB_LAYOUT@' "$cfg"; \
+    if grep -rq '@KB_LAYOUT@' "$cfg" \
+        ; then echo "FATAL: the provisioner left @KB_LAYOUT@ unsubstituted"; exit 1; fi; \
     XDG_RUNTIME_DIR="$runtime" Hyprland --i-am-really-stupid \
         --verify-config --config "$cfg/hyprland.lua" | grep -q 'config ok'; \
     rm -rf "$cfg" "$runtime"
@@ -2009,7 +2037,8 @@ RUN set -eux; \
     # provisioner before deleting it, because `include optional=true` (26.04+)
     # is then the better shape.
     rm -f "$d/inc.kdl"; \
-    ! niri validate --config "$d/config.kdl"; \
+    if niri validate --config "$d/config.kdl" \
+        ; then echo "FATAL: niri accepted a config whose include is missing"; exit 1; fi; \
     rm -rf "$d"
 
 # Greeter session picker: offer Hyprland + niri only. sway/labwc are the greeter
@@ -2094,7 +2123,8 @@ RUN set -eux; \
     grep -q 'org.freedesktop.impl.portal.FileChooser' /usr/share/xdg-desktop-portal/portals/gtk.portal; \
     # No wildcard survives: that is the whole point of overriding the packaged
     # file, so a regression that reintroduces it must fail the build.
-    ! grep -qE '^\s*default=.*\*' /etc/xdg-desktop-portal/labwc-portals.conf; \
+    if grep -qE '^\s*default=.*\*' /etc/xdg-desktop-portal/labwc-portals.conf \
+        ; then echo "FATAL: a default=* wildcard survives in labwc-portals.conf"; exit 1; fi; \
     grep -qE '^default=gtk$' /etc/xdg-desktop-portal/labwc-portals.conf; \
     grep -qE '^org\.freedesktop\.impl\.portal\.ScreenCast=wlr$' /etc/xdg-desktop-portal/labwc-portals.conf; \
     echo "portals: labwc pinned to wlr capture + gtk desktop interfaces"
@@ -2139,7 +2169,8 @@ RUN set -eux; \
     grep -q 'org.freedesktop.impl.portal.Secret' /usr/share/xdg-desktop-portal/portals/gnome-keyring.portal; \
     # No wildcard, and gtk leads the default list — that ordering IS the fix, so
     # a regression back to `default=gnome;gtk` must fail the build.
-    ! grep -qE '^\s*default=.*\*' /etc/xdg-desktop-portal/niri-portals.conf; \
+    if grep -qE '^\s*default=.*\*' /etc/xdg-desktop-portal/niri-portals.conf \
+        ; then echo "FATAL: a default=* wildcard survives in niri-portals.conf"; exit 1; fi; \
     grep -qE '^default=gtk;gnome$' /etc/xdg-desktop-portal/niri-portals.conf; \
     grep -qE '^org\.freedesktop\.impl\.portal\.ScreenCast=gnome$' /etc/xdg-desktop-portal/niri-portals.conf; \
     grep -qE '^org\.freedesktop\.impl\.portal\.Screenshot=gnome$' /etc/xdg-desktop-portal/niri-portals.conf; \
@@ -2212,10 +2243,13 @@ RUN set -eux; \
     # Neither of the two backends in `default` implements Secret. If either ever
     # does, this pin becomes redundant rather than wrong — but the assertion
     # says WHY the pin is here, so a future reader is not left guessing.
-    ! grep -q 'org.freedesktop.impl.portal.Secret' /usr/share/xdg-desktop-portal/portals/hyprland.portal; \
-    ! grep -q 'org.freedesktop.impl.portal.Secret' /usr/share/xdg-desktop-portal/portals/gtk.portal; \
+    if grep -q 'org.freedesktop.impl.portal.Secret' /usr/share/xdg-desktop-portal/portals/hyprland.portal \
+        ; then echo "FATAL: hyprland.portal now implements Secret; revisit the pin above"; exit 1; fi; \
+    if grep -q 'org.freedesktop.impl.portal.Secret' /usr/share/xdg-desktop-portal/portals/gtk.portal \
+        ; then echo "FATAL: gtk.portal now implements Secret; revisit the pin above"; exit 1; fi; \
     # No wildcard, and the three pins are present.
-    ! grep -qE '^\s*default=.*\*' /etc/xdg-desktop-portal/hyprland-portals.conf; \
+    if grep -qE '^\s*default=.*\*' /etc/xdg-desktop-portal/hyprland-portals.conf \
+        ; then echo "FATAL: a default=* wildcard survives in hyprland-portals.conf"; exit 1; fi; \
     grep -qE '^default=hyprland;gtk$' /etc/xdg-desktop-portal/hyprland-portals.conf; \
     grep -qE '^org\.freedesktop\.impl\.portal\.ScreenCast=hyprland$' /etc/xdg-desktop-portal/hyprland-portals.conf; \
     grep -qE '^org\.freedesktop\.impl\.portal\.Screenshot=hyprland$' /etc/xdg-desktop-portal/hyprland-portals.conf; \
@@ -2287,7 +2321,8 @@ RUN set -eux; \
     # so naming a font the image does not ship is invisible until someone looks
     # at a titlebar. Noto Sans comes from google-noto-sans-fonts in core.
     grep -q '<name>Noto Sans</name>' /usr/share/apex/labwc/rc.xml; \
-    ! grep -qE '<name>[^<]*Mono[^<]*</name>' /usr/share/apex/labwc/rc.xml; \
+    if grep -qE '<name>[^<]*Mono[^<]*</name>' /usr/share/apex/labwc/rc.xml \
+        ; then echo "FATAL: labwc rc.xml names a Mono family for titlebar text"; exit 1; fi; \
     fc-match --format='%{family}\n' 'Noto Sans' | grep -qi 'noto sans'; \
     grep -qE '<cornerRadius>1[0-2]</cornerRadius>' /usr/share/apex/labwc/rc.xml; \
     grep -q '<dropShadows>yes</dropShadows>' /usr/share/apex/labwc/rc.xml; \
@@ -2372,7 +2407,8 @@ RUN set -eux; \
     bash -n /usr/libexec/apex-open-browser; \
     grep -q 'local browser *= *"/usr/libexec/apex-open-browser"' \
         /usr/share/apex/hypr/apex/keybindings.lua; \
-    ! grep -qE 'local browser *= *"(firefox|zen)' /usr/share/apex/hypr/apex/keybindings.lua; \
+    if grep -qE 'local browser *= *"(firefox|zen)' /usr/share/apex/hypr/apex/keybindings.lua \
+        ; then echo "FATAL: the keybinding hard-codes a browser instead of the wrapper"; exit 1; fi; \
     echo "zen: first-boot flatpak; firefox keeps the web handlers; SUPER+W follows the default"
 
 # The whole apex-greet tree lands at /usr/share/apex-greet so the QML's
@@ -2394,11 +2430,13 @@ RUN set -eux; \
     : 'greetd auto-login is [initial_session]. The ordinary config must not'; \
     : 'have one: a machine that logs a user in without asking is a kiosk,'; \
     : 'whatever else it calls itself.'; \
-    ! grep -qE '^[[:space:]]*\[initial_session\]' /etc/greetd/config.toml; \
+    if grep -qE '^[[:space:]]*\[initial_session\]' /etc/greetd/config.toml \
+        ; then echo "FATAL: greetd is configured to fire once per boot"; exit 1; fi; \
     : 'And it must not BE the recipe. Compared by content, because a recipe'; \
     : 'copied into place would satisfy every other check in this file.'; \
-    ! cmp -s /etc/greetd/config.toml \
-             /usr/share/apex/shared-machine/greetd-kiosk.toml; \
+    if cmp -s /etc/greetd/config.toml \
+             /usr/share/apex/shared-machine/greetd-kiosk.toml \
+        ; then echo "FATAL: the shipped greetd config IS the shared-machine kiosk recipe"; exit 1; fi; \
     echo "login config: no auto-login, and not the kiosk recipe"
 
 # ── Greeter wallpaper: the user's own, not the shipped default ─────────────
@@ -2559,8 +2597,10 @@ RUN set -eux; \
     # `apex vm create` must not grow a way to weaken a VM by accident. These
     # two flags are the security posture of the guest, and clap refusing both
     # at once is what stops argument order deciding it.
-    ! /usr/bin/apex vm create box --secure-boot --no-secure-boot >/dev/null 2>&1; \
-    ! /usr/bin/apex vm create box --graphics spice >/dev/null 2>&1; \
+    if /usr/bin/apex vm create box --secure-boot --no-secure-boot >/dev/null 2>&1 \
+        ; then echo "FATAL: apex vm create accepted both secure-boot flags at once"; exit 1; fi; \
+    if /usr/bin/apex vm create box --graphics spice >/dev/null 2>&1 \
+        ; then echo "FATAL: apex vm create accepted a --graphics flag"; exit 1; fi; \
     # §19's "expose apex doctor results graphically" is this flag and nothing
     # else on the OS side. Losing it silently turns the settings page into a
     # screen that renders no diagnostics.
@@ -2579,7 +2619,8 @@ RUN set -eux; \
     # the refusal is checkable directly, and it is checked for the REASON as
     # well as the exit status: "it refused" has been true here while "it
     # refused for the reason under test" was false.
-    ! /usr/bin/apex recover reset --scope desktop >/dev/null 2>&1; \
+    if /usr/bin/apex recover reset --scope desktop >/dev/null 2>&1 \
+        ; then echo "FATAL: apex recover reset ran as root instead of refusing"; exit 1; fi; \
     /usr/bin/apex recover reset --scope desktop 2>&1 | grep -q 'must not run as root'; \
     # `reset` is a dry run without --commit. This is the single most important
     # runtime property in §19, so it is proven against the shipped binary
@@ -2595,9 +2636,10 @@ RUN set -eux; \
     test -f "$APEX_RESET_PROBE/.config/apex-shell/input.json" \
         || { echo "FATAL: apex recover reset deleted a file without --commit"; exit 1; }; \
     # And --commit without --confirm must also change nothing.
-    ! setpriv --reuid=1000 --regid=1000 --clear-groups \
+    if setpriv --reuid=1000 --regid=1000 --clear-groups \
         env HOME="$APEX_RESET_PROBE" /usr/bin/apex recover reset --scope desktop --commit \
-        >/dev/null 2>&1; \
+        >/dev/null 2>&1 \
+        ; then echo "FATAL: apex recover reset --commit ran without --confirm"; exit 1; fi; \
     test -f "$APEX_RESET_PROBE/.config/apex-shell/input.json" \
         || { echo "FATAL: apex recover reset deleted a file without --confirm"; exit 1; }; \
     rm -rf "$APEX_RESET_PROBE"; \
@@ -2631,11 +2673,13 @@ RUN set -eux; \
     # The one thing the CLI must never grow: a verb that hands back a value.
     # Anchored to the command column, because the descriptions legitimately say
     # "read from stdin" and clap's own help verb says "Print this message".
-    ! /usr/bin/apex secret --help | grep -qE '^  (show|reveal|export|cat|print|read|dump|get)\b'; \
+    if /usr/bin/apex secret --help | grep -qE '^  (show|reveal|export|cat|print|read|dump|get)\b' \
+        ; then echo "FATAL: apex secret grew a verb that hands a secret back"; exit 1; fi; \
     # And the refusal that carries §14's central security decision has to be
     # live in the shipped binary, not just in the source. Asserted on both the
     # daemon and the CLI, because each has its own argument parser.
-    ! /usr/bin/apex-aid --listen 127.0.0.1:11434 >/dev/null 2>&1; \
+    if /usr/bin/apex-aid --listen 127.0.0.1:11434 >/dev/null 2>&1 \
+        ; then echo "FATAL: apex-aid accepted a TCP listener, which has no SO_PEERCRED"; exit 1; fi; \
     /usr/bin/apex-aid --listen 127.0.0.1:11434 2>&1 | grep -q SO_PEERCRED; \
     /usr/bin/apex ai serve --listen 127.0.0.1:11434 2>&1 | grep -q SO_PEERCRED; \
     # The compositor keybinds and the labwc root-menu replacement both invoke
