@@ -128,7 +128,7 @@ if [ -z "$DISP" ]; then
 fi
 Xvfb "$DISP" -screen 0 1280x900x24 -nolisten tcp >/dev/null 2>&1 &
 XPID=$!
-for i in $(seq 1 60); do [ -e "/tmp/.X11-unix/X${DISP#:}" ] && break; sleep 0.25; done
+for _ in $(seq 1 60); do [ -e "/tmp/.X11-unix/X${DISP#:}" ] && break; sleep 0.25; done
 if [ ! -e "/tmp/.X11-unix/X${DISP#:}" ]; then
     echo "SKIP: Xvfb did not come up on $DISP. COULD-NOT-RUN."
     exit 0
@@ -166,10 +166,10 @@ fi
 export GDK_BACKEND=x11 GSK_RENDERER=cairo
 
 audit_page() {   # audit_page <page> <sentinel accessible name> <floor> [KEY=VAL ...]
-    local page="$1" sentinel="$2" floor="$3" n i
+    local page="$1" sentinel="$2" floor="$3" n
     shift 3
 
-    for i in $(seq 1 40); do
+    for _ in $(seq 1 40); do
         n="$(python3 "$WALK" --count 2>/dev/null || echo 0)"
         [ "$n" = "0" ] && break
         sleep 0.3
@@ -195,7 +195,7 @@ audit_page() {   # audit_page <page> <sentinel accessible name> <floor> [KEY=VAL
     # exist yet, and would have reported "every control has a name" about almost
     # nothing.
     local built=0
-    for i in $(seq 1 100); do
+    for _ in $(seq 1 100); do
         python3 "$WALK" --dump >"$ATSPI_W/dump-$page.txt" 2>/dev/null
         grep -q "| name=$sentinel |" "$ATSPI_W/dump-$page.txt" && { built=1; break; }
         kill -0 "$GPID" 2>/dev/null || break
@@ -363,7 +363,7 @@ fi
 # a focus trap never returns.
 RING=""
 TAPS=14
-for i in $(seq 1 "$TAPS"); do
+for _ in $(seq 1 "$TAPS"); do
     xdotool key --window "$WID" --clearmodifiers Tab >/dev/null 2>&1
     sleep 0.35
     f="$(focused_name)"
@@ -415,7 +415,7 @@ section "the keyboard alone can fill the page in"
 # Typed, not set. xdotool delivers real X key events to the real toolkit, so
 # this exercises the same path a person's fingers do.
 type_into() {   # type_into <accessible name> <text>
-    for i in $(seq 1 30); do
+    for _ in $(seq 1 30); do
         f="$(focused_name)"
         [ "${f#*|}" = "$1" ] && { xdotool type --window "$WID" --clearmodifiers "$2" >/dev/null 2>&1; return 0; }
         xdotool key --window "$WID" --clearmodifiers Tab >/dev/null 2>&1
@@ -476,14 +476,14 @@ section "the keyboard alone moves the installer from one page to the next"
 
 ADV_BUILT=0; ADV_REACHED=0; ADV_MOVED=0; ADV_LEFT=0
 advance_with() {   # advance_with <xdotool key name>
-    local key="$1" i f wid
+    local key="$1" f wid
     ADV_BUILT=0; ADV_REACHED=0; ADV_MOVED=0; ADV_LEFT=0
 
     # A fresh process on the welcome page. The account page's process has to be
     # gone from the registry first, or the walk below reads two trees at once
     # and `Begin` is "reachable" on a page that is not on screen.
     kill "$GPID" 2>/dev/null
-    for i in $(seq 1 40); do
+    for _ in $(seq 1 40); do
         [ "$(python3 "$WALK" --count 2>/dev/null || echo 0)" = "0" ] && break
         sleep 0.3
     done
@@ -491,7 +491,7 @@ advance_with() {   # advance_with <xdotool key name>
     APEX_GUI_PAGE=welcome atspi_run_app python3 "$GUI" \
         >"$ATSPI_W/gui-adv-$key.out" 2>"$ATSPI_W/gui-adv-$key.err" &
     GPID=$!
-    for i in $(seq 1 100); do
+    for _ in $(seq 1 100); do
         python3 "$WALK" --dump >"$ATSPI_W/dump-adv-$key.txt" 2>/dev/null
         grep -q '| name=Begin |' "$ATSPI_W/dump-adv-$key.txt" && { ADV_BUILT=1; break; }
         kill -0 "$GPID" 2>/dev/null || break
@@ -504,7 +504,7 @@ advance_with() {   # advance_with <xdotool key name>
     xdotool windowactivate --sync "$wid" >/dev/null 2>&1
     xdotool windowfocus "$wid" >/dev/null 2>&1
 
-    for i in $(seq 1 20); do
+    for _ in $(seq 1 20); do
         f="$(focused_name)"
         [ "${f#*|}" = "Begin" ] && { ADV_REACHED=1; break; }
         xdotool key --window "$wid" --clearmodifiers Tab >/dev/null 2>&1
@@ -513,7 +513,7 @@ advance_with() {   # advance_with <xdotool key name>
     [ "$ADV_REACHED" = 1 ] || return 0
 
     xdotool key --window "$wid" --clearmodifiers "$key" >/dev/null 2>&1
-    for i in $(seq 1 40); do
+    for _ in $(seq 1 40); do
         python3 "$WALK" --dump >"$ATSPI_W/dump-adv-$key.txt" 2>/dev/null
         grep -q '| name=Keyboard test |' "$ATSPI_W/dump-adv-$key.txt" && { ADV_MOVED=1; break; }
         sleep 0.4
