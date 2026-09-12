@@ -242,3 +242,17 @@ session — both of which are more than a flag.
   not. Driving a page needs a driver in the capsule, which needs a package that
   is not in the image.
 * **The proxy is `CONNECT`-only**, so a plain-http site cannot be automated.
+* **A capsule trusts the system CA store and nothing else, and there is no way
+  to add to it.** A fresh profile has a fresh `cert9.db`, so a site behind a
+  private or self-signed certificate is refused by the browser before any of
+  this page's boundaries come into it. Measured rather than reasoned: the live
+  lab's own HTTPS server is self-signed, and pointing a capsule's browser at it
+  produced no page and no screenshot — the browser sat on the refusal until the
+  capsule timed out. The lab now renders from a `data:` URL for anything that
+  needs a page, and reaches its server with `curl -k`, so that what it measures
+  is the capsule rather than a certificate.
+
+  Adding one would be a real flag with a real argument behind it — a CA is
+  trust, and handing a capsule a CA it did not have is widening what it will
+  believe. It is not built, and a capsule silently trusting more than the
+  system does would be worse than the gap.

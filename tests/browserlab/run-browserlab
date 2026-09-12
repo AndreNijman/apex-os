@@ -309,8 +309,18 @@ D="\$PWD"
     # The same host by a NAME that resolves to loopback. accepts_address must
     # refuse it: a rule that wrote a name did not mean this machine.
     printf 'named-loopback-get=%s\n' "\$(curl -s --max-time 20 -k "https://localhost:${PORT}/ping" 2>&1 | head -c 60; printf ' rc=%s' "\$?")"
-    # With no proxy at all. The namespace has no route, so this must be a
-    # network error and not a connection.
+    # With no proxy at all, to an address that is NOT loopback. Measured
+    # rather than assumed: the first version probed 127.0.0.1 unproxied and
+    # got "Could not connect to server" — ECONNREFUSED against the capsule's
+    # OWN loopback, where the lab's server is not listening. True, and nothing
+    # to do with routing. 198.51.100.7 is TEST-NET-2 and never routable, so
+    # what comes back is the namespace's answer rather than a server's.
+    printf 'unproxied-literal=%s\n' "\$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy \\
+        curl -s -S --max-time 20 -k "https://198.51.100.7/ping" 2>&1 | head -c 120)"
+    # And by name, which additionally has no resolver to ask — which is why
+    # the DAEMON resolves and why the allowlist checks a name.
+    printf 'unproxied-name=%s\n' "\$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy \\
+        curl -s -S --max-time 20 -k "https://example.com/" 2>&1 | head -c 120)"
     printf 'unproxied-get=%s\n' "\$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy \\
         curl -s -S --max-time 20 -k "https://127.0.0.1:${PORT}/ping" 2>&1 | head -c 120)"
     printf 'profile-dir-exists=%s\n' "\$([ -d "\$PWD/.profile" ] && echo yes || echo no)"
@@ -353,7 +363,7 @@ flow_profile() {
     }
     capsule_run profile --allow "127.0.0.1:$PORT" \
         --download observed.txt \
-        -- --screenshot "shot.png" "https://127.0.0.1:$PORT/"
+        -- --screenshot "shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
     local obs="$OUT/profile/got/observed.txt"
     [[ -f "$obs" ]] || { cannot "the capsule produced no observation file, so nothing can be said about what it saw"; return; }
     local seen; seen="$(cat "$obs")"
@@ -377,7 +387,7 @@ flow_profile() {
 flow_headless() {
     capsule_run headless --allow "127.0.0.1:$PORT" \
         --download observed.txt --download shot.png \
-        -- --screenshot "shot.png" "https://127.0.0.1:$PORT/"
+        -- --screenshot "shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
     local obs="$OUT/headless/got/observed.txt"
     [[ -f "$obs" ]] || { cannot "the capsule produced no observation file"; return; }
     local seen; seen="$(cat "$obs")"
@@ -397,7 +407,7 @@ flow_headless() {
 flow_network() {
     capsule_run network --allow "127.0.0.1:$PORT" \
         --download observed.txt \
-        -- --screenshot "shot.png" "https://127.0.0.1:$PORT/"
+        -- --screenshot "shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
     local obs="$OUT/network/got/observed.txt"
     [[ -f "$obs" ]] || { cannot "the capsule produced no observation file"; return; }
     local seen; seen="$(cat "$obs")"
@@ -410,7 +420,29 @@ flow_network() {
     says "the daemon recorded the denial" "denied" "$(cat "$LAB/daemon.log" 2>/dev/null)"
     # Ignoring the proxy buys nothing: no route, no resolver.
     says_not "a capsule that ignores the proxy does not get a connection" "APEX-BROWSERLAB-PONG" "$(grep '^unproxied-get=' <<<"$seen")"
-    says "and the reason is the empty namespace, not a refusal" "curl" "$(grep '^unproxied-get=' <<<"$seen")"
+    # The claim is that the namespace has no ROUTE, so the destination has to
+    # be one that needs routing. Loopback does not, and measuring against it
+    # is how this assertion nearly passed for the wrong reason.
+    says "an unproxied literal address is unreachable, not refused" "Network is unreachable" \
+         "$(grep '^unproxied-literal=' <<<"$seen")"
+    says "and a name cannot even be resolved inside the capsule" "Could not resolve host" \
+         "$(grep '^unproxied-name=' <<<"$seen")"
+
+    # ── that the BROWSER uses the bridge, not just that curl can ────────────
+    #
+    # Everything above is curl's word. The preference file is the only thing
+    # pointing Firefox at the bridge, so the browser's own use of it needs its
+    # own evidence — and the evidence has to come from the enforcer. Pointing
+    # the browser at a destination nobody allowed produces a denial in the
+    # DAEMON's log naming that host, and nothing but a proxied request could
+    # have produced it.
+    : > "$LAB/daemon-mark"
+    local before; before="$(wc -l < "$LAB/daemon.log" 2>/dev/null || echo 0)"
+    capsule_run browser-proxy --allow "127.0.0.1:$PORT" --timeout 60 \
+        -- --screenshot "shot.png" "https://never-allowed.browserlab.invalid/"
+    local after_log; after_log="$(tail -n +$((before + 1)) "$LAB/daemon.log" 2>/dev/null)"
+    says "the browser's own request reached the daemon's proxy and was denied" \
+         "never-allowed.browserlab.invalid" "$after_log"
     # The engine refuses a destination the runtime has not allowed, rather
     # than starting a capsule that reaches nothing.
     local refused
@@ -422,7 +454,7 @@ flow_network() {
 flow_downloads() {
     capsule_run downloads --allow "127.0.0.1:$PORT" \
         --download observed.txt \
-        -- --screenshot "shot.png" "https://127.0.0.1:$PORT/"
+        -- --screenshot "shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
     local got="$OUT/downloads/got"
     local obs="$got/observed.txt"
     [[ -f "$obs" ]] || { cannot "the capsule produced no observation file"; return; }
@@ -456,7 +488,7 @@ PY
     mkdir -p "$mgot"
     "$mutant" run --timeout 150 --allow "127.0.0.1:$PORT" \
         --download observed.txt --download-to "$mgot" \
-        -- --screenshot "shot.png" "https://127.0.0.1:$PORT/" \
+        -- --screenshot "shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>" \
         > "$OUT/downloads/mutant.log" 2>&1
     if [[ -e "$mgot/leak.txt" ]]; then
         _chaos_pass "an engine whose loop runs over the directory DOES leak the unnominated file"
@@ -470,7 +502,7 @@ PY
     mkdir -p "$nodest"
     local out
     out="$("$ENGINE" run --timeout 150 --allow "127.0.0.1:$PORT" --download observed.txt \
-        -- --screenshot "shot.png" "https://127.0.0.1:$PORT/" 2>&1)"
+        -- --screenshot "shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>" 2>&1)"
     says "without a destination nothing leaves, however much is nominated" "nothing left the capsule" "$out"
     claim_not "and no destination was invented" bash -c "compgen -G '$nodest/*' >/dev/null"
 }
@@ -585,7 +617,16 @@ main() {
             state="$FAILED"
             FLOW_REASON="$(printf '%s; ' "${CHAOS_EXPECT_NOTES[@]}" | grep -o 'BAD  [^;]*' | head -3 | tr '\n' ' ')${FLOW_REASON:+ — $FLOW_REASON}"
             rc=1
-        elif (( FLOW_CANNOT == 1 )) && (( CHAOS_EXPECT_OK == 0 )); then
+        elif (( FLOW_CANNOT == 1 )); then
+            # could-not-run BEATS verified, which is the vmlab's precedence and
+            # not an accident. The first version only reported could-not-run
+            # when NOTHING had been observed, so the capability flow — which
+            # exercises the refusal live and cannot exercise the pin-binding
+            # without a secret service — came out as "verified" with the gap
+            # demoted to a clause in the reason. A reader scanning the verdict
+            # column would have read that as capability auth being proven. A
+            # flow that names something it could not exercise has not verified
+            # the flow, whatever else held.
             state="$CANNOT"
         elif (( CHAOS_EXPECT_OK > 0 )); then
             state="$VERIFIED"
