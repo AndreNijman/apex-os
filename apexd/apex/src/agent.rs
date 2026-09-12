@@ -533,6 +533,20 @@ pub struct RunArgs {
     /// confined thing can write is not a boundary.
     #[arg(long, value_parser = parse_connectors)]
     pub connectors: Option<ConnectorPolicy>,
+    /// all | curated | none. Which plugins the session loads (dimension 8).
+    ///
+    /// A plugin's hooks and the scripts beside them are spawned by the agent
+    /// itself, before the session has done anything, and no MCP configuration
+    /// of any kind is involved — so dimension 7 cannot reach them and this
+    /// dimension REMOVES where that one confines. APEX does not own the
+    /// agent's process and cannot put a sandbox around a process the agent
+    /// spawns; what it can decide is which plugins are loaded at all.
+    ///
+    /// `curated` takes its names from `plugin_allow` in the runtime's
+    /// configuration and not from this command line, for the reason
+    /// `--connectors curated` takes its names from there.
+    #[arg(long, value_parser = parse_plugins)]
+    pub plugins: Option<PluginPolicy>,
 
     // ── §7: where the session is driven from ────────────────────────────────
     /// Declare where this session is driven from (§7's request_origin).
@@ -677,6 +691,7 @@ impl RunArgs {
             ("--network", self.network.map(|v| v.as_str())),
             ("--origin-policy", self.origin_policy.map(|v| v.as_str())),
             ("--connectors", self.connectors.map(|v| v.as_str())),
+            ("--plugins", self.plugins.map(|v| v.as_str())),
             ("--origin", self.origin.map(|v| v.as_str())),
         ] {
             if let Some(v) = value {
@@ -1007,6 +1022,7 @@ dimension_parser!(
     ConnectorPolicy,
     "all, local, curated or none"
 );
+dimension_parser!(parse_plugins, PluginPolicy, "all, curated or none");
 
 /// `--agents` and `--remote` on `apex agent lock`.
 ///
@@ -1124,6 +1140,9 @@ pub fn resolve_policy(cfg: &config::Config, args: &RunArgs) -> Result<AgentPolic
     }
     if let Some(v) = args.connectors {
         policy.connectors = v;
+    }
+    if let Some(v) = args.plugins {
+        policy.plugins = v;
     }
 
     // Refuse anything this build cannot enforce, here as well as in the
@@ -4335,6 +4354,7 @@ mod tests {
             network: None,
             origin_policy: None,
             connectors: None,
+            plugins: None,
             origin: None,
             unsafe_everything: false,
             ttl: None,
@@ -4585,6 +4605,67 @@ mod tests {
         assert_eq!(p.secrets, SecretPolicy::Brokered);
     }
 
+    /// Dimension 8 reaches a session from the command line, and a `curated`
+    /// run with nothing curated is refused rather than started empty.
+    ///
+    /// Built in `d02528d3`, wired to the wire in the commit before this one,
+    /// and until now reachable only by editing the runtime's configuration
+    /// file — which is to say, not by the person typing the command.
+    #[test]
+    fn the_plugin_dimension_is_reachable_from_the_command_line() {
+        let cfg = config::Config::default();
+
+        // The default is untouched: a run that says nothing about plugins gets
+        // every plugin the machine has enabled, exactly as before the
+        // dimension existed.
+        assert_eq!(
+            resolve_policy(&cfg, &run_args()).expect("resolve").plugins,
+            PluginPolicy::AsConfigured,
+        );
+
+        let removed = RunArgs {
+            plugins: Some(PluginPolicy::NoPlugins),
+            ..run_args()
+        };
+        assert_eq!(
+            resolve_policy(&cfg, &removed).expect("resolve").plugins,
+            PluginPolicy::NoPlugins,
+            "--plugins none must reach the policy, or the flag is decoration"
+        );
+
+        // `curated` with an empty `plugin_allow` is refused HERE, in front of
+        // the person who typed it, rather than starting a session with every
+        // plugin removed. "Nobody filled this in" and "load nothing" are two
+        // different requests; the daemon refuses it too, and this is the copy
+        // whose message names the flag.
+        let curated = RunArgs {
+            plugins: Some(PluginPolicy::Curated),
+            ..run_args()
+        };
+        let err = resolve_policy(&cfg, &curated).expect_err("an empty curated list");
+        assert!(
+            err.to_string().contains("plugin"),
+            "the refusal does not name the dimension: {err}"
+        );
+        // And with names in the runtime's configuration — never in the request
+        // — the same run resolves.
+        let filled = config::Config {
+            plugin_allow: vec!["apex".to_string()],
+            ..config::Config::default()
+        };
+        assert_eq!(
+            resolve_policy(&filled, &curated).expect("resolve").plugins,
+            PluginPolicy::Curated,
+        );
+
+        // A typo is refused by the argument parser with the real values, so
+        // nothing downstream is handed a value that was never checked.
+        let err = parse_plugins("some").expect_err("a typo");
+        assert!(err.contains("curated"), "{err}");
+        assert!(err.contains("none"), "{err}");
+        assert_eq!(parse_plugins("none"), Ok(PluginPolicy::NoPlugins));
+    }
+
     #[test]
     fn a_misspelled_dimension_value_names_the_ones_that_exist() {
         // Refused by the argument parser, so nothing downstream is ever handed
@@ -4609,6 +4690,8 @@ mod tests {
             secrets: Some(SecretPolicy::None),
             network: Some(NetworkPolicy::Offline),
             origin_policy: Some(OriginPolicy::LocalElevationOnly),
+            connectors: Some(ConnectorPolicy::NoConnectors),
+            plugins: Some(PluginPolicy::NoPlugins),
             host: Some("katana".into()),
             ..run_args()
         };
@@ -4619,6 +4702,12 @@ mod tests {
             "--secrets none",
             "--network offline",
             "--origin-policy local_elevation_only",
+            // Dimensions 7 and 8. Both are removals, so losing one in transit
+            // gives the remote session MORE than was asked for — the far end
+            // would load every plugin on it, hooks included, and reach every
+            // connector it defines.
+            "--connectors none",
+            "--plugins none",
             "--agent-bypass",
         ] {
             assert!(forwarded.contains(flag), "{flag} was not forwarded: {forwarded}");
