@@ -3853,8 +3853,8 @@ tasks:
   - stop_slop
   evidence: >-
     LANDED on apex-os roadmap/v2.2 2026-09-12 as merge ebce9b46 (rounds 1+2). ROUND 3 2026-09-13 is on TWO
-    branches, both pushed and neither merged yet: apex-shell task/p1-063-2-shell (four commits 7ad9b7d..dfef320)
-    and apex-os task/p1-063-2 (three commits 175882d..51c00e0a). THE APEX-SHELL SURFACE, WHICH WAS THE LAST
+    branches, both pushed and neither merged yet: apex-shell task/p1-063-2-shell (four commits, bfb24ed..dfef320)
+    and apex-os task/p1-063-2 (three commits, e799422b..51c00e0a). THE APEX-SHELL SURFACE, WHICH WAS THE LAST
     GENUINELY-BUILDABLE PIECE, IS NOW WRITTEN AND DRAWN. src/services/lid.js is a pure parser over apex lid
     status/report --json; LidService.qml polls status then report one after the other, refcounted so a page nobody
     is looking at spawns nothing, and runs apex lid pin only on an explicit press; LidPage.qml is registered in
@@ -3920,15 +3920,17 @@ tasks:
     tests/test-apex-lid.sh 60 assertions became 73 and is 73/0 here. apex-shell: every tests/check-*.sh green,
     every node suite green, run-settings-pages-test.sh 21/0, run-settings-staged-test.sh 21/0, run-popup-smoke.sh
     and run-nexus-smoke.sh ERROR count 0 each (popup-smoke opens dashboard-home, which is the only thing that
-    instantiates the edited QuickSettings), qmllint 0 errors on every new file. CRITERION 2 REMAINS ASSERTED LIVE
-    FROM ROUND 2: a real WireGuard tunnel (real keys, real handshake, two netns with the veth created INSIDE one
-    so neither end ever exists in the root namespace) carried 47 of 47 pings with 0 percent loss across a REAL
-    SW_LID close, rx 500 to 6004 bytes DURING the closed window, peer still handshaken after, NM's nine saved
-    connections identical before and after; the lid event was real - uinput device tagged power-switch by udev,
-    logind logged "Watching system buttons on /dev/input/event21", "Lid closed." and "Lid opened.", flipped its
-    own LidClosed property, and no suspend line appeared in the journal. WHAT IS STILL NOT MET, AND IT IS THE SAME
-    TWO AS ROUND 2. CRITERION 1 LACKS CAUSATION ONLY: the machine did not suspend, but THE L16 IS DOCKED (Docked=b
-    true, card1-DP-1 connected, re-measured 2026-09-13) and logind consults HandleLidSwitchDocked, default ignore,
+    instantiates the edited QuickSettings), run-nav-geometry-test.sh 4398 passed against the base's 4366 with the
+    SAME 16 pre-existing failures (all on the privacy page, none mentioning lid) - checked against a worktree at
+    bfb24ed rather than assumed, qmllint 0 errors on every new file. CRITERION 2 REMAINS ASSERTED LIVE FROM ROUND
+    2: a real WireGuard tunnel (real keys, real handshake, two netns with the veth created INSIDE one so neither
+    end ever exists in the root namespace) carried 47 of 47 pings with 0 percent loss across a REAL SW_LID close,
+    rx 500 to 6004 bytes DURING the closed window, peer still handshaken after, NM's nine saved connections
+    identical before and after; the lid event was real - uinput device tagged power-switch by udev, logind logged
+    "Watching system buttons on /dev/input/event21", "Lid closed." and "Lid opened.", flipped its own LidClosed
+    property, and no suspend line appeared in the journal. WHAT IS STILL NOT MET, AND IT IS THE SAME TWO AS ROUND
+    2. CRITERION 1 LACKS CAUSATION ONLY: the machine did not suspend, but THE L16 IS DOCKED (Docked=b true,
+    card1-DP-1 connected, re-measured 2026-09-13) and logind consults HandleLidSwitchDocked, default ignore,
     BEFORE any inhibitor - so the lid would have done nothing with or without the lock. The live suite reports
     COULD-NOT-RUN rather than banking a pass it did not earn, apex lid status says which of the two is keeping the
     machine awake with "could not be established" as a third answer that is not "yes", and the new page and tile
@@ -4179,35 +4181,51 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Printing/scanning/network-share maturity, on task/p2-005-device-maturity. 36232f5 tests/test-device-image.sh
-    41 passed, mutation-proved seven ways (40/1 x5, 39/2, 40/1; restored 41/0), adding gvfs-fuse/gphoto2/nfs and
-    giving the share stack a floor after hplip hung every enumeration. 3142bbd fixed scan enumeration hanging on
-    avahi's ABSENCE rather than its answer. fce0a99 `apex devices` as a verb covering cards, printers, scanners
-    and shares, 53 passed, cargo test -p apex 315 passed, mutation-proved seven ways (49/4, 52/1 x5, 51/2;
-    restored 53/0). 5a7d0c6 makes 'there is none' and 'I could not look' stop arriving as the same answer. All
-    suites re-run rather than quoted: test-device-image.sh 39/0, test-device-services-netns.sh 12/0,
-    test-apex-devices.sh 55/0, cargo test -p apex 315/0, tests/run-clippy.sh clean. Full write-up with both
-    machines' readings: ROADMAP/evidence/P2-005-007-device-maturity.md. REMAINDER is hardware nobody here has: a
-    print job to a printer, a share mounted from a server, a card in a slot. The L16's avahi is still masked and
-    unmasking it is Andre's call, so that machine cannot discover a printer or scanner at all. reconstructed
-    2026-09-07 from ROADMAP/state/agents/p2-005.md; the original text was destroyed by the set-status.py
-    --evidence defect (script fixed the same day). LANDED by integrate-4: apex-os roadmap/v2.2 = 95d068c, 8
-    commits from task/p2-005-device-maturity, ZERO conflicts. cargo test 1799/2 -> 1804/1, which reads as plus 5
-    tests and zero new failures once the baseline's two are named (a pty deadlock that had to be killed, and the
-    cgroup/origin artifact); only the second recurred. run-clippy.sh PASS on the landed tip, and this was the
-    first landing carrying new Rust. Suites after landing: test-apex-devices 55/0/0, test-device-image 39/0,
-    test-device-services-netns 12/0/0, and test-apex-firewall still 31/0/1. The netns suite is safe on this
-    machine for a checked reason rather than an assumed one: it uses unshare -rmn with no sudo, and nftables
+    Printing/scanning/network-share maturity. 36232f5 tests/test-device-image.sh 41 passed, mutation-proved seven
+    ways, adding gvfs-fuse/gvfs-gphoto2/gvfs-nfs and giving the share stack a floor after hplip hung every
+    enumeration. 3142bbd fixed scan enumeration hanging on avahi's ABSENCE rather than its answer. fce0a99 `apex
+    devices` as a verb covering cards, printers, scanners and shares. 5a7d0c6 makes 'there is none' and 'I could
+    not look' stop arriving as the same answer. LANDED by integrate-4 at 95d068c, ZERO conflicts; run-clippy PASS.
+    The netns suite is safe on this machine for a checked reason: it uses unshare -rmn with no sudo, and nftables
     tables are network-namespace scoped, so nft -f apex.nft inside it cannot reach the L16's ruleset. Note for
-    anyone reading the old report: c823974 added tests/test-device-firewall-netns.sh and a later commit on the
-    same branch renamed it test-device-services-netns.sh -- the file is not missing. STILL PARTIAL, and every
-    remainder is hardware nobody here has: a print job to a printer, a share mounted from a server, a card in a
-    slot, an EAP handshake with a real access point, a tunnel to a VPN endpoint, a paired headset, an attached
-    dock. Three cheap things are left: an apex devices entry in files/system/libexec/apex-desktop-menu; a rebuilt
-    image plus a re-run of apex devices on both machines, because several readers change answer once 36232f5's
-    packages land (gvfs-fuse, boltd, wg, the NM VPN plugins, dnsmasq as a real package, aptX, the connectivity
-    check); and the L16's masked avahi, whose unmasking is Andre's call, not an agent's -- until then that machine
-    cannot discover a printer or a scanner.
+    anyone reading the old report: c823974 added tests/test-device-firewall-netns.sh and a later commit renamed it
+    test-device-services-netns.sh -- the file is not missing. ROUND p2-c 2026-09-13, on task/p2-c-2 (pushed, tip
+    9bd99232, merged off roadmap/v2.2 e799422b). THE BUILT IMAGE EXISTS AND THE READINGS WERE RETAKEN:
+    ghcr.io/andrenijman/apex-os:base-d12d3450, whose /usr/libexec/apex-devices is byte-identical to the tip's, and
+    which carries every package P2-007 named -- gvfs-fuse, gvfs-nfs, gvfs-gphoto2, gvfs-mtp, gvfs-smb,
+    samba-client, cifs-utils, bolt 0.9.11, pipewire-codec-aptx, bluez 5.87, sane-airscan, wireguard-tools,
+    NetworkManager-openvpn/openconnect, dnsmasq (rpm-owned this time), libgphoto2, ipp-usb. Two tier facts that
+    cost time and are written down so nobody repeats them: Containerfile.base opens FROM ${CORE}, so the chain is
+    core->base and the base- image already contains core's packages (the core- image has the packages and no
+    apex-devices); and 36232f5 is NOT an ancestor of roadmap/v2.2 because integrate-4 cherry-picked, so `git
+    branch --contains` naming only the task branch is not evidence the work is unlanded. Before/after for every
+    reader the image moved is a table in ROADMAP/evidence/P2-005-007-device-maturity.md: VPN protocols none ->
+    `openconnect openvpn vpnc`; WireGuard `kernel yes, tools no` -> `yes (wg, wg-quick)`; boltd not installed ->
+    installed; headset codecs gained aptx; SMB/WebDAV/NFS/MTP/cameras (file manager) all yes; SMB and NFS as real
+    mounts yes; scan enumeration returns promptly; the connectivity check reads ENABLED because
+    21-apex-connectivity.conf now ships; dnsmasq no longer carries the came-from-an-extension caveat. STATED
+    RATHER THAN GLOSSED: a container has no D-Bus, systemd, NetworkManager, bluetoothd, udevd or seat, so links,
+    connectivity, paired devices, hotplug and `sharing a printer` move only from `not installed` to `installed and
+    not running`, and the container's `hotspot / tethering: nothing known is in the way` is because
+    firewall_enforcing is false with no systemd, NOT because the mechanism was checked. A booted reading needs
+    `apex update` + reboot on the L16, which is the boot path and off-limits to this unit. Not a gap: the gphoto2
+    CLI is genuinely absent while libgphoto2 and gvfs-gphoto2 are present, so `camera (PTP) tooling no` beside
+    `cameras (file manager) yes` is two true statements; the older evidence's "gphoto2" meant gvfs-gphoto2. DROP
+    FROM THE 'THREE CHEAP THINGS': the apex-desktop-menu entry cannot be done in this repo at all -- that file is
+    a right-click handler holding no entries, and labwc/menu.xml says by its own header that APEX Shell owns the
+    launcher, so the entry belongs in apex-shell's QML. SUITES THIS ROUND, every one re-run rather than quoted:
+    test-apex-devices 55 -> 66 passed/0, test-device-services-netns 12 -> 29 passed/0/0, test-apex-firewall 32 ->
+    42 passed/0/0, test-device-image 39/0 unchanged. No Rust changed and that is proven by construction: `git diff
+    --name-only roadmap/v2.2...HEAD -- apexd/` is EMPTY, so cargo test -p apex 315 and run-clippy stand from the
+    landing. All three gates rc=0: check-containerfile-assertions 176 -> 177 checked/0 failed,
+    check-shellcheck-coverage 150 -> 160 discovered/0 newly failing, check-suites-run-in-ci 72 suites/0 unrun and
+    undeclared. tests/suites-not-in-ci.txt and the pr-validation.yml steps were NOT touched -- followups-4 owns
+    those, and no suite was renamed. THIRTY-ONE MUTATIONS across four files, each restored byte-identical with
+    plain cp and verified by sha256. STILL PARTIAL. The remainder is hardware nobody here has -- a print job to a
+    printer, a share mounted from a server, a card in a slot -- plus the L16's masked avahi, whose unmasking is
+    Andre's call and without which that machine can discover neither a printer nor a scanner. The 'rebuilt image
+    and a re-run of apex devices' item is now DONE for the container half and named precisely for the half that
+    needs metal.
 - id: P2-006
   title: Networking maturity
   priority: P2
@@ -4220,33 +4238,74 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Networking maturity, on task/p2-005-device-maturity. c823974 and f9ab0e7 add
-    tests/test-device-services-netns.sh, 12 passed, mutation-proved four ways (11/1, 9/3, 9/3, 11/1; restored
-    12/0) -- the firewall rules had been read but never sent a packet through, and a shared printer was
-    unreachable with nothing saying so. 1adbdb2 fixes NetworkManager answering `full` for a link nobody can route
-    over. THE FINDING THAT MATTERS, measured with positive controls and owed to P1-044: a hotspot CANNOT work
-    under the shipped firewall policy, three independent ways -- forward is policy drop, the DHCP rule matches
-    replies rather than a client's DISCOVER, and port 53 is shut. The exception mechanism itself is sound
-    (631/445/2049 reopen immediately). Also open: two lines in `apex devices network` state the current policy as
-    fact and go stale the day it changes. REMAINDER: an EAP handshake with a real access point and a tunnel to a
-    real VPN endpoint. reconstructed 2026-09-07 from ROADMAP/state/agents/p2-005.md; the original text was
-    destroyed by the set-status.py --evidence defect (script fixed the same day). LANDED by integrate-4: apex-os
-    roadmap/v2.2 = 95d068c, 8 commits from task/p2-005-device-maturity, ZERO conflicts. cargo test 1799/2 ->
-    1804/1, which reads as plus 5 tests and zero new failures once the baseline's two are named (a pty deadlock
-    that had to be killed, and the cgroup/origin artifact); only the second recurred. run-clippy.sh PASS on the
-    landed tip, and this was the first landing carrying new Rust. Suites after landing: test-apex-devices 55/0/0,
-    test-device-image 39/0, test-device-services-netns 12/0/0, and test-apex-firewall still 31/0/1. The netns
-    suite is safe on this machine for a checked reason rather than an assumed one: it uses unshare -rmn with no
-    sudo, and nftables tables are network-namespace scoped, so nft -f apex.nft inside it cannot reach the L16's
-    ruleset. Note for anyone reading the old report: c823974 added tests/test-device-firewall-netns.sh and a later
-    commit on the same branch renamed it test-device-services-netns.sh -- the file is not missing. STILL PARTIAL,
-    and every remainder is hardware nobody here has: a print job to a printer, a share mounted from a server, a
-    card in a slot, an EAP handshake with a real access point, a tunnel to a VPN endpoint, a paired headset, an
-    attached dock. Three cheap things are left: an apex devices entry in files/system/libexec/apex-desktop-menu; a
-    rebuilt image plus a re-run of apex devices on both machines, because several readers change answer once
-    36232f5's packages land (gvfs-fuse, boltd, wg, the NM VPN plugins, dnsmasq as a real package, aptX, the
-    connectivity check); and the L16's masked avahi, whose unmasking is Andre's call, not an agent's -- until then
-    that machine cannot discover a printer or a scanner.
+    Networking maturity. c823974 and f9ab0e7 add tests/test-device-services-netns.sh -- the firewall rules had
+    been read but never sent a packet through. 1adbdb2 fixes NetworkManager answering `full` for a link nobody can
+    route over. THE FINDING OWED TO P1-044, measured with positive controls: a hotspot could not work under the
+    shipped policy, three ways -- forward was policy drop, the DHCP rule matched replies rather than a client's
+    DISCOVER, and port 53 was shut. LANDED by integrate-4 at 95d068c. ROUND p2-c 2026-09-13, on task/p2-c-2
+    (pushed, tip 9bd99232, merged off roadmap/v2.2 e799422b). THE BUILT IMAGE EXISTS AND THE READINGS WERE
+    RETAKEN: ghcr.io/andrenijman/apex-os:base-d12d3450, whose /usr/libexec/apex-devices is byte-identical to the
+    tip's, and which carries every package P2-007 named -- gvfs-fuse, gvfs-nfs, gvfs-gphoto2, gvfs-mtp, gvfs-smb,
+    samba-client, cifs-utils, bolt 0.9.11, pipewire-codec-aptx, bluez 5.87, sane-airscan, wireguard-tools,
+    NetworkManager-openvpn/openconnect, dnsmasq (rpm-owned this time), libgphoto2, ipp-usb. Two tier facts that
+    cost time and are written down so nobody repeats them: Containerfile.base opens FROM ${CORE}, so the chain is
+    core->base and the base- image already contains core's packages (the core- image has the packages and no
+    apex-devices); and 36232f5 is NOT an ancestor of roadmap/v2.2 because integrate-4 cherry-picked, so `git
+    branch --contains` naming only the task branch is not evidence the work is unlanded. Before/after for every
+    reader the image moved is a table in ROADMAP/evidence/P2-005-007-device-maturity.md: VPN protocols none ->
+    `openconnect openvpn vpnc`; WireGuard `kernel yes, tools no` -> `yes (wg, wg-quick)`; boltd not installed ->
+    installed; headset codecs gained aptx; SMB/WebDAV/NFS/MTP/cameras (file manager) all yes; SMB and NFS as real
+    mounts yes; scan enumeration returns promptly; the connectivity check reads ENABLED because
+    21-apex-connectivity.conf now ships; dnsmasq no longer carries the came-from-an-extension caveat. STATED
+    RATHER THAN GLOSSED: a container has no D-Bus, systemd, NetworkManager, bluetoothd, udevd or seat, so links,
+    connectivity, paired devices, hotplug and `sharing a printer` move only from `not installed` to `installed and
+    not running`, and the container's `hotspot / tethering: nothing known is in the way` is because
+    firewall_enforcing is false with no systemd, NOT because the mechanism was checked. A booted reading needs
+    `apex update` + reboot on the L16, which is the boot path and off-limits to this unit. Not a gap: the gphoto2
+    CLI is genuinely absent while libgphoto2 and gvfs-gphoto2 are present, so `camera (PTP) tooling no` beside
+    `cameras (file manager) yes` is two true statements; the older evidence's "gphoto2" meant gvfs-gphoto2. DROP
+    FROM THE 'THREE CHEAP THINGS': the apex-desktop-menu entry cannot be done in this repo at all -- that file is
+    a right-click handler holding no entries, and labwc/menu.xml says by its own header that APEX Shell owns the
+    launcher, so the entry belongs in apex-shell's QML. SUITES THIS ROUND, every one re-run rather than quoted:
+    test-apex-devices 55 -> 66 passed/0, test-device-services-netns 12 -> 29 passed/0/0, test-apex-firewall 32 ->
+    42 passed/0/0, test-device-image 39/0 unchanged. No Rust changed and that is proven by construction: `git diff
+    --name-only roadmap/v2.2...HEAD -- apexd/` is EMPTY, so cargo test -p apex 315 and run-clippy stand from the
+    landing. All three gates rc=0: check-containerfile-assertions 176 -> 177 checked/0 failed,
+    check-shellcheck-coverage 150 -> 160 discovered/0 newly failing, check-suites-run-in-ci 72 suites/0 unrun and
+    undeclared. tests/suites-not-in-ci.txt and the pr-validation.yml steps were NOT touched -- followups-4 owns
+    those, and no suite was renamed. THIRTY-ONE MUTATIONS across four files, each restored byte-identical with
+    plain cp and verified by sha256. THE HOTSPOT FINDING IS NOW CLOSED, MECHANISM AND MEASUREMENT BOTH. c7a28f2c
+    (the predecessor's) adds `set hotspot_ifaces { type ifname }` empty in the shipped policy, `iifname
+    @hotspot_ifaces udp dport { 53, 67 } accept` plus the tcp half of DNS, `apex firewall hotspot add|remove|list`
+    with the interface name validated before it becomes an nft element, a NetworkManager dispatcher that opens a
+    link only after nmcli confirms ipv4.method=shared, and a Containerfile FATAL refusing any line that accepts 53
+    or 67 without naming a link -- scoped to the link rather than the port, because a `dns` catalogue entry would
+    open a resolver on the cafe Wi-Fi too. c8297aa3 is the measurement: test-device-services-netns.sh 12 -> 29,
+    seventeen new assertions that are each a datagram or a SYN. A second veth apexhost2 on 10.92.0.0/24 exists for
+    no other reason than to be the link the exception is NOT scoped to, so 'the scope holds' is traffic rather
+    than a claim about a rule's text; a third namespace behind this one makes 'does the policy route what a client
+    sends' answerable with a packet delivered elsewhere. The DHCP probe is what a client with no address really
+    sends -- SO_BROADCAST, sport 68, dport 67 -- as a directed broadcast from an addressed source rather than
+    255.255.255.255 from 0.0.0.0, because the namespace now has two links and a limited broadcast would need
+    SO_BINDTODEVICE; the rule matches on arrival interface and ports, identical either way. The hotspot cases call
+    the shipped apex-firewall, not `nft add element`, because the tool is what the dispatcher invokes. The forward
+    case carries its own control: a policy-drop forward chain is added (SILENT), deleted, and re-probed (ARRIVED),
+    so 'the shipped policy routes a client's traffic' is not the only answer the probe can give -- P1-044 removed
+    the forward chain deliberately, and that is now measured instead of inferred from a comment. Eleven mutations,
+    all files restored byte-identical. THE TWO STALE LINES IN `apex devices network` ARE GONE: they stated the
+    firewall's policy as fact -- 'the firewall drops forwarded traffic' and 'the DHCP rule matches replies' -- and
+    both were true when measured and false now, so the reader told a user with a working hotspot two reasons it
+    could not work. It reads the mechanism instead (dispatcher present, hotspot_ifaces set present, systemd
+    askable), never the live set, because nft list needs root and this command must not ask for it. A DEFECT THE
+    MEASUREMENT FOUND: nft prints a set's elements quoted and wraps them one per line as soon as there is more
+    than one, so the old `hotspot list` parser matched neither line and the tool answered 'not sharing this
+    machine's connection on any link' while two links were open -- a firewall tool giving a shut link's answer for
+    an open one. AND A DEFECT FOUND BY RUNNING THE IMAGE: `connectivity` printed nmcli's 'Could not create
+    NMClient object' error as the state of the network and then explained that NetworkManager 'answers <that
+    error> for any connected link'; `links` ten lines above already refused to do that, and connectivity had
+    thrown the rc away. STILL PARTIAL, and the remainder is now exactly two things that need metal: an EAP
+    handshake with a real access point, and a tunnel to a real VPN endpoint -- plus turning this laptop into a
+    hotspot and joining a phone to it, which needs the image on the metal first.
 - id: P2-007
   title: Bluetooth/dock/peripheral maturity
   priority: P2
@@ -4259,31 +4318,69 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Bluetooth/dock/peripheral maturity, on task/p2-005-device-maturity, delivered through the same `apex devices`
-    verb and suites as P2-005/P2-006 (test-apex-devices.sh 55/0 covering six areas, cargo test -p apex 315/0,
-    run-clippy.sh clean, evidence at ROADMAP/evidence/P2-005-007-device-maturity.md). 5d5441b is the message pass
-    -- what a user reads, in the voice the rest of the CLI uses. Several readers change their answer once
-    36232f5's packages land in a built image: gvfs-fuse, boltd, wg, the VPN plugins, dnsmasq as a real package,
-    aptX and the connectivity check, so the readings must be retaken after the next image build. REMAINDER is
-    hardware nobody here has: a paired headset and an attached dock. reconstructed 2026-09-07 from
-    ROADMAP/state/agents/p2-005.md; the original text was destroyed by the set-status.py --evidence defect (script
-    fixed the same day). LANDED by integrate-4: apex-os roadmap/v2.2 = 95d068c, 8 commits from
-    task/p2-005-device-maturity, ZERO conflicts. cargo test 1799/2 -> 1804/1, which reads as plus 5 tests and zero
-    new failures once the baseline's two are named (a pty deadlock that had to be killed, and the cgroup/origin
-    artifact); only the second recurred. run-clippy.sh PASS on the landed tip, and this was the first landing
-    carrying new Rust. Suites after landing: test-apex-devices 55/0/0, test-device-image 39/0,
-    test-device-services-netns 12/0/0, and test-apex-firewall still 31/0/1. The netns suite is safe on this
-    machine for a checked reason rather than an assumed one: it uses unshare -rmn with no sudo, and nftables
-    tables are network-namespace scoped, so nft -f apex.nft inside it cannot reach the L16's ruleset. Note for
-    anyone reading the old report: c823974 added tests/test-device-firewall-netns.sh and a later commit on the
-    same branch renamed it test-device-services-netns.sh -- the file is not missing. STILL PARTIAL, and every
-    remainder is hardware nobody here has: a print job to a printer, a share mounted from a server, a card in a
-    slot, an EAP handshake with a real access point, a tunnel to a VPN endpoint, a paired headset, an attached
-    dock. Three cheap things are left: an apex devices entry in files/system/libexec/apex-desktop-menu; a rebuilt
-    image plus a re-run of apex devices on both machines, because several readers change answer once 36232f5's
-    packages land (gvfs-fuse, boltd, wg, the NM VPN plugins, dnsmasq as a real package, aptX, the connectivity
-    check); and the L16's masked avahi, whose unmasking is Andre's call, not an agent's -- until then that machine
-    cannot discover a printer or a scanner.
+    Bluetooth/dock/peripheral maturity, delivered through the same `apex devices` verb and suites as
+    P2-005/P2-006. 5d5441b is the message pass -- what a user reads, in the voice the rest of the CLI uses. LANDED
+    by integrate-4 at 95d068c; run-clippy PASS. Evidence: ROADMAP/evidence/P2-005-007-device-maturity.md. ROUND
+    p2-c 2026-09-13, on task/p2-c-2 (pushed, tip 9bd99232, merged off roadmap/v2.2 e799422b). THE BUILT IMAGE
+    EXISTS AND THE READINGS WERE RETAKEN: ghcr.io/andrenijman/apex-os:base-d12d3450, whose
+    /usr/libexec/apex-devices is byte-identical to the tip's, and which carries every package P2-007 named --
+    gvfs-fuse, gvfs-nfs, gvfs-gphoto2, gvfs-mtp, gvfs-smb, samba-client, cifs-utils, bolt 0.9.11,
+    pipewire-codec-aptx, bluez 5.87, sane-airscan, wireguard-tools, NetworkManager-openvpn/openconnect, dnsmasq
+    (rpm-owned this time), libgphoto2, ipp-usb. Two tier facts that cost time and are written down so nobody
+    repeats them: Containerfile.base opens FROM ${CORE}, so the chain is core->base and the base- image already
+    contains core's packages (the core- image has the packages and no apex-devices); and 36232f5 is NOT an
+    ancestor of roadmap/v2.2 because integrate-4 cherry-picked, so `git branch --contains` naming only the task
+    branch is not evidence the work is unlanded. Before/after for every reader the image moved is a table in
+    ROADMAP/evidence/P2-005-007-device-maturity.md: VPN protocols none -> `openconnect openvpn vpnc`; WireGuard
+    `kernel yes, tools no` -> `yes (wg, wg-quick)`; boltd not installed -> installed; headset codecs gained aptx;
+    SMB/WebDAV/NFS/MTP/cameras (file manager) all yes; SMB and NFS as real mounts yes; scan enumeration returns
+    promptly; the connectivity check reads ENABLED because 21-apex-connectivity.conf now ships; dnsmasq no longer
+    carries the came-from-an-extension caveat. STATED RATHER THAN GLOSSED: a container has no D-Bus, systemd,
+    NetworkManager, bluetoothd, udevd or seat, so links, connectivity, paired devices, hotplug and `sharing a
+    printer` move only from `not installed` to `installed and not running`, and the container's `hotspot /
+    tethering: nothing known is in the way` is because firewall_enforcing is false with no systemd, NOT because
+    the mechanism was checked. A booted reading needs `apex update` + reboot on the L16, which is the boot path
+    and off-limits to this unit. Not a gap: the gphoto2 CLI is genuinely absent while libgphoto2 and gvfs-gphoto2
+    are present, so `camera (PTP) tooling no` beside `cameras (file manager) yes` is two true statements; the
+    older evidence's "gphoto2" meant gvfs-gphoto2. DROP FROM THE 'THREE CHEAP THINGS': the apex-desktop-menu entry
+    cannot be done in this repo at all -- that file is a right-click handler holding no entries, and
+    labwc/menu.xml says by its own header that APEX Shell owns the launcher, so the entry belongs in apex-shell's
+    QML. SUITES THIS ROUND, every one re-run rather than quoted: test-apex-devices 55 -> 66 passed/0,
+    test-device-services-netns 12 -> 29 passed/0/0, test-apex-firewall 32 -> 42 passed/0/0, test-device-image 39/0
+    unchanged. No Rust changed and that is proven by construction: `git diff --name-only roadmap/v2.2...HEAD --
+    apexd/` is EMPTY, so cargo test -p apex 315 and run-clippy stand from the landing. All three gates rc=0:
+    check-containerfile-assertions 176 -> 177 checked/0 failed, check-shellcheck-coverage 150 -> 160 discovered/0
+    newly failing, check-suites-run-in-ci 72 suites/0 unrun and undeclared. tests/suites-not-in-ci.txt and the
+    pr-validation.yml steps were NOT touched -- followups-4 owns those, and no suite was renamed. THIRTY-ONE
+    MUTATIONS across four files, each restored byte-identical with plain cp and verified by sha256. THE READERS
+    P2-007 SAID WOULD CHANGE HAVE BEEN RETAKEN AND THEY DID CHANGE -- that sentence was the whole reason this
+    round was dispatched, and it is now answered with readings rather than a prediction: boltd not installed ->
+    `installed (udev starts it when a device appears)`; headset codecs `aac faststream g722 lc3 ldac opus-g opus
+    sbc` with the note 'no aptX: a Qualcomm headset will fall back to SBC' -> `aac aptx faststream g722 lc3 ldac
+    opus-g opus sbc`; gvfs-fuse, gvfs-nfs, gvfs-gphoto2 and samba-client all present so every file-manager share
+    reader answers yes and both real-mount readers answer yes; wg and the VPN plugins present; dnsmasq rpm-owned.
+    ALSO THIS ROUND, and it belongs to P2-007 because the dock and Bluetooth readers are the ones a container can
+    least be trusted about: the limits of a container reading are written down rather than glossed. `hotplug
+    (udev)` says systemd-udevd is NOT running and says every reader below it would report an absence and be right
+    to; `paired devices` says bluetoothd is not running rather than reporting an empty list, which is the exact
+    defect this file exists to avoid; the Thunderbolt readers DO answer in a container because they read sysfs --
+    two host routers authorised, two domains at security=user with iommu=1, two USB-C ports with something
+    attached. A NEW SUITE SECTION THAT HAD NO COVERAGE AT ALL: 9bd99232 tests the NetworkManager dispatcher, whose
+    security property was asserted only in its own header -- `up` must open a link ONLY after nmcli confirms
+    ipv4.method=shared (every ordinary Wi-Fi connection coming up runs this script, so getting it wrong opens DHCP
+    and a resolver on the cafe network through the door that fills the set), and `down` must close WITHOUT asking
+    anything (the profile may already be gone, and 'I could not check' must not be why a link stays open). Ten
+    cases driving the real script against a logging shim, mutation-proved seven ways; D3 -- removing the 5s cap on
+    the nmcli query -- does not merely fail, it hangs for a minute, which is what a dispatcher script does to
+    every later script on NetworkManager's queue. AND A GATE HOLE CLOSED, 9fd2c4b7: check-shellcheck-coverage.sh
+    used the exec bit as a discovery predicate, but a script installed with `COPY --chmod=0755` needs no exec bit
+    in git, so ten shipped shell scripts with shebangs were linted by nobody -- among them apex-session-select and
+    apex-shell-autostart, both on the login path, and the hotspot dispatcher itself. All ten were already clean,
+    so it cost nothing this time, which is the point. Discovery is the shebang alone now (150 -> 160 scripts); the
+    negative control is a deliberately dirty mode-644 probe that makes the new gate exit 1 naming it while the old
+    predicate, with that same file present, reports every discovered script clean. STILL PARTIAL. The remainder is
+    a paired headset and an attached dock -- hardware nobody here has -- and a booted reading on the L16 for
+    everything behind D-Bus, which is the boot path.
 - id: P2-008
   title: First-party virtualization UX
   priority: P2

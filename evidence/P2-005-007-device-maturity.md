@@ -234,3 +234,98 @@ Thunderbolt, USB4 and docks
 
 timeout 150 bash /tmp/apex-devices-p2005 all  0.12s user 0.12s system 3% cpu 6.747 total
 ```
+
+---
+
+## 2026-09-13 — the readings retaken in a built image (round: p2-c)
+
+P2-007's evidence said several readers "change their answer once 36232f5's
+packages land in a built image". They did. This is the retake.
+
+**The image.** `ghcr.io/andrenijman/apex-os:base-d12d34502f65c4e8704e82e1285ce103a415e4ab`,
+14.8 GB, pulled. `d12d3450` is an ancestor of `roadmap/v2.2`, and `95d068c` —
+integrate-4's landing of the device work — is an ancestor of `d12d3450`, so the
+packages are in it. Checked rather than assumed: the image's
+`/usr/libexec/apex-devices` is byte-identical to the tip's
+(`ba5b5b4e002beb4db4fb1332fcc5b557fef644365d4170af5aa4fdb474a35e90`).
+
+Two things about the tiers, because both cost time here:
+
+- **The chain is core → base**, not base → core. `Containerfile.base` opens
+  `FROM ${CORE}`, so the `base-` image already contains everything the `core-`
+  one has. Pulling `core-d12d3450` to look for the device packages finds them
+  and finds no `apex-devices`: the APEX tooling is added in the base layer.
+- **`36232f5` is not an ancestor of `roadmap/v2.2`.** Integrate-4 landed that
+  branch by cherry-pick, so the content is on the tip under different hashes.
+  `git branch --contains 36232f5` naming only `task/p2-005-device-maturity` is
+  not evidence the work is unlanded; the Containerfiles are.
+
+**Packages, read from the image's own rpmdb** (`rpm -q`, all present):
+gvfs 1.58.4, gvfs-fuse, gvfs-mtp, gvfs-smb, gvfs-nfs, gvfs-gphoto2,
+samba-client 4.23.12, cifs-utils 7.7, bluez 5.87, bluez-obexd, blueman 2.4.6,
+pipewire-codec-aptx 1.4.9, bolt 0.9.11, sane-backends 1.4.0, sane-airscan
+0.99.36, simple-scan 49.1, hplip 3.26.4, cups 2.4.19, wireguard-tools
+1.0.20260223, NetworkManager-openvpn 1.12.5, NetworkManager-openconnect 1.2.10,
+dnsmasq 2.92, libgphoto2 2.5.33, ipp-usb 0.9.34. 1742 packages in total.
+
+`NetworkManager-wireguard` is not a package and never was: WireGuard is built
+into NetworkManager, and `wireguard-tools` is what the reader wants.
+
+**Readers that changed.** Left is the reading in the evidence above, taken on
+the L16's older image; right is `apex devices all` inside `base-d12d3450`:
+
+| reader | before | after |
+|---|---|---|
+| SMB / WebDAV / NFS / MTP / cameras (file manager) | missing pieces | `yes` for all five |
+| SMB as a real mount | no | `yes (mount.cifs)` |
+| NFS as a real mount | no | `yes (mount.nfs)` |
+| VPN protocols | `none` | `openconnect openvpn vpnc` |
+| WireGuard | `kernel yes, tools no` | `yes (wg, wg-quick)` |
+| headset codecs | `aac faststream g722 lc3 ldac opus-g opus sbc` — "no aptX" | `aac aptx faststream …` |
+| boltd | not installed | `installed (udev starts it when a device appears)` |
+| scanners | hplip's backend hung the enumeration | `none found`, returned promptly, names eSCL/WSD |
+| connectivity check enabled | `unknown` — nothing set a uri | `yes`, because `21-apex-connectivity.conf` ships |
+| dnsmasq | present, owned by no package (came from an extension) | rpm-owned; the impermanence caveat does not fire |
+
+**What a container cannot move, stated rather than glossed.** There is no D-Bus,
+no systemd, no NetworkManager, no bluetoothd, no udevd and no seat in there. So
+these readers move from "not installed" to "installed and not running", which is
+not the same as working:
+
+- `links` and `connectivity`: `could not reach NetworkManager`.
+- `paired devices`: `unavailable — bluetoothd is not running`.
+- `hotplug (udev)`: `systemd-udevd is NOT running`, and the reader says every
+  reader below it would report an absence and be right to.
+- `hotspot / tethering`: `nothing known is in the way` — **because
+  `firewall_enforcing` is false with no systemd, not because the mechanism was
+  checked.** Do not read that line as a verdict on the hotspot work.
+- `sharing a printer`: `could not ask cupsd`.
+
+A reading that moves these needs `apex update` and a reboot on the L16. That is
+the boot path, which this unit is not allowed near.
+
+**One reader is right and reads as a gap.** `camera (PTP) tooling  no — gphoto2
+is absent` alongside `cameras (file manager) yes`. Both are true: `libgphoto2`
+and `gvfs-gphoto2` are installed, so a camera appears in a file manager, and the
+`gphoto2` CLI is a separate package that is not. The earlier evidence's
+"gvfs-fuse/gphoto2/nfs" meant `gvfs-gphoto2`. Nothing to fix; worth not
+re-finding.
+
+**Two defects the built image exposed**, both fixed on `task/p2-c-2`:
+
+1. `apex devices network` stated the firewall's policy as fact in two places —
+   that it dropped forwarded traffic, and that its DHCP rule matched replies.
+   Both were true when P2-006 measured them and both are false now, so the
+   reader reported a machine where a hotspot works as two reasons it cannot.
+2. `connectivity` printed nmcli's `Could not create NMClient object` error as
+   the state of the network, and then explained that NetworkManager "answers
+   '<that error>' for any connected link". `links`, ten lines above, already
+   refused to do this; connectivity threw the rc away.
+
+**The live L16 reading with the new reader** (read-only, nothing changed):
+`apex-firewall.service` is `inactive` on the machine's current image, so the
+hotspot reader correctly adds no blocker and the only note is the dnsmasq-from-
+an-extension caveat. The L16 therefore cannot act as a positive control for the
+"firewall enforcing, dispatcher missing" branch; the fixture in
+`tests/test-apex-devices.sh` covers it. The same run reconfirms both 802.1X
+profiles validate nothing.

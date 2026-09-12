@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-13T04:05+08:00",
+  "updated": "2026-09-13T05:00+08:00",
   "_round": "Round 23. TODO IS ZERO: 90 done / 36 partial / 0 todo / 2 blocked of 128 \u2014 every roadmap item has been started, and what remains is finishing partials plus the two LUKS/TPM items that are genuinely blocked. Six agents dispatched fresh after the 3am limit killed five of round 22's.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 c3bfbb0b -> e799422b. Agent-merged: p1-061, p2-b, p1-053c, p2-a. Orchestrator-merged: followups-4 (two suites wired), p1-053c handoff. Plus the skopeo retry, the workflow selector fix, the suite-gate comment fix and the SBOM budget.",
@@ -71,12 +71,12 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p1-053c",
       "branch": "task/p1-053c-android-handoff",
-      "agent_id": "a8b949965b291efff",
+      "agent_id": "a74ba1fdc52c9457e",
       "dispatched": "2026-09-13T03:45+08:00",
       "session": "round 23 orchestrator",
       "queue_id": "p1-053c",
       "card": "ROADMAP/state/agents/p1-053c.md",
-      "at_dispatch": "Predecessor's two commits are landed. Re-given the three measured protocol facts and the requests.json guard, because this unit has been wrong about the vocabulary three times. Told P1-060 almost certainly cannot close and not to record done to tidy the board."
+      "at_dispatch": "Round 3. Round 2's four commits landed as 375ca0dd. ONE criterion is closable: P1-059 C3 clipboard RECEIVE has no verb \u2014 send is done, and round 2 put 'read the computer's clipboard' into HelpParityTest's forbidden-claims list so the absence is asserted by a test. Given round 2's method as the lesson: round 1 refused C2 with arithmetic that was entirely correct about a Frame::Control and irrelevant to Data frames, which had been chunking every PTY byte all along. Told P1-060 will not close and why."
     },
     {
       "slug": "p2-d",
@@ -159,7 +159,9 @@
     "an agent truncated a 1121-line card to 16 lines": "p2-b's splice anchored on its final section's heading TEXT with str.index, and the same text appears inline in the round-19 prose near the top, so it cut from the wrong place. ROADMAP/ is not a git repo and no backup existed. The card was rebuilt from the session transcript \u2014 faithful in substance, NOT byte-for-byte for the pre-round-20 sections, and it says so at the top. Lesson for every agent: anchor a splice on something unique, and ROADMAP/ has no undo but the wip snapshot.",
     "the containerfile checker could not see through a directory COPY without a trailing slash": "Third resolver bug in that gate, found by p2-f: `COPY files/desktop/apex-greet /usr/share/apex-greet` has no trailing slash, so a grep against a file INSIDE it did not resolve and every boot-critical greeter assertion sat in the could-not-check bucket. Fixed by the unit that found it and proven by a mutation that passed silently before and fails now: 171 -> 181 checked. Running total for this gate: 106 -> 145 (multi-line COPY) -> 170 (merges) -> 181 (directory COPY). Every one of those increments was assertions that existed and were never being checked.",
     "a regression shipped and was caught in the same round: undefined !== \"\"": "p2-f's greeter status line tested a notice against `\"\"`. A ctx without the property yields `undefined`, and `undefined !== \"\"` is TRUE, so the line rendered the string 'undefined' AND swallowed the Caps Lock warning and the screen-reader announcement \u2014 on the login screen. test-apex-greet-a11y.sh went 5/0 -> 4/1 and was right. Both bindings test for truth now. Note the division of labour it recorded: with the fixture's ctx made faithful, reverting the spelling no longer reddens the a11y fixture \u2014 only the watchdog suite catches it.",
-    "nmtui is named by no APEX dnf list": "The safe-graphics menu offers nmtui, which is inherited from fedora-bootc:43 and required by nothing \u2014 not even a weak dep of NetworkManager. A base-image change upstream would remove it and the recovery menu would offer a binary that is not there. Now asserted at build time (thunar too). If it fires, the fix is NetworkManager-tui in core."
+    "nmtui is named by no APEX dnf list": "The safe-graphics menu offers nmtui, which is inherited from fedora-bootc:43 and required by nothing \u2014 not even a weak dep of NetworkManager. A base-image change upstream would remove it and the recovery menu would offer a binary that is not there. Now asserted at build time (thunar too). If it fires, the fix is NetworkManager-tui in core.",
+    "`cargo test -p apex-remoted` does not rebuild apex-agentd": "Three mutations of inject.rs came back GREEN against a binary compiled before they existed \u2014 a mutation that cannot fail, in the harness rather than the Containerfile this time. Fixed by p1-053c: refuse_if_stale now compares each sibling binary against the crates it is built from. An existence check was necessary and not sufficient. This is the THIRD stale-artefact defect in two days, after check-doc-verbs.sh reading a target/debug/apex that cargo test --bins --no-run never refreshes. Whenever a test drives a BINARY rather than a library, ask what rebuilt it.",
+    "round 1 refused a criterion with arithmetic about the wrong type": "P1-059 C2 was refused as impossible: MAX_PAYLOAD 65514, base64 4/3, ~48 KB against a 100 KB-2 MB screenshot. Every number correct; all of it measured a Frame::Control. Open/Data/Close IS begin/chunk/end \u2014 wire.rs:66 says so \u2014 and Frame::data_frames had been chunking every PTY byte the phone ever received. One daemon verb closed it. The lesson for every unit: before recording that something cannot be done, check which TYPE your measurement was about. A false 'cannot be done from here' is how work does not get done, and this is the second instance in two days (p2-f claimed GreetContext.qml was in apex-shell)."
   },
   "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt \u2014 the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
   "_orchestrator": {
