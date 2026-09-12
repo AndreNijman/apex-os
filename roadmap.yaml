@@ -3139,7 +3139,7 @@ tasks:
 - id: P1-063
   title: Lid-closed continuous operation
   priority: P1
-  status: todo
+  status: partial
   area: power
   depends_on:
   - P0-015
@@ -3156,6 +3156,47 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    Lid-closed continuous operation. Round 2 on apex-os task/p1-063-lid-2 (5 commits, pushed; workspace 3007
+    passed 0 failed, clippy --locked --workspace --all-targets -D warnings clean). ROUND 1 SHIPPED A POLICY AND A
+    DRIVER NOTHING EVER RAN: no unit, no Containerfile stanza, so on a built image every criterion was unmet
+    however green the suites were. apex-lid.service now exists and is enabled, with four load-bearing properties
+    asserted at BUILD time - Restart=on-failure (a desktop exits 0 and must not restart for ever), KillMode left
+    at default (process would leave the systemd-inhibit child alive with its keeper gone), ProtectSystem NOT
+    strict and ProtectKernelTunables NOT set (either remounts /sys read-only and silently breaks every power-down
+    write), and the image refused a static HandleLidSwitch= anywhere. CRITERION 2 IS THE ONE THAT WAS BROKEN AND
+    IS NOW ASSERTED. read_vpn has no memory, so a tunnel that went away answered None - identical to never having
+    had one - and vpn_held scored the timeline as an unordered set: Up Up None None printed 'the VPN held'.
+    VpnState::Down was unreachable from the driver, so the criterion COULD NOT FAIL. Fixed in two places (note_vpn
+    in the driver carries the name forward; vpn_held reads the timeline in order) and mutation-proved both ways,
+    including that a tunnel brought up midway is not retroactively a drop. Third defect in the same function:
+    read_vpn returned the moment nmcli was unavailable, so sing-box - APEX's OWN shipped VPN, a tun device
+    NetworkManager never lists - was never asked about. ASSERTED LIVE ON THE L16: a real WireGuard tunnel (real
+    keys, real handshake, two netns with the veth created INSIDE one so neither end ever exists in the root
+    namespace and NetworkManager cannot auto-create a saved profile) carried 47 of 47 pings with 0 percent loss
+    across a REAL SW_LID close, rx counters 500 to 6004 bytes DURING the closed window, peer still handshaken
+    after; NM's nine saved connections identical before and after. The lid event was real: uinput device tagged
+    power-switch by udev, logind said 'Watching system buttons on /dev/input/event21', logged 'Lid closed.' and
+    'Lid opened.', flipped its own LidClosed property, and no suspend or sleep line appeared in the journal. TWO
+    MORE DEFECTS FOUND BY THE NEW SHELL SUITE (tests/test-apex-lid.sh, 54 assertions, which the driver's own
+    header already claimed existed): the keyboard backlight was NEVER ZEROED - kbd_backlights returned an already-
+    re-rooted path that apply_sysfs re-rooted again, and write_abs created the whole tree and reported ok - and a
+    guard firing on the FIRST poll left no record at all, because GuardSuspend opens no keep-working period, so
+    the owner reopened to be shown the PREVIOUS close with ended_by null. Both mutation-proved, both files
+    restored byte-identical. FOUND AND SURFACED: the L16 is DOCKED (Docked=b true, card1-DP-1 connected) and
+    logind consults HandleLidSwitchDocked (default ignore) BEFORE any inhibitor, so apex lid status saying 'keep-
+    working' there credits APEX with an outcome logind produced on its own; status now names which of the two it
+    is, with 'could not be established' as a third answer that is not 'yes'. WHAT IS NOT MET. Criterion 1 is
+    asserted except for CAUSATION: the machine did not suspend, but because it is docked the inhibitor cannot be
+    shown to be why - the live suite reports that as COULD-NOT-RUN rather than banking it, and re-running with the
+    external display unplugged closes it. Criterion 3's 'draws measurably less' COULD NOT BE MEASURED: it means
+    applying the real power-down to Andre's live desktop - blanking his panel, blocking his bluetooth, stopping
+    his timers - which the standing rules forbid; the power-down itself and its exact restore are asserted over a
+    fixture, and the two ways it could kill a VPN with the machine awake (block the radio, stop a network-carrying
+    unit) are closed by name against the SHIPPED defaults. Criterion 4 is asserted as 'the driver does nothing, so
+    today's behaviour stands' and not by observing a real suspend, which is forbidden here. Criteria 5 and 6 are
+    met. The apex-shell tile is still unwritten; status --json now carries everything it needs including the
+    logind object, and apex lid pin needs no privilege by design.
 - id: P2-001
   title: Encrypted backup framework
   priority: P2
