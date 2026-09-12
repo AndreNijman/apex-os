@@ -1124,16 +1124,28 @@ mod tests {
     fn a_scope_name_that_would_forge_a_login_session_is_refused() {
         // The one-refactor-away case: name the scope after the session and
         // `/session-` appears in the cgroup path of every process in it, which
-        // origin::classify reads as a human at this machine — the origin §7
-        // reserves root and break-glass for.
+        // origin::classify used to read as a human at this machine — the
+        // origin §7 reserves root and break-glass for.
+        //
+        // **`classify` no longer promotes it (P2-016, 2026-09-12).** The
+        // user-manager arm now runs first, so every transient scope a user
+        // manager can hold is a `scheduled-job` whatever it calls itself, and
+        // this name is no longer the difference between local and remote.
+        //
+        // The name check stays, and the assertion above is now the reason
+        // rather than the consequence: two fences, and this is the one that
+        // does not depend on a substring rule in another crate staying the way
+        // it is today. `classify` was reordered once; the name it is fed
+        // should not be the thing that made it safe. If the classifier is ever
+        // relaxed again, this refusal is what is still standing.
         use apex_agent_core::origin::classify;
         use apex_agent_core::policy::RequestOrigin;
 
         let forged = "/user.slice/user-1000.slice/user@1000.service/app.slice/session-99-agent.scope";
         assert_eq!(
             classify(forged, true),
-            Some(RequestOrigin::LocalTerminal),
-            "this is the promotion the name check exists to prevent"
+            Some(RequestOrigin::ScheduledJob),
+            "the classifier's user-manager arm must run before its session arm"
         );
         assert!(ScopeName::checked("session-99-agent".to_string()).is_err());
         // ...and it is refused for the right reason: it is caught before the

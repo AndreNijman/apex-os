@@ -1391,6 +1391,24 @@ jobs:
       - name: Run session-picker wording assertions
         run: ./tests/test-apex-greet-sessions.sh
 
+      # P2-016's guest and kiosk halves. Two claims, tested two ways.
+      #
+      # Criterion 3 -- "kiosk/shared-device policy is possible WITHOUT
+      # weakening ordinary desktop use" -- is an assertion about an ABSENCE:
+      # the shipped greetd config must carry no auto-login stanza, or APEX
+      # would have stopped asking who you are and would still boot. The suite
+      # also feeds the same check a config that HAS one, because an absence
+      # assertion that never sees a presence cannot fail.
+      #
+      # Criterion 2 runs the real /usr/libexec/apex-guest-wipe against a
+      # fixture passwd, a fixture secretd store and a fixture greeter state
+      # dir, as an ordinary user. It creates no account and touches nothing
+      # outside its temp directory -- and asserts that redirection worked
+      # before it asserts anything about wiping. It starts no compositor and
+      # opens no window.
+      - name: Run shared-machine (guest, kiosk) assertions
+        run: ./tests/test-apex-shared-machine.sh
+
       # What a screen reader and a keyboard-only user get from the login
       # screen. P2-003's "accessible login" and P2-004's "keyboard layout
       # before password" both land on the same surface, so they are measured

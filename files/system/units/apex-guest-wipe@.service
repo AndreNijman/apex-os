@@ -1,0 +1,52 @@
+# APEX-OS — clear a disposable guest account (systemd SYSTEM service, P2-016).
+#
+# %i is the account name, which must also appear in /etc/apex/guest-accounts;
+# the engine refuses otherwise. See the engine's header for all four fences and
+# files/system/shared-machine/README.md for the recipe this belongs to.
+#
+# NOT ENABLED BY THIS REPO. Nothing installs a guest account either, so on a
+# stock APEX this unit exists and has nothing to act on — which is the whole of
+# "kiosk/shared-device policy is possible without weakening ordinary desktop
+# use" as it applies here: the machinery ships inert and enabling it is an
+# explicit, per-machine act.
+#
+# WHY ROOT
+# The credential namespace this exists to clear is /var/lib/apex-secretd/
+# users/<uid>/, which is 0700 root-owned precisely so the account cannot read
+# it (P0-002). Nothing running as the guest can clear it, which is the reason
+# a tmpfs home is not disposability on this system.
+
+[Unit]
+Description=Clear the disposable guest account %i
+Documentation=man:apex(1)
+# The wipe must not race the session it is cleaning up after. The engine asks
+# logind and refuses while the account still has a session, so an accidental
+# early start is loud rather than destructive — but ordering it after the slice
+# is what makes that the unlikely path rather than the usual one.
+After=user-%i.slice
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/apex-guest-wipe %i
+# Exit 2 is the engine's refusal — a fence held. That is not a unit failure and
+# must not be reported as one, or a machine with no guest configured would show
+# a failed unit at every boot.
+SuccessExitStatus=0 2
+
+# Hardening. It needs to remove things under /var and under the guest's home,
+# and nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/apex-secretd /var/lib/apex-greet /home /var/home
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+PrivateNetwork=yes
+
+[Install]
+# Deliberately no WantedBy. Enabling this is a per-machine decision:
+#   systemctl enable apex-guest-wipe@apex-guest.service
+WantedBy=
