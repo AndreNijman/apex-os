@@ -134,6 +134,27 @@ pub enum Credential {
     Brokered { service: String },
     /// A literal value in a file the agent reads. What P1-018 removes.
     InConfig { header: String, shape: Shape },
+    /// A remote server with no credential in its definition, which the agent
+    /// therefore authenticates **itself**.
+    ///
+    /// §13.12, in one variant: *"do not hand provider credentials directly to
+    /// the model just because the MCP server supports OAuth."* A remote MCP
+    /// server that carries no `Authorization` header is not a server with no
+    /// credential. Either it needs none, or the agent performs an OAuth flow
+    /// against it and holds the resulting token — and a token the agent's own
+    /// runtime obtained is agent-readable *by construction*, because the agent
+    /// is the thing that sends it. Which of the two it is cannot be read off
+    /// the definition, and the difference does not change the answer: in one
+    /// case there is no credential to protect, in the other the credential is
+    /// already in the model's reach.
+    ///
+    /// Reported rather than assumed absent, which is what `None` used to mean
+    /// here. Cloudflare's own remote servers are the instance §13.12 names —
+    /// `mcp.cloudflare.com`, `bindings.mcp.cloudflare.com` and the rest — and
+    /// they are OAuth by default. Nothing in this file knows their names: the
+    /// rule is about remote servers, and a list of hostnames would be a list
+    /// that goes stale.
+    AgentAuthenticates { url: String },
     /// `${VAR}`, which the agent expands from an environment the agent also
     /// reads — so the value is agent-readable wherever it is defined.
     FromEnvironment {
@@ -151,10 +172,19 @@ impl Credential {
     ///
     /// The acceptance criterion in one method: `Brokered` is the only answer
     /// that is no, and `None` is not a credential at all.
+    ///
+    /// [`Credential::AgentAuthenticates`] answers **yes**, and that is the
+    /// P1-017 change rather than a detail. It used to be `None` — a remote
+    /// server with no header reported as carrying no credential — which is an
+    /// absence inferred from a file that would not mention it either way. If
+    /// the server authenticates at all, the agent is what authenticates to it,
+    /// and what the agent holds the agent can read.
     pub fn agent_readable(&self) -> bool {
         matches!(
             self,
-            Credential::InConfig { .. } | Credential::FromEnvironment { .. }
+            Credential::InConfig { .. }
+                | Credential::FromEnvironment { .. }
+                | Credential::AgentAuthenticates { .. }
         )
     }
 }
@@ -443,7 +473,15 @@ fn credential_of(
             };
         }
     }
-    Credential::None
+    // Nothing in the definition. For a program the agent starts that is the
+    // whole story — a stdio server's secrets, if it has any, are its own
+    // business and its `env` block is already covered above. For an ENDPOINT
+    // it is not: something authenticates to a remote server, and if the
+    // definition does not, the agent does.
+    match transport {
+        Transport::Endpoint { url, .. } => Credential::AgentAuthenticates { url: url.clone() },
+        _ => Credential::None,
+    }
 }
 
 /// The service an `apex mcp bridge <service>` definition brokers.
@@ -488,6 +526,9 @@ pub fn as_json(found: &[Server]) -> Value {
             };
             let credential = match &s.credential {
                 Credential::None => serde_json::json!({"where": "none"}),
+                Credential::AgentAuthenticates { url } => {
+                    serde_json::json!({"where": "agent", "url": url})
+                }
                 Credential::Brokered { service } => {
                     serde_json::json!({"where": "broker", "service": service})
                 }
@@ -827,6 +868,11 @@ mod tests {
         // P1-018's second acceptance criterion as a predicate, so the listing
         // and the tests answer it the same way.
         assert!(!Credential::None.agent_readable());
+        // …and the fifth answer, which is a yes: see the variant's own note.
+        assert!(Credential::AgentAuthenticates {
+            url: "https://mcp.cloudflare.com/mcp".into()
+        }
+        .agent_readable());
         assert!(!Credential::Brokered { service: "m".into() }.agent_readable());
         assert!(Credential::InConfig {
             header: "Authorization".into(),
@@ -840,6 +886,90 @@ mod tests {
             source: None
         }
         .agent_readable());
+    }
+
+    #[test]
+    fn a_remote_server_with_no_header_authenticates_through_the_agent_itself() {
+        // P1-017 / §13.12. `{"type":"http","url":"https://bindings.mcp.
+        // cloudflare.com/mcp"}` is what `claude mcp add` writes for a server
+        // that uses OAuth — the whole point of OAuth being that no token goes
+        // in the file. Reading that as "carries no credential" is an absence
+        // inferred from a file that would not mention it either way, and the
+        // consequence is the criterion reading as met: the agent holds the
+        // token it obtained, and what the agent holds the agent can read.
+        //
+        // Which of "needs no auth" and "the agent authenticates" it is cannot
+        // be read off the definition, and it does not change the answer: in
+        // one case there is nothing to protect, in the other the credential is
+        // already in the model's reach.
+        let env = Environment {
+            from_settings: BTreeMap::new(),
+        };
+        let remote = serde_json::json!({
+            "type": "http",
+            "url": "https://bindings.mcp.cloudflare.com/mcp"
+        });
+        let transport = transport_of_value(&remote);
+        match credential_of_value(&remote, &transport, &env) {
+            Credential::AgentAuthenticates { url } => {
+                assert_eq!(url, "https://bindings.mcp.cloudflare.com/mcp")
+            }
+            other => panic!("a remote server's OAuth token was reported as absent: {other:?}"),
+        }
+        assert!(
+            credential_of_value(&remote, &transport, &env).agent_readable(),
+            "the criterion read as met for a server the agent authenticates to"
+        );
+
+        // A program the agent starts is the other case, and it stays `None`: a
+        // stdio server's own secrets are its own business, and its `env` block
+        // is already classified above this line.
+        let stdio = serde_json::json!({"type": "stdio", "command": "some-server"});
+        let transport = transport_of_value(&stdio);
+        assert_eq!(
+            credential_of_value(&stdio, &transport, &env),
+            Credential::None
+        );
+
+        // And a remote server whose definition DOES carry a header is still
+        // reported by its header, not swallowed by the new arm.
+        let with_header = serde_json::json!({
+            "type": "http",
+            "url": "https://example.invalid/mcp",
+            "headers": {"Authorization": "Bearer abc"}
+        });
+        let transport = transport_of_value(&with_header);
+        assert!(matches!(
+            credential_of_value(&with_header, &transport, &env),
+            Credential::InConfig { .. }
+        ));
+
+        // Nor is a brokered one, whose definition is stdio by construction.
+        let bridged = serde_json::json!({
+            "type": "stdio", "command": "apex",
+            "args": ["mcp", "bridge", "cf-bindings"]
+        });
+        let transport = transport_of_value(&bridged);
+        assert!(!credential_of_value(&bridged, &transport, &env).agent_readable());
+
+        // The document `apex mcp list --json` emits has to say it too, and
+        // with its own word: a consumer branching on `where` must be able to
+        // tell "nothing to protect" from "the model holds it".
+        let doc = as_json(&[Server {
+            name: "cf".into(),
+            key: "cf".into(),
+            surface: Surface::User,
+            transport: Transport::Endpoint {
+                kind: "http".into(),
+                url: "https://bindings.mcp.cloudflare.com/mcp".into(),
+            },
+            credential: Credential::AgentAuthenticates {
+                url: "https://bindings.mcp.cloudflare.com/mcp".into(),
+            },
+        }]);
+        assert_eq!(doc["servers"][0]["credential"]["where"], "agent");
+        assert_eq!(doc["servers"][0]["agentReadable"], true);
+        assert_eq!(doc["agentReadable"], 1);
     }
 
     #[test]
