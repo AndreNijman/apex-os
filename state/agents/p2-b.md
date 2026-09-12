@@ -485,6 +485,36 @@ first, which this branch introduced and caught before it shipped:
 3. The GUI render container's build context was `/var/empty`, which does not
    exist on an ubuntu runner, and the build's error output went to `/dev/null`.
 
+## The defect CI found that this laptop could not
+
+Worth its own section because it is the argument for dispatching CI at all.
+
+`set_locale_keymap_in()` falls back to `Australia/Perth` when the live
+environment has no real timezone. The guard was `case "$tz" in ""|"UTC")`.
+systemd writes the **canonical** zone name into `/etc/localtime`, and on a
+machine with no timezone configured that name is **`Etc/UTC`**, not `UTC` — so
+the commonest spelling of the exact case the line exists to catch went past it.
+The result was not a wrong timezone but **none**: `tz` stayed `Etc/UTC`, the
+deploy root had no such entry, the `[ -e ]` guard declined to link it, and the
+installed system got no `/etc/localtime` at all.
+
+**Why the test could not see it here.** The assertion read the REAL
+`/etc/localtime`, so its verdict depended on where the tester lives. This laptop
+is set to `Australia/Perth` — which is exactly the value the assertion expects —
+so it passed for the wrong reason. The runner resolves `Etc/UTC`, and failed.
+
+The extracted function's two HOST reads are now redirected to a file the suite
+controls, making the live zone an INPUT rather than a property of the machine.
+Three cases now run deterministically: no zone → Perth, `Etc/UTC` → Perth,
+`Europe/Berlin` → carried through. The third is what stops the fix degenerating
+into "always Perth", which would throw away a zone the ISO had already resolved.
+
+The redirect is asserted in **both** directions. A blanket
+`s|/etc/localtime|…|` also rewrites `"$deploy/etc/localtime"`, which is where
+the function WRITES its answer; the first attempt did that and turned every
+assertion into `want [a zone] got []`. One assertion checks the read moved,
+another checks the write did not.
+
 ## CI, round 2
 
 apex-os's `pr-validation.yml` accepts `workflow_dispatch`, so this branch was
