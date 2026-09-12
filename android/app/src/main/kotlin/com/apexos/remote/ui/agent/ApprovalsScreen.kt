@@ -192,7 +192,7 @@ fun ApprovalsScreen(
 }
 
 /** What a confirmed revoke would do. */
-private sealed interface Revocation {
+internal sealed interface Revocation {
     val title: String
     val explanation: String
 
@@ -315,7 +315,7 @@ private fun RequestRow(request: PrivilegeRequest, nowSeconds: Long) {
  * that had not — and the thing they would then not do is the thing that makes
  * it happen.
  */
-private fun decisionLine(r: PrivilegeRequest): String = when {
+internal fun decisionLine(r: PrivilegeRequest): String = when {
     r.isPending -> "waiting for a decision at the machine"
     r.isDenied -> "denied"
     r.awaitingExecution -> "allowed, but not run yet — it still has to be run at the machine"
