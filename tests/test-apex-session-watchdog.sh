@@ -126,8 +126,11 @@ reset_state() { rm -f "$STATE/session-launch" "$STATE/session-failures"; }
 section "§1 the counter, in isolation"
 # ─────────────────────────────────────────────────────────────────────────────
 
-[ -x "$WD" ] && ok "the shipped helper is executable" \
-             || bad "the shipped helper is executable" "mode $(stat -c %a "$WD" 2>/dev/null)"
+if [ -x "$WD" ]; then
+    ok "the shipped helper is executable"
+else
+    bad "the shipped helper is executable" "mode $(stat -c %a "$WD" 2>/dev/null)"
+fi
 
 reset_state
 out1="$(wd record apex-labwc; wd check)"
@@ -214,20 +217,27 @@ outB="$(env APEX_SESSION_WATCHDOG_STATE="$STATE" \
             APEX_SESSION_WATCHDOG_SESSIONS="$EMPTY_SESSIONS" sh "$WD" check)"
 is "with no recovery entry installed, check prints nothing even at threshold" "" "$outB"
 
-# An unwritable state directory is what a greeter meets if tmpfiles did not run.
-RO="$WORK/readonly"; mkdir -p "$RO"; chmod 0555 "$RO"
-if [ -w "$RO" ]; then
-    skp "an unwritable state directory is survived silently" "running as root; $RO is writable anyway"
-else
-    outC="$(env APEX_SESSION_WATCHDOG_STATE="$RO/nested" \
-                APEX_SESSION_WATCHDOG_SESSIONS="$STAGE" sh "$WD" record apex-labwc 2>&1)"; rcC=$?
-    is "an unwritable state directory makes record silent" "" "$outC"
-    is "…and exit 0" "0" "$rcC"
-    outD="$(env APEX_SESSION_WATCHDOG_STATE="$RO/nested" \
-                APEX_SESSION_WATCHDOG_SESSIONS="$STAGE" sh "$WD" check 2>/dev/null)"; rcD=$?
-    is "…and check silent" "" "$outD"
-    is "…and exit 0" "0" "$rcD"
-fi
+# A state directory the greeter cannot create is what it meets if tmpfiles did
+# not run. The obvious way to write this — mkdir a directory and chmod it 0555 —
+# TESTS NOTHING ON THE ONE MACHINE THAT RUNS THIS SUITE AUTOMATICALLY: CI runs
+# as root, root has CAP_DAC_OVERRIDE, and the first version of this section
+# therefore turned itself into a SKIP there while passing locally. A skip is a
+# could-not-run, and the four assertions that matter most — the ones that say
+# the helper is silent when it cannot write — were the ones not running.
+#
+# So the directory is made uncreatable by SHAPE rather than by permission: the
+# parent is a regular file, and mkdir(2) returns ENOTDIR to uid 0 exactly as it
+# does to everybody else. Verified under `unshare --user --map-root-user`, which
+# is CI's uid without CI.
+NODIR="$WORK/not-a-directory"; : > "$NODIR"
+outC="$(env APEX_SESSION_WATCHDOG_STATE="$NODIR/state" \
+            APEX_SESSION_WATCHDOG_SESSIONS="$STAGE" sh "$WD" record apex-labwc 2>&1)"; rcC=$?
+is "a state directory that cannot be created makes record silent" "" "$outC"
+is "…and exit 0" "0" "$rcC"
+outD="$(env APEX_SESSION_WATCHDOG_STATE="$NODIR/state" \
+            APEX_SESSION_WATCHDOG_SESSIONS="$STAGE" sh "$WD" check 2>/dev/null)"; rcD=$?
+is "…and check silent" "" "$outD"
+is "…and exit 0" "0" "$rcD"
 
 reset_state
 for _ in 1 2 3; do wd record apex-labwc >/dev/null; wd check >/dev/null; done

@@ -2534,6 +2534,29 @@ RUN set -eux; \
         if ! grep -qF "$needle" /usr/share/apex/safe-graphics/menu.xml; then \
             echo "FATAL: the safe-graphics menu offers no way to: $needle"; exit 1; fi; \
     done; \
+    # NAMING A REMEDY ON THE MENU IS NOT SHIPPING IT. The loop above proves the
+    # menu offers a way to reach files and the network, which is P2-018's second
+    # criterion; it proves nothing about whether either binary is in the image,
+    # and a menu entry for a command that is not there is a recovery session
+    # that looks complete and does nothing when clicked — the K12/K13 defect,
+    # where every source-reading assertion stays green while the artifact is
+    # broken. Both are checked HERE, on the built artifact.
+    #
+    # Thunar comes from Containerfile.core (core is this file's FROM), so it is
+    # named by APEX and a build that lost it says so. nmtui is DIFFERENT and
+    # the difference is the point: NetworkManager-tui is named by no APEX dnf
+    # list. It is inherited from quay.io/fedora/fedora-bootc:43, nothing in the
+    # image requires it, and it is not even a weak dependency of NetworkManager
+    # — it is simply in the base manifest today. This assertion is the only
+    # thing standing between a base-image change and a recovery session whose
+    # single network tool vanished silently. IF IT EVER FIRES, the fix is to add
+    # NetworkManager-tui to the dnf list in Containerfile.core, not to drop the
+    # entry from the menu.
+    for _bin in thunar nmtui; do \
+        if ! command -v "$_bin" >/dev/null 2>&1; then \
+            echo "FATAL: the safe-graphics menu offers $_bin but the image has no such command"; \
+            exit 1; fi; \
+    done; \
     # The terminals the helper will look for, in its own order. foot and
     # alacritty both come from core; asserting it here is what keeps a session
     # whose only client is a terminal from shipping without one.
@@ -2707,6 +2730,74 @@ RUN set -eux; \
     : 'and is proved in both directions, and SKIPs with a reason where sway'; \
     : 'cannot be executed.'; \
     echo "greeter session wrapper: installed, named by greetd, and both hosts bind the reader"
+
+# ── The bounce watchdog: what makes the recovery session reachable ────────
+# P2-018's first criterion is that a graphics/compositor/shell failure CAN
+# ENTER the recovery desktop. APEX Safe Graphics shipped as a session a PERSON
+# enters. Nothing NOTICED a failure: greetd is a stock Fedora unit with no
+# Restart=, no StartLimitBurst and no OnFailure=, and apex-boot-health's units
+# are inert on every published image because they condition on
+# LoaderBootCountPath while every APEX image boots GRUB. So a machine whose
+# driver stopped working bounced — session starts, dies in a second, login
+# screen returns — for ever, and every bounce looked like the last one.
+#
+# The greeter is the one process demonstrably alive after each bounce, so it is
+# the one that counts: it records what it launched on the way out and asks on
+# the way in. Three sessions that did not survive the grace period and the
+# picker preselects APEX Safe Graphics, with a line saying why.
+#
+# THESE ASSERTIONS ARE HERE FOR THE SAME REASON THE WRAPPER'S ARE, and they are
+# the stronger half of the safety argument. This code runs on the only path
+# that reaches Greetd.launch(): a helper that hangs there is a machine nobody
+# can log in to, and a greeter naming a session no Containerfile installed is
+# the K12/K13 defect with the login screen as its blast radius. A build that
+# cannot prove BOTH is a build that must not ship.
+COPY --chmod=0755 files/system/libexec/apex-session-watchdog \
+     /usr/libexec/apex-session-watchdog
+RUN set -eux; \
+    sh -n /usr/libexec/apex-session-watchdog; \
+    test -x /usr/libexec/apex-session-watchdog; \
+    : 'Both hooks must be NAMED by the greeter that is actually installed.'; \
+    : 'A watchdog nothing calls counts nothing, and would leave every test in'; \
+    : 'tests/ green while the feature was absent from the image.'; \
+    grep -q 'apex-session-watchdog record' /usr/share/apex-greet/GreetContext.qml; \
+    grep -q 'apex-session-watchdog check' /usr/share/apex-greet/GreetContext.qml; \
+    : 'and BOTH must be capped. `timeout` is the whole lockout argument: the'; \
+    : 'greeter defers Greetd.launch() to persistProc.onExited, so an uncapped'; \
+    : 'hook that never returns is a password prompt that never proceeds. Two'; \
+    : 'calls, two caps — counted, so a third hook added later without one'; \
+    : 'fails this build instead of shipping.'; \
+    if [ "$(grep -c 'timeout 5 /usr/libexec/apex-session-watchdog' \
+            /usr/share/apex-greet/GreetContext.qml)" != 2 ]; then \
+        echo "FATAL: the greeter's watchdog hooks are not both capped by timeout"; \
+        exit 1; fi; \
+    command -v timeout >/dev/null; \
+    : 'The greeter must act on the helper output ONLY when it equals its own'; \
+    : 'recoverySession constant. Without that comparison the helper could name'; \
+    : 'any session on the machine, and a preselection is the one thing on this'; \
+    : 'screen the user did not ask for.'; \
+    grep -q 's === ctx.recoverySession' /usr/share/apex-greet/GreetContext.qml; \
+    : 'and the user cycling the picker must settle the question for good.'; \
+    grep -q '_userPicked' /usr/share/apex-greet/GreetContext.qml; \
+    : 'THE TWO HALVES MUST NAME THE SAME SESSION, AND IT MUST BE INSTALLED.'; \
+    : 'Read out of the shipped files, not out of the repository: this is the'; \
+    : 'assertion that would have caught a launcher repointed at a path no'; \
+    : 'Containerfile copies.'; \
+    _wd_id="$(sed -n 's/^RECOVERY="\([^"]*\)".*/\1/p' \
+              /usr/libexec/apex-session-watchdog | head -n1)"; \
+    _qml_id="$(sed -n 's/.*readonly property string recoverySession: *"\([^"]*\)".*/\1/p' \
+               /usr/share/apex-greet/GreetContext.qml | head -n1)"; \
+    if [ -z "$_wd_id" ] || [ "$_wd_id" != "$_qml_id" ]; then \
+        echo "FATAL: watchdog recovery session [$_wd_id] != greeter's [$_qml_id]"; \
+        exit 1; fi; \
+    if ! test -f "/usr/share/wayland-sessions/$_wd_id.desktop"; then \
+        echo "FATAL: the recovery session [$_wd_id] is not an installed session entry"; \
+        exit 1; fi; \
+    : 'The state directory is the greetd-owned one tmpfiles creates below. A'; \
+    : 'watchdog pointed anywhere else would silently never count, because the'; \
+    : 'greeter runs as greetd and can write nowhere else.'; \
+    grep -q '/var/lib/apex-greet' /usr/libexec/apex-session-watchdog; \
+    echo "session watchdog: installed, called on both greeter hooks, capped, and the recovery session exists"
 
 # ── Greeter wallpaper: the user's own, not the shipped default ─────────────
 # THE BUG: change your wallpaper in APEX Shell and the login/lock screen kept
