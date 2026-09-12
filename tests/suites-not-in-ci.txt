@@ -12,7 +12,5 @@ tests/test-apex-lid-live.sh          needs a real SW_LID device and a logind ses
 #
 # ── DEBT: these can run headless and simply were never wired in ─────────────
 tests/test-apex-firewall-ssh.sh      asserts the ssh allowance in the shipped ruleset
-tests/test-device-services-netns.sh  12 assertions; sends real packets in a private netns
 tests/test-secret-at-rest.sh         the at-rest property P0-002 earned
-tests/test-apex-multilib.sh          drives apex-pkg; needs care about what it installs
 tests/test-labwc-session.sh          needs a nested compositor; check whether the harness now allows it
