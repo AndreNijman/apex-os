@@ -885,9 +885,12 @@ fn install_mcp_config(
         Ok(()) => {
             if curated.dropped() > 0 || wraps {
                 eprintln!(
-                    "apex-agentd: {} connector(s) for this session, {} of them sandboxed,                      {} removed",
+                    "apex-agentd: {} connector(s) for this session, {} of them sandboxed \
+                     ({} of those by their own definition, so only by this file for the rest), \
+                     {} removed",
                     curated.kept(),
                     curated.confined(),
+                    curated.confined_everywhere(),
                     curated.dropped()
                 );
             }
@@ -898,7 +901,8 @@ fn install_mcp_config(
             // curated and is not. Every connector the policy meant to remove
             // is reachable after this line.
             eprintln!(
-                "apex-agentd: writing {} failed ({e}), so {} starts with the connectors it                  finds and NOT the ones this session asked for",
+                "apex-agentd: writing {} failed ({e}), so {} starts with the connectors it \
+                 finds and NOT the ones this session asked for",
                 path.display(),
                 adapter.id
             );
