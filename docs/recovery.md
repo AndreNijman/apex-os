@@ -317,19 +317,66 @@ and somebody in recovery still has a home directory they came here to reach.
 
 **From the greeter.** "APEX Safe Graphics" is in the session list.
 
+**The machine offers it, after three failed starts.** This is the route you do
+not have to know about. `/usr/libexec/apex-session-watchdog` counts: the greeter
+writes down what it launched, and the next greeter to start asks how long ago
+that was. A session that did not last 45 seconds did not get anywhere. Three of
+those in a row for the same session and the picker comes up already on APEX Safe
+Graphics, with a line above the password box saying *Your desktop did not start
+— APEX Safe Graphics selected*.
+
+Everything about that sentence is a suggestion, not a decision:
+
+- It **preselects**. Cycle the picker to your normal desktop and the machine
+  stops arguing for that login: touching the picker settles the question for
+  the greeter you are looking at. If the desktop bounces again, the next
+  greeter will preselect again — which is the right behaviour, because by then
+  it has failed a fourth time.
+- The recovery session is **never remembered** as your default. Your previous
+  choice survives the visit, so once the machine is fixed you land back on the
+  desktop you were actually using rather than on the rescue one.
+- The count is **cleared by success, not by recovery**. Any ordinary session
+  that survives 45 seconds wipes it. A working trip through APEX Safe Graphics
+  clears nothing, because recovery working says nothing about whether the normal
+  desktop was fixed. So after you fix the machine, pick your desktop once and
+  the notice is gone.
+- It **survives a reboot**, on purpose. A machine that bounced three times and
+  was then power-cycled has not been fixed by the power cycle.
+
+To clear the count by hand — the state is owned by the `greetd` user, so this
+needs root:
+
+```sh
+sudo /usr/libexec/apex-session-watchdog reset
+```
+
+and to see what it currently believes, which needs nothing:
+
+```sh
+/usr/libexec/apex-session-watchdog status
+```
+
+**What it does not catch, stated plainly.** It detects a session that *dies*
+within 45 seconds. A compositor that comes up and stays up while the shell
+inside it crashes in a loop is not a bounce, and this will not notice it; nor
+will a desktop that paints nothing but never exits. Those are the cases the
+virtual console below is for. The counter is deliberately the narrow, certain
+half of the problem rather than a heuristic that could put a working machine
+into the rescue session.
+
 **From a virtual console.** `Ctrl+Alt+F2`, log in, and run:
 
 ```sh
 apex-safe-graphics
 ```
 
-The second route is not a convenience. The greeter is itself a wlroots
+The virtual console is not a convenience. The greeter is itself a wlroots
 compositor on VT 1, so a machine with no working GL may never paint the session
 picker at all — and a recovery desktop reachable only through a screen that
 does not come up is not a recovery desktop. Nothing else in APEX advertises the
 virtual consoles; this is the document that does.
 
-There is no third route through a recovery boot entry, for the reason the
+There is no route through a recovery boot entry, for the reason the
 section above gives at length: a shipped helper may not write the ESP or an EFI
 variable, and `tests/test-boot-v2.sh` fails the build if one tries.
 

@@ -1555,6 +1555,58 @@ jobs:
       - name: Run session-picker wording assertions
         run: ./tests/test-apex-greet-sessions.sh
 
+      # P2-018's first criterion, and the half that did not exist until now:
+      # APEX Safe Graphics shipped as a session a PERSON enters, and NOTHING
+      # noticed a failure. greetd is a stock Fedora unit with no Restart=, no
+      # StartLimitBurst and no OnFailure=, and apex-boot-health's units are
+      # inert on every published image because they condition on
+      # LoaderBootCountPath while every APEX image boots GRUB.
+      #
+      # It runs beside the session-picker suite because it needs exactly what
+      # that one needs — python3 and the shipped GreetContext.qml — and because
+      # it lifts BOTH greeter hooks out of that same file and runs them. It
+      # starts no compositor, no greeter and no session, opens no window, and
+      # touches no real /var/lib/apex-greet.
+      #
+      # THE FLOOR IS NOT DECORATION HERE. This suite's most important
+      # assertions are the three fail-open mutations — the helper replaced by
+      # `sleep 60`, then deleted, then run with timeout(1) off PATH — and each
+      # requires the greeter's launch hook to return 0 anyway. A suite that
+      # stopped finding its input would assert none of that and exit 0, and the
+      # change it guards is the one that can leave somebody at a password
+      # prompt that never proceeds.
+      #
+      # `skipped` must be 0 for the same reason it must be in the firewall step
+      # below: a could-not-run is not a pass. That is not hypothetical for this
+      # suite — its unwritable-state-directory section USED to skip on exactly
+      # this runner, because CI is root and chmod 0555 does not stop root. It
+      # was rewritten to make the directory uncreatable by shape instead, and
+      # this line is what stops that regressing quietly.
+      #
+      # §5 also skips its nine assertions without node(1), which is the other
+      # way this suite could go quiet. A GitHub runner always has node — the
+      # actions themselves need it — so a skip there means the runner image
+      # changed under us, and that is worth failing over rather than passing
+      # with the preselection rule unexecuted.
+      - name: Run session-watchdog assertions
+        run: |
+          set -euo pipefail
+          out="$(./tests/test-apex-session-watchdog.sh 2>&1)"
+          printf '%s\n' "$out"
+          summary="$(printf '%s' "$out" | grep -E '^session-watchdog: ' || true)"
+          [ -n "$summary" ] || { echo "::error::the session-watchdog suite printed no summary line"; exit 1; }
+          read -r passed _ failed _ skipped _ <<<"$(printf '%s' "$summary" | sed 's/^session-watchdog: //')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed session-watchdog assertions failed"; exit 1; }
+          [ "$skipped" = 0 ] || {
+              echo "::error::$skipped session-watchdog assertions could not run ($summary); a could-not-run is not a pass"
+              exit 1
+          }
+          [ "$passed" -ge 91 ] || {
+              echo "::error::only $passed session-watchdog assertions ran; 91 ran as both uid 0 and uid 1000 on 2026-09-13, so some no longer execute"
+              exit 1
+          }
+
       # P2-016's guest and kiosk halves. Two claims, tested two ways.
       #
       # Criterion 3 -- "kiosk/shared-device policy is possible WITHOUT
@@ -2279,6 +2331,8 @@ jobs:
             tests/test-apex-host.sh tests/test-apex-dispatch.sh \
             tests/test-apex-ai.sh tests/test-apex-env-devices-live.sh \
             tests/test-apex-greet-sessions.sh \
+            tests/test-apex-session-watchdog.sh \
+            files/system/libexec/apex-session-watchdog \
             tests/test-apex-greet-a11y.sh tests/test-apex-greet-layout.sh \
             tests/test-apex-greet-session-bus.sh tests/test-apex-a11y-stack.sh \
             tests/test-labwc-keybind-reload.sh \
