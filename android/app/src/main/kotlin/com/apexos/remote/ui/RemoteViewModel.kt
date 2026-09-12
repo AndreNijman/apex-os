@@ -804,16 +804,39 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             // reads the line, and waiting up to four seconds to see it makes a
             // reply feel as though it went nowhere.
             refreshAgents()
+        } catch (e: AgentError) {
+            // The daemon ANSWERED, so nothing was typed, and saying otherwise
+            // would be the worst possible error message here: told the reply
+            // "may have been delivered", the user does not resend, and their
+            // agent waits for ever. `protocol.rs` states this for the
+            // version-skew case in its own words — "the client reports that it
+            // could not deliver, and nothing has been typed" — and it holds
+            // for every other kind too: `refuse_input`'s permission_denied,
+            // `no_such_session`, `session_exited`, and the `Input::Failed`
+            // that becomes `internal` all refuse BEFORE or instead of the
+            // write.
+            val message = if (Agentd.isTooOld(e)) {
+                // Not a refusal. `Request::Input` landed 2026-09-08; a machine
+                // older than that answers `bad_request` for the verb itself,
+                // which is the same error kind a refusal uses.
+                "This machine's APEX is too old to accept a typed reply. Nothing was sent. " +
+                    "Run `sudo apex update` on the machine, or attach the terminal instead."
+            } else {
+                "Nothing was sent: ${describe(e)}"
+            }
+            updateAgents(machine) { it.copy(busy = null, failure = message) }
         } catch (e: Exception) {
-            // Never retried, and the message says so. A lost reply to `input`
-            // means the bytes ARE on the terminal; a retry would type the
-            // user's sentence a second time into an agent that has already
-            // acted on the first.
+            // No answer came back, so whether the bytes landed is genuinely
+            // unknown — a socket that dropped after the write reaching the PTY
+            // looks identical to one that dropped before it. Never retried: a
+            // retry on the first case types the user's sentence a second time
+            // into an agent that has already acted on the first.
             updateAgents(machine) {
                 it.copy(
                     busy = null,
-                    failure = "The reply may already have been delivered: ${describe(e)}. " +
-                        "Check the session before sending it again.",
+                    failure = "The connection went before the machine answered, so this reply " +
+                        "may or may not have been delivered: ${describe(e)}. Check the session " +
+                        "before sending it again.",
                 )
             }
         }
