@@ -24,6 +24,31 @@
 # ratchet checks you did both.
 #
 # 2026-09-12: 132 entries.
+# 2026-09-12: 117. `apex host` (8 of 8) and `apex ai` (7 of 7) left, written
+#             up as docs/hosts.md and docs/ai.md -- the two worst whole-verb
+#             gaps the first measurement found. Still here, and worth naming
+#             because they are the next worst: `apex shell` (14), `apex env`
+#             (11), `apex task` (7), and section 20's handoff verbs `apex
+#             build`, `apex send` and `apex open`, which docs/hosts.md wants
+#             to link to and cannot.
+# 2026-09-12: 121. Four verbs landed on the integration tip the same day the
+#             count above was taken, each documented nowhere and declared
+#             nowhere, so the reverse pass -- which is a CI gate -- failed on
+#             the tip with four BADs:
+#
+#                 apex task audit          2814a56d, section 13.14
+#                 apex cloudflare preview  7f4475dd, section 13.13
+#                 apex secret approve      a67eb704, section 13.8
+#                 apex secret approvals    a67eb704, section 13.8
+#
+#             Declared rather than written up, which is the choice this file
+#             exists to offer. Each belongs to a cluster that is undocumented
+#             as a whole -- `apex task` is 7 more lines below, `apex cloudflare`
+#             3 -- and a single sub-verb written up alone would take its parent
+#             off this list on a passing mention, which is precisely the rot
+#             the ratchet is here to stop. The number goes UP because these
+#             four did not exist when 132 was measured, not because the
+#             ratchet slipped: the 132 the docs owed is 117 now.
 
 apex profile
 
@@ -55,23 +80,6 @@ apex storage erase
 
 apex firmware
 apex firmware status
-
-apex ai models
-apex ai pull
-apex ai rm
-apex ai run
-apex ai unload
-apex ai status
-apex ai serve
-
-apex host add
-apex host list
-apex host show
-apex host remove
-apex host probe
-apex host run
-apex host describe
-apex host path
 
 apex build
 
@@ -152,6 +160,7 @@ apex task show
 apex task checkpoint
 apex task rm
 apex task path
+apex task audit
 
 apex request list
 apex request show
@@ -160,6 +169,7 @@ apex request grants
 apex cloudflare
 apex cloudflare connect
 apex cloudflare status
+apex cloudflare preview
 
 apex backup
 apex backup key
@@ -173,6 +183,8 @@ apex backup restore
 apex secret list
 apex secret remove
 apex secret revoke
+apex secret approve
+apex secret approvals
 
 apex mcp planes
 apex mcp memory

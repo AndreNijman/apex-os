@@ -475,7 +475,17 @@ else
     bad "an unknown key in the registry is refused, not ignored" "$out"
 fi
 
-# A future version must refuse rather than guess.
+# A future version must refuse rather than guess -- and say what to do about it.
+#
+# Section 25: a registry from a newer APEX is what a `bootc rollback` leaves
+# behind, because hosts.toml lives under $XDG_CONFIG_HOME and does not roll
+# back with the image. So the refusal has to name the remedy, not only the
+# mismatch. The same case for tasks.toml (test-apex-task.sh) shipped red for
+# three rounds because it pinned the OLD phrase, "understands up to", and
+# P1-045 changed the message under it. This one is asserted in the same four
+# parts as the Rust unit test beside the message
+# (`host.rs::a_future_version_is_refused_rather_than_guessed_at`), so the two
+# halves of one claim go stale together rather than one at a time.
 cp "$REG" "$REG.bak"
 python3 - "$REG" <<'PY'
 import sys, pathlib
@@ -484,10 +494,19 @@ p.write_text("version = 99\n" + p.read_text())
 PY
 out=$(apex host list 2>&1); rc=$?
 cp "$REG.bak" "$REG"
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "understands up to"; then
-    ok "a registry from a newer apex is refused with the version it understands"
+# `reads version [0-9]+` rather than `reads version 1`: the version this build
+# understands is the one thing here that is expected to change, and pinning it
+# is how the task case went stale in the first place.
+missing=
+[ "$rc" -ne 0 ] || missing="$missing rc=$rc"
+for part in 'version 99' 'reads version [0-9]+' 'rollback' 'Boot the newer deployment'; do
+    printf '%s' "$out" | grep -qE "$part" || missing="$missing [$part]"
+done
+if [ -z "$missing" ]; then
+    ok "a registry from a newer apex is refused, with both versions and the remedy"
 else
-    bad "a registry from a newer apex is refused" "rc=$rc out=$out"
+    bad "a registry from a newer apex is refused, with both versions and the remedy" \
+        "missing:$missing out=$out"
 fi
 
 # ── list and its empty state ────────────────────────────────────────────────
