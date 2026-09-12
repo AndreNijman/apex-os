@@ -39,9 +39,10 @@
 #
 #  The installer has eleven pages. SIX are audited here: welcome, keyboard,
 #  wifi, secureboot, confirm and account. The name audit runs on all six; the
-#  Tab ring is walked on `account`, which has the most fields and both
-#  passwords; the keyboard-only page advance is measured on welcome → keyboard,
-#  where the button is gated on nothing.
+#  Tab ring is walked on FIVE -- keyboard, wifi, secureboot, confirm and
+#  account -- where every round before 20 walked `account` alone and a focus
+#  trap on any other page was invisible; the keyboard-only page advance is
+#  measured on welcome -> keyboard, where the button is gated on nothing.
 #
 #  The `wifi` page has two shapes and the one the installer builds depends on
 #  the machine: with no Wi-Fi adapter it returns an explanation and two buttons,
