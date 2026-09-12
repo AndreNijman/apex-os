@@ -4,6 +4,7 @@
 //! tier planning work even when `apexd` is not running. Every D-Bus verb
 //! degrades gracefully — a clear message, a non-zero exit, never a panic.
 
+mod account;
 mod agent;
 mod ai;
 mod backup;
@@ -573,6 +574,18 @@ enum Cmd {
     Backup {
         #[command(subcommand)]
         cmd: backup::BackupCmd,
+    },
+
+    /// Online accounts: Nextcloud, Google, Microsoft, WebDAV, S3/R2.
+    ///
+    /// An account is a credential in the same root-owned store `apex secret`
+    /// uses, under a reserved name, so there is no second place a cloud
+    /// credential can be. What this adds is the provider table: it knows the
+    /// endpoint, how the credential is presented, and which operation a scope
+    /// like `files.read` grants.
+    Account {
+        #[command(subcommand)]
+        cmd: account::AccountCmd,
     },
 
     /// The secret service: let an agent USE a credential without holding it.
@@ -1426,6 +1439,7 @@ async fn main() {
         Cmd::Request { cmd } => request::main(cmd),
         Cmd::Cloudflare { cmd } => cloudflare::main(cmd),
         Cmd::Backup { cmd } => backup::main(cmd),
+        Cmd::Account { cmd } => account::main(cmd),
         Cmd::Secret { cmd } => secret::main(cmd),
         Cmd::Mcp { cmd } => mcp::main(cmd),
         Cmd::GitShim { args } => gitshim::main(args),

@@ -1797,6 +1797,20 @@ jobs:
       - name: Run the keybind reload assertions
         run: ./tests/test-labwc-keybind-reload.sh
 
+      # P2-018's recovery session, in the same job for the same reason: it
+      # starts a real labwc under WLR_BACKENDS=headless, so it needs the
+      # compositor this step just installed and nothing else. Its own
+      # structural half runs anywhere and its live half skips cleanly where
+      # labwc will not start, so a runner that cannot host a compositor
+      # reports a skip rather than a false green.
+      #
+      # The assertion that matters here is the one no structural check can
+      # make: an unparseable rc.xml is planted exactly where the user's lives
+      # and the session has to come up anyway, which is what `labwc -C` buys
+      # and what its absence would silently cost.
+      - name: Run the safe-graphics recovery assertions
+        run: ./tests/test-apex-safe-graphics.sh
+
       # End-to-end, against a real daemon on an isolated socket: that the
       # daemon resolves the asking session from the connection's PEER
       # CREDENTIALS and not from anything the client sent. The negative control
@@ -2045,6 +2059,9 @@ jobs:
             tests/test-apex-greet-a11y.sh tests/test-apex-greet-layout.sh \
             tests/test-apex-greet-session-bus.sh tests/test-apex-a11y-stack.sh \
             tests/test-labwc-keybind-reload.sh \
+            tests/test-apex-safe-graphics.sh \
+            files/system/libexec/apex-safe-graphics \
+            files/system/libexec/apex-safe-graphics-terminal \
             tests/test-apex-chaos.sh tests/test-apex-vm.sh
           # The chaos harness separately, with -x so the driver's `. lib.sh`
           # is followed, and the cases as bash fragments because they are
