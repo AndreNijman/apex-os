@@ -25,16 +25,11 @@
 //! ## What a "hardened profile" can and cannot do here — measured
 //!
 //! P1-028's second criterion is that hardened profiles can reduce cloud-side
-//! tools and connectors. The honest answer has two halves, and the word
-//! "profile" means different things in them.
+//! tools and connectors. There are now two mechanisms, they are not the same
+//! mechanism, and the report keeps them apart because a reader who merged them
+//! would draw the wrong conclusion from either.
 //!
-//! **The five named presets cannot.** [`PolicyPreset`] has `default`,
-//! `agent-bypass`, `unrestricted`, `system-access` and `unsafe-everything`,
-//! and every one of them is a *widening* of `default` — there is no preset
-//! tighter than the default, and none of `AgentPolicy`'s six dimensions names
-//! a tool or a connector. Nothing selects a connector by name, anywhere.
-//!
-//! **One dimension can, and really does.**
+//! **Removing the network removes the whole cloud plane.**
 //! `AgentPolicy::effective_network` reads, in full:
 //!
 //! ```text
@@ -44,21 +39,39 @@
 //!
 //! so `--sandbox strict` removes the session's network unconditionally, and
 //! `policy_invariants.rs` asserts it as a floor. A session with no network
-//! cannot reach any cloud connector, so `strict` reduces the cloud plane to
-//! nothing while leaving local programs runnable. `NetworkPolicy::Offline`
-//! reaches the same place when asked for directly.
+//! cannot reach any cloud connector. That is all-or-nothing and it is reported
+//! as what it is: a consequence of removing the network, not a selection.
+//! None of the five named presets does even this — [`PolicyPreset`] has
+//! `default`, `agent-bypass`, `unrestricted`, `system-access` and
+//! `unsafe-everything`, and every one of them *widens* the default.
 //!
-//! That is a real reduction and it is reported as what it is: a consequence of
-//! removing the network, not a per-connector switch. The difference matters,
-//! because a reader who believed APEX could disable one cloud connector and
-//! keep another would be wrong — and [`plane_report`] says so in the same
-//! breath as it says how many would go.
+//! **Selecting connectors by name is a dimension of its own**, and since
+//! `mcpconf` landed it exists: `ConnectorPolicy` is
+//! `as_configured | local_only | curated | none`, and `curated` keeps only the
+//! names in the runtime's `connector_allow`. `local_only` removes the cloud
+//! plane *without* removing the network, which the sandbox route cannot do.
 //!
-//! There is no per-server off switch at all today. The only way to stop one
-//! connector is to disable the whole plugin that defines it, which
-//! `mcp/connect.rs` already has to tell people, and the `--strict-mcp-config`
-//! path that would let a daemon hand the agent a curated set is named as a
-//! remainder in `sidecar.rs` and is not implemented.
+//! ### The qualifier, which is not a footnote
+//!
+//! That selection happens in exactly one place: `apex-agentd` writing a
+//! configuration file and starting the agent with `--strict-mcp-config`. So it
+//! applies to a session started through `apex agent`, on an adapter that can
+//! be told to ignore every other MCP configuration —
+//! [`Adapter::strict_mcp`](apex_agent_core::adapter::Adapter::strict_mcp) says
+//! which, and the report names them rather than hard-coding one. A person who
+//! types the agent's own name in a terminal gets every connector on this
+//! machine, unreduced and unwrapped, because nothing APEX writes is on that
+//! path. A readout that said "curated" without saying where would be the label
+//! problem one level up.
+//!
+//! ### Which is why the tables are run, not written
+//!
+//! [`Selection`] rows are produced by calling the real
+//! [`mcpconf::curate`] over the real definitions on this machine, once per
+//! `ConnectorPolicy` value. The numbers are therefore a measurement of what a
+//! session would be handed, and an arm of the curator that changed would move
+//! them. A table written here would be a second copy of the policy, and the
+//! thing this module exists to stop is a second copy of a fact.
 //!
 //! ## P1-027: a provider interface that is not a store
 //!
@@ -97,7 +110,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use apex_agent_core::policy::{AgentPolicy, NetworkPolicy, PolicyPreset};
+use apex_agent_core::adapter;
+use apex_agent_core::mcpconf::{self, Approval, Curated, Definition, Wire, Wrap};
+use apex_agent_core::policy::{AgentPolicy, ConnectorPolicy, NetworkPolicy, PolicyPreset};
 use apex_agent_core::protocol::SandboxPolicy;
 
 use crate::mcp::servers::{self, Server, Surface, Transport};
@@ -131,6 +146,21 @@ impl Plane {
             Transport::Stdio { .. } => Plane::Local,
             Transport::Endpoint { .. } => Plane::Cloud,
             Transport::Other(what) => Plane::Unknown(what.clone()),
+        }
+    }
+
+    /// The same three answers, from the launcher's own view of a definition.
+    ///
+    /// [`Transport`] is what a report reads and [`Wire`] is what the session
+    /// launcher decides against; both are derived from the same JSON object.
+    /// This exists so the plane of a connector in the *selection* table is the
+    /// plane the curator saw, rather than a second reading of the same file
+    /// that could disagree with it.
+    pub fn of_wire(w: &Wire) -> Plane {
+        match w {
+            Wire::Program { .. } => Plane::Local,
+            Wire::Endpoint { .. } => Plane::Cloud,
+            Wire::Unplaceable(what) => Plane::Unknown(what.clone()),
         }
     }
 
@@ -231,8 +261,219 @@ pub fn reductions() -> Vec<Reduction> {
     out
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+//  what a session is actually handed — measured by running the curator
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// What one `--connectors` value does to the connectors this machine defines.
+///
+/// Every field is counted from a real [`mcpconf::curate`] run over the real
+/// definitions, not from a table written here. That is the difference between
+/// a readout and a claim: if the curator's approval rule, its wrapping rule or
+/// its plane test changes, these numbers move, and
+/// `a_connector_policy_row_is_the_curators_own_answer` goes red when they stop
+/// matching.
+#[derive(Debug, Clone)]
+pub struct Selection {
+    pub policy: ConnectorPolicy,
+    /// How it is spelled on the command line.
+    pub flag: String,
+    pub kept_local: usize,
+    pub kept_cloud: usize,
+    /// Kept, and on neither plane — a transport this build cannot place.
+    pub kept_unplaceable: usize,
+    pub dropped: usize,
+    /// Kept programs bubblewrap confines in such a session.
+    pub sandboxed: usize,
+    /// Of those, the ones still confined when the agent is started by hand.
+    pub sandboxed_everywhere: usize,
+    /// Why this value would be refused rather than run, when it would be.
+    ///
+    /// `curated` with nothing in `connector_allow` is refused by
+    /// `AgentPolicy::validate_for`, and a row that printed "0 kept" for it
+    /// would describe a session that never starts as one that starts with
+    /// everything removed.
+    pub refused: Option<String>,
+}
+
+impl Selection {
+    pub fn kept(&self) -> usize {
+        self.kept_local + self.kept_cloud + self.kept_unplaceable
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "policy": self.policy.as_str(),
+            "flag": self.flag,
+            "kept": self.kept(),
+            "keptLocal": self.kept_local,
+            "keptCloud": self.kept_cloud,
+            "keptUnplaceable": self.kept_unplaceable,
+            "removed": self.dropped,
+            "sandboxed": self.sandboxed,
+            "sandboxedWithoutTheLaunchFile": self.sandboxed_everywhere,
+            "refused": self.refused,
+        })
+    }
+}
+
+/// What a session started through `apex agent` would be handed, measured.
+///
+/// Built once and passed to both the text and the JSON readout, so the two
+/// cannot disagree — and built from the same `mcpconf` functions the daemon
+/// calls in `install_mcp_config`, so neither can disagree with a real launch.
+#[derive(Debug, Clone)]
+pub struct Launch {
+    /// The default policy's answer, per connector. What the local plane's
+    /// confinement column is read out of.
+    pub as_configured: Curated,
+    /// One row per [`ConnectorPolicy`] value.
+    pub selections: Vec<Selection>,
+    /// The names in the runtime's `connector_allow`.
+    pub allow: Vec<String>,
+    /// Adapters that can be told to ignore every other MCP configuration, and
+    /// can therefore be handed a curated one at all.
+    pub strict_adapters: Vec<&'static str>,
+    /// `false` when the runtime could not find its own `apex` binary, which is
+    /// a could-not-run rather than a choice and changes what the numbers mean.
+    pub wrapper_available: bool,
+}
+
+impl Launch {
+    /// Run the real curator once per policy value.
+    ///
+    /// Pure in the same sense [`mcpconf::curate`] is: every filesystem
+    /// question is the caller's, so a test can hand it fixtures and assert the
+    /// table exhaustively.
+    pub fn measure(
+        defs: &[Definition],
+        approval: &Approval,
+        allow: &[String],
+        apex: Option<&Path>,
+    ) -> Launch {
+        let mut selections = Vec::new();
+        for policy in ConnectorPolicy::ALL {
+            let c = mcpconf::curate(defs, approval, *policy, allow, apex);
+            let mut kept_local = 0;
+            let mut kept_cloud = 0;
+            let mut kept_unplaceable = 0;
+            for d in c.decisions.iter().filter(|d| d.kept) {
+                // The plane the CURATOR saw, off the definition it decided
+                // against. Reading it back off a second walk of the same files
+                // is how a report comes to name a plane the launcher did not.
+                let wire = defs
+                    .iter()
+                    .find(|def| def.name == d.name)
+                    .map(Definition::wire);
+                match wire.as_ref().map(Plane::of_wire) {
+                    Some(Plane::Local) => kept_local += 1,
+                    Some(Plane::Cloud) => kept_cloud += 1,
+                    _ => kept_unplaceable += 1,
+                }
+            }
+            selections.push(Selection {
+                policy: *policy,
+                flag: match policy {
+                    ConnectorPolicy::AsConfigured => "(the default)".to_string(),
+                    p => format!("--connectors {}", p.as_str()),
+                },
+                kept_local,
+                kept_cloud,
+                kept_unplaceable,
+                dropped: c.dropped(),
+                sandboxed: c.confined(),
+                sandboxed_everywhere: c.confined_everywhere(),
+                refused: (*policy == ConnectorPolicy::Curated && allow.is_empty()).then(|| {
+                    "refused, not run: connector_allow is empty, and \"nobody filled this\n\
+                     in\" is not \"reach nothing\" — `--connectors none` says the second"
+                        .to_string()
+                }),
+            });
+        }
+        Launch {
+            as_configured: mcpconf::curate(
+                defs,
+                approval,
+                ConnectorPolicy::AsConfigured,
+                allow,
+                apex,
+            ),
+            selections,
+            allow: allow.to_vec(),
+            strict_adapters: adapter::ADAPTERS
+                .iter()
+                .filter(|a| a.strict_mcp)
+                .map(|a| a.id)
+                .collect(),
+            wrapper_available: apex.is_some(),
+        }
+    }
+
+    /// What confines one connector, and when, as the curator answered it.
+    fn wrap_of(&self, name: &str) -> Option<Wrap> {
+        self.as_configured
+            .decisions
+            .iter()
+            .find(|d| d.name == name)
+            .and_then(|d| d.confined)
+    }
+
+    /// The sentence the local plane prints beside a program.
+    ///
+    /// Three answers, not two. The middle one is the whole reason [`Wrap`]
+    /// exists: a plugin's bare definition is confined in a session APEX
+    /// started and bare in one anybody else started, and a column that said
+    /// "sandboxed" would be describing only half the machine.
+    fn confinement_line(&self, name: &str) -> String {
+        match self.wrap_of(name) {
+            Some(Wrap::InDefinition) => {
+                "sandboxed however it is started (its definition names `apex mcp run`)".to_string()
+            }
+            Some(Wrap::AtLaunch) => {
+                "sandboxed only under `apex agent` (the launch file wraps it; running the agent \
+                 yourself does not)"
+                    .to_string()
+            }
+            Some(Wrap::Not) => {
+                "NOT sandboxed — `apex mcp confine` would change that".to_string()
+            }
+            // A program with no decision at all means the launcher never saw
+            // this definition, which is a disagreement between two readers of
+            // the same files and must not be printed as a verdict.
+            Some(Wrap::NoProcess) | None => {
+                "not classified by the session launcher — report this".to_string()
+            }
+        }
+    }
+}
+
+/// The session launcher's verdicts for this `$HOME`, under the default policy.
+///
+/// The one place three readouts get their confinement answers from —
+/// `apex mcp list`, `apex mcp planes` and `apex provenance show` — so none of
+/// them can decide a plugin's server is sandboxed while another decides it is
+/// not. It is the same [`mcpconf::curate`] call `apex-agentd` makes in
+/// `install_mcp_config`, which is what makes these readouts about a real
+/// launch rather than about this file's opinion of one.
+///
+/// [`ConnectorPolicy::AsConfigured`], so `connector_allow` is not consulted;
+/// `&[]` is passed rather than this machine's real list precisely so nobody
+/// reads a selection into an answer that is only about wrapping. The wrapper is
+/// this binary — `None` would be a could-not-run, and `curate` reports the
+/// servers unconfined and says why rather than claiming a sandbox it could not
+/// build.
+pub fn launch_verdicts(home: &Path, cwd: Option<&Path>) -> Curated {
+    mcpconf::curate(
+        &mcpconf::read(home, cwd),
+        &mcpconf::approvals(home, cwd),
+        ConnectorPolicy::AsConfigured,
+        &[],
+        std::env::current_exe().ok().as_deref(),
+    )
+}
+
 /// The plane readout: every connector by plane, and what each policy removes.
-pub fn plane_report(found: &[Server]) -> String {
+pub fn plane_report(found: &[Server], launch: &Launch) -> String {
     let mut out = String::new();
     let cloud: Vec<&Server> = found.iter().filter(|s| Plane::of(&s.transport).is_cloud()).collect();
     let local: Vec<&Server> = found
@@ -249,18 +490,10 @@ pub fn plane_report(found: &[Server]) -> String {
         out.push_str("  none\n");
     }
     for s in &local {
-        let confined = match &s.transport {
-            Transport::Stdio { command, args } => servers::confined_server(command, args).is_some(),
-            _ => false,
-        };
         out.push_str(&format!(
             "  {:<28}  {}\n",
             s.name,
-            if confined {
-                "sandboxed (starts through apex mcp run)"
-            } else {
-                "NOT sandboxed — apex mcp confine would change that"
-            }
+            launch.confinement_line(&s.name)
         ));
     }
 
@@ -299,7 +532,34 @@ pub fn plane_report(found: &[Server]) -> String {
     if !unknown.is_empty() {
         out.push_str(&format!(", {} neither", unknown.len()));
     }
-    out.push_str(".\n\nWHAT A NAMED POLICY DOES TO THE CLOUD PLANE\n");
+
+    // The per-connector table first, because it is the one that selects, and a
+    // reader who stops after one table should have read that one.
+    out.push_str(".\n\nWHAT `--connectors` DOES TO THESE CONNECTORS — run, not described\n");
+    out.push_str(&format!(
+        "{:<14}  {:<24}  {:>5}  {:>5}  {:>7}  {:>9}\n",
+        "POLICY", "FLAG", "LOCAL", "CLOUD", "REMOVED", "SANDBOXED"
+    ));
+    for sel in &launch.selections {
+        out.push_str(&format!(
+            "{:<14}  {:<24}  {:>5}  {:>5}  {:>7}  {:>9}\n",
+            sel.policy.as_str(),
+            sel.flag,
+            sel.kept_local,
+            sel.kept_cloud,
+            sel.dropped,
+            sel.sandboxed
+        ));
+        if let Some(why) = &sel.refused {
+            // Every line of it indented under the row it belongs to, so a
+            // refusal is not mistaken for the next policy's row.
+            for line in why.lines() {
+                out.push_str(&format!("{:<14}  {line}\n", ""));
+            }
+        }
+    }
+
+    out.push_str("\nWHAT A NAMED POLICY DOES TO THE CLOUD PLANE — by removing the network\n");
     out.push_str(&format!(
         "{:<26}  {:<20}  {:<8}  {}\n",
         "POLICY", "NETWORK", "CLOUD", "FLAG"
@@ -314,23 +574,66 @@ pub fn plane_report(found: &[Server]) -> String {
         ));
     }
 
-    // The honesty paragraph, and it is not decoration: without it the table
-    // above reads as a per-connector switch, which does not exist.
+    // The honesty paragraph, and it is not decoration: without it the tables
+    // above read as properties of this machine rather than of one path
+    // through it.
+    let sandboxed = launch.as_configured.confined();
+    let everywhere = launch.as_configured.confined_everywhere();
     out.push_str(&format!(
-        "\nHow the cloud plane is reduced, exactly: a strict sandbox removes the session's\n\
-         network, and a session with no network reaches no endpoint. That takes all {}\n\
-         cloud connector(s) at once — it does not select one. Nothing in APEX can disable\n\
-         one cloud connector and keep another: there is no per-server switch, and the only\n\
-         way to stop a single one today is to disable the whole plugin that defines it.\n\
-         None of the five named presets reduces anything; every one of them widens the\n\
-         default. The `--strict-mcp-config` path that would let the daemon hand an agent a\n\
-         curated connector set is named in sidecar.rs as a remainder and is not built.\n",
+        "\nTWO DIFFERENT MECHANISMS, and neither is the other. A strict sandbox removes the\n\
+         session's network, and a session with no network reaches no endpoint — that takes\n\
+         all {} cloud connector(s) at once and selects none of them. None of the five named\n\
+         presets reduces anything; every one of them widens the default. `--connectors` is\n\
+         the selection: `local_only` removes the cloud plane WITHOUT removing the\n\
+         network, and `curated` keeps only the connectors the runtime's own configuration\n\
+         names.\n",
         cloud.len()
     ));
+    out.push_str(&match launch.allow.len() {
+        0 => "\nconnector_allow names nothing on this machine, so `--connectors curated` is\n\
+              refused rather than run. Set it in the runtime's configuration — not in the\n\
+              request, because a list the confined thing can write is not a boundary.\n"
+            .to_string(),
+        _ => format!(
+            "\nconnector_allow names {}: {}.\n",
+            launch.allow.len(),
+            launch.allow.join(", ")
+        ),
+    });
+    out.push_str(&format!(
+        "\nWHERE ALL OF THAT APPLIES, which is narrower than this machine: only a session\n\
+         started through `apex agent`, on an adapter that can be told to ignore every\n\
+         other MCP configuration — today {}. Start the agent yourself and you get every\n\
+         connector above, unreduced.\n",
+        if launch.strict_adapters.is_empty() {
+            "none".to_string()
+        } else {
+            launch.strict_adapters.join(", ")
+        },
+    ));
+    // The number, only where there is one. "0 of the 0 sandboxed" is noise on
+    // a machine with nothing wrapped, and noise in a security readout is how
+    // the sentence that matters stops being read.
+    if sandboxed > everywhere {
+        out.push_str(&format!(
+            "{} of the {} sandboxed connector(s) above lose their sandbox when you do,\n\
+             because that wrapper lives only in the file the daemon writes.\n\
+             `apex mcp confine` writes it into the definition instead, which survives\n\
+             anything — until the plugin updates and replaces the file.\n",
+            sandboxed - everywhere,
+            sandboxed
+        ));
+    }
+    if !launch.wrapper_available {
+        out.push_str(
+            "\nAnd on this run the `apex` binary the wrapper needs could not be found, so the\n\
+             sandboxed counts above are what this machine COULD do, not what it would.\n",
+        );
+    }
     out
 }
 
-pub fn plane_json(found: &[Server]) -> Value {
+pub fn plane_json(found: &[Server], launch: &Launch) -> Value {
     let cloud = found.iter().filter(|s| Plane::of(&s.transport).is_cloud()).count();
     let local = found
         .iter()
@@ -339,20 +642,44 @@ pub fn plane_json(found: &[Server]) -> Value {
     json!({
         "connectors": found.iter().map(|s| {
             let plane = Plane::of(&s.transport);
+            let wrap = launch.wrap_of(&s.name);
             json!({
                 "name": s.name,
                 "plane": plane.tag(),
                 "planeDetail": plane.describe(),
                 "agentReadableCredential": s.credential.agent_readable(),
                 "definedIn": s.surface.describe(),
+                // What confines it, and whether that survives somebody
+                // starting the agent themselves. A consumer reading only
+                // `sandboxed` gets the truth about an APEX-started session;
+                // the second field is what stops it being read as a fact about
+                // the machine.
+                "sandboxed": wrap.and_then(|w| w.confined()),
+                "sandboxedBy": wrap.map_or("unknown", |w| w.tag()),
+                "sandboxSurvivesAHandRun": wrap.is_some_and(|w| w.survives_a_hand_run()),
             })
         }).collect::<Vec<_>>(),
         "local": local,
         "cloud": cloud,
         "policies": reductions().iter().map(|r| r.to_json(cloud, local)).collect::<Vec<_>>(),
-        "perConnectorSwitch": false,
-        "howCloudIsReduced": "a strict sandbox removes the session's network, which removes \
-                              every cloud connector at once; no policy selects one connector",
+        // The selection table, each row a real run of the curator.
+        "connectorPolicies":
+            launch.selections.iter().map(Selection::to_json).collect::<Vec<_>>(),
+        "perConnectorSwitch": true,
+        "perConnectorSwitchIs": "--connectors curated, against connector_allow in the runtime's \
+                                 configuration",
+        "connectorAllow": launch.allow,
+        // The qualifier, as a field rather than only as prose, because the
+        // consumer most likely to over-claim is the one that never reads the
+        // prose.
+        "appliesOnlyToSessionsStartedBy": "apex agent",
+        "adaptersThatCanBeCurated": launch.strict_adapters,
+        "sandboxedUnderApexAgent": launch.as_configured.confined(),
+        "sandboxedWhenStartedByHand": launch.as_configured.confined_everywhere(),
+        "howCloudIsReduced": "two ways, and they are different: removing the session's network \
+                              (--sandbox strict) takes every cloud connector at once and \
+                              selects none, while --connectors local|curated|none selects, and \
+                              only for a session apex agent started",
     })
 }
 
@@ -729,12 +1056,25 @@ pub fn planes_main(json: bool) -> Result<i32> {
     let home = crate::mcp::home();
     let cwd = std::env::current_dir().ok();
     let found = servers::discover(&home, cwd.as_deref());
+    // The same three inputs `apex-agentd`'s `install_mcp_config` uses, read
+    // here so the readout is of a launch rather than of a design. `current_exe`
+    // rather than a `PATH` lookup, for the reason the daemon resolves its own
+    // binary: a wrapper pointing at a different build is the one pairing
+    // guaranteed to be wrong.
+    let cfg = apex_agent_core::config::Config::load();
+    let apex = std::env::current_exe().ok();
+    let launch = Launch::measure(
+        &mcpconf::read(&home, cwd.as_deref()),
+        &mcpconf::approvals(&home, cwd.as_deref()),
+        &cfg.connector_allow,
+        apex.as_deref(),
+    );
     if json {
-        println!("{}", serde_json::to_string_pretty(&plane_json(&found))?);
+        println!("{}", serde_json::to_string_pretty(&plane_json(&found, &launch))?);
     } else if found.is_empty() {
         println!("no MCP server is defined for this account");
     } else {
-        print!("{}", plane_report(&found));
+        print!("{}", plane_report(&found, &launch));
     }
     Ok(0)
 }
@@ -913,6 +1253,7 @@ fn probe_one(found: &[Server], name: &str) -> Health {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn stdio(name: &str) -> Server {
         Server {
@@ -989,26 +1330,190 @@ mod tests {
         }
     }
 
+    fn plugin_stdio(name: &str, plugin: &str) -> Server {
+        Server {
+            name: name.to_string(),
+            key: name.rsplit(':').next().unwrap_or(name).to_string(),
+            surface: Surface::Plugin {
+                plugin: plugin.to_string(),
+                file: PathBuf::from("/tmp/p/.mcp.json"),
+            },
+            transport: Transport::Stdio {
+                command: "node".into(),
+                args: vec!["server.js".into()],
+            },
+            credential: servers::Credential::None,
+        }
+    }
+
+    /// The same three connectors as definitions, for the launcher's side.
+    fn fixture_defs() -> Vec<Definition> {
+        vec![
+            Definition {
+                name: "mine".into(),
+                key: "mine".into(),
+                origin: mcpconf::Origin::User,
+                def: json!({"command": "npx", "args": ["-y", "server"]}),
+            },
+            Definition {
+                name: "plugin:p:srv".into(),
+                key: "srv".into(),
+                origin: mcpconf::Origin::Plugin {
+                    plugin: "p".into(),
+                    file: PathBuf::from("/tmp/p/.mcp.json"),
+                },
+                def: json!({"command": "node", "args": ["server.js"]}),
+            },
+            Definition {
+                name: "cloud-one".into(),
+                key: "cloud-one".into(),
+                origin: mcpconf::Origin::User,
+                def: json!({"type": "http", "url": "https://x/mcp"}),
+            },
+        ]
+    }
+
+    fn fixture_found() -> Vec<Server> {
+        vec![
+            stdio("mine"),
+            plugin_stdio("plugin:p:srv", "p"),
+            endpoint("cloud-one", "https://x/mcp"),
+        ]
+    }
+
+    fn fixture_launch(allow: &[String]) -> Launch {
+        Launch::measure(
+            &fixture_defs(),
+            &Approval::default(),
+            allow,
+            Some(Path::new("/usr/bin/apex")),
+        )
+    }
+
     #[test]
-    fn the_report_says_the_reduction_is_all_or_nothing_rather_than_per_connector() {
-        // The sentence that stops the table above being read as a per-server
-        // switch. A report that lost it would be a label.
-        let found = vec![stdio("local-one"), endpoint("cloud-one", "https://x/mcp")];
-        let text = plane_report(&found);
+    fn a_connector_policy_row_is_the_curators_own_answer() {
+        // The table is RUN, not written. Each row here is checked against what
+        // `mcpconf::curate` does with the same inputs, so a table that started
+        // describing a policy the launcher no longer applies fails here rather
+        // than being printed to somebody making a security decision.
+        let launch = fixture_launch(&["cloud-one".to_string()]);
+        let row = |p: ConnectorPolicy| {
+            launch
+                .selections
+                .iter()
+                .find(|s| s.policy == p)
+                .unwrap_or_else(|| panic!("a row for {}", p.as_str()))
+                .clone()
+        };
+
+        let all = row(ConnectorPolicy::AsConfigured);
+        assert_eq!((all.kept_local, all.kept_cloud, all.dropped), (2, 1, 0));
+        // One of the two programs is a plugin's, so the launch file wraps it;
+        // the user's own is left exactly as they wrote it.
+        assert_eq!(all.sandboxed, 1);
+        assert_eq!(all.sandboxed_everywhere, 0, "neither is wrapped on disk");
+
+        let local = row(ConnectorPolicy::LocalOnly);
+        assert_eq!((local.kept_local, local.kept_cloud, local.dropped), (2, 0, 1));
+        assert!(local.refused.is_none());
+
+        let curated = row(ConnectorPolicy::Curated);
+        assert_eq!(
+            (curated.kept_local, curated.kept_cloud, curated.dropped),
+            (0, 1, 2),
+            "curated keeps the one connector_allow names, and it is the cloud one — \
+             which is the per-connector selection the old readout said did not exist"
+        );
+
+        let none = row(ConnectorPolicy::NoConnectors);
+        assert_eq!(none.kept(), 0);
+        assert_eq!(none.dropped, 3);
+
+        // And every row agrees with a direct run of the curator.
+        for sel in &launch.selections {
+            let c = mcpconf::curate(
+                &fixture_defs(),
+                &Approval::default(),
+                sel.policy,
+                &["cloud-one".to_string()],
+                Some(Path::new("/usr/bin/apex")),
+            );
+            assert_eq!(sel.kept(), c.kept(), "{}", sel.policy.as_str());
+            assert_eq!(sel.dropped, c.dropped(), "{}", sel.policy.as_str());
+            assert_eq!(sel.sandboxed, c.confined(), "{}", sel.policy.as_str());
+        }
+    }
+
+    #[test]
+    fn an_empty_connector_list_is_a_refusal_and_not_a_row_of_zeroes() {
+        // "Nobody filled this in" and "reach nothing" are different statements
+        // and `validate_for` refuses the first. A row printing 0 kept would
+        // describe a session that never starts as one that starts empty.
+        let launch = fixture_launch(&[]);
+        let curated = launch
+            .selections
+            .iter()
+            .find(|s| s.policy == ConnectorPolicy::Curated)
+            .expect("a curated row");
+        let why = curated.refused.as_deref().unwrap_or("");
+        assert!(why.contains("refused, not run"), "{why}");
+        assert!(why.contains("connector_allow is empty"), "{why}");
+
+        let text = plane_report(&fixture_found(), &launch);
+        assert!(text.contains("refused rather than run"), "{text}");
+    }
+
+    #[test]
+    fn the_report_says_where_the_reduction_applies_and_where_it_stops() {
+        // The qualifier, which is the whole difference between a fact about
+        // this machine and a fact about one path through it. Every number in
+        // the tables above is about a session `apex agent` started; a person
+        // who types the agent's own name gets none of it.
+        let launch = fixture_launch(&["cloud-one".to_string()]);
+        let found = fixture_found();
+        let text = plane_report(&found, &launch);
+
         assert!(text.contains("LOCAL PLANE"), "{text}");
         assert!(text.contains("CLOUD PLANE"), "{text}");
         assert!(
-            text.contains("does not select one"),
-            "the all-or-nothing sentence is missing:\n{text}"
+            text.contains("started through `apex agent`"),
+            "the readout must say where curation applies:\n{text}"
         );
         assert!(
-            text.contains("no per-server switch"),
-            "the missing-switch sentence is missing:\n{text}"
+            text.contains("Start the agent yourself"),
+            "and where it stops:\n{text}"
         );
-        let j = plane_json(&found);
-        assert_eq!(j["perConnectorSwitch"], serde_json::Value::Bool(false));
-        assert_eq!(j["local"], 1);
+        // The adapter list is read off the adapters, not typed here, so an
+        // adapter that grows the flag appears without this file changing.
+        assert!(text.contains("claude"), "{text}");
+
+        // The per-connector column is three-way. The plugin's server is
+        // sandboxed only under `apex agent`; the user's own is not sandboxed
+        // at all. A two-valued column would print the same word for both.
+        assert!(
+            text.contains("sandboxed only under `apex agent`"),
+            "the at-launch answer is missing:\n{text}"
+        );
+        assert!(
+            text.contains("NOT sandboxed — `apex mcp confine`"),
+            "the not-sandboxed answer is missing:\n{text}"
+        );
+
+        let j = plane_json(&found, &launch);
+        assert_eq!(j["perConnectorSwitch"], serde_json::Value::Bool(true));
+        assert_eq!(j["local"], 2);
         assert_eq!(j["cloud"], 1);
+        assert_eq!(j["sandboxedUnderApexAgent"], 1);
+        assert_eq!(j["sandboxedWhenStartedByHand"], 0);
+        assert_eq!(j["adaptersThatCanBeCurated"][0], "claude");
+
+        let by: Vec<&str> = j["connectors"]
+            .as_array()
+            .expect("connectors")
+            .iter()
+            .map(|c| c["sandboxedBy"].as_str().expect("sandboxedBy"))
+            .collect();
+        assert_eq!(by, vec!["none", "launch", "no_process"]);
     }
 
     #[test]
