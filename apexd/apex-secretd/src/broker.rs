@@ -390,6 +390,158 @@ fn run_git(
     Ok(Output { code, text })
 }
 
+/// How long a brokered tool may run.
+///
+/// **Shorter than [`crate::providers::cloudflare::temporary::LIFETIME_SECS`]**,
+/// and the compile-time assertion below is why that is not a coincidence: a
+/// tool that outran the credential minted for it would fail halfway through
+/// with an authentication error that has nothing to do with what it was
+/// asked to do, and the operator would go looking in the wrong place. The
+/// assertion means the two constants cannot drift apart silently.
+///
+/// It covers the tool and not the whole operation: §13.4's exchange makes two
+/// requests of its own before the tool starts, each bounded by
+/// [`crate::providers::cloudflare::api::TIMEOUT_SECS`], so a worst case where
+/// both of those run long AND the tool runs to its limit exceeds the
+/// credential's life. That case ends in an authentication failure from the far
+/// side rather than in anything unsafe — a credential that expired is a
+/// credential that stopped working — and tightening it would mean a timeout
+/// budget threaded through three modules to buy nothing.
+pub const TOOL_TIMEOUT_SECS: u64 = 180;
+
+const _: () = assert!(
+    TOOL_TIMEOUT_SECS < crate::providers::cloudflare::temporary::LIFETIME_SECS,
+    "a brokered tool may not outlive the short-lived credential it is given"
+);
+
+/// A tool the broker runs on the caller's behalf, with a credential the caller
+/// never sees.
+///
+/// §13.4: *"Do not pass even the temporary token directly to the agent if a
+/// broker-owned `wrangler`/API child process can perform the operation."*
+/// [`run_curl`] is that sentence's API half. This is the tool half, and the
+/// difference between them is only how the credential is presented: `curl`
+/// takes a configuration on stdin, and `wrangler` and `terraform` read one
+/// environment variable and have no stdin channel at all.
+///
+/// ## Where the credential goes, and what that is worth
+///
+/// The environment, and **not** the command line: `/proc/<pid>/cmdline` is
+/// world-readable and an environment is not. That is the same choice
+/// [`run_git`] already makes for `APEX_GIT_TOKEN`, for the same reason, and
+/// this is that mechanism generalised rather than a second one.
+///
+/// The environment is **built here and never inherited**. The daemon's own
+/// environment is root's, and passing it through would hand the child root's
+/// `HOME`, whatever systemd set, and any `CLOUDFLARE_*` variable that happened
+/// to be in it — which would make the credential this struct carries the
+/// second-most-interesting one in the room.
+///
+/// The honest limit is the crate note's: the child runs as the owner, so for
+/// as long as it runs, a same-uid process **outside a confined session** can
+/// read its environment. Inside one it cannot — the sandbox uses
+/// `--unshare-pid`, so the daemon's children are not in the agent's `/proc` at
+/// all. And P1-011 is what bounds the rest: the credential in that environment
+/// is one that expires in minutes and is deleted when the operation returns,
+/// so the window is a window rather than the account.
+pub struct Tool<'a> {
+    /// Absolute. Never resolved through `PATH`, because the `PATH` a child is
+    /// given is one this file writes and the point of writing it would be lost
+    /// if the program name were looked up in it.
+    pub program: &'a str,
+    pub args: &'a [String],
+    /// The directory the tool runs in — the caller's project, because that is
+    /// where its `wrangler.toml` or its `.tf` files are.
+    pub cwd: &'a Path,
+    /// The variable the tool reads its credential from, and the value.
+    pub credential: (&'static str, &'a str),
+    /// Variables that are not credentials but that the tool needs: an account
+    /// id, an environment name. Names are `&'static str` so there is no
+    /// variable a caller can invent.
+    pub extra: Vec<(&'static str, String)>,
+}
+
+/// Run a tool as the owner, with a cleared environment and one credential in
+/// it.
+pub fn run_tool(tool: &Tool<'_>, owner: &Owner) -> Result<Output, String> {
+    if !Path::new(tool.program).is_absolute() {
+        return Err(format!(
+            "'{}' is not an absolute path, and this service does not look a \
+             program up in a PATH it wrote itself",
+            tool.program
+        ));
+    }
+    if !Path::new(tool.program).exists() {
+        // Not "you may not": the tool is not installed, which is a different
+        // thing to tell an operator and has a different fix.
+        return Err(format!(
+            "'{}' is not installed on this machine, so the operation could not \
+             be carried out",
+            tool.program
+        ));
+    }
+
+    // `timeout` rather than a watchdog thread, for `run_git`'s reason: the
+    // child has to actually die.
+    let mut cmd = Command::new("timeout");
+    cmd.arg(TOOL_TIMEOUT_SECS.to_string())
+        .arg(tool.program)
+        .args(tool.args);
+
+    cmd.env_clear()
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("HOME", &owner.home)
+        .env("USER", &owner.name)
+        .env("LOGNAME", &owner.name)
+        .env("LC_ALL", "C")
+        // A proxy the environment could name is a destination the caller did
+        // not choose and this daemon did not check.
+        .env("NO_PROXY", "*")
+        // Neither of these tools may decide on its own to fetch a newer
+        // version of itself and run that instead, which is what an update
+        // check is one prompt away from.
+        .env("CI", "1")
+        .env("NO_COLOR", "1")
+        .current_dir(tool.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    for (name, value) in &tool.extra {
+        cmd.env(name, value);
+    }
+    // Last, so that nothing above can be spelled the same and win.
+    cmd.env(tool.credential.0, tool.credential.1);
+
+    drop_to(&mut cmd, owner);
+
+    let out = cmd.output().map_err(|e| {
+        format!("running {}: {e}", Path::new(tool.program).file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| tool.program.to_string()))
+    })?;
+
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !err.trim().is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(err.trim_end());
+    }
+    if text.len() > HTTP_MAX_BYTES {
+        text.truncate(HTTP_MAX_BYTES);
+        text.push_str("\napex: the rest of this output was not carried");
+    }
+    let code = out.status.code().unwrap_or(-1);
+    if code == 124 {
+        text.push_str(&format!(
+            "\napex: that tool did not finish within {TOOL_TIMEOUT_SECS}s and was stopped"
+        ));
+    }
+    Ok(Output { code, text })
+}
+
 /// How large a brokered HTTP reply may be before it is refused.
 ///
 /// Bounded because the far end is a server the owner chose but the daemon does
