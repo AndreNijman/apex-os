@@ -24,6 +24,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.material3.Switch
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.Alignment
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -77,13 +80,14 @@ fun StartAgentScreen(
     knownDirectories: List<String>,
     busy: String?,
     failure: String?,
-    onStart: (agent: String?, cwd: String, worktree: String?, prompt: String?) -> Unit,
+    onStart: (agent: String?, cwd: String, worktree: String?, prompt: String?, checkpoint: Boolean) -> Unit,
     onBack: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var agent by remember(hello) { mutableStateOf(hello?.defaultAgent?.ifEmpty { null }) }
     var cwd by remember(knownDirectories) { mutableStateOf(knownDirectories.firstOrNull() ?: "") }
     var worktree by remember { mutableStateOf("") }
+    var checkpoint by remember { mutableStateOf(false) }
     var prompt by remember { mutableStateOf("") }
 
     Scaffold(
@@ -225,6 +229,33 @@ fun StartAgentScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
 
+            Spacer(Modifier.height(16.dp))
+            Label("Checkpoint")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Switch(checked = checkpoint, onCheckedChange = { checkpoint = it })
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Capture the project before the agent starts",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    // What it does AND what it does not, before it is chosen —
+                    // which is as close as this app can get to P1-056's
+                    // "checkpoint/undo actions show consequences before
+                    // execution". The undo itself is not reachable from here:
+                    // there is no checkpoint request on this socket, only this
+                    // flag on `run` and the id the daemon reports back.
+                    Text(
+                        "A commit under refs/apex that is not a branch and is never pushed. " +
+                            "Your index, your stash and your branch are left alone. Undoing it " +
+                            "is done at the machine with `apex agent undo`; this app can show " +
+                            "you the command but cannot run it or say what it would change.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
             Spacer(Modifier.height(20.dp))
             Button(
                 onClick = {
@@ -233,6 +264,7 @@ fun StartAgentScreen(
                         cwd.trim(),
                         worktree.trim().ifEmpty { null },
                         prompt.trim().ifEmpty { null },
+                        checkpoint,
                     )
                 },
                 enabled = cwd.trim().startsWith("/") && busy == null,

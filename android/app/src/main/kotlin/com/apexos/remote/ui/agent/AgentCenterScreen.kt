@@ -61,6 +61,14 @@ fun AgentCenterScreen(
     onRefresh: () -> Unit,
     onOpen: (AgentSession) -> Unit,
     onStart: () -> Unit,
+    onProjects: () -> Unit,
+    onApprovals: () -> Unit,
+    /** How many privileged operations are waiting at the machine. */
+    pendingApprovals: Int = 0,
+    /** Whether this phone will show a notification at all. */
+    notificationsEnabled: Boolean = true,
+    /** True while `POST_NOTIFICATIONS` has never been asked for. */
+    notificationsUnasked: Boolean = false,
     onBack: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -82,6 +90,41 @@ fun AgentCenterScreen(
         Column(Modifier.fillMaxSize().padding(padding)) {
             busy?.let { Strip(it, alarming = false) }
             failure?.let { Strip(it, alarming = true, onDismiss = onDismiss) }
+
+            // Said on screen rather than left to be discovered. Without the
+            // permission the poll goes on raising alerts and `Notifier.post`
+            // goes on declining to show them, and the user concludes the
+            // feature is broken rather than unasked.
+            if (!notificationsEnabled) {
+                Strip(
+                    if (notificationsUnasked) {
+                        "Notifications have not been turned on for this app, so nothing will " +
+                            "reach you when an agent needs you. Everything still shows here."
+                    } else {
+                        "Notifications are switched off for this app in Android's settings, so " +
+                            "nothing will reach you when an agent needs you."
+                    },
+                    alarming = false,
+                )
+            }
+
+            // The two other things a machine has, above the list rather than
+            // in a menu: a pending root operation is the one thing on this
+            // screen the user cannot act on from here, so it has to be
+            // visible enough to send them to the machine.
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+                TextButton(onClick = onProjects) { Text("Projects") }
+                TextButton(onClick = onApprovals) {
+                    Text(
+                        if (pendingApprovals > 0) "Approvals ($pendingApprovals)" else "Approvals",
+                        color = if (pendingApprovals > 0) {
+                            ApexTones.forState("permission_request")
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                    )
+                }
+            }
 
             if (sessions.isEmpty() && busy == null) {
                 Empty(onStart)
