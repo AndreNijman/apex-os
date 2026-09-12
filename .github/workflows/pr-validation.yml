@@ -1716,6 +1716,26 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('android/gradle/libs.versions.toml', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-${{ runner.os }}-
 
+      # The platform AGP compiles against, installed rather than assumed. The
+      # runner image ships several, and which ones move between image releases;
+      # a compileSdk the image happens not to carry fails the job at
+      # `assembleDebug`, minutes in.
+      #
+      # The `android.jar` check is not belt and braces. On the laptop this app
+      # was written on, `platforms;android-35` installed BROKEN: the unzip died
+      # with a DirectoryNotEmptyException and left a directory containing only
+      # `package.xml`, which every tool then reported as "installed" and AGP
+      # rejected with "Build properties not found". A present directory is not
+      # a present platform.
+      - name: Android platform 36
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:?no Android SDK on this runner}}"
+          "$sdk/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" >/dev/null
+          jar="$sdk/platforms/android-36/android.jar"
+          test -f "$jar" || { echo "::error::$jar is missing; the platform unpacked badly"; exit 1; }
+          echo "android-36: $(stat -c%s "$jar") bytes"
+
       # The protocol suite first, and on its own. `:core` is a plain Kotlin/JVM
       # module with no Android plugin in it, so this step needs no SDK, no
       # device and no emulator — which is the property that makes the protocol
@@ -1740,8 +1760,8 @@ jobs:
           # The figure at the time this job was written. A drop means tests
           # stopped running, which is the failure this step exists to catch; a
           # rise is fine and the floor moves with it.
-          test "$total" -ge 86 \
-            || { echo "::error::only $total protocol tests ran; expected at least 86"; exit 1; }
+          test "$total" -ge 87 \
+            || { echo "::error::only $total protocol tests ran; expected at least 87"; exit 1; }
 
       # The rule InsecureStorageTest rests on. That test walks a directory and
       # accounts for every byte in it, which is evidence about app storage only
@@ -1764,6 +1784,24 @@ jobs:
           # `assembleDebug` succeeding without producing an artefact is the same
           # class of quiet pass as a suite that ran nothing.
           ls -l app/build/outputs/apk/debug/app-debug.apk
+
+      # The JVM-testable part of `:app`. Small, and it is where the address
+      # parser lives — the one piece of the Android module whose bugs are
+      # invisible on a network where IPv4 happens to work.
+      - name: App unit tests
+        run: ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest
+
+      - name: The app suite actually ran
+        run: |
+          set -euo pipefail
+          total=0
+          for xml in app/build/test-results/testDebugUnitTest/*.xml; do
+            n="$(sed -n 's/.*<testsuite [^>]*tests="\([0-9]*\)".*/\1/p' "$xml" | head -1)"
+            total=$((total + ${n:-0}))
+          done
+          echo "app: $total tests"
+          test "$total" -ge 6 \
+            || { echo "::error::only $total app tests ran; expected at least 6"; exit 1; }
 
   result:
     name: PR validation

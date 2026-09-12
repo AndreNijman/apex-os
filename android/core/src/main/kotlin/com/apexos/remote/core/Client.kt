@@ -144,7 +144,7 @@ class Session internal constructor(
     private val channel: NoiseChannel,
     private val input: InputStream,
     private val output: OutputStream,
-) {
+) : java.io.Closeable {
     private val writeLock = Any()
     private val outstanding = java.util.concurrent.ConcurrentHashMap<Long, Long>()
     private val nextToken = java.util.concurrent.atomic.AtomicLong(0)
@@ -199,7 +199,7 @@ class Session internal constructor(
      */
     fun receive(): Frame {
         while (true) {
-            val frame = Frame.decode(channel.open(Transport.readMessage(input)))
+            val frame = readFrame()
             when (frame) {
                 is Frame.Ping -> send(Frame.Pong(frame.token))
                 is Frame.Pong -> {
@@ -217,6 +217,71 @@ class Session internal constructor(
                 else -> return frame
             }
         }
+    }
+
+    /** One frame off the wire, keepalives and all. The only reader of [input]. */
+    private fun readFrame(): Frame = Frame.decode(channel.open(Transport.readMessage(input)))
+
+    /**
+     * Ping, and read until the answer comes back. Returns the round trip in
+     * milliseconds.
+     *
+     * Separate from [ping] because the two have different callers. [ping] is
+     * for a session with a frame loop already running: it posts the ping and
+     * the loop times the answer whenever it arrives. This is for a session that
+     * has nothing else to do yet — the moment after a connection opens, when
+     * the only question is whether frames actually cross this path, which a
+     * completed handshake does not answer.
+     *
+     * **Only before a channel is open.** Anything that is not a keepalive
+     * belongs to a caller, and this method has nowhere to put it, so it refuses
+     * rather than swallowing somebody's terminal. A silent peer is the
+     * transport's problem: whatever read deadline the stream carries is what
+     * ends the wait.
+     */
+    fun measureRoundTrip(): Long {
+        val token = nextToken.incrementAndGet()
+        val sentAt = System.nanoTime()
+        outstanding[token] = sentAt
+        send(Frame.Ping(token))
+        while (true) {
+            when (val frame = readFrame()) {
+                is Frame.Ping -> send(Frame.Pong(frame.token))
+                is Frame.Pong -> {
+                    // Somebody else's token, or one already answered. Ignored
+                    // for the same reason [receive] ignores it: a peer that
+                    // echoed a number of its own choosing must not be able to
+                    // report a quality it did not earn.
+                    if (frame.token == token) {
+                        outstanding.remove(token)
+                        return ((System.nanoTime() - sentAt) / 1_000_000).also { roundTripMs = it }
+                    }
+                }
+                else -> throw WireException(
+                    WireError.Malformed(
+                        "a $frame arrived while measuring the connection; measure before opening a channel",
+                    ),
+                )
+            }
+        }
+    }
+
+    /**
+     * Hang up.
+     *
+     * [Closeable] and not a bare method, so a caller can `use` a session and a
+     * screen that goes away cannot leave a socket open. Both streams are
+     * closed and failures are swallowed: the far end may already be gone, and
+     * a throw from a close is a throw that hides whatever ended the session.
+     *
+     * Closing does not invalidate the channel's keys, and nothing here tries to
+     * pretend otherwise — a Noise transport has no "closed" state. What it does
+     * is end the stream, after which [send] and [receive] fail. That is the
+     * only signal a caller needs.
+     */
+    override fun close() {
+        runCatching { output.close() }
+        runCatching { input.close() }
     }
 }
 

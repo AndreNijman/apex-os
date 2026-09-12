@@ -308,4 +308,38 @@ class ClientTranscriptTest {
         assertTrue(session.roundTripMs != null, "the round trip this end asked for was not measured")
         assertTrue(session.roundTripMs!! >= 0)
     }
+
+    @Test
+    fun `closing a session ends the stream, so nothing can be sent afterwards`() {
+        // A screen that goes away must not leave a socket open, which means a
+        // session has to be closeable — and "closeable" is only a real property
+        // if a send after it fails. Piped streams rather than byte arrays,
+        // because a `ByteArrayOutputStream.close()` is a no-op and a test built
+        // on one would pass whatever `close` did.
+        val (desktop, m2) = desktopHalf()
+        val toDevice = java.io.PipedOutputStream()
+        val deviceReads = java.io.PipedInputStream(toDevice, 1 shl 16)
+        toDevice.write(framed(m2))
+        val toDesktop = java.io.PipedOutputStream()
+        val desktopReads = java.io.PipedInputStream(toDesktop, 1 shl 16)
+
+        val session = Client.openSession(
+            input = deviceReads,
+            output = toDesktop,
+            identity = InMemoryStaticKey(deviceSecret),
+            desktopPublic = desktopPublic,
+            version = version,
+            ephemerals = initiatorEphemeral,
+        )
+        val _unused = desktop
+        session.send(Frame.Control("""{"ok":true}""".toByteArray()))
+        session.close()
+        assertThrows<java.io.IOException> {
+            session.send(Frame.Control("""{"ok":true}""".toByteArray()))
+        }
+        // Closing twice is not an error; a caller that closes in a `finally`
+        // and again in a `use` must not be punished for it.
+        session.close()
+        val _alsoUnused = desktopReads
+    }
 }
