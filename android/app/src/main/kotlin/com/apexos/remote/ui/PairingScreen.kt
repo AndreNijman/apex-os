@@ -92,6 +92,8 @@ fun PairingScreen(
      * a link worth sending somebody.
      */
     initialPayload: String? = null,
+    /** Called once [initialPayload] has been captured, so the link fires once. */
+    onPayloadConsumed: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var granted by remember {
@@ -102,6 +104,16 @@ fun PairingScreen(
     }
     var typing by remember { mutableStateOf(initialPayload != null) }
     var typed by remember { mutableStateOf(initialPayload.orEmpty()) }
+
+    // Consumed HERE, after the two `remember`s above have captured it, and not
+    // at the navigate that brought us here. `NavController.navigate` schedules
+    // a back-stack change that the `NavHost` acts on at the next recomposition;
+    // a consume beside it runs first, and this screen would then remember an
+    // empty string. Clearing it now is still worth doing — it stops a later
+    // lock and unlock returning the user to a code that has since expired.
+    LaunchedEffect(initialPayload) {
+        if (initialPayload != null) onPayloadConsumed()
+    }
     val asker = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted = it }
