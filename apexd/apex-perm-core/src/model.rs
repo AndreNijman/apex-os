@@ -418,12 +418,29 @@ impl GrantOrigin {
 
 /// When a revocation takes effect.
 ///
-/// Nothing in this implementation produces [`Timing::Immediate`], and the
-/// reason is written down rather than left to be rediscovered: whether a
-/// permission-store change reaches an *already running* PipeWire client — and
-/// how fast — was not measured, because measuring it would have meant taking a
-/// camera grant away on a live machine. `NextRequest` is the conservative true
-/// statement. If somebody measures it, this is the variant to start using.
+/// Nothing in this implementation produces [`Timing::Immediate`], and that is
+/// now a measured fact rather than a cautious one.
+///
+/// The question was whether a permission-store change reaches an *already
+/// running* PipeWire client. `tests/measure-permission-store-reach.sh` answers
+/// it on a private session bus with a private PipeWire, WirePlumber and
+/// `XDG_DATA_HOME`, so the grant taken away belongs to an application id that
+/// does not exist — the earlier round thought measuring it meant revoking a
+/// real camera grant, and it does not.
+///
+/// Measured on the L16, 2026-09-12: **it does not reach it.** WirePlumber's
+/// `client/access-portal.lua` grants a portal client its permissions when the
+/// client CONNECTS, and did nothing when the store changed under a client that
+/// was already connected — six seconds later the client still held `rwxm-` on
+/// every object. Every other link was verified working in the same run: the
+/// client was recorded with `pipewire.access = portal`, WirePlumber had granted
+/// it, the store read back `['no']`, and the `Changed` signal was caught on the
+/// bus. Where the chain breaks is deliberately not claimed here.
+///
+/// So [`Timing::NextRequest`] is the correct statement, and this variant stays
+/// unreachable. If a future stack changes that, the measurement script is the
+/// thing to re-run, and `nothing_claims_a_revocation_is_immediate` is the test
+/// that has to be changed deliberately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Timing {
@@ -777,6 +794,11 @@ mod tests {
 
     /// The measurement in docs/app-permissions.md §2.4, held as a test so that
     /// a later edit has to change the claim deliberately.
+    ///
+    /// §2.4 used to say the measurement had not been taken. It has now:
+    /// `tests/measure-permission-store-reach.sh` showed a permission-store
+    /// change NOT reaching an already-running PipeWire client, so this test is
+    /// no longer a caution — it is the recorded result.
     #[test]
     fn nothing_claims_a_revocation_is_immediate() {
         for e in [
