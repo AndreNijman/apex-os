@@ -628,6 +628,16 @@ fn serve(daemon: &Arc<Daemon>, stream: UnixStream) -> Result<()> {
             return session::handle_attach(daemon, writer, reader, id, cols, rows, replay);
         }
 
+        // And neither does `Receive`, for the same reason with the direction
+        // reversed: the connection stops being a control channel and becomes a
+        // byte sink that the file being handed over is written into. It is
+        // matched here rather than in `dispatch` because `dispatch` cannot
+        // reach the connection, and a verb whose payload is the rest of the
+        // stream has to be answered by something that holds it.
+        if let Request::Receive { id, name, len } = request {
+            return inject::handle_receive(daemon, &caller, writer, reader, id, &name, len);
+        }
+
         let response = dispatch(daemon, request, &mut caller);
         respond(&mut writer, &response)?;
     }
@@ -682,6 +692,11 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
         Request::Attach { .. } => Response::error(
             ErrorKind::Internal,
             "attach is handled before dispatch and must never reach it",
+        ),
+
+        Request::Receive { .. } => Response::error(
+            ErrorKind::Internal,
+            "receive is handled before dispatch and must never reach it",
         ),
 
         Request::Resize { id, cols, rows } => {
