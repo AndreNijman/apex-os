@@ -94,7 +94,7 @@ command on a laptop.
 Every device, one line each, with what the last probe found:
 
 ```
-katana  APEX 9.9.9 (gaming), 20 cpu, 62 GiB, cuda, ai,agent,build
+katana  APEX 0.1.0 (gaming), 20 cpu, 62 GiB, cuda, ai,agent,build
 l16     Fedora Linux 43 (Workstation Edition), 8 cpu, 15 GiB, build
 ```
 

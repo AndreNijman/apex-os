@@ -68,18 +68,21 @@ Downloads a model into the shared store and verifies it. Needs root, because
 the store is root-owned.
 
 ```
-sudo apex ai pull qwen2.5-coder-7b
-sudo apex ai pull qwen2.5-coder-7b@sha256:<hex>
+sudo apex ai pull qwen25-coder
+sudo apex ai pull qwen25-coder@sha256:cc324af0…
 ```
 
 Three provenance cases, and only three:
 
-| what you typed | where the digest comes from |
+| what you typed | where the name-to-digest mapping comes from |
 |---|---|
 | a catalogue name | the signed image |
-| `name@sha256:<hex>` | you, explicitly, and it must match the catalogue |
 | `--url` with `--digest` | you, explicitly |
 | `--url` alone | **refused** |
+
+`name@sha256:<hex>` is not a fourth case. The mapping still comes from the
+image; the suffix asserts *what you expected it to be*, and a digest that does
+not match the catalogue's is refused with both values rather than pulled.
 
 A URL with no digest is refused rather than trusted, because verifying a
 download against a digest handed to you by the same server proves only that it
