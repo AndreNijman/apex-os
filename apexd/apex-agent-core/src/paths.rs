@@ -8,9 +8,11 @@
 //! * session records and logs live in `$XDG_STATE_HOME` — they survive a
 //!   daemon restart and a reboot so `apex agent list` can still explain what
 //!   ran yesterday;
-//! * per-session scratch lives under `/tmp/apex-agent/<id>` — it is the one
-//!   writable path outside the project that a sandboxed agent gets, and it is
-//!   removed with the session.
+//! * per-session scratch lives under `/tmp/apex-agent-<uid>/<id>` — it is the
+//!   one writable path outside the project that a sandboxed agent gets, and it
+//!   is removed with the session. The uid is in the path because it was not,
+//!   once, and a second account on the machine then could not start a session
+//!   at all: see [`SCRATCH_ROOT_PREFIX`].
 //!
 //! Nothing here is privileged. Every path is user-owned and every directory is
 //! created `0700`, because a session log is a transcript of the user's work.
@@ -109,7 +111,17 @@ fn passwd_home() -> Option<PathBuf> {
 
 /// The daemon's control socket. One per user, not per session.
 pub fn control_socket() -> PathBuf {
-    runtime_dir().join("apex-agentd/control.sock")
+    control_socket_in(&runtime_dir())
+}
+
+/// The same socket, under a runtime directory the caller already has.
+///
+/// The `*_in` form exists for the reason the store's do: a function that builds
+/// a sandbox specification has to stay pure to be asserted exhaustively, and
+/// reading `$XDG_RUNTIME_DIR` inside it would make the argv depend on the
+/// environment of whichever test ran first.
+pub fn control_socket_in(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join("apex-agentd/control.sock")
 }
 
 /// Root of the persistent session store.
@@ -199,11 +211,130 @@ pub fn data_home() -> PathBuf {
     home().join(".local/share")
 }
 
-/// The scratch directory a sandboxed session may write to. Deliberately under
-/// `/tmp` and not `$XDG_RUNTIME_DIR`: agents generate build output here and
-/// `XDG_RUNTIME_DIR` is a small tmpfs that other software depends on.
+/// The prefix session scratch directories live under, before the uid.
+///
+/// Deliberately under `/tmp` and not `$XDG_RUNTIME_DIR`: agents generate build
+/// output here, and `XDG_RUNTIME_DIR` is a small tmpfs that other software
+/// depends on.
+///
+/// ## Why the uid is in the path, and what happened without it (P2-016)
+///
+/// This was `/tmp/apex-agent` — one directory for the machine, with the
+/// session id below it — and that is the only path in this module with no user
+/// in it. Measured on a live APEX laptop on 2026-09-12:
+///
+/// ```text
+/// $ ls -lad /tmp/apex-agent
+/// drwxr-xr-x  andre  /tmp/apex-agent
+/// ```
+///
+/// `0755`, owned by whoever logged in first, and that is not an accident of
+/// this machine: [`ensure_private_dir`] is called on the LEAF
+/// (`<root>/<id>`), so `create_dir_all` makes the root along the way under the
+/// caller's umask and only the leaf is chmodded to `0700`. `/tmp` is sticky,
+/// so the second user can neither write into that directory nor remove it.
+///
+/// Two things follow, and both are P2-016 criterion 1 — per-user agents and
+/// session isolation:
+///
+///  * **the second account cannot run an agent at all.** `session.rs` treats a
+///    failure to create the scratch directory as fatal, deliberately, so every
+///    session start for the second user ends in `EACCES` on a directory owned
+///    by the first. Whoever logs in first owns the feature for the machine.
+///  * **session ids collide across accounts.** Ids are allocated per daemon
+///    and start again at 1, so two users' session 1 name one directory — and a
+///    session reap runs `remove_dir_all` on its own id's directory, which is
+///    the hazard [`SCRATCH_ROOT_ENV`] was added to keep a *test* daemon away
+///    from a live one. Two accounts are the same collision with no variable to
+///    set.
+///
+/// So the default carries the uid. Each account creates its own top-level
+/// directory in `/tmp`, which is world-writable, and never needs write
+/// permission on anything another account made.
+///
+/// What this does NOT solve, because it cannot be solved by a path: a
+/// predictable name in a sticky directory can be pre-created by another
+/// account, and `ensure_private_dir` will then fail to chmod a directory it
+/// does not own. That is a loud refusal and a denial of service rather than a
+/// disclosure — the mode is never loosened and no data is written into a
+/// directory whose mode could not be set — and it takes a deliberate act,
+/// where the shared root above took only a second login.
+pub const SCRATCH_ROOT_PREFIX: &str = "/tmp/apex-agent-";
+
+/// The environment variable that moves it.
+///
+/// The one path in this module that no XDG variable reaches, which made it the
+/// one path a test daemon shared with the user's real one — and a session reap
+/// runs `remove_dir_all` on its own id's directory, so a fixture daemon that
+/// numbered a session the same as a live one would delete a running session's
+/// scratch. Every suite in this repository fixtures `XDG_RUNTIME_DIR` and
+/// `XDG_STATE_HOME`; this is what lets one fixture the last of it.
+///
+/// Read from the daemon's own environment and never from a request, so it has
+/// exactly the trust of `XDG_RUNTIME_DIR`: a session cannot set it, because the
+/// daemon's environment is fixed before any session exists.
+pub const SCRATCH_ROOT_ENV: &str = "APEX_AGENT_SCRATCH_ROOT";
+
+/// The shipped disposable-capsule engine (§19).
+pub const DISPOSABLE_ENGINE: &str = "/usr/libexec/apex-disposable";
+
+/// Overrides [`DISPOSABLE_ENGINE`], for a suite that must not create capsules.
+///
+/// The engine itself already takes `APEX_DISPOSABLE_ENV_ENGINE` and
+/// `APEX_DISPOSABLE_ROOT`, so a test can run the REAL engine against a fake
+/// capsule engine in a scratch root. This variable is the last link in that
+/// chain: without it a suite cannot reach the engine in the repository at all,
+/// because the daemon would look under `/usr/libexec` on the running system.
+pub const DISPOSABLE_ENGINE_ENV: &str = "APEX_DISPOSABLE_ENGINE";
+
+/// Where the daemon looks for the disposable engine.
+///
+/// Absolute or nothing, for the reason [`scratch_root`] insists on it: a
+/// relative path would resolve against the daemon's working directory, which
+/// is not the caller's.
+pub fn disposable_engine() -> PathBuf {
+    if let Some(p) = std::env::var_os(DISPOSABLE_ENGINE_ENV) {
+        let path = PathBuf::from(p);
+        if path.is_absolute() {
+            return path;
+        }
+    }
+    PathBuf::from(DISPOSABLE_ENGINE)
+}
+
+/// The scratch directory a sandboxed session may write to.
 pub fn scratch_dir(id: u32) -> PathBuf {
-    PathBuf::from(format!("/tmp/apex-agent/{id}"))
+    scratch_root().join(id.to_string())
+}
+
+/// The default scratch root for one account, as a function of the uid alone.
+///
+/// Split out for the reason every `*_in` in this module is: a test process has
+/// exactly one uid, and the claim worth asserting — that two accounts get two
+/// roots — is about two. A test that rebuilt the formula for itself would
+/// assert only that the test author and this function agree today, and would
+/// stay green with the uid dropped from the line below.
+pub fn scratch_root_for(uid: u32) -> PathBuf {
+    PathBuf::from(format!("{SCRATCH_ROOT_PREFIX}{uid}"))
+}
+
+/// The root the scratch directories sit in.
+///
+/// Per-uid by default — see [`SCRATCH_ROOT_PREFIX`] for what a shared root
+/// cost. The override is returned verbatim and is NOT given a uid suffix: a
+/// suite that sets it has already chosen a directory of its own, and appending
+/// to it would make the variable's value not be the path.
+pub fn scratch_root() -> PathBuf {
+    if let Some(dir) = std::env::var_os(SCRATCH_ROOT_ENV) {
+        let path = PathBuf::from(dir);
+        // Absolute or nothing: a relative root would be resolved against the
+        // daemon's working directory, which is not the user's and which the
+        // sandbox then binds by that name.
+        if path.is_absolute() {
+            return path;
+        }
+    }
+    scratch_root_for(uid())
 }
 
 /// Create `dir` and every missing parent with `0700`.
@@ -285,6 +416,95 @@ mod tests {
         match std::env::var_os("XDG_DATA_HOME") {
             Some(v) if !v.is_empty() => assert_eq!(data_home(), PathBuf::from(v)),
             _ => assert_eq!(data_home(), home().join(".local/share")),
+        }
+    }
+
+    #[test]
+    fn the_scratch_root_reads_its_own_variable_and_falls_back_to_the_default() {
+        // Written against whatever the environment actually is, for the same
+        // reason `data_home_reads_its_own_variable_and_falls_back_to_the_spec`
+        // is: `set_var` is process-global and races the other tests here.
+        match std::env::var_os(SCRATCH_ROOT_ENV) {
+            Some(v) if !v.is_empty() && Path::new(&v).is_absolute() => {
+                assert_eq!(scratch_root(), PathBuf::from(v));
+            }
+            _ => assert_eq!(scratch_root(), scratch_root_for(uid())),
+        }
+        assert!(scratch_dir(7).ends_with("7"));
+        assert!(scratch_dir(7).starts_with(scratch_root()));
+    }
+
+    #[test]
+    fn two_accounts_do_not_share_a_scratch_root() {
+        // P2-016 criterion 1, and the whole reason the uid is in this path.
+        // The root was `/tmp/apex-agent` for the machine: `ensure_private_dir`
+        // is called on the LEAF, so `create_dir_all` made the root along the
+        // way under the caller's umask and only the leaf was chmodded. Measured
+        // on the live laptop on 2026-09-12, `/tmp/apex-agent` was
+        // `drwxr-xr-x andre` — 0755, owned by whoever logged in first, in a
+        // sticky /tmp the second account can neither write to nor remove. Every
+        // session start for that account then fails, fatally and by design
+        // (`session.rs` treats it as fatal), and session ids — which restart at
+        // 1 per daemon — named the same directories.
+        //
+        // Asserted through `scratch_root_for`, which is what `scratch_root`
+        // itself calls, so dropping the uid from the production line fails
+        // this. A test that rebuilt `format!("{PREFIX}{uid}")` for itself would
+        // not: it would be asserting its own arithmetic.
+        assert_ne!(scratch_root_for(1000), scratch_root_for(1001));
+        assert_ne!(
+            scratch_root_for(1000).join("1"),
+            scratch_root_for(1001).join("1"),
+            "session 1 of two accounts named one directory"
+        );
+
+        // And the root is a direct child of /tmp, with the uid as its whole
+        // final component. This is the assertion that forbids the original bug
+        // coming back in the shape that looks like a fix: a prefix of
+        // `/tmp/apex-agent/` would give `/tmp/apex-agent/1000` — per-uid
+        // leaves under a shared parent, which is the same directory nobody
+        // owns, created the same way, failing for the same account.
+        for uid in [0_u32, 1, 1000, 65534] {
+            let root = scratch_root_for(uid);
+            let parts: Vec<_> = root.components().collect();
+            assert_eq!(
+                parts.len(),
+                3,
+                "{} is not a direct child of /tmp: {parts:?}",
+                root.display()
+            );
+            assert_eq!(
+                root.parent().map(Path::to_path_buf),
+                Some(PathBuf::from("/tmp")),
+                "{}",
+                root.display()
+            );
+            assert!(
+                root.file_name()
+                    .expect("a final component")
+                    .to_string_lossy()
+                    .ends_with(&uid.to_string()),
+                "{} does not name uid {uid}",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn this_accounts_scratch_root_names_this_account() {
+        // `scratch_root_for` is only the formula; this is what ties the live
+        // reader to it, so a `scratch_root` that stopped consulting the uid —
+        // or went back to a constant — is caught here. Stepped over when a
+        // suite has set the override, for the reason `scratch_root` documents:
+        // a directory a test chose is not required to mention anybody.
+        match std::env::var_os(SCRATCH_ROOT_ENV) {
+            Some(v) if !v.is_empty() && Path::new(&v).is_absolute() => {}
+            _ => assert_eq!(
+                scratch_root(),
+                scratch_root_for(uid()),
+                "the default scratch root does not name uid {}",
+                uid()
+            ),
         }
     }
 

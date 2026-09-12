@@ -76,6 +76,26 @@ on:
       - "config/**"
       - "kernel/**"
       - ".github/**"
+  # ═══ WHY THE INTEGRATION BRANCH IS BUILT BY DISPATCH, NOT BY A PUSH ═══
+  #
+  # `push` above is main-only, and stays that way. An image build is ~1 hour and
+  # several GB of runner time; paying that on every landing of an integration
+  # branch buys nothing a dispatch does not, and the roadmap program lands many
+  # times a day. So the integration branch is built when somebody wants to know
+  # whether it builds:
+  #
+  #     gh workflow run build-image.yml --ref roadmap/v2.2
+  #
+  # That was already possible — this dispatch trigger is not new. What was
+  # missing, and what made using it a bad idea, is the PUBLISH guard below: a
+  # dispatch from a non-main ref used to move `:apex`, `:daily`, `:gaming-mesa`,
+  # `:gaming-nvidia`, every `platform-*`, `edge`, `:core` and `:base` — i.e. ship
+  # an unreviewed branch to every deployed machine. It now builds, signs and
+  # verifies without touching a name anything tracks.
+  #
+  # NOTE, because it is not obvious and it matters: a dispatch runs the workflow
+  # file FROM THE REF DISPATCHED. Dispatching a branch that predates this guard
+  # runs the unguarded file.
   workflow_dispatch:
     inputs:
       build_qcow2:
@@ -136,6 +156,18 @@ env:
   # ONLY thing keeping already-deployed machines updating after the collapse to a
   # single image. But it is NOT a speed optimisation, and should not be cited as one.
   IMAGE: ghcr.io/andrenijman/apex-os
+  # ═══ THE ONE THING THAT SEPARATES A BUILD FROM A RELEASE ═══
+  #
+  # Every floating tag this workflow writes — :core, :base, :apex, :daily,
+  # :gaming-mesa, :gaming-nvidia, platform-*, edge — is a name somebody else's
+  # machine is tracking, or that another workflow builds FROM. Moving one is a
+  # release to the fleet, and it used to happen on EVERY run of this workflow
+  # from ANY ref, guarded by nothing but "did the push produce a digest".
+  #
+  # A non-main run now pushes and signs its per-SHA tags, which nothing tracks,
+  # and moves no floating name. That is what makes `gh workflow run
+  # build-image.yml --ref <branch>` a safe way to ask "does this branch build".
+  PUBLISH: ${{ github.ref == 'refs/heads/main' }}
   # No CACHE_PREFIX: nothing reads or writes a registry build cache any more.
   # `--cache-to` killed two builds outright (podman "image not known" mid-push)
   # and `--cache-from` became meaningless once base stopped producing
@@ -165,6 +197,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
+
+      # Five assertions in the Containerfiles could never pass or never run, and
+      # each was found by a `base` job dying at a later step than the last -- 50
+      # minutes of core build apiece, and the branch produced no image for five
+      # days. This resolves those assertions back to the files in this repo that
+      # become them and runs them here, in seconds, before anything is built.
+      - name: Containerfile assertions
+        run: ./tests/check-containerfile-assertions.sh
 
       - name: Pin apex-shell
         id: shell
@@ -267,6 +307,31 @@ jobs:
         uses: actions/checkout@v4
       - name: Toolchain
         run: rustup component add clippy
+
+      # The same setup pr-validation.yml needs, for the same six assertions,
+      # in the second workflow that runs them. apex/tests/mcp_sidecar_live.rs
+      # confines a real MCP server and checks the confinement holds; APEX ships
+      # bubblewrap so they pass on any APEX machine, and the GitHub runner is
+      # Ubuntu and does not. Without this the rust job fails, and because
+      # `base` needs `rust` and `image` needs `base`, THE IMAGE NEVER BUILDS —
+      # which is how this branch went from 2026-09-07 to 2026-09-12 without a
+      # single image, behind two other defects that each looked like the cause.
+      #
+      # Ubuntu 24.04 also ships kernel.apparmor_restrict_unprivileged_userns=1,
+      # so bwrap installs and then cannot create the namespace. Relaxed for the
+      # ephemeral runner and PROVEN before any test runs, so a sandbox that
+      # cannot start fails here, naming the reason, rather than later as five
+      # assertion failures that read like product defects.
+      - name: Sandbox tooling the confinement assertions need
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          bwrap --version
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --dev-bind / / --unshare-net --unshare-user true \
+            || { echo "FATAL: bwrap cannot create a user namespace on this runner"; exit 1; }
+          echo "bwrap can create a user namespace"
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -284,8 +349,34 @@ jobs:
       # deliberately. Add the step back the same day `cargo fmt --all` lands.
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+      # Through tests/in-login-session.sh, the same wrapper pr-validation.yml
+      # runs its tests under, and for the same reason — this job never got it.
+      #
+      # `apex-agentd` decides whether a human is at this machine from the
+      # CONNECTING PEER's cgroup (`origin::classify`). A GitHub-hosted runner
+      # places its processes in `/system.slice/hosted-compute-agent.service`,
+      # which is neither a login session nor a user service, so the daemon
+      # cannot classify the connection at all and refuses before reaching the
+      # behaviour under test. Six of `apex-agentd/tests/budget.rs`'s eight
+      # assertions fail that way, `cargo test` exits 101, and because `base`
+      # declares `needs: [changes, rust, core]` the failure SKIPS the whole
+      # image build — so this one missing wrapper is why no image can be built
+      # from any branch whose head is not already green here.
+      #
+      # Measured rather than argued, on 2026-09-12, by reproducing the runner's
+      # placement locally with a transient system-slice service running as the
+      # invoking uid:
+      #
+      #   /system.slice/…service, unwrapped   2 passed, 6 failed
+      #       "…places this connection in "/system.slice/…", which is neither
+      #        a login session nor a user service…"  — CI's message exactly
+      #   /system.slice/…service, wrapped     8 passed, 0 failed
+      #       (the helper minted session-7.scope and the tests ran in it)
+      #
+      # The helper runs the command in place when it cannot mint a session, so
+      # this cannot turn a legible failure into a skipped one.
       - name: Test
-        run: cargo test --locked
+        run: ../tests/in-login-session.sh cargo test --locked
 
   # ── Job 2: core (heavy, gated) ────────────────────────────────────────────
   core:
@@ -341,8 +432,30 @@ jobs:
           # `sudo podman login` created ROOT-OWNED in this job's runtime dir —
           # the same rootful/rootless split the cosign login step above exists
           # for. It has nothing to log in to here anyway.
-          D="$(skopeo inspect --no-creds --format '{{.Digest}}' "docker://$UPSTREAM_BASE")"
-          test -n "$D"
+          # Retried, because this one call decides whether an hour of build
+          # happens. On 2026-09-12 it failed on a fatal from quay's CDN —
+          # cdn01.quay.io returning an error for the blob behind the manifest —
+          # and took `core`, and therefore `base`, `image` and `qcow2`, with it.
+          # Nothing was wrong with the tree: the previous run had built `core`
+          # from the same base minutes earlier. A single transient read is not a
+          # reason to discard a build.
+          #
+          # Five attempts with a widening gap, and the LAST failure is still
+          # fatal: a genuinely unreachable base must stop the build, not be
+          # retried into a silent skip. The attempt number is printed so a log
+          # says whether it was flaky or dead.
+          D=""
+          for _try in 1 2 3 4 5; do
+              if D="$(skopeo inspect --no-creds --format '{{.Digest}}' \
+                        "docker://$UPSTREAM_BASE" 2>&1)" && [ -n "$D" ]; then
+                  echo "resolved on attempt $_try"
+                  break
+              fi
+              echo "attempt $_try failed: $D"
+              D=""
+              [ "$_try" -lt 5 ] && sleep $(( _try * 10 ))
+          done
+          test -n "$D" || { echo "::error::could not resolve $UPSTREAM_BASE after 5 attempts"; exit 1; }
           echo "digest=$D" >> "$GITHUB_OUTPUT"
           echo "fedora-bootc digest: $D"
 
@@ -509,6 +622,13 @@ jobs:
             sleep $(( attempt * 30 ))
           done
           digest="$(cat "$digestfile")"
+          # A build is not a release. The per-SHA tag above is pushed from any
+          # ref; the friendly name below is what installed machines and other
+          # workflows resolve, so only main may move it. See PUBLISH at the top.
+          if [ "${PUBLISH:-false}" != "true" ]; then
+            echo "not publishing from ${GITHUB_REF:-unknown}: pushed $repo:$sha_tag, left :$friendly where it was"
+            exit 0
+          fi
           # skopeo, not `podman push` again: same repository, so every blob is
           # already present and this is a manifest write. `podman push` does not
           # take that shortcut — it re-uploads.
@@ -983,6 +1103,13 @@ jobs:
             sleep $(( attempt * 30 ))
           done
           digest="$(cat "$digestfile")"
+          # A build is not a release. The per-SHA tag above is pushed from any
+          # ref; the friendly name below is what installed machines and other
+          # workflows resolve, so only main may move it. See PUBLISH at the top.
+          if [ "${PUBLISH:-false}" != "true" ]; then
+            echo "not publishing from ${GITHUB_REF:-unknown}: pushed $repo:$sha_tag, left :$friendly where it was"
+            exit 0
+          fi
           # skopeo, not `podman push` again: same repository, so every blob is
           # already present and this is a manifest write. `podman push` does not
           # take that shortcut — it re-uploads.
@@ -1226,10 +1353,65 @@ jobs:
           syft --version
 
           REF="$IMAGE@${{ steps.push.outputs.digest }}"
+
+          # This step died twice on the first build this branch ever completed:
+          # once as "the runner has received a shutdown signal" and once as a
+          # bare exit 143, four and a half minutes after syft printed its
+          # version and with no output of its own. Everything before it —
+          # build, Secure Boot chain, payload split, push, cosign signature —
+          # was green both times.
+          #
+          # By this point the runner holds core, base and the final image in
+          # local podman storage, and syft is about to pull the whole image out
+          # of the registry AGAIN into its own cache. The local copies are dead
+          # weight: the image is pushed and signed, and the promote step below
+          # is skopeo registry-to-registry and never reads local storage. So
+          # they go, and the numbers are printed either side — if this fails a
+          # third time, the log will say whether it was disk or memory instead
+          # of leaving the next person to guess.
+          echo "── before prune ──"; df -h / /mnt 2>/dev/null || true; free -m || true
+          sudo podman image prune -af  >/dev/null 2>&1 || true
+          sudo podman system prune -af >/dev/null 2>&1 || true
+          echo "── after prune ──";  df -h / /mnt 2>/dev/null || true; free -m || true
+
           # Read the image out of the registry rather than local storage: the
           # push above is the artefact users get, and a local-storage read could
           # describe something the registry does not have.
-          syft "registry:$REF" -o spdx-json > /tmp/sbom.spdx.json
+          #
+          # Under `timeout` so a hang is reported as a hang. A bare 143 from a
+          # killed process reads as "something went wrong somewhere", which is
+          # exactly how this cost two builds.
+          # 45 minutes, raised from 15 on 2026-09-12 after a run that was NOT
+          # short of resources: 86 GB free and 14.8 GB of memory available at
+          # the prune, and syft still ran the full fifteen and was killed. The
+          # image is simply large — `core` carries ChatGPT at 1.3 GB and Claude
+          # Desktop at 548 MB — and syft pulls the whole thing out of the
+          # registry before it catalogues a byte.
+          #
+          # Restricting the cataloguers would be faster and would make the
+          # artefact worse: the two Electron trees are precisely where a CVE
+          # question lands, and an RPM-only SBOM would answer it with silence
+          # while looking authoritative. Time is the cheaper thing to spend.
+          #
+          # SYFT_PARALLELISM because the default is one worker; this image has
+          # thousands of packages across two app bundles.
+          #
+          # The elapsed time is printed on SUCCESS too. Fifteen minutes was
+          # picked without measurement and cost three builds to disprove; the
+          # next person changing this number should have the real figure.
+          _t0=$(date +%s)
+          SYFT_PARALLELISM=4 timeout 2700 syft "registry:$REF" -o spdx-json \
+            > /tmp/sbom.spdx.json || {
+            rc=$?
+            _el=$(( $(date +%s) - _t0 ))
+            if [ "$rc" = 124 ]; then
+              echo "::error::syft did not finish cataloguing the image in 45 minutes (${_el}s)"
+            else
+              echo "::error::syft exited $rc after ${_el}s (143 = killed; check the disk and memory figures above)"
+            fi
+            exit 1
+          }
+          echo "syft catalogued the image in $(( $(date +%s) - _t0 ))s"
 
           # An SBOM that describes nothing is worse than none: it answers the
           # CVE question with silence and looks authoritative doing it. The
@@ -1286,17 +1468,41 @@ jobs:
             skopeo copy --retry-times 3 --src-creds "$creds" --dest-creds "$creds" \
               "docker://$IMAGE@$digest" "docker://$IMAGE:$1"
           }
-          # Platform + per-SHA tags first; the names installed machines actually
-          # track are moved LAST, so any earlier registry failure leaves the
-          # fleet on the previous signed release rather than half-migrated.
+          # Per-SHA names first. Nothing tracks these, so they are written from
+          # any ref: they are what makes a non-main build a real, complete,
+          # inspectable build rather than a dry run.
+          for f in apex daily gaming-mesa gaming-nvidia; do
+            promote "$f-${{ github.sha }}"
+          done
+          if [ "${PUBLISH:-false}" != "true" ]; then
+            echo "not publishing from ${GITHUB_REF:-unknown}: per-SHA tags written;"
+            echo "  :apex :daily :gaming-mesa :gaming-nvidia :platform-* :edge NOT moved."
+            echo "  This build is complete; it is simply not a release."
+            exit 0
+          fi
+          # The floating names, and the ones installed machines actually track
+          # are moved LAST, so any earlier registry failure leaves the fleet on
+          # the previous signed release rather than half-migrated.
           for f in apex daily gaming-mesa gaming-nvidia; do
             promote "platform-$f-${{ github.sha }}"
             promote "platform-$f"
-            promote "$f-${{ github.sha }}"
           done
           for f in apex daily gaming-mesa gaming-nvidia; do
             promote "$f"
           done
+          # §26. `edge` is a NAME for what those four already are: every
+          # successful build of main, as soon as it is published. It is moved
+          # here, with them, because a channel that lagged its own definition
+          # would be a lie the first time somebody switched onto it.
+          #
+          # stable, candidate and beta are deliberately NOT moved here. A
+          # channel that advanced on every build is edge with a different
+          # spelling, and three of those would be worse than none — a user who
+          # chose `stable` would be taking the same risk while believing they
+          # had opted out of it. They move only through promote-channel.yml,
+          # which is a dispatch a person runs, and which refuses a digest that
+          # is not already on the channel above the one being moved.
+          promote edge
 
       # The migration promise, measured. Reading the digest back out of the
       # registry is the only thing that proves a machine tracking `:gaming-mesa`
@@ -1312,9 +1518,18 @@ jobs:
           creds="$GHCR_USER:$GHCR_TOKEN"
           want="${{ steps.push.outputs.digest }}"
           fail=0
-          for t in apex daily gaming-mesa gaming-nvidia \
-                   platform-apex platform-daily platform-gaming-mesa platform-gaming-nvidia \
-                   "daily-${{ github.sha }}"; do
+          # A non-main run moved no floating name, so asserting they point here
+          # would fail for a reason that is not the build — and a red run whose
+          # redness means nothing is worse than no run. It checks what it did
+          # write instead, so the step still proves something on every ref.
+          if [ "${PUBLISH:-false}" = "true" ]; then
+            TAGS="apex daily gaming-mesa gaming-nvidia edge
+                  platform-apex platform-daily platform-gaming-mesa platform-gaming-nvidia
+                  daily-${{ github.sha }}"
+          else
+            TAGS="apex-${{ github.sha }} daily-${{ github.sha }}"
+          fi
+          for t in $TAGS; do
             got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' "docker://$IMAGE:$t" 2>/dev/null || echo MISSING)"
             if [ "$got" = "$want" ]; then
               echo "  ok   :$t -> $got"

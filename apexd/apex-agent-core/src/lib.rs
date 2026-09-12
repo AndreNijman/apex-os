@@ -19,17 +19,23 @@
 //! apex-agentd  — unprivileged, per-user, systemd --user
 //!         ├─ PTY + session lifecycle       session.rs
 //!         ├─ the six permission dimensions policy.rs
+//!         ├─ system-access grants          grant.rs
+//!         ├─ proving a human is present    auth.rs
 //!         ├─ where a request came from     origin.rs
 //!         ├─ what a screen lock means      lock.rs
+//!         ├─ a security key was touched    webauthn.rs
 //!         ├─ sandbox policy                sandbox.rs
 //!         ├─ network destination policy    destination.rs
 //!         ├─ adapters                      adapter.rs
 //!         ├─ agent profiles                profile.rs
 //!         ├─ claude's own hook lifecycle   hook.rs
+//!         ├─ handing a file to a session   inject.rs
 //!         ├─ projects + worktrees          project.rs
+//!         ├─ per-worktree status            worktree.rs
 //!         ├─ project window layouts        layout.rs
 //!         ├─ checkpoints                   checkpoint.rs
-//!         └─ privilege requests            request.rs
+//!         ├─ privilege requests            request.rs
+//!         └─ the audit half nobody can edit journal.rs
 //!         ▲
 //!         │  newline-delimited JSON on a Unix socket    protocol.rs
 //! apex agent … / APEX Shell
@@ -42,16 +48,25 @@
 //! human's own privilege — this process never gains rights.
 
 pub mod adapter;
+pub mod auth;
 pub mod checkpoint;
 pub mod client;
 pub mod config;
 pub mod destination;
 pub mod git;
+pub mod grant;
+pub mod graph;
+pub mod handoff;
 pub mod hook;
+pub mod inject;
+pub mod journal;
 pub mod layout;
+pub mod mcpconf;
+pub mod mux;
 pub mod lock;
 pub mod origin;
 pub mod paths;
+pub mod pluginconf;
 pub mod policy;
 pub mod profile;
 pub mod project;
@@ -59,7 +74,10 @@ pub mod protocol;
 pub mod request;
 pub mod sandbox;
 pub mod session;
+pub mod statusline;
 pub mod term;
+pub mod webauthn;
+pub mod worktree;
 
 pub use policy::AgentPolicy;
 pub use protocol::{AgentState, SandboxPolicy, SessionInfo};

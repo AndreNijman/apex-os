@@ -1597,6 +1597,11 @@ fn offline_status() -> Status {
             st.gpu_layers = Some(r.fit.placement.gpu_layers());
             st.total_layers = match r.fit.placement {
                 ai::Placement::Split { total, .. } => Some(total),
+                // A full offload of a model whose layer count is not declared
+                // knows the placement, not the total. Reporting the sentinel as
+                // the total would make `apex ai status` print a count nobody
+                // measured.
+                ai::Placement::Gpu { layers } if layers == ai::ALL_LAYERS_UNKNOWN => None,
                 ai::Placement::Gpu { layers } => Some(layers),
                 ai::Placement::Cpu => None,
             };
@@ -1618,6 +1623,38 @@ fn offline_status() -> Status {
         }
     }
     st
+}
+
+/// The `fit:` line of `apex ai status`.
+///
+/// Pure, so the wording is exercised by the unit tests rather than by reading
+/// it — the same split the response framing above uses.
+///
+/// `ALL_LAYERS_UNKNOWN` is the `-ngl` value that means "all of them" for a model
+/// whose manifest declares no layer count. It is the right thing to PASS to
+/// llama-server, which clamps it, and the wrong thing to PRINT: "999 layer(s)
+/// on the GPU" is the same class of lie as the "all 1 layers fit" this branch
+/// set out to fix, just in the other direction. So the sentinel is named here
+/// rather than rendered.
+fn fit_line(layers: u32, total: Option<u32>, ctx: u32, vram_mib: Option<u64>) -> String {
+    let placed = if layers == ai::ALL_LAYERS_UNKNOWN {
+        "every layer (this model declares no layer count)".to_string()
+    } else {
+        format!(
+            "{layers} layer(s){}",
+            match total {
+                Some(t) if t != layers => format!(" of {t}"),
+                _ => String::new(),
+            }
+        )
+    };
+    format!(
+        "{placed} on the GPU, {ctx}-token context{}",
+        match vram_mib {
+            Some(v) if v > 0 => format!(", {v} MiB of VRAM"),
+            _ => String::new(),
+        }
+    )
 }
 
 fn print_status(s: &Status) {
@@ -1659,18 +1696,7 @@ fn print_status(s: &Status) {
         );
     }
     if let (Some(layers), Some(ctx)) = (s.gpu_layers, s.context) {
-        println!(
-            "fit:       {} layer(s){} on the GPU, {ctx}-token context{}",
-            layers,
-            match s.total_layers {
-                Some(t) if t != layers => format!(" of {t}"),
-                _ => String::new(),
-            },
-            match s.vram_mib {
-                Some(v) if v > 0 => format!(", {v} MiB of VRAM"),
-                _ => String::new(),
-            }
-        );
+        println!("fit:       {}", fit_line(layers, s.total_layers, ctx, s.vram_mib));
     }
     println!(
         "idle:      {}s of {}s{}",
@@ -1762,6 +1788,38 @@ fn serve(listen: Option<&str>, foreground: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
+
+    // ── the fit: line ────────────────────────────────────────────────────────
+
+    #[test]
+    fn an_undeclared_layer_count_is_not_printed_as_a_number() {
+        // ALL_LAYERS_UNKNOWN is the right thing to hand llama-server, which
+        // clamps it, and the wrong thing to show a person: "999 layer(s) on the
+        // GPU" is the same class of lie as the "all 1 layers fit" that the
+        // planner fix removed, only in the other direction.
+        let line = fit_line(ai::ALL_LAYERS_UNKNOWN, None, 8192, Some(4096));
+        assert!(line.contains("every layer"), "{line}");
+        assert!(line.contains("declares no layer count"), "{line}");
+        assert!(
+            !line.contains(&ai::ALL_LAYERS_UNKNOWN.to_string()),
+            "the sentinel leaked into the output: {line}"
+        );
+        // The rest of the line is unchanged.
+        assert!(line.contains("8192-token context"), "{line}");
+        assert!(line.contains("4096 MiB of VRAM"), "{line}");
+    }
+
+    #[test]
+    fn a_declared_layer_count_still_prints_as_a_number() {
+        // The negative control: the sentinel branch must not have swallowed the
+        // ordinary case.
+        let full = fit_line(32, Some(32), 8192, Some(4096));
+        assert!(full.contains("32 layer(s) on the GPU"), "{full}");
+        assert!(!full.contains(" of 32"), "a full offload names no total: {full}");
+
+        let split = fit_line(20, Some(32), 4096, Some(3000));
+        assert!(split.contains("20 layer(s) of 32 on the GPU"), "{split}");
+    }
     use super::*;
 
     #[test]

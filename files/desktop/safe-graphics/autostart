@@ -1,0 +1,21 @@
+#!/bin/sh
+# APEX Safe Graphics — labwc autostart.
+#
+# ONE client: a terminal. Deliberately NOT `apex-shell-autostart` and
+# deliberately not `qs` — APEX Shell is one of the things that can be broken,
+# and a recovery session that starts it would fail in the same way the session
+# the user just left failed. tests/test-apex-safe-graphics.sh asserts that
+# neither name appears in this file.
+#
+# The terminal is chosen by /usr/libexec/apex-safe-graphics and handed over in
+# the environment. If none was found the session still comes up: the root menu
+# is on a plain right-click and can still roll the machine back, which is more
+# than a black screen offers.
+
+if [ -n "${APEX_SAFE_GRAPHICS_TERMINAL:-}" ]; then
+    "$APEX_SAFE_GRAPHICS_TERMINAL" &
+fi
+
+# No `wait`. labwc runs this with `sh autostart` and carries on; blocking here
+# would hold the compositor's startup on a terminal that may itself be the
+# thing that is broken.

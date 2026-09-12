@@ -392,8 +392,33 @@ struct Route {
 /// The whole surface, probed.
 struct Surface {
     bootloader: &'static str,
+    /// Why `bootloader` above is a guess rather than a reading, when it is one.
+    ///
+    /// Carried onto the surface, not just consulted while building the routes,
+    /// because the LABEL is a second place the same fact reaches the user. A
+    /// whole-directory efivarfs refusal takes `LoaderInfo` down, `bootloader`
+    /// falls back to the kernel command line, and that fallback is "grub" on
+    /// every APEX image — UKI or not. `apex boot status` already says so
+    /// (boot.rs); this surface printed the bare word and the two disagreed
+    /// about the same machine.
+    bootloader_unavailable: Option<String>,
     rows: Vec<Row>,
     routes: Vec<Route>,
+}
+
+/// The recovery surface's rows as `(id, health, detail)`, for §26's post-update
+/// health verdict.
+///
+/// One prober, two callers — the same rule `boot::chain_facts` follows. A
+/// second implementation of "is the GPU driver bound" would be the one nobody
+/// keeps correct, and it would be the one deciding whether to refuse somebody's
+/// update.
+pub(crate) fn health_rows() -> Vec<(String, Health, String)> {
+    probe(&Sys::from_env())
+        .rows
+        .into_iter()
+        .map(|r| (r.id.to_string(), r.state, r.detail))
+        .collect()
 }
 
 /// Deployments present under `/ostree/deploy/*/deploy`.
@@ -1091,6 +1116,7 @@ fn probe(sys: &Sys) -> Surface {
 
     Surface {
         bootloader: chain.bootloader,
+        bootloader_unavailable: chain.bootloader_unavailable,
         rows,
         routes,
     }
@@ -1240,6 +1266,11 @@ fn cmd_status(json: bool) -> i32 {
     if json {
         let doc = json!({
             "bootloader": s.bootloader,
+            // A sibling key, never a change to the value above: apex-shell's
+            // RecoveryService.qml and RecoveryPage.qml read `bootloader` and
+            // two shell suites pin the bare strings. Named as `apex boot
+            // status --json` names it, so a consumer learns one word for it.
+            "bootloaderUnavailable": s.bootloader_unavailable,
             "rows": s.rows.iter().map(|r| json!({
                 "id": r.id,
                 "label": r.label,
@@ -1264,6 +1295,26 @@ fn cmd_status(json: bool) -> i32 {
 
     println!("APEX recovery");
     println!("  bootloader : {}", s.bootloader);
+    if s.bootloader_unavailable.is_some() {
+        // 15, because "  bootloader : " is what precedes the label and `wrap`
+        // bounds a line INCLUDING the indent it is told about.
+        const CAVEAT_COL: usize = 15;
+        // The reason itself is an efivarfs path plus an OS error, one token of
+        // which is longer than the whole 96-column budget — so it goes in the
+        // JSON key and in `apex boot status`, and what is said here is the part
+        // that changes what the user should believe: the word above was not
+        // read off the machine.
+        println!(
+            "{:<15}{}",
+            "",
+            wrap(
+                "not confirmed: LoaderInfo could not be read, so this is the kernel \
+                 command line's guess rather than a measurement. `apex boot status` \
+                 prints the reason.",
+                CAVEAT_COL,
+            )
+        );
+    }
     println!();
     println!("{:<22}  {:<12}  DETAIL", "COMPONENT", "STATE");
     // 38, not 24: the prefix printed before the first line of the detail is
@@ -2344,6 +2395,63 @@ mod tests {
             route.how.contains("cannot be determined"),
             "got: {}",
             route.how
+        );
+    }
+
+    #[test]
+    fn the_bootloader_label_says_so_when_the_identity_could_not_be_read() {
+        // The route above was fixed and the LABEL was not. `probe` consulted
+        // `bootloader_unavailable` while building the routes and then dropped
+        // it, so `Surface` could not carry it and both renderings of
+        // `apex recover status` printed a bare "grub" — the kernel command
+        // line's guess — about a machine whose bootloader nobody could read.
+        // `apex boot status` printed the caveat for the same fixture, so the
+        // two surfaces contradicted each other on the same machine.
+        let m = Machine::new("label-efivars-eacces");
+        let efivars = m.0.join("sys/firmware/efi/efivars");
+        std::fs::create_dir_all(&efivars).unwrap();
+        std::fs::write(
+            efivars.join(format!("LoaderInfo-{TEST_LOADER_GUID}")),
+            b"\x07\x00\x00\x00s\x00y\x00s\x00t\x00e\x00m\x00d\x00-\x00b\x00o\x00o\x00t\x00",
+        )
+        .unwrap();
+        let target = format!("sys/firmware/efi/efivars/LoaderInfo-{TEST_LOADER_GUID}");
+        let sealed = seal(&m.0, "sys/firmware/efi/efivars", |root| {
+            std::fs::read(root.join(&target)).map(|_| ())
+        });
+        if !sealed {
+            return; // the caller overrides the mode bit; it proves nothing here
+        }
+        let s = probe(&m.sys());
+        // The label itself is deliberately unchanged: apex-shell reads this
+        // value and two shell suites pin the bare strings.
+        assert_eq!(
+            s.bootloader, "grub",
+            "the cmdline fallback is still the label; only the caveat is new"
+        );
+        let why = s
+            .bootloader_unavailable
+            .as_deref()
+            .expect("an unreadable LoaderInfo must reach the surface, not stop at the routes");
+        assert!(
+            why.contains("LoaderInfo") && why.contains("Permission denied"),
+            "the caveat must carry the reason it could not be read, got: {why}"
+        );
+    }
+
+    #[test]
+    fn a_readable_efivarfs_leaves_the_bootloader_label_uncaveated() {
+        // The other half, and the one that stops the caveat from being
+        // unconditional prose that always prints and therefore says nothing.
+        let m = Machine::new("label-efivars-readable");
+        let efivars = m.0.join("sys/firmware/efi/efivars");
+        std::fs::create_dir_all(&efivars).unwrap();
+        let s = probe(&m.sys());
+        assert_eq!(s.bootloader, "grub");
+        assert!(
+            s.bootloader_unavailable.is_none(),
+            "a LoaderInfo that is merely absent is a reading, not a refusal, got {:?}",
+            s.bootloader_unavailable
         );
     }
 

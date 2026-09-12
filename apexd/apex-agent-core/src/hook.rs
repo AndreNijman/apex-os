@@ -281,6 +281,30 @@ pub struct Observation {
     /// One line for the Agent Center, already trimmed and bounded.
     pub detail: Option<String>,
     pub tool: ToolTransition,
+    /// The agent's own permission mode, as the agent reported it (§4.1).
+    ///
+    /// §4.1's third criterion is that the agent-native mode is visible in the
+    /// Agent Center, and until this existed there was nothing to show:
+    /// `policy.native` is `inherit` for the default case, which describes what
+    /// APEX did — pass no flag — rather than what the agent is doing.
+    ///
+    /// Bounded and stripped for the same reason `detail` is: it lands in a
+    /// session record that the shell renders, and it comes off a document the
+    /// agent writes.
+    pub native: Option<String>,
+    /// Which subagent this event is about, and what kind (§P1-020).
+    ///
+    /// `Some` only on the two subagent events, and only for the fields the
+    /// payload actually carried. The daemon builds the session graph out of
+    /// these; up to P1-020 they were read here for the detail line and then
+    /// dropped, so no subagent was recorded anywhere.
+    pub agent_id: Option<String>,
+    pub agent_type: Option<String>,
+    /// A test run starting or finishing, when this event is one (§P1-036).
+    ///
+    /// `None` for every event that is not a `Bash` tool call naming a known
+    /// runner, which is nearly all of them.
+    pub test: Option<crate::worktree::TestNote>,
 }
 
 /// Longest detail line a hook may publish.
@@ -319,12 +343,94 @@ pub fn observe(event: HookEvent, payload: &Payload) -> Observation {
         HookEvent::TaskCreated | HookEvent::TaskCompleted | HookEvent::Note => None,
     };
 
+    // The two subagent fields are carried ONLY for the two subagent events.
+    // `agent_type` is also set on Claude's task events, and letting it through
+    // there would have the daemon open a graph node for a to-do item.
+    let is_subagent = matches!(
+        event,
+        HookEvent::SubagentStart | HookEvent::SubagentStop
+    );
+
     Observation {
         event,
         state,
         detail: detail_for(event, payload),
         tool: event.tool_transition(),
+        native: native_mode(payload),
+        agent_id: if is_subagent {
+            payload.agent_id.clone()
+        } else {
+            None
+        },
+        agent_type: if is_subagent {
+            payload.agent_type.clone()
+        } else {
+            None
+        },
+        test: test_note(event, payload),
     }
+}
+
+/// Whether this event is a test run starting, passing or failing (§P1-036).
+///
+/// Detected here because this is where the payload is already parsed, and
+/// because it is the one place that knows the difference between
+/// `post_tool_use` and `post_tool_use_failure` — which, `Payload` carrying no
+/// exit code, is the ONLY evidence of a tool's outcome that exists.
+///
+/// Only `Bash` is considered. A test suite is a command; `Edit` on a file
+/// called `tests.rs` is not a test run.
+fn test_note(event: HookEvent, payload: &Payload) -> Option<crate::worktree::TestNote> {
+    use crate::worktree::{self, TestPhase};
+
+    let phase = match event {
+        HookEvent::PreToolUse => TestPhase::Started,
+        HookEvent::PostToolUse => TestPhase::Passed,
+        HookEvent::PostToolUseFailure => TestPhase::Failed,
+        _ => return None,
+    };
+    if payload.tool_name.as_deref() != Some("Bash") {
+        return None;
+    }
+    let command = payload.tool_input.get("command")?.as_str()?;
+    let runner = worktree::test_command(command)?;
+    Some(worktree::TestNote {
+        phase,
+        command: runner,
+    })
+}
+
+/// Longest permission-mode name kept.
+///
+/// Claude's are `default`, `acceptEdits`, `plan` and `bypassPermissions`. The
+/// bound is not about those — it is about the field being read off a document
+/// the agent writes, into a record the shell renders in a fixed-width column.
+const MAX_NATIVE: usize = 32;
+
+/// The agent's own permission mode, as it reported it.
+///
+/// Passed through rather than mapped onto [`crate::policy::NativeMode`], and
+/// that is the point of the field. §4.1 says APEX passes no permission flag
+/// and lets the agent's profile decide, so the interesting value is precisely
+/// the one APEX has no vocabulary for: `bypassPermissions`, `acceptEdits`,
+/// `plan`. Folding those three into "not ask" would answer the question
+/// criterion 3 asks — what mode is this agent in — with a summary of what
+/// APEX did about it, which is the thing the user can already see.
+///
+/// Bounded and stripped of anything that is not a plain identifier, because it
+/// is rendered in a table by a client that trusts the record.
+fn native_mode(payload: &Payload) -> Option<String> {
+    let raw = payload.permission_mode.as_deref()?.trim();
+    if raw.is_empty() || raw.chars().count() > MAX_NATIVE {
+        return None;
+    }
+    if !raw
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    Some(raw.to_string())
 }
 
 /// The one line the Agent Center shows beside the state.
@@ -413,7 +519,18 @@ fn clamp(text: &str) -> String {
 /// hook command takes no session id: `$APEX_AGENT_SESSION` is in the
 /// environment bwrap set, and an id on the command line would be an id the
 /// agent could edit.
-pub fn settings_json(apex: &Path) -> serde_json::Value {
+///
+/// `plugins` is dimension 8's block, or `None` for a policy that removes no
+/// plugin. It rides in this document rather than in a second `--settings` file
+/// because it is the same file, already written and already passed — and
+/// because it was measured to be the one mechanism that removes a plugin's
+/// hooks while leaving the subscriptions above running. See
+/// [`crate::pluginconf`] for the other three and what each of them also took.
+pub fn settings_json(
+    apex: &Path,
+    status: Option<&crate::statusline::UserStatusLine>,
+    plugins: Option<&crate::pluginconf::Curated>,
+) -> serde_json::Value {
     let mut hooks = serde_json::Map::new();
 
     for event in HookEvent::ALL {
@@ -434,7 +551,35 @@ pub fn settings_json(apex: &Path) -> serde_json::Value {
         }
     }
 
-    serde_json::json!({ "hooks": hooks })
+    let mut document = serde_json::json!({
+        "hooks": hooks,
+        // §P1-021. `hooks` is a list key and Claude combines list keys across
+        // settings sources, which is why the subscriptions above add
+        // themselves and leave the user's own hooks running. `statusLine` is
+        // an object, and this file outranks every source but managed policy —
+        // so naming it here REPLACES whatever the user configured.
+        //
+        // That is why `apex agent statusline` runs the user's own command and
+        // copies its output through, and why the presentation keys are carried
+        // across here. Both halves are needed for "without breaking terminal
+        // statusline"; either one alone changes what the user sees.
+        "statusLine": crate::statusline::overlay(&shell_quote(apex), status),
+    });
+
+    // Dimension 8 (P1-026). An object key, so this REPLACES the user's own
+    // `enabledPlugins` rather than merging into it — the same precedence
+    // `statusLine` above relies on. That is why `pluginconf::curate` writes
+    // every enabled plugin with an explicit boolean instead of only the
+    // removals: the document then says the same thing under either merge rule.
+    //
+    // Absent when the policy removes nothing, which is the default. Writing
+    // the user's own object back at them would be a replacement performed for
+    // no reason, and the first behaviour to break if Claude ever changes how
+    // the key combines.
+    if let Some(curated) = plugins {
+        document["enabledPlugins"] = serde_json::Value::Object(curated.block.clone());
+    }
+    document
 }
 
 /// Quote a path for the shell Claude runs a `command` hook through.
@@ -789,6 +934,45 @@ mod tests {
     }
 
     #[test]
+    fn the_subagent_events_carry_the_two_fields_the_graph_is_built_from() {
+        // P0-011 delivered both events to the daemon and dropped `agent_id`
+        // and `agent_type` here, so the detail line said "Explore started" and
+        // nothing anywhere recorded which subagent that was. This is the
+        // regression: the two fields leave `observe`, not just `detail_for`.
+        let payload = Payload {
+            agent_id: Some("agent-7".into()),
+            agent_type: Some("Explore".into()),
+            ..Default::default()
+        };
+        for event in [HookEvent::SubagentStart, HookEvent::SubagentStop] {
+            let obs = observe(event, &payload);
+            assert_eq!(obs.agent_id.as_deref(), Some("agent-7"), "{event}");
+            assert_eq!(obs.agent_type.as_deref(), Some("Explore"), "{event}");
+        }
+    }
+
+    #[test]
+    fn no_other_event_opens_a_node_in_the_graph() {
+        // `agent_type` is set on Claude's task events too, and letting it
+        // through there would have the daemon open a subagent for a to-do
+        // item. The daemon branches on the event, but a field that is only
+        // ever meaningful for two events is carried for two events.
+        let payload = Payload {
+            agent_id: Some("agent-7".into()),
+            agent_type: Some("Explore".into()),
+            ..Default::default()
+        };
+        for event in HookEvent::ALL {
+            if matches!(event, HookEvent::SubagentStart | HookEvent::SubagentStop) {
+                continue;
+            }
+            let obs = observe(*event, &payload);
+            assert!(obs.agent_id.is_none(), "{event} carried an agent id");
+            assert!(obs.agent_type.is_none(), "{event} carried an agent type");
+        }
+    }
+
+    #[test]
     fn no_claude_event_is_subscribed_twice() {
         // Two subscriptions to one upstream event means two processes spawned
         // per occurrence and two state publications racing each other.
@@ -954,7 +1138,7 @@ mod tests {
 
     #[test]
     fn the_settings_document_subscribes_every_event_with_a_short_timeout() {
-        let v = settings_json(Path::new("/usr/bin/apex"));
+        let v = settings_json(Path::new("/usr/bin/apex"), None, None);
         let hooks = v["hooks"].as_object().expect("hooks object");
 
         for event in HookEvent::ALL {
@@ -979,20 +1163,20 @@ mod tests {
         // The id comes from $APEX_AGENT_SESSION, which bwrap set. On the
         // command line it would be a number the agent could edit into another
         // session's.
-        let text = settings_json(Path::new("/usr/bin/apex")).to_string();
+        let text = settings_json(Path::new("/usr/bin/apex"), None, None).to_string();
         assert!(!text.contains("--session"), "{text}");
         assert!(!text.contains("APEX_AGENT_SESSION"), "{text}");
     }
 
     #[test]
     fn a_path_with_a_space_is_quoted_for_the_shell() {
-        let v = settings_json(Path::new("/opt/my apps/apex"));
+        let v = settings_json(Path::new("/opt/my apps/apex"), None, None);
         let cmd = v["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .expect("command");
         assert_eq!(cmd, "'/opt/my apps/apex' agent hook stop");
         // The ordinary case stays unquoted and readable.
-        let v = settings_json(Path::new("/usr/bin/apex"));
+        let v = settings_json(Path::new("/usr/bin/apex"), None, None);
         assert_eq!(
             v["hooks"]["Stop"][0]["hooks"][0]["command"],
             "/usr/bin/apex agent hook stop"

@@ -46,10 +46,26 @@
     <windowRule identifier="*" serverDecoration="no" skipTaskbar="yes" />
   </windowRules>
 
-  <!-- No keybinds: kiosk greeter, keyboard events belong to the client.
+  <!-- ONE keybind: the screen reader, and nothing else. Keyboard events belong
+       to the client, and this is the exception that proves it — a user who
+       cannot see the screen has no way to ask for a reader through a client
+       they cannot read, so the host has to offer the one key that starts one.
+
+       W-A-s is SUPER+ALT+S: the same combination the desktop uses (apex-shell's
+       `screenreader-toggle` default, generated into all three sessions) and the
+       same one GNOME has used for years.
+
+       greetd's command is `/usr/libexec/apex-greet-session labwc -C …`, which
+       has already started the session bus and the accessibility bus this needs;
+       orca sets org.a11y.Status.ScreenReaderEnabled itself on connecting, which
+       is the property Qt's bridge gates on.
+
        (Omitting <keyboard> entirely means labwc's built-in defaults would
-       apply, so declare an explicit empty set.) -->
+       apply, so this set stays explicit and stays this short.) -->
   <keyboard>
+    <keybind key="W-A-s">
+      <action name="Execute" command="/usr/libexec/apex-screen-reader toggle"/>
+    </keybind>
   </keyboard>
 
 </labwc_config>

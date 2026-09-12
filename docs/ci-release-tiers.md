@@ -13,11 +13,46 @@ rebuilding Mesa, NVIDIA modules, package transactions, or initramfs images.
 2. `base` contains APEX system services and shared OS configuration.
 3. `Containerfile.apex` stamps the edition and owns the final initramfs.
 4. The one green image is promoted to `apex`, `daily`, `gaming-mesa` and
-   `gaming-nvidia`, plus moving and revision-pinned `platform-<name>` tags for
-   each. A step then reads every tag's digest back out of the registry and fails
-   the run if any differs.
+   `gaming-nvidia`, plus `edge`, plus moving and revision-pinned
+   `platform-<name>` tags for each. A step then reads every tag's digest back
+   out of the registry and fails the run if any differs.
 
 There is no flavor matrix and no `target_platform` input: there is one image.
+
+## Update channels
+
+Four tags on that one image, and they are what `apex channel` moves a machine
+between:
+
+| tag | moved by | what it means |
+|---|---|---|
+| `edge` | every successful build of `main` | new work arrives first, and so do its faults |
+| `beta` | `promote-channel.yml`, by hand | a build that has been on edge and looks sound |
+| `candidate` | the same | a build being considered for stable |
+| `stable` | the same | only builds that have been through the other three |
+
+`edge` is promoted in the same step as `apex`, `daily`, `gaming-mesa` and
+`gaming-nvidia`, because it is a name for what those four already are. The other
+three are deliberately absent from that step: a channel that advanced on every
+build would be edge with a different spelling, and a user who chose `stable`
+would be taking edge's risk while believing they had opted out of it.
+
+`.github/workflows/promote-channel.yml` moves the slow three. It is
+`workflow_dispatch` only, shares this workflow's concurrency group, and refuses
+before it writes anything unless both hold:
+
+- the digest is cosign-signed under this repository's `build-image.yml` identity
+  on `refs/heads/main` — a channel tag is what a machine's bootc origin points
+  at, so pointing one at an unsigned or forked image is the supply chain undone
+  by a pasted string;
+- the digest is **already** on the channel above the target. `apex channel list`
+  tells users stable carries "only builds that have run on the other channels
+  first", and without this check that sentence is a hope.
+
+The four migration tags keep their own meaning and keep moving on every build.
+They are not deprecated aliases for `edge`; they are live references owned by
+other people's laptops, and a machine following one is on edge whether or not it
+uses the word. `apex channel status` says so in those terms.
 Platform builds run for OS source changes and the weekly upstream refresh. The
 reusable base tier uses a registry-backed Buildah cache with a 14-day lookup
 lifetime.

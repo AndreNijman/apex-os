@@ -47,6 +47,17 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         `# cpio/zstd assemble and inspect initramfs images. gzip is in the` \
         `# base image; zstd is what dracut actually emits on Fedora 43.` \
         cpio zstd \
+        `# ── added for P2-008: the libvirt stack apex-vm drives ──────────` \
+        `# session mode only. libvirt-daemon-kvm pulls virtqemud, which` \
+        `# autospawns per-user over qemu:///session with no system daemon,` \
+        `# no polkit and no virbr0 — the three things the host must not` \
+        `# grow. libvirt-client is virsh; virt-install authors the domain.` \
+        libvirt-daemon-kvm libvirt-client virt-install \
+        `# virtiofsd is a separate binary from qemu and is what the share` \
+        `# flow needs; without it a <filesystem driver type='virtiofs'/>` \
+        `# domain fails at start rather than at define, which reads as a` \
+        `# libvirt bug instead of a missing package.` \
+        virtiofsd \
         `# A kernel and dracut so this image can produce a UKI with no APEX` \
         `# machine in reach — GitHub runners have neither an ostree deployment` \
         `# nor 5 GB of patience for an apex-os-core pull. The APEX-image path` \
@@ -85,6 +96,18 @@ RUN set -eux; \
     test -x /usr/bin/systemd-cryptenroll; \
     test -f /usr/lib/systemd/boot/efi/systemd-bootx64.efi; \
     test -f /usr/lib/systemd/boot/efi/linuxx64.efi.stub; \
+    \
+    : '── P2-008: the libvirt stack, and the two binaries that are not'; \
+    : 'in the same package as the thing that needs them. virtiofsd ships'; \
+    : 'separately from qemu, and virt-install separately from virsh.'; \
+    command -v virsh; \
+    command -v virt-install; \
+    test -x /usr/libexec/virtiofsd; \
+    test -x /usr/sbin/virtqemud || test -x /usr/bin/virtqemud; \
+    : 'Session-mode virtiofs needs libvirt 9.0 or newer. Recorded rather'; \
+    : 'than assumed, so a lab that is too old says which version it is.'; \
+    virsh --version > /etc/apex-bootlab-libvirt-version; \
+    test -s /etc/apex-bootlab-libvirt-version; \
     \
     : '── exactly one kernel, and record which one. A second kernel would'; \
     : 'make "the kernel under test" ambiguous for every scenario below.'; \

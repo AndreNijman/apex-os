@@ -511,6 +511,73 @@ fn couple(tcp: TcpStream, unix: UnixStream) {
 mod tests {
     use super::*;
 
+    /// How long a test will wait for the proxy's answer before calling it a
+    /// defect. Generous: the work behind every one of these is microseconds.
+    const ANSWER_DEADLINE: Duration = Duration::from_secs(10);
+
+    /// Read the proxy's answer to end-of-file, with a deadline.
+    ///
+    /// These tests used `read_to_string` with no timeout, and that waits for
+    /// EVERY copy of the far end to be closed — not just the one this test
+    /// handed to `serve`. A copy can be somewhere the test has never heard of.
+    /// It was: `pty::spawn` forked while these sockets were open, the child
+    /// wedged before exec, and because it never exec'd, FD_CLOEXEC never fired
+    /// and it held the server end open for as long as it lived. The read here
+    /// then waited for an end-of-file that could no longer come.
+    ///
+    /// That child is fixed. This deadline is here because the next fd-holder
+    /// will not be: a test with no deadline does not fail, it HANGS, reporting
+    /// neither pass nor fail until somebody notices hours later. With one, the
+    /// same defect is a named failure in ten seconds — and the name says where
+    /// to look, because "an inherited descriptor" is not the first guess anyone
+    /// makes when a proxy test stops returning.
+    fn read_answer(client: &UnixStream) -> String {
+        client
+            .set_read_timeout(Some(ANSWER_DEADLINE))
+            .expect("set a read deadline");
+        let mut reader: &UnixStream = client;
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                // The connection ending abruptly IS an end: `serve` drops a
+                // client it refuses to keep reading from, and one of these
+                // tests asserts exactly that. Only a DEADLINE means the far end
+                // is still held open, which is the defect this guard is for.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::BrokenPipe
+                    ) =>
+                {
+                    break
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    panic!(
+                        "the server end of this socket pair was STILL OPEN after {:?}, \
+                         with {} bytes read. `serve` has returned, so something else is \
+                         holding a copy of it — an inherited descriptor in a forked child \
+                         that has not reached exec is how this happened before (see \
+                         pty::spawn). Partial answer: {:?}",
+                        ANSWER_DEADLINE,
+                        out.len(),
+                        String::from_utf8_lossy(&out)
+                    );
+                }
+                Err(e) => panic!("reading the proxy's answer: {e}"),
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
     #[test]
     fn a_connect_line_is_read_and_anything_else_is_not() {
         // The shapes a real client sends, including the ones that would make a
@@ -591,8 +658,7 @@ mod tests {
         client_w
             .write_all(b"CONNECT secrets.example.com:443 HTTP/1.1\r\n\r\n")
             .unwrap();
-        let mut answer = String::new();
-        (&client).read_to_string(&mut answer).unwrap();
+        let answer = read_answer(&client);
         worker.join().unwrap();
 
         assert!(answer.starts_with("HTTP/1.1 403 Forbidden"), "{answer}");
@@ -610,8 +676,7 @@ mod tests {
         client_w
             .write_all(b"GET http://api.example.com/v1 HTTP/1.1\r\nHost: api.example.com\r\n\r\n")
             .unwrap();
-        let mut answer = String::new();
-        (&client).read_to_string(&mut answer).unwrap();
+        let answer = read_answer(&client);
         worker.join().unwrap();
 
         // Refused even though the host IS on the allowlist: the method is the
@@ -631,8 +696,7 @@ mod tests {
         // No blank line, ever, and more than the cap allows.
         let junk = vec![b'A'; MAX_HEAD_BYTES + 1024];
         let _ = client_w.write_all(&junk);
-        let mut answer = String::new();
-        let _ = (&client).read_to_string(&mut answer);
+        let answer = read_answer(&client);
         worker.join().unwrap();
         assert!(answer.is_empty(), "expected the connection to be dropped: {answer}");
     }
@@ -647,8 +711,7 @@ mod tests {
         client_w
             .write_all(b"CONNECT api.example.com HTTP/1.1\r\n\r\n")
             .unwrap();
-        let mut answer = String::new();
-        (&client).read_to_string(&mut answer).unwrap();
+        let answer = read_answer(&client);
         worker.join().unwrap();
         assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
     }

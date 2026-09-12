@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use crate::audit::AuditLine;
 use crate::capability::CapabilityRecord;
 use crate::operation::OperationInfo;
-use crate::store::ServiceInfo;
+use crate::store::{Approval, ServiceInfo};
 
 /// Bumped when a change is not backward compatible. Clients send nothing and
 /// the daemon reports it in [`Response::Hello`], so a mismatch is a message
@@ -112,6 +112,39 @@ pub enum Request {
     /// What is allowed, per project.
     Grants,
 
+    /// §13.8: approve one operation, once, or withdraw an approval.
+    ///
+    /// Not a grant. A grant is consulted and keeps standing; this is **spent**
+    /// by the first operation that matches it, and it expires on its own. See
+    /// [`crate::store::Approval`] for why the two are different types in
+    /// different files.
+    ///
+    /// Refused from inside a managed agent session, like `Grant` and for the
+    /// same reason: a session that can approve its own production deploy has
+    /// not been made to ask for approval, it has been made to type one more
+    /// line.
+    Approve {
+        project: String,
+        service: String,
+        /// The operation, in any spelling the registry resolves.
+        operation: String,
+        /// Exactly what the operation will name. Empty for one that names
+        /// nothing.
+        #[serde(default)]
+        resource: String,
+        /// How long it may be spent for, in milliseconds. Bounded by
+        /// [`crate::store::MAX_APPROVAL_TTL_MS`]; defaults to
+        /// [`crate::store::APPROVAL_TTL_MS`].
+        #[serde(default)]
+        ttl_ms: Option<u64>,
+        /// Take one back instead of giving one.
+        #[serde(default)]
+        withdraw: bool,
+    },
+
+    /// Every approval this account has outstanding.
+    Approvals,
+
     /// Perform a capability. The credential does not come back; the
     /// operation's output does.
     ///
@@ -131,6 +164,31 @@ pub enum Request {
     Audit {
         #[serde(default = "default_audit_lines")]
         lines: usize,
+        /// Only lines recorded for this project root, when given.
+        ///
+        /// Filtered by the daemon, **before** `lines` is applied, and that
+        /// ordering is the point rather than an optimisation: the trail is one
+        /// file for the machine, so a caller asking "what did this worktree
+        /// do" against a busy trail would otherwise get a thousand lines from
+        /// everywhere else and conclude the worktree had done nothing. §13.13's
+        /// destroy plan is derived from these lines, and a plan short of a
+        /// resource is a plan that says it cleaned up when it did not.
+        #[serde(default)]
+        project: Option<String>,
+    },
+
+    /// §13.14: what this project's budget allows and what it has spent today.
+    ///
+    /// Its own verb rather than something a client works out from
+    /// [`Request::Audit`], because a client cannot do it honestly: the trail is
+    /// root-owned, `Audit` hands back a bounded window of it, and a count taken
+    /// from a window is an undercount presented as a fact. One counting
+    /// implementation, in the daemon, is also the only way the report and the
+    /// enforcement can agree.
+    Usage {
+        /// The root to count, exactly — a worktree is not its project. Required:
+        /// a budget is a project's, and "all of them" is not a budget.
+        project: String,
     },
 }
 
@@ -186,6 +244,12 @@ pub enum Response {
         projects: BTreeMap<String, Vec<String>>,
     },
 
+    /// §13.8's outstanding one-shot approvals, soonest to expire first.
+    ///
+    /// Metadata only, by construction: [`crate::store::Approval`] has no field
+    /// a value could occupy, for [`Response::Services`]' reason.
+    Approvals { pending: Vec<Approval> },
+
     /// A capability ran. Carries the RESULT, never the credential.
     Performed {
         /// The record as the daemon finally read it, with `audit_id` filled in.
@@ -201,6 +265,9 @@ pub enum Response {
 
     /// The audit trail, oldest first.
     Audit { entries: Vec<AuditLine> },
+
+    /// §13.14's answer to [`Request::Usage`].
+    Usage { report: Box<crate::budget::Report> },
 
     /// Verb failed. `kind` is stable enough to branch on; `message` is for
     /// humans.
@@ -245,8 +312,10 @@ impl Response {
             Response::Ok => "ok",
             Response::Services { .. } => "services",
             Response::Grants { .. } => "grants",
+            Response::Approvals { .. } => "approvals",
             Response::Performed { .. } => "performed",
             Response::Audit { .. } => "audit",
+            Response::Usage { .. } => "usage",
             Response::Error { .. } => "error",
         }
     }
@@ -313,6 +382,16 @@ mod tests {
             Response::Grants {
                 projects: BTreeMap::from([("/p".to_string(), vec!["demo:git-fetch".to_string()])]),
             },
+            Response::Approvals {
+                pending: vec![Approval {
+                    project: "/p".into(),
+                    service: "demo".into(),
+                    operation: "cloudflare.worker.deploy".into(),
+                    resource: "my-worker".into(),
+                    granted_ms: 1,
+                    expires_ms: 2,
+                }],
+            },
             Response::Performed {
                 record: record.clone(),
                 endpoint: "https://github.com".into(),
@@ -321,6 +400,23 @@ mod tests {
             },
             Response::Audit {
                 entries: vec![AuditLine::from_record("a1", AuditEvent::Used, 1000, 1, &record)],
+            },
+            Response::Usage {
+                report: Box::new(crate::budget::Report {
+                    project: "/p".into(),
+                    day_start_ms: 1,
+                    budgeted: true,
+                    operations: 1,
+                    per_operation: BTreeMap::from([("git.fetch".to_string(), 1)]),
+                    per_service: BTreeMap::from([("demo".to_string(), 1)]),
+                    caps: vec![crate::budget::Cap {
+                        name: "operations_daily".into(),
+                        kind: "operations".into(),
+                        used: "1".into(),
+                        limit: "200".into(),
+                        unmeasurable: None,
+                    }],
+                }),
             },
             Response::error(ErrorKind::PermissionDenied, "not granted"),
         ]
@@ -339,6 +435,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "approvals",
                 "audit",
                 "error",
                 "grants",
@@ -346,6 +443,7 @@ mod tests {
                 "ok",
                 "performed",
                 "services",
+                "usage",
             ],
             "the reply surface changed; every entry must be a reply that \
              cannot carry a credential"
@@ -432,7 +530,7 @@ mod tests {
                     "origin",
                 )),
             },
-            Request::Audit { lines: 5 },
+            Request::Audit { lines: 5, project: None },
         ];
         for req in requests {
             let text = serde_json::to_string(&req).unwrap();
@@ -463,7 +561,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_str::<Request>(r#"{"op":"audit"}"#).unwrap(),
-            Request::Audit { lines: 20 }
+            Request::Audit { lines: 20, project: None }
         );
     }
 

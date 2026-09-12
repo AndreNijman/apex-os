@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Pairing reads a QR code off the desktop's screen. Requested at the
+         moment the camera is opened and not at install, and the app works
+         without it: a pairing payload can be pasted instead. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+
+    <!-- The LAN leg is a direct TCP connection to the desktop; the relay leg
+         is an outbound WebSocket. Both need the network and nothing else. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- An agent waiting for you is the whole point of carrying this app, so
+         the notification is not decoration. Asked at the moment the Agent
+         Center first connects rather than at install, and the app works
+         without it: the same alerts are on the Agent Center's own list.
+
+         Note what this permission does NOT buy. There is no push transport
+         anywhere in APEX — no FCM, no UnifiedPush, no ntfy, and no subscribe
+         verb on the daemon's socket — so these notifications come from polling
+         a connection this phone opened, and they arrive only while that poll
+         is alive. Granting this does not make the phone wake for an agent it
+         is not already connected to. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ApexRemote">
+
+        <!--
+          `allowBackup` is false and the extraction rules deny everything, on
+          purpose and not out of caution. A backup of this app's files would
+          copy the sealed device key to wherever the backup goes, and the
+          keystore key that unseals it does NOT travel — so the copy is useless
+          to its owner and is one more place the ciphertext exists for everyone
+          else. Re-pairing takes ten seconds and produces a fresh key; that is
+          the right recovery story.
+        -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- A pairing payload opened from anywhere else: a camera app that
+                 resolves URIs, a message, a paste. The scheme is what makes it
+                 reach this app instead of a browser. -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="apex-remote" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

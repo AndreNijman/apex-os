@@ -160,8 +160,14 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 COPY apex-install         /usr/bin/apex-install
 COPY apex-installer-gui   /usr/bin/apex-installer-gui
 COPY apex-installer-launch /usr/bin/apex-installer-launch
+# The session script owns the cage loop so the keyboard page can restart the
+# compositor (a wlroots keymap is compiled once, at startup, from
+# XKB_DEFAULT_LAYOUT). apex-installer-launch EXECS this path, so an image
+# missing it has no installer at all.
+COPY apex-installer-session /usr/bin/apex-installer-session
 RUN chmod 0755 /usr/bin/apex-install /usr/bin/apex-installer-gui \
-                /usr/bin/apex-installer-launch
+                /usr/bin/apex-installer-launch \
+                /usr/bin/apex-installer-session
 
 # ── Build-time assertions: the GUI stack must provably work ──────────────────
 # Every previous instance of this class of bug shipped SILENTLY: the missing
@@ -200,6 +206,16 @@ RUN set -eu; \
     bash -n /usr/bin/apex-installer-launch \
         || { echo "FATAL: apex-installer-launch has a bash syntax error"; exit 1; }; \
     echo "OK: apex-installer-launch parses"; \
+    bash -n /usr/bin/apex-installer-session \
+        || { echo "FATAL: apex-installer-session has a bash syntax error"; exit 1; }; \
+    echo "OK: apex-installer-session parses"; \
+    _t=$(grep -oE '^GUI_CMD=\(([^ )]+)' /usr/bin/apex-installer-launch | cut -d'(' -f2); \
+    [ -x "$_t" ] \
+        || { echo "FATAL: apex-installer-launch execs '$_t', which is not an executable in this image"; exit 1; }; \
+    echo "OK: apex-installer-launch's exec target $_t is present and executable"; \
+    [ -r /usr/share/X11/xkb/rules/base.lst ] \
+        || { echo "FATAL: xkb base.lst missing — the keyboard page would list no layouts"; exit 1; }; \
+    echo "OK: xkb layout database present"; \
     [ -f /usr/lib/systemd/system/seatd.service ] \
         || { echo "FATAL: seatd.service unit file missing"; exit 1; }; \
     echo "OK: seatd.service unit present"

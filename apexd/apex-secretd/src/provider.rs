@@ -27,15 +27,22 @@
 //! 6. **the host pin** — the provider says where the credential would go and
 //!    the framework compares it with where the credential was stored for. A
 //!    provider cannot skip this, because it never sees the value until after;
-//! 7. **reading the value**, once, only after every check above;
-//! 8. **scrubbing** the value — and a minted one — out of anything returned;
-//! 9. **the audit line**, from the record the decision was made on.
+//! 7. **§13.8's approval** — where the provider declared one is needed, the
+//!    framework finds the owner's and **spends** it, or refuses. A provider
+//!    cannot spend one, record one, or tell whether one exists;
+//! 8. **reading the value**, once, only after every check above;
+//! 9. **scrubbing** the value — and a minted one — out of anything returned;
+//! 10. **the audit line**, from the record the decision was made on.
 //!
-//! **A provider supplies** four things and no policy:
+//! **A provider supplies** five things and no policy:
 //!
 //! * **which operations exist** — a `ProviderSpec`, the §13.2 vocabulary;
 //! * **what a resource name means** — [`Provider::bind`], which resolves a name
 //!   the caller gave into a concrete target *and declares the endpoint*;
+//! * **whether the standing grant is enough for this one** — [`Approval`],
+//!   §13.8. A statement about the resolved request, not a decision: the
+//!   provider says *this is production*, and the framework says whether the
+//!   owner approved it;
 //! * **how a credential is presented** — [`Provider::perform`]: a git credential
 //!   helper, an `Authorization: Bearer`, a signed request, a `wrangler` child;
 //! * **how to mint a short-lived credential**, if it can — [`Provider::mint`],
@@ -94,6 +101,15 @@ pub struct Bind<'a> {
     pub service: &'a ServiceInfo,
     /// The account the operation runs as.
     pub owner: &'a Owner,
+    /// §11's audit id for this request, which §15 correlates a task graph on.
+    ///
+    /// Read-only, like everything else here, and the only field a provider has
+    /// that identifies THIS request rather than what it asks for. It exists
+    /// because §13.11's usage has to be attributable to a task without the
+    /// provider being told anything about the task: an id that appears in this
+    /// machine's own trail and in a far side's log is enough to join the two,
+    /// and a project path in somebody else's logs would be more than enough.
+    pub audit_id: &'a str,
 }
 
 /// Scheme and host a credential would be sent to.
@@ -136,17 +152,130 @@ pub struct Bound {
     /// The operation in words, for the audit line and the reply. Read by a
     /// person, so it says what happened, not what type it was.
     pub detail: String,
+    /// The name a credential this operation CREATES would be stored under, for
+    /// the operations that create one. `None` for everything else, which is
+    /// almost everything.
+    ///
+    /// Declared here — before the call, next to the endpoint — rather than
+    /// alongside the value it names, and that is the whole design. §13.10 says
+    /// a service token or a Tunnel credential goes into protected storage and
+    /// the agent gets a handle; the far side issues such a credential **once**
+    /// and never shows it again. So the framework has to be able to refuse a
+    /// name that is already taken while refusing is still free. Afterwards is
+    /// too late: the token exists, the reply is the only copy, and a refusal
+    /// then would destroy it.
+    pub creates: Option<String>,
+    /// Whether the standing grant is the whole of the decision for *this*
+    /// request, or the owner has to have approved this one.
+    ///
+    /// See [`Approval`]. Declared here for the same structural reason
+    /// [`Bound::creates`] is: only the provider knows that `my-worker` is this
+    /// project's production worker, and only the framework may consult the
+    /// store — so the answer has to cross the seam, and the seam is this
+    /// struct.
+    pub approval: Approval,
+}
+
+/// §13.8: whether the grant is enough for this request.
+///
+/// ## Why a provider says this and does not enforce it
+///
+/// §13.8's rule is about *environments*, and an environment is a Cloudflare
+/// idea — `[cloudflare.production] worker = "…"` in the project's own file.
+/// The framework must not learn what one is; that is P1-001's whole argument.
+/// But the framework is also the only thing that may read the store, and an
+/// approval has to live in the store, because a provider that could record
+/// "the owner said yes" could record it for itself.
+///
+/// So the knowledge and the authority are split at exactly the place they
+/// already are for [`Bound::creates`]: the provider says *this one needs the
+/// owner*, in a sentence a person can read, and the framework decides whether
+/// the owner said so. A provider cannot approve anything and cannot skip the
+/// question — [`Approval::Standing`] is not "no check", it is "the grant that
+/// was already checked is the answer".
+///
+/// ## Why it is not a bool
+///
+/// The refusal has to say *why this particular request* needs approval, and
+/// "true" cannot. A `production` deploy and a `preview` deploy differ in
+/// nothing the framework can see: same operation, same credential, same
+/// project. Without the sentence the message would be "this needs approval",
+/// which tells the reader nothing they did not already know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Approval {
+    /// The grant the framework already checked is the whole decision. What
+    /// every provider means unless it says otherwise, and what git, MCP and
+    /// bearer mean always.
+    Standing,
+    /// The owner has to have approved this exact operation on this exact
+    /// resource, and the approval is spent by performing it.
+    ///
+    /// The string is why, in words, and it reaches the person who has to
+    /// decide — so it names the thing that makes this request different, not
+    /// the rule that made it so.
+    Required(String),
+}
+
+impl Approval {
+    /// The word §11's `approval_policy` carries when this arm decided.
+    ///
+    /// `Standing` is not one of them: the policy on that path is whatever
+    /// [`crate::service::Service::decide`] already wrote, and overwriting it
+    /// here would erase the distinction between a grant and a future
+    /// break-glass.
+    pub fn why(&self) -> Option<&str> {
+        match self {
+            Approval::Standing => None,
+            Approval::Required(why) => Some(why),
+        }
+    }
+}
+
+/// A credential an operation created, on its way into the store.
+///
+/// §13.10: *"Broker service-token/Tunnel/Access credentials directly into
+/// protected storage. The agent receives handles/capabilities, not plaintext
+/// secrets."* A provider cannot reach the store — [`Bind`] says so in as many
+/// words, and that is worth keeping — so this is how a created credential gets
+/// there: the provider hands it back through a field the framework owns, and
+/// [`crate::service::Service::use_capability`] stores it, scrubs it out of
+/// anything on its way to the caller, and records the line.
+///
+/// The name is not here. It is on [`Bound::creates`], for the reason that
+/// field's note gives.
+#[derive(Debug)]
+pub struct Created {
+    /// The host the new credential may be sent to, and nowhere else. This is
+    /// the pin the framework will apply to every future use of it, so a
+    /// provider that cannot name an honest host must not create one at all.
+    pub host: String,
+    /// `https`, or `http` for a loopback host — the store refuses anything
+    /// else, because a credential sent in clear over a network is a credential
+    /// you no longer have.
+    pub scheme: String,
+    /// The username half, where the credential has one: an Access service
+    /// token's `client_id` is not a secret and is useless without its
+    /// `client_secret`, so it is stored beside it rather than returned alone.
+    pub username: Option<String>,
+    /// The secret itself. Never `Clone`, never printed, and the reason this
+    /// struct does not derive `Clone` either.
+    pub value: SecretValue,
 }
 
 /// What an operation produced.
 ///
-/// The credential is *not* scrubbed here — the framework does that, with both
-/// the stored value and any minted one, so scrubbing is an invariant rather
-/// than a thing each provider has to remember.
-#[derive(Debug, Clone)]
+/// The credential is *not* scrubbed here — the framework does that, with the
+/// stored value, any minted one, and any one this operation created, so
+/// scrubbing is an invariant rather than a thing each provider has to
+/// remember.
+#[derive(Debug)]
 pub struct Performed {
     pub code: i32,
     pub output: String,
+    /// A credential this operation created, for the framework to store. Its
+    /// name is [`Bound::creates`], which the framework checked before the
+    /// operation ran.
+    pub created: Option<Created>,
 }
 
 /// Why a provider refused or failed.
@@ -218,19 +347,138 @@ pub trait Provider: Send + Sync {
     /// §13.4: exchange the stored credential for a short-lived one scoped to
     /// this operation, if the provider can.
     ///
-    /// Returning `Ok(None)` — the default — means it cannot, and the stored
-    /// credential is used directly. When it returns a value, that value is what
-    /// [`Provider::perform`] is given, and the framework scrubs **both** out of
-    /// the output: a minted token is still a credential, and §13.4 is explicit
-    /// that even a temporary one is not handed to the agent.
+    /// ## Why this is a verdict and not an `Option`
+    ///
+    /// It used to be `Result<Option<SecretValue>, ProviderError>`, and `None`
+    /// had to mean three different things at once: *this provider has no
+    /// narrower form for this operation*, *the far side refused to issue one*,
+    /// and *the attempt did not run to a conclusion*. Those are not the same
+    /// answer. A credential service that could not reach the far side has not
+    /// established that no narrower credential exists, and reporting it as
+    /// though it had is this repository's own recurring defect — the one the
+    /// `permission denied is not absence` note is about.
+    ///
+    /// So it is modelled on [`apex::verify::Verdict`], which separates failed
+    /// from absent from could-not-run and treats could-not-run as neither. The
+    /// framework takes a different branch per arm and records which one
+    /// happened, so `apex secret audit` can answer "was this operation carried
+    /// out with a narrowed credential, and if not, why not" — a question that
+    /// had no answer at all while every no was spelled `None`.
+    ///
+    /// The default is [`Minted::NoNarrowerForm`]: a provider that says nothing
+    /// says "I have no narrower form", which is the honest reading of silence
+    /// and is what git and MCP mean.
+    /// An `Err` is the one case the four arms cannot express: not *what*
+    /// happened, but that what happened is not acceptable here. A project that
+    /// has declared it will only run against a narrowed credential refuses the
+    /// operation that way, because falling back to the stored one would be
+    /// doing the exact thing the owner wrote down that they did not want.
     fn mint(
         &self,
         _req: &Bind<'_>,
         _bound: &Bound,
         _value: &SecretValue,
-    ) -> Result<Option<SecretValue>, ProviderError> {
-        Ok(None)
+    ) -> Result<Minted, ProviderError> {
+        Ok(Minted::NoNarrowerForm(
+            "this provider has no short-lived form of its credential".to_string(),
+        ))
     }
+
+    /// End the life of a credential [`Provider::mint`] issued.
+    ///
+    /// Called by the framework after [`Provider::perform`] has returned,
+    /// **whether it succeeded or failed**, and given the *stored* credential
+    /// rather than the minted one: the narrow credential is narrow precisely
+    /// because it cannot create or destroy tokens, so the only thing that can
+    /// revoke it is the one that issued it.
+    ///
+    /// A minted credential that outlives the operation it was minted for is
+    /// the thing §13.4 exists to avoid, and an expiry is a backstop rather
+    /// than a revocation: between the operation ending and the expiry passing,
+    /// the credential is still spendable by anyone who got hold of it.
+    ///
+    /// An `Err` here does not fail the operation — the operation already
+    /// happened — but it is recorded, because a revoke that silently did not
+    /// happen leaves exactly the credential this method exists to remove.
+    fn revoke(
+        &self,
+        _req: &Bind<'_>,
+        _bound: &Bound,
+        _stored: &SecretValue,
+        _lease: &Lease,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// What a provider can do about §13.4's short-lived credential, and the four
+/// answers that are not the same answer.
+///
+/// The shape is [`apex::verify::Verdict`]'s, one level down: a conclusion, an
+/// absence, a refusal, and a did-not-run that is none of the other three.
+#[derive(Debug)]
+pub enum Minted {
+    /// A short-lived credential scoped to this operation, and the handle that
+    /// ends its life.
+    Narrowed { value: SecretValue, lease: Lease },
+    /// This provider has no narrower form of this credential for this
+    /// operation. A conclusion, reached without needing the far side.
+    NoNarrowerForm(String),
+    /// The far side was asked and said no — most often because the stored
+    /// credential is not permitted to issue credentials. **Not** an absence:
+    /// a narrower credential may well be possible for someone else's token,
+    /// and the reason says so.
+    Denied(String),
+    /// The attempt did not reach a conclusion. Never an absence and never a
+    /// refusal: nothing was established about whether a narrower credential
+    /// exists.
+    CouldNotRun(String),
+}
+
+impl Minted {
+    /// The word the audit line carries. One per arm, and they must stay
+    /// distinct: collapsing two of them is the defect this enum exists to
+    /// prevent, and a test asserts that no two are equal.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Minted::Narrowed { .. } => "narrowed",
+            Minted::NoNarrowerForm(_) => "no-narrower-form",
+            Minted::Denied(_) => "denied",
+            Minted::CouldNotRun(_) => "could-not-run",
+        }
+    }
+
+    /// The credential itself, for the one arm that has one.
+    pub fn value(&self) -> Option<&SecretValue> {
+        match self {
+            Minted::Narrowed { value, .. } => Some(value),
+            Minted::NoNarrowerForm(_) | Minted::Denied(_) | Minted::CouldNotRun(_) => None,
+        }
+    }
+
+    /// Why, for the three arms that have a why.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Minted::Narrowed { .. } => None,
+            Minted::NoNarrowerForm(why) | Minted::Denied(why) | Minted::CouldNotRun(why) => {
+                Some(why)
+            }
+        }
+    }
+}
+
+/// What it takes to end a minted credential's life, and when it ends anyway.
+///
+/// `handle` is opaque to the framework: it is whatever the provider that
+/// minted the credential needs in order to revoke it — for Cloudflare, the
+/// token id. The framework never interprets it, and it is not a credential,
+/// which is why it may appear in an audit line where the value may not.
+#[derive(Debug, Clone)]
+pub struct Lease {
+    pub handle: String,
+    /// When the credential stops being accepted regardless, in milliseconds
+    /// since the epoch. A backstop, not a revocation.
+    pub expires_ms: u64,
 }
 
 /// The providers this daemon serves.
@@ -351,6 +599,7 @@ mod tests {
             resource: ResourceKind::Name,
             params: &[],
             aliases: &["one-read"],
+            same_everywhere: false,
         }],
     };
 
@@ -364,6 +613,7 @@ mod tests {
             resource: ResourceKind::Name,
             params: &[],
             aliases: &[],
+            same_everywhere: false,
         }],
     };
 
@@ -377,6 +627,7 @@ mod tests {
             resource: ResourceKind::Name,
             params: &[],
             aliases: &[],
+            same_everywhere: false,
         }],
     };
 
@@ -501,6 +752,7 @@ mod tests {
             project: "/tmp",
             service: &service,
             owner: &owner,
+            audit_id: "test",
         };
         let bound = Bound {
             endpoint: Endpoint {
@@ -508,10 +760,16 @@ mod tests {
                 host: "example.com".into(),
             },
             detail: "read a thing".into(),
+            creates: None,
+            approval: Approval::Standing,
         };
         let minted = Stub(&ONE)
             .mint(&req, &bound, &SecretValue::new(b"not-a-real-token".to_vec()))
             .expect("the default must not be an error");
-        assert!(minted.is_none());
+        // "no narrower form" and not "could not run": a provider that never
+        // reached for one has concluded there is none, which is a different
+        // sentence from a provider whose attempt failed.
+        assert_eq!(minted.as_str(), "no-narrower-form", "{minted:?}");
+        assert!(minted.value().is_none());
     }
 }

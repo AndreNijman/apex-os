@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  Run a command in whatever terminal APEX Safe Graphics found (P2-018).
+#
+#  A separate two-screen script rather than a line in `menu.xml`, because the
+#  terminals in the image do not agree on how to be given one:
+#
+#      foot       foot <command> [args]        — no -e, the command is positional
+#      alacritty  alacritty -e <command> …
+#      xterm      xterm -e <command> …
+#
+#  A menu that hardcoded either spelling would silently open an empty terminal
+#  on a machine with the other one, and the person reading that menu is already
+#  having a bad day. With no arguments it opens the terminal itself.
+#
+#  `exec` at the end for the usual reason: the menu's Execute action starts
+#  this, and a shell left sitting in the middle is a process nobody reaps.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+term="${APEX_SAFE_GRAPHICS_TERMINAL:-}"
+if [ -z "$term" ]; then
+    for candidate in foot alacritty xterm; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            term="$candidate"
+            break
+        fi
+    done
+fi
+
+if [ -z "$term" ]; then
+    printf '[apex-safe-graphics-terminal] no terminal is installed\n' >&2
+    exit 1
+fi
+
+if [ "$#" -eq 0 ]; then
+    exec "$term"
+fi
+
+case "$(basename "$term")" in
+    foot) exec "$term" "$@" ;;
+    *) exec "$term" -e "$@" ;;
+esac

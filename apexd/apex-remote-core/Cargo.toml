@@ -1,0 +1,40 @@
+[package]
+name = "apex-remote-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+apex-agent-core = { path = "../apex-agent-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+snow = "0.9.6"
+data-encoding = "2.11.1"
+rand = "0.9.5"
+# RFC 6455 names SHA-1 for the WebSocket accept value. It is a protocol
+# constant there, not a security primitive, and the crate is already in the
+# lock through snow, so this edge costs nothing new to build or to audit.
+sha1 = "0.10.7"
+sha2 = "0.10.9"
+
+# TLS, so that `wss://` is a relay this client can actually dial.
+#
+# `ROADMAP/design/P1-052-relay.md` §5.1 costed three ways to reach an
+# HTTPS-only Worker and this is the one that was chosen. `default-features =
+# false` matters twice over: it keeps the default `aws-lc-rs` provider out (it
+# wants cmake at image-build time) and it keeps `logging` out (it drags `log`
+# into a workspace that has none). `tls12` stays because an enterprise TLS
+# proxy in front of a relay is a real deployment and costs no extra crate.
+rustls = { version = "0.23.42", default-features = false, features = ["std", "ring", "tls12"] }
+
+# The root store is the MACHINE's, at /etc/pki, and not a bundle vendored into
+# this binary. See the module note in src/tls.rs for why, and for why an empty
+# store is a refusal rather than a fall back to a vendored one.
+rustls-native-certs = "0.8"
+rustls-pki-types = { version = "1", features = ["std"] }
+

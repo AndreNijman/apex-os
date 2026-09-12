@@ -24,7 +24,8 @@ use anyhow::{Context, Result};
 use apex_agent_core::paths;
 use apex_agent_core::protocol::{AgentState, SessionInfo};
 use apex_agent_core::destination::Allowlist;
-use apex_agent_core::hook::ToolTransition;
+use apex_agent_core::graph;
+use apex_agent_core::hook::{HookEvent, ToolTransition};
 use apex_agent_core::sandbox::SandboxSpec;
 use apex_agent_core::session::{self as logic, OutputScanner, Scrollback, SCROLLBACK_BYTES};
 
@@ -88,6 +89,17 @@ pub struct Session {
     log_capped: bool,
     /// True once the reader thread has been asked to stop.
     pub closing: bool,
+    /// Unix milliseconds at which the session was first asked to stop.
+    ///
+    /// `SIGTERM` is a request, and a process may decline it. That is fine for
+    /// `apex agent kill`, where the user can ask again — and not fine for
+    /// §3.4's automatic expiry, where the session declining to die is a
+    /// session keeping root past its window. This is what lets a caller
+    /// escalate after a bounded grace: see [`force_kill`] and the daemon's
+    /// expiry thread.
+    pub closing_since_ms: Option<u64>,
+    /// True once `SIGKILL` has been sent, so it is sent once.
+    pub killed: bool,
 }
 
 impl Session {
@@ -159,12 +171,59 @@ impl Session {
         self.info.last_activity = now_secs();
     }
 
+    /// Record what a published lifecycle event says about the session graph
+    /// (§P1-020).
+    ///
+    /// Three of the events matter and the rest are none of this method's
+    /// business. `subagent_start` and `subagent_stop` open and close a node;
+    /// `stop` — the end of a turn — closes whatever is still open, because
+    /// nothing Claude delegated outlives the reply it was delegated for and a
+    /// `SubagentStop` is a hook that can fail to arrive. See
+    /// [`apex_agent_core::graph`] for why the record holds no state field to
+    /// go stale in the first place.
+    pub fn apply_graph_event(
+        &mut self,
+        event: HookEvent,
+        agent_id: Option<&str>,
+        agent_type: Option<&str>,
+    ) {
+        let at = now_secs();
+        match event {
+            HookEvent::SubagentStart => {
+                graph::subagent_started(&mut self.info.children, agent_id, agent_type, at)
+            }
+            HookEvent::SubagentStop => {
+                graph::subagent_stopped(&mut self.info.children, agent_id, agent_type, at)
+            }
+            // Two sweeps, two words, because they are two different facts.
+            // The turn ending is provisional — a subagent can outlive it, and
+            // `subagent_stopped` will overwrite the entry if the real report
+            // turns up. The session ending is not: the agent is on its way
+            // out, and nothing it delegated survives the process.
+            HookEvent::Stop => {
+                graph::close_open(&mut self.info.children, graph::ChildEnd::ParentStop, at);
+            }
+            HookEvent::SessionEnd => {
+                graph::close_open(&mut self.info.children, graph::ChildEnd::ParentExit, at);
+            }
+            _ => {}
+        }
+    }
+
     /// Record that the process ended.
     pub fn set_exited(&mut self, code: Option<i32>, signal: Option<i32>) {
         self.info.exit_code = code;
         self.info.exit_signal = signal;
         self.info.state = apex_agent_core::session::exit_state(code, signal);
         self.info.last_activity = now_secs();
+        // Nothing this session started is still running, whatever the last
+        // hook said. This is the sweep that keeps the graph from claiming a
+        // subagent is working under an agent that is gone.
+        graph::close_open(
+            &mut self.info.children,
+            graph::ChildEnd::ParentExit,
+            self.info.last_activity,
+        );
         self.attachers.clear();
         self.info.attached = 0;
         if let Some(log) = self.log.as_mut() {
@@ -306,6 +365,8 @@ impl Registry {
             log_bytes: 0,
             log_capped: false,
             closing: false,
+            closing_since_ms: None,
+            killed: false,
         }));
         self.sessions.insert(id, Arc::clone(&handle));
         handle
@@ -555,6 +616,12 @@ fn reconcile_stale_records_in(store: &Path) {
         if info.exit_code.is_none() && info.exit_signal.is_none() {
             info.exit_code = Some(-1);
         }
+        // A record left behind by a daemon that died holds whatever the graph
+        // looked like at the last write, which for a session that was working
+        // is a set of open subagents. The parent is demonstrably gone, so they
+        // are closed here for the same reason `set_exited` closes them: the
+        // one thing the graph must never do is report a dead agent as alive.
+        graph::close_open(&mut info.children, graph::ChildEnd::ParentExit, now_secs());
         write_record_in(store, &info);
     }
 }
@@ -581,18 +648,154 @@ pub fn historical_records() -> Vec<SessionInfo> {
     out
 }
 
-/// Stop a session's process group and close its terminal.
+/// Ask a session's process group to stop, and close its terminal.
+///
+/// `SIGHUP` then `SIGTERM`: a request, which a process may decline. Records
+/// when it was first asked, so a caller that cannot accept a decline can
+/// escalate — see [`force_kill`].
 pub fn terminate(session: &mut Session) {
     if session.info.is_live() {
         let _ = pty::signal_group(session.pgid, libc::SIGHUP);
         let _ = pty::signal_group(session.pgid, libc::SIGTERM);
+        if session.closing_since_ms.is_none() {
+            session.closing_since_ms = Some(apex_agent_core::request::now_ms());
+        }
     }
     session.closing = true;
 }
 
+/// `SIGKILL` a session's process group, once.
+///
+/// The escalation [`terminate`] leaves room for. Returns whether the signal
+/// was actually sent, so the caller records the escalation exactly once and
+/// only when there was something to escalate against.
+///
+/// This exists for §3.4. A break-glass session that outlived its window has
+/// `no_new_privs` cleared and cannot have it put back, so "the grant expired"
+/// is only true if the process is gone — and a process that ignores `SIGTERM`
+/// would otherwise keep `sudo` for as long as it liked while the audit trail
+/// said its window was over.
+pub fn force_kill(session: &mut Session) -> bool {
+    if session.killed || !session.info.is_live() {
+        return false;
+    }
+    session.killed = true;
+    pty::signal_group(session.pgid, libc::SIGKILL).is_ok()
+}
+
+/// How long a session gets to exit on its own before [`force_kill`].
+///
+/// Long enough for an agent to flush a transcript and drop a lock; short
+/// enough that a break-glass window is not meaningfully extended by declining
+/// to die.
+pub const TERMINATE_GRACE_MS: u64 = 10_000;
+
+/// The grace has to leave time to flush a transcript and drop a lock, and it
+/// has to be a small enough fraction of the shortest useful break-glass window
+/// that declining to die does not meaningfully extend it. Both are facts about
+/// constants, so they are checked when the crate compiles.
+const _: () = assert!(TERMINATE_GRACE_MS >= 1_000);
+const _: () = assert!(TERMINATE_GRACE_MS * 60 < apex_agent_core::grant::MAX_BREAK_GLASS_MS);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A process that declines SIGTERM, which is the case the escalation
+    /// exists for.
+    ///
+    /// `sh` with SIGTERM and SIGHUP trapped, spawned on a real PTY through the
+    /// same `pty::spawn` a session uses — so the process group, the signal
+    /// delivery and the reaping are the shipped ones and not a mock.
+    fn a_session_that_refuses_to_die() -> Option<(Session, pty::Spawned)> {
+        // `ready` is written once the traps are installed, so the test asks it
+        // to stop only after it can decline. Without that the signals race
+        // `sh` reaching its own first command, and the fixture dies to SIGHUP
+        // while appearing to prove the opposite.
+        let script = "trap '' TERM HUP INT QUIT; echo ready; while true; do sleep 0.05; done";
+        let argv = vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()];
+        let spawned = pty::spawn(
+            &argv,
+            std::path::Path::new("/tmp"),
+            &[],
+            false,
+            true,
+            apex_agent_core::term::WinSize { cols: 80, rows: 24 },
+        )
+        .ok()?;
+        let mut s = session(1);
+        s.info.pid = spawned.pid;
+        s.pid = spawned.pid;
+        s.pgid = spawned.pgid;
+        s.master = spawned.master;
+        // Wait for `ready` on the PTY rather than sleeping a guessed amount.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut seen = Vec::new();
+        while std::time::Instant::now() < deadline && !seen.windows(5).any(|w| w == b"ready") {
+            let mut buf = [0u8; 256];
+            match pty::read_nonblocking(spawned.master, &mut buf) {
+                Ok(Some(n)) if n > 0 => seen.extend_from_slice(&buf[..n]),
+                _ => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        if !seen.windows(5).any(|w| w == b"ready") {
+            return None;
+        }
+        Some((s, spawned))
+    }
+
+    #[test]
+    fn a_session_that_ignores_sigterm_is_killed_rather_than_asked_again() {
+        // §3.4's automatic expiry, at the only place it can actually be
+        // enforced. A break-glass session has `no_new_privs` cleared and
+        // nothing can put it back, so "the window is over" is true only when
+        // the process is gone — and SIGTERM is a request a process may
+        // decline. Without the escalation the expiry would be a polite note
+        // while the session kept root.
+        let Some((mut s, spawned)) = a_session_that_refuses_to_die() else {
+            eprintln!("SKIP: no PTY available in this environment");
+            return;
+        };
+
+        // Asked politely, and it declines. Recorded so a caller can escalate.
+        terminate(&mut s);
+        assert!(s.closing);
+        let asked = s.closing_since_ms.expect("the ask was timed");
+        assert!(asked > 0);
+        // Still there a moment later, which is the whole premise.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            pty::try_wait(spawned.pid),
+            pty::Wait::Running,
+            "the fixture died to SIGTERM, so it is not testing the escalation"
+        );
+
+        // Escalated, once.
+        assert!(force_kill(&mut s), "the kill was not sent");
+        assert!(!force_kill(&mut s), "the kill was sent twice");
+
+        // And it is gone. SIGKILL cannot be declined; this asserts the signal
+        // reached the right process GROUP, which is the part that could be
+        // wrong.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut outcome = pty::Wait::Running;
+        while std::time::Instant::now() < deadline {
+            outcome = pty::try_wait(spawned.pid);
+            if outcome != pty::Wait::Running {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            outcome,
+            pty::Wait::Signalled(libc::SIGKILL),
+            "the session survived its own expiry"
+        );
+        // Asked again after it is gone changes nothing.
+        s.info.exit_signal = Some(libc::SIGKILL);
+        assert!(!force_kill(&mut s));
+    }
+
 
     /// A store of this test's own.
     ///
@@ -646,6 +849,12 @@ mod tests {
             policy: apex_agent_core::AgentPolicy::default(),
             request_origin: Some(apex_agent_core::policy::RequestOrigin::LocalTerminal),
             origin_source: Some(apex_agent_core::origin::OriginSource::Observed),
+            actor: None,
+            grant: None,
+            grant_expires_ms: None,
+            native_observed: None,
+            telemetry: None,
+        children: Vec::new(),
             pid: 0,
             started: 0,
             last_activity: 0,
@@ -655,6 +864,8 @@ mod tests {
             checkpoint: None,
             cols: 80,
             rows: 24,
+            injected: 0,
+            capsule: None,
         }
     }
 
@@ -673,6 +884,8 @@ mod tests {
             log_bytes: 0,
             log_capped: false,
             closing: false,
+            closing_since_ms: None,
+            killed: false,
         }
     }
 

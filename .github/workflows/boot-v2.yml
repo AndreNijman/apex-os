@@ -43,12 +43,31 @@ on:
       - "apexd/apex/src/boot.rs"
       - "tests/test-boot-v2.sh"
       - ".github/workflows/boot-v2.yml"
+  # P1-062's second criterion is "boot/update/install/rollback loops run
+  # CONTINUOUSLY in VMs", and a dispatch input defaulting to 0 does not do that:
+  # it is a loop nobody runs. Weekly is what "continuously" means for a lab that
+  # boots five OVMF guests per iteration.
+  #
+  # Two things about this trigger are worth knowing rather than rediscovering.
+  # GitHub runs `schedule:` from the DEFAULT branch only, so this fires nothing
+  # until roadmap/v2.2 reaches main — which is correct: it arrives with the work
+  # it exercises. And Actions minutes are free on this repository because it is
+  # public, so the cost here is runner time and attention, not money; the weekly
+  # cadence is chosen against attention, since a nightly red on a branch nobody
+  # is watching teaches people to ignore it.
+  schedule:
+    - cron: "0 18 * * 0"   # Sunday 18:00 UTC = Monday 02:00 AWST
+
   workflow_dispatch:
     inputs:
       scenarios:
         description: "Scenarios to run (blank = all VM scenarios)"
         type: string
         default: ""
+      chaos_iterations:
+        description: "P1-062 chaos series: boot/rollback iterations to run (0 = none)"
+        type: string
+        default: "0"
 
 permissions:
   contents: read
@@ -170,6 +189,71 @@ jobs:
             || { echo "FATAL: expected 'apex-good.efi apex-new+0-3.efi ', got '$entries'" >&2; exit 1; }
 
           echo "boot-v2: every guest booted or was refused as expected"
+
+      # ── P1-062 criterion 2: the boot/rollback loop ──────────────────────
+      #
+      # "Boot/update/install/rollback loops run continuously in VMs." This is
+      # where that can be true, because this is the job that already has the
+      # boot lab, OVMF and qemu — and nowhere else in this repository does.
+      #
+      # `tests/chaos/cases/reboot-loop.sh` is one iteration: a deployment
+      # staged with three boot attempts that nothing ever blesses, five real
+      # guest boots, and the assertion that the machine comes back on the
+      # previous deployment AND that the exhausted entry is still in the ESP
+      # afterwards so the rollback is legible. `chaos-loop` repeats it with a
+      # cursor, so a killed run costs the iteration in flight and nothing else.
+      #
+      # OPT-IN, AND DELIBERATELY SO. The default is 0 iterations and this step
+      # does nothing on a pull request. Making it periodic is one line — a
+      # `schedule:` trigger next to `workflow_dispatch` above — and that line
+      # is not being added on an agent's own judgement, because a cron is a
+      # recurring bill nobody asked for. Each iteration is roughly a minute
+      # with KVM and several without; the accel step above records which.
+      #
+      # `could-not-inject` fails the series with no opt-out, so a run where the
+      # lab is absent or no guest booted cannot come out green. That is the
+      # entire point of the unit.
+      - name: P1-062 chaos — bounded boot/rollback series
+        # On a schedule there is no input at all, so the dispatch condition
+        # would skip the step and the weekly run would prove nothing. Named
+        # explicitly rather than relying on a default, because a skipped step
+        # counts as success and that is how six gates in this repository came to
+        # be silently not running.
+        if: ${{ github.event_name == 'schedule' || (inputs.chaos_iterations != '' && inputs.chaos_iterations != '0') }}
+        env:
+          ITERATIONS: ${{ github.event_name == 'schedule' && '3' || inputs.chaos_iterations }}
+        run: |
+          set -euo pipefail
+          # Numeric, checked here rather than interpolated into a command line:
+          # workflow_dispatch input is attacker-controlled for anyone who can
+          # dispatch, and this value reaches a loop bound.
+          case "$ITERATIONS" in
+            ''|*[!0-9]*) echo "::error::chaos_iterations must be a number"; exit 1 ;;
+          esac
+          CHAOS_BOOTLAB_IMAGE=localhost/apex-bootlab \
+            ./tests/chaos/chaos-loop \
+              --out "$RUNNER_TEMP/chaos-series" \
+              --iterations "$ITERATIONS" \
+              --seed "$GITHUB_RUN_ID" \
+              reboot-loop
+          ./tests/chaos/chaos-loop --out "$RUNNER_TEMP/chaos-series" --report
+
+      - name: Upload the chaos series
+        if: ${{ always() && inputs.chaos_iterations != '' && inputs.chaos_iterations != '0' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-boot-series
+          # Verdicts, cursor, env records and serial logs. NOT the disk images:
+          # they are 130 MB each and the ESP is reconstructible from the
+          # verdicts, which is what a reader needs.
+          path: |
+            ${{ runner.temp }}/chaos-series/cursor
+            ${{ runner.temp }}/chaos-series/iter-*/**/verdict.json
+            ${{ runner.temp }}/chaos-series/iter-*/**/observe.out
+            ${{ runner.temp }}/chaos-series/iter-*/env.txt
+            ${{ runner.temp }}/chaos-series/iter-*/**/root/lab/*.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload the serial logs
         if: always()

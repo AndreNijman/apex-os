@@ -14,10 +14,18 @@ path = "src/main.rs"
 
 [dependencies]
 apex-secret-core = { path = "../apex-secret-core" }
+apex-backup-core = { path = "../apex-backup-core" }
+apex-perm-core = { path = "../apex-perm-core" }
 apexd-core = { path = "../apexd-core" }
 apex-agent-core = { path = "../apex-agent-core" }
+apex-remote-core = { path = "../apex-remote-core" }
 anyhow.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+# `apex channel` reads ~/.config/apex/channel.toml, which is where every other
+# user-facing APEX config lives. Already in the build graph through apexd-core,
+# so the direct edge costs nothing but says what this crate actually uses.
+toml.workspace = true
 libc.workspace = true
 zbus.workspace = true
 zvariant.workspace = true

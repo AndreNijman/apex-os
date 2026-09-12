@@ -203,6 +203,23 @@ pub struct Output {
     pub text: String,
 }
 
+/// What a curl run produced, with the two streams still apart.
+///
+/// [`Output`] merges them, which is right for git — git says everything worth
+/// reading on stderr, and the caller wants one transcript. It is wrong for an
+/// HTTP client whose caller parses stdout: the Cloudflare provider asks curl to
+/// print the status on the last line of stdout, and a warning appended to that
+/// line makes the status unreadable. So [`run_curl`] hands both back and each
+/// caller decides. `perform_http` merges them exactly as it always did.
+pub(crate) struct CurlOutput {
+    /// curl's **exit code**, which is not an HTTP status. 0 means the transfer
+    /// happened; 22 with `fail-with-body` means the server answered an error
+    /// status and the body is still in `stdout`.
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// Perform the capability with the credential attached.
 ///
 /// Returns the child's combined output with the credential scrubbed out of it.
@@ -278,7 +295,7 @@ const CREDENTIAL_HELPER: &str =
 /// can write a `.git/config`. So the drop happens between fork and exec, and is
 /// then verified, because a drop that reported success without happening is the
 /// one failure this whole arrangement exists to prevent.
-fn drop_to(cmd: &mut Command, owner: &Owner) {
+pub(crate) fn drop_to(cmd: &mut Command, owner: &Owner) {
     let target_uid = owner.uid;
     let target_gid = owner.gid;
     let groups = owner.groups.clone();
@@ -373,12 +390,167 @@ fn run_git(
     Ok(Output { code, text })
 }
 
+/// How long a brokered tool may run.
+///
+/// **Shorter than [`crate::providers::cloudflare::temporary::LIFETIME_SECS`]**,
+/// and the compile-time assertion below is why that is not a coincidence: a
+/// tool that outran the credential minted for it would fail halfway through
+/// with an authentication error that has nothing to do with what it was
+/// asked to do, and the operator would go looking in the wrong place. The
+/// assertion means the two constants cannot drift apart silently.
+///
+/// It covers the tool and not the whole operation: §13.4's exchange makes two
+/// requests of its own before the tool starts, each bounded by
+/// [`crate::providers::cloudflare::api::TIMEOUT_SECS`], so a worst case where
+/// both of those run long AND the tool runs to its limit exceeds the
+/// credential's life. That case ends in an authentication failure from the far
+/// side rather than in anything unsafe — a credential that expired is a
+/// credential that stopped working — and tightening it would mean a timeout
+/// budget threaded through three modules to buy nothing.
+pub const TOOL_TIMEOUT_SECS: u64 = 180;
+
+const _: () = assert!(
+    TOOL_TIMEOUT_SECS < crate::providers::cloudflare::temporary::LIFETIME_SECS,
+    "a brokered tool may not outlive the short-lived credential it is given"
+);
+
+/// A tool the broker runs on the caller's behalf, with a credential the caller
+/// never sees.
+///
+/// §13.4: *"Do not pass even the temporary token directly to the agent if a
+/// broker-owned `wrangler`/API child process can perform the operation."*
+/// [`run_curl`] is that sentence's API half. This is the tool half, and the
+/// difference between them is only how the credential is presented: `curl`
+/// takes a configuration on stdin, and `wrangler` and `terraform` read one
+/// environment variable and have no stdin channel at all.
+///
+/// ## Where the credential goes, and what that is worth
+///
+/// The environment, and **not** the command line: `/proc/<pid>/cmdline` is
+/// world-readable and an environment is not. That is the same choice
+/// [`run_git`] already makes for `APEX_GIT_TOKEN`, for the same reason, and
+/// this is that mechanism generalised rather than a second one.
+///
+/// The environment is **built here and never inherited**. The daemon's own
+/// environment is root's, and passing it through would hand the child root's
+/// `HOME`, whatever systemd set, and any `CLOUDFLARE_*` variable that happened
+/// to be in it — which would make the credential this struct carries the
+/// second-most-interesting one in the room.
+///
+/// The honest limit is the crate note's: the child runs as the owner, so for
+/// as long as it runs, a same-uid process **outside a confined session** can
+/// read its environment. Inside one it cannot — the sandbox uses
+/// `--unshare-pid`, so the daemon's children are not in the agent's `/proc` at
+/// all. And P1-011 is what bounds the rest: the credential in that environment
+/// is one that expires in minutes and is deleted when the operation returns,
+/// so the window is a window rather than the account.
+pub struct Tool<'a> {
+    /// Absolute. Never resolved through `PATH`, because the `PATH` a child is
+    /// given is one this file writes and the point of writing it would be lost
+    /// if the program name were looked up in it.
+    pub program: &'a str,
+    pub args: &'a [String],
+    /// The directory the tool runs in — the caller's project, because that is
+    /// where its `wrangler.toml` or its `.tf` files are.
+    pub cwd: &'a Path,
+    /// The variable the tool reads its credential from, and the value.
+    pub credential: (&'static str, &'a str),
+    /// Variables that are not credentials but that the tool needs: an account
+    /// id, an environment name. Names are `&'static str` so there is no
+    /// variable a caller can invent.
+    pub extra: Vec<(&'static str, String)>,
+}
+
+/// Run a tool as the owner, with a cleared environment and one credential in
+/// it.
+pub fn run_tool(tool: &Tool<'_>, owner: &Owner) -> Result<Output, String> {
+    if !Path::new(tool.program).is_absolute() {
+        return Err(format!(
+            "'{}' is not an absolute path, and this service does not look a \
+             program up in a PATH it wrote itself",
+            tool.program
+        ));
+    }
+    if !Path::new(tool.program).exists() {
+        // Not "you may not": the tool is not installed, which is a different
+        // thing to tell an operator and has a different fix.
+        return Err(format!(
+            "'{}' is not installed on this machine, so the operation could not \
+             be carried out",
+            tool.program
+        ));
+    }
+
+    // `timeout` rather than a watchdog thread, for `run_git`'s reason: the
+    // child has to actually die.
+    let mut cmd = Command::new("timeout");
+    cmd.arg(TOOL_TIMEOUT_SECS.to_string())
+        .arg(tool.program)
+        .args(tool.args);
+
+    cmd.env_clear()
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("HOME", &owner.home)
+        .env("USER", &owner.name)
+        .env("LOGNAME", &owner.name)
+        .env("LC_ALL", "C")
+        // A proxy the environment could name is a destination the caller did
+        // not choose and this daemon did not check.
+        .env("NO_PROXY", "*")
+        // Neither of these tools may decide on its own to fetch a newer
+        // version of itself and run that instead, which is what an update
+        // check is one prompt away from.
+        .env("CI", "1")
+        .env("NO_COLOR", "1")
+        .current_dir(tool.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    for (name, value) in &tool.extra {
+        cmd.env(name, value);
+    }
+    // Last, so that nothing above can be spelled the same and win.
+    cmd.env(tool.credential.0, tool.credential.1);
+
+    drop_to(&mut cmd, owner);
+
+    let out = cmd.output().map_err(|e| {
+        format!("running {}: {e}", Path::new(tool.program).file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| tool.program.to_string()))
+    })?;
+
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !err.trim().is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(err.trim_end());
+    }
+    if text.len() > HTTP_MAX_BYTES {
+        text.truncate(HTTP_MAX_BYTES);
+        text.push_str("\napex: the rest of this output was not carried");
+    }
+    let code = out.status.code().unwrap_or(-1);
+    if code == 124 {
+        text.push_str(&format!(
+            "\napex: that tool did not finish within {TOOL_TIMEOUT_SECS}s and was stopped"
+        ));
+    }
+    Ok(Output { code, text })
+}
+
 /// How large a brokered HTTP reply may be before it is refused.
 ///
 /// Bounded because the far end is a server the owner chose but the daemon does
 /// not control, and an unbounded read is a way for it to exhaust this machine's
 /// memory one connection at a time.
 pub const HTTP_MAX_BYTES: usize = 3 * 1024 * 1024;
+
+/// The curl this build runs, by absolute path.
+pub const CURL: &str = "/usr/bin/curl";
 
 /// The `Mcp-Session-Id` a server issued, if it issued one.
 pub struct HttpOutput {
@@ -454,13 +626,139 @@ pub fn perform_http(
     config.push_str(&format!("max-filesize = {HTTP_MAX_BYTES}\n"));
     config.push_str(&format!("max-time = {GIT_TIMEOUT_SECS}\n"));
 
-    let mut out = run_curl(&config, owner)?;
+    let mut out = merged(run_curl(&config, owner)?);
     let (headers, rest) = strip_http_headers(&out.text);
     out.text = scrub(&scrub(&rest, token), &info.header_value(token));
     Ok(HttpOutput {
         out,
         session: mcp_session_id(&headers),
     })
+}
+
+/// How a brokered HTTP request presents the stored credential.
+///
+/// A provider says which, rather than the broker inferring it from
+/// [`ServiceInfo::auth`]. `auth` has two values because that is all the *store*
+/// needs to know — `bearer`, or bytes somebody else interprets — and "somebody
+/// else" is the provider. A WebDAV app password and a raw `Authorization`
+/// header are both stored as `raw` and are not the same request.
+pub enum HttpAuth<'a> {
+    /// `Authorization:` built by [`ServiceInfo::header_value`].
+    Header,
+    /// HTTP Basic, as `user = "name:password"` in the configuration on curl's
+    /// **stdin**.
+    ///
+    /// curl's own `--user`, deliberately, rather than a base64 this file would
+    /// compute: the encoding is not the hard part, keeping the credential off
+    /// the command line is, and `user` in a config read from stdin is the one
+    /// channel `perform_http` already argues is unreadable by a third party.
+    /// `--basic` is set with it so curl cannot be talked into a different
+    /// scheme by a `WWW-Authenticate` the far end chose.
+    Basic { username: &'a str },
+}
+
+/// One WebDAV request to the server a credential belongs to.
+///
+/// `rel_path` is a [`apex_secret_core::operation::Syntax::Path`] the framework
+/// has already checked: `/`-joined names, no leading `/`, no `//`, no `..`, no
+/// `:`. So it can be appended to the pinned endpoint without encoding and
+/// without climbing out of it — and it is checked a second time here, because
+/// this function builds a URL and "the caller checked" is not a property this
+/// file can see.
+pub struct WebdavRequest<'a> {
+    pub method: &'a str,
+    pub rel_path: &'a str,
+    pub body: &'a [u8],
+    pub depth: Option<&'a str>,
+    pub content_type: Option<&'a str>,
+}
+
+/// The URL a WebDAV request goes to: the pinned endpoint, then the path.
+///
+/// Its own function so the join is one place a reader can check. The host,
+/// scheme, port and base path are all from the stored record; the only caller
+/// contribution is `rel_path`, and [`apex_secret_core::operation::valid_path`]
+/// is what stops it being an authority, an absolute path or a climb.
+pub fn webdav_url(info: &ServiceInfo, rel_path: &str) -> Result<String, String> {
+    if !apex_secret_core::operation::valid_path(rel_path) {
+        return Err(format!(
+            "'{}' is not a path within this account",
+            rel_path.escape_debug()
+        ));
+    }
+    Ok(format!(
+        "{}/{rel_path}",
+        info.url().trim_end_matches('/')
+    ))
+}
+
+/// Carry one WebDAV request to the account's own server.
+///
+/// The same channels as [`perform_http`] and for the same reasons: the
+/// credential goes down curl's stdin as a configuration, a body goes in a file
+/// in a directory only root can write, and response headers come back ahead of
+/// the body on stdout so there is no third path. Redirects are not followed, so
+/// the far end cannot move the request to a host the owner did not choose.
+pub fn perform_webdav(
+    info: &ServiceInfo,
+    value: &SecretValue,
+    auth: &HttpAuth<'_>,
+    req: &WebdavRequest<'_>,
+    owner: &Owner,
+    dir: &Path,
+) -> Result<Output, String> {
+    let token = value
+        .as_str()
+        .ok_or_else(|| "that credential is not text, so it cannot be presented".to_string())?;
+    let url = webdav_url(info, req.rel_path)?;
+
+    let staged = if req.body.is_empty() {
+        None
+    } else {
+        Some(TempFile::create(dir, req.body)?)
+    };
+
+    let mut config = String::new();
+    config.push_str(&format!("url = {}\n", quote(&url)));
+    config.push_str(&format!("request = {}\n", quote(req.method)));
+    match auth {
+        HttpAuth::Header => config.push_str(&format!(
+            "header = {}\n",
+            quote(&format!("Authorization: {}", info.header_value(token)))
+        )),
+        HttpAuth::Basic { username } => {
+            config.push_str(&format!("user = {}\n", quote(&format!("{username}:{token}"))));
+            config.push_str("basic\n");
+        }
+    }
+    if let Some(depth) = req.depth {
+        config.push_str(&format!("header = {}\n", quote(&format!("Depth: {depth}"))));
+    }
+    if let Some(ct) = req.content_type {
+        config.push_str(&format!("header = {}\n", quote(&format!("Content-Type: {ct}"))));
+    }
+    // See `perform_http`: curl sends `Expect: 100-continue` for a body over a
+    // kilobyte, and a server that honours it answers with a header block of its
+    // own — two blocks, and a stripper written for one hands the caller a reply
+    // with HTTP in front of it.
+    config.push_str("header = \"Expect:\"\n");
+    if let Some(file) = &staged {
+        config.push_str(&format!("data-binary = {}\n", quote(&format!("@{}", file.path))));
+    }
+    config.push_str("dump-header = \"-\"\n");
+    config.push_str("silent\nshow-error\nfail-with-body\n");
+    config.push_str("proto = \"=https,http\"\n");
+    config.push_str(&format!("max-filesize = {HTTP_MAX_BYTES}\n"));
+    config.push_str(&format!("max-time = {GIT_TIMEOUT_SECS}\n"));
+
+    let mut out = merged(run_curl(&config, owner)?);
+    let (_headers, rest) = strip_http_headers(&out.text);
+    // Both spellings, because a Basic request never builds `header_value` and a
+    // header request never builds the `user:` pair — scrubbing only the one the
+    // request used would leave the other reachable the day a provider changes
+    // which it asks for.
+    out.text = scrub(&scrub(&rest, token), &info.header_value(token));
+    Ok(out)
 }
 
 /// Split curl's stdout into the header blocks it dumped and the body.
@@ -511,12 +809,33 @@ pub fn mcp_session_id(headers: &str) -> Option<String> {
 }
 
 /// Run curl as the owner, with its whole configuration on stdin.
-fn run_curl(config: &str, owner: &Owner) -> Result<Output, String> {
-    let mut cmd = Command::new("curl");
-    cmd.arg("--config").arg("-");
+///
+/// ## `-q`, and why it is the first argument
+///
+/// This process is root and sets `HOME` to the **owner's**. Without `-q`, curl
+/// reads `$HOME/.curlrc` before anything else and takes every option in it —
+/// `proxy`, `header`, `insecure`, `write-out`, `output` — from a file the
+/// owner's own account can write. That is the same hole [`run_git`] closes with
+/// `GIT_CONFIG_GLOBAL=/dev/null`: the account this runs *for* must not get to
+/// configure the child this daemon spawns on its behalf. `-q` has to be the
+/// first argument on the line — curl reads the default config at the point it
+/// sees the flag, so `--config - -q` would read `.curlrc` first and only then
+/// disable it.
+///
+/// ## The absolute path
+///
+/// `PATH` is pinned below, so a bare `curl` would resolve the same today. It is
+/// spelled out anyway because the pin and the lookup are two facts that have to
+/// stay in step, and [`crate::providers::cloudflare::api`] — the other curl in
+/// this build — already spells it out.
+pub(crate) fn run_curl(config: &str, owner: &Owner) -> Result<CurlOutput, String> {
+    let mut cmd = Command::new(CURL);
+    cmd.arg("-q").arg("--config").arg("-");
     cmd.env_clear()
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .env("HOME", &owner.home)
+        .env("USER", &owner.name)
+        .env("LOGNAME", &owner.name)
         .env("LC_ALL", "C")
         // A proxy the environment could name is a destination the caller did
         // not choose and this daemon did not check.
@@ -537,23 +856,37 @@ fn run_curl(config: &str, owner: &Owner) -> Result<Output, String> {
         .wait_with_output()
         .map_err(|e| format!("waiting for curl: {e}"))?;
 
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    if text.len() > HTTP_MAX_BYTES {
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if stdout.len() > HTTP_MAX_BYTES {
         return Err(format!(
             "that reply is larger than the {HTTP_MAX_BYTES} bytes this service will carry"
         ));
     }
-    let err = String::from_utf8_lossy(&out.stderr);
-    if !err.trim().is_empty() {
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push_str(err.trim_end());
-    }
-    Ok(Output {
+    Ok(CurlOutput {
         code: out.status.code().unwrap_or(-1),
-        text,
+        stdout,
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     })
+}
+
+/// Append what curl said on stderr to what it printed, the way [`Output`] has
+/// always carried a brokered reply.
+///
+/// Its own function so that "the MCP path merges the streams" is one line a
+/// reader can find, rather than a thing `run_curl` did to every caller.
+fn merged(out: CurlOutput) -> Output {
+    let CurlOutput {
+        code,
+        mut stdout,
+        stderr,
+    } = out;
+    if !stderr.trim().is_empty() {
+        if !stdout.is_empty() && !stdout.ends_with('\n') {
+            stdout.push('\n');
+        }
+        stdout.push_str(stderr.trim_end());
+    }
+    Output { code, text: stdout }
 }
 
 /// A curl config value, quoted so nothing in it can be read as syntax.
@@ -766,5 +1099,134 @@ mod tests {
         .expect("spawn");
         assert_ne!(out.code, 0);
         assert!(!out.text.trim().is_empty(), "stderr was dropped");
+    }
+
+    /// A server that records every header it was sent and answers 200.
+    ///
+    /// Small on purpose: the only question it is asked is *which headers
+    /// arrived*, and a request the child never made cannot be recorded.
+    struct HeaderRecorder {
+        port: u16,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl HeaderRecorder {
+        fn start() -> HeaderRecorder {
+            use std::io::{BufRead, BufReader};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+            let port = listener.local_addr().expect("addr").port();
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorder = std::sync::Arc::clone(&seen);
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let recorder = std::sync::Arc::clone(&recorder);
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        let mut reader =
+                            BufReader::new(stream.try_clone().expect("clone"));
+                        let mut headers = Vec::new();
+                        loop {
+                            let mut line = String::new();
+                            match reader.read_line(&mut line) {
+                                Ok(0) => break,
+                                Ok(_) => {}
+                                Err(_) => return,
+                            }
+                            if line.trim_end().is_empty() {
+                                break;
+                            }
+                            headers.push(line.trim_end().to_string());
+                        }
+                        recorder.lock().expect("lock").extend(headers);
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                              Content-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        );
+                    });
+                }
+            });
+            HeaderRecorder { port, seen }
+        }
+
+        fn headers(&self) -> Vec<String> {
+            self.seen.lock().expect("lock").clone()
+        }
+    }
+
+    /// The owner's `~/.curlrc` must not configure a child this daemon spawns.
+    ///
+    /// This process is root and hands curl the owner's `HOME`, so without `-q`
+    /// curl reads that account's own `.curlrc` before the configuration on its
+    /// stdin — and every option in it applies. `header` is the mildest thing
+    /// that file could say; `proxy` is the one that matters, because it names a
+    /// destination the caller did not choose and this daemon did not check.
+    ///
+    /// The mutation that proves it bites: drop the `-q` from `run_curl` and the
+    /// header arrives, because the request is real and the server is real.
+    /// (The absolute path in `CURL` is *not* mutation-testable here: `PATH` is
+    /// pinned to system directories, so a bare `curl` resolves to the same
+    /// binary. It is spelled out for the reason the doc comment gives, not
+    /// because a test can tell the difference.)
+    #[test]
+    fn a_curlrc_in_the_owners_home_cannot_configure_the_brokered_request() {
+        // Safe: getuid cannot fail.
+        let me = unsafe { libc::getuid() };
+        let mut owner = owner(me).expect("own uid");
+
+        let dir = std::env::temp_dir().join(format!("apex-curlrc-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("fake home");
+        std::fs::write(
+            dir.join(".curlrc"),
+            "header = \"X-Curlrc: the owner configured this\"\n",
+        )
+        .expect("write .curlrc");
+        // The child's HOME comes from the account record, not from `$HOME`, so
+        // this is the only way to point it anywhere.
+        owner.home = dir.to_string_lossy().into_owned();
+
+        let server = HeaderRecorder::start();
+        let info = ServiceInfo {
+            service: "memory".into(),
+            host: "127.0.0.1".into(),
+            scheme: "http".into(),
+            username: "x-access-token".into(),
+            path: "/mcp".into(),
+            auth: "bearer".into(),
+            port: Some(server.port),
+            added: 0,
+        };
+        let out = perform_http(
+            &info,
+            &SecretValue::new(b"apex-curlrc-test-token".to_vec()),
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            None,
+            &owner,
+            &dir.join("messages"),
+        )
+        .expect("the request runs");
+        assert_eq!(out.out.code, 0, "{}", out.out.text);
+
+        let headers = server.headers();
+        // The request really happened — otherwise "no X-Curlrc" would be true
+        // of a curl that never ran, which is the failure this must not have.
+        assert!(
+            headers.iter().any(|h| h.starts_with("POST /mcp")),
+            "the child never reached the server: {headers:?}"
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|h| h.to_ascii_lowercase().starts_with("authorization:")),
+            "the credential never went: {headers:?}"
+        );
+        assert!(
+            !headers
+                .iter()
+                .any(|h| h.to_ascii_lowercase().starts_with("x-curlrc:")),
+            "the owner's ~/.curlrc was read: {headers:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

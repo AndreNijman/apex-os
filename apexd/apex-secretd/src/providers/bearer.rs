@@ -33,7 +33,7 @@ use apex_secret_core::operation::{
 };
 use apex_secret_core::SecretValue;
 
-use crate::provider::{Bind, Bound, Endpoint, Performed, Provider, ProviderError};
+use crate::provider::{Approval, Bind, Bound, Endpoint, Lease, Minted, Performed, Provider, ProviderError};
 
 pub const SPEC: ProviderSpec = ProviderSpec {
     id: "demo",
@@ -46,6 +46,11 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             resource: ResourceKind::None,
             params: &[],
             aliases: &[],
+            // The honest twin of `cloudflare.account.read`: the same
+            // declaration — no resource, no parameters — and a `bind` that
+            // reads only the stored record. Declared true so the framework has
+            // a case where the claim holds as well as one where it does not.
+            same_everywhere: true,
         },
         OperationSpec {
             id: "demo.object.read",
@@ -54,6 +59,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             resource: ResourceKind::Path,
             params: &[],
             aliases: &[],
+            same_everywhere: false,
         },
         OperationSpec {
             id: "demo.object.write",
@@ -67,6 +73,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
                 summary: "an annotation to store with it",
             }],
             aliases: &[],
+            same_everywhere: false,
         },
     ],
 };
@@ -78,10 +85,40 @@ pub const SPEC: ProviderSpec = ProviderSpec {
 /// it.
 pub struct BearerProvider {
     pub port: u16,
-    /// Whether [`Provider::mint`] exchanges the stored credential for a
-    /// short-lived one. §13.4's path, off by default so both are exercised.
-    pub mints: bool,
+    /// What [`Provider::mint`] answers. §13.4's four outcomes, so the
+    /// framework's branch for each one is exercised rather than assumed.
+    pub mints: Minting,
+    /// Whether [`Provider::perform`] fails with the credential in its error
+    /// message — the mistake a provider makes when it hands back whatever the
+    /// tool it drove said about a failed request.
+    pub fails_with_token: bool,
+    /// Every lease this provider was asked to revoke, in order. Shared with
+    /// the test that built it, because the provider itself disappears into the
+    /// registry — and the question a test needs to answer is whether the
+    /// framework asked at all, which cannot be seen from outside.
+    pub revoked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Whether the revoke reports that it could not be done.
+    pub revoke_fails: bool,
 }
+
+/// What the test provider's [`Provider::mint`] will answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Minting {
+    /// A short-lived credential. §13.4's path.
+    Narrowed,
+    /// No narrower form exists. What git and MCP mean.
+    None,
+    /// The far side refused to issue one.
+    Denied,
+    /// The attempt did not reach a conclusion.
+    CouldNotRun,
+    /// The project requires a narrowed credential and there is not one, so the
+    /// operation must not run at all.
+    Refuses,
+}
+
+/// The handle the test provider's lease carries.
+pub const LEASE: &str = "lease-7f2a";
 
 /// What `mint` hands back. Distinct from the stored value so a test can tell
 /// which one reached the far side, and so both must be scrubbed.
@@ -116,6 +153,11 @@ impl Provider for BearerProvider {
         Ok(Bound {
             endpoint: Endpoint::from_url(&url)?,
             detail: format!("{} {}", req.operation.id, self.path(req)),
+            creates: None,
+            // A bearer request reaches only the endpoint pinned when its
+            // credential was stored, so there is no second thing for the owner
+            // to be asked about.
+            approval: Approval::Standing,
         })
     }
 
@@ -125,11 +167,40 @@ impl Provider for BearerProvider {
         _req: &Bind<'_>,
         _bound: &Bound,
         _value: &SecretValue,
-    ) -> Result<Option<SecretValue>, ProviderError> {
-        if !self.mints {
-            return Ok(None);
+    ) -> Result<Minted, ProviderError> {
+        Ok(match self.mints {
+            Minting::Narrowed => Minted::Narrowed {
+                value: SecretValue::new(MINTED.as_bytes().to_vec()),
+                lease: Lease {
+                    handle: LEASE.to_string(),
+                    expires_ms: 4_102_444_800_000,
+                },
+            },
+            Minting::None => Minted::NoNarrowerForm("there is no narrower form".to_string()),
+            Minting::Denied => Minted::Denied("the far side would not issue one".to_string()),
+            Minting::CouldNotRun => {
+                Minted::CouldNotRun("the far side could not be reached".to_string())
+            }
+            Minting::Refuses => {
+                return Err(ProviderError::Refused(
+                    "this project runs only on a narrowed credential".to_string(),
+                ))
+            }
+        })
+    }
+
+    fn revoke(
+        &self,
+        _req: &Bind<'_>,
+        _bound: &Bound,
+        _stored: &SecretValue,
+        lease: &Lease,
+    ) -> Result<(), String> {
+        self.revoked.lock().expect("lock").push(lease.handle.clone());
+        if self.revoke_fails {
+            return Err("the far side would not take the revoke".to_string());
         }
-        Ok(Some(SecretValue::new(MINTED.as_bytes().to_vec())))
+        Ok(())
     }
 
     /// How the credential is presented: `Authorization: Bearer`.
@@ -142,6 +213,15 @@ impl Provider for BearerProvider {
         let token = value
             .as_str()
             .ok_or_else(|| ProviderError::Failed("that credential is not text".into()))?;
+        if self.fails_with_token {
+            // Badly written, on purpose. The framework is what makes it not
+            // matter, and a provider written next year will do this by
+            // accident.
+            return Err(ProviderError::Failed(format!(
+                "the api rejected the request: upstream said `Bearer {token}` \
+                 was not accepted"
+            )));
+        }
         let method = if req.operation.effect.is_write() {
             "PUT"
         } else {
@@ -155,6 +235,7 @@ impl Provider for BearerProvider {
             // way a badly written API reports an auth failure, and the
             // framework is what keeps that out of the caller's hands.
             output: format!("{status} {body}"),
+            created: None,
         })
     }
 }
@@ -282,6 +363,14 @@ mod tests {
         service: Service,
         dir: PathBuf,
         api: Api,
+        revoked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Fixture {
+        /// The leases the framework asked the provider to end, in order.
+        fn revoked(&self) -> Vec<String> {
+            self.revoked.lock().expect("lock").clone()
+        }
     }
 
     impl Drop for Fixture {
@@ -301,7 +390,17 @@ mod tests {
 
     /// A service serving ONLY the bearer provider, with a credential stored for
     /// the fixture and one operation granted.
-    fn fixture(name: &str, mints: bool, granted: &str) -> Fixture {
+    fn fixture(name: &str, mints: Minting, granted: &str) -> Fixture {
+        fixture_with(name, mints, false, false, granted)
+    }
+
+    fn fixture_with(
+        name: &str,
+        mints: Minting,
+        fails_with_token: bool,
+        revoke_fails: bool,
+        granted: &str,
+    ) -> Fixture {
         let api = Api::start();
         let dir = std::env::temp_dir().join(format!(
             "apex-bearer-{name}-{}-{}",
@@ -310,11 +409,15 @@ mod tests {
         ));
         std::fs::remove_dir_all(&dir).ok();
 
+        let revoked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut registry = Registry::new();
         registry
             .register(Box::new(BearerProvider {
                 port: api.port,
                 mints,
+                fails_with_token,
+                revoked: std::sync::Arc::clone(&revoked),
+                revoke_fails,
             }))
             .expect("register");
         let service = Service::new(Store::new(dir.clone()), false, registry);
@@ -342,7 +445,12 @@ mod tests {
             .grant(peer, "/tmp/apex-bearer-project", "api", granted, false)
             .as_error()
             .is_none());
-        Fixture { service, dir, api }
+        Fixture {
+            service,
+            dir,
+            api,
+            revoked,
+        }
     }
 
     fn record(operation: &str, resource: &str) -> CapabilityRecord {
@@ -357,7 +465,7 @@ mod tests {
         // with git: a header instead of a credential helper, a path instead of
         // a remote name, and a real HTTP request on a real socket that the far
         // side refuses without the credential.
-        let f = fixture("run", false, "demo.object.read");
+        let f = fixture("run", Minting::None, "demo.object.read");
         let reply = f
             .service
             .use_capability(me(), record("demo.object.read", "bucket/logs/today.json"), Vec::new());
@@ -395,7 +503,7 @@ mod tests {
         // §13.4: prefer a short-lived credential where the provider has one,
         // and do not hand even that to the agent. No git test can reach this —
         // the git provider has no short-lived form.
-        let f = fixture("mint", true, "demo.object.read");
+        let f = fixture("mint", Minting::Narrowed, "demo.object.read");
         let reply = f
             .service
             .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new());
@@ -409,12 +517,130 @@ mod tests {
         assert!(!output.contains(STORED), "{output}");
     }
 
+    /// The lease ends whatever the operation did, and the framework is what
+    /// ends it — a provider cannot, because it does not know whether `perform`
+    /// was the last thing to happen.
+    ///
+    /// Both halves in one test because they are one property: a credential
+    /// minted for an operation does not outlive it, and a failure is the case
+    /// most likely to be forgotten.
+    #[test]
+    fn the_framework_ends_a_lease_however_the_operation_ended() {
+        let worked = fixture("lease-ok", Minting::Narrowed, "demo.object.read");
+        assert!(worked
+            .service
+            .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new())
+            .as_error()
+            .is_none());
+        assert_eq!(worked.revoked(), vec![LEASE.to_string()]);
+
+        let failed = fixture_with(
+            "lease-fail",
+            Minting::Narrowed,
+            true,
+            false,
+            "demo.object.read",
+        );
+        assert!(failed
+            .service
+            .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new())
+            .as_error()
+            .is_some());
+        assert_eq!(
+            failed.revoked(),
+            vec![LEASE.to_string()],
+            "the operation failed and its credential was left standing"
+        );
+    }
+
+    /// The four answers reach the trail as four different words, at the
+    /// framework layer where every provider that will ever be written meets
+    /// them.
+    ///
+    /// This is the "permission denied is not absence" rule in the one place it
+    /// is easiest to break: three of the four arms end with the stored
+    /// credential being used, so from the operation's point of view they look
+    /// identical, and only the trail tells them apart.
+    #[test]
+    fn a_narrowing_that_failed_and_a_narrowing_with_nothing_to_do_are_not_the_same_line() {
+        let word = |name: &str, mints: Minting| -> String {
+            let f = fixture(name, mints, "demo.object.read");
+            assert!(f
+                .service
+                .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new())
+                .as_error()
+                .is_none());
+            let trail = std::fs::read_to_string(Store::new(f.dir.clone()).audit_path())
+                .expect("the trail");
+            let line: serde_json::Value = serde_json::from_str(
+                trail
+                    .lines()
+                    .rfind(|l| l.contains("\"used\""))
+                    .expect("a used line"),
+            )
+            .expect("json");
+            line["narrowing"].as_str().expect("narrowing").to_string()
+        };
+        assert_eq!(word("w-narrowed", Minting::Narrowed), "narrowed");
+        assert_eq!(word("w-none", Minting::None), "no-narrower-form");
+        assert_eq!(word("w-denied", Minting::Denied), "denied");
+        assert_eq!(word("w-couldnot", Minting::CouldNotRun), "could-not-run");
+    }
+
+    /// §13.4 says *prefer*, so three of the four arms fall back to the stored
+    /// credential rather than refusing — that is what this service already
+    /// did, and refusing instead would break every operation for an owner
+    /// whose stored token cannot issue credentials.
+    ///
+    /// A provider that has been told the project will not accept that says so
+    /// with an `Err`, and then nothing runs. The credential is never
+    /// presented: the refusal happens before `perform` is reached.
+    #[test]
+    fn a_provider_that_will_not_run_without_a_narrowed_credential_stops_the_operation() {
+        let f = fixture("w-required", Minting::Refuses, "demo.object.read");
+        let reply =
+            f.service
+                .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new());
+        let (kind, message) = reply.as_error().expect("it must refuse");
+        assert_eq!(kind, ErrorKind::PermissionDenied);
+        assert!(message.contains("narrowed"), "{message}");
+        assert!(
+            f.api.authorizations().is_empty(),
+            "the credential was presented anyway"
+        );
+        assert!(f.revoked().is_empty());
+    }
+
+    #[test]
+    fn a_provider_that_puts_the_credential_in_an_error_does_not_get_to_hand_it_over() {
+        // `refuse` was the one path out of `use_capability` that ran no scrub.
+        // Everything else either cannot carry a value or goes through
+        // `scrub_all` — so a provider that failed AFTER the value was read put
+        // the credential in the reply and in the trail, both of which an agent
+        // can see. There is nothing hypothetical about the mistake: handing
+        // back whatever the tool said is the obvious way to write `perform`.
+        let f = fixture_with("failing", Minting::None, true, false, "demo.object.read");
+        let reply = f
+            .service
+            .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new());
+        let (_, message) = reply.as_error().expect("the provider failed");
+        assert!(message.contains("not accepted"), "{message}");
+        assert!(!message.contains(STORED), "the refusal carries the credential");
+        assert!(message.contains("«redacted»"), "{message}");
+        assert!(!serde_json::to_string(&reply).unwrap().contains(STORED));
+
+        let path = Store::new(f.dir.clone()).audit_path();
+        let trail = std::fs::read_to_string(&path).expect("the trail");
+        assert!(!trail.contains(STORED), "the trail carries the credential");
+        assert!(trail.contains("refused"), "it was recorded as a refusal");
+    }
+
     #[test]
     fn the_host_pin_applies_to_a_provider_that_does_nothing_to_earn_it() {
         // The framework compares where the provider says it is going with where
         // the credential was stored for, between `bind` and `perform`. This
         // provider contains no such check and cannot skip one.
-        let f = fixture("pin", false, "demo.object.read");
+        let f = fixture("pin", Minting::None, "demo.object.read");
         let peer = me();
         // Re-store the credential for a different host. The provider still
         // builds its URL from `service.host`, so make them disagree the only
@@ -458,7 +684,7 @@ mod tests {
     fn an_ungranted_operation_never_reaches_the_provider() {
         // The grant check runs before `bind`, so a request that was never
         // allowed does not cause the provider to touch anything.
-        let f = fixture("ungranted", false, "demo.object.read");
+        let f = fixture("ungranted", Minting::None, "demo.object.read");
         let reply = f
             .service
             .use_capability(me(), record("demo.object.write", "bucket/key"), Vec::new());
@@ -470,7 +696,7 @@ mod tests {
     fn the_declared_shape_is_enforced_for_a_provider_the_framework_never_saw() {
         // Resource kind, parameter names and parameter syntax, all from the
         // provider's own declaration, all checked by the framework.
-        let f = fixture("shape", false, "demo.object.write");
+        let f = fixture("shape", Minting::None, "demo.object.write");
         let peer = me();
         for (operation, resource, param) in [
             // `demo.object.write` takes a path, not an absolute one and not a
@@ -508,7 +734,7 @@ mod tests {
 
     #[test]
     fn the_trail_records_the_provider_s_own_words_and_none_of_its_credential() {
-        let f = fixture("trail", true, "demo.object.read");
+        let f = fixture("trail", Minting::Narrowed, "demo.object.read");
         f.service
             .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new());
 
@@ -537,7 +763,7 @@ mod tests {
         // `apex secret capabilities` over the wire. A provider registered here
         // reaches the CLI's help with no CLI change, which is the second
         // acceptance criterion in one assertion.
-        let f = fixture("hello", false, "demo.object.read");
+        let f = fixture("hello", Minting::None, "demo.object.read");
         let Response::Hello {
             capabilities,
             vocabulary,
@@ -569,7 +795,7 @@ mod tests {
         // `demo.object.read` and `demo.object.write` share a class. Granting
         // one must not grant the other — the semantic vocabulary §13.2 asks for
         // is only worth having if the grant table respects it.
-        let f = fixture("siblings", false, "demo.object.read");
+        let f = fixture("siblings", Minting::None, "demo.object.read");
         let Response::Grants { projects } = f.service.grants(me()) else {
             panic!("expected grants");
         };
@@ -583,7 +809,7 @@ mod tests {
     fn a_request_for_an_operation_no_registered_provider_offers_is_refused() {
         // The vocabulary is closed by the registry: this service serves only
         // the bearer provider, so git's operations do not exist for it.
-        let f = fixture("closed", false, "demo.object.read");
+        let f = fixture("closed", Minting::None, "demo.object.read");
         for evil in ["git.push", "demo.object.delete", "exec", "demo.account.write"] {
             let reply = f.service.use_capability(me(), record(evil, "bucket/key"), Vec::new());
             assert_eq!(

@@ -1,0 +1,44 @@
+{
+  // DEPLOYED 2026-09-12 to Andre's account, on his instruction. What it costs
+  // and what it exposes is in ROADMAP/design/P1-052-relay.md; the one thing
+  // still open there is that this relay is unauthenticated and unrate-limited,
+  // and it now answers on a public name.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "apex-remote-relay",
+  "main": "src/index.js",
+
+  // A custom domain rather than the account's workers.dev name.
+  //
+  // Not cosmetic. `*.workers.dev` is one subdomain for the whole account —
+  // every Worker on it shares `tung-tung-tung-sahur`, so the relay's hostname
+  // would have been inherited from unrelated projects and could only be
+  // changed by renaming all of them. A route on a zone this account already
+  // owns gives the relay a name that says what it is, and it can be moved or
+  // withdrawn without touching anything else.
+  //
+  // It also removes the constraint §5.1 of the design doc was written around:
+  // workers.dev is HTTPS-only, which is why the client had to learn TLS. On a
+  // zone the scheme is a choice rather than a given — and it stays wss://,
+  // because the TLS the client now speaks is what keeps the rendezvous id off
+  // the wire for an on-path observer.
+  "routes": [
+    { "pattern": "apex-relay.andrenijman.com", "custom_domain": true }
+  ],
+
+  // Pinned, not "today". A compatibility date is the one setting that
+  // silently changes runtime behaviour under a Worker nobody has touched, and
+  // this one is chosen: from 2026-04-07 the runtime answers WebSocket Close
+  // frames itself, which is the behaviour src/index.js is written against.
+  "compatibility_date": "2026-04-07",
+
+  "durable_objects": {
+    "bindings": [{ "name": "ROOM", "class_name": "RelayRoom" }]
+  },
+
+  // SQLite-backed, which is the only kind the Workers Free plan offers — and
+  // this Worker stores nothing at all, so the backend costs nothing either
+  // way. The migration is still required for the class to exist.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelayRoom"] }],
+
+  "observability": { "enabled": true }
+}

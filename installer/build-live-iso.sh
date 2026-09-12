@@ -410,7 +410,8 @@ sudo bash -n "$WORK/rootfs/usr/bin/apex-install" \
 # a missing seat backend, absent firmware — and each one shipped an ISO that
 # booted to a black screen. If any of these is missing there is no fallback UI
 # left to rescue the user, so the build must stop instead.
-for b in cage seatd Xwayland apex-installer-gui apex-installer-launch; do
+for b in cage seatd Xwayland apex-installer-gui apex-installer-launch \
+         apex-installer-session; do
   _need_bin "$b"
 done
 sudo chroot "$WORK/rootfs" python3 -c \
@@ -421,6 +422,18 @@ sudo chroot "$WORK/rootfs" python3 -m py_compile /usr/bin/apex-installer-gui \
 sudo rm -rf "$WORK/rootfs/usr/bin/__pycache__"
 sudo bash -n "$WORK/rootfs/usr/bin/apex-installer-launch" \
   || { echo "BUILD ASSERT FAILED: apex-installer-launch has a syntax error"; exit 1; }
+sudo bash -n "$WORK/rootfs/usr/bin/apex-installer-session" \
+  || { echo "BUILD ASSERT FAILED: apex-installer-session has a syntax error"; exit 1; }
+# The launcher EXECS the session script. A rootfs without it has no installer at
+# all — cage never starts — and that is exactly the class of silent failure this
+# block exists to catch, so resolve the target rather than trusting the list.
+_sess_target=$(grep -oE '^GUI_CMD=\(([^ )]+)' "$WORK/rootfs/usr/bin/apex-installer-launch" | cut -d'(' -f2)
+sudo test -x "$WORK/rootfs$_sess_target" \
+  || { echo "BUILD ASSERT FAILED: apex-installer-launch execs $_sess_target, absent from the live rootfs"; exit 1; }
+# The keyboard page reads its layout list from here. Without it the page falls
+# back to a short built-in list, which is a quietly worse installer.
+sudo test -r "$WORK/rootfs/usr/share/X11/xkb/rules/base.lst" \
+  || { echo "BUILD ASSERT FAILED: xkeyboard-config's base.lst missing from the live rootfs"; exit 1; }
 # Enablement, not just presence. An installed-but-not-enabled seatd is exactly
 # the kind of thing that looks fine in `rpm -q` and leaves cage unable to take
 # a seat on tty1 at boot, which is a black screen with no diagnosis.

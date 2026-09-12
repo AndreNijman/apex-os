@@ -41,8 +41,14 @@ section() { printf '\n── %s ──\n' "$1"; }
 # first: the installed copy is whatever the last image shipped, which lags the
 # tree under test, and checking a change against a stale source of truth fails
 # for reasons unrelated to the change.
+# APEX_SHELL_TREE first, because the two repositories are not always siblings:
+# roadmap work happens in paired worktrees under /var/tmp/apex-work, where
+# `../apex-shell` resolves to nothing and the fallback silently measures the
+# INSTALLED shell — whatever the last image shipped. That is the worst of the
+# three outcomes: it runs, it is green, and it says nothing about the change.
 SHELL_TREE=""
-for cand in "${ROOT}/../apex-shell" /usr/share/apex-shell; do
+for cand in "${APEX_SHELL_TREE:-}" "${ROOT}/../apex-shell" /usr/share/apex-shell; do
+    [ -n "$cand" ] || continue
     [ -f "${cand}/src/services/config_tab/KeybindService.qml" ] && { SHELL_TREE="$cand"; break; }
 done
 
@@ -153,6 +159,40 @@ PYEOF
 [ "$d_total" = "$present" ] \
     && ok "the model parser sees every id in _defaults ($present)" \
     || bad "the model parser sees $d_total of $present ids in _defaults"
+
+# ── the screen reader's way in (roadmap P2-003) ─────────────────────────────
+# The image ships orca and deliberately autostarts nothing, so this one binding
+# is the whole of "a blind user can turn the reader on". It is asserted HERE
+# rather than only in apex-shell because labwc is the third of the three
+# sessions and the one that gets its bindings by a different mechanism from the
+# other two: no IPC, no include, an allowlist plus an exec arm that DROPS any
+# command still starting with `$` after substitution. A binding written the
+# natural way — `type: "exec", command: "$qsIpc …"` — reaches Hyprland and niri
+# and is silently skipped here, which satisfies two thirds of the criterion
+# while reading as though it satisfied all of it. That is exactly the trap
+# voice-ptt's comment in KeybindService.qml records, and the only thing that
+# catches it is running this generator.
+if printf '%s\n' "$block" | grep -q 'apex-screen-reader'; then
+    ok "the screen-reader binding survives the labwc generator"
+else
+    bad "the screen-reader binding survives the labwc generator — on Floating there is no way to start a reader"
+fi
+# The <action> sits on the line AFTER its <keybind>, so the key is read by
+# matching the whole element rather than by assuming the two share a line.
+printf '%s\n' "$block" > "$WORK/block.txt"
+sr_key="$(python3 - "$WORK/block.txt" <<'PYEOF'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+key = ""
+for m in re.finditer(r'<keybind key="([^"]+)">(.*?)</keybind>', text, re.S):
+    if "apex-screen-reader" in m.group(2):
+        key = m.group(1); break
+print(key)
+PYEOF
+)"
+[ "$sr_key" = "W-A-s" ] \
+    && ok "on the combination a screen-reader user already knows (W-A-s = SUPER+ALT+S)" \
+    || bad "the screen-reader binding is on [$sr_key], not W-A-s"
 
 # A duplicate key is two bindings fighting over one shortcut, and labwc resolves
 # that by taking one of them silently.

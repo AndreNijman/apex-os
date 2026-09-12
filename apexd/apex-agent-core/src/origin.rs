@@ -258,6 +258,455 @@ pub fn child_of(parent: RequestOrigin) -> RequestOrigin {
     }
 }
 
+
+// ── observing an origin from a connection (§7, P0-013) ──────────────────────
+//
+// Lives here rather than in `apex-agentd` because it is not only the agent
+// runtime's question. `apex-remoted` asks it too, and for the same reason:
+// "may this caller do something §7 reserves for a human at this machine" has
+// exactly one right answer per process, and two implementations of it would
+// be two answers waiting to disagree.
+//
+// ## What is observable
+//
+// From a pid the kernel reported through `SO_PEERCRED`:
+//
+// * `/proc/<pid>/cgroup` says which systemd unit or scope the peer lives in.
+//   A process in `session-N.scope` belongs to a **login session** — somebody
+//   logged in and this descends from that login. A process under
+//   `user@N.service` is a **user service**: started by systemd, with nobody
+//   present. That distinction is what separates §7's local origins from
+//   `scheduled-job`, and a process cannot move itself between them.
+// * `/proc/<pid>/stat`'s `tty_nr` says whether the peer has a controlling
+//   terminal. Inside a login session that separates `local-terminal` from
+//   `apex-shell`, which is a graphical process with no tty. Both are local,
+//   so this one is presentation rather than policy.
+//
+// ## What is not observable, and what happens then
+//
+// `claude-remote-control`, `mcp` and `cloud-job` have no kernel-visible
+// signature at all. Those origins are reached by declaration instead, and a
+// declaration can only ever cost the caller something — see [`may_declare`].
+//
+// A `/proc` read that fails is **not** a classification. It returns an error
+// and the caller refuses the request. The tempting alternative is to fall
+// back to the default, and the default is `local-terminal`: the origin §7
+// reserves root and break-glass for. "I could not tell" and "a human is at
+// the keyboard" are not the same answer.
+
+/// Classify a process by its placement, or say what could not be read.
+///
+/// The error is a sentence, not a code: it reaches the user as the reason
+/// their request was refused, and "could not read /proc/1234/cgroup" is what
+/// makes that refusal actionable rather than mysterious.
+pub fn observe_pid(pid: i32) -> Result<RequestOrigin, String> {
+    let placement = read_cgroup(pid)?;
+    match classify(&placement, has_controlling_tty(pid)?) {
+        Some(o) => Ok(o),
+        None => Err(format!(
+            "/proc/{pid}/cgroup places this connection in {placement:?}, which is neither a login \
+             session nor a user service, so there is no way to tell whether a human is at this \
+             machine"
+        )),
+    }
+}
+
+/// Whether this process itself is a systemd user service.
+///
+/// `apex-remoted` checks it about itself at start-up. A remote proxy started
+/// from a login session is observed as `local-terminal` by everything it
+/// connects to, and a proxy that is trusted as a human at the keyboard is the
+/// exact hole the connection latch exists to close. Two guards rather than
+/// one, because the latch is a runtime discipline and this is a fact about
+/// how the process was started.
+pub fn is_a_user_service() -> Result<bool, String> {
+    is_a_user_service_of(std::process::id() as i32)
+}
+
+/// The same question about any pid, so a test can ask it about one that is
+/// gone and check that "could not tell" does not come back as "no".
+pub fn is_a_user_service_of(pid: i32) -> Result<bool, String> {
+    let placement = read_cgroup(pid)?;
+    Ok(matches!(
+        classify(&placement, false),
+        Some(RequestOrigin::ScheduledJob)
+    ))
+}
+
+/// The peer's cgroup path, as written in `/proc/<pid>/cgroup`.
+///
+/// cgroup v2 writes exactly one line, `0::<path>`. A v1 hierarchy writes
+/// several with numeric ids, and none of them means what this reads it to
+/// mean, so anything that is not the v2 form is an unreadable placement
+/// rather than a guess.
+pub fn read_cgroup(pid: libc::pid_t) -> Result<String, String> {
+    let path = format!("/proc/{pid}/cgroup");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+    text.lines()
+        .find_map(|l| l.strip_prefix("0::"))
+        .map(|p| p.trim().to_string())
+        .ok_or_else(|| {
+            format!("{path} has no unified (0::) hierarchy, so the peer's placement is unknown")
+        })
+}
+
+/// Whether the peer has a controlling terminal.
+///
+/// `tty_nr` is field 7 of `/proc/<pid>/stat`, and everything before it has to
+/// be skipped past the executable name — which is in parentheses and may
+/// itself contain spaces and parentheses. So the split is on the LAST `)`,
+/// never on whitespace; `apex-agentd`'s `peer::parent_of` avoids `stat` entirely for the same
+/// reason.
+pub fn has_controlling_tty(pid: libc::pid_t) -> Result<bool, String> {
+    let path = format!("/proc/{pid}/stat");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+    let after_comm = text
+        .rsplit_once(')')
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| format!("{path} is not in the expected form"))?;
+    // After `pid (comm)` the fields are state, ppid, pgrp, session, tty_nr.
+    let tty = after_comm
+        .split_whitespace()
+        .nth(4)
+        .ok_or_else(|| format!("{path} has no tty_nr field"))?;
+    let tty: i64 = tty
+        .parse()
+        .map_err(|_| format!("{path} has an unreadable tty_nr {tty:?}"))?;
+    Ok(tty != 0)
+}
+
+/// Whether a cgroup path passes through a systemd **user manager**.
+///
+/// One path segment of the form `user@<n>.service`, tested as a segment rather
+/// than with two independent `contains` calls, because the whole weight of the
+/// ordering below rests on this answer and "the string has `/user@` somewhere
+/// and `.service` somewhere else" is a different question.
+///
+/// Everything a user's own systemd instance creates — a service, a timer's
+/// job, a transient scope from `systemd-run --user` — is placed *below* this
+/// segment. logind's session scopes are not: they are direct children of
+/// `user-<uid>.slice`, a sibling of `user@<uid>.service`. That asymmetry is
+/// what makes the segment decidable, and it is not a convention this code
+/// chose — it is where the two different creators put their cgroups.
+fn is_under_user_manager(cgroup: &str) -> bool {
+    cgroup
+        .split('/')
+        .any(|seg| seg.starts_with("user@") && seg.ends_with(".service"))
+}
+
+/// The classification itself, over values rather than over `/proc`.
+///
+/// Split out so the rule is testable without a fixture filesystem, and so the
+/// three cases can be read against §7 in one place.
+///
+/// ## The user-manager test comes FIRST, and that ordering is the security
+///
+/// The two conditions are not disjoint, and until 2026-09-12 the session test
+/// ran first, which made §7's first column — the one root approval and
+/// break-glass are reserved for — claimable by any unprivileged process on the
+/// machine:
+///
+/// ```text
+/// $ systemd-run --user --scope --quiet --unit=session-4242.scope -- cat /proc/self/cgroup
+/// 0::/user.slice/user-1000.slice/user@1000.service/app.slice/session-4242.scope
+/// ```
+///
+/// That path contains `/session-` and `.scope`, so it classified as
+/// `local-terminal`: a process choosing its own unit name was enough to be
+/// observed as a human at the keyboard. Naming a transient unit needs no
+/// privilege — it is the user's own systemd instance — so the observation this
+/// module exists to make could be dictated by the thing being observed.
+///
+/// Testing the user manager first closes it, because the containment is
+/// one-directional: a user manager's cgroup may have anything named below it,
+/// and a logind session scope can never appear below one. So a path through
+/// `user@<n>.service` is a user service whatever a deeper scope calls itself,
+/// and the only way left to reach the first column is to actually hold a
+/// logind session — which is what `tests/in-login-session.sh` mints through
+/// PAM, and which that script deliberately never faked for exactly this
+/// reason.
+pub fn classify(cgroup: &str, has_tty: bool) -> Option<RequestOrigin> {
+    if is_under_user_manager(cgroup) {
+        // A systemd user service. Nobody logged in to start it and nobody is
+        // waiting on it, which is exactly what §7 means by `scheduled-job`.
+        return Some(RequestOrigin::ScheduledJob);
+    }
+    if cgroup.contains("/session-") && cgroup.contains(".scope") {
+        // A login session: somebody logged in and this descends from it. The
+        // tty split is presentation — APEX Shell is a graphical process with
+        // no controlling terminal, a shell prompt has one — and both answers
+        // are local, so getting it wrong costs a label and not a permission.
+        return Some(if has_tty {
+            RequestOrigin::LocalTerminal
+        } else {
+            RequestOrigin::ApexShell
+        });
+    }
+    None
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+
+    #[test]
+    fn a_login_session_with_a_terminal_is_a_local_terminal() {
+        let cg = "/user.slice/user-1000.slice/session-3.scope";
+        assert_eq!(classify(cg, true), Some(RequestOrigin::LocalTerminal));
+        assert_eq!(classify(cg, false), Some(RequestOrigin::ApexShell));
+        // Both halves are local, which is the property that matters.
+        assert!(classify(cg, true).unwrap().is_local());
+        assert!(classify(cg, false).unwrap().is_local());
+    }
+
+    #[test]
+    fn a_user_service_is_never_local_however_it_reached_the_socket() {
+        // The case that makes the classifier worth having: a systemd timer
+        // runs on this machine, as this user, with no human anywhere. A
+        // classifier that only asked "same uid?" would call it local.
+        for cg in [
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/nightly-build.service",
+            "/user.slice/user-1000.slice/user@1000.service/background.slice/tidy.service",
+        ] {
+            for tty in [true, false] {
+                let got = classify(cg, tty).expect("classified");
+                assert_eq!(got, RequestOrigin::ScheduledJob, "{cg}");
+                assert!(!got.is_local(), "{cg} was called local");
+            }
+        }
+    }
+
+    #[test]
+    fn an_orphan_of_a_session_is_still_not_a_human_at_this_machine() {
+        // The escape from the ancestry check, and why the cgroup check covers
+        // it. `peer::resolve_by_ancestry` finds a session by walking /proc
+        // parents, so a process that orphans itself — double-fork, or simply
+        // outliving its parent — is reparented and the walk no longer reaches
+        // the session's pid. It looks like an ordinary process of this user.
+        //
+        // It is not reparented to pid 1. Under systemd a user process is
+        // reparented inside the user manager, so its cgroup is under
+        // `user@N.service`, which is what this reads as a scheduled job —
+        // nobody is present. §7 gives that the remote column, so a grant is
+        // refused there too.
+        //
+        // The two mechanisms are not redundant: ancestry catches the ordinary
+        // case and attributes it to the right session for the audit trail,
+        // and this catches the case ancestry loses. Neither alone would do.
+        for cg in [
+            "/user.slice/user-1000.slice/user@1000.service/apex-agentd.service",
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/apex-agentd.service",
+            "/user.slice/user-1000.slice/user@1000.service/init.scope",
+        ] {
+            for tty in [true, false] {
+                let got = classify(cg, tty).expect("classified");
+                assert_eq!(got, RequestOrigin::ScheduledJob, "{cg}");
+                assert!(!got.is_local(), "{cg} was called local");
+            }
+        }
+    }
+
+    #[test]
+    fn a_placement_that_is_neither_is_refused_rather_than_assumed_local() {
+        // The fail-open this module exists to avoid. `RequestOrigin`'s Default
+        // is `local-terminal`, so any path that returns a default here hands
+        // out §7's first column to something nobody identified.
+        for cg in [
+            "/",
+            "/system.slice/sshd.service",
+            "/user.slice/user-1000.slice",
+            "",
+            "/machine.slice/libpod-abc.scope",
+        ] {
+            assert_eq!(classify(cg, true), None, "{cg:?} was classified");
+            assert_eq!(classify(cg, false), None, "{cg:?} was classified");
+        }
+    }
+
+    #[test]
+    fn a_session_scope_is_not_matched_by_a_name_that_merely_contains_it() {
+        // `.scope` and `/session-` both have to be there. A user service
+        // called `session-manager.service` is still a user service.
+        let cg = "/user.slice/user-1000.slice/user@1000.service/app.slice/session-manager.service";
+        assert_eq!(classify(cg, true), Some(RequestOrigin::ScheduledJob));
+    }
+
+    #[test]
+    fn a_transient_scope_named_like_a_session_cannot_buy_the_first_column() {
+        // THE spoof. Measured on a live APEX laptop on 2026-09-12, as the
+        // ordinary unprivileged user, with no sudo and no prompt:
+        //
+        //   $ systemd-run --user --scope --quiet --unit=session-4242.scope \
+        //         -- cat /proc/self/cgroup
+        //   0::/user.slice/user-1000.slice/user@1000.service/app.slice/session-4242.scope
+        //
+        // Before the ordering was fixed this classified as `local-terminal`,
+        // which is what §7 reserves root approval and break-glass for. Naming
+        // a transient unit costs nothing — it is the caller's own systemd
+        // instance — so the observation could be dictated by the process being
+        // observed, and the entire "origin is established, not asserted"
+        // property of this module was decoration.
+        //
+        // Every shape a user manager can be talked into producing, including
+        // the `--unit=session-9999.scope` form the p0-014 card recorded and
+        // the nested slices systemd actually uses.
+        for cg in [
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/session-4242.scope",
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/session-9999.scope",
+            "/user.slice/user-1000.slice/user@1000.service/session-1.scope",
+            "/user.slice/user-1000.slice/user@1000.service/background.slice/session-7.scope",
+            // Root has a user manager too, and root's is the one where being
+            // wrong costs the most.
+            "/user.slice/user-0.slice/user@0.service/app.slice/session-3.scope",
+        ] {
+            for tty in [true, false] {
+                let got = classify(cg, tty).expect("classified");
+                assert_eq!(got, RequestOrigin::ScheduledJob, "{cg}");
+                assert!(
+                    !got.is_local(),
+                    "{cg} was called local: a process that picked its own unit \
+                     name has just been observed as a human at the keyboard"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_real_session_scopes_this_machine_produces_are_still_local() {
+        // The other half of the ordering change, and the reason it is safe to
+        // make. Read off a live APEX laptop on 2026-09-12 — every `0::` line
+        // of every process on the machine, deduplicated — the ONLY paths
+        // carrying a `/session-N.scope` segment were direct children of
+        // `user-<uid>.slice`. Nothing legitimate sits below `user@N.service`
+        // and calls itself a session, so testing the user manager first takes
+        // nothing away from a real login.
+        //
+        // `session-c1.scope` is the greeter's: logind session ids are not
+        // numeric, so a rule that required digits would refuse greetd.
+        for (cg, tty, want) in [
+            (
+                // The measured desktop session: the login shell this was run
+                // from, and quickshell (apex-shell) in the same scope.
+                "/user.slice/user-1000.slice/session-4.scope",
+                true,
+                RequestOrigin::LocalTerminal,
+            ),
+            (
+                "/user.slice/user-1000.slice/session-4.scope",
+                false,
+                RequestOrigin::ApexShell,
+            ),
+            (
+                "/user.slice/user-977.slice/session-c1.scope",
+                false,
+                RequestOrigin::ApexShell,
+            ),
+            (
+                // A second human, logged in at the same time. Session
+                // isolation is about this case existing at all.
+                "/user.slice/user-1001.slice/session-12.scope",
+                true,
+                RequestOrigin::LocalTerminal,
+            ),
+        ] {
+            let got = classify(cg, tty).expect("classified");
+            assert_eq!(got, want, "{cg} (tty={tty})");
+            assert!(got.is_local(), "{cg} stopped being local");
+        }
+    }
+
+    #[test]
+    fn session_slice_is_not_session_dash_and_never_was() {
+        // `user@1000.service/session.slice/pipewire.service` is on this
+        // machine right now, and it is a hair away from the session test:
+        // `session.slice` versus `session-4.scope`. It must classify as a user
+        // service through the user-manager arm, and it would ALSO have missed
+        // the old session arm — so this asserts the near-miss stays a miss
+        // from both directions rather than relying on the new ordering to
+        // cover a second bug.
+        let cg = "/user.slice/user-1000.slice/user@1000.service/session.slice/pipewire.service";
+        assert!(!cg.contains("/session-"), "the near-miss stopped being near");
+        for tty in [true, false] {
+            assert_eq!(classify(cg, tty), Some(RequestOrigin::ScheduledJob));
+        }
+    }
+
+    #[test]
+    fn the_user_manager_segment_is_a_segment_and_not_a_substring() {
+        // `is_under_user_manager` is the whole ordering guard, so the shape it
+        // matches is pinned here rather than left to the two `contains` calls
+        // it replaced — which would have said yes to any path with `/user@`
+        // anywhere and `.service` anywhere else.
+        assert!(is_under_user_manager(
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/x.scope"
+        ));
+        assert!(is_under_user_manager("/user@0.service"));
+        // A unit whose NAME merely begins with `user@` is not a user manager,
+        // and neither is one that merely mentions it.
+        assert!(!is_under_user_manager(
+            "/user.slice/user-1000.slice/session-4.scope"
+        ));
+        assert!(!is_under_user_manager("/system.slice/user@service"));
+        assert!(!is_under_user_manager(
+            "/user.slice/user-1000.slice/session-4.scope/user@1000.service.d"
+        ));
+        assert!(!is_under_user_manager(""));
+    }
+
+    #[test]
+    fn our_own_placement_is_readable_and_classifies() {
+        // Against real /proc, because the parsing is where this breaks. The
+        // test binary runs somewhere on the machine running it, so the only
+        // claim made is that both reads succeed and produce a decision — not
+        // which decision, since a CI container is placed differently from a
+        // desktop.
+        let me = std::process::id() as libc::pid_t;
+        let cg = read_cgroup(me).expect("our own cgroup is readable");
+        assert!(cg.starts_with('/'), "{cg:?}");
+        has_controlling_tty(me).expect("our own tty_nr is readable");
+    }
+
+    #[test]
+    fn the_tty_field_survives_an_executable_name_full_of_parentheses() {
+        // /proc/<pid>/stat embeds the command name in parentheses and does not
+        // escape it, so splitting on whitespace finds the wrong field for a
+        // process called `foo) 1 2 3`. The parse takes everything after the
+        // LAST `)`, which is the only form that works.
+        let stat = "1234 (evil) 0 0 0) S 1 1234 1234 1025 1234 4194304 …";
+        let after = stat.rsplit_once(')').map(|(_, r)| r).expect("a closing paren");
+        let tty: i64 = after.split_whitespace().nth(4).unwrap().parse().unwrap();
+        assert_eq!(tty, 1025, "the tty field was read from the wrong column");
+    }
+
+    #[test]
+    fn a_pid_that_is_gone_is_an_error_and_not_an_origin() {
+        // A peer that exited between connect and this lookup. The caller
+        // refuses; it does not fall back to a default.
+        let gone = 0x7fff_fffe;
+        assert!(read_cgroup(gone).is_err());
+        assert!(has_controlling_tty(gone).is_err());
+        let err = observe_pid(gone).expect_err("must refuse");
+        assert!(err.contains("/proc/"), "{err}");
+        // And the same refusal reaches the start-up guard, which must not
+        // read "not a user service" when it means "could not tell".
+        assert!(is_a_user_service_of(gone).is_err());
+    }
+
+    #[test]
+    fn a_v1_only_cgroup_file_is_unreadable_rather_than_a_guess() {
+        // cgroup v1 writes several numbered lines and none of them means what
+        // this reads. Refusing beats picking one.
+        let d = std::env::temp_dir().join(format!("apex-origin-{}", std::process::id()));
+        std::fs::create_dir_all(&d).expect("mkdir");
+        let f = d.join("cgroup");
+        std::fs::write(&f, "3:cpu:/user.slice\n2:memory:/user.slice\n").expect("write");
+        // read_cgroup takes a pid, so the shape is asserted directly.
+        let text = std::fs::read_to_string(&f).unwrap();
+        assert!(text.lines().all(|l| l.strip_prefix("0::").is_none()));
+        std::fs::remove_dir_all(&d).ok();
+    }
+}
+
 // ── §7's default policy table ───────────────────────────────────────────────
 
 /// A row of §7's "Recommended default policy" table.

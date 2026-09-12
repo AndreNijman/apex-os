@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-installer-session — run the GUI under cage, and restart cage when the
+#  user picks a keyboard layout.
+#
+#  ── Why this file exists at all ─────────────────────────────────────────────
+#
+#  The acceptance criterion is "keyboard layout before password creation", and
+#  the point of it is not bookkeeping: it is that the person can TYPE their
+#  password on their own keyboard. Recording the choice in the answers file
+#  gets it onto the installed system and does nothing whatever for the keys
+#  under their hands while the installer is still running.
+#
+#  What decides those keys is libxkbcommon, and it was measured rather than
+#  assumed:
+#
+#      ldd /usr/lib64/libxkbcommon.so.0  ->  linux-vdso, libc, ld-linux. That is
+#      the whole list. No libdbus, no libsystemd. And `strings` on it contains
+#      no `org.freedesktop.locale1`, no `localectl`, no `xorg.conf` — while it
+#      does contain XKB_DEFAULT_{RULES,MODEL,LAYOUT,VARIANT,OPTIONS}.
+#
+#  So the five environment variables are its ENTIRE configuration surface. That
+#  kills the obvious cheap fix: `localectl set-x11-keymap` writes
+#  /etc/X11/xorg.conf.d/00-keyboard.conf and /etc/vconsole.conf and signals over
+#  dbus, and libxkbcommon reads none of those three. It would change the files
+#  and leave the live keyboard exactly as it was — the appearance of a fix,
+#  which is worse than none, because the user would watch a layout get selected
+#  and then type their password on the old one anyway.
+#
+#  cage is on that same path (`ldd /usr/bin/cage` lists libwlroots-0.18.so and
+#  libxkbcommon.so.0), and a wlroots compositor compiles its keymap with all-NULL
+#  RMLVO, which is precisely the call that makes libxkbcommon consult the env.
+#  Measured through that exact call, one physical key:
+#
+#      XKB_DEFAULT_LAYOUT=us  ->  y z q ;
+#      XKB_DEFAULT_LAYOUT=de  ->  z y q ö
+#      XKB_DEFAULT_LAYOUT=fr  ->  y w a m
+#
+#  and setting the variable AFTER a keymap is compiled changes nothing; only the
+#  next compile sees it. Hence this script. The layout is fixed when the
+#  compositor starts, so to change it the compositor has to start again.
+#
+#  ── Why it is not a loop inside apex-installer-launch ───────────────────────
+#
+#  The launcher has one job and a hard-won shape: one path, no probes, and a
+#  retry-then-diagnose safety net whose entire purpose is that a user never sits
+#  in front of a black screen with no explanation (apex-logs 48). Giving it a
+#  SECOND reason to re-run cage would entangle "the compositor failed to start"
+#  with "the compositor was restarted on purpose", and those need opposite
+#  responses. So the restart lives here, the launcher runs this instead of cage,
+#  and its retry still wraps the whole thing unchanged.
+#
+#  ── The restart is bounded, deliberately ────────────────────────────────────
+#
+#  An unbounded restart loop behind a compositor is indistinguishable from a
+#  black screen, which is the one outcome the launcher exists to rule out. Three
+#  restarts is far more than a person choosing a keyboard needs and small enough
+#  that a bug surfaces as a diagnostic instead of a hang.
+# ─────────────────────────────────────────────────────────────────────────────
+# No `set -e`: every failure here is handled explicitly, and the whole point of
+# this script is to reach its diagnostic rather than die quietly.
+set -uo pipefail
+
+# All four are overridable so the suite can drive this script with a stub cage
+# and a stub GUI. In the image every one of them takes its default.
+GUI="${APEX_INSTALLER_GUI:-/usr/bin/apex-installer-gui}"
+CAGE="${APEX_INSTALLER_CAGE:-cage}"
+STATE="${APEX_INSTALLER_STATE:-/run/apex-installer/session-keymap}"
+LOG="${APEX_INSTALLER_LOG:-/var/log/apex-installer-launch.log}"
+
+# EX_TEMPFAIL. The GUI exits with this to mean "restart me with the layout I
+# just wrote to the state file". Measured before relying on it: `cage -- sh -c
+# 'exit 75'` returns 75, so cage does propagate its child's status and the exit
+# code is a real channel rather than a hope.
+RESTART_RC=75
+MAX_RESTARTS="${APEX_INSTALLER_MAX_RESTARTS:-3}"
+
+log() { printf '%s %s\n' "$(date '+%F %T')" "session: $*" >>"$LOG" 2>/dev/null || true; }
+
+# A layout name only. Checked against xkb's own database, the same awk the
+# engine and apex-shell-firstrun already use, because a well-shaped name that
+# xkb does not know does not fail — it silently degrades to `us`, which is the
+# exact lockout this feature exists to end, with the user believing otherwise.
+xkb_knows() {
+    local want="$1"
+    printf '%s' "$want" | grep -Eq '^[a-z][a-z0-9_-]{0,31}$' || return 1
+    [ -r /usr/share/X11/xkb/rules/base.lst ] || return 0   # absent db: shape only
+    awk -v want="$want" \
+        '/^! layout/{f=1;next} /^!/{f=0} f && $1==want{found=1} END{exit !found}' \
+        /usr/share/X11/xkb/rules/base.lst 2>/dev/null
+}
+
+# A stale state file from an earlier boot would silently start the session on a
+# layout nobody in this room picked, which is the failure this whole feature is
+# about. Clear it before the first launch, not after the last.
+mkdir -p "$(dirname "$STATE")" 2>/dev/null || true
+rm -f "$STATE" 2>/dev/null || true
+
+log "starting (pid $$): cage=$CAGE gui=$GUI state=$STATE max-restarts=$MAX_RESTARTS"
+log "initial keymap: XKB_DEFAULT_LAYOUT=${XKB_DEFAULT_LAYOUT:-<unset, libxkbcommon default us>}"
+
+restarts=0
+while :; do
+    "$CAGE" -s -- "$GUI"
+    rc=$?
+
+    if [ "$rc" -ne "$RESTART_RC" ]; then
+        log "GUI exited rc=$rc — not a restart request; session over"
+        exit "$rc"
+    fi
+
+    # From here on the GUI has asked for a restart. Every path below either
+    # restarts or exits; none falls through silently.
+    if [ "$restarts" -ge "$MAX_RESTARTS" ]; then
+        log "GUI asked for restart number $((restarts + 1)) but the cap is $MAX_RESTARTS — refusing"
+        log "this is a defect, not a user action; handing rc=70 to the launcher so it diagnoses"
+        exit 70   # EX_SOFTWARE, which the launcher treats as a failed start
+    fi
+
+    if [ ! -r "$STATE" ]; then
+        log "GUI asked for a restart but $STATE is missing or unreadable — nothing to apply"
+        exit 70
+    fi
+
+    # Parsed key=value, not sourced. The file is written by a root process on a
+    # tmpfs, so this is not a trust boundary; it is read this way because
+    # `.`-ing a file that a crash left half-written would execute whatever the
+    # fragment happened to be, and because a malformed layout must be REFUSED
+    # rather than compiled into a keymap that silently falls back to us.
+    _layout=""; _variant=""
+    while IFS='=' read -r _k _v || [ -n "$_k" ]; do
+        case "$_k" in
+            layout)  _layout="$_v" ;;
+            variant) _variant="$_v" ;;
+        esac
+    done < "$STATE"
+
+    if ! xkb_knows "$_layout"; then
+        log "GUI asked for layout '$_layout', which xkb does not know — refusing to restart into it"
+        exit 70
+    fi
+    # A variant is optional, but a bad one is still a broken keymap.
+    if [ -n "$_variant" ] && ! printf '%s' "$_variant" | grep -Eq '^[a-z][a-z0-9_-]{0,31}$'; then
+        log "GUI asked for variant '$_variant', which is not shaped like one — dropping the variant"
+        _variant=""
+    fi
+
+    # Already there. Restarting would throw the user's progress away and buy
+    # nothing, and a GUI bug that asked repeatedly would burn the whole restart
+    # budget before anyone saw a diagnostic.
+    if [ "$_layout" = "${XKB_DEFAULT_LAYOUT:-}" ] && [ "$_variant" = "${XKB_DEFAULT_VARIANT:-}" ]; then
+        log "GUI asked to restart into layout '$_layout' which is already active — ignoring, session over"
+        exit 0
+    fi
+
+    restarts=$((restarts + 1))
+    export XKB_DEFAULT_LAYOUT="$_layout"
+    # Unset rather than set empty: libxkbcommon treats an empty XKB_DEFAULT_VARIANT
+    # as a request for the layout's *empty-named* variant, not as "no preference",
+    # and on some layouts those are different keymaps.
+    if [ -n "$_variant" ]; then
+        export XKB_DEFAULT_VARIANT="$_variant"
+    else
+        unset XKB_DEFAULT_VARIANT
+    fi
+    # The GUI needs to know, on its next start, that it is resuming rather than
+    # beginning — so it can skip straight past the keyboard page it already
+    # answered instead of asking again and restarting forever.
+    export APEX_INSTALLER_RESUMED=1
+    log "restart $restarts of $MAX_RESTARTS: relaunching cage with XKB_DEFAULT_LAYOUT=$_layout${_variant:+ XKB_DEFAULT_VARIANT=$_variant}"
+done
