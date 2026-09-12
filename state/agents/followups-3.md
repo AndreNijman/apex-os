@@ -64,4 +64,19 @@ measurement and fix the one that is.
   another unit's commit.
 
 ## NEXT
-Nothing started. Take them in the order above; 2, 3 and 4 are the cheapest.
+Round 2 (fresh agent; the first was killed by a usage limit). IN PROGRESS —
+this block is rewritten at the end of the round.
+
+Settled so far, all first-hand on this machine:
+ 1. **DONE, by someone else** — `f9dff3b7` wrote `docs/remote.md`. Verified:
+    forward pass on that file, 8 valid / 0 not-a-command; reverse pass over the
+    canonical docs, **0 undocumented and undeclared, 0 stale**, and no `remote`
+    line in `tests/doc-verbs-undocumented`. Those two together are airtight:
+    an undocumented `apex remote` verb would have to be in the debt file or in
+    the undeclared count, and it is in neither.
+ 2. **DONE, by someone else** — `5a1a5390`. `tests/test-apex-task.sh` is
+    **71 passed / 0 failed** at this tip. The PRODUCT was right and the shell
+    assertion was three days stale; it now asserts the same four parts the Rust
+    test does.
+ 5a. **DONE** — per-commit build check, four p1-020os commits, all rc=0.
+ 5b. **DONE** — seven remote refs deleted after content verification.
