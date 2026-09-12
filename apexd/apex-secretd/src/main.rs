@@ -510,7 +510,30 @@ mod tests {
         // The file survives the listener being dropped, and connecting to it
         // now fails — which is what makes it stale rather than live.
         assert!(socket.exists());
-        assert!(UnixStream::connect(&socket).is_err());
+
+        // Reported rather than merely asserted, because this failed once on a
+        // GitHub runner and passed 52 times here — 40 in isolation and 12 full
+        // parallel runs of all 180 — so the next failure has to arrive with
+        // enough to diagnose it instead of the bare word `false`. `bind()`'s
+        // staleness rule is exactly this connect, so a machine where it
+        // succeeds would silently refuse to start a daemon whose predecessor
+        // had died.
+        if let Ok(live) = UnixStream::connect(&socket) {
+            let meta = std::fs::symlink_metadata(&socket);
+            panic!(
+                "connecting to a socket whose only listener was dropped SUCCEEDED.\n\
+                 \x20 path:      {}\n\
+                 \x20 file type: {:?}\n\
+                 \x20 peer:      {:?}\n\
+                 \x20 tmpdir:    {:?}\n\
+                 If this is reproducible, `bind()`'s staleness probe cannot tell a \
+                 dead daemon from a live one on this system.",
+                socket.display(),
+                meta.as_ref().map(|m| m.file_type()),
+                live.peer_addr(),
+                std::env::temp_dir(),
+            );
+        }
         let _listener = bind(&socket).expect("rebind over a stale socket");
         std::fs::remove_dir_all(&dir).ok();
     }
