@@ -15,6 +15,8 @@ import com.apexos.remote.core.Pairing
 import com.apexos.remote.core.agent.Alert
 import com.apexos.remote.ui.ApexRemoteApp
 import com.apexos.remote.ui.Notifier
+import com.apexos.remote.core.CrashReport
+import com.apexos.remote.data.MachineRepository
 
 /**
  * The one activity.
@@ -63,6 +65,7 @@ class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        installCrashHandler()
         enableEdgeToEdge()
         payload = pairingPayload(intent)
         alertTap = alertTarget(intent)
@@ -153,5 +156,65 @@ class MainActivity : FragmentActivity() {
             runCatching { Device.checkName(name) }.onSuccess { return it }
         }
         return "android"
+    }
+}
+
+/**
+ * Keep a redacted report of an uncaught exception, if the user has said so.
+ *
+ * ## Where the consent lives, and why it is not read here
+ *
+ * `AppStorage.saveCrash` refuses when consent is off, so this function can be
+ * wrong about everything else and still not write a report nobody asked for.
+ * That placement is deliberate: this code runs while the process is being torn
+ * down, it is the least exercised path in any app, and a consent check sitting
+ * here would be one edit away from being skipped.
+ *
+ * ## Reading the setting on a dying thread
+ *
+ * The consent flag is in the store, and the store is on disk. Reading it here
+ * is a blocking read on the crashing thread, which is the only option: the
+ * process will not outlive this call, so anything handed to a coroutine would
+ * never be scheduled. `AppStorage.load` returns an empty store — and therefore
+ * `crashReports = false` — when the file is missing or will not parse, so the
+ * failure mode of that read is "write nothing", which is the right one.
+ *
+ * ## The previous handler is always called
+ *
+ * Whatever Android installed shows the "app has stopped" dialog and ends the
+ * process. Swallowing the exception instead would leave a phone sitting in a
+ * broken activity with no way out, so the report is a side effect and the
+ * crash still happens.
+ */
+private fun MainActivity.installCrashHandler() {
+    val previous = Thread.getDefaultUncaughtExceptionHandler()
+    val repository = MachineRepository(applicationContext)
+    val version = runCatching {
+        packageManager.getPackageInfo(packageName, 0).versionName
+    }.getOrNull() ?: "unknown"
+
+    Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+        // Everything in here is wrapped. A crash inside crash handling would
+        // replace a report about the real fault with one about this code, and
+        // the real one is the one somebody needs.
+        runCatching {
+            val consented = repository.crashConsentBlocking()
+            if (consented) {
+                repository.saveCrashBlocking(
+                    CrashReport.of(
+                        error,
+                        CrashReport.Environment(
+                            appVersion = version,
+                            androidRelease = Build.VERSION.RELEASE ?: "unknown",
+                            sdkInt = Build.VERSION.SDK_INT,
+                            model = Build.MODEL ?: "unknown",
+                        ),
+                        thread = thread.name,
+                    ),
+                    consented = true,
+                )
+            }
+        }
+        previous?.uncaughtException(thread, error)
     }
 }

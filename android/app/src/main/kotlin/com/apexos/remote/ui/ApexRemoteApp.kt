@@ -33,6 +33,8 @@ import com.apexos.remote.ui.agent.StartAgentScreen
 import com.apexos.remote.ui.agent.knownDirectories
 import com.apexos.remote.ui.term.TerminalScreen
 import com.apexos.remote.ui.theme.ApexRemoteTheme
+import android.content.Intent
+import androidx.compose.ui.platform.LocalContext
 
 /**
  * The whole app, above the screens.
@@ -111,6 +113,13 @@ fun ApexRemoteApp(
 
         NavHost(navigation, startDestination = Destinations.MACHINES) {
             composable(Destinations.MACHINES) {
+                val context = LocalContext.current
+                // Read on arrival. A report written by the handler during the
+                // PREVIOUS process is on disk before this one starts, so
+                // nothing else would ever notice it.
+                LaunchedEffect(state.settings.crashReports) {
+                    if (state.settings.crashReports) viewModel.refreshCrash()
+                }
                 MachinesScreen(
                     state = state,
                     onPair = { navigation.navigate(Destinations.PAIRING) },
@@ -121,6 +130,19 @@ fun ApexRemoteApp(
                     onPing = { viewModel.ping(activity, it) },
                     onForget = { viewModel.forget(it) },
                     onDynamicColour = { viewModel.setDynamicColour(it) },
+                    onCrashReports = { viewModel.setCrashReports(it) },
+                    onShareCrash = { report ->
+                        // ACTION_SEND with the text in the intent, so the user
+                        // picks where it goes. No upload, no reporting SDK,
+                        // and no destination this app chose for them.
+                        val send = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "APEX Remote crash report")
+                            putExtra(Intent.EXTRA_TEXT, report)
+                        }
+                        runCatching { context.startActivity(Intent.createChooser(send, null)) }
+                    },
+                    onClearCrash = { viewModel.clearCrash() },
                     onLock = { viewModel.lock() },
                     onDismiss = { viewModel.dismiss() },
                 )
