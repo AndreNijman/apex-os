@@ -23,21 +23,50 @@
 #    case_baseline   run the subject with NO fault (optional but expected)
 #    case_observe    run the subject WITH the fault; its stdout is the
 #                    diagnostic a human reads
+#    case_prove_exposed
+#                    optional, and it is the OTHER half of case_prove: an
+#                    observation that the subject actually MET the fault. A
+#                    fault can be real, proven, and irrelevant — which is not
+#                    a failure and is emphatically not a pass. See the fourth
+#                    arm below.
 #    case_judge      record expectations with expect_says / expect_rc /
 #                    expect_no_corruption / expect_differs_from_baseline
 #
 #  The driver, not the case, owns the verdict. The ordering below is the whole
 #  argument of this unit:
 #
-#      prerequisite unmet ─────────────────► could-not-inject
-#      case_prove said the fault is absent ► could-not-inject
-#      subject could not be run at all ────► could-not-inject
-#      an expectation failed ──────────────► failed
-#      otherwise ─────────────────────────► survived
+#      prerequisite unmet ──────────────────────────► could-not-inject
+#      case_prove said the fault is absent ─────────► could-not-inject
+#      subject could not be run at all ─────────────► could-not-inject
+#      case_prove_exposed says it never met it ─────► could-not-inject
+#      an expectation failed ───────────────────────► failed
+#      otherwise ───────────────────────────────────► survived
 #
 #  There is no arm in which a case that injected nothing reports a pass, and
 #  tests/test-apex-chaos.sh proves that by feeding the driver cases whose
-#  injector and whose observer each cannot run.
+#  injector, whose observer and whose exposure proof each cannot run.
+#
+#  ═══ THE FOURTH ARM, AND WHY IT HAD TO BE ADDED ═══
+#
+#  `case_prove` answers "is the fault present?". It does not answer "did the
+#  subject meet it?", and the first network-loss case found out the hard way
+#  that those are different questions. It put `apex trust --verify` inside a
+#  network namespace with no route to anything, proved with a refused
+#  connect() that the network really was gone, and went RED — because
+#  verify.rs short-circuits the registry entirely under a fixture root, so the
+#  subject never opened a socket. The fault was real, the proof was honest,
+#  and the case was testing nothing.
+#
+#  Red was the wrong verdict for that: nothing about the subject had been
+#  learned, and a red case claims something was. `could-not-inject` is the
+#  right one, and it needs a step that runs AFTER the subject — which is why
+#  it cannot be folded into `case_prove`.
+#
+#  A case with no `case_prove_exposed` is not penalised: for most faults the
+#  subject's exposure IS the fixture it was pointed at, and there is nothing
+#  left to observe. It is required where the fault lives in the ENVIRONMENT
+#  rather than in the fixture — a namespace, a full filesystem, a killed
+#  process — because that is exactly where a subject can walk past it.
 #
 #  ═══ EXIT CODES ═══
 #
@@ -158,8 +187,23 @@ if [[ -z "$OUT" ]]; then
 fi
 mkdir -p "$OUT"
 
-APEX_BIN="${APEX_BIN:-$CHAOS_REPO/apexd/target/debug/apex}"
-export APEX_BIN
+# The real binary, and the wrapper the cases are actually handed. `$APEX_BIN`
+# is deliberately NOT the binary — see the fixture-root rule in lib.sh.
+CHAOS_APEX_REAL="${APEX_BIN:-$CHAOS_REPO/apexd/target/debug/apex}"
+CHAOS_GUARD_MARKER="$OUT/unrooted-subject-invocations"
+: > "$CHAOS_GUARD_MARKER"
+chaos_write_guard "$OUT/apex-guard" "$CHAOS_APEX_REAL" "$CHAOS_GUARD_MARKER"
+APEX_BIN="$OUT/apex-guard"
+export APEX_BIN CHAOS_APEX_REAL CHAOS_GUARD_MARKER
+
+# A case that ran the subject with no fixture root has not produced a result,
+# it has produced an accident. Exit 2, not a verdict.
+chaos_check_guard() {
+    [[ -s "$CHAOS_GUARD_MARKER" ]] || return 0
+    chaos_info "the guard refused these invocations (phase, argv):"
+    sed 's/^/      /' "$CHAOS_GUARD_MARKER" >&2
+    chaos_die "a case invoked the subject with no fixture root set; refusing to run it against this machine"
+}
 
 chaos_log "APEX chaos run — seed $SEED, bundles in $OUT"
 chaos_write_env "$OUT/env.txt"
@@ -185,7 +229,7 @@ for name in "${RUN[@]}"; do
     # definitions: undefine first, so a case that forgets `case_prove` inherits
     # the previous case's and silently passes. That is precisely the class of
     # bug this harness exists to refuse.
-    unset -f case_setup case_inject case_prove case_baseline case_observe case_judge case_cleanup 2>/dev/null || true
+    unset -f case_setup case_inject case_prove case_prove_exposed case_baseline case_observe case_judge case_cleanup 2>/dev/null || true
     CASE_TITLE=""; CASE_CRITERION=""; CASE_NEEDS=""; CASE_STAGED=0
     CASE_ALLOW_CHANGED=""
     # shellcheck disable=SC1090
@@ -213,6 +257,7 @@ for name in "${RUN[@]}"; do
 
     # 2 ── setup, then the pristine snapshot and the no-fault baseline.
     if [[ -z "$state" ]]; then
+        export CHAOS_PHASE=setup
         if ! case_setup > "$dir/setup.out" 2> "$dir/setup.err"; then
             state="$CHAOS_CANNOT"
             reason="the fixture could not be built: $(tail -1 "$dir/setup.err" 2>/dev/null)"
@@ -220,6 +265,7 @@ for name in "${RUN[@]}"; do
     fi
     if [[ -z "$state" ]]; then
         chaos_snapshot "$CASE_ROOT" "$dir/state.before"
+        export CHAOS_PHASE=baseline
         if declare -F case_baseline >/dev/null; then
             case_baseline > "$dir/baseline.out" 2> "$dir/baseline.err" || true
         else
@@ -230,10 +276,12 @@ for name in "${RUN[@]}"; do
     # 3 ── inject. The injector's exit code is recorded and is NOT the proof.
     if [[ -z "$state" ]]; then
         inject_rc=0
+        export CHAOS_PHASE=inject
         case_inject > "$dir/inject.out" 2> "$dir/inject.err" || inject_rc=$?
         printf '%s\n' "$inject_rc" > "$dir/inject.rc"
 
         # 4 ── prove. An observation the injector did not make.
+        export CHAOS_PHASE=prove
         if ! case_prove > "$dir/prove.out" 2> "$dir/prove.err"; then
             state="$CHAOS_CANNOT"
             reason="the fault was not present after injection: $(tail -1 "$dir/prove.out" 2>/dev/null)$(tail -1 "$dir/prove.err" 2>/dev/null)"
@@ -246,13 +294,29 @@ for name in "${RUN[@]}"; do
     #      verification that could not run.
     if [[ -z "$state" ]]; then
         CASE_OBSERVE_RC=0
+        export CHAOS_PHASE=observe
         case_observe > "$dir/observe.out" 2> "$dir/observe.err" || CASE_OBSERVE_RC=$?
         printf '%s\n' "$CASE_OBSERVE_RC" > "$dir/observe.rc"
-        if [[ "$CASE_OBSERVE_RC" == 127 ]]; then
+        # 126 is the guard's own refusal and 127 is a binary that is not there.
+        # Both mean the subject did not run, and neither is a verdict about it.
+        if [[ "$CASE_OBSERVE_RC" == 127 || "$CASE_OBSERVE_RC" == 126 ]]; then
             state="$CHAOS_CANNOT"
             reason="the subject could not be executed: $(tail -1 "$dir/observe.err" 2>/dev/null)"
         fi
         export CASE_OBSERVE_RC
+    fi
+
+    # 5b ── the subject must have MET the fault. A fault that is real, proven
+    #       and irrelevant teaches nothing about the subject, so it is
+    #       could-not-inject and never red. This is the one check that has to
+    #       run after the subject, which is why it is not part of case_prove.
+    if [[ -z "$state" ]] && declare -F case_prove_exposed >/dev/null; then
+        export CHAOS_PHASE=prove-exposed
+        if ! case_prove_exposed > "$dir/exposed.out" 2> "$dir/exposed.err"; then
+            state="$CHAOS_CANNOT"
+            reason="the fault was present but the subject never met it: $(tail -1 "$dir/exposed.out" 2>/dev/null)$(tail -1 "$dir/exposed.err" 2>/dev/null)"
+            reason="${reason:-the exposure proof said the subject never met the fault}"
+        fi
     fi
 
     # 6 ── judge.
@@ -262,6 +326,7 @@ for name in "${RUN[@]}"; do
         CASE_BASELINE_OUT="$(cat "$dir/baseline.out" 2>/dev/null || true)"
         CASE_OBSERVED="$(cat "$dir/observe.out" "$dir/observe.err" 2>/dev/null || true)"
         export CASE_BASELINE_OUT CASE_OBSERVED
+        export CHAOS_PHASE=judge
         case_judge || true
         if (( CHAOS_EXPECT_BAD > 0 )); then
             state="$CHAOS_FAILED"
@@ -281,8 +346,13 @@ for name in "${RUN[@]}"; do
     #      as no diagnostics, which is the criterion this unit is built on.
     #      It runs whatever the verdict, including after a could-not-inject.
     if declare -F case_cleanup >/dev/null; then
+        export CHAOS_PHASE=cleanup
         case_cleanup >> "$dir/setup.out" 2>> "$dir/setup.err" || true
     fi
+
+    # Checked after every case rather than once at the end, so the run stops on
+    # the case that broke the rule instead of on whichever ran last.
+    chaos_check_guard
 
     printf '%s\n' "${CHAOS_EXPECT_NOTES[@]:-}" > "$dir/expectations.txt"
     chaos_write_verdict "$dir" "$name" "$state" "$reason" "$case_seed" "$CASE_TITLE"
