@@ -51,7 +51,43 @@ An install would buy a CPU placement, which proves the supervisor's bookkeeping
 and not "placed on the GPU, and unloading released its VRAM". No install was
 attempted.
 
+**APEX-SHELL CI CAN BE RUN ON `roadmap/v2.2`, AND ITS OWN COMMENT SAYS IT
+CANNOT. THIS IS THE MOST REUSABLE THING THIS ROUND FOUND.** `ci.yml` triggers
+only on push/PR to `main`/`dev`, so — in its own words — "nothing here has run
+for any of it: every roadmap suite in this repository has therefore been
+verified on exactly one laptop." The same comment adds that `workflow_dispatch`
+"does nothing for the branch that adds it", because GitHub only lists a workflow
+once it is on the DEFAULT branch. That last part is **wrong in practice**:
+
+    gh workflow run ci.yml --repo AndreNijman/apex-shell --ref roadmap/v2.2
+
+was accepted and produced run `34688615921`. The workflow is registered at that
+path from `main`, and the dispatched ref's own copy is what declares the
+trigger, so the roadmap branch's copy runs. **Any apex-shell unit can get real
+second-machine CI without pushing anything and without opening a PR.** Every
+apex-shell item in this program that is resting on "verified on the developer's
+laptop" can be upgraded this way for the price of one command.
+
+First run's verdict for this unit: the three source-level suites pass unchanged
+on `archlinux:latest` — 47/0, 42/0, 12/0 — and the facade test reports
+`SKIP: quickshell not installed`, which is the honest outcome and leaves the
+60/0 engine run laptop-only.
+
 ### Round-13 findings that belong to OTHER units, not this one
+- **`roadmap/v2.2` HAS A RED apex-shell CI STEP AND NOBODY COULD HAVE KNOWN**,
+  because apex-shell CI had never run for this program until the dispatch above.
+  Step "labwc session support is wired up" fails:
+      ✗ top-bar mask no longer preserves Hyprland input behavior
+      ✗ labwc bar no longer honours its exclusion-gap floor
+  **It is a STALE ASSERTION, not a regression — checked, not assumed.** The step
+  greps `src/windows/TopBar.qml` for the literals `height: Compositor.isLabwc ?
+  Theme.borderWidth : root.implicitHeight` and `Math.max(Theme.notchHeight,
+  Theme.exclusionGap)`. The file still does both things, at :28 and :107-109,
+  but through a per-output `theme.` object rather than the global `Theme.`
+  singleton — an artefact of the per-output-scaling migration. So the fix is the
+  capitalisation in ci.yml's inline grep, and the shipped behaviour is fine.
+  NOT fixed here on purpose: it is another unit's, and the file is shared
+  program-wide machinery that this unit must not push to `roadmap/v2.2`.
 - **apex-agentd fails CI on the runner, twice, same root cause.**
   `tests/test-agent-inject.sh` → `FAIL two sessions started`, because
   `/proc/<pid>/cgroup` places the connection in
@@ -97,6 +133,12 @@ landing. Every count in this card's evidence still holds:
 `cargo test --locked --workspace` 3032/0 · `check-compositor-naming.sh` 42/0 ·
 `compositor-facade-test.qml` 60/0 under real headless labwc ·
 `check-compositor-backends.sh` 47/0 · `check-gaming-mode-gate.sh` 12/0.
+
+Three of those are now confirmed on a SECOND machine as well: apex-os's
+`test-apex-greet-sessions.sh` 41/0/0 and `test-labwc-keybind-reload.sh` 18/0/0
+on ubuntu-24.04 (run 34635660418), and apex-shell's 47/0, 42/0 and 12/0 on
+archlinux:latest (run 34688615921). Only `compositor-facade-test.qml` 60/0
+remains laptop-only, and it skips honestly in CI rather than pretending.
 
 **A note on status vocabulary.** Round 13's dispatch prompt asked for BASE-009
 and BASE-010 to be recorded `blocked`. They were left `partial`, deliberately.

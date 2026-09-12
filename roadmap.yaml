@@ -368,7 +368,18 @@ tasks:
     NOT AN AGENT'S: 'Floating' is ratified at ROADMAP.md:1031, but 'Scrolling' (niri) and 'Tiling' (Hyprland) are
     an agent's reading of ROADMAP.md:91 and are new user-visible words on the login carousel and in Settings. They
     live in one map plus one option list in apex-shell and two .desktop files plus one Containerfile sed in
-    apex-os, so changing them is cheap.
+    apex-os, so changing them is cheap. SECOND-MACHINE EVIDENCE, NEW THIS ROUND (round 13, 2026-09-12). Until now
+    every roadmap suite in apex-shell had run on exactly one laptop: ci.yml triggers only on push/PR to main and
+    dev, and its own comment says so - 'nothing here has run for any of it'. That comment also claims
+    workflow_dispatch 'does nothing for the branch that adds it', and THAT IS WRONG: `gh workflow run ci.yml
+    --repo AndreNijman/apex-shell --ref roadmap/v2.2` was accepted and produced run 34688615921, because the
+    workflow is registered at that path from main while the dispatched ref's own copy declares the trigger. In
+    that run, on an archlinux:latest container - a different distro, bash and Qt from the developer's Fedora
+    laptop - this item's suites pass unchanged: 'Compositor adapter invariants' passed=47 failed=0, 'What Settings
+    is allowed to call the compositor' (check-compositor-naming.sh) passed=42 failed=0, 'Whether the power menu
+    may offer Gaming Mode' passed=12 failed=0. The facade test reported 'SKIP: quickshell not installed', which is
+    the honest outcome its harness is built for and leaves the 60/0 engine run laptop-only. The run failed
+    overall, on a step that is NOT this item's - see the card for the stale TopBar.qml greps.
 - id: BASE-014
   title: Preserve modern Floating/labwc visual integration
   priority: P0
