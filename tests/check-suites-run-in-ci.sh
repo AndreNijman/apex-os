@@ -42,7 +42,14 @@ missing=(); resurrected=(); run=0
 for s in tests/test-*.sh; do
     [ -f "$s" ] || continue
     base="${s#tests/}"
-    if grep -rqF "$base" "$WORKFLOWS"/; then
+    # A COMMENT naming a suite is not an invocation of it. This file's own
+    # step in pr-validation.yml describes the defect by naming
+    # tests/test-apex-lid.sh, and a bare `grep -F` read that prose as proof the
+    # suite runs — the same shape as the forbid-check this repository once
+    # shipped that matched the comment explaining what it forbade. Lines whose
+    # first non-blank character is `#` are dropped, which covers both YAML
+    # comments and shell comments inside a `run:` block.
+    if grep -rhF "$base" "$WORKFLOWS"/ | grep -qvE '^[[:space:]]*#'; then
         run=$((run + 1))
         is_exempt "$s" && resurrected+=("$s")
     else

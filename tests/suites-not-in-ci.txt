@@ -20,3 +20,4 @@ tests/test-device-services-netns.sh  12 assertions; sends real packets in a priv
 tests/test-apex-trust-enforcement.sh the signature/provenance enforcement policy
 tests/test-secret-at-rest.sh         the at-rest property P0-002 earned
 tests/test-apex-multilib.sh          drives apex-pkg; needs care about what it installs
+tests/test-labwc-session.sh          needs a nested compositor; check whether the harness now allows it
