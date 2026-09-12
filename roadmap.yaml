@@ -2445,15 +2445,19 @@ tasks:
     it does not ("the default headless output is 1920x1080" - measured false); left alone deliberately and written
     up as its own item. (3) QuickControl centred its panel on root.screen.height - the other monitor's height on a
     mixed desk, 540px out - the POSITION half of the popup bug round two fixed the SIZE half of; it reads its
-    anchor's screen now and scaling-test asserts anchor.rect.y per output. NINE MUTATION PAIRS across the three
-    rounds, every restore a plain cp verified by an empty git status; the two that would otherwise have slipped
-    are M6 (the manual override, which reds only on the output whose own density disagrees with it) and M7 (the
-    anchor rect, which HEADLESS-2 still PASSES under, because a PopupWindow reports HEADLESS-2 whichever bar it is
-    anchored to). TWO THINGS LEFT, both named rather than hidden. PluginService.theme is 4 reads of one versioned
-    snapshot handed to plugin code across a trust boundary and declared stable across apiVersion 1.x: per-output
-    there is an apiVersion change, not a rename, and it is the written-out exception in check-scale-tokens'
-    closure rule. And the honest limit of all of this: it is two headless outputs, read off laid-out pixels.
-    Nobody has looked at a physical mixed-DPI desk.
+    anchor's screen now and scaling-test asserts anchor.rect.y per output. FIFTEEN MUTATION PAIRS across the three
+    rounds - six in round one, one in round two, eight in round three - every restore a plain cp, verified by git
+    status coming back empty, which is stronger than a sha256 of one file because it proves nothing else moved
+    either. The two that would otherwise have slipped are round one's manual-override pair (a manual factor reds
+    only on the output whose own density disagrees with it) and round three's anchor-rect pair (HEADLESS-2 still
+    PASSES under it, because a PopupWindow reports HEADLESS-2 whichever bar it is anchored to). One pair
+    deliberately did NOT redden and is recorded as such: silencing the apex firewall stub leaves nav-geometry at
+    4366/0, which is how the comment crediting that payload with the recovery was found to be wrong. TWO THINGS
+    LEFT, both named rather than hidden. PluginService.theme is 4 reads of one versioned snapshot handed to plugin
+    code across a trust boundary and declared stable across apiVersion 1.x: per-output there is an apiVersion
+    change, not a rename, and it is the written-out exception in check-scale-tokens' closure rule. And the honest
+    limit of all of this: it is two headless outputs, read off laid-out pixels. Nobody has looked at a physical
+    mixed-DPI desk.
 - id: P1-041
   title: Creator color-management stack
   priority: P1

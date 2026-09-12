@@ -757,6 +757,10 @@ harness was recovered and committed first, before anything else was attempted.
 | `c688de74` | `orca` into `Containerfile.core` + `tests/test-apex-a11y-stack.sh` (13) + 4 mutants |
 | `db16b410` | the installer audit's page-advance section and the `confirm` page (38 → 50) |
 | `6805174a` | all three suites into `pr-validation.yml`, and the job-selector defect below |
+| `cc8076d1` | the session-bus host check no longer goes red twice when the greeter is fixed |
+| `e077350f` | the two defects CI found in the audit: the wifi page's second shape, and a masking assertion passing about an empty field |
+| `5e576c63` | `docs/update-cost.md` — orca's 23 MiB beside the AI apps' 1.9 GB, in the same tier |
+| `73f158d2` | text through XTEST, with a COULD-NOT-RUN where no mechanism delivers |
 
 ### Mutation verdicts
 
