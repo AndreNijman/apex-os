@@ -56,7 +56,7 @@
 
 use std::io::Write;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use apex_secret_core::store::ServiceInfo;
@@ -860,6 +860,88 @@ pub fn scrub(text: &str, token: &str) -> String {
     }
     text.replace(token, "«redacted»")
 }
+
+/// A directory the child can read one file out of and nobody else can list.
+///
+/// Root-owned and `0711`: the owner can open a path it is told, and cannot
+/// enumerate what is in there. The file itself is `0400` and handed to the
+/// owner, because the child has already dropped privileges by the time it
+/// reads it.
+///
+/// **Here rather than in a provider**, which is what `providers/mod.rs` already
+/// says about the MCP run directory in as many words: *"where a root process
+/// writes a file an unprivileged child then reads is the framework's business,
+/// not a provider's."* It lived in the Cloudflare transport until the S3
+/// provider needed the same thing, and a second copy of a root-writes /
+/// child-reads helper is the kind of duplication that stays in step until one
+/// of them is fixed.
+///
+/// Why a copy at all, rather than pointing `curl` at the file in the project:
+/// the file has already been through `project::read_file`'s `O_NOFOLLOW` walk
+/// and owner check, and a path re-opened afterwards is a path that could have
+/// become something else in between.
+pub(crate) struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+impl Scratch {
+    pub(crate) fn new(owner: &Owner) -> Result<Scratch, String> {
+        let mut name = [0u8; 16];
+        // Not for secrecy — the file is the caller's own data and is mode 0400
+        // to the caller. It is so that two calls at once cannot collide and so
+        // that the path is not one another user could have created first.
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut name))
+            .map_err(|e| e.to_string())?;
+        let hex: String = name.iter().map(|b| format!("{b:02x}")).collect();
+        let dir = std::env::temp_dir().join(format!("apex-brk-{hex}"));
+        std::fs::create_dir(&dir).map_err(|e| e.to_string())?;
+        let scratch = Scratch(dir);
+        std::fs::set_permissions(
+            &scratch.0,
+            std::os::unix::fs::PermissionsExt::from_mode(0o711),
+        )
+        .map_err(|e| e.to_string())?;
+        let _ = owner;
+        Ok(scratch)
+    }
+
+    pub(crate) fn write(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        owner: &Owner,
+    ) -> Result<PathBuf, String> {
+        let path = self.0.join(name);
+        let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|e| e.to_string())?;
+        drop(file);
+        lchown(&path, owner.uid, owner.gid)?;
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o400))
+            .map_err(|e| e.to_string())?;
+        Ok(path)
+    }
+}
+
+fn lchown(path: &Path, uid: u32, gid: u32) -> Result<(), String> {
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return Err("that path cannot be named".to_string());
+    };
+    // Safe: `c` is a NUL-terminated path that outlives the call. `lchown` and
+    // not `chown` so this cannot be redirected through a link, though the
+    // directory it is in is not writable by anyone but root.
+    if unsafe { libc::lchown(c.as_ptr(), uid, gid) } != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(())
+}
+
 
 #[cfg(test)]
 mod tests {

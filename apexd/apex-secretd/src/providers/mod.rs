@@ -20,6 +20,7 @@ pub mod bearer;
 pub mod cloudflare;
 pub mod git;
 pub mod mcp;
+pub mod s3;
 
 /// Every provider, registered.
 ///
@@ -36,6 +37,7 @@ pub fn default_registry(run_dir: std::path::PathBuf) -> Result<Registry, String>
     registry.register(Box::new(git::GitProvider))?;
     registry.register(Box::new(cloudflare::CloudflareProvider::new()))?;
     registry.register(Box::new(mcp::McpProvider::new(run_dir)))?;
+    registry.register(Box::new(s3::S3Provider))?;
     Ok(registry)
 }
 
@@ -92,6 +94,8 @@ mod tests {
                 "git.ls-remote",
                 "git.push",
                 "mcp.request",
+                "s3.object.read",
+                "s3.object.write",
             ]
         );
     }
