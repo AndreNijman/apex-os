@@ -24,14 +24,13 @@
 //!
 //! ## What is deliberately not here
 //!
-//! **TLS.** `apex-secretd/src/providers/cloudflare/api.rs` already settled how
-//! this workspace reaches a TLS endpoint — it shells out to `curl`, because
-//! nothing here speaks TLS — and a WebSocket cannot be carried over a one-shot
-//! `curl`. So everything below is generic over `Read`/`Write`: the caller
-//! supplies the stream. [`Endpoint::secure`] records whether the URL asked for
-//! TLS, and it is the connector's business, not this module's, to refuse or
-//! satisfy it. See `ROADMAP/design/P1-052-relay.md` for what deploying behind
-//! `wss://` would take.
+//! **TLS.** Not because this workspace cannot speak it — since the relay-tls
+//! unit it can, in [`crate::tls`] — but because it is a different layer.
+//! Everything below is generic over `Read`/`Write` and the caller supplies the
+//! stream, which is precisely what makes a TLS leg cost nothing here: the
+//! connector hands in a pair of halves and not one line of the codec changes.
+//! [`Endpoint::secure`] records whether the URL asked for TLS, and it remains
+//! the connector's business, not this module's, to satisfy it.
 //!
 //! **Server framing.** A relay double lives in this crate's tests and a real
 //! relay is the Worker under `relay/`. Neither needs the server half of the
@@ -137,7 +136,8 @@ impl std::error::Error for RelayError {}
 /// connection attempt every few seconds for the life of the machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
-    /// Whether the URL asked for TLS. Not acted on here — see the module note.
+    /// Whether the URL asked for TLS. Acted on by the connector — see
+    /// [`crate::tls`] — and never here.
     pub secure: bool,
     pub host: String,
     pub port: u16,
