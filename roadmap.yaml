@@ -2024,8 +2024,8 @@ tasks:
     row per policy value, and that an empty connector_allow prints a refusal rather than a row of zeroes. Fixture-
     driven: the suite's run() sets XDG_CONFIG_HOME into the fixture, so the empty list asserted is the fixture's
     and not this machine's. tests/test-apex-skill.sh --with-binary: 73/0 on the tip -> 82/0 on this branch. Branch
-    task/p1-025-plugin-trust-2 (cbcacfc3, 93ea60f4, 4ac67153, 7f0038d3), pushed, unmerged at the time of writing;
-    round 1 is merged as 564fffd5.
+    task/p1-025-plugin-trust-2 (cbcacfc3, 93ea60f4, 4ac67153, 7f0038d3, e48234fb), pushed, unmerged at the time of
+    writing; round 1 is merged as 564fffd5.
 - id: P1-029
   title: Represent local/remote/scheduled/cloud agent lifecycle types
   priority: P1
