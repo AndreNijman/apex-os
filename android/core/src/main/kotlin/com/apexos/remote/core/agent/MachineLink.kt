@@ -3,6 +3,7 @@ package com.apexos.remote.core.agent
 import com.apexos.remote.core.FrameChannel
 import com.apexos.remote.core.link.Disconnected
 import com.apexos.remote.core.link.Mux
+import com.apexos.remote.core.link.Upload
 import java.io.Closeable
 import java.util.concurrent.TimeoutException
 
@@ -157,6 +158,29 @@ class MachineLink(
      * four-second poll. `Mux.CONTROL_TIMEOUT_MS` is five minutes, matching
      * `apex-remoted`'s own, so a large repository has room.
      */
+    /**
+     * Hand a file to a session whose bytes are on this phone (P1-059).
+     *
+     * **On a connection of its own**, and this is the one verb here that does
+     * not travel on the connection this class holds. Two reasons, both about
+     * the connection rather than about the file: `receive` TAKES A CHANNEL
+     * OVER, so it cannot go through [request] at all — `apex-remoted` refuses
+     * a takeover verb on channel zero by name — and a multi-megabyte upload
+     * ahead of everything else in [Mux]'s strict FIFO is a session list that
+     * arrives when the photo finishes. [com.apexos.remote.core.link.Upload]
+     * has the whole account.
+     *
+     * Blocking, like everything else here, and for longer than anything else
+     * here: callers run it inside `withContext(Dispatchers.IO)`.
+     */
+    fun upload(
+        id: Int,
+        name: String,
+        len: Long,
+        source: () -> java.io.InputStream,
+        onProgress: (Long) -> Unit = {},
+    ): Upload.Landed = Upload.send(connect, id, name, len, source, onProgress)
+
     fun worktrees(project: String? = null): List<WorktreeStatus> =
         Agentd.readWorktrees(request(Agentd.worktrees(project)))
 

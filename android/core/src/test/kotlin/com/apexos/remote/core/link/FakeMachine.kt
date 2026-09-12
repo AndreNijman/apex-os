@@ -78,7 +78,40 @@ class FakeMachine(
      * could not produce it could not test the distinction.
      */
     private val pingEveryMs: Long = 0,
+    /**
+     * How an `Open` carrying a `receive` is answered.
+     *
+     * `receiving` takes the channel over the way `attached` does; anything
+     * else is `Control(reply)` then `Close(channel, "")`, which is what
+     * `apex-remoted` does with a daemon refusal.
+     */
+    private val receiveReply: (String) -> String = { """{"reply":"receiving","id":7,"len":0}""" },
+    /**
+     * The line the daemon writes once it has every byte, which reaches the
+     * device as `Data` on the upload's own channel.
+     *
+     * A function of what arrived, so a fixture can answer a refusal as easily
+     * as a success.
+     */
+    private val injectedReply: (ByteArray) -> String = {
+        """{"reply":"injected","id":7,"path":"/tmp/apex-agent-1000/7/inbox/001-shot.png","bracketed":false}"""
+    },
+    /**
+     * Bytes of that closing reply per `Data` frame. Zero means one frame.
+     *
+     * Not a detail: `apex-remoted`'s pump reads the daemon's socket into a
+     * 16 KiB buffer and frames whatever it got, so a reply can legitimately
+     * arrive in two pieces — and a client that parsed the first piece as the
+     * whole answer would report a refusal for a file that was delivered.
+     */
+    private val replyChunkBytes: Int = 0,
 ) {
+    /** Everything a client has uploaded on a `receive` channel. */
+    val uploaded = ConcurrentLinkedQueue<ByteArray>()
+
+    /** How many `receive` channels have been opened. */
+    val uploadsStarted = AtomicInteger(0)
+
     /** How many `Data` frames have been sent. The throttle's own evidence. */
     val dataFramesSent = AtomicInteger(0)
 
@@ -160,6 +193,10 @@ class FakeMachine(
                     is Frame.Open -> {
                         val request = frame.request.toString(Charsets.UTF_8)
                         requests.add(request)
+                        if (request.contains(""""cmd":"receive"""")) {
+                            serveUpload(frame.channel, request, toClient, toMachine)
+                            continue
+                        }
                         if (closeWithoutReply != null) {
                             // The proxy-failure shape: no `Control` at all.
                             toClient.put(Frame.Close(frame.channel, closeWithoutReply))
@@ -204,6 +241,69 @@ class FakeMachine(
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         }
+    }
+
+    /**
+     * `Request::Receive`, as `apex-agentd` and `apex-remoted` between them do
+     * it.
+     *
+     * The connection is taken over: after `receiving` the daemon reads exactly
+     * `len` bytes and this loop does the same, which is why it polls inside
+     * the branch rather than returning to the caller's loop. Everything
+     * refusable is decided before the reply, so a fixture that refuses sends
+     * `Control` then `Close` and reads nothing.
+     */
+    private fun serveUpload(
+        channel: UInt,
+        request: String,
+        toClient: LinkedBlockingQueue<Any>,
+        toMachine: LinkedBlockingQueue<Any>,
+    ) {
+        uploadsStarted.incrementAndGet()
+        val reply = receiveReply(request)
+        toClient.put(Frame.Control(reply.toByteArray(Charsets.UTF_8)))
+        if (!reply.contains(""""receiving"""")) {
+            toClient.put(Frame.Close(channel, ""))
+            return
+        }
+        val want = Regex(""""len":(\d+)""").find(request)?.groupValues?.get(1)?.toLong() ?: 0L
+        val got = java.io.ByteArrayOutputStream()
+        while (got.size() < want) {
+            val item = toMachine.poll(30, TimeUnit.SECONDS) ?: return
+            if (item is Hangup) return
+            when (val f = item as Frame) {
+                is Frame.Data -> if (f.channel == channel) {
+                    // Never past the declared length, as the daemon's
+                    // `read_body` is never past it: a client that sends more
+                    // leaves the surplus unread.
+                    val room = (want - got.size()).toInt()
+                    got.write(f.bytes, 0, minOf(room, f.bytes.size))
+                }
+                is Frame.Close -> if (f.channel == channel) return
+                else -> Unit
+            }
+        }
+        val bytes = got.toByteArray()
+        uploaded.add(bytes)
+        val line = injectedReply(bytes).toByteArray(Charsets.UTF_8)
+        if (replyChunkBytes <= 0) {
+            toClient.put(Frame.Data(channel, line))
+        } else {
+            var at = 0
+            while (at < line.size) {
+                val end = minOf(at + replyChunkBytes, line.size)
+                toClient.put(Frame.Data(channel, line.copyOfRange(at, end)))
+                at = end
+            }
+        }
+        toClient.put(Frame.Close(channel, ""))
+    }
+
+    /** Everything a client uploaded, joined. */
+    fun uploadedBytes(): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        for (b in uploaded) out.write(b)
+        return out.toByteArray()
     }
 
     /** Everything a client sent on a PTY channel, joined. */

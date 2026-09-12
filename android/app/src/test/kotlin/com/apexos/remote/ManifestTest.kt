@@ -97,6 +97,28 @@ class ManifestTest {
     }
 
     @Test
+    fun `the photo picker's fallback is visible under package visibility too`() {
+        // The same defect, one feature later. `PickVisualMedia` looks for a
+        // system fallback picker with `PackageManager.resolveActivity` on this
+        // action — read out of activity-1.12.4's bytecode rather than assumed
+        // — and package visibility filters that call on API 30 and later. A
+        // null answer is not a crash; it sends the contract down
+        // `ACTION_OPEN_DOCUMENT`, so the user presses "Photo" and gets a file
+        // browser. Quiet, wrong, and exactly what a phone-less round cannot
+        // see.
+        assertTrue(
+            manifest.contains("androidx.activity.result.contract.action.PICK_IMAGES"),
+            "the photo picker's system fallback is not declared in <queries>, so on a phone " +
+                "without the platform picker the Photo button opens a file browser",
+        )
+        // And the thing that must NOT have appeared alongside it. A picker is
+        // the alternative to a permission, not a companion to one.
+        for (p in Handoff.Files.FORBIDDEN_PERMISSIONS) {
+            assertFalse(declares(p), "$p was added alongside the picker")
+        }
+    }
+
+    @Test
     fun `the permissions this app does declare are the four it can justify`() {
         // A fixed set rather than a floor. A permission added without a reason
         // fails here and has to be argued for in a diff, which is the only
