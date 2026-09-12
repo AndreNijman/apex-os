@@ -47,6 +47,19 @@ reasons that are recorded rather than argued:
 
 A VM-tier browser capsule is listed under "what is not built".
 
+## Checking the machine can run one
+
+```
+apex browser doctor
+```
+
+Reports each part a capsule needs and names the one that is missing rather than
+failing halfway through a run: the browser binary (present, present-but-not-
+executable, or missing), `apex` itself, and whether the agent runtime answers —
+which is the one a fresh machine is most likely to be missing, so it prints the
+`systemctl --user enable --now apex-agentd` that fixes it. Exits non-zero when
+anything is absent, so it is usable as a precondition in a script.
+
 ## The capsule
 
 ```
