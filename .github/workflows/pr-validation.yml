@@ -2162,6 +2162,16 @@ jobs:
       # "a skipped check counts as success" shape this repository has been
       # bitten by, and it would have switched off the shellcheck gate on the
       # very files this branch adds. Anything expected to be red belongs at the
+      - name: Every suite is actually run by CI
+        run: |
+          # The harder half of the same defect. CI invokes suites BY NAME, so
+          # writing tests/test-foo.sh, landing it, and never adding a workflow
+          # line leaves a file that looks like coverage and gates nothing.
+          # Measured 2026-09-12: 70 suites, 13 named in no workflow at all —
+          # including tests/test-apex-lid.sh, sixty assertions for a feature the
+          # owner asked for by name, which no CI run had ever executed.
+          ./tests/check-suites-run-in-ci.sh
+
       - name: Every shell script is linted, by discovery
         run: |
           # The step above lints a hand-written LIST. A list cannot cover a file
