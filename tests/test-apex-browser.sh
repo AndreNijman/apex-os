@@ -371,6 +371,13 @@ has   "a --profile among the browser's arguments is refused" 'cannot be passed' 
 exits "and it is a REFUSAL, not an ordinary error"           2 "$rc"
 out=$("$ENGINE" run --allow e.example:443 -- -P other https://e.example/ 2>&1)
 has "so is Firefox's short spelling of it"                   'cannot be passed' "$out"
+# Measured, not assumed, and the measurement found a hole: `firefox
+# --profile=DIR` creates and uses a profile at DIR, so a refusal listing only
+# the space-separated form was one character from being walked around.
+out=$("$ENGINE" run --allow e.example:443 -- --profile=/home/u/.mozilla https://e.example/ 2>&1)
+has "and the = spelling Firefox also accepts"                'cannot be passed' "$out"
+out=$("$ENGINE" run --allow e.example:443 -- --display=:0 https://e.example/ 2>&1)
+has "the display refusal covers its = spelling too"          'no compositor' "$out"
 out=$("$ENGINE" run --allow e.example:443 -- -display :0 https://e.example/ 2>&1)
 has "and a display is refused with the reason there is none" 'no compositor' "$out"
 
