@@ -29,7 +29,16 @@ import kotlinx.serialization.json.Json
  * caller supplies. Neither this file nor the handshake changes between them.
  */
 interface SecretBox {
-    /** Wrap plaintext so that only this device, with the user present, can unwrap it. */
+    /**
+     * Wrap plaintext so that only this device, with the user present, can
+     * unwrap it.
+     *
+     * **The implementation must not retain [plaintext].** The caller wipes
+     * that array the instant this returns — a private key living on in a
+     * long-lived object is the thing this whole interface exists to prevent —
+     * so an implementation that kept the reference would find its own copy
+     * zeroed underneath it. Copy what you need before returning.
+     */
     fun seal(plaintext: ByteArray): ByteArray
 
     /** Unwrap, or throw. A refused biometric is a throw, and that is correct. */

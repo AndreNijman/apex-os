@@ -167,6 +167,12 @@ fn generate() -> String {
         "prologue_hex": hex(&prologue),
         "desktop_secret_hex": hex(&DESKTOP_SECRET),
         "desktop_public_hex": hex(&desktop_public),
+        // Not part of a handshake, but derived from the same pinned key and
+        // by a rule the device has to reproduce exactly or it meets nobody.
+        "rendezvous_id": crate::rendezvous::rendezvous_id(&desktop_public),
+        "device_id": crate::device::Device::id_for(&crate::b64_encode(&device_public)),
+        "desktop_key_b64": crate::b64_encode(&desktop_public),
+        "device_key_b64": crate::b64_encode(&device_public),
         "device_secret_hex": hex(&DEVICE_SECRET),
         "device_public_hex": hex(&device_public),
         "initiator_ephemeral_hex": hex(&INITIATOR_EPHEMERAL),
