@@ -2148,6 +2148,108 @@ jobs:
       - name: §13.5 backup to S3 — SigV4 against an independent verifier
         run: ./tests/test-apex-backup-s3.sh
 
+      # ── suites that existed and that CI had never once invoked ───────────
+      #
+      # These two were among the thirteen `check-suites-run-in-ci.sh` found on
+      # 2026-09-12: real assertion counts, landed, reviewed, and named in no
+      # workflow. They are wired here rather than in `rust` because neither
+      # needs a toolchain — one parses a static ruleset and one parses the
+      # Containerfiles — and because the engine selector `^(files/|tests/|
+      # Containerfile)` is exactly the set of files they are ABOUT, which is
+      # the rule the six comments in the `changes` job were written to enforce.
+      #
+      # `!cancelled()` on each, so that a suite CI has never run cannot, by
+      # going red on its first outing, skip the two coverage gates below it and
+      # switch off the very checks that found it.
+      - name: Install nftables for the ruleset parse
+        if: ${{ !cancelled() }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nftables || echo "note: nftables unavailable"
+          # `nft -c` applies nothing, but libnftables still opens a netlink
+          # socket, so it needs CAP_NET_ADMIN — which this job does not have.
+          # The suite's own fallback is a private user+network namespace, and
+          # that is refused on Ubuntu 24.04 unless this knob is cleared. The
+          # bubblewrap step near the top of this job already clears it; this is
+          # the belt to that braces, so a reordering there cannot silently turn
+          # every parse assertion below into a SKIP. The value is per-boot on
+          # an ephemeral VM.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
+            echo "note: apparmor userns knob unavailable"
+          command -v nft >/dev/null && echo "have: $(nft --version)" || echo "MISSING: nft"
+
+      # P1-044's default-drop policy, asserted rule by rule against the shipped
+      # files/system/nftables/apex.nft. It never loads the ruleset — `nft -c`
+      # parses — so it cannot disconnect the machine running it, which is why
+      # it is safe here and why its live sibling is not.
+      #
+      # It degrades honestly rather than vacuously: with no nft, or with nft
+      # unable to reach netlink even inside a private netns, the parse
+      # assertion reports SKIP with the reason instead of passing. The step
+      # above is what keeps that skip from being the normal outcome — and the
+      # summary check below is what keeps it from being an outcome CI accepts.
+      #
+      # A SKIP here is a COULD NOT RUN, and a could-not-run must not report a
+      # green tick: without this the whole point of wiring the suite in would
+      # be lost the first time the runner image dropped nftables, and the step
+      # would go on passing while inspecting the ruleset not at all. That is
+      # the exact defect class this suite was found by. The pass floor is a
+      # floor and not an equality so that adding an assertion does not require
+      # editing this file, but a DROP in the count fails, which is the
+      # direction that hides a deleted rule.
+      - name: Run firewall policy assertions
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          out="$(./tests/test-apex-firewall.sh 2>&1)"
+          printf '%s\n' "$out"
+          summary="$(printf '%s' "$out" | grep -E '^apex-firewall: ' || true)"
+          [ -n "$summary" ] || { echo "::error::the firewall suite printed no summary line"; exit 1; }
+          read -r passed _ failed _ skipped _ <<<"$(printf '%s' "$summary" | sed 's/^apex-firewall: //')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed firewall assertions failed"; exit 1; }
+          [ "$skipped" = 0 ] || {
+              echo "::error::$skipped firewall assertions could not run on this runner ($summary); a could-not-run is not a pass"
+              exit 1
+          }
+          [ "$passed" -ge 32 ] || {
+              echo "::error::only $passed firewall assertions ran; 32 ran on 2026-09-12, so some no longer execute"
+              exit 1
+          }
+
+      # P2-005's device packages, read out of the Containerfiles the way
+      # BuildKit reads them — comments dropped, continuations joined, each RUN
+      # body parsed with `bash -n` — rather than grepped. Every gap it guards
+      # was a package that was present and enabled nothing, or absent behind a
+      # name that looked like it covered the case: no gvfs-fuse, so a mounted
+      # share existed only inside GTK; no bolt, so a Thunderbolt dock sat at
+      # authorized=0 with nothing able to authorise it.
+      #
+      # `Containerfile` is in the engine selector, so a PR that deletes a
+      # package name from an install list selects this job.
+      #
+      # The count floor is here for the same reason as the firewall one above:
+      # every assertion in this suite is a `grep` over a parsed Containerfile,
+      # so a checkout that put the Containerfiles somewhere else, or a parser
+      # that returned nothing, would make the suite assert nothing and exit 0.
+      # 39 assertions ran on this branch on 2026-09-13; a drop is a suite that
+      # stopped looking, not a suite that got shorter.
+      - name: Run device-image package assertions
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          out="$(./tests/test-device-image.sh 2>&1)"
+          printf '%s\n' "$out"
+          summary="$(printf '%s' "$out" | grep -E '^device image: ' || true)"
+          [ -n "$summary" ] || { echo "::error::the device-image suite printed no summary line"; exit 1; }
+          read -r passed _ failed _ <<<"$(printf '%s' "$summary" | sed 's/^device image: //')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed device-image assertions failed"; exit 1; }
+          [ "$passed" -ge 39 ] || {
+              echo "::error::only $passed device-image assertions ran; 39 ran on 2026-09-13, so some no longer execute"
+              exit 1
+          }
+
       - name: ShellCheck the privileged helpers
         run: |
           set -euo pipefail

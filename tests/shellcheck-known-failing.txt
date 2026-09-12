@@ -17,7 +17,6 @@ files/system/system-sleep/apex-wifi-resume
 tests/lib/atspi.sh
 tests/mutate-greet-atspi.sh
 tests/test-apex-ai-apps.sh
-tests/test-apex-backup.sh
 tests/test-apex-devices.sh
 tests/test-apex-display.sh
 tests/test-apex-firewall-live.sh
