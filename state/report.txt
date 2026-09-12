@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-12 12:03 AWST
+APEX ROADMAP — resume report — 2026-09-12 17:04 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -7,73 +7,90 @@ APEX ROADMAP — resume report — 2026-09-12 12:03 AWST
   BASE          16         2         -         -
   L              -         1         -         2
   P0            24         1         -         -
-  P1            34        14        14         -
-  P2             5         7         7         -
-  ALL           79        25        21         2   of 127
+  P1            41        13         9         -
+  P2             5         8         6         -
+  ALL           86        25        15         2   of 128
 
   P0 not done: P0-001(part)
 
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p1-014     dead 94m   P1-014,P1-015,P1-016,P1-017        task/p1-014-cf-environments
-             head 7f4475dd feat(cf): section 13.13 worktree previews, with owner
-             dirty 3 file(s), 0 unpushed, card 98m
-             NEXT **P1-014 is DONE and pushed** — two commits on `task/p1-014-cf-env
+  p1-014     dead 234m  P1-014,P1-015,P1-016,P1-017        task/p1-014-cf-guardrails
+             head 92e937cd test(secret): two assertions that measured the machin
+             dirty 0 file(s), 0 unpushed, card 235m
+             NEXT **Do not dispatch this unit — all four items are recorded; only th
 
-  p1-025     dead 94m   P1-026,P1-028                      task/p1-025-plugin-trust
-             head be1e1780 test(provenance): the two arms nothing reached, and a
-             dirty 0 file(s), 0 unpushed, card 120m
-             NEXT Implementing now, on `task/p1-025-plugin-trust` in `/var/tmp/apex-
+  p1-025     dead 254m  P1-025,P1-026,P1-027,P1-028        task/p1-025-plugin-trust-2
+             head e48234fb test(skill): the suite asserted the sentence that was
+             dirty 0 file(s), 0 unpushed, card 255m
+             NEXT Round 2 (this agent, fresh branch `task/p1-025-plugin-trust-2` in
 
-  followups  dead 114m                                     task/followups-r18
-             head 431ef97f ci: a docs-only PR skipped the job that checks the do
-             dirty 0 file(s), 0 unpushed, card 115m
-             NEXT **ALL THREE ARE CLOSED.** Round 18, apex-os branch `task/followups
+  p1-053a    dead 238m  P1-053,P1-054,P1-055               task/p1-053a-android-2
+             head ad834989 fix(android): the deep-link code was still lost, one 
+             dirty 0 file(s), 0 unpushed, card 239m
+             NEXT **P1-053 is complete on `task/p1-053a-android-2`** (worktree
 
-  p1-053a    dead 94m   P1-053,P1-054,P1-055               task/p1-053a-android
-             head 74ecba13 build(android): an Android app module that assembles,
-             dirty 7 file(s), 0 unpushed, card 103m
-             NEXT Round 1 landed `android/core` (the protocol, pure JVM, 79 tests) a
-
-  p1-040     dead 94m   P1-040                             task/p1-040-scaling-migration
-             head f5787d3 fix(shell): a popup is sized by the output it is ancho
-             dirty 0 file(s), 0 unpushed, card 95m
+  p1-040     dead 215m  P1-040                             task/p1-040-scaling-finish
+             head 6d5527c docs(tests): say which half of the firewall stub recov
+             dirty 0 file(s), 0 unpushed, card 216m
              NEXT (no card)
 
-  p2-b       dead 94m   P2-003,P2-004                      task/p2-b-round18
-             head 1417402 Merge task/p2-b-accessibility-i18n into roadmap/v2.2 (
-             dirty 0 file(s), ? unpushed, card 115m
-             NEXT Ordered. Items 1-3 are this round's remaining plan; 4 onward are i
+  p2-b       dead 209m  P2-003,P2-004                      task/p2-b-round18b
+             head 207a045 Merge task/p1-040-scaling-migration into roadmap/v2.2
+             dirty 0 file(s), 0 unpushed, card 209m
+             NEXT Ordered. 1-4 are accessibility (P2-003) and are what this unit sho
 
-  p1-062     dead 94m   P1-062                             task/p1-062-chaos
-             head 481fc579 Merge task/followups-r18 into roadmap/v2.2
-             dirty 2 file(s), ? unpushed, card 113m
-             NEXT Nothing done yet. Start with criterion 3 — reproducible diagnostic
+  p1-062     dead 242m                                     task/p1-062-chaos-2
+             head bd8bf1ee test(chaos): a check that claimed more scope than it 
+             dirty 0 file(s), 0 unpushed, card 242m
+             NEXT Round 2, branch `task/p1-062-chaos-2`, worktree `/var/tmp/apex-wor
+
+  p2-virt    dead 193m  P2-008,P2-009                      task/p2-virt
+             head 498fdb0e fix(vm): three defects a review found before the lab 
+             dirty 1 file(s), 0 unpushed, card 238m
+             NEXT Nothing done yet. Survey what `apexd` already has for VMs before w
+
+  p2-016     dead 194m  P2-016                             task/p2-016-multiuser
+             head 82984e71 test(remote): a paired device belongs to an account, 
+             dirty 4 file(s), 0 unpushed, card 199m
+             NEXT **Round 1 complete. Five commits, all pushed** to `task/p2-016-mul
+
+  p1-053a-r3 dead 193m  P1-054,P1-055                      task/p1-053a-android-3
+             head dba4c319 feat(android): the agent model, checked against the d
+             dirty 4 file(s), 0 unpushed, card -
+             NEXT (no card)
+
+  p1-063     dead 193m  P1-063                             task/p1-063-lid
+             head 2401a57c feat(lid): the apex lid driver, and a thermal guard m
+             dirty 1 file(s), 0 unpushed, card 215m
+             NEXT Polkit is settled (above). Next: `apexd-core/src/lid.rs` — the pur
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 481fc579 Merge task/followups-r18 into roadmap/v2.2
-    task/p1-014-cf-environments
-      a67eb704 feat(secret): section 13.8 environment protection, as a one-s   [1/10 added lines on tip]
-      4d987517 test(secret): the approval race test could not fail, so it wa   [0/10 added lines on tip]
-      7f4475dd feat(cf): section 13.13 worktree previews, with ownership rea   [2/10 added lines on tip]
-    task/p1-025-plugin-trust
-      074989ae feat(agent): curate the MCP configuration a session is launch   [2/10 added lines on tip]
-      d214dae2 test(agent): prove a plugin's server is confined by making it   [4/10 added lines on tip]
-    task/p1-053a-android
-      00608951 feat(android): the APEX Remote protocol as a pure-JVM module   [0/10 added lines on tip]
-      7fccc335 test(android): 79 JVM tests, and the two that make the rest m   [0/10 added lines on tip]
-      74ecba13 build(android): an Android app module that assembles, and the   [0/10 added lines on tip]
-    task/p2-b-round18
-      15283c02 test(a11y): walk the greeter's accessibility tree over AT-SPI   [2/10 added lines on tip]
-      88877e7d test(a11y): mutate the AT-SPI suite, and correct what the har   [0/10 added lines on tip]
-      8477dcbc test(a11y): make the surface discover the a11y bus, not be ha   [0/10 added lines on tip]
-      39f20442 feat(installer): name every field, and audit the installer wi   [0/10 added lines on tip]
+  int-os:  tip c8586195 fix(test): the erase fixture named two loop devices a
+    task/p1-053a-android-3
+      a9822417 feat(android): a terminal emulator that answers the questions   [0/10 added lines on tip]
+      516b347a test(android): the terminal, held to the criteria one propert   [0/10 added lines on tip]
+      b88a899c feat(android): the multiplexer, and reconnect that is re-atta   [0/10 added lines on tip]
+      dba4c319 feat(android): the agent model, checked against the desktop's   [1/10 added lines on tip]
+    task/p1-063-lid
+      d2b4a898 feat(lid): P1-063 lid-closed policy, as a total function over   [1/10 added lines on tip]
+      2401a57c feat(lid): the apex lid driver, and a thermal guard measured    [0/10 added lines on tip]
+    task/p2-016-multiuser
+      7e7111d6 fix(origin): a process that names its own scope was being obs   [0/10 added lines on tip]
+      b823f811 test(secret): the cross-account test was answered by passwd,    [1/10 added lines on tip]
+      3054f007 fix(paths): the second account on a machine could not start a   [0/10 added lines on tip]
+      f1cc2578 feat(shared-machine): guest disposability and a kiosk recipe,   [0/10 added lines on tip]
+      82984e71 test(remote): a paired device belongs to an account, and noth   [0/10 added lines on tip]
+    task/p2-virt
+      27e20bd6 feat(vm): apex vm — rootless, headless, Secure-Boot-enforcing   [1/10 added lines on tip]
+      36e38d06 test(vm): 94 assertions against the shipped engine, and the X   [0/10 added lines on tip]
+      498fdb0e fix(vm): three defects a review found before the lab could hi   [1/10 added lines on tip]
 
-  int-shell:  tip 34fef17 Merge task/p0-021-agent-parity into roadmap/v2.2
+  int-shell:  tip 6e74101 Merge task/p1-040-scaling-finish into roadmap/v2.2
     fix/labwc-desktop-parity  — squash-merged, safe to delete
       landed whole as f609a6c fix(labwc): complete desktop parity (#6)
     fix/popup-first-open-and-media-keys  — squash-merged, safe to delete
@@ -82,12 +99,7 @@ APEX ROADMAP — resume report — 2026-09-12 12:03 AWST
       landed whole as 4e267eb fix: screenshots and popup input regions off Hyprland (#
     task/p0-016-agent-settings  — squash-merged, safe to delete
       landed whole as 4335e42 fix(agents): the sudo caveat was written before no_new_p
-    task/p1-040-scaling-migration
-      a45cca8 fix(shell): the bar's notch widths stop crossing the window bo   [0/10 added lines on tip]
-      7e4a015 feat(shell): one shared ThemeSet per factor, derived from the    [0/10 added lines on tip]
-      4584fca feat(shell): every surface sizes itself from the output it is    [2/10 added lines on tip]
-      57111a0 fix(shell): each surface builds its own token set; the shared    [1/10 added lines on tip]
-      f5787d3 fix(shell): a popup is sized by the output it is anchored to,    [1/10 added lines on tip]
+    (nothing — every task branch's content is on the integration tip)
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -97,19 +109,20 @@ APEX ROADMAP — resume report — 2026-09-12 12:03 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 2min 41s Sat
+  snapshot timer: active   last 1min 2s Sat
   wip refs:
     apex-os    dd3496b  apex-os-
-    apex-os    8177750  int-os-
-    apex-os    d9963d4  roadmap-state
+    apex-os    ec48aa8  int-os-
+    apex-os    5ca54d3  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
-    apex-os    55f08ae  wt-base-os-
+    apex-os    f00797c  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
     apex-os    1951fdc  wt-disposable-
     apex-os    2e3bbcd  wt-editors-
     apex-os    31a3d16  wt-editors2-
     apex-os    7ebac77  wt-followups-
     apex-os    59b7328  wt-followups-int3-
+    apex-os    884b151  wt-followups2-
     apex-os    0683355  wt-greeter-os-
     apex-os    c74f38d  wt-multilib2-
     apex-os    0fd2d78  wt-p0-002-
@@ -123,9 +136,8 @@ APEX ROADMAP — resume report — 2026-09-12 12:03 AWST
     apex-os    746639a  wt-p0-014-
     apex-os    580c657  wt-p0-019-os-
     apex-os    00c1973  wt-p0-025-os-
-    apex-os    2c9c560  wt-p0-finish-
-    apex-shell 5f8e8fb  apex-shell-
-    apex-shell df979e1  int-shell-
+    apex-shell 6736eb7  apex-shell-
+    apex-shell c53747d  int-shell-
     apex-shell 68c971d  wt-base-shell-
     apex-shell c8f1e50  wt-editors2-shell-
     apex-shell 75049cf  wt-greeter-shell-
@@ -146,19 +158,18 @@ APEX ROADMAP — resume report — 2026-09-12 12:03 AWST
     apex-shell f10daa7  wt-p1-039-
     apex-shell 589d611  wt-p1-040-
     apex-shell 71c31b7  wt-p1-040b-
+    apex-shell 6e781d3  wt-p1-040c-
     apex-shell 086727e  wt-p1-044-shell-
     apex-shell fb019fa  wt-p1-048-
-    apex-shell 8b2c759  wt-p1-052-shell-
 
 ────────────────────────────────────────────────────────────────────────────
   next
 ────────────────────────────────────────────────────────────────────────────
-  7 agent(s) dispatched, ceiling 6
+  10 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
     p1-014         P1-014,P1-015,P1-016,P1-017      Cloudflare environment protection, worktree preview environm
     p1-025         P1-025,P1-026,P1-027,P1-028      Skill inventory and audit, plugin provenance and isolation, 
-    p1-040-per-output-scaling P1-040                           Per-output scaling: two densities, two sizes, one shell
     p1-053a        P1-053,P1-054,P1-055             Android app foundation, Agent Center parity, full PTY/TUI re
     p2-b           P2-003,P2-004                    Accessibility baseline and internationalisation baseline
 
@@ -184,7 +195,7 @@ APEX ROADMAP — resume report — 2026-09-12 12:03 AWST
   COMPLETE (every roadmap item done — not offered again).
   This says the WORK is done, not that it is landed — check the
   unlanded section above before assuming roadmap/v2.2 carries it:
-    p0-014, p1-018, p1-020, p1-023, p1-035, p1-044, p2-e
+    p0-014, p1-018, p1-020, p1-023, p1-035, p1-040-per-output-scaling, p1-044, p2-e
 
 ────────────────────────────────────────────────────────────────────────────
   how to resume
