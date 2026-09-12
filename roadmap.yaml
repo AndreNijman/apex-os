@@ -3222,18 +3222,32 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Accessibility baseline. LANDED 2026-09-12 (apex-shell merge 1417402, apex-os merge f6eefd0d). MEASURED RATHER
-    THAN GREPPED, which is what this item's earlier rounds lacked: the shared settings controls name themselves
-    and answer the keyboard (a11y-controls 21), the greeter is asserted for accessibility and layout (greet-a11y
-    22, greet-layout 25), and Reduce Motion is measured for HOW FAR IT ACTUALLY REACHES rather than being read off
-    a property (reduce-motion 12). 69f59cb0 also fixed CI to actually RUN the greeter accessibility suite and made
-    its staging portable - it had been present and not executed. STILL PARTIAL, with each gap named as an
-    assertion rather than a topic: the AT-SPI walk cannot be performed because at-spi registryd will not activate
-    in the harness, so 'screen reader validated' is unproven; popups/ and NavPane use bespoke widgets that the
-    shared-control work does not cover; the image ships ZERO accessibility packages, so magnifier and high-
-    contrast have nothing to validate; and no RTL fonts are present. The keyboard-only path is covered by the
-    controls work; screen reader, magnifier and high contrast are not, and closing them needs packages in the
-    image first - which is a decision about what APEX ships, not a test to write.
+    Accessibility baseline. ROUND 3 LANDED on apex-os roadmap/v2.2 2026-09-12 as merge b6920252
+    (task/p2-b-round18b, which carries round 18's own branch via 2d4d0d26 - that round had never reached the
+    integration tip). ASSERTED, not swept for, and the suites are: tests/test-apex-greet-a11y.sh 22, tests/test-
+    apex-greet-layout.sh 25, tests/test-apex-greet-atspi.sh 30 (LOCAL ONLY, not in CI), tests/test-apex-greet-
+    session-bus.sh 16 (new, 6/6 mutants), installer/test-installer-a11y.sh 51 local and 47 plus 4 skipped in CI
+    (8/8 mutants, run twice), tests/test-apex-a11y-stack.sh 13 (new, 4/4 mutants), plus apex-shell
+    tests/run-a11y-controls-test.sh 21 and tests/check-reduce-motion.sh 12. THREE DEFECTS NOTHING WAS LOOKING FOR:
+    (1) the keyboard could not leave a page - the audit's own section titled 'fill the page in AND MOVE ON' never
+    moved on, so a primary button could be reachable, named, announced and inert; now Tab to Begin then Return
+    then Space, each in its own process, each required to produce the next page's sentinel AND to leave the old
+    one's button gone. (2) The wifi page has two shapes: with no adapter the installer builds a different page
+    entirely, and the audit waited 40s for an impossible sentinel and then blamed the installer. (3) A masking
+    assertion passing about an empty field - CI's xdotool type delivered nothing and 'the password never crosses
+    the bus' passed anyway, which is true of a field nobody typed into; now gated on the read-back, text via
+    XTEST, and where no mechanism delivers it the result is a named could-not-run rather than a red line blaming
+    the installer. STAYS PARTIAL, and each reason is named rather than implied: the greeter is unreadable in
+    production and that is now ASSERTED rather than fixed - it has no D-Bus session bus and a dbus-run-session
+    one-liner is not the fix, because a11y-bus activation is refused here (SELinux on this machine, no .service
+    file on the runner), and it was deliberately not attempted because greetd is boot-critical and cannot be
+    exercised headlessly here; orca ships but nothing can start it, with no keybinding and no toggle; greet-atspi
+    still runs on one laptop only, needing a wlroots compositor in the Fedora container; the Tab ring is walked on
+    one installer page; the text-entry pair is measured on this laptop only; magnifier, sticky keys, slow keys,
+    mouse keys and the on-screen keyboard are absent; and high-contrast is a Hyprland shader rather than an
+    accessibility feature. orca's cost, measured rather than estimated: 5 packages, 4 MiB down, 23 MiB installed,
+    recorded in docs/update-cost.md beside the AI apps' 1.9 GB because the pair is what makes the tier rule
+    legible.
 - id: P2-004
   title: Internationalisation baseline
   priority: P2
