@@ -100,7 +100,12 @@ apex_update_hits() {
 
 sec "the harness may not touch the boot path"
 violations=""
-for f in "$CHAOS"/run-chaos "$CHAOS"/lib.sh "$CHAOS"/cases/*.sh; do
+# chaos-loop is in this list for a reason worth stating: it was NOT, and the
+# ok-line below still said "no file under tests/chaos/". The file was clean, so
+# nothing was wrong with the tree — but the claim was wider than the check that
+# backed it, which is this unit's entire subject appearing in the file that
+# exists to refuse it.
+for f in "$CHAOS"/run-chaos "$CHAOS"/chaos-loop "$CHAOS"/lib.sh "$CHAOS"/cases/*.sh; do
     [[ -e "$f" ]] || continue
     h="$(boot_path_hits "$f")"
     [[ -n "$h" ]] && violations+="${f#"$REPO"/}: $h"$'\n'
@@ -361,6 +366,47 @@ else
     bad "the guard marker does not name what was run" \
         "$(cat "$GB/unrooted-subject-invocations" 2>/dev/null)"
 fi
+
+sec "a staged case is never in a default run"
+# This mechanism is the only thing keeping reboot-loop — five VM boots needing
+# /dev/kvm, podman and a built boot lab — from turning every PR red on a runner
+# that has none of them. Nothing tested it.
+mkcase stagedcase <<'CASE'
+CASE_NEEDS=""
+CASE_STAGED=1
+case_setup()   { :; }
+case_inject()  { :; }
+case_prove()   { return 0; }
+case_observe() { echo observed; }
+case_judge()   { _chaos_fail "a staged case ran without being asked for"; }
+CASE
+listing="$(env APEX_BIN=/bin/true "$CHAOS/run-chaos" --cases-dir "$CASES" --list 2>&1)"
+if sed -n '/^staged/,$p' <<<"$listing" | grep -q 'stagedcase'; then
+    ok "--list puts it under staged"
+else
+    bad "a CASE_STAGED=1 case is not listed as staged" "$listing"
+fi
+if sed -n '/^default:/,/^staged/p' <<<"$listing" | grep -q 'stagedcase'; then
+    bad "a staged case is also in the default list" "$listing"
+else
+    ok "…and not in the default list"
+fi
+# And the half that matters: a no-argument run must not run it. Its judge fails
+# unconditionally, so if it ran at all the verdict is red.
+drc=0
+env APEX_BIN=/bin/true APEX_TRUST_ROOT="$TMP/fixture" \
+    "$CHAOS/run-chaos" --out "$TMP/out-default" --cases-dir "$CASES" --seed 5 \
+    > "$TMP/default.log" 2>&1 || drc=$?
+if [[ -e "$TMP/out-default/stagedcase" ]]; then
+    bad "a default run executed the staged case" "$(tail -3 "$TMP/default.log")"
+else
+    ok "a run with no arguments did not execute it"
+fi
+# Asked for by name, it runs — or "staged" would just mean "disabled", and a
+# case nobody can invoke is worse than no case.
+run_case stagedcase
+is "asked for by name it runs, and its verdict is judged" "$STATE" "failed"
+rm -f "$CASES/stagedcase.sh"
 
 sec "a malformed case is the harness's problem, not a verdict"
 printf 'CASE_TITLE=""\n' > "$CASES/broken.sh"
