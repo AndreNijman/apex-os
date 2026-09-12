@@ -21,6 +21,17 @@
 //! * The camera and audio device nodes, and whether this user can open them —
 //!   `access(2)`, which answers through the POSIX ACL rather than around it.
 //!
+//! ## The one test-only lever, named as one
+//!
+//! `APEX_PERM_DEV_ROOT` replaces `/dev` as the directory the camera and audio
+//! nodes are looked for in. It exists because the native row's whole subject is
+//! a device node, so a machine with no webcam — every CI runner — produces
+//! `NoPrimitive` and a test asserting the ACL sentence passes or fails on
+//! whether the developer's laptop has a camera. A fixture makes that assertion
+//! mean what it says. It is read once, in [`probe_session`], and changes only
+//! where the nodes are looked for; every other answer on the row is derived the
+//! same way it always is.
+//!
 //! ## The one heuristic, named as one
 //!
 //! Whether the compositor hands out a screen-copy protocol to any client that
@@ -196,11 +207,13 @@ pub fn probe_session() -> Session {
         .map(str::to_string)
         .collect();
 
-    let camera_node = first_matching("/dev", |n| {
+    let dev = std::env::var("APEX_PERM_DEV_ROOT").unwrap_or_else(|_| "/dev".into());
+    let camera_node = first_matching(&dev, |n| {
         n.starts_with("video") && n[5..].chars().all(|c| c.is_ascii_digit())
     });
-    let audio_capture_node =
-        first_matching("/dev/snd", |n| n.starts_with("pcmC") && n.ends_with('c'));
+    let audio_capture_node = first_matching(&format!("{dev}/snd"), |n| {
+        n.starts_with("pcmC") && n.ends_with('c')
+    });
 
     // The ACL question is asked of whichever node exists. `false` when there
     // is no node at all is right: nothing to be granted.
