@@ -2,13 +2,14 @@ package com.apexos.remote.security
 
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
-import android.security.keystore.UserNotAuthenticatedException
 import com.apexos.remote.core.SecretBox
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 
 /**
@@ -25,40 +26,61 @@ import javax.crypto.spec.GCMParameterSpec
  * ## Two levels of gate, and why the split is by API and not by taste
  *
  * The wrapping key is created with `setUserAuthenticationRequired(true)`, so
- * unwrapping needs the user present. *How* present differs:
+ * using it needs the user present. *How* present differs:
  *
  * * **API 30 and above** — `setUserAuthenticationParameters(0, BIOMETRIC_STRONG
- *   or DEVICE_CREDENTIAL)`. Timeout zero means per-use: every single unwrap
+ *   or DEVICE_CREDENTIAL)`. Timeout zero means per-use: every single operation
  *   needs a fresh authentication, and the PIN counts. That is the behaviour
  *   this app wants everywhere.
  * * **API 28 and 29** — the parameter object does not exist, and the older
  *   `setUserAuthenticationValidityDurationSeconds` has one shape that is
- *   per-use (`-1`) and it accepts **biometrics only**. A device credential
- *   cannot satisfy a per-use gate there at all. So those two releases get the
- *   per-use biometric gate, which is strictly the stronger of the two options
- *   available, and a phone with no enrolled biometric falls back to
- *   [insecureFallbackReason] rather than silently storing a key with no gate.
+ *   per-use (`-1`) and it accepts **biometrics only**. That is not this file's
+ *   preference: `androidx.biometric` refuses the combination outright below 30,
+ *   in so many words — *"Crypto-based authentication is not supported for
+ *   device credential prior to API 30."* [AppLock.authenticators] makes the
+ *   same split for the same reason, and the two must not drift apart. A phone
+ *   with no enrolled biometric falls back to [insecureFallbackReason] rather
+ *   than silently storing a key with no gate at all.
+ *
+ * ## Both directions are gated, and the earlier claim that sealing was free
+ * ## was simply wrong
+ *
+ * An earlier draft of this file asserted that encryption was exempt from the
+ * user-authentication requirement, and used that to avoid a prompt during
+ * pairing. It is not exempt. `KeyGenParameterSpec`'s own documentation says of
+ * `setUserAuthenticationRequired`: *"This authorization applies only to secret
+ * key and private key operations. Public key operations are not restricted."*
+ * An AES key is a secret key, so **sealing is gated exactly as opening is** —
+ * the exemption is for the public half of an asymmetric pair, which this design
+ * does not have. A `seal()` that skipped the prompt would have thrown on a real
+ * phone, at the end of pairing, after the desktop had already burnt the token.
+ *
+ * So there are two prompted pairs: [beginSeal]/[finishSeal] and
+ * [beginOpen]/[finishOpen].
  *
  * ## Per-use means the Cipher rides in the prompt
  *
  * A key gated per-use cannot be initialised and then used later: the
- * authentication authorises *one* `Cipher`. So [beginOpen] initialises the
- * cipher, [AppLock] carries it through `BiometricPrompt.CryptoObject`, and the
- * `doFinal` happens on the cipher the prompt hands back. Initialising a cipher
- * that needs authentication throws [UserNotAuthenticatedException], and that
- * throw is the signal to show the prompt — not an error.
- *
- * ## Sealing is not gated; opening is
- *
- * [seal] uses a `Cipher` in encrypt mode, which the keystore permits without
- * authentication even on a key that requires it for decryption. That is
- * deliberate rather than incidental: gating the seal as well would mean two
- * biometric prompts during a single pairing — one to store the new key, one to
- * use it — for no gain, because the thing being protected is the *reading* of
- * an existing key and there is nothing yet to read.
+ * authentication authorises *one* `Cipher`. `Cipher.init` succeeds — it begins
+ * a keystore operation — and it is `doFinal` that needs the operation to have
+ * been authorised. So [beginOpen] initialises the cipher, [AppLock] carries it
+ * through `BiometricPrompt.CryptoObject`, and the `doFinal` happens on the
+ * cipher the prompt hands back. (`UserNotAuthenticatedException` at `init` is
+ * the *time-bound* flavour of this gate, which this file deliberately does not
+ * use: a window during which the key works is a window during which a phone
+ * taken out of a hand works.)
  */
 class KeystoreSecretBox private constructor(
     private val key: SecretKey,
+    /**
+     * Whether this key really is gated — read back off the key, not echoed
+     * from what the caller asked for.
+     *
+     * The difference matters: [describe] and the `user_verification` flag in
+     * the pairing request are both claims made to somebody else, and a claim
+     * assembled from the caller's own intention is the exact "I put it
+     * somewhere safe" statement this design refuses to make.
+     */
     val authenticationIsRequired: Boolean,
 ) : SecretBox {
 
@@ -70,30 +92,44 @@ class KeystoreSecretBox private constructor(
         }
 
     /**
-     * Wrap the device key.
+     * Wrap the device key, on a box that needs no prompt.
      *
-     * The IV is chosen by the keystore, not by this code: a keystore key is
-     * created with randomized encryption required, and supplying an IV is
-     * refused. It is read back off the initialised cipher and stored in front
-     * of the ciphertext, which is the only place it can come from at unwrap
-     * time.
+     * Only reachable when [authenticationIsRequired] is false — a phone with no
+     * screen lock. On a gated key the keystore refuses this at `doFinal`, which
+     * is why [beginSeal] exists and why `MachineStore.record` is handed an
+     * already-authorised box rather than this one.
      */
-    override fun seal(plaintext: ByteArray): ByteArray {
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, key)
+    override fun seal(plaintext: ByteArray): ByteArray =
+        finishSeal(beginSeal(), plaintext)
+
+    /**
+     * Unwrap directly. Same rule: only for an ungated key.
+     */
+    override fun open(ciphertext: ByteArray): ByteArray =
+        finishOpen(beginOpen(ciphertext), ciphertext)
+
+    /** An initialised encrypting cipher, ready to go into a `CryptoObject`. */
+    fun beginSeal(): Cipher = Cipher.getInstance(TRANSFORMATION).apply {
+        // No IV is supplied. A keystore key created with randomized encryption
+        // required refuses one; the keystore chooses it, and it is read back
+        // off the cipher afterwards.
+        init(Cipher.ENCRYPT_MODE, key)
+    }
+
+    /**
+     * Finish a wrap on the cipher the prompt authorised.
+     *
+     * The IV goes in front of the ciphertext because that is the only place it
+     * can come from at unwrap time — the keystore chose it and nothing else
+     * recorded it.
+     */
+    fun finishSeal(cipher: Cipher, plaintext: ByteArray): ByteArray {
         val iv = cipher.iv
         check(iv.size == IV_BYTES) { "the keystore produced a ${iv.size}-byte IV" }
         // A copy, because `SecretBox.seal` promises not to retain the array it
         // is given and the caller wipes it the instant this returns.
         return iv + cipher.doFinal(plaintext.copyOf())
     }
-
-    /**
-     * Unwrap directly. Throws [UserNotAuthenticatedException] on a gated key,
-     * which is [AppLock]'s cue rather than a failure.
-     */
-    override fun open(ciphertext: ByteArray): ByteArray =
-        finishOpen(beginOpen(ciphertext), ciphertext)
 
     /**
      * An initialised decrypting cipher for [ciphertext], ready to go into a
@@ -126,17 +162,15 @@ class KeystoreSecretBox private constructor(
          *
          * [requireAuthentication] false is for the case where the phone can
          * enrol nothing at all; the caller is expected to have told the user
-         * so, and [authenticationIsRequired] records which happened so the
-         * pairing request can report it honestly rather than always claiming a
-         * second factor it may not have.
+         * so. What comes back reports the gate the key *has*, read off the key
+         * itself, which is not always the gate that was asked for — a key
+         * created by an older build of this app is the obvious case.
          */
         fun forDevice(deviceId: String, requireAuthentication: Boolean = true): KeystoreSecretBox {
             val alias = aliasFor(deviceId)
             val store = KeyStore.getInstance(PROVIDER).apply { load(null) }
             val existing = store.getKey(alias, null) as SecretKey?
-            if (existing != null) {
-                return KeystoreSecretBox(existing, requireAuthentication)
-            }
+            if (existing != null) return KeystoreSecretBox(existing, gateOn(existing))
             val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)
             val spec = KeyGenParameterSpec.Builder(
                 alias,
@@ -159,23 +193,43 @@ class KeystoreSecretBox private constructor(
                             KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL,
                         )
                     } else {
-                        // API 28-29. `-1` is per-use and biometrics only; there
-                        // is no per-use device-credential option on these
-                        // releases, so this is the strongest gate available.
+                        // API 28-29. `-1` is per-use and biometrics only, which
+                        // is not a preference: androidx.biometric refuses a
+                        // CryptoObject with DEVICE_CREDENTIAL below API 30.
                         @Suppress("DEPRECATION")
                         setUserAuthenticationValidityDurationSeconds(-1)
                     }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        // A new fingerprint enrolled after pairing invalidates
-                        // this key, which is the point: somebody who can add a
-                        // finger to an unlocked phone must not thereby inherit
-                        // a paired device identity. Re-pairing is the recovery.
-                        setInvalidatedByBiometricEnrollment(true)
-                    }
+                    // A new fingerprint enrolled after pairing invalidates this
+                    // key, which is the point: somebody who can add a finger to
+                    // an unlocked phone must not thereby inherit a paired
+                    // device identity. Re-pairing is the recovery.
+                    setInvalidatedByBiometricEnrollment(true)
                 }
                 .build()
             generator.init(spec)
-            return KeystoreSecretBox(generator.generateKey(), requireAuthentication)
+            val created = generator.generateKey()
+            return KeystoreSecretBox(created, gateOn(created))
+        }
+
+        /**
+         * The gate a key actually carries.
+         *
+         * Asked of the keystore rather than remembered, because the two can
+         * differ — an alias created by an older build, a device whose secure
+         * lock screen was removed and re-added — and because a security
+         * property the app merely believes in is not one.
+         *
+         * A key the factory will not describe is treated as **ungated**. That
+         * is the pessimistic reading and it is the right one: the consequence
+         * is an honest [describe] and a pairing request that does not promise a
+         * second factor, where the optimistic reading would promise one that
+         * may not exist.
+         */
+        private fun gateOn(key: SecretKey): Boolean = try {
+            val factory = SecretKeyFactory.getInstance(key.algorithm, PROVIDER)
+            (factory.getKeySpec(key, KeyInfo::class.java) as KeyInfo).isUserAuthenticationRequired
+        } catch (_: Exception) {
+            false
         }
 
         /** Forget a machine's wrapping key. The sealed bytes become noise. */

@@ -4,6 +4,7 @@ import com.apexos.remote.core.Client
 import com.apexos.remote.core.InMemoryStaticKey
 import com.apexos.remote.core.MachineStore
 import com.apexos.remote.core.PairedMachine
+import com.apexos.remote.core.PairingAnswer
 import com.apexos.remote.core.PairingOffer
 import com.apexos.remote.core.SecretBox
 import com.apexos.remote.core.Session
@@ -24,22 +25,41 @@ import kotlinx.coroutines.withContext
  */
 class PairingService {
     /**
-     * Try each LAN address the offer named, in order, and pair with the first
-     * that answers.
+     * Pair with the machine whose QR code produced [offer], and return the
+     * record to store.
      *
-     * None of the addresses is authenticated and none needs to be: reaching the
-     * wrong one produces a handshake that does not complete, not a connection
-     * to the wrong machine. So "try them all" is safe in a way it would not be
-     * in a protocol that trusted an address.
+     * The addresses in the offer are tried in order and none of them is
+     * authenticated — none needs to be. Reaching the wrong one produces a
+     * handshake that does not complete, not a connection to the wrong machine,
+     * so "try them all" is safe here in a way it would not be in a protocol
+     * that trusted an address.
      */
     suspend fun pair(
         offer: PairingOffer,
         deviceName: String,
-        box: SecretBox,
+        boxFor: suspend (deviceId: String) -> SecretBox,
         userVerification: Boolean,
         nowMs: Long,
-    ): PairedMachine = withContext(Dispatchers.IO) {
+    ): PairedMachine {
+        // The identity is generated here and not by the caller, because "a
+        // fresh key per machine" is a property of pairing rather than a choice
+        // a screen should be able to get wrong. The box, on the other hand, is
+        // the caller's: the keystore alias is derived from the device id, which
+        // does not exist until this line has run, and on Android obtaining the
+        // box raises a biometric prompt that must happen on the main thread.
+        // Hence a function of the id rather than a value — and hence a `suspend`
+        // one.
         val identity = InMemoryStaticKey.generate()
+        val answer = handshake(offer, identity, deviceName, userVerification)
+        return MachineStore.record(identity, offer, answer, boxFor(identity.deviceId()), nowMs)
+    }
+
+    private suspend fun handshake(
+        offer: PairingOffer,
+        identity: InMemoryStaticKey,
+        deviceName: String,
+        userVerification: Boolean,
+    ): PairingAnswer = withContext(Dispatchers.IO) {
         var lastFailure: Exception? = null
         for (address in offer.lan) {
             val socket = try {
@@ -48,8 +68,14 @@ class PairingService {
                 lastFailure = e
                 continue
             }
+            // Only a *connection* failure moves on to the next address. Once a
+            // socket is open the exception from inside it propagates, and that
+            // is deliberate: a refusal, a spent token or a machine that could
+            // not prove it holds the key from the QR code are all answers, and
+            // trying the same desktop again on its other IP would produce the
+            // same answer while burning the offer a second time.
             socket.use {
-                val answer = Client.pair(
+                return@withContext Client.pair(
                     input = it.getInputStream(),
                     output = it.getOutputStream(),
                     offer = offer,
@@ -57,7 +83,6 @@ class PairingService {
                     deviceName = deviceName,
                     userVerification = userVerification,
                 )
-                return@withContext MachineStore.record(identity, offer, answer, box, nowMs)
             }
         }
         throw NoRouteToMachine(

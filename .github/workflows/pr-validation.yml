@@ -1740,8 +1740,16 @@ jobs:
           # The figure at the time this job was written. A drop means tests
           # stopped running, which is the failure this step exists to catch; a
           # rise is fine and the floor moves with it.
-          test "$total" -ge 81 \
-            || { echo "::error::only $total protocol tests ran; expected at least 81"; exit 1; }
+          test "$total" -ge 86 \
+            || { echo "::error::only $total protocol tests ran; expected at least 86"; exit 1; }
+
+      # The rule InsecureStorageTest rests on. That test walks a directory and
+      # accounts for every byte in it, which is evidence about app storage only
+      # while AppStorage really is the only thing that writes there. A
+      # preferences file or a scrollback cache would be a second place for a key
+      # to land and one the walk never looks at.
+      - name: App storage has exactly one writer
+        run: ./tools/no-second-write-path.sh
 
       # The Android half. `assembleDebug` is as far as a machine with no device
       # can go: it proves the app compiles, links against `:core`, resolves
