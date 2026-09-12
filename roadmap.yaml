@@ -2036,11 +2036,17 @@ tasks:
     a directory reached by two routes counted twice), and digest.rs's exclusion matching by name rather than by
     key takes the unit suite 522/0 -> 521/1, where the excluded list became [.in_use, tools/.in_use] and an
     EXECUTABLE left the digest. Clippy PASS, cargo test --workspace --no-fail-fast 0 failures over five clean
-    repeats.
+    repeats. ROUND 4 (branch task/p1-025-plugin-trust-4, pushed, unmerged at the time of writing) did not change
+    skill.rs and does not change this answer. It moved the suite that guards it: tests/test-apex-skill.sh is 96
+    passed / 0 failed with --with-binary (82/0 was round 2's number) and 38/0 structural, and the suite gained a
+    third answer - skipped() prints a '----' line and a 'N could not run' total that is deliberately NOT added to
+    PASS, because a check that quietly did not happen is how a suite reports 82/0 about something it never
+    measured. The one check that can report it is the live plugin-removal test, which needs a claude CI does not
+    install.
 - id: P1-026
   title: Plugin/marketplace provenance and isolation
   priority: P1
-  status: partial
+  status: done
   area: agent-profile
   depends_on:
   - P0-009
@@ -2052,59 +2058,97 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Plugin and marketplace provenance and isolation. CRITERION 1 DONE, unchanged since the 2026-09-11 landing
-    (merge ba105394, apexd/apex/src/provenance.rs plus apex provenance show/record): marketplace origin and
-    commit/hash are tracked, and provenance here means the hash of what RUNS rather than a recorded URL nobody
-    re-checks. Two mutation pairs prove the parts that matter, both of the permission-denied-is-not-absence class:
-    provenance.rs's 'git status could not run' arm flipped to Some(false) takes 522/0 -> 521/1 on
-    a_git_status_that_could_not_run_is_not_a_clean_working_tree, and the EACCES arm collapsed to None takes 522/0
-    -> 521/1 on a_registry_that_is_there_and_refused_is_not_a_registry_that_is_absent. Both were checked for
-    VACUITY rather than assumed. The baseline is trust-on-first-use and is labelled as that everywhere, because
-    nobody signs a Claude Code plugin. CRITERION 2 ADVANCED TWICE AND IS STILL PARTIAL, and the remainder has
-    MOVED, so the old wording no longer describes it. Round 1 (merge 564fffd5) built the mechanism: apex-agentd
-    writes a curated MCP configuration and starts the agent with --strict-mcp-config, so every third-party
-    definition - a plugin's or a repository's - is rewritten to start through apex mcp run and bubblewrap confines
-    it. That is proved by a plugin server OBSERVED failing to escape, not by a grep: apex/tests/mcp_launch_live.rs
-    runs the real wrapped argv and the probe fails to read a file in the real home that is definitely there and
-    fails to reach a listener that is definitely listening, while the same probes run as the bare command SUCCEED
-    - without that inverse a typo would report a sandbox. Round 2 (cbcacfc3, 93ea60f4, 4ac67153, 7f0038d3) found
-    that all three of APEX's own readouts still answered the pre-round-1 question - they asked whether the
-    definition ON DISK names the wrapper - and so printed 'NOT sandboxed' about servers every APEX-started session
-    confines. mcpconf::Wrap now has four values and the two ways of being sandboxed are never merged: InDefinition
-    survives anybody starting the agent, AtLaunch holds only where the launch file is read. apex mcp list, apex
-    mcp planes and apex provenance show read their verdict out of one function, connector::launch_verdicts, so
-    they cannot disagree. A live defect fixed with it: the github plugin's CLOUD endpoint was printed 'NOT
-    sandboxed, though it could be: apex mcp confine would wrap it' - advice for an action apex mcp confine
-    explicitly refuses, about a program that does not exist. WHAT IS STILL SHORT, stated rather than implied. (a)
-    The confinement exists only where APEX starts the session: through apex agent, on an adapter that can be told
-    to ignore every other MCP configuration, which is claude alone today (Adapter::strict_mcp). Type the agent's
-    own name in a terminal and every plugin server starts from the definition the plugin wrote. APEX cannot close
-    that without owning the binary, and the readouts say so in the same sentence as the word sandbox rather than
-    in a footnote. (b) A plugin's HOOKS and shipped executables are run by the agent itself, so APEX adds them no
-    sandbox of its own - they are inside whatever the SESSION is confined to, a real boundary under --sandbox
-    project or strict and none at all under unrestricted. That is now the honest wording, replacing 'nothing in
-    APEX confines them', which understated it. The unbuilt route for (b) is measured and named: claude 2.1.260 has
-    --safe-mode (every customization off, plugins and hooks included) and --bare (skip hooks and plugin sync), so
-    a hardened profile could REMOVE that content rather than confine it - deliberately not wired this round
-    because it is another policy dimension, therefore another protocol version bump, and it would need a live
-    hook-escape test to be more than a grep. NOTE for whoever takes it: the old evidence blamed 'QML plugins run
-    in-process in apex-shell'. That belongs to a different subject - P1-026 is area agent-profile, depends on
-    P0-009/P0-010 which are both about the AGENT's profile, and provenance.rs's own header keeps apex plugin (the
-    shell's QML platform) and apex provenance (Claude Code's marketplace plugins) deliberately apart. It is
-    dropped from this evidence rather than carried forward. Counts: apexd workspace 2880 -> 2888 passed, 0 failed;
-    clippy --locked --workspace --all-targets -D warnings clean. Five mutation pairs this round, each watched red
-    on a NAMED test and restored byte-identical with plain cp: curate's AtLaunch->InDefinition (agent-core 669/0
-    -> 668/1, confined_everywhere 2 not 1), decide's Curated arm made unconditional (connector 12/0 -> 11/1),
-    confinement_line's AtLaunch arm returning the InDefinition sentence (12/0 -> 11/1), build_at reverted to the
-    definition-only reading (provenance 15/0 -> 14/1), describe_sandbox's AtLaunch arm made unreachable (apex bin
-    551/0 -> 550/1). A FIFTH commit, e48234fb, covers the shell suite: tests/test-apex-skill.sh guards this
-    criterion by grepping provenance.rs for the words it may and may not print, and required 'Nothing here
-    confines them' about a plugin's hooks - the wording this round replaced because it understates the case. Left
-    alone it was the one thing on the branch CI would have caught and the cargo tests could not: 73 passed, 1
-    failed. The assertion was replaced by four that are harder to satisfy vacuously rather than deleted - the
-    at-launch sentence, the clause saying where it stops, the hooks wording, and the named case where the session
-    has no sandbox either. tests/test-apex-skill.sh --with-binary: 73/0 on the tip -> 82/0 on this branch. Branch
-    task/p1-025-plugin-trust-2, pushed, unmerged at the time of writing.
+    Plugin and marketplace provenance and isolation. BOTH CRITERIA NOW MET, and criterion 2 took four rounds.
+    Everything below is observed rather than asserted; where it is not, it says so. CRITERION 1 DONE, unchanged
+    since the 2026-09-11 landing (merge ba105394, apexd/apex/src/provenance.rs plus apex provenance show/record):
+    marketplace origin and commit/hash are tracked, and provenance here means the hash of what RUNS rather than a
+    recorded URL nobody re-checks. Two mutation pairs prove the parts that matter, both of the
+    permission-denied-is-not-absence class: provenance.rs's 'git status could not run' arm flipped to Some(false)
+    takes 522/0 -> 521/1 on a_git_status_that_could_not_run_is_not_a_clean_working_tree, and the EACCES arm
+    collapsed to None takes 522/0 -> 521/1 on
+    a_registry_that_is_there_and_refused_is_not_a_registry_that_is_absent. The baseline is trust-on-first-use and
+    is labelled as that everywhere, because nobody signs a Claude Code plugin. CRITERION 2 DONE. 'Executable
+    plugin content runs inside a sandbox' has three legs and each one is now a measurement. LEG 1, the MCP servers
+    a plugin declares: their own bubblewrap. Round 1 (merge 564fffd5) made apex-agentd write a curated MCP
+    configuration and start the agent with --strict-mcp-config, so every third-party definition is rewritten to
+    start through apex mcp run. Proved by a plugin server OBSERVED failing to escape:
+    apex/tests/mcp_launch_live.rs runs the real wrapped argv and the probe fails to read a file in the real home
+    that is definitely there and fails to reach a listener that is definitely listening, while the same probes run
+    as the bare command SUCCEED. That file refuses to skip when bwrap is absent, so a runner without it is a
+    could-not-run and never a pass. LEG 2, a plugin's HOOKS and shipped scripts: they are spawned by the agent
+    itself, before the session has done anything, and no MCP configuration of any kind is involved - so leg 1
+    cannot reach them. They run inside whatever the SESSION is confined to, and that confinement is itself
+    observed rather than argued: tests/test-agent-profile.sh, section 'the mounts a confined session gets', plants
+    $HOME/.ssh/id_ed25519 in a fixture home under /var/tmp, starts a REAL session with apex agent run --sandbox
+    project --network offline against a real apex-agentd, and the agent stand-in reports from inside its own
+    namespace that the file it can see on disk is unreadable - with read_credentials succeeding in the same run as
+    the inverse control, and a done= gate that fails the suite if the stub never executed. CI runs it at
+    pr-validation.yml:1904 in a job that installs bubblewrap and relaxes
+    kernel.apparmor_restrict_unprivileged_userns. A hook is a child of that process, so it is inside that
+    namespace by construction - which is the one joint in this argument that is a kernel property rather than an
+    APEX measurement, and it is named rather than hidden. SandboxPolicy::Project is the default (protocol.rs:307),
+    so this holds without anybody asking for it; under --sandbox unrestricted there is no boundary and apex
+    provenance show says so in the same sentence as the word sandbox. LEG 3, removal, which is what APEX can offer
+    for content it cannot wrap separately: dimension 8, landed round 3 as d02528d3 and finished round 4.
+    apex-agentd writes an enabledPlugins block into the settings document it already passes, so a hardened profile
+    can start the session without the plugin at all. The choice of mechanism was measured across six ways of
+    starting claude 2.1.260: --safe-mode and --bare both take APEX's own hook bridge with them and --safe-mode
+    takes round 1's curated MCP document too, so a profile built on either would silently switch off the
+    confinement it was reached for. Only --settings {enabledPlugins:{...:false}} removes a plugin's hooks while
+    keeping both. The table is in d02528d3's message. THE LIVE PROOF for leg 3, which is what moved this item:
+    round 4's apexd/apex/tests/plugin_removal_live.rs starts the real claude five times against a fixture home
+    holding a real enabled plugin whose SessionStart hook appends to a file, and watches for the mark. Through the
+    real path - pluginconf::read, pluginconf::curate, hook::settings_json, and the adapter's own
+    hook_settings_args - not a hand-written --settings file, which would measure Claude's flag rather than APEX's
+    use of it. Three things stop it being vacuous: the CONTROL runs first with no document at all and the hook has
+    to fire (it did not, for an hour: a plugin can be enabled in settings.json, present in installed_plugins.json
+    and still load as nothing because its marketplace is absent from known_marketplaces.json, and that state reads
+    exactly like a successful removal); both KEEP runs are asserted, separating 'the policy removed it' from
+    '--settings breaks plugins'; and those keep runs calibrate the 30-second window, which is otherwise
+    indistinguishable from a removal. ROUND 4's FOUR OTHER FINDINGS. (1) 6d3ce356: round 3 shipped a fail-open.
+    plugins was in AgentPolicy::dimensions() but not in the version table, and check_daemon_understands maps every
+    name it does not recognise onto POLICY_DIMENSIONS_VERSION - revision 2. Config::policy copies the field
+    straight through, so plugins = none in agent.toml reached that path with no CLI flag at all: the check passed,
+    the daemon dropped the key, and the session loaded every plugin and ran every SessionStart hook with nothing
+    anywhere saying so. PROTOCOL_VERSION 7 -> 8, PLUGIN_POLICY_VERSION = 8, and the table split out as
+    settings_a_daemon_could_drop so it can be asserted without a socket - none of it could be, before. (2)
+    6e3d17aa: --plugins, at all four sites a dimension has to appear at; forward_argv is the one that matters,
+    because a remote run that loses a REMOVAL gives the far end more than was asked for, and --connectors was in
+    forward_argv but not in the test guarding it. (3) 86a64ee9: apex provenance show told a reader their hooks get
+    no sandbox and stopped there, on a tip that had the remedy - the mirror of the defect round 2 spent a commit
+    deleting. One clause naming --plugins none and --plugins curated, plus removableByPluginPolicy in the JSON
+    beside unconfinedExecutableContent, and deliberately NOT offered for a plugin whose only content is an MCP
+    server, because leg 1 already handles that. (4) d542c1f8: five more string literals that lost a backslash and
+    print fourteen to eighteen spaces mid-sentence. WHERE THIS APPLIES, stated as scope rather than as a
+    shortfall, because no build could close it: all three legs exist where APEX starts the session - through apex
+    agent, and leg 1 additionally only on an adapter that can be told to ignore every other MCP configuration,
+    which is claude alone today (Adapter::strict_mcp, read rather than hard-coded). Type the agent's own name in a
+    terminal and APEX is not in the path at all. The readouts say this in the same sentence as the word sandbox
+    and the JSON carries it as appliesOnlyToSessionsStartedBy, because the consumer most likely to over-claim is
+    the one that never reads the prose. WHAT WAS NOT VERIFIED, plainly. The live removal test is #[ignore]d and
+    ran on the L16 ONLY: CI installs no claude, so tests/test-apex-skill.sh --with-binary prints a '----'
+    could-not-run line there and counts it separately from PASS. CI has never held that check - it has only ever
+    reported that it could not run it. And nothing has exercised --plugins through the DAEMON end to end: the
+    running apex-agentd on this laptop answers its handshake with protocol 1 (probed read-only on its own socket),
+    so apex agent run --plugins none is refused with 'the running agent runtime speaks protocol 1 and would ignore
+    --plugins' and no session starts - which is the version guard working, but means the session.rs -> document
+    wiring is unit-tested only. Restarting apex-agentd is Andre's call, not an agent's. Counts: apexd workspace
+    3054 -> 3057 passed, 0 failed (the live test is #[ignore]d and counts in neither); tests/test-apex-skill.sh
+    73/0 -> 96/0 with --with-binary and 38/0 structural; clippy --locked --workspace --all-targets -D warnings
+    clean; shellcheck -S warning -x clean. Nine mutations this round, each watched red on a NAMED test and
+    restored byte-identical with plain cp: 'plugins' dropped from the version filter prints [(plugins, 2),
+    (--plugins, 8)], which IS the defect that was on the tip; --plugins pushed at CONNECTOR_POLICY_VERSION prints
+    [(--plugins, 7)]; PROTOCOL_VERSION back to 7 reddens protocol.rs's
+    every_version_guard_names_a_revision_that_exists; the resolve_policy arm deleted gives AsConfigured where
+    NoPlugins was asked for; the forward_argv row deleted reddens
+    a_remote_run_carries_every_dimension_it_was_given; curate's NoPlugins arm returning true is RED LIVE - a real
+    agent started and the hook observed running - on a_removed_plugins_hook_is_observed_not_to_run; settings_json
+    dropping the enabledPlugins assignment is red live on the curated-keep document; removable_content widened to
+    include mcp reddens the MCP-only case; the remedy clause made unreachable reddens the hooks case. Measured
+    live here: apex provenance show over the real home reports 7 plugins, 1 of them (codex) carrying content only
+    removal reaches, and it now prints the remedy beside the shortfall while the other six correctly do not.
+    Branch task/p1-025-plugin-trust-4 (6d3ce356, 6e3d17aa, f1ca568e, 86a64ee9, d542c1f8), pushed, UNMERGED at the
+    time of writing; round 3 is merged as fa3ae29e and rounds 1-2 as 564fffd5 and the round-2 merge.
 - id: P1-027
   title: Memory provider interface
   priority: P1
@@ -2126,6 +2170,9 @@ tasks:
     development, let alone written to - and the memory view declares that APEX owns no store of its own. Provider
     health and project mapping are visible; there is no migration, forced or otherwise, which is the criterion
     that would have been easiest to fail by building something better and quietly making it the source of truth.
+    ROUND 4 (branch task/p1-025-plugin-trust-4) touched nothing in this item's area; the answer above is unchanged
+    and was re-recorded only so the four items of this unit carry the same round stamp. The live vault was not
+    probed this round either.
 - id: P1-028
   title: Separate local and cloud-side connector trust planes
   priority: P1
@@ -2191,7 +2238,16 @@ tasks:
     Fixture-driven: the suite's run() sets XDG_CONFIG_HOME into the fixture, so the empty list asserted is the
     fixture's and not this machine's. tests/test-apex-skill.sh --with-binary: 73/0 on the tip -> 82/0 on this
     branch. Branch task/p1-025-plugin-trust-2 (cbcacfc3, 93ea60f4, 4ac67153, 7f0038d3, e48234fb), pushed, unmerged
-    at the time of writing; round 1 is merged as 564fffd5.
+    at the time of writing; round 1 is merged as 564fffd5. ROUND 4 (branch task/p1-025-plugin-trust-4, pushed,
+    unmerged at the time of writing) does not change this answer; round 2's branch has since landed. Two updates
+    of fact. First, the counts: tests/test-apex-skill.sh is now 96 passed / 0 failed with --with-binary rather
+    than 82/0, and apexd workspace 3057 passed / 0 failed rather than 2888. Second, the trust planes gained a
+    sibling that the readout now names: dimension 8 (plugin policy, protocol 8), which REMOVES a plugin where
+    dimension 7 confines its MCP servers, because a plugin's hooks are spawned by the agent itself and no MCP
+    document reaches them. apex provenance show prints that remedy beside the shortfall and the JSON carries
+    removableByPluginPolicy - see P1-026. The shell half of criterion 1 is unchanged: apex-shell still has no
+    connector surface, and a dashboard section would be its first security surface rather than the unmet half of
+    this criterion.
 - id: P1-029
   title: Represent local/remote/scheduled/cloud agent lifecycle types
   priority: P1
