@@ -473,9 +473,29 @@ vm_boot() {
 # ── assertions ──────────────────────────────────────────────────────────────
 BOOTV2_PASS=0
 BOOTV2_FAIL=0
+BOOTV2_CANNOT=0
+BOOTV2_CANNOT_WHY=()
 
 ok()   { BOOTV2_PASS=$((BOOTV2_PASS + 1)); printf '  ok   %s\n' "$*" >&2; }
 bad()  { BOOTV2_FAIL=$((BOOTV2_FAIL + 1)); printf '  FAIL %s\n' "$*" >&2; }
+
+# The third word, and it is not a convenience.
+#
+# Some of what L-001 has to qualify depends on the machine the lab runs on —
+# whether the guest kernel offers S3, whether a firmware build with the right
+# properties exists. A check that could not be PERFORMED is neither a pass nor
+# a failure, and this program's standing rule is that COULD-NOT-RUN must never
+# be recorded as either. `ok` would buy a green square by redefining the word;
+# `bad` would report a laptop's kernel configuration as an APEX defect.
+#
+# It does not fail the run — a CI machine without S3 has disproved nothing —
+# but the summary line says COULD-NOT-RUN in capitals and lists every reason,
+# so it cannot be read as green by anyone who reads the line they were given.
+cannot() {
+    BOOTV2_CANNOT=$((BOOTV2_CANNOT + 1))
+    BOOTV2_CANNOT_WHY+=("$*")
+    printf '  ---- COULD-NOT-RUN  %s\n' "$*" >&2
+}
 
 assert_eq() {
     local want="$1" got="$2" what="$3"
@@ -501,6 +521,15 @@ assert_serial_lacks() {
 }
 
 bootv2_summary() {
-    printf '\n== %s: %d passed, %d failed ==\n' "${1:-boot-v2}" "$BOOTV2_PASS" "$BOOTV2_FAIL" >&2
+    if (( BOOTV2_CANNOT )); then
+        printf '\n== %s: %d passed, %d failed, %d COULD-NOT-RUN ==\n' \
+            "${1:-boot-v2}" "$BOOTV2_PASS" "$BOOTV2_FAIL" "$BOOTV2_CANNOT" >&2
+        local why
+        for why in "${BOOTV2_CANNOT_WHY[@]}"; do
+            printf '   could-not-run: %s\n' "$why" >&2
+        done
+    else
+        printf '\n== %s: %d passed, %d failed ==\n' "${1:-boot-v2}" "$BOOTV2_PASS" "$BOOTV2_FAIL" >&2
+    fi
     (( BOOTV2_FAIL == 0 )) || return 1
 }
