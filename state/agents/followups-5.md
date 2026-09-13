@@ -1,26 +1,27 @@
 # followups-5
-items: (no roadmap ids — CI plumbing: three pre-existing red steps gating ~45 others)
-repo: apex-os
+items: (no roadmap ids — CI plumbing: red steps gating 77 others)
 worktree: /var/tmp/apex-work/wt-followups-5
 branch: task/followups-5
+repo: apex-os
 
 ## NEXT
-Read the failing output of the three red steps on the last dispatch run
-(`gh run view <id> --log-failed`) — Static "Validate Containerfile layer order",
-engine "Run virtualization assertions", rust "§26 channels" — and classify each
-as product defect / gate defect / runner-vs-L16 environment difference BEFORE
-changing anything.
+Fix `files/scripts/check-containerfile-order`: a path inside a grep PATTERN is
+not a read. Then read run 34728030705 (dispatched on the structural commit) for
+the downstream picture.
 
 ## DONE
-- (nothing yet)
+- `13e7ec84` ci: 93 `run:` steps in static/rust/engine now carry
+  `if: ${{ !cancelled() }}`. PUSHED. Run 34728030705 dispatched on it.
 
 ## IN PROGRESS
-- (nothing yet)
+- the three red steps (see FOUND for the diagnosis of each).
 
 ## FOUND
-- P3 labwc thread CLOSED by the orchestrator: dispatch run 34717723637 reports
+- P3 labwc thread CLOSED: run 34717723637 reports
   `P3 labwc — the shipped session, probed headless by real clients: success`.
-  followups-4's one outstanding question is answered; the labwc matrix is green.
+- **77 steps, not 45.** Static loses 20 as well as engine's 35 and rust's 22.
+- **rust's red step is no longer `§26 channels` — it is `Tests`, step 8**, which
+  is 16 steps HIGHER, so §26 did not even run on 34727364060.
 
 ## BLOCKED ON
 - nothing
