@@ -105,6 +105,97 @@ mod tests {
         );
     }
 
+    /// P2-017: **an account scope may not name an operation no provider
+    /// offers.**
+    ///
+    /// `apex-secret-core::account::PROVIDERS` maps a scope a person types
+    /// (`files.read`) onto a §13.2 operation id (`webdav.file.read`), and
+    /// `apex account grant` records a grant for that id. Nothing checked that
+    /// the id exists, because nothing could: `apex-secret-core` is a library
+    /// and `default_registry` is in this binary crate, which depends on it and
+    /// not the other way round. **This crate is the only place both are
+    /// visible.**
+    ///
+    /// It was not hypothetical. Before this test, `apex account grant google
+    /// files.read` succeeded and wrote a grant for `gdrive.file.read`; no
+    /// provider has ever offered `gdrive.*` or `msgraph.*`, and `S3_SCOPES`
+    /// named `s3.object.list` which the S3 provider landed in `5054be77`
+    /// does not have either. Every one of those is a permission a user was
+    /// told they had granted and which could never be exercised — the failure
+    /// arrives later, somewhere else, as "that is not an operation this build
+    /// offers".
+    ///
+    /// Two halves, and the second is the one that stops this rotting: the
+    /// count is asserted, so emptying `PROVIDERS` or every scope table would
+    /// fail here rather than passing on an empty loop.
+    #[test]
+    fn every_account_scope_names_an_operation_some_provider_actually_offers() {
+        use apex_secret_core::account;
+
+        let registry = default_registry(std::env::temp_dir()).expect("registry");
+        let mut checked = 0;
+        for provider in account::PROVIDERS {
+            for scope in provider.scopes {
+                let (_, op) = registry.lookup(scope.operation).unwrap_or_else(|e| {
+                    panic!(
+                        "`apex account grant {}.<name> {}` would record a grant for \
+                         operation '{}', and no provider in this build offers it ({e}). \
+                         Either add the provider that serves it or take the scope out \
+                         of the table — a scope that cannot be performed is a \
+                         permission the user was told they had.",
+                        provider.id, scope.name, scope.operation
+                    )
+                });
+                // Not just "it resolves": an ALIAS resolves too, and a grant is
+                // stored under the canonical id. A scope pointing at an old
+                // spelling would be recorded as something else and read back
+                // as a scope nobody granted.
+                assert_eq!(
+                    op.id, scope.operation,
+                    "scope '{}' on {} names '{}', which resolves to the canonical \
+                     operation '{}'. Grants are stored canonically, so point the \
+                     scope at the canonical id.",
+                    scope.name, provider.id, scope.operation, op.id
+                );
+                // P1-001's routing rule, restated where it can be checked
+                // against the live registry rather than against the table's own
+                // idea of itself.
+                assert!(
+                    scope.operation.starts_with(&format!("{}.", provider.transport)),
+                    "scope '{}' on {} routes into '{}' but its operation is '{}'; the \
+                     first segment is what routes, so this grant would go to a \
+                     different provider",
+                    scope.name,
+                    provider.id,
+                    provider.transport,
+                    scope.operation
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 5,
+            "only {checked} account scopes were checked; this test ran on almost \
+             nothing, which is how it would pass while the tables were empty"
+        );
+        // The providers that deliberately offer NO scope yet, named one at a
+        // time. Adding a sixth provider with an empty table has to be a line
+        // somebody writes here on purpose, because "it has no scopes" is
+        // exactly what the loop above cannot notice.
+        let empty: Vec<&str> = account::PROVIDERS
+            .iter()
+            .filter(|p| p.scopes.is_empty())
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(
+            empty,
+            vec!["google", "microsoft"],
+            "the set of account providers with nothing grantable changed. Each one is \
+             a provider APEX can hold a credential for and spend on nothing; if a \
+             transport landed, give it its scopes, and if one was added, say why here."
+        );
+    }
+
     #[test]
     fn p0_002_and_p0_003_spellings_still_resolve() {
         // Grants written before P1-001 say `git-push` and `mcp-request`. The
