@@ -18,6 +18,7 @@
 
 mod broker;
 mod budget;
+mod clipboard;
 mod disposable;
 mod egress;
 mod elevation;
@@ -756,6 +757,12 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
                 session::Input::Failed(e) => Response::error(ErrorKind::Internal, e),
             }
         }
+
+        // The one verb here that carries something out of this machine which
+        // no session produced. It takes no `id` — one seat, one clipboard —
+        // so there is nothing to look up, and the whole of the decision is
+        // who is asking. See `clipboard.rs`.
+        Request::Clipboard => clipboard::handle(daemon, caller),
 
         Request::Signal { id, signal } => {
             let Some(number) = apex_agent_core::session::signal_number(&signal) else {

@@ -667,6 +667,57 @@ pub enum Request {
     /// reports that it could not deliver, and nothing has been typed. The
     /// failure loses a message, never a restriction.
     Input { id: u32, data: String },
+    /// Read what is on the machine's clipboard right now (P1-059 criterion 3,
+    /// the receive half).
+    ///
+    /// The only verb in this vocabulary that carries something OUT of the
+    /// machine that no session produced. Everything else on this socket either
+    /// asks about sessions, or pushes into one; this reaches past the sessions
+    /// entirely, to a selection a person made with a mouse.
+    ///
+    /// ## What it is not
+    ///
+    /// It is not `apex send --clipboard`. That is ssh to another Linux host in
+    /// the §20 registry, `wl-paste` here and `wl-copy` there, host to host. It
+    /// shares a word and nothing else: a phone is not an ssh destination
+    /// running `wl-copy`, and three rounds of Android work called this verb
+    /// missing because the similar name was read as the same feature.
+    ///
+    /// It is also not a session verb, which is why it carries no `id`. There
+    /// is nothing to name: one clipboard per Wayland seat, and the daemon
+    /// either has a display to read it from or says so.
+    ///
+    /// ## Who is refused
+    ///
+    /// [`Request::Input`]'s predicate — a caller that resolves to a managed
+    /// session, and one that cannot be classified at all. The first refusal
+    /// is the one that matters and it is not a
+    /// formality: a person copies a password out of a password manager several
+    /// times a day, and an agent that could read this would have a thirty-
+    /// second window on every one of them, outside every sandbox, with no
+    /// grant asked for and nothing on screen. A phone the user paired and
+    /// unlocked is a person; an agent is not.
+    ///
+    /// ## Why there is a cap and what it is made of
+    ///
+    /// The reply is one line of this protocol, and for a remote caller that
+    /// line is one `apex_remote_core::wire::Frame::Control` — at most 65514
+    /// bytes, which `Frame::encode` refuses rather than truncates. In
+    /// `apex-remoted` that refusal is a `?` on the send, so an oversize reply
+    /// would drop the **whole device connection**, terminal included, rather
+    /// than fail one request. `serde_json` escapes a C0 control byte as
+    /// `\uXXXX`, six bytes for one, so the worst case is six times the raw
+    /// size and the daemon refuses anything over `clipboard::MAX_BYTES`
+    /// (`apex-agentd`), a number chosen so that six times it still fits in one
+    /// frame. A clipboard past that is refused with its size named, not
+    /// silently clipped: a person pasting half of what they copied into an
+    /// agent is worse served than one who is told to send a file instead.
+    ///
+    /// Not a protocol bump, by the criterion on [`Request::Event`]: a daemon
+    /// that predates this answers "unparseable request", the phone says the
+    /// machine is too old, and nothing has been read. The failure loses a
+    /// feature, never a restriction.
+    Clipboard,
     /// Deliver a signal by name (`int`, `term`, `kill`, `stop`, `cont`).
     Signal { id: u32, signal: String },
     /// Publish a state transition. This is the open event protocol: any client
@@ -1252,6 +1303,22 @@ pub enum Response {
         /// paste or as typing.
         bracketed: bool,
     },
+    /// What was on the machine's clipboard when [`Request::Clipboard`] asked.
+    ///
+    /// `text` is the selection, verbatim, with no trailing newline added —
+    /// `wl-paste --no-newline`, because a newline this daemon appended would
+    /// be a newline the phone pastes into a terminal, and on a terminal that
+    /// is the return key.
+    ///
+    /// An empty string is a real answer and means the clipboard is empty. It
+    /// is not an error, and reporting it as one would have the phone say the
+    /// machine refused when the machine simply had nothing.
+    ///
+    /// There is no `bytes` field beside it on purpose. The reply carries the
+    /// content, so a count the client could derive is a second number to
+    /// disagree with the first — which is the reason
+    /// [`Response::Injected`]'s `path` is one field and not two.
+    Clipboard { text: String },
     /// Per-worktree status, main tree first, projects in listing order.
     Worktrees {
         worktrees: Vec<crate::worktree::WorktreeStatus>,
@@ -1641,6 +1708,14 @@ mod tests {
                 id: 3,
                 text: "output\n".into(),
             },
+            // A clipboard holds whatever was copied, which routinely includes
+            // the newline and the quote that NDJSON framing cares about. The
+            // assertion below that no serialised response contains a literal
+            // newline is the one this variant is here to exercise.
+            Response::Clipboard {
+                text: "line one\nline two \"quoted\"\n".into(),
+            },
+            Response::Clipboard { text: String::new() },
             // Response::Request is the riskiest shape in this enum: an
             // internally-tagged variant wrapping a struct that itself
             // #[serde(flatten)]s an internally-tagged enum. Both layers use a
