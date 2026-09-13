@@ -213,8 +213,12 @@ SECRETD_PID=""
 start_secretd() {
     [[ -n "$SECRETD_BIN" ]] || return 1
     export APEX_SECRETD_SOCKET="$LAB/secretd.sock"
+    # 9>&- so this daemon does not inherit the run lock. An orphaned child
+    # holding it would make the NEXT run say "another run-browserlab holds the
+    # lock" about a run that is long gone — a wrong reason, which is worse than
+    # no reason.
     "$SECRETD_BIN" --socket "$APEX_SECRETD_SOCKET" --store "$LAB/secretd-store" \
-        > "$LAB/secretd.log" 2>&1 &
+        > "$LAB/secretd.log" 2>&1 9>&- &
     SECRETD_PID=$!
     local waited=0
     while (( waited < 40 )); do
@@ -236,7 +240,7 @@ start_daemon() {
     mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" \
              "$XDG_DATA_HOME" "$APEX_AGENT_SCRATCH_ROOT" "$APEX_BROWSER_ROOT" "$OUT"
     chmod 700 "$XDG_RUNTIME_DIR"
-    "$AGENTD_BIN" > "$LAB/daemon.log" 2>&1 &
+    "$AGENTD_BIN" > "$LAB/daemon.log" 2>&1 9>&- &   # 9>&-: see start_secretd
     DAEMON_PID=$!
     local waited=0
     while (( waited < 20 )); do
@@ -313,7 +317,7 @@ srv = http.server.HTTPServer(("127.0.0.1", PORT), H)
 srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
 srv.serve_forever()
 PY
-    python3 "$LAB/server.py" "$PORT" "$LAB" > "$LAB/server.log" 2>&1 &
+    python3 "$LAB/server.py" "$PORT" "$LAB" > "$LAB/server.log" 2>&1 9>&- &   # 9>&-: see start_secretd
     SERVER_PID=$!
     local waited=0
     while (( waited < 20 )); do
@@ -842,6 +846,24 @@ main() {
     done
 
     [[ -x "$ENGINE" ]] || die "no engine at $ENGINE"
+
+    # ── one at a time ───────────────────────────────────────────────────────
+    #
+    # $LAB is ONE fixed path and the next line removes it. Two runs at once
+    # therefore delete each other's tree mid-flow, and what comes out is not a
+    # failure that reads as one: capsules vanish while their sessions are still
+    # writing, verdicts land in a bundle the other run already cleared, and the
+    # teardown flow reports a session left running that belongs to somebody
+    # else. Measured rather than imagined — it happened here on 2026-09-13 and
+    # cost a full run.
+    #
+    # -n, so a second one says so immediately instead of waiting out a lab that
+    # takes minutes. BROWSERLAB_ROOT is the way to run two deliberately.
+    exec 9>"${LAB}.lock" || die "cannot create ${LAB}.lock"
+    if ! flock -n 9; then
+        die "another run-browserlab holds ${LAB}.lock. This lab has one fixed root and starts by removing it, so two at once delete each other's tree. Wait for it, or give this one a BROWSERLAB_ROOT of its own."
+    fi
+
     rm -rf -- "$LAB" 2>/dev/null
     # OUT is outside $LAB so it survives teardown; it therefore has to be
     # cleared here instead, or a flow that does not run this time keeps the
