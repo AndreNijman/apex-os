@@ -279,15 +279,15 @@ Items: P2-008, P2-009, P2-012. Round 2 landed as merge `13d53c01`; this branch
 is off that tip.
 
 ### NEXT
-Measure whether `browser.policies.alternatePath` is honoured by release Firefox
-155 (Fedora build). Three steps, in `/var/tmp/p2-d-scratch/`: (1) fresh profile
-+ `user.js` naming an absolute policies.json carrying `Certificates.Install`,
-headless `--screenshot <abs>/x.png` against a self-signed loopback server —
-verdict is the PNG, never the exit code; (2) control, same without the pref,
-must refuse; (3) control, the same policies.json bound over
-`/etc/firefox/policies/policies.json` (round 2's mechanism), must render. If
-(1) fails and (3) passes, gap 5 is BLOCKED on a protocol field — write that
-rather than a flag that refuses everything.
+Add the `policies.json` shape assertion to `Containerfile.base` beside the
+existing firefox block (line ~501): an ALLOWLIST — `set(policies.keys()) ==
+{"Preferences"}` and every preference `Status == "default"` — not a denylist,
+because `SecurityDevices`, `Handlers` and `ExtensionSettings` are CA/trust
+vectors a denylist of `Certificates`/`Proxy` misses. Run
+`tests/check-containerfile-assertions.sh` before and after so the line
+registers LIVE not inert, and mutate `files/system/firefox/policies.json` once
+to watch it fail. Then update both docs with the measurements below, and record
+gap 5 as BLOCKED.
 
 ### DONE (round 3)
 - `be9844cc` — the lab refuses a concurrent run (`flock -n` on `${LAB}.lock`,
@@ -311,3 +311,60 @@ rather than a flag that refuses everything.
   this round is told not to touch. An engine that ran `bwrap` itself instead is
   a `Containerfile.base` build refusal by design.
 - A dead lab run's orphaned daemon held the run lock (see `be9844cc`).
+
+### MEASURED (round 3) — the CA question, closed in the negative, and a stronger property
+
+Fixture: a real two-link chain (`openssl`-made CA -> leaf for
+`capsule-ca.test`/127.0.0.1), a python HTTPS server on 127.0.0.1:18443 serving
+it. Falsifying control on the fixture itself: `curl` without the CA fails
+verification, `curl --cacert ca.pem` returns the page. Every browser arm runs
+headless inside a bwrap of the capsule's shape (`--ro-bind / /`, `--proc /proc`,
+`--tmpfs $HOME`, `--tmpfs /run`, no `DISPLAY`/`WAYLAND_DISPLAY`, `--no-remote`),
+under `timeout`, with an ABSOLUTE `--screenshot` path. **The verdict is the PNG,
+never the exit code** — `--screenshot` exits 0 having written nothing.
+Scripts kept: `/var/tmp/p2-d-scratch/{ca-probe,dist-probe,peruser-probe}.sh`.
+
+| arm | exit | PNG | means |
+|---|---|---|---|
+| no policy at all (control) | 124 | 0 B | a fresh profile refuses the private CA and sits on it |
+| `browser.policies.alternatePath` = abs path | 124 | 0 B | not honoured |
+| `browser.policies.alternatePath` = `file://` URI | 124 | 0 B | not honoured, either spelling |
+| policies.json bound over `/etc/firefox/policies/policies.json` | 0 | 8778 B | round 2's mechanism reproduces |
+| CA policy in `/usr/lib64/firefox/distribution/`, `/etc` file PRESENT | 124 | 0 B | **pre-empted** |
+| the same bind with `/etc/firefox` masked (control) | 0 | 8778 B | the bind and the file were right; only the `/etc` file's existence differed |
+
+1. **`browser.policies.alternatePath` cannot be the route, and the reason is in
+   the shipped binary rather than inferred from a failure.**
+   `modules/EnterprisePoliciesParent.sys.mjs` in `/usr/lib64/firefox/omni.ja`
+   (extract with `unzip`, not python `zipfile` — the header is non-standard):
+
+       if (alternatePath &&
+           (Cu.isInAutomation || AppConstants.NIGHTLY_BUILD) &&
+           (!configFile || !configFile.exists())) {
+
+   Fedora's `firefox-155.0-1.fc43` is a release build, so the pref is read and
+   discarded. There is no env escape either: `shouldIgnoreLocalPolicies()` is
+   `NIGHTLY_BUILD && Cu.isInAutomation`. **So there is no in-profile route to a
+   CA**, and gap 5 stays a namespace bind, which stays a protocol field.
+
+2. **A new security property, stronger than the one the docs record.** The same
+   function returns EARLY on the SysConfD file:
+
+       if (AppConstants.platform == "linux" && AppConstants.MOZ_SYSTEM_POLICIES) {
+         ... if (systemConfigFile.exists()) { return systemConfigFile; }
+       }
+
+   So `/etc/firefox/policies/policies.json` does not merely *reach* inside every
+   capsule — while it exists it is the **only** policy file any Firefox on this
+   machine reads, capsule or not, and it pre-empts the install tree's
+   `distribution/policies.json` outright. Measured both ways (rows 5 and 6).
+   That file is owned by no rpm (`rpm -qf`: not owned) and is dropped by
+   `Containerfile.base:407` from `files/system/firefox/policies.json`.
+
+3. **The per-user route (`toolkit.policies.perUserDir` ->`XREUserRunTimeDir`)
+   is COULD-NOT-RUN, not disproved.** Both its arms came back empty, including
+   the one with `/etc/firefox` masked that should have rendered, so the negative
+   has no positive control behind it — I could not find the directory name Gecko
+   uses under `$XDG_RUNTIME_DIR` (tried `firefox`, `mozilla/firefox`,
+   `Firefox`). Recorded as unmeasured. The `distribution/` arm above proves the
+   pre-emption claim without needing it.

@@ -16,10 +16,14 @@ again. What it leaves behind is in FOUND.
 
 Remaining, in the order this round takes them:
 
-1. RFC 8628 device code for Google and Microsoft, and the first thing in this
-   build that REFRESHES a token. Design settled below.
-2. The vapour-scope defect (FOUND #1) — a cross-crate test, landed green with
-   its fix in the same commit.
+1. **NEXT ACTION**: the OAuth vocabulary in `apex-secret-core/src/account.rs`
+   (`OAuth { device_url, token_url, auth_host, scopes, client_secret }` + a
+   `oauth_for_auth_host()` lookup covering Google, Microsoft AND Cloudflare),
+   then `ProviderSpec::may_supersede_credentials` + `Bound::replaces` +
+   an `oauth` provider in `apex-secretd` that performs RFC 6749 §6 refresh.
+   Prove it on CLOUDFLARE's shape, because Cloudflare is the only one of the
+   three with a transport that can spend the refreshed token.
+2. ~~The vapour-scope defect~~ **DONE, `c224eea7`.**
 3. P2-019 fleet transport + server side.
 4. gvfs — a design paragraph only; not enough budget to build it.
 5. P2-018 criterion 2 — the exact recipe that would close it.
@@ -45,9 +49,12 @@ Remaining, in the order this round takes them:
 ## DONE
 Round 1: landed as merge 4e8969ef (10 commits).
 Round 2: landed as merge f2229185 — P2-018 criterion 1, the recovery verb.
+Round 3, on task/p2-f-3 (pushed):
+  c224eea7  a scope may not name an operation no provider offers — the
+            cross-crate gate in apex-secretd, both mutants run and red.
 
 ## IN PROGRESS
-- Nothing committed on task/p2-f-3 yet.
+- Nothing half-written. `c224eea7` is committed and pushed.
 
 ## FOUND
 - **`5054be77` landed the S3 provider and SigV4 signer.** Round 2's card
