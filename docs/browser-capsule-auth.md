@@ -6,7 +6,7 @@ capability auth". Three of those four are built and measured
 credential to a site**, and that is why the item is recorded `partial`.
 
 This page is the written decision the gap needs before anybody writes code for
-it. It says what the framework actually guarantees today, what each route would
+it. It says what the framework guarantees today, what each route would
 change, which measurement kills or permits each one, and what the chosen route
 would cost. Nothing here is built.
 
@@ -20,9 +20,9 @@ design puts there on purpose.
 
 Neither is built. Route B needs two changes to the agent protocol and a TLS
 server in `apex-agentd`, both scoped below. It also changes a sentence
-`docs/browser-capsule.md` currently states as a property — "a tunnel is
-opaque" — which is the sort of thing that should be seen before it is built
-rather than found in a diff.
+`docs/browser-capsule.md` states as a property — "a tunnel is opaque" — which
+is the sort of thing that should be seen before it is built rather than found
+in a diff.
 
 ## What a capsule can and cannot be handed today, measured
 
@@ -34,9 +34,8 @@ about.
 first attempt at a control exported a variable beside `apex browser` and
 reached nothing at all: a session's environment is built by the daemon, and the
 sandbox does not inherit the caller's. So the control was rerouted through the
-capsule *profile*, which is a file the engine really does write — and that is
-also the only route a credential could take if the engine were the one carrying
-it.
+capsule *profile*, which is a file the engine does write — and that is also the
+only route a credential could take if the engine were the one carrying it.
 
 **Anything a capsule can see, the caller can take home.** The same flow's second
 control writes the value into a file inside the capsule and nominates it: it
@@ -73,13 +72,13 @@ the writing half needs no package.
 `moz_cookies.expiry` is **milliseconds** in schema version 17, not the seconds
 every older reference gives. A cookie seeded with a seconds-valued expiry is
 read as long expired, is silently not sent, and the run still exits 0 having
-rendered the page and written the screenshot. The first probe did exactly that
-and reported "a pre-seeded cookie is not sent" — a wrong conclusion about the
+rendered the page and written the screenshot. The first probe did that and
+reported "a pre-seeded cookie is not sent" — a wrong conclusion about the
 whole route, from a unit error, with no error anywhere.
 
 Anything that writes this file has to take the schema from a database the
-browser itself created, the way the probe eventually did, rather than from a
-constant somebody typed.
+browser itself created, the way the probe did, rather than from a constant
+somebody typed.
 
 ### Why it is rejected
 
@@ -125,9 +124,9 @@ in the capsule.
 
 It is also general in the way Route A is not: it works for every site whose
 authentication is a header, with no per-site provider. `ServiceInfo::auth`
-already distinguishes `bearer` from `raw` for exactly this reason.
+already distinguishes `bearer` from `raw` for this reason.
 
-### The prerequisite everybody assumed was blocking, and is not
+### The prerequisite that looked like a blocker, and is not
 
 A fresh profile trusts the system CA store and nothing else, and `nss-tools` is
 not in the image — so `certutil` cannot add one. That was recorded as closing
@@ -135,8 +134,8 @@ the question. It does not:
 
 **A `policies.json` bound inside the capsule's namespace installs a CA with no
 `certutil` at all.** Measured, with a control: a fresh profile refused a
-privately-signed loopback server and sat on the refusal until it was killed;
-the same profile, the same server, with
+self-signed loopback server and sat on the refusal until it was killed; the
+same profile, the same server, with
 `{"policies":{"Certificates":{"Install":["…/ca.pem"]}}}` bound over
 `/etc/firefox/policies/policies.json` inside the namespace only, completed the
 handshake and rendered the page. The machine's own file was untouched
@@ -178,8 +177,8 @@ the file's shape. See "what is not decided" below.
   destination: the daemon reads the plaintext of a connection it is itself
   authenticating. That is not a new trust relationship — the daemon already
   holds the credential and already decides where the capsule may go, and it is
-  strictly more trusted than the capsule — but it is a documented property
-  changing, and it has to change in the documentation at the same time.
+  more trusted than the capsule — but it is a documented property changing,
+  and it has to change in the documentation at the same time.
 * **Nothing new in the image.** `openssl` and `bwrap` are already there.
 
 ### What it does not solve
@@ -236,6 +235,6 @@ stores.
 | `expiry` is milliseconds, and a seconds value fails silently | the first probe, which drew the wrong conclusion from it |
 | the engine cannot pass a value through the environment | the `authentication` flow's first control, which reached nothing |
 | a value inside a capsule reaches the caller | the same flow's second control, through `--download` |
-| a namespace-local `policies.json` installs a CA with no `certutil` | a privately-signed loopback server, refused by the control profile and rendered by the policy one |
+| a namespace-local `policies.json` installs a CA with no `certutil` | a self-signed loopback server, refused by the control profile and rendered by the policy one |
 | `certutil` is absent | `nss-tools` is not installed |
 | the host's enterprise policy is read inside a capsule | the same bind measurement, which is why it works |
