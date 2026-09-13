@@ -200,6 +200,24 @@ fn scopes(id: &str, json: bool) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(0);
     }
+    // A header with no rows under it reads as "nothing matched your filter",
+    // and there is no filter. Say the actual reason, which is that the
+    // credential can be held and cannot yet be spent.
+    if p.scopes.is_empty() {
+        println!(
+            "{} accounts have no grantable scopes in this build.",
+            p.label
+        );
+        println!();
+        println!("The credential can be stored and refreshed — `apex account add {}.<name>`", p.id);
+        println!("puts it in the root-owned store and keeps it renewed — but there is no");
+        println!("{} transport in apex-secretd yet, so no operation can spend it.", p.transport);
+        println!();
+        println!("This is checked rather than described: apex-secretd's");
+        println!("every_account_scope_names_an_operation_some_provider_actually_offers");
+        println!("fails the build if a scope here names an operation no provider offers.");
+        return Ok(0);
+    }
     println!("{:<16} {:<22} {:<6} SUMMARY", "SCOPE", "OPERATION", "EFFECT");
     for s in p.scopes {
         println!(
