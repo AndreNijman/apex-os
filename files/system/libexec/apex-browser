@@ -432,26 +432,43 @@ cmd_run() {
     # can reach, which is the half of the capability model a browser can
     # honestly use — see docs/browser-capsule.md for the half it cannot.
     if [ -n "$capability" ]; then
-        local pinned cap_rc
-        pinned="$(capability_host "$capability")"; cap_rc=$?
+        local answer cap_rc pin_host pin_port pinned
+        answer="$(capability_pin "$capability")"; cap_rc=$?
         case "$cap_rc" in
             3) die "the secret service could not be asked, so this capsule's destination is unknown.
   That is not the same as '$capability' being absent, and the difference decides
   what fixes it: start the service (\`sudo systemctl start apex-secretd\`)
   rather than storing a credential. What it said:
-  ${pinned}" ;;
+  ${answer}" ;;
             1) die "the secret service has no credential named '$capability'.
   \`apex secret list\` shows what is stored; \`apex secret add $capability --host HOST\`
   stores one. The capsule's destination comes from that host, not from --allow." ;;
+            4) die "the secret service answered, and this engine could not read the answer.
+  That is a version mismatch between \`apex secret list --json\` and this
+  program, not a missing credential and not a stopped service — so neither
+  \`apex secret add\` nor \`systemctl start apex-secretd\` is the fix." ;;
         esac
-        [ -n "$pinned" ] || die "the credential '$capability' has no pinned host, so it cannot decide where a capsule may go"
+        pin_host="$(printf '%s\n' "$answer" | sed -n 1p)"
+        pin_port="$(printf '%s\n' "$answer" | sed -n 2p)"
+        [ -n "$pin_host" ] || die "the credential '$capability' has no pinned host, so it cannot decide where a capsule may go"
+        pinned="$(join_destination "$pin_host" "$pin_port")"
+        # A caller may REPEAT the pin and may not widen it. The host has to be
+        # the pinned one; a port, if the caller spells one out, has to be the
+        # pinned one too — `--allow host:443` against a credential pinned to
+        # `host:9443` is a different endpoint, not the same one said twice.
+        local d d_host d_port split
         for d in "${allow[@]}"; do
-            case "${d%%:*}" in
-                "$pinned") ;;
-                *) refuse "--allow names '$d' but the capability '$capability' is pinned to '$pinned'.
+            split="$(split_destination "$d")"
+            d_host="$(printf '%s\n' "$split" | sed -n 1p)"
+            d_port="$(printf '%s\n' "$split" | sed -n 2p)"
+            [ "$d_host" = "$pin_host" ] || refuse "--allow names '$d' but the capability '$capability' is pinned to '$pinned'.
   A capability decides where its authority is spent. Widening it at the call
-  site is the thing the pin exists to stop." ;;
-            esac
+  site is the thing the pin exists to stop."
+            if [ -n "$d_port" ] && [ -n "$pin_port" ] && [ "$d_port" != "$pin_port" ]; then
+                refuse "--allow names port $d_port on '$d_host' but the capability '$capability' is pinned to '$pinned'.
+  A different port is a different endpoint. A capability decides where its
+  authority is spent, and the port is part of where."
+            fi
         done
         # The pin is the destination, whether or not --allow repeated it.
         allow=("$pinned")
@@ -695,29 +712,111 @@ cmd_run() {
     return 0
 }
 
-# The host a stored credential is pinned to. Printed by `apex secret list`,
-# which never prints a value — asking for the pin is not asking for the secret.
+# The destination a stored credential is pinned to, as two lines: the host,
+# then the port or an empty line. `apex secret list` never prints a value —
+# asking for the pin is not asking for the secret.
 #
-# THREE ANSWERS, NOT TWO. "the secret service did not answer", "it answered and
-# has no credential of that name" and "here is the pin" are different facts,
-# and the first written as the second is this repository's most-repeated
-# defect: a question that could not be asked, reported as the answer. A capsule
-# refused because secretd is stopped must say so, because the fix is
-# `systemctl start apex-secretd` and not `apex secret add`.
+# FOUR ANSWERS, NOT TWO. "the secret service did not answer", "it answered and
+# has no credential of that name", "it answered with something this engine
+# cannot read" and "here is the pin" are different facts, and the first written
+# as the second is this repository's most-repeated defect: a question that
+# could not be asked, reported as the answer. A capsule refused because secretd
+# is stopped must say so, because the fix is `systemctl start apex-secretd` and
+# not `apex secret add`.
 #
-#   0  printed the pinned host
+# ── WHY THIS READS --json AND NOT THE TABLE ─────────────────────────────────
+#
+# It read the table once, and against a REAL apex-secretd `--capability` could
+# not work at all. Two reasons, both measured rather than reasoned about:
+#
+#   * the table's ENDPOINT column is `scheme://host`, not `host`. The pin came
+#     out as `https://intranet.example`, which is not a destination — so every
+#     capsule naming a capability was refused, either because `--allow
+#     intranet.example` "did not match the pin" or because the runtime
+#     allowlist was told to add a line with a scheme in it. Fail-closed, and
+#     completely unusable.
+#   * the table has no port column at all. A credential stored with
+#     `--port 9443` printed `http://127.0.0.1`, so the pin could not have
+#     carried the port even after the scheme was stripped off it.
+#
+# The suite did not catch either, because its stub printed a bare host in the
+# second column — a stub that agreed with the engine rather than with the CLI.
+# The stub now prints what `apex secret list` prints, and the JSON is what this
+# parses, because the JSON is the interface with the fields in it.
+#
+# stdout and stderr are kept APART. `apex secret list` writes a banner to
+# stderr when the store is not root-owned, and folding that into the parse put
+# a line whose first field is `apex` in front of the credentials — which a
+# credential named `apex` would then have been matched against.
+#
+#   0  printed the pinned host on line 1 and its port, or nothing, on line 2
 #   1  the service answered; there is no credential of that name
 #   3  the service could not be asked
-capability_host() {
-    local want="$1" out rc
-    out="$("$APEX" secret list 2>&1)"; rc=$?
+#   4  the service answered with something this engine cannot read
+capability_pin() {
+    local want="$1" tmp out rc
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/apex-browser-cap.XXXXXX")" || return 3
+    "$APEX" secret list --json >"$tmp/out" 2>"$tmp/err"; rc=$?
     if [ "$rc" != 0 ]; then
-        printf '%s' "$out"
+        cat "$tmp/err" "$tmp/out"
+        rm -rf "$tmp"
         return 3
     fi
-    out="$(printf '%s\n' "$out" | awk -v n="$want" '$1 == n { print $2; exit }')"
-    [ -n "$out" ] || return 1
+    # The file is an ARGUMENT, not stdin. `python3 -` reads its program from
+    # stdin, so a `<"$tmp/out"` beside the heredoc is one redirection too many:
+    # the heredoc wins, the program runs, and `json.load(sys.stdin)` reads a
+    # stream somebody else already drained. That spelling answered "the service
+    # answered with something this engine cannot read" for every credential
+    # that existed — a silent nothing with a confident message on it.
+    out="$(python3 - "$want" "$tmp/out" <<'PY'
+import json, sys
+want = sys.argv[1]
+try:
+    with open(sys.argv[2]) as fh:
+        services = json.load(fh)
+    if not isinstance(services, list):
+        raise ValueError("not a list")
+except Exception:
+    sys.exit(4)
+for s in services:
+    if not isinstance(s, dict):
+        sys.exit(4)
+    if s.get("service") == want:
+        host = s.get("host") or ""
+        port = s.get("port")
+        print(host)
+        print("" if port in (None, "") else port)
+        sys.exit(0)
+sys.exit(1)
+PY
+)"; rc=$?
+    rm -rf "$tmp"
+    [ "$rc" = 0 ] || return "$rc"
     printf '%s' "$out"
+}
+
+# Split a destination into a host and a port, as two lines, so that neither an
+# IPv6 literal nor a missing port is handled by cutting a string at the first
+# or the last colon. `[::1]:9443`, `::1`, `h:443` and `h` are all destinations
+# a caller can type, and `${d%%:*}` gets three of the four wrong.
+split_destination() {
+    case "$1" in
+        \[*\]:*) printf '%s\n%s\n' "${1%%\]:*}" "${1##*\]:}" | sed '1s/^\[//' ;;
+        \[*\])   printf '%s\n\n' "$1" | sed '1s/^\[//; 1s/\]$//' ;;
+        *:*:*)   printf '%s\n\n' "$1" ;;
+        *:*)     printf '%s\n%s\n' "${1%%:*}" "${1##*:}" ;;
+        *)       printf '%s\n\n' "$1" ;;
+    esac
+}
+
+# The destination a pin names, spelled the way a caller would type it.
+join_destination() {
+    local host="$1" port="$2"
+    [ -n "$port" ] || { printf '%s' "$host"; return; }
+    case "$host" in
+        *:*) printf '[%s]:%s' "$host" "$port" ;;
+        *)   printf '%s:%s' "$host" "$port" ;;
+    esac
 }
 
 # ── usage ───────────────────────────────────────────────────────────────────
