@@ -206,6 +206,95 @@ esp_mkdir_p() {
         || die "could not create $path in $esp"
 }
 
+# ── a software TPM the HOST can issue commands to ───────────────────────────
+#
+# vm_boot's swtpm speaks qemu's unix control protocol, so nothing outside the
+# guest can send it a command. The two operations L-001 has to qualify are both
+# host-side:
+#
+#   * a TPM CLEAR. On a real machine TPM2_Clear is issued by the FIRMWARE, from
+#     its setup menu, while the platform hierarchy is still enabled — the OS
+#     never gets to do it, because firmware disables the platform hierarchy
+#     before handing over. An emulator started with `not-need-init` leaves the
+#     platform hierarchy enabled with empty auth, so `tpm2_clear -c p` here is
+#     the same command the firmware issues, not a stand-in for it.
+#   * a RE-ENROLMENT after that clear, which is `systemd-cryptenroll` and is
+#     what the user's recovery procedure actually consists of.
+#
+# Both tools speak the mssim protocol over TCP rather than qemu's unix control
+# socket. Same emulator, same state directory — which is the only reason an
+# object sealed through one is reachable through the other, and the reason this
+# is a session over a directory rather than a second TPM.
+#
+#   swtpm_session STATE_DIR TAG COMMAND...
+#
+# COMMAND runs with $SWTPM_TCTI exported. Both `tpm2_*` (via -T "$SWTPM_TCTI")
+# and `systemd-cryptenroll --tpm2-device=` accept that exact string.
+#
+# The clean shutdown at the end is not hygiene. swtpm writes its NV state when
+# it exits, and starting qemu's swtpm on a half-written state file loses the
+# sealed object — which reaches the guest as an unlock failure indistinguishable
+# from a broken PCR policy. apex-luks-enroll learned this the same way.
+swtpm_session() {
+    local state="$1" tag="$2"; shift 2
+    # Not 2321: apex-luks-enroll owns that port and a scenario may run while its
+    # emulator is still shutting down. A collision would present as a sealed
+    # object that cannot be unsealed, which is the failure this whole file is
+    # trying to make legible.
+    local port="${APEX_SWTPM_SESSION_PORT:-2381}"
+    [[ -d "$state" ]] || die "swtpm_session: no TPM state directory at $state"
+
+    swtpm socket --tpm2 --tpmstate "dir=$state" \
+        --server "type=tcp,port=$port,bindaddr=127.0.0.1" \
+        --ctrl "type=tcp,port=$((port + 1)),bindaddr=127.0.0.1" \
+        --flags not-need-init,startup-clear \
+        --log "file=$state/swtpm-$tag.log,level=1" \
+        --pid "file=$state/swtpm-$tag.pid" --daemon \
+        || die "swtpm failed to start for '$tag' (see $state/swtpm-$tag.log)"
+
+    local rc=0 i
+    export SWTPM_TCTI="swtpm:host=127.0.0.1,port=$port"
+    set +e
+    "$@"
+    rc=$?
+    set -e
+
+    if [[ -f "$state/swtpm-$tag.pid" ]]; then
+        kill "$(cat "$state/swtpm-$tag.pid")" 2>/dev/null || true
+        # shellcheck disable=SC2034  # a bounded wait; nothing reads the counter.
+        for i in $(seq 1 200); do
+            kill -0 "$(cat "$state/swtpm-$tag.pid" 2>/dev/null || echo 0)" 2>/dev/null || break
+            sleep 0.05
+        done
+        rm -f "$state/swtpm-$tag.pid"
+    fi
+    unset SWTPM_TCTI
+    return "$rc"
+}
+
+# The independent observation that a TPM CLEAR really happened.
+#
+# `tpm2_clear` exiting 0 proves a command was accepted, not that the seeds
+# rotated — and "the tool ran" standing in for "the state changed" is the defect
+# family this repository keeps meeting. Every primary key under the owner
+# hierarchy is derived from the Storage Primary Seed, so its NAME is a function
+# of the seed. Create one before the clear and one after: a different name is
+# the seed having changed, observed through the TPM's own key derivation rather
+# than through the exit status of the tool that asked for it.
+#
+# This is also exactly why the sealed LUKS object stops working: systemd seals
+# to an SRK under this same hierarchy, so a new seed means a parent that no
+# longer exists.
+swtpm_owner_primary_name() {
+    local ctx; ctx="$(mktemp)"
+    local name=""
+    name="$(tpm2_createprimary -T "$SWTPM_TCTI" -C o -g sha256 -G ecc -c "$ctx" 2>/dev/null \
+            | sed -n 's/^name: *//p' | tr -d '[:space:]')"
+    rm -f "$ctx"
+    [[ -n "$name" ]] || name="<unreadable>"
+    printf '%s\n' "$name"
+}
+
 # ── guest launch ────────────────────────────────────────────────────────────
 #
 # Returns 0 only on a clean guest-initiated poweroff. Everything else — timeout
@@ -221,10 +310,24 @@ esp_mkdir_p() {
 # cannot get a shell.
 vm_boot() {
     local disk="" vars="" name="run" timeout=120 mem=2048 smp=2
-    local tpm=0 serial="" extra_disk="" accel="kvm:tcg" tpm_state=""
+    local tpm=0 serial="" accel="kvm:tcg" tpm_state="" s3=0 code_override=""
+    # An ARRAY, because the firmware-change scenario needs two: the volume under
+    # test on /dev/vdb and the by-value control volume on /dev/vdc. Attachment
+    # order is the guest's device order, so the array order is load-bearing and
+    # the guest probe names the devices rather than guessing.
+    local -a extra_disks=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --disk)       disk="$2"; shift 2;;
+            # S3 (suspend-to-RAM) and a QMP monitor, together, because neither
+            # is any use alone: qemu's q35 disables S3 by default, and a guest
+            # that suspends with nothing able to wake it is a guest that hangs
+            # until the timeout kills it. See qmp-wake.py for the waker.
+            --s3)         s3=1; shift;;
+            # A firmware image other than the discovered secboot one. Only the
+            # firmware-update scenario passes this, and it says in its own text
+            # what it loses by doing so.
+            --code)       code_override="$2"; shift 2;;
             # A swtpm state directory to KEEP across runs. Without it every
             # --tpm boot gets a fresh TPM, which is right for the bootloader
             # scenarios and fatal for the LUKS one: a key sealed to one TPM's
@@ -238,7 +341,7 @@ vm_boot() {
             --smp)        smp="$2"; shift 2;;
             --tpm)        tpm=1; shift;;
             --serial)     serial="$2"; shift 2;;
-            --extra-disk) extra_disk="$2"; shift 2;;
+            --extra-disk) extra_disks+=("$2"); shift 2;;
             --accel)      accel="$2"; shift 2;;
             *) die "vm_boot: unknown argument $1";;
         esac
@@ -247,7 +350,13 @@ vm_boot() {
     [[ -f "$vars" ]] || die "vm_boot: no varstore at $vars"
     [[ -n "$serial" ]] || die "vm_boot: --serial is required"
 
-    local code; code="$(ovmf_code_secboot)"
+    local code
+    if [[ -n "$code_override" ]]; then
+        [[ -f "$code_override" ]] || die "vm_boot: no firmware image at $code_override"
+        code="$code_override"
+    else
+        code="$(ovmf_code_secboot)"
+    fi
     local tpmdir="" tpm_args=()
     if (( tpm )); then
         if [[ -n "$tpm_state" ]]; then
@@ -278,14 +387,44 @@ vm_boot() {
         )
     fi
 
-    local extra_args=()
-    [[ -n "$extra_disk" ]] && extra_args=(-drive "if=virtio,format=raw,file=$extra_disk,media=disk")
+    local extra_args=() d
+    for d in "${extra_disks[@]}"; do
+        [[ -f "$d" ]] || die "vm_boot: no extra disk image at $d"
+        extra_args+=(-drive "if=virtio,format=raw,file=$d,media=disk")
+    done
 
     : > "$serial"
     local dbg="${serial%.log}.ovmf.log"
     : > "$dbg"
 
-    info "booting '$name' (SB enforcing, tpm=$tpm, timeout=${timeout}s)"
+    # ── S3 and the thing that wakes the guest up ────────────────────────────
+    #
+    # `-global ICH9-LPC.disable_s3=1` is qemu's q35 default and is what every
+    # other scenario wants: a guest that suspends when nobody can wake it is a
+    # guest that hangs until the timeout kills it, which reads as a kernel
+    # panic. The suspend/resume scenario flips it and supplies a waker.
+    #
+    # The waker runs on the HOST and talks QMP, so "the machine suspended" is
+    # observed by qemu rather than claimed by the guest. That matters: the guest
+    # also reports it, and the two observers are independent. A guest that
+    # printed "resumed" without ever suspending would be contradicted here.
+    local s3_args=(-global ICH9-LPC.disable_s3=1)
+    local qmp_sock="" waker_pid="" waker_rec=""
+    if (( s3 )); then
+        qmp_sock="$(dirname "$serial")/qmp-$name.sock"
+        waker_rec="${serial%.log}.wake.json"
+        rm -f "$qmp_sock" "$waker_rec"
+        s3_args=(
+            -global ICH9-LPC.disable_s3=0
+            -qmp "unix:$qmp_sock,server=on,wait=off"
+        )
+        python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/qmp-wake.py" \
+            --socket "$qmp_sock" --record "$waker_rec" --timeout "$timeout" \
+            >>"$dbg" 2>&1 &
+        waker_pid=$!
+    fi
+
+    info "booting '$name' (SB enforcing, tpm=$tpm, s3=$s3, timeout=${timeout}s)"
     info "  firmware $code"
     info "  serial   $serial"
 
@@ -296,7 +435,7 @@ vm_boot() {
         -machine "q35,smm=on,accel=$accel" \
         -cpu max -m "$mem" -smp "$smp" \
         -global driver=cfi.pflash01,property=secure,value=on \
-        -global ICH9-LPC.disable_s3=1 \
+        "${s3_args[@]}" \
         -drive "if=pflash,unit=0,format=raw,readonly=on,file=$code" \
         -drive "if=pflash,unit=1,format=raw,file=$vars" \
         -drive "if=virtio,format=raw,file=$disk,media=disk" \
@@ -308,6 +447,11 @@ vm_boot() {
         2>>"$dbg"
     rc=$?
     set -e
+
+    if [[ -n "$waker_pid" ]]; then
+        wait "$waker_pid" 2>/dev/null || true
+        rm -f "$qmp_sock"
+    fi
 
     if [[ -n "$tpmdir" && -f "$tpmdir/swtpm-$name.pid" ]]; then
         kill "$(cat "$tpmdir/swtpm-$name.pid")" 2>/dev/null || true
