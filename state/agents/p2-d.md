@@ -270,3 +270,44 @@ The brief it was given, which stands for whoever picks this up:
   and 403s a mismatch, and `tests/test-apex-backup-ssh.sh` starts a real
   unprivileged `sshd` from a fixture config and kills it by pid, never by name.
   Both are worked examples of exercising a root-ish service hermetically.
+
+---
+
+## Round 3 — 2026-09-13. Branch `task/p2-d-3`, worktree `/var/tmp/apex-work/wt-p2-d`
+
+Items: P2-008, P2-009, P2-012. Round 2 landed as merge `13d53c01`; this branch
+is off that tip.
+
+### NEXT
+Measure whether `browser.policies.alternatePath` is honoured by release Firefox
+155 (Fedora build). Three steps, in `/var/tmp/p2-d-scratch/`: (1) fresh profile
++ `user.js` naming an absolute policies.json carrying `Certificates.Install`,
+headless `--screenshot <abs>/x.png` against a self-signed loopback server —
+verdict is the PNG, never the exit code; (2) control, same without the pref,
+must refuse; (3) control, the same policies.json bound over
+`/etc/firefox/policies/policies.json` (round 2's mechanism), must render. If
+(1) fails and (3) passes, gap 5 is BLOCKED on a protocol field — write that
+rather than a flag that refuses everything.
+
+### DONE (round 3)
+- `be9844cc` — the lab refuses a concurrent run (`flock -n` on `${LAB}.lock`,
+  taken before the `rm -rf` of the one fixed root), and every background child
+  closes fd 9 so a dead run's orphan cannot hold it. Both arms measured on a
+  reduction: with `9>&-` a later run ACQUIRES while the old child is alive;
+  without it that run is REFUSED by the orphan. Carries round 2's uncommitted
+  prose pass over `docs/browser-capsule-auth.md`.
+
+### FOUND (round 3)
+- **Gap 5 as briefed collides with the round's own file fence, and the collision
+  is real rather than a misreading.** The dispatch says to build the CA flag on
+  the mechanism round 2 measured — a `--ro-bind` inside the namespace. Checked
+  rather than assumed: `SandboxSpec` has the field for it (`ro_at`, "read-only
+  binds whose source is not their destination"), but nothing populates `ro` or
+  `ro_at` from the wire — every push is a daemon-internal decision in
+  `apex-agentd/src/session.rs:429-455` — and `RunRequest` in `protocol.rs` has
+  no path-bind field at all. There is no `--allow-ro` flag anywhere in the tree
+  either; `sandbox.rs`'s doc comment names one that does not exist. So the bind
+  route IS a `protocol.rs` field plus an `apex-agentd` change: the two files
+  this round is told not to touch. An engine that ran `bwrap` itself instead is
+  a `Containerfile.base` build refusal by design.
+- A dead lab run's orphaned daemon held the run lock (see `be9844cc`).

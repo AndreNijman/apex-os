@@ -42,13 +42,13 @@
       ],
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p2-d",
-      "branch": "task/p2-d-3 (off roadmap/v2.2, carrying 2 dirty files)",
+      "branch": "task/p2-d-3",
       "agent_id": "a5fc927ff01b89ec0",
       "dispatched": "2026-09-13T08:35+08:00",
       "session": "round 24 orchestrator",
       "queue_id": "p2-d",
       "card": "ROADMAP/state/agents/p2-d.md",
-      "at_dispatch": "Round 3. Warned FIRST that its card's gap list predates its own last two commits: gap 2 is closed (live apex-secretd, pin exercised four ways with the vmlab turned-around loop as control) and gap 1 now has a WRITTEN DECISION rather than a question — docs/browser-capsule-auth.md picks route B. Route B is explicitly NOT this round's build, because it needs protocol fields and a PROTOCOL_VERSION bump and p1-053c owns protocol.rs. Given instead gap 5, which round 2 accidentally unblocked: a policies.json bound over /etc/firefox/policies/policies.json inside the namespace installs a CA with no certutil, so nss-tools' absence does NOT close that question. Plus the hanging finding that the host's own enterprise policy is read inside every capsule and nothing asserts its shape."
+      "at_dispatch": "Branch created by the agent off roadmap/v2.2 with `git checkout -b`, carrying the two dirty files (docs/browser-capsule-auth.md, tests/browserlab/run-browserlab) forward from task/p2-d-2, which is landed. Round 3. Warned FIRST that its card's gap list predates its own last two commits: gap 2 is closed (live apex-secretd, pin exercised four ways with the vmlab turned-around loop as control) and gap 1 now has a WRITTEN DECISION rather than a question — docs/browser-capsule-auth.md picks route B. Route B is explicitly NOT this round's build, because it needs protocol fields and a PROTOCOL_VERSION bump and p1-053c owns protocol.rs. Given instead gap 5, which round 2 accidentally unblocked: a policies.json bound over /etc/firefox/policies/policies.json inside the namespace installs a CA with no certutil, so nss-tools' absence does NOT close that question. Plus the hanging finding that the host's own enterprise policy is read inside every capsule and nothing asserts its shape."
     },
     {
       "slug": "p2-b",
@@ -105,13 +105,13 @@
       ],
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p1-053c",
-      "branch": "task/p1-053c-clipboard (off roadmap/v2.2, carrying 2 dirty files)",
+      "branch": "task/p1-053c-clipboard",
       "agent_id": "a6f141862c8f1c2fe",
       "dispatched": "2026-09-13T08:35+08:00",
       "session": "round 24 orchestrator",
       "queue_id": "p1-053c",
       "card": "ROADMAP/state/agents/p1-053c.md",
-      "at_dispatch": "Round 4, and it was nearly CLOSED BY HAND as device-blocked. It is dispatched instead because its card's 'nothing is half-written' is false: 134 uncommitted lines in the worktree are the clipboard-RECEIVE Request variant and its privilege predicate — P1-059's one open criterion, the verb three rounds called missing. Told the doc comment already written IS the design (no id: one clipboard per Wayland seat; not apex send --clipboard, which is ssh+wl-copy host to host; an agent is refused because a person copies a password out of a manager several times a day). Told to verify the 65514/6x-escape cap arithmetic rather than trust the comment, since round 1's on-paper refusal of criterion 2 was overturned by round 3 for exactly that reason, and that HelpParityTest's forbidden-claims entry must come out in the same commit or the suite is the defect. Owns protocol.rs this round; p2-d's route-B protocol change deferred so it can."
+      "at_dispatch": "Branch created by the agent off roadmap/v2.2 with `git checkout -b`, carrying the two dirty files (apex-agent-core/src/protocol.rs, apex-agentd/src/privilege.rs) forward from task/p1-053c-android-handoff, which is landed. Round 4, and it was nearly CLOSED BY HAND as device-blocked. It is dispatched instead because its card's 'nothing is half-written' is false: 134 uncommitted lines in the worktree are the clipboard-RECEIVE Request variant and its privilege predicate — P1-059's one open criterion, the verb three rounds called missing. Told the doc comment already written IS the design (no id: one clipboard per Wayland seat; not apex send --clipboard, which is ssh+wl-copy host to host; an agent is refused because a person copies a password out of a manager several times a day). Told to verify the 65514/6x-escape cap arithmetic rather than trust the comment, since round 1's on-paper refusal of criterion 2 was overturned by round 3 for exactly that reason, and that HelpParityTest's forbidden-claims entry must come out in the same commit or the suite is the defect. Owns protocol.rs this round; p2-d's route-B protocol change deferred so it can."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -174,8 +174,9 @@
     "session": "round 24 orchestrator",
     "registered": "2026-09-13T08:10+08:00",
     "started_by": "apex-roadmap-resume.timer (timeout 4h claude -p) — verified sole orchestrator, one `claude -p` in pgrep",
-    "heartbeat_refresher": "a detached loop rewrites state/orchestrator.heartbeat every 10 min so autoresume.timer stays out of the way",
-    "landed_tip_verification": "cargo test --locked --workspace --no-fail-fast on 13d53c01, niced, log at /var/tmp/apex-work/suite-logs/round24-landed-tip-cargo-test.log. NOTE: the workspace root is apexd/, not the repo root — the first attempt ran from int-os and died with `could not find Cargo.toml` after the orchestrator had banked it as started."
+    "heartbeat_refresher": "A detached loop rewrites state/orchestrator.heartbeat every 5 min, GUARDED BY `kill -0 768096` so it dies with the session. The first version of it this round was `while true` under setsid and would have OUTLIVED the `timeout 4h` kill, refreshing the heartbeat forever — autoresume.sh skips on a heartbeat under 45 minutes old, so the timer would have skipped at 13:06, 18:06 and every fire after that while six agents' branches sat unlanded. state/orchestrator.pid is also written, which is the stronger check autoresume.sh prefers (kill -0 plus a cmdline containing `claude`).",
+    "landed_tip_verification": "cargo test --locked --workspace --no-fail-fast on 13d53c01, niced, log at /var/tmp/apex-work/suite-logs/round24-landed-tip-cargo-test.log. NOTE: the workspace root is apexd/, not the repo root — the first attempt ran from int-os and died with `could not find Cargo.toml` after the orchestrator had banked it as started.",
+    "pid": 768096
   },
   "_previous_pause": {
     "when": "2026-09-07T15:32+08:00 to 2026-09-08T08:56+08:00",

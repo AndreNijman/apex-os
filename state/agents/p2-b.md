@@ -1,6 +1,13 @@
 # p2-b — accessibility baseline (P2-003) and internationalisation baseline (P2-004)
 
-**ROUND 22 IS THE LIVE ONE, on a FRESH branch in BOTH repos:
+**ROUND 23 IS THE LIVE ONE, on a FRESH branch in BOTH repos:
+`task/p2-b-round23`**, cut from the round-22 landings (apex-os `13d53c01`,
+apex-shell `0a3824c`) and pushed on both remotes before the first commit.
+Worktrees unchanged: `/var/tmp/apex-work/wt-p2-b4` (apex-os),
+`/var/tmp/apex-work/wt-p2-b4-sh` (apex-shell). Per-agent scratchpad:
+`/var/tmp/apex-work/scratch-p2-b/`.
+
+Earlier: **ROUND 22, on a FRESH branch in BOTH repos:
 `task/p2-b-round22`.** Round 21's work landed on `roadmap/v2.2` (apex-os merge
 `7ea639d2`, apex-shell merge `bfb24ed`), so the round-19-named branch had served
 its purpose and round 22 cut new ones off the new tips — apex-os `cd4a799e`,
@@ -1273,12 +1280,10 @@ the other one; both are now walked.
 ## NEXT
 
 **One line, and it is the load-bearing part of this card:** in
-`/var/tmp/apex-work/wt-p2-b4` on `task/p2-b-round22`, do a throwaway 30-tap Tab
-walk of the installer's `wifi` page (adapter shape — this laptop HAS a wifi
-device, `nmcli -t -f TYPE device` says `wifi`) and read the printed
-`wifi tab →` lines, to find out whether `Gtk.ListBoxRow` network rows are Tab
-stops and whether they announce anything, BEFORE choosing tap counts and floors
-for a `ring_wifi()` in `installer/test-installer-a11y.sh`.
+`/var/tmp/apex-work/wt-p2-b4-sh` on `task/p2-b-round23`, run
+`./tests/mutate-rtl.sh` (committed as `e857d7f`) and read its verdicts; R1 is
+PREDICTED TO SURVIVE and that is a defect in the fixture, not in the mutant —
+see "ROUND 23" below for why and for the fix.
 
 ### The standing queue
 
