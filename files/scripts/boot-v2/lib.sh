@@ -94,6 +94,10 @@ _ovmf_raw() {
 ovmf_code_secboot() {
     local c
     if c="$(_ovmf_raw CODE)"; then printf '%s\n' "$c"; return 0; fi
+    # shellcheck disable=SC2043  # a one-entry search path, written as a list
+    # because that is what it is: the next distribution that moves the 4 MB
+    # build adds a line here. Collapsing it to an `if` would make adding one a
+    # rewrite instead of a line.
     for c in /usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd; do
         [[ -f "$c" ]] && { printf '%s\n' "$c"; return 0; }
     done
@@ -120,6 +124,7 @@ ovmf_vars_template() {
         fi
         printf '%s\n' "$v"; return 0
     fi
+    # shellcheck disable=SC2043  # a one-entry search path; see ovmf_code_secboot.
     for v in /usr/share/edk2/x64/OVMF_VARS.4m.fd; do
         [[ -f "$v" ]] || continue
         virt-fw-vars --input "$v" --print 2>/dev/null | grep -qE '^name=(PK|db)\b' && continue
@@ -150,8 +155,6 @@ sd_stub_efi() {
 # untestable. `parted` writes the GPT into a plain file and the FAT filesystem
 # is built separately and dd'd into place, so nothing here needs losetup or
 # root inside the container.
-ESP_OFFSET_BYTES=$((1024 * 1024))   # parted's default 1 MiB first-partition start
-
 esp_disk_create() {
     local disk="$1" esp_mib="${2:-256}"
     local total_mib=$(( esp_mib + 2 ))
@@ -270,8 +273,8 @@ vm_boot() {
         [[ -S "$tpmdir/sock-$name" ]] || die "swtpm control socket never appeared"
         tpm_args=(
             -chardev "socket,id=chrtpm,path=$tpmdir/sock-$name"
-            -tpmdev emulator,id=tpm0,chardev=chrtpm
-            -device tpm-tis,tpmdev=tpm0
+            -tpmdev "emulator,id=tpm0,chardev=chrtpm"
+            -device "tpm-tis,tpmdev=tpm0"
         )
     fi
 
@@ -312,6 +315,7 @@ vm_boot() {
         # directory: swtpm writes its NV state on shutdown, and starting a
         # second instance on a half-written state file is how a sealed object
         # disappears between two boots.
+        # shellcheck disable=SC2034  # a bounded wait; nothing reads the counter.
         for i in $(seq 1 100); do
             kill -0 "$(cat "$tpmdir/swtpm-$name.pid" 2>/dev/null || echo 0)" 2>/dev/null || break
             sleep 0.05

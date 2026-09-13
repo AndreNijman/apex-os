@@ -52,6 +52,23 @@ dnf5 -y download --resolve --arch=x86_64 --arch=noarch --arch=i686 \
     --destdir "$WORK/dl" fontconfig >/dev/null 2>&1 \
     || { echo "PROBE_SKIP no repository reachable"; exit 0; }
 
+# A native build the "image" ALREADY HAS, at the same EVR. Without one the
+# third decision below cannot be exercised at all: `download --resolve` fetches
+# only what is NOT installed, so the set it builds can never contain a native
+# overlap, and the assertion that the engine still leaves such a build out
+# reported SKIP on every run — a could-not-run wearing a pass.
+#
+# Install first, then download the same name in the same transaction's view of
+# the repository, so the two EVRs are equal by construction rather than by
+# luck. `zip` is not in the base image, is on no protected list, and pulls
+# nothing: what is wanted here is an ordinary package, not an interesting one.
+if dnf5 -y install zip >/dev/null 2>&1 \
+   && dnf5 -y download --arch=x86_64 --destdir "$WORK/dl" zip >/dev/null 2>&1; then
+    echo "PROBE_NATIVE ok"
+else
+    echo "PROBE_NATIVE failed"
+fi
+
 echo "PROBE_SET $(ls "$WORK/dl" | wc -l) rpms, $(ls "$WORK/dl" | grep -c i686) i686"
 bash -c "source $PKG >/dev/null 2>&1; set +e; guard_rpms '$WORK/dl'" 2>&1 \
     | grep -oE "(allowing|refusing|skipping|omitting) '[^']*'" \
@@ -83,7 +100,11 @@ if printf '%s\n' "$decisions" | grep -q "allowing 'glibc-.*\.i686'"; then
 elif printf '%s\n' "$decisions" | grep -q "refusing 'glibc'"; then
     bad "glibc.i686 refused as a core package, so no 32-bit application can install"
 else
-    echo "SKIP  glibc.i686 was not in this set"
+    # Not a SKIP. `fontconfig` requires glibc and the download asked for i686,
+    # so glibc.i686 is in this set by construction; its absence means the set
+    # was not built the way this suite believes, and every decision read below
+    # is then about some other set. That is a failure, not an abstention.
+    bad "glibc.i686 was not in the set at all, so the multilib rule was never exercised"
 fi
 
 # The defect that silently deleted the libraries: the installed-check asked
@@ -98,10 +119,12 @@ fi
 # The fix must not become "install everything": a native build the image
 # already ships at the same version must still be skipped, or the overlay
 # shadows the image from the other direction.
-if printf '%s\n' "$decisions" | grep -qE "(skipping|omitting) '[^']*\.(x86_64|noarch)'"; then
+if ! printf '%s\n' "$out" | grep -q 'PROBE_NATIVE ok'; then
+    bad "the set could not be given a native build the image already has, so this decision was never exercised"
+elif printf '%s\n' "$decisions" | grep -qE "(skipping|omitting) '[^']*\.(x86_64|noarch)'"; then
     ok "a native build the image already provides is still left out"
 else
-    echo "SKIP  nothing native overlapped the image in this set"
+    bad "a native build the image already ships was carried into the overlay, which shadows the image from the other direction"
 fi
 
 echo

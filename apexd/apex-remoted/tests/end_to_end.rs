@@ -449,7 +449,37 @@ fn open_offer(h: &Harness) -> Option<PairingOffer> {
     if reply["reply"] == "error" {
         // This process is not local, so pairing is refused — which is itself
         // the rule under test in `pairing_is_refused_for_a_caller_that_is_not_local`.
-        eprintln!("SKIP: this process may not pair ({})", reply["message"]);
+        //
+        // The refusal has to be about the PLACEMENT. `local_caller` also
+        // refuses when the kernel would not report peer credentials and when
+        // the connection belongs to another account, and neither of those is
+        // a could-not-run: they mean this harness is wrong. Established from
+        // /proc rather than read off the message, so the two halves are
+        // independent.
+        let placement = apex_agent_core::origin::observe_pid(std::process::id() as i32);
+        let why = reply["message"].as_str().unwrap_or_default().to_string();
+        let names_the_placement = match &placement {
+            Ok(o) => why.contains(o.as_str()),
+            Err(_) => why.contains("/proc/") || why.contains("cgroup"),
+        };
+        assert!(
+            names_the_placement,
+            "pairing was refused for a reason that is not this process's placement \
+             ({placement:?}): {reply}"
+        );
+        // Without this the skip is a swallow. CI runs this crate's tests
+        // through `tests/in-login-session.sh`, and that helper "says out loud
+        // why it could not and runs the tests exactly as before" when PAM
+        // fails — so a broken session would turn every pairing assertion in
+        // this file into a silent pass on the runner and tell nobody. See
+        // `Harness::offer` in relay.rs for the same knob and the four-way
+        // table behind it.
+        assert!(
+            std::env::var_os("APEX_REQUIRE_LOCAL_ORIGIN").is_none(),
+            "APEX_REQUIRE_LOCAL_ORIGIN is set, so this run was supposed to hold a real \
+             logind session and does not: {why}"
+        );
+        eprintln!("SKIP: this process may not pair ({why})");
         return None;
     }
     Some(PairingOffer::decode(reply["qr"].as_str().expect("a qr")).expect("decode"))

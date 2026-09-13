@@ -9,13 +9,17 @@
 tests/test-apex-audio-live.sh        needs real audio hardware; -live by name
 tests/test-apex-firewall-live.sh     loads nftables into the live kernel; needs CAP_NET_ADMIN
 tests/test-apex-lid-live.sh          needs a real SW_LID device and a logind session
+# firewall-ssh is here and not below because it is not headless-able at all:
+# it is a DRIVER that loads the policy into ANOTHER host's live kernel over
+# ssh, holds that ssh open across the load to prove the connection survived,
+# and probes the target from off the machine. It requires --target HOST plus
+# --yes-this-host-may-lose-its-network, and refuses outright if the target
+# resolves to the machine it is running on. A runner is one ephemeral VM with
+# no second host to un-network, and 127.0.0.1 is exactly the vantage point the
+# suite's own header says would make the measurement meaningless.
+tests/test-apex-firewall-ssh.sh      needs a SECOND machine, and refuses to target its own
 #
 # ── DEBT: these can run headless and simply were never wired in ─────────────
-tests/test-apex-lid.sh               60 assertions for P1-063; no CI run has ever executed it
-tests/test-apex-firewall-ssh.sh      asserts the ssh allowance in the shipped ruleset
-tests/test-apex-devices.sh           55 assertions over six device areas
-tests/test-device-services-netns.sh  12 assertions; sends real packets in a private netns
-tests/test-apex-trust-enforcement.sh the signature/provenance enforcement policy
-tests/test-secret-at-rest.sh         the at-rest property P0-002 earned
-tests/test-apex-multilib.sh          drives apex-pkg; needs care about what it installs
-tests/test-labwc-session.sh          needs a nested compositor; check whether the harness now allows it
+# (none. 2026-09-13: the last eight were wired in or, for firewall-ssh, moved
+#  above with the reason it cannot run here. Add a line only with a reason,
+#  and expect the next person to delete it.)

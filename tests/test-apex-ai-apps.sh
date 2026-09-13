@@ -327,8 +327,13 @@ if grep -q '^PRETTY_NAME="APEX-OS"' /usr/lib/os-release 2>/dev/null; then
         note "the documented stopgap and must NOT be retired before an in-image"
         note "Claude Desktop lands, or this machine stops getting the app at all."
     fi
-    sys_timers=$(ls /usr/lib/systemd/system/ 2>/dev/null \
-        | grep -iE '^(chatgpt|claude).*\.(timer|service)$')
+    # `find -iname`, not `ls | grep`: a unit file whose name contained a
+    # newline would reach the emptiness test below as two names, and the
+    # assertion is that there are NONE.
+    sys_timers=$(find /usr/lib/systemd/system/ -maxdepth 1 \
+        \( -iname 'chatgpt*.timer'  -o -iname 'chatgpt*.service' \
+        -o -iname 'claude*.timer'   -o -iname 'claude*.service' \) \
+        -printf '%f\n' 2>/dev/null)
     if [ -z "$sys_timers" ]; then
         ok "the image ships no per-app updater unit for either app"
     else

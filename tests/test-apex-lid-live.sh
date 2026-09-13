@@ -55,7 +55,6 @@
 set -uo pipefail
 set +e
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NS_A=apexlid-live-a
 NS_B=apexlid-live-b
 

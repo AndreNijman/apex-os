@@ -348,6 +348,7 @@ fi
 # reconnects through the tunnel the instant the direct path stops answering,
 # and a green light there would be a fact about the tunnel.
 newconn=""
+# shellcheck disable=SC2034  # a bounded wait; nothing reads the counter.
 for attempt in 1 2 3; do
     newconn="$(ssh -o BatchMode=yes -o ConnectTimeout=10 -o ControlPath=none \
                    "$TARGET" 'printf "%s\n" "$SSH_CONNECTION"' 2>/dev/null | awk '{print $3}')"

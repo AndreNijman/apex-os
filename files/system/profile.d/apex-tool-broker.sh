@@ -1,4 +1,11 @@
 # APEX: put the brokered `wrangler` and `terraform` ahead of the real ones for
+#
+# shellcheck shell=sh
+# No shebang because nothing executes this: /etc/profile.d is SOURCED, and by
+# whichever shell the login is running. So the dialect has to be declared, and
+# `sh` is the right one to declare — it is the strictest of the shells that can
+# source this, and linting it as bash would let a bashism through that a dash
+# login would then choke on.
 # a PERSON working inside a managed session.
 #
 # THIS IS NOT WHAT ROUTES AN AGENT'S COMMANDS, and it must not be mistaken for

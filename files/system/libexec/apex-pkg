@@ -1566,6 +1566,14 @@ cmd_list() {
 # it over a fixture tree. $PKG_ROOT is a hardcoded readonly and giving it an
 # environment override would put a redirectable path into a script that runs as
 # root, which is a worse trade than one parameter.
+# shellcheck disable=SC2120  # the caller that passes $1 is tests/test-apex-pkg.sh,
+# which sources this file and calls `state_kind "$SK/..."` eight times over a
+# fixture tree. shellcheck only sees the callers in THIS file, all of which take
+# the $STATE default, so it reads the parameter as dead. It is not: dropping it
+# would take the suite's only way to drive this function over anything but the
+# real /var/lib/apex. Flagged by shellcheck 0.9.0, which is what ubuntu-24.04
+# runners ship, and NOT by 0.11.0 — this file was clean on the machine it was
+# written on and red in CI.
 state_kind() {
     # Not named STATE: that is a readonly global, and `local STATE=` is an error
     # in bash rather than a shadow. The suite found this the first time it ran.

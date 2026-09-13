@@ -38,6 +38,8 @@ bad()  { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
 skipped() { printf 'SKIP  %s — %s\n' "$1" "$2"; skip=$((skip + 1)); }
 section() { printf '\n── %s ──\n' "$1"; }
 
+# shellcheck disable=SC2043  # one hard requirement today, written as the same
+# tool-check list every other suite here uses.
 for tool in python3; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "FATAL: $tool is required; this suite cannot test anything without it" >&2
