@@ -1,94 +1,76 @@
 # p2-f
-items: P2-016 (per dispatch only — see NOTE), P2-017, P2-018, P2-019
-repo: apex-os (the greeter QML is in apex-os, NOT apex-shell)
+items: P2-017, P2-018, P2-019  (P2-016 — see NOTE at the bottom, unchanged)
+repo: apex-os
 worktree: /var/tmp/apex-work/wt-p2-f
-branch: task/p2-f-2   (7 commits + 1 merge off roadmap/v2.2 @ e799422b, all PUSHED)
+branch: task/p2-f-3   (cut from origin/roadmap/v2.2 @ 13d53c01)
 
 ## NEXT
-Round 2 closed P2-018's criterion 1. The remaining open work, in the order a
-round should take it:
+ROUND 3 IN PROGRESS. Round 2's branch `task/p2-f-2` landed as `f2229185`.
 
-1. **S3/R2 SigV4 signer** (P2-017 criterion 1). The wall P1-011's temporary.rs
-   already hit. Rust, in apex-secret-core; needs its own clippy + cargo test
-   cycle, so give it a round of its own rather than sharing one with a
-   boot-critical change.
-2. **RFC 8628 device-code for Google and Microsoft** (P2-017 criterion 1).
-   `apex/src/cloudflare.rs` has a complete implementation to copy, including
-   its best idea: the refresh token under a SEPARATE service pinned to a
-   different host, so the endpoint pin makes it unspendable as an API token.
-   Nothing refreshes any token today, Cloudflare's included.
-3. **gvfs / file-manager integration** (P2-017 criterion 2). Not started.
-4. **Fleet transport and server side** (P2-019). `docs/fleet.md` is a design
-   with a "must never be built" list and no daemon; that is deliberate. What is
-   missing is enrollment/inventory over a wire.
-5. **P2-018 criterion 2 is still STRUCTURAL**: the menu entries are asserted to
-   exist AND their binaries are now asserted to be in the image, but none has
-   been RUN from inside the session.
+**Round 3's queue changed on the first look, and this is the reason:**
+**item 1 of round 2's list — the S3/R2 SigV4 signer — WAS BUILT BY ANOTHER
+UNIT and is on the tip already**, as `5054be77` "feat(secretd): an S3
+provider, with a SigV4 signer pinned against botocore" (verified
+`git merge-base --is-ancestor 5054be77 origin/roadmap/v2.2`). Do not build it
+again. What it leaves behind is in FOUND.
+
+Remaining, in the order this round takes them:
+
+1. RFC 8628 device code for Google and Microsoft, and the first thing in this
+   build that REFRESHES a token. Design settled below.
+2. The vapour-scope defect (FOUND #1) — a cross-crate test, landed green with
+   its fix in the same commit.
+3. P2-019 fleet transport + server side.
+4. gvfs — a design paragraph only; not enough budget to build it.
+5. P2-018 criterion 2 — the exact recipe that would close it.
+
+## DESIGN DECISIONS TAKEN THIS ROUND (so a successor does not re-litigate them)
+
+- **Refresh is `Bound::replaces`, a sibling of `Bound::creates`.** Rejected:
+  a new `Request` variant (that is the second write path `account.rs`'s module
+  note refuses) and framework-driven refresh at `Use` time (the right product
+  end-state, but `ServiceInfo` has no `expires` and no `refresher` field —
+  `added` is its only timestamp — so it needs a protocol change to `Add` and
+  orchestration in `service.rs`; that is a round of its own, recorded here as
+  the follow-on with those field names).
+- `service.rs:1053` refuses a `creates` name that is already taken, for a
+  reason that is true of creation and false of refresh: the far side issues
+  once. A refresh's whole purpose is to supersede. So `replaces` is gated by a
+  STATIC flag on `OperationSpec`, enumerated by a test in `providers/mod.rs`
+  mirroring `the_everywhere_gate_reads_the_operations_own_declaration`.
+- One `oauth` provider serves Google, Microsoft and Cloudflare: RFC 6749 §6 is
+  the same request at all three. `bind` maps the refresh credential's pinned
+  host to its token endpoint from a hard-coded table, which is pin-consistent.
 
 ## DONE
 Round 1: landed as merge 4e8969ef (10 commits).
-Round 2 (task/p2-f-2, pushed, NOT merged): P2-018 criterion 1 — the verb.
+Round 2: landed as merge f2229185 — P2-018 criterion 1, the recovery verb.
 
-  c4515644  the watchdog + greeter hooks + 80-assertion suite
-            (recovered UNCOMMITTED from the worktree; the killed agent had
-            written it and never committed — it was not redone)
-  0b4d1e6b  Containerfile.base bakes it and refuses a build that cannot count;
-            check-containerfile-assertions.sh taught to resolve directory
-            COPYs; thunar/nmtui asserted present in the image
-  e4ca169f  CI runs the suite, floored on failures, SKIPS and count drops
-  c30defc6  docs/recovery.md: the third route in
-  6ff58f9b  §5 — `_selectWanted` extracted and EXECUTED under node
-  f49272e5  doc: how long the preselection actually lasts
-  876f6d10  FIX a regression this round shipped: the notice tested against ""
-            swallowed the Caps Lock warning. See FOUND.
+## IN PROGRESS
+- Nothing committed on task/p2-f-3 yet.
 
 ## FOUND
-- `files/desktop/apex-greet/GreetContext.qml` lives in **apex-os**.
-- `/var/lib/apex-greet` is tmpfiles-created, `0755 greetd greetd`.
-- The greeter's launch path is `persistProc` and `Greetd.launch()` is deferred
-  to `persistProc.onExited` — the single safest hook point, and also why a
-  hanging hook there is a LOCKOUT. Everything added is `timeout`-capped and
-  `|| true`'d, and last-user/last-session are written BEFORE the helper runs.
-- **`tests/test-apex-greet-layout.sh` already parses both QML files with
-  qmllint-qt6.** There is no need to reach for `qs -p` (which is banned) to
-  find out whether a greeter edit would boot. Run that suite.
-- **`tests/test-apex-greet-sessions.sh` already executes `_selectWanted` under
-  node(1).** Its ctx has no recovery fields, so `undefined !== ""` walked the
-  new branch and matched nothing — it stayed green without executing the
-  change. A suite passing is not the same as a suite covering.
-- **check-containerfile-assertions.sh could not resolve a grep against a file
-  inside a directory COPY whose destination has no trailing slash.** The
-  greeter is copied exactly that way, so every assertion about the LOGIN SCREEN
-  sat in the "could not check" bucket. Fixed here: 171 -> 181 checked.
-- **`nmtui` is named by no APEX dnf list.** It is inherited from
-  fedora-bootc:43, nothing in the image requires it, and it is not a weak
-  dependency of NetworkManager. The safe-graphics menu offers it. There is now
-  a build assertion; if it ever fires, add NetworkManager-tui to
-  Containerfile.core.
-- **CI runs as root, and a chmod-based "unwritable directory" test is a no-op
-  there.** Make a directory uncreatable by SHAPE (parent is a regular file →
-  ENOTDIR for uid 0 too). `unshare --user --map-root-user` reproduces CI's uid
-  without sudo and without a prompt.
-- Build order is **core → base → apex** (`Containerfile.base` is `FROM
-  ${CORE}`), so a base assertion CAN see a core package. Thunar is one.
-- **`tests/greet-a11y-test.qml` INSTANTIATES GreetSurface.qml under a real QML
-  engine** (qmltestrunner). It is the only place in either repo where greeter
-  QML is a live object rather than text. It caught a regression this round
-  shipped, and it is where a surface change should be tested.
-- **The `undefined !== ""` trap bit twice in one round, in two files.** A ctx
-  without the property yields undefined and `undefined !== ""` is TRUE, so the
-  branch is taken and the binding renders undefined. Test QML for TRUTH. The
-  watchdog suite now asserts neither greeter file regresses to that spelling.
-- `check-doc-verbs.sh` is red on the tip and not because of this unit:
-  `apex browser doctor` undocumented, `apex secret list` stale. Identical on
-  origin/roadmap/v2.2 — verified, not assumed.
-
-## NOTE — card/dispatch mismatch, unresolved on purpose
-The card carries P2-017/018/019; the round-2 dispatch also named **P2-016**.
-P2-016's evidence belongs to unit `p2-016-multiuser-2` (landed 2026-09-12 as
-merge 5eca2402). This round did no P2-016 work and did NOT call set-status on
-it — set-status.py REPLACES evidence, and writing it would have destroyed that
-unit's record. Whoever owns the queue should settle which unit holds P2-016.
+- **`5054be77` landed the S3 provider and SigV4 signer.** Round 2's card
+  listed it as this round's item 1; it is done, and by somebody else.
+- **VAPOUR SCOPES — a real defect the S3 landing exposed.**
+  `apex-secret-core/src/account.rs` lets a user run `apex account grant
+  google files.read`, which records a grant for operation `gdrive.file.read`.
+  **No provider in `default_registry()` offers `gdrive.*` or `msgraph.*`, and
+  `S3_SCOPES` names `s3.object.list` which the new S3 provider does not offer
+  either** (it has `s3.object.read` and `s3.object.write`). Nothing checks
+  this today because `apex-secret-core` cannot see the registry — but
+  `apex-secretd` depends on `apex-secret-core`, so a test THERE can, and that
+  is where the gate belongs.
+- Nothing in this build refreshes any token, Cloudflare's included, and
+  `apex cf status` prints that fact ("a refresh token is stored too, and
+  nothing spends it yet") — so if refresh lands, that line has to change.
 
 ## BLOCKED ON
 (nothing)
+
+## NOTE — card/dispatch mismatch, unresolved on purpose
+Round 2's dispatch also named **P2-016**, whose evidence belongs to unit
+`p2-016-multiuser-2` (landed 2026-09-12 as merge 5eca2402). Rounds 2 and 3 did
+no P2-016 work and did NOT call set-status on it — set-status.py REPLACES
+evidence, and writing it would have destroyed that unit's record. Whoever owns
+the queue should settle which unit holds P2-016.

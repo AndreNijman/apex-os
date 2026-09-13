@@ -1277,6 +1277,65 @@ the other one; both are now walked.
    something that was never true of a page with a list. The anchor is now the
    first stop whose role is not `list item`.
 
+## ROUND 23 — the RTL switch is driven by a TRANSLATION CATALOGUE, not by the locale
+
+**The finding, and it is the biggest one this unit has produced.**
+`Qt.application.layoutDirection` — the switch round 22 bound `CfgRow` and
+`CfgScroll` to — does NOT follow the locale. It follows whether a Qt translation
+catalogue for that language is loaded, because Qt decides it by translating the
+string `QT_LAYOUT_DIRECTION` and comparing the answer to `RTL`. Nothing in QML
+can see that, and a suite run on a developer's desktop cannot see it either,
+because the desktop's own environment supplies the catalogue.
+
+Measured, with a negative control that makes it a mechanism rather than a
+coincidence — `qmltestrunner -platform offscreen`, `env -i` plus one variable at
+a time, reading `Qt.application.layoutDirection` and `Qt.locale().textDirection`
+off the same run:
+
+    LANG=ar_EG.UTF-8  QT_QPA_PLATFORMTHEME=qt6ct   APEXDIR=1  TEXTDIR=1
+    LANG=he_IL.UTF-8  QT_QPA_PLATFORMTHEME=qt6ct   APEXDIR=1  TEXTDIR=1
+    LANG=fa_IR.UTF-8  QT_QPA_PLATFORMTHEME=qt6ct   APEXDIR=1  TEXTDIR=1
+    LANG=ur_PK.UTF-8  QT_QPA_PLATFORMTHEME=qt6ct   APEXDIR=0  TEXTDIR=1   <-- control
+    LANG=ar_EG.UTF-8  QT_QPA_PLATFORMTHEME unset   APEXDIR=0  TEXTDIR=1
+    LANG=ar_EG.UTF-8  QT_QPA_PLATFORMTHEME=bogus   APEXDIR=0  TEXTDIR=1
+
+`/usr/share/qt6/translations/` has `qt_ar.qm`, `qt_he.qm`, `qt_fa.qm` and NO
+`qt_ur.qm`. Urdu is unambiguously right-to-left and Qt's own `QLocale` says so
+in the same run (`TEXTDIR=1`), and the application direction still comes back
+LeftToRight. That is the catalogue being the mechanism, not the locale.
+
+**What makes it work in the shipped image is `qt6ct`, and it was configured for
+a palette.** `apex-os/Containerfile.core:948` appends
+`QT_QPA_PLATFORMTHEME=qt6ct` to `/etc/environment` and
+`files/desktop/labwc/environment:22` sets it again; the comment in
+`files/system/qt6ct/qt6ct.conf:3` says why it exists — "dark palette". The
+qt6ct platform theme plugin installs a QTranslator, that QTranslator brings
+`qt_<lang>.qm` with it, and `QT_LAYOUT_DIRECTION` comes along for the ride. So
+RTL mirroring works on a shipped APEX desktop **entirely as a side effect of a
+theming choice**. Drop qt6ct, or move to any other theming route, and every
+mirrored surface silently stops mirroring with nothing red anywhere.
+
+**It also settles half of standing-queue item 3 in an unexpected direction.**
+`/usr/bin/quickshell` installs no QTranslator — that was measured in round 20
+and is still true — but the process it runs in DOES have one installed by the
+platform theme. What quickshell lacks is a route to load OUR catalogue, not a
+translator at all.
+
+**And it explains why round 22's suite was 13/0/0 on this laptop and could not
+have been in CI.** `tests/run-rtl-test.sh` section 1 inherits
+`QT_QPA_PLATFORMTHEME` from whoever runs it. The mutation harness runs its
+suite under `env -i HOME PATH USER TMPDIR` — deliberately, so a mutant's verdict
+is not about the operator's shell — and the FIRST thing it reported was the
+baseline failing 3 of 15:
+
+    FAIL  the layout direction is not a constant — both runs answered 0
+    FAIL  under LANG=ar_EG.UTF-8 it is RightToLeft — got 0
+    FAIL  under LANG=he_IL.UTF-8 it is RightToLeft — got 0
+
+The harness was right and the suite was wrong. An assertion whose truth is
+supplied by the ambient environment is the same defect class as a gate that
+inspects nothing.
+
 ## NEXT
 
 **One line, and it is the load-bearing part of this card:** in
