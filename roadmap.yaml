@@ -3464,54 +3464,62 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Android voice, screenshot, file and clipboard handoff. LANDED on apex-os roadmap/v2.2 2026-09-13 as merge
-    551e9e1a (task/p1-053c-android-handoff, seven commits). THREE OF FOUR CRITERIA MET; THE FILE/SCREENSHOT ONE IS
-    REFUSED WITH ARITHMETIC RATHER THAN APPROXIMATED. C1 PUSH-TO-TALK DONE, and the design was reversed mid-round
-    for a reason worth keeping (1cafad93 then 5f3a815d): the desktop stages a transcript in the agent's input line
-    for a human to review, and copying that placement to a phone builds a push-to-talk whose result appears twenty
-    minutes later at a desk nobody is standing at. The review moved to where the person is - transcript and
-    clipboard go into the phone's reply box, Send is the same button a typed reply uses, and there is now exactly
-    ONE path to the wire (Reply.bytes through Reply.check's recycled-id guard) where the first version had two.
-    NOTHING SUBMITS: Input writes raw bytes to the PTY master and appends nothing, so Voice and Clipboard payloads
-    end in no terminator while Reply appends CR, and both halves of the shared fixture assert the last byte. The
-    target is FROZEN at the start and Handoff.Voice.landsOn compares all three identity values, not the id, which
-    is reused after a prune - without it one agent's dictated answer lands in another agent's box where the person
-    reads it as their own words and presses Send. Two running agents and nothing selected is a REFUSAL, not a
-    guess, because this app has no notion of focus. NO_RECOGNISER would have fired on every phone until the
-    <queries> block was declared: on API 30+ package visibility makes resolveActivity answer null, which is
-    refusal and absence confused in the direction that makes a working feature look broken. C3 CLIPBOARD HALF-MET
-    AND SAYS SO IN THE SOURCE: send is done and is gated on THE SEND rather than on the app's own Paste button,
-    because a native long-press paste runs no code of this app's - Clipboard.inspect classifies interior line
-    breaks, control bytes a TUI acts on, and a 16 KB cap, with FIRST_LINE the default and EVERYTHING reachable
-    only after the user has been told what it does; nothing is silently stripped. Receive is NOT met: no verb on
-    this socket reads the machine's clipboard, and 'apex send --clipboard' is a different feature wearing a
-    similar name (wl-paste, ssh to another Linux host in the section 20 registry, wl-copy there). Transport
-    encryption is the paired channel's, which P1-051/P1-052 own. C4 DONE: the photo-picker rule plus a manifest
-    guard, tested in ManifestTest. C2 NOT MET, AND THE ARITHMETIC IS THE EVIDENCE: apex-remote-core's MAX_PAYLOAD
-    is 65514 bytes, a control frame carries one line of agentd JSON, base64 costs 4/3, so a single-frame handoff
-    tops out near 48 KB while a screenshot is 100 KB to 2 MB. A verb that carries a log tail and refuses the thing
-    the criterion is named after is the same mistake as building a request nothing can parse. Doing it properly
-    means chunked transfer - begin/chunk/end, staging state and a size cap in the daemon, a timeout, cleanup of an
-    abandoned upload, and the origin gate below applied to the destination. That is a protocol unit, not an
-    Android round, and it is recorded as one rather than faked. A DAEMON HOLE THIS UNIT FOUND AND FIXED
-    (02e133c0), which is P1-059's fourth criterion inverted: Request::Inject reads an absolute host path with the
-    daemon's own access outside every sandbox, and inject::handle refused exactly one caller - a managed session -
-    never consulting the origin, because when P1-035 landed the only imaginable callers were that session and a
-    human at a keyboard. apex-remoted's control() is a DENYLIST of one verb (attach) and a proxy is not a managed
-    session, so a paired phone could have sent {"cmd":"inject","source":"/home/u/.ssh/id_ed25519"} and had the
-    daemon carry that key into a session's inbox and type the path. Gated with decide's own predicate rather than
-    a paraphrase; an origin that could not be established is refused rather than defaulted. Pinned by
-    a_declared_connection_cannot_hand_a_file_to_a_session, written so the undeclared control reaches
-    no_such_session - downstream of the gate, which proves it was passed rather than absent. Two mutations, both
-    red, restored byte-identical. test-agent-inject.sh 48/0 after the change: nothing that works today pays for
-    it. Counts on the branch tip: 421 :core tests, 33 :app, 684 apex-agent-core unit tests plus its six
-    integration suites, apex-agentd green, all three android gates. ROUND 2 (2026-09-13,
-    task/p1-053c-android-handoff, four commits, PUSHED): CRITERION 2 IS NOW MET, AND ROUND 1'S REFUSAL OF IT WAS
-    WRONG IN A WAY WORTH RECORDING. The arithmetic above is correct and the conclusion does not follow, because
-    every number in it measures a Frame::Control. apex-remote-core's wire has four more variants and
-    Open/Data/Close IS begin/chunk/end - wire.rs:66 says so in its own words, "a Data frame is split by the writer
-    and reassembled by the reader as an ordinary byte stream, so the limit is invisible above this layer", and
-    Frame::data_frames is bytes.chunks(MAX_PAYLOAD), in the tree, carrying every PTY byte the phone has ever
+    CORRECTION 2026-09-13 (round 24), and it overturns the sentence that follows: CRITERION 2 IS CLOSED, and the
+    item is partial because of CRITERION 3, not criterion 2. Round 1's refusal-with-arithmetic was entirely
+    correct about a Frame::Control and irrelevant to Data frames, which had been chunking every PTY byte all
+    along; round 3 measured that rather than inheriting it. C3 is clipboard send/receive: SEND has been done since
+    round 1 and RECEIVE has no verb at all - nothing on this socket reads the machine's clipboard, and apex send
+    --clipboard is a different feature wearing a similar name. That absence is asserted by a test rather than left
+    as a note: round 3 put 'read the computer's clipboard' into HelpParityTest's forbidden-claims list. Three of
+    four criteria plus half is partial, and recording done to tidy the board is the mistake this unit was warned
+    about one item over. Android voice, screenshot, file and clipboard handoff. LANDED on apex-os roadmap/v2.2
+    2026-09-13 as merge 551e9e1a (task/p1-053c-android-handoff, seven commits). THREE OF FOUR CRITERIA MET; THE
+    FILE/SCREENSHOT ONE IS REFUSED WITH ARITHMETIC RATHER THAN APPROXIMATED. C1 PUSH-TO-TALK DONE, and the design
+    was reversed mid-round for a reason worth keeping (1cafad93 then 5f3a815d): the desktop stages a transcript in
+    the agent's input line for a human to review, and copying that placement to a phone builds a push-to-talk
+    whose result appears twenty minutes later at a desk nobody is standing at. The review moved to where the
+    person is - transcript and clipboard go into the phone's reply box, Send is the same button a typed reply
+    uses, and there is now exactly ONE path to the wire (Reply.bytes through Reply.check's recycled-id guard)
+    where the first version had two. NOTHING SUBMITS: Input writes raw bytes to the PTY master and appends
+    nothing, so Voice and Clipboard payloads end in no terminator while Reply appends CR, and both halves of the
+    shared fixture assert the last byte. The target is FROZEN at the start and Handoff.Voice.landsOn compares all
+    three identity values, not the id, which is reused after a prune - without it one agent's dictated answer
+    lands in another agent's box where the person reads it as their own words and presses Send. Two running agents
+    and nothing selected is a REFUSAL, not a guess, because this app has no notion of focus. NO_RECOGNISER would
+    have fired on every phone until the <queries> block was declared: on API 30+ package visibility makes
+    resolveActivity answer null, which is refusal and absence confused in the direction that makes a working
+    feature look broken. C3 CLIPBOARD HALF-MET AND SAYS SO IN THE SOURCE: send is done and is gated on THE SEND
+    rather than on the app's own Paste button, because a native long-press paste runs no code of this app's -
+    Clipboard.inspect classifies interior line breaks, control bytes a TUI acts on, and a 16 KB cap, with
+    FIRST_LINE the default and EVERYTHING reachable only after the user has been told what it does; nothing is
+    silently stripped. Receive is NOT met: no verb on this socket reads the machine's clipboard, and 'apex send
+    --clipboard' is a different feature wearing a similar name (wl-paste, ssh to another Linux host in the section
+    20 registry, wl-copy there). Transport encryption is the paired channel's, which P1-051/P1-052 own. C4 DONE:
+    the photo-picker rule plus a manifest guard, tested in ManifestTest. C2 NOT MET, AND THE ARITHMETIC IS THE
+    EVIDENCE: apex-remote-core's MAX_PAYLOAD is 65514 bytes, a control frame carries one line of agentd JSON,
+    base64 costs 4/3, so a single-frame handoff tops out near 48 KB while a screenshot is 100 KB to 2 MB. A verb
+    that carries a log tail and refuses the thing the criterion is named after is the same mistake as building a
+    request nothing can parse. Doing it properly means chunked transfer - begin/chunk/end, staging state and a
+    size cap in the daemon, a timeout, cleanup of an abandoned upload, and the origin gate below applied to the
+    destination. That is a protocol unit, not an Android round, and it is recorded as one rather than faked. A
+    DAEMON HOLE THIS UNIT FOUND AND FIXED (02e133c0), which is P1-059's fourth criterion inverted: Request::Inject
+    reads an absolute host path with the daemon's own access outside every sandbox, and inject::handle refused
+    exactly one caller - a managed session - never consulting the origin, because when P1-035 landed the only
+    imaginable callers were that session and a human at a keyboard. apex-remoted's control() is a DENYLIST of one
+    verb (attach) and a proxy is not a managed session, so a paired phone could have sent
+    {"cmd":"inject","source":"/home/u/.ssh/id_ed25519"} and had the daemon carry that key into a session's inbox
+    and type the path. Gated with decide's own predicate rather than a paraphrase; an origin that could not be
+    established is refused rather than defaulted. Pinned by a_declared_connection_cannot_hand_a_file_to_a_session,
+    written so the undeclared control reaches no_such_session - downstream of the gate, which proves it was passed
+    rather than absent. Two mutations, both red, restored byte-identical. test-agent-inject.sh 48/0 after the
+    change: nothing that works today pays for it. Counts on the branch tip: 421 :core tests, 33 :app, 684
+    apex-agent-core unit tests plus its six integration suites, apex-agentd green, all three android gates. ROUND
+    2 (2026-09-13, task/p1-053c-android-handoff, four commits, PUSHED): CRITERION 2 IS NOW MET, AND ROUND 1'S
+    REFUSAL OF IT WAS WRONG IN A WAY WORTH RECORDING. The arithmetic above is correct and the conclusion does not
+    follow, because every number in it measures a Frame::Control. apex-remote-core's wire has four more variants
+    and Open/Data/Close IS begin/chunk/end - wire.rs:66 says so in its own words, "a Data frame is split by the
+    writer and reassembled by the reader as an ordinary byte stream, so the limit is invisible above this layer",
+    and Frame::data_frames is bytes.chunks(MAX_PAYLOAD), in the tree, carrying every PTY byte the phone has ever
     received. So the missing piece was never a chunking protocol; it was ONE daemon verb that turns a channel into
     a byte sink the way attach turns one into a PTY. The next unit that reads "refused with arithmetic" should
     take this as the warning: the arithmetic can be right and the thing it measures the wrong thing. SECOND
@@ -4042,47 +4050,53 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED 2026-09-13: apex-os merge 7ea639d2 carries round 21's installer work on top of round 20's - the Tab
-    ring was walked on one page, so a focus trap on any other was invisible, and it now runs on four audited pages
-    with two more mutants holding it, one of them a safety property. check-no-conflict-markers.sh PASS. STILL
-    PARTIAL: the screen reader at the login screen, end to end, needs someone who can boot an ISO and listen -
-    orca as the greetd system user, a writable HOME, speech-dispatcher with no audio session, and whether SELinux
-    permits that context to exec gnome_atspi_exec_t. The wrapper degrades safely if the exec is refused, so the
-    failure mode is a silent no-reader rather than a broken login, and that much IS asserted. Accessibility
-    baseline. ROUND 20 on apex-os task/p2-b-round19 (tip d12e9ef4), pushed, not yet merged; round 19 landed as
-    merge 4b1e797f. ROUND 20 CLOSED THE TWO THINGS THE CARD'S ## NEXT ITEM 4 ASKED FOR. (1) THE INSTALLER MUTATION
-    SET WAS RE-TAKEN, which round 19's settle-window change had invalidated: installer/mutate-installer-a11y.sh, 8
-    applied, 8 CAUGHT, 0 survived, tree matches HEAD - then re-taken AGAIN at the end of the round with two new
-    mutants, 10 applied, 0 failed-to-apply, 10 CAUGHT, 0 survived. (2) THE TAB RING WAS WALKED ON ONE PAGE AND NOW
-    RUNS ON FOUR - keyboard, secureboot, confirm and account. Every round before this name-audited the other
-    pages, which answers "can a reader say what this is" and not "can a keyboard user get to it", so a focus trap
-    on any page but account was invisible to the whole suite. installer/test-installer-a11y.sh is 68 assertions
-    (was 51), 0 failed, 0 skipped here, and 63 passed 0 failed 5 skipped on the GitHub runner (run 34701797842,
-    Installer safety and UI green). THE RING WALK FOUND SOMETHING ON ITS FIRST RUN AND THE FINDING WAS THAT THE
-    ASSERTION WAS WRONG, NOT THE INSTALLER. A generic "Tab reaches at least three controls" went RED on confirm:
-    the ring has exactly two stops, Back and the ERASE field, where the audit counts three named controls. That is
-    the page working as designed - go = self.btn("Erase and install", ..., False) and only e_erase's changed
-    handler turns it on, when the text is exactly ERASE; an insensitive GTK button is not a tab stop. The floor
-    was replaced by the assertion the criterion actually needs, in both directions: the destructive button must
-    NOT be in the ring while the field is empty - a keyboard user must not be able to land on an irreversible
-    action without having confirmed it - and it MUST join the ring once ERASE is typed with the keyboard alone and
-    read back over the bus. Mutant B9 makes the button sensitive from the start and that assertion is the only
-    thing in the suite that catches it: the page audit cannot, because the button is named either way, and a ring
-    walk that only counts stops cannot either. B10 is the walk's own vacuity floor - press a key that moves
-    nothing and every stop recorded is the same control, which is what a focus trap looks like from outside. On
-    the runner the typed-ERASE half correctly says COULD-NOT-RUN ("the field reads [] after typing"), because that
-    X server takes Tab and Return and drops synthesised text; it does not pass about an empty field. STILL
-    PARTIAL, and the reasons are products and hardware rather than harness. THE READER AT THE LOGIN SCREEN IS
-    UNPROVEN END TO END: everything around it is asserted - greetd runs /usr/libexec/apex-greet-session which
-    starts a session bus with an empty service directory, execs at-spi-bus-launcher and at-spi2-registryd, then
-    EXECS the compositor (test-apex-greet-session-bus.sh 37 assertions, 13/13 mutants); SUPER+ALT+S starts orca on
-    all three desktop sessions and both greeter hosts; the tree is readable AND operable over AT-SPI on three
-    machines (test-apex-greet-atspi.sh 31 assertions, 8/8 mutants, identical totals on this laptop, in a bare
-    fedora:43 container and on the GitHub runner), and the password never crosses the bus. What has NOT been shown
-    is orca running as the greetd system user - a writable HOME, and speech-dispatcher with no audio session - or
-    whether SELinux permits the greetd session context to exec gnome_atspi_exec_t. If that exec is refused the
-    wrapper degrades safely, which IS asserted, so the failure mode is a silent no-reader rather than a broken
-    login. NEEDS SOMEONE WHO CAN BOOT AN ISO AND LISTEN. Greeter audio is a second, separate gap: nothing in this
+    LANDED 2026-09-13 (round 24): apex-os roadmap/v2.2 11fd5832 -> 13d53c01 carries task/p2-b-round22 (5d070093,
+    638dc219, 2eff50b8, 719513fa, fe6cc17e). The Wi-Fi page is now inside the audited set: every network row was a
+    Tab stop that announced nothing, the ring is walked with the scanner stubbed so it runs on a machine with no
+    Wi-Fi card, four mutants hold it, and B11 and B13 were fixed after B11 was found breaking the GUI instead of
+    mutating it. check-no-conflict-markers.sh PASS on the landed tip. STILL PARTIAL for the unchanged reason: the
+    reader at the login screen end to end needs someone who can boot an ISO and listen. LANDED 2026-09-13: apex-os
+    merge 7ea639d2 carries round 21's installer work on top of round 20's - the Tab ring was walked on one page,
+    so a focus trap on any other was invisible, and it now runs on four audited pages with two more mutants
+    holding it, one of them a safety property. check-no-conflict-markers.sh PASS. STILL PARTIAL: the screen reader
+    at the login screen, end to end, needs someone who can boot an ISO and listen - orca as the greetd system
+    user, a writable HOME, speech-dispatcher with no audio session, and whether SELinux permits that context to
+    exec gnome_atspi_exec_t. The wrapper degrades safely if the exec is refused, so the failure mode is a silent
+    no-reader rather than a broken login, and that much IS asserted. Accessibility baseline. ROUND 20 on apex-os
+    task/p2-b-round19 (tip d12e9ef4), pushed, not yet merged; round 19 landed as merge 4b1e797f. ROUND 20 CLOSED
+    THE TWO THINGS THE CARD'S ## NEXT ITEM 4 ASKED FOR. (1) THE INSTALLER MUTATION SET WAS RE-TAKEN, which round
+    19's settle-window change had invalidated: installer/mutate-installer-a11y.sh, 8 applied, 8 CAUGHT, 0
+    survived, tree matches HEAD - then re-taken AGAIN at the end of the round with two new mutants, 10 applied, 0
+    failed-to-apply, 10 CAUGHT, 0 survived. (2) THE TAB RING WAS WALKED ON ONE PAGE AND NOW RUNS ON FOUR -
+    keyboard, secureboot, confirm and account. Every round before this name-audited the other pages, which answers
+    "can a reader say what this is" and not "can a keyboard user get to it", so a focus trap on any page but
+    account was invisible to the whole suite. installer/test-installer-a11y.sh is 68 assertions (was 51), 0
+    failed, 0 skipped here, and 63 passed 0 failed 5 skipped on the GitHub runner (run 34701797842, Installer
+    safety and UI green). THE RING WALK FOUND SOMETHING ON ITS FIRST RUN AND THE FINDING WAS THAT THE ASSERTION
+    WAS WRONG, NOT THE INSTALLER. A generic "Tab reaches at least three controls" went RED on confirm: the ring
+    has exactly two stops, Back and the ERASE field, where the audit counts three named controls. That is the page
+    working as designed - go = self.btn("Erase and install", ..., False) and only e_erase's changed handler turns
+    it on, when the text is exactly ERASE; an insensitive GTK button is not a tab stop. The floor was replaced by
+    the assertion the criterion actually needs, in both directions: the destructive button must NOT be in the ring
+    while the field is empty - a keyboard user must not be able to land on an irreversible action without having
+    confirmed it - and it MUST join the ring once ERASE is typed with the keyboard alone and read back over the
+    bus. Mutant B9 makes the button sensitive from the start and that assertion is the only thing in the suite
+    that catches it: the page audit cannot, because the button is named either way, and a ring walk that only
+    counts stops cannot either. B10 is the walk's own vacuity floor - press a key that moves nothing and every
+    stop recorded is the same control, which is what a focus trap looks like from outside. On the runner the
+    typed-ERASE half correctly says COULD-NOT-RUN ("the field reads [] after typing"), because that X server takes
+    Tab and Return and drops synthesised text; it does not pass about an empty field. STILL PARTIAL, and the
+    reasons are products and hardware rather than harness. THE READER AT THE LOGIN SCREEN IS UNPROVEN END TO END:
+    everything around it is asserted - greetd runs /usr/libexec/apex-greet-session which starts a session bus with
+    an empty service directory, execs at-spi-bus-launcher and at-spi2-registryd, then EXECS the compositor
+    (test-apex-greet-session-bus.sh 37 assertions, 13/13 mutants); SUPER+ALT+S starts orca on all three desktop
+    sessions and both greeter hosts; the tree is readable AND operable over AT-SPI on three machines
+    (test-apex-greet-atspi.sh 31 assertions, 8/8 mutants, identical totals on this laptop, in a bare fedora:43
+    container and on the GitHub runner), and the password never crosses the bus. What has NOT been shown is orca
+    running as the greetd system user - a writable HOME, and speech-dispatcher with no audio session - or whether
+    SELinux permits the greetd session context to exec gnome_atspi_exec_t. If that exec is refused the wrapper
+    degrades safely, which IS asserted, so the failure mode is a silent no-reader rather than a broken login.
+    NEEDS SOMEONE WHO CAN BOOT AN ISO AND LISTEN. Greeter audio is a second, separate gap: nothing in this
     repository configures a sound path for the greetd user. OTHER SUB-FEATURES, unchanged and named rather than
     implied: no magnifier, no sticky keys, no slow keys, no mouse keys, no on-screen keyboard anywhere in either
     repo. High contrast ships as six shaders applied through Hyprland only, as a visual effect and not an a11y
@@ -4111,64 +4125,76 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED 2026-09-13: apex-shell merge bfb24ed. Round 21 was mostly about the measurement being switched off
-    rather than about i18n: the CI step ran apt-get inside an archlinux container so the 12-assertion suite had
-    never run on a second machine at all, a red step above it switched the measurement off, and the lint step
-    failed files the documented local gate passes. The mutation harness is committed rather than left in a
-    scratchpad. check-no-conflict-markers.sh PASS. STILL PARTIAL for the reason round 20 measured: a QTranslator
-    needs a HOST change and no amount of QML will do it - QTranslator is a C++ class and is not a QML type,
-    /usr/bin/quickshell calls neither it nor installTranslator, and it constructs a bare QQmlEngine rather than
-    the QQmlApplicationEngine whose translation loader is the one route that needs no code. Either upstream, or a
-    compiled QML extension module whose initializeEngine() installs one - which changes the image build. RTL is a
-    LAYOUT gap and not a font gap: 0 LayoutMirroring and 0 layoutDirection in src/. Internationalisation baseline.
-    ROUND 20 on apex-shell task/p2-b-round19 (tip eb97b40), pushed, not yet merged. THE NAMED GAP MOVED FROM A
-    GREP TO A MEASUREMENT, AND A CLAIM THIS UNIT HAD CARRIED SINCE ROUND 1 TURNED OUT TO BE FALSE. (1) THE
-    TRANSLATOR GAP IS IN THE HOST, NOT src/. Every round before this recorded it as "no QTranslator anywhere in
-    src/" - a grep over QML. The observation was right and the spelling invited the wrong repair, because it reads
-    like an omission a line of QML could fix. It cannot: QTranslator is a C++ class and is not a QML type. Asked
-    of the binaries instead, with the positive control in the same run because "nm printed nothing" and "the
-    binary contains no such call" look identical from outside: libQt6QuickTest - the host the suite has just
-    watched translate - calls QTranslator 4 times; /usr/bin/quickshell, the host the shell really runs in, calls
-    it 0 times and installTranslator 0 times; libQt6Qml DOES carry an automatic route (QQmlApplicationEngine plus
-    its translation loader, which installs a .qm found beside the root QML file with no code at all) and
-    quickshell constructs a bare QQmlEngine, so that route is not taken either - the engine-constructor count
-    being non-zero is the control for that one. Closing the row needs a translator installed INTO the engine:
-    upstream in quickshell, or a QML extension module on the import path whose initializeEngine() does it. Not
-    attempted - a compiled artefact in a repository of QML and shell scripts, and it changes the image build. Trap
-    recorded: undefined symbols only. libQt6Qml both defines QTranslator's caller and is linked by every QML host,
-    so a scan of the LINK CLOSURE reports "found" for a host that never calls it. (2) "THE SHELL WILL TOFU ON CJK"
-    WAS NEVER RUN AND IS FALSE. The ledger carried it from round 1 to round 19: ~45 sites hardcode font.family
-    "JetBrains Mono", that family has no CJK coverage, therefore tofu. Both premises are true and the conclusion
-    does not follow - QFontEngineMulti asks fontconfig for a font that owns the glyph. Measured through the real
-    engine at pixelSize 32, with the monospace premise asserted FIRST because the whole discriminator rests on it
-    (every glyph JetBrains Mono draws advances 19.1875): CJK 32, Arabic 19.265625 (DejaVu Sans Mono), Hebrew
-    21.390625 (DejaVu Sans), Thai 19.75 (Droid Sans Thai), Devanagari 24.453125 (Droid Sans Devanagari) - each
-    matched against a family fontconfig says covers that codepoint, each required not to be covered by JetBrains
-    Mono itself. So THE RTL ROW'S "the image cannot render it" IS ALSO WRONG. What is still absent there is
-    LAYOUT: 0 LayoutMirroring and 0 layoutDirection in src/, re-checked. Fonts were never the blocker. (3) THE
-    SUITE NOW RUNS ON A SECOND MACHINE, AND CI HAD NEVER RUN IT. run-i18n-test.sh is 23 assertions here, 0 failed,
-    0 skipped; on the GitHub Arch runner 15 passed, 0 failed, 5 skipped (run 34700588997). Every earlier round had
-    it on one laptop. Two reasons it had never run there, both fixed on this branch: the step installed its Qt
-    tools with apt-get inside an archlinux container, and the job's shellcheck step above it ran without -x and
-    failed tests/test-headless-lib.sh, which stops the job before this step - an SC2034 about a test fixture
-    switching off the measurement below it. WHAT THE SECOND MACHINE DOES NOT COVER, named rather than implied:
-    section 4's quickshell probe SKIPS there (no quickshell) so the host measurement is ONE LAPTOP ONLY, and the
-    Arabic/Hebrew/Thai/Devanagari rows SKIP because that container has no font covering them - the suite fails on
-    a missing font only where /run/ostree-booted says the font set being measured IS the image's, which is the
-    round-19 lesson about asserting on the runner instead of the product. Only the CJK row has two machines (Noto
-    Sans CJK HK, advance 32, the same number). MUTATION: T1-T4 over the host probe, 4 applied 4 CAUGHT 0 survived;
-    F1-F5 over the font section, 5 applied 5 CAUGHT 0 survived, re-run after the ostree gate changed and still
-    5/5. Tree matches HEAD after every mutate and restore. F3-F5 were first reported SURVIVED and that was the
-    harness grepping for a sentence the failure does not contain - the same shape as I2 and B2 before them; the
-    expectation was corrected, not the mutant. STILL PARTIAL, each with its reason: no user sees a translated word
-    until item (1) is closed, so the ~200-string AgentHelpContent conversion is parked deliberately - 200 unseen
-    strings is the weaker increment; the locale picker is still BLOCKED because Containerfile.core installs
-    glibc-langpack-en only, so a free picker degrades silently to C.UTF-8; the translated installer is GTK4/Python
-    and needs gettext, a separate pipeline; RTL layout mirroring does not exist; IME/fcitx5 ships but no suite
-    asserts it; per-user language does not exist; and the recovery flow still applies no layout. Keyboard layout
-    before password and timezone remain DONE and measured on a second machine (CI run 34661483871, "cage started
-    de: the same physical keys now produce the GERMAN letters"); installer-keymap 43 and installer-locale 26 both
-    green on the runner again in run 34701797842.
+    LANDED 2026-09-13 (round 24): apex-shell roadmap/v2.2 1da66c7 -> 0a3824c carries 9f87fca, and
+    tests/run-rtl-test.sh was re-run ON THE LANDED TIP: 13 passed, 0 failed, 0 skipped. THE RTL ROW IS NO LONGER A
+    FONT QUESTION AND THE OLD CLAIM IS DEAD: measured through the real engine, Arabic falls out of the hardcoded
+    JetBrains Mono to DejaVu Sans Mono, Hebrew to DejaVu Sans, Thai to Droid Sans Thai and Devanagari to Droid
+    Sans Devanagari, all four image-owned. What was missing is LAYOUT, and CfgRow and CfgScroll now mirror off
+    Qt.application.layoutDirection with childrenInherit - not off SettingsService, which imports Quickshell and
+    qmltestrunner cannot load. The suite pins the remaining half in BOTH directions rather than claiming RTL is
+    done: the shell paints from 14 window roots, 0 of them mirror, and 16 explicit numeric x: are outside
+    mirroring's reach by construction. Section 1 measures the machine rather than Qt - the image ships
+    glibc-langpack-en only, so the locale direction is asserted as a DISAGREEMENT between a scrubbed environment
+    and LANG=ar_EG.UTF-8, with he_IL asked too so no verdict rests on one locale name. STILL PARTIAL: the window
+    roots, and the QTranslator host change. LANDED 2026-09-13: apex-shell merge bfb24ed. Round 21 was mostly about
+    the measurement being switched off rather than about i18n: the CI step ran apt-get inside an archlinux
+    container so the 12-assertion suite had never run on a second machine at all, a red step above it switched the
+    measurement off, and the lint step failed files the documented local gate passes. The mutation harness is
+    committed rather than left in a scratchpad. check-no-conflict-markers.sh PASS. STILL PARTIAL for the reason
+    round 20 measured: a QTranslator needs a HOST change and no amount of QML will do it - QTranslator is a C++
+    class and is not a QML type, /usr/bin/quickshell calls neither it nor installTranslator, and it constructs a
+    bare QQmlEngine rather than the QQmlApplicationEngine whose translation loader is the one route that needs no
+    code. Either upstream, or a compiled QML extension module whose initializeEngine() installs one - which
+    changes the image build. RTL is a LAYOUT gap and not a font gap: 0 LayoutMirroring and 0 layoutDirection in
+    src/. Internationalisation baseline. ROUND 20 on apex-shell task/p2-b-round19 (tip eb97b40), pushed, not yet
+    merged. THE NAMED GAP MOVED FROM A GREP TO A MEASUREMENT, AND A CLAIM THIS UNIT HAD CARRIED SINCE ROUND 1
+    TURNED OUT TO BE FALSE. (1) THE TRANSLATOR GAP IS IN THE HOST, NOT src/. Every round before this recorded it
+    as "no QTranslator anywhere in src/" - a grep over QML. The observation was right and the spelling invited the
+    wrong repair, because it reads like an omission a line of QML could fix. It cannot: QTranslator is a C++ class
+    and is not a QML type. Asked of the binaries instead, with the positive control in the same run because "nm
+    printed nothing" and "the binary contains no such call" look identical from outside: libQt6QuickTest - the
+    host the suite has just watched translate - calls QTranslator 4 times; /usr/bin/quickshell, the host the shell
+    really runs in, calls it 0 times and installTranslator 0 times; libQt6Qml DOES carry an automatic route
+    (QQmlApplicationEngine plus its translation loader, which installs a .qm found beside the root QML file with
+    no code at all) and quickshell constructs a bare QQmlEngine, so that route is not taken either - the
+    engine-constructor count being non-zero is the control for that one. Closing the row needs a translator
+    installed INTO the engine: upstream in quickshell, or a QML extension module on the import path whose
+    initializeEngine() does it. Not attempted - a compiled artefact in a repository of QML and shell scripts, and
+    it changes the image build. Trap recorded: undefined symbols only. libQt6Qml both defines QTranslator's caller
+    and is linked by every QML host, so a scan of the LINK CLOSURE reports "found" for a host that never calls it.
+    (2) "THE SHELL WILL TOFU ON CJK" WAS NEVER RUN AND IS FALSE. The ledger carried it from round 1 to round 19:
+    ~45 sites hardcode font.family "JetBrains Mono", that family has no CJK coverage, therefore tofu. Both
+    premises are true and the conclusion does not follow - QFontEngineMulti asks fontconfig for a font that owns
+    the glyph. Measured through the real engine at pixelSize 32, with the monospace premise asserted FIRST because
+    the whole discriminator rests on it (every glyph JetBrains Mono draws advances 19.1875): CJK 32, Arabic
+    19.265625 (DejaVu Sans Mono), Hebrew 21.390625 (DejaVu Sans), Thai 19.75 (Droid Sans Thai), Devanagari
+    24.453125 (Droid Sans Devanagari) - each matched against a family fontconfig says covers that codepoint, each
+    required not to be covered by JetBrains Mono itself. So THE RTL ROW'S "the image cannot render it" IS ALSO
+    WRONG. What is still absent there is LAYOUT: 0 LayoutMirroring and 0 layoutDirection in src/, re-checked.
+    Fonts were never the blocker. (3) THE SUITE NOW RUNS ON A SECOND MACHINE, AND CI HAD NEVER RUN IT.
+    run-i18n-test.sh is 23 assertions here, 0 failed, 0 skipped; on the GitHub Arch runner 15 passed, 0 failed, 5
+    skipped (run 34700588997). Every earlier round had it on one laptop. Two reasons it had never run there, both
+    fixed on this branch: the step installed its Qt tools with apt-get inside an archlinux container, and the
+    job's shellcheck step above it ran without -x and failed tests/test-headless-lib.sh, which stops the job
+    before this step - an SC2034 about a test fixture switching off the measurement below it. WHAT THE SECOND
+    MACHINE DOES NOT COVER, named rather than implied: section 4's quickshell probe SKIPS there (no quickshell) so
+    the host measurement is ONE LAPTOP ONLY, and the Arabic/Hebrew/Thai/Devanagari rows SKIP because that
+    container has no font covering them - the suite fails on a missing font only where /run/ostree-booted says the
+    font set being measured IS the image's, which is the round-19 lesson about asserting on the runner instead of
+    the product. Only the CJK row has two machines (Noto Sans CJK HK, advance 32, the same number). MUTATION:
+    T1-T4 over the host probe, 4 applied 4 CAUGHT 0 survived; F1-F5 over the font section, 5 applied 5 CAUGHT 0
+    survived, re-run after the ostree gate changed and still 5/5. Tree matches HEAD after every mutate and
+    restore. F3-F5 were first reported SURVIVED and that was the harness grepping for a sentence the failure does
+    not contain - the same shape as I2 and B2 before them; the expectation was corrected, not the mutant. STILL
+    PARTIAL, each with its reason: no user sees a translated word until item (1) is closed, so the ~200-string
+    AgentHelpContent conversion is parked deliberately - 200 unseen strings is the weaker increment; the locale
+    picker is still BLOCKED because Containerfile.core installs glibc-langpack-en only, so a free picker degrades
+    silently to C.UTF-8; the translated installer is GTK4/Python and needs gettext, a separate pipeline; RTL
+    layout mirroring does not exist; IME/fcitx5 ships but no suite asserts it; per-user language does not exist;
+    and the recovery flow still applies no layout. Keyboard layout before password and timezone remain DONE and
+    measured on a second machine (CI run 34661483871, "cage started de: the same physical keys now produce the
+    GERMAN letters"); installer-keymap 43 and installer-locale 26 both green on the runner again in run
+    34701797842.
 - id: P2-005
   title: Printing/scanning/network-share maturity
   priority: P2
@@ -4537,9 +4563,26 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    PARTIAL on apex-os branch task/p2-d-browser-capsule (tip 3cc53176, 11 commits, all pushed; NOT merged; base
-    4b1e797f). apex browser is a capsule that is a confined allowlisted 'apex agent' session:
-    files/system/libexec/apex-browser contains NO confinement of its own and never invokes bwrap
+    LANDED 2026-09-13 (round 24): apex-os roadmap/v2.2 11fd5832 -> 13d53c01 carries task/p2-d-2 (3e19e299,
+    3920ff48). THE PIN-BINDING HALF IS NO LONGER STUB-TESTED. Round 1 recorded that apex-secretd is a root service
+    the lab cannot start; that was true of the shipped service and false of the binary, which takes --socket and
+    --store. The lab now starts its own unprivileged apex-secretd on its own socket with its own store under $LAB
+    and kills it BY PID, and the pin is exercised live: a stored credential pins a capsule to host AND port, a
+    capsule naming only the capability reaches the pinned destination, --allow naming another host is refused by
+    name, and the same host on another port is refused as a different endpoint - with the vmlab's turned-around
+    loop as the falsifying control. 3e19e299 is the defect that found: capability_host parsed column two of apex
+    secret list, the stub printed a bare host and the real CLI prints scheme://host, so the pin came out as
+    https://intranet.example, which is not a destination. THE UNMET CRITERION NOW HAS A WRITTEN DECISION RATHER
+    THAN A GAP: docs/browser-capsule-auth.md picks route B, the daemon presents the credential, and REJECTS route
+    A on a measurement - a capsule that holds a value can put it in a nominated file the caller takes home, which
+    is the whole property the capsule model buys. Six negative observations hold the value-never-in-the-capsule
+    claim, with two controls, and the first control attempt reached nothing at all because a session's environment
+    is built by the daemon and does not inherit the caller's. Scoped at two protocol fields plus a
+    PROTOCOL_VERSION bump (an old daemon tunnels CONNECT untouched and presents nothing, so the CLI must refuse
+    rather than let a capsule 401 at the far end) and a TLS server in apex-agentd. STILL PARTIAL: route B is
+    decided and scoped, not built. PARTIAL on apex-os branch task/p2-d-browser-capsule (tip 3cc53176, 11 commits,
+    all pushed; NOT merged; base 4b1e797f). apex browser is a capsule that is a confined allowlisted 'apex agent'
+    session: files/system/libexec/apex-browser contains NO confinement of its own and never invokes bwrap
     (Containerfile.base makes that a build refusal), so the masked home and the egress proxy have one
     implementation rather than two. It rests on apex-agent-core/src/sandbox.rs (tmpfs $HOME, /run and
     $XDG_RUNTIME_DIR, --proc /proc, --unshare-net), apex-agentd/src/egress.rs (NetworkPolicy::Allowlist, a CONNECT
