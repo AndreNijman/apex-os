@@ -176,6 +176,23 @@ fixture() {
     printf '[origin]\ncontainer-image-reference=ostree-unverified-registry:%s\n' "$tag" \
         > "$root/ostree/deploy/default/deploy/$csum.0.origin"
     printf '{"default":[{"type":"insecureAcceptAnything"}]}\n' > "$root/etc/containers/policy.json"
+    # THE SECOND ROOT. `apex channel`'s health verdict is built from two
+    # readers: `failed_units()`, which honours $APEX_TRUST_ROOT, and
+    # `recover::health_rows()`, which is `Sys::from_env()` and honours
+    # $APEX_RECOVER_ROOT. Setting only the first left the rollout stop half
+    # fixture and half THIS MACHINE — and the half that came from the machine
+    # is the `filesystem` row, which reads /proc/mounts.
+    #
+    # That is not theoretical. It is why `§26 channels` was red on the runner
+    # and green on the laptop that wrote it: a GitHub runner mounts /usr
+    # read-write, the row goes Attention, and "a healthy machine is not held"
+    # measured the developer's own mount flags. Measured both ways with the
+    # built binary before this line existed: same fixture, held=false against a
+    # read-only /usr and held=true against a read-write one.
+    #
+    # A read-only /usr on an overlay root is what an APEX machine looks like.
+    printf 'composefs / overlay ro,relatime 0 0\nnone /usr overlay ro,relatime 0 0\n' \
+        > "$root/proc/mounts"
     if [[ -n "$digest" ]]; then
         # What `rpm-ostree status --json` would say. Under a fixture root the
         # binary reads this instead of spawning, which is the only reason the
@@ -199,7 +216,7 @@ record() {
 }
 
 held() { # held <trust-root> -> true / false / error:...
-    APEX_TRUST_ROOT="$1" "$APEX" channel status --json \
+    APEX_TRUST_ROOT="$1" APEX_RECOVER_ROOT="$1" "$APEX" channel status --json \
         > "$TMP/held.json" 2>"$TMP/held.err" || true
     python3 -c 'import json,sys
 try:
@@ -208,7 +225,19 @@ except Exception as e:
     print("error:%s" % e)' "$TMP/held.json"
 }
 
-run() { APEX_TRUST_ROOT="$1" "$APEX" "${@:2}" > "$TMP/out" 2> "$TMP/err"; echo $?; }
+# `reasons` from the same fixture, one per line, so a case can say WHICH row
+# held the machine rather than only that something did.
+why() { # why <trust-root>
+    APEX_TRUST_ROOT="$1" APEX_RECOVER_ROOT="$1" "$APEX" channel status --json \
+        > "$TMP/why.json" 2>/dev/null || true
+    python3 -c 'import json,sys
+try:
+    print("\n".join(json.load(open(sys.argv[1]))["reasons"]))
+except Exception as e:
+    print("error:%s" % e)' "$TMP/why.json" > "$TMP/why"
+}
+
+run() { APEX_TRUST_ROOT="$1" APEX_RECOVER_ROOT="$1" "$APEX" "${@:2}" > "$TMP/out" 2> "$TMP/err"; echo $?; }
 
 sec "a machine installed before channels existed is told where it stands"
 # The state of every APEX machine that exists. `:daily` moves on every build of
@@ -296,7 +325,7 @@ case "$(held "$R")" in
     false) bad "the rollout stop did not fire on a regression" ;;
     *)     bad "apex channel status --json did not answer: $(cat "$TMP/held.err")" ;;
 esac
-APEX_TRUST_ROOT="$R" "$APEX" channel status > "$TMP/out" 2>&1 || true
+APEX_TRUST_ROOT="$R" APEX_RECOVER_ROOT="$R" "$APEX" channel status > "$TMP/out" 2>&1 || true
 has 'The next `apex update` is held' "$TMP/out" "the human readout says the next update is held"
 has 'apex-shell.service' "$TMP/out" "and names the unit"
 
@@ -347,7 +376,7 @@ sec "the hold claims only what it measured"
 # nothing here established, on the one screen somebody reads while their
 # machine is misbehaving.
 break_unit "$R"
-APEX_TRUST_ROOT="$R" "$APEX" channel status --json > "$TMP/out" 2>&1 || true
+APEX_TRUST_ROOT="$R" APEX_RECOVER_ROOT="$R" "$APEX" channel status --json > "$TMP/out" 2>&1 || true
 hasnt 'came back from its last update' "$TMP/out" "the JSON does not assert the update caused it"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
