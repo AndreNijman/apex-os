@@ -1,6 +1,6 @@
 {
- "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap \u2014 do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
- "updated": "2026-09-13T03:40+08:00",
+ "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
+ "updated": "2026-09-13T08:45+08:00",
  "concurrency_ceiling": 6,
  "units": [
   {
@@ -12,7 +12,8 @@
    "title": "The 18 labwc matrix rows that need real applications",
    "after": [],
    "conflicts": [],
-   "note": "Automated already: screenshots, multi-monitor, lock and idle, scaling. The remainder needs real programs on a real session and is written out step by step in state/agents/p1-038.md: portals, Firefox and Chromium screen sharing, OBS, Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling, rotation, refresh rate, VRR, suspend and resume, dock hotplug. This one cannot be done headless and cannot be done on the L16 while Andre is using it \u2014 it is a katana job, or a job for Andre with a checklist. Do not pretend otherwise."
+   "note": "Automated already: screenshots, multi-monitor, lock and idle, scaling. The remainder needs real programs on a real session and is written out step by step in state/agents/p1-038.md: portals, Firefox and Chromium screen sharing, OBS, Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling, rotation, refresh rate, VRR, suspend and resume, dock hotplug. This one cannot be done headless and cannot be done on the L16 while Andre is using it — it is a katana job, or a job for Andre with a checklist. Do not pretend otherwise.",
+   "closed": "CLOSED TO DISPATCH 2026-09-13 (round 24) — and this says the work is ANDRE'S, not that it is done. Offered as READY in four consecutive reports and correctly refused four times for the same reason, which is written in this unit's own note: the 18 remaining labwc matrix rows need real applications on a real session (portals, Firefox/Chromium screen sharing, OBS, Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling, rotation, refresh rate, VRR, suspend/resume, dock hotplug). It cannot be done headless, it cannot be done on the L16 while Andre is using it, and katana is off-limits. The step-by-step checklist is already written in state/agents/p1-038.md — it is ready for a human to run, which is the deliverable. Re-open it the moment there is a machine Andre is not sitting at."
   },
   {
    "id": "p0-014",
@@ -26,7 +27,7 @@
     "integrate-3"
    ],
    "conflicts": [],
-   "note": "Both are already implemented on task/p0-013-request-origin and land as `partial`. P0-014's remainder is a real FIDO/WebAuthn path behind --origin-policy remote. P0-015's remainder is that nothing reports lock state: APEX Shell locks with ext-session-lock and never calls SetLockedHint, so logind reports LockedHint=no on a session locked for an hour. The shell half was recovered from a WIP snapshot and pushed as fix/locked-hint at 87c84f3 (LockedHintService.qml, qmldir, Lockscreen.qml wiring) \u2014 integrate that first. P0-015 criterion 2 also needs P0-007's session grants to exist. P0-005's agent also produced an apex-shell branch, task/p0-005-agent-center-modes (the row shows the mode an agent is in) \u2014 integrate it alongside the apex-os side."
+   "note": "Both are already implemented on task/p0-013-request-origin and land as `partial`. P0-014's remainder is a real FIDO/WebAuthn path behind --origin-policy remote. P0-015's remainder is that nothing reports lock state: APEX Shell locks with ext-session-lock and never calls SetLockedHint, so logind reports LockedHint=no on a session locked for an hour. The shell half was recovered from a WIP snapshot and pushed as fix/locked-hint at 87c84f3 (LockedHintService.qml, qmldir, Lockscreen.qml wiring) — integrate that first. P0-015 criterion 2 also needs P0-007's session grants to exist. P0-005's agent also produced an apex-shell branch, task/p0-005-agent-center-modes (the row shows the mode an agent is in) — integrate it alongside the apex-os side."
   },
   {
    "id": "p1-018",
@@ -59,8 +60,8 @@
    "conflicts": [
     "p1-002"
    ],
-   "note": "26 of section 13.2's 32 operations remain after P1-002 took seven. Two framework gaps the Cloudflare author hit and worked around locally, which P1-005 should fix generally rather than repeat: Bound carries no provider payload, so bind cannot hand what it resolved to perform \u2014 Cloudflare re-resolves and refuses on mismatch, but git does NOT, which makes git's host pin a TOCTOU rather than a guarantee; and mint cannot reach a companion service, which is why OAuth refresh could not be expressed as mint and why P1-011 will hit the same wall.",
-   "closed": "Landed as merge 4f80746e; the range against roadmap/v2.2 is empty. P1-006 is done. P1-005 stays partial only because the token spent is account-wide \u2014 the per-task credential IS P1-011 \u2014 and P1-007 stays partial because no elevated class exists in apex-secret-core to require, which is its own item. Nothing left to dispatch here. Closed 2026-09-12 after a dispatched agent had to be redirected."
+   "note": "26 of section 13.2's 32 operations remain after P1-002 took seven. Two framework gaps the Cloudflare author hit and worked around locally, which P1-005 should fix generally rather than repeat: Bound carries no provider payload, so bind cannot hand what it resolved to perform — Cloudflare re-resolves and refuses on mismatch, but git does NOT, which makes git's host pin a TOCTOU rather than a guarantee; and mint cannot reach a companion service, which is why OAuth refresh could not be expressed as mint and why P1-011 will hit the same wall.",
+   "closed": "Landed as merge 4f80746e; the range against roadmap/v2.2 is empty. P1-006 is done. P1-005 stays partial only because the token spent is account-wide — the per-task credential IS P1-011 — and P1-007 stays partial because no elevated class exists in apex-secret-core to require, which is its own item. Nothing left to dispatch here. Closed 2026-09-12 after a dispatched agent had to be redirected."
   },
   {
    "id": "p1-008",
@@ -78,7 +79,7 @@
     "p1-002",
     "p1-005"
    ],
-   "closed": "Landed as merge 230ee02a; 0 unlanded. P1-008 and P1-010 done. P1-009 stays partial because the third criterion turns on a schema question the pinned schema cannot settle either way \u2014 workers-ai-post-run-model declares two path parameters and no headers. A citation problem, not effort."
+   "closed": "Landed as merge 230ee02a; 0 unlanded. P1-008 and P1-010 done. P1-009 stays partial because the third criterion turns on a schema question the pinned schema cannot settle either way — workers-ai-post-run-model declares two path parameters and no headers. A citation problem, not effort."
   },
   {
    "id": "p1-011",
@@ -96,7 +97,7 @@
     "p1-005",
     "p1-008"
    ],
-   "closed": "Landed as merge 598f6996; 0 unlanded. P1-011 and P1-012 are done. P1-013 stays partial for a structural reason: a preview health check is an UNAUTHENTICATED GET to *.workers.dev and the host pin correctly forbids spending an api.cloudflare.com credential anywhere else, so it belongs in the `apex cf` CLI rather than in a brokered operation \u2014 and the relay moved to a custom domain on andrenijman.com, so workers.dev is no longer the right target anyway. Closed 2026-09-12 after a THIRD agent in one round was dispatched onto finished work."
+   "closed": "Landed as merge 598f6996; 0 unlanded. P1-011 and P1-012 are done. P1-013 stays partial for a structural reason: a preview health check is an UNAUTHENTICATED GET to *.workers.dev and the host pin correctly forbids spending an api.cloudflare.com credential anywhere else, so it belongs in the `apex cf` CLI rather than in a brokered operation — and the relay moved to a custom domain on andrenijman.com, so workers.dev is no longer the right target anyway. Closed 2026-09-12 after a THIRD agent in one round was dispatched onto finished work."
   },
   {
    "id": "p1-014",
@@ -115,7 +116,7 @@
    "conflicts": [
     "p1-011"
    ],
-   "closed": "Landed as merge 514d46a3; 0 unlanded. P1-014, P1-016 and P1-017 done. P1-015 met ALL THREE of its acceptance criteria and is partial only because two of section 13.13's five named resources cannot be reached by anything in this build \u2014 a fact about the vocabulary, not about effort."
+   "closed": "Landed as merge 514d46a3; 0 unlanded. P1-014, P1-016 and P1-017 done. P1-015 met ALL THREE of its acceptance criteria and is partial only because two of section 13.13's five named resources cannot be reached by anything in this build — a fact about the vocabulary, not about effort."
   },
   {
    "id": "p1-020",
@@ -234,7 +235,7 @@
    "after": [],
    "conflicts": [],
    "note": "Its `after: p1-050` was dropped when p1-050 landed. Also owns the real second factor for P1-051 (Android Keystore with setUserAuthenticationRequired, per-approval challenge, attestation); p0-014 is building the desktop CTAP2 verifier it pairs with.",
-   "closed": "Landed as merge 4ae4cf22; 0 unlanded. P1-053 done. P1-054 is partial because the socket has no profile/projects/worktrees verb \u2014 adding them is a protocol change and p1-053b owns the decision. P1-055 is partial for want of a gemini fixture, and gemini is not installed on this machine."
+   "closed": "Landed as merge 4ae4cf22; 0 unlanded. P1-053 done. P1-054 is partial because the socket has no profile/projects/worktrees verb — adding them is a protocol change and p1-053b owns the decision. P1-055 is partial for want of a gemini fixture, and gemini is not installed on this machine."
   },
   {
    "id": "p1-053c",
@@ -388,17 +389,18 @@
    "items": [
     "P1-063"
    ],
-   "title": "Lid-closed continuous operation \u2014 agents and the VPN keep running with the lid shut",
+   "title": "Lid-closed continuous operation — agents and the VPN keep running with the lid shut",
    "after": [],
    "conflicts": [],
-   "note": "Andre's own request, in his words. The primitive is a handle-lid-switch BLOCK inhibitor, not an edit to HandleLidSwitch= - it is dynamic, it reverts the moment the holder dies, and it leaves a machine with no live work suspending exactly as it does now; a static HandleLidSwitch=ignore would turn every laptop bag into an oven. Guards are not optional and must say which one fired. Round 2 owns the apex-shell half and the seven undocumented `apex lid` verbs. Two criteria need hardware or Andre's own machine and must not be faked: re-running the live suite with every external display unplugged, and measuring that a powered-down lid-closed session draws measurably less."
+   "note": "Andre's own request, in his words. The primitive is a handle-lid-switch BLOCK inhibitor, not an edit to HandleLidSwitch= - it is dynamic, it reverts the moment the holder dies, and it leaves a machine with no live work suspending exactly as it does now; a static HandleLidSwitch=ignore would turn every laptop bag into an oven. Guards are not optional and must say which one fired. Round 2 owns the apex-shell half and the seven undocumented `apex lid` verbs. Two criteria need hardware or Andre's own machine and must not be faked: re-running the live suite with every external display unplugged, and measuring that a powered-down lid-closed session draws measurably less.",
+   "closed": "CLOSED TO DISPATCH 2026-09-13 (round 24). Round 3 is finished, pushed AND landed — apex-os 619e764a, apex-shell 1da66c7 — and followups-4 wired its 60 lid assertions into CI runner-green. Both remaining criteria are ANDRE'S PHYSICAL ACTIONS and an agent must not fake either. Criterion 1: causation needs the external display physically unplugged. Re-measured 2026-09-13 — Docked=b true, card1-DP-1 connected — and with a display attached logind consults HandleLidSwitchDocked (default ignore) BEFORE any inhibitor, so the lid does nothing with or without APEX's block and the non-suspend cannot be attributed to APEX. The one command that closes it, undocked: `sudo ./tests/test-apex-lid-live.sh`. Criterion 3: 'draws measurably less' needs an undocked machine ON BATTERY that nobody is using — power_now reads CHARGING power on mains — and the runnable recipe is in docs/lid.md under 'What has NOT been measured'. Nothing here is waiting on an agent."
   }
  ],
  "_completed_units": {
   "followups-integrate-3": "COMPLETE AND LANDED 2026-09-07, round 6. All four hardening items the third integration round routed onward are on apex-os roadmap/v2.2 as ef87088..678bb5d (the broker's bare curl reading the owner's ~/.curlrc under root, 'reaches the same thing everywhere' made a declared fact, a bind test that bound nothing and passed, one curl in this build with a readable contract, and the MCP verbs documented in docs/agent-runtime.md). REMOVED from units rather than left with a marker, because resume.sh derives 'finished' from roadmap.yaml item status and this unit's items are '(hardening)' - no roadmap ids - so it can never satisfy that test and would have been offered as READY forever, which is exactly the double-dispatch the queue exists to prevent. One follow-up did NOT belong to it and is still owed: apex remote pair|devices|revoke|status|enable is documented nowhere, and it is recorded in dispatch.json _deliberately_held for the next integrate round.",
   "trust-enforcement": "COMPLETE AND LANDED 2026-09-08 on apex-os roadmap/v2.2 as e67fab9 -> 583355e. APEX now refuses an update whose image signature does not verify: cosign-free sigstore verification (skopeo + openssl) against a PINNED Sigstore root shipped by Containerfile.base, wired into ops::update BEFORE channel::record_update and BEFORE FsyncGuard::disable, escaping only via --allow-unverified. 455 Rust tests in the crate (+51) and a new tests/test-apex-trust-enforcement.sh at 77/0 with real minted-CA cryptography. REMOVED from units rather than marked done, because its items are '(new, from P1-047)' - not roadmap ids - so resume.sh's finished() test can never be satisfied and the unit would have been offered forever. Still open and recorded on P1-047's evidence: provenance=warn until a build publishes a .att; /etc/containers/policy.json is still one insecureAcceptAnything; transparency-log inclusion is not verified and every report says so; and `bootc upgrade` run directly bypasses the gate (ops::update is its only caller in the repo, grepped).",
   "desktop-ai-apps": "COMPLETE AND LANDED 2026-09-12 on apex-os roadmap/v2.2 as merge 3bf8e558 (branch tip d7b12d37). Both AI desktop apps ship from Containerfile.core stage 5a-aiapps, arrive via sudo apex update alone, and have both vendor self-update channels removed. Proven END TO END in a scratch fedora-bootc:43 container with the stanza text extracted VERBATIM from the Containerfile: exit 0, chatgpt 26.908.40401-1 and claude-desktop 1.52386.0 installed, repo file absent, both schemes registered. Eleven mutation pairs, eleven named assertions red, file restored byte-identical. REMOVED from units rather than marked done because its items are '(new, from the 2026-09-11 CLAUDE.md decision)' - not roadmap ids - so resume.sh's finished() test can never be satisfied and it would be offered forever, the same trap followups-integrate-3 and trust-enforcement hit. OUTSTANDING and NOT the unit's to do: the claude-desktop-update.timer stopgap on the L16 cannot be retired until an image built from this tip is deployed, and /etc/yum.repos.d/chatgpt.repo is live and enabled on that machine - a self-update side channel that ostree's /etc merge will KEEP because it was never an image default.",
-  "p2-a": "COMPLETE 2026-09-13, round 23. Round 1 landed as merge 05227d16; round 2 landed as merge cd4a799e (five commits). All three items are now DONE: P2-001 (all five of \u00a713.5's target kinds carried - local, nas, ssh, s3, r2 - with the ssh target exercised against a real sshd on loopback and the s3 target against a loopback double that recomputes SigV4 from what arrives), P2-002 (unchanged, already done), P2-013 (github, cloudflare, ssh and agent identity all enforced, with is_enforced/enforced_by flipped in the same commits that enforce them so `apex project identity` never claims enforcement before it exists). Removed from the ready set; p2-f, which was held behind it, is dispatched.",
+  "p2-a": "COMPLETE 2026-09-13, round 23. Round 1 landed as merge 05227d16; round 2 landed as merge cd4a799e (five commits). All three items are now DONE: P2-001 (all five of §13.5's target kinds carried - local, nas, ssh, s3, r2 - with the ssh target exercised against a real sshd on loopback and the s3 target against a loopback double that recomputes SigV4 from what arrives), P2-002 (unchanged, already done), P2-013 (github, cloudflare, ssh and agent identity all enforced, with is_enforced/enforced_by flipped in the same commits that enforce them so `apex project identity` never claims enforcement before it exists). Removed from the ready set; p2-f, which was held behind it, is dispatched.",
   "p1-053b": "COMPLETE AND LANDED. Its work is merge 69a2f51e and the branch is an ancestor of roadmap/v2.2 with 0 commits ahead. It was still sitting in READY on 2026-09-13 and would have been offered forever - the same double-dispatch trap that had already cost three agent runs on p1-005, p1-011 and base-partials. Removed from units."
  },
  "_notes": {

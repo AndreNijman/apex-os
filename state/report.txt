@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-13 08:06 AWST
+APEX ROADMAP — resume report — 2026-09-13 08:21 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,61 +16,45 @@ APEX ROADMAP — resume report — 2026-09-13 08:06 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  followups-4 dead 204m                                     task/followups-4
-             head 4c9de165 fix(ci): the labwc step refused two probes whose clie
-             dirty 0 file(s), 0 unpushed, card 206m
-             NEXT One thing outstanding: read dispatch run 34717723637 for the `P3 l
+  later      ALIVE      L-001,L-002,L-003                  task/later-tpm-qualification
+             head 13d53c01 Merge task/p2-d-2 into roadmap/v2.2
+             dirty 0 file(s), ? unpushed, card 4m
+             NEXT Merge origin/roadmap/v2.2 (13d53c01) into the worktree, then read 
 
-  p1-053c    dead 204m  P1-059,P1-060                      task/p1-053c-android-handoff
-             head 375ca0dd Merge task/p1-053c-android-handoff into roadmap/v2.2
-             dirty 2 file(s), 14 unpushed, card 219m
-             NEXT **P1-059 criterion 2 is CLOSED. The item stays `partial`, and the 
-
-  p2-d       dead 204m  P2-008,P2-009,P2-012               task/p2-d-browser-capsule
-             head 3920ff48 test(browserlab): a real apex-secretd, and the value 
-             dirty 2 file(s), 64 unpushed, card 284m
+  p2-d       ALIVE      P2-008,P2-009,P2-012               task/p2-d-3 (off roadmap/v2.2, carrying 2 dirty files)
+             head 13d53c01 Merge task/p2-d-2 into roadmap/v2.2
+             dirty 2 file(s), ? unpushed, card 298m
              NEXT **This round is complete and pushed. Do not re-derive any of the a
 
-  p2-b       dead 204m  P2-003,P2-004                      task/p2-b-round19
-             head fe6cc17e test(installer): B11 broke the GUI instead of mutatin
-             dirty 1 file(s), 91 unpushed, card 274m
+  p2-b       ALIVE      P2-003,P2-004                      task/p2-b-round23
+             head 
+             dirty 0 file(s), ? unpushed, card 289m
              NEXT **One line, and it is the load-bearing part of this card:** in
 
-  later      dead 205m  L-001,L-002,L-003                  task/later-tpm-qualification
-             head 11fd5832 Merge task/p2-c-2 into roadmap/v2.2
-             dirty 0 file(s), ? unpushed, card -
-             NEXT (no card)
+  p2-f       ALIVE      P2-016,P2-017,P2-018,P2-019        task/p2-f-3
+             head 13d53c01 Merge task/p2-d-2 into roadmap/v2.2
+             dirty 0 file(s), ? unpushed, card 255m
+             NEXT Round 2 closed P2-018's criterion 1. The remaining open work, in t
+
+  followups-5 ALIVE                                         task/followups-5
+             head 13d53c01 Merge task/p2-d-2 into roadmap/v2.2
+             dirty 0 file(s), ? unpushed, card 3m
+             NEXT Read the failing output of the three red steps on the last dispatc
+
+  p1-053c    ALIVE      P1-059,P1-060                      task/p1-053c-clipboard (off roadmap/v2.2, carrying 2 dirty files)
+             head 13d53c01 Merge task/p2-d-2 into roadmap/v2.2
+             dirty 2 file(s), ? unpushed, card 234m
+             NEXT **P1-059 criterion 2 is CLOSED. The item stays `partial`, and the 
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 11fd5832 Merge task/p2-c-2 into roadmap/v2.2
-    task/followups-4
-      10bc2aa5 test(remote): FAILED where the answer was COULD NOT RUN, in b   [0/10 added lines on tip]
-      b4f47cce ci: an unrelated red step above the two gates switched both o   [5/10 added lines on tip]
-      995c6a60 test(ci): P1-063's sixty lid assertions, wired in — and the s   [1/10 added lines on tip]
-      15df7504 test(ci): two more unrun suites — 55 device assertions and §2   [2/10 added lines on tip]
-      66ca2dfb fix(pkg): apex-pkg was clean on the machine it was written on   [0/8 added lines on tip]
-      84af0b76 test(ci): the netns device-services suite, and multilib — who   [1/10 added lines on tip]
-      23a862b5 fix(lint): the 27 scripts shellcheck could not pass, and the    [0/10 added lines on tip]
-      658f7aa4 fix(test): the trust suite minted its CA with flags the CI ru   [0/10 added lines on tip]
-      73da7287 test(ci): P0-002's at-rest half, and the one suite that genui   [2/10 added lines on tip]
-      5600b4d7 test(ci): the labwc session matrix, which could only ever run   [2/10 added lines on tip]
-      4c9de165 fix(ci): the labwc step refused two probes whose clients nobo   [0/10 added lines on tip]
-    task/p2-b-round22
-      5d070093 fix(installer): every Wi-Fi network was a Tab stop that annou   [0/10 added lines on tip]
-      638dc219 test(labwc): three failures about a shell tree from weeks ago   [0/10 added lines on tip]
-      2eff50b8 test(installer): walk the wifi page's Tab ring, and stub the    [2/10 added lines on tip]
-      719513fa test(installer): four mutants for the wifi ring, and B2 no lo   [0/10 added lines on tip]
-      fe6cc17e test(installer): B11 broke the GUI instead of mutating it, an   [0/10 added lines on tip]
-    task/p2-d-2
-      3e19e299 fix(browser): a capability could not pin anything against a r   [0/10 added lines on tip]
-      3920ff48 test(browserlab): a real apex-secretd, and the value a capsul   [0/10 added lines on tip]
+  int-os:  tip 13d53c01 Merge task/p2-d-2 into roadmap/v2.2
+    (nothing — every task branch's content is on the integration tip)
 
-  int-shell:  tip 1da66c7 Merge task/p1-063-2-shell into roadmap/v2.2
-    task/p2-b-round22
-      9f87fca feat(i18n): the settings surface mirrors, and RTL stops being    [1/10 added lines on tip]
+  int-shell:  tip 0a3824c Merge task/p2-b-round22 into roadmap/v2.2
+    (nothing — every task branch's content is on the integration tip)
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -90,11 +74,11 @@ APEX ROADMAP — resume report — 2026-09-13 08:06 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 08:06:42 AWST 22s
+  snapshot timer: active   last 08:21:43 AWST 1s
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    cba1ee2  roadmap-state
+    apex-os    a7730c4  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -117,7 +101,7 @@ APEX ROADMAP — resume report — 2026-09-13 08:06 AWST
     apex-os    f30f7ca  wt-p0-011-
     apex-os    9b605a1  wt-p0-011b-
     apex-os    746639a  wt-p0-014-
-    apex-shell af5691e  apex-shell-
+    apex-shell c78e746  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell 02674e0  int-shell-
     apex-shell 68c971d  wt-base-shell-
@@ -146,19 +130,17 @@ APEX ROADMAP — resume report — 2026-09-13 08:06 AWST
 ────────────────────────────────────────────────────────────────────────────
   next
 ────────────────────────────────────────────────────────────────────────────
-  5 agent(s) dispatched, ceiling 6
+  6 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
     p1-053c        P1-059,P1-060                    Android voice, screenshot, file and clipboard handoff; ship 
     p2-b           P2-003,P2-004                    Accessibility baseline and internationalisation baseline
     p2-d           P2-008,P2-009,P2-012             First-party virtualization UX, disposable VM agent execution
+    p2-f           P2-016,P2-017,P2-018,P2-019      Multi-user/guest/kiosk, APEX Online Accounts, guaranteed saf
     later          L-001,L-002,L-003                TPM and recovery qualification, then LUKS2 by default and TP
 
   READY (dependencies believed satisfied — confirm against the agent table above):
-    p1-038-hardware P1-038                           The 18 labwc matrix rows that need real applications
     p2-c           P2-005,P2-006,P2-007             Printing/scanning/network-share, networking, Bluetooth/dock/
-    p2-f           P2-016,P2-017,P2-018,P2-019      Multi-user/guest/kiosk, APEX Online Accounts, guaranteed saf
-    p1-063         P1-063                           Lid-closed continuous operation — agents and the VPN keep ru
 
   HELD:
     final          after *
@@ -167,6 +149,7 @@ APEX ROADMAP — resume report — 2026-09-13 08:06 AWST
   This says the WORK is done, not that it is landed — check the
   unlanded section above before assuming roadmap/v2.2 carries it:
     p0-014, p1-018, p1-020, p1-023, p1-025, p1-035, p1-040-per-output-scaling, p1-044, p1-061, p2-e
+    p1-038-hardware — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-13 (round 24) — and this says the work is ANDRE'S, not that it is done. Offered as READY in four consecutive reports and correctly refused four times for the same reason, which is written in this unit's own note: the 18 remaining labwc matrix rows need real applications on a real session (portals, Firefox/Chromium screen sharing, OBS, Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling, rotation, refresh rate, VRR, suspend/resume, dock hotplug). It cannot be done headless, it cannot be done on the L16 while Andre is using it, and katana is off-limits. The step-by-step checklist is already written in state/agents/p1-038.md — it is ready for a human to run, which is the deliverable. Re-open it the moment there is a machine Andre is not sitting at.
     p1-005 — CLOSED BY HAND: Landed as merge 4f80746e; the range against roadmap/v2.2 is empty. P1-006 is done. P1-005 stays partial only because the token spent is account-wide — the per-task credential IS P1-011 — and P1-007 stays partial because no elevated class exists in apex-secret-core to require, which is its own item. Nothing left to dispatch here. Closed 2026-09-12 after a dispatched agent had to be redirected.
     p1-008 — CLOSED BY HAND: Landed as merge 230ee02a; 0 unlanded. P1-008 and P1-010 done. P1-009 stays partial because the third criterion turns on a schema question the pinned schema cannot settle either way — workers-ai-post-run-model declares two path parameters and no headers. A citation problem, not effort.
     p1-011 — CLOSED BY HAND: Landed as merge 598f6996; 0 unlanded. P1-011 and P1-012 are done. P1-013 stays partial for a structural reason: a preview health check is an UNAUTHENTICATED GET to *.workers.dev and the host pin correctly forbids spending an api.cloudflare.com credential anywhere else, so it belongs in the `apex cf` CLI rather than in a brokered operation — and the relay moved to a custom domain on andrenijman.com, so workers.dev is no longer the right target anyway. Closed 2026-09-12 after a THIRD agent in one round was dispatched onto finished work.
@@ -174,6 +157,7 @@ APEX ROADMAP — resume report — 2026-09-13 08:06 AWST
     p1-052-relay — CLOSED BY HAND: 0 unlanded; P1-052 done and the relay is deployed. P1-051's criteria 1, 3 and 5 are done and landed on apex-shell as a36f1a4. The remainder does not close until the device key lives in Android Keystore with setUserAuthenticationRequired, which is p1-053b/p1-053c territory, not a separate unit.
     p1-053a — CLOSED BY HAND: Landed as merge 4ae4cf22; 0 unlanded. P1-053 done. P1-054 is partial because the socket has no profile/projects/worktrees verb — adding them is a protocol change and p1-053b owns the decision. P1-055 is partial for want of a gemini fixture, and gemini is not installed on this machine.
     base-partials — CLOSED BY HAND: Landed round 12 on both repos; `git merge-base --is-ancestor` confirms task/base-partials and task/base-partials-shell are both contained in roadmap/v2.2, zero unlanded commits. BASE-009 needs a disposable machine with a gaming userspace (the switch is `loginctl terminate-user`, which kills the session running the test) and katana is off-limits; BASE-010 needs non-zero spendable VRAM and this is an APU, so apexd falls to Backend::Cpu by design. Closed 2026-09-12 after a second agent was dispatched onto a finished unit.
+    p1-063 — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-13 (round 24). Round 3 is finished, pushed AND landed — apex-os 619e764a, apex-shell 1da66c7 — and followups-4 wired its 60 lid assertions into CI runner-green. Both remaining criteria are ANDRE'S PHYSICAL ACTIONS and an agent must not fake either. Criterion 1: causation needs the external display physically unplugged. Re-measured 2026-09-13 — Docked=b true, card1-DP-1 connected — and with a display attached logind consults HandleLidSwitchDocked (default ignore) BEFORE any inhibitor, so the lid does nothing with or without APEX's block and the non-suspend cannot be attributed to APEX. The one command that closes it, undocked: `sudo ./tests/test-apex-lid-live.sh`. Criterion 3: 'draws measurably less' needs an undocked machine ON BATTERY that nobody is using — power_now reads CHARGING power on mains — and the runnable recipe is in docs/lid.md under 'What has NOT been measured'. Nothing here is waiting on an agent.
 
 ────────────────────────────────────────────────────────────────────────────
   how to resume
