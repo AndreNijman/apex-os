@@ -202,6 +202,7 @@ jobs:
       # These checks are cheap enough to run over the complete tree. That avoids
       # path-filter blind spots when an included or copied file changes.
       - name: Validate shell and Python syntax
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           # Selected by SHEBANG, not by suffix. The old list was `*.sh` plus two
@@ -229,6 +230,7 @@ jobs:
           node --check files/system/libexec/apex-plugin-verdict.js
 
       - name: Validate TOML
+        if: ${{ !cancelled() }}
         run: |
           python3 - <<'PY'
           import pathlib
@@ -241,6 +243,7 @@ jobs:
           PY
 
       - name: Validate Containerfile layer order
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           # Two mistakes that otherwise surface only hours into an image build,
@@ -260,6 +263,7 @@ jobs:
             Containerfile.base Containerfile.core Containerfile.apex
 
       - name: Input page and generator agree
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           # The settings page writes a JSON model; the generator reads it.
@@ -316,6 +320,7 @@ jobs:
           esac
 
       - name: §24 every session APEX ships has a decided portal backend set
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           # Screen sharing, file pickers, screenshots and the dark/light Settings
@@ -387,6 +392,7 @@ jobs:
             || fail "apex-gaming.desktop changed its desktop name; re-decide whether it now needs a portal config"
 
       - name: The blueprint and the capsule engine agree on the languages
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           # `[development] languages` is validated by apexd-core's LANGUAGES
@@ -408,6 +414,7 @@ jobs:
           python3 files/scripts/check-language-parity
 
       - name: Only the daemon may run host commands
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           # `RealWriter::for_daemon` is the one constructor permitted to shell
@@ -448,6 +455,7 @@ jobs:
           echo "host commands: only the daemon opts in"
 
       - name: Only `apex apply` may converge the machine
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           # The blueprint's counterpart to the check above, for the same class
@@ -500,6 +508,7 @@ jobs:
           echo "converging: only \`apex apply\` opts in, and it never escalates"
 
       - name: §12 shares one apply guard, and its planner stays pure
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           # The third member of the family above, for roadmap §12's per-game
@@ -574,6 +583,7 @@ jobs:
       # in `rust` below, where the toolchain is, and dies rather than skipping
       # if the binary is missing.
       - name: §22 boot v2 — the opt-in is structural, and nothing shipped touches a boot path
+        if: ${{ !cancelled() }}
         run: ./tests/test-boot-v2.sh
 
       # §27's trust readout, structural half. In `static` because the check
@@ -583,6 +593,7 @@ jobs:
       # workflow sets rust=false, and the drift would ship — with every machine
       # reporting a good image as signed by the wrong party.
       - name: §27 trust — the readout is wired into apex status, and expects the identity CI signs under
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-trust.sh
 
       # §13.4's tool half, the part an agent actually types. In `static`
@@ -592,6 +603,7 @@ jobs:
       # to run if `apex` resolves to anything but its own stub, so it cannot
       # quietly start measuring the runner's machine.
       - name: §13.4 tool broker — a brokered subcommand reaches apex, and everything else reaches the tool
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-tool-broker.sh
 
       # §25's persistent-state migration, structural half. In `static` because
@@ -600,6 +612,7 @@ jobs:
       # change whose consequence lands the day the schema moves, on somebody
       # else's machine.
       - name: §25 schema — every store declares its rollback answer, and no version key defaults to current
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-schema.sh
 
       # §48's Storage Manager, structural half. Three one-line changes away
@@ -608,6 +621,7 @@ jobs:
       # forever on every bootc machine, and a trust in blkid reports an
       # encrypted disk as unencrypted.
       - name: §48 storage — a failing disk is red not grey, and the composefs root is not a full disk
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-storage.sh
 
       # §P2-015's firmware readout, structural half. fwupdmgr's exit status
@@ -617,6 +631,7 @@ jobs:
       # this machine drops the flag from seven devices including the System
       # Firmware, so printing it as a capability is a lie about the hardware.
       - name: §P2-015 firmware — the document is the only truth, and updatable is not a property
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-firmware.sh
 
       # §33's qualification database, structural half. The two properties it
@@ -625,6 +640,7 @@ jobs:
       # nobody asked, and a verdict collapsed to a bool turns every row nobody
       # has tried into a fault report about working hardware.
       - name: §33 qualify — nothing is recorded without consent, and a check nobody tried is not a check that failed
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-qualify.sh
 
       # P1-025/026/027/028, structural half, and it belongs in `static` for the
@@ -637,6 +653,7 @@ jobs:
       # cannot be caught by clippy: silencing the lint is what makes clippy
       # green.
       - name: §P1-025 skills & provenance — a refused read is never an absence, and dead code was called rather than silenced
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-skill.sh
 
       # §P1-061 application permissions. In `static` because the subject is a
@@ -650,6 +667,7 @@ jobs:
       # test exists to catch. The half that matters runs on any machine with
       # the desktop stack, which is every machine this feature ships to.
       - name: §P1-061 app permissions — a revoked grant is refused, and the native one cannot be
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-permissions.sh
 
       # §P1-061 criterion 4, the other half: does a permission-store change
@@ -669,6 +687,7 @@ jobs:
       # runner. It is listed so the entry point exists rather than being
       # something only one laptop knows about.
       - name: §P1-061 app permissions — does a store change reach a running client (measurement)
+        if: ${{ !cancelled() }}
         run: ./tests/measure-permission-store-reach.sh
 
       # §26's channels, structural half, and this one has to be in `static`:
@@ -678,6 +697,7 @@ jobs:
       # every build — a user who chose it would be taking edge's risk while
       # believing they had opted out.
       - name: §26 channels — edge moves with every build, the slower ones do not, and a promotion cannot skip a channel
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-channel.sh
 
       # §19's disposable engine, and the structural rules its teardown depends
@@ -693,6 +713,7 @@ jobs:
       # in `rust` below, where the toolchain is, and dies rather than skipping
       # if the binary is missing.
       - name: §19 disposable execution — the teardown's four fences, and the copy boundary
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-recover.sh
 
       # §14's cross-file constants. The daemon, the CLI and the unit all have to
@@ -730,9 +751,11 @@ jobs:
       # would be satisfiable by its own prose, which is the defect this
       # repository has shipped four times.
       - name: P1-062 the chaos harness — the boot-path rule, and every verdict arm
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-chaos.sh
 
       - name: §14 the daemon, the CLI and the unit agree
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           test -f files/scripts/check-ai-parity
@@ -752,6 +775,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Toolchain
+        if: ${{ !cancelled() }}
         run: rustup component add clippy
 
       # bubblewrap is not on the GitHub runner, and six assertions in
@@ -768,6 +792,7 @@ jobs:
       # not get checked in CI is the one you least want quiet. This file already
       # records four occasions where something skipped and the workflow passed.
       - name: Sandbox tooling the confinement assertions need
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           sudo apt-get update -qq
@@ -798,6 +823,7 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-
 
       - name: Clippy
+        if: ${{ !cancelled() }}
         run: cargo clippy --all-targets --locked -- -D warnings
 
       # `cargo test` does not build the `apex` binary, and apex-agentd's
@@ -806,6 +832,7 @@ jobs:
       # and reports as a pass, which is how it went unnoticed that the live
       # assertion had never run in CI at all — four green tests in 0.13 s.
       - name: Build the apex CLI, which the live agent tests drive
+        if: ${{ !cancelled() }}
         run: cargo build --locked -p apex
 
       # APEX_REQUIRE_APEX_CLI turns that skip into a failure. Same shape as
@@ -822,6 +849,7 @@ jobs:
       # one that shows it. The helper enters a real logind session first, or
       # says out loud why it could not and runs the tests exactly as before.
       - name: Tests
+        if: ${{ !cancelled() }}
         run: ../tests/in-login-session.sh cargo test --locked
         env:
           APEX_REQUIRE_APEX_CLI: "1"
@@ -854,6 +882,7 @@ jobs:
       # being bitten by three times. Here it would fire the day somebody
       # renames the test.
       - name: The non-local column, from the runner's own placement
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           cargo test --locked -p apex-agentd --test request_origin
@@ -883,6 +912,7 @@ jobs:
       # fails on. It asserts the guard itself by setting the variable
       # explicitly, per case.
       - name: Run blueprint and sync assertions
+        if: ${{ !cancelled() }}
         working-directory: .
         env:
           APEX_BLUEPRINT_NO_APPLY: "1"
@@ -906,6 +936,7 @@ jobs:
       # fake scxctl/nvidia-smi/systemctl first on PATH, fails if any of them is
       # called, and proves that tripwire is armed with a negative control.
       - name: Run mode, workload and Performance Lab assertions
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-modes.sh
 
@@ -925,6 +956,7 @@ jobs:
       # does not exist, so nothing in it can reach a live apexd — which is also
       # what makes it behave identically here and on a developer's desktop.
       - name: Run per-game profile and boot-to-game assertions
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-gaming.sh
 
@@ -944,6 +976,7 @@ jobs:
       # comes from the environment: bootctl is a fixed absolute path and under
       # a fixture root it is not executed at all.
       - name: §22 boot v2 — apex boot status against GRUB and systemd-boot fixtures
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
           APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
@@ -961,6 +994,7 @@ jobs:
       # refuses to run under a fixture root, so this step never leaves the
       # runner and cannot go red because ghcr.io is having a bad day.
       - name: §27 trust — apex trust against unverified, signed and unreadable fixtures
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
           APEX: ${{ github.workspace }}/apexd/target/debug/apex
@@ -1112,6 +1146,7 @@ jobs:
       # if any store path resolves outside it: this is the suite that drives the
       # code which REWRITES persistent state.
       - name: §25 schema — apex schema against records older and newer than this build
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
           APEX: ${{ github.workspace }}/apexd/target/debug/apex
@@ -1128,6 +1163,7 @@ jobs:
       # spawned at all, and the notifier's notify-send is a shim that writes to
       # a file.
       - name: §48 storage — apex storage against a healthy disk, a failing one and a refused read
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
           APEX: ${{ github.workspace }}/apexd/target/debug/apex
@@ -1143,6 +1179,7 @@ jobs:
       # asked for. No fwupdmgr is spawned; every answer is a file the script
       # writes, so this runs on a machine with no fwupd and no system bus.
       - name: §P2-015 firmware — apex firmware against fwupd's own oddest answers
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
           APEX: ${{ github.workspace }}/apexd/target/debug/apex
@@ -1158,6 +1195,7 @@ jobs:
       # database, and a sealed SecureBoot variable, which must read as not
       # checked rather than as a firmware that fails.
       - name: §33 qualify — apex qualify against a fixture machine, consent gate and all
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
           APEX: ${{ github.workspace }}/apexd/target/debug/apex
@@ -1175,6 +1213,7 @@ jobs:
       # runs beside them: a suite where every case refuses would pass on a
       # binary that refused everything.
       - name: §P1-061 app permissions — revoke refuses what it cannot do, and names what it can
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
           APEX: ${{ github.workspace }}/apexd/target/debug/apex
@@ -1197,6 +1236,7 @@ jobs:
       # prefers XDG_STATE_HOME, so a suite setting only HOME would write over
       # the runner's real one.
       - name: §P1-025 skills & provenance — apex skill / provenance / mcp planes against fixture homes
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
           APEX: ${{ github.workspace }}/apexd/target/debug/apex
@@ -1210,6 +1250,7 @@ jobs:
       # the four channel tags and on the legacy alias every installed machine
       # actually follows.
       - name: §26 channels — apex channel against a machine on each tag
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
           APEX: ${{ github.workspace }}/apexd/target/debug/apex
@@ -1237,6 +1278,7 @@ jobs:
       # The structural half of the same file runs in `static`, where no path
       # filter can skip it.
       - name: §19 recovery, repair and the scoped factory reset
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
           APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
@@ -1267,6 +1309,7 @@ jobs:
       # reference, no dead-code warning and no test failure. `apex task` was
       # simply gone. Only asking the built artifact what it can do catches it.
       - name: Every verb is in the binary
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-verbs.sh
 
@@ -1282,6 +1325,7 @@ jobs:
       # It asks the binary this job already built, not the installed apex,
       # which on a runner does not exist.
       - name: Docs and the CLI agree, in both directions
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         run: ./tests/check-doc-verbs.sh
 
@@ -1291,10 +1335,12 @@ jobs:
       # later step than the last. This resolves them back to the files in this
       # repo that become them and runs them here.
       - name: Containerfile assertions can actually pass
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         run: ./tests/check-containerfile-assertions.sh
 
       - name: Run trusted-device assertions
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-host.sh
 
@@ -1305,6 +1351,7 @@ jobs:
       # launcher. This runs the structural half here; the live half needs the
       # unpacked zed.app and skips in CI.
       - name: The shipped editors are launchable
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-editors.sh
 
@@ -1319,6 +1366,7 @@ jobs:
       # the host's repos. This runs the structural half here; the live half
       # needs the installed apps and skips in CI.
       - name: The desktop AI apps ship with the system and bring no updater
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-ai-apps.sh
 
@@ -1337,6 +1385,7 @@ jobs:
       # has this repository at the same absolute path; that proved the design,
       # and this keeps it proved.
       - name: Run remote-compute and handoff assertions
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-dispatch.sh
 
@@ -1356,6 +1405,7 @@ jobs:
       # test-labwc-keybinds.sh documents for the shell tree. The suite hard
       # exits if the repository copy is missing rather than falling back.
       - name: Run local inference assertions
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-ai.sh
 
@@ -1380,6 +1430,7 @@ jobs:
       # a negative control proving the recorder is armed. That is the "never a
       # polkit or keyring prompt" rule asserted rather than claimed.
       - name: §21 task — binder assertions, refusals and the no-prompt tripwire
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
           APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
@@ -1422,6 +1473,7 @@ jobs:
       # the fixture tree before and after — enough for
       # `run-chaos --replay <bundle>` on another machine.
       - name: P1-062 chaos — four faults injected, proven, and survived
+        if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
           APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
@@ -1533,6 +1585,7 @@ jobs:
       # gate or is a pure function. Cases needing `rpm` skip out loud here and
       # run for real in the image smoke test in build-image.yml.
       - name: Run package-engine assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-pkg.sh
 
       # The per-login provisioner edits files that belong to the user. These
@@ -1540,9 +1593,11 @@ jobs:
       # against throwaway HOMEs, asserting the repairs happen once and nothing
       # the user wrote is touched.
       - name: Run user-provisioner assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-firstrun.sh
 
       - name: Run input-settings assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-input.sh
 
       # §8's capsule engine. `apex env create` pulls hundreds of megabytes and
@@ -1560,6 +1615,7 @@ jobs:
       # preflight that refuses root and a missing subuid range BEFORE an image
       # is downloaded.
       - name: Run capsule assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-env.sh
 
       # P2-008's virtualization engine. Same trade as the capsule suite above
@@ -1582,6 +1638,7 @@ jobs:
       # these runners have no /dev/kvm. The step below runs it anyway, and
       # that is the point.
       - name: Run virtualization assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-vm.sh
 
       # ── the could-not-run arm, EXERCISED rather than asserted by comment ───
@@ -1606,6 +1663,7 @@ jobs:
       # every runner. This step is the end-to-end shape: the lab, invoked the
       # way a person invokes it, writing a bundle.
       - name: P2-008 the vmlab, and its verdicts wherever this runs
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           ./tests/vmlab/run-vmlab --out "$RUNNER_TEMP/vmlab"
@@ -1644,6 +1702,7 @@ jobs:
       # --profile; and user.js, which is the only thing pointing Firefox at the
       # egress bridge because Firefox does not read $HTTP_PROXY.
       - name: Run browser capsule assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-browser.sh
 
       # ── and its live lab, wherever this runs ──────────────────────────────
@@ -1660,6 +1719,7 @@ jobs:
       # could not run must say WHY, and no flow may come back `failed`. A
       # runner that can run them verifies them instead, which is also a pass.
       - name: P2-012 the browserlab, and its verdicts wherever this runs
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           ./tests/browserlab/run-browserlab --out "$RUNNER_TEMP/browserlab"
@@ -1708,6 +1768,7 @@ jobs:
       # `--additional-flags` plus one argument, which is the way this file
       # could otherwise have gone quietly vacuous.
       - name: Run capsule device-profile assertions (live where the hardware is)
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-env-devices-live.sh
 
       # What the login session picker calls the three desktops. BASE-013's
@@ -1726,6 +1787,7 @@ jobs:
       # rather than re-implemented — this tree already carries three copies of
       # that loop. It starts no compositor and opens no window.
       - name: Run session-picker wording assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-greet-sessions.sh
 
       # P2-018's first criterion, and the half that did not exist until now:
@@ -1762,6 +1824,7 @@ jobs:
       # changed under us, and that is worth failing over rather than passing
       # with the preselection rule unexecuted.
       - name: Run session-watchdog assertions
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           out="$(./tests/test-apex-session-watchdog.sh 2>&1)"
@@ -1796,6 +1859,7 @@ jobs:
       # before it asserts anything about wiping. It starts no compositor and
       # opens no window.
       - name: Run shared-machine (guest, kiosk) assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-shared-machine.sh
 
       # P2-016 criterion 1. One assertion carries it: `apex user add` without
@@ -1811,6 +1875,7 @@ jobs:
       # go through the production path while no account is created, removed or
       # changed, and nothing is written outside its temp directory.
       - name: Run account (standard vs administrator) assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-user.sh
 
       # What a screen reader and a keyboard-only user get from the login
@@ -2000,6 +2065,7 @@ jobs:
       # exception is the curated table, and the suite checks that it explains
       # itself and stays overridable with --source.
       - name: Run resolver assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-resolve.sh
 
       # The display engine is the one generator that can reach hardware, so its
@@ -2009,6 +2075,7 @@ jobs:
       # exists for was a test that reconfigured the live desktop it ran on, and
       # a developer running this locally is exactly that situation.
       - name: Run display-settings assertions
+        if: ${{ !cancelled() }}
         env:
           APEX_DISPLAY_NO_LIVE: "1"
         run: ./tests/test-apex-display.sh
@@ -2026,6 +2093,7 @@ jobs:
       # binary is installed, which is what the runner will normally do — the
       # value is on a machine that has them.
       - name: Run the Hyprland Lua config assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-hypr-lua.sh
 
       # The input half of the same argument. test-apex-input.sh proves each
@@ -2039,6 +2107,7 @@ jobs:
       # Same nesting, so it draws nothing and cannot reach a real session, and
       # the same status-0 skip where the binaries are absent.
       - name: Run the live input-settings assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-input-live.sh
 
       # §17's fourth generator. The shell has written Hyprland .conf/.lua and
@@ -2068,6 +2137,7 @@ jobs:
       # Both are pinned to the matching branch now. Keep the two in step: if one
       # is ever changed, the other is wrong.
       - name: Vendor apex-shell for the keybind model
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           want="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
@@ -2086,6 +2156,7 @@ jobs:
           test -f "${GITHUB_WORKSPACE}/../apex-shell/src/services/config_tab/KeybindService.qml"
 
       - name: Run labwc keybind generator assertions
+        if: ${{ !cancelled() }}
         env:
           # Turns "no shell tree, skip everything" into a failure. Without it the
           # suite reported passed=0 failed=0 and a green tick on its first CI
@@ -2114,6 +2185,7 @@ jobs:
       # where labwc or wtype will not run, so a runner that cannot host a
       # compositor reports a skip rather than a false green or a false red.
       - name: Install a compositor and a synthetic keyboard
+        if: ${{ !cancelled() }}
         run: |
           # Tolerant on purpose. The suite below skips with status 0 where labwc
           # or wtype will not run, so a runner that cannot host a compositor
@@ -2128,6 +2200,7 @@ jobs:
             || echo "labwc/wtype unavailable on this runner; the reload suite will skip"
 
       - name: Run the keybind reload assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-labwc-keybind-reload.sh
 
       # P2-018's recovery session, in the same job for the same reason: it
@@ -2142,6 +2215,7 @@ jobs:
       # and the session has to come up anyway, which is what `labwc -C` buys
       # and what its absence would silently cost.
       - name: Run the safe-graphics recovery assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-safe-graphics.sh
 
       # End-to-end, against a real daemon on an isolated socket: that the
@@ -2159,6 +2233,7 @@ jobs:
       # sandbox, and a runner has no bwrap by default. Without this the one
       # assertion that matters most is the one that never runs.
       - name: Install bubblewrap
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           sudo apt-get update -qq
@@ -2187,6 +2262,7 @@ jobs:
             echo "note: dev.tty.legacy_tiocsti knob absent (compiled out — fine)"
 
       - name: Run privilege-request assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-privilege-requests.sh
 
       # P1-035's three claims, none of which a unit test can reach: the typed
@@ -2196,6 +2272,7 @@ jobs:
       # and the suite builds its own — its own XDG_RUNTIME_DIR, its own state,
       # killed by pid.
       - name: Run file-injection assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-agent-inject.sh
 
       # P1-036's named guarantee, which is the whole reason the conflict answer
@@ -2206,6 +2283,7 @@ jobs:
       # repository with a real conflict, and the suite builds one, along with
       # its own daemon on its own socket and its own project store.
       - name: Run worktree-status assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-agent-worktrees.sh
 
       # P1-037's acceptance line — an agent session that runs in a disposable
@@ -2217,6 +2295,7 @@ jobs:
       # podman, no distrobox and no image pull, and it cannot fail here for a
       # reason unrelated to this code.
       - name: Run disposable-capsule assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-agent-disposable.sh
       # §7's other half, and the one the privilege suite deliberately does not
       # touch: approving a request WITHOUT --no-run performs the operation and
@@ -2238,6 +2317,7 @@ jobs:
       # 24.04 runner at all; without it this suite skips out loud rather than
       # passing.
       - name: Run root-approval assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-root-approval.sh
 
       # §5's two claims, neither of which the unit tests can reach: a portable
@@ -2248,6 +2328,7 @@ jobs:
       # no network and no API call, and it touches nobody's own profile — the
       # fixture home is under /var/tmp, because the sandbox masks /tmp.
       - name: Run agent-profile assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-agent-profile.sh
 
       # The compositor adapter is faked through APEX_WINDOW_ADAPTER, so this
@@ -2255,6 +2336,7 @@ jobs:
       # is a separate program. `restore` is only ever called with --dry-run, so
       # the suite cannot start a window.
       - name: Run project-layout assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-project-layout.sh
 
       # fish and nushell cannot source the POSIX agent.sh, so each has its own
@@ -2264,6 +2346,7 @@ jobs:
       # degrades that section to a LOUD SKIP rather than a red build, and the
       # suite refuses to report success if every section skipped.
       - name: Install fish and nushell
+        if: ${{ !cancelled() }}
         run: |
           set -uo pipefail
           sudo apt-get update -qq
@@ -2285,6 +2368,7 @@ jobs:
           fi
 
       - name: Run fish and nushell agent-integration assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-shell-agent.sh
 
       # The layout templates open panes in a real multiplexer, so a real one has
@@ -2293,6 +2377,7 @@ jobs:
       # the version is kept in step by hand, and a failed download degrades that
       # section to a LOUD SKIP rather than a red build.
       - name: Install tmux and zellij
+        if: ${{ !cancelled() }}
         run: |
           set -uo pipefail
           sudo apt-get install -y -qq tmux
@@ -2313,6 +2398,7 @@ jobs:
       # runtime, and every agent pane resolves to `apex agent run` against a
       # stub on PATH.
       - name: Run terminal layout template assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-mux-layouts.sh
 
       # §4's whole claim is "agents use credentials without receiving the raw
@@ -2322,6 +2408,7 @@ jobs:
       # the git operation is genuinely attempted against 127.0.0.1:1, which
       # refuses instantly, so no network is used and the token goes nowhere.
       - name: Run secret-broker assertions
+        if: ${{ !cancelled() }}
         env:
           # The suite's one legitimate skip is its sandbox section: without
           # bubblewrap a confined session cannot be built, so the boundary
@@ -2339,6 +2426,7 @@ jobs:
       # credential is stored and LEFT, which is the outcome an interrupted or
       # ungranted run has to have.
       - name: Run credential-migration assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-secret-migrate.sh
 
       # P2-001/P2-002's backup framework, end to end through the real CLI. Two
@@ -2358,6 +2446,7 @@ jobs:
       # proven in the `rust` job instead, against the same loopback double that
       # 401s an unauthenticated request.
       - name: §13.5 backup — encrypted at rest, versioned restore, and the four verdicts
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-backup.sh
 
       # P2-001's ssh target, against a REAL sshd on loopback — the fixture the
@@ -2375,6 +2464,7 @@ jobs:
       # config file inside its own fixture, and it is killed by pid. Nothing
       # under /etc/ssh and no system unit is read or written.
       - name: §13.5 backup over ssh — a real sshd on loopback
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           sudo apt-get update -qq
@@ -2394,6 +2484,7 @@ jobs:
       # a kernel-chosen port and the access key id is AWS's own documentation
       # example, which authorises nothing.
       - name: §13.5 backup to S3 — SigV4 against an independent verifier
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-backup-s3.sh
 
       # ── suites that existed and that CI had never once invoked ───────────
@@ -2537,6 +2628,7 @@ jobs:
           fi
 
       - name: ShellCheck the privileged helpers
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           sudo apt-get update -qq
@@ -2823,6 +2915,7 @@ jobs:
       # very files this branch adds. Anything expected to be red belongs at the
       # bottom of its job.
       - name: Run plugin CLI assertions
+        if: ${{ !cancelled() }}
         run: ./tests/test-apex-plugin.sh
 
   android:
