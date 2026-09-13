@@ -44,6 +44,20 @@ LAYER_RE = re.compile(r"^(RUN|COPY|ADD|ENV|LABEL|ARG|WORKDIR|USER)\s", re.I)
 
 IGNORE_PREFIXES = ("/proc", "/sys", "/dev", "/tmp", "/var/tmp", "/run")
 
+# The quoted pattern operand of a pattern-matching command: the command, its
+# flags (so `-e PATTERN` and `grep -qF PATTERN` are both covered), then the
+# first quoted word. Flags are kept in the replacement; only the pattern goes.
+# Unquoted patterns are deliberately NOT stripped — a bare word in that
+# position is indistinguishable from a file operand, and over-stripping is the
+# direction that turns this checker into a step that inspects nothing.
+PATTERN_ARG_RE = re.compile(
+    r"""\b(?:grep|egrep|fgrep|zgrep|rg|sed|awk)\b   # a command whose next word is a pattern
+        ((?:\s+-[^\s]+)*)                           # its flags, kept
+        \s+('[^']*'|"[^"]*")                        # the quoted pattern, removed
+    """,
+    re.X,
+)
+
 VOLATILE_MARKERS = ("--from=apex-builder",)
 VOLATILE_MIN_POSITION = 0.75
 
@@ -139,6 +153,28 @@ def referenced_paths(line):
     # up. Documentation is not a read.
     line = re.sub(r":\s*'[^']*'", " ", line)
     line = re.sub(r':\s*"[^"]*"', " ", line)
+
+    # A PATTERN is text to match, not a file to open — and the difference is the
+    # whole question this checker asks. On run 34727364060 this line of
+    # Containerfile.base:
+    #
+    #   grep -q '^ExecStart=/usr/bin/apex lid watch$' \
+    #       /usr/lib/systemd/system/apex-lid.service
+    #
+    # was reported as "RUN reads /usr/bin/apex, but the COPY that creates it is
+    # at line 2952". It reads the unit file — which IS a read, is kept below,
+    # and is correctly provided nine lines above — and mentions /usr/bin/apex
+    # only as a string to look for. The Containerfile even says so in the
+    # comment directly above it. That false positive reddened `Validate
+    # Containerfile layer order` and, because a failed step skips every step
+    # below it, took the twenty static gates under it off every run with it.
+    #
+    # Only the pattern OPERAND is removed, never the file operands: a naive
+    # "ignore anything grep touches" would silently stop checking every
+    # `RUN grep -q x /path/created/later`, which is the commonest real shape of
+    # the defect this file exists to catch. tests/test-containerfile-order.sh
+    # asserts both directions.
+    line = PATTERN_ARG_RE.sub(lambda m: m.group(1) + " ", line)
 
     found = set()
     for tok in re.findall(r"/(?:usr|etc|var|opt)[A-Za-z0-9_./@+${}-]*", line):
