@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-13 03:26 AWST
+APEX ROADMAP — resume report — 2026-09-13 08:06 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,46 +16,61 @@ APEX ROADMAP — resume report — 2026-09-13 03:26 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p1-053c    ALIVE      P1-059,P1-060                      task/p1-053c-android-handoff
-             head cd4a799e Merge task/p2-a-backup into roadmap/v2.2
-             dirty 4 file(s), 31 unpushed, card 2m
-             NEXT Round 2, step 1: finish and commit
+  followups-4 dead 204m                                     task/followups-4
+             head 4c9de165 fix(ci): the labwc step refused two probes whose clie
+             dirty 0 file(s), 0 unpushed, card 206m
+             NEXT One thing outstanding: read dispatch run 34717723637 for the `P3 l
 
-  followups-4 ALIVE                                         task/followups-4
-             head ed1429da test(ci): two of the thirteen unrun suites, wired and
-             dirty 0 file(s), 0 unpushed, card 0m
-             NEXT Read dispatch run 34714159369 (`gh run view 34714159369 --log-fail
+  p1-053c    dead 204m  P1-059,P1-060                      task/p1-053c-android-handoff
+             head 375ca0dd Merge task/p1-053c-android-handoff into roadmap/v2.2
+             dirty 2 file(s), 14 unpushed, card 219m
+             NEXT **P1-059 criterion 2 is CLOSED. The item stays `partial`, and the 
 
-  p2-b       ALIVE      P2-003,P2-004                      task/p2-b-round19
-             head cd4a799e Merge task/p2-a-backup into roadmap/v2.2
-             dirty 1 file(s), 66 unpushed, card 3m
+  p2-d       dead 204m  P2-008,P2-009,P2-012               task/p2-d-browser-capsule
+             head 3920ff48 test(browserlab): a real apex-secretd, and the value 
+             dirty 2 file(s), 64 unpushed, card 284m
+             NEXT **This round is complete and pushed. Do not re-derive any of the a
+
+  p2-b       dead 204m  P2-003,P2-004                      task/p2-b-round19
+             head fe6cc17e test(installer): B11 broke the GUI instead of mutatin
+             dirty 1 file(s), 91 unpushed, card 274m
              NEXT **One line, and it is the load-bearing part of this card:** in
 
-  p2-f       ALIVE      P2-017,P2-018,P2-019               task/p2-f-2
-             head cd4a799e Merge task/p2-a-backup into roadmap/v2.2
-             dirty 2 file(s), ? unpushed, card 5m
-             NEXT Write `files/system/libexec/apex-session-watchdog` (verbs record/c
-
-  p2-c       ALIVE      P2-005,P2-006,P2-007               task/p2-c-2
-             head cd4a799e Merge task/p2-a-backup into roadmap/v2.2
-             dirty 2 file(s), ? unpushed, card -
+  later      dead 205m  L-001,L-002,L-003                  task/later-tpm-qualification
+             head 11fd5832 Merge task/p2-c-2 into roadmap/v2.2
+             dirty 0 file(s), ? unpushed, card -
              NEXT (no card)
-
-  p1-063     ALIVE      P1-063                             task/p1-063-2
-             head 2401a57c feat(lid): the apex lid driver, and a thermal guard m
-             dirty 1 file(s), ? unpushed, card 572m
-             NEXT 1. **Re-run `sudo ./tests/test-apex-lid-live.sh` with every extern
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip cd4a799e Merge task/p2-a-backup into roadmap/v2.2
+  int-os:  tip 11fd5832 Merge task/p2-c-2 into roadmap/v2.2
     task/followups-4
-      ed1429da test(ci): two of the thirteen unrun suites, wired and floored   [0/10 added lines on tip]
+      10bc2aa5 test(remote): FAILED where the answer was COULD NOT RUN, in b   [0/10 added lines on tip]
+      b4f47cce ci: an unrelated red step above the two gates switched both o   [5/10 added lines on tip]
+      995c6a60 test(ci): P1-063's sixty lid assertions, wired in — and the s   [1/10 added lines on tip]
+      15df7504 test(ci): two more unrun suites — 55 device assertions and §2   [2/10 added lines on tip]
+      66ca2dfb fix(pkg): apex-pkg was clean on the machine it was written on   [0/8 added lines on tip]
+      84af0b76 test(ci): the netns device-services suite, and multilib — who   [1/10 added lines on tip]
+      23a862b5 fix(lint): the 27 scripts shellcheck could not pass, and the    [0/10 added lines on tip]
+      658f7aa4 fix(test): the trust suite minted its CA with flags the CI ru   [0/10 added lines on tip]
+      73da7287 test(ci): P0-002's at-rest half, and the one suite that genui   [2/10 added lines on tip]
+      5600b4d7 test(ci): the labwc session matrix, which could only ever run   [2/10 added lines on tip]
+      4c9de165 fix(ci): the labwc step refused two probes whose clients nobo   [0/10 added lines on tip]
+    task/p2-b-round22
+      5d070093 fix(installer): every Wi-Fi network was a Tab stop that annou   [0/10 added lines on tip]
+      638dc219 test(labwc): three failures about a shell tree from weeks ago   [0/10 added lines on tip]
+      2eff50b8 test(installer): walk the wifi page's Tab ring, and stub the    [2/10 added lines on tip]
+      719513fa test(installer): four mutants for the wifi ring, and B2 no lo   [0/10 added lines on tip]
+      fe6cc17e test(installer): B11 broke the GUI instead of mutating it, an   [0/10 added lines on tip]
+    task/p2-d-2
+      3e19e299 fix(browser): a capability could not pin anything against a r   [0/10 added lines on tip]
+      3920ff48 test(browserlab): a real apex-secretd, and the value a capsul   [0/10 added lines on tip]
 
-  int-shell:  tip bfb24ed Merge task/p2-b-round19 into roadmap/v2.2
-    (nothing — every task branch's content is on the integration tip)
+  int-shell:  tip 1da66c7 Merge task/p1-063-2-shell into roadmap/v2.2
+    task/p2-b-round22
+      9f87fca feat(i18n): the settings surface mirrors, and RTL stops being    [1/10 added lines on tip]
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -72,18 +87,14 @@ APEX ROADMAP — resume report — 2026-09-13 03:26 AWST
       the false positive its own docstring warns about. Content-landed;
       nothing to do.
 
-  settled.json has entries the heuristic no longer flags — the commit
-  landed, was dropped, or the branch is gone. Safe to delete:
-    dd28fd3d
-
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 03:26:44 AWST 29s
+  snapshot timer: active   last 08:06:42 AWST 22s
   wip refs:
     apex-os    dd3496b  apex-os-
-    apex-os    17e6373  int-os-
-    apex-os    17d687a  roadmap-state
+    apex-os    9c14e5c  int-os-
+    apex-os    cba1ee2  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -92,7 +103,7 @@ APEX ROADMAP — resume report — 2026-09-13 03:26 AWST
     apex-os    31a3d16  wt-editors2-
     apex-os    7ebac77  wt-followups-
     apex-os    0a2f642  wt-followups-3-
-    apex-os    5c2999b  wt-followups-4-
+    apex-os    a6e9909  wt-followups-4-
     apex-os    59b7328  wt-followups-int3-
     apex-os    884b151  wt-followups2-
     apex-os    0683355  wt-greeter-os-
@@ -106,7 +117,8 @@ APEX ROADMAP — resume report — 2026-09-13 03:26 AWST
     apex-os    f30f7ca  wt-p0-011-
     apex-os    9b605a1  wt-p0-011b-
     apex-os    746639a  wt-p0-014-
-    apex-shell f6e78dd  apex-shell-
+    apex-shell af5691e  apex-shell-
+    apex-shell bcfe98f  base-
     apex-shell 02674e0  int-shell-
     apex-shell 68c971d  wt-base-shell-
     apex-shell c8f1e50  wt-editors2-shell-
@@ -130,24 +142,23 @@ APEX ROADMAP — resume report — 2026-09-13 03:26 AWST
     apex-shell 589d611  wt-p1-040-
     apex-shell 71c31b7  wt-p1-040b-
     apex-shell 6e781d3  wt-p1-040c-
-    apex-shell 086727e  wt-p1-044-shell-
 
 ────────────────────────────────────────────────────────────────────────────
   next
 ────────────────────────────────────────────────────────────────────────────
-  6 agent(s) dispatched, ceiling 6
+  5 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
     p1-053c        P1-059,P1-060                    Android voice, screenshot, file and clipboard handoff; ship 
     p2-b           P2-003,P2-004                    Accessibility baseline and internationalisation baseline
-    p2-c           P2-005,P2-006,P2-007             Printing/scanning/network-share, networking, Bluetooth/dock/
-    p2-f           P2-016,P2-017,P2-018,P2-019      Multi-user/guest/kiosk, APEX Online Accounts, guaranteed saf
-    p1-063         P1-063                           Lid-closed continuous operation — agents and the VPN keep ru
+    p2-d           P2-008,P2-009,P2-012             First-party virtualization UX, disposable VM agent execution
+    later          L-001,L-002,L-003                TPM and recovery qualification, then LUKS2 by default and TP
 
   READY (dependencies believed satisfied — confirm against the agent table above):
     p1-038-hardware P1-038                           The 18 labwc matrix rows that need real applications
-    p2-d           P2-008,P2-009,P2-012             First-party virtualization UX, disposable VM agent execution
-    later          L-001,L-002,L-003                TPM and recovery qualification, then LUKS2 by default and TP
+    p2-c           P2-005,P2-006,P2-007             Printing/scanning/network-share, networking, Bluetooth/dock/
+    p2-f           P2-016,P2-017,P2-018,P2-019      Multi-user/guest/kiosk, APEX Online Accounts, guaranteed saf
+    p1-063         P1-063                           Lid-closed continuous operation — agents and the VPN keep ru
 
   HELD:
     final          after *
