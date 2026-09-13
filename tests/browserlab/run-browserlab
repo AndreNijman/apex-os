@@ -45,9 +45,13 @@
 #
 #  What it must not do to the machine it runs on, and does not:
 #
-#    * it never touches the user's own apex-agentd. It starts its OWN, on a
-#      private $XDG_RUNTIME_DIR, and kills it at the end. The live runtime
-#      keeps running throughout and is never signalled.
+#    * it never touches the user's own apex-agentd, and never the machine's
+#      apex-secretd either. It starts its OWN of each — the daemon on a
+#      private $XDG_RUNTIME_DIR, the secret service on its own socket with its
+#      own store under $LAB — and kills both BY PID at the end. A shipped
+#      apex-secretd is the credential store for every project on the machine,
+#      so `pkill apex-secretd` is the one thing this file must never do.
+#      The live runtime keeps running throughout and is never signalled.
 #    * every path it uses is under /var/tmp. That is load-bearing rather than
 #      tidy: session.rs::bridge_program REFUSES a bridge binary under /tmp or
 #      under $HOME, because a confined session cannot see either, and its own
@@ -98,7 +102,14 @@ LAB="${BROWSERLAB_ROOT:-/var/tmp/apex-browserlab}"
 # cleanup the moment the run ended, and a failing flow left nothing to read.
 OUT="${BROWSERLAB_OUT:-${LAB}-out}"
 KEEP=0
-FLOWS=(profile headless network downloads capability teardown)
+FLOWS=(profile headless network downloads capability authentication teardown)
+
+# The value of the fixture credential, and the string every capsule is searched
+# for. It is stored through `apex secret add` like any other value, and the
+# claim the authentication flow makes is that it appears nowhere a capsule can
+# reach — so it has to be distinctive enough that finding it anywhere means
+# something, and it must never be typed on a command line.
+CREDENTIAL_MARKER="APEX-BROWSERLAB-CREDENTIAL-VALUE-a1b2c3"
 
 log()  { printf '\n>>> %s\n' "$*" >&2; }
 info() { printf '    %s\n' "$*" >&2; }
@@ -132,13 +143,19 @@ write_verdict() {
 # "prerequisites missing" would make the common CI case unreadable.
 APEX_BIN=""
 AGENTD_BIN=""
+SECRETD_BIN=""
 BROWSER_BIN="${BROWSERLAB_BROWSER:-/usr/bin/firefox}"
 
 find_built_runtime() {
     local d
     for d in "$REPO/apexd/target/debug" "$REPO/apexd/target/release"; do
         if [[ -x "$d/apex" && -x "$d/apex-agentd" ]]; then
-            APEX_BIN="$d/apex"; AGENTD_BIN="$d/apex-agentd"; return 0
+            APEX_BIN="$d/apex"; AGENTD_BIN="$d/apex-agentd"
+            # Not a prerequisite. A build without it makes the capability flow
+            # could-not-run and leaves every other flow alone, which is the
+            # honest shape: one missing binary is not "the lab cannot run".
+            [[ -x "$d/apex-secretd" ]] && SECRETD_BIN="$d/apex-secretd"
+            return 0
         fi
     done
     return 1
@@ -176,6 +193,36 @@ missing_prereq() {
 # the daemon writes nothing into that home.
 DAEMON_PID=""
 SERVER_PID=""
+SECRETD_PID=""
+
+# ── the lab's own apex-secretd ──────────────────────────────────────────────
+#
+# Round 1 recorded that "apex-secretd is a root service this lab does not
+# start", and left the pin-binding half of P2-012 stub-tested. That was true of
+# the SHIPPED service and not of the binary: apex-secretd takes --socket and
+# --store, APEX_SECRETD_SOCKET points the CLI at one, and
+# tests/test-apex-backup-s3.sh has driven a real unprivileged one since
+# 2026-09-13. So the lab starts its own, on its own socket, with its own store
+# under $LAB, and kills it BY PID — never by name, which would take a real
+# service with it.
+#
+# What that instance is NOT is a boundary: an unprivileged store is readable by
+# the account that started it, and the CLI says so on stderr every time. It is
+# exercising the pin, which is a decision the CLIENT makes about where a
+# capsule may go, and that decision is the same whoever owns the store.
+start_secretd() {
+    [[ -n "$SECRETD_BIN" ]] || return 1
+    export APEX_SECRETD_SOCKET="$LAB/secretd.sock"
+    "$SECRETD_BIN" --socket "$APEX_SECRETD_SOCKET" --store "$LAB/secretd-store" \
+        > "$LAB/secretd.log" 2>&1 &
+    SECRETD_PID=$!
+    local waited=0
+    while (( waited < 40 )); do
+        [[ -S "$APEX_SECRETD_SOCKET" ]] && return 0
+        sleep 0.25; waited=$((waited + 1))
+    done
+    return 1
+}
 
 start_daemon() {
     export XDG_RUNTIME_DIR="$LAB/run"
@@ -201,6 +248,13 @@ start_daemon() {
 
 lab_teardown() {
     [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null
+    if [[ -n "$SECRETD_PID" ]]; then
+        # By pid. `pkill apex-secretd` would take a real one with it, and on a
+        # machine where the shipped service is running that is the credential
+        # store for every project on it.
+        kill "$SECRETD_PID" 2>/dev/null
+        wait "$SECRETD_PID" 2>/dev/null
+    fi
     if [[ -n "$DAEMON_PID" ]]; then
         # The lab's own daemon, by pid, never by name. `pkill apex-agentd`
         # would take the user's live runtime with it.
@@ -327,13 +381,42 @@ D="\$PWD"
         curl -s -S --max-time 20 -k "https://example.com/" 2>&1 | head -c 120)"
     printf 'unproxied-get=%s\n' "\$(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy \\
         curl -s -S --max-time 20 -k "https://127.0.0.1:${PORT}/ping" 2>&1 | head -c 120)"
+    # ── is the credential's VALUE anywhere a capsule can reach? ────────────
+    #
+    # The claim the engine makes is that it never hands a capsule the value:
+    # not in the profile, not in the environment, not on the command line. Four
+    # places, searched from INSIDE, and the answer comes out through the
+    # nomination boundary like every other observation here.
+    #
+    # NO BACKTICKS IN THIS HEREDOC. Its delimiter is unquoted so that $PORT and
+    # $CREDENTIAL_MARKER interpolate, which means a backtick in a comment is a
+    # command substitution that runs while the observer is being written. The
+    # first draft of this note ran "apex browser" against the INSTALLED apex on
+    # every lab start, and announced it: "error: unrecognized subcommand".
+    printf 'marker-in-capsule=%s\n' "\$(grep -rlF '${CREDENTIAL_MARKER}' "\$PWD" 2>/dev/null | head -3 | tr '\n' ' ')"
+    printf 'marker-in-home=%s\n' "\$(grep -rlF '${CREDENTIAL_MARKER}' "\$HOME" 2>/dev/null | head -3 | tr '\n' ' ')"
+    printf 'marker-in-env=%s\n' "\$(env | grep -cF '${CREDENTIAL_MARKER}')"
+    printf 'marker-in-cmdline=%s\n' "\$(tr '\0' ' ' < /proc/self/cmdline 2>/dev/null | grep -cF '${CREDENTIAL_MARKER}')"
     printf 'profile-dir-exists=%s\n' "\$([ -d "\$PWD/.profile" ] && echo yes || echo no)"
     printf 'user-js-proxy=%s\n' "\$(grep -c 'network.proxy.type' "\$PWD/.profile/user.js" 2>/dev/null)"
 } > "\$D/observed.txt" 2>&1
+# If the value IS reachable, write it to a file a caller could nominate. This
+# is the exfiltration half: a capsule that holds a credential can put it in a
+# file, and the nomination loop is a path from the capsule to the host. Nothing
+# is written when there is nothing to find, which is the shipped case.
+#
+# Assembled in \$HOME first — a tmpfs that dies with the capsule — and moved in
+# afterwards, so that the file being written is never one of the files being
+# searched.
 # Never nominated. If this reaches the host, the copy loop ran over the
 # directory instead of over the nominations.
 printf 'BROWSERLAB-LEAK\n' > "\$D/leak.txt"
 printf 'the capsule created leak.txt in %s\n' "\$D" >> "\$D/observed.txt"
+{
+    env | grep -F '${CREDENTIAL_MARKER}'
+    grep -rhF '${CREDENTIAL_MARKER}' "\$PWD" "\$HOME" 2>/dev/null
+} > "\$HOME/.harvest" 2>/dev/null
+[ -s "\$HOME/.harvest" ] && mv "\$HOME/.harvest" "\$D/harvest.txt"
 exec "$BROWSER_BIN" "\$@"
 OBS
     chmod 0755 "$LAB/observer"
@@ -531,23 +614,193 @@ PY
 
 # What --capability decides, and the difference between three answers.
 flow_capability() {
-    # The refusal that matters most is the one about not knowing. secretd is a
-    # root service and this lab does not start one, so what can be exercised
-    # live here is that a capsule REFUSES rather than guessing — and that the
-    # refusal names the right fix.
     local out
-    out="$("$ENGINE" run --capability nothing-is-stored-here -- "https://example.invalid/" 2>&1)"
-    if grep -qF "could not be asked" <<<"$out"; then
-        _chaos_pass "a capsule whose capability cannot be looked up refuses, and says the service could not be asked"
-        says "and it names the fix for THAT case rather than the other one" "apex-secretd" "$out"
-        says_not "it does not claim the credential is absent" "has no credential named" "$out"
-        cannot "apex-secretd is not running, so the pin-binding half was not exercised; what ran is the three-answer refusal"
-    elif grep -qF "has no credential named" <<<"$out"; then
-        _chaos_pass "the secret service answered and the capsule refused a name it does not hold"
-        cannot "the service holds no credential to pin a capsule to, so the pin-binding half was not exercised"
-    else
-        _chaos_fail "a capsule with an unknown capability neither refused nor said why: $out"
+    # ── the answer a stopped service gives ──────────────────────────────────
+    #
+    # First, and with the lab's own secretd RUNNING, because the fact under
+    # test is that the engine tells "nobody answered" apart from "there is no
+    # such credential". Pointing one call at a socket that does not exist is
+    # the only honest way to produce the first answer without stopping a
+    # service somebody else might be using.
+    out="$(APEX_SECRETD_SOCKET="$LAB/no-such-secretd.sock" \
+        "$ENGINE" run --capability nothing-is-stored-here -- "https://example.invalid/" 2>&1)"
+    says "a capsule whose capability cannot be looked up says the service could not be asked" \
+         "could not be asked" "$out"
+    says "and it names the fix for THAT case rather than the other one" "apex-secretd" "$out"
+    says_not "it does not claim the credential is absent" "has no credential named" "$out"
+
+    if [[ -z "$SECRETD_PID" ]]; then
+        cannot "no apex-secretd came up, so the pin-binding half was not exercised; what ran is the could-not-be-asked refusal"
+        return
     fi
+
+    # ── the answer a running service gives about a name it does not hold ────
+    out="$("$ENGINE" run --capability nothing-is-stored-here -- "https://example.invalid/" 2>&1)"
+    says     "a service that ANSWERED and holds no such name says that instead" "has no credential named" "$out"
+    says_not "and does not blame the service for being down" "could not be asked" "$out"
+
+    # ── the pin ─────────────────────────────────────────────────────────────
+    #
+    # The credential is stored for the lab's own server, port and all. The port
+    # is the half the human table could never carry, and the runtime allowlist
+    # holds 127.0.0.1:$PORT and not a bare 127.0.0.1 — so a pin that lost its
+    # port is refused here rather than quietly aiming somewhere else.
+    local got="$OUT/capability/got"
+    mkdir -p "$got"
+    out="$("$ENGINE" run --timeout 150 --capability labsrv --download-to "$got" \
+        --download observed.txt -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>CAP</h1>" 2>&1)"
+    printf '%s\n' "$out" > "$OUT/capability/pinned.log"
+    says     "a stored credential pins the capsule to its host AND its port" \
+             "pins this capsule to 127.0.0.1:$PORT" "$out"
+    says_not "and the pin is a destination, with no scheme on it" \
+             "pins this capsule to http://" "$out"
+    if [[ -s "$got/observed.txt" ]] && grep -qF "APEX-BROWSERLAB-PONG" "$got/observed.txt"; then
+        _chaos_pass "and a capsule that named ONLY the capability reached the pinned destination"
+    else
+        _chaos_fail "a capsule pinned by a capability reached nothing; the pin did not survive into the session"
+    fi
+
+    # ── the pin refuses to be widened, by host and by port ──────────────────
+    local rc
+    out="$("$ENGINE" run --capability labsrv --allow "browser-only.test:8443" -- "https://x/" 2>&1)"; rc=$?
+    says  "--allow naming another host is refused, by name" "is pinned to" "$out"
+    claim "and that is a REFUSAL rather than an error" test "$rc" = 2
+
+    out="$("$ENGINE" run --capability labsrv --allow "127.0.0.1:1" -- "https://x/" 2>&1)"; rc=$?
+    says  "the same host on a different port is refused too" "A different port is a different endpoint" "$out"
+    claim "and that is also a REFUSAL" test "$rc" = 2
+
+    # ── the falsifying control ──────────────────────────────────────────────
+    #
+    # A security claim needs a demonstration that it can fail. This is the
+    # vmlab's turned-around-egress-loop, pointed at the pin: a copy of the
+    # engine that looks the capability up and then does NOT apply it — the
+    # guard loop emptied and the assignment that makes the pin the destination
+    # removed. If a capsule pinned to `elsewhere` then reaches 127.0.0.1:$PORT
+    # because the CALL SITE asked for it, the two refusals above are what
+    # stopped it, and they are not passing for some unrelated reason.
+    local mutant="$LAB/apex-browser.cap-mutant"
+    cp "$ENGINE" "$mutant"
+    python3 - "$mutant" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+loop = '        for d in "${allow[@]}"; do'
+pin  = '        allow=("$pinned")'
+assert s.count(loop) == 1, "the guard loop this control empties is not where it was"
+assert s.count(pin) == 1, "the assignment this control removes is not where it was"
+s = s.replace(loop, '        for d in ; do').replace(pin, '        :')
+open(p, "w").write(s)
+PY
+    chmod 0755 "$mutant"
+    local mgot="$OUT/capability/mutant-got"
+    mkdir -p "$mgot"
+    "$mutant" run --timeout 150 --capability elsewhere --allow "127.0.0.1:$PORT" \
+        --download-to "$mgot" --download observed.txt \
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>CAP</h1>" \
+        > "$OUT/capability/mutant.log" 2>&1
+    if [[ -s "$mgot/observed.txt" ]] && grep -qF "APEX-BROWSERLAB-PONG" "$mgot/observed.txt"; then
+        _chaos_pass "an engine that looks the pin up and ignores it DOES send the capsule where the call site asked"
+    else
+        _chaos_fail "the mutated engine reached nothing either, so the two refusals above are not evidence about the pin"
+    fi
+    rm -f "$mutant"
+
+    # The half this flow does NOT cover has a flow of its own now, so that the
+    # verdict column shows both facts instead of one hiding the other: the pin
+    # binding is live, and authentication is still not built.
+}
+
+# ── authentication ──────────────────────────────────────────────────────────
+#
+# P2-012's unmet criterion. A capsule cannot present a credential to a site —
+# docs/browser-capsule-auth.md is the written decision about why, what the two
+# routes cost and what each would change.
+#
+# What CAN be measured now is the property that decision would be trading away,
+# and it is worth measuring precisely because of that: a capsule is never given
+# the credential's value. The fixture credential's value is a marker string,
+# the observer searches four places from inside the namespace, and the answer
+# comes out through the nomination boundary.
+#
+# A negative observation needs a control or it is indistinguishable from an
+# observer that looked nowhere. The control is an engine that DOES hand the
+# value in — reading it out of the lab's own store, which is unprivileged and
+# readable, and exporting it into the session. If the observer then finds it,
+# and a nominated file carries it out to the host, the shipped engine's silence
+# is evidence rather than a blind spot.
+flow_authentication() {
+    if [[ -z "$SECRETD_PID" ]]; then
+        cannot "no apex-secretd came up, so there was no stored value to look for"
+        return
+    fi
+    local got="$OUT/authentication/got"
+    mkdir -p "$got"
+    "$ENGINE" run --timeout 150 --capability labsrv --download-to "$got" \
+        --download observed.txt --download harvest.txt \
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>AUTH</h1>" \
+        > "$OUT/authentication/engine.log" 2>&1
+    local obs="$got/observed.txt"
+    [[ -f "$obs" ]] || { cannot "the capsule produced no observation file"; return; }
+    local seen; seen="$(cat "$obs")"
+
+    says "the capsule searched for the value and found none in its own directory" \
+         "marker-in-capsule=" "$seen"
+    claim "the value is not in the capsule directory, profile included" \
+          bash -c "[[ \"\$(grep '^marker-in-capsule=' <<<\"\$0\")\" == 'marker-in-capsule=' ]]" "$seen"
+    claim "nor anywhere in the capsule's home" \
+          bash -c "[[ \"\$(grep '^marker-in-home=' <<<\"\$0\")\" == 'marker-in-home=' ]]" "$seen"
+    # The environment is the daemon's, not the caller's — measured while
+    # building the control below, which first tried to leak the value by
+    # exporting it beside the engine and reached nothing at all.
+    says "nor in the environment the session was given, which the daemon builds" "marker-in-env=0" "$seen"
+    says "nor on the command line the browser was started with" "marker-in-cmdline=0" "$seen"
+    claim_not "and nothing was harvested for a caller to take out" test -e "$got/harvest.txt"
+
+    # ── the falsifying control ──────────────────────────────────────────────
+    local mutant="$LAB/apex-browser.value-mutant"
+    cp "$ENGINE" "$mutant"
+    #
+    # It leaks through the PROFILE, not through the environment. Exporting a
+    # variable beside the engine was the first attempt and it reached nothing:
+    # a session's environment is built by the daemon, and the sandbox does not
+    # inherit the caller's. The profile is a file this engine really does write
+    # into the capsule, so it is a route a defect could actually take.
+    python3 - "$mutant" "$LAB/secretd-store" <<'PY'
+import sys
+p, store = sys.argv[1], sys.argv[2]
+s = open(p).read()
+anchor = '    [ -s "$prof/user.js" ] || die "cannot write the capsule profile preferences"\n'
+assert s.count(anchor) == 1, "the profile check this control hangs off is not where it was"
+leak = (
+    '    # (mutated) write the credential value into the capsule profile, the\n'
+    '    # way a provider that handed a session back would have to.\n'
+    '    printf \'user_pref("apex.capability.value", "%s");\\n\' '
+    '"$(grep -rhoaE "APEX-BROWSERLAB-CREDENTIAL-VALUE-[a-z0-9]+" '
+    + repr(store).replace("'", '"') + ' 2>/dev/null | head -1)" >> "$prof/user.js"\n'
+)
+open(p, "w").write(s.replace(anchor, anchor + leak))
+PY
+    chmod 0755 "$mutant"
+    local mgot="$OUT/authentication/mutant-got"
+    mkdir -p "$mgot"
+    "$mutant" run --timeout 150 --capability labsrv --download-to "$mgot" \
+        --download observed.txt --download harvest.txt \
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>AUTH</h1>" \
+        > "$OUT/authentication/mutant.log" 2>&1
+    if [[ -s "$mgot/observed.txt" ]] && grep -q '^marker-in-capsule=..*' "$mgot/observed.txt"; then
+        _chaos_pass "an engine that DOES write the value into the profile is seen by the same searches"
+    else
+        _chaos_fail "the control put the value in the capsule and the observer did not see it, so the assertions above looked nowhere"
+    fi
+    if [[ -s "$mgot/harvest.txt" ]] && grep -qF "$CREDENTIAL_MARKER" "$mgot/harvest.txt"; then
+        _chaos_pass "and a capsule that holds a value can put it in a nominated file the caller takes home"
+    else
+        _chaos_fail "the control could not carry the value out, so the exfiltration observation is not evidence"
+    fi
+    rm -f "$mutant"
+
+    cannot "a capsule still cannot present a credential to a site: the framework performs the operation and agentd tunnels CONNECT, so a TLS tunnel has nowhere to put a header (docs/browser-capsule-auth.md)"
 }
 
 # Not a flow, a postcondition of all of them.
@@ -628,6 +881,25 @@ main() {
     "$APEX_BIN" agent allow "127.0.0.1:$PORT" >/dev/null 2>&1 \
         || die "the lab runtime would not take its own allowlist entry"
 
+    # The lab's own secret service, if this build has one. Not fatal: a missing
+    # apex-secretd makes the capability flow could-not-run and nothing else.
+    if start_secretd; then
+        log "starting the lab's own apex-secretd (never the shipped one)"
+        info "socket $APEX_SECRETD_SOCKET, store $LAB/secretd-store"
+        # The value goes in on STDIN. argv is world-readable through /proc,
+        # which is why `apex secret add` has no option for it — and a lab that
+        # put one on a command line would be teaching the wrong thing.
+        printf '%s' "$CREDENTIAL_MARKER" | "$APEX_BIN" secret add labsrv \
+            --host 127.0.0.1 --scheme http --port "$PORT" >/dev/null 2>&1 \
+            || die "the lab's secret service would not store its own fixture credential"
+        printf 'browserlab-not-a-real-credential' | "$APEX_BIN" secret add elsewhere \
+            --host browser-only.test >/dev/null 2>&1 \
+            || die "the lab's secret service would not store its second fixture credential"
+    else
+        SECRETD_PID=""
+        info "no apex-secretd in the build; the capability flow will say so"
+    fi
+
     local f rc=0
     for f in "${FLOWS[@]}"; do
         declare -F chaos_reset_expectations >/dev/null 2>&1 && chaos_reset_expectations
@@ -639,7 +911,8 @@ main() {
             headless)   flow_headless ;;
             network)    flow_network ;;
             downloads)  flow_downloads ;;
-            capability) flow_capability ;;
+            capability)     flow_capability ;;
+            authentication) flow_authentication ;;
             teardown)   flow_teardown ;;
             *) FLOW_REASON="no such flow" ;;
         esac
