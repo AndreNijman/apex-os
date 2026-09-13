@@ -73,14 +73,27 @@ if [ "${APEX_LABWC_SESSION_TESTS:-0}" != "1" ]; then
     exit 0
 fi
 
-# A nested compositor needs a parent display. Without one there is no session to
-# probe and pretending otherwise would report green on nothing.
-if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
-    skp "no parent display; labwc cannot start nested"
+# A compositor needs somewhere to put its output. There are two answers, and
+# only one of them existed until now.
+#
+# NESTED needs a parent display, and that is the developer's own desktop — real
+# windows, taking real focus, which is what the opt-in above is for.
+#
+# HEADLESS needs nothing at all: wlroots renders to a buffer and there is no
+# screen involved, which is what makes this suite runnable on a CI runner, and
+# runnable safely on a machine somebody is using. It was never wired up, so the
+# suite could only ever run the way that interrupts people.
+HEADLESS=0
+if [ "${WLR_BACKENDS:-}" = headless ]; then
+    HEADLESS=1
+    ok "the headless backend is selected, so nothing is drawn on anybody's screen"
+elif [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
+    skp "no parent display and WLR_BACKENDS is not headless; labwc has nowhere to render"
     printf '\nlabwc-session: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
     exit 0
+else
+    ok "a parent display is available to nest inside"
 fi
-ok "a parent display is available to nest inside"
 
 # ── the config under test ────────────────────────────────────────────────────
 # The shipped templates, rendered exactly as the provisioner renders them, so
@@ -94,7 +107,19 @@ sed 's/@ACCENT@/#D9F99D/g' "${TMPL}/themerc-override" > "${CFG}/labwc/themerc-ov
 run_nested() {
     local script="$1" seconds="${2:-25}"
     chmod +x "$script"
-    XDG_CONFIG_HOME="${CFG}" timeout "$seconds" labwc --startup "$script" 2>/dev/null
+    if [ "$HEADLESS" = 1 ]; then
+        # WAYLAND_DISPLAY and DISPLAY are STRIPPED, not merely ignored. Setting
+        # WLR_BACKENDS=headless while a parent display is still visible leaves
+        # wlroots able to pick the wayland backend anyway, and the first thing
+        # the operator would know about it is a window appearing on their
+        # screen. With no parent in the environment there is nothing to nest
+        # into, so "headless" is a property of the run rather than a promise.
+        env -u WAYLAND_DISPLAY -u DISPLAY \
+            XDG_CONFIG_HOME="${CFG}" WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 \
+            timeout "$seconds" labwc --startup "$script" 2>/dev/null
+    else
+        XDG_CONFIG_HOME="${CFG}" timeout "$seconds" labwc --startup "$script" 2>/dev/null
+    fi
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }

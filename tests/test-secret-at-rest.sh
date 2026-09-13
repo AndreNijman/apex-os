@@ -133,6 +133,11 @@ STORE="${WORK}/store"
 PRE_SECRETD="$(pgrep -x apex-secretd 2>/dev/null | tr '\n' ' ')"
 # setsid so the daemon is not in this script's process group and a stray
 # Ctrl-C cannot take it down before cleanup records what it found.
+# shellcheck disable=SC2024  # the redirect is this shell's, deliberately.
+# "${WORK}" is this suite's own `mktemp -d`, owned by the invoking uid, and the
+# whole point of the suite is to measure what that uid can and cannot read. A
+# log the test user could not open would defeat it; `sudo tee` would make the
+# log root-owned and the cleanup unable to remove it.
 sudo -n setsid "$SECRETD" --socket "$APEX_SECRETD_SOCKET" --store "$STORE" \
     > "${WORK}/secretd.log" 2>&1 &
 for _ in $(seq 1 100); do [ -S "$APEX_SECRETD_SOCKET" ] && break; sleep 0.1; done
@@ -235,11 +240,16 @@ if sudo -n test -f "$audit"; then
         && ok "the audit trail is 0600 root-owned (is '${audit_stat}')" \
         || bad "the audit trail is 0600 root-owned (is '${audit_stat}')"
     printf '%s' "$SENTINEL" > /dev/null
-    err="$(printf 'forged\n' >> "$audit" 2>&1)"
+    # `2>&1 >>file`, not `>>file 2>&1`. The order is the whole point and this
+    # line had it backwards: with the append applied first the capture is handed
+    # the file rather than the diagnostic, so $err came back empty on every run.
+    # Its two siblings above — the value file and the user directory — have
+    # always had it the right way round.
+    err="$(printf 'forged\n' 2>&1 >> "$audit")"
     rc=$?
     [ "$rc" != 0 ] \
         && ok "the audited account cannot append to its own audit trail" \
-        || bad "the audited account cannot append to its own audit trail"
+        || bad "the audited account cannot append to its own audit trail (rc=${rc}, said '${err}')"
 else
     ok "no audit entry was written by a store-only operation (nothing was used)"
 fi

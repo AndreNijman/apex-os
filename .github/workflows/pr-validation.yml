@@ -97,13 +97,36 @@ jobs:
           # exactly the change most likely to introduce an id `apex ai pull`
           # would refuse. `config/` is small and every file in it is read by the
           # binary this job builds.
-          # files/desktop/{fish,nushell,shell}/ and the multiplexer adapter are
-          # in the RUST selector as well as the engine one, because the suites
-          # that assert them (test-shell-agent.sh, test-mux-layouts.sh) run in
-          # the rust job — it is the only one with a toolchain to build `apex`.
-          # A PR touching only one of those files would otherwise set
-          # engine=true, rust=false, skip the job, and pass: a skipped job counts
-          # as success. Fourth instance of this bug in this file.
+          # `files/` — the WHOLE tree — is in the RUST selector as well as the
+          # engine one. It began as files/desktop/{fish,nushell,shell}/ and the
+          # multiplexer adapter, added because test-shell-agent.sh and
+          # test-mux-layouts.sh assert them and run in the rust job, the only
+          # one with a toolchain to build `apex`. A PR touching only one of
+          # those set engine=true, rust=false, skipped the job, and passed: a
+          # skipped job counts as success. Fourth instance of this bug.
+          #
+          # It is now the whole tree because the narrow path was the wrong
+          # shape, and paying the debt one path at a time is what produced six
+          # numbered instances. Counted 2026-09-13: SIX suites in the rust job
+          # read something under files/ —
+          #   check-containerfile-assertions.sh  files/system/NetworkManager/
+          #   test-apex-blueprint.sh             files/system/libexec/apex-pkg
+          #   test-apex-lid.sh                   files/system/units/, and a grep
+          #                                      over ALL of files/ for a static
+          #                                      HandleLidSwitch=
+          #   test-apex-recover.sh               files/system/libexec/
+          #   test-apex-storage.sh               files/system/{libexec,units}/
+          #   test-boot-v2.sh                    files/scripts/boot-v2, units/
+          # — and the selector reached none of them. Deleting apex-lid.service,
+          # or adding `HandleLidSwitch=ignore` to any drop-in under files/, is a
+          # files/-only change: engine=true, rust=false, job skipped, PR green,
+          # on exactly the change those suites exist to catch. Seventh instance,
+          # and the only one of the seven that was never introduced by a single
+          # commit — it has been latent under every narrow entry above.
+          #
+          # The cost is that a files/-only PR now also spins the rust job. That
+          # is the trade this file already declares two screens up: "the unknown
+          # case fails towards running too much, never too little."
           # docs/ and README.md are in the RUST selector, and only because the
           # job that checks them is the one with a toolchain: check-doc-verbs.sh
           # asks the built `apex` binary what it can do, in both directions. A
@@ -127,7 +150,7 @@ jobs:
           # otherwise never run the check that the file is still what `snow`
           # produces, and hand-editing it is precisely how the Kotlin suite
           # stops being evidence about the protocol the desktop speaks.
-          grep -Eq '^(apexd/|config/|Containerfile|docs/|README\.md|tests/|files/desktop/(fish|nushell|shell)/|files/system/libexec/apex-mux|android/core/src/test/resources/)' <<<"$files" && rust=true
+          grep -Eq '^(apexd/|config/|Containerfile|docs/|README\.md|tests/|files/|android/core/src/test/resources/)' <<<"$files" && rust=true
           grep -Eq '^installer/' <<<"$files" && installer=true
           # files/** is the whole runtime payload of the image — the package
           # engine, session launchers, guards. A PR touching only that used to
@@ -677,9 +700,13 @@ jobs:
       # the refusal of a TCP endpoint — and they are in three different
       # languages, so nothing but a parity check can hold them together.
       #
-      # In `static` and not `rust` on purpose: the selectors would skip it. A PR
-      # touching only files/system/units/apex-aid.service does not set
-      # rust=true, and that unit is one of the files this check reads.
+      # In `static` and not `rust` on purpose. It was put here because a PR
+      # touching only files/system/units/apex-aid.service did not set rust=true,
+      # and that unit is one of the files this check reads. The rust selector
+      # gained `files/` on 2026-09-13, so that particular hole is closed — but
+      # `static` is the job with no selector at all, and a parity check across
+      # three languages is exactly the thing that should run on every PR rather
+      # than on the PRs somebody predicted. It stays here.
       #
       # `--self-test` is the part that makes it worth having: it mutates each
       # constant and asserts the check catches it, and it also asserts a COMMENT
@@ -798,6 +825,18 @@ jobs:
         run: ../tests/in-login-session.sh cargo test --locked
         env:
           APEX_REQUIRE_APEX_CLI: "1"
+          # The same shape, for the other thing this step buys. `apex-remoted`'s
+          # relay and end-to-end suites cannot pair a device unless §7 observes
+          # a human at this machine, so outside a login session they SKIP with
+          # the placement named — the honest answer, and a silent pass if it
+          # happens HERE, because in-login-session.sh falls back to running the
+          # tests unchanged when PAM refuses rather than failing. This step is
+          # the one place the session is supposed to exist, so here a skip is a
+          # failure. Measured on the runner 2026-09-12: the helper reported
+          # `logind session 3, 0::/user.slice/user-1001.slice/session-3.scope`,
+          # so this knob asserts a fact that already held rather than asking
+          # for a new one.
+          APEX_REQUIRE_LOCAL_ORIGIN: "1"
 
       # §7's table has two columns and they live in two different
       # environments, so no single `cargo test` run can cover both: inside a
@@ -930,6 +969,140 @@ jobs:
           cargo build -p apex --locked --manifest-path apexd/Cargo.toml
           test -x "$APEX"
           ./tests/test-apex-trust.sh --with-binary
+
+      # §27's other half, and the half that refuses things. The step above
+      # guards the READOUT — that `apex trust` describes the machine's trust
+      # state without lying about it. This one guards the GATE: that
+      # `apex update` refuses an image whose signature does not verify, permits
+      # one it merely could not check, and says which of the two happened.
+      # It was DEBT in tests/suites-not-in-ci.txt; no CI run had executed it.
+      #
+      # Every assertion needs a minted CA and a real signature, so it is slower
+      # than the readout suite and it needs openssl. It never touches a real
+      # deployment: the fixtures are a mktemp tree passed as APEX_TRUST_ROOT.
+      #
+      # The floor is the assertion that matters on a RUNNER specifically. This
+      # repository has a standing note that the CI runner is a second
+      # environment, openssl among the differences, and the suite already
+      # feature-detects `openssl x509 -not_before`. A runner whose openssl
+      # cannot mint one of these certificates would quietly assert less and
+      # still print a green summary — so the count is read back and floored.
+      - name: §27 trust — the gate rather than the readout, so a bad signature is refused
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX"
+          rc=0; out="$(./tests/test-apex-trust-enforcement.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the trust-enforcement suite exited $rc; it exits 1 before asserting anything if openssl is missing"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^[[:space:]]*[0-9]+ passed, [0-9]+ failed$' || true)"
+          [ -n "$summary" ] || { echo "::error::the trust-enforcement suite printed no summary line"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $1}')"
+          failed="$(printf '%s' "$summary" | awk '{print $3}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed trust-enforcement assertions failed"; exit 1; }
+          [ "$passed" -ge 77 ] || { echo "::error::only $passed trust-enforcement assertions ran; 77 ran on 2026-09-13, so some no longer execute — the runner's openssl is the first thing to check, the suite drops assertions it cannot mint a certificate for"; exit 1; }
+          if printf '%s\n' "$out" | grep -qiE '^[[:space:]]*(SKIP|skipped)'; then
+              echo "::error::the trust-enforcement suite printed a SKIP; a could-not-run is not a pass"
+              exit 1
+          fi
+
+      # P0-002's first criterion has two halves, and only one of them was ever
+      # measured anywhere. The PATH half — the store is /var/lib/apex-secretd
+      # and not $HOME — is a unit test and has been true since the crate landed.
+      # The AT-REST half is not a property of the path at all: it is whether a
+      # process running as the owner's own uid can open the file. That needs
+      # real root and a real uid boundary, so it is a shell suite, and it sat in
+      # tests/suites-not-in-ci.txt as DEBT — the property P0-002 earned, checked
+      # by nobody.
+      #
+      # In the rust job because it builds apex-secretd itself with cargo, and
+      # this is the only job with a toolchain.
+      #
+      # It uses `sudo -n`, which by definition cannot prompt, and touches
+      # nothing outside a fresh mktemp tree: --store and --socket point the
+      # daemon there, and the real /var/lib/apex-secretd and the shipped unit
+      # are never started, stopped or read. A GitHub runner's passwordless sudo
+      # is what makes it meaningful here — without it the suite abstains, and
+      # the step below refuses the abstention rather than banking its exit 0.
+      - name: P0-002 secrets at rest — the owner's own uid is refused by the kernel
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          rc=0; out="$(./tests/test-secret-at-rest.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the secret-at-rest suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^secret-at-rest: [0-9]+ passed, [0-9]+ failed$' || true)"
+          [ -n "$summary" ] || {
+              echo "::error::no summary line. Both of this suite's abstentions print 'secret-at-rest: 0 passed, 0 failed, SKIPPED' and exit 0 — no passwordless sudo, or running AS root — and either would otherwise be a green tick over the whole at-rest property"
+              exit 1
+          }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^secret-at-rest: //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed at-rest assertions failed"; exit 1; }
+          [ "$passed" -ge 19 ] || { echo "::error::only $passed at-rest assertions ran; 19 ran on 2026-09-13, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the secret-at-rest suite printed a SKIP; it has no skip counter, so one appearing means an assertion stopped being made"
+              exit 1
+          fi
+
+      # ── P1-063 lid, and the reason this step exists at all ─────────────────
+      # tests/test-apex-lid.sh is sixty assertions for the behaviour Andre
+      # asked for by name — close the lid at school and the agents keep
+      # running — and until this line, no CI run had ever executed one of
+      # them. It sat in tests/suites-not-in-ci.txt as debt: a file that looks
+      # like coverage and gates nothing.
+      #
+      # It lives in the RUST job because it drives the shipped `apex lid`
+      # binary, and this is the only job with a toolchain. tests/ is in the
+      # rust selector, so an edit to the suite reaches it.
+      #
+      # The suite opens no window, starts no compositor, suspends nothing and
+      # never touches the machine running it: every fixture is a tree under
+      # mktemp, HOME is pushed inside it so the invoking account's own
+      # ~/.config/apex/lid.toml cannot be read, and every power-down action is
+      # a logged argv rather than a syscall. The real SW_LID half needs uinput,
+      # root and a machine you are willing to watch sleep — that is
+      # test-apex-lid-live.sh, which stays exempt for that reason.
+      #
+      # The step reads the suite's own summary line back rather than banking
+      # exit 0, because the point of wiring a suite in is evidence that it RAN.
+      # It also fails on a SKIP: this suite ships no skip helper at all, by a
+      # decision written into its header, so a SKIP appearing means an
+      # assertion stopped being made.
+      - name: P1-063 lid — sixty assertions no CI run had ever executed
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        env:
+          APEX_BIN: ${{ github.workspace }}/apexd/target/debug/apex
+        run: |
+          set -euo pipefail
+          cargo build -p apex --locked --manifest-path apexd/Cargo.toml
+          test -x "$APEX_BIN"
+          rc=0; out="$(./tests/test-apex-lid.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the lid suite exited $rc; it says FATAL and exits 2 when it cannot find the binary or python3"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^[[:space:]]*[0-9]+ passed, [0-9]+ failed$' || true)"
+          [ -n "$summary" ] || { echo "::error::the lid suite printed no summary line"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $1}')"
+          failed="$(printf '%s' "$summary" | awk '{print $3}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed lid assertions failed"; exit 1; }
+          [ "$passed" -ge 60 ] || { echo "::error::only $passed lid assertions ran; 60 ran on 2026-09-13, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the lid suite printed a SKIP; it ships no skip helper, so one appearing means an assertion stopped being made"
+              exit 1
+          fi
 
       # §25's binary half: `apex schema` against real state trees — a record
       # from before the version key existed migrated with a copy kept, a record
@@ -2325,6 +2498,44 @@ jobs:
               exit 1
           }
 
+      # tests/test-apex-devices.sh — 55 assertions over six device areas, and
+      # until this line no CI run had executed one of them. It was DEBT in
+      # tests/suites-not-in-ci.txt, not a decision.
+      #
+      # It is shell-only: it drives files/system/libexec/apex-devices against a
+      # fixture tree under mktemp, with a $PATH of its own stubs, so it reaches
+      # no device on the machine running it. Engine job, because the engine
+      # selector is `^(files/|tests/|…)` and the helper it drives lives under
+      # files/.
+      #
+      # The point of the suite is the EACCES sweep's finding — that a reader
+      # which collapses "permission denied" into "there is none" is the same
+      # bug in fourteen places — so its fixtures are deliberately unreadable in
+      # places and it counts a `skipped` of its own. The step therefore fails on
+      # skipped > 0 as well as on failed > 0, and separately on a bare `SKIP`
+      # line, which would be an echo that bypassed the counter.
+      - name: P1 devices — 55 assertions over six device areas
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          rc=0; out="$(./tests/test-apex-devices.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the devices suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex-devices: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::the devices suite printed no summary line"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $2}')"
+          failed="$(printf '%s' "$summary" | awk '{print $4}')"
+          skipped="$(printf '%s' "$summary" | awk '{print $6}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed device assertions failed"; exit 1; }
+          [ "$skipped" = 0 ] || { echo "::error::$skipped device assertions could not run on this runner; a could-not-run is not a pass"; exit 1; }
+          [ "$passed" -ge 55 ] || { echo "::error::only $passed device assertions ran; 55 ran on 2026-09-13, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the devices suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
+              exit 1
+          fi
+
       - name: ShellCheck the privileged helpers
         run: |
           set -euo pipefail
@@ -2378,6 +2589,208 @@ jobs:
           # on paths built from variables inside a container it starts itself.
           shellcheck -S warning -x tests/vmlab/run-vmlab tests/vmlab/mk-guest
 
+      # tests/test-device-services-netns.sh — 12 assertions about whether a
+      # printer, a Windows share and an NFS export can actually be reached
+      # through the shipped policy, and whether `apex firewall allow <name>`
+      # opens the port the catalogue says it does. It asserts no RULE; P1-044
+      # owns those. It was DEBT in tests/suites-not-in-ci.txt.
+      #
+      # It sends REAL packets, and it can do that here because it sends them
+      # inside `unshare -rmn`: a private user, mount and network namespace with
+      # a veth pair and a peer that is a sleeping process addressed by pid. The
+      # machine running it has no interface added, no rule loaded and no port
+      # opened. It needs unshare, nsenter, ip, nft and python3, and it needs the
+      # apparmor userns knob the nftables step above already clears — that is
+      # why it is placed after it and not earlier.
+      #
+      # Its own report() exits 0 when everything was SKIPPED, because it exits
+      # on the failure count alone. So a runner that refused the namespace would
+      # hand this step a green tick over nothing measured at all. The skipped
+      # counter is read back and required to be zero for exactly that reason.
+      - name: P1 device services — a printer, a share and an export through the real policy
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          rc=0; out="$(./tests/test-device-services-netns.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the device-services netns suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^device services \(netns\): [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::the device-services netns suite printed no summary line"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^device services (netns): //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          skipped="$(printf '%s' "$counts" | awk '{print $5}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed device-services assertions failed"; exit 1; }
+          [ "$skipped" = 0 ] || {
+              echo "::error::$skipped device-services assertions could not run ($summary). This suite's own report() exits 0 on a skip-only run, so without this line a runner that refused the namespace would show a green tick over nothing measured at all"
+              exit 1
+          }
+          [ "$passed" -ge 12 ] || { echo "::error::only $passed device-services assertions ran; 12 ran on 2026-09-13, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the device-services netns suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
+              exit 1
+          fi
+
+      # tests/test-apex-multilib.sh — the engine's multilib DECISIONS, judged
+      # against packages Fedora actually ships. test-apex-pkg.sh asserts the
+      # argv the engine builds, which is the right level for most of it and was
+      # not enough here: `apex install steam` was broken by six defects and the
+      # one that reached a user's screen produced correct argv and a wrong
+      # result. It was DEBT in tests/suites-not-in-ci.txt, with the note "drives
+      # apex-pkg; needs care about what it installs".
+      #
+      # That care is already in the suite's shape, and it was checked rather
+      # than assumed: every rpm is downloaded and every decision is taken INSIDE
+      # `podman run --rm`, against a Fedora image, with this repository mounted
+      # read-only. The engine is sourced there and only `guard_rpms` is called —
+      # a function that decides and deletes from a scratch destdir. Nothing is
+      # installed on the runner, no sysext is built, and /var/lib/extensions is
+      # never opened. (`source apex-pkg` does reach `main` with no arguments,
+      # which prints usage.)
+      #
+      # This step also fails if podman is missing: the suite prints SKIP and
+      # exits 0 in that case, and so does its "no repository reachable" path.
+      # Either would otherwise be a green tick over three decisions nobody made.
+      - name: P1 multilib — the engine's decisions over a real Fedora package set
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          command -v podman >/dev/null || { echo "::error::podman is not on this runner; the multilib suite would SKIP and exit 0, and a could-not-run is not a pass"; exit 1; }
+          rc=0; out="$(./tests/test-apex-multilib.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the multilib suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex-multilib: [0-9]+ passed, [0-9]+ failed$' || true)"
+          [ -n "$summary" ] || { echo "::error::the multilib suite printed no summary line, which is what it does when podman is absent or no repository was reachable — it then exits 0, so this line is the only thing between that and a green tick"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^apex-multilib: //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed multilib decisions were wrong"; exit 1; }
+          [ "$passed" -ge 3 ] || { echo "::error::only $passed multilib decisions were judged; 3 ran on 2026-09-13, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the multilib suite printed a SKIP; every one of its abstentions is now a failure by design, so a SKIP means a new one was added"
+              exit 1
+          fi
+
+      # tests/test-labwc-session.sh — the APEX Floating session, probed by real
+      # clients against a real labwc running the SHIPPED config. It was the last
+      # DEBT line in tests/suites-not-in-ci.txt, and its note asked the right
+      # question: "check whether the harness now allows it".
+      #
+      # It does, because the suite gained a second way to render. Until today it
+      # could only nest inside a parent display, which on the only machine that
+      # ever ran it meant real windows on a developer's active workspace — a
+      # blanket `tests/*.sh` sweep once launched compositors over somebody's
+      # work, which is why the APEX_LABWC_SESSION_TESTS opt-in exists. wlroots'
+      # headless backend needs no screen at all, and nobody had wired it up.
+      #
+      # The suite does not merely set WLR_BACKENDS=headless; it STRIPS
+      # WAYLAND_DISPLAY and DISPLAY from the compositor's environment, because
+      # with a parent still visible wlroots can pick the wayland backend anyway
+      # and the first anyone would know is a window appearing. With no parent in
+      # the environment there is nothing to nest into.
+      #
+      # The tools below are not optional and the install is not tolerant. A
+      # missing wl-copy makes the clipboard probe report `fail`, not `skip` —
+      # this suite turns a could-not-run into a failure by design — so a runner
+      # that cannot host them should say so here rather than five minutes later
+      # as a wrong-looking assertion.
+      - name: Install the clients the labwc session matrix probes with
+        if: ${{ !cancelled() }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            labwc wlr-randr wl-clipboard grim swaybg swaylock swayidle gammastep \
+            xdg-desktop-portal-wlr xdg-desktop-portal-gtk
+          # Named one by one, and the list is the suite's, not a guess. Run
+          # 34717346972 installed everything except swaylock and swayidle and
+          # the step went red with `16 passed, 0 failed, 2 skipped` — the two
+          # protocol probes whose clients those are (ext-session-lock and
+          # ext-idle-notify) reported "probe client not installed". That is the
+          # step working: it refused to call a capability proven when the thing
+          # that would have proven it was absent.
+          for t in labwc wlr-randr wl-copy wl-paste grim swaybg swaylock swayidle gammastep; do
+              command -v "$t" >/dev/null || { echo "::error::$t is missing after the install; the suite would report its probe as a SKIP and the step below refuses that"; exit 1; }
+          done
+
+      - name: P3 labwc — the shipped session, probed headless by real clients
+        if: ${{ !cancelled() }}
+        env:
+          APEX_LABWC_SESSION_TESTS: "1"
+          WLR_BACKENDS: headless
+          WLR_LIBINPUT_NO_DEVICES: "1"
+        run: |
+          set -euo pipefail
+          rc=0; out="$(./tests/test-labwc-session.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the labwc session suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^labwc-session: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::the labwc session suite printed no summary line"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^labwc-session: //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          skipped="$(printf '%s' "$counts" | awk '{print $5}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed labwc session assertions failed"; exit 1; }
+          [ "$skipped" = 0 ] || {
+              echo "::error::$skipped labwc session assertions could not run ($summary). Both of this suite's skip paths — the APEX_LABWC_SESSION_TESTS opt-in and 'nowhere to render' — exit 0, so without this line a step that started no compositor at all would show a green tick"
+              exit 1
+          }
+          [ "$passed" -ge 18 ] || { echo "::error::only $passed labwc session assertions ran; 18 ran on 2026-09-13, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the labwc session suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
+              exit 1
+          fi
+
+      - name: Every suite is actually run by CI
+        # `if: !cancelled()` for the reason the comment block below gives
+        # about placement, read in its other direction. That block is about a
+        # known-red step ABOVE the gates; the same "a skipped check counts as
+        # success" shape arrives from any red step above them, known or not.
+        # On run 34714159369 it did: `Run virtualization assertions` went red
+        # and BOTH of these gates reported `-`, so the branch that was wiring
+        # suites into CI got no runner evidence that the suite gate passed.
+        # A gate a defect elsewhere in the job can switch off is not a gate.
+        if: ${{ !cancelled() }}
+        run: |
+          # The harder half of the same defect. CI invokes suites BY NAME, so
+          # writing tests/test-foo.sh, landing it, and never adding a workflow
+          # line leaves a file that looks like coverage and gates nothing.
+          # Measured 2026-09-12: 70 suites, 13 named in no workflow at all —
+          # including tests/test-apex-lid.sh, sixty assertions for a feature the
+          # owner asked for by name, which no CI run had ever executed.
+          ./tests/check-suites-run-in-ci.sh
+
+      - name: Every shell script is linted, by discovery
+        # `if: !cancelled()` for the reason the comment block below gives
+        # about placement, read in its other direction. That block is about a
+        # known-red step ABOVE the gates; the same "a skipped check counts as
+        # success" shape arrives from any red step above them, known or not.
+        # On run 34714159369 it did: `Run virtualization assertions` went red
+        # and BOTH of these gates reported `-`, so the branch that was wiring
+        # suites into CI got no runner evidence that the suite gate passed.
+        # A gate a defect elsewhere in the job can switch off is not a gate.
+        if: ${{ !cancelled() }}
+        run: |
+          # The step above lints a hand-written LIST. A list cannot cover a file
+          # nobody remembered to add, and on 2026-09-12 it did not: 140 shell
+          # scripts under tests/ and files/, 38 named, 102 not — including four
+          # suites landed in the previous two days and both of the checkers
+          # written to catch exactly this species of gap. That is the same
+          # defect as a path selector naming nothing: the step runs, reports
+          # success, and inspects nothing.
+          #
+          # This one FINDS the scripts. It lives in the engine job because the
+          # engine selector — `^(files/|tests/|Containerfile|\.github/workflows/)`
+          # — covers every directory it walks, so no edit to a discovered script
+          # can reach `main` without this step running. Putting it anywhere else
+          # would make it another instance of the bug the comments above describe.
+          ./tests/check-shellcheck-coverage.sh
+
       # ── LAST IN THIS JOB, AND THAT PLACEMENT IS THE POINT ──────────────────
       # §16's OS-side CLI. `apex plugin` owns NO plugin rules: every verdict
       # comes from apex-shell's own src/services/plugins/manifest.js, through
@@ -2408,31 +2821,6 @@ jobs:
       # "a skipped check counts as success" shape this repository has been
       # bitten by, and it would have switched off the shellcheck gate on the
       # very files this branch adds. Anything expected to be red belongs at the
-      - name: Every suite is actually run by CI
-        run: |
-          # The harder half of the same defect. CI invokes suites BY NAME, so
-          # writing tests/test-foo.sh, landing it, and never adding a workflow
-          # line leaves a file that looks like coverage and gates nothing.
-          # Measured 2026-09-12: 70 suites, 13 named in no workflow at all —
-          # including tests/test-apex-lid.sh, sixty assertions for a feature the
-          # owner asked for by name, which no CI run had ever executed.
-          ./tests/check-suites-run-in-ci.sh
-
-      - name: Every shell script is linted, by discovery
-        run: |
-          # The step above lints a hand-written LIST. A list cannot cover a file
-          # nobody remembered to add, and on 2026-09-12 it did not: 140 shell
-          # scripts under tests/ and files/, 38 named, 102 not — including four
-          # suites landed in the previous two days and both of the checkers
-          # written to catch exactly this species of gap. That is the same
-          # defect as a path selector naming nothing: the step runs, reports
-          # success, and inspects nothing.
-          #
-          # This one FINDS the scripts. It lives in the engine job because the
-          # engine selector is `^(files/|tests/|Containerfile)`, which is
-          # precisely the set it walks — putting it anywhere else would make it
-          # the sixth instance of the bug the comments above it describe.
-          ./tests/check-shellcheck-coverage.sh
       # bottom of its job.
       - name: Run plugin CLI assertions
         run: ./tests/test-apex-plugin.sh

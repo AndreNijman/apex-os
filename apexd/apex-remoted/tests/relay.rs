@@ -637,10 +637,102 @@ impl Harness {
             .to_string()
     }
 
-    fn offer(&self) -> PairingOffer {
+    /// A pairing offer, or `None` because of where this process is running.
+    ///
+    /// ## What this replaced, and why
+    ///
+    /// It used to be `reply["qr"].as_str().unwrap_or_else(|| panic!(...))`.
+    /// A `cargo test --workspace` run from a systemd user service then failed
+    /// five of this file's eight tests on one reply:
+    ///
+    /// ```text
+    /// a scheduled-job request cannot pair a device: pairing hands a phone
+    /// standing access to this machine's agents, so §7 reserves it for a
+    /// human at the keyboard
+    /// ```
+    ///
+    /// Nothing was broken. `apex_agent_core::origin::classify` reads the
+    /// connecting process's cgroup, everything a user's own systemd instance
+    /// starts sits below `user@<uid>.service`, and §7 calls that a
+    /// `scheduled-job` — so `apex-remoted`'s `may_pair` refused, exactly as
+    /// designed, and this suite reported FAILED where the honest answer was
+    /// COULD NOT RUN. CI does not see it because the `Tests` step goes through
+    /// `tests/in-login-session.sh`, which mints a real logind session through
+    /// PAM; the runner's own log says
+    /// `0::/user.slice/user-1001.slice/session-3.scope`.
+    ///
+    /// ## Why it is not simply a skip either
+    ///
+    /// A skip that fired whenever the daemon said no would swallow two things
+    /// worth knowing: a §7 hole that let an unattended process pair a phone,
+    /// and PAM failing under `in-login-session.sh` — which would turn five red
+    /// tests green on a runner and tell nobody. So the placement is
+    /// established INDEPENDENTLY of the reply, from `/proc`, through the same
+    /// function the daemon calls, and all four combinations are decided:
+    ///
+    /// | this process | the daemon | verdict |
+    /// |---|---|---|
+    /// | local     | offered | run the test |
+    /// | local     | refused | FAIL — §7's local column has become unreachable |
+    /// | not local | refused | SKIP, naming the placement |
+    /// | not local | offered | FAIL — an unattended caller was handed a phone's access |
+    ///
+    /// `is_local()` rather than a second copy of `MAY_PAIR`: `control.rs`'s
+    /// own `every_origin_that_may_pair_is_local_and_no_other_is` asserts the
+    /// two agree over all seven origins, so this reads the rule rather than
+    /// restating it. `MAY_PAIR` itself is unreachable from here — `apex-remoted`
+    /// is a binary-only crate.
+    ///
+    /// `APEX_REQUIRE_LOCAL_ORIGIN` turns the skip into a failure, the same
+    /// shape as `APEX_REQUIRE_APEX_CLI` in apex-agentd's suites. CI sets it on
+    /// the step that goes through `in-login-session.sh`; a developer running
+    /// this crate from a user service or a cron job does not.
+    fn offer(&self) -> Option<PairingOffer> {
         let reply = self.control(r#"{"cmd":"pair"}"#);
-        let qr = reply["qr"].as_str().unwrap_or_else(|| panic!("{reply}"));
-        PairingOffer::decode(qr).expect("a pairing offer")
+        // Asked about this process, because this process is the peer the
+        // daemon saw: `control()` connects from here.
+        let placement = apex_agent_core::origin::observe_pid(std::process::id() as i32);
+        let local = matches!(&placement, Ok(o) if o.is_local());
+
+        if let Some(qr) = reply["qr"].as_str() {
+            assert!(
+                local,
+                "a caller §7 does not call local was handed a pairing code. \
+                 /proc says {placement:?}, and the daemon offered anyway: {reply}"
+            );
+            return Some(PairingOffer::decode(qr).expect("a pairing offer"));
+        }
+
+        assert_eq!(reply["reply"], "error", "neither an offer nor an error: {reply}");
+        assert!(
+            !local,
+            "pairing was refused for a caller §7 calls local ({placement:?}), so the \
+             local column of §7 cannot be reached at all: {reply}"
+        );
+
+        // The refusal has to be ABOUT the placement. `local_caller` can also
+        // fail because the kernel would not report peer credentials or because
+        // the connection belongs to another account, and neither of those is
+        // an environment this suite may shrug at — they mean the harness is
+        // wrong, not that a human is absent.
+        let why = reply["message"].as_str().unwrap_or_default().to_string();
+        let names_the_placement = match &placement {
+            Ok(o) => why.contains(o.as_str()),
+            Err(_) => why.contains("/proc/") || why.contains("cgroup"),
+        };
+        assert!(
+            names_the_placement,
+            "pairing was refused for a reason that is not this process's placement \
+             ({placement:?}), so it is not a could-not-run: {reply}"
+        );
+
+        assert!(
+            std::env::var_os("APEX_REQUIRE_LOCAL_ORIGIN").is_none(),
+            "APEX_REQUIRE_LOCAL_ORIGIN is set, so this run was supposed to hold a real \
+             logind session and does not: {why}"
+        );
+        eprintln!("SKIP: this process may not pair — {why}");
+        None
     }
 
     /// One connection to the desktop THROUGH THE RELAY, as a guest.
@@ -915,7 +1007,7 @@ fn a_device_reaches_the_desktop_through_a_relay_neither_of_them_listens_on() {
     }
 
     let device = Device::new();
-    let offer = h.offer();
+    let Some(offer) = h.offer() else { return };
     let paired = device.pair(&h, &offer, "a phone");
     assert_eq!(paired["ok"], true, "pairing through the relay failed: {paired}");
     assert!(paired["device"].as_str().is_some_and(|d| !d.is_empty()), "{paired}");
@@ -961,7 +1053,7 @@ fn the_relay_carries_the_session_and_can_read_none_of_it() {
     }
     let h = harness!("opaque");
     let device = Device::new();
-    let offer = h.offer();
+    let Some(offer) = h.offer() else { return };
     assert_eq!(device.pair(&h, &offer, SENTINEL)["ok"], true);
     assert!(h.hosts_seen(2));
 
@@ -1001,7 +1093,7 @@ fn the_relay_carries_the_session_and_can_read_none_of_it() {
 fn a_relayed_session_is_recorded_as_relayed_and_a_direct_one_is_not() {
     let h = harness!("labels");
     let device = Device::new();
-    let offer = h.offer();
+    let Some(offer) = h.offer() else { return };
     assert_eq!(device.pair(&h, &offer, "labelled")["ok"], true);
     assert!(h.hosts_seen(2));
 
@@ -1199,7 +1291,7 @@ fn window_contains(haystack: &[u8], needle: &[u8]) -> bool {
 fn the_desktop_measures_the_connection_and_a_device_cannot_invent_the_answer() {
     let h = harness!("quality");
     let device = Device::new();
-    let offer = h.offer();
+    let Some(offer) = h.offer() else { return };
     assert_eq!(device.pair(&h, &offer, "measured")["ok"], true);
     assert!(h.hosts_seen(2));
 
@@ -1225,7 +1317,7 @@ fn the_desktop_measures_the_connection_and_a_device_cannot_invent_the_answer() {
     // nothing.
     assert!(h.hosts_seen(3));
     let silent = Device::new();
-    let offer = h.offer();
+    let Some(offer) = h.offer() else { return };
     assert_eq!(silent.pair(&h, &offer, "silent")["ok"], true);
     assert!(h.hosts_seen(4));
     let mut quiet = silent.connect(&h, desktop_key(&h)).expect("a session");
@@ -1282,7 +1374,7 @@ fn a_network_change_costs_the_session_and_costs_nothing_else() {
     // the remote layer does not undo it.
     let h = harness!("cut");
     let device = Device::new();
-    let offer = h.offer();
+    let Some(offer) = h.offer() else { return };
     assert_eq!(device.pair(&h, &offer, "roaming")["ok"], true);
     assert!(h.hosts_seen(2));
 

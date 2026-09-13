@@ -39,7 +39,7 @@ if [ ! -f "$OVMF_VARS" ]; then
 fi
 
 log "Launching VM '$NAME' (timeout ${TIMEOUT}s, NIC=${NIC:-on}) -> $LOG"
-NIC_ARGS=(-netdev user,id=n0 -device virtio-net-pci,netdev=n0)
+NIC_ARGS=(-netdev "user,id=n0" -device "virtio-net-pci,netdev=n0")
 [ "${NIC:-on}" = "off" ] && NIC_ARGS=()
 set +e
 timeout --foreground "$TIMEOUT" qemu-system-x86_64 \

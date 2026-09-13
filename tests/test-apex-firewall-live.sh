@@ -477,7 +477,7 @@ sec "path MTU discovery, which fails as slowness rather than as an error"
 # connection does not fail — it stalls, and nobody blames the firewall.
 pmtu_works() {
     h ip route flush cache 2>/dev/null
-    local out; out="$(nsxt 8 "$NS_HOST" ping -M do -s 1400 -c2 -W2 10.9.45.2 2>&1)"
+    local out; out="$(nsxt 8 "$NS_HOST" ping -M 'do' -s 1400 -c2 -W2 10.9.45.2 2>&1)"
     printf '%s' "$out" | grep -qi 'frag.*needed\|mtu *= *1280' && return 0
     h ip route get 10.9.45.2 2>/dev/null | grep -q 'mtu 1280'
 }
