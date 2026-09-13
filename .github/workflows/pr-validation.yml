@@ -262,6 +262,42 @@ jobs:
           python3 files/scripts/check-containerfile-order \
             Containerfile.base Containerfile.core Containerfile.apex
 
+      # ── the checker above, checked ────────────────────────────────────────
+      #
+      # It was red on 34727364060 for a defect of its own: a path inside a
+      # quoted `grep` PATTERN counted as a read, so Containerfile.base:1644 —
+      # which greps a unit file for the string `ExecStart=/usr/bin/apex lid
+      # watch` and reads nothing — was reported as reading /usr/bin/apex ahead
+      # of the COPY at line 2952. The Containerfile says in a comment directly
+      # above that line that the binary is deliberately not read there.
+      #
+      # Nothing asserted the checker itself. Fixing a false positive by making
+      # a gate answer "OK" more often is the exact defect this repository has
+      # recorded most: a step that runs and inspects nothing. So the fix comes
+      # with a harness whose cases sit on BOTH sides — a checker that always
+      # passed fails six of them, and one that always failed fails eight — and
+      # the over-stripping mutation (drop everything on a `grep` line, not just
+      # the pattern) is caught by its own control.
+      - name: The layer-order checker can still fail
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          ./tests/test-containerfile-order.sh | tee /tmp/cf-order.log
+          # Read the summary back rather than banking the exit code. A suite
+          # that printed nothing and exited 0 would otherwise be indis-
+          # tinguishable from one that ran, which is the defect one level up.
+          line=$(tail -1 /tmp/cf-order.log)
+          echo "measured: $line"
+          n=$(sed -n 's/^\([0-9]*\) passed.*/\1/p' <<<"$line")
+          if [ -z "$n" ] || [ "$n" -lt 24 ]; then
+            echo "FATAL: expected at least 24 passing cases, got: $line"
+            exit 1
+          fi
+          if ! grep -q ', 0 failed$' <<<"$line"; then
+            echo "FATAL: the harness reported failures: $line"
+            exit 1
+          fi
+
       - name: Input page and generator agree
         if: ${{ !cancelled() }}
         run: |
