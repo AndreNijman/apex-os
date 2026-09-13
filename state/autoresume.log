@@ -158,3 +158,32 @@ State snapshotted to `refs/wip/roadmap-state`. Waiting on the six agents now.
 2026-09-13 03:32:43 resume session ended (exit 143)
 2026-09-13 08:07:07 report refreshed (188 lines)
 2026-09-13 08:07:07 starting a resume session (38 items outstanding)
+Background tasks still running after 600s; terminating. Set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 to wait indefinitely.
+Round 24 is landed, recorded, and dispatched. Status:
+
+## Landed
+| repo | move | branches |
+|---|---|---|
+| apex-os | `11fd5832 → 13d53c01` | `followups-4` (13), `p2-b-round22` (5), `p2-d-2` (2) |
+| apex-shell | `1da66c7 → 0a3824c` | `p2-b-round22` (1) |
+
+One real conflict, in `tests/test-apex-devices.sh`'s `reset_world`: the integration branch had added `nmdispatch`/`fwpolicy` to the `rm` list while followups-4 had added `${WORK:?}` shellcheck quoting to the same lines. Took both sides and re-ran the suite — 66/0/0.
+
+Verification on the landed tip: `cargo test --locked --workspace` **3187 passed, 0 failed, 2 ignored, exit 0**; `check-no-conflict-markers.sh` PASS both repos; `run-rtl-test.sh` 13/0/0. **The report now shows zero unlanded work in both repos.**
+
+## The call that changed the round
+`p1-053c` was about to be closed by hand as device-blocked. Its worktree had **134 uncommitted lines** implementing the clipboard-*receive* verb — P1-059's one open criterion, which three rounds had called missing. Three of five dead agents' cards were stale the same way, and checking `git status` before dispatching rewrote three of six briefs.
+
+## Dispatched (6, at ceiling)
+`later` (TPM + recovery in the VM lab — the last two blocked items depend on it) · `p2-d` (capsule CA trust, via the `policies.json` bind round 2 found) · `p2-b` (RTL at the 14 window roots) · `p2-f` (SigV4 signer, then RFC 8628) · `followups-5` (the three red CI steps gating ~45 others) · `p1-053c` (finish the clipboard verb).
+
+Route B capsule auth is deferred one round on purpose — it needs a `PROTOCOL_VERSION` bump in the file `p1-053c` is editing.
+
+## Closed to dispatch (work is Andre's, not done)
+- **p1-038-hardware** — refused as READY four rounds running; checklist is ready for a human at `ROADMAP/state/agents/p1-038.md`.
+- **p1-063** — round 3 landed and its 60 CI assertions are green; what's left is `sudo ./tests/test-apex-lid-live.sh` **undocked**, and a battery reading on an idle machine.
+
+Two things I fixed that weren't in the brief: the heartbeat refresher I first started would have outlived this session's `timeout 4h` kill and made `apex-roadmap-resume.timer` skip forever — it's now `kill -0`-guarded with `state/orchestrator.pid` written; and two `branch` fields in `dispatch.json` carried prose that `resume.sh` would have tried to `rev-parse`.
+
+I'll land each agent's branch as its completion notification arrives rather than batching at the end.
+2026-09-13 08:34:51 resume session ended (exit 0)
