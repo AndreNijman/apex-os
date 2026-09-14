@@ -1416,6 +1416,95 @@ mutants from a mutation harness. Copy kept as
 subset mechanism — that is the real gap, and adding one (`mutate-rtl.sh` has the
 same problem) would make these harnesses affordable to run.**
 
+### ROUND 25 — the mutation verdicts, as printed
+
+**Run 1, on `bc60a19`: 13 applied, 0 failed-to-apply, 12 CAUGHT, 1 SURVIVED.**
+
+    R1  CAUGHT   and with NOTHING set by hand the row matches
+    R2  CAUGHT   CfgRow mirrors exactly when the application does
+    R3  CAUGHT   CfgRow passes mirroring down to the control it holds
+    R4  CAUGHT   window roots mirror
+    R5  CAUGHT   the direction follows the locale
+    R6  CAUGHT   the fixture ran all
+    R7  CAUGHT   the engine mirrors a plain left anchor
+    R8  CAUGHT   the direction follows the locale
+    R9  CAUGHT   an RTL language Qt has no catalogue for does NOT flip
+    R10 SURVIVED explicit numeric x: sites left in src/ are exactly the bucketed ones
+    R11 CAUGHT   lifecycle banner keeps its 2px inset
+    R12 CAUGHT   an untouched CfgScroll mirrors on its shipped declaration alone
+    R13 CAUGHT   an untouched CfgScroll mirrors on its shipped declaration alone
+
+**R1 IS DEAD.** The round-23 prediction is closed: with `test_040` reading
+`row2`, the hardcoded `LayoutMirroring.enabled: false` is caught in the RTL
+pass. R12 and R13 prove `test_060` goes red in both directions.
+
+**R10 DID NOT SURVIVE — the harness scored it wrong, and that is the sixth time
+in this unit.** The suite went red on SIX assertions including the one R10
+names (`run-rtl-test: 24 passed, 6 failed`). The expectation contained the word
+"left"; the failure message does not, because the `ok` and `bad` labels for
+that assertion are different sentences.
+
+**The general defect behind it, swept rather than patched.** Of 20 `bad` labels
+in `run-rtl-test.sh`, EIGHT were not a prefix of any `ok` label. Four are
+failure-only guards with no paired `ok` and are correctly divergent. FIVE were
+real divergences — each one a wrong mutation expectation waiting to be written,
+and one of them (R4's) was already being matched by luck, against the `bad`
+label rather than the `ok` label its author took it from. All five now share a
+stable prefix, counts moved into the parenthetical.
+
+**`mutate-rtl.sh` now has a THIRD verdict, `MISSCORED`.** A mutant that leaves
+the suite green has SURVIVED; a mutant that turns the suite red on assertions
+other than the one it names has been CAUGHT by a misnamed expectation, and the
+fix is in the harness rather than in the shell. The two are mechanically
+distinguishable — read the totals line — so the harness distinguishes them,
+counts them separately, and fails the run on a non-zero count. **I2, B2, F3,
+F4, F5 and R10 were all this, and every one of them was recorded as a survival
+and chased as a product defect first.** Worth porting to
+`mutate-installer-a11y.sh` and every other mutation harness in both repos.
+
+**Run 2, on `1363af5`, after the labels and the expectation were fixed:**
+
+    mutants applied=13, failed-to-apply=0, caught=13, SURVIVED=0, MISSCORED=0
+    the tree matches HEAD
+
+**13 of 13 CAUGHT. R1 is closed.** The suite is 30 passed / 0 failed / 0 skipped
+under `env -i`, up from 13 at the start of round 23 and 28 at the start of this
+one.
+
+**And the MISSCORED arm was then shown capable of firing** (`acf4879`). Run 2
+produced 13 CAUGHT, 0 SURVIVED, 0 MISSCORED — so the arm added to close a
+false-green had itself never executed. Adding a gate that inspects nothing
+while closing one is not a joke this unit can afford twice, so the decision is
+factored into `classify` and exercised on canned output before the baseline
+runs, using R10's ACTUAL output from this round rather than an invention:
+
+    ── self-test: this harness can tell its three verdicts apart ──
+      ok   a red suite naming the expectation is CAUGHT
+      ok   a red suite NOT naming it is MISSCORED, not a survival
+      ok   a green suite is the only thing that is a SURVIVAL
+      ok   counting failures off a red / green totals line
+      ok   output with no totals line at all counts 0 and cannot read as green
+
+Checked in the direction that matters: with the MISSCORED arm disabled the
+self-test reports `want MISSCORED got SURVIVED` and aborts 3. The last row pins
+the crash case — a harness that reads a crashed suite as a clean green run is
+how a mutation set quietly stops measuring anything.
+
+### Commits this round, all pushed on `task/p2-b-round23`
+
+apex-shell, on top of the landed `a0b3deb`:
+
+| sha | what |
+| --- | --- |
+| `4e1ec25` | the SC2034 that was skipping forty suites on `roadmap/v2.2` |
+| `965609c` | `row2`/`scroll2` — the fixture was measuring a row its own test had repaired; `test_060`; EXPECT_TESTS 8 -> 9 |
+| `bc60a19` | R12/R13, and R1's comment rewritten because it claimed a kill that did not happen |
+| `1363af5` | R10 was CAUGHT and scored SURVIVED; five divergent `ok`/`bad` label pairs; the MISSCORED verdict |
+| `acf4879` | `classify` + a six-row self-test, verified red as well as green |
+
+apex-os: the `fdf0a8e6` merge only, pushed. No commits — the branch name exists
+for apex-shell's `pr-validation.yml` parity step, as it must.
+
 ## NEXT
 
 **One line, and it is the load-bearing part of this card:** in

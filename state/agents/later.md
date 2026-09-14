@@ -5,16 +5,20 @@ worktree: /var/tmp/apex-work/wt-later
 branch: task/later-tpm-qualification
 
 ## NEXT
-Run `luks-tpm-clear` for the FIRST time (it has never executed), FOREGROUND, long timeout:
-  mkdir -p /var/tmp/apex-work/scratch-later/r1-clear && \
-  ln -s ../out/apex-root /var/tmp/apex-work/scratch-later/r1-clear/apex-root && \
-  podman run --rm --device /dev/kvm -v /var/tmp/apex-work/wt-later:/work:z \
-    -v /var/tmp/apex-work/scratch-later:/lab:z localhost/apex-bootlab \
-    -c '/work/files/scripts/boot-v2/run-scenarios --work /lab/r1-clear luks-tpm-clear' \
-    > /var/tmp/apex-work/scratch-later/r1-clear.log 2>&1; echo rc=$?
-NEVER background these with `nohup ... &`: podman forwards SIGTERM when the harness
-shell exits and the run dies part-way while still reporting exit 0. That is how the
-predecessor's evidence was lost. Then luks-firmware-change, then luks-s3.
+luks-tpm-clear is RE-RUNNING with the fixes as podman container `later-clear2`
+(work dir /lab/r2-clear). Collect it with:
+  podman wait later-clear2; podman logs later-clear2 > /var/tmp/apex-work/scratch-later/r2-clear.log 2>&1
+Expect 19 passed, 0 failed (16 + the two repaired controls + the new blob-changed
+control). THEN run luks-firmware-change, THEN luks-s3, each the same way:
+  D=/var/tmp/apex-work/scratch-later/r1-<name>; mkdir -p $D; ln -s ../out/apex-root $D/apex-root
+  podman run -d --name later-<name> --device /dev/kvm \
+    -v /var/tmp/apex-work/wt-later:/work:z -v /var/tmp/apex-work/scratch-later:/lab:z \
+    localhost/apex-bootlab -c '/work/files/scripts/boot-v2/run-scenarios --work /lab/r1-<name> <name>'
+Use `podman run -d` + `podman wait`, NEVER `nohup podman run &`: a backgrounded
+foreground podman gets SIGTERM forwarded when the harness shell exits and the run
+dies part-way while reporting exit 0. Detached containers live under conmon and
+survive a tool timeout. Never edit files in the worktree while a container is
+executing run-scenarios from it — bash reads scripts incrementally.
 
 ## DONE
 - Card created at round start.
@@ -24,6 +28,13 @@ predecessor's evidence was lost. Then luks-firmware-change, then luks-s3.
   -> kernel 7.2.3-cachyos2.fc43.x86_64 (16,898,120 B), initramfs 375,558,646 B, os-release
   NAME="APEX-OS". Read-only against the live OS; no boot path touched.
 - Collected the read-only SILICON evidence from the L16 (see FOUND).
+
+- FIRST EXECUTION of luks-tpm-clear (2026-09-14, round 25): 16 passed, 3 failed.
+  Log /var/tmp/apex-work/scratch-later/r1-clear.log. All three failures were real;
+  diagnosed and fixed in e2345ed7 (pushed).
+- e2345ed7 fixes four things, each measured not assumed:
+  the two-step wipe-then-enrol, the blob-changed control, swtpm_owner_primary_name
+  via tpm2_readpublic, and the always-printed summary (EXIT trap).
 
 ## IN PROGRESS
 - Three new scenarios planned for files/scripts/boot-v2/run-scenarios:
@@ -52,6 +63,35 @@ predecessor's evidence was lost. Then luks-firmware-change, then luks-s3.
      observers. If the kernel refuses `mem`, that is COULD-NOT-RUN with the errno.
 
 ## FOUND
+- THE DOCUMENTED TPM-CLEAR RECOVERY IS A NO-OP THAT REPORTS SUCCESS. Measured
+  2026-09-14 on systemd 258.10-1.fc43, against a TPM that had really been cleared:
+    systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=... --tpm2-public-key=... VOL
+  prints "This PCR set is already enrolled, executing no operation." and EXITS 0.
+  systemd de-duplicates against the token already in the header BEFORE it acts on
+  the wipe, so nothing is written. Proof: the tokens dumped before and after were
+  byte-identical (tpm2-blob AJ4AINf9+bFEhlIi...), and the next guest boot failed
+  with Esys_Load rc 0x1df, "TPM key integrity check failed ... Key enrolled in
+  superblock most likely does not belong to this TPM". Wiping in a SEPARATE
+  invocation first, then enrolling, yields a new blob (AJ4AIMCkDPHJ...) and works.
+  THIS IS A PRODUCT FINDING, not a lab artefact: it is the recovery procedure a
+  user would be told to run after a firmware TPM clear, and it silently does
+  nothing while looking like it worked.
+- The control that should have caught it could not: counting tokens
+  (tpm2=1 recovery=1 pubkey=yes pcrs=[11]) is TRUE of the no-op, character for
+  character. Only the sealed blob distinguishes them.
+- tpm2_createprimary's YAML has NO `name:` line (it ends at sym-mode) in the lab
+  image's tpm2-tools. `createprimary | sed -n 's/^name: *//p'` returns "" from a
+  perfectly healthy TPM. Use tpm2_readpublic -c <ctx>. This made the clear's own
+  control fail for a parsing reason unrelated to its subject.
+- swtpm state DOES persist across host sessions: sealed in one session, loaded in
+  the next, rc 0, and the owner primary name is identical across sessions
+  (000bd952e2507b1b...). So "the seeds did not persist" is ruled OUT as a cause of
+  any unlock failure here — checked, because it was the obvious suspect.
+- A run whose scenario aborted printed NO summary line at all (measured: no staged
+  root -> refusal text, rc 1, zero "== boot-v2 VM harness" lines). The exit status
+  did propagate — the orchestrator's report of "exit 0" was a measurement artefact,
+  `$?` read through a pipe; rc is 1, verified directly. The defect was the missing
+  verdict, now printed from an EXIT trap and verified in both directions.
 - Substrate decision, recorded so it does not read as ignoring the brief: this
   qualification goes in `files/scripts/boot-v2/run-scenarios`, NOT `tests/vmlab`.
   P2-008's vmlab guest (tests/vmlab/mk-guest) is a busybox initramfs with no cryptsetup

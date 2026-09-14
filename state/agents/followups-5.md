@@ -5,12 +5,12 @@ branch: task/followups-5
 repo: apex-os
 
 ## NEXT
-Read run **34796578198** (`task/followups-5` @ `9df69d6b`, dispatched
-2026-09-14 01:38Z) and confirm the three rust reds are green:
-`§26 channels`, `Every verb is in the binary`, `Chaos diagnostics`.
-`gh run view 34796578198 --repo AndreNijman/apex-os`. If green, the branch is
-ready to land. Engine's EIGHT reds are diagnosed separately (see FOUND) and are
-mostly NOT this unit's — hand them to the orchestrator.
+Fix `Input page and generator agree` in `.github/workflows/pr-validation.yml`
+(~line 338): when apex-shell has no branch matching `$GITHUB_REF_NAME`, fall
+back to apex-shell **`roadmap/v2.2`** BEFORE its default branch. Then finish
+reading run 34796578198's rust + engine jobs.
+**DO NOT LAND** until a run on this branch is green — the orchestrator is
+holding the landing deliberately.
 
 ## DONE
 - `13e7ec84` ci: 93 `run:` steps carry `if: ${{ !cancelled() }}`. LANDED.

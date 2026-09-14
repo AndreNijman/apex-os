@@ -53,8 +53,15 @@ Round 3, on task/p2-f-3 (pushed):
   c224eea7  a scope may not name an operation no provider offers — the
             cross-crate gate in apex-secretd, both mutants run and red.
 
-## IN PROGRESS
-- Nothing half-written. `c224eea7` is committed and pushed.
+## IN PROGRESS (round 4 — fresh agent, predecessor died holding this)
+- `apex-secret-core/src/account.rs`, UNCOMMITTED when round 4 started: the OAuth
+  vocabulary (`ClientSecret`, `OAuth`, `GOOGLE_OAUTH`/`MICROSOFT_OAUTH`/
+  `CLOUDFLARE_OAUTH`, `OAUTH`, `oauth_for_auth_host`, `Provider::oauth`,
+  `Provider::validate`, `AccountRef::refresh_service`). **It compiles and has
+  ZERO tests** — `validate()`, `oauth_for_auth_host()` and `refresh_service()`
+  have no callers at all, which is this repo's dominant defect family (a gate
+  that inspects nothing). Round 4 keeps it and writes the tests before
+  committing.
 
 ## FOUND
 - **`5054be77` landed the S3 provider and SigV4 signer.** Round 2's card
