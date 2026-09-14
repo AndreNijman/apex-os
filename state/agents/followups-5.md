@@ -5,13 +5,24 @@ branch: task/followups-5
 repo: apex-os
 
 ## NEXT
-Read the 66-line `Run terminal layout template assertions` step of run
-34802332142 (job 103847365659) in
-`/var/tmp/apex-work/scratch-followups-5/e.log` — its one FAIL is "the layout
-landed as a tab zellij can describe" (mux-layouts: 45 passed, 1 failed) — then
-the 60-of-134 virtualization reds. Then dispatch a fresh run.
+Read run 34803818557's `Package engine` job (dispatched 03:47Z on `479105b6`,
+so it does NOT contain the vm or mux fixes) to confirm the six fixed steps went
+green; then dispatch a fresh run on the tip and work the two INTERMITTENT reds
+— `Run labwc keybind generator assertions` (red only on 34796578198) and `Run
+terminal layout template assertions` (red only on 34802332142, one FAIL: the
+zellij tab is "Tab #1" not "apex", i.e. `zellij --layout-string` did not land).
 
 ## DONE
+- `df6c4797` test(vm): the one probe that could not be faked with $PATH read
+  the host. PUSHED. All 60 virtualization FAILs were `require_stack`'s
+  `have_kvm` reading the real /dev/kvm, in a suite that fakes virsh/qemu-img/
+  lsusb/swtpm through $PATH and whose subject is the domain XML — a pure
+  function needing no hypervisor. Now `KVM_NODE="${APEX_VM_KVM:-/dev/kvm}"`,
+  the idiom `tests/vmlab/run-vmlab` already used (`APEX_VMLAB_KVM`). Five new
+  assertions drive the guard's other direction in the same run, and reverting
+  `have_kvm` to the literal turns four of them red, so they are not vacuous.
+  Measured: before 133/0 here and **74/60** without a usable node (the runner's
+  own line); after 138/0 in BOTH.
 - `479105b6` test(root-approval): `mount --bind` cannot create a target only
   APEX machines have. PUSHED. `/usr/libexec/apex-pkg` is `ops::PKG_ENGINE`;
   ubuntu-24.04 has no such file, so the stub bind died and took the 8
@@ -59,8 +70,9 @@ the 60-of-134 virtualization reds. Then dispatch a fresh run.
   Rust ✓ all 41 steps** — `Pack the chaos bundles` ✓ and `Chaos diagnostics` ✓,
   the first time either has been green. Engine still running; nine reds so far.
 - Working the engine reds down, in order. Family A (5 steps) DONE, see above.
-  Family A (5 steps), nushell PATH (1) and root-approval (1) DONE — 7 of the
-  9 engine reds. Left: virtualization (60 fails), mux-layouts zellij (1).
+  **All 7 PERSISTENT engine reds are fixed** (red on all three of runs
+  34795907584 / 34796578198 / 34802332142). The other two are INTERMITTENT and
+  are each one assertion: labwc keybind generator, terminal layout template.
 
 ## FOUND
 - **THE 1 → 8 IS NOT A REGRESSION I CAUSED.** `13e7ec84` (`!cancelled()`) is
