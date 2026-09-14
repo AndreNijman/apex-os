@@ -83,10 +83,12 @@ const CONNECT_TIMEOUT_SECS: u64 = 15;
 
 /// The username `apex secret add` writes when a credential has no name half.
 ///
-/// Read here rather than assumed: this provider treats it as *no client id was
-/// recorded*, and a build that changed the placeholder without changing this
-/// would start presenting the string `x-access-token` as an OAuth client.
-const NO_USERNAME: &str = "x-access-token";
+/// Read off the store's own constant rather than spelled again here: this
+/// provider treats it as *no client id was recorded*, and a build that changed
+/// the placeholder in one crate and not the other would start presenting the
+/// literal string `x-access-token` to an authorisation server as an OAuth
+/// client.
+const NO_USERNAME: &str = apex_secret_core::store::DEFAULT_USERNAME;
 
 /// Longest a token this will accept from a token endpoint.
 ///
@@ -100,7 +102,10 @@ pub const SPEC: ProviderSpec = ProviderSpec {
     summary: "renew a stored access token with the refresh token beside it, \
               against the authorisation server it was issued by",
     operations: &[OperationSpec {
-        id: "oauth.token.refresh",
+        // The same constant `apex cloudflare refresh` asks with, in the crate
+        // they both link, so a rename cannot leave the CLI requesting an
+        // operation no provider offers.
+        id: account::REFRESH_OPERATION,
         summary: "renew this account's access token, and the refresh token \
                   beside it if the server rotates one",
         // A read of a token endpoint and a WRITE of the store. `effect` is what

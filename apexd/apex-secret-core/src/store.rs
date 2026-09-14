@@ -130,8 +130,18 @@ fn default_scheme() -> String {
     "https".to_string()
 }
 
+/// What [`ServiceInfo::username`] holds when a credential has no name half.
+///
+/// A constant rather than a string spelled in each place that means it,
+/// because two of those places are in different crates and have to agree: the
+/// CLI writes it, and `apex-secretd`'s `oauth` provider reads it to mean *no
+/// OAuth client was recorded with this credential* and falls back to the
+/// table's default client. A build that changed the placeholder in one of them
+/// would start presenting the literal `x-access-token` as an OAuth client id.
+pub const DEFAULT_USERNAME: &str = "x-access-token";
+
 fn default_username() -> String {
-    "x-access-token".to_string()
+    DEFAULT_USERNAME.to_string()
 }
 
 fn default_auth() -> String {
