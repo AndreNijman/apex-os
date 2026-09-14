@@ -102,6 +102,17 @@ LSUSB="${APEX_VM_LSUSB:-lsusb}"
 # and never hardcoded into the XML without checking: OVMF's layout changed
 # between Fedora releases twice, and a domain naming a firmware that is not
 # there fails at start with "failed to open file".
+# The KVM character device, as a variable rather than a literal — the same
+# reason tests/vmlab/run-vmlab gives for APEX_VMLAB_KVM, and the same reason the
+# firmware search path above is one. A device node is the one piece of this
+# stack that cannot be faked with $PATH, so without this the suite that asserts
+# the domain XML — a pure function needing no hypervisor at all — could only
+# run on a machine that has a usable one. It was green on the maintainer's
+# laptop and 74 passed / 60 failed on every CI run, every failure the same
+# refusal. Pointing it elsewhere grants nothing: libvirt still needs the real
+# node to START a domain, and this probe only decides which sentence the user
+# is told before anything is created.
+KVM_NODE="${APEX_VM_KVM:-/dev/kvm}"
 VIRTIOFSD="${APEX_VM_VIRTIOFSD:-/usr/libexec/virtiofsd}"
 SWTPM="${APEX_VM_SWTPM:-swtpm}"
 SWTPM_SETUP="${APEX_VM_SWTPM_SETUP:-swtpm_setup}"
@@ -190,7 +201,7 @@ remove_vm_dir() {
 # below observes the capability, and each returns its own sentence so that a
 # refusal names the ONE thing that is missing instead of printing a checklist.
 
-have_kvm() { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }
+have_kvm() { [ -r "$KVM_NODE" ] && [ -w "$KVM_NODE" ]; }
 
 have_virsh() { command -v "$VIRSH" >/dev/null 2>&1; }
 
@@ -288,9 +299,9 @@ require_stack() {
   The virtualization stack is userspace, so it is not in the image — KVM
   itself is (the kernel modules are in the signed kernel). Install it with:
     $INSTALL_HINT"
-    have_kvm || die "/dev/kvm is not readable and writable by this user.
+    have_kvm || die "$KVM_NODE is not readable and writable by this user.
   Either this machine has no hardware virtualization enabled in firmware, or
-  this user is not in a group that can open it. \`ls -l /dev/kvm\` says which."
+  this user is not in a group that can open it. \`ls -l $KVM_NODE\` says which."
     have_libvirt_session || die "libvirt is installed but $VM_URI does not answer.
   That URI is served by a per-user virtqemud that systemd autospawns; it
   failing usually means there is no user session bus. \`$VIRSH -c $VM_URI
@@ -628,7 +639,7 @@ add_usb() {
 cmd_doctor() {
     local fail=0
     printf 'apex vm — virtualization stack\n\n'
-    probe_line "hardware KVM (/dev/kvm readable and writable)" have_kvm || fail=1
+    probe_line "hardware KVM ($KVM_NODE readable and writable)" have_kvm || fail=1
     probe_line "libvirt client (virsh)" have_virsh || fail=1
     probe_line "libvirt session daemon ($VM_URI answers)" have_libvirt_session || fail=1
     probe_line "Secure-Boot-enforcing OVMF firmware" have_ovmf || fail=1
