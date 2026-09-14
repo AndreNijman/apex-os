@@ -32,6 +32,30 @@ holding the landing deliberately.
 - run 34796578198, watching.
 
 ## FOUND
+- **THE 1 → 8 IS NOT A REGRESSION I CAUSED.** `13e7ec84` (`!cancelled()`) is
+  why the engine job now reports EIGHT red steps where it used to report one,
+  and rust three where it used to report one. Those failures were always
+  there; the job stopped before reaching them. A red step used to switch off
+  every step below it, so the count was never a count of defects — it was a
+  count of *how far the job got*. Read the rise as visibility, not decay.
+- **THE GENERAL CLASS, three instances of it this round.** A gate that reads
+  state belonging to the environment it happens to run in is green wherever
+  that environment agrees with the author's and red wherever it does not, and
+  neither colour means what it says:
+  1. **§26 channels** — the fixture leaked to the real `/proc/mounts`. A
+     GitHub runner mounts `/usr` **rw**; this L16 mounts it **ro**. Green
+     here, red there, indefinitely, and no amount of local re-running finds it.
+  2. **Input page parity** — the comparison target is chosen by BRANCH NAME,
+     and the fallback is the other repository's DEFAULT branch. apex-shell has
+     no `task/*` twin for most branches, so the gate compares an integration
+     branch against `main` and reports drift that is not there. Here the
+     "second environment" is another repo's default branch. Measured: vs
+     apex-shell `main` → rc=1, two touchpad defaults; vs apex-shell
+     `roadmap/v2.2` → rc=0, "22 settings, identical keys and defaults".
+     The step's OWN comment complains about exactly this misfire and then
+     leaves the fallback doing it.
+  3. **Chaos diagnostics** — the upload asserted nothing about what it
+     uploaded, so it uploaded nothing for its whole life.
 - **§26 channels root cause, measured.** The verdict has TWO readers:
   `failed_units()` honours `$APEX_TRUST_ROOT`; `recover::health_rows()` is
   `Sys::from_env()` and honours `$APEX_RECOVER_ROOT`. The fixture set only the

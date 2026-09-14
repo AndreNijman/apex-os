@@ -131,7 +131,7 @@ suite and a mutation pair.
 | multiple layouts | **greeter DONE** | `test-apex-greet-layout.sh` "both configured layouts survive extraction" / "a three-layout machine reports all three in order". Nothing in the desktop shell switches layouts yet. |
 | IME / fcitx5 | present in image, untested | `Containerfile.core:1182-1189` installs fcitx5 + chinese-addons/hangul/anthy/m17n; autostarted in 3 places. `QT_IM_MODULE`/`GTK_IM_MODULE` deliberately unset (Wayland text-input-v3). No suite asserts any of it. |
 | CJK | **MEASURED, and the old claim was false** | The ledger carried "fonts present, shell will tofu" from round 1 to round 19 on an argument that was never run: ~45 sites hardcode `font.family: "JetBrains Mono"`, that family has no CJK coverage, therefore tofu. Both premises are true and the conclusion does not follow — `QFontEngineMulti` asks fontconfig for a font that owns the glyph. `tests/run-i18n-test.sh` section 5, 7 assertions: 漢 advances **32** under JetBrains Mono, matching a family that covers U+6f22 and not JetBrains Mono's own **19.1875**, which is asserted first because the whole discriminator rests on that family being monospaced. **On two machines** — the same 32 on the GitHub Arch runner against Noto Sans CJK HK. |
-| RTL | **the LAYOUT is absent; "the image cannot render it" was wrong** | apex-shell: 0 `LayoutMirroring`, 0 `layoutDirection`, re-checked round 20 — that half stands and is the real gap. The rendering half does not. Measured through the engine: Arabic ا falls out of JetBrains Mono to **DejaVu Sans Mono** (19.265625), Hebrew א to **DejaVu Sans** (21.390625), Thai ก to **Droid Sans Thai** (19.75), Devanagari अ to **Droid Sans Devanagari** (24.453125) — all four image-owned rpms on this deployment, none of them JetBrains Mono's own 19.1875. So the image renders them; nothing mirrors the UI. The Noto families really are absent, which is a quality question, not a tofu one. |
+| RTL | **the shared settings surface MIRRORS and is mutation-proved; the WINDOW ROOTS still do not** | apex-shell: **2 components declare mirroring** (`CfgRow`, `CfgScroll`) and **0 of 14 window roots** do — the 0 is the honest remaining half and is pinned in both directions by R4. `tests/run-rtl-test.sh` is **30 passed / 0 failed / 0 skipped** under `env -i`, and `tests/mutate-rtl.sh` is **13 mutants, 13 CAUGHT, 0 survived, 0 misscored** (round 25). The round-20 note said 0 `LayoutMirroring` and 0 `layoutDirection`; The rendering half does not. Measured through the engine: Arabic ا falls out of JetBrains Mono to **DejaVu Sans Mono** (19.265625), Hebrew א to **DejaVu Sans** (21.390625), Thai ก to **Droid Sans Thai** (19.75), Devanagari अ to **Droid Sans Devanagari** (24.453125) — all four image-owned rpms on this deployment, none of them JetBrains Mono's own 19.1875. So the image renders them; nothing mirrors the UI. The Noto families really are absent, which is a quality question, not a tofu one. |
 | locales / timezones | **keyboard + timezone DONE, LOCALE still not offered** | The installer now collects keyboard and timezone and the engine honours both (above). **Locale is deliberately still not offered**, and this is a decision, not an omission: `Containerfile.core:809` installs **`glibc-langpack-en` only**, so a free locale picker would let a user choose one that silently degrades to `C.UTF-8` on the installed system — a worse failure than not asking, because it looks like it worked. Closing this row means adding langpacks to `Containerfile.core` first, then a picker restricted to what the target actually ships. Named, not faked. |
 | translated installer | **not present** | 0 `qsTr`/gettext in `installer/`. The installer is GTK4/Python, so its route is gettext, not Qt — a separate pipeline from the one proven below. |
 | translated shell | **pipeline PROVEN on TWO machines; the blocker is the HOST, not `src/`** | `tests/run-i18n-test.sh` — **23 assertions here, 15 passed / 0 failed / 5 skipped on the GitHub Arch runner** (run 34700588997), where every earlier round had it on one laptop. **Round 20 moved the named gap from a grep to a measurement.** It was "no QTranslator anywhere in `src/`", which reads like an omission a line of QML could fix; QTranslator is C++ and is not a QML type, so no file under `src/` can install one. Asked of the hosts instead, with the control in the same run: `libQt6QuickTest` — the host section 3 watches translate — calls QTranslator 4 times; `/usr/bin/quickshell` calls it 0 times, calls `installTranslator` 0 times, and never constructs a `QQmlApplicationEngine`, which is where libQt6Qml's automatic `i18n/qml_<lang>.qm` loader lives. Closing the row needs a translator installed INTO the engine: upstream in quickshell, or a QML extension module whose `initializeEngine()` does it. Earlier detail: all four links run with the real tools on a shipped file; `qsTr()` marks 5 strings in `AgentHelpContent.qml`; `lupdate-qt6` extracts exactly 5 into the right context; `lrelease-qt6` compiles `translations/apex-shell_de.ts`; and a **running QML engine under `qmltestrunner -translation`** reads the German back off the live singleton. The load-bearing assertion is the sensitivity one — the SAME fixture runs with and without `-translation` and the two must DISAGREE; three independent strings are sampled so one lucky match cannot carry it. |
@@ -1507,17 +1507,33 @@ for apex-shell's `pr-validation.yml` parity step, as it must.
 
 ## NEXT
 
-**One line, and it is the load-bearing part of this card:** in
-`/var/tmp/apex-work/wt-p2-b4-sh` on `task/p2-b-round23` (clean, pushed at
-`bc60a19`), run `./tests/mutate-rtl.sh` and read all THIRTEEN verdicts — R1 must
-now be CAUGHT by `test_040` on `row2` in the RTL pass, R12 by `test_060` in the
-RTL pass and R13 by `test_060` in the LTR pass; anything that SURVIVES, read
-"what the suite said instead" BEFORE touching code, because three times in this
-unit a SURVIVED verdict was the harness `want` string being wrong (I2, B2, F3-F5)
-rather than the mutant living.
+**One line:** in `/var/tmp/apex-work/wt-p2-b4` (apex-os, `task/p2-b-round23`,
+clean at `fdf0a8e6`, NO commits this round), write the guard that asserts the
+IMAGE sets `QT_QPA_PLATFORMTHEME=qt6ct` — **`Containerfile.core:2030`** (the
+card's earlier `:948` is stale; v2.2 has moved) appends it to `/etc/environment`
+and `files/desktop/labwc/environment:22` sets it again — with a mutation pair,
+because round 23 measured that this theming line is the whole mechanism by which
+the shell mirrors at all.
 
-Run it in the background and redirect to a file: 14 suite runs, each starting
-two `qmltestrunner` passes.
+**Checked, not assumed, and the honest version is narrower than "nothing asserts
+it":** `tests/test-apex-ai-apps.sh:254` greps `printf 'QT_QPA_PLATFORMTHEME` to
+LOCATE the /etc/environment line, then asserts `ELECTRON_OZONE_PLATFORM_HINT`
+and `DISABLE_AUTOUPDATER` on it. So deleting the variable does go red — with a
+message about Electron and AI apps, in a suite nobody would read for a
+right-to-left regression, and only because it happens to be a grep anchor.
+Changing its VALUE (`qt6ct` -> anything) is caught by nothing at all, and that
+is the change that silently un-mirrors the shell. `files/desktop/labwc/environment`
+is unguarded outright. `run-rtl-test.sh` does check the live value, but only on
+a booted APEX host — it SKIPs on the CI runner, so the one repository that can
+break this has no guard that names the consequence.
+
+Avoid the M7 trap when writing it: a bare `grep -q QT_QPA_PLATFORMTHEME` passes
+on the comment in `files/system/qt6ct/qt6ct.conf:3`. Extract the assignment and
+assert the VALUE, and make the mutant change `qt6ct` rather than delete a line.
+
+**The RTL mutation round is CLOSED** — 13/13 caught, 0 survived, 0 misscored,
+suite 30/0/0 under `env -i`, everything pushed through `acf4879`. Do not re-run
+it to check.
 
 ### The standing queue
 

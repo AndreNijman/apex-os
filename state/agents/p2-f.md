@@ -5,7 +5,43 @@ worktree: /var/tmp/apex-work/wt-p2-f
 branch: task/p2-f-3   (cut from origin/roadmap/v2.2 @ 13d53c01)
 
 ## NEXT
-ROUND 3 IN PROGRESS. Round 2's branch `task/p2-f-2` landed as `f2229185`.
+Add `supersedes_credentials: bool` to `OperationSpec` (mandatory, no Default —
+mirrors `same_everywhere`), `false` at every existing literal, then
+`Bound::replaces: Vec<String>` + `Performed::replaced: Vec<Replaced { name,
+value }>` in `apex-secretd/src/provider.rs`.
+
+## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
+1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
+2. **`replaces` is a `Vec`, not an `Option`.** RFC 6749 §6 lets the server issue
+   a NEW refresh token, and Wrangler writes one back — so assume Cloudflare
+   rotates. Storing only the new access token would leave the old refresh token
+   dead at the server and the account broken until `apex cf connect`. So a
+   refresh replaces TWO credentials: `cloudflare` (access) and
+   `cloudflare-refresh` (the rotated refresh).
+3. **`Replaced { name: String, value: SecretValue }` — value-only, on purpose.**
+   No host, no scheme, no username: the framework reuses the EXISTING
+   `ServiceInfo` and swaps the value, so a refresh structurally cannot repoint
+   a credential's pin. That is a property of the type rather than a check.
+   `store.put` overwrites in place and leaves grants/approvals alone (verified
+   in `store.rs`), so no new store method and no window with no credential.
+4. Framework checks in `service.rs`, mirroring the `creates` block: name is
+   `valid_service_name`; the name must ALREADY EXIST (a replace of a missing
+   name is a `creates` that skipped the free-name check); `!replaces.is_empty()
+   && !may_supersede_credentials(op)` refuses; post-perform each returned name
+   must be in the declared set; `replaced` values join the `scrub_all` slice —
+   a token endpoint's reply IS the secret.
+5. `oauth` provider: copy `s3/mod.rs::call`'s curl-config pattern into
+   `broker::run_curl`. `api::call` cannot be reused (hardwired `/client/v4` and
+   a Bearer header, no form body). Needs a `#[cfg(test)]` table-injection point
+   like `CloudflareProvider::at(port)`, because a loopback double is
+   `127.0.0.1` and `oauth_for_auth_host("127.0.0.1")` is `None` by design.
+6. `same_everywhere: false` on the refresh op — `true` would drag it into the
+   two-projects bind fixture, which is MCP-shaped and panics on a bind failure.
+7. Check whether `apex cf refresh` can pass the per-project grant check at all,
+   or whether `cf connect` must record the grant when it stores the refresh
+   token. That answer decides what `cloudflare.rs:681`'s status line says.
+
+Round 2's branch `task/p2-f-2` landed as `f2229185`.
 
 **Round 3's queue changed on the first look, and this is the reason:**
 **item 1 of round 2's list — the S3/R2 SigV4 signer — WAS BUILT BY ANOTHER
@@ -53,15 +89,11 @@ Round 3, on task/p2-f-3 (pushed):
   c224eea7  a scope may not name an operation no provider offers — the
             cross-crate gate in apex-secretd, both mutants run and red.
 
-## IN PROGRESS (round 4 — fresh agent, predecessor died holding this)
-- `apex-secret-core/src/account.rs`, UNCOMMITTED when round 4 started: the OAuth
-  vocabulary (`ClientSecret`, `OAuth`, `GOOGLE_OAUTH`/`MICROSOFT_OAUTH`/
-  `CLOUDFLARE_OAUTH`, `OAUTH`, `oauth_for_auth_host`, `Provider::oauth`,
-  `Provider::validate`, `AccountRef::refresh_service`). **It compiles and has
-  ZERO tests** — `validate()`, `oauth_for_auth_host()` and `refresh_service()`
-  have no callers at all, which is this repo's dominant defect family (a gate
-  that inspects nothing). Round 4 keeps it and writes the tests before
-  committing.
+## IN PROGRESS (round 4)
+- Next up, nothing written yet: `OperationSpec::supersedes_credentials` (a
+  mandatory static bool, ~60 literal sites, mechanical) + `Bound::replaces:
+  Vec<String>` / `Performed::replaced: Vec<Replaced>` + the framework checks in
+  `apex-secretd/src/service.rs` + the `oauth` provider. See ROUND 4 PLAN.
 
 ## FOUND
 - **`5054be77` landed the S3 provider and SigV4 signer.** Round 2's card
