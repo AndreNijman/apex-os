@@ -5,25 +5,16 @@ worktree: /var/tmp/apex-work/wt-p2-f
 branch: task/p2-f-3   (cut from origin/roadmap/v2.2 @ 13d53c01)
 
 ## NEXT
-Round 5 commit 3: write `apexd/apex-secretd/src/providers/oauth.rs` — an
-`oauth` provider offering `oauth.token.refresh` (`Effect::Write`,
-`ResourceKind::None`, no params, `same_everywhere: false`,
-`supersedes_credentials: true`); `bind` routes by
-`account::oauth_for_auth_host(&req.service.host)` and NOTHING the caller
-said, endpoint `https://<auth_host>`, `replaces` = the access-credential
-name derived from `req.service.service` plus that name itself; `perform`
-POSTs `grant_type=refresh_token&refresh_token=…&client_id=…` as
-`data-urlencode` lines in a curl config on stdin via `broker::run_curl`,
-copying `providers/s3/mod.rs::call`'s config pattern (NOT
-`cloudflare/api::call` — it hardwires `/client/v4` and a Bearer header and
-takes no form body). Register it in `providers/mod.rs::default_registry`,
-add `"oauth.token.refresh"` to
-`the_shipped_registry_builds_and_offers_every_provider_s_vocabulary` and
-change the empty set in
-`the_set_of_operations_that_may_overwrite_a_stored_credential_is_spelled_out`
-to `["oauth.token.refresh"]`. Needs a `#[cfg(test)]` table-injection point
-like `api::Api::loopback(port)`, because a loopback double is `127.0.0.1`
-and `oauth_for_auth_host("127.0.0.1")` is `None` by design.
+Round 6 commit 1: add `apex cf refresh` (and/or `apex account refresh`) in
+`apexd/apex/src/cloudflare.rs` — send a `Use` for `oauth.token.refresh`
+against the stored `cloudflare-refresh` credential — and change
+`cloudflare.rs`'s status line that currently reads "a refresh token is
+stored too, and nothing spends it yet", which is now false. Before writing
+it, answer round-4 step 7 by READING `service.rs::use_capability`'s grant
+check: a `Use` needs a per-project grant, and `apex cf connect` records
+none for `oauth.token.refresh` — so either the CLI's own project counts,
+or `cf connect` must record that grant when it stores the refresh token.
+Whichever it is, say it in the status line.
 
 ## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
 1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
@@ -98,6 +89,17 @@ Remaining, in the order this round takes them:
   host to its token endpoint from a hard-coded table, which is pin-consistent.
 
 ## DONE
+Round 6 (round 27 of the program), on task/p2-f-3 (pushed):
+  33483c37  the `oauth` provider — RFC 6749 §6 against the server that
+            issued the token — registered in `default_registry`,
+            `oauth.token.refresh` added to the vocabulary test, and the
+            superseding set changed from EMPTY to exactly `["oauth.token
+            .refresh"]`. 11 provider tests against a loopback double that
+            parses the form body that actually arrived.
+            Full suite on the branch: 3235 passed / 0 failed / 2 ignored.
+            `clippy --workspace --all-targets -- -D warnings` exit 0.
+  0a8783e3  `account::renewed_service` + `REFRESH_SUFFIXES` — the inverse
+            of `AccountRef::refresh_service`, widened to `-refresh`.
 Round 5, on task/p2-f-3 (pushed):
   306e79e1  `Bound::replaces` / `Performed::replaced` / `Replaced { name,
             value }`, the five framework checks in `use_capability`,
@@ -112,10 +114,11 @@ Round 3, on task/p2-f-3 (pushed):
   c224eea7  a scope may not name an operation no provider offers — the
             cross-crate gate in apex-secretd, both mutants run and red.
 
-## IN PROGRESS (round 5)
-- `git status` run: worktree CLEAN at `306e79e1` (commit 2 pushed).
-  Nothing half-written.
-- About to touch: a NEW file `apexd/apex-secretd/src/providers/oauth.rs`.
+## IN PROGRESS (round 6)
+- `git status` run: worktree CLEAN at `33483c37`, pushed. Nothing
+  half-written. Round 5's commit sequence is FINISHED through step 3.
+- About to touch: `apexd/apex/src/cloudflare.rs` (the status line and a
+  `refresh` verb). Nothing started.
 
 ## ROUND 5 COMMIT SEQUENCE (settled with the advisor)
 1. ~~`supersedes_credentials` + the 64 `false` literals + the registry test~~
@@ -126,8 +129,7 @@ Round 3, on task/p2-f-3 (pushed):
    dead-code warning, so it lands with its caller.
 2. ~~`Bound::replaces` / `Performed::replaced` / `Replaced` + the framework
    checks + the `Replacer` test provider~~ **DONE, `306e79e1`, pushed.**
-3. the `oauth` provider + a loopback double: rotated refresh (two `Replaced`),
-   non-rotated (one), non-2xx, a token carrying `"` / `\` / newline.
+3. ~~the `oauth` provider + a loopback double~~ **DONE, `33483c37`, pushed.**
 4. `apex cf refresh` + the `cloudflare.rs` status line + the step-7 answer.
 
 ## FOUND
@@ -148,6 +150,13 @@ Round 3, on task/p2-f-3 (pushed):
 
 ## BLOCKED ON
 (nothing)
+
+## FLAKE, not a regression — do not chase it
+`apex-secretd`'s `tests::a_stale_socket_from_a_dead_daemon_is_replaced`
+failed once in a full `--workspace` run and passed 3/3 when run alone. It
+is the known apex-os "suites interfere in a sequential loop" family; the
+socket staleness probe races another suite's `/tmp` socket. Re-run it
+alone before believing it.
 
 ## NOTE — card/dispatch mismatch, unresolved on purpose
 Round 2's dispatch also named **P2-016**, whose evidence belongs to unit

@@ -5,131 +5,71 @@ branch: task/followups-5
 repo: apex-os
 
 ## NEXT
-Read run 34803818557's `Package engine` job (dispatched 03:47Z on `479105b6`,
-so it does NOT contain the vm or mux fixes) to confirm the six fixed steps went
-green; then dispatch a fresh run on the tip and work the two INTERMITTENT reds
-— `Run labwc keybind generator assertions` (red only on 34796578198) and `Run
-terminal layout template assertions` (red only on 34802332142, one FAIL: the
-zellij tab is "Tab #1" not "apex", i.e. `zellij --layout-string` did not land).
+Sweep the tree for `PRODUCER | grep -q` under `set -o pipefail` where the
+producer can be SIGPIPEd (tar/cat/find/journalctl/large printf) — the
+mirror-image defect fixed as `94a3a2ac`. Then read run 34814935040 (the tip
+run on `654fa854`, dispatched 06:47Z by the landing push, in flight) and
+confirm `Run virtualization assertions` went green — `df6c4797` is IN it.
 
 ## DONE
+- **ROUND 27 VERIFICATION, read out of run 34803818557 job 103851638407
+  (`Package engine`, on `479105b6`): 62 steps green, ONE red.** All seven
+  persistent engine reds are FIXED AND CONFIRMED ON THE RUNNER, with counts
+  byte-matching what I measured locally:
+  `inject 48/0`, `worktrees 61/0`, `disposable 58/0`, `profile 48/0`,
+  `secret-broker 66/0` (= `bd69bb2f`, 188 assertions that had never run),
+  `shell-agent 58/0` (= `5229bef4`), `root-approval 20/0` (= `479105b6`).
+  The single red is `apex-vm: 74 passed, 60 failed` — the run predates
+  `df6c4797`, which is the fix, so this is expected, not a regression.
+  BOTH intermittents were GREEN on this run: `labwc-keybind-reload 18/0`
+  and `mux-layouts 46/0`.
 - `df6c4797` test(vm): the one probe that could not be faked with $PATH read
-  the host. PUSHED. All 60 virtualization FAILs were `require_stack`'s
+  the host. PUSHED+LANDED. All 60 apex-vm FAILs were `require_stack`'s
   `have_kvm` reading the real /dev/kvm, in a suite that fakes virsh/qemu-img/
-  lsusb/swtpm through $PATH and whose subject is the domain XML — a pure
-  function needing no hypervisor. Now `KVM_NODE="${APEX_VM_KVM:-/dev/kvm}"`,
-  the idiom `tests/vmlab/run-vmlab` already used (`APEX_VMLAB_KVM`). Five new
-  assertions drive the guard's other direction in the same run, and reverting
-  `have_kvm` to the literal turns four of them red, so they are not vacuous.
-  Measured: before 133/0 here and **74/60** without a usable node (the runner's
-  own line); after 138/0 in BOTH.
+  lsusb/swtpm through $PATH and whose subject is the domain XML. Now
+  `KVM_NODE="${APEX_VM_KVM:-/dev/kvm}"`. Local: before 133/0 here and
+  **74/60** without a node — the runner's own line, now confirmed identical
+  on the runner — after 138/0 in BOTH.
 - `479105b6` test(root-approval): `mount --bind` cannot create a target only
-  APEX machines have. PUSHED. `/usr/libexec/apex-pkg` is `ops::PKG_ENGINE`;
-  ubuntu-24.04 has no such file, so the stub bind died and took the 8
-  after-the-engine assertions with it. Now the DIRECTORY is mirrored and bound,
-  one code path. **Near-miss caught and recorded**: the first version `cp`'d
-  the stub over a mirrored SYMLINK to the real engine — it failed here only
-  because /usr is ro, and would have overwritten the shipped engine on any rw
-  /usr, i.e. on every runner. Measured: absent-target before 13/8 (the runner's
-  own line), after 20/0; plain here 20/0; the new `cmp -s` guard fires 13/8
-  rc=1 naming itself. Runner reproduced with `./tests/in-login-session.sh
-  bwrap --dev-bind / / --tmpfs /usr/libexec -- ./tests/test-root-approval.sh`.
-- `5229bef4` test(shell): the guard asked the ambient PATH, the assertions a
-  scrubbed one. PUSHED. All 23 nushell FAILs were `env -i
-  PATH="${BIN}:/usr/bin:/bin"` missing `/usr/local/bin`, where CI installs
-  `nu`; `command -v nu` two lines up said it was there. Now symlinked into
-  `${WORK}/shells`, appended last, and the guards read `[ -x "${SHELLS}/nu" ]`.
-  **Four directions**, the runner's split reproduced with `bwrap --ro-bind
-  <non-exec file> /usr/bin/nu`: before 34/23/1 — the runner's own line exactly
-  — after 58/0/0; nu absent 33/0/1 rc=0 loud skip; plain here 58/0/0.
+  APEX machines have. Mirror the DIRECTORY and bind it. Runner now 20/0.
+  Near-miss recorded: v1 `cp`'d a stub over a mirrored SYMLINK to the real
+  engine; safe here only because /usr is ro, would have eaten the shipped
+  engine on every runner.
+- `5229bef4` test(shell): guard asked the ambient PATH, assertions a scrubbed
+  one. 23 nushell FAILs were a missing `/usr/local/bin`. Runner now 58/0.
 - `bd69bb2f` test(agent): five engine suites stopped at the first session CI
-  could not place. PUSHED. inject/worktrees/disposable/profile/secret-broker
-  now re-enter through `tests/in-login-session.sh`, the block
-  test-privilege-requests.sh already carried. **Both directions measured in the
-  runner's own cgroup shape** (`sudo systemd-run --uid=1000 --unit=… --pty` →
-  `0::/system.slice/<unit>.service`, uid 1000): without the wrapper
-  2/1, 5/1, 3/1, 28/1, 55/1 — byte-identical to the runner's five logs — and
-  with it 48/0, 61/0, 58/0, 48/0, 66/0. **188 assertions that had never run.**
+  could not place; they now re-enter through `tests/in-login-session.sh`.
+- `94a3a2ac` ci(chaos): the archive guard failed exactly when the path WAS
+  present — `tar -tzf A | grep -q P` under pipefail. LANDED.
 - `13e7ec84` ci: 93 `run:` steps carry `if: ${{ !cancelled() }}`. LANDED.
-  **It worked, and it is the round's biggest win**: run 34795907584 shows all
-  22 rust steps past `Tests` and *eight* engine reds instead of one. The reds
-  below were invisible before it.
-- `69ef58cf` fix(ci): a path inside a grep PATTERN is not a read. LANDED and
-  **confirmed**: `Static validation` is ✓ on 34795907584 (1m3s), X before.
-- `cf7722d9` fix(test): the channel fixture read the real `/proc/mounts`.
-  PUSHED. Local: 59 passed / 0 failed `--with-binary`.
-- `2a8ada6f` test(verbs): `apex browser` added to the enumerated list.
-  PUSHED. Local: 65 passed / 0 failed.
-- `c07574b7` ci(chaos): pack the bundles to a tar before upload. PUSHED.
-- `9df69d6b` merge of `origin/roadmap/v2.2` (fdf0a8e6). Rebuilt and re-ran
-  after it: verbs 65/0, channel 59/0 binary + 22/0 structural. Both files
-  clean under `shellcheck -S warning`.
+- `69ef58cf` / `cf7722d9` / `2a8ada6f` / `c07574b7` — see git log.
 
 ## IN PROGRESS
-- run 34802332142 (round 26, branch tip `94a3a2ac`). **Static ✓ all 28 steps.
-  Rust ✓ all 41 steps** — `Pack the chaos bundles` ✓ and `Chaos diagnostics` ✓,
-  the first time either has been green. Engine still running; nine reds so far.
-- Working the engine reds down, in order. Family A (5 steps) DONE, see above.
-  **All 7 PERSISTENT engine reds are fixed** (red on all three of runs
-  34795907584 / 34796578198 / 34802332142). The other two are INTERMITTENT and
-  are each one assertion: labwc keybind generator, terminal layout template.
+- Sweeping `| grep -q` under pipefail across the tree (558 raw hits; filtering
+  to SIGPIPE-able producers in pipefail scripts).
+- Run 34814935040 on tip `654fa854` in flight: Static ✓, Android ✓, Rust and
+  Package engine still running.
 
 ## FOUND
-- **THE 1 → 8 IS NOT A REGRESSION I CAUSED.** `13e7ec84` (`!cancelled()`) is
-  why the engine job now reports EIGHT red steps where it used to report one,
-  and rust three where it used to report one. Those failures were always
-  there; the job stopped before reaching them. A red step used to switch off
-  every step below it, so the count was never a count of defects — it was a
-  count of *how far the job got*. Read the rise as visibility, not decay.
-- **THE GENERAL CLASS, three instances of it this round.** A gate that reads
-  state belonging to the environment it happens to run in is green wherever
-  that environment agrees with the author's and red wherever it does not, and
-  neither colour means what it says:
-  1. **§26 channels** — the fixture leaked to the real `/proc/mounts`. A
-     GitHub runner mounts `/usr` **rw**; this L16 mounts it **ro**. Green
-     here, red there, indefinitely, and no amount of local re-running finds it.
-  2. **Input page parity** — the comparison target is chosen by BRANCH NAME,
-     and the fallback is the other repository's DEFAULT branch. apex-shell has
-     no `task/*` twin for most branches, so the gate compares an integration
-     branch against `main` and reports drift that is not there. Here the
-     "second environment" is another repo's default branch. Measured: vs
-     apex-shell `main` → rc=1, two touchpad defaults; vs apex-shell
-     `roadmap/v2.2` → rc=0, "22 settings, identical keys and defaults".
-     The step's OWN comment complains about exactly this misfire and then
-     leaves the fallback doing it.
-  3. **Chaos diagnostics** — the upload asserted nothing about what it
-     uploaded, so it uploaded nothing for its whole life.
-- **§26 channels root cause, measured.** The verdict has TWO readers:
-  `failed_units()` honours `$APEX_TRUST_ROOT`; `recover::health_rows()` is
-  `Sys::from_env()` and honours `$APEX_RECOVER_ROOT`. The fixture set only the
-  first, so the `filesystem` row read the REAL `/proc/mounts`. A GitHub runner
-  mounts `/usr` **rw** → Attention → "a healthy machine is not held" fails.
-  This L16 mounts `/usr` **ro** (`sysext /usr overlay ro,...`), so the defect
-  **cannot exist here** — it was green locally and red on the runner for a day.
-  Both directions: fixture ro → 57/0; fixture rw → 56/1 "a healthy machine was
-  held". The runner's own log is byte-identical: `56 passed, 1 failed`.
-- **The predecessor's `why()` helper was inert.** It read `["reasons"]`, the
-  flat shape of `apex channel report --json`; `status --json` nests it at
-  `health.reasons`. Every call returned `error:'reasons'` — a diagnostic that
-  diagnosed nothing, in the arm that had just spent a day red naming no row.
-  Fixed, wired in, and asserted: mutating the key back turns 59/0 into 57/2.
-- **`Chaos diagnostics` has never uploaded a byte.** `upload-artifact@v4`
-  refuses any path with a colon (NTFS), and `tests/chaos/lib.sh:499` writes
-  `sys/bus/pci/devices/0000:03:00.0/class` into the fixture the bundle
-  snapshots. The chaos RUN passed 4/4; the upload then failed the whole rust
-  job. Its own preamble says "a diagnostic that only exists inside a finished
-  runner is not one" — that was its own condition. Now tarred, and the pack
-  step refuses an empty archive or one missing the colon fixture. Four
-  directions measured; a real local bundle packs 194 paths / 16K and the colon
-  path extracts back out byte-for-byte.
-- **`apex browser` was in the binary and not in `test-apex-verbs.sh`'s list.**
-  The gate working as designed — the list is deliberately enumerated.
-- **Static is fully green.** `Input page and generator agree` also went green
-  on 34795907584 — somebody else's fix, not mine.
-- **Engine has EIGHT reds** on 34795907584 (job 103828863057), newly visible:
-  virtualization, file-injection, worktree-status, disposable-capsule,
-  root-approval, agent-profile, fish/nushell agent-integration, secret-broker.
-  Six are agent-related and may share one cause. Being trawled.
+- **THE 1 → 8 IS NOT A REGRESSION.** `13e7ec84` (`!cancelled()`) is why the
+  engine job reports EIGHT/NINE red steps where it used to report ONE. A red
+  step used to switch off every step below it, so the count was never a count
+  of defects — it was a count of how far the job got. READ THE RISE AS
+  VISIBILITY, NOT DECAY. It is now vindicated: the same job on `479105b6`
+  runs all 63 steps and reports 62 ✓ / 1 X.
+- **TWO SUITES REPORT `0 passed, 0 failed` ON THE RUNNER** — the dominant
+  defect family, a gate that runs and inspects nothing: `hypr-lua: 0 passed,
+  0 failed` and `input-live: 0 passed, 0 failed`. Both are ✓ steps. Under
+  investigation.
+- **The intermittents are environmental, not flaky-by-race.** Both were green
+  on 34803818557 and each was red on exactly one earlier run.
+- **THE GENERAL CLASS** — a gate that reads state belonging to the environment
+  it runs in: (1) §26 channels leaked to the real `/proc/mounts` (runner /usr
+  rw, L16 ro); (2) Input-page parity picked its comparison target by BRANCH
+  NAME, falling back to the other repo's `main`; (3) Chaos diagnostics
+  uploaded nothing for its whole life.
+- **A result must be read out of a gate's LOG, not off a pipeline's exit
+  code.** `cargo test … | tail -60` reports `tail`'s 0 over a truncated log.
 - P3 labwc CLOSED (run 34717723637). **77 steps gated, not 45.**
 
 ## BLOCKED ON

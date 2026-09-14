@@ -1711,3 +1711,123 @@ and `p2-c`'s `NEXT` asked for the commit it had already landed.
 `dispatch.json`'s `_field_contract` was also violated by round 25: `p2-b`'s
 `worktree` held `"a + b"`, so four consecutive reports said **"no worktree"** for
 a worktree that was fine. Fixed to `worktree`/`second_worktree`.
+
+## Round 27 — 2026-09-14, 14:40–15:15 AWST
+
+Seven branches landed (six apex-os, one apex-shell), five status records, one
+unit closed by hand, one unit released from a two-round hold, six fresh agents
+at the ceiling. **`done` moved 90 → 91** — the first status advance in three
+rounds, and `todo` is still zero: 91 done / 35 partial / 0 todo / 2 blocked.
+
+### The killer is not the lid — it is hypridle's 15-minute idle timeout
+
+Round 26 recorded the lid closing at 09:45:17 and correctly called it "P1-063
+happening to the program that is building P1-063". That diagnosis was right for
+*that* death and wrong as a general theory, and the difference matters because
+the fix is different.
+
+`journalctl --list-boots` for today reads: boot −3 ends 12:06:24 in a **clean
+reboot**; boot −2 (12:14–12:19) and boot −1 (13:35–14:32) **both** end at
+`systemd-sleep: Performing sleep operation 'suspend'` → `PM: suspend entry
+(s2idle)`, and the resume never comes. **Neither has a `Lid closed` line
+anywhere in the journal.** What does exist is the last listener in
+`~/.config/hypr/hypridle.conf`:
+
+```
+# 15 min — suspend.
+listener {
+    timeout = 900
+    on-timeout = loginctl suspend
+}
+```
+
+Fifteen minutes with no input suspends this machine, and s2idle does not come
+back on this hardware. **An orchestrator waiting on agent notifications is
+exactly "no input".** So the program has been killing itself on a timer, three
+times today, and a lid inhibitor would not have saved a single one of round 26's
+six agents.
+
+Mitigation held for this round, session-scoped and self-limiting:
+`systemd-inhibit --what=sleep:idle --mode=block` for 8 h, which auto-releases and
+reverts the moment the holder dies. Verified rather than assumed —
+`busctl call … CanSuspend` answers `"challenge"`, not `"yes"`.
+
+**It deliberately does not cover the lid.** `LidSwitchIgnoreInhibited` defaults
+to `yes`, so a lid close bypasses a `sleep` inhibitor entirely; only a
+`handle-lid-switch` block stops it, which is exactly why P1-063's design names
+that primitive. That block was **not** taken, because P1-063's own design says
+the thermal guard is mandatory and it has not shipped — a laptop that never
+suspends in a bag is an oven. Do not read this run as lid-safe.
+
+The honest framing for P1-063: the item is about the lid, the thing killing the
+program is the idle timeout, and they are adjacent rather than identical.
+
+### The finding of the round, committed by the orchestrator against itself
+
+The first gate run of the round was `cargo test --locked --workspace
+--no-fail-fast 2>&1 | tail -60`, backgrounded. It came back **exit 0**. The exit
+code belonged to `tail`. The log it left was 70 lines long, its `test result`
+lines summed to **26 tests**, and the real run was **3235**.
+
+Without `pipefail`, a pipeline's status is the *last* command's, so a gate read
+off the end of a pipe is a gate that inspects nothing — the same family as round
+26's `tar | grep -q` under pipefail, with the sign flipped a second time. Re-run
+to a file with the status captured explicitly, then read the result out of the
+file:
+
+```
+{ cargo test … > LOG 2>&1; echo "CARGO_EXIT=$?" >> LOG; }
+```
+
+3235 passed, 0 failed, 2 ignored, `CARGO_EXIT=0`, up from 3218 — read out of a
+3564-line log, and only then pushed.
+
+A second instance of the same carelessness, caught before it set: the first four
+evidence strings were written with **merge SHAs the orchestrator had invented**
+rather than read from `git log`. They were replaced with the real ones
+(`d3ad8f7d`, `8968135b`, `769e4fc2`, `de78631e`) and the file re-checked for any
+placeholder remaining. Never write a sha you have not read.
+
+### Cards lagged their commits again — but optimistically, for once
+
+Every previous round found cards claiming a clean tree over uncommitted work.
+This round `later`'s `NEXT` claimed **more** work outstanding than there was: it
+said `later-r4-luks-s3` "IS RUNNING" and that `luks-tpm-clear` had never
+completed end to end.
+
+All four boot-lab containers had finished before the 12:06 reboot. The
+orchestrator collected them instead of re-running anything, checking
+`State.FinishedAt` on each so round 26's `finished=0001-01-01` artifact could not
+recur:
+
+| container | finished | result |
+| --- | --- | --- |
+| `later-r3-luks-tpm-clear` | 11:41:25 | **20 passed, 0 failed — complete end to end** |
+| `later-r3-luks-firmware-change` | 11:40:57 | 18 passed, 0 failed, 1 could-not-run |
+| `later-r3-luks-s3` | 11:43:21 | 4 passed, 1 failed |
+| `later-r4-luks-s3` | 11:53:15 | 6 passed, 0 failed, 1 could-not-run |
+
+**Two of the three scenarios that card calls outstanding are done.** Only the
+QMP waker in `luks-s3` has still never executed. The card was corrected in place
+before the fresh agent was dispatched onto it.
+
+The two still-uncommitted trees (`p2-c`'s 140 lines in `apex-devices`, `p2-f`'s
+`oauth.rs`) were left for their fresh agents as an ordered first action, as round
+26 did successfully for `p1-053c`.
+
+### p1-053c closed; p2-d released
+
+`P1-059` met all four criteria and is **done** — criterion 3 was the only one
+open and both halves are in. What remains on the unit is `P1-060` C1 and C2,
+which need a physical Android device or a working emulator, and this machine has
+neither (four consecutive emulator SIGSEGVs, measured across rounds 1–3). Same
+shape as `p1-038-hardware`: the work is real and it is not an agent's to do here.
+
+That closure freed the slot `p2-d` had been held two rounds for. The hold's
+reason is gone as well as its slot: p1-053c's round 6 **did not touch
+`protocol.rs` at all**, and `PROTOCOL_VERSION` still reads `8` on the landed tip,
+because the clipboard verbs deliberately did not bump — an older daemon answers
+`unparseable request`, which loses a feature and never a restriction. p2-d owns
+that file uncontended, is free to take 8 → 9 for Route-B capsule auth, and was
+told to announce the bump at the top of its card because other units rebase onto
+it.

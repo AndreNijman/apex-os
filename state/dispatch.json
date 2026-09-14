@@ -1,24 +1,24 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-14T11:35+08:00",
- "_round": "Round 26. TODO IS STILL ZERO: 90 done / 36 partial / 0 todo / 2 blocked of 128. ALL SIX of round 25's agents were dead when this session resumed, and for the first time the cause is KNOWN rather than inferred: THE LAPTOP LID CLOSED AT 09:45:17 AWST. journalctl -b -2 reads `systemd-logind[1254]: Lid closed.` -> `Suspending...` -> `PM: suspend entry (s2idle)`, the s2idle resume never came back, and a fresh boot started at 09:52:41 (`journalctl --list-boots`: boot -2 ends 09:45:17, boot -1 starts 09:52:41). Six agents and a live QEMU/swtpm TPM lab died mid-sentence. That is P1-063 happening to the program that is building P1-063. SIX BRANCHES LANDED (five apex-os, one apex-shell), six status records written, six fresh agents dispatched at the ceiling. THE FINDING OF THE ROUND, and it is a guard that inverted itself: `tar -tzf ARCHIVE | grep -q PATTERN` under `set -euo pipefail` FAILS WHEN THE PATTERN IS PRESENT. grep -q exits at its first match, tar dies of SIGPIPE, pipefail makes the pipeline non-zero. So followups-5's new chaos-archive check printed 'the fixture sysfs tree is not in the archive' over an archive containing it, one line after '194 paths packed', while the upload it guards succeeded at 16,173 bytes. The `n=$(... | wc -l)` line directly above it is correct for the mirror-image reason: wc reads to EOF, so tar never sees a closed pipe. Fixed as 94a3a2ac by materialising the listing, verified in all three directions. This is the 'a gate that runs and inspects nothing' family with the sign flipped, and it is worth grepping the tree for other `| grep -q` under pipefail. SECOND FINDING, unchanged and still true: CARDS LAG COMMITS. p1-053c's card said 'Nothing is uncommitted. The worktree is clean' while holding 165 uncommitted lines of the exact Android work its own NEXT described; later's NEXT said a container was 'RE-RUNNING' that had died 90 minutes earlier at 17 assertions. Check `git status` and the branch log before believing any card's NEXT.",
+ "updated": "2026-09-14T15:10+08:00",
+ "_round": "Round 27. TODO IS STILL ZERO and DONE MOVED 90 -> 91: 91 done / 35 partial / 0 todo / 2 blocked of 128. ALL SIX of round 26's agents were dead again, and THE CAUSE IS NOT THE LID THIS TIME — it is hypridle. journalctl --list-boots: boot -3 ended 12:06:24 in a clean reboot, boot -2 (12:14-12:19) and boot -1 (13:35-14:32) BOTH end at `systemd-sleep: Performing sleep operation 'suspend'` -> `PM: suspend entry (s2idle)` with no resume, and neither has a `Lid closed` line anywhere in the journal. ~/.config/hypr/hypridle.conf's last listener is `timeout = 900 / on-timeout = loginctl suspend`: FIFTEEN MINUTES OF NO INPUT SUSPENDS THE MACHINE, and s2idle does not come back on this hardware. An unattended autonomous run cannot survive that, and an orchestrator waiting on agent notifications is exactly 'no input'. MITIGATION HELD THIS ROUND: a session-scoped `systemd-inhibit --what=sleep:idle --mode=block` for 8h (auto-releases; reverts if the holder dies). Verified rather than assumed — `busctl ... CanSuspend` answers \"challenge\", not \"yes\". IT DELIBERATELY DOES NOT COVER THE LID: LidSwitchIgnoreInhibited defaults to yes, so a lid close bypasses a `sleep` inhibitor and only a `handle-lid-switch` block would stop it. That block was NOT taken, because P1-063's own design says the thermal guard is mandatory and it has not shipped — a laptop that never suspends in a bag is an oven. DO NOT ASSUME THIS RUN IS LID-SAFE. SEVEN BRANCHES LANDED (six apex-os, one apex-shell), five status records written, one unit closed by hand, six fresh agents dispatched at the ceiling. THE FINDING OF THE ROUND, and the orchestrator committed it against itself: `cargo test ... | tail -60` REPORTED EXIT 0 FROM `tail`, over a log truncated to its last 60 lines, which summed to 26 tests. The real run was 3235. Without pipefail the exit status of a pipeline is the LAST command's, so a gate read off the end of a pipe is a gate that inspects nothing — the same family as round 26's `grep -q` under pipefail, with the sign flipped again. Re-run to a file, then read the result out of the file. SECOND FINDING: CARDS LAG COMMITS, and this round they lagged in the OPTIMISTIC direction for once — `later`'s NEXT said a container 'IS RUNNING' and that luks-tpm-clear had never completed end to end. All four containers had finished before the 12:06 reboot; the orchestrator collected them instead of re-running anything, and luks-tpm-clear is COMPLETE AT 20/0. Two of the three scenarios that card calls outstanding are done. Always check `git status` and `podman inspect` before believing a card's NEXT.",
  "_landed_this_round": {
-  "apex-os": "roadmap/v2.2 fdf0a8e6 -> 2219ef75. FIVE merges, ZERO conflicts, check-no-conflict-markers.sh PASS after every one: task/later-tpm-qualification (e2345ed7, the first execution of luks-tpm-clear and the systemd no-op it found), task/p1-053c-clipboard (f253e882 + 9ff8308e + 114339c7, the clipboard receive verb, +1490), task/p2-c-2 (3ab3b6ce, `apex firewall status --json` and the prose-coupling defect, +514/-40), task/p2-f-3 (9e0a8c7d, the OAuth table a daemon-side refresh is routed by, +596/-6), task/followups-5 (cf7722d9, 2a8ada6f, c07574b7, cbb1f7b1 and the orchestrator's own 94a3a2ac). Verified ON THE LANDED TIP: cargo test --locked --workspace --no-fail-fast from int-os/apexd = 3218 passed, 0 failed, 2 ignored, exit 0 (up from 3189).",
-  "apex-shell": "roadmap/v2.2 a0b3deb -> acf4879. Fast-forward of task/p2-b-round23's remaining five commits (4e1ec25, 965609c, bc60a19, 1363af5, acf4879 — the RTL fixture repairs and the closed mutation round). check-no-conflict-markers.sh PASS. tests/run-rtl-test.sh re-run ON THE LANDED TIP, headless under -platform offscreen: 30 passed, 0 failed, 0 skipped — up from 28 last round and 13 the round before."
+  "apex-os": "roadmap/v2.2 2219ef75 -> 654fa854. SIX merges, ZERO conflicts, tests/check-no-conflict-markers.sh PASS after every one: task/p1-053c-clipboard (d3ad8f7d), task/p2-b-round23 (8968135b), task/p2-c-2 (769e4fc2), task/p2-f-3 (de78631e), task/followups-5 (527aa001), task/later-tpm-qualification (654fa854). Gated BEFORE the push, not after: cargo test --locked --workspace --no-fail-fast from int-os/apexd = 3235 passed, 0 failed, 2 ignored, CARGO_EXIT=0 — read out of a 3564-line log file, because the first attempt was piped through `tail -60` and reported tail's exit code. Also green on the landed tip: check-containerfile-assertions.sh (exit 0), test-containerfile-order.sh (24/0), test-apex-platform-theme.sh (18/0/0).",
+  "apex-shell": "roadmap/v2.2 acf4879 -> b7953e4. One merge, task/p2-c-2-shell (a585e4e, ded1ab1, c6c4f15, ae32f12), zero conflicts, check-no-conflict-markers.sh PASS. tests/check-firewall-ui.sh re-run ON THE LANDED TIP, headless: 35 passed, 0 failed — including 'the sweep reads the machine-readable status, not the prose' and 'an apex too old for --json still gets read, through a prose fallback'. The other 12 apex-shell branches with a non-zero ahead-count are pre-round-10 cherry-pick landings the report's content check already cleared; they were deliberately not touched."
  },
  "_status_recorded_this_round": {
-  "L-001": "partial - e2345ed7, with the systemd-cryptenroll no-op named and the run's honest limit stated: 17 assertions passed / 0 failed, then killed part-way through boot 3 of 4 by the lid closing. luks-tpm-clear has still never completed end to end; luks-firmware-change and luks-s3 have still never run once.",
-  "P1-059": "partial - the three clipboard commits; the OS half of criterion 3 is CLOSED, the Android half is not written, so the item stays partial.",
-  "P2-006": "partial - 3ab3b6ce, `apex firewall status --json` plus the prose-coupling defect, with the severity bounded honestly (unprivileged shell gets EACCES, so a user session does not hit it today; a root session does).",
-  "P2-017": "partial - 9e0a8c7d, the OAuth table reached only through oauth_for_auth_host(), which takes the host the credential was already pinned to and nothing the caller said.",
-  "P2-004": "partial - acf4879, run-rtl-test.sh 30/0/0 on the landed tip, mutation round closed 13/13, with the remaining half still pinned numerically (14 window roots, 0 mirror, 2 components declare mirroring).",
-  "P1-063": "partial - THE LID MEASUREMENT. The baseline half of criterion 1, which the 2026-09-13 note said could not be arranged: undocked, lid closed, no APEX inhibitor, the machine suspends and the work dies. The docking question is answered by logind's own behaviour - a lid close only reaches HandleLidSwitch=suspend when NOT docked, so the suspend firing IS the proof the external display was disconnected. What is still missing is the same lid close WITH the inhibitor held.",
-  "_method": "All six written with /var/tmp/apex-int5-logs/append-evidence.py, which reads existing evidence out of roadmap.yaml and concatenates. set-status.py REPLACES evidence and has no append flag. roadmap.yaml re-parsed clean after each: 128 tasks, 90 done / 36 partial / 2 blocked."
+  "P1-059": "partial -> DONE. All four criteria met; C3 was the only one open and both halves are in. Merge d3ad8f7d. This is the round's one status advance, 90 -> 91 done.",
+  "P2-004": "partial - merge 8968135b, test-apex-platform-theme.sh 18/0/0 on the landed tip with mutate-platform-theme.sh as its pair, closing the hole that changing QT_QPA_PLATFORMTHEME's VALUE was caught by nothing. Carries the qt6-qttranslations weak-dependency finding.",
+  "P2-006": "partial - merges 769e4fc2 (os) and b7953e4 (shell). The prose coupling is closed the RIGHT way: firewall.js consumes --json, so it structurally cannot return. check-firewall-ui.sh 35/0.",
+  "P2-017": "partial - merge de78631e, 908 insertions over 10 files with service.rs +634. The oauth PROVIDER itself was still uncommitted at landing time and is handed to round 27's agent.",
+  "L-001": "partial - merge 654fa854, PLUS four real container measurements the card did not know it had. luks-tpm-clear COMPLETED END TO END at 20/0 (finished 11:41:25); luks-firmware-change 18/0/1; luks-s3 4/1 then 6/0/1. State.FinishedAt checked on each so 'Exited (0)' is not taken at face value. Logs saved to /var/tmp/apex-work/scratch-later/r27-*.log.",
+  "_method": "All five written with /var/tmp/apex-int5-logs/append-evidence.py, which reads existing evidence out of roadmap.yaml and concatenates; set-status.py REPLACES evidence and has no append flag. roadmap.yaml re-parsed clean after each write: 128 tasks, 91 done / 35 partial / 2 blocked. CORRECTION MADE MID-ROUND: the first four evidence strings were written with PLACEHOLDER merge SHAs that the orchestrator had invented rather than read from git. They were replaced with the real ones (d3ad8f7d, 8968135b, 769e4fc2, de78631e) and the file was re-checked for any placeholder remaining. Never write a sha you have not read out of `git log`."
  },
  "_deliberately_held": {
-  "p2-d": "STILL NOT re-dispatched, and the reason is now one round older. Its Route B capsule auth needs a PROTOCOL_VERSION bump in apexd/apex-agent-core/src/protocol.rs, and p1-053c is STILL editing that file - its 165 uncommitted lines include apexd/apex-agent-core/tests/android_requests_wire.rs and apexd/apex-remoted/src/proxy.rs, i.e. the wire format. p1-053c was told to announce loudly in its card if it bumps PROTOCOL_VERSION. Re-offer p2-d the moment p1-053c's Android half is committed, or immediately if p2-c closes and frees the slot.",
-  "p1-038-hardware": "Still closed to dispatch - unchanged reason, the 18 labwc matrix rows need real applications on a real session.",
-  "p1-063": "Still closed to dispatch as WORK, but round 26 added a real measurement to it rather than leaving it silent - see _status_recorded_this_round. Both remaining criteria are still Andre's physical actions."
+  "p2-d": "HOLD LIFTED AND DISPATCHED this round, after two rounds held. The reason it was held is gone: p1-053c is CLOSED and its round 6 did not touch protocol.rs at all — PROTOCOL_VERSION is still 8 on the landed tip. p2-d owns that file uncontended and was told it is free to take 8 -> 9 for Route-B capsule auth, and told to announce the bump at the top of its card the moment it makes it.",
+  "p1-038-hardware": "Still closed to dispatch — unchanged reason, the 18 labwc matrix rows need real applications on a real session.",
+  "p1-063": "Still closed to dispatch as WORK. Both remaining criteria are Andre's physical actions. NOTE: this round's hypridle finding is adjacent but NOT the same thing — P1-063 is about the lid, and what is killing the run is the 15-minute idle timeout. Worth folding into the item: a lid inhibitor alone would not have saved any of round 26's agents.",
+  "p1-053c": "CLOSED BY HAND this round — see queue.json. P1-059 done; P1-060 needs a device or a working emulator and this machine has neither (four consecutive emulator SIGSEGVs measured across rounds 1-3)."
  },
  "agents": [
   {
@@ -31,30 +31,13 @@
    "repo": "apex-os",
    "worktree": "/var/tmp/apex-work/wt-later",
    "branch": "task/later-tpm-qualification",
-   "agent_id": "a5b1d9d1bf4927209",
+   "agent_id": "a30084714950e9faf",
    "queue_id": "later",
    "card": "ROADMAP/state/agents/later.md",
-   "at_dispatch": "Round 4, FRESH agent replacing a lid-killed predecessor. Branch LANDED this round (e2345ed7) as part of 2219ef75. Card's NEXT was stale: it said container later-clear2 was RE-RUNNING. The orchestrator collected it - podman inspect shows finished=0001-01-01, so podman's 'Exited (0)' is an artifact, not a pass. Real result saved to /var/tmp/apex-work/scratch-later/r2-clear.log: 17 assertions passed, 0 failed, through boot1 unlock, the snapshot, TPM2_Clear over the platform hierarchy, the Storage Primary Seed rotation, boot2 tpm-unlock=REFUSED AND recovery-unlock=SUCCESS in the same boot, PCR 11 unchanged across the clear, re-enrolment from the recovery key alone, and the sealed blob really being replaced - then killed part-way through boot 3 of 4 by the lid. NEXT ACTION: finish luks-tpm-clear (never completed end to end), then luks-firmware-change, then luks-s3 (never executed once). Told the `podman run -d` + `podman wait` recipe and told again never to use `nohup podman run &`. Also told to fix the real defect the predecessor named: a run where every scenario hits cannot() prints NO summary line and exits 0.",
-   "dispatched": "2026-09-14T11:33+08:00",
-   "session": "round 26 orchestrator",
-   "predecessor_status": "dead at dispatch - the lid closed at 09:45:17 AWST, the machine suspended and the s2idle resume never returned; no reachable Claude session on the machine"
-  },
-  {
-   "slug": "p1-053c",
-   "items": [
-    "P1-059",
-    "P1-060"
-   ],
-   "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-p1-053c",
-   "branch": "task/p1-053c-clipboard",
-   "agent_id": "a19abef91290a5197",
-   "queue_id": "p1-053c",
-   "card": "ROADMAP/state/agents/p1-053c.md",
-   "at_dispatch": "Round 6, FRESH agent. Branch LANDED this round (f253e882, 9ff8308e, 114339c7) as part of 2219ef75; cargo test on the landed tip 3218/0/2, up from 3189. THE CARD SAYS 'Nothing is uncommitted. The worktree is clean' AND IT IS FALSE - 165 uncommitted lines across 6 files, and they are exactly the Android half of C3 the card's own NEXT describes (MachineLink.kt +28, Sessions.kt +62, AgentdRequestWireTest.kt +22, requests.json +14/-1, android_requests_wire.rs +31, proxy.rs +9). THIRD CONSECUTIVE ROUND this unit's work sat uncommitted while its agent died: 134 lines, then 1,490, now 165. FIRST ACTION ORDERED: read the diff, cargo check + gradlew :core:test :app:test, commit in pieces, push. Told it owns protocol.rs uncontended again because p2-d is held a second round, and told to announce a PROTOCOL_VERSION bump loudly because p2-d is waiting on exactly that.",
-   "dispatched": "2026-09-14T11:33+08:00",
-   "session": "round 26 orchestrator",
-   "predecessor_status": "dead at dispatch - the lid closed at 09:45:17 AWST, the machine suspended and the s2idle resume never returned; no reachable Claude session on the machine"
+   "at_dispatch": "Round 5, FRESH agent replacing a hypridle-killed predecessor. Branch LANDED (654fa854). THE CARD'S NEXT WAS STALE IN THE OPTIMISTIC DIRECTION and the orchestrator corrected the card in place before dispatch: it claimed later-r4-luks-s3 'IS RUNNING' and that luks-tpm-clear had never completed. All four containers had finished before the 12:06 reboot; the orchestrator collected them (State.FinishedAt verified, logs at scratch-later/r27-*.log) rather than re-running anything. luks-tpm-clear is COMPLETE AT 20/0; luks-firmware-change 18/0/1 with a structural could-not-run (PCR 0 needs a second OVMF build differing ONLY in code); luks-s3 4/1 then 6/0/1. NEXT ACTION: the QMP waker, the one thing that has still never executed — r4 ended 'the guest reported no s3 field at all'. Then docs/boot-v2.md's three missing scenario records and its Recovery row that documents a silent no-op, and the defect where a run whose scenarios all hit cannot() prints no summary and exits 0.",
+   "dispatched": "2026-09-14T15:10+08:00",
+   "session": "round 27 orchestrator",
+   "predecessor_status": "dead at dispatch - hypridle's 15-minute idle timeout ran `loginctl suspend` and the s2idle resume never returned (boots -2 and -1 both end at PM: suspend entry, no Lid closed line anywhere); no reachable Claude session on the machine"
   },
   {
    "slug": "p2-c",
@@ -66,13 +49,13 @@
    "repo": "apex-os",
    "worktree": "/var/tmp/apex-work/wt-p2-005",
    "branch": "task/p2-c-2",
-   "agent_id": "a57ceb8ee26bd0067",
+   "agent_id": "a39022abbc14fd9f0",
    "queue_id": "p2-c",
    "card": "ROADMAP/state/agents/p2-c.md",
-   "at_dispatch": "Round 2, FRESH agent. Branch LANDED this round (3ab3b6ce) as part of 2219ef75, recorded against P2-006. Card's NEXT was stale - it asked for the json_str()/each_exception()/cmd_status_json work that 3ab3b6ce IS. 100 uncommitted lines waiting in apexd/apex/src/main.rs, almost certainly the CLI consumer side; told to read the diff and decide deliberately, then commit and push. NEXT ACTION: finish the --json thread, and specifically decide whether apex-shell's CAPTURED STATUS_LOADED fixture should be re-captured or whether firewall.js should consume --json so the prose coupling cannot return - the second is the real fix. Dispatched with the same explicit honesty frame as round 25: three of the four card items are Andre's physical actions, and closing the unit with a written checklist for him is a deliverable, not a failure. Same shape as p1-038-hardware, which was correctly refused four times.",
-   "dispatched": "2026-09-14T11:33+08:00",
-   "session": "round 26 orchestrator",
-   "predecessor_status": "dead at dispatch - the lid closed at 09:45:17 AWST, the machine suspended and the s2idle resume never returned; no reachable Claude session on the machine"
+   "at_dispatch": "Round 3, FRESH agent. BOTH branches LANDED (769e4fc2 os, b7953e4 shell). The card's open design question is ANSWERED IN THE DIRECTION IT PREFERRED — firewall.js consumes --json, so the prose coupling cannot return; check-firewall-ui.sh 35/0 on the landed shell tip, told explicitly not to redo it. Worktree held 140 UNCOMMITTED lines (apex-devices +60, test-apex-devices.sh +88/-1); FIRST ACTION ORDERED: read, verify, commit in pieces, push. Then the card's NEXT — hunt apex devices for more readers that STATE instead of READ, and if nothing turns up write Andre's checklist into ROADMAP/evidence/P2-005-007-device-maturity.md and CLOSE THE UNIT. Dispatched with the same explicit honesty frame: three of four remaining items are Andre's physical actions and closing with a written checklist is a deliverable, not a failure.",
+   "dispatched": "2026-09-14T15:10+08:00",
+   "session": "round 27 orchestrator",
+   "predecessor_status": "dead at dispatch - hypridle's 15-minute idle timeout ran `loginctl suspend` and the s2idle resume never returned (boots -2 and -1 both end at PM: suspend entry, no Lid closed line anywhere); no reachable Claude session on the machine"
   },
   {
    "slug": "p2-b",
@@ -85,13 +68,13 @@
    "branch": "task/p2-b-round23",
    "second_worktree": "/var/tmp/apex-work/wt-p2-b4-sh",
    "second_branch": "task/p2-b-round23",
-   "agent_id": "a9b7b32e947aef1f0",
+   "agent_id": "a42d4dec31b542f8c",
    "queue_id": "p2-b",
    "card": "ROADMAP/state/agents/p2-b.md",
-   "at_dispatch": "Round 25 of this unit, FRESH agent. apex-shell branch LANDED as acf4879 (all five remaining commits); run-rtl-test.sh re-run on the landed tip 30/0/0, up from 28. apex-os branch has no commits. BOTH worktrees are CLEAN this time - the installer/mutate-installer-a11y.sh work round 25 flagged is no longer outstanding. NEXT ACTION unchanged from the card: the guard that asserts the IMAGE sets QT_QPA_PLATFORMTHEME=qt6ct, with a mutation pair, at Containerfile.core (the card's :948 AND :2030 are both stale now - told to re-locate) and files/desktop/labwc/environment:22 which is unguarded outright. Told the narrow honest version: deleting the variable goes red only incidentally, via a grep ANCHOR in test-apex-ai-apps.sh:254, with a message about Electron; changing its VALUE is caught by nothing. Told the M7 trap (a bare grep -q passes on the comment in qt6ct.conf:3). ALSO TOLD TO PRUNE ITS CARD - 112 KB against a ~2 KB budget defeats the purpose the directory exists for. NOTE: this entry now obeys the _field_contract - one worktree and one branch in the primary fields, the shell tree in second_worktree/second_branch. Round 25 wrote 'a + b' into `worktree` and every report since said 'no worktree' for a worktree that was fine.",
-   "dispatched": "2026-09-14T11:33+08:00",
-   "session": "round 26 orchestrator",
-   "predecessor_status": "dead at dispatch - the lid closed at 09:45:17 AWST, the machine suspended and the s2idle resume never returned; no reachable Claude session on the machine"
+   "at_dispatch": "Round 26 of this unit, FRESH agent. apex-os branch LANDED (8968135b), all four commits; test-apex-platform-theme.sh 18/0/0 and both Containerfile gates green on the landed tip. BOTH worktrees clean, nothing unlanded. NEXT ACTION: standing-queue item 6 — extend installer/test-installer-a11y.sh's Tab-ring walk to the wifi page, reusing audit_page's shape detection because that page is built differently with and without a wifi device. That is P2-003 work, the weaker of its two items. TOLD A SECOND TIME TO PRUNE ITS CARD: 28 KB against a ~2 KB budget, and last round's identical instruction was not carried out.",
+   "dispatched": "2026-09-14T15:10+08:00",
+   "session": "round 27 orchestrator",
+   "predecessor_status": "dead at dispatch - hypridle's 15-minute idle timeout ran `loginctl suspend` and the s2idle resume never returned (boots -2 and -1 both end at PM: suspend entry, no Lid closed line anywhere); no reachable Claude session on the machine"
   },
   {
    "slug": "p2-f",
@@ -104,13 +87,13 @@
    "repo": "apex-os",
    "worktree": "/var/tmp/apex-work/wt-p2-f",
    "branch": "task/p2-f-3",
-   "agent_id": "a86077971f2986b64",
+   "agent_id": "a1d1a984372b36dd9",
    "queue_id": "p2-f",
    "card": "ROADMAP/state/agents/p2-f.md",
-   "at_dispatch": "Round 5, FRESH agent. Branch LANDED this round (9e0a8c7d, the OAuth table) as part of 2219ef75; cargo test on the landed tip 3218/0/2. Worktree CLEAN - round 25's uncommitted account.rs IS 9e0a8c7d and is landed; its 1 commit 'ahead' is only its own merge of the previous tip, no content. NEXT ACTION: step 2 of the card's ROUND 4 PLAN - supersedes_credentials on OperationSpec (mandatory, no Default), Bound::replaces as a Vec, Performed::replaced, the framework checks in service.rs, the oauth provider over broker::run_curl, and step 7's grant-check question. All seven settled design decisions restated verbatim at dispatch so they are not re-litigated. Told for the third time not to rebuild the S3/R2 SigV4 signer - 5054be77 landed it.",
-   "dispatched": "2026-09-14T11:33+08:00",
-   "session": "round 26 orchestrator",
-   "predecessor_status": "dead at dispatch - the lid closed at 09:45:17 AWST, the machine suspended and the s2idle resume never returned; no reachable Claude session on the machine"
+   "at_dispatch": "Round 6, FRESH agent. Branch LANDED (de78631e). Worktree held UNCOMMITTED work again — account.rs +37, providers/mod.rs +26/-7, and an untracked providers/oauth.rs plus oauth/ dir, i.e. exactly the card's own NEXT. FIRST ACTION ORDERED: read the diff, cargo check + cargo test, commit in pieces, push. Then finish the oauth provider per the card's settled ROUND 4 PLAN, restated at dispatch so it is not re-litigated: route by account::oauth_for_auth_host and nothing the caller said, copy providers/s3/mod.rs::call's curl-config pattern NOT cloudflare/api::call, and add the #[cfg(test)] loopback injection point. Told for the fourth time not to rebuild the SigV4 signer — 5054be77 landed it.",
+   "dispatched": "2026-09-14T15:10+08:00",
+   "session": "round 27 orchestrator",
+   "predecessor_status": "dead at dispatch - hypridle's 15-minute idle timeout ran `loginctl suspend` and the s2idle resume never returned (boots -2 and -1 both end at PM: suspend entry, no Lid closed line anywhere); no reachable Claude session on the machine"
   },
   {
    "slug": "followups-5",
@@ -118,13 +101,31 @@
    "repo": "apex-os",
    "worktree": "/var/tmp/apex-work/wt-followups-5",
    "branch": "task/followups-5",
-   "agent_id": "a4155f5cf91951e6b",
+   "agent_id": "a7ee7907540472e7a",
    "queue_id": "followups-5",
    "card": "ROADMAP/state/agents/followups-5.md",
-   "at_dispatch": "Round 3, FRESH agent. THE HOLD IS LIFTED AND THE BRANCH LANDED - round 25 deliberately withheld it pending a judged CI run, and the run has now been read. Run 34796578198's reds, resolved one by one by the orchestrator: Static validation had exactly ONE red step, `Input page and generator agree`, which is the apex-shell branch-name artifact cbb1f7b1 fixes and which structurally cannot occur on roadmap/v2.2 because a branch of that name DOES exist in apex-shell. Rust validation had exactly one, `Pack the chaos bundles`, and that one was a guard that inverted itself (see _round; fixed as 94a3a2ac). The predecessor's cbb1f7b1 was committed and never pushed; the orchestrator pushed it. Fresh run 34802332142 dispatched on the branch tip so the agent inherits a judged branch. NEXT ACTION: read 34802332142, confirm Static validation and the chaos pack step are green, then work down the NINE Package engine reds and `Require every applicable test`. Told explicitly to say the 1 -> 8 thing in its report: 13e7ec84's !cancelled() is why the engine job reports eight or nine reds where it reported one, and the rise is visibility, not decay.",
-   "dispatched": "2026-09-14T11:33+08:00",
-   "session": "round 26 orchestrator",
-   "predecessor_status": "dead at dispatch - the lid closed at 09:45:17 AWST, the machine suspended and the s2idle resume never returned; no reachable Claude session on the machine"
+   "at_dispatch": "Round 4, FRESH agent. THE BRANCH LANDED (527aa001) and the worktree was clean. NEXT ACTION: read run 34803818557's Package engine job, then dispatch a fresh run — noting the tip has moved a long way, roadmap/v2.2 is now 654fa854 with six merges — and work the two INTERMITTENT reds (labwc keybind generator; terminal layout template, where the zellij tab is 'Tab #1' not 'apex'). Told to say the 1 -> 8 thing explicitly: 13e7ec84's !cancelled() is why the engine job reports eight or nine reds where it reported one, and the rise is VISIBILITY, NOT DECAY. Given the whole-tree `| grep -q` under pipefail sweep as a first-class task, and given the orchestrator's own `cargo test | tail -60` mistake as a worked example of the same family.",
+   "dispatched": "2026-09-14T15:10+08:00",
+   "session": "round 27 orchestrator",
+   "predecessor_status": "dead at dispatch - hypridle's 15-minute idle timeout ran `loginctl suspend` and the s2idle resume never returned (boots -2 and -1 both end at PM: suspend entry, no Lid closed line anywhere); no reachable Claude session on the machine"
+  },
+  {
+   "slug": "p2-d",
+   "items": [
+    "P2-008",
+    "P2-009",
+    "P2-012"
+   ],
+   "repo": "apex-os",
+   "worktree": "/var/tmp/apex-work/wt-p2-d",
+   "branch": "task/p2-d-2",
+   "agent_id": "ac903652006d3b39f",
+   "queue_id": "p2-d",
+   "card": "ROADMAP/state/agents/p2-d.md",
+   "at_dispatch": "Round 2 of this unit, dispatched after TWO ROUNDS OF DELIBERATE HOLD. The hold is lifted because the thing it waited on is gone: p1-053c is closed and its round 6 did not touch protocol.rs at all — PROTOCOL_VERSION still reads 8 on the landed tip, because the clipboard verbs deliberately did not bump (an older daemon answers 'unparseable request', losing a feature and never a restriction). p2-d owns that file uncontended and was told it is free to take 8 -> 9, and told to announce the bump at the TOP of its card because other units rebase onto it. Work in the card's own order of value: (1) a capsule cannot authenticate to a site — P2-012's unmet criterion; the daemon performs the operation but agentd's proxy tunnels CONNECT, so a TLS tunnel has nowhere to put a header, and closing it needs either an in-capsule driver handed a one-request token or a provider that performs a login. Pointed at p2-f's concurrent supersedes_credentials work (de78631e, service.rs +634) because it may already give the shape. (2) the pin-binding half is stub-tested only, since secretd is a root service the lab does not start. (3) --allow cannot narrow below the runtime allowlist, which is a protocol change it now owns. Given the three browser-capsule traps and the two rootless VM-lab traps so it does not rediscover them.",
+   "dispatched": "2026-09-14T15:10+08:00",
+   "session": "round 27 orchestrator",
+   "predecessor_status": "no predecessor running - unit was deliberately held for two rounds, not killed"
   }
  ],
  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
