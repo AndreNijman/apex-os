@@ -335,14 +335,50 @@ jobs:
           # and buttonAreas. Whoever performs the final integration must land
           # both sides together, or opening the Input page silently changes a
           # user's touchpad behaviour.
-          ref="${GITHUB_REF_NAME:-}"
-          if [ -n "$ref" ] && git clone --depth 1 -q --branch "$ref" \
-               https://github.com/AndreNijman/apex-shell /tmp/apex-shell-parity 2>/dev/null; then
-            echo "input parity: comparing against apex-shell branch '$ref'"
+          # ...and then the fallback did exactly the thing the paragraph above
+          # forbids, on every branch. apex-shell has no `task/*` twin for most
+          # of this program's branches, so "no matching branch" sent the
+          # comparison to apex-shell's DEFAULT branch — `main`, the one the
+          # paragraph above says is knowingly drifted. The result: this step
+          # was red on every apex-os feature branch, for a reason that had
+          # nothing to do with the change, which is the precise failure the
+          # comment was written to describe. Measured on task/followups-5:
+          #   vs apex-shell main          -> rc=1, click_method and drag_lock
+          #   vs apex-shell roadmap/v2.2  -> rc=0, "22 settings, identical"
+          #
+          # So try the integration branch BEFORE the default one. Exact match
+          # stays first, which is what keeps the main-vs-main drift reported:
+          # on apex-os `main` the exact match is apex-shell `main`, and that
+          # comparison still fails, deliberately.
+          #
+          # `roadmap/v2.2` is hardcoded because it is this program's
+          # integration branch, named as such at the top of this file. When
+          # the integration branch moves, this moves with it.
+          #
+          # GITHUB_HEAD_REF first, because on a pull_request GITHUB_REF_NAME is
+          # `<n>/merge` — a name no other repository will ever have, so the
+          # lookup could only ever miss. Same expression the keybind vendoring
+          # step below uses; the two are meant to stay in step.
+          want="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
+          shell_ref=""
+          for cand in "$want" roadmap/v2.2; do
+            [ -n "$cand" ] || continue
+            # ls-remote rather than a clone with stderr thrown away: that
+            # conflates "the branch does not exist" with "the network is
+            # down", and sends the second one to a silently wrong comparison.
+            if git ls-remote --exit-code --heads \
+                 https://github.com/AndreNijman/apex-shell "$cand" >/dev/null 2>&1; then
+              shell_ref="$cand"; break
+            fi
+          done
+          if [ -n "$shell_ref" ]; then
+            git clone --depth 1 -q --branch "$shell_ref" \
+              https://github.com/AndreNijman/apex-shell /tmp/apex-shell-parity
+            echo "input parity: comparing against apex-shell branch '$shell_ref'"
           else
             git clone --depth 1 -q https://github.com/AndreNijman/apex-shell \
               /tmp/apex-shell-parity || true
-            echo "input parity: no matching apex-shell branch; comparing against its default branch"
+            echo "::warning::input parity: apex-shell has no '$want' and no roadmap/v2.2; comparing against its default branch"
           fi
           set +e
           python3 files/scripts/check-input-parity \
@@ -2214,15 +2250,35 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          want="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-          if git ls-remote --exit-code --heads \
-               https://github.com/AndreNijman/apex-shell "$want" >/dev/null 2>&1; then
-            echo "keybind model: vendoring apex-shell branch '$want'"
-            git clone --depth 1 --branch "$want" \
+          # The integration branch sits between the exact match and the default
+          # branch, for the reason spelled out on the input-parity step above:
+          # apex-shell has no `task/*` twin for most of this program's
+          # branches, so "no matching branch" meant "compare against main",
+          # and main is 137 commits behind the work — the exact staleness the
+          # paragraph above says this step was changed to stop having. It is
+          # latent here rather than red only because the keybind assertions
+          # happen to still pass against the older model; that is luck, not a
+          # property. Exact match stays first, so apex-os `main` still
+          # vendors apex-shell `main`.
+          #
+          # Kept deliberately identical to the input-parity step above. If one
+          # is ever changed, the other is wrong.
+          want="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-}}"
+          shell_ref=""
+          for cand in "$want" roadmap/v2.2; do
+            [ -n "$cand" ] || continue
+            if git ls-remote --exit-code --heads \
+                 https://github.com/AndreNijman/apex-shell "$cand" >/dev/null 2>&1; then
+              shell_ref="$cand"; break
+            fi
+          done
+          if [ -n "$shell_ref" ]; then
+            echo "keybind model: vendoring apex-shell branch '$shell_ref'"
+            git clone --depth 1 --branch "$shell_ref" \
               https://github.com/AndreNijman/apex-shell.git \
               "${GITHUB_WORKSPACE}/../apex-shell"
           else
-            echo "keybind model: apex-shell has no branch '$want'; using its default branch"
+            echo "::warning::keybind model: apex-shell has no '$want' and no roadmap/v2.2; using its default branch"
             git clone --depth 1 https://github.com/AndreNijman/apex-shell.git \
               "${GITHUB_WORKSPACE}/../apex-shell"
           fi
