@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-13 08:21 AWST
+APEX ROADMAP — resume report — 2026-09-14 09:15 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,45 +16,55 @@ APEX ROADMAP — resume report — 2026-09-13 08:21 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  later      ALIVE      L-001,L-002,L-003                  task/later-tpm-qualification
-             head 13d53c01 Merge task/p2-d-2 into roadmap/v2.2
-             dirty 0 file(s), ? unpushed, card 4m
-             NEXT Merge origin/roadmap/v2.2 (13d53c01) into the worktree, then read 
+  later      unknown    L-001,L-002,L-003                  task/later-tpm-qualification
+             head 378d8ddd feat(boot-v2): qualify TPM clear, firmware change and
+             dirty 0 file(s), 0 unpushed, card 1484m
+             NEXT Baseline `luks-tpm` scenario is RUNNING in localhost/apex-bootlab 
 
-  p2-d       ALIVE      P2-008,P2-009,P2-012               task/p2-d-3 (off roadmap/v2.2, carrying 2 dirty files)
-             head 13d53c01 Merge task/p2-d-2 into roadmap/v2.2
-             dirty 2 file(s), ? unpushed, card 298m
+  p2-d       unknown    P2-008,P2-009,P2-012               task/p2-d-3
+             head be9844cc test(browserlab): two runs at once deleted each other
+             dirty 0 file(s), 0 unpushed, card 1481m
              NEXT **This round is complete and pushed. Do not re-derive any of the a
 
-  p2-b       ALIVE      P2-003,P2-004                      task/p2-b-round23
+  p2-b       no worktree P2-003,P2-004                      task/p2-b-round23
              head 
-             dirty 0 file(s), ? unpushed, card 289m
+             dirty 0 file(s), ? unpushed, card 1489m
              NEXT **One line, and it is the load-bearing part of this card:** in
 
-  p2-f       ALIVE      P2-016,P2-017,P2-018,P2-019        task/p2-f-3
-             head 13d53c01 Merge task/p2-d-2 into roadmap/v2.2
-             dirty 0 file(s), ? unpushed, card 255m
-             NEXT Round 2 closed P2-018's criterion 1. The remaining open work, in t
+  p2-f       unknown    P2-016,P2-017,P2-018,P2-019        task/p2-f-3
+             head c224eea7 fix(account): a scope may not name an operation no pr
+             dirty 1 file(s), 0 unpushed, card 1482m
+             NEXT ROUND 3 IN PROGRESS. Round 2's branch `task/p2-f-2` landed as `f22
 
-  followups-5 ALIVE                                         task/followups-5
-             head 13d53c01 Merge task/p2-d-2 into roadmap/v2.2
-             dirty 0 file(s), ? unpushed, card 3m
-             NEXT Read the failing output of the three red steps on the last dispatc
+  followups-5 unknown                                       task/followups-5
+             head 69ef58cf fix(ci): a path inside a grep PATTERN is not a read
+             dirty 1 file(s), 0 unpushed, card 1487m
+             NEXT Fix `files/scripts/check-containerfile-order`: a path inside a gre
 
-  p1-053c    ALIVE      P1-059,P1-060                      task/p1-053c-clipboard (off roadmap/v2.2, carrying 2 dirty files)
+  p1-053c    unknown    P1-059,P1-060                      task/p1-053c-clipboard
              head 13d53c01 Merge task/p2-d-2 into roadmap/v2.2
-             dirty 2 file(s), ? unpushed, card 234m
-             NEXT **P1-059 criterion 2 is CLOSED. The item stays `partial`, and the 
+             dirty 7 file(s), ? unpushed, card 1489m
+             NEXT Round 4 in progress. See IN PROGRESS for the exact next step.
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
   int-os:  tip 13d53c01 Merge task/p2-d-2 into roadmap/v2.2
-    (nothing — every task branch's content is on the integration tip)
+    task/followups-5
+      69ef58cf fix(ci): a path inside a grep PATTERN is not a read   [1/10 added lines on tip]
+    task/later-tpm-qualification
+      d362e952 feat(boot-v2): lab machinery for TPM clear, firmware change a   [0/10 added lines on tip]
+      378d8ddd feat(boot-v2): qualify TPM clear, firmware change and S3 agai   [1/10 added lines on tip]
+    task/p2-d-3
+      be9844cc test(browserlab): two runs at once deleted each other's tree,   [1/10 added lines on tip]
+    task/p2-f-3
+      c224eea7 fix(account): a scope may not name an operation no provider o   [1/10 added lines on tip]
 
   int-shell:  tip 0a3824c Merge task/p2-b-round22 into roadmap/v2.2
-    (nothing — every task branch's content is on the integration tip)
+    task/p2-b-round23
+      e857d7f test(i18n): the RTL suite gets the mutation harness that prove   [1/10 added lines on tip]
+      90ba936 fix(i18n): the RTL switch is a translation catalogue, and the    [1/10 added lines on tip]
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -74,11 +84,11 @@ APEX ROADMAP — resume report — 2026-09-13 08:21 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 08:21:43 AWST 1s
+  snapshot timer: active   last 09:15:32 AWST 19s
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    a7730c4  roadmap-state
+    apex-os    31bc7c5  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -88,9 +98,11 @@ APEX ROADMAP — resume report — 2026-09-13 08:21 AWST
     apex-os    7ebac77  wt-followups-
     apex-os    0a2f642  wt-followups-3-
     apex-os    a6e9909  wt-followups-4-
+    apex-os    a15a761  wt-followups-5-
     apex-os    59b7328  wt-followups-int3-
     apex-os    884b151  wt-followups2-
     apex-os    0683355  wt-greeter-os-
+    apex-os    68fbc10  wt-later-
     apex-os    c74f38d  wt-multilib2-
     apex-os    0fd2d78  wt-p0-002-
     apex-os    e63b0e3  wt-p0-003-
@@ -99,9 +111,7 @@ APEX ROADMAP — resume report — 2026-09-13 08:21 AWST
     apex-os    162d6fa  wt-p0-009-
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
-    apex-os    9b605a1  wt-p0-011b-
-    apex-os    746639a  wt-p0-014-
-    apex-shell c78e746  apex-shell-
+    apex-shell 848f35f  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell 02674e0  int-shell-
     apex-shell 68c971d  wt-base-shell-

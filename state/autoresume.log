@@ -187,3 +187,5 @@ Two things I fixed that weren't in the brief: the heartbeat refresher I first st
 
 I'll land each agent's branch as its completion notification arrives rather than batching at the end.
 2026-09-13 08:34:51 resume session ended (exit 0)
+2026-09-14 09:15:54 report refreshed (182 lines)
+2026-09-14 09:15:54 starting a resume session (38 items outstanding)
