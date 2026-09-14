@@ -62,7 +62,13 @@ case "$verb" in
 esac'
 shim lpstat      'cat "$STATE/lpstat" 2>/dev/null; exit "$(cat "$STATE/lpstat.rc" 2>/dev/null || echo 0)"'
 shim cupsctl     'cat "$STATE/cupsctl" 2>/dev/null'
-shim nmcli       'cat "$STATE/nmcli.$*" 2>/dev/null || cat "$STATE/nmcli" 2>/dev/null; exit "$(cat "$STATE/nmcli.rc" 2>/dev/null || echo 0)"'
+# The rc is per-argv as well as global: `$STATE/nmcli.rc.<args>` beats
+# `$STATE/nmcli.rc`. One global rc could not express the state that matters
+# most here — the connection LIST answering while a single profile's settings
+# read fails — and a reader that sorts that failure into "this profile is not
+# enterprise" is the same wrong answer one level down from the one this suite
+# was extended for.
+shim nmcli       'cat "$STATE/nmcli.$*" 2>/dev/null || cat "$STATE/nmcli" 2>/dev/null; exit "$(cat "$STATE/nmcli.rc.$*" 2>/dev/null || cat "$STATE/nmcli.rc" 2>/dev/null || echo 0)"'
 shim bluetoothctl 'cat "$STATE/bluetoothctl" 2>/dev/null'
 shim rfkill      'cat "$STATE/rfkill" 2>/dev/null'
 shim scanimage   'if [ -e "$STATE/scanimage.hang" ]; then sleep 300; fi; cat "$STATE/scanimage" 2>/dev/null'
@@ -562,6 +568,86 @@ printf '802-1x.eap:peap\n802-1x.ca-cert:--\n802-1x.system-ca-certs:yes\n' \
 out=$(devices network)
 case_silent "system-ca-certs=yes is not flagged" "$out" "crackable offline" \
             "the system trust store is a CA certificate; flagging it would be noise"
+
+# ── "no saved profile uses it" is a SAFETY CLAIM, and it was being guessed ──
+#
+# Measured in the built image, not read off the source: `links` and
+# `connectivity` both said "could not reach NetworkManager" and this reader,
+# asking the same daemon, answered "no saved profile uses it" — a positive
+# statement that the machine carries no unvalidated enterprise profile, made
+# without looking. `run` folds stderr into stdout, so `names` held nmcli's
+# NMClient error, the 802-11-wireless filter matched none of it, and zero
+# profiles came out the other end.
+#
+# It is the worst line in the file to get wrong in that direction: the laptop
+# this was written for has saved 802.1X profiles that validate nothing, and the
+# whole MITM warning is suppressed along with the count.
+#
+# The ENTERPRISE LINE is read, not the whole report. `links` says "could not
+# reach NetworkManager" in this same state, so an assertion over the full
+# output would be satisfied by a different line and could not fail — the trap
+# the connectivity cases above were rewritten for.
+eline() { grep -E '^  enterprise Wi-Fi' <<<"$1"; }
+
+reset_world
+printf 'Error: Could not create NMClient object: Could not connect: No such file or directory.\n' \
+    > "$STATE/nmcli"
+printf '1\n' > "$STATE/nmcli.rc"
+out=$(devices network)
+el=$(eline "$out")
+[ -n "$el" ] \
+    && ok "an unreachable NetworkManager still gets an enterprise Wi-Fi line" \
+    || bad "an unreachable NetworkManager still gets an enterprise Wi-Fi line" \
+           "going silent reads as a machine with nothing to report"
+case_says "and that line says it could not look" "$el" "could not be read" \
+          "'I could not look' must not arrive as a result"
+case_silent "a failed read is never 'no saved profile uses it'" "$el" "no saved profile" \
+            "that sentence tells a user they do not have the problem they have"
+case_says "and the difference is spelled out" "$out" "NOT the same as having no enterprise profile" \
+          "the user has to know the profiles are still there and still used"
+
+# The true-negative control. Without it the fix could be "always say
+# unavailable", which passes every case above and is just as useless.
+reset_world
+out=$(devices network)
+case_says "an nmcli that answers with no profiles still says there are none" \
+          "$(eline "$out")" "no saved profile uses it" \
+          "a reader that can only say 'unavailable' has stopped reading"
+
+reset_world
+PATH="$(path_without nmcli)"
+out=$(devices network)
+PATH=$REAL_PATH
+case_silent "a machine with no nmcli at all does not claim to have counted" \
+            "$(eline "$out")" "no saved profile" \
+            "there is nothing on this machine that could have answered the question"
+
+reset_world
+printf '124\n' > "$STATE/nmcli.rc"
+out=$(devices network)
+case_says "an nmcli that never returns is a timeout, not an empty list" \
+          "$(eline "$out")" "did not answer in 10s" \
+          "a wedged daemon and a machine with no profiles are different answers"
+
+# One level down: the LIST answers, and a single profile's settings read fails.
+# `eap` comes back empty, and empty is exactly how a profile that is not
+# enterprise at all looks — so the failed read used to be sorted, silently, into
+# "not enterprise".
+reset_world
+printf '802-11-wireless:eduroam\n802-11-wireless:home\n' \
+    > "$STATE/nmcli.-t -f TYPE,NAME connection show"
+printf '802-1x.eap:peap\n802-1x.ca-cert:--\n802-1x.system-ca-certs:no\n' \
+    > "$STATE/nmcli.-t -f 802-1x.eap,802-1x.ca-cert,802-1x.system-ca-certs connection show eduroam"
+printf '1\n' > "$STATE/nmcli.rc.-t -f 802-1x.eap,802-1x.ca-cert,802-1x.system-ca-certs connection show home"
+out=$(devices network)
+case_says "a profile whose settings would not read is counted as unread" \
+          "$(eline "$out")" "1 not readable" \
+          "empty settings look exactly like a profile that is not enterprise"
+case_says "and it is named, so the user can go and look" "$out" \
+          "home: nmcli would not report its settings" \
+          "a count with no name is not something anyone can act on"
+case_says "the profile that DID read is still counted" "$(eline "$out")" "1 saved profile(s)" \
+          "one unreadable neighbour must not cost the finding that was readable"
 
 # ── hotplug ─────────────────────────────────────────────────────────────────
 echo
