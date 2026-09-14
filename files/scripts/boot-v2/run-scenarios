@@ -735,8 +735,17 @@ luks_boot() {
 # Reads the serial log and nothing else: the UKI, the ESP and the hook cpio all
 # contain these strings, so a grep over the work directory would find them with
 # no guest having run.
+#
+# THE `|| true` IS LOAD-BEARING. This file runs under `set -euo pipefail`, so a
+# grep that matches nothing fails the pipeline, fails the assignment
+# `x="$(luks_serial_field ...)"`, and kills the whole run. Every caller here
+# treats an absent field as a value — luks-s3 has an explicit `""` branch that
+# records COULD-NOT-RUN — and none of them ever got to see it: measured
+# 2026-09-14, the s3 scenario aborted at exactly that assignment and its
+# remaining nine assertions, including the entire suspend arm, never ran. A
+# field that is not there is an answer, and the caller decides what it means.
 luks_serial_field() {
-    grep -ao "APEX-BOOTLAB: $2=[^ ]*" "$1" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r'
+    grep -ao "APEX-BOOTLAB: $2=[^ ]*" "$1" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r' || true
 }
 
 # The systemd-tpm2 sealed blob out of a LUKS2 header, or `<none>`.
@@ -1158,6 +1167,19 @@ PY
 # Secure Boot policy register. It does NOT move PCR 0, the firmware code
 # measurement, because the firmware binary is the same one. See the
 # could-not-run below.
+# The size of the dbx variable inside an OVMF varstore, or 0 if it holds none.
+#
+# `virt-fw-vars --print` writes one line per variable, "dbx : blob: N bytes",
+# with its INFO chatter on the same stream; the parse is anchored on the whole
+# line so `dbxDefault` or a value containing the word cannot satisfy it, and a
+# parse that matched nothing prints 0 rather than an empty string — the caller
+# does arithmetic on this, and an empty string in `(( ))` is 0 silently.
+varstore_dbx_bytes() {
+    virt-fw-vars --input "$1" --print 2>/dev/null \
+        | sed -n 's/^[[:space:]]*dbx[[:space:]]*:[[:space:]]*blob:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*bytes[[:space:]]*$/\1/p' \
+        | head -1 | grep -E '^[0-9]+$' || printf '0\n'
+}
+
 scenario_luks_firmware_change() {
     log "luks-firmware-change: a dbx update moves the firmware state; the PCR 11 policy must not care"
     luks_require_root
@@ -1239,17 +1261,40 @@ scenario_luks_firmware_change() {
     fi
     info "applying the UEFI revocation list $dbx"
     local vars_fw="$WORK/vars-luks-fw-updated.fd"
+    # THE BASELINE IS A SECOND COPY OF THE SAME TEMPLATE, and that is the whole
+    # correction here. This compared against $WORK/vars-luks-fw.fd — the
+    # varstore two guests had already booted from, into which OVMF and
+    # systemd-boot write BootOrder, LoaderEntryDefault and their own bookkeeping
+    # every time. It differs from a fresh template whether or not a dbx update
+    # was ever applied, so the comparison was true by construction and the ok
+    # line below was unconditional. Two copies of one template differ in exactly
+    # the one operation performed between them.
+    local vars_pristine="$WORK/vars-luks-fw-pristine.fd"
+    fresh_vars "$vars_pristine"
     fresh_vars "$vars_fw"
     virt-fw-vars --input "$vars_fw" --output "$vars_fw" --add-dbx "$dbx" >/dev/null 2>&1 \
         || { bad "virt-fw-vars could not append the dbx update"; return; }
     # The varstore really changed. A no-op edit would leave PCR 7 alone and the
     # control would keep unlocking, which would read as "APEX's policy survived"
     # while nothing had happened.
-    if cmp -s "$WORK/vars-luks-fw.fd" "$vars_fw"; then
+    if files_same "$vars_pristine" "$vars_fw"; then
         bad "the variable store is byte-identical after the dbx update — nothing was applied"
         return
     fi
-    ok "the guest's UEFI variable store changed (dbx appended from $(basename "$dbx"))"
+    # And the bytes that moved are IN dbx. "The file changed" is satisfied by a
+    # timestamp, a re-serialisation or a variable this scenario has no interest
+    # in; the claim under test is that the REVOCATION LIST grew, because that is
+    # what PCR 7 measures. virt-fw-vars' own template already carries a dummy
+    # dbx entry, so the assertion is growth and not appearance.
+    local dbx_before dbx_after
+    dbx_before="$(varstore_dbx_bytes "$vars_pristine")"
+    dbx_after="$(varstore_dbx_bytes "$vars_fw")"
+    if (( dbx_after > dbx_before )); then
+        ok "the guest's dbx grew from $dbx_before to $dbx_after bytes ($(basename "$dbx"))"
+    else
+        bad "dbx went $dbx_before -> $dbx_after bytes: the revocation list did not grow, so whatever changed in the varstore is not the variable PCR 7 measures"
+        return
+    fi
 
     # ── boot C: the firmware state moved. Only the control may break. ──────
     rc="$(luks_boot fw --vars "$vars_fw" --extra-disk "$ctl")"
@@ -1328,11 +1373,22 @@ scenario_luks_s3() {
     assert_serial_lacks "$ser" "APEX-BOOTLAB: s3=resumed"
     local s3_control; s3_control="$(luks_serial_field "$ser" s3)"
     info "no-S3 control reported s3=$s3_control"
-    if [[ -n "$s3_control" ]]; then
-        ok "with qemu's S3 disabled the guest reported s3=$s3_control, not a resume"
-    else
-        bad "the no-S3 control reported no s3 field at all — the probe did not run its suspend path, so the positive below is unconstrained"
-    fi
+    # NAMED, not merely non-empty. The first execution of this scenario hung
+    # here: with qemu's S3 off the kernel still offers `mem`, which quietly
+    # means s2idle, so the guest suspended to idle in the arm meant to prove it
+    # could not suspend and nothing existed to wake it. The control's answer is
+    # now a specific string — the guest looked for `deep` in
+    # /sys/power/mem_sleep, did not find it and did not suspend — and any other
+    # answer, including a suspend that somehow happened, is a failure rather
+    # than a pass for being non-empty.
+    case "$s3_control" in
+        NO-DEEP-SLEEP)
+            ok "with qemu's S3 off the guest found no deep sleep state to enter and did not suspend" ;;
+        "")
+            bad "the no-S3 control reported no s3 field at all — the probe did not reach its suspend path, so the positive below is unconstrained" ;;
+        *)
+            bad "the no-S3 control reported s3=$s3_control, which is neither a refusal to enter S3 nor an expected state for a guest with S3 disabled" ;;
+    esac
     cp "$ser" "$WORK/serial-luks-s3-control.log"
 
     # ── the real one ───────────────────────────────────────────────────────
@@ -1376,6 +1432,14 @@ scenario_luks_s3() {
     assert_serial_lacks "$ser" "APEX-BOOTLAB: post-resume-marker=LOST"
     assert_serial_has "$ser" "APEX-BOOTLAB: post-resume-tpm-unlock=SUCCESS"
     assert_serial_lacks "$ser" "APEX-BOOTLAB: post-resume-tpm-unlock=REFUSED"
+    # And the same marker again through a mapper created AFTER the resume, so
+    # the plaintext came off the disk rather than out of the page cache of a
+    # device that had been open since before the sleep.
+    assert_serial_has "$ser" "APEX-BOOTLAB: post-resume-reattach-marker=found"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: post-resume-reattach-marker=LOST"
+    # It really was S3 and not suspend-to-idle: the guest selected `deep` by
+    # name and printed what /sys/power/mem_sleep then held.
+    assert_serial_has "$ser" "APEX-BOOTLAB: s3-mode=deep"
     cp "$ser" "$WORK/serial-luks-s3-resumed.log"
 }
 
