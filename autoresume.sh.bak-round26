@@ -87,35 +87,13 @@ fi
 
 say "starting a resume session ($remaining items outstanding)"
 cd "$ROOT" || exit 1
-
-# CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 is load-bearing, not tuning.
-#
-# In `claude -p` there is no next turn: once the orchestrator emits its final
-# response the harness gives background agents a 600 s grace period and then
-# SIGTERMs them. Round 24's log is the proof and it is exact -- the orchestrator
-# posted "I'll land each agent's branch as its completion notification arrives",
-# then "Background tasks still running after 600s; terminating.", and
-# scratch-later/run1.log recorded `forwarding signal 15 to container` at
-# 08:34:51, the same second the session ended. Agents were getting a fraction of
-# a four-hour window, which is a large part of why cards lag their commits every
-# single round: they are killed mid-piece.
-#
-# Round 25 is NOT an instance of this and is not claimed as one -- it died at
-# 09:45:17 to `systemd-logind: Lid closed.` -> `Suspending...`, a different
-# cause with a different fix (see state/dispatch.json `_orchestrator`.
-# `lid_inhibitor`). Two failure modes, both real; do not merge them.
-#
-# 0 means wait indefinitely -- and `timeout 4h` above is what bounds it, so the
-# session still cannot outlive its window. The harness names this variable
-# itself in the message it prints when it kills them.
-CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 \
 timeout 4h claude -p --permission-mode bypassPermissions "$(cat <<'PROMPT'
 AUTONOMOUS RESUME — APEX ROADMAP v2.2. You are continuing an autonomous run Andre asked for; ask him nothing and do not wait for approval.
 
 Read ROADMAP/state/report.txt first. It was regenerated seconds ago and holds the roadmap counts, every dispatched agent with whether it is alive and what its next action was, which branches carry work the integration branch does not have, and the ready dispatch queue. Do not re-derive any of it with git commands.
 
 Then:
-1. Land finished task branches onto roadmap/v2.2 in both repos. LAND BY MERGE, not rebase: round 10 changed the mechanism after a 12-commit cherry-pick conflicted on commit 1, and every task branch already carries merges of roadmap/v2.2. Run tests/check-no-conflict-markers.sh after each merge, then push --force-with-lease.
+1. Land finished task branches onto roadmap/v2.2 in both repos (rebase --onto, run tests/check-no-conflict-markers.sh, push --force-with-lease).
 2. Record what landed with ROADMAP/set-status.py <id> <status> --evidence "...".
 3. Update ROADMAP/state/dispatch.json.
 4. Dispatch from the queue's READY list, up to six concurrent agents. Give every agent the card requirement from ROADMAP/state/README.md.

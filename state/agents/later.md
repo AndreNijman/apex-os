@@ -5,20 +5,20 @@ worktree: /var/tmp/apex-work/wt-later
 branch: task/later-tpm-qualification
 
 ## NEXT
-luks-tpm-clear is RE-RUNNING with the fixes as podman container `later-clear2`
-(work dir /lab/r2-clear). Collect it with:
-  podman wait later-clear2; podman logs later-clear2 > /var/tmp/apex-work/scratch-later/r2-clear.log 2>&1
-Expect 19 passed, 0 failed (16 + the two repaired controls + the new blob-changed
-control). THEN run luks-firmware-change, THEN luks-s3, each the same way:
-  D=/var/tmp/apex-work/scratch-later/r1-<name>; mkdir -p $D; ln -s ../out/apex-root $D/apex-root
-  podman run -d --name later-<name> --device /dev/kvm \
-    -v /var/tmp/apex-work/wt-later:/work:z -v /var/tmp/apex-work/scratch-later:/lab:z \
-    localhost/apex-bootlab -c '/work/files/scripts/boot-v2/run-scenarios --work /lab/r1-<name> <name>'
-Use `podman run -d` + `podman wait`, NEVER `nohup podman run &`: a backgrounded
-foreground podman gets SIGTERM forwarded when the harness shell exits and the run
-dies part-way while reporting exit 0. Detached containers live under conmon and
-survive a tool timeout. Never edit files in the worktree while a container is
-executing run-scenarios from it — bash reads scripts incrementally.
+Round 26 in progress. Pre-launch edits to files/scripts/boot-v2/{lib.sh,run-scenarios}
+are being made NOW (asserted-nothing summary defect + the vars-change control).
+When they are committed, launch all three NEVER-COMPLETED scenarios in parallel:
+  for n in luks-tpm-clear luks-firmware-change luks-s3; do
+    D=/var/tmp/apex-work/scratch-later/r3-$n; mkdir -p $D; ln -sfn ../out/apex-root $D/apex-root
+    podman run -d --name later-r3-$n --device /dev/kvm \
+      -v /var/tmp/apex-work/wt-later:/work:z -v /var/tmp/apex-work/scratch-later:/lab:z \
+      localhost/apex-bootlab -c "/work/files/scripts/boot-v2/run-scenarios --work /lab/r3-$n $n"
+  done
+  timeout 590 podman wait later-r3-luks-tpm-clear later-r3-luks-firmware-change later-r3-luks-s3
+  podman logs later-r3-$n > /var/tmp/apex-work/scratch-later/r3-$n.log 2>&1
+NEVER `nohup podman run &` (SIGTERM forwarded, dies part-way, reports 0). NEVER edit
+files/scripts/boot-v2/** while a container is executing run-scenarios from /work —
+bash reads the script incrementally. tests/, docs/ and this card are safe mid-run.
 
 ## DONE
 - Card created at round start.
@@ -32,6 +32,15 @@ executing run-scenarios from it — bash reads scripts incrementally.
 - FIRST EXECUTION of luks-tpm-clear (2026-09-14, round 25): 16 passed, 3 failed.
   Log /var/tmp/apex-work/scratch-later/r1-clear.log. All three failures were real;
   diagnosed and fixed in e2345ed7 (pushed).
+- SECOND EXECUTION of luks-tpm-clear (round 25 tail, container `later-clear2`,
+  log /var/tmp/apex-work/scratch-later/r2-clear.log): 17 assertions passed, 0 failed,
+  through boot1 unlock+marker, PCR11 extension, the snapshot, TPM2_Clear over the
+  platform hierarchy, the Storage Primary Seed rotation, boot2 tpm-unlock=REFUSED AND
+  recovery-unlock=SUCCESS in the same boot, PCR 11 unchanged, re-enrolment from the
+  recovery key alone, and the sealed blob really being replaced. It then DIED part way
+  through boot 3 of 4 — NOT a scenario defect: at 09:45:17 AWST the laptop lid closed,
+  logind suspended (s2idle) and never resumed; podman inspect shows finished=0001-01-01,
+  so the "Exited (0)" is an artefact. Do not go hunting for a boot-3 bug.
 - e2345ed7 fixes four things, each measured not assumed:
   the two-step wipe-then-enrol, the blob-changed control, swtpm_owner_primary_name
   via tpm2_readpublic, and the always-printed summary (EXIT trap).
