@@ -5,12 +5,10 @@ branch: task/followups-5
 repo: apex-os
 
 ## NEXT
-Fix `Input page and generator agree` in `.github/workflows/pr-validation.yml`
-(~line 338): when apex-shell has no branch matching `$GITHUB_REF_NAME`, fall
-back to apex-shell **`roadmap/v2.2`** BEFORE its default branch. Then finish
-reading run 34796578198's rust + engine jobs.
-**DO NOT LAND** until a run on this branch is green — the orchestrator is
-holding the landing deliberately.
+Pull the `Package engine` log for run 34802332142 job 103847365659 into
+`/var/tmp/apex-work/scratch-followups-5/engine.log` and read the FIRST failing
+step, `Run virtualization assertions`, to its FATAL line; fix it, prove the gate
+fails in both directions, commit, push `task/followups-5`.
 
 ## DONE
 - `13e7ec84` ci: 93 `run:` steps carry `if: ${{ !cancelled() }}`. LANDED.
@@ -29,7 +27,10 @@ holding the landing deliberately.
   clean under `shellcheck -S warning`.
 
 ## IN PROGRESS
-- run 34796578198, watching.
+- run 34802332142 (round 26, branch tip `94a3a2ac`). **Static ✓ all 28 steps.
+  Rust ✓ all 41 steps** — `Pack the chaos bundles` ✓ and `Chaos diagnostics` ✓,
+  the first time either has been green. Engine still running; nine reds so far.
+- Working the engine reds down, in order.
 
 ## FOUND
 - **THE 1 → 8 IS NOT A REGRESSION I CAUSED.** `13e7ec84` (`!cancelled()`) is
