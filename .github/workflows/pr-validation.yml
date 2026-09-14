@@ -1587,10 +1587,19 @@ jobs:
           # An archive nobody looked inside is the same mistake one layer down.
           # Assert it round-trips, name the colon path specifically, and refuse
           # an archive that unpacks to nothing.
-          n=$(tar -tzf "$RUNNER_TEMP/chaos-bundles.tar.gz" | wc -l)
+          #
+          # Materialise the listing rather than piping it. `tar -tzf … | grep -q`
+          # makes grep exit at its FIRST match; tar then dies of SIGPIPE, and
+          # under `pipefail` the pipeline reports failure — so the guard fails
+          # exactly WHEN the path is present, and passes when it is absent and
+          # grep has to read to the end. Run 34796578198 is that inversion: the
+          # step printed "the fixture sysfs tree is not in the archive" over an
+          # archive holding it, one line after "194 paths packed".
+          tar -tzf "$RUNNER_TEMP/chaos-bundles.tar.gz" > "$RUNNER_TEMP/chaos-listing.txt"
+          n=$(wc -l < "$RUNNER_TEMP/chaos-listing.txt")
           echo "$n paths packed"
           [ "$n" -gt 1 ] || { echo "FATAL: the chaos archive is empty" >&2; exit 1; }
-          tar -tzf "$RUNNER_TEMP/chaos-bundles.tar.gz" | grep -q '0000:03:00\.0' || {
+          grep -q '0000:03:00\.0' "$RUNNER_TEMP/chaos-listing.txt" || {
             echo "FATAL: the fixture sysfs tree is not in the archive — the" >&2
             echo "       bundle cannot be replayed from it" >&2
             exit 1
