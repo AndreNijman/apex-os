@@ -193,6 +193,7 @@ fun ApexRemoteApp(
                     nowSeconds = state.agents.nowSeconds,
                     busy = state.busy ?: state.agents.busy,
                     failure = state.failure ?: state.agents.failure,
+                    notice = state.agents.notice,
                     onRefresh = { viewModel.refreshAgents() },
                     onOpen = {
                         viewModel.selectSession(it)
@@ -202,6 +203,9 @@ fun ApexRemoteApp(
                     onProjects = { navigation.navigate(Destinations.WORKTREES) },
                     onApprovals = { navigation.navigate(Destinations.APPROVALS) },
                     onHelp = { navigation.navigate(Destinations.HELP) },
+                    onCopyFromMachine = { viewModel.pullMachineClipboard() },
+                    clipboardPull = state.agents.clipboardPull,
+                    onClipboardCopied = { viewModel.clipboardPullConsumed() },
                     pendingApprovals = state.agents.approvals.pending.size,
                     notificationsEnabled = state.notificationsEnabled,
                     notificationsUnasked = state.notificationsUnasked,
