@@ -3449,7 +3449,7 @@ tasks:
 - id: P1-059
   title: Android voice, screenshot, file and clipboard handoff
   priority: P1
-  status: partial
+  status: done
   area: android
   depends_on:
   - P1-053
@@ -3607,7 +3607,16 @@ tasks:
     LANDED tip, not on the branch: cargo test --locked --workspace --no-fail-fast from int-os/apexd = 3218 passed,
     0 failed, 2 ignored, exit 0 (up from 3189 last round; the 29 new tests are these commits'). Note for the
     record: this work existed as 1,490 UNCOMMITTED lines for two rounds and two agents died holding it before
-    round 25 committed it.
+    round 25 committed it. ROUND 27 (2026-09-14): LANDED as merge d3ad8f7d into roadmap/v2.2 654fa854 - efa5d198
+    (Agentd.clipboard/readClipboard, MachineLink.clipboard, the shared requests.json wire fixture both ends, and
+    the proxy.rs assertion that clipboard does NOT take over the channel), 053b57bd (the Clipboard button, view
+    model and guide), b341e433 (15 tests over a shared fixture asserting the REPLY direction from both ends) and
+    e30e5462 (a pre-existing defect: dismissing a banner on the Agent Center did not clear it). Criterion 3 was
+    the only one open and BOTH halves are now in, so all four criteria are met and this item is DONE. Verified on
+    the landed tip, not on the branch: cargo test --locked --workspace --no-fail-fast = 3235 passed, 0 failed, 2
+    ignored, exit 0 read out of the log rather than off a pipeline exit code. PROTOCOL_VERSION deliberately NOT
+    bumped - it stays 8; a daemon older than Request::Clipboard answers 'unparseable request', which loses a
+    feature and never a restriction.
 - id: P1-060
   title: Ship APEX Remote Android as a production-quality application
   priority: P1
@@ -4242,7 +4251,15 @@ tasks:
     this row is still pinned in both directions rather than claimed, and the tip asserts it numerically: the shell
     paints from 14 window roots, 0 of them mirror, and exactly 2 shared config components (CfgRow, CfgScroll)
     declare mirroring. A suite reporting 'RTL: done' over a mirrored settings page and an unmirrored bar would be
-    worse than no suite.
+    worse than no suite. ROUND 27 (2026-09-14): LANDED as merge 8968135b - the platform-theme guard that round 26
+    dispatched for, four commits. tests/test-apex-platform-theme.sh re-run ON THE LANDED TIP: 18 passed, 0 failed,
+    0 skipped, with tests/mutate-platform-theme.sh as its mutation pair, closing the hole that changing
+    QT_QPA_PLATFORMTHEME's VALUE (as opposed to deleting the variable) was caught by nothing. THE FINDING:
+    qt6-qttranslations reaches the image ONLY as a weak Recommends of qt6-qtbase-gui and is named in NEITHER
+    Containerfile - measured on the booted host, rpm -q --whatrequires returns no package. It owns qt_ar.qm, which
+    IS the whole mechanism by which anything mirrors, so any build passing --setopt=install_weak_deps=False (and
+    apex-pkg already has a --no-weak-deps flag) silently deletes RTL support. 578914fd names it explicitly.
+    check-containerfile-assertions.sh and test-containerfile-order.sh (24/0) both green on the landed tip.
 - id: P2-005
   title: Printing/scanning/network-share maturity
   priority: P2
@@ -4405,7 +4422,14 @@ tasks:
     header says it was CAPTURED, and nothing re-captures it). The --json contract is written down beside the
     helper: policy is ruleset_state's enum verbatim, always_allowed is one string, hotspot_links is an array when
     loaded and NULL otherwise. +247/-40 in files/system/libexec/apex-firewall and +307 in
-    tests/test-apex-firewall.sh.
+    tests/test-apex-firewall.sh. ROUND 27 (2026-09-14): LANDED on both repos - apex-os merge 769e4fc2 (12201d9e
+    plus 100 lines in apexd/apex/src/main.rs, the CLI consumer side of --json) and apex-shell merge b7953e4
+    (a585e4e, ded1ab1, c6c4f15, ae32f12). The prose-coupling defect is closed the RIGHT way rather than by
+    re-capturing the fixture: firewall.js now consumes --json, so the coupling structurally cannot return, with a
+    prose fallback for an apex too old to offer --json. tests/check-firewall-ui.sh re-run ON THE LANDED SHELL TIP,
+    headless: 35 passed, 0 failed, including 'the sweep reads the machine-readable status, not the prose' and 'an
+    apex too old for --json still gets read, through a prose fallback'. c6c4f15 also wired five apex-shell suites
+    that ran nowhere into CI.
 - id: P2-007
   title: Bluetooth/dock/peripheral maturity
   priority: P2
@@ -4969,7 +4993,14 @@ tasks:
     in different processes, so two copies is one copy that can drift. Provider::validate holds the table to four
     rules that were each otherwise a silent failure. +577 in apex-secret-core/src/account.rs, +25/-6 in
     apex/src/cloudflare.rs. Verified on the landed tip: cargo test --locked --workspace 3218 passed / 0 failed / 2
-    ignored.
+    ignored. ROUND 27 (2026-09-14): LANDED as merge de78631e - 862d1c37 (an operation declares whether it may
+    supersede a stored credential) and 306e79e1 (the framework half of a refresh), 908 insertions across 10 files
+    with apexd/apex-secretd/src/service.rs +634. supersedes_credentials is mandatory on OperationSpec with no
+    Default, Bound::replaces is a Vec (RFC 6749 section 6 lets the server rotate the refresh token, so a refresh
+    replaces BOTH the access credential and the rotated refresh), and Replaced carries value only - no host,
+    scheme or username - so a refresh structurally cannot repoint a credential's pin. The oauth PROVIDER itself is
+    the next commit and was still uncommitted in the worktree at landing time; it is snapshotted to refs/wip and
+    handed to round 27's fresh agent as its first action.
 - id: P2-018
   title: Guaranteed Safe Graphics / desktop failover mode
   priority: P2
@@ -5211,7 +5242,20 @@ tasks:
     re-enrolment against the cleared TPM -- then was killed part-way through boot 3 of 4 when the laptop lid
     closed at 09:45:17 AWST and the machine suspended. It has still never completed end to end, and
     luks-firmware-change and luks-s3 have still never been executed once. Log
-    /var/tmp/apex-work/scratch-later/r2-clear.log.
+    /var/tmp/apex-work/scratch-later/r2-clear.log. ROUND 27 (2026-09-14): LANDED as merge 654fa854 (13be81a8,
+    c84b2f83). THE CARD'S NEXT WAS STALE IN THE OTHER DIRECTION THIS TIME - it said later-r4-luks-s3 'IS RUNNING'
+    and that luks-tpm-clear had never completed end to end. Both were wrong: all four containers had finished
+    before the 12:06 reboot and the orchestrator collected them rather than re-running anything. Real results,
+    read out of podman logs and saved to /var/tmp/apex-work/scratch-later/r27-*.log, with State.FinishedAt checked
+    on each so 'Exited (0)' is not taken at face value: luks-tpm-clear FINISHED END TO END at 20 passed / 0 failed
+    (finished 11:41:25) - the scenario the card says has never completed; luks-firmware-change 18 passed / 0
+    failed / 1 COULD-NOT-RUN (finished 11:40:57), the could-not-run being honest and structural - moving PCR 0
+    needs a second OVMF build differing ONLY in code, and the lab image's two 4M builds differ in Secure Boot
+    enforcement as well, so swapping them would conflate 'the firmware changed' with 'Secure Boot was turned off';
+    luks-s3 ran twice, r3 at 4 passed / 1 failed (finished 11:43:21) and r4 at 6 passed / 0 failed / 1
+    COULD-NOT-RUN (finished 11:53:15), the could-not-run being 'the guest reported no s3 field at all'. So two of
+    the three scenarios the card calls outstanding are in fact complete, and only the QMP waker path in luks-s3
+    has still never executed.
 - id: L-002
   title: Enable LUKS2 by default
   priority: Later

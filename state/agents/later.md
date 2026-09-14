@@ -5,6 +5,51 @@ worktree: /var/tmp/apex-work/wt-later
 branch: task/later-tpm-qualification
 
 ## NEXT
+
+**ORCHESTRATOR CORRECTION, round 27 (2026-09-14 15:0x AWST). The text below
+this block was written before the 12:06 reboot and is WRONG in the direction
+that wastes a round: it says `later-r4-luks-s3` "IS RUNNING" and that
+`luks-tpm-clear` has never completed end to end. Neither is true.**
+
+All four containers finished before the reboot. The orchestrator collected them
+rather than re-running anything; logs are saved as
+`/var/tmp/apex-work/scratch-later/r27-<container>.log`. `State.FinishedAt` was
+checked on each, so these are real results and not round 26's `finished=0001-01-01`
+artifact:
+
+| container | finished | result |
+| --- | --- | --- |
+| `later-r3-luks-tpm-clear` | 11:41:25 | **20 passed, 0 failed — COMPLETE END TO END** |
+| `later-r3-luks-firmware-change` | 11:40:57 | 18 passed, 0 failed, 1 could-not-run |
+| `later-r3-luks-s3` | 11:43:21 | 4 passed, **1 failed** |
+| `later-r4-luks-s3` | 11:53:15 | 6 passed, 0 failed, 1 could-not-run |
+
+So **two of the three scenarios this card calls outstanding are done**, and
+L-001's evidence in roadmap.yaml already records all four measurements. The
+`luks-firmware-change` could-not-run is structural and honest — moving PCR 0
+needs a second OVMF build differing ONLY in code, and the lab's two 4M builds
+differ in Secure Boot enforcement too, so swapping them conflates "the firmware
+changed" with "Secure Boot was turned off". Do not spend the round re-litigating
+it; record it as a limit.
+
+**THE ONE THING STILL UNEXECUTED is the QMP waker in `luks-s3`.** r4 got
+further than r3 but ended `the guest reported no s3 field at all`. Read
+`/var/tmp/apex-work/scratch-later/r27-later-r4-luks-s3.log` first, then
+`/lab/r4-luks-s3/serial-luks-s3.wake.json` and `qmp-wake.py`. Branch
+`task/later-tpm-qualification` LANDED this round as merge `654fa854`.
+
+**THEN** (unchanged and still owed): `docs/boot-v2.md` has no record of the now
+THREE completed scenarios, and its Recovery table row "the TPM was cleared …
+Re-enroll afterwards" documents a procedure that is a silent no-op. Fix that row
+and add the measurements.
+
+NEVER `nohup podman run &` — use `podman run -d` then `podman wait`. NEVER edit
+`files/scripts/boot-v2/**` while a container is executing `run-scenarios` from
+`/work`.
+
+---
+### superseded round-26 NEXT, kept only as history
+
 later-r4-luks-s3 IS RUNNING (launched 11:5x AWST off c84b2f83, work /lab/r4-luks-s3).
 Collect it:
   timeout 590 podman wait later-r4-luks-s3
