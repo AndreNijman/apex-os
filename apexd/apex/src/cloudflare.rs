@@ -284,11 +284,9 @@ fn connect_with_a_pasted_token() -> Result<i32> {
 /// Wrangler and get `invalid_client` from Cloudflare with nothing to explain
 /// it.
 fn username_for<'a>(service: &str, client_id: &'a str) -> &'a str {
-    if service == REFRESH_SERVICE {
-        client_id
-    } else {
-        apex_secret_core::store::DEFAULT_USERNAME
-    }
+    let _ = service;
+    let _ = client_id;
+    apex_secret_core::store::DEFAULT_USERNAME
 }
 
 fn store(service: &str, host: &str, scheme: &str, username: &str, value: &str) -> Result<()> {
