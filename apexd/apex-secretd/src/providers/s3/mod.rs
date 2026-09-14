@@ -279,6 +279,7 @@ impl Provider for S3Provider {
             endpoint: Endpoint::from_url(&origin(req.service))?,
             detail,
             creates: None,
+            replaces: Vec::new(),
             // Nothing here reaches a second thing the owner would want to be
             // asked about separately: the bucket is bound in the project's own
             // file and the endpoint is the credential's.
@@ -329,6 +330,7 @@ impl Provider for S3Provider {
                     code: i32::from(!reply.ok),
                     output: reply.body,
                     created: None,
+                    replaced: Vec::new(),
                 })
             }
             ("s3.object.write", Some(key)) => {
@@ -366,6 +368,7 @@ impl Provider for S3Provider {
                     code: i32::from(!reply.ok),
                     output: reply.body,
                     created: None,
+                    replaced: Vec::new(),
                 })
             }
             // `bind` refused a write with no key, and the framework checked the
@@ -561,6 +564,7 @@ impl S3Provider {
                     code: 1,
                     output: format!("HTTP {}: {}", reply.status, one_line(&reply.body)),
                     created: None,
+                    replaced: Vec::new(),
                 });
             }
             keys.extend(parse_keys(&reply.body));
@@ -571,6 +575,7 @@ impl S3Provider {
                         code: 0,
                         output: render_listing(&keys),
                         created: None,
+                        replaced: Vec::new(),
                     })
                 }
             }

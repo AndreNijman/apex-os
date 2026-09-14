@@ -157,6 +157,7 @@ impl Provider for BearerProvider {
             endpoint: Endpoint::from_url(&url)?,
             detail: format!("{} {}", req.operation.id, self.path(req)),
             creates: None,
+            replaces: Vec::new(),
             // A bearer request reaches only the endpoint pinned when its
             // credential was stored, so there is no second thing for the owner
             // to be asked about.
@@ -239,6 +240,7 @@ impl Provider for BearerProvider {
             // framework is what keeps that out of the caller's hands.
             output: format!("{status} {body}"),
             created: None,
+            replaced: Vec::new(),
         })
     }
 }
