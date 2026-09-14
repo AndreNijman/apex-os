@@ -5,14 +5,15 @@ worktree: /var/tmp/apex-work/wt-p2-f
 branch: task/p2-f-3   (cut from origin/roadmap/v2.2 @ 13d53c01)
 
 ## NEXT
-Round 5 commit 1: add `supersedes_credentials: bool` to `OperationSpec` in
-`apexd/apex-secret-core/src/operation.rs` (mandatory, no Default — mirrors
-`same_everywhere`), write `false` at every one of the ~85 literals the grep
-`rg 'same_everywhere' apexd --type rust` lists, add
-`may_supersede_credentials(op)` beside `may_be_granted_everywhere` in
-`apexd/apex-secretd/src/service.rs`, and a registry test in
-`apexd/apex-secretd/src/providers/mod.rs` mirroring
-`the_everywhere_gate_reads_the_operations_own_declaration`.
+Round 5 commit 2: in `apexd/apex-secretd/src/provider.rs` add
+`Bound::replaces: Vec<String>`, `Performed::replaced: Vec<Replaced>` and
+`pub struct Replaced { name: String, value: SecretValue }`; restore
+`may_supersede_credentials` beside `may_be_granted_everywhere` in
+`apexd/apex-secretd/src/service.rs` (it was held back from commit 1 — an
+unused `pub(crate) fn` is a dead-code warning and CI runs
+`cargo clippy --all-targets --locked -- -D warnings`); add the framework
+checks in `use_capability` mirroring the `creates` block; add a `Replacer`
+test provider in `service.rs`'s tests mirroring `Creator`.
 
 ## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
 1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
@@ -87,6 +88,11 @@ Remaining, in the order this round takes them:
   host to its token endpoint from a hard-coded table, which is pin-consistent.
 
 ## DONE
+Round 5, on task/p2-f-3 (pushed):
+  862d1c37  `OperationSpec::supersedes_credentials`, mandatory, `false` at all
+            64 literals; `ProviderSpec::validate` refuses a superseding
+            operation that calls itself `Effect::Read`. Both new tests
+            mutation-checked red. 3220 passed / 0 failed / 2 ignored.
 Round 1: landed as merge 4e8969ef (10 commits).
 Round 2: landed as merge f2229185 — P2-018 criterion 1, the recovery verb.
 Round 3, on task/p2-f-3 (pushed):
@@ -94,15 +100,17 @@ Round 3, on task/p2-f-3 (pushed):
             cross-crate gate in apex-secretd, both mutants run and red.
 
 ## IN PROGRESS (round 5)
-- `git status` run: worktree CLEAN as of the merge of `origin/roadmap/v2.2`
-  (2219ef75) into `task/p2-f-3` as `91c30b14`. Nothing half-written yet.
-- About to touch: `apexd/apex-secret-core/src/operation.rs` (`OperationSpec`).
+- `git status` run: worktree CLEAN at `862d1c37` (commit 1 pushed).
+  Nothing half-written.
+- About to touch: `apexd/apex-secretd/src/provider.rs`.
 
 ## ROUND 5 COMMIT SEQUENCE (settled with the advisor)
-1. `supersedes_credentials` + the ~85 `false` literals + the gate + the
-   registry test. The `oauth` provider does NOT land here, so the registry
-   test's superseding set is asserted **empty** in this commit and becomes
-   `["oauth.token.refresh"]` in commit 3.
+1. ~~`supersedes_credentials` + the 64 `false` literals + the registry test~~
+   **DONE, `862d1c37`, pushed.** The superseding set is asserted EMPTY there;
+   commit 3 changes that line to `["oauth.token.refresh"]`. The gate function
+   `may_supersede_credentials` moved to commit 2 — CI runs
+   `clippy --all-targets -- -D warnings` and an unused `pub(crate) fn` is a
+   dead-code warning, so it lands with its caller.
 2. `Bound::replaces` / `Performed::replaced` / `Replaced { name, value }` +
    the framework checks in `service.rs` + a `Replacer` test provider mirroring
    `Creator` (careless output that contains the new secret, `ran` measured).

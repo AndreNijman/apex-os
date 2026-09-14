@@ -5,20 +5,23 @@ worktree: /var/tmp/apex-work/wt-later
 branch: task/later-tpm-qualification
 
 ## NEXT
-Round 26 in progress. Pre-launch edits to files/scripts/boot-v2/{lib.sh,run-scenarios}
-are being made NOW (asserted-nothing summary defect + the vars-change control).
-When they are committed, launch all three NEVER-COMPLETED scenarios in parallel:
-  for n in luks-tpm-clear luks-firmware-change luks-s3; do
-    D=/var/tmp/apex-work/scratch-later/r3-$n; mkdir -p $D; ln -sfn ../out/apex-root $D/apex-root
-    podman run -d --name later-r3-$n --device /dev/kvm \
-      -v /var/tmp/apex-work/wt-later:/work:z -v /var/tmp/apex-work/scratch-later:/lab:z \
-      localhost/apex-bootlab -c "/work/files/scripts/boot-v2/run-scenarios --work /lab/r3-$n $n"
-  done
+THREE CONTAINERS ARE RUNNING RIGHT NOW (launched 2026-09-14 11:38 AWST off
+commit 13be81a8): later-r3-luks-tpm-clear, later-r3-luks-firmware-change,
+later-r3-luks-s3, each `run-scenarios --work /lab/r3-<name> <name>`. Collect
+them — do NOT relaunch without checking `podman ps -a` first:
   timeout 590 podman wait later-r3-luks-tpm-clear later-r3-luks-firmware-change later-r3-luks-s3
-  podman logs later-r3-$n > /var/tmp/apex-work/scratch-later/r3-$n.log 2>&1
-NEVER `nohup podman run &` (SIGTERM forwarded, dies part-way, reports 0). NEVER edit
-files/scripts/boot-v2/** while a container is executing run-scenarios from /work —
-bash reads the script incrementally. tests/, docs/ and this card are safe mid-run.
+  for n in luks-tpm-clear luks-firmware-change luks-s3; do
+    podman logs later-r3-$n > /var/tmp/apex-work/scratch-later/r3-$n.log 2>&1; done
+If one exited 137 or shows a timeout kill, RE-RUN THAT ONE ALONE before calling
+it a defect: three guests at 4096 MiB share this host. Relaunch recipe:
+  D=/var/tmp/apex-work/scratch-later/r3-<name>; rm -rf $D; mkdir -p $D
+  ln -sfn ../out/apex-root $D/apex-root
+  podman run -d --name later-r3-<name> --device /dev/kvm \
+    -v /var/tmp/apex-work/wt-later:/work:z -v /var/tmp/apex-work/scratch-later:/lab:z \
+    localhost/apex-bootlab -c '/work/files/scripts/boot-v2/run-scenarios --work /lab/r3-<name> <name>'
+NEVER `nohup podman run &` (SIGTERM forwarded, dies part-way, reports 0). NEVER
+edit files/scripts/boot-v2/** while a container is executing run-scenarios from
+/work — bash reads the script incrementally. tests/, docs/ and this card are safe.
 
 ## DONE
 - Card created at round start.
@@ -44,6 +47,20 @@ bash reads the script incrementally. tests/, docs/ and this card are safe mid-ru
 - e2345ed7 fixes four things, each measured not assumed:
   the two-step wipe-then-enrol, the blob-changed control, swtpm_owner_primary_name
   via tpm2_readpublic, and the always-printed summary (EXIT trap).
+
+- ROUND 26 pre-launch commit 13be81a8 (pushed): two more "green for work it did
+  not do" defects, both found while preparing the never-run scenarios.
+  1. A run whose every check was `cannot` printed 0 passed / 0 failed and EXITED 0.
+     bootv2_summary now records an empty run as a failure; ok+cannot is still a pass.
+  2. The firmware-change control could not fail, for two independent reasons:
+     the lab image ships NO diffutils (`command -v cmp` is empty in
+     localhost/apex-bootlab), so `if cmp -s A B` exited 127 = the "they differ"
+     branch; and the baseline was the varstore two guests had already booted from,
+     which OVMF rewrites every boot. Now sha256sum (lib.sh files_same) against a
+     second copy of the SAME template, plus a new assertion that the dbx
+     REVOCATION LIST grew (76 -> 21340 bytes, parser verified 4 ways).
+  tests/test-boot-v2.sh gained 12 assertions for all of it (74 passed, 0 failed),
+  in the no-toolchain mode so the `static` job runs them.
 
 ## IN PROGRESS
 - Three new scenarios planned for files/scripts/boot-v2/run-scenarios:

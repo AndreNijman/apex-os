@@ -167,16 +167,22 @@ suite and a mutation pair.
 
 ## NEXT
 
-**One line:** in `/var/tmp/apex-work/wt-p2-b4` (apex-os, `task/p2-b-round23`, now
-fast-forwarded to `2219ef75`), write `tests/test-apex-platform-theme.sh` — the
-three-way agreement guard that the IMAGE sets `QT_QPA_PLATFORMTHEME=qt6ct` —
-then `tests/mutate-platform-theme.sh`, then wire the suite into
-`pr-validation.yml` after the ai-apps step.
+**One line:** in `/var/tmp/apex-work/wt-p2-b4` (apex-os, `task/p2-b-round23`,
+pushed at `b1db5eb0`), write `tests/mutate-platform-theme.sh` — modelled on
+`tests/mutate-greet-session-bus.sh` for the file/restore shape and on apex-shell
+`tests/mutate-rtl.sh` for the three-way `classify()` + its self-test — with
+mutants (a) printf value `qt6ct`→`qt5ct`, (b) labwc value `qt6ct`→`qt5ct`,
+(c) both together, (d) the printf line deleted, (e) the `>> /etc/environment`
+redirect removed, (f) `qt6ct` dropped from the install list,
+(g) `qt6-qttranslations` dropped from the install list; run it, then commit,
+push, and record the table here.
 
 ## IN PROGRESS
 
-`tests/test-apex-platform-theme.sh` (apex-os, new file) — not yet written.
-Nothing is committed this round yet.
+`tests/mutate-platform-theme.sh` (apex-os, new file) — not yet written. Files it
+must restore: `Containerfile.core`, `files/desktop/labwc/environment`,
+`tests/test-apex-platform-theme.sh`. Restore with `git checkout --`, never `cp`
+(finding 9). Run the suite under `env -i HOME PATH USER TMPDIR`.
 
 ## FOUND (round 26, before writing a line)
 
@@ -279,6 +285,30 @@ Ordered. Items 1-2 need hardware and are **not** this agent's to attempt or fake
     Lock and recovery screens are not measured; only login is.
 11. **A SKIP in the installer suites means the criterion is unmeasured, not met.**
 
-## DONE (this round)
+## DONE (round 26)
 
-Nothing yet.
+apex-os `task/p2-b-round23`, fast-forwarded onto `2219ef75` first, pushed at
+`b1db5eb0`:
+
+- **`578914fd`** — `Containerfile.core` now names `qt6-qttranslations`
+  explicitly. No image-size change (it was already present); what changes is
+  that dropping it now takes a deliberate edit. See FOUND below.
+- **`b1db5eb0`** — `tests/test-apex-platform-theme.sh`, **18 passed / 0 failed /
+  0 skipped** on this booted host, plus its step in `pr-validation.yml`
+  immediately after the ai-apps step (`check-suites-run-in-ci.sh`: 75 suites,
+  71 run by CI, 4 exempt, 0 undeclared).
+
+**Proved red before it was fixed**, which is the evidence the round exists for.
+The first run of the suite against the unmodified tree was **15/3/0**, and the
+three reds were: two from the extractor's own `\S+` swallowing the shell `;`
+(caught by the suite's positive self-test — the parser bug, fixed in the same
+file), and one product row, *"the image names qt6-qttranslations EXPLICITLY, not
+as a weak dependency"*. After the parser fix, **17/1/0** with that one product
+row still red; after `578914fd`, **18/0/0**. Both logs are kept:
+`/var/tmp/apex-work/scratch-p2-b/platform-theme-RED-before-fix.log` and
+`…/platform-theme-RED-qttranslations.log`.
+
+Gates run and green: `check-containerfile-assertions.sh` (188 checked, 0 failed),
+`test-containerfile-order.sh` (24/0), `check-shellcheck-coverage.sh` (164
+scripts, 0 newly failing), `shellcheck -S warning -x` on the new suite, and
+`python3 -c yaml.safe_load` on the edited workflow.

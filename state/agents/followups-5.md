@@ -5,12 +5,22 @@ branch: task/followups-5
 repo: apex-os
 
 ## NEXT
-Pull the `Package engine` log for run 34802332142 job 103847365659 into
-`/var/tmp/apex-work/scratch-followups-5/engine.log` and read the FIRST failing
-step, `Run virtualization assertions`, to its FATAL line; fix it, prove the gate
-fails in both directions, commit, push `task/followups-5`.
+Fix the nushell half of `Run fish and nushell agent-integration assertions` (23
+FAILs): `tests/test-shell-agent.sh` scrubs to `env -i PATH="${BIN}:/usr/bin:/bin"`,
+which excludes `/usr/local/bin` where the workflow installs `nu` — resolve
+`nu`/`fish`'s real dir with `command -v` once and append it to the scrubbed
+PATHs, leaving the deliberate `$NOAPEX` (l.227) and `${DOWN}` (l.327,480)
+fixtures alone.
 
 ## DONE
+- `bd69bb2f` test(agent): five engine suites stopped at the first session CI
+  could not place. PUSHED. inject/worktrees/disposable/profile/secret-broker
+  now re-enter through `tests/in-login-session.sh`, the block
+  test-privilege-requests.sh already carried. **Both directions measured in the
+  runner's own cgroup shape** (`sudo systemd-run --uid=1000 --unit=… --pty` →
+  `0::/system.slice/<unit>.service`, uid 1000): without the wrapper
+  2/1, 5/1, 3/1, 28/1, 55/1 — byte-identical to the runner's five logs — and
+  with it 48/0, 61/0, 58/0, 48/0, 66/0. **188 assertions that had never run.**
 - `13e7ec84` ci: 93 `run:` steps carry `if: ${{ !cancelled() }}`. LANDED.
   **It worked, and it is the round's biggest win**: run 34795907584 shows all
   22 rust steps past `Tests` and *eight* engine reds instead of one. The reds
@@ -30,7 +40,9 @@ fails in both directions, commit, push `task/followups-5`.
 - run 34802332142 (round 26, branch tip `94a3a2ac`). **Static ✓ all 28 steps.
   Rust ✓ all 41 steps** — `Pack the chaos bundles` ✓ and `Chaos diagnostics` ✓,
   the first time either has been green. Engine still running; nine reds so far.
-- Working the engine reds down, in order.
+- Working the engine reds down, in order. Family A (5 steps) DONE, see above.
+  Left: nushell PATH (23), virtualization (60), root-approval bind (8),
+  mux-layouts zellij tab (1).
 
 ## FOUND
 - **THE 1 → 8 IS NOT A REGRESSION I CAUSED.** `13e7ec84` (`!cancelled()`) is
