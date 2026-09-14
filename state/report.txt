@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-14 13:38 AWST
+APEX ROADMAP — resume report — 2026-09-14 14:39 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -18,32 +18,32 @@ APEX ROADMAP — resume report — 2026-09-14 13:38 AWST
 ────────────────────────────────────────────────────────────────────────────
   later      unknown    L-001,L-002,L-003                  task/later-tpm-qualification
              head c84b2f83 fix(boot-v2): `mem` is not S3, and a missing serial f
-             dirty 0 file(s), 0 unpushed, card 109m
+             dirty 0 file(s), 0 unpushed, card 170m
              NEXT later-r4-luks-s3 IS RUNNING (launched 11:5x AWST off c84b2f83, wor
 
   p1-053c    unknown    P1-059,P1-060                      task/p1-053c-clipboard
              head e30e5462 fix(android): dismissing a banner on the Agent Center
-             dirty 0 file(s), 0 unpushed, card 107m
+             dirty 0 file(s), 0 unpushed, card 168m
              NEXT **P1-059 IS FINISHED — ask the orchestrator to land `task/p1-053c-
 
   p2-c       unknown    P2-005,P2-006,P2-007               task/p2-c-2
              head 85776285 Merge roadmap/v2.2 (2219ef75) into task/p2-c-2
-             dirty 2 file(s), 0 unpushed, card 113m
+             dirty 2 file(s), 0 unpushed, card 174m
              NEXT In /var/tmp/apex-work/wt-p2-005 (apex-os): build the image and run
 
   p2-b       unknown    P2-003,P2-004                      task/p2-b-round23
              head 77bbd712 test(i18n): the mutation pair for the platform theme,
-             dirty 0 file(s), 0 unpushed, card 110m
+             dirty 0 file(s), 0 unpushed, card 171m
              NEXT **One line:** the platform-theme guard is COMPLETE and pushed (ape
 
   p2-f       unknown    P2-016,P2-017,P2-018,P2-019        task/p2-f-3
              head 306e79e1 feat(secretd): the framework half of a credential a r
-             dirty 4 file(s), 0 unpushed, card 111m
+             dirty 4 file(s), 0 unpushed, card 172m
              NEXT Round 5 commit 3: write `apexd/apex-secretd/src/providers/oauth.rs
 
   followups-5 unknown                                       task/followups-5
              head df6c4797 test(vm): the one probe that could not be faked with 
-             dirty 0 file(s), 0 unpushed, card 106m
+             dirty 0 file(s), 0 unpushed, card 167m
              NEXT Read run 34803818557's `Package engine` job (dispatched 03:47Z on 
 
 
@@ -100,11 +100,11 @@ APEX ROADMAP — resume report — 2026-09-14 13:38 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 13:38:57 AWST 23s
+  snapshot timer: active   last 14:39:46 AWST 24s
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    f9cba87  roadmap-state
+    apex-os    feea6b5  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -127,7 +127,7 @@ APEX ROADMAP — resume report — 2026-09-14 13:38 AWST
     apex-os    162d6fa  wt-p0-009-
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
-    apex-shell 9a5cbd5  apex-shell-
+    apex-shell 913f81d  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell 02674e0  int-shell-
     apex-shell 68c971d  wt-base-shell-
