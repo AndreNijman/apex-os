@@ -4194,7 +4194,13 @@ tasks:
     and the recovery flow still applies no layout. Keyboard layout before password and timezone remain DONE and
     measured on a second machine (CI run 34661483871, "cage started de: the same physical keys now produce the
     GERMAN letters"); installer-keymap 43 and installer-locale 26 both green on the runner again in run
-    34701797842.
+    34701797842. LANDED 2026-09-14 (round 25): apex-shell roadmap/v2.2 0a3824c -> a0b3deb carries
+    task/p2-b-round23 (e857d7f the RTL mutation harness, 90ba936 the switch itself). THE RTL SWITCH IS A
+    TRANSLATION CATALOGUE, AND THE SUITE WAS READING THE OPERATOR'S SHELL - a test that takes its direction from
+    the ambient environment passes for a reason that has nothing to do with the code. tests/run-rtl-test.sh re-run
+    ON THE LANDED TIP: 28 passed, 0 failed, 0 skipped (13 before). The remaining half stays pinned in both
+    directions rather than claimed: the shell paints from 14 window roots and 0 of them mirror, and exactly 2
+    shared config components declare mirroring (CfgRow, CfgScroll).
 - id: P2-005
   title: Printing/scanning/network-share maturity
   priority: P2
@@ -4644,7 +4650,9 @@ tasks:
     stop_slop run - slopcheck 99 hits to 89, the remainder being em dashes and passives that every page in docs/
     carries (virtualization 28 per 1k, recovery 33, agent-runtime 35, this page 34). Nothing left behind: no
     capsule, no session, no lab daemon, no container, the virt stack never installed, the user's agent runtime
-    still active. Card: ROADMAP/state/agents/p2-d.md. Docs: docs/browser-capsule.md.
+    still active. Card: ROADMAP/state/agents/p2-d.md. Docs: docs/browser-capsule.md. LANDED 2026-09-14 (round 25):
+    apex-os 13d53c01 -> fdf0a8e6 carries task/p2-d-3 (be9844cc). Two lab defects found by running it twice: two
+    concurrent browserlab runs deleted each other's tree, and a dead run's child kept the lock.
 - id: P2-013
   title: Per-project identity binding
   priority: P2
@@ -4884,7 +4892,13 @@ tasks:
     so EVERY Nextcloud account this branch could have stored would have 404d on every file, in a way that also
     reads like a wrong password. Provider::path_for composes it, in the core crate so a second caller cannot get
     it wrong differently. NOT VERIFIED: nothing was run against a real Nextcloud, Google, Microsoft or S3
-    endpoint.
+    endpoint. LANDED 2026-09-14 (round 25): apex-os 13d53c01 -> fdf0a8e6 carries task/p2-f-3 (c224eea7) - A SCOPE
+    MAY NOT NAME AN OPERATION NO PROVIDER OFFERS. The defect the S3 landing exposed: apex account grant google
+    files.read recorded a grant for gdrive.file.read, and no provider in default_registry() offers gdrive.* or
+    msgraph.*, while S3_SCOPES named s3.object.list which the S3 provider does not offer either (it has
+    s3.object.read and s3.object.write). apex-secret-core cannot see the registry, but apex-secretd depends on
+    apex-secret-core, so the cross-crate gate lives there. Both mutants run and red. cargo test --locked
+    --workspace on the landed tip: 3189 passed, 0 failed, 2 ignored.
 - id: P2-018
   title: Guaranteed Safe Graphics / desktop failover mode
   priority: P2
@@ -5091,6 +5105,24 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    LANDED 2026-09-14 (round 25): apex-os roadmap/v2.2 13d53c01 -> fdf0a8e6 carries task/later-tpm-qualification
+    (d362e952 lab machinery, 378d8ddd the three scenarios). lib.sh gains swtpm_session() (a software TPM the HOST
+    can drive over mssim TCP on the SAME state dir qemu attaches through its unix control socket, which is what
+    permits a real TPM2_Clear and a real systemd-cryptenroll re-enrolment), swtpm_owner_primary_name() (a clear is
+    confirmed by the owner primary key's NAME changing, because tpm2_clear exiting 0 proves a command was accepted
+    and not that a seed rotated), and cannot() (COULD-NOT-RUN as its own word, never a pass and never a failure).
+    Three scenarios added: luks-tpm-clear (4 boots, one UKI throughout so a refusal cannot be the PCR policy in
+    disguise), luks-firmware-change (a second volume on /dev/vdc bound BY VALUE to PCR 7 as the control, changed
+    with Fedora's real DBXUpdate blob via virt-fw-vars), luks-s3 (mutation runs FIRST with qemu's S3 off, two
+    non-colluding observers: the guest's suspend_stats and qemu asked over QMP). THE HONEST LIMIT, MEASURED NOT
+    ASSUMED: the three NEW scenarios have never been executed - the predecessor's run was SIGTERM'd at 08:34:51 on
+    2026-09-13 (scratch-later/run1.log holds the signal-15 forward) and the agent died with it. What WAS verified
+    before landing: the shared-fixture extraction did not regress the pre-existing scenario - luks-tpm re-run on
+    the branch tip in localhost/apex-bootlab against the real staged APEX root gives 21 passed, 0 failed, exit 0
+    (scratch-later/orch-v3.log). All four luks scenarios are in STAGED, which run-scenarios keeps OUT of ALL, so a
+    default CI run cannot silently skip them and still report success - and landing them therefore cannot turn
+    boot-v2.yml red.
 - id: L-002
   title: Enable LUKS2 by default
   priority: Later
