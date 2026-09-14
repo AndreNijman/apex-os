@@ -506,6 +506,10 @@ bad()  { BOOTV2_FAIL=$((BOOTV2_FAIL + 1)); printf '  FAIL %s\n' "$*" >&2; }
 # It does not fail the run — a CI machine without S3 has disproved nothing —
 # but the summary line says COULD-NOT-RUN in capitals and lists every reason,
 # so it cannot be read as green by anyone who reads the line they were given.
+#
+# UNLESS IT IS ALL THE RUN DID. `cannot` not failing the run is a statement
+# about a run that also proved something; a run whose every check was a
+# could-not-run proved nothing at all, and bootv2_summary fails that, below.
 cannot() {
     BOOTV2_CANNOT=$((BOOTV2_CANNOT + 1))
     BOOTV2_CANNOT_WHY+=("$*")
@@ -535,7 +539,38 @@ assert_serial_lacks() {
     else ok "serial '$(basename "$serial")' does not contain $marker"; fi
 }
 
+# Two files, byte for byte, WITHOUT diffutils.
+#
+# MEASURED 2026-09-14: the boot lab image ships no `cmp` and no `diff` — see
+# bootlab/Containerfile, which installs neither and asserts neither — and the
+# firmware-change scenario decided its "the varstore really changed" control
+# with `if cmp -s A B; then bad ...; fi`. With no cmp that is exit 127, the
+# `if` takes the branch it takes when the files DIFFER, and the control printed
+# its ok line whatever the two files held. A control that cannot fail is the
+# defect it was written to catch, one level up.
+#
+# sha256sum is coreutils, so it is present wherever bash is. It also says what
+# it compared when it disagrees, which `cmp -s` does not.
+files_same() {
+    local a b
+    a="$(sha256sum <"$1")" || return 2
+    b="$(sha256sum <"$2")" || return 2
+    [[ "$a" == "$b" ]]
+}
+
 bootv2_summary() {
+    # A RUN THAT ASSERTED NOTHING IS NOT A PASS.
+    #
+    # `cannot` deliberately does not fail the run, and `ok`/`bad` are the only
+    # things that count — so a run in which every single check was a
+    # could-not-run ended 0 passed, 0 failed, exit 0, and every caller that
+    # reads an exit status was told the qualification had passed. It had not
+    # run. This is the same defect as the missing summary line and the same
+    # defect as a control that cannot fail: a gate reporting green for work it
+    # never did. An empty run is INCOMPLETE, and INCOMPLETE is a failure.
+    if (( BOOTV2_PASS == 0 && BOOTV2_FAIL == 0 )); then
+        bad "this run asserted nothing: no check passed and none failed, so there is no result here to read as green"
+    fi
     if (( BOOTV2_CANNOT )); then
         printf '\n== %s: %d passed, %d failed, %d COULD-NOT-RUN ==\n' \
             "${1:-boot-v2}" "$BOOTV2_PASS" "$BOOTV2_FAIL" "$BOOTV2_CANNOT" >&2
