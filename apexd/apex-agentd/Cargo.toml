@@ -30,3 +30,10 @@ libc.workspace = true
 [dev-dependencies]
 apex-agent-core = { path = "../apex-agent-core", features = ["test-support"] }
 serde_json.workspace = true
+# `clipboard::MAX_BYTES` is sized so that the worst-case JSON encoding of a
+# full clipboard still fits one `Frame::Control`. The test that checks that sum
+# imports `wire::MAX_PAYLOAD` rather than restating 65514, because a test that
+# repeats the number it is checking against keeps passing on the day the number
+# moves. Dev-only: the daemon itself has no business knowing about the remote
+# wire, and `apex-remoted` is what bridges the two.
+apex-remote-core = { path = "../apex-remote-core" }

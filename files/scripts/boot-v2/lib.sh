@@ -285,13 +285,28 @@ swtpm_session() {
 # This is also exactly why the sealed LUKS object stops working: systemd seals
 # to an SRK under this same hierarchy, so a new seed means a parent that no
 # longer exists.
+# The name comes from tpm2_readpublic and NOT from tpm2_createprimary's own
+# output. MEASURED 2026-09-14 on tpm2-tools in the lab image: createprimary's
+# YAML ends at `sym-mode:` and carries no `name:` line at all, so the obvious
+# `createprimary | sed -n 's/^name: *//p'` yields the empty string on a TPM that
+# is working perfectly. The first run of luks-tpm-clear reported
+# "could not read an owner primary name, so the clear cannot be confirmed"
+# against a TPM that had in fact been cleared correctly — a control that fails
+# for a reason unrelated to its subject, which is worse than no control,
+# because it spends a real failure on a parsing bug.
 swtpm_owner_primary_name() {
     local ctx; ctx="$(mktemp)"
     local name=""
-    name="$(tpm2_createprimary -T "$SWTPM_TCTI" -C o -g sha256 -G ecc -c "$ctx" 2>/dev/null \
-            | sed -n 's/^name: *//p' | tr -d '[:space:]')"
+    if tpm2_createprimary -T "$SWTPM_TCTI" -C o -g sha256 -G ecc -c "$ctx" >/dev/null 2>&1; then
+        name="$(tpm2_readpublic -T "$SWTPM_TCTI" -c "$ctx" 2>/dev/null \
+                | sed -n 's/^name: *//p' | tr -d '[:space:]')"
+    fi
     rm -f "$ctx"
-    [[ -n "$name" ]] || name="<unreadable>"
+    # A name is 2 bytes of algorithm plus a sha256 digest: 68 hex characters.
+    # Length-checked rather than merely non-empty, because the failure this
+    # replaces was a parse that produced "" from a healthy TPM, and a parse that
+    # produced a fragment would be the same defect wearing a different mask.
+    [[ "$name" =~ ^[[:xdigit:]]{68}$ ]] || name="<unreadable>"
     printf '%s\n' "$name"
 }
 
