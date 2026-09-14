@@ -5,23 +5,20 @@ worktree: /var/tmp/apex-work/wt-later
 branch: task/later-tpm-qualification
 
 ## NEXT
-THREE CONTAINERS ARE RUNNING RIGHT NOW (launched 2026-09-14 11:38 AWST off
-commit 13be81a8): later-r3-luks-tpm-clear, later-r3-luks-firmware-change,
-later-r3-luks-s3, each `run-scenarios --work /lab/r3-<name> <name>`. Collect
-them — do NOT relaunch without checking `podman ps -a` first:
-  timeout 590 podman wait later-r3-luks-tpm-clear later-r3-luks-firmware-change later-r3-luks-s3
-  for n in luks-tpm-clear luks-firmware-change luks-s3; do
-    podman logs later-r3-$n > /var/tmp/apex-work/scratch-later/r3-$n.log 2>&1; done
-If one exited 137 or shows a timeout kill, RE-RUN THAT ONE ALONE before calling
-it a defect: three guests at 4096 MiB share this host. Relaunch recipe:
-  D=/var/tmp/apex-work/scratch-later/r3-<name>; rm -rf $D; mkdir -p $D
-  ln -sfn ../out/apex-root $D/apex-root
-  podman run -d --name later-r3-<name> --device /dev/kvm \
-    -v /var/tmp/apex-work/wt-later:/work:z -v /var/tmp/apex-work/scratch-later:/lab:z \
-    localhost/apex-bootlab -c '/work/files/scripts/boot-v2/run-scenarios --work /lab/r3-<name> <name>'
-NEVER `nohup podman run &` (SIGTERM forwarded, dies part-way, reports 0). NEVER
-edit files/scripts/boot-v2/** while a container is executing run-scenarios from
-/work — bash reads the script incrementally. tests/, docs/ and this card are safe.
+later-r4-luks-s3 IS RUNNING (launched 11:5x AWST off c84b2f83, work /lab/r4-luks-s3).
+Collect it:
+  timeout 590 podman wait later-r4-luks-s3
+  podman logs later-r4-luks-s3 > /var/tmp/apex-work/scratch-later/r4-luks-s3.log 2>&1
+Expect the control arm to say s3=NO-DEEP-SLEEP and power off cleanly, then the
+--s3 arm to suspend (s3-mode=deep), be woken by qmp-wake.py and report
+post-resume-{marker,reattach-marker,tpm-unlock}. The QMP waker has NEVER
+executed. If it hangs (qemu rc=137 on the SECOND boot) the waker is the suspect:
+read /lab/r4-luks-s3/serial-luks-s3.wake.json and qmp-wake.py.
+THEN: docs/boot-v2.md still has no record of the three completed scenarios, and
+its Recovery table row "the TPM was cleared ... Re-enroll afterwards" is the
+procedure that is a silent no-op — fix that row and add the measurements.
+NEVER `nohup podman run &`. NEVER edit files/scripts/boot-v2/** while a
+container is executing run-scenarios from /work.
 
 ## DONE
 - Card created at round start.
@@ -62,6 +59,26 @@ edit files/scripts/boot-v2/** while a container is executing run-scenarios from
   tests/test-boot-v2.sh gained 12 assertions for all of it (74 passed, 0 failed),
   in the no-toolchain mode so the `static` job runs them.
 
+- ROUND 26 RESULTS. All three never-completed scenarios were run in parallel as
+  detached containers off 13be81a8 (11:38-11:43 AWST):
+  * luks-tpm-clear: **20 passed, 0 failed, exit 0 — COMPLETED END TO END for the
+    first time.** log scratch-later/r3-luks-tpm-clear.log. Full cycle: unlock +
+    marker, TPM2_Clear over the platform hierarchy, the Storage Primary Seed
+    rotating, boot2 tpm-unlock=REFUSED *and* recovery-unlock=SUCCESS in the same
+    boot, PCR 11 unchanged across the clear, re-enrolment from the recovery key
+    alone, the sealed blob really replaced, then boot3 unlock=SUCCESS with
+    plaintext-marker=found.
+  * luks-firmware-change: **18 passed, 0 failed, 1 COULD-NOT-RUN (PCR 0), exit 0
+    — FIRST EXECUTION EVER, passed.** log scratch-later/r3-luks-firmware-change.log.
+    dbx grew 76 -> 21340 bytes, PCR 7 moved 10DC0C7C... -> 74595FFF..., PCR 11
+    stayed E09EAEB1..., and in the SAME boot the by-value PCR 7 control REFUSED
+    while the signed-PCR-11 volume SUCCEEDED and read its marker back.
+  * luks-s3: FIRST EXECUTION EVER, 4 passed / 1 failed, and both failures were
+    lab defects, not APEX ones — fixed in c84b2f83, re-running as later-r4-luks-s3.
+- ROUND 26 COMMITS (both pushed): 13be81a8 (asserted-nothing + the firmware
+  control that could never fail), c84b2f83 (`mem` is not S3 + luks_serial_field
+  aborting the run + no `sync` in the initramfs + the page-cache-cold re-read).
+
 ## IN PROGRESS
 - Three new scenarios planned for files/scripts/boot-v2/run-scenarios:
   1. `luks-tpm-clear` (4 boots): boot1 unlock SUCCESS + marker written; `cp -a` snapshot
@@ -89,6 +106,53 @@ edit files/scripts/boot-v2/** while a container is executing run-scenarios from
      observers. If the kernel refuses `mem`, that is COULD-NOT-RUN with the errno.
 
 ## FOUND
+- WHAT THE systemd-cryptenroll NO-OP IS ACTUALLY KEYED ON, measured 2026-09-14
+  host-side with no guest boot (scratch-later/rotate-probe.log, rotate-probe2.log):
+  the de-duplication compares the PUBLIC KEY *and* the PCR set against what the
+  header already holds, and the TPM's state plays no part in it.
+  * Same pubkey, same PCR set, TPM NOT cleared -> "This PCR set is already
+    enrolled, executing no operation.", exit 0, header byte-identical.
+  * The documented single-command recovery form, `--wipe-slot=tpm2` and
+    `--tpm2-public-key=` in ONE invocation -> the same no-op, exit 0, and the
+    WIPE does not happen either. So the round-25 finding is not about a cleared
+    TPM at all: the de-dup fires on the header alone.
+  * A DIFFERENT public key, same PCR 11 -> "New TPM2 token enrolled as key slot
+    3", a second systemd-tpm2 token with a different blob and a different policy
+    hash. So docs/boot-v2.md's "you rotated the PCR signing key" row is SOUND —
+    checked because it was the obvious next victim, and it is not one.
+  * `--wipe-slot=tpm2` in its own invocation wipes ALL tpm2 slots ("Wiped slot 3.
+    Wiped slot 2."), which is what makes the two-step form work.
+- systemd-cryptenroll prints "TPM2 device supports SHA256 PCR bank but none of
+  the selected PCRs are valid! Firmware apparently did not initialize any of the
+  selected PCRs. Proceeding anyway with SHA256 bank. PCR policy effectively
+  unenforced!" whenever PCR 11 is unmeasured at enrol time. That is exactly the
+  L16's state today (PCR11 = 64 zeros), so a user following the documented
+  enrolment on the shipped image is told, in systemd's own words, that the
+  policy binds nothing. It is the same fact as the L-003 blocker, from the
+  other end.
+- `mem` IS NOT S3. With qemu's `-global ICH9-LPC.disable_s3=1` (qemu's q35
+  DEFAULT) Linux still lists `mem` in /sys/power/state and still accepts a write
+  to it: it silently means s2idle, because /sys/power/mem_sleep offers no `deep`.
+  The luks-s3 negative control therefore SUSPENDED in the arm meant to prove it
+  could not suspend, nothing there can wake it, and qemu died on the 240 s
+  timeout. Fixed by selecting `deep` by name and confirming the kernel's
+  brackets around it.
+- A GREP THAT MATCHED NOTHING KILLED THE RUN. luks_serial_field is a pipeline
+  under `set -euo pipefail`, so an absent serial field failed the assignment and
+  aborted run-scenarios. luks-s3's explicit empty-field COULD-NOT-RUN branch has
+  been unreachable since it was written.
+- THE LAB IMAGE SHIPS NO diffutils. `command -v cmp` is empty in
+  localhost/apex-bootlab and bootlab/Containerfile neither installs nor asserts
+  it, so `if cmp -s A B; then bad ...; fi` exited 127 — the same branch as "the
+  files differ" — and the firmware-change control printed its ok line
+  unconditionally.
+- THE APEX INITRAMFS HAS NO `sync` (nor `dd`). Every guest run printed
+  "sync: command not found" twice. Nothing depended on it — the detach flushes —
+  but the two flushes in guest-luks-probe.sh were not flushes.
+- The post-resume marker read went through a mapper that had been open since
+  before the sleep, and RAM survives S3, so the page cache could have answered it
+  without dm-crypt decrypting anything. Now read a second time through the
+  freshly re-attached mapper, whose cache is cold.
 - THE DOCUMENTED TPM-CLEAR RECOVERY IS A NO-OP THAT REPORTS SUCCESS. Measured
   2026-09-14 on systemd 258.10-1.fc43, against a TPM that had really been cleared:
     systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=... --tpm2-public-key=... VOL

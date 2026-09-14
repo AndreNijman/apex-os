@@ -211,6 +211,14 @@ The gap the round was dispatched for, stated honestly — it is narrower than
   host, so the one repository that can break this has no guard naming the
   consequence.
 
+**Scope fact about link 2, not a defect.** `files/desktop/labwc/environment` is a
+TEMPLATE: `apex-shell-firstrun` seeds it into `~/.config/labwc/environment` per
+user (its own header says so, and `test-apex-firstrun.sh` asserts the seeding).
+The new guard asserts the template, so an existing user's already-seeded copy
+does not change when the template does. The values agree today, so nothing is
+wrong — but link 2 is guarded at the source, not at the seeded copy, and a
+future value change would need a migration as well as an edit.
+
 **The M7 trap has three decoys, not one.** A bare `grep -q qt6ct` is satisfied by
 the comment in `files/system/qt6ct/qt6ct.conf:3`, by the
 `COPY files/system/qt6ct/qt6ct.conf` line in `Containerfile.base`, and by the
