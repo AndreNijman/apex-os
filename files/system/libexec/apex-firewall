@@ -32,6 +32,11 @@ readonly CONF_DIR=/etc/apex/firewall.d
 readonly CATALOGUE=/usr/share/apex/firewall/services
 readonly HOTSPOT_SET=hotspot_ifaces
 
+# Written once because it is now said twice — the prose status prints it and
+# `status --json` reports it. Two copies of a sentence listing what a firewall
+# never drops is two chances to tell a user something that stopped being true.
+readonly ALWAYS_ALLOWED='established replies, loopback, ICMP, DHCP, mDNS/LLMNR, ssh'
+
 msg()  { printf 'apex-firewall: %s\n' "$*"; }
 warn() { printf 'apex-firewall: warning: %s\n' "$*" >&2; }
 die()  { printf 'apex-firewall: error: %s\n' "$*" >&2; exit 1; }
@@ -119,6 +124,63 @@ ruleset_state() {
     fi
 }
 
+# ── one reader for /etc/apex/firewall.d ─────────────────────────────────────
+# The prose status and `status --json` must never disagree about whether a port
+# is open — "this is open" printed next to a reload that dropped it is the one
+# answer this tool must never give, and the way that happens is two loops over
+# the same directory drifting apart. So there is one loop, and it calls back.
+#
+# A CALLBACK and not a tab-separated line: a filename may contain any byte but
+# `/` and NUL, `valid_name` gates what this tool creates but not what a person
+# can drop in by hand, and a name with a tab in it would arrive at the renderer
+# as two fields. `proto` and `port` are safe — `read -r proto port _` splits on
+# IFS, so neither can hold whitespace.
+#
+#   $1 = callback, invoked as:  cb <name> ok|rejected <proto> <port> <detail>
+each_exception() {
+    local cb="$1" f name proto port
+    for f in "$CONF_DIR"/*.conf; do
+        [ -e "$f" ] || continue
+        name="$(basename "$f" .conf)"
+        proto=""; port=""
+        # Re-read every time rather than remembered from the last reload, so a
+        # status run tells the truth even if nothing has reloaded since.
+        read -r proto port _ < "$f" 2>/dev/null
+        if valid_spec "${proto:-}" "${port:-}"; then
+            "$cb" "$name" ok "$proto" "$port" ""
+        else
+            "$cb" "$name" rejected "" "" \
+                "$(printf '%s %s' "${proto:-}" "${port:-}" | sed 's/^ *//;s/ *$//')"
+        fi
+    done
+}
+
+# The shared links the loaded ruleset has open, ONE PER LINE. The caller must
+# have established that the ruleset is readable; this cannot tell an empty set
+# from a set it was not allowed to read, which is the distinction the whole
+# file is built around.
+#
+# nft prints a set's elements quoted, and wraps them one per line as soon as
+# there is more than one:
+#
+#     elements = { "apexhost",
+#                  "apexhost2" }
+#
+# A line-at-a-time `s/.*elements = { \(.*\) }.*/\1/` matches neither line, so
+# with two shared links it came back EMPTY and the tool said "not sharing this
+# machine's connection on any link" while both were open — a firewall tool
+# reporting a shut link as the answer for an open one. Measured in a namespace
+# against the real `nft list set`, not guessed at;
+# tests/test-device-services-netns.sh keeps it measured.
+hotspot_open_links() {
+    nft list set $TABLE "$HOTSPOT_SET" 2>/dev/null |
+    tr '\n\t' '  ' |
+    sed -n 's/.*elements = {\([^}]*\)}.*/\1/p' |
+    tr -d '"' | tr ',' '\n' |
+    sed 's/^ *//; s/ *$//' |
+    grep -v '^$'
+}
+
 cmd_list() {
     printf '%-13s %-5s %-6s %s\n' NAME PROTO PORT DESCRIPTION
     catalogue | while read -r name proto port desc; do
@@ -126,7 +188,25 @@ cmd_list() {
     done
 }
 
+# The prose renderer's half of each_exception.
+_status_any=0
+_status_row() {  # name kind proto port detail
+    _status_any=1
+    if [ "$2" = ok ]; then
+        printf '  %-13s %s %s\n' "$1" "$3" "$4"
+    else
+        # Reporting a port as open when the reload rejected it is the one
+        # answer this tool must never give.
+        printf '  %-13s could not be applied — rejected: %s\n' "$1" "$5"
+    fi
+}
+
 cmd_status() {
+    case "${1:-}" in
+        --json) cmd_status_json; return ;;
+        "")     ;;
+        *)      die "usage: apex firewall status [--json]" ;;
+    esac
     local state; state="$(ruleset_state)"
     case "$state" in
         absent)     msg "nft is not installed; no policy is being enforced" ;;
@@ -138,7 +218,7 @@ cmd_status() {
     esac
     echo
     echo "always allowed, and not removable here:"
-    echo "  established replies, loopback, ICMP, DHCP, mDNS/LLMNR, ssh"
+    echo "  $ALWAYS_ALLOWED"
     echo
     # Named here rather than left to `hotspot list`, because it is the one
     # opening a user did not choose in this file and would not otherwise find.
@@ -150,25 +230,123 @@ cmd_status() {
         echo
     fi
     echo "exceptions you have added:"
-    local any=0 f name proto port
-    for f in "$CONF_DIR"/*.conf; do
-        [ -e "$f" ] || continue
-        name="$(basename "$f" .conf)"
-        proto=""; port=""
-        read -r proto port _ < "$f" 2>/dev/null
-        if valid_spec "${proto:-}" "${port:-}"; then
-            printf '  %-13s %s %s\n' "$name" "$proto" "$port"
-        else
-            # Re-checked here rather than remembered from the last reload, so
-            # a status run tells the truth even if nothing has reloaded since.
-            # Reporting a port as open when the reload rejected it is the one
-            # answer this tool must never give.
-            printf '  %-13s could not be applied — rejected: %s\n' \
-                "$name" "$(printf '%s %s' "${proto:-}" "${port:-}" | sed 's/^ *//;s/ *$//')"
-        fi
-        any=1
-    done
-    [ "$any" = 1 ] || echo "  (none)"
+    _status_any=0
+    each_exception _status_row
+    [ "$_status_any" = 1 ] || echo "  (none)"
+}
+
+# ── status --json ───────────────────────────────────────────────────────────
+#
+#  WHY THIS EXISTS. APEX Shell's Firewall settings page reads this tool and,
+#  having nothing else to read, parsed its PROSE — heading by heading, sentence
+#  by sentence. That coupling failed the first time the prose moved, and it
+#  failed silently, which is the only way this kind of coupling ever fails:
+#
+#  `c7a28f2c` added the shared-links line to the status screen, between the
+#  "always allowed" heading and the "exceptions you have added" heading. The
+#  shell assigns every unprefixed line under the first heading to its
+#  "always allowed" field, so on a machine where the ruleset is readable the
+#  settings page began reporting
+#
+#      always allowed:  not sharing this machine's connection on any link
+#
+#  in place of the list of things the policy never drops. Nothing failed. No
+#  test went red — the shell's fixture had been captured before the line
+#  existed, so its suite went on checking a shape this tool can no longer
+#  print. A user reading that page would have been told the wrong thing about
+#  what their firewall lets through.
+#
+#  So the machine-readable answer is a separate surface with a shape, and the
+#  prose stays free to be prose. They are rendered from the same two readers —
+#  `each_exception` and `ALWAYS_ALLOWED` — so they cannot disagree.
+#
+#  CONTRACT (stdout is JSON and nothing else; warnings go to stderr; the exit
+#  status is 0 in every policy state, exactly as the prose is, because "the
+#  ruleset could not be read" is an answer and not a failure):
+#
+#    policy          "absent" | "notloaded" | "unreadable" | "loaded"
+#                    — the ruleset_state enum verbatim, not a re-derivation
+#    always_allowed  the sentence the prose prints, as one string
+#    hotspot_links   array of interface names when policy is "loaded";
+#                    null otherwise. NULL AND NOT [] ON PURPOSE: [] says "this
+#                    machine is sharing nothing", and a caller that cannot read
+#                    the ruleset has not learned that. It is the same
+#                    distinction that makes ruleset_state separate "unreadable"
+#                    from "notloaded" in the first place.
+#    exceptions      array, one per /etc/apex/firewall.d/*.conf, each
+#                    {name, proto, port, rejected, detail}. A rejected entry
+#                    carries empty proto/port and the offending text in detail,
+#                    so a caller rendering it cannot accidentally show a port.
+#
+#  NO `jq`, AND NO SHELLING OUT TO A JSON WRITER. This runs at boot from
+#  apex-firewall.service, Before=network-pre.target, where the dependency graph
+#  is small on purpose.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# One JSON string literal, quotes included.
+#
+# `name` comes from a filename and `detail` from the first line of a file the
+# user wrote by hand — neither has been through valid_name, because this tool
+# reports what is in the directory rather than only what it put there. Both can
+# therefore contain a quote or a backslash, and an unescaped one would not
+# produce a wrong field: it would produce a document the caller cannot parse at
+# all, and a settings page that falls back to "could not be read" because
+# somebody named a file `my"printer.conf`.
+#
+# Order matters: backslashes first, or the escapes added afterwards get escaped
+# themselves. The trailing `tr -d` removes the control characters that have no
+# two-character escape — JSON requires \uXXXX for those and bash has no clean
+# way to emit it; dropping them keeps the document parseable, which is the
+# property that matters here.
+json_str() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '"%s"' "$(printf '%s' "$s" | tr -d '\000-\037')"
+}
+
+_json_first=1
+_json_row() {  # name kind proto port detail
+    [ "$_json_first" = 1 ] || printf ','
+    _json_first=0
+    printf '\n    '
+    if [ "$2" = ok ]; then
+        printf '{"name": %s, "proto": %s, "port": %s, "rejected": false, "detail": ""}' \
+            "$(json_str "$1")" "$(json_str "$3")" "$(json_str "$4")"
+    else
+        printf '{"name": %s, "proto": "", "port": "", "rejected": true, "detail": %s}' \
+            "$(json_str "$1")" "$(json_str "$5")"
+    fi
+}
+
+cmd_status_json() {
+    local state; state="$(ruleset_state)"
+    printf '{\n'
+    printf '  "policy": %s,\n' "$(json_str "$state")"
+    printf '  "always_allowed": %s,\n' "$(json_str "$ALWAYS_ALLOWED")"
+
+    if [ "$state" = loaded ]; then
+        local first=1 link
+        printf '  "hotspot_links": ['
+        while read -r link; do
+            [ -n "$link" ] || continue
+            [ "$first" = 1 ] || printf ', '
+            first=0
+            printf '%s' "$(json_str "$link")"
+        done < <(hotspot_open_links)
+        printf '],\n'
+    else
+        printf '  "hotspot_links": null,\n'
+    fi
+
+    printf '  "exceptions": ['
+    _json_first=1
+    each_exception _json_row
+    [ "$_json_first" = 1 ] || printf '\n  '
+    printf ']\n}\n'
 }
 
 # One file. Returns non-zero without touching the sets if it cannot be read as
@@ -261,26 +439,13 @@ cmd_hotspot() {
             unreadable) msg "cannot read the ruleset; reading it needs root"
                         msg "  try: sudo apex firewall hotspot list" ;;
             loaded)
-                # Flattened first, and the quotes taken off. nft prints a set's
-                # elements quoted, and wraps them one per line as soon as there
-                # is more than one:
-                #
-                #     elements = { "apexhost",
-                #                  "apexhost2" }
-                #
-                # A line-at-a-time `s/.*elements = { \(.*\) }.*/\1/` matches
-                # neither line, so with two shared links it came back EMPTY and
-                # this printed "not sharing this machine's connection on any
-                # link" while both were open — a firewall tool reporting a shut
-                # link as the answer for an open one. With one link it matched
-                # and printed the name with nft's quotes still on it. Measured
-                # in a namespace against the real `nft list set`, not guessed
-                # at; tests/test-device-services-netns.sh keeps it measured.
+                # One reader, shared with `status --json` — see
+                # hotspot_open_links for what nft's set printing actually looks
+                # like, and which bug the old line-at-a-time parser had. Names
+                # cannot contain a comma (valid_ifname), so joining on one and
+                # spacing it out afterwards is safe.
                 local out
-                out="$(nft list set $TABLE "$HOTSPOT_SET" 2>/dev/null |
-                       tr '\n\t' '  ' |
-                       sed -n 's/.*elements = {\([^}]*\)}.*/\1/p' |
-                       tr -d '"' | tr -s ' ' | sed 's/^ *//; s/ *$//; s/ *, */, /g')"
+                out="$(hotspot_open_links | paste -sd, - | sed 's/,/, /g')"
                 if [ -n "$out" ]; then
                     msg "sharing this machine's connection on: $out"
                     msg "  DHCP and DNS are open on those links only"
@@ -369,6 +534,7 @@ Usage: apex firewall <command>
 
 Commands:
   status          What the policy is, and what you have opened
+  status --json   The same, as JSON, for a program rather than a person
   list            The services you can open, by name
   allow <name>    Open one, on every interface. Needs root.
   deny <name>     Close one again. Needs root.
@@ -385,7 +551,8 @@ EOF
 }
 
 case "${1:-}" in
-    status|"")   cmd_status ;;
+    status)      shift; cmd_status "$@" ;;
+    "")          cmd_status ;;
     list)        cmd_list ;;
     allow)       shift; cmd_allow "$@" ;;
     deny)        shift; cmd_deny "$@" ;;
