@@ -5,14 +5,21 @@ branch: task/followups-5
 repo: apex-os
 
 ## NEXT
-Fix the nushell half of `Run fish and nushell agent-integration assertions` (23
-FAILs): `tests/test-shell-agent.sh` scrubs to `env -i PATH="${BIN}:/usr/bin:/bin"`,
-which excludes `/usr/local/bin` where the workflow installs `nu` — resolve
-`nu`/`fish`'s real dir with `command -v` once and append it to the scrubbed
-PATHs, leaving the deliberate `$NOAPEX` (l.227) and `${DOWN}` (l.327,480)
-fixtures alone.
+Fix `Run root-approval assertions` (8 FAILs): `tests/test-root-approval.sh:88`
+binds the stub over `/usr/libexec/apex-pkg`, which ubuntu-24.04 does not have —
+`mount: /usr/libexec/apex-pkg: mount point does not exist`. Make the inner
+namespace provide the mount point (it is already `unshare -r -m --propagation
+private`, l.248), prove both directions, commit.
 
 ## DONE
+- `5229bef4` test(shell): the guard asked the ambient PATH, the assertions a
+  scrubbed one. PUSHED. All 23 nushell FAILs were `env -i
+  PATH="${BIN}:/usr/bin:/bin"` missing `/usr/local/bin`, where CI installs
+  `nu`; `command -v nu` two lines up said it was there. Now symlinked into
+  `${WORK}/shells`, appended last, and the guards read `[ -x "${SHELLS}/nu" ]`.
+  **Four directions**, the runner's split reproduced with `bwrap --ro-bind
+  <non-exec file> /usr/bin/nu`: before 34/23/1 — the runner's own line exactly
+  — after 58/0/0; nu absent 33/0/1 rc=0 loud skip; plain here 58/0/0.
 - `bd69bb2f` test(agent): five engine suites stopped at the first session CI
   could not place. PUSHED. inject/worktrees/disposable/profile/secret-broker
   now re-enter through `tests/in-login-session.sh`, the block
@@ -41,8 +48,8 @@ fixtures alone.
   Rust ✓ all 41 steps** — `Pack the chaos bundles` ✓ and `Chaos diagnostics` ✓,
   the first time either has been green. Engine still running; nine reds so far.
 - Working the engine reds down, in order. Family A (5 steps) DONE, see above.
-  Left: nushell PATH (23), virtualization (60), root-approval bind (8),
-  mux-layouts zellij tab (1).
+  Family A (5 steps) and the nushell PATH (1 step) DONE, see above.
+  Left: root-approval bind (8), virtualization (60), mux-layouts zellij (1).
 
 ## FOUND
 - **THE 1 → 8 IS NOT A REGRESSION I CAUSED.** `13e7ec84` (`!cancelled()`) is
