@@ -95,6 +95,27 @@ for b in fish nu bash sh sed cat tail printf date env; do
     p="$(command -v "$b" 2>/dev/null)" && ln -sf "$p" "${NOAPEX}/${b}"
 done
 
+# Where `fish` and `nu` actually are. Every scrubbed PATH below is a fixture
+# directory plus `/usr/bin:/bin` — the fixture is what makes "apex is absent"
+# and "the runtime is down" mean something, and `/usr/bin:/bin` was standing in
+# for "and the interpreter, obviously". It is not obvious: it is an assumption
+# about the machine. On this image both shells are in /usr/bin; nushell is in
+# no distribution archive, so CI installs it to /usr/local/bin, which no
+# scrubbed PATH here contains. Measured on run 34802332142 — twenty-three
+# nushell assertions read `env: 'nu': No such file or directory` while
+# `command -v nu` in the guard above them answered `/usr/local/bin/nu`. The
+# guard and the invocations were asking different questions, so the section
+# neither ran nor said it had not.
+#
+# Symlinks, the same idiom as $NOAPEX, rather than adding /usr/local/bin: this
+# directory can contain nothing but the two interpreters, so it cannot leak a
+# stray binary into a fixture that is testing an absence. It is appended LAST
+# everywhere for the same reason — it can never shadow $BIN's or $DOWN's stub.
+SHELLS="${WORK}/shells"; mkdir -p "$SHELLS"
+for b in fish nu; do
+    p="$(command -v "$b" 2>/dev/null)" && ln -sf "$p" "${SHELLS}/${b}"
+done
+
 PROJ="${WORK}/proj"; mkdir -p "$PROJ"
 OUTSIDE="${WORK}/outside"; mkdir -p "$OUTSIDE"
 
@@ -131,7 +152,7 @@ EMPTY="${WORK}/state-empty"; mkdir -p "${EMPTY}/apex/agent/sessions"
 # The parity target is not a description of the prompt format, it is the bytes
 # `agent.sh` produces for the same records. Captured once, here.
 bash_prompt() { # cwd state_home
-    (cd "$1" && env -i PATH="${BIN}:/usr/bin:/bin" HOME="${WORK}/home" \
+    (cd "$1" && env -i PATH="${BIN}:/usr/bin:/bin:${SHELLS}" HOME="${WORK}/home" \
         XDG_STATE_HOME="$2" bash --noprofile --norc -c \
         ". '${ROOT}/files/desktop/shell/agent.sh'; apex_agent_prompt" 2>/dev/null)
 }
@@ -140,7 +161,12 @@ bash_prompt() { # cwd state_home
 #  fish
 # ─────────────────────────────────────────────────────────────────────────────
 section "fish"
-if ! command -v fish >/dev/null 2>&1; then
+# `[ -x "${SHELLS}/fish" ]`, not `command -v fish`. The guard has to ask the
+# same question the assertions will: the symlink exists exactly when the shell
+# was found, and it is what the scrubbed PATH resolves. Asking the ambient PATH
+# instead is how the nushell section below spent a run reporting twenty-three
+# behaviour failures that were one missing directory.
+if [ ! -x "${SHELLS}/fish" ]; then
     skipped "fish integration" "fish is not installed on this machine"
 elif [ ! -r "$FISH_CONF" ]; then
     bad "fish: ${FISH_CONF} exists"
@@ -165,7 +191,7 @@ else
         local -a extra=()
         while [ "$1" != "--" ]; do extra+=("$1"); shift; done
         shift
-        (cd "$cwd" && env -i PATH="${BIN}:/usr/bin:/bin" HOME="${WORK}/home" \
+        (cd "$cwd" && env -i PATH="${BIN}:/usr/bin:/bin:${SHELLS}" HOME="${WORK}/home" \
             XDG_DATA_HOME="$FD" XDG_CONFIG_HOME="${WORK}/fishcfg" \
             "${extra[@]}" fish -c "$1" 2>&1)
     }
@@ -324,7 +350,7 @@ functions -q apex_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
         || { bad "the project verbs do not leak the agent verbs"; printf '      %s\n' "$out"; }
 
     # ── the runtime is down ──────────────────────────────────────────────────
-    out="$( (cd "$PROJ" && env -i PATH="${DOWN}:/usr/bin:/bin" HOME="${WORK}/home" \
+    out="$( (cd "$PROJ" && env -i PATH="${DOWN}:/usr/bin:/bin:${SHELLS}" HOME="${WORK}/home" \
         XDG_DATA_HOME="$FD" XDG_CONFIG_HOME="${WORK}/fishcfg" fish -c \
         'complete -C "apex agent attach "' 2>&1) )"
     [ -z "$out" ] && ok "completion with the runtime down prints nothing at all" \
@@ -335,7 +361,7 @@ fi
 #  nushell
 # ─────────────────────────────────────────────────────────────────────────────
 section "nushell"
-if ! command -v nu >/dev/null 2>&1; then
+if [ ! -x "${SHELLS}/nu" ]; then
     skipped "nushell integration" "nu is not installed on this machine"
 elif [ ! -r "$NU_FILE" ]; then
     bad "nushell: ${NU_FILE} exists"
@@ -351,7 +377,7 @@ else
         local -a extra=()
         while [ "$1" != "--" ]; do extra+=("$1"); shift; done
         shift
-        (cd "$cwd" && env -i PATH="${BIN}:/usr/bin:/bin" HOME="${WORK}/home" \
+        (cd "$cwd" && env -i PATH="${BIN}:/usr/bin:/bin:${SHELLS}" HOME="${WORK}/home" \
             "${extra[@]}" nu -n -c "source ${NU_FILE}
 $1" 2>&1)
     }
@@ -363,7 +389,7 @@ $1" 2>&1)
     # The install directory, asked of nushell. A file in the wrong place breaks
     # nothing visibly — it is simply never read — so "it looks right" is exactly
     # the check that would pass on the day nushell changes it.
-    out="$(env -i PATH="/usr/bin:/bin" HOME="${WORK}/home" nu -n -c \
+    out="$(env -i PATH="/usr/bin:/bin:${SHELLS}" HOME="${WORK}/home" nu -n -c \
         '$nu.vendor-autoload-dirs | to text' 2>&1)"
     printf '%s' "$out" | grep -qx '/usr/share/nushell/vendor/autoload' \
         && ok "nushell reads the directory the image installs into" \
@@ -477,7 +503,7 @@ $1" 2>&1)
         && ok "nushell offers the new layout verbs" || bad "nushell offers the new layout verbs"
 
     # ── the runtime is down ──────────────────────────────────────────────────
-    out="$( (cd "$PROJ" && env -i PATH="${DOWN}:/usr/bin:/bin" HOME="${WORK}/home" \
+    out="$( (cd "$PROJ" && env -i PATH="${DOWN}:/usr/bin:/bin:${SHELLS}" HOME="${WORK}/home" \
         nu -n -c "source ${NU_FILE}
 print -n ((nu-complete apex sessions) | str join ' ')" 2>&1) )"
     [ -z "$out" ] && ok "nushell completion with the runtime down is silent and empty" \
@@ -530,7 +556,7 @@ while time.time() < deadline:
         os.write(fd, script[sent]); sent += 1; ready = False
 sys.stdout.write(out.decode("utf-8", "replace"))
 PY
-    repl="$( (cd "$PROJ" && env -i PATH="${BIN}:/usr/bin:/bin" HOME="${WORK}/home" \
+    repl="$( (cd "$PROJ" && env -i PATH="${BIN}:/usr/bin:/bin:${SHELLS}" HOME="${WORK}/home" \
         XDG_DATA_HOME="$ND" XDG_CONFIG_HOME="${WORK}/nucfg" XDG_CACHE_HOME="${WORK}/nucache" \
         XDG_STATE_HOME="$STATE" TERM=xterm \
         python3 "${WORK}/replrun.py" nu --no-history 2>&1 | tr -d '\r') )"
