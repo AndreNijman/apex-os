@@ -37,9 +37,12 @@
 #  real check that really passes. What it does NOT get is capability over
 #  anything owned by real root — so the operation that runs afterwards has to
 #  be one that cannot touch the machine. `unshare -m` gives this run its own
-#  mount namespace and a stub is bind-mounted over /usr/libexec/apex-pkg, the
-#  absolute path `apex install` execs. The bind is invisible outside this
-#  process tree and the real engine is never run.
+#  mount namespace, and a mirror of /usr/libexec carrying a stub `apex-pkg` is
+#  bind-mounted over the real directory — /usr/libexec/apex-pkg is the absolute
+#  path `apex install` execs. The directory rather than the file, because
+#  `mount --bind` cannot create a target that is not there and only an APEX
+#  machine has that file; see the inner half for what that cost. The mount is
+#  invisible outside this process tree and the real engine is never run.
 #
 #  The two steps that genuinely need a person are named at the end, with the
 #  exact commands and the exact output to expect.
@@ -83,11 +86,68 @@ if [ "${APEX_ROOT_APPROVAL_INNER:-}" = "1" ]; then
     printf 'inner: euid %s, /proc/self/status says %s\n' \
         "$(id -u)" "$(awk '/^Uid:/{print $3}' /proc/self/status)"
 
-    # The engine `apex install` execs, by absolute path. Bound over inside this
-    # mount namespace only.
-    if ! mount --bind "${WORK}/fake-apex-pkg" /usr/libexec/apex-pkg 2>"${WORK}/mount.err"; then
-        echo "INNER-FATAL: could not bind the stub engine"
+    # The engine `apex install` execs, by absolute path. Replaced inside this
+    # mount namespace only; the real engine is never run.
+    #
+    # The DIRECTORY is replaced rather than the file, and that is not
+    # fastidiousness. `mount --bind` cannot create its own target, and on a
+    # machine that is not APEX there is nothing at /usr/libexec/apex-pkg to
+    # bind over. An ubuntu-24.04 runner answered
+    #
+    #     mount: /usr/libexec/apex-pkg: mount point does not exist.
+    #
+    # and took eight assertions down with it — every one of them about what
+    # happens AFTER the engine is reached — while this laptop, where the image
+    # ships the engine at that path, reported 20 passed and 0 failed. Green
+    # here and red there for as long as the suite has existed.
+    #
+    # Creating the target is not open to this process either. It is uid 0 in
+    # its OWN user namespace, mapped to an unprivileged uid outside it, so a
+    # write into /usr/libexec is EACCES on a runner and EROFS on this machine,
+    # where /usr is mounted read-only.
+    #
+    # So the real directory is bound aside, a mirror of it is built out of
+    # symlinks, the stub is dropped in as `apex-pkg`, and the mirror is bound
+    # over /usr/libexec. Nothing else in the directory disappears. There is one
+    # code path rather than an `if the file is missing` branch, because a
+    # branch only CI takes is how the original defect survived.
+    if [ ! -d /usr/libexec ]; then
+        echo "INNER-FATAL: /usr/libexec does not exist, so there is nowhere to put the stub engine"
+        exit 3
+    fi
+    mkdir -p "${WORK}/real-libexec" "${WORK}/libexec"
+    if ! mount --bind /usr/libexec "${WORK}/real-libexec" 2>"${WORK}/mount.err"; then
+        echo "INNER-FATAL: could not bind the real /usr/libexec aside"
         sed 's/^/      /' "${WORK}/mount.err"
+        exit 3
+    fi
+    # `apex-pkg` is deliberately NOT mirrored, and the `rm -f` after the loop
+    # is not belt and braces. On an APEX machine the real engine IS in this
+    # directory, so mirroring it would leave ${WORK}/libexec/apex-pkg a symlink
+    # pointing at /usr/libexec/apex-pkg — and `cp` follows a symlink and writes
+    # through it. Measured here: the copy failed only because this machine
+    # mounts /usr read-only, which turned overwriting the shipped engine into
+    # an INNER-FATAL. On any machine where /usr is writable — a GitHub runner
+    # mounts it rw — a test suite would have overwritten the real
+    # /usr/libexec/apex-pkg with a stub that exits 23.
+    for entry in "${WORK}/real-libexec"/* "${WORK}/real-libexec"/.[!.]*; do
+        [ -e "$entry" ] || continue
+        [ "$(basename "$entry")" = "apex-pkg" ] && continue
+        ln -sfn "$entry" "${WORK}/libexec/$(basename "$entry")"
+    done
+    rm -f "${WORK}/libexec/apex-pkg"
+    cp "${WORK}/fake-apex-pkg" "${WORK}/libexec/apex-pkg"
+    chmod 0755 "${WORK}/libexec/apex-pkg"
+    if ! mount --bind "${WORK}/libexec" /usr/libexec 2>"${WORK}/mount.err"; then
+        echo "INNER-FATAL: could not bind the stub engine over /usr/libexec"
+        sed 's/^/      /' "${WORK}/mount.err"
+        exit 3
+    fi
+    # Asked of the filesystem rather than inferred from mount(8) exiting 0.
+    # ops::PKG_ENGINE is this path and nothing else; if it is not the stub now,
+    # everything below would be measuring the real engine.
+    if [ ! -x /usr/libexec/apex-pkg ] || ! cmp -s "${WORK}/fake-apex-pkg" /usr/libexec/apex-pkg; then
+        echo "INNER-FATAL: /usr/libexec/apex-pkg is not the stub after the bind"
         exit 3
     fi
 

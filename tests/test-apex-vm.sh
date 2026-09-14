@@ -187,11 +187,27 @@ cat > "$FW/30-fixture-sb-enrolled.json" <<'EOF'
   "features": ["enrolled-keys", "requires-smm", "secure-boot"] }
 EOF
 
+# A usable KVM node, as a FIXTURE, for the same reason the firmware descriptor
+# above is one — and this is the piece that was missing. Everything else the
+# engine touches is faked through $PATH; a character device cannot be, so
+# `have_kvm` was the one probe still reading the host. The result was a suite
+# green on a machine with hardware virtualization and 74 passed / 60 failed on
+# every CI run this file has ever had, all 60 the same refusal, none of them
+# about the domain XML this suite exists to assert. The XML generator is a pure
+# function and needs no hypervisor; now neither does asserting it.
+#
+# A plain rw regular file: `have_kvm` asks -r and -w and nothing else, which is
+# the whole question it is entitled to ask before anything has been created.
+KVMNODE="$WORK/kvm"
+: > "$KVMNODE"
+chmod 0600 "$KVMNODE"
+
 export PATH="$BIN:/usr/bin:/bin"
 export HOME="$FAKEHOME"
 export APEX_VM_HOME="$VMHOME"
 export APEX_VM_FIRMWARE_DIRS="$FW"
 export APEX_VM_VIRTIOFSD="$VIRTIOFSD"
+export APEX_VM_KVM="$KVMNODE"
 
 # The refusal that makes every other assertion meaningful. A suite that fell
 # back to the real virsh would define domains on the developer's machine.
@@ -508,6 +524,20 @@ has "doctor: prints the one install command" "sudo apex install" "$out"
 out=$(PATH="/usr/bin:/bin" APEX_VM_VIRSH="$WORK/nope-virsh" bash "$ENGINE" create x 2>&1); rc=$?
 is "create refuses before creating anything when libvirt is absent" 1 "$rc"
 has "create names the package set" "apex install qemu-kvm" "$out"
+
+# The KVM guard, in the direction the fixture above turns off. Everything in
+# this suite runs against a node that IS readable and writable, so without
+# these four lines the fixture would have quietly disabled a refusal instead of
+# relocating it — which is the failure shape this whole suite is written
+# against. Two nodes, two answers, from the same engine.
+out=$(APEX_VM_KVM="$WORK/no-such-kvm" bash "$ENGINE" create x 2>&1); rc=$?
+is  "create refuses when the KVM node cannot be opened" 1 "$rc"
+has "and names the node it could not open" "$WORK/no-such-kvm" "$out"
+has "and says how to find out which reason it was" "ls -l $WORK/no-such-kvm" "$out"
+out=$(APEX_VM_KVM="$WORK/no-such-kvm" bash "$ENGINE" doctor 2>&1); rc=$?
+has "doctor: names the KVM node it probed, rather than a literal" \
+    "$WORK/no-such-kvm readable and writable" "$out"
+is  "doctor: and fails when the KVM node cannot be opened" 1 "$rc"
 
 echo
 echo "── the three defects the live lab found, each asserted here ──"
