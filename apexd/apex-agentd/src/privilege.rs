@@ -346,6 +346,65 @@ pub fn refuse_input(who: &Origin, target: u32) -> Option<Response> {
     None
 }
 
+/// Whether a connection may read what is on the machine's clipboard.
+///
+/// `None` means it may. A [`Response`] means it may not, and says why.
+///
+/// ## The same predicate as [`refuse_input`], and it is not laziness
+///
+/// Two refusals, and they are [`refuse_input`]'s two: a caller that IS a
+/// managed session, and a caller this daemon could not classify at all. The
+/// sentences differ because the verb differs, and the sentence is what the
+/// person reads — but the rule is the same rule, and writing it as a second
+/// predicate that happened to agree today is how two gates drift into
+/// answering different questions.
+///
+/// What makes a session the caller to refuse here is not the same *reason* it
+/// is refused from `input`, though. `input` is refused because bytes on a PTY
+/// cannot be told from a person typing, so a session could drive a sibling.
+/// This is refused because of what a clipboard HOLDS. A person copies a
+/// password out of a password manager and pastes it thirty seconds later; an
+/// agent that could ask this verb would have a window on every one of those,
+/// outside every sandbox, with nothing on screen and no grant spent. There is
+/// no session-scoped version of that to offer instead — one seat has one
+/// clipboard — so the answer is no, and the answer does not depend on which
+/// session is asking.
+///
+/// A caller that could not be classified is refused for the reason it is
+/// everywhere else in this file: "could not read" is not evidence of a human,
+/// and treating it as one is the defect [`Origin::unreadable`] exists to
+/// prevent. Fail closed. The cost is a phone told the machine could not work
+/// out who was asking, against an agent quietly reading a password.
+///
+/// **Not** `inject`'s gate (`inject::handle`), and the difference is the whole
+/// design. `inject` additionally refuses a non-local origin, because its
+/// `source` is a host path read with the daemon's own access. A clipboard read
+/// names no path and reaches nothing a person did not put on a clipboard
+/// themselves, and refusing a remote origin would refuse the only caller the
+/// verb exists for — the same reasoning `Request::Receive` records.
+pub fn refuse_clipboard(who: &Origin) -> Option<Response> {
+    if let Some(caller) = who.session {
+        return Some(Response::error(
+            ErrorKind::PermissionDenied,
+            format!(
+                "session {caller} may not read this machine's clipboard; a clipboard holds \
+                 whatever a person last copied, which is regularly a password, and nothing \
+                 about that is scoped to a session"
+            ),
+        ));
+    }
+    if let Some(why) = who.origin_unreadable.as_deref() {
+        return Some(Response::error(
+            ErrorKind::PermissionDenied,
+            format!(
+                "refusing to read this machine's clipboard: this connection could not be \
+                 classified, so there is no way to tell it is not a session asking ({why})"
+            ),
+        ));
+    }
+    None
+}
+
 /// Record a narrower origin (§7), for a session or for a connection.
 ///
 /// Two callers, one rule. A **session** narrows its own record, permanently:
@@ -1531,6 +1590,106 @@ mod tests {
             message.contains("could not be classified"),
             "the refusal must say why it could not decide: {message}"
         );
+    }
+
+    #[test]
+    fn a_person_may_read_this_machines_clipboard_and_an_agent_may_not() {
+        // Both directions in one test on purpose. A refusal predicate asserted
+        // only in the refusing direction is indistinguishable from `|_| Some`,
+        // which refuses the caller the verb exists for and passes every test
+        // anybody wrote for it.
+        //
+        // The allowed caller is a paired phone. `refuse_input`'s own test uses
+        // a local terminal for this, and using a REMOTE origin here is the
+        // claim that matters: this verb is not `inject`, it does not refuse a
+        // non-local origin, and a version of it that did would refuse the only
+        // caller it has. `claude-remote-control` is the origin `apex-remoted`
+        // declares for a paired device — see `proxy.rs:139` and the note there
+        // about why an eighth origin was not added.
+        let phone = unsessioned(RequestOrigin::RemoteControl);
+        assert!(
+            refuse_clipboard(&phone).is_none(),
+            "a paired device is the caller this verb exists for"
+        );
+        assert!(
+            refuse_clipboard(&unsessioned(RequestOrigin::LocalTerminal)).is_none(),
+            "and a person at the machine is not refused either"
+        );
+
+        // The refusal. A person copies a password out of a password manager
+        // and pastes it thirty seconds later; an agent that could ask this
+        // would have a window on every one of those, outside every sandbox,
+        // with nothing on screen and no grant spent.
+        let agent = Origin {
+            session: Some(7),
+            ..Origin::default()
+        };
+        let refusal = refuse_clipboard(&agent).expect("a session must be refused");
+        let (kind, message) = refusal.as_error().expect("an error");
+        assert_eq!(kind, ErrorKind::PermissionDenied);
+        assert!(
+            message.contains("session 7"),
+            "the refusal must name which session asked: {message}"
+        );
+        assert!(
+            message.contains("clipboard"),
+            "and what it was refused: {message}"
+        );
+    }
+
+    #[test]
+    fn an_unclassified_caller_may_not_read_this_machines_clipboard_either() {
+        // `session: None` here means "the walk never happened", not "the walk
+        // happened and found nothing". Reading a failed classification as a
+        // human is how an agent gets the password.
+        let who = Origin::unreadable("the kernel would not report the peer credentials");
+        assert!(who.session.is_none(), "the fixture must exercise the gap");
+        let refusal = refuse_clipboard(&who).expect("an unclassified caller must be refused");
+        let (kind, message) = refusal.as_error().expect("an error");
+        assert_eq!(kind, ErrorKind::PermissionDenied);
+        assert!(
+            message.contains("could not be classified"),
+            "the refusal must say why it could not decide: {message}"
+        );
+    }
+
+    #[test]
+    fn the_clipboard_gate_and_the_input_gate_agree_on_every_origin() {
+        // The claim `refuse_clipboard`'s documentation makes — "the same rule,
+        // different sentence" — asserted rather than left as prose. Two gates
+        // that were written to agree drift when one of them is edited, and
+        // the drift is silent: each keeps passing its own tests.
+        //
+        // Only the VERDICTS are compared. The messages differ deliberately,
+        // because the sentence is what the person reads.
+        let mut cases: Vec<(String, Origin)> = vec![
+            (
+                "a session".to_string(),
+                Origin {
+                    session: Some(3),
+                    ..Origin::default()
+                },
+            ),
+            (
+                "an unreadable origin".to_string(),
+                Origin::unreadable("peer credentials unavailable"),
+            ),
+            ("the default origin".to_string(), Origin::default()),
+        ];
+        // Every §7 origin, taken from the enum rather than from a list written
+        // here: an eighth origin added later is covered without anybody
+        // remembering to come back to this test.
+        for o in RequestOrigin::ALL {
+            cases.push((o.as_str().to_string(), unsessioned(*o)));
+        }
+        for (what, who) in cases {
+            assert_eq!(
+                refuse_clipboard(&who).is_some(),
+                refuse_input(&who, 4).is_some(),
+                "the two gates disagree about {what}, so one of them has been edited \
+                 and the other has not"
+            );
+        }
     }
 
     #[test]
