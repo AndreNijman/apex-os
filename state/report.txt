@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-14 09:55 AWST
+APEX ROADMAP — resume report — 2026-09-14 11:12 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -18,32 +18,32 @@ APEX ROADMAP — resume report — 2026-09-14 09:55 AWST
 ────────────────────────────────────────────────────────────────────────────
   later      unknown    L-001,L-002,L-003                  task/later-tpm-qualification
              head e2345ed7 fix(boot-v2): the documented TPM-clear recovery was a
-             dirty 0 file(s), 0 unpushed, card 13m
+             dirty 0 file(s), 0 unpushed, card 89m
              NEXT luks-tpm-clear is RE-RUNNING with the fixes as podman container `l
 
   p2-b       no worktree P2-003,P2-004                      task/p2-b-round23
              head 
-             dirty 0 file(s), ? unpushed, card 11m
+             dirty 0 file(s), ? unpushed, card 88m
              NEXT **One line:** in `/var/tmp/apex-work/wt-p2-b4` (apex-os, `task/p2-
 
   p2-f       unknown    P2-016,P2-017,P2-018,P2-019        task/p2-f-3
              head cebbe2a4 Merge remote-tracking branch 'origin/roadmap/v2.2' in
-             dirty 0 file(s), 10 unpushed, card 11m
+             dirty 0 file(s), 10 unpushed, card 87m
              NEXT Add `supersedes_credentials: bool` to `OperationSpec` (mandatory, 
 
   followups-5 unknown                                       task/followups-5
              head cbb1f7b1 ci(parity): the apex-shell fallback compared every fe
-             dirty 0 file(s), 1 unpushed, card 12m
+             dirty 0 file(s), 1 unpushed, card 89m
              NEXT Fix `Input page and generator agree` in `.github/workflows/pr-vali
 
   p1-053c    unknown    P1-059,P1-060                      task/p1-053c-clipboard
              head 491a3fef Merge remote-tracking branch 'origin/roadmap/v2.2' in
-             dirty 6 file(s), 0 unpushed, card 15m
+             dirty 6 file(s), 0 unpushed, card 91m
              NEXT Build the Android half of P1-059 C3 in `/var/tmp/apex-work/wt-p1-0
 
   p2-c       unknown    P2-005,P2-006,P2-007               task/p2-c-2
              head 3ab3b6ce feat(firewall): the settings page parsed prose, and t
-             dirty 1 file(s), 0 unpushed, card 19m
+             dirty 1 file(s), 0 unpushed, card 96m
              NEXT OS side: add `json_str()` + `each_exception()` + `cmd_status_json`
 
 
@@ -92,11 +92,11 @@ APEX ROADMAP — resume report — 2026-09-14 09:55 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 09:55:58 AWST 18s
+  snapshot timer: active   last 11:12:24 AWST 20s
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    785b4c8  roadmap-state
+    apex-os    8867c73  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -119,7 +119,7 @@ APEX ROADMAP — resume report — 2026-09-14 09:55 AWST
     apex-os    162d6fa  wt-p0-009-
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
-    apex-shell 7f04b01  apex-shell-
+    apex-shell 5381b6a  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell 02674e0  int-shell-
     apex-shell 68c971d  wt-base-shell-
