@@ -82,6 +82,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
         // `providers::tests::an_operation_that_claims_to_reach_the_same_
         // thing_everywhere_must_bind_the_same_in_two_projects`.
         same_everywhere: true,
+        supersedes_credentials: false,
     }],
 };
 

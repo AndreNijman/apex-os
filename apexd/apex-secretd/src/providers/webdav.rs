@@ -73,6 +73,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "webdav.file.read",
@@ -82,6 +83,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "webdav.file.write",
@@ -91,6 +93,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
     ],
 };

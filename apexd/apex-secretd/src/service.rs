@@ -2208,6 +2208,7 @@ mod tests {
                 params: &[],
                 aliases: &[],
                 same_everywhere: false,
+                supersedes_credentials: false,
             },
             OperationSpec {
                 id: "creator.token.smuggle",
@@ -2217,6 +2218,7 @@ mod tests {
                 params: &[],
                 aliases: &[],
                 same_everywhere: false,
+                supersedes_credentials: false,
             },
         ],
     };
