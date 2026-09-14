@@ -49,6 +49,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use apex_secret_core::account::CLOUDFLARE_OAUTH;
 use apex_secret_core::client::Client;
 use apex_secret_core::project::ProjectConfig;
 use apex_secret_core::protocol::{Request, Response};
@@ -71,10 +72,20 @@ pub const REFRESH_SERVICE: &str = "cloudflare-refresh";
 pub const API_HOST: &str = "api.cloudflare.com";
 
 /// The host that issues and refreshes tokens.
-pub const AUTH_HOST: &str = "dash.cloudflare.com";
+///
+/// Read off the shared table rather than spelled again. `apex-secretd` finds a
+/// token endpoint by looking up the host a credential is PINNED to, so this
+/// string and `CLOUDFLARE_OAUTH.auth_host` are the same fact — and if they
+/// drifted, the CLI would file the refresh token under a host the daemon's
+/// lookup does not know, which reads as "there is no refresh for this".
+pub const AUTH_HOST: &str = CLOUDFLARE_OAUTH.auth_host;
 
 /// Wrangler's OAuth client. See the module note for why it is Wrangler's.
-pub const WRANGLER_CLIENT_ID: &str = "54d11594-84e4-41aa-b438-e81b8fa78ee7";
+///
+/// RFC 6749 §6 requires a refresh to present the same `client_id` the grant
+/// was issued to, and the refresh runs in the daemon while the grant runs
+/// here. One constant, in the crate both link.
+pub const WRANGLER_CLIENT_ID: &str = apex_secret_core::account::WRANGLER_CLIENT_ID;
 
 /// RFC 8628's grant type.
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
@@ -286,11 +297,13 @@ pub struct Endpoints {
 impl Endpoints {
     pub fn cloudflare() -> Endpoints {
         Endpoints {
-            // Read out of workers-sdk rather than reconstructed: the device
+            // Read out of workers-sdk rather than reconstructed, and now off
+            // the shared table rather than rebuilt from a host: the device
             // endpoint has to live on the same auth domain as the token
-            // endpoint it is paired with.
-            device: format!("https://{AUTH_HOST}/oauth2/device/auth"),
-            token: format!("https://{AUTH_HOST}/oauth2/token"),
+            // endpoint it is paired with, and `Provider::validate` is what
+            // holds the table to that.
+            device: CLOUDFLARE_OAUTH.device_url.to_string(),
+            token: CLOUDFLARE_OAUTH.token_url.to_string(),
             floor: Duration::from_secs(5),
             limit: Duration::from_secs(300),
             backoff: Duration::from_secs(5),
