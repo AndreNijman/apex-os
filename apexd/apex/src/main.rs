@@ -1022,7 +1022,24 @@ enum EnvCmd {
 #[derive(Subcommand)]
 enum FirewallCmd {
     /// What the policy is, and which exceptions you have added.
-    Status,
+    Status {
+        /// Report as JSON, for a program rather than a person.
+        ///
+        /// APEX Shell's Firewall settings page reads this. It used to parse
+        /// the helper's PROSE, and that broke the first time a line moved —
+        /// silently, because a sentence has no shape to fail against. The
+        /// contract the helper answers with is written at `cmd_status_json`
+        /// in `files/system/libexec/apex-firewall`.
+        ///
+        /// This flag has to exist HERE and not only in the helper: `apex` is
+        /// clap, `firewall_argv` rebuilds the helper's argv verb by verb from
+        /// typed fields, and a `--json` clap does not model is rejected before
+        /// any process is spawned. The helper growing the flag on its own
+        /// would have left `apex firewall status --json` failing with
+        /// "unexpected argument" while the helper it wraps supported it.
+        #[arg(long)]
+        json: bool,
+    },
     /// The services you can open, by name.
     List,
     /// Open one service on every interface. Requires root.
@@ -1773,7 +1790,13 @@ fn env_argv(cmd: EnvCmd) -> Vec<String> {
 /// root-run helper can be asserted without running it.
 fn firewall_argv(cmd: FirewallCmd) -> Vec<String> {
     match cmd {
-        FirewallCmd::Status => vec!["status".to_string()],
+        FirewallCmd::Status { json } => {
+            let mut a = vec!["status".to_string()];
+            if json {
+                a.push("--json".to_string());
+            }
+            a
+        }
         FirewallCmd::List => vec!["list".to_string()],
         FirewallCmd::Allow { name } => vec!["allow".to_string(), name],
         FirewallCmd::Deny { name } => vec!["deny".to_string(), name],
@@ -3412,6 +3435,81 @@ mod tests {
                 "--enable-repo=extra".to_string(),
                 "--allow-unsigned".to_string(),
             ]
+        );
+    }
+
+    // ── the firewall helper's argv ──────────────────────────────────────────
+    //
+    // `firewall_argv`'s own doc comment says it is kept pure "so the argv this
+    // hands a root-run helper can be asserted without running it". Nothing
+    // asserted it. That is the shape of defect this program keeps finding — a
+    // stated property with no test behind it — and it mattered the moment
+    // `status` grew a flag, because `apex` is clap: a word this function does
+    // not emit is a word the helper never sees, however well the helper
+    // supports it.
+
+    /// The helper argv an `apex firewall ...` command line produces, through
+    /// clap, rather than by constructing the enum by hand — so a flag that
+    /// clap would reject cannot pass here.
+    fn firewall_engine_argv(argv: &[&str]) -> Vec<String> {
+        match Cli::parse_from(argv).command {
+            Cmd::Firewall { cmd } => firewall_argv(cmd),
+            _ => panic!("not a firewall command"),
+        }
+    }
+
+    #[test]
+    fn status_is_prose_unless_json_is_asked_for() {
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "status"]),
+            vec!["status".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_json_flag_reaches_the_helper() {
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "status", "--json"]),
+            vec!["status".to_string(), "--json".to_string()]
+        );
+    }
+
+    #[test]
+    fn every_firewall_verb_reaches_the_helper_by_its_own_name() {
+        // The helper dispatches on this word. A verb renamed here and not
+        // there is not a compile error — it is `apex firewall reload` exiting
+        // 2 with the helper's usage, which reads like the user's mistake.
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "list"]),
+            vec!["list".to_string()]
+        );
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "reload"]),
+            vec!["reload".to_string()]
+        );
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "allow", "mdns"]),
+            vec!["allow".to_string(), "mdns".to_string()]
+        );
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "deny", "mdns"]),
+            vec!["deny".to_string(), "mdns".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_service_name_is_passed_as_one_word_however_it_is_spelt() {
+        // The helper takes this straight into a path under
+        // /etc/apex/firewall.d and refuses it there. What must not happen on
+        // THIS side is the name arriving split or reshaped, because then the
+        // helper's own refusal is about a different string than the user typed.
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "deny", "../../etc/issue"]),
+            vec!["deny".to_string(), "../../etc/issue".to_string()]
+        );
+        assert_eq!(
+            firewall_engine_argv(&["apex", "firewall", "deny", "a b"]),
+            vec!["deny".to_string(), "a b".to_string()]
         );
     }
 
