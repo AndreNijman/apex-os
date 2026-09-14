@@ -1442,6 +1442,25 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-ai-apps.sh
 
+      # QT_QPA_PLATFORMTHEME is not a palette preference. Qt decides
+      # layoutDirection by translating the string QT_LAYOUT_DIRECTION, so it
+      # needs a Qt translation catalogue loaded — and the only thing in APEX
+      # that installs a QTranslator is the qt6ct platform theme plugin, on its
+      # way to applying a dark palette. Right-to-left mirroring therefore rests
+      # on a theming choice, a labwc environment file, and a package that until
+      # now reached the image only as a weak dependency.
+      #
+      # The step above greps that same variable, but only to LOCATE the
+      # /etc/environment line before asserting Electron settings on it. Deleting
+      # the variable goes red there for the wrong reason; changing its VALUE was
+      # caught by nothing at all. apex-shell's run-rtl-test.sh checks the live
+      # value and SKIPs off a booted APEX host, so this repository — the one
+      # that can actually break it — had no guard naming the consequence.
+      - name: The Qt platform theme that makes the shell mirror is set, to qt6ct
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-apex-platform-theme.sh
+
       # §20's remote compute and handoff. The largest group of cases in it is
       # about one refusal: `apex build --on` has to decide which directory on
       # the far side is this project, and the failure mode of a wrong answer is
