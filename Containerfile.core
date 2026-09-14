@@ -790,6 +790,21 @@ RUN set -eux; \
 # additional cost — a security primitive should not rest on another package
 # happening to pull it in. The base assertion stays: it is what catches the
 # package being dropped again.
+#
+# qt6-qttranslations is here for exactly that reason and for a second one that
+# is not obvious. It is a `Recommends:` of qt6-qtbase-gui and NOTHING requires
+# it — measured on a booted APEX host: `rpm -q --whatrequires qt6-qttranslations`
+# answers "no package". It owns /usr/share/qt6/translations/qt_<lang>.qm, and
+# those catalogues are the entire mechanism by which any Qt surface in APEX
+# mirrors for a right-to-left language: Qt does not read the direction off the
+# locale, it TRANSLATES the string QT_LAYOUT_DIRECTION and compares the answer
+# to "RTL". Urdu proves it — unambiguously RTL, QLocale agrees, and Qt still
+# answers LeftToRight because upstream ships no qt_ur.qm. So a build that ever
+# passes --setopt=install_weak_deps=False (apex-pkg already has a
+# --no-weak-deps flag) would delete right-to-left support with nothing red
+# anywhere. tests/test-apex-platform-theme.sh is the assertion; this line is
+# what makes it true. mksquashfs reaching the image only as a weak dependency
+# of dracut-squash is the same class, already on record in apex-pkg.
 # Own transaction, `dnf5 clean all` at the end.
 RUN set -eux; \
     dnf5 -y copr enable sdegler/hyprland; \
@@ -801,7 +816,7 @@ RUN set -eux; \
         pipewire pipewire-pulseaudio wireplumber rtkit \
         playerctl brightnessctl wl-clipboard slurp wtype cliphist \
         upower libnotify lm_sensors cava wf-recorder ImageMagick \
-        qt6ct qt6-qtwebengine mpv-mpris xdg-user-dirs polkit gnome-keyring \
+        qt6ct qt6-qttranslations qt6-qtwebengine mpv-mpris xdg-user-dirs polkit gnome-keyring \
         gammastep geoclue2 jq dconf \
         kanshi wlr-randr wlopm \
         bubblewrap \
