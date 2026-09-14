@@ -246,8 +246,16 @@ want "the image names qt6-qttranslations EXPLICITLY, not as a weak dependency" \
 
 # The palette half, for completeness: this is what the theme was configured FOR,
 # and it is the reason the mechanism looks optional to a reader.
+#
+# Anchored at END of line, and the dots escaped. The first version of this was
+# `... /etc/xdg/qt6ct/qt6ct.conf` with no `$`, and mutant M10 — which changes the
+# destination to qt6ct.conf.disabled, i.e. copies the file somewhere qt6ct will
+# never read — SURVIVED, because the intended path is a prefix of the broken
+# one. An unanchored path match is the same defect as a grep that matches a
+# comment: it succeeds on text that is not the thing.
+qtconf_re=$(printf '%s' "$QTCONF" | sed 's/\./\\./g')
 want "the qt6ct configuration the theme reads is COPYed into the image" \
-    grep -qE "^COPY +${QTCONF} +/etc/xdg/qt6ct/qt6ct.conf" Containerfile.*
+    grep -qE "^COPY +${qtconf_re} +/etc/xdg/qt6ct/qt6ct\.conf[[:space:]]*$" Containerfile.*
 
 section "the shipped artefacts on this machine, where this is a booted APEX"
 
