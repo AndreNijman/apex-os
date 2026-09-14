@@ -20,6 +20,7 @@ pub mod bearer;
 pub mod cloudflare;
 pub mod git;
 pub mod mcp;
+pub mod oauth;
 pub mod s3;
 pub mod webdav;
 
@@ -38,6 +39,7 @@ pub fn default_registry(run_dir: std::path::PathBuf) -> Result<Registry, String>
     registry.register(Box::new(git::GitProvider))?;
     registry.register(Box::new(cloudflare::CloudflareProvider::new()))?;
     registry.register(Box::new(mcp::McpProvider::new(run_dir.clone())))?;
+    registry.register(Box::new(oauth::OAuthProvider::new()))?;
     registry.register(Box::new(s3::S3Provider))?;
     registry.register(Box::new(webdav::WebdavProvider::new(run_dir)))?;
     Ok(registry)
@@ -96,6 +98,7 @@ mod tests {
                 "git.ls-remote",
                 "git.push",
                 "mcp.request",
+                "oauth.token.refresh",
                 "s3.object.read",
                 "s3.object.write",
                 "webdav.file.list",
@@ -264,11 +267,9 @@ mod tests {
         // operation that may overwrite an owner's stored credential has to be a
         // line somebody writes here on purpose.
         //
-        // It is EMPTY in this build, and that is the current truth rather than
-        // a placeholder: `supersedes_credentials` landed before the `oauth`
-        // provider that needs it, so that the ~64 `false` declarations and the
-        // gate could be reviewed on their own. The commit that registers
-        // `oauth.token.refresh` is the commit that changes this line.
+        // RFC 6749 §6 is the only thing in this build whose purpose is to
+        // supersede a credential. Everything else that writes a secret to the
+        // store CREATES one, and a create is refused if the name is taken.
         let registry = default_registry(std::env::temp_dir()).expect("registry");
         let mut supersedes = Vec::new();
         for id in registry.operation_ids() {
@@ -277,14 +278,25 @@ mod tests {
                 supersedes.push(id);
             }
         }
-        let expected: Vec<String> = Vec::new();
         assert_eq!(
-            supersedes, expected,
+            supersedes,
+            vec!["oauth.token.refresh"],
             "the set of operations allowed to overwrite a stored credential \
              changed. Each one is an operation that can replace a secret the \
              owner is holding, so name it here and say why it is not a \
              `creates` that skipped the free-name check."
         );
+        // The framework's gate reads the declaration and computes nothing of
+        // its own, checked over the whole vocabulary rather than over the one
+        // operation it was written for.
+        for id in registry.operation_ids() {
+            let (_, op) = registry.lookup(&id).expect("declared");
+            assert_eq!(
+                crate::service::may_supersede_credentials(op),
+                op.supersedes_credentials,
+                "the gate on '{id}' disagrees with its own declaration"
+            );
+        }
     }
 
     /// The claim, asked of the provider instead of the declaration.
