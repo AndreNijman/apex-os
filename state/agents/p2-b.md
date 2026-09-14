@@ -1336,13 +1336,99 @@ The harness was right and the suite was wrong. An assertion whose truth is
 supplied by the ambient environment is the same defect class as a gate that
 inspects nothing.
 
+## ROUND 25 — R1 survived a SECOND time, and one unused variable was skipping forty suites
+
+**Both findings are live and both are pushed on `task/p2-b-round23` in
+apex-shell** (`4e1ec25`, `965609c`, `bc60a19`, on top of the landed `a0b3deb`).
+apex-os carries the `fdf0a8e6` merge and no commits this round.
+
+**1. The CI one, and it is the more urgent.** `shellcheck -S warning -x
+tests/*.sh` is step 3 of `arch-validate`, and `arch-validate` is ONE job
+spanning ci.yml lines 29-1875. A red step there skips every step below it that
+carries no explicit `if`, and exactly two do. `90ba936` — which landed on
+`roadmap/v2.2` hours earlier this same round — introduced `theme_src`, assigned
+in both arms of the platform-theme probe and read in neither. SC2034 fires at
+WARNING level, so the step exits 1. Measured on the landed tip, not inferred:
+
+    $ git stash && shellcheck -S warning -x tests/*.sh
+    tests/run-rtl-test.sh line 121: theme_src appears unused (SC2034)
+    rc=1
+
+So apex-shell `roadmap/v2.2` was, at the moment this round started, skipping the
+settings-controls suite, the shared-controls accessibility suite,
+check-reduce-motion and everything else in that job while reporting a lint
+error. Only `Internationalisation baseline` and `Right-to-left layout baseline`
+survived, because round 23 had guarded those two with `if: ${{ !cancelled() }}`
+for this exact failure — four days later it recurred on a different variable.
+Fixed by USING the variable, because the comment three lines above already
+promised "the suite says which it used" and it did not. **The documented local
+gate is `shellcheck -S warning -x tests/*.sh` from the repo root; nothing else
+in this repository catches the class before CI does. Run it before any push
+that touches `tests/`.**
+
+Standing-queue item 9's last bullet — "apex-shell roadmap/v2.2 is red until this
+branch merges" — was written about a DIFFERENT shellcheck defect in round 23 and
+was true again for a new reason. Treat that bullet as a recurring hazard, not a
+closed one.
+
+**2. R1 survived a second time, and it is the subtler survival.** Round 23 had
+already fixed one cause (every assertion forced mirroring by hand, so a row
+hardcoded `false` still mirrored). The two-pass run landed, and R1 still lived:
+`test_040` read `row` — the same instance `test_030` had just finished driving.
+`test_030` forces mirroring both ways and then calls `restoreBinding()`, which
+installs the CORRECT binding imperatively; QtTest runs functions in NAME ORDER,
+so by the time `test_040` looked, the suite had **repaired the very declaration
+the mutant broke**. "Nothing was set by hand" was false — something had been set
+by hand, and it happened to be the right thing.
+
+That is the N8/K4 family in a new dress: an assertion that cannot fail because
+the state it reads was restored before it read it. It is invisible to review and
+invisible to the suite; only the mutant finds it.
+
+Fix: `row2` and `scroll2` in `tests/rtl-test.qml` — instances nothing anywhere
+in the fixture writes to. `test_040` moves to `row2`; `labelBox()` takes the row
+to measure instead of closing over `row`.
+
+**3. `test_060` and the two mutants that had to come with it.** CfgScroll's own
+shipped declaration was unmeasured in BOTH directions: section 3 only COUNTS the
+files containing the word `LayoutMirroring`, and a count cannot tell a live
+binding from one that is present and overridden, while `test_050` drives
+`scroll` and restores its binding by hand exactly as `test_030` does. `test_060`
+reads `scroll2`. R12 (`false`, dies in the RTL pass) and R13 (`true`, dies in the
+LTR pass) are its pair — `test_060` landed in the first commit with no mutant at
+all, which is this unit's own rule broken in the act of enforcing it.
+
+R1's comment in `mutate-rtl.sh` is rewritten: it claimed "this mutant dies in the
+RTL pass" and on the landed tip it did not. A harness whose comments assert
+verdicts it did not produce is the defect class it exists to catch.
+
+**Suite: 28 -> 30 passed, 0 failed, 0 skipped**, run under
+`env -i HOME PATH USER TMPDIR` as the harness runs it, never from the operator's
+shell. `EXPECT_TESTS` 8 -> 9.
+
+**4. The apex-os uncommitted diff was a scratch narrowing, and it was
+DISCARDED.** `installer/mutate-installer-a11y.sh` had mutants **B1-B10 deleted**
+— the predecessor cutting the run down so the four round-23 wifi mutants would
+finish (every installer mutant starts SIX GUI processes on a private Xvfb;
+the header says budget minutes each). Committing it would have deleted ten
+mutants from a mutation harness. Copy kept as
+`scratchpad/p2-b/mutate-installer-a11y.narrowed-scratch.sh`. **The harness has no
+subset mechanism — that is the real gap, and adding one (`mutate-rtl.sh` has the
+same problem) would make these harnesses affordable to run.**
+
 ## NEXT
 
 **One line, and it is the load-bearing part of this card:** in
-`/var/tmp/apex-work/wt-p2-b4-sh` on `task/p2-b-round23`, run
-`./tests/mutate-rtl.sh` (committed as `e857d7f`) and read its verdicts; R1 is
-PREDICTED TO SURVIVE and that is a defect in the fixture, not in the mutant —
-see "ROUND 23" below for why and for the fix.
+`/var/tmp/apex-work/wt-p2-b4-sh` on `task/p2-b-round23` (clean, pushed at
+`bc60a19`), run `./tests/mutate-rtl.sh` and read all THIRTEEN verdicts — R1 must
+now be CAUGHT by `test_040` on `row2` in the RTL pass, R12 by `test_060` in the
+RTL pass and R13 by `test_060` in the LTR pass; anything that SURVIVES, read
+"what the suite said instead" BEFORE touching code, because three times in this
+unit a SURVIVED verdict was the harness `want` string being wrong (I2, B2, F3-F5)
+rather than the mutant living.
+
+Run it in the background and redirect to a file: 14 suite runs, each starting
+two `qmltestrunner` passes.
 
 ### The standing queue
 

@@ -180,12 +180,13 @@
  },
  "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt — the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
  "_orchestrator": {
-  "session": "round 24 orchestrator",
-  "registered": "2026-09-13T08:10+08:00",
-  "started_by": "apex-roadmap-resume.timer (timeout 4h claude -p) — verified sole orchestrator, one `claude -p` in pgrep",
-  "heartbeat_refresher": "A detached loop rewrites state/orchestrator.heartbeat every 5 min, GUARDED BY `kill -0 768096` so it dies with the session. The first version of it this round was `while true` under setsid and would have OUTLIVED the `timeout 4h` kill, refreshing the heartbeat forever — autoresume.sh skips on a heartbeat under 45 minutes old, so the timer would have skipped at 13:06, 18:06 and every fire after that while six agents' branches sat unlanded. state/orchestrator.pid is also written, which is the stronger check autoresume.sh prefers (kill -0 plus a cmdline containing `claude`).",
-  "landed_tip_verification": "cargo test --locked --workspace --no-fail-fast on 13d53c01, niced, log at /var/tmp/apex-work/suite-logs/round24-landed-tip-cargo-test.log. NOTE: the workspace root is apexd/, not the repo root — the first attempt ran from int-os and died with `could not find Cargo.toml` after the orchestrator had banked it as started.",
-  "pid": 768096
+  "session": "round 25 orchestrator (apex-4d)",
+  "registered": "2026-09-14T09:35+08:00",
+  "pid": 15197,
+  "started_by": "apex-roadmap-resume.timer, which fired at 09:15:32 AWST (timeout 4h claude -p). Verified SOLE orchestrator: pgrep -af claude shows exactly one `claude -p` (15197 under timeout 15196) and ListAgents reported no reachable peer session.",
+  "heartbeat_refresher": "A detached loop rewrites state/orchestrator.heartbeat every 5 min, GUARDED BY `kill -0 15197` so it dies with the session and then removes state/orchestrator.pid. This is round 24's corrected shape, not its first one: a `while true` under setsid would OUTLIVE the `timeout 4h` kill and refresh the heartbeat forever, and autoresume.sh skips on a heartbeat under 45 minutes old — so the timer would skip every fire while branches sat unlanded.",
+  "why_it_matters": "Registration was MISSING for the first 20 minutes of this session — state/orchestrator.pid did not exist and the heartbeat was stale. autoresume.sh's first busy-check (a subagent .output touched in the last 20 min) would have covered the window while agents write, but not a window in which the orchestrator is landing branches alone. The next timer fire is ~14:15.",
+  "landed_tip_verification": "cargo test --locked --workspace --no-fail-fast run from int-os/apexd (NOT the repo root — there is no top-level Cargo.toml and cargo from the root exits 101): 3189 passed, 0 failed, 2 ignored on fdf0a8e6."
  },
  "_previous_pause": {
   "when": "2026-09-07T15:32+08:00 to 2026-09-08T08:56+08:00",
