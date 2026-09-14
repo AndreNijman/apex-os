@@ -438,6 +438,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             // token. So `*` is refused, and `apex cf status` needs a grant in
             // the project it is run in.
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.worker.read",
@@ -450,6 +451,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             // project's own `apex.toml` maps to an account and an
             // environment. Per project by construction.
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.worker.upload-version",
@@ -474,6 +476,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             ],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.worker.deploy",
@@ -484,6 +487,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[VERSION, SHARE, MESSAGE],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.worker.rollback",
@@ -494,6 +498,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[VERSION, MESSAGE],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.worker.tail",
@@ -503,6 +508,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.worker.route.read",
@@ -512,6 +518,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         // ── §13.3's storage surfaces: D1, KV, Queues, Hyperdrive ────────────
         //
@@ -529,6 +536,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.d1.query",
@@ -544,6 +552,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[SQL],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.d1.migrate",
@@ -557,6 +566,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             }],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.kv.read",
@@ -566,6 +576,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.kv.write",
@@ -587,6 +598,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             ],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.queue.publish",
@@ -601,6 +613,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             }],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.queue.manage",
@@ -634,6 +647,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             ],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.hyperdrive.read",
@@ -644,6 +658,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.hyperdrive.edit",
@@ -686,6 +701,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             ],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
 
         // ── §13.5, R2 ───────────────────────────────────────────────────────
@@ -702,6 +718,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.r2.object.write",
@@ -711,6 +728,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[FILE],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         // ── §13.9, DNS ──────────────────────────────────────────────────────
         //
@@ -729,6 +747,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             }],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.dns.create",
@@ -738,6 +757,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[KIND, CONTENT, TTL, PROXIED, COMMENT],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.dns.update",
@@ -756,6 +776,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             ],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.dns.delete",
@@ -765,6 +786,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[KIND],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         // ── §13.11, Workers AI and the AI Gateway ───────────────────────────
         //
@@ -799,6 +821,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[PROMPT, INPUT_FILE],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.ai-gateway.run",
@@ -810,6 +833,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[PROMPT, INPUT_FILE],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.ai-gateway.edit",
@@ -850,6 +874,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             ],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
 
         // ── §13.6, the Secrets Store ────────────────────────────────────────
@@ -886,6 +911,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[SCOPES, COMMENT_ON_SECRET, VALUE_FILE],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.secret.rotate",
@@ -896,6 +922,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[COMMENT_ON_SECRET, VALUE_FILE],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.secret.bind",
@@ -924,6 +951,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             ],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
 
         // ── §13.10, Cloudflare One ──────────────────────────────────────────
@@ -964,6 +992,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.access.edit",
@@ -983,6 +1012,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.access.service-token.create",
@@ -1016,6 +1046,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             ],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.tunnel.read",
@@ -1026,6 +1057,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.tunnel.edit",
@@ -1041,6 +1073,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             }],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.r2.bucket.create",
@@ -1068,6 +1101,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             ],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         // ---------------------------------------------------------------
         // P1-012: the tools, not the API.
@@ -1092,6 +1126,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.wrangler.versions-upload",
@@ -1103,6 +1138,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.terraform.plan",
@@ -1115,6 +1151,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             // Reads the project's own `.tf` files and its own state. Two
             // projects, two different plans, one stored credential.
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "cloudflare.terraform.apply",
@@ -1124,6 +1161,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
     ],
 };
@@ -1378,6 +1416,7 @@ impl CloudflareProvider {
             code: out.code,
             output: out.text,
             created: None,
+            replaced: Vec::new(),
         })
     }
 
@@ -3520,6 +3559,7 @@ impl Provider for CloudflareProvider {
             },
             detail: CloudflareProvider::detail(req.operation, &target, req.params),
             creates,
+            replaces: Vec::new(),
             // §13.8. The environment is in the binding, and this is the one
             // place that knows it.
             approval: protection(req.operation, &target),
@@ -3882,6 +3922,7 @@ impl Provider for CloudflareProvider {
             code: i32::from(!reply.ok()),
             output,
             created,
+            replaced: Vec::new(),
         })
     }
 
