@@ -1,6 +1,6 @@
 {
  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
- "updated": "2026-09-13T08:45+08:00",
+ "updated": "2026-09-14T15:10+08:00",
  "concurrency_ceiling": 6,
  "units": [
   {
@@ -250,7 +250,8 @@
    ],
    "conflicts": [
     "p1-053b"
-   ]
+   ],
+   "closed": "CLOSED TO DISPATCH 2026-09-14 (round 27). P1-059 is DONE — its branch landed as merge d3ad8f7d and all four criteria are met; criterion 3 was the only one open and both its halves (the OS verb and the Android client) are now in. What remains on this unit is P1-060 C1 and C2, and those need a physical Android device or a working emulator, of which this machine has NEITHER — the predecessor measured four consecutive SIGSEGV crashes of the emulator across rounds 1-3. Same shape as p1-038-hardware: the work is real, it is not an agent's to do here. If a device appears, re-open and start with C2's headless-testable parts (backgrounding, battery saver, poor-network — LowBandwidthTest is the precedent) and leave talkback/rotation/foldables for the device. NOTE FOR WHOEVER TOUCHES THE WIRE: this unit did NOT bump PROTOCOL_VERSION; it stays 8, and p2-d now owns that file uncontended."
   },
   {
    "id": "p1-061",
