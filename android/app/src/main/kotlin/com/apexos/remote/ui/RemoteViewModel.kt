@@ -148,7 +148,25 @@ data class AgentUiState(
      * it; see `Notifier`.
      */
     val alerts: List<Alert> = emptyList(),
-)
+) {
+    /**
+     * Every transient banner on this machine's screens, cleared.
+     *
+     * Exists because [failure] and [notice] live HERE and `dismiss()` used to
+     * clear only the fields on the state above this one. The Agent Center
+     * draws `state.failure ?: state.agents.failure`, so a refusal raised by
+     * `replyToSession` — which writes the second — was shown with a dismiss
+     * button that cleared the first and left the banner on screen. Adding a
+     * notice strip beside it would have added a second button that does
+     * nothing, which is why this is fixed here rather than worked around at
+     * the call site.
+     *
+     * [clipboardPull] is deliberately NOT cleared: it is not a banner, it is
+     * work in flight, and dropping it would mean a user who dismissed a
+     * message during the round trip never gets the text they asked for.
+     */
+    fun dismissed(): AgentUiState = copy(failure = null, notice = null)
+}
 
 /**
  * One answer to one `clipboard` request, waiting to be put on the phone.
@@ -1319,7 +1337,17 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         _state.update { it.copy(crash = null) }
     }
 
-    fun dismiss() = _state.update { it.copy(message = null, failure = null, connection = null) }
+    fun dismiss() = _state.update {
+        it.copy(
+            message = null,
+            failure = null,
+            connection = null,
+            // The agent-scoped banners too. Without this the Agent Center's
+            // dismiss button cleared whichever of the two `failure` fields it
+            // was NOT showing. See `AgentUiState.dismissed`.
+            agents = it.agents.dismissed(),
+        )
+    }
 
     private suspend fun sealingBox(
         activity: FragmentActivity,
