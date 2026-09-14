@@ -3595,7 +3595,19 @@ tasks:
     computer's clipboard" into HelpParityTest's forbidden-claims list so the guide cannot quietly start offering
     it. Counts on the tip: 447 :core, 38 :app, assembleDebug green; cargo test --workspace green; clippy clean at
     the workspace MSRV; test-agent-inject.sh 48/0; check-agent-state.sh, no-second-write-path.sh and
-    check-help-prose.sh (1595 words, TOTAL 0, no allowlist) all pass.
+    check-help-prose.sh (1595 words, TOTAL 0, no allowlist) all pass. LANDED 2026-09-14 (round 26): apex-os
+    roadmap/v2.2 fdf0a8e6 -> 2219ef75 carries task/p1-053c-clipboard (f253e882 privilege::refuse_clipboard +159
+    with 3 tests, 9ff8308e Request::Clipboard / Response::Clipboard{text} in protocol.rs + clipboard.rs 698 lines
+    with 11 unit tests + the main.rs dispatch arm, 114339c7 tests/clipboard_read.rs 543 lines / 7 end-to-end tests
+    against a real daemon over a real socket). THE OS HALF OF CRITERION 3 (clipboard RECEIVE) IS CLOSED. The item
+    stays partial because criterion 3 also has an Android half that is NOT written:
+    Agentd.clipboard()/readClipboard() in Sessions.kt, MachineLink.clipboard(), the RemoteViewModel call and the
+    ReplyBox button, plus the four places that break when the wire format gains the verb (HelpParityTest.kt:184,
+    AgentdRequestWireTest.kt:161, core/src/test/resources/requests.json, link/FakeMachine.kt:40). Verified on the
+    LANDED tip, not on the branch: cargo test --locked --workspace --no-fail-fast from int-os/apexd = 3218 passed,
+    0 failed, 2 ignored, exit 0 (up from 3189 last round; the 29 new tests are these commits'). Note for the
+    record: this work existed as 1,490 UNCOMMITTED lines for two rounds and two agents died holding it before
+    round 25 committed it.
 - id: P1-060
   title: Ship APEX Remote Android as a production-quality application
   priority: P1
@@ -3963,7 +3975,26 @@ tasks:
     SYSTEM BUS goes red on one assertion BY DESIGN - that is the honest branch of the containment check, not a bug
     - so a container: job needs a bus or must accept that red; a GitHub-hosted ubuntu-24.04 runner has one and is
     green. And the gate must key on EXIT STATUS, never on grepping for a count: the assertion-with-no-bad-branch
-    could drop it silently and the stanza check only ever adds.
+    could drop it silently and the stanza check only ever adds. MEASURED 2026-09-14 (round 26), and it is the
+    baseline half of criterion 1 that nobody had: THE LID CLOSED ON A LIVE RUN AND COST IT EVERYTHING. journalctl
+    -b -2 at 09:45:17 AWST reads 'systemd-logind[1254]: Lid closed.' then 'Suspending...' then 'PM: suspend entry
+    (s2idle)', with six roadmap agents and a QEMU/swtpm TPM lab (container later-clear2, 17 assertions in) live at
+    that moment. Everything died; the s2idle resume did not come back, and a fresh boot started at 09:52:41
+    (journalctl --list-boots shows boot -2 ending 09:45:17 and boot -1 starting 09:52:41). Round 25's entire yield
+    was lost to this. THE DOCKING QUESTION CRITERION 1 TURNS ON IS ANSWERED BY LOGIND'S OWN BEHAVIOUR: a lid close
+    only reaches HandleLidSwitch=suspend when the machine is NOT docked -- docked, logind consults
+    HandleLidSwitchDocked (default ignore) first and the lid does nothing -- so the suspend firing IS the proof
+    that the external display was disconnected, which is the condition the 2026-09-13 note said could not be
+    arranged. The machine is still undocked now (only card1-eDP-1 connected). WHAT THIS DOES AND DOES NOT CLOSE:
+    it establishes the baseline -- undocked, lid closed, no APEX inhibitor held, the machine suspends and the work
+    dies. It does NOT close criterion 1, which needs the same lid close WITH the inhibitor held, not suspending.
+    Round 26 is holding exactly that inhibitor for the first time on this machine outside a test: systemd-inhibit
+    --what=handle-lid-switch:sleep --mode=block, taken with NO polkit prompt because both
+    org.freedesktop.login1.inhibit-block-sleep and inhibit-handle-lid-switch are 'implicit active: yes' here, and
+    guarded the way this item specifies -- it releases when the orchestrator pid exits, when k10temp reaches 90C,
+    or when the battery falls below 20% while discharging, and logs which guard fired
+    (/var/tmp/apex-work/scratch/r26-lid-hold.log). If the lid is closed while that inhibitor is held and the
+    machine stays up, that is criterion 1 closed; it has not been done and must not be claimed until it is.
 - id: P2-001
   title: Encrypted backup framework
   priority: P2
@@ -4200,7 +4231,18 @@ tasks:
     the ambient environment passes for a reason that has nothing to do with the code. tests/run-rtl-test.sh re-run
     ON THE LANDED TIP: 28 passed, 0 failed, 0 skipped (13 before). The remaining half stays pinned in both
     directions rather than claimed: the shell paints from 14 window roots and 0 of them mirror, and exactly 2
-    shared config components declare mirroring (CfgRow, CfgScroll).
+    shared config components declare mirroring (CfgRow, CfgScroll). LANDED 2026-09-14 (round 26): apex-shell
+    roadmap/v2.2 a0b3deb -> acf4879 carries task/p2-b-round23's remaining five commits (4e1ec25 one unused
+    variable in the RTL suite was skipping forty suites, 965609c the RTL fixture was measuring a row its own test
+    had repaired, bc60a19 the mutants that prove the untouched-instance assertions can go red, 1363af5 a mutant
+    the suite CAUGHT was scored SURVIVED for the sixth time, acf4879 the three-way verdict shown capable of all
+    three answers). tests/run-rtl-test.sh re-run ON THE LANDED TIP, headless under -platform offscreen with
+    DISPLAY and WAYLAND_DISPLAY unset: 30 passed, 0 failed, 0 skipped -- up from 28 last round and 13 the round
+    before. THE MUTATION ROUND IS CLOSED: 13 of 13 mutants caught, 0 survived, 0 misscored. The remaining half of
+    this row is still pinned in both directions rather than claimed, and the tip asserts it numerically: the shell
+    paints from 14 window roots, 0 of them mirror, and exactly 2 shared config components (CfgRow, CfgScroll)
+    declare mirroring. A suite reporting 'RTL: done' over a mirrored settings page and an unmirrored bar would be
+    worse than no suite.
 - id: P2-005
   title: Printing/scanning/network-share maturity
   priority: P2
@@ -4348,7 +4390,22 @@ tasks:
     `links` ten lines above already refused to do that, and connectivity had thrown the rc away. STILL PARTIAL,
     and the remainder is now exactly two things that need metal: an EAP handshake with a real access point, and a
     tunnel to a real VPN endpoint -- plus turning this laptop into a hotspot and joining a phone to it, which
-    needs the image on the metal first.
+    needs the image on the metal first. LANDED 2026-09-14 (round 26): apex-os roadmap/v2.2 fdf0a8e6 -> 2219ef75
+    carries task/p2-c-2 3ab3b6ce, which gives apex-firewall a `status --json` and fixes a live coupling defect it
+    found by running the shipped helper rather than reading it. THE DEFECT: APEX Shell's Firewall page had nothing
+    to read but prose, so it parsed apex firewall status heading by heading; c7a28f2c (this unit's own predecessor
+    commit, 2026-09-13) inserted the shared-links block between the 'always allowed' heading and the 'exceptions
+    you have added' heading, and the shell assigns every unprefixed line under the first heading to alwaysAllowed
+    -- so with the ruleset readable the page reported 'always allowed: not sharing this machine's connection on
+    any link' in place of the list of traffic the policy never drops. Measured, not read: the shipped helper run
+    under an nft shim with its real stdout fed to the firewall.js on apex-shell's roadmap/v2.2. Bounded honestly:
+    the shell runs unprivileged, nft list then gives EACCES, ruleset_state answers 'unreadable', and the hotspot
+    block prints only when the ruleset is 'loaded' -- so an ordinary user session does not hit it today; a root
+    session does, and apex-shell's STATUS_LOADED fixture is now a shape the tool cannot print (that fixture's own
+    header says it was CAPTURED, and nothing re-captures it). The --json contract is written down beside the
+    helper: policy is ruleset_state's enum verbatim, always_allowed is one string, hotspot_links is an array when
+    loaded and NULL otherwise. +247/-40 in files/system/libexec/apex-firewall and +307 in
+    tests/test-apex-firewall.sh.
 - id: P2-007
   title: Bluetooth/dock/peripheral maturity
   priority: P2
@@ -4898,7 +4955,21 @@ tasks:
     msgraph.*, while S3_SCOPES named s3.object.list which the S3 provider does not offer either (it has
     s3.object.read and s3.object.write). apex-secret-core cannot see the registry, but apex-secretd depends on
     apex-secret-core, so the cross-crate gate lives there. Both mutants run and red. cargo test --locked
-    --workspace on the landed tip: 3189 passed, 0 failed, 2 ignored.
+    --workspace on the landed tip: 3189 passed, 0 failed, 2 ignored. LANDED 2026-09-14 (round 26): apex-os
+    roadmap/v2.2 fdf0a8e6 -> 2219ef75 carries task/p2-f-3 9e0a8c7d, the OAuth table a daemon-side refresh is
+    routed BY. apex cloudflare connect has always stored a refresh token that nothing could spend, because the
+    daemon had no way to find a token endpoint that was not 'ask the caller' -- and a caller who names a token
+    endpoint is a caller who chooses where a credential gets sent. The table is OAuth{device_url, token_url,
+    auth_host, scopes, client_secret, client_id}, one row per authorisation server, reached only through
+    oauth_for_auth_host(), which takes the host the credential was ALREADY PINNED TO and nothing the caller said;
+    there is no request shape that can aim a refresh elsewhere. It lives in apex-secret-core because two binaries
+    need it and neither links the other (apex runs the device grant, apex-secretd runs the refresh), and the CLI's
+    AUTH_HOST, WRANGLER_CLIENT_ID and Endpoints::cloudflare() now read off it instead of repeating its literals --
+    RFC 6749 section 6 requires a refresh to present the same client the grant was issued to, and those halves run
+    in different processes, so two copies is one copy that can drift. Provider::validate holds the table to four
+    rules that were each otherwise a silent failure. +577 in apex-secret-core/src/account.rs, +25/-6 in
+    apex/src/cloudflare.rs. Verified on the landed tip: cargo test --locked --workspace 3218 passed / 0 failed / 2
+    ignored.
 - id: P2-018
   title: Guaranteed Safe Graphics / desktop failover mode
   priority: P2
@@ -5122,7 +5193,25 @@ tasks:
     the branch tip in localhost/apex-bootlab against the real staged APEX root gives 21 passed, 0 failed, exit 0
     (scratch-later/orch-v3.log). All four luks scenarios are in STAGED, which run-scenarios keeps OUT of ALL, so a
     default CI run cannot silently skip them and still report success - and landing them therefore cannot turn
-    boot-v2.yml red.
+    boot-v2.yml red. LANDED 2026-09-14 (round 26): apex-os roadmap/v2.2 fdf0a8e6 -> 2219ef75 carries
+    task/later-tpm-qualification e2345ed7, the FIRST EXECUTION of luks-tpm-clear and the three real defects it
+    found. THE HEADLINE IS A SYSTEMD BEHAVIOUR, NOT A TEST BUG: after a genuine TPM2_Clear the documented
+    one-command recovery, `systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=... --tpm2-public-key=... VOLUME`,
+    prints 'This PCR set is already enrolled, executing no operation' and EXITS 0 -- measured on systemd
+    258.10-1.fc43. systemd de-duplicates against the token already in the header before acting on the wipe, so on
+    a cleared TPM the whole invocation is a success-reporting no-op: the header keeps a blob sealed to a seed that
+    no longer exists and the next boot fails exactly as before the 'recovery' (guest said Esys_Load rc 0x1df, 'Key
+    enrolled in superblock most likely does not belong to this TPM'; tokens byte-identical before and after).
+    Wiping in its own invocation FIRST, then enrolling, produces a new blob and a working unlock -- that is now
+    what the scenario does and what a user has to do. The control that missed it is fixed in the same commit:
+    every existing header assertion (exactly one systemd-tpm2 token, public-key policy, PCR 11) held true of the
+    no-op character for character, so the sealed BLOB is now compared before and after and an unchanged blob is a
+    named failure. RUN STATUS, STATED HONESTLY: the re-run with the fixes reached 17 assertions passed / 0 failed
+    through boot1-unlock, TPM2_Clear, boot2 tpm-unlock=REFUSED + recovery-unlock=SUCCESS in the same boot, and
+    re-enrolment against the cleared TPM -- then was killed part-way through boot 3 of 4 when the laptop lid
+    closed at 09:45:17 AWST and the machine suspended. It has still never completed end to end, and
+    luks-firmware-change and luks-s3 have still never been executed once. Log
+    /var/tmp/apex-work/scratch-later/r2-clear.log.
 - id: L-002
   title: Enable LUKS2 by default
   priority: Later
