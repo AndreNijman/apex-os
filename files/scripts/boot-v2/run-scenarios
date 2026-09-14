@@ -49,6 +49,36 @@ STAGED=(apex-image luks-tpm luks-tpm-clear luks-firmware-change luks-s3)
 if (( LIST )); then printf '%s\n' "${ALL[@]}" "${STAGED[@]}"; exit 0; fi
 (( ${#SCENARIOS[@]} )) || SCENARIOS=("${ALL[@]}")
 
+# ── the summary line is not optional ────────────────────────────────────────
+#
+# MEASURED 2026-09-14: `run-scenarios --work <dir-with-no-staged-root> luks-tpm`
+# printed its refusal and stopped, and the run produced NO
+# `== boot-v2 VM harness: N passed, M failed ==` line at all. The exit status
+# was 1, so a caller that checks `$?` was told — but a caller reading the log,
+# which is how every one of these runs is actually read, saw a transcript with
+# no verdict in it. "A gate that runs and inspects nothing" is the dominant
+# defect family in this repository; a gate that inspects everything and then
+# reports nothing is the same defect read from the other end.
+#
+# So the summary is printed from an EXIT trap and therefore survives `die`,
+# an unset variable, a `set -e` abort inside a scenario, and a signal. An abort
+# with no recorded failure is itself recorded as a failure, because a run that
+# stopped early has not passed — that is the case the old code reported as
+# silence.
+BOOTV2_SUMMARY_PRINTED=0
+bootv2_report() {
+    local rc=$?
+    (( BOOTV2_SUMMARY_PRINTED )) && return
+    BOOTV2_SUMMARY_PRINTED=1
+    if (( rc != 0 )) && (( BOOTV2_FAIL == 0 )); then
+        bad "the harness aborted with exit status $rc before finishing: the scenarios above are INCOMPLETE"
+    fi
+    bootv2_summary "boot-v2 VM harness" || true
+    (( rc != 0 )) || rc=$(( BOOTV2_FAIL == 0 ? 0 : 1 ))
+    exit "$rc"
+}
+trap bootv2_report EXIT
+
 KVER="$(cat /etc/apex-bootlab-kver 2>/dev/null || true)"
 [[ -n "$KVER" ]] || die "/etc/apex-bootlab-kver missing — not running inside the boot lab image"
 LAB_KERNEL="/usr/lib/modules/$KVER/vmlinuz"
@@ -709,6 +739,24 @@ luks_serial_field() {
     grep -ao "APEX-BOOTLAB: $2=[^ ]*" "$1" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r'
 }
 
+# The systemd-tpm2 sealed blob out of a LUKS2 header, or `<none>`.
+#
+# This is the field that identifies WHICH TPM state a volume is bound to: it is
+# the sealed object wrapped by a key derived from the Storage Primary Seed, so a
+# clear followed by a real re-enrolment must change it and a re-enrolment that
+# quietly did nothing cannot. Every other field in the token — type, PCR set,
+# public key, policy hash — is identical either way.
+luks_tpm2_blob() {
+    python3 - "$1" <<'PY' 2>/dev/null || printf '<none>\n'
+import json, subprocess, sys
+out = subprocess.run(["cryptsetup", "luksDump", "--dump-json-metadata", sys.argv[1]],
+                     capture_output=True, check=True, text=True).stdout
+blobs = [t["tpm2-blob"] for t in json.loads(out).get("tokens", {}).values()
+         if t.get("type") == "systemd-tpm2" and t.get("tpm2-blob")]
+print(blobs[0] if len(blobs) == 1 else "<none>")
+PY
+}
+
 # A 64-hex-character digest that is not the all-zero one an uninitialised PCR
 # bank reports. Both halves matter: an empty capture would pass a bare
 # "not zeros" test, and the first version of this check matched [0-9a-f]
@@ -995,14 +1043,34 @@ scenario_luks_tpm_clear() {
     # nothing else, and a re-enrolment that needed the original passphrase
     # would be a procedure they cannot perform.
     #
-    # --wipe-slot=tpm2 in the same invocation, because systemd wipes AFTER
-    # enrolling: leaving the dead keyslot behind would grow one stale token per
-    # clear, and a header with two systemd-tpm2 tokens is a header whose
-    # behaviour depends on which one cryptsetup tries first.
-    local reenrolled=0
+    # TWO INVOCATIONS, AND THE REASON IS A MEASURED DEFECT IN THE OBVIOUS ONE.
+    #
+    # The natural incantation — and the one this scenario was written with —
+    # is a single `systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=... `.
+    # MEASURED 2026-09-14, systemd 258.10-1.fc43, against a genuinely cleared
+    # TPM: it prints
+    #
+    #     This PCR set is already enrolled, executing no operation.
+    #
+    # and EXITS 0. systemd de-duplicates against the token already in the
+    # header before it considers the wipe, so on a cleared TPM the whole
+    # command is a no-op that reports success. The header keeps the old blob,
+    # sealed to the destroyed seed, and the next boot fails exactly as it did
+    # before the "recovery". That is the recovery procedure a user would be
+    # told to run, and it silently does nothing.
+    #
+    # Wiping FIRST removes the token the de-duplication matches against, so the
+    # enrolment that follows has nothing to consider itself equal to. The wipe
+    # still has to happen in the same procedure — leaving the dead keyslot
+    # behind would grow one stale token per clear, and a header with two
+    # systemd-tpm2 tokens is a header whose behaviour depends on which one
+    # cryptsetup tries first.
+    local reenrolled=0 blob_before blob_after
+    blob_before="$(luks_tpm2_blob "$LUKS_IMG")"
     if swtpm_session "$LUKS_STATE" reenrol bash -c '
             PASSWORD="$(cat "$1")" systemd-cryptenroll \
-                --wipe-slot=tpm2 \
+                --wipe-slot=tpm2 "$3" >/dev/null 2>&1 &&
+            PASSWORD="$(cat "$1")" systemd-cryptenroll \
                 --tpm2-device="$SWTPM_TCTI" \
                 --tpm2-public-key="$2" \
                 --tpm2-public-key-pcrs=11 \
@@ -1012,6 +1080,21 @@ scenario_luks_tpm_clear() {
         ok "re-enrolled a TPM2 keyslot using ONLY the recovery key as the credential"
     else
         bad "re-enrolment with the recovery key failed — the recovery path does not lead back to a working TPM unlock"
+    fi
+
+    # THE CONTROL ON THE RE-ENROLMENT ITSELF, and the one whose absence let the
+    # first run of this scenario call a no-op a success. Counting tokens cannot
+    # see this: the de-duplicating no-op leaves exactly one systemd-tpm2 token
+    # with a public-key policy over PCR 11, which is character for character
+    # what a correct re-enrolment leaves. The sealed BLOB is the only field that
+    # has to differ, because it is wrapped by a seed that no longer exists.
+    blob_after="$(luks_tpm2_blob "$LUKS_IMG")"
+    if [[ "$blob_before" == "<none>" || "$blob_after" == "<none>" ]]; then
+        bad "could not read a systemd-tpm2 blob out of the header (before='$blob_before' after='$blob_after')"
+    elif [[ "$blob_before" != "$blob_after" ]]; then
+        ok "the sealed blob was really replaced, so the enrolment was not a de-duplicated no-op"
+    else
+        bad "the sealed blob is UNCHANGED across the re-enrolment — systemd reported success and wrote nothing, so the header is still bound to the destroyed seed"
     fi
 
     # Exactly one systemd-tpm2 token, still with a public-key policy. A wipe
@@ -1199,7 +1282,7 @@ scenario_luks_firmware_change() {
 
     # The limitation, recorded in the run rather than only in a comment, so it
     # reaches whoever reads the log rather than only whoever reads the source.
-    cannot "PCR 0 (the firmware CODE measurement) was not changed: that needs a second OVMF build with the same Secure Boot properties, and this lab image ships one. A dbx update moves PCR 7, which is the Secure Boot policy register."
+    cannot "PCR 0 (the firmware CODE measurement) was not changed: that needs a second OVMF build differing ONLY in code, and this lab image ships none. It carries two 4M builds, OVMF_CODE_4M.qcow2 and OVMF_CODE_4M.secboot.qcow2, but they differ in Secure Boot enforcement as well as in code, so swapping them would conflate 'the firmware changed' with 'Secure Boot was turned off'. A dbx update moves PCR 7, the Secure Boot POLICY register, and not PCR 0."
     info "pcr11 stayed $pcr11_a across the whole scenario"
 }
 
@@ -1302,4 +1385,7 @@ for s in "${SCENARIOS[@]}"; do
     declare -F "$fn" >/dev/null || die "no such scenario: $s (try --list)"
     "$fn"
 done
-bootv2_summary "boot-v2 VM harness"
+# No explicit summary call: bootv2_report runs on EXIT and prints exactly one,
+# on this path and on every abort path alike. Two call sites would be two
+# chances for the reporting to differ from the reporting under failure, which
+# is the only time anybody reads it closely.
