@@ -324,6 +324,43 @@ pub const CLOUDFLARE_OAUTH: OAuth = OAuth {
 /// Every authorisation server this build knows how to refresh against.
 pub const OAUTH: &[&OAuth] = &[&GOOGLE_OAUTH, &MICROSOFT_OAUTH, &CLOUDFLARE_OAUTH];
 
+/// The endings that mark a stored name as a refresh credential.
+///
+/// Two, because two conventions already exist on disk and neither may be
+/// renamed: [`AccountRef::refresh_service`] appends `.refresh`, and
+/// `apex cloudflare connect` — which invented the split-host idea this is all
+/// carried over from — has been filing `cloudflare-refresh` since before there
+/// were accounts. Renaming either would orphan a credential somebody is
+/// holding, and the whole value of a refresh token is that it was stored once
+/// and has not had to be typed again.
+pub const REFRESH_SUFFIXES: &[&str] = &[".refresh", "-refresh"];
+
+/// Which stored credential a refresh credential renews.
+///
+/// [`AccountRef::refresh_service`]'s inverse, generalised to cover the CLI's
+/// older spelling as well, and the daemon's only way to answer the question:
+/// `bind` never sees a value and must not take a name from the caller, so the
+/// one thing it has is [`crate::store::ServiceInfo::service`] — the name the
+/// request is already running against.
+///
+/// Deriving the sibling from that name is safe because it does not widen
+/// anything. The framework has already matched a grant on *this* credential,
+/// the name it produces still has to name a credential the same uid stored,
+/// and the value written is the authorisation server's rather than the
+/// caller's. What it cannot do is reach another user's store or invent a host
+/// — the first because the uid comes from `SO_PEERCRED`, the second because
+/// the record the value is written into is the one that was already there.
+///
+/// `None` when the name carries neither suffix, which means it is not a
+/// refresh credential at all and there is nothing to renew.
+pub fn renewed_service(refresh_service: &str) -> Option<String> {
+    REFRESH_SUFFIXES
+        .iter()
+        .find_map(|suffix| refresh_service.strip_suffix(suffix))
+        .filter(|stem| !stem.is_empty())
+        .map(str::to_string)
+}
+
 /// The authorisation server a credential pinned to `host` belongs to.
 ///
 /// The daemon's only way to find a token endpoint. It takes the host the
