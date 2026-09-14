@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "Every `clipboard` reply this phone claims to understand, asserted from",
+    "BOTH ends. `Agentd.readClipboard` parses this file in",
+    "AgentdClipboardReplyTest; apexd/apex-agent-core/tests/",
+    "android_clipboard_wire.rs deserializes the same entries into",
+    "Response::Clipboard and round-trips them. Neither half alone is worth",
+    "much: a Kotlin test reading a string a Kotlin author wrote proves the",
+    "two agree with each other, not that the daemon sends it.",
+    "",
+    "The request direction already had this treatment (requests.json). This",
+    "is the reply direction, which had none -- `readClipboard` was written",
+    "and shipped with no test on either side.",
+    "",
+    "`empty` is the case that matters most and the easiest to get wrong. An",
+    "empty string is a REAL answer meaning the machine's clipboard is empty,",
+    "not a failure and not a missing field. Response::Clipboard's own",
+    "documentation says so. A client that reported it as an error would send",
+    "somebody hunting for a permission to grant when the machine simply had",
+    "nothing on it, and a client that reported it as nothing at all would",
+    "read as a button that does not work.",
+    "",
+    "`multiline` carries the newline and the quote that NDJSON framing cares",
+    "about, because a clipboard holds whatever was last copied and that is",
+    "routinely a stack trace. It is the same text protocol.rs uses in its own",
+    "round-trip case, copied from there rather than invented here."
+  ],
+  "text": { "reply": "clipboard", "text": "https://example.invalid/a?b=c#d" },
+  "empty": { "reply": "clipboard", "text": "" },
+  "multiline": { "reply": "clipboard", "text": "line one\nline two \"quoted\"\n" },
+  "unicode": { "reply": "clipboard", "text": "café — 日本語 📋" },
+  "spaces_only": { "reply": "clipboard", "text": "   " }
+}

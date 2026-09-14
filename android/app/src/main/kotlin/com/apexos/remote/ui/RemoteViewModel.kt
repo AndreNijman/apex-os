@@ -125,6 +125,22 @@ data class AgentUiState(
     val worktrees: WorktreesUiState = WorktreesUiState(),
     val approvals: ApprovalsUiState = ApprovalsUiState(),
     /**
+     * Text fetched from the MACHINE's clipboard and not yet put on the phone's.
+     *
+     * A one-shot: the screen copies it and calls back to clear it. It is here
+     * rather than written to the clipboard from this class because a
+     * `ClipboardManager` needs a `Context` and this is not an
+     * `AndroidViewModel` — the alternative was giving the view model a context
+     * for one feature, which is a worse trade than one nullable field.
+     *
+     * **Null also means "the machine's clipboard was empty"**, which is why
+     * that case is reported through [notice] and never by leaving this null
+     * and saying nothing. Writing an empty string to the phone's clipboard
+     * would silently destroy whatever the person had copied on the phone,
+     * which is the one outcome worse than telling them there was nothing.
+     */
+    val clipboardPull: ClipboardPull? = null,
+    /**
      * Alerts raised by the last poll and not yet shown.
      *
      * Held here rather than delivered through a callback so that the mapping
@@ -132,7 +148,37 @@ data class AgentUiState(
      * it; see `Notifier`.
      */
     val alerts: List<Alert> = emptyList(),
-)
+) {
+    /**
+     * Every transient banner on this machine's screens, cleared.
+     *
+     * Exists because [failure] and [notice] live HERE and `dismiss()` used to
+     * clear only the fields on the state above this one. The Agent Center
+     * draws `state.failure ?: state.agents.failure`, so a refusal raised by
+     * `replyToSession` — which writes the second — was shown with a dismiss
+     * button that cleared the first and left the banner on screen. Adding a
+     * notice strip beside it would have added a second button that does
+     * nothing, which is why this is fixed here rather than worked around at
+     * the call site.
+     *
+     * [clipboardPull] is deliberately NOT cleared: it is not a banner, it is
+     * work in flight, and dropping it would mean a user who dismissed a
+     * message during the round trip never gets the text they asked for.
+     */
+    fun dismissed(): AgentUiState = copy(failure = null, notice = null)
+}
+
+/**
+ * One answer to one `clipboard` request, waiting to be put on the phone.
+ *
+ * [token] exists so that asking twice for the SAME text still copies twice.
+ * The screen consumes this from a `LaunchedEffect`, and a `LaunchedEffect`
+ * keyed on the text alone would not re-run when the second answer equals the
+ * first — so a user who tapped the button again, saw nothing happen and
+ * concluded the feature was broken would be right about the symptom and wrong
+ * about the cause. Keyed on the token, every answer is a new effect.
+ */
+data class ClipboardPull(val text: String, val token: Long)
 
 /**
  * Projects, worktrees and the work in them (P1-056).
@@ -588,6 +634,104 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         machine: PairedMachine? = null,
         block: (ApprovalsUiState) -> ApprovalsUiState,
     ) = updateAgents(machine) { it.copy(approvals = block(it.approvals)) }
+
+    // ---- the machine's clipboard (P1-059 criterion 3, receive) ----------
+
+    /**
+     * Put what is on the COMPUTER's clipboard onto this phone's.
+     *
+     * The receive half of P1-059's third criterion. The send half is the
+     * `Paste` button in `ReplyBox`, which carries the phone's clipboard the
+     * other way; the two are one criterion pointing in opposite directions.
+     *
+     * **Machine-scoped, and modelled on [loadWorktrees] rather than on
+     * `replyToSession` for that reason.** `Request::Clipboard` carries no
+     * session id — one Wayland seat has one clipboard — so this is a property
+     * of the link and the only precondition is that the link is up. It is
+     * offered from the Agent Center beside Projects, not from `ReplyBox`,
+     * which returns early unless some agent is waiting: a person copies
+     * something on the computer and wants it here regardless of what any
+     * agent is doing.
+     *
+     * Explicit, never on the four-second poll, and for a sharper reason than
+     * `worktrees`' cost: a clipboard is whatever was last copied, and polling
+     * one would stream a person's passwords and tokens to a phone they did
+     * not ask to send them to.
+     *
+     * Three outcomes, three different channels, because collapsing any two of
+     * them misinforms:
+     * * text — onto the phone's clipboard, and [notice] says how much;
+     * * **empty — [notice], not [failure] and not silence.** The daemon's
+     *   `Response::Clipboard` documents an empty string as a real answer, so
+     *   drawing it as an error sends the user hunting for a permission to
+     *   grant when the machine simply had nothing on it;
+     * * refused or unreachable — [failure], with the daemon's own sentence.
+     *
+     * `withContext(Dispatchers.IO)` is mandatory, not stylistic:
+     * `StrictMode.enableDeathOnNetwork()` kills the process for a socket on
+     * the main thread, and `Mux.request` blocks for up to five minutes.
+     */
+    fun pullMachineClipboard() = viewModelScope.launch {
+        val machine = _state.value.agents.machine ?: return@launch
+        val link = links[machine.deviceId] ?: return@launch
+        updateAgents(machine) {
+            it.copy(busy = "Reading ${machine.machine}'s clipboard…", failure = null, notice = null)
+        }
+        try {
+            val text = withContext(Dispatchers.IO) { link.clipboard() }
+            updateAgents(machine) {
+                it.copy(
+                    busy = null,
+                    // Nothing is handed to the screen when there is nothing to
+                    // copy: writing "" to the phone's clipboard would destroy
+                    // whatever the person had copied here, to tell them the
+                    // computer had nothing.
+                    clipboardPull = if (text.isEmpty()) {
+                        null
+                    } else {
+                        ClipboardPull(text, System.currentTimeMillis())
+                    },
+                    notice = if (text.isEmpty()) {
+                        "${machine.machine}'s clipboard is empty. Nothing was copied here, and " +
+                            "what you had copied on this phone is untouched."
+                    } else {
+                        val what = if (text.length == 1) "1 character" else "${text.length} characters"
+                        "Copied $what from ${machine.machine}."
+                    },
+                )
+            }
+        } catch (e: AgentError) {
+            val message = if (Agentd.isTooOld(e)) {
+                // Not a refusal. `Request::Clipboard` landed 2026-09-13; an
+                // older runtime answers `bad_request` for the verb itself,
+                // which is the same error kind a refusal uses, and reporting
+                // it as "permission denied" would send the user looking for a
+                // setting that does not exist.
+                "This machine's APEX is too old to share its clipboard. " +
+                    "Run `sudo apex update` on the machine."
+            } else {
+                "Could not read ${machine.machine}'s clipboard: ${describe(e)}"
+            }
+            updateAgents(machine) { it.copy(busy = null, failure = message) }
+        } catch (e: Exception) {
+            updateAgents(machine) {
+                it.copy(
+                    busy = null,
+                    failure = "Could not read ${machine.machine}'s clipboard: ${describe(e)}",
+                )
+            }
+        }
+    }
+
+    /**
+     * The screen has put [AgentUiState.clipboardPull] on the phone's clipboard.
+     *
+     * Cleared here rather than left to be overwritten by the next pull, so
+     * that the text does not sit in the view model's state for the rest of the
+     * session. A clipboard holds whatever was last copied, which on a
+     * developer's machine is routinely a token.
+     */
+    fun clipboardPullConsumed() = updateAgents { it.copy(clipboardPull = null) }
 
     // ---- worktrees (P1-056) ---------------------------------------------
 
@@ -1193,7 +1337,17 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         _state.update { it.copy(crash = null) }
     }
 
-    fun dismiss() = _state.update { it.copy(message = null, failure = null, connection = null) }
+    fun dismiss() = _state.update {
+        it.copy(
+            message = null,
+            failure = null,
+            connection = null,
+            // The agent-scoped banners too. Without this the Agent Center's
+            // dismiss button cleared whichever of the two `failure` fields it
+            // was NOT showing. See `AgentUiState.dismissed`.
+            agents = it.agents.dismissed(),
+        )
+    }
 
     private suspend fun sealingBox(
         activity: FragmentActivity,
