@@ -5,10 +5,14 @@ worktree: /var/tmp/apex-work/wt-p2-f
 branch: task/p2-f-3   (cut from origin/roadmap/v2.2 @ 13d53c01)
 
 ## NEXT
-Add `supersedes_credentials: bool` to `OperationSpec` (mandatory, no Default —
-mirrors `same_everywhere`), `false` at every existing literal, then
-`Bound::replaces: Vec<String>` + `Performed::replaced: Vec<Replaced { name,
-value }>` in `apex-secretd/src/provider.rs`.
+Round 5 commit 1: add `supersedes_credentials: bool` to `OperationSpec` in
+`apexd/apex-secret-core/src/operation.rs` (mandatory, no Default — mirrors
+`same_everywhere`), write `false` at every one of the ~85 literals the grep
+`rg 'same_everywhere' apexd --type rust` lists, add
+`may_supersede_credentials(op)` beside `may_be_granted_everywhere` in
+`apexd/apex-secretd/src/service.rs`, and a registry test in
+`apexd/apex-secretd/src/providers/mod.rs` mirroring
+`the_everywhere_gate_reads_the_operations_own_declaration`.
 
 ## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
 1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
@@ -89,11 +93,22 @@ Round 3, on task/p2-f-3 (pushed):
   c224eea7  a scope may not name an operation no provider offers — the
             cross-crate gate in apex-secretd, both mutants run and red.
 
-## IN PROGRESS (round 4)
-- Next up, nothing written yet: `OperationSpec::supersedes_credentials` (a
-  mandatory static bool, ~60 literal sites, mechanical) + `Bound::replaces:
-  Vec<String>` / `Performed::replaced: Vec<Replaced>` + the framework checks in
-  `apex-secretd/src/service.rs` + the `oauth` provider. See ROUND 4 PLAN.
+## IN PROGRESS (round 5)
+- `git status` run: worktree CLEAN as of the merge of `origin/roadmap/v2.2`
+  (2219ef75) into `task/p2-f-3` as `91c30b14`. Nothing half-written yet.
+- About to touch: `apexd/apex-secret-core/src/operation.rs` (`OperationSpec`).
+
+## ROUND 5 COMMIT SEQUENCE (settled with the advisor)
+1. `supersedes_credentials` + the ~85 `false` literals + the gate + the
+   registry test. The `oauth` provider does NOT land here, so the registry
+   test's superseding set is asserted **empty** in this commit and becomes
+   `["oauth.token.refresh"]` in commit 3.
+2. `Bound::replaces` / `Performed::replaced` / `Replaced { name, value }` +
+   the framework checks in `service.rs` + a `Replacer` test provider mirroring
+   `Creator` (careless output that contains the new secret, `ran` measured).
+3. the `oauth` provider + a loopback double: rotated refresh (two `Replaced`),
+   non-rotated (one), non-2xx, a token carrying `"` / `\` / newline.
+4. `apex cf refresh` + the `cloudflare.rs` status line + the step-7 answer.
 
 ## FOUND
 - **`5054be77` landed the S3 provider and SigV4 signer.** Round 2's card

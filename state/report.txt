@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-14 11:12 AWST
+APEX ROADMAP — resume report — 2026-09-14 11:32 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,63 +16,48 @@ APEX ROADMAP — resume report — 2026-09-14 11:12 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  later      unknown    L-001,L-002,L-003                  task/later-tpm-qualification
+  later      ALIVE      L-001,L-002,L-003                  task/later-tpm-qualification
              head e2345ed7 fix(boot-v2): the documented TPM-clear recovery was a
-             dirty 0 file(s), 0 unpushed, card 89m
-             NEXT luks-tpm-clear is RE-RUNNING with the fixes as podman container `l
+             dirty 0 file(s), 0 unpushed, card 0m
+             NEXT Round 26 in progress. Pre-launch edits to files/scripts/boot-v2/{l
 
-  p2-b       no worktree P2-003,P2-004                      task/p2-b-round23
-             head 
-             dirty 0 file(s), ? unpushed, card 88m
+  p1-053c    ALIVE      P1-059,P1-060                      task/p1-053c-clipboard
+             head 50d7026f Merge remote-tracking branch 'origin/roadmap/v2.2' in
+             dirty 0 file(s), 0 unpushed, card 2m
+             NEXT Commit the 165 uncommitted lines listed under IN PROGRESS (all six
+
+  p2-c       ALIVE      P2-005,P2-006,P2-007               task/p2-c-2
+             head 85776285 Merge roadmap/v2.2 (2219ef75) into task/p2-c-2
+             dirty 0 file(s), 0 unpushed, card 2m
+             NEXT In /var/tmp/apex-work/wt-p2-c-shell: add `parseStatusJson()` to
+
+  p2-b       ALIVE      P2-003,P2-004                      task/p2-b-round23
+             head 2219ef75 Merge remote-tracking branch 'origin/task/followups-5
+             dirty 0 file(s), 18 unpushed, card 108m
              NEXT **One line:** in `/var/tmp/apex-work/wt-p2-b4` (apex-os, `task/p2-
 
-  p2-f       unknown    P2-016,P2-017,P2-018,P2-019        task/p2-f-3
-             head cebbe2a4 Merge remote-tracking branch 'origin/roadmap/v2.2' in
-             dirty 0 file(s), 10 unpushed, card 87m
+  p2-f       ALIVE      P2-016,P2-017,P2-018,P2-019        task/p2-f-3
+             head 91c30b14 Merge remote-tracking branch 'origin/roadmap/v2.2' in
+             dirty 0 file(s), 28 unpushed, card 108m
              NEXT Add `supersedes_credentials: bool` to `OperationSpec` (mandatory, 
 
-  followups-5 unknown                                       task/followups-5
-             head cbb1f7b1 ci(parity): the apex-shell fallback compared every fe
-             dirty 0 file(s), 1 unpushed, card 89m
-             NEXT Fix `Input page and generator agree` in `.github/workflows/pr-vali
-
-  p1-053c    unknown    P1-059,P1-060                      task/p1-053c-clipboard
-             head 491a3fef Merge remote-tracking branch 'origin/roadmap/v2.2' in
-             dirty 6 file(s), 0 unpushed, card 91m
-             NEXT Build the Android half of P1-059 C3 in `/var/tmp/apex-work/wt-p1-0
-
-  p2-c       unknown    P2-005,P2-006,P2-007               task/p2-c-2
-             head 3ab3b6ce feat(firewall): the settings page parsed prose, and t
-             dirty 1 file(s), 0 unpushed, card 96m
-             NEXT OS side: add `json_str()` + `each_exception()` + `cmd_status_json`
+  followups-5 ALIVE                                         task/followups-5
+             head 94a3a2ac ci(chaos): the archive guard failed exactly when the 
+             dirty 0 file(s), 0 unpushed, card 2m
+             NEXT Pull the `Package engine` log for run 34802332142 job 103847365659
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip fdf0a8e6 Merge remote-tracking branch 'origin/task/later-tpm-q
-    task/followups-5
-      cf7722d9 fix(test): the channel fixture read the real /proc/mounts, so   [0/10 added lines on tip]
-      2a8ada6f test(verbs): `apex browser` is in the binary and was not in t   [0/1 added lines on tip]
-      c07574b7 ci(chaos): the diagnostics step has never uploaded a byte, an   [0/10 added lines on tip]
-    task/later-tpm-qualification
-      e2345ed7 fix(boot-v2): the documented TPM-clear recovery was a no-op t   [0/10 added lines on tip]
+  int-os:  tip 2219ef75 Merge remote-tracking branch 'origin/task/followups-5
     task/p1-053c-clipboard
-      f253e882 feat(agentd): a session may not read this machine's clipboard   [2/10 added lines on tip]
-      9ff8308e feat(agentd): read this machine's clipboard over the agent pr   [0/10 added lines on tip]
-      114339c7 test(agentd): Request::Clipboard against a real daemon over a   [4/10 added lines on tip]
+      efa5d198 feat(android): the phone can ask the computer for its clipboa   [0/10 added lines on tip]
     task/p2-c-2
-      3ab3b6ce feat(firewall): the settings page parsed prose, and the prose   [0/10 added lines on tip]
-    task/p2-f-3
-      9e0a8c7d feat(account): the OAuth table a daemon-side refresh is route   [0/10 added lines on tip]
+      12201d9e feat(firewall): the helper grew --json, and clap would have r   [1/10 added lines on tip]
 
-  int-shell:  tip a0b3deb Merge remote-tracking branch 'origin/task/p2-b-round23
-    task/p2-b-round23
-      4e1ec25 fix(ci): one unused variable in the RTL suite was skipping for   [0/2 added lines on tip]
-      965609c test(i18n): the RTL fixture was measuring a row its own test h   [0/10 added lines on tip]
-      bc60a19 test(i18n): the mutants that prove the untouched-instance asse   [1/10 added lines on tip]
-      1363af5 fix(test): a mutant the suite CAUGHT was scored SURVIVED, for    [0/10 added lines on tip]
-      acf4879 test(test): the three-way verdict, shown capable of all three    [1/10 added lines on tip]
+  int-shell:  tip acf4879 test(test): the three-way verdict, shown capable of al
+    (nothing — every task branch's content is on the integration tip)
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -92,11 +77,11 @@ APEX ROADMAP — resume report — 2026-09-14 11:12 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 11:12:24 AWST 20s
+  snapshot timer: active   last 2min 3s Mon
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    8867c73  roadmap-state
+    apex-os    463718a  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -119,7 +104,7 @@ APEX ROADMAP — resume report — 2026-09-14 11:12 AWST
     apex-os    162d6fa  wt-p0-009-
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
-    apex-shell 5381b6a  apex-shell-
+    apex-shell 4ddfa7d  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell 02674e0  int-shell-
     apex-shell 68c971d  wt-base-shell-

@@ -1618,3 +1618,96 @@ headless and the queue says so in as many words; `later` needs a physical TPM;
 **stale queue entry** for work landed as `69a2f51e` and is now marked complete,
 because that is the double-dispatch trap that has already cost this program
 three agent runs.
+
+---
+
+## Round 26 — 2026-09-14
+
+Six branches landed, six status records written, six fresh agents dispatched.
+`apex-os` `fdf0a8e6 → 2219ef75` (five merges, zero conflicts); `apex-shell`
+`a0b3deb → acf4879`. Verified on the landed tips: `cargo test --locked
+--workspace --no-fail-fast` from `int-os/apexd` **3218 passed, 0 failed, 2
+ignored** (up from 3189), `tests/run-rtl-test.sh` **30/0/0** (up from 28),
+`check-no-conflict-markers.sh` PASS after every merge.
+
+### What killed round 25, and it was not a usage limit
+
+Every previous round has had to *infer* why its agents were dead. This one did
+not. `journalctl -b -2` at **09:45:17 AWST**:
+
+    systemd-logind[1254]: Lid closed.
+    systemd-logind[1254]: Suspending...
+    kernel: PM: suspend entry (s2idle)
+
+Andre shut the laptop lid. Six agents and a live QEMU/swtpm TPM lab died
+mid-sentence, and the s2idle resume never returned — `journalctl --list-boots`
+shows boot -2 ending at 09:45:17 and a *fresh boot* starting at 09:52:41.
+
+**That is P1-063 happening to the program that is building P1-063**, and it is
+worth stating plainly: the mechanism landed two rounds ago but is not in an
+image, so the machine still behaves exactly as it did before the work.
+
+It also produced the measurement P1-063's criterion 1 has been waiting on. The
+2026-09-13 note said causation could not be established because the machine was
+docked, and with a display attached logind consults `HandleLidSwitchDocked`
+(default `ignore`) *before* any inhibitor. But a lid close only reaches
+`HandleLidSwitch=suspend` when the machine is **not** docked — so the suspend
+firing **is** the proof the external display was disconnected. The baseline half
+of criterion 1 is now measured: undocked, lid closed, no APEX inhibitor, the
+machine suspends and the work dies. What is still missing is the same lid close
+*with* the inhibitor held.
+
+So round 26 held one, for the first time outside a test:
+`systemd-inhibit --what=handle-lid-switch:sleep --mode=block`, with **no polkit
+prompt** — both `inhibit-block-sleep` and `inhibit-handle-lid-switch` are
+`implicit active: yes` here, checked with `pkaction` before taking it. It is
+guarded the way P1-063 specifies rather than held unconditionally: it releases
+when the orchestrator pid exits, at `k10temp` ≥ 90 °C, or below 20% battery
+while discharging, and it logs which guard fired. Lid closed means no airflow;
+"it kept working until it died" is a worse outcome than suspending.
+
+### A guard that failed exactly when it should have passed
+
+`followups-5`'s new chaos-archive check, added last round:
+
+    tar -tzf "$ARCHIVE" | grep -q '0000:03:00\.0' || { echo "FATAL: ... not in the archive"; exit 1; }
+
+under `set -euo pipefail`. **`grep -q` exits at its first match, `tar` then dies
+of SIGPIPE, and `pipefail` makes the pipeline non-zero — so the guard failed
+precisely *because* the path was present**, and would have passed had it been
+absent and grep read to the end. Run 34796578198 shows the inversion verbatim:
+`194 paths packed`, then `tar: stdout: write error`, then the FATAL — while the
+upload it guards succeeded at 16,173 bytes. The `n=$(… | wc -l)` line directly
+above it is correct for the mirror-image reason: `wc` reads to EOF, so tar never
+sees a closed pipe.
+
+Fixed as `94a3a2ac` by materialising the listing to a file first, verified in
+all three directions (present → rc 0, absent → FATAL rc 1, no directory →
+documented early exit 0). This is the `a gate that runs and inspects nothing`
+family with the sign flipped, and the shape is worth grepping for: **any
+`| grep -q` inside a `pipefail` script whose producer is long.**
+
+### The 600 s ceiling, fixed for future rounds
+
+Round 24's log reads: orchestrator posts its final message, then `Background
+tasks still running after 600s; terminating.`, then `scratch-later/run1.log`
+records `forwarding signal 15 to container` at the same second. In `claude -p`
+there is no next turn — a final response starts a 600 s countdown on every
+background agent. `ROADMAP/autoresume.sh` now sets
+`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`, bounded as before by `timeout 4h`.
+
+Two distinct failure modes, both real; the comment in `autoresume.sh` says so
+explicitly so the next reader does not collapse them into one.
+
+### Cards lagged their commits again — three of six
+
+`p1-053c`'s card said *"Nothing is uncommitted. The worktree is clean"* while
+holding **165 uncommitted lines** of exactly the Android work its own `NEXT`
+described. That is the third consecutive round this unit's work sat uncommitted
+while its agent died: 134 lines, then 1,490, now 165. `later`'s `NEXT` said a
+container was "RE-RUNNING" that had died 90 minutes earlier at 17 assertions,
+and `p2-c`'s `NEXT` asked for the commit it had already landed.
+
+`dispatch.json`'s `_field_contract` was also violated by round 25: `p2-b`'s
+`worktree` held `"a + b"`, so four consecutive reports said **"no worktree"** for
+a worktree that was fine. Fixed to `worktree`/`second_worktree`.
