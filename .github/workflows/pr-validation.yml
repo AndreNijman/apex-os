@@ -1522,12 +1522,50 @@ jobs:
           test -x "$APEX_BIN"
           ./tests/chaos/run-chaos --out "$RUNNER_TEMP/chaos" --seed "$GITHUB_RUN_ID"
 
+      # The comment above says "a diagnostic that only exists inside a finished
+      # runner is not one". That was the exact state this step was in: it has
+      # never uploaded a byte, and it failed the whole `rust` job every run.
+      #
+      # upload-artifact@v4 refuses any path containing a colon (NTFS), and a
+      # chaos bundle snapshots a fixture sysfs tree whose PCI addresses are
+      # `0000:03:00.0` by construction — tests/chaos/lib.sh writes
+      # `sys/bus/pci/devices/0000:03:00.0/class`. So the upload aborted on the
+      # fixture it exists to preserve:
+      #   "The path for one of the files in artifact is not valid:
+      #    /failed-rollback/root/sys/bus/pci/devices/0000:03:00.0/class"
+      #
+      # A tar has no such restriction, so the bundles go up WHOLE. Excluding
+      # the sysfs tree would also make the upload succeed, and would throw away
+      # the fixture `run-chaos --replay` needs — a green tick for a diagnostic
+      # that no longer diagnoses, which is the failure mode this file is full
+      # of scar tissue about.
+      - name: Pack the chaos bundles
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -d "$RUNNER_TEMP/chaos" ]; then
+            echo "no chaos directory at $RUNNER_TEMP/chaos — nothing to pack"
+            exit 0
+          fi
+          tar -czf "$RUNNER_TEMP/chaos-bundles.tar.gz" -C "$RUNNER_TEMP" chaos
+          # An archive nobody looked inside is the same mistake one layer down.
+          # Assert it round-trips, name the colon path specifically, and refuse
+          # an archive that unpacks to nothing.
+          n=$(tar -tzf "$RUNNER_TEMP/chaos-bundles.tar.gz" | wc -l)
+          echo "$n paths packed"
+          [ "$n" -gt 1 ] || { echo "FATAL: the chaos archive is empty" >&2; exit 1; }
+          tar -tzf "$RUNNER_TEMP/chaos-bundles.tar.gz" | grep -q '0000:03:00\.0' || {
+            echo "FATAL: the fixture sysfs tree is not in the archive — the" >&2
+            echo "       bundle cannot be replayed from it" >&2
+            exit 1
+          }
+
       - name: Chaos diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: chaos-bundles
-          path: ${{ runner.temp }}/chaos
+          path: ${{ runner.temp }}/chaos-bundles.tar.gz
           if-no-files-found: warn
           retention-days: 14
 
