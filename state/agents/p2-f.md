@@ -5,15 +5,25 @@ worktree: /var/tmp/apex-work/wt-p2-f
 branch: task/p2-f-3   (cut from origin/roadmap/v2.2 @ 13d53c01)
 
 ## NEXT
-Round 5 commit 2: in `apexd/apex-secretd/src/provider.rs` add
-`Bound::replaces: Vec<String>`, `Performed::replaced: Vec<Replaced>` and
-`pub struct Replaced { name: String, value: SecretValue }`; restore
-`may_supersede_credentials` beside `may_be_granted_everywhere` in
-`apexd/apex-secretd/src/service.rs` (it was held back from commit 1 — an
-unused `pub(crate) fn` is a dead-code warning and CI runs
-`cargo clippy --all-targets --locked -- -D warnings`); add the framework
-checks in `use_capability` mirroring the `creates` block; add a `Replacer`
-test provider in `service.rs`'s tests mirroring `Creator`.
+Round 5 commit 3: write `apexd/apex-secretd/src/providers/oauth.rs` — an
+`oauth` provider offering `oauth.token.refresh` (`Effect::Write`,
+`ResourceKind::None`, no params, `same_everywhere: false`,
+`supersedes_credentials: true`); `bind` routes by
+`account::oauth_for_auth_host(&req.service.host)` and NOTHING the caller
+said, endpoint `https://<auth_host>`, `replaces` = the access-credential
+name derived from `req.service.service` plus that name itself; `perform`
+POSTs `grant_type=refresh_token&refresh_token=…&client_id=…` as
+`data-urlencode` lines in a curl config on stdin via `broker::run_curl`,
+copying `providers/s3/mod.rs::call`'s config pattern (NOT
+`cloudflare/api::call` — it hardwires `/client/v4` and a Bearer header and
+takes no form body). Register it in `providers/mod.rs::default_registry`,
+add `"oauth.token.refresh"` to
+`the_shipped_registry_builds_and_offers_every_provider_s_vocabulary` and
+change the empty set in
+`the_set_of_operations_that_may_overwrite_a_stored_credential_is_spelled_out`
+to `["oauth.token.refresh"]`. Needs a `#[cfg(test)]` table-injection point
+like `api::Api::loopback(port)`, because a loopback double is `127.0.0.1`
+and `oauth_for_auth_host("127.0.0.1")` is `None` by design.
 
 ## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
 1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
@@ -89,6 +99,9 @@ Remaining, in the order this round takes them:
 
 ## DONE
 Round 5, on task/p2-f-3 (pushed):
+  306e79e1  `Bound::replaces` / `Performed::replaced` / `Replaced { name,
+            value }`, the five framework checks in `use_capability`,
+            `Service::swap`. Five mutations run and red. 3225 / 0 / 2.
   862d1c37  `OperationSpec::supersedes_credentials`, mandatory, `false` at all
             64 literals; `ProviderSpec::validate` refuses a superseding
             operation that calls itself `Effect::Read`. Both new tests
@@ -100,9 +113,9 @@ Round 3, on task/p2-f-3 (pushed):
             cross-crate gate in apex-secretd, both mutants run and red.
 
 ## IN PROGRESS (round 5)
-- `git status` run: worktree CLEAN at `862d1c37` (commit 1 pushed).
+- `git status` run: worktree CLEAN at `306e79e1` (commit 2 pushed).
   Nothing half-written.
-- About to touch: `apexd/apex-secretd/src/provider.rs`.
+- About to touch: a NEW file `apexd/apex-secretd/src/providers/oauth.rs`.
 
 ## ROUND 5 COMMIT SEQUENCE (settled with the advisor)
 1. ~~`supersedes_credentials` + the 64 `false` literals + the registry test~~
@@ -111,9 +124,8 @@ Round 3, on task/p2-f-3 (pushed):
    `may_supersede_credentials` moved to commit 2 — CI runs
    `clippy --all-targets -- -D warnings` and an unused `pub(crate) fn` is a
    dead-code warning, so it lands with its caller.
-2. `Bound::replaces` / `Performed::replaced` / `Replaced { name, value }` +
-   the framework checks in `service.rs` + a `Replacer` test provider mirroring
-   `Creator` (careless output that contains the new secret, `ran` measured).
+2. ~~`Bound::replaces` / `Performed::replaced` / `Replaced` + the framework
+   checks + the `Replacer` test provider~~ **DONE, `306e79e1`, pushed.**
 3. the `oauth` provider + a loopback double: rotated refresh (two `Replaced`),
    non-rotated (one), non-2xx, a token carrying `"` / `\` / newline.
 4. `apex cf refresh` + the `cloudflare.rs` status line + the step-7 answer.

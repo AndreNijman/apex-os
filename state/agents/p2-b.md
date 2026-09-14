@@ -116,7 +116,7 @@ not-present. Rows that cannot be honestly measured here are named, not faked.
 | apex-os | `tests/test-apex-greet-session-bus.sh` | 37 assertions | 13/13 caught |
 | apex-os | `tests/test-apex-greet-a11y.sh` | 22 assertions | in the round-18 set |
 | apex-os | `tests/test-apex-greet-layout.sh` | 25 (23 + 1 skip off-host) | — |
-| apex-os | `tests/test-apex-platform-theme.sh` | **round 26 — see NEXT** | — |
+| apex-os | `tests/test-apex-platform-theme.sh` | **18 passed / 0 failed / 0 skipped** under `env -i` | 13 applied: 10/10 red caught, 0 survived, 0 misscored; 3/3 green held, 0 false-red |
 | apex-os | `installer/test-installer-a11y.sh` | 68 assertions, 4 pages' Tab rings | round-18b set |
 | apex-os | `installer/test-installer-keymap.sh` | 43 assertions | — |
 | apex-os | `installer/test-installer-locale.sh` | 26 assertions | — |
@@ -158,7 +158,7 @@ suite and a mutation pair.
 | multiple layouts | **greeter DONE** | `test-apex-greet-layout.sh`: both configured layouts survive extraction; a three-layout machine reports all three in order. Nothing in the desktop shell switches layouts yet. |
 | IME / fcitx5 | present in image, untested | fcitx5 + chinese-addons/hangul/anthy/m17n installed in `Containerfile.core`, autostarted in 3 places. `QT_IM_MODULE`/`GTK_IM_MODULE` deliberately unset (Wayland text-input-v3). No suite asserts any of it. |
 | CJK | **MEASURED, and the old claim was false** | `run-i18n-test.sh` §5, 7 assertions: 漢 advances **32** under JetBrains Mono, matching a family that covers U+6f22 and not JetBrains Mono's own **19.1875** (asserted first, because the discriminator rests on that family being monospaced). Same 32 on the GitHub Arch runner against Noto Sans CJK HK. |
-| RTL | **the shared settings surface MIRRORS and is mutation-proved; the WINDOW ROOTS still do not** | apex-shell: **2 components declare mirroring** (`CfgRow`, `CfgScroll`) and **0 of 14 window roots** do — the 0 is the honest remaining half and is pinned in both directions. `run-rtl-test.sh` 30/0/0 under `env -i`; `mutate-rtl.sh` 13/13 caught. Rendering half measured through the engine: Arabic ا falls to DejaVu Sans Mono (19.265625), Hebrew א to DejaVu Sans (21.390625), Thai ก to Droid Sans Thai (19.75), Devanagari अ to Droid Sans Devanagari (24.453125) — all image-owned. The Noto families really are absent, which is a typographic quality question, not a tofu one. |
+| RTL | **the shared settings surface MIRRORS and is mutation-proved; the WINDOW ROOTS still do not** | apex-shell: **2 components declare mirroring** (`CfgRow`, `CfgScroll`) and **0 of 14 window roots** do — the 0 is the honest remaining half and is pinned in both directions. `run-rtl-test.sh` 30/0/0 under `env -i`; `mutate-rtl.sh` 13/13 caught. **Round 26 guarded the mechanism itself from the apex-os side** — `tests/test-apex-platform-theme.sh`, 18/0/0, 13 mutants — because mirroring rests on `QT_QPA_PLATFORMTHEME=qt6ct` and on `qt6-qttranslations`, and the value of the first and the existence of the second were asserted nowhere. Rendering half measured through the engine: Arabic ا falls to DejaVu Sans Mono (19.265625), Hebrew א to DejaVu Sans (21.390625), Thai ก to Droid Sans Thai (19.75), Devanagari अ to Droid Sans Devanagari (24.453125) — all image-owned. The Noto families really are absent, which is a typographic quality question, not a tofu one. |
 | locales / timezones | **keyboard + timezone DONE, LOCALE still not offered** | Deliberate: the image installs **`glibc-langpack-en` only**, so a free picker would let a user choose a locale that silently degrades to `C.UTF-8` on the installed system — a worse failure than not asking, because it looks like it worked. Closing the row means adding langpacks first, then a picker restricted to what the target ships. |
 | translated installer | **not present** | 0 `qsTr`/gettext in `installer/`. GTK4/Python, so its route is gettext — a separate pipeline. |
 | translated shell | **pipeline PROVEN on TWO machines; the blocker is the HOST** | `run-i18n-test.sh` — 23 assertions here, 15/0/5 on the Arch runner. All four links run with real tools on a shipped file: `qsTr()` marks 5 strings in `AgentHelpContent.qml`, `lupdate-qt6` extracts exactly 5 into the right context, `lrelease-qt6` compiles `apex-shell_de.ts`, and a running engine under `qmltestrunner -translation` reads the German back off the live singleton. The load-bearing assertion is the sensitivity one — the SAME fixture with and without `-translation` must DISAGREE, sampled on three strings. The gap is the host; see finding 2. |
@@ -167,22 +167,16 @@ suite and a mutation pair.
 
 ## NEXT
 
-**One line:** in `/var/tmp/apex-work/wt-p2-b4` (apex-os, `task/p2-b-round23`,
-pushed at `b1db5eb0`), write `tests/mutate-platform-theme.sh` — modelled on
-`tests/mutate-greet-session-bus.sh` for the file/restore shape and on apex-shell
-`tests/mutate-rtl.sh` for the three-way `classify()` + its self-test — with
-mutants (a) printf value `qt6ct`→`qt5ct`, (b) labwc value `qt6ct`→`qt5ct`,
-(c) both together, (d) the printf line deleted, (e) the `>> /etc/environment`
-redirect removed, (f) `qt6ct` dropped from the install list,
-(g) `qt6-qttranslations` dropped from the install list; run it, then commit,
-push, and record the table here.
+**One line:** the platform-theme guard is COMPLETE and pushed (apex-os
+`task/p2-b-round23` @ `77bbd712`, 4 commits, nothing uncommitted) — the next
+action is standing-queue item **6**: in `/var/tmp/apex-work/wt-p2-b4`, extend
+`installer/test-installer-a11y.sh`'s Tab-ring walk to the `wifi` page, reusing
+the shape detection `audit_page` already does because the page is built
+differently depending on whether the machine has a wifi device.
 
 ## IN PROGRESS
 
-`tests/mutate-platform-theme.sh` (apex-os, new file) — not yet written. Files it
-must restore: `Containerfile.core`, `files/desktop/labwc/environment`,
-`tests/test-apex-platform-theme.sh`. Restore with `git checkout --`, never `cp`
-(finding 9). Run the suite under `env -i HOME PATH USER TMPDIR`.
+Nothing. Both worktrees are clean and both branches are pushed.
 
 ## FOUND (round 26, before writing a line)
 
@@ -297,6 +291,37 @@ apex-os `task/p2-b-round23`, fast-forwarded onto `2219ef75` first, pushed at
   0 skipped** on this booted host, plus its step in `pr-validation.yml`
   immediately after the ai-apps step (`check-suites-run-in-ci.sh`: 75 suites,
   71 run by CI, 4 exempt, 0 undeclared).
+- **`c9db7fcf`** — the hole the mutation harness found in the commit above:
+  the `COPY files/system/qt6ct/qt6ct.conf /etc/xdg/qt6ct/qt6ct.conf` assertion
+  had no `$` anchor, so a destination of `qt6ct.conf.disabled` — a path qt6ct
+  never reads — matched as a prefix and **M10 SURVIVED against a suite
+  reporting 18 passed, 0 failed**. Anchored, dots escaped.
+- **`77bbd712`** — `tests/mutate-platform-theme.sh`. **13 mutants applied, 0
+  failed to apply; red: 10 CAUGHT, 0 SURVIVED, 0 MISSCORED; green: 3 HELD, 0
+  FALSE-RED; tree matches HEAD.** Baseline 18/0/0 under
+  `env -i HOME PATH USER TMPDIR`. Log:
+  `/var/tmp/apex-work/scratch-p2-b/mutate-platform-theme.log`.
+
+| id | mutant | verdict |
+| --- | --- | --- |
+| M1 | `/etc/environment` VALUE `qt6ct`→`qt5ct` — the change nothing anywhere caught before | CAUGHT |
+| M2 | labwc value alone — two compositors mirror, the third does not | CAUGHT |
+| M3 | the COORDINATED rename of both files — every agreement assertion satisfied | CAUGHT, by the install list |
+| M4 | the whole `/etc/environment` write deleted | CAUGHT |
+| M5 | the `>> /etc/environment` redirect alone removed — printf writes to the build log | CAUGHT |
+| M6 | `qt6ct` dropped from the install list — Qt falls back silently | CAUGHT |
+| M7 | `qt6-qttranslations` dropped back to a weak dependency | CAUGHT |
+| M8 | the labwc assignment commented out | CAUGHT |
+| M9 | `export ` put in front of it — labwc sets a variable named "export QT_…" | CAUGHT |
+| M10 | `qt6ct.conf` COPYed to a destination qt6ct never reads | CAUGHT (SURVIVED first; see `c9db7fcf`) |
+| G1 | a Containerfile COMMENT naming a different theme — must NOT fire | HELD |
+| G2 | a commented-out assignment in the labwc file — must NOT fire | HELD |
+| G3 | a `RUN` that merely mentions another theme name — must NOT fire | HELD |
+
+The **green** mutants are the half that is usually missing. `grep -q qt6ct`
+over this repository is satisfied by three places that set nothing, and a guard
+that fires on a comment is as useless as one that never fires and worse to live
+with — the first person to hit it deletes the assertion rather than the comment.
 
 **Proved red before it was fixed**, which is the evidence the round exists for.
 The first run of the suite against the unmodified tree was **15/3/0**, and the
@@ -307,6 +332,15 @@ as a weak dependency"*. After the parser fix, **17/1/0** with that one product
 row still red; after `578914fd`, **18/0/0**. Both logs are kept:
 `/var/tmp/apex-work/scratch-p2-b/platform-theme-RED-before-fix.log` and
 `…/platform-theme-RED-qttranslations.log`.
+
+**The CI path was exercised, not assumed.** The suite's live half is gated on
+`/run/ostree-booted`; a copy with that gate inverted (the branch the GitHub
+runner will take) reports **14 passed / 0 failed / 1 skipped, exit 0** — so
+fourteen of the eighteen assertions are structural and run on every machine, and
+the gate is real off this laptop rather than being a suite that measures its
+author's desktop. That check matters here specifically: "a gate that reads state
+belonging to the environment it happens to run in" is this repository's second
+most common CI defect and three instances were found in round 26 alone.
 
 Gates run and green: `check-containerfile-assertions.sh` (188 checked, 0 failed),
 `test-containerfile-order.sh` (24/0), `check-shellcheck-coverage.sh` (164

@@ -5,13 +5,24 @@ branch: task/followups-5
 repo: apex-os
 
 ## NEXT
-Fix `Run root-approval assertions` (8 FAILs): `tests/test-root-approval.sh:88`
-binds the stub over `/usr/libexec/apex-pkg`, which ubuntu-24.04 does not have —
-`mount: /usr/libexec/apex-pkg: mount point does not exist`. Make the inner
-namespace provide the mount point (it is already `unshare -r -m --propagation
-private`, l.248), prove both directions, commit.
+Read the 66-line `Run terminal layout template assertions` step of run
+34802332142 (job 103847365659) in
+`/var/tmp/apex-work/scratch-followups-5/e.log` — its one FAIL is "the layout
+landed as a tab zellij can describe" (mux-layouts: 45 passed, 1 failed) — then
+the 60-of-134 virtualization reds. Then dispatch a fresh run.
 
 ## DONE
+- `479105b6` test(root-approval): `mount --bind` cannot create a target only
+  APEX machines have. PUSHED. `/usr/libexec/apex-pkg` is `ops::PKG_ENGINE`;
+  ubuntu-24.04 has no such file, so the stub bind died and took the 8
+  after-the-engine assertions with it. Now the DIRECTORY is mirrored and bound,
+  one code path. **Near-miss caught and recorded**: the first version `cp`'d
+  the stub over a mirrored SYMLINK to the real engine — it failed here only
+  because /usr is ro, and would have overwritten the shipped engine on any rw
+  /usr, i.e. on every runner. Measured: absent-target before 13/8 (the runner's
+  own line), after 20/0; plain here 20/0; the new `cmp -s` guard fires 13/8
+  rc=1 naming itself. Runner reproduced with `./tests/in-login-session.sh
+  bwrap --dev-bind / / --tmpfs /usr/libexec -- ./tests/test-root-approval.sh`.
 - `5229bef4` test(shell): the guard asked the ambient PATH, the assertions a
   scrubbed one. PUSHED. All 23 nushell FAILs were `env -i
   PATH="${BIN}:/usr/bin:/bin"` missing `/usr/local/bin`, where CI installs
@@ -48,8 +59,8 @@ private`, l.248), prove both directions, commit.
   Rust ✓ all 41 steps** — `Pack the chaos bundles` ✓ and `Chaos diagnostics` ✓,
   the first time either has been green. Engine still running; nine reds so far.
 - Working the engine reds down, in order. Family A (5 steps) DONE, see above.
-  Family A (5 steps) and the nushell PATH (1 step) DONE, see above.
-  Left: root-approval bind (8), virtualization (60), mux-layouts zellij (1).
+  Family A (5 steps), nushell PATH (1) and root-approval (1) DONE — 7 of the
+  9 engine reds. Left: virtualization (60 fails), mux-layouts zellij (1).
 
 ## FOUND
 - **THE 1 → 8 IS NOT A REGRESSION I CAUSED.** `13e7ec84` (`!cancelled()`) is
