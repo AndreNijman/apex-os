@@ -36,6 +36,21 @@ set -uo pipefail
 set +e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Before the temp tree, the daemon or the build: this suite needs an
+# environment the daemon will observe as LOCAL, and that has to be arranged
+# from outside the suite. `apex-agentd` places a peer from its cgroup, and a
+# process started by systemd — a CI job, a timer-dispatched agent — is in
+# neither a login session nor a user service, so §7 refuses it before the
+# behaviour under test is reached. Here it stops the suite starting the
+# confined session the instructions are asserted against.
+# The helper runs this file again with the guard set, either inside a logind
+# session it created or — saying why, out loud — in place; either way the
+# suite runs exactly once, so this is `exec` and not a call. Same block, and
+# the same reason, as tests/test-privilege-requests.sh.
+if [ -z "${APEX_LOGIN_SESSION_WRAPPED:-}" ] && [ -x "${ROOT}/tests/in-login-session.sh" ]; then
+    exec "${ROOT}/tests/in-login-session.sh" "${BASH_SOURCE[0]}" "$@"
+fi
 WORK="$(mktemp -d -p /var/tmp apex-profile-XXXXXX)"
 
 pass=0; fail=0
