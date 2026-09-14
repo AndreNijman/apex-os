@@ -106,6 +106,18 @@ mod tests {
                 "webdav.file.write",
             ]
         );
+        // The one id another crate's CLI spells for itself. `apex cloudflare
+        // refresh` sends a `Use` for `account::REFRESH_OPERATION` and cannot
+        // see this registry to know whether anything offers it — this is the
+        // only place both are visible, which is the same reason the scope gate
+        // below lives here.
+        assert!(
+            registry
+                .operation_ids()
+                .iter()
+                .any(|id| id == apex_secret_core::account::REFRESH_OPERATION),
+            "`apex cf refresh` asks for an operation no provider offers"
+        );
     }
 
     /// P2-017: **an account scope may not name an operation no provider

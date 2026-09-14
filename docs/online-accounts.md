@@ -159,11 +159,27 @@ not stated gets trusted for things it never did.
   yet. Until it is, a Google or Microsoft account can be added only by pasting
   an access token you obtained elsewhere, and `apex account add` says so before
   it reads stdin.
-* **Nothing refreshes a token.** Not for these providers and not for
-  Cloudflare's either; `apex cloudflare connect` has the same gap on record.
-  The provider table carries `refreshable` as a value the code reads, so the
-  day a refresher exists it does not have to be taught which providers have
-  one.
+* ~~**Nothing refreshes a token.**~~ **Built for Cloudflare only, and the
+  "only" is the honest part.** An `oauth` provider offers
+  `oauth.token.refresh` — RFC 6749 §6, performed in the daemon — and
+  `apex cloudflare refresh` spends it. Where the request goes is decided by
+  the host the refresh token was **pinned to** when it was stored: the
+  operation declares no resource and no parameters, so no caller can aim one
+  somewhere else.
+
+  Google and Microsoft are in the same table and are refused **with the
+  reason**, because §6 requires a refresh to present the same OAuth client the
+  grant was issued to, APEX registers no application at either, and the client
+  a person signed in with is not recorded anywhere. The way out is a change to
+  the *grant*, not to the refresher: whatever stores a refresh token has to
+  store its client id beside it, and the provider already reads the store's
+  non-secret half first for exactly that — `apex cloudflare connect` now
+  writes the client there, so `--client-id` survives a renewal.
+
+  Two limits worth stating. A reply that rotates no refresh token leaves the
+  stored one alone, because overwriting a still-good credential is the failure
+  a refresh exists to prevent. And a refresh is a capability like any other:
+  it is granted per project, and connecting does not grant it.
 * **There is no file-manager integration.** APEX ships gvfs with its WebDAV,
   SMB and NFS backends, and `apex devices share` reports which of them are
   present, but no account here mounts anything and nothing hands GTK a
