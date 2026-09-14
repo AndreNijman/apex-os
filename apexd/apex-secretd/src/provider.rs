@@ -165,6 +165,31 @@ pub struct Bound {
     /// too late: the token exists, the reply is the only copy, and a refusal
     /// then would destroy it.
     pub creates: Option<String>,
+    /// The names of credentials this operation may OVERWRITE, for the
+    /// operations that supersede one. Empty for everything else, which is
+    /// everything but an OAuth refresh.
+    ///
+    /// [`Bound::creates`]'s sibling, and the exception to its rule: `creates`
+    /// refuses a name that is already taken, and `replaces` **requires** that
+    /// the name is. The two are not symmetrical by accident — a replace of a
+    /// name nothing is stored under is a `creates` that skipped the free-name
+    /// check, and the framework refuses it as one.
+    ///
+    /// ## Why a `Vec` and not an `Option`
+    ///
+    /// RFC 6749 §6 lets the authorisation server issue a **new refresh token**
+    /// with the new access token, and Wrangler writes one back — so this build
+    /// assumes Cloudflare rotates. Storing only the access token would leave
+    /// the old refresh token dead at the server and the account broken until
+    /// somebody runs `apex cf connect` again, which is the failure that looks
+    /// like "refresh works and then one day it doesn't". One refresh therefore
+    /// replaces up to two credentials: the access token and the rotated refresh
+    /// token.
+    ///
+    /// It is a **declaration of what may be replaced**, not a list of what
+    /// will be. A reply with no `refresh_token` in it replaces one of the two,
+    /// and the other stands.
+    pub replaces: Vec<String>,
     /// Whether the standing grant is the whole of the decision for *this*
     /// request, or the owner has to have approved this one.
     ///
@@ -262,6 +287,34 @@ pub struct Created {
     pub value: SecretValue,
 }
 
+/// A new value for a credential that is already stored.
+///
+/// [`Created`]'s sibling, and it carries **only the value**. That is the whole
+/// design of it, and it is a property of the type rather than a check somebody
+/// has to remember to write: no host, no scheme, no username, so the framework
+/// reuses the existing [`ServiceInfo`] and swaps the secret inside it. A
+/// refresh **structurally cannot** repoint a credential's pin at a host of a
+/// provider's choosing, because there is no field on this struct through which
+/// it could say one.
+///
+/// It matters because a replace is the one write to the store that does not go
+/// through the free-name check. `Created` may name a host — it has to, it is
+/// creating the pin — and the framework validates that host before it keeps
+/// anything. Here there is nothing to validate: the pin was decided when the
+/// credential was stored, and it is not up for renegotiation by an operation
+/// that renews the secret behind it.
+#[derive(Debug)]
+pub struct Replaced {
+    /// Which stored credential this is the new value of. Must be one the
+    /// provider declared in [`Bound::replaces`]; the framework discards a
+    /// value for any other name rather than storing it.
+    pub name: String,
+    /// The new secret. Never `Clone`, never printed, and scrubbed out of this
+    /// operation's own output by the framework — for a token endpoint, the
+    /// reply *is* the secret.
+    pub value: SecretValue,
+}
+
 /// What an operation produced.
 ///
 /// The credential is *not* scrubbed here — the framework does that, with the
@@ -276,6 +329,15 @@ pub struct Performed {
     /// name is [`Bound::creates`], which the framework checked before the
     /// operation ran.
     pub created: Option<Created>,
+    /// New values for credentials that are already stored, for the framework
+    /// to swap in. Every name here has to be one of [`Bound::replaces`], which
+    /// the framework checked before the operation ran.
+    ///
+    /// A **subset**, not an equality: `replaces` says what may be replaced and
+    /// this says what was. An RFC 6749 §6 reply that rotates no refresh token
+    /// carries one entry where the declaration allowed two, and the credential
+    /// it did not mention is left exactly as it was.
+    pub replaced: Vec<Replaced>,
 }
 
 /// Why a provider refused or failed.
@@ -764,6 +826,7 @@ mod tests {
             },
             detail: "read a thing".into(),
             creates: None,
+            replaces: Vec::new(),
             approval: Approval::Standing,
         };
         let minted = Stub(&ONE)

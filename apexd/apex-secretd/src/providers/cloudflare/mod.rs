@@ -1416,6 +1416,7 @@ impl CloudflareProvider {
             code: out.code,
             output: out.text,
             created: None,
+            replaced: Vec::new(),
         })
     }
 
@@ -3558,6 +3559,7 @@ impl Provider for CloudflareProvider {
             },
             detail: CloudflareProvider::detail(req.operation, &target, req.params),
             creates,
+            replaces: Vec::new(),
             // §13.8. The environment is in the binding, and this is the one
             // place that knows it.
             approval: protection(req.operation, &target),
@@ -3920,6 +3922,7 @@ impl Provider for CloudflareProvider {
             code: i32::from(!reply.ok()),
             output,
             created,
+            replaced: Vec::new(),
         })
     }
 

@@ -313,6 +313,7 @@ impl Provider for GitProvider {
             detail: op.summary(),
             // A git push creates nothing a credential could be made of.
             creates: None,
+            replaces: Vec::new(),
             // §13.8's environments are Cloudflare's. A git remote has no
             // preview and no production, and inventing one by matching on a
             // branch name would be this provider deciding policy.
@@ -335,6 +336,7 @@ impl Provider for GitProvider {
             code: out.code,
             output: out.text,
             created: None,
+            replaced: Vec::new(),
         })
     }
 }
