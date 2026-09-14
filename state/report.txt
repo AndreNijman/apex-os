@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-14 14:39 AWST
+APEX ROADMAP — resume report — 2026-09-14 14:55 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -7,80 +7,58 @@ APEX ROADMAP — resume report — 2026-09-14 14:39 AWST
   BASE          16         2         -         -
   L              -         1         -         2
   P0            24         1         -         -
-  P1            43        20         -         -
+  P1            44        19         -         -
   P2             7        12         -         -
-  ALL           90        36         -         2   of 128
+  ALL           91        35         -         2   of 128
 
   P0 not done: P0-001(part)
 
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  later      unknown    L-001,L-002,L-003                  task/later-tpm-qualification
+  later      ALIVE      L-001,L-002,L-003                  task/later-tpm-qualification
              head c84b2f83 fix(boot-v2): `mem` is not S3, and a missing serial f
-             dirty 0 file(s), 0 unpushed, card 170m
-             NEXT later-r4-luks-s3 IS RUNNING (launched 11:5x AWST off c84b2f83, wor
+             dirty 0 file(s), 0 unpushed, card 6m
+             NEXT **ORCHESTRATOR CORRECTION, round 27 (2026-09-14 15:0x AWST). The t
 
-  p1-053c    unknown    P1-059,P1-060                      task/p1-053c-clipboard
-             head e30e5462 fix(android): dismissing a banner on the Agent Center
-             dirty 0 file(s), 0 unpushed, card 168m
-             NEXT **P1-059 IS FINISHED — ask the orchestrator to land `task/p1-053c-
-
-  p2-c       unknown    P2-005,P2-006,P2-007               task/p2-c-2
-             head 85776285 Merge roadmap/v2.2 (2219ef75) into task/p2-c-2
-             dirty 2 file(s), 0 unpushed, card 174m
+  p2-c       ALIVE      P2-005,P2-006,P2-007               task/p2-c-2
+             head 1206730f fix(devices): "no saved profile uses it" is a safety 
+             dirty 1 file(s), 0 unpushed, card 189m
              NEXT In /var/tmp/apex-work/wt-p2-005 (apex-os): build the image and run
 
-  p2-b       unknown    P2-003,P2-004                      task/p2-b-round23
+  p2-b       ALIVE      P2-003,P2-004                      task/p2-b-round23
              head 77bbd712 test(i18n): the mutation pair for the platform theme,
-             dirty 0 file(s), 0 unpushed, card 171m
-             NEXT **One line:** the platform-theme guard is COMPLETE and pushed (ape
+             dirty 0 file(s), 0 unpushed, card 2m
+             NEXT In `/var/tmp/apex-work/wt-p2-b4-sh`, give `src/windows/Lockscreen.
 
-  p2-f       unknown    P2-016,P2-017,P2-018,P2-019        task/p2-f-3
-             head 306e79e1 feat(secretd): the framework half of a credential a r
-             dirty 4 file(s), 0 unpushed, card 172m
-             NEXT Round 5 commit 3: write `apexd/apex-secretd/src/providers/oauth.rs
+  p2-f       ALIVE      P2-016,P2-017,P2-018,P2-019        task/p2-f-3
+             head 33483c37 feat(secretd): an oauth provider that renews a token 
+             dirty 0 file(s), 0 unpushed, card 2m
+             NEXT Round 6 commit 1: add `apex cf refresh` (and/or `apex account refr
 
-  followups-5 unknown                                       task/followups-5
+  followups-5 ALIVE                                         task/followups-5
              head df6c4797 test(vm): the one probe that could not be faked with 
-             dirty 0 file(s), 0 unpushed, card 167m
-             NEXT Read run 34803818557's `Package engine` job (dispatched 03:47Z on 
+             dirty 0 file(s), 0 unpushed, card 2m
+             NEXT Sweep the tree for `PRODUCER | grep -q` under `set -o pipefail` wh
+
+  p2-d       ALIVE      P2-008,P2-009,P2-012               task/p2-d-2
+             head 654fa854 Merge remote-tracking branch 'origin/task/later-tpm-q
+             dirty 0 file(s), 108 unpushed, card 1821m
+             NEXT **This round is complete and pushed. Do not re-derive any of the a
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 2219ef75 Merge remote-tracking branch 'origin/task/followups-5
-    task/followups-5
-      bd69bb2f test(agent): five suites stopped at the first session CI coul   [1/10 added lines on tip]
-      5229bef4 test(shell): the guard asked the ambient PATH and the asserti   [0/10 added lines on tip]
-      479105b6 test(root-approval): mount --bind cannot create a target only   [0/10 added lines on tip]
-      df6c4797 test(vm): the one probe that could not be faked with $PATH, a   [0/10 added lines on tip]
-    task/later-tpm-qualification
-      13be81a8 fix(boot-v2): a run that asserted nothing reported a pass, an   [0/10 added lines on tip]
-      c84b2f83 fix(boot-v2): `mem` is not S3, and a missing serial field kil   [0/10 added lines on tip]
-    task/p1-053c-clipboard
-      efa5d198 feat(android): the phone can ask the computer for its clipboa   [0/10 added lines on tip]
-      053b57bd feat(android): Clipboard on the Agent Center brings the compu   [4/10 added lines on tip]
-      b341e433 test(android): the clipboard REPLY direction, asserted from b   [2/10 added lines on tip]
-      e30e5462 fix(android): dismissing a banner on the Agent Center actuall   [1/10 added lines on tip]
-    task/p2-b-round23
-      578914fd fix(image): qt6-qttranslations reached the image only as a we   [0/10 added lines on tip]
-      b1db5eb0 test(i18n): the theme that makes the shell mirror had no guar   [0/10 added lines on tip]
-      c9db7fcf fix(test): the COPY assertion matched a prefix, so a broken d   [0/8 added lines on tip]
-      77bbd712 test(i18n): the mutation pair for the platform theme, in both   [1/10 added lines on tip]
+  int-os:  tip 654fa854 Merge remote-tracking branch 'origin/task/later-tpm-q
     task/p2-c-2
-      12201d9e feat(firewall): the helper grew --json, and clap would have r   [1/10 added lines on tip]
+      1206730f fix(devices): "no saved profile uses it" is a safety claim, a   [1/10 added lines on tip]
     task/p2-f-3
-      862d1c37 feat(secret-core): an operation declares whether it may super   [3/10 added lines on tip]
-      306e79e1 feat(secretd): the framework half of a credential a refresh s   [1/10 added lines on tip]
+      0a8783e3 feat(secret-core): the credential a refresh credential renews   [0/10 added lines on tip]
+      33483c37 feat(secretd): an oauth provider that renews a token at the s   [2/10 added lines on tip]
 
-  int-shell:  tip acf4879 test(test): the three-way verdict, shown capable of al
-    task/p2-c-2-shell
-      a585e4e fix(firewall): a paragraph joined the list, and the fixture co   [0/10 added lines on tip]
-      ded1ab1 feat(firewall): the settings page reads a shape now, not a sen   [1/10 added lines on tip]
-      c6c4f15 ci: five suites in this repository ran nowhere   [0/10 added lines on tip]
-      ae32f12 fix(firewall): a missing hotspot_links is a renamed key, not a   [0/10 added lines on tip]
+  int-shell:  tip b7953e4 Merge remote-tracking branch 'origin/task/p2-c-2-shell
+    (nothing — every task branch's content is on the integration tip)
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -100,11 +78,11 @@ APEX ROADMAP — resume report — 2026-09-14 14:39 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 14:39:46 AWST 24s
+  snapshot timer: active   last 1min 56s Mon
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    feea6b5  roadmap-state
+    apex-os    c3a1b23  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -127,7 +105,7 @@ APEX ROADMAP — resume report — 2026-09-14 14:39 AWST
     apex-os    162d6fa  wt-p0-009-
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
-    apex-shell 913f81d  apex-shell-
+    apex-shell 5ac7123  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell 02674e0  int-shell-
     apex-shell 68c971d  wt-base-shell-
@@ -159,14 +137,13 @@ APEX ROADMAP — resume report — 2026-09-14 14:39 AWST
   6 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
-    p1-053c        P1-059,P1-060                    Android voice, screenshot, file and clipboard handoff; ship 
     p2-b           P2-003,P2-004                    Accessibility baseline and internationalisation baseline
     p2-c           P2-005,P2-006,P2-007             Printing/scanning/network-share, networking, Bluetooth/dock/
+    p2-d           P2-008,P2-009,P2-012             First-party virtualization UX, disposable VM agent execution
     p2-f           P2-016,P2-017,P2-018,P2-019      Multi-user/guest/kiosk, APEX Online Accounts, guaranteed saf
     later          L-001,L-002,L-003                TPM and recovery qualification, then LUKS2 by default and TP
 
   READY (dependencies believed satisfied — confirm against the agent table above):
-    p2-d           P2-008,P2-009,P2-012             First-party virtualization UX, disposable VM agent execution
 
   HELD:
     final          after *
@@ -182,6 +159,7 @@ APEX ROADMAP — resume report — 2026-09-14 14:39 AWST
     p1-014 — CLOSED BY HAND: Landed as merge 514d46a3; 0 unlanded. P1-014, P1-016 and P1-017 done. P1-015 met ALL THREE of its acceptance criteria and is partial only because two of section 13.13's five named resources cannot be reached by anything in this build — a fact about the vocabulary, not about effort.
     p1-052-relay — CLOSED BY HAND: 0 unlanded; P1-052 done and the relay is deployed. P1-051's criteria 1, 3 and 5 are done and landed on apex-shell as a36f1a4. The remainder does not close until the device key lives in Android Keystore with setUserAuthenticationRequired, which is p1-053b/p1-053c territory, not a separate unit.
     p1-053a — CLOSED BY HAND: Landed as merge 4ae4cf22; 0 unlanded. P1-053 done. P1-054 is partial because the socket has no profile/projects/worktrees verb — adding them is a protocol change and p1-053b owns the decision. P1-055 is partial for want of a gemini fixture, and gemini is not installed on this machine.
+    p1-053c — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-14 (round 27). P1-059 is DONE — its branch landed as merge d3ad8f7d and all four criteria are met; criterion 3 was the only one open and both its halves (the OS verb and the Android client) are now in. What remains on this unit is P1-060 C1 and C2, and those need a physical Android device or a working emulator, of which this machine has NEITHER — the predecessor measured four consecutive SIGSEGV crashes of the emulator across rounds 1-3. Same shape as p1-038-hardware: the work is real, it is not an agent's to do here. If a device appears, re-open and start with C2's headless-testable parts (backgrounding, battery saver, poor-network — LowBandwidthTest is the precedent) and leave talkback/rotation/foldables for the device. NOTE FOR WHOEVER TOUCHES THE WIRE: this unit did NOT bump PROTOCOL_VERSION; it stays 8, and p2-d now owns that file uncontended.
     base-partials — CLOSED BY HAND: Landed round 12 on both repos; `git merge-base --is-ancestor` confirms task/base-partials and task/base-partials-shell are both contained in roadmap/v2.2, zero unlanded commits. BASE-009 needs a disposable machine with a gaming userspace (the switch is `loginctl terminate-user`, which kills the session running the test) and katana is off-limits; BASE-010 needs non-zero spendable VRAM and this is an APU, so apexd falls to Backend::Cpu by design. Closed 2026-09-12 after a second agent was dispatched onto a finished unit.
     p1-063 — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-13 (round 24). Round 3 is finished, pushed AND landed — apex-os 619e764a, apex-shell 1da66c7 — and followups-4 wired its 60 lid assertions into CI runner-green. Both remaining criteria are ANDRE'S PHYSICAL ACTIONS and an agent must not fake either. Criterion 1: causation needs the external display physically unplugged. Re-measured 2026-09-13 — Docked=b true, card1-DP-1 connected — and with a display attached logind consults HandleLidSwitchDocked (default ignore) BEFORE any inhibitor, so the lid does nothing with or without APEX's block and the non-suspend cannot be attributed to APEX. The one command that closes it, undocked: `sudo ./tests/test-apex-lid-live.sh`. Criterion 3: 'draws measurably less' needs an undocked machine ON BATTERY that nobody is using — power_now reads CHARGING power on mains — and the runnable recipe is in docs/lid.md under 'What has NOT been measured'. Nothing here is waiting on an agent.
 
