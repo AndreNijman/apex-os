@@ -250,6 +250,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_set_of_operations_that_may_overwrite_a_stored_credential_is_spelled_out() {
+        // `the_everywhere_gate_reads_the_operations_own_declaration`'s twin,
+        // for the second static claim an operation makes about itself: whether
+        // it may overwrite a credential that is already in the store. The
+        // framework's own gate on the claim lands with the check that reads it;
+        // this is the review gate over the shipped vocabulary.
+        //
+        // The set is spelled out for that test's reason — the safety comes from
+        // the field being mandatory and from the framework refusing an
+        // undeclared replacement, and this is the review gate on top: adding an
+        // operation that may overwrite an owner's stored credential has to be a
+        // line somebody writes here on purpose.
+        //
+        // It is EMPTY in this build, and that is the current truth rather than
+        // a placeholder: `supersedes_credentials` landed before the `oauth`
+        // provider that needs it, so that the ~64 `false` declarations and the
+        // gate could be reviewed on their own. The commit that registers
+        // `oauth.token.refresh` is the commit that changes this line.
+        let registry = default_registry(std::env::temp_dir()).expect("registry");
+        let mut supersedes = Vec::new();
+        for id in registry.operation_ids() {
+            let (_, op) = registry.lookup(&id).expect("declared");
+            if op.supersedes_credentials {
+                supersedes.push(id);
+            }
+        }
+        let expected: Vec<String> = Vec::new();
+        assert_eq!(
+            supersedes, expected,
+            "the set of operations allowed to overwrite a stored credential \
+             changed. Each one is an operation that can replace a secret the \
+             owner is holding, so name it here and say why it is not a \
+             `creates` that skipped the free-name check."
+        );
+    }
+
     /// The claim, asked of the provider instead of the declaration.
     ///
     /// `same_everywhere` says the operation reaches the same thing whichever

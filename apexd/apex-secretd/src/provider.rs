@@ -600,6 +600,7 @@ mod tests {
             params: &[],
             aliases: &["one-read"],
             same_everywhere: false,
+            supersedes_credentials: false,
         }],
     };
 
@@ -614,6 +615,7 @@ mod tests {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         }],
     };
 
@@ -628,6 +630,7 @@ mod tests {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         }],
     };
 

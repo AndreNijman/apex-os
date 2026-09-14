@@ -459,6 +459,47 @@ pub struct OperationSpec {
     /// The reverse does not hold, and that asymmetry is the whole point:
     /// `names_nothing` is necessary and not sufficient.
     pub same_everywhere: bool,
+    /// **The provider's claim that this operation may overwrite a credential
+    /// that is already stored.**
+    ///
+    /// False for every operation this build has ever had, and it has to stay
+    /// that way by default: the framework's rule for a created credential is
+    /// that a name which is already taken is refused *before* anything runs,
+    /// because the far side issues a service token once and overwriting the
+    /// stored copy would destroy a secret nothing can fetch again. That rule is
+    /// right for creation and wrong for exactly one thing — a refresh.
+    ///
+    /// RFC 6749 §6 is a request whose entire purpose is to supersede: the
+    /// authorisation server issues a new access token for an account that
+    /// already has one, and may rotate the refresh token with it. An operation
+    /// that does that cannot use [`super::store`]'s free-name rule, because the
+    /// name is *supposed* to be taken.
+    ///
+    /// ## Why a static flag and not a decision at bind time
+    ///
+    /// [`crate::store::Store::put`] overwrites in place. So the difference
+    /// between "refresh this account" and "silently replace the owner's
+    /// Cloudflare token with something a provider chose" is one field on a
+    /// struct the provider fills in per request — which is to say, no
+    /// difference an auditor could see. Declaring it here makes it a property
+    /// of the **vocabulary**: `apex secret capabilities` can list which
+    /// operations in this build are allowed to overwrite a stored credential,
+    /// the list is a constant in the provider's own module, and a provider that
+    /// returns a replacement without having declared one is refused by the
+    /// framework rather than obeyed.
+    ///
+    /// Mandatory, for [`OperationSpec::same_everywhere`]'s reason: there is no
+    /// `Default` for this struct and nothing constructs one with `..`, so
+    /// adding an operation does not compile until its author has answered.
+    ///
+    /// ## The invariant, and where it is checked
+    ///
+    /// `supersedes_credentials` implies [`Effect::Write`] — an operation that
+    /// rewrites what is in the store is not a read, whatever it reads on the
+    /// way. [`ProviderSpec::validate`] refuses the contradiction at
+    /// registration, so `apex secret capabilities` cannot describe a superseding
+    /// operation to an owner as something that only reads.
+    pub supersedes_credentials: bool,
 }
 
 impl OperationSpec {
@@ -618,6 +659,20 @@ impl ProviderSpec {
                 return Err(format!(
                     "'{}' claims to reach the same thing in every project, but it acts \
                      on something the caller names",
+                    op.id
+                ));
+            }
+            // The one coherence rule on
+            // [`OperationSpec::supersedes_credentials`]. An operation that
+            // overwrites a credential in the store is a write, whatever else it
+            // does — and `effect` is what `apex secret capabilities` and the
+            // approval prompt show the owner, so a superseding operation
+            // described as a read would be described to them wrongly at the one
+            // moment they are being asked.
+            if op.supersedes_credentials && !matches!(op.effect, Effect::Write) {
+                return Err(format!(
+                    "'{}' may overwrite a stored credential but declares itself a \
+                     read; an operation that rewrites the store is a write",
                     op.id
                 ));
             }
@@ -926,6 +981,7 @@ mod tests {
                 // `names_nothing` alone cannot express and the one
                 // `cloudflare.account.read` is really in.
                 same_everywhere: false,
+                supersedes_credentials: false,
             },
             OperationSpec {
                 id: "demo.thing.write",
@@ -948,6 +1004,7 @@ mod tests {
                 ],
                 aliases: &["demo-write"],
                 same_everywhere: false,
+                supersedes_credentials: false,
             },
             OperationSpec {
                 id: "demo.blob.object.read",
@@ -957,6 +1014,7 @@ mod tests {
                 params: &[],
                 aliases: &[],
                 same_everywhere: false,
+                supersedes_credentials: false,
             },
         ],
     };
@@ -990,6 +1048,7 @@ mod tests {
             }],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         };
         assert!(!NAMES_ONLY_A_PARAMETER.names_nothing());
     }
@@ -1009,6 +1068,7 @@ mod tests {
                 params: &[],
                 aliases: &[],
                 same_everywhere: false,
+                supersedes_credentials: false,
             }],
         };
         let err = IMPOSTOR.validate().unwrap_err();
@@ -1025,6 +1085,7 @@ mod tests {
                 params: &[],
                 aliases: &[],
                 same_everywhere: false,
+                supersedes_credentials: false,
             }],
         };
         assert!(UNPARSEABLE.validate().is_err());
@@ -1048,6 +1109,7 @@ mod tests {
                 params: &[],
                 aliases: &[],
                 same_everywhere: true,
+                supersedes_credentials: false,
             }],
         };
         let err = NAMES_A_RESOURCE.validate().unwrap_err();
@@ -1071,6 +1133,7 @@ mod tests {
                 }],
                 aliases: &[],
                 same_everywhere: true,
+                supersedes_credentials: false,
             }],
         };
         assert!(NAMES_A_PARAMETER.validate().is_err());
@@ -1088,6 +1151,7 @@ mod tests {
                 params: &[],
                 aliases: &[],
                 same_everywhere: true,
+                supersedes_credentials: false,
             }],
         };
         assert_eq!(COHERENT.validate(), Ok(()));
@@ -1097,6 +1161,55 @@ mod tests {
         // the shape `cloudflare.account.read` is really in.
         assert!(DEMO.operations[0].names_nothing());
         assert!(!DEMO.operations[0].same_everywhere);
+        assert_eq!(DEMO.validate(), Ok(()));
+    }
+
+    #[test]
+    fn an_operation_that_may_overwrite_a_stored_credential_may_not_call_itself_a_read() {
+        // `effect` is what `apex secret capabilities` prints and what the §13.8
+        // prompt shows the owner. A refresh reads a token endpoint's reply, so
+        // "read" is the word a provider author reaches for — and it is the one
+        // word that must not appear next to an operation that then rewrites a
+        // credential in the store.
+        const READ_THAT_WRITES: ProviderSpec = ProviderSpec {
+            id: "demo",
+            summary: "s",
+            operations: &[OperationSpec {
+                id: "demo.token.refresh",
+                summary: "renew the stored token",
+                effect: Effect::Read,
+                resource: ResourceKind::None,
+                params: &[],
+                aliases: &[],
+                same_everywhere: false,
+                supersedes_credentials: true,
+            }],
+        };
+        let err = READ_THAT_WRITES.validate().unwrap_err();
+        assert!(err.contains("declares itself a read"), "{err}");
+
+        // The coherent version is accepted, so this is a rule about the
+        // contradiction and not a ban on the field.
+        const COHERENT: ProviderSpec = ProviderSpec {
+            id: "demo",
+            summary: "s",
+            operations: &[OperationSpec {
+                id: "demo.token.refresh",
+                summary: "renew the stored token",
+                effect: Effect::Write,
+                resource: ResourceKind::None,
+                params: &[],
+                aliases: &[],
+                same_everywhere: false,
+                supersedes_credentials: true,
+            }],
+        };
+        assert_eq!(COHERENT.validate(), Ok(()));
+
+        // And the converse is NOT a rule: a write that supersedes nothing is
+        // every write this build has, so the check must not fire on one.
+        assert!(matches!(DEMO.operation("demo.thing.write").unwrap().effect, Effect::Write));
+        assert!(!DEMO.operation("demo.thing.write").unwrap().supersedes_credentials);
         assert_eq!(DEMO.validate(), Ok(()));
     }
 

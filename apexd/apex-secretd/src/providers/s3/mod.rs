@@ -122,6 +122,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "s3.object.write",
@@ -131,6 +132,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[FILE],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
     ],
 };

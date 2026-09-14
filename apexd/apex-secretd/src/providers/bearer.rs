@@ -51,6 +51,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             // reads only the stored record. Declared true so the framework has
             // a case where the claim holds as well as one where it does not.
             same_everywhere: true,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "demo.object.read",
@@ -60,6 +61,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "demo.object.write",
@@ -74,6 +76,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             }],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
     ],
 };

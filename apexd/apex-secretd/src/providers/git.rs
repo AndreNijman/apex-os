@@ -176,6 +176,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             // every directory. True of all three, and the reason
             // `--everywhere` was gated in the first place.
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "git.fetch",
@@ -185,6 +186,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &["git-fetch"],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "git.ls-remote",
@@ -194,6 +196,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &["git-ls-remote"],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
     ],
 };
