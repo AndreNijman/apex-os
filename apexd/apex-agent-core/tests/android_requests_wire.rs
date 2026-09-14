@@ -99,6 +99,37 @@ fn input_is_a_verb_and_carries_the_terminator_the_daemon_does_not_add() {
     }
 }
 
+#[test]
+fn clipboard_is_a_verb_and_it_is_the_opposite_direction_from_input() {
+    // The receive half of P1-059 criterion 3, and the reason this test sits
+    // directly under `input`: the two are the same criterion pointing opposite
+    // ways, and reading one as the other is what left the verb unbuilt for
+    // three rounds. `input` carries the PHONE's clipboard to the computer.
+    // This carries the COMPUTER's to the phone.
+    assert!(
+        matches!(parse("clipboard"), Request::Clipboard),
+        "`clipboard` parsed as {:?}",
+        parse("clipboard")
+    );
+
+    // No `id`, asserted from the daemon's side as well as the phone's. One
+    // Wayland seat has one clipboard, so there is nothing to name — and the
+    // consequence the UI depends on is that this is not a session action.
+    // A daemon that started requiring an id would break a phone that sends
+    // none, and this is where that is caught rather than on a user's device.
+    let bare: Request = serde_json::from_str(r#"{"cmd":"clipboard"}"#)
+        .expect("a clipboard request carries no fields");
+    assert!(matches!(bare, Request::Clipboard));
+
+    // Deliberately NOT an assertion that `clipboard` is absent from
+    // `takes_over_the_channel`. That predicate lives in `apex-remoted`, which
+    // this crate does not and should not depend on, and the only version of
+    // the check available here — comparing the string "clipboard" against
+    // "attach" and "receive" — would pass without inspecting anything. The
+    // real guard is `apex-remoted`'s own test; an assertion written here to
+    // look thorough would be a gate that reads nothing.
+}
+
 
 #[test]
 fn receive_is_a_verb_and_the_caller_chooses_no_part_of_the_path() {

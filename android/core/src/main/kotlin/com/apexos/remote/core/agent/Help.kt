@@ -212,6 +212,22 @@ object Help {
                     "The relay has no deployment yet. Off the computer's network, this app " +
                         "reaches nothing.",
                 ),
+                h("The computer's clipboard"),
+                p(
+                    "Clipboard, on the agent list, fetches whatever was last copied on the " +
+                        "computer and puts it on this phone, ready to paste anywhere. It does " +
+                        "not belong to any session, so it works whether or not an agent is " +
+                        "waiting for you.",
+                ),
+                note(
+                    "This is the opposite direction from Paste in the reply box, which sends " +
+                        "what is on THIS phone to an agent. If the computer's clipboard is " +
+                        "empty you are told so, and what you had copied here is left alone.",
+                ),
+                p(
+                    "Long text is refused rather than cut short: past eight kilobytes the " +
+                        "computer says so instead of handing over part of what you copied.",
+                ),
                 h("Taking this phone's access away"),
                 p(
                     "Forget the computer here, or remove this device at the computer. Either " +
