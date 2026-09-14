@@ -5,15 +5,16 @@ worktree: /var/tmp/apex-work/wt-later
 branch: task/later-tpm-qualification
 
 ## NEXT
-Baseline `luks-tpm` scenario is RUNNING in localhost/apex-bootlab (started 08:23 AWST,
-log /var/tmp/apex-work/scratch-later/baseline-luks-tpm.log, work dir
-/var/tmp/apex-work/scratch-later/out). Wait for it, confirm it goes green on the L16.
-Then add three scenarios to files/scripts/boot-v2/run-scenarios in this order:
-luks-tpm-clear, luks-firmware-change, luks-s3 (details in IN PROGRESS).
-Re-run command:
+Run `luks-tpm-clear` for the FIRST time (it has never executed), FOREGROUND, long timeout:
+  mkdir -p /var/tmp/apex-work/scratch-later/r1-clear && \
+  ln -s ../out/apex-root /var/tmp/apex-work/scratch-later/r1-clear/apex-root && \
   podman run --rm --device /dev/kvm -v /var/tmp/apex-work/wt-later:/work:z \
     -v /var/tmp/apex-work/scratch-later:/lab:z localhost/apex-bootlab \
-    -c '/work/files/scripts/boot-v2/run-scenarios --work /lab/out <scenario>'
+    -c '/work/files/scripts/boot-v2/run-scenarios --work /lab/r1-clear luks-tpm-clear' \
+    > /var/tmp/apex-work/scratch-later/r1-clear.log 2>&1; echo rc=$?
+NEVER background these with `nohup ... &`: podman forwards SIGTERM when the harness
+shell exits and the run dies part-way while still reporting exit 0. That is how the
+predecessor's evidence was lost. Then luks-firmware-change, then luks-s3.
 
 ## DONE
 - Card created at round start.
