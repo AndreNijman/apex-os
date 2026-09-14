@@ -247,6 +247,15 @@ mod tests {
         assert!(takes_over_the_channel(br#"{"id":1,"cmd":"attach"}"#));
         assert!(takes_over_the_channel(br#"{"len":1,"cmd":"receive"}"#));
         assert!(!takes_over_the_channel(br#"{"cmd":"list"}"#));
+        // `clipboard` is the verb this list was most recently checked against,
+        // and the answer has to be NO. The phone builds it as an ordinary
+        // control request and sends it through `MachineLink.request` rather
+        // than through `Upload`; if it ever became a takeover verb, that
+        // client would open a channel nobody answers and the reply would
+        // never come. Asserted here, in the file that owns the predicate,
+        // rather than restated as a string comparison in `apex-agent-core`,
+        // which cannot see this function.
+        assert!(!takes_over_the_channel(br#"{"cmd":"clipboard"}"#));
         assert!(!takes_over_the_channel(br#"{"cmd":"inject","id":1,"source":"/x"}"#));
         assert!(!takes_over_the_channel(br#"{"cmd":"attach_something_else"}"#));
         assert!(!takes_over_the_channel(br#"{"cmd":"receive_something_else"}"#));
