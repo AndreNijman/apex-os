@@ -311,66 +311,54 @@ const WEBDAV_SCOPES: &[Scope] = &[
     },
 ];
 
-const DRIVE_SCOPES: &[Scope] = &[
-    Scope {
-        name: "files.list",
-        operation: "gdrive.file.list",
-        effect: Effect::Read,
-        summary: "list the files in a folder on this Drive",
-    },
-    Scope {
-        name: "files.read",
-        operation: "gdrive.file.read",
-        effect: Effect::Read,
-        summary: "read a file from this Drive",
-    },
-    Scope {
-        name: "files.write",
-        operation: "gdrive.file.write",
-        effect: Effect::Write,
-        summary: "write a file to this Drive, replacing what is there",
-    },
-];
+/// Google Drive: **none**, and the reason is a property of the flow rather
+/// than a gap somebody forgot to fill.
+///
+/// This table used to name `gdrive.file.list`, `gdrive.file.read` and
+/// `gdrive.file.write`. No provider in `apex-secretd` offers any of them, so
+/// `apex account grant google files.read` recorded a grant for an operation
+/// that could never be performed — a permission the user was told they had
+/// made. [`crate::account::PROVIDERS`] is now checked against the shipped
+/// registry by a test in `apex-secretd`, which is the only crate that can see
+/// both.
+///
+/// It is empty rather than repointed because of what Google's limited-input
+/// flow allows, read from
+/// `developers.google.com/identity/protocols/oauth2/limited-input-device`
+/// rather than from memory: the device grant accepts **only** `email`,
+/// `openid`, `profile`, `drive.appdata`, `drive.file`, `youtube` and
+/// `youtube.readonly`. Full `drive` and `drive.readonly` are not on the list.
+/// `drive.file` sees only files the calling app itself created or the user
+/// individually picked — so "list the files in a folder on this Drive" is not
+/// a thing a device-code Google account can do **at all**, whatever transport
+/// is written for it. A `gdrive` provider is worth building against
+/// `drive.file` for APEX's own files; it is not worth pretending it can read
+/// the user's Drive.
+const DRIVE_SCOPES: &[Scope] = &[];
 
-const GRAPH_SCOPES: &[Scope] = &[
-    Scope {
-        name: "files.list",
-        operation: "msgraph.file.list",
-        effect: Effect::Read,
-        summary: "list the files in a folder on this OneDrive",
-    },
-    Scope {
-        name: "files.read",
-        operation: "msgraph.file.read",
-        effect: Effect::Read,
-        summary: "read a file from this OneDrive",
-    },
-    Scope {
-        name: "files.write",
-        operation: "msgraph.file.write",
-        effect: Effect::Write,
-        summary: "write a file to this OneDrive, replacing what is there",
-    },
-    Scope {
-        name: "mail.read",
-        operation: "msgraph.mail.read",
-        effect: Effect::Read,
-        summary: "read this account's mail",
-    },
-];
+/// Microsoft Graph: **none yet**, for the plainer reason.
+///
+/// Unlike Google, nothing about the device grant narrows this: a public client
+/// may ask for `Files.Read`, `Files.ReadWrite` and `Mail.Read`. What is missing
+/// is the transport — there is no `msgraph` provider in `default_registry()` —
+/// and a scope table that names operations no provider serves is the defect
+/// described on [`DRIVE_SCOPES`]. The four names this used to carry
+/// (`msgraph.file.{list,read,write}`, `msgraph.mail.read`) are the right
+/// vocabulary for that provider when somebody writes it.
+const GRAPH_SCOPES: &[Scope] = &[];
 
 const S3_SCOPES: &[Scope] = &[
-    Scope {
-        name: "objects.list",
-        operation: "s3.object.list",
-        effect: Effect::Read,
-        summary: "list the objects in a bucket",
-    },
     Scope {
         name: "objects.read",
         operation: "s3.object.read",
         effect: Effect::Read,
-        summary: "read an object from a bucket",
+        // `objects.list` used to be a fourth scope here, pointing at
+        // `s3.object.list`. The S3 provider has no such operation and never
+        // had one: it renders a listing through `s3.object.read` when the
+        // resource names a bucket without a key, "the same
+        // one-operation-for-both shape `cloudflare.r2.object.read` has". One
+        // operation, so one scope, and the summary says both things it does.
+        summary: "read an object from a bucket, or list what is in one",
     },
     Scope {
         name: "objects.write",
@@ -469,6 +457,18 @@ pub enum AccountError {
         provider: &'static str,
         scope: String,
     },
+    /// The provider has no scopes at all yet, which is a different answer from
+    /// "not that one".
+    ///
+    /// Told apart because the two send the reader somewhere different: an
+    /// unknown scope means read the list, and an empty list means there is
+    /// nothing to read and no amount of trying other names will help. Pointing
+    /// at `apex account scopes google` when that command prints a header and
+    /// no rows is the shape of refusal this repository keeps finding in its own
+    /// code.
+    NoScopesYet {
+        provider: &'static str,
+    },
     HostRequired {
         provider: &'static str,
     },
@@ -505,6 +505,13 @@ impl std::fmt::Display for AccountError {
                 f,
                 "{provider} has no scope '{}'; `apex account scopes {provider}` lists them",
                 scope.escape_debug()
+            ),
+            AccountError::NoScopesYet { provider } => write!(
+                f,
+                "a {provider} account can be stored and refreshed, but this build has no \
+                 {provider} transport, so there is no operation to grant it yet and \
+                 nothing can spend the credential. `apex account scopes {provider}` says \
+                 the same thing at more length"
             ),
             AccountError::HostRequired { provider } => write!(
                 f,
@@ -608,9 +615,17 @@ impl AccountRef {
         self.provider
             .scope(scope)
             .map(|s| s.operation)
-            .ok_or_else(|| AccountError::UnknownScope {
-                provider: self.provider.id,
-                scope: scope.to_string(),
+            .ok_or_else(|| {
+                if self.provider.scopes.is_empty() {
+                    AccountError::NoScopesYet {
+                        provider: self.provider.id,
+                    }
+                } else {
+                    AccountError::UnknownScope {
+                        provider: self.provider.id,
+                        scope: scope.to_string(),
+                    }
+                }
             })
     }
 }
@@ -809,17 +824,48 @@ mod tests {
     fn a_scope_the_provider_does_not_have_is_refused_rather_than_ignored() {
         let a = AccountRef::new("webdav", "home").unwrap();
         assert_eq!(a.operation("files.read").unwrap(), "webdav.file.read");
-        // Microsoft has `mail.read` and WebDAV does not. A silent miss here
-        // would grant nothing and report success.
-        let e = a.operation("mail.read").unwrap_err();
+        // S3 has `objects.read` and WebDAV does not. A silent miss here would
+        // grant nothing and report success.
+        let e = a.operation("objects.read").unwrap_err();
         assert!(matches!(e, AccountError::UnknownScope { .. }), "{e:?}");
         assert_eq!(
-            AccountRef::new("microsoft", "work")
+            AccountRef::new("s3", "backups")
                 .unwrap()
-                .operation("mail.read")
+                .operation("objects.read")
                 .unwrap(),
-            "msgraph.mail.read"
+            "s3.object.read"
         );
+    }
+
+    /// A provider with no scopes refuses differently, and says which.
+    ///
+    /// This test exists because of what it replaced. Until P2-017's round 3
+    /// the line above read `AccountRef::new("microsoft", "work")
+    /// .operation("mail.read").unwrap() == "msgraph.mail.read"` — a green
+    /// assertion about a mapping into an operation **no provider has ever
+    /// offered**. The test was true about the table and said nothing about
+    /// whether the grant it produced could be spent, which is the only
+    /// question that matters. `apex-secretd`'s
+    /// `every_account_scope_names_an_operation_some_provider_actually_offers`
+    /// is the one that can ask it; this one holds the other half — that the
+    /// refusal a user now meets tells them the truth.
+    #[test]
+    fn a_provider_with_no_transport_yet_says_so_instead_of_listing_nothing() {
+        for id in ["google", "microsoft"] {
+            let a = AccountRef::new(id, "mine").unwrap();
+            // `files.read` is the name somebody would reach for first, and it
+            // is the exact scope that used to be accepted here.
+            let e = a.operation("files.read").unwrap_err();
+            assert!(
+                matches!(e, AccountError::NoScopesYet { .. }),
+                "{id}: {e:?} — an empty table must not read as 'not that one'"
+            );
+            let said = e.to_string();
+            assert!(said.contains("no operation to grant"), "{id}: {said}");
+            // And it must not send the reader to a command that prints a
+            // header and no rows without warning them that is what it does.
+            assert!(said.contains("nothing can spend the credential"), "{id}: {said}");
+        }
     }
 
     #[test]
