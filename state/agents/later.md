@@ -6,319 +6,89 @@ branch: task/later-tpm-qualification
 
 ## NEXT
 
-**ORCHESTRATOR CORRECTION, round 27 (2026-09-14 15:0x AWST). The text below
-this block was written before the 12:06 reboot and is WRONG in the direction
-that wastes a round: it says `later-r4-luks-s3` "IS RUNNING" and that
-`luks-tpm-clear` has never completed end to end. Neither is true.**
+Collect the two firmware experiments, then land the diagnosis:
+  podman wait later-r5-s3-fw2025 later-r5-s3-nosmm
+  podman logs later-r5-s3-fw2025 > /var/tmp/apex-work/scratch-later/r5-fw2025.log 2>&1
+  podman logs later-r5-s3-nosmm  > /var/tmp/apex-work/scratch-later/r5-nosmm.log  2>&1
+Both run `luks-s3` from a COPY of the scripts at /var/tmp/apex-work/scratch-later/
+tree-exp (so the worktree stays editable), with APEX_BOOTLAB_FW pointing at a
+pre-populated firmware cache: fw-2025 = edk2-ovmf-20250812-18.fc43's 4M secboot
+build (varies ONLY the edk2 version), fw-nosmm = the in-image non-secboot 4M
+build (varies SMM+SB). Whichever resumes decides whether the S3 criterion can be
+measured at all. Then: `## FOUND` entry 1 is the result to write up in
+docs/boot-v2.md and to turn into the scenario's precise COULD-NOT-RUN.
 
-All four containers finished before the reboot. The orchestrator collected them
-rather than re-running anything; logs are saved as
-`/var/tmp/apex-work/scratch-later/r27-<container>.log`. `State.FinishedAt` was
-checked on each, so these are real results and not round 26's `finished=0001-01-01`
-artifact:
-
-| container | finished | result |
-| --- | --- | --- |
-| `later-r3-luks-tpm-clear` | 11:41:25 | **20 passed, 0 failed — COMPLETE END TO END** |
-| `later-r3-luks-firmware-change` | 11:40:57 | 18 passed, 0 failed, 1 could-not-run |
-| `later-r3-luks-s3` | 11:43:21 | 4 passed, **1 failed** |
-| `later-r4-luks-s3` | 11:53:15 | 6 passed, 0 failed, 1 could-not-run |
-
-So **two of the three scenarios this card calls outstanding are done**, and
-L-001's evidence in roadmap.yaml already records all four measurements. The
-`luks-firmware-change` could-not-run is structural and honest — moving PCR 0
-needs a second OVMF build differing ONLY in code, and the lab's two 4M builds
-differ in Secure Boot enforcement too, so swapping them conflates "the firmware
-changed" with "Secure Boot was turned off". Do not spend the round re-litigating
-it; record it as a limit.
-
-**THE ONE THING STILL UNEXECUTED is the QMP waker in `luks-s3`.** r4 got
-further than r3 but ended `the guest reported no s3 field at all`. Read
-`/var/tmp/apex-work/scratch-later/r27-later-r4-luks-s3.log` first, then
-`/lab/r4-luks-s3/serial-luks-s3.wake.json` and `qmp-wake.py`. Branch
-`task/later-tpm-qualification` LANDED this round as merge `654fa854`.
-
-**THEN** (unchanged and still owed): `docs/boot-v2.md` has no record of the now
-THREE completed scenarios, and its Recovery table row "the TPM was cleared …
-Re-enroll afterwards" documents a procedure that is a silent no-op. Fix that row
-and add the measurements.
-
-NEVER `nohup podman run &` — use `podman run -d` then `podman wait`. NEVER edit
-`files/scripts/boot-v2/**` while a container is executing `run-scenarios` from
-`/work`.
-
----
-### superseded round-26 NEXT, kept only as history
-
-later-r4-luks-s3 IS RUNNING (launched 11:5x AWST off c84b2f83, work /lab/r4-luks-s3).
-Collect it:
-  timeout 590 podman wait later-r4-luks-s3
-  podman logs later-r4-luks-s3 > /var/tmp/apex-work/scratch-later/r4-luks-s3.log 2>&1
-Expect the control arm to say s3=NO-DEEP-SLEEP and power off cleanly, then the
---s3 arm to suspend (s3-mode=deep), be woken by qmp-wake.py and report
-post-resume-{marker,reattach-marker,tpm-unlock}. The QMP waker has NEVER
-executed. If it hangs (qemu rc=137 on the SECOND boot) the waker is the suspect:
-read /lab/r4-luks-s3/serial-luks-s3.wake.json and qmp-wake.py.
-THEN: docs/boot-v2.md still has no record of the three completed scenarios, and
-its Recovery table row "the TPM was cleared ... Re-enroll afterwards" is the
-procedure that is a silent no-op — fix that row and add the measurements.
-NEVER `nohup podman run &`. NEVER edit files/scripts/boot-v2/** while a
-container is executing run-scenarios from /work.
+NEVER `nohup podman run &` — `podman run -d` then `podman wait`. NEVER edit
+files/scripts/boot-v2/** while a container is executing run-scenarios from it.
 
 ## DONE
-- Card created at round start.
-- Merged origin/roadmap/v2.2 (13d53c01) into the worktree, clean.
-- Staged the REAL APEX root for UKI builds:
-  `sudo -n files/scripts/boot-v2/apex-stage-root --output .../scratch-later/out/apex-root`
-  -> kernel 7.2.3-cachyos2.fc43.x86_64 (16,898,120 B), initramfs 375,558,646 B, os-release
-  NAME="APEX-OS". Read-only against the live OS; no boot path touched.
-- Collected the read-only SILICON evidence from the L16 (see FOUND).
-
-- FIRST EXECUTION of luks-tpm-clear (2026-09-14, round 25): 16 passed, 3 failed.
-  Log /var/tmp/apex-work/scratch-later/r1-clear.log. All three failures were real;
-  diagnosed and fixed in e2345ed7 (pushed).
-- SECOND EXECUTION of luks-tpm-clear (round 25 tail, container `later-clear2`,
-  log /var/tmp/apex-work/scratch-later/r2-clear.log): 17 assertions passed, 0 failed,
-  through boot1 unlock+marker, PCR11 extension, the snapshot, TPM2_Clear over the
-  platform hierarchy, the Storage Primary Seed rotation, boot2 tpm-unlock=REFUSED AND
-  recovery-unlock=SUCCESS in the same boot, PCR 11 unchanged, re-enrolment from the
-  recovery key alone, and the sealed blob really being replaced. It then DIED part way
-  through boot 3 of 4 — NOT a scenario defect: at 09:45:17 AWST the laptop lid closed,
-  logind suspended (s2idle) and never resumed; podman inspect shows finished=0001-01-01,
-  so the "Exited (0)" is an artefact. Do not go hunting for a boot-3 bug.
-- e2345ed7 fixes four things, each measured not assumed:
-  the two-step wipe-then-enrol, the blob-changed control, swtpm_owner_primary_name
-  via tpm2_readpublic, and the always-printed summary (EXIT trap).
-
-- ROUND 26 pre-launch commit 13be81a8 (pushed): two more "green for work it did
-  not do" defects, both found while preparing the never-run scenarios.
-  1. A run whose every check was `cannot` printed 0 passed / 0 failed and EXITED 0.
-     bootv2_summary now records an empty run as a failure; ok+cannot is still a pass.
-  2. The firmware-change control could not fail, for two independent reasons:
-     the lab image ships NO diffutils (`command -v cmp` is empty in
-     localhost/apex-bootlab), so `if cmp -s A B` exited 127 = the "they differ"
-     branch; and the baseline was the varstore two guests had already booted from,
-     which OVMF rewrites every boot. Now sha256sum (lib.sh files_same) against a
-     second copy of the SAME template, plus a new assertion that the dbx
-     REVOCATION LIST grew (76 -> 21340 bytes, parser verified 4 ways).
-  tests/test-boot-v2.sh gained 12 assertions for all of it (74 passed, 0 failed),
-  in the no-toolchain mode so the `static` job runs them.
-
-- ROUND 26 RESULTS. All three never-completed scenarios were run in parallel as
-  detached containers off 13be81a8 (11:38-11:43 AWST):
-  * luks-tpm-clear: **20 passed, 0 failed, exit 0 — COMPLETED END TO END for the
-    first time.** log scratch-later/r3-luks-tpm-clear.log. Full cycle: unlock +
-    marker, TPM2_Clear over the platform hierarchy, the Storage Primary Seed
-    rotating, boot2 tpm-unlock=REFUSED *and* recovery-unlock=SUCCESS in the same
-    boot, PCR 11 unchanged across the clear, re-enrolment from the recovery key
-    alone, the sealed blob really replaced, then boot3 unlock=SUCCESS with
-    plaintext-marker=found.
-  * luks-firmware-change: **18 passed, 0 failed, 1 COULD-NOT-RUN (PCR 0), exit 0
-    — FIRST EXECUTION EVER, passed.** log scratch-later/r3-luks-firmware-change.log.
-    dbx grew 76 -> 21340 bytes, PCR 7 moved 10DC0C7C... -> 74595FFF..., PCR 11
-    stayed E09EAEB1..., and in the SAME boot the by-value PCR 7 control REFUSED
-    while the signed-PCR-11 volume SUCCEEDED and read its marker back.
-  * luks-s3: FIRST EXECUTION EVER, 4 passed / 1 failed, and both failures were
-    lab defects, not APEX ones — fixed in c84b2f83, re-running as later-r4-luks-s3.
-- ROUND 26 COMMITS (both pushed): 13be81a8 (asserted-nothing + the firmware
-  control that could never fail), c84b2f83 (`mem` is not S3 + luks_serial_field
-  aborting the run + no `sync` in the initramfs + the page-cache-cold re-read).
+- Branch landed on roadmap/v2.2 this round as merge 654fa854. Tip c84b2f83 is
+  pushed; nothing of mine is unlanded.
+- Round 26 results (collected by the orchestrator after the 12:06 reboot, logs
+  at scratch-later/r27-*.log, State.FinishedAt verified on each):
+  * luks-tpm-clear       20 passed, 0 failed — COMPLETE END TO END.
+  * luks-firmware-change 18 passed, 0 failed, 1 could-not-run (PCR 0).
+  * luks-s3 (r3)          4 passed, 1 failed  -> fixed in c84b2f83.
+  * luks-s3 (r4)          6 passed, 0 failed, 1 could-not-run.
+- Commits on the branch: d362e952 lab machinery; 378d8ddd the three scenarios;
+  e2345ed7 the TPM-clear recovery no-op; 13be81a8 asserted-nothing + a control
+  that could never fail; c84b2f83 `mem` is not S3 + the serial-field abort.
 
 ## IN PROGRESS
-- Three new scenarios planned for files/scripts/boot-v2/run-scenarios:
-  1. `luks-tpm-clear` (4 boots): boot1 unlock SUCCESS + marker written; `cp -a` snapshot
-     of luks.img + tpm state; TPM2_Clear over the same swtpm TCTI apex-luks-enroll uses
-     (tpm2_clear -c p; platform auth empty on swtpm); boot2 must show tpm-unlock=REFUSED
-     AND recovery-unlock=SUCCESS in the SAME boot; then re-enrol host-side against the
-     CLEARED TPM (--wipe-slot=tpm2 first, assert the stale token is gone not orphaned);
-     boot3 unlock SUCCESS + plaintext-marker=found. That is the user's whole recovery
-     procedure, not just "the recovery key works".
-  2. `luks-firmware-change`: claim under test is "signed PCR 11 binds nothing in PCR 0-7".
-     Control is the whole scenario — a SECOND volume on /dev/vdc bound BY VALUE to PCR 7
-     (--tpm2-pcrs=7:sha256=<value the guest printed in boot 1>; a bare --tpm2-pcrs=7
-     refuses before anything changes because swtpm's PCR 7 is unmeasured at host-side
-     enrol time). Boot A both SUCCEED (control valid). Then change PCR 7 by applying
-     Fedora's real dbx blob /usr/share/edk2/ovmf/DBXUpdate-20260630.x64.bin with
-     virt-fw-vars, keeping the APEX cert in db so the UKI still boots. Boot B: PCR 11
-     slot SUCCEEDS, PCR 7 control REFUSES. NOTE precisely in the writeup: a varstore
-     change moves PCR 7, not PCR 0.
-  3. `luks-s3`: needs vm_boot changes — it hardcodes `-global ICH9-LPC.disable_s3=1` and
-     `-nodefaults` (no monitor). Add `--s3`: disable_s3=0 plus `-qmp unix:...` and a
-     host-side python that polls query-status for `suspended` then issues system_wakeup.
-     Guest side: read /sys/power/suspend_stats/success, `echo mem > /sys/power/state`,
-     read it again; then re-read the plaintext marker through the still-open mapper AND
-     detach/re-attach via the TPM to prove the TPM answered after resume. Two independent
-     observers. If the kernel refuses `mem`, that is COULD-NOT-RUN with the errno.
+- Two firmware experiments running as detached containers (see NEXT).
+- docs/boot-v2.md: the Recovery table row for a cleared TPM still documents the
+  single-command `systemd-cryptenroll --wipe-slot=tpm2 --tpm2-public-key=…`,
+  which is measured to be a silent no-op; and the doc has no record of the three
+  completed scenarios.
+- run-scenarios ~line 1405, scenario_luks_s3's `""` branch: it says "the guest
+  reported no s3 field" while two other witnesses sit unread on disk.
 
 ## FOUND
-- WHAT THE systemd-cryptenroll NO-OP IS ACTUALLY KEYED ON, measured 2026-09-14
-  host-side with no guest boot (scratch-later/rotate-probe.log, rotate-probe2.log):
-  the de-duplication compares the PUBLIC KEY *and* the PCR set against what the
-  header already holds, and the TPM's state plays no part in it.
-  * Same pubkey, same PCR set, TPM NOT cleared -> "This PCR set is already
-    enrolled, executing no operation.", exit 0, header byte-identical.
-  * The documented single-command recovery form, `--wipe-slot=tpm2` and
-    `--tpm2-public-key=` in ONE invocation -> the same no-op, exit 0, and the
-    WIPE does not happen either. So the round-25 finding is not about a cleared
-    TPM at all: the de-dup fires on the header alone.
-  * A DIFFERENT public key, same PCR 11 -> "New TPM2 token enrolled as key slot
-    3", a second systemd-tpm2 token with a different blob and a different policy
-    hash. So docs/boot-v2.md's "you rotated the PCR signing key" row is SOUND —
-    checked because it was the obvious next victim, and it is not one.
-  * `--wipe-slot=tpm2` in its own invocation wipes ALL tpm2 slots ("Wiped slot 3.
-    Wiped slot 2."), which is what makes the two-step form work.
-- systemd-cryptenroll prints "TPM2 device supports SHA256 PCR bank but none of
-  the selected PCRs are valid! Firmware apparently did not initialize any of the
-  selected PCRs. Proceeding anyway with SHA256 bank. PCR policy effectively
-  unenforced!" whenever PCR 11 is unmeasured at enrol time. That is exactly the
-  L16's state today (PCR11 = 64 zeros), so a user following the documented
-  enrolment on the shipped image is told, in systemd's own words, that the
-  policy binds nothing. It is the same fact as the L-003 blocker, from the
-  other end.
-- `mem` IS NOT S3. With qemu's `-global ICH9-LPC.disable_s3=1` (qemu's q35
-  DEFAULT) Linux still lists `mem` in /sys/power/state and still accepts a write
-  to it: it silently means s2idle, because /sys/power/mem_sleep offers no `deep`.
-  The luks-s3 negative control therefore SUSPENDED in the arm meant to prove it
-  could not suspend, nothing there can wake it, and qemu died on the 240 s
-  timeout. Fixed by selecting `deep` by name and confirming the kernel's
-  brackets around it.
-- A GREP THAT MATCHED NOTHING KILLED THE RUN. luks_serial_field is a pipeline
-  under `set -euo pipefail`, so an absent serial field failed the assignment and
-  aborted run-scenarios. luks-s3's explicit empty-field COULD-NOT-RUN branch has
-  been unreachable since it was written.
-- THE LAB IMAGE SHIPS NO diffutils. `command -v cmp` is empty in
-  localhost/apex-bootlab and bootlab/Containerfile neither installs nor asserts
-  it, so `if cmp -s A B; then bad ...; fi` exited 127 — the same branch as "the
-  files differ" — and the firmware-change control printed its ok line
-  unconditionally.
-- THE APEX INITRAMFS HAS NO `sync` (nor `dd`). Every guest run printed
-  "sync: command not found" twice. Nothing depended on it — the detach flushes —
-  but the two flushes in guest-luks-probe.sh were not flushes.
-- The post-resume marker read went through a mapper that had been open since
-  before the sleep, and RAM survives S3, so the page cache could have answered it
-  without dm-crypt decrypting anything. Now read a second time through the
-  freshly re-attached mapper, whose cache is cold.
-- THE DOCUMENTED TPM-CLEAR RECOVERY IS A NO-OP THAT REPORTS SUCCESS. Measured
-  2026-09-14 on systemd 258.10-1.fc43, against a TPM that had really been cleared:
-    systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=... --tpm2-public-key=... VOL
-  prints "This PCR set is already enrolled, executing no operation." and EXITS 0.
-  systemd de-duplicates against the token already in the header BEFORE it acts on
-  the wipe, so nothing is written. Proof: the tokens dumped before and after were
-  byte-identical (tpm2-blob AJ4AINf9+bFEhlIi...), and the next guest boot failed
-  with Esys_Load rc 0x1df, "TPM key integrity check failed ... Key enrolled in
-  superblock most likely does not belong to this TPM". Wiping in a SEPARATE
-  invocation first, then enrolling, yields a new blob (AJ4AIMCkDPHJ...) and works.
-  THIS IS A PRODUCT FINDING, not a lab artefact: it is the recovery procedure a
-  user would be told to run after a firmware TPM clear, and it silently does
-  nothing while looking like it worked.
-- The control that should have caught it could not: counting tokens
-  (tpm2=1 recovery=1 pubkey=yes pcrs=[11]) is TRUE of the no-op, character for
-  character. Only the sealed blob distinguishes them.
-- tpm2_createprimary's YAML has NO `name:` line (it ends at sym-mode) in the lab
-  image's tpm2-tools. `createprimary | sed -n 's/^name: *//p'` returns "" from a
-  perfectly healthy TPM. Use tpm2_readpublic -c <ctx>. This made the clear's own
-  control fail for a parsing reason unrelated to its subject.
-- swtpm state DOES persist across host sessions: sealed in one session, loaded in
-  the next, rc 0, and the owner primary name is identical across sessions
-  (000bd952e2507b1b...). So "the seeds did not persist" is ruled OUT as a cause of
-  any unlock failure here — checked, because it was the obvious suspect.
-- A run whose scenario aborted printed NO summary line at all (measured: no staged
-  root -> refusal text, rc 1, zero "== boot-v2 VM harness" lines). The exit status
-  did propagate — the orchestrator's report of "exit 0" was a measurement artefact,
-  `$?` read through a pipe; rc is 1, verified directly. The defect was the missing
-  verdict, now printed from an EXIT trap and verified in both directions.
-- Substrate decision, recorded so it does not read as ignoring the brief: this
-  qualification goes in `files/scripts/boot-v2/run-scenarios`, NOT `tests/vmlab`.
-  P2-008's vmlab guest (tests/vmlab/mk-guest) is a busybox initramfs with no cryptsetup
-  and no tpm2 stack — it can prove a TPM device node exists and nothing about an unlock.
-  run-scenarios boots the REAL APEX initramfs (systemd-cryptsetup, systemd-pcrphase,
-  libtss2), already has apex-luks-enroll, signed-PCR-11 UKIs and a PERSISTENT swtpm
-  state dir. "Snapshot, break, recover" is `cp -a` of the LUKS image + swtpm state dir;
-  vm_boot is raw qemu, so that is exactly equivalent to a libvirt disk+nvram snapshot.
-- MEASURED ON THE L16, read-only, 2026-09-13 08:23 AWST — the decisive fact for L-003:
-    /sys/class/tpm/tpm0 -> ../../devices/platform/STM0925:00   (discrete ST TPM, not fTPM)
-    tpm_version_major = 2
-    PCR0  = E09A852EF5AF0FFE803F0AE102B23F5E0EEBEC2C51ADEDAB39A076CB85AC414D
-    PCR4  = 317B0C0C0F9C1996E21EBAF74DCB097E907CB78202935EA283D937F2470D238C
-    PCR7  = 0306B4609EF33E306C907BD56CD1AD3E108022665F96C4938BDE99235665D419
-    PCR11 = 0000000000000000000000000000000000000000000000000000000000000000
-    mokutil --sb-state = "SecureBoot enabled"; efivar SecureBoot byte = 1
-    LENOVO 21SCCTO1WW, BIOS R2UET31W (1.31), 2026-05-27
-  PCR 11 IS ALL ZEROS ON THE REAL MACHINE. Nothing measured it, because the shipped
-  image boots GRUB and only sd-stub extends PCR 11. So the signed-PCR-11 policy that
-  boot-v2 chose — the only policy that survives a kernel update — has NOTHING TO BIND TO
-  on a default APEX install. That is a measurement, not an argument, and it is why
-  L-003 cannot be flipped on for the shipped image.
-- `vm_boot` in files/scripts/boot-v2/lib.sh hardcodes `-global ICH9-LPC.disable_s3=1`
-  and `-nodefaults`, so S3 is off and there is no QMP monitor. Both must change for the
-  suspend/resume criterion.
-- Everything in docs/boot-v2.md's "What was measured" was measured on KATANA, which is
-  off-limits this round. scenario_luks_tpm had never been shown to run on the L16.
-- The boot lab image already carries everything the new scenarios need, checked not
-  assumed: tpm2_clear, tpm2_pcrread, swtpm_ioctl, socat, virt-fw-vars, and Fedora's real
-  DBXUpdate-20260630.x64.bin. Two 4M OVMF builds exist (OVMF_CODE_4M.qcow2 and
-  OVMF_CODE_4M.secboot.qcow2) but they differ in Secure Boot enforcement as well as in
-  code, so swapping them conflates "firmware changed" with "Secure Boot off" — the dbx
-  update is the faithful stand-in for what fwupd does on real hardware.
-
-## L-002 / L-003 SURVEY OF THE SHIPPED PRODUCT (read-only, worktree @ 13d53c01)
-Every line below is a file+line in the repo, not prose. This is the "what would strand
-a user" material, and the headline is that L-002 is NOT a default to flip:
-
-- THE INSTALLER CANNOT ENCRYPT AT ALL. `installer/apex-install:739-753` is the complete
-  answers-file key list and has no encryption key; `:755` allows modes disk|partition
-  only; `:1223` is `bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE"` and `:1173`
-  is a plain `mkfs."$ROOTFS_TYPE"` straight onto $TARGET. `apex-installer-gui:682-688`
-  is the whole 7-step page list — no encryption page. grep for encrypt/luksFormat/
-  cryptenroll/recovery key/rd.luks/crypttab over installer/ returns ZERO. LUKS appears
-  only as a REFUSAL (`apex-install:920-927` refuses to mkfs over a crypto_LUKS header).
-  So "enable LUKS2 by default" is a feature that does not exist, not a default.
-- NO IN-PLACE ENCRYPTION. Both modes are destructive fresh installs; there is no
-  `to-existing-root` path. Existing installs cannot be encrypted, so any default is
-  fresh-install-only by construction.
-- THE INITRAMFS KEYMAP IS ALWAYS `us`, and this is the largest lockout risk.
-  `Containerfile.core:2104-2107` bakes KEYMAP=us; `Containerfile.apex:236` builds the
-  initramfs inside that container; nothing passes rd.vconsole.keymap and nothing
-  regenerates the initramfs (grep rd.vconsole over installer/ files/ -> 0).
-  The installer writes the layout only to the TARGET deployment AFTER install
-  (`apex-install:488-490`). Worse, it writes an XKB layout name into a CONSOLE keymap
-  field (validated against X11/xkb/rules/base.lst at `:800-803`) — XKB `gb` is not
-  console `uk` — and `apex-vconsole-guard` (Containerfile.base:2025-2039) then silently
-  repairs an unloadable keymap back to `us` at every boot. A UK user's passphrase
-  cannot be typed at the prompt. The installer's own comment at `:727-729` names this
-  exact failure: "a wrong layout is a password that cannot be typed on first boot."
-- PLYMOUTH SHOWS THE PROMPT BUT NOT THE ERROR. Both themes implement
-  display_password (apex-os.script:208-235, SetDisplayPasswordFunction at :235) so the
-  prompt and bullets do render — but `fun message (text) { }` at :230 is a NO-OP, so a
-  wrong-password retry, an ask-password string or a dracut timeout is silently dropped.
-  The user sees a prompt that appears to do nothing. Only apex-os-chartreuse ships
-  (Containerfile.apex:229-234).
-- `cryptsetup` IN THE IMAGE IS AN UNPINNED TRANSITIVE DEPENDENCY. grep cryptsetup over
-  Containerfile.{base,core,apex} -> 0 hits; it arrives only from quay.io/fedora/
-  fedora-bootc:43 and is asserted NOWHERE at build time, while the NVIDIA initramfs
-  contents ARE asserted with lsinitrd right beside the dracut call
-  (Containerfile.apex:247-249). The claim "the APEX initramfs can unlock LUKS" today
-  rests on a comment in a CI-lab script (guest-luks-probe.sh:11-15), not on a gate.
-- L-003's STRUCTURAL BLOCKER, in code not prose. The shipped image boots GRUB via
-  bootupd (`apex-install:6-9`, `:1241`; ESP is \EFI\fedora\). Containerfile.base:825-837
-  states no bootloader is ever installed, and `Containerfile.base:852` is the ONLY COPY
-  of anything boot-v2 into the image — and it copies the DOCUMENTATION. apex-mkuki,
-  apex-mkesp, apex-luks-enroll are never shipped. So there is no path by which a
-  shipped APEX install boots a UKI, therefore no sd-stub, therefore no PCR 11 — which
-  is exactly what the L16 measurement (PCR11 = 64 zeros) shows on real silicon.
-- apexd IS REPORT-ONLY. `apex/src/storage.rs:114-139` has Status/Warnings/Wipe and no
-  enroll verb; `apexd-core/src/storage.rs:513-530` maps Encryption::Plain to
-  Health::Available with the comment "an unencrypted disk is a choice, and this report
-  does not judge it". `apex boot status` never reads /etc/crypttab (boot.rs:427-428).
-- A DISCREPANCY WORTH LANDING: two SHIPPED files assert as settled fact that the
-  machines are LUKS2+TPM2 — `files/system/libexec/apex-session-select:18-22` and
-  `files/system/sudoers/apex-session-select:9-12` ("both target machines end up on
-  LUKS2+TPM2"), used to justify refusing autologin. The shipped installer cannot
-  produce that state. The tense is aspirational; the justification is load-bearing.
-- NO TEST ASSERTS ENCRYPTION IS OFF BY DEFAULT (grep luks/encrypt over tests/*.sh finds
-  only reporting assertions). tests/test-boot-v2.sh:95-109 DOES assert no shipped unit
-  or libexec helper runs bootctl install/efibootmgr, with both controls — but its scan
-  is scoped to files/**/libexec, *.service, *.timer, so files/scripts/** is not covered.
+- **THE QMP WAKER WORKS. THE FIRMWARE DOES NOT COME BACK.** The round-26
+  could-not-run was not the waker: scratch-later/r4-luks-s3/serial-luks-s3.wake.json
+  records suspended_seen=true at 26.176 s, wakeup_sent=true, resumed_seen=true,
+  woke_at 26.692 — qemu saw the guest suspend, woke it, and saw it run again.
+  What failed is OVMF's S3 resume, in serial-luks-s3.ovmf.log:
+    8184  SecCoreStartupWithStack  (the resume boot)
+    8185  SEC: S3 resume (with PEI decompression)     <- S3 was detected
+    8281  PeiInstallPeiMemory MemoryBegin 0x7EF70000, MemoryLength 0x90000
+    8303  PopulateMemoryTypeInformation: No Memory Type Information HOB found
+    8304  Memory Type Information HOB not found during memory services
+          initialization but PCD was set
+    8307  ASSERT MemoryServices.c(203)
+  and a DEBUG-build ASSERT deadloops, so qemu was killed at the 240 s timeout.
+  On the COLD boot the same firmware orders it the other way — PeiVariable.efi
+  at 106, RefreshMemTypeInfo at 110, PublishPeiMemory at 118 — so the HOB exists
+  before permanent memory is installed. On the S3 path OVMF's PlatformPei
+  publishes memory in its own entry point, before the variable PPI is
+  dispatched, and PeiCore asserts. edk2-ovmf-20260812-4.fc43, qemu 10.1.5.
+  Nothing here is an APEX defect and nothing here is a lab defect.
+- THE DOCUMENTED TPM-CLEAR RECOVERY IS A NO-OP THAT REPORTS SUCCESS.
+  `systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=… --tpm2-public-key=… VOL`
+  prints "This PCR set is already enrolled, executing no operation." and exits 0
+  with the header byte-identical; the de-dup compares the PUBLIC KEY and the PCR
+  set against the header and fires BEFORE the wipe is acted on, so the TPM's
+  state plays no part. Wiping in a SEPARATE invocation first produces a new
+  sealed blob and works. systemd 258.10-1.fc43. Product finding: it is the
+  recovery a user is told to run after a firmware TPM clear.
+- PCR 11 IS ALL ZEROS ON THE L16 (measured 2026-09-13, read-only). The shipped
+  image boots GRUB via bootupd and only sd-stub extends PCR 11, so the
+  signed-PCR-11 policy boot-v2 chose has nothing to bind to on a default
+  install. That is why L-003 cannot be flipped on for the shipped image.
+- L-002 IS NOT A DEFAULT TO FLIP: the installer cannot encrypt at all
+  (installer/apex-install:739-755, :1173, :1223; no encryption page in
+  apex-installer-gui:682-688), there is no in-place path, the initramfs keymap
+  is always `us` (Containerfile.core:2104-2107), plymouth's `message()` is a
+  no-op (apex-os.script:230), and `cryptsetup` is an unpinned transitive
+  dependency asserted nowhere. Two shipped files already assert LUKS2+TPM2 as
+  settled fact (apex-session-select:18-22 and its sudoers file:9-12).
+- PCR 0 CANNOT BE MOVED IN THIS LAB, structurally: it needs a second OVMF build
+  differing ONLY in code, and the two 4M builds differ in Secure Boot
+  enforcement too. The dbx update (PCR 7, 76 -> 21340 bytes) is the faithful
+  stand-in for what fwupd does. Recorded as a limit, not a defect.
+- Older, still true: the lab image ships no diffutils; the APEX initramfs has no
+  `sync` or `dd`; tpm2_createprimary's YAML has no `name:` line (use
+  tpm2_readpublic); swtpm state does persist across host sessions.
 
 ## BLOCKED ON
 - Nothing.
