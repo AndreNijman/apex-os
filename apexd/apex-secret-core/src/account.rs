@@ -176,6 +176,167 @@ impl Presentation {
     }
 }
 
+/// Whether the token endpoint wants a `client_secret`, and what that costs.
+///
+/// Three states rather than a bool, because they send `apex account add`
+/// somewhere different and collapsing them would make one provider's hard
+/// requirement look like another's optional extra.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientSecret {
+    /// A public client: RFC 8252 §8.5's case. `client_id` alone is enough at
+    /// every step. Microsoft, and Cloudflare's own device flow.
+    None,
+    /// The token endpoint refuses the poll without one.
+    ///
+    /// Google's limited-input-device flow, read from
+    /// `developers.google.com/identity/protocols/oauth2/limited-input-device`:
+    /// `client_secret` is listed **Required** on the poll and *Optional* on the
+    /// refresh. This is why APEX ships no Google `client_id` by default — see
+    /// [`OAuth::client_id`].
+    RequiredToObtain,
+}
+
+/// An authorisation server APEX speaks RFC 8628 and RFC 6749 §6 to.
+///
+/// ## Why the table is here and not in either front-end
+///
+/// Two different binaries need it and neither can link the other. `apex`
+/// runs the device grant (`apex account add`, `apex cf connect`);
+/// `apex-secretd` runs the refresh, because a refresh spends a stored
+/// credential and only the daemon may read one. A second copy of these URLs
+/// would be a second copy of these URLs, and the one that drifts is the one
+/// that sends a credential somewhere.
+///
+/// It also makes the refresh **pin-consistent**: the daemon does not take a
+/// token endpoint from the caller or from the credential, it looks one up by
+/// the host the credential was already pinned to
+/// ([`oauth_for_auth_host`]). A refresh credential filed under
+/// `dash.cloudflare.com` can be POSTed to `dash.cloudflare.com`'s token
+/// endpoint and to nowhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OAuth {
+    /// RFC 8628 §3.1's device authorization endpoint.
+    pub device_url: &'static str,
+    /// RFC 6749 §3.2's token endpoint: polled during the grant, and POSTed
+    /// again to refresh. Must be on [`OAuth::auth_host`].
+    pub token_url: &'static str,
+    /// The host both URLs are on, and therefore the host the REFRESH
+    /// credential is pinned to.
+    ///
+    /// Separate from the provider's API host on purpose, and it is the single
+    /// best idea in `apex cloudflare connect`: a refresh token filed under
+    /// `dash.cloudflare.com` **cannot be spent as an API token** against
+    /// `api.cloudflare.com`, because the framework pins a credential to the
+    /// host it was stored for and refuses a request that goes anywhere else.
+    /// The separation is not tidiness; it is what makes the second secret
+    /// harmless if the first is granted away.
+    pub auth_host: &'static str,
+    /// Asked for, and no more — §13.5's rule at the only moment it can be
+    /// applied, because a token's scopes are fixed when it is issued.
+    pub scopes: &'static [&'static str],
+    pub client_secret: ClientSecret,
+    /// The OAuth client to ask as, when this build ships one.
+    ///
+    /// `None` means **APEX has no registered application at this provider and
+    /// will not borrow somebody else's**, so `--client-id` is required and the
+    /// refusal says why. That is the honest answer for Google and Microsoft
+    /// and it is worth stating plainly:
+    ///
+    /// * Every third-party tool that speaks these flows embeds a client id it
+    ///   registered — and for Google, a `client_secret` with it, because the
+    ///   flow requires one. Shipping a borrowed pair would put another
+    ///   project's credential in APEX's binary and put APEX's users on another
+    ///   project's consent screen and quota.
+    /// * `apex cf connect` already makes the opposite call for Cloudflare, and
+    ///   says so where a user can read it: the default is **Wrangler's** id,
+    ///   the consent screen says Wrangler, and the grant a person approves is
+    ///   Wrangler's. That was a decision about one provider, made with its
+    ///   reasoning written down, not a precedent to copy silently.
+    pub client_id: Option<&'static str>,
+}
+
+/// Google's limited-input-device flow.
+///
+/// Scopes are `openid` and `profile` and nothing else, which is not an
+/// oversight: no `gdrive` transport exists, so there is no operation that
+/// could spend a Drive scope, and asking for one would be holding a permission
+/// this build cannot use. See [`DRIVE_SCOPES`] for the harder limit underneath
+/// that one.
+pub const GOOGLE_OAUTH: OAuth = OAuth {
+    device_url: "https://oauth2.googleapis.com/device/code",
+    token_url: "https://oauth2.googleapis.com/token",
+    auth_host: "oauth2.googleapis.com",
+    scopes: &["openid", "profile"],
+    client_secret: ClientSecret::RequiredToObtain,
+    client_id: None,
+};
+
+/// Microsoft identity platform, `common` tenant.
+///
+/// `common` rather than `consumers` or `organizations` because it takes both a
+/// personal Microsoft account and a work or school one, and APEX has no way to
+/// know which the user has before they sign in. The cost is documented by
+/// Microsoft and worth repeating: on `common` and `consumers` a personal
+/// account is asked to sign in a second time, because the device cannot reach
+/// the browser's cookies.
+///
+/// `offline_access` is what makes a refresh token come back at all, so it is
+/// not optional for a flow whose whole point is that it can be renewed.
+pub const MICROSOFT_OAUTH: OAuth = OAuth {
+    device_url: "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode",
+    token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+    auth_host: "login.microsoftonline.com",
+    scopes: &["openid", "profile", "offline_access"],
+    client_secret: ClientSecret::None,
+    client_id: None,
+};
+
+/// The OAuth client `apex cloudflare connect` asks as.
+///
+/// **Wrangler's**, and that is a decision with its reasoning written down
+/// rather than an accident: Cloudflare registers no application for APEX, the
+/// consent screen a person approves says Wrangler, and `apex cf connect` tells
+/// them so. It is here, in the crate both binaries link, because the CLI runs
+/// the grant and the daemon runs the refresh, and RFC 6749 §6 requires the
+/// refresh to present the SAME client. Two copies of this string is one copy
+/// that can drift, and the one that drifts is the one that stops refreshing.
+pub const WRANGLER_CLIENT_ID: &str = "54d11594-84e4-41aa-b438-e81b8fa78ee7";
+
+/// Cloudflare's device grant, as `apex cloudflare connect` already uses it.
+///
+/// Listed here so `apex-secretd` can refresh the token that command stored.
+/// It is deliberately NOT in [`PROVIDERS`] — a Cloudflare credential is not an
+/// "online account", it is §13.1's project identity, and `apex account` must
+/// not be able to delete it.
+pub const CLOUDFLARE_OAUTH: OAuth = OAuth {
+    device_url: "https://dash.cloudflare.com/oauth2/device/auth",
+    token_url: "https://dash.cloudflare.com/oauth2/token",
+    auth_host: "dash.cloudflare.com",
+    // The list `apex/src/cloudflare.rs` asks for, which is one scope per
+    // operation the shipped provider can actually perform. It is not repeated
+    // here: the CLI owns the grant and this entry exists for the refresh,
+    // which re-presents whatever was granted and asks for nothing new.
+    scopes: &[],
+    client_secret: ClientSecret::None,
+    client_id: Some(WRANGLER_CLIENT_ID),
+};
+
+/// Every authorisation server this build knows how to refresh against.
+pub const OAUTH: &[&OAuth] = &[&GOOGLE_OAUTH, &MICROSOFT_OAUTH, &CLOUDFLARE_OAUTH];
+
+/// The authorisation server a credential pinned to `host` belongs to.
+///
+/// The daemon's only way to find a token endpoint. It takes the host the
+/// credential was *already pinned to* rather than anything the caller said, so
+/// there is no request shape that can aim a refresh somewhere else.
+pub fn oauth_for_auth_host(host: &str) -> Option<&'static OAuth> {
+    let host = host.trim().trim_end_matches('.');
+    OAUTH
+        .iter()
+        .copied()
+        .find(|o| o.auth_host.eq_ignore_ascii_case(host))
+}
+
 /// Where the endpoint lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Host {
@@ -235,6 +396,14 @@ pub struct Provider {
     /// naming the page, not a tutorial.
     pub obtain: &'static str,
     pub scopes: &'static [Scope],
+    /// The authorisation server, for a provider whose [`Provider::flow`] is an
+    /// OAuth one. `None` for every other flow.
+    ///
+    /// `Flow::DeviceCode` without this is a provider `apex account add` would
+    /// offer to sign in to and then have nowhere to ask, so
+    /// [`Provider::validate`] refuses the combination and a test runs it over
+    /// the shipped table.
+    pub oauth: Option<&'static OAuth>,
 }
 
 impl Provider {
@@ -266,6 +435,62 @@ impl Provider {
     /// Whether this provider needs `--host` at `add` time.
     pub fn needs_host(&self) -> bool {
         matches!(self.host, Host::PerAccount)
+    }
+
+    /// Whether the declaration is internally consistent.
+    ///
+    /// Modelled on [`crate::operation::ProviderSpec::validate`], and here for
+    /// the same reason: these are programming errors, and a table checked by a
+    /// test that runs over every row is cheaper than one found when somebody
+    /// is halfway through signing in.
+    pub fn validate(&self) -> Result<(), String> {
+        match (self.flow, self.oauth) {
+            (Flow::DeviceCode | Flow::AuthCode, None) => {
+                return Err(format!(
+                    "{} declares the {} flow and names no authorisation server, so \
+                     `apex account add` would offer to sign in and have nowhere to ask",
+                    self.id,
+                    self.flow.as_str()
+                ))
+            }
+            (flow, Some(_)) if !flow.is_refreshable() => {
+                return Err(format!(
+                    "{} names an authorisation server but its flow ({}) is not an OAuth \
+                     one, so nothing would ever use it",
+                    self.id,
+                    flow.as_str()
+                ))
+            }
+            _ => {}
+        }
+        if let (Host::Fixed(api), Some(oauth)) = (self.host, self.oauth) {
+            // The whole point of the second service. If the two were the same
+            // host the endpoint pin would stop distinguishing them, and a
+            // refresh token would become spendable as an access token.
+            if oauth.auth_host.eq_ignore_ascii_case(api) {
+                return Err(format!(
+                    "{}'s API host and authorisation host are both '{api}'. The refresh \
+                     token is kept unspendable as an API token BY the host pin, so this \
+                     would silently give up that property",
+                    self.id
+                ));
+            }
+        }
+        if let Some(oauth) = self.oauth {
+            for (what, url) in [("device", oauth.device_url), ("token", oauth.token_url)] {
+                let expected = format!("https://{}/", oauth.auth_host);
+                if !url.starts_with(&expected) {
+                    return Err(format!(
+                        "{}'s {what} endpoint is '{url}', which is not on its declared \
+                         authorisation host '{}'. The daemon finds a token endpoint by \
+                         looking up the host a credential is PINNED to, so a mismatch \
+                         here would make a refresh unroutable",
+                        self.id, oauth.auth_host
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The host to store, given what the caller asked for.
@@ -383,6 +608,7 @@ pub const PROVIDERS: &[Provider] = &[
         path_carries_username: false,
         obtain: "your server's own account settings; most offer a per-device password",
         scopes: WEBDAV_SCOPES,
+        oauth: None,
     },
     Provider {
         id: "nextcloud",
@@ -398,6 +624,7 @@ pub const PROVIDERS: &[Provider] = &[
         path_carries_username: true,
         obtain: "Settings -> Security -> Devices & sessions -> Create new app password",
         scopes: WEBDAV_SCOPES,
+        oauth: None,
     },
     Provider {
         id: "s3",
@@ -410,6 +637,7 @@ pub const PROVIDERS: &[Provider] = &[
         path_carries_username: false,
         obtain: "an access key pair from the bucket's own console",
         scopes: S3_SCOPES,
+        oauth: None,
     },
     Provider {
         id: "google",
@@ -422,6 +650,7 @@ pub const PROVIDERS: &[Provider] = &[
         path_carries_username: false,
         obtain: "sign in on another device when APEX prints the code",
         scopes: DRIVE_SCOPES,
+        oauth: Some(&GOOGLE_OAUTH),
     },
     Provider {
         id: "microsoft",
@@ -434,6 +663,7 @@ pub const PROVIDERS: &[Provider] = &[
         path_carries_username: false,
         obtain: "sign in on another device when APEX prints the code",
         scopes: GRAPH_SCOPES,
+        oauth: Some(&MICROSOFT_OAUTH),
     },
 ];
 
@@ -574,6 +804,29 @@ impl AccountRef {
     /// The store's name for this account.
     pub fn service(&self) -> String {
         format!("{NAMESPACE}.{}.{}", self.provider.id, self.name)
+    }
+
+    /// Where this account's REFRESH token is filed, which is not where its
+    /// access token is.
+    ///
+    /// Two properties, and both are load-bearing:
+    ///
+    /// 1. It is a **separate service pinned to the authorisation host**
+    ///    ([`OAuth::auth_host`]), never the API host. The framework refuses a
+    ///    request whose endpoint is not the host the credential was stored
+    ///    for, so granting an agent every scope on `account.google.home` still
+    ///    cannot get it the refresh token, and the refresh token cannot be
+    ///    presented to the API as though it were an access token. `apex
+    ///    cloudflare connect` invented this and it is carried across rather
+    ///    than reinvented.
+    /// 2. It **does not parse back as an account**. `.` is not a legal
+    ///    character in an account name, so [`AccountRef::parse`] returns `None`
+    ///    for this string: it never appears in `apex account list`, it cannot
+    ///    be granted a scope, and `apex account rm` cannot be pointed at it
+    ///    directly. `rm` removes it because it computes this name from the
+    ///    account, which is the only way in.
+    pub fn refresh_service(&self) -> String {
+        format!("{}.refresh", self.service())
     }
 
     /// Read an account out of the form a person types: `nextcloud.home`.
@@ -915,5 +1168,329 @@ mod tests {
         assert!(Flow::AuthCode.is_refreshable());
         assert!(!Flow::AppPassword.is_refreshable());
         assert!(!Flow::AccessKey.is_refreshable());
+    }
+
+    // ── the OAuth table ─────────────────────────────────────────────────────
+
+    /// A row of the table that exists only to be broken.
+    ///
+    /// Every negative below is this one with a single field changed, so what
+    /// each test proves is the field it changed and not the fixture.
+    const SYNTHETIC: Provider = Provider {
+        id: "synthetic",
+        label: "Synthetic",
+        transport: "synthetic",
+        flow: Flow::Token,
+        presentation: Presentation::Bearer,
+        host: Host::Fixed("api.synthetic.example"),
+        path: "",
+        path_carries_username: false,
+        obtain: "it does not exist",
+        scopes: &[],
+        oauth: None,
+    };
+
+    const SYNTHETIC_OAUTH: OAuth = OAuth {
+        device_url: "https://auth.synthetic.example/device",
+        token_url: "https://auth.synthetic.example/token",
+        auth_host: "auth.synthetic.example",
+        scopes: &["openid"],
+        client_secret: ClientSecret::None,
+        client_id: None,
+    };
+
+    #[test]
+    fn every_shipped_provider_declares_an_authorisation_server_it_can_reach() {
+        // The whole table, at the one moment the answer is cheap. The
+        // alternative is finding out when a person is halfway through signing
+        // in on their phone.
+        //
+        // The count is asserted for the reason every loop in this workspace
+        // asserts one: emptying `PROVIDERS` would make this pass on nothing,
+        // which is the failure this repository keeps finding in its own gates.
+        let mut checked = 0;
+        for p in PROVIDERS {
+            p.validate()
+                .unwrap_or_else(|e| panic!("the shipped '{}' row is incoherent: {e}", p.id));
+            // And the pairing itself, stated rather than implied: a flow that
+            // can renew has somewhere to renew AT, and one that cannot has no
+            // authorisation server hanging off it pretending otherwise.
+            assert_eq!(
+                p.flow.is_refreshable(),
+                p.oauth.is_some(),
+                "'{}' says is_refreshable()={} and names {} authorisation server",
+                p.id,
+                p.flow.is_refreshable(),
+                if p.oauth.is_some() { "an" } else { "no" }
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked,
+            PROVIDERS.len(),
+            "the loop did not visit every provider"
+        );
+        assert!(checked >= 5, "only {checked} providers were checked");
+
+        // The two that carry one, named. Adding a third has to be a line
+        // somebody writes here, because a new OAuth provider is a new place a
+        // credential gets sent.
+        let oauthed: Vec<&str> = PROVIDERS
+            .iter()
+            .filter(|p| p.oauth.is_some())
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(oauthed, vec!["google", "microsoft"]);
+    }
+
+    #[test]
+    fn a_provider_that_offers_to_sign_in_must_say_where() {
+        // `apex account add` reads `flow` to decide what to do. A device-code
+        // provider with no authorisation server would print "sign in on
+        // another device" and then have no endpoint to ask, which is a dead
+        // end the user cannot act on.
+        let err = Provider {
+            flow: Flow::DeviceCode,
+            oauth: None,
+            ..SYNTHETIC
+        }
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("nowhere to ask"), "{err}");
+
+        assert!(Provider {
+            flow: Flow::AuthCode,
+            oauth: None,
+            ..SYNTHETIC
+        }
+        .validate()
+        .is_err());
+
+        // And the coherent version of the same row is accepted, so this is a
+        // rule about the contradiction and not a ban on the flow.
+        assert_eq!(
+            Provider {
+                flow: Flow::DeviceCode,
+                oauth: Some(&SYNTHETIC_OAUTH),
+                ..SYNTHETIC
+            }
+            .validate(),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_flow_that_cannot_renew_may_not_name_an_authorisation_server() {
+        // The other direction, and it is not symmetry for its own sake: an
+        // app-password provider carrying a token endpoint is a token endpoint
+        // nothing will ever POST to, and the next person to read the table
+        // will believe that account refreshes.
+        for flow in [Flow::Token, Flow::AppPassword, Flow::AccessKey] {
+            let err = Provider {
+                flow,
+                oauth: Some(&SYNTHETIC_OAUTH),
+                ..SYNTHETIC
+            }
+            .validate()
+            .unwrap_err();
+            assert!(err.contains("nothing would ever use it"), "{flow:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_authorisation_host_may_not_be_the_api_host_it_guards() {
+        // The property `apex cloudflare connect` invented and this table
+        // carries across: the framework pins a credential to the host it was
+        // stored for, so a refresh token filed under the AUTH host cannot be
+        // presented to the API. Collapse the two hosts and that protection is
+        // gone — silently, because everything still compiles and every request
+        // still works.
+        const SAME: OAuth = OAuth {
+            device_url: "https://api.synthetic.example/device",
+            token_url: "https://api.synthetic.example/token",
+            auth_host: "api.synthetic.example",
+            scopes: &[],
+            client_secret: ClientSecret::None,
+            client_id: None,
+        };
+        let err = Provider {
+            flow: Flow::DeviceCode,
+            oauth: Some(&SAME),
+            ..SYNTHETIC
+        }
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("silently give up that property"), "{err}");
+
+        // The shipped rows really are in the safe shape, checked against the
+        // API host each one declares rather than against a list written here.
+        for p in PROVIDERS {
+            if let (Host::Fixed(api), Some(oauth)) = (p.host, p.oauth) {
+                assert_ne!(
+                    api.to_ascii_lowercase(),
+                    oauth.auth_host.to_ascii_lowercase(),
+                    "'{}' stores its access token and its refresh token on one host",
+                    p.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_endpoint_off_the_declared_authorisation_host_is_refused() {
+        // `oauth_for_auth_host` is the daemon's ONLY way to find a token
+        // endpoint, and it looks one up by the host the credential is already
+        // pinned to. A `token_url` that is not on `auth_host` would therefore
+        // be unroutable — the lookup would succeed and hand back an endpoint
+        // the pin then refuses — so the mismatch is refused here instead.
+        for (device, token) in [
+            ("https://elsewhere.example/device", "https://auth.synthetic.example/token"),
+            ("https://auth.synthetic.example/device", "https://elsewhere.example/token"),
+            // The prefix check has to be on `https://host/` and not on the
+            // bare host, or `auth.synthetic.example.attacker.example` passes.
+            (
+                "https://auth.synthetic.example.attacker.example/device",
+                "https://auth.synthetic.example/token",
+            ),
+            // And http is not https.
+            ("http://auth.synthetic.example/device", "https://auth.synthetic.example/token"),
+        ] {
+            let oauth = OAuth {
+                device_url: device,
+                token_url: token,
+                ..SYNTHETIC_OAUTH
+            };
+            // `&'static` is what the field wants; a test-local leak is the
+            // cheapest honest way to get one and the process is about to end.
+            let leaked: &'static OAuth = Box::leak(Box::new(oauth));
+            let err = Provider {
+                flow: Flow::DeviceCode,
+                oauth: Some(leaked),
+                ..SYNTHETIC
+            }
+            .validate()
+            .unwrap_err();
+            assert!(err.contains("not on its declared"), "{device} / {token}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_refresh_is_routed_by_the_host_its_credential_is_already_pinned_to() {
+        // The one property that makes a daemon-side refresh safe: the token
+        // endpoint is not taken from the caller and not taken from the
+        // credential's contents, it is looked up from the host the credential
+        // was stored for. There is no request shape that can aim a refresh
+        // somewhere else, because the caller never names a host at all.
+        let cf = oauth_for_auth_host("dash.cloudflare.com").expect("Cloudflare is in the table");
+        assert_eq!(cf.token_url, "https://dash.cloudflare.com/oauth2/token");
+        assert_eq!(cf.client_id, Some(WRANGLER_CLIENT_ID));
+
+        assert_eq!(
+            oauth_for_auth_host("oauth2.googleapis.com").map(|o| o.token_url),
+            Some("https://oauth2.googleapis.com/token")
+        );
+        assert_eq!(
+            oauth_for_auth_host("login.microsoftonline.com").map(|o| o.auth_host),
+            Some("login.microsoftonline.com")
+        );
+
+        // A host is matched case-insensitively and with the root label
+        // stripped, because a `ServiceInfo` host comes from a person typing
+        // one and both spellings name the same server.
+        assert!(oauth_for_auth_host("DASH.Cloudflare.COM").is_some());
+        assert!(oauth_for_auth_host("dash.cloudflare.com.").is_some());
+        assert!(oauth_for_auth_host("  dash.cloudflare.com  ").is_some());
+
+        // And the ones that must NOT resolve. `api.cloudflare.com` is the
+        // headline: an access token pinned there must never find a token
+        // endpoint, or the refresh path becomes a second way to spend it.
+        for miss in [
+            "api.cloudflare.com",
+            "www.googleapis.com",
+            "graph.microsoft.com",
+            "dash.cloudflare.com.attacker.example",
+            "attacker.example",
+            "",
+            "127.0.0.1",
+        ] {
+            assert!(
+                oauth_for_auth_host(miss).is_none(),
+                "'{miss}' found an authorisation server"
+            );
+        }
+
+        // Every row is reachable through the lookup, so a row added to the
+        // table and not to `OAUTH` cannot sit there looking registered.
+        for oauth in OAUTH {
+            assert_eq!(
+                oauth_for_auth_host(oauth.auth_host).map(|o| o.token_url),
+                Some(oauth.token_url),
+                "'{}' is in the table and the lookup does not find it",
+                oauth.auth_host
+            );
+        }
+        assert_eq!(OAUTH.len(), 3);
+    }
+
+    #[test]
+    fn a_refresh_token_s_name_does_not_parse_back_as_an_account() {
+        // The second load-bearing property of `refresh_service`. It is a name
+        // in the same flat namespace as the account's own, so if it parsed
+        // back as an account it would appear in `apex account list`, could be
+        // granted a scope, and could be handed to `apex account rm` directly —
+        // which is a way to point account commands at the credential that
+        // renews every other one.
+        //
+        // `.` is not legal in an account name, which is what makes this true;
+        // the test is here so a future loosening of `AccountRef::new` cannot
+        // quietly make the refresh token addressable.
+        let account = AccountRef::new("google", "home").unwrap();
+        let refresh = account.refresh_service();
+        assert_eq!(refresh, "account.google.home.refresh");
+        assert!(
+            AccountRef::parse(&refresh).is_none(),
+            "'{refresh}' parses back as an account"
+        );
+        // It is still a name the store will take — a property that has to hold
+        // or the credential cannot be filed at all.
+        assert!(valid_service_name(&refresh));
+        assert_ne!(refresh, account.service());
+
+        // And the longest account the namespace allows still yields a service
+        // name inside the store's 64-byte cap once `.refresh` is on the end.
+        // This is the bound `every_provider_derives_a_service_name_the_store_
+        // accepts` checks for the account itself, re-checked for the sibling
+        // that is seven bytes longer.
+        for p in PROVIDERS {
+            let longest = AccountRef::new(p.id, &"z".repeat(MAX_NAME))
+                .unwrap()
+                .refresh_service();
+            assert!(
+                valid_service_name(&longest),
+                "{longest} is too long to store"
+            );
+        }
+    }
+
+    #[test]
+    fn a_provider_that_needs_a_client_secret_says_which_step_needs_it() {
+        // Three states and not a bool, because they send `apex account add`
+        // somewhere different. Google refuses the poll without one; Microsoft
+        // and Cloudflare are public clients.
+        assert_eq!(GOOGLE_OAUTH.client_secret, ClientSecret::RequiredToObtain);
+        assert_eq!(MICROSOFT_OAUTH.client_secret, ClientSecret::None);
+        assert_eq!(CLOUDFLARE_OAUTH.client_secret, ClientSecret::None);
+
+        // APEX ships no registered application at Google or Microsoft and will
+        // not borrow one, so `--client-id` is required there. Cloudflare is the
+        // deliberate exception, and the exception is Wrangler's id, which
+        // `apex cf connect` says out loud on the consent screen.
+        assert_eq!(GOOGLE_OAUTH.client_id, None);
+        assert_eq!(MICROSOFT_OAUTH.client_id, None);
+        assert_eq!(CLOUDFLARE_OAUTH.client_id, Some(WRANGLER_CLIENT_ID));
+
+        // `offline_access` is what makes Microsoft return a refresh token at
+        // all. Without it the flow this table exists to serve cannot run.
+        assert!(MICROSOFT_OAUTH.scopes.contains(&"offline_access"));
     }
 }
