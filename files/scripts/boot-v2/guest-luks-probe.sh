@@ -44,6 +44,19 @@ done
 say "apex-initramfs-reached"
 say "luks-mode=$MODE"
 
+# THE APEX INITRAMFS HAS NO `sync`, measured: every run of this probe printed
+# "50-apex-luks-probe.sh: line NNN: sync: command not found" to the console and
+# carried on, so the two flushes below this file thought it was doing were not
+# happening. It does not change any result — a dm-crypt mapper's dirty pages
+# are written back when the device is closed, and every path here detaches
+# before powering off, which is why the marker survives a reboot in the
+# `luks-tpm` scenario — but a flush that silently is not one is exactly the
+# kind of thing this file exists to refuse. So it is reported as a fact of the
+# environment, once, and the calls become a function that knows the answer.
+if command -v sync >/dev/null 2>&1; then HAVE_SYNC=1; else HAVE_SYNC=0; fi
+say "sync-available=$HAVE_SYNC"
+flush() { [ "$HAVE_SYNC" = 1 ] && sync; return 0; }
+
 # ── what the stub handed us ────────────────────────────────────────────────
 # sd-stub extracts the UKI's .pcrsig and .pcrpkey into /.extra/, and systemd's
 # own tmpfiles then copies them to /run/systemd/. Both are checked, and which
@@ -153,10 +166,12 @@ if attach apexlab /dev/vdb - "$TPM_OPTS"; then
         "$MARKER"*)
             say "plaintext-marker=found" ;;
         *)
-            # `sync` afterwards because the guest ends with `poweroff -f`,
-            # which does not flush the page cache.
+            # A flush afterwards because the guest ends with `poweroff -f`,
+            # which does not flush the page cache. See flush() above: this
+            # initramfs has no `sync`, and the detach is what actually writes
+            # the sector back.
             if printf '%-511s\n' "$MARKER" > /dev/mapper/apexlab 2>/dev/null; then
-                sync
+                flush
                 say "plaintext-marker=written"
             else
                 say "plaintext-marker=WRITE-FAILED"
@@ -182,19 +197,54 @@ if attach apexlab /dev/vdb - "$TPM_OPTS"; then
     #                       the part vendors get wrong (Shutdown/Startup(STATE)
     #                       across S3), and it is a different question from
     #                       whether dm-crypt kept its key.
+    #
+    # `mem` IS NOT S3, AND THE DIFFERENCE HUNG THE FIRST RUN OF THIS SCENARIO.
+    # Measured 2026-09-14: with qemu's `-global ICH9-LPC.disable_s3=1` — which
+    # is qemu's q35 DEFAULT and the whole basis of the negative control — Linux
+    # still lists `mem` in /sys/power/state and still accepts a write to it. It
+    # silently means s2idle, suspend-to-idle, because /sys/power/mem_sleep has
+    # no `deep` to offer. The guest duly suspended to idle in the arm that was
+    # supposed to prove it could not suspend, nothing in that arm can issue a
+    # wakeup, and qemu was killed by the 240-second timeout with the scenario's
+    # first assertion reading `want '0', got '137'`.
+    #
+    # So the mode is SELECTED, not assumed: `deep` is required by name, written
+    # to mem_sleep by name, and reported to the console so the log says which
+    # sleep state was entered. Without `deep` this reports and does not suspend,
+    # which is what the negative control is actually asking about.
     if [ "$DO_S3" = 1 ]; then
+        S3_MODES=$(cat /sys/power/mem_sleep 2>/dev/null || echo "")
         if [ ! -w /sys/power/state ]; then
-            say "s3=<no /sys/power/state>"
+            say "s3=NO-SYSFS"
         elif ! grep -q mem /sys/power/state 2>/dev/null; then
-            say "s3=<kernel offers no mem state: $(cat /sys/power/state 2>/dev/null)>"
+            say "s3=NO-MEM-STATE"
+            say "s3-detail=states='$(cat /sys/power/state 2>/dev/null)'"
+        elif ! echo "$S3_MODES" | grep -q deep; then
+            # The negative control lands here, by construction and not by luck.
+            say "s3=NO-DEEP-SLEEP"
+            say "s3-detail=mem_sleep='$S3_MODES'"
         else
+            # Offered is not selected. The write is checked by reading the file
+            # back and looking for the brackets the kernel puts around the
+            # ACTIVE mode, and if `deep` is not the active one the guest does
+            # NOT fall through to the write below: `mem` would then be s2idle
+            # again, and nothing in this lab can wake a guest from s2idle.
+            echo deep > /sys/power/mem_sleep 2>/dev/null || true
+            S3_SELECTED=$(cat /sys/power/mem_sleep 2>/dev/null || echo "")
+            case "$S3_SELECTED" in
+                *"[deep]"*) S3_DEEP=1 ;;
+                *)          S3_DEEP=0 ;;
+            esac
+        fi
+        if [ "$DO_S3" = 1 ] && [ "${S3_DEEP:-0}" = 1 ]; then
+            say "s3-mode=deep"
             # The counter is read before and after and BOTH are reported. A
             # single "after" value proves nothing: the kernel may have
             # suspended successfully at some earlier point, or the file may not
             # exist and be read as empty. The delta is the observation.
             S3_BEFORE=$(cat /sys/power/suspend_stats/success 2>/dev/null || echo "?")
             say "s3-attempt before=$S3_BEFORE"
-            sync
+            flush
             # This blocks until something resumes the machine. Under the lab
             # that is files/scripts/boot-v2/qmp-wake.py issuing system_wakeup;
             # on real hardware it is the power button. If nothing wakes it, the
@@ -226,6 +276,20 @@ if attach apexlab /dev/vdb - "$TPM_OPTS"; then
                 /usr/lib/systemd/systemd-cryptsetup detach apexlab >/dev/null 2>&1 || true
                 if attach apexlab /dev/vdb - "$TPM_OPTS"; then
                     say "post-resume-tpm-unlock=SUCCESS"
+                    # The same marker, read a second time through a mapper that
+                    # did not exist a moment ago. The read above went through a
+                    # device that had been open since before the sleep, so the
+                    # page cache could have answered it without dm-crypt
+                    # decrypting anything; closing the device wrote its dirty
+                    # sectors back and dropped that cache, so this read has to
+                    # come off /dev/vdb through a freshly unsealed key. Two
+                    # reads, two different things proved.
+                    POST2=""
+                    read -r POST2 < /dev/mapper/apexlab 2>/dev/null || true
+                    case "$POST2" in
+                        "$MARKER"*) say "post-resume-reattach-marker=found" ;;
+                        *)          say "post-resume-reattach-marker=LOST" ;;
+                    esac
                 else
                     say "post-resume-tpm-unlock=REFUSED"
                 fi
