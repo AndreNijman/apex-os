@@ -1074,6 +1074,67 @@ impl Service {
             }
         }
 
+        // The `creates` rule's exception, checked with the same timing and for
+        // the same reason: while refusing is still free.
+        //
+        // An operation that supersedes a credential is the one write to the
+        // store that does NOT go through the free-name check above, so
+        // everything that check would have caught has to be caught here
+        // instead — and the first of those is that the operation was allowed to
+        // ask at all. `supersedes_credentials` is a constant in the provider's
+        // own module; `Bound::replaces` is a field a provider fills in per
+        // request. Reading only the second would make "renew this account" and
+        // "replace the owner's Cloudflare token with something this provider
+        // chose" the same request.
+        if !bound.replaces.is_empty() {
+            if !may_supersede_credentials(op) {
+                return refuse(
+                    &record,
+                    format!(
+                        "'{}' asked to replace a stored credential ({}), and it is \
+                         not an operation that may: overwriting a credential \
+                         destroys the secret that was there, and only an \
+                         operation whose whole purpose is to supersede one — an \
+                         OAuth refresh — is allowed to. This is a defect in the \
+                         provider, not something to grant.",
+                        op.id,
+                        bound.replaces.join(", ")
+                    ),
+                    ErrorKind::BadRequest,
+                );
+            }
+            for name in &bound.replaces {
+                if !store::valid_service_name(name) {
+                    return refuse(
+                        &record,
+                        StoreError::BadServiceName(name.clone()).to_string(),
+                        ErrorKind::BadRequest,
+                    );
+                }
+                // The mirror image of the `creates` check, and it is not
+                // symmetry for its own sake. A replace of a name nothing is
+                // stored under is a CREATE that skipped the free-name check —
+                // it would put a credential in the store under a name the
+                // framework never checked was free, pinned to a host nothing
+                // validated, because `Replaced` carries no host to validate.
+                if self.store.info(peer.uid, name).is_none() {
+                    return refuse(
+                        &record,
+                        format!(
+                            "this operation would replace the credential stored as \
+                             '{name}', and nothing is stored under that name. A \
+                             replace of a name that does not exist is a create \
+                             that skipped the check for whether the name was \
+                             free, so this service will not do it. Store one with \
+                             `apex secret add {name}` — or, for an account, \
+                             connect it again."
+                        ),
+                        ErrorKind::BadRequest,
+                    );
+                }
+            }
+        }
+
         // §13.8, and the last thing that can refuse for free.
         //
         // AFTER the pin and after the `creates` check, because both of those
@@ -1212,14 +1273,20 @@ impl Service {
         // `client_secret` in its own output is not hypothetical, because the
         // natural way to write such an operation is to hand back the reply, and
         // for these operations the reply *is* the secret.
-        let mut output = scrub_all(
-            &out.output,
-            &[
-                Some(&stored),
-                minted.value(),
-                out.created.as_ref().map(|c| &c.value),
-            ],
-        );
+        //
+        // Four now, with the values of any credential this operation
+        // SUPERSEDED, and that one is not defence in depth: an RFC 6749 §6
+        // reply is a JSON document whose fields are the new access token and
+        // the new refresh token, and the natural way to write the provider is
+        // to hand the reply back as the operation's output. For a token
+        // endpoint the reply IS the secret, twice over.
+        let mut secrets: Vec<Option<&SecretValue>> = vec![
+            Some(&stored),
+            minted.value(),
+            out.created.as_ref().map(|c| &c.value),
+        ];
+        secrets.extend(out.replaced.iter().map(|r| Some(&r.value)));
+        let mut output = scrub_all(&out.output, &secrets);
 
         let (spend_word, spend_detail) = spend.borrow().clone();
         self.record(AuditLine {
@@ -1271,6 +1338,69 @@ impl Service {
                 );
             }
             (_, None) => {}
+        }
+
+        // The same half for a credential this operation SUPERSEDED, and the
+        // same division of labour: the provider could not have written to the
+        // store, so this is the one place a replacement can be forgotten, and
+        // therefore the one place it is not.
+        if !out.replaced.is_empty() {
+            let mut swapped: Vec<String> = Vec::new();
+            let mut failed: Vec<String> = Vec::new();
+            let mut why_failed: Vec<String> = Vec::new();
+            let mut undeclared: Vec<String> = Vec::new();
+            for new in out.replaced {
+                // A value for a name the provider never declared it would
+                // replace. Dropped here, which loses it — the same end a
+                // credential that arrived through an unchecked path gets above,
+                // and for the same reason: the declaration is what the
+                // free-name check was skipped in favour of.
+                if !bound.replaces.contains(&new.name) {
+                    undeclared.push(new.name);
+                    continue;
+                }
+                match self.swap(peer, &new.name, &new.value) {
+                    Ok(()) => swapped.push(new.name),
+                    Err(why) => {
+                        why_failed.push(format!("'{}': {why}", new.name));
+                        failed.push(new.name);
+                    }
+                }
+            }
+            if !swapped.is_empty() {
+                output.push_str(&format!(
+                    "\napex: {} now holds the value this renewed. It is not in \
+                     this reply and cannot be read back out of this service.",
+                    join_names(&swapped)
+                ));
+            }
+            if !undeclared.is_empty() {
+                code = 1;
+                output.push_str(&format!(
+                    "\napex: this provider returned a new value for {}, which it \
+                     did not declare it would replace. It has been discarded \
+                     rather than written over a credential this service never \
+                     checked.",
+                    join_names(&undeclared)
+                ));
+            }
+            // The partial failure worth spelling out rather than reporting as
+            // "some of it worked". The far side has already acted: a rotated
+            // refresh token means the OLD one is dead there, so a credential
+            // this could not write is a credential that is now wrong in the
+            // store and cannot be recovered by running this again.
+            if !failed.is_empty() {
+                code = 1;
+                output.push_str(&format!(
+                    "\napex: this operation succeeded at the far side and {} \
+                     COULD NOT BE UPDATED here ({}). What is stored under that \
+                     name is now the OLD secret, which the far side has already \
+                     replaced — so it will not work, and running this again will \
+                     not fix it. Connect the account again.",
+                    join_names(&failed),
+                    why_failed.join("; ")
+                ));
+            }
         }
 
         Response::Performed {
@@ -1346,6 +1476,75 @@ impl Service {
              this service; `apex secret list` shows that it is there.",
             info.scheme, info.host
         ))
+    }
+
+    /// Put a new value into a credential that is already stored.
+    ///
+    /// [`Service::keep`]'s sibling, and everything it does NOT do is the point.
+    /// It reads the existing [`ServiceInfo`] and writes the same record back
+    /// with a new secret inside it, so:
+    ///
+    /// * **the pin does not move.** Host, scheme, port, path and username are
+    ///   whatever they were when the owner stored the credential. A provider
+    ///   has no way to say otherwise — [`provider::Replaced`] carries a value
+    ///   and a name and nothing else — so a refresh cannot repoint a credential
+    ///   at a host of its own choosing even if its author tried;
+    /// * **grants and approvals are untouched.** `Store::put` overwrites the
+    ///   value and the metadata record and reads nothing else, so the project
+    ///   grants that made this request legal are still exactly what they were.
+    ///   A refresh that silently widened what a credential may be used for
+    ///   would be worse than one that failed;
+    /// * **there is no window with no credential.** `put` overwrites in place
+    ///   rather than removing and re-adding, so a concurrent request either
+    ///   sees the old secret or the new one.
+    ///
+    /// The one field that moves is [`ServiceInfo::added`], which is
+    /// documented as *when it was stored* and is the record's only timestamp.
+    /// A refresh stores it, so it moves — otherwise nothing on this machine
+    /// could ever answer "when was this token last renewed", and the answer to
+    /// that question is the first thing anybody wants when a refresh has
+    /// quietly stopped working.
+    fn swap(&self, peer: Peer, name: &str, value: &SecretValue) -> Result<(), String> {
+        // Checked before `perform` ran, and checked again here rather than
+        // assumed: between the two, the operation itself ran, and an owner may
+        // have removed the credential in that time. Storing it anyway would put
+        // a secret in the store under a name nothing has ever pinned.
+        let Some(mut info) = self.store.info(peer.uid, name) else {
+            return Err(format!(
+                "nothing is stored under '{name}' any more — it was there when \
+                 this operation was allowed to run and it is not now"
+            ));
+        };
+        info.added = store::now_ms();
+        self.store
+            .put(peer.uid, &info, value)
+            .map_err(|e| e.to_string())?;
+        self.record(AuditLine::administrative(
+            &self.next_audit_id(),
+            AuditEvent::Stored,
+            peer.uid,
+            peer.pid,
+            name,
+            &format!(
+                "credential replaced by a brokered operation, for {}://{}",
+                info.scheme, info.host
+            ),
+        ));
+        Ok(())
+    }
+}
+
+/// `'a'`, `'a' and 'b'`, `'a', 'b' and 'c'` — for a sentence a person reads.
+///
+/// A refresh touches one credential or two, and the message about it is read
+/// by somebody deciding whether their account still works, so it is written as
+/// a sentence rather than as a debug list.
+fn join_names(names: &[String]) -> String {
+    let quoted: Vec<String> = names.iter().map(|n| format!("'{n}'")).collect();
+    match quoted.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -1464,6 +1663,24 @@ fn valid_host_char(c: char) -> bool {
 /// alone.
 pub(crate) fn may_be_granted_everywhere(op: &'static OperationSpec) -> bool {
     op.same_everywhere
+}
+
+/// Whether this operation may overwrite a credential that is already stored.
+///
+/// [`may_be_granted_everywhere`]'s shape, and for its reason: the operation's
+/// own declaration answers it and nothing here computes it, so a provider added
+/// later cannot acquire the permission by accident.
+///
+/// The default answer — and the answer for every operation this build shipped
+/// before the `oauth` provider — is no, which is what makes the
+/// [`provider::Bound::creates`] rule coherent: an operation that would store a
+/// credential under a name somebody already holds is refused before it runs,
+/// because the far side issues a service token once and the stored copy is the
+/// only one. The exception is RFC 6749 §6, whose entire purpose is to
+/// supersede, and it is an exception a provider writes into its vocabulary
+/// rather than one it decides per request.
+pub(crate) fn may_supersede_credentials(op: &'static OperationSpec) -> bool {
+    op.supersedes_credentials
 }
 
 fn refuse_store(e: StoreError) -> Response {
@@ -2208,6 +2425,7 @@ mod tests {
                 params: &[],
                 aliases: &[],
                 same_everywhere: false,
+                supersedes_credentials: false,
             },
             OperationSpec {
                 id: "creator.token.smuggle",
@@ -2217,6 +2435,7 @@ mod tests {
                 params: &[],
                 aliases: &[],
                 same_everywhere: false,
+                supersedes_credentials: false,
             },
         ],
     };
@@ -2239,6 +2458,7 @@ mod tests {
                     "creator.token.create" => Some(format!("issued-{}", req.resource)),
                     _ => None,
                 },
+                replaces: Vec::new(),
                 approval: provider::Approval::Standing,
             })
         }
@@ -2261,6 +2481,7 @@ mod tests {
                     username: Some("id-42".to_string()),
                     value: SecretValue::new(ISSUED.as_bytes().to_vec()),
                 }),
+                replaced: Vec::new(),
             })
         }
     }
@@ -2386,6 +2607,403 @@ mod tests {
         assert!(
             Store::new(dir.clone()).info(peer.uid, "issued-beta").is_none(),
             "it was stored under a name nothing checked"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+
+    // ── a credential an operation SUPERSEDES ────────────────────────────────
+    //
+    // `Creator`'s twin, written the same way and for the same reason: each test
+    // runs against a provider that behaves the way the careless implementation
+    // would — it hands back the token endpoint's reply, and for a refresh that
+    // reply IS both secrets. A polite fake that withheld them could not tell a
+    // working scrub from a missing one.
+    //
+    // The shape is Cloudflare's, because it is the one this exists for: the
+    // request runs on the REFRESH credential, pinned to the authorisation host,
+    // and it replaces two credentials — the access token pinned to the API host
+    // and itself.
+
+    /// The new access token the fake endpoint issues.
+    const NEW_ACCESS: &str = "apex-refreshed-access-9c2ad1-do-not-leak";
+    /// The rotated refresh token beside it. RFC 6749 §6 allows this and
+    /// Wrangler writes one back, so this build assumes it happens.
+    const NEW_REFRESH: &str = "apex-refreshed-refresh-4f81b0-do-not-leak";
+
+    struct Replacer {
+        /// Whether `perform` ran. Every refusal here is supposed to happen
+        /// BEFORE the far side is asked for anything, and "before" is a claim
+        /// that has to be measured rather than asserted.
+        ran: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    const REPLACER: ProviderSpec = ProviderSpec {
+        id: "replacer",
+        summary: "renews credentials, so the framework's half of a refresh can be tested",
+        operations: &[
+            OperationSpec {
+                id: "replacer.token.refresh",
+                summary: "renew the access token and the refresh token beside it",
+                effect: apex_secret_core::operation::Effect::Write,
+                resource: apex_secret_core::operation::ResourceKind::None,
+                params: &[],
+                aliases: &[],
+                same_everywhere: false,
+                supersedes_credentials: true,
+            },
+            OperationSpec {
+                id: "replacer.token.renew-only",
+                summary: "renew the access token and rotate nothing, which is also legal",
+                effect: apex_secret_core::operation::Effect::Write,
+                resource: apex_secret_core::operation::ResourceKind::None,
+                params: &[],
+                aliases: &[],
+                same_everywhere: false,
+                supersedes_credentials: true,
+            },
+            OperationSpec {
+                id: "replacer.token.undeclared",
+                summary: "return a value for a name it never declared, which must not work",
+                effect: apex_secret_core::operation::Effect::Write,
+                resource: apex_secret_core::operation::ResourceKind::None,
+                params: &[],
+                aliases: &[],
+                same_everywhere: false,
+                supersedes_credentials: true,
+            },
+            OperationSpec {
+                id: "replacer.token.ghost",
+                summary: "replace a name nothing is stored under, which must not work",
+                effect: apex_secret_core::operation::Effect::Write,
+                resource: apex_secret_core::operation::ResourceKind::None,
+                params: &[],
+                aliases: &[],
+                same_everywhere: false,
+                supersedes_credentials: true,
+            },
+            OperationSpec {
+                id: "replacer.token.smuggle",
+                summary: "replace a credential without having declared that it may, \
+                          which must not work",
+                effect: apex_secret_core::operation::Effect::Write,
+                resource: apex_secret_core::operation::ResourceKind::None,
+                params: &[],
+                aliases: &[],
+                same_everywhere: false,
+                // The declaration that makes this the interesting case: the
+                // static flag says no and the per-request field says yes.
+                supersedes_credentials: false,
+            },
+        ],
+    };
+
+    impl provider::Provider for Replacer {
+        fn spec(&self) -> &'static ProviderSpec {
+            &REPLACER
+        }
+
+        fn bind(&self, req: &provider::Bind<'_>) -> Result<provider::Bound, provider::ProviderError> {
+            Ok(provider::Bound {
+                endpoint: provider::Endpoint {
+                    scheme: "https".to_string(),
+                    host: "auth.example.test".to_string(),
+                },
+                detail: "renew the stored token".to_string(),
+                creates: None,
+                replaces: match req.operation.id {
+                    "replacer.token.refresh" | "replacer.token.renew-only" => {
+                        vec!["replacer".to_string(), "replacer-refresh".to_string()]
+                    }
+                    // Declares only the access token, and then hands back a
+                    // value for the refresh token as well.
+                    "replacer.token.undeclared" => vec!["replacer".to_string()],
+                    // Names something nothing is stored under.
+                    "replacer.token.ghost" => {
+                        vec!["replacer".to_string(), "replacer-missing".to_string()]
+                    }
+                    "replacer.token.smuggle" => vec!["replacer".to_string()],
+                    _ => Vec::new(),
+                },
+                approval: provider::Approval::Standing,
+            })
+        }
+
+        fn perform(
+            &self,
+            req: &provider::Bind<'_>,
+            _bound: &provider::Bound,
+            _value: &SecretValue,
+        ) -> Result<provider::Performed, provider::ProviderError> {
+            self.ran.store(true, Ordering::SeqCst);
+            let replaced = match req.operation.id {
+                "replacer.token.refresh" => vec![
+                    provider::Replaced {
+                        name: "replacer".to_string(),
+                        value: SecretValue::new(NEW_ACCESS.as_bytes().to_vec()),
+                    },
+                    provider::Replaced {
+                        name: "replacer-refresh".to_string(),
+                        value: SecretValue::new(NEW_REFRESH.as_bytes().to_vec()),
+                    },
+                ],
+                // A reply with no `refresh_token` in it: `replaces` allowed two
+                // and this returns one. The other must be left alone.
+                "replacer.token.renew-only" => vec![provider::Replaced {
+                    name: "replacer".to_string(),
+                    value: SecretValue::new(NEW_ACCESS.as_bytes().to_vec()),
+                }],
+                "replacer.token.undeclared" => vec![provider::Replaced {
+                    name: "replacer-refresh".to_string(),
+                    value: SecretValue::new(NEW_REFRESH.as_bytes().to_vec()),
+                }],
+                _ => Vec::new(),
+            };
+            Ok(provider::Performed {
+                code: 0,
+                // What the careless provider does: hands back the token
+                // endpoint's reply, which for this operation is both secrets.
+                output: format!(
+                    r#"{{"access_token":"{NEW_ACCESS}","refresh_token":"{NEW_REFRESH}"}}"#
+                ),
+                created: None,
+                replaced,
+            })
+        }
+    }
+
+    /// A service serving only [`Replacer`], with the two credentials a refresh
+    /// touches stored and every operation granted in `/tmp/p`.
+    ///
+    /// The two are on DIFFERENT hosts, which is the shape `apex cf connect`
+    /// stores and the reason the second credential is safe: the access token is
+    /// pinned to the API host, the refresh token to the authorisation host, and
+    /// the framework refuses to send either anywhere else. A fixture that put
+    /// both on one host would make the pin vacuous here.
+    fn replacer_service(tag: &str) -> (Service, PathBuf, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        let dir = std::env::temp_dir().join(format!(
+            "apex-secretd-replaces-{}-{tag}-{}",
+            std::process::id(),
+            store::now_ms()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut registry = Registry::new();
+        registry
+            .register(Box::new(Replacer { ran: ran.clone() }))
+            .expect("register");
+        let service = Service::new(Store::new(dir.clone()), false, registry);
+        let peer = me();
+        service.add(
+            peer,
+            demo_service("replacer", "api.example.test", "https"),
+            SecretValue::new(b"the-old-access-token".to_vec()),
+        );
+        service.add(
+            peer,
+            demo_service("replacer-refresh", "auth.example.test", "https"),
+            SecretValue::new(b"the-old-refresh-token".to_vec()),
+        );
+        for op in [
+            "replacer.token.refresh",
+            "replacer.token.renew-only",
+            "replacer.token.undeclared",
+            "replacer.token.ghost",
+            "replacer.token.smuggle",
+        ] {
+            service.grant(peer, "/tmp/p", "replacer-refresh", op, false);
+        }
+        (service, dir, ran)
+    }
+
+    #[test]
+    fn a_credential_an_operation_replaces_is_stored_and_never_comes_back() {
+        // Both halves, like the `creates` test: the caller did NOT get either
+        // secret, and both ARE in the store, byte for byte. A build that
+        // scrubbed the reply and stored nothing would pass the first half and
+        // leave the account holding a token the far side has already replaced.
+        let (svc, dir, ran) = replacer_service("stored");
+        let peer = me();
+        let before = Store::new(dir.clone())
+            .info(peer.uid, "replacer")
+            .expect("stored");
+        let reply = svc.use_capability(
+            peer,
+            record("replacer-refresh", "replacer.token.refresh", "", "/tmp/p"),
+            Vec::new(),
+        );
+
+        let Response::Performed { output, exit_code, .. } = &reply else {
+            panic!("{reply:?}");
+        };
+        assert!(ran.load(Ordering::SeqCst), "the operation never ran");
+        assert_eq!(*exit_code, 0, "{output}");
+        assert!(!output.contains(NEW_ACCESS), "the new access token came back: {output}");
+        assert!(!output.contains(NEW_REFRESH), "the new refresh token came back: {output}");
+        assert!(output.contains("'replacer' and 'replacer-refresh'"), "{output}");
+
+        let store = Store::new(dir.clone());
+        assert_eq!(
+            store.value(peer.uid, "replacer").expect("value").as_str(),
+            Some(NEW_ACCESS)
+        );
+        assert_eq!(
+            store.value(peer.uid, "replacer-refresh").expect("value").as_str(),
+            Some(NEW_REFRESH)
+        );
+
+        // The pin did not move, and it could not have: `Replaced` carries no
+        // host. Asserted anyway, because the whole argument for the type's
+        // shape is that this is structural rather than checked — and an
+        // assertion is how a later change that adds a host field gets noticed.
+        let after = store.info(peer.uid, "replacer").expect("still stored");
+        assert_eq!((&after.host, &after.scheme, &after.username), (&before.host, &before.scheme, &before.username));
+        assert_eq!(after.port, before.port);
+        assert_eq!(after.path, before.path);
+        // The one field that DOES move, so "when was this last renewed" has an
+        // answer at all.
+        assert!(after.added >= before.added, "the timestamp went backwards");
+
+        // The grant that made this legal is untouched. A refresh that widened
+        // or dropped what a credential may be used for would be worse than one
+        // that failed.
+        assert!(svc
+            .store
+            .grants(peer.uid)
+            .allows_any(Some("/tmp/p"), "replacer-refresh", &["replacer.token.refresh"]));
+
+        // And the trail says both credentials were replaced, with neither
+        // secret in it.
+        let lines = audit::tail(&trail(&dir), 50);
+        for name in ["replacer", "replacer-refresh"] {
+            // The LAST such line, not the first: `add` wrote one when the
+            // fixture stored the credential, and a test that read that one
+            // would pass with the replacement never recorded at all.
+            let line = lines
+                .iter()
+                .rev()
+                .find(|l| l.event == AuditEvent::Stored && l.provider == name)
+                .unwrap_or_else(|| panic!("no `stored` line for '{name}'"));
+            assert!(line.detail.contains("replaced by a brokered operation"), "{line:?}");
+        }
+        let text = std::fs::read_to_string(trail(&dir)).unwrap_or_default();
+        assert!(!text.contains(NEW_ACCESS) && !text.contains(NEW_REFRESH), "a secret is in the trail");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_reply_that_rotates_nothing_leaves_the_other_credential_exactly_as_it_was() {
+        // `Bound::replaces` is what MAY be replaced, not what will be. An
+        // RFC 6749 §6 reply without a `refresh_token` is legal and ordinary,
+        // and a framework that treated the declaration as a promise would
+        // either fail the request or blank the credential it did not hear
+        // about.
+        let (svc, dir, _ran) = replacer_service("subset");
+        let peer = me();
+        let reply = svc.use_capability(
+            peer,
+            record("replacer-refresh", "replacer.token.renew-only", "", "/tmp/p"),
+            Vec::new(),
+        );
+
+        let Response::Performed { output, exit_code, .. } = &reply else {
+            panic!("{reply:?}");
+        };
+        assert_eq!(*exit_code, 0, "{output}");
+        let store = Store::new(dir.clone());
+        assert_eq!(
+            store.value(peer.uid, "replacer").expect("value").as_str(),
+            Some(NEW_ACCESS)
+        );
+        assert_eq!(
+            store.value(peer.uid, "replacer-refresh").expect("value").as_str(),
+            Some("the-old-refresh-token"),
+            "the credential the reply said nothing about was written to"
+        );
+        assert!(output.contains("'replacer' now holds"), "{output}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_operation_that_never_declared_it_supersedes_may_not_replace_anything() {
+        // The static flag against the per-request field. `Bound::replaces` is
+        // filled in by the provider for THIS request;
+        // `OperationSpec::supersedes_credentials` is a constant in its module.
+        // Reading only the first would make "renew this account" and "overwrite
+        // the owner's token with something this provider chose" the same
+        // request, and nothing an auditor reads could tell them apart.
+        let (svc, dir, ran) = replacer_service("ungated");
+        let peer = me();
+        let reply = svc.use_capability(
+            peer,
+            record("replacer-refresh", "replacer.token.smuggle", "", "/tmp/p"),
+            Vec::new(),
+        );
+        let (kind, message) = reply.as_error().expect("it was allowed to replace");
+        assert_eq!(kind, ErrorKind::BadRequest, "{message}");
+        assert!(message.contains("not an operation that may"), "{message}");
+        assert!(!ran.load(Ordering::SeqCst), "the far side was asked before the refusal");
+        assert_eq!(
+            Store::new(dir.clone()).value(peer.uid, "replacer").expect("value").as_str(),
+            Some("the-old-access-token")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_replace_of_a_name_nothing_is_stored_under_is_refused_before_anything_runs() {
+        // A replace of a missing name is a CREATE that skipped the free-name
+        // check — it would store a secret under a name the framework never
+        // checked was free, pinned to a host nothing validated, because
+        // `Replaced` carries no host to validate. Refused before `perform`, so
+        // no token is issued at the far side and then dropped.
+        let (svc, dir, ran) = replacer_service("ghost");
+        let peer = me();
+        let reply = svc.use_capability(
+            peer,
+            record("replacer-refresh", "replacer.token.ghost", "", "/tmp/p"),
+            Vec::new(),
+        );
+        let (kind, message) = reply.as_error().expect("a missing name was accepted");
+        assert_eq!(kind, ErrorKind::BadRequest, "{message}");
+        assert!(message.contains("replacer-missing"), "{message}");
+        assert!(message.contains("skipped the check"), "{message}");
+        assert!(!ran.load(Ordering::SeqCst), "the far side was asked before the refusal");
+        assert!(
+            Store::new(dir.clone()).info(peer.uid, "replacer-missing").is_none(),
+            "it was stored anyway"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_provider_that_returns_a_value_for_a_name_it_never_declared_has_it_discarded() {
+        // The `creates` smuggle test's twin. The declaration is checked before
+        // the call and is what the free-name check was skipped in favour of, so
+        // a value arriving for a name outside it is dropped rather than written
+        // over a credential this service never checked — and dropped rather
+        // than returned.
+        let (svc, dir, _ran) = replacer_service("undeclared");
+        let peer = me();
+        let reply = svc.use_capability(
+            peer,
+            record("replacer-refresh", "replacer.token.undeclared", "", "/tmp/p"),
+            Vec::new(),
+        );
+
+        let Response::Performed { output, exit_code, .. } = &reply else {
+            panic!("{reply:?}");
+        };
+        assert!(!output.contains(NEW_REFRESH), "the smuggled secret came back: {output}");
+        assert_eq!(*exit_code, 1, "a discarded credential is not a clean run: {output}");
+        assert!(output.contains("discarded"), "{output}");
+        assert_eq!(
+            Store::new(dir.clone())
+                .value(peer.uid, "replacer-refresh")
+                .expect("value")
+                .as_str(),
+            Some("the-old-refresh-token"),
+            "a value the provider never declared was written to the store"
         );
         std::fs::remove_dir_all(&dir).ok();
     }

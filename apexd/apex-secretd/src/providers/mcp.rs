@@ -82,6 +82,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
         // `providers::tests::an_operation_that_claims_to_reach_the_same_
         // thing_everywhere_must_bind_the_same_in_two_projects`.
         same_everywhere: true,
+        supersedes_credentials: false,
     }],
 };
 
@@ -151,6 +152,7 @@ impl Provider for McpProvider {
             detail: format!("mcp request to {}", req.service.service),
             // An MCP request answers; it does not issue a credential.
             creates: None,
+            replaces: Vec::new(),
             // §13.8 is about environments, and an MCP server has none: the
             // endpoint is the stored record's own and the caller contributes
             // nothing to it. There is no production half of a thing with one
@@ -184,6 +186,7 @@ impl Provider for McpProvider {
             code: http.out.code,
             output: http.out.text,
             created: None,
+            replaced: Vec::new(),
         })
     }
 }
