@@ -166,9 +166,18 @@ class MachineLink(
      * a frozen editor on the computer would freeze this phone's whole
      * connection, terminal included.
      *
-     * Throws [AgentError] for every refusal, including the empty-vs-refused
-     * distinction [Agentd.readClipboard] documents; `Agentd.isTooOld` names
-     * the one that means the computer's runtime predates the verb.
+     * **Returns the EMPTY STRING when the computer's clipboard is empty, and
+     * that is a real answer rather than a failure** — `Response::Clipboard`
+     * says so in its own words. It is the one outcome callers keep getting
+     * wrong: reported as an error it sends somebody hunting for a permission
+     * to grant when the machine simply had nothing on it, and reported as
+     * nothing at all it reads as a button that does not work.
+     *
+     * Every genuine refusal arrives as an [AgentError] instead — not text,
+     * over the cap, no compositor, a wedged application — each carrying a
+     * sentence the daemon wrote for a person to read, which callers should
+     * show rather than paraphrase. `Agentd.isTooOld` names the one that means
+     * the computer's runtime predates the verb rather than that it refused.
      */
     fun clipboard(): String = Agentd.readClipboard(request(Agentd.clipboard()))
 
