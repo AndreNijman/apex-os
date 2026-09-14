@@ -27,9 +27,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.apexos.remote.core.agent.AgentGraph
@@ -38,6 +41,7 @@ import com.apexos.remote.core.agent.Elapsed
 import com.apexos.remote.core.agent.Gauge
 import com.apexos.remote.core.agent.Order
 import com.apexos.remote.core.agent.live
+import com.apexos.remote.ui.ClipboardPull
 import com.apexos.remote.ui.theme.ApexTones
 import com.apexos.remote.ui.theme.MachineText
 
@@ -58,6 +62,14 @@ fun AgentCenterScreen(
     nowSeconds: Long,
     busy: String?,
     failure: String?,
+    /**
+     * Something that worked and that the user still has to be told.
+     *
+     * Carries the clipboard outcomes: how much was copied, or that the
+     * machine's clipboard was empty. Empty is deliberately here and not in
+     * [failure] — see `RemoteViewModel.pullMachineClipboard`.
+     */
+    notice: String? = null,
     onRefresh: () -> Unit,
     onOpen: (AgentSession) -> Unit,
     onStart: () -> Unit,
@@ -65,6 +77,26 @@ fun AgentCenterScreen(
     onApprovals: () -> Unit,
     /** Open the guide. */
     onHelp: () -> Unit,
+    /**
+     * Ask the machine for its clipboard (P1-059 criterion 3, receive half).
+     *
+     * Here and not in `ReplyBox`, which is reachable only while some agent is
+     * waiting for input. Wanting what the computer copied has nothing to do
+     * with whether an agent is waiting, and the request itself carries no
+     * session id, so this belongs with the other id-less machine action —
+     * Projects — and not under a session.
+     */
+    onCopyFromMachine: () -> Unit = {},
+    /**
+     * The machine's clipboard, waiting to be put on this phone's.
+     *
+     * Handed over as state rather than written by the view model because a
+     * `ClipboardManager` needs a `Context`, and this composable already has
+     * one through `LocalClipboardManager`.
+     */
+    clipboardPull: ClipboardPull? = null,
+    /** Called once [clipboardPull] has been put on the phone's clipboard. */
+    onClipboardCopied: () -> Unit = {},
     /** How many privileged operations are waiting at the machine. */
     pendingApprovals: Int = 0,
     /** Whether this phone will show a notification at all. */
@@ -75,6 +107,16 @@ fun AgentCenterScreen(
     onDismiss: () -> Unit,
 ) {
     val (needsYou, rest) = Order.groups(sessions)
+
+    // Keyed on the TOKEN and not on the text: asking twice for the same
+    // clipboard has to copy twice, and an effect keyed on the text would not
+    // re-run for an identical second answer. See `ClipboardPull`.
+    val clipboard = LocalClipboardManager.current
+    LaunchedEffect(clipboardPull?.token) {
+        val pull = clipboardPull ?: return@LaunchedEffect
+        clipboard.setText(AnnotatedString(pull.text))
+        onClipboardCopied()
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -92,6 +134,11 @@ fun AgentCenterScreen(
         Column(Modifier.fillMaxSize().padding(padding)) {
             busy?.let { Strip(it, alarming = false) }
             failure?.let { Strip(it, alarming = true, onDismiss = onDismiss) }
+            // Not alarming: everything that arrives here WORKED. "The
+            // machine's clipboard is empty" is the case this exists for —
+            // drawn in red it reads as a permission problem, and drawn
+            // nowhere it reads as a button that does nothing.
+            notice?.let { Strip(it, alarming = false, onDismiss = onDismiss) }
 
             // Said on screen rather than left to be discovered. Without the
             // permission the poll goes on raising alerts and `Notifier.post`
@@ -129,6 +176,12 @@ fun AgentCenterScreen(
                         },
                     )
                 }
+                // "Clipboard" and not "Paste": the word names what is being
+                // fetched, and the direction is the thing users get wrong
+                // about this feature. Paste already means the opposite
+                // journey in this app — the button in `ReplyBox` that puts
+                // THIS phone's clipboard into a reply.
+                TextButton(onClick = onCopyFromMachine) { Text("Clipboard") }
                 TextButton(onClick = onHelp) { Text("Guide") }
             }
 
