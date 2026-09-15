@@ -1918,6 +1918,7 @@ fn handoff(id: Option<u32>, to: &str, no_start: bool, transcript_bytes: usize) -
         // its own human decision. There is nothing to narrow here, and
         // inheriting the old grant's verbs would be inheriting the grant.
         capabilities: None,
+        allow: None,
         cols: 80,
         rows: 24,
         env: vec![],
@@ -4364,6 +4365,7 @@ mod tests {
             unsafe_everything: false,
             ttl: None,
             capabilities: None,
+            allow: None,
             worktree: None,
             checkpoint: false,
             cwd: None,

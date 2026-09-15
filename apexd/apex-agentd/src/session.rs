@@ -172,6 +172,41 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
         )
         .map_err(PolicyRefused)?;
 
+    // P2-012: this session may reach fewer destinations than the runtime does.
+    //
+    // Validated against the runtime's list above and narrowed out of it here,
+    // in that order, because the two questions are different: `validate_for`
+    // refuses an allowlisted session whose RUNTIME list is empty — nobody has
+    // filled the policy in — and `narrow` refuses a session that named a
+    // destination the runtime does not cover. Collapsing them would answer the
+    // second question with the first one's message.
+    //
+    // From here down `allowlist` is the SESSION's, and every use of it —
+    // the egress proxy, the recorded confinement §6.2 judges tool calls
+    // against, the refusal text a denied request is shown — is the narrowed
+    // one. One binding rather than two, so a later reader cannot pick the
+    // wrong one.
+    let allowlist = match &req.allow {
+        None => allowlist,
+        Some(_) if policy.effective_network() != NetworkPolicy::Allowlist => {
+            // `ttl_ms` on an ordinary session, one dimension over: refused
+            // rather than ignored, because a caller who listed destinations
+            // believes they asked for a boundary. An `open` session reaches
+            // everything, and silently accepting a list here would say
+            // otherwise in `apex agent status`.
+            return Err(AllowlistRefused(format!(
+                "--allow names destinations for a session whose network is `{}`, which \
+                 reaches everything; it narrows the `allowlist` mode and has nothing to \
+                 narrow here. re-run with `--network allowlist`, or drop --allow",
+                policy.effective_network().as_str()
+            ))
+            .into());
+        }
+        Some(lines) => allowlist
+            .narrow(lines)
+            .map_err(|e| AllowlistRefused(e.to_string()))?,
+    };
+
     // Dimension 1 is the agent's own, and only the adapter knows whether this
     // one can express it. Refused rather than dropped: a `--agent-bypass` that
     // silently did nothing would leave the user believing confirmations were
