@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-16 09:08 AWST
+APEX ROADMAP — resume report — 2026-09-16 09:13 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -18,32 +18,32 @@ APEX ROADMAP — resume report — 2026-09-16 09:08 AWST
 ────────────────────────────────────────────────────────────────────────────
   later      unknown    L-001,L-002,L-003                  task/later-tpm-qualification
              head c84b2f83 fix(boot-v2): `mem` is not S3, and a missing serial f
-             dirty 0 file(s), 0 unpushed, card 2530m
+             dirty 0 file(s), 0 unpushed, card 2534m
              NEXT Collect the two firmware experiments, then land the diagnosis:
 
   p2-c       unknown    P2-005,P2-006,P2-007               task/p2-c-2
              head 1206730f fix(devices): "no saved profile uses it" is a safety 
-             dirty 1 file(s), 0 unpushed, card 2723m
+             dirty 1 file(s), 0 unpushed, card 2727m
              NEXT In /var/tmp/apex-work/wt-p2-005 (apex-os): build the image and run
 
   p2-b       unknown    P2-003,P2-004                      task/p2-b-round23
              head 77bbd712 test(i18n): the mutation pair for the platform theme,
-             dirty 0 file(s), 0 unpushed, card 2535m
+             dirty 0 file(s), 0 unpushed, card 2540m
              NEXT In `/var/tmp/apex-work/wt-p2-b4-sh`, give `src/windows/Lockscreen.
 
   p2-f       unknown    P2-016,P2-017,P2-018,P2-019        task/p2-f-3
              head f3e5cbf5 feat(cli): apex cf refresh, and the two lines that sa
-             dirty 0 file(s), 0 unpushed, card 2528m
+             dirty 0 file(s), 0 unpushed, card 2533m
              NEXT Round 6 commit 1: add `apex cf refresh` (and/or `apex account refr
 
   followups-5 unknown                                       task/followups-5
              head df6c4797 test(vm): the one probe that could not be faked with 
-             dirty 1 file(s), 0 unpushed, card 2531m
+             dirty 1 file(s), 0 unpushed, card 2535m
              NEXT Reproduce the zellij race locally (zellij 0.45.1 IS installed here
 
   p2-d       unknown    P2-008,P2-009,P2-012               task/p2-d-2
              head 654fa854 Merge remote-tracking branch 'origin/task/later-tpm-q
-             dirty 8 file(s), 108 unpushed, card 2532m
+             dirty 8 file(s), 108 unpushed, card 2537m
              NEXT Add `RunRequest::allow: Option<Vec<String>>` + `SESSION_ALLOWLIST_
 
 
@@ -79,11 +79,11 @@ APEX ROADMAP — resume report — 2026-09-16 09:08 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 09:08:51 AWST 19s
+  snapshot timer: active   last 2min 32s Wed
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    3c80aca  roadmap-state
+    apex-os    318b3b9  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -106,7 +106,7 @@ APEX ROADMAP — resume report — 2026-09-16 09:08 AWST
     apex-os    162d6fa  wt-p0-009-
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
-    apex-shell 8552151  apex-shell-
+    apex-shell 1ad0b8a  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell 02674e0  int-shell-
     apex-shell 68c971d  wt-base-shell-
