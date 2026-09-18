@@ -943,44 +943,56 @@ tasks:
     because it belongs to this item and not to the accessibility unit. Everything recorded above this paragraph
     still stands and was not re-measured this round. ROUND 31 (2026-09-19), THE REOPEN ANSWERED AND MEASURED:
     partial -> DONE. CRITERION 1 IS MET AGAIN, ON AN ASSERTION THAT FAILS WITHOUT THE FIX, BUT THE FIX IS NOT YET
-    LANDED - it is apex-shell task/p0-015-repump (f6928d9 fix+test, 8b02b60 the CI step's description), cut from
-    roadmap/v2.2 @ 8eccbfa, and 8eccbfa still carries the drop until the orchestrator merges it. This done is on
-    the strength of a measurement, not of a merge. THE DEFECT IS REAL AND IT IS NARROWER THAN THE REOPEN SAID, and
-    the narrowing is what decides the fix. _pump() has a SECOND guard, _desired === _confirmed. The state is a
-    boolean, so once _confirmed is a defined bool, a newer _desired that differs from the failed _target
-    NECESSARILY EQUALS _confirmed - logind already holds it, and dropping it costs nothing. The drop is only
-    observable while _confirmed === undefined, before the service has ever successfully reached logind. That is
-    shell startup, exactly when logind's Display session is most likely to be missing, and Lockscreen.qml's
-    initial sync already depends on _confirmed starting undefined so that first call is never suppressed. A lock
-    engaged in that window was never reported and never would be - criterion 1 verbatim, since apex-agentd polls
-    LockedHint and this service is its only writer. THE COROLLARY DECIDES THE SHAPE: an unconditional re-pump in
-    _failed() is not merely inelegant in that same window, it is an INFINITE LOOP, because undefined !== false
-    keeps _pump()'s guard open forever. So the fix makes the distinction in code, not in prose: _failed() re-pumps
-    only when _desired !== _target - _target being the value the dead chain carried, that test IS 'something newer
-    arrived and was never tried'. It cannot storm structurally rather than by promise: the only thing that can
-    make _desired differ from the _target that just failed is another setLocked() from OUTSIDE, so a failure can
-    never generate work for itself; N external calls bound the follow-ups at N. Deferred with Qt.callLater because
-    _failed() runs inside a Process's onExited and _pump() re-arms showUserProc, which on a step-1 failure is that
-    same Process mid-emission. THE TEST RUNS QUICKSHELL TWICE, and the second run is not padding: its assertions
-    need a service that has never succeeded, and no process whose startup sync worked can be put back into that
-    state. New scenario startup-drop ($HINT_SCENARIO) in tests/locked-hint-test.qml, new stub mode
-    slow-fail-showuser that sleeps BEFORE it fails so switching the control file back to ok mid-sleep rescues only
-    the follow-up chain and not the one already running. Both directions: the untried lock must be delivered, and
-    a failure with nothing newer asked for must sit still. Premises are asserted rather than assumed (_busy at the
-    moment the newer request arrives, _desired === true && _target === false, _confirmed === undefined). MEASURED,
-    sway headless in a private XDG_RUNTIME_DIR: unmutated main 31/0 + startup-drop 10/0 = 41/0 exit 0. MUTANT A,
-    the condition forced to false (the pre-fix _failed): startup-drop 7 passed / 3 failed, exit 1, logging 'note:
-    1 calls: [loginctl show-user ...]' - the lock never reached logind - AND main STAYED 31/0, which is the
-    measured answer to whether the existing suite was enough: it was not and could not have been. MUTANT B, forced
-    to true (the naive unconditional re-pump): startup-drop 8/2 with the negative control reading 'note: 342 calls
-    in 1.2s', and main also red at 20/7. Restored with git checkout --, sha256sum -c OK against
-    4c3715f1697fa837ccd24b4492e0f6d96cf268220d42ba065543f4ee97559aec, tree clean, re-run 41/0 exit 0. NOT CLAIMED:
-    that this is p2-b's 2-in-9 mutation flake. The existing main run has _confirmed defined from phase 0 onward,
-    so that flake is not obviously this window; it was NOT RE-RUN THIS ROUND. Also fixed in passing, in the runner
-    being edited anyway: two `echo "$out" | grep -q` gradings became `[[ == * ]]`, because under set -o pipefail a
-    grep -q that MATCHES can return 141. NO APEX-OS CHANGE WAS NEEDED OR MADE and no empty task/p0-014-repump
-    branch was created; criterion 2 was untouched this round and is not re-claimed. Everything recorded above this
-    paragraph still stands and was not re-measured.
+    LANDED - it is apex-shell task/p0-015-repump (f6928d9 fix+test, 8b02b60 the CI step's description, f523a0b the
+    stale account in the suite that found it), cut from roadmap/v2.2 @ 8eccbfa, and 8eccbfa still carries the drop
+    until the orchestrator merges it. This done is on the strength of a measurement, not of a merge. THE DEFECT IS
+    REAL AND IT IS NARROWER THAN THE REOPEN SAID, and the narrowing is what decides the fix. _pump() has a SECOND
+    guard, _desired === _confirmed. The state is a boolean, so once _confirmed is a defined bool, a newer _desired
+    that differs from the failed _target NECESSARILY EQUALS _confirmed - logind already holds it, and dropping it
+    costs nothing. The drop is only observable while _confirmed === undefined, before the service has ever
+    successfully reached logind. That is shell startup, exactly when logind's Display session is most likely to be
+    missing, and Lockscreen.qml's initial sync already depends on _confirmed starting undefined so that first call
+    is never suppressed. A lock engaged in that window was never reported and never would be - criterion 1
+    verbatim, since apex-agentd polls LockedHint and this service is its only writer. THE COROLLARY DECIDES THE
+    SHAPE: an unconditional re-pump in _failed() is not merely inelegant in that same window, it is an INFINITE
+    LOOP, because undefined !== false keeps _pump()'s guard open forever. So the fix makes the distinction in
+    code, not in prose: _failed() re-pumps only when _desired !== _target - _target being the value the dead chain
+    carried, that test IS 'something newer arrived and was never tried'. It cannot storm structurally rather than
+    by promise: the only thing that can make _desired differ from the _target that just failed is another
+    setLocked() from OUTSIDE, so a failure can never generate work for itself; N external calls bound the
+    follow-ups at N. Deferred with Qt.callLater because _failed() runs inside a Process's onExited and _pump()
+    re-arms showUserProc, which on a step-1 failure is that same Process mid-emission; whether Quickshell
+    tolerates that was NOT tried and is NOT claimed to fail - the deferred form does not need it to, and what is
+    measured is that the follow-up chain launches and delivers on a step-1 failure. THE TEST RUNS QUICKSHELL
+    TWICE, and the second run is not padding: its assertions need a service that has never succeeded, and no
+    process whose startup sync worked can be put back into that state. New scenario startup-drop ($HINT_SCENARIO)
+    in tests/locked-hint-test.qml, new stub mode slow-fail-showuser that sleeps BEFORE it fails so switching the
+    control file back to ok mid-sleep rescues only the follow-up chain and not the one already running. Both
+    directions: the untried lock must be delivered, and a failure with nothing newer asked for must sit still.
+    Premises are asserted rather than assumed (_busy at the moment the newer request arrives, _desired === true &&
+    _target === false, _confirmed === undefined). MEASURED, sway headless in a private XDG_RUNTIME_DIR: unmutated
+    main 31/0 + startup-drop 10/0 = 41/0 exit 0. MUTANT A, the condition forced to false (the pre-fix _failed):
+    startup-drop 7 passed / 3 failed, exit 1, logging 'note: 1 calls: [loginctl show-user ...]' - the lock never
+    reached logind - AND main STAYED 31/0, which is the measured answer to whether the existing suite was enough:
+    it was not and could not have been. MUTANT B, forced to true (the naive unconditional re-pump): startup-drop
+    8/2 with the negative control reading 'note: 342 calls in 1.2s', and main also red at 20/7. Restored with git
+    checkout --, sha256sum -c OK against 4c3715f1697fa837ccd24b4492e0f6d96cf268220d42ba065543f4ee97559aec, tree
+    clean, re-run 41/0 exit 0. AND THE 2-IN-9 FLAKE IS THIS WINDOW, on primary-source evidence rather than
+    inference, correcting what this paragraph first said: the flake is in tests/run-lockscreen-atspi-shim.sh, not
+    in the locked-hint suite, and that file's own comment at lines 274-289 names the mechanism - its loginctl stub
+    exits 0 with no stdout, so step 1 always fails and _confirmed never leaves undefined, and a setLocked(true)
+    arriving during the failing startup chain was dropped because _failed() did not re-pump. The shim closed it
+    with a WAIT rather than a fix. NOT RE-RUN THIS ROUND and the 2-in-9 rate is not re-measured; what is measured
+    is the mechanism, in tests/locked-hint-test.qml's startup-drop scenario. That stale shim comment is corrected
+    by f523a0b, which also measures the whole atspi suite against the fix: tests/run-lockscreen-atspi.sh 17 passed
+    / 0 failed / 6 skipped exit 0 on labwc headless, including 'labwc acknowledged ext-session-lock' and 'an
+    ENGAGED lock still asks logind for nothing' - the lock's own setLocked(true) finds the service idle, its chain
+    fails at step 1, _desired === _target, and the new path correctly does nothing.
+    tests/check-headless-runners.sh 28/0. Also fixed in passing, in the runner being edited anyway: two `echo
+    "$out" | grep -q` gradings became `[[ == * ]]`, because under set -o pipefail a grep -q that MATCHES can
+    return 141. NO APEX-OS CHANGE WAS NEEDED OR MADE and no empty task/p0-014-repump branch was created; criterion
+    2 was untouched this round and is not re-claimed. Everything recorded above this paragraph still stands and
+    was not re-measured.
 - id: P0-016
   title: Add Agent Settings page with password-gated Always Unrestricted toggle
   priority: P0

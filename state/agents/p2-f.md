@@ -360,6 +360,30 @@ Round 3, on task/p2-f-3 (pushed):
 4. `apex cf refresh` + the `cloudflare.rs` status line + the step-7 answer.
 
 ## FOUND
+- **A FILE LARGER THAN `HTTP_MAX_BYTES` IS REPORTED AS A SUCCESSFUL READ OF AN
+  EMPTY FILE. Found this round, MEASURED, and deliberately NOT fixed here
+  because it is not msgraph's — `gdrive` has it, and `s3`/`oauth` look the
+  same.** Neither `perform` nor `download_outcome` reads curl's exit code on a
+  2xx. Measured against a loopback server answering `Content-Length: 4000000`
+  with `max-filesize = 3145728`: **curl exits 63, prints `Maximum file size
+  exceeded` on stderr, and its `write-out` STILL RUNS** — stdout is exactly
+  `"\n200"`. So `split_status` yields `("", Some(200))` and the caller gets
+  `code: 0, output: ""`. The reproduction is
+  `/var/tmp/apex-work/scratch-p2-f/round31/bigserver.py` + `cfg.txt`. It is the
+  "permission denied is not absence" shape: a truncation reported as a checked
+  fact. The fix is one condition (`out.code != 0` must not read as success) in
+  each of the four providers, plus a double mode per provider that sends an
+  oversized `Content-Length`; that is a round of its own and should take all
+  four, because fixing one makes the family look handled.
+- **A GATE'S COMMENT CREDITED IT WITH A PROPERTY IT DID NOT HAVE, written by me
+  this round and caught by the advisor before it landed.** `mod.rs`'s scope
+  gate gained `assert_eq!(count-with-scopes, PROVIDERS.len())` with a comment
+  saying it catches what `empty.is_empty()` cannot, "otherwise emptying
+  `PROVIDERS` satisfies both". On an empty table that assertion is `0 == 0` —
+  the same predicate. What actually catches an emptied `PROVIDERS` is the
+  pre-existing `checked >= 5` floor, verified by emptying the const and running
+  the gate ALONE (red, and it is the only assertion in it that can fire).
+  Removed in `f8a27e21` with the reasoning left in place.
 - **AN ASSERTION THAT PASSED FOR THE WRONG REASON, caught only by mutating it.**
   `apex secret use account.microsoft.local msgraph.file.read '12319191!11919'`
   exits non-zero, so "a consumer OneDrive id is refused" read green — but the
@@ -411,18 +435,20 @@ Round 3, on task/p2-f-3 (pushed):
   (round 27), Google and Microsoft sign in and renew (round 28), and the
   status line was corrected in `eeaf08ac`.
 - ~~**A token stored for Google or Microsoft can be spent on NOTHING**~~
-  **HALF DONE, round 30.** Google can now be spent: `gdrive.file.read` exists
-  (`9f8d2468`) and `files.read` names it (`bdd9b51f`). **Microsoft still
-  cannot** — no `msgraph` transport, `GRAPH_SCOPES` still empty, and
-  `apex account add` still says so for that provider. What a Google token
+  **DONE, round 31.** Google went first (`9f8d2468` + `bdd9b51f`, round 30);
+  Microsoft followed (`25ce55ec` + `0ae35a7c` + `f6643031`, round 31). **No
+  provider in `PROVIDERS` is now without a transport**, which is asserted as
+  the positive claim in both crates rather than looped over. The narrowness
+  below is still true of Google and is Google's; What a Google token
   reaches is narrower than "your Drive" and the narrowness is Google's:
   `drive.file` sees only files this OAuth client created or the user picked, so
   on a Drive APEX has never written to **every file id answers 404** — the
   scope working, not the transport failing. `files.write` is what makes the
   first file readable and it needs `/upload/drive/v3/files`, a different path
   from the stored `/drive/v3`.
-- **A SUCCESSFUL `gdrive.file.read` through the socket cannot be measured
-  against a double, by construction — do not treat this as a gap to close.**
+- **A SUCCESSFUL `gdrive.file.read` OR `msgraph.file.read` through the socket
+  cannot be measured against a double, by construction — do not treat this as
+  a gap to close.** (msgraph joined this in round 31, same reason, same pin.)
   The host pin refuses a credential on `127.0.0.1`, and a credential on
   `www.googleapis.com` would reach Google. So criterion 2 for gdrive is
   daemon-direct (the 11 in-process tests) plus, through the socket, the grant,
@@ -454,6 +480,14 @@ is the known apex-os "suites interfere in a sequential loop" family; the
 socket staleness probe races another suite's `/tmp` socket. Re-run it
 alone before believing it.
 
+## NOTE — card/dispatch mismatch, RESOLVED by round 31's dispatch
+Round 31's dispatch named **P2-016** as this unit's, so the `items:` line at the
+top now carries it and the queue question below is settled. The warning stands
+and is repeated in NEXT: P2-016's evidence belongs to unit
+`p2-016-multiuser-2` (landed 2026-09-12 as merge 5eca2402) and is 8,724 bytes.
+set-status.py REPLACES. Read it before writing it.
+
+--- the original note, kept for the record ---
 ## NOTE — card/dispatch mismatch, unresolved on purpose
 Round 2's dispatch also named **P2-016**, whose evidence belongs to unit
 `p2-016-multiuser-2` (landed 2026-09-12 as merge 5eca2402). Rounds 2 and 3 did
