@@ -5623,7 +5623,73 @@ tasks:
     that paints nothing but never exits; the virtual console remains the route for those. That narrowness is
     deliberate — a heuristic wide enough to catch them could put a working machine into the rescue session. STILL
     OPEN on this item: nothing else; the rest of p2-f's queue is P2-017's SigV4 signer and device-code flows,
-    P2-019's transport, and a real boot.
+    P2-019's transport, and a real boot. ROUND 29 (2026-09-18), on task/p2-f-4 as 653a6d5d and fb884d8f, PUSHED,
+    NOT yet merged. CRITERION 2 IS NO LONGER STRUCTURAL, which supersedes both statements above that say it is.
+    Every command in menu.xml is now READ OUT OF THE FILE and RUN from inside the session, so a remedy renamed in
+    the menu cannot go on being tested in its old spelling. Each runs under env -i with the environment the
+    compositor handed a client its OWN autostart started: the fixture terminal dumps env -0 before it writes its
+    marker, so a marker implies a complete dump, and the wrapped entries go through apex-safe-graphics-terminal —
+    the file the menu actually invokes, which had no live coverage at all — dispatching to a fixture under its
+    foot convention. MEASURED ON THE L16: apex recover status rc=1 in-session and rc=0 outside it from the same
+    binary, which is the remedy WORKING (recover.rs returns 1 when a component needs attention), so accepting only
+    0 is how a recovery suite comes to be green on healthy hardware alone; apex doctor rc=0, 17 lines;
+    apex-safe-graphics diagnose writes a bundle whose compositor.txt names THIS session's WAYLAND_DISPLAY and
+    XDG_CURRENT_DESKTOP=labwc, so the bundle describes the recovery session rather than the one that broke; thunar
+    starts as a client of that compositor and is still up at six seconds. NOT RUN, AND EACH IS A DIFFERENT ANSWER
+    FROM BROKEN: sudo apex rollback execs bootc rollback on the machine running the suite, so its verb is asked
+    for --help, which clap answers during parsing, and sudo and pkexec tripwires sit on the PATH the compositor
+    hands its clients so that "we did not run it" is an assertion rather than a claim; nmtui's full-screen
+    interface needs a terminal and driving it means driving NetworkManager's saved connections — and the finding
+    that makes the menu's wrapper load-bearing is measured instead: nmtui with NO terminal exits ZERO having drawn
+    nothing, so run-it-and-check-the-status would have reported the network remedy healthy on a session where it
+    never painted; labwc's Exit action is not a command and running it would end the session the other assertions
+    are standing in. THE GRAPHICAL REMEDY HAS A NEGATIVE CONTROL THAT RUNS EVERY TIME: the same launch pointed at
+    a socket that does not exist must NOT survive, or "still up after six seconds" is a number anything would
+    score. Before it starts at all a gate requires the client environment to carry a DISPLAY that is not the
+    developer's — labwc runs an XWayland of its own and hands its clients a DISPLAY, so "no DISPLAY" was the wrong
+    check — and NO session bus address, because a GUI application on a bus that already has an instance of it
+    opens no window: it hands its arguments to that instance and the window appears on the desktop of whoever owns
+    the bus. The suite now clears DBUS_SESSION_BUS_ADDRESS for that reason and runs the client under
+    dbus-run-session. A REAL DEFECT FOUND BY RUNNING THE SESSION RATHER THAN READING IT: the shipped recovery
+    rc.xml carried a theme block with an EMPTY name element, which labwc refuses with "[ERROR] Empty string is not
+    allowed for name.theme. Ignoring." on EVERY start — on the one session whose entire job is to look like it is
+    working on a machine that is not. Fixed by omitting the element, which is what actually asks for the built-in
+    theme. The suite now requires the shipped configuration to put NOTHING on the compositor's error channel,
+    snapshotted at startup so nothing a client does later can land in it, WITH A CONTROL, because a clean log
+    proves nothing unless this build writes errors there at all: the same session started over a menu naming
+    ApexNoSuchActionExists must complain, and labwc does (action.c, "Invalid action"). That control is what turns
+    menu.xml's seven entries from "well-formed XML" into "actions labwc will perform" — xmllint and labwc do not
+    agree automatically. ALSO FIXED IN THE SAME FILE: five printf-into-grep-q sites. Under set -o pipefail grep
+    exits on the first match and the writer takes SIGPIPE, so the pipeline returns 141 ON A MATCH, and one of the
+    five was the NEGATIVE assertion that the recovery session does not start quickshell — it would have reported
+    clean at precisely the moment it did. Reproduced both ways: against a 200,000-line input the old form returns
+    141 and MISSES a token that is present; against a 40-line one it detects it. The shipped files are small, so
+    this was latent here rather than live, and the fixture's size was the only thing deciding it.
+    tests/test-apex-safe-graphics.sh 59 -> 86 passed, 0 failed, 0 skipped. FOURTEEN MUTATIONS, every one red,
+    every one restored byte-identical with plain cp and git diff --exit-code silent afterwards: the wrapper's foot
+    branch gaining a -e (4 red); XDG_CURRENT_DESKTOP dropped from the session (2); GALLIUM_DRIVER removed from
+    BOTH the script and the environment file (1 — removing it from only one leaves the suite green, which is the
+    documented redundancy, and removing WLR_RENDERER from both stops the compositor starting at all, so the
+    surgical mutation is the one on GALLIUM); menu.xml naming "apex doctorr" (1, and the structural grep still
+    passed because "apex doctorr" contains "apex doctor", which is why the live read of the menu is worth having);
+    quickshell added to the shipped autostart (1); the diagnose bundle losing WAYLAND_DISPLAY (1); the thunar
+    control pointed at the real socket (1); the GUI isolation gate forced to judge the environment unsafe (2, and
+    thunar was NOT launched); DBUS_SESSION_BUS_ADDRESS left inherited, which is the real trigger and was only run
+    after the previous mutation had proved the gate refuses to launch (2, same, no thunar process anywhere
+    afterwards); a sudo call added in-session (1); apex recover status required to exit 0 (1); one menu entry
+    escaping the verdict counter (1); the empty theme name returned (1); the control menu's action made a valid
+    one (1). Plus one non-defect run with every presence check answering "absent", which is the shape a CI runner
+    has: 76 passed / 0 failed / 5 skipped, so no skip cascades into a failure. Gates: check-shellcheck-coverage
+    165 discovered / 0 known-failing / 0 newly failing, check-suites-run-in-ci 75 suites / 71 run by CI / 4 exempt
+    / 0 unrun and undeclared (no fifth exemption), shellcheck -S warning clean on the suite and both shipped
+    helpers, xmllint clean on both XML files. STILL NOT PROVEN, STATED PLAINLY: no image was built and nothing
+    here has run on a real boot; THE MENU IS NEVER OPENED — right-click, ShowMenu and Execute are not driven,
+    because that needs synthetic pointer input this suite does not inject, so what is proved is that every command
+    the menu would run does run, and that labwc accepts every action the menu names; sudo apex rollback is
+    deliberately never executed; nmtui's interface is never drawn; labwc's Exit is never taken. In CI the runner
+    has labwc but no apex, no thunar and no nmtui, so five of these become skips there and the live proof is the
+    L16's. THE SESSION WATCHDOG WAS NOT TOUCHED: round 28 left it narrow on purpose and nothing learned this round
+    argues for widening it.
 - id: P2-019
   title: Design APEX Fleet / managed-device architecture
   priority: P2
@@ -5825,7 +5891,60 @@ tasks:
     recovery path failing before it works. True of the TPM clear and of the PCR 7-bound control volume, which both
     refuse the TPM unlock and then open with the recovery key in the same boot. NOT true of S3 - scenario_luks_s3
     contains no reference to a recovery key at all; its negative arm is the same run with qemu's S3 support off,
-    and what it proves is that the volume stays open across the suspend. docs/boot-v2.md now says so.
+    and what it proves is that the volume stays open across the suspend. docs/boot-v2.md now says so. ROUND 29
+    (2026-09-18), on task/later-2 as 18a015ec, PUSHED, NOT yet merged. THE PCR 0 LIMIT IS GONE - ON AN EMULATED
+    TPM, and that qualifier belongs in the same sentence as the result. New scenario luks-firmware-code, 22 passed
+    / 0 failed / 1 could-not-run, exit 0, container later-r7-fwcode State.ExitCode 0 and State.FinishedAt checked,
+    and the 22 ok lines in the log counted against the summary line. Two Fedora OVMF builds differing in edk2
+    revision and nothing else - edk2-d46aa46c8361 (20250812, supplied through the new $APEX_BOOTLAB_FW_ALT) and
+    edk2-2970e5699ba6 (20260812, the lab image's) - both Secure Boot, both 4 MB, all three boots from a fresh copy
+    of ONE varstore template. PCR 0 moved 0FA5AE84ABAB76C8D4752C359795F141212F883176F9ACFFF0E77743EBF0643F ->
+    0E33803144670784CA0F2EF208108CC8DEA8D23D2A06FE7D7AF5D1109B75BFFB; PCR 11 stayed
+    22C006FB6217982C06A57DFDDBEEA0419F54200D9C3AF216143D9BE62A1E6B3A throughout; APEX's signed PCR 11 policy still
+    unlocked; a control volume bound BY VALUE to PCR 0 refused in that same boot; and the 512-byte plaintext
+    marker written under the OLD firmware was read back under the NEW one. AN UNPLANNED FINDING WORTH THE RUN: PCR
+    7 is IDENTICAL across the two revisions (933DE452FF745C293B21C2F5D2DC9473751040495200B46A0EF345B42D948C31), so
+    an edk2 version change moves the code register and leaves the Secure Boot policy register alone; the scenario
+    reports PCR 7 and deliberately asserts nothing about it, because that is a fact about edk2 and not about APEX.
+    THE SUPPLIED FIRMWARE IS NOT TRUSTED: its revision is read out of the binary (grep -a for the rpm build path,
+    no binutils in the lab image) and it must REFUSE AN UNSIGNED UKI before anything rests on it - without that, a
+    build with Secure Boot compiled out would move PCR 0 for the obvious reason and the run would report that a
+    firmware update had not broken the policy, about a firmware that had stopped checking signatures. That trap is
+    real and sits in this unit's own scratch dir as a non-secboot build named OVMF_CODE_4M.secboot.fd. The honest
+    boundary is recorded IN THE RUN as a could-not-run: an OVMF binary swap is not a vendor UEFI capsule - no
+    microcode, no ACPI tables, no option ROMs, no management-engine firmware. SECOND NEW SCENARIO, luks-no-tpm, 16
+    passed / 0 failed / 1 could-not-run, container later-r7-notpm ExitCode 0: one volume booted twice with the TPM
+    DEVICE as the only difference. With it, tpm-unlock=SUCCESS and plaintext-marker=written. Without it,
+    tpm-device=absent, systemd says "No TPM2 hardware discovered and EFI firmware does not see it either, falling
+    back to traditional unlocking", tpm-unlock=REFUSED, recovery-unlock=SUCCESS, and recovery-marker=found - the
+    marker written through the TPM path comes back through the recovery key, so it is the same disk and not merely
+    an opened keyslot. The qemu exit status is ASSERTED, because a guest hanging on a TPM that will never answer
+    strands the user as surely as one that refuses. Its could-not-run names what it does not model: a machine that
+    NEVER had a TPM could not carry a systemd-tpm2 token at all and never reaches either boot. A SECOND OVERCLAIM
+    FROM ROUND 28 IS WITHDRAWN, found the same way round 28 found its own: round 28 said the PCR 7-bound control
+    volume refuses the TPM unlock and then opens with the recovery key in the same boot. It does not. The control
+    carries no recovery key by construction, guest-luks-probe.sh's control branch has no recovery path, and grep
+    finds no recovery-unlock line in any serial log of any firmware-change boot (r3-luks-firmware-change,
+    r7-fwcode). TWO scenarios show refusal followed by recovery in one boot: luks-tpm-clear and the new
+    luks-no-tpm. The firmware scenarios show a refusal and no recovery, on purpose. docs/boot-v2.md now says so
+    and carries the new deliverable: a table of L-001's five acceptance words against the scenario testing each,
+    with "every row is swtpm" in front of it rather than in a footnote and no row at all for "Real TPM"; the
+    mechanisms silicon has that swtpm does not (Shutdown/Startup(STATE) across a real sleep, a clear under
+    physical presence from firmware setup, PCR 0 from a capsule carrying microcode and ACPI rather than one binary
+    swapped for another, dictionary-attack lockout, fTPM resets that are a clear nobody asked for, and laptops
+    offering only s2idle); and a numbered five-run hardware procedure with what to record at each step and four
+    prerequisites, including that PCR 11 must not be 64 zeros before starting, which on a stock APEX install it
+    IS. tests/test-boot-v2.sh 78 -> 105 passed / 0 failed, including a set comparison in BOTH directions between
+    the scenario_* functions and --list, because a scenario written and never registered is skipped by a default
+    run that then reports green. Nine mutants, each caught by the assertion aimed at it; sources restored with
+    plain cp and confirmed byte-identical by sha256. ALL FOUR GATES GREEN: shellcheck 165 discovered / 0
+    known-failing / 0 newly failing; suites 75 / 71 in CI / 4 exempt; doc verbs 250 valid / 8 deliberate / 0 not a
+    command, and 191 documented / 114 declared undocumented / 0 undocumented and undeclared / 0 stale;
+    test-boot-v2 105 / 0. All containers removed, no qemu process left. WHAT IS STILL NOT DONE IS STILL THE WHOLE
+    OF THE ACCEPTANCE WORD "REAL": every measurement in every round of this unit used swtpm in a VM. NO SILICON
+    TPM HAS BEEN THROUGH AN ENROL-AND-RECOVER CYCLE, the L16's TPM is off-limits to this program, and L-002 and
+    L-003 stay blocked behind that per state/queue.json. What a VM can qualify is now qualified; the rest is
+    written down as a procedure for whoever has a machine they are willing to clear.
 - id: L-002
   title: Enable LUKS2 by default
   priority: Later
@@ -5838,6 +5957,26 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    ROUND 29 (2026-09-18) - STATUS UNCHANGED, still blocked; this records what exists toward it so the next reader
+    does not re-derive it. THE ACCEPTANCE IS 'does not strand users across qualified hardware/recovery cases', and
+    the case that had no scenario at all now has one: apex-os task/later-2 adds luks-no-tpm to
+    files/scripts/boot-v2/run-scenarios, 16 passed / 0 failed / 1 could-not-run, container later-r7-notpm ExitCode
+    0. One volume booted twice with the TPM DEVICE as the only difference: with it, tpm-unlock=SUCCESS and
+    plaintext-marker=written; without it, tpm-device=absent, tpm-unlock=REFUSED, recovery-unlock=SUCCESS and
+    recovery-marker=found, so the recovery key returns the same plaintext the TPM path wrote. The qemu exit status
+    is asserted, because a guest that hangs on a missing TPM strands the user as surely as one that refuses. THE
+    TPM IS EMULATED (swtpm), and the run does not model a machine that NEVER had a TPM - such a volume could not
+    carry a systemd-tpm2 token at all. THREE THINGS STILL BLOCK THIS, none of them fixed by that scenario. (1)
+    L-001's acceptance word 'Real' is unmet: no silicon TPM has done an enrol-and-recover cycle, and
+    state/queue.json makes L-002 wait on it. (2) THE INSTALLER CANNOT ENCRYPT AT ALL - re-verified round 28: every
+    crypto_LUKS branch in installer/apex-install is a refusal to overwrite an existing header (:920-925), never a
+    path that creates one, and the same at apex-installer-gui:170. There is no in-place path either. (3) The
+    supporting details are unresolved: the initramfs keymap is always 'us' (Containerfile.core:2104-2107),
+    plymouth's message() is a no-op (apex-os.script:230), and cryptsetup is an unpinned transitive dependency
+    asserted nowhere. Two SHIPPED files already assert LUKS2+TPM2 as settled fact (apex-session-select:18-22 and
+    its sudoers :9-12), which is a defect regardless of when this lands. docs/boot-v2.md carries the five-run
+    hardware procedure that would satisfy (1).
 - id: L-003
   title: Enable TPM auto-unlock by default where safe
   priority: Later
@@ -5851,6 +5990,25 @@ tasks:
   gates:
   - tests
   - stop_slop
+  evidence: >-
+    ROUND 29 (2026-09-18), STATUS UNCHANGED, still blocked; recorded so the reason lives in the item rather than
+    only in an agent card. THE ACCEPTANCE IS 'Measured boot + TPM unlock + recovery path validated', and all three
+    are validated in a VM against swtpm. apex-os files/scripts/boot-v2/run-scenarios covers measured boot and TPM
+    unlock (luks-tpm), a TPM clear with recovery in the same boot (luks-tpm-clear, 20/0), both halves of a
+    firmware change (luks-firmware-change moves PCR 7, 18/0/1; luks-firmware-code moves PCR 0, 22/0/1, new this
+    round), suspend and resume (luks-s3, 17/0 on edk2-20250812), and a missing TPM with recovery in the same boot
+    (luks-no-tpm, 16/0/1, new this round). IT CANNOT BE TURNED ON BY DEFAULT FOR THE SHIPPED IMAGE, and the
+    measurement that says so is not about policy: PCR 11 IS ALL ZEROS ON THE L16 (measured 2026-09-13, read-only).
+    The shipped image boots GRUB through bootupd and only sd-stub extends PCR 11, so the signed PCR 11 policy that
+    boot-v2 chose has nothing to bind to on a default install. 'Where safe' is therefore nowhere until a machine
+    boots the UKI and sd-stub path, which is the human enrolment procedure in docs/boot-v2.md. Depends on L-001,
+    where no silicon TPM has done an enrol-and-recover cycle, and on L-002, where the installer cannot encrypt a
+    disk in the first place. NOTE FOR WHOEVER RECORDS AGAINST THIS ITEM NEXT: ROADMAP/set-status.py could not
+    write evidence to the LAST task in roadmap.yaml at all. Its body regex ran to the next '- id: ' line, which
+    for the final task means it swallowed the global_agent_rules block and produced a file that does not parse;
+    the guard refused to write, so nothing was corrupted and nothing could be recorded. Fixed this round to
+    capture the run of indented lines instead, verified by checking that both expressions capture identical bodies
+    for all 127 other tasks.
 global_agent_rules:
 - Inspect the current APEX-OS and APEX Shell source before changing anything.
 - Verify an existing implementation before reimplementing it.

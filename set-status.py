@@ -76,7 +76,18 @@ def main():
         sys.exit("refusing to store empty evidence")
 
     src = open(PATH).read()
-    m = re.search(rf"^- id: {re.escape(tid)}\n((?:(?!^- id: ).*\n)*)", src, re.M)
+    # A task's body is the run of INDENTED lines after its `- id:` line.
+    #
+    # This used to read "everything up to the next `- id: `", which is the same
+    # thing for 127 of the 128 tasks and wrong for the last one: L-003 is the
+    # final task, so its body swallowed the whole `global_agent_rules:` block
+    # that follows it, and the rendered evidence landed after those rules at
+    # task indentation. The result did not parse, so the guard below refused to
+    # write and the last item in the file could not be given evidence at all —
+    # a refusal, not a corruption, but still a task nobody could record against.
+    # Checked rather than assumed: the two expressions capture identical bodies
+    # for every task except L-003.
+    m = re.search(rf"^- id: {re.escape(tid)}\n((?:[ \t].*\n)*)", src, re.M)
     if not m:
         sys.exit(f"{tid} not found")
     body = m.group(1)
