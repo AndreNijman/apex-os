@@ -300,10 +300,13 @@ unset DBUS_SESSION_BUS_PID
 
 WORK="$(mktemp -d)"
 COMP_PID=""
+CONTROL_PID=""
 cleanup() {
     # By pid, always. `pkill labwc` would kill the developer's session.
     [ -n "$COMP_PID" ] && kill "$COMP_PID" 2>/dev/null
     [ -n "$COMP_PID" ] && wait "$COMP_PID" 2>/dev/null
+    [ -n "$CONTROL_PID" ] && kill "$CONTROL_PID" 2>/dev/null
+    [ -n "$CONTROL_PID" ] && wait "$CONTROL_PID" 2>/dev/null
     rm -rf "$WORK"
 }
 trap cleanup EXIT INT TERM
@@ -460,6 +463,67 @@ done
 kill -0 "$COMP_PID" 2>/dev/null \
     && ok "the compositor is still up after the user's autostart would have exited it" \
     || bad "the compositor is still up"
+
+# ── the compositor's own verdict on the recovery configuration ───────────────
+# xmllint says these files are well-formed XML. labwc is the one that decides
+# whether they are a CONFIGURATION, and it does not agree automatically: it
+# refuses an empty theme name, and it refuses a menu <action> whose name is not
+# one of its own — both with an `[ERROR]` line and then carrying on with a
+# default. That is the failure mode this whole session exists to avoid being:
+# up, apparently fine, and not doing what the file says.
+#
+# So the shipped configuration must produce NOTHING on the error channel. The
+# snapshot is taken here rather than at the end, so nothing a client does later
+# can land in it. A future environment-specific error would show as a failure
+# with the line printed, which is a deliberate one-line decision to allowlist
+# rather than a silence to discover from a screenshot.
+COMP_STARTUP_LOG="${WORK}/comp-startup.log"
+cp "${WORK}/comp.log" "$COMP_STARTUP_LOG"
+startup_errors="$(grep -n '\[ERROR\]' "$COMP_STARTUP_LOG" 2>/dev/null)"
+[ -z "$startup_errors" ] \
+    && ok "the recovery session starts with nothing on its error channel" \
+    || bad "the recovery session starts with nothing on its error channel" \
+           "$startup_errors"
+
+# THE CONTROL, and it is what makes the assertion above mean anything. A log
+# with no errors in it proves nothing unless this labwc writes errors there at
+# all — a build that logged elsewhere, or a redirection that lost stderr, would
+# make "clean" the answer to every question. The same session over a menu
+# carrying an action labwc does not have must therefore complain.
+#
+# `/bin/true` as the terminal, deliberately: the fixture terminal would start a
+# second time and overwrite the environment dump the remedies below replay.
+control_cfg="${WORK}/control-config"
+mkdir -p "$control_cfg"
+cp "${CONFIG}/rc.xml" "${CONFIG}/autostart" "${CONFIG}/environment" "$control_cfg/"
+cat > "${control_cfg}/menu.xml" <<'BADMENU'
+<?xml version="1.0"?>
+<openbox_menu>
+  <menu id="root-menu" label="control">
+    <item label="an action labwc does not have">
+      <action name="ApexNoSuchActionExists"/>
+    </item>
+  </menu>
+</openbox_menu>
+BADMENU
+control_log="${WORK}/comp-control.log"
+APEX_SAFE_GRAPHICS_TERMINAL=/bin/true \
+APEX_SAFE_GRAPHICS_CONFIG="$control_cfg" "$SESSION" > "$control_log" 2>&1 &
+CONTROL_PID=$!
+for _ in $(seq 1 60); do
+    grep -q '\[ERROR\]' "$control_log" 2>/dev/null && break
+    kill -0 "$CONTROL_PID" 2>/dev/null || break
+    sleep 0.2
+done
+kill "$CONTROL_PID" 2>/dev/null
+wait "$CONTROL_PID" 2>/dev/null
+CONTROL_PID=""
+if grep -q '\[ERROR\]' "$control_log" 2>/dev/null; then
+    ok "a menu entry naming an action labwc does not have IS reported, so the clean log above is a measurement"
+else
+    bad "a menu entry naming an action labwc does not have is reported" \
+        "the control produced no error either, so this compositor's error channel is not being read: $(tail -3 "$control_log")"
+fi
 
 # ── criterion 2, live: the remedies are RUN from inside the session ──────────
 section "the remedies run from inside the session"
