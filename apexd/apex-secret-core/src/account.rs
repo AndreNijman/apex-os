@@ -324,6 +324,53 @@ pub const CLOUDFLARE_OAUTH: OAuth = OAuth {
 /// Every authorisation server this build knows how to refresh against.
 pub const OAUTH: &[&OAuth] = &[&GOOGLE_OAUTH, &MICROSOFT_OAUTH, &CLOUDFLARE_OAUTH];
 
+/// The endings that mark a stored name as a refresh credential.
+///
+/// Two, because two conventions already exist on disk and neither may be
+/// renamed: [`AccountRef::refresh_service`] appends `.refresh`, and
+/// `apex cloudflare connect` — which invented the split-host idea this is all
+/// carried over from — has been filing `cloudflare-refresh` since before there
+/// were accounts. Renaming either would orphan a credential somebody is
+/// holding, and the whole value of a refresh token is that it was stored once
+/// and has not had to be typed again.
+pub const REFRESH_SUFFIXES: &[&str] = &[".refresh", "-refresh"];
+
+/// The operation that renews an access token with the refresh token beside it.
+///
+/// Named here, in the crate the CLI and the daemon both link, rather than in
+/// either of them. `apex-secretd`'s `oauth` provider declares its one
+/// operation with this constant and `apex cloudflare refresh` asks for it with
+/// this constant, so the two cannot drift into a request for an operation no
+/// provider offers — the exact defect the cross-crate scope gate in
+/// `apex-secretd::providers` was written for.
+pub const REFRESH_OPERATION: &str = "oauth.token.refresh";
+
+/// Which stored credential a refresh credential renews.
+///
+/// [`AccountRef::refresh_service`]'s inverse, generalised to cover the CLI's
+/// older spelling as well, and the daemon's only way to answer the question:
+/// `bind` never sees a value and must not take a name from the caller, so the
+/// one thing it has is [`crate::store::ServiceInfo::service`] — the name the
+/// request is already running against.
+///
+/// Deriving the sibling from that name is safe because it does not widen
+/// anything. The framework has already matched a grant on *this* credential,
+/// the name it produces still has to name a credential the same uid stored,
+/// and the value written is the authorisation server's rather than the
+/// caller's. What it cannot do is reach another user's store or invent a host
+/// — the first because the uid comes from `SO_PEERCRED`, the second because
+/// the record the value is written into is the one that was already there.
+///
+/// `None` when the name carries neither suffix, which means it is not a
+/// refresh credential at all and there is nothing to renew.
+pub fn renewed_service(refresh_service: &str) -> Option<String> {
+    REFRESH_SUFFIXES
+        .iter()
+        .find_map(|suffix| refresh_service.strip_suffix(suffix))
+        .filter(|stem| !stem.is_empty())
+        .map(str::to_string)
+}
+
 /// The authorisation server a credential pinned to `host` belongs to.
 ///
 /// The daemon's only way to find a token endpoint. It takes the host the
@@ -1492,5 +1539,51 @@ mod tests {
         // `offline_access` is what makes Microsoft return a refresh token at
         // all. Without it the flow this table exists to serve cannot run.
         assert!(MICROSOFT_OAUTH.scopes.contains(&"offline_access"));
+    }
+
+    #[test]
+    fn the_name_a_refresh_credential_renews_is_its_own_with_the_suffix_taken_off() {
+        // `AccountRef::refresh_service`'s inverse. It is the daemon's ONLY way
+        // to know what an RFC 6749 §6 refresh is renewing — `bind` may not take
+        // a name from the caller — so a round trip is the property, not an
+        // example.
+        for account in ["account.google.work", "account.nextcloud.home"] {
+            let refresh = format!("{account}.refresh");
+            assert_eq!(renewed_service(&refresh).as_deref(), Some(account));
+        }
+        // The CLI's older spelling, which predates accounts and cannot be
+        // renamed without orphaning a stored token.
+        assert_eq!(renewed_service("cloudflare-refresh").as_deref(), Some("cloudflare"));
+
+        // A name that carries neither suffix renews nothing. Guessing one
+        // would be inventing a credential to overwrite.
+        for plain in ["cloudflare", "account.google.work", "refresh", ""] {
+            assert_eq!(renewed_service(plain), None, "'{plain}' named something to renew");
+        }
+        // ...and neither does a name that is ONLY a suffix. The stem would be
+        // empty, and an empty service name is not a credential — without the
+        // filter these would name `""` and a replace of `""` would be checked
+        // against the store rather than refused here.
+        for bare in [".refresh", "-refresh"] {
+            assert_eq!(renewed_service(bare), None, "'{bare}' named something to renew");
+        }
+
+        // Every suffix in the table works, so adding one cannot half-land.
+        for suffix in REFRESH_SUFFIXES {
+            assert_eq!(renewed_service(&format!("demo{suffix}")).as_deref(), Some("demo"));
+        }
+    }
+
+    #[test]
+    fn the_operation_that_renews_a_token_is_named_once() {
+        // Spelled in this crate because `apex` (the CLI, which asks for it) and
+        // `apex-secretd` (the provider, which offers it) both link this one and
+        // neither links the other. A test in `apex-secretd::providers` holds
+        // the registry to it.
+        assert_eq!(REFRESH_OPERATION, "oauth.token.refresh");
+        // A §13.2 operation id: `<provider>.<noun>.<verb>`, lowercase.
+        let parts: Vec<&str> = REFRESH_OPERATION.split('.').collect();
+        assert_eq!(parts.len(), 3, "{REFRESH_OPERATION}");
+        assert_eq!(parts[0], "oauth", "the provider half names the provider");
     }
 }
