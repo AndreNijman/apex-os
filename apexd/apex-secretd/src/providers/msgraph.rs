@@ -112,6 +112,18 @@
 //! loopback host reaches the table through a `#[cfg(test)]` constructor and
 //! through nothing that ships.
 //!
+//! # A known defect this provider SHARES and does not fix
+//!
+//! Neither [`MsgraphProvider::perform`] nor [`download_outcome`] reads curl's
+//! exit code on a 2xx, and neither does [`crate::providers::gdrive`]. Measured
+//! rather than reasoned: against a server answering `Content-Length: 4000000`
+//! with `max-filesize = 3145728`, **curl exits 63 and its `write-out` still
+//! runs**, so stdout is exactly `"\n200"` — a truncated read arrives as
+//! `code: 0` with an empty body, which is an empty file reported as a
+//! successful one. It is recorded in this unit's agent card rather than
+//! patched here, because `gdrive`, `s3` and `oauth` have the same shape and
+//! fixing one of four makes the family look handled.
+//!
 //! `printable`, `quoted`, `one_line` and `split_status` are a copy of the ones
 //! in `gdrive`, `s3` and `oauth`, which are already copies of each other. Four
 //! copies of eight lines is the house style here and a fifth is not the round
