@@ -1967,3 +1967,54 @@ length was checked *after* `fs::read`, which on a character device grows a `Vec`
 until the daemon dies. That last one's mutation only went red once the assertion
 was strengthened — a redundant `take` guard had been hiding removal of the
 load-bearing one.
+
+### Round 30, third landing pass — FOUND 14 closed, and one item went backwards
+
+`task/p2-b-round30` landed on apex-shell as **`8eccbfa`** (four commits, 2,073
+insertions over 8 files; the apex-os branch of the same name was pushed and
+empty, which this unit needs anyway because apex-shell's CI matches on branch
+name). On the merged tip: suites 66/66/0 (was 64/64), the structure-check
+REQUIRED list 112 paths / 0 missing (was 106), `ci.yml` parses, and
+`check-quickshell-a11y-cause.sh` re-run by the integrator at **14/0/0**.
+
+**FOUND 14 no longer ends in "upstream".** The empty accessibility tree is a
+three-way interaction in which no single party is obviously wrong: qtbase
+registers `qAccessibleCleanup` through `qAddPostRoutine` and it calls
+`qAccessibleFactories()->clear()`, post routines run from `~QCoreApplication`;
+qtdeclarative installs `qQuickAccessibleFactory` from a `Q_CONSTRUCTOR_FUNCTION`,
+which is once per **library load** and never again; and quickshell builds a
+`QCoreApplication` to parse its command line and deletes it on the line before
+`new QGuiApplication(...)`. So the first app object's destructor empties Qt's
+factory list permanently.
+
+Measured five ways offscreen, then **confirmed in the real process**: an
+`LD_PRELOAD` interposing `QGuiApplication::exec()` took five windows from
+all-null-rooted to all-non-null-rooted and the bus tree from **1 node to 8**, in
+the same process with no restart. Reproduced on a second machine —
+`check-quickshell-a11y-cause.sh` is 14/0/0 on the Arch runner at Qt 6.11.2, so
+the cause is neither a Fedora fact nor a 6.10.3 fact. The new suite is a **pin**:
+mode A must stay null, so it goes red the day upstream fixes this.
+
+It does **not** claim the shell is accessible. The shim is test-only and ships
+nowhere; a real screen reader still gets one node. The action that would change
+that is one macro in qtdeclarative (`Q_COREAPP_STARTUP_FUNCTION`, measured
+working as mode D) and **nobody has filed it** — both agents were told not to,
+because filing on a public tracker is outward-facing and Andre's call.
+
+**P0-015: `done` → `partial`.** The round's one status change, and it is a
+regression: 91 → 90 done. p2-b's mutation runs hit a 2-in-9 flake and named it;
+the integrator verified it against the source before demoting rather than taking
+it on report. In `LockedHintService.qml`, `_succeeded()` ends with `_pump()` and
+`_failed()` does not — so a `setLocked()` arriving *while a chain is in flight*
+only updates `_desired`, and if that chain then fails the newer request is
+dropped and never retried. The comment in `_failed()` does not cover this: it
+argues against retrying **the step that just failed**, which is a different
+thing from acting on a **newer** request that was never tried at all.
+`apex-agentd` polls `LockedHint`, so a dropped lock is agents continuing to run
+through a lock the user engaged — P0-015 criterion 1 verbatim.
+
+Demoting it put the `p0-014` unit back into READY automatically, which is the
+mechanism working as designed, and an agent is on the fix with the design
+tension stated up front: a naive re-pump from `_failed()` is exactly the call
+storm the `_busy` guard exists to prevent, so the fix has to separate the two
+cases in code and say why it cannot storm.

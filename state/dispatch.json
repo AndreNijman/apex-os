@@ -1,10 +1,10 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-19T03:15+08:00",
+  "updated": "2026-09-19T03:25+08:00",
   "_round": "Round 30. All four of round 29's agents were dead at the resume, every worktree clean with nothing unpushed, so the round was a landing round: four merges, zero unlanded left in either repo. Three agents re-dispatched fresh from cards (never by SendMessage); `later` retired because its remainder is hardware. Three slots deliberately free — one still held for the Android unit, two headroom. No new unit was invented to fill them: the READY list was empty and the COMPLETE section is exhaustive.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 bde4d96c -> 6b531503. Three merges, in order: c6bc990a (task/later-2, tip 0391b4ec, 741 insertions over 5 files), 7658fe1f (task/p2-b-round29, tip cb02019f, tests/lib/atspi.sh), 6b531503 (task/p2-f-4, tip 79027b51, 551 insertions over 2 files). Each merge --no-ff; check-no-conflict-markers.sh PASS after each; pushed once with --force-with-lease. FOURTH MERGE, later the same session: f40ffefe (task/p2-f-5, tip 933bbee1, 1,353 insertions over 7 files — the gdrive provider). Rust changed in this one, so the workspace was actually rebuilt on the merged tip: cargo test --locked --workspace --no-fail-fast 3299 passed / 0 failed / 2 ignored, clippy --workspace --all-targets -D warnings exit 0, tests/test-secret-broker.sh 84/0, and all four count gates unchanged. roadmap/v2.2 is now f40ffefe. FIFTH MERGE: da6fc0fb (task/p2-d-6, tip 044fa254, 1,836 insertions over 16 files — gap 5, the per-run browser CA bind, with route B deliberately not started). Re-run on that tip: cargo test --locked --workspace --no-fail-fast 3314 passed / 0 failed / 2 ignored across 56 targets, clippy exit 0, tests/test-apex-browser.sh 116/0, tests/test-secret-broker.sh 84/0 (re-run because the same tip now also carries gdrive), and all four count gates unchanged. roadmap/v2.2 is now da6fc0fb. THE WIRE VERSION MOVED TO 10 — see _decisions.",
-    "apex-shell": "roadmap/v2.2 379eef8 -> d5c781a. One merge: task/p2-b-round29 tip 5ae27c3, 2,013 insertions over 6 files. --no-ff DELIBERATELY: the branch was cut from 379eef8 and would have fast-forwarded, leaving no merge sha to cite in evidence.",
+    "apex-shell": "roadmap/v2.2 379eef8 -> d5c781a. One merge: task/p2-b-round29 tip 5ae27c3, 2,013 insertions over 6 files. --no-ff DELIBERATELY: the branch was cut from 379eef8 and would have fast-forwarded, leaving no merge sha to cite in evidence. SECOND MERGE: 8eccbfa (task/p2-b-round30, tip 20a1613, 2,073 insertions over 8 files — the FOUND 14 cause pin and the AT-SPI shim read-back). On that tip: suites 66/66/0 (was 64/64), structure-check REQUIRED 112 paths / 0 missing (was 106), ci.yml parses, and the integrator re-ran check-quickshell-a11y-cause.sh at 14/0/0. apex-shell roadmap/v2.2 is now 8eccbfa.",
     "verification": "unlanded.py roadmap/v2.2 against both repos after the pushes: 'nothing — every task branch's content is on the integration tip', both repos. bde4d96c (task/p2-d-5) was already an ancestor: it was merged mid-round-29 and had never been recorded against P2-008/009/012, which round 30 fixed."
   },
   "_status_recorded_this_round": {
@@ -12,14 +12,15 @@
     "L-001": "partial (unchanged) - merge c6bc990a. Unit closed to dispatch; the remainder is the five-run hardware procedure in docs/boot-v2.md.",
     "L-002": "blocked (unchanged) - merge c6bc990a; nothing on the item changed and nothing was re-verified.",
     "L-003": "blocked (unchanged) - merge c6bc990a; same.",
-    "P2-003": "partial (unchanged) - merges 7658fe1f (os) and d5c781a (shell). On the merged shell tip: 64 suites / 64 reachable / 0 exempt, and all 106 ci.yml structure-check REQUIRED paths exist, checked by extracting the list and stat-ing each.",
-    "P2-004": "partial (unchanged) - recorded explicitly as NOT ADVANCED. Round 29's p2-b work was entirely P2-003; the RTL 17/3/2 discriminator is untouched.",
+    "P2-003": "partial (unchanged) - merge 8eccbfa. FOUND 14 CLOSED: the empty accessibility tree has a named cause (qtbase clears the factory list from ~QCoreApplication; qtdeclarative installs its factory once per library load; quickshell deletes a QCoreApplication before constructing QGuiApplication), measured five ways offscreen, confirmed in the real process by LD_PRELOAD taking the bus tree from 1 node to 8, and reproduced on the Arch runner at Qt 6.11.2. Does NOT claim the shell is accessible - the shim is test-only.",
+    "P2-004": "partial (unchanged) - recorded again as NOT ADVANCED. The RTL discriminator is still 17/3/2 and was the only red CI step this round; it predates the branch.",
     "P2-018": "partial (unchanged) - merge 6b531503. Criterion 2 closed; the remaining gap named honestly - the menu is never OPENED, only every command it would run is run.",
     "P2-008": "partial (unchanged) - merge bde4d96c recorded for the first time.",
     "P2-009": "partial (unchanged) - merge bde4d96c recorded for the first time.",
     "P2-012": "partial (unchanged) - merge da6fc0fb. Gap 5 closed, route B not started, PROTOCOL_VERSION 10 taken and route B moved to 11. Unit closed to dispatch pending Andre's answer; both answers produce a dispatch.",
     "_no_status_advanced": "Deliberate. Counts stay 91 done / 35 partial / 2 blocked of 128. Every card said its items stay partial or blocked, and each says why in a sentence about the world rather than about effort.",
-    "P2-017": "partial (unchanged) - merge f40ffefe. The gdrive provider exists, so a Google token can be spent on something for the first time. Stays partial for reasons recorded rather than softened: no Google endpoint was contacted, the refresh question is unchanged and NOT superseded, the agentd forwarding path is not exercised for gdrive, and a successful read through the socket cannot be measured against a loopback double because the host pin refuses loopback — the price of the pin, not a gap."
+    "P2-017": "partial (unchanged) - merge f40ffefe. The gdrive provider exists, so a Google token can be spent on something for the first time. Stays partial for reasons recorded rather than softened: no Google endpoint was contacted, the refresh question is unchanged and NOT superseded, the agentd forwarding path is not exercised for gdrive, and a successful read through the socket cannot be measured against a loopback double because the host pin refuses loopback — the price of the pin, not a gap.",
+    "P0-015": "done -> PARTIAL. The round's one status REGRESSION and the only change to the counts: 91 -> 90 done, 35 -> 36 partial. Defect found by p2-b's mutation runs (2-in-9 flake) and verified against apex-shell 8eccbfa src/services/system/LockedHintService.qml lines 44-100 by the orchestrator before the demotion, not taken on report. _failed() clears _busy without re-pumping, so a setLocked() that arrived during the failing chain is dropped forever; apex-agentd polls LockedHint, so that is agents continuing through a lock the user engaged - criterion 1. Reopening it also put the p0-014 unit back into READY automatically, which is the mechanism working as designed, and an agent is on it."
   },
   "_deliberately_held": {
     "p2-d": "SUPERSEDED 2026-09-19 (round 30). The old text here said the hold was lifted and the unit was 'free to take 8 -> 9' — two rounds stale and wrong about the number. It took 9 in round 4 and 10 in round 30. The unit is now CLOSED TO DISPATCH pending Andre's answer; see queue.json _completed_units.p2-d.",
@@ -29,24 +30,6 @@
     "later": "CLOSED BY HAND 2026-09-19 (round 30) — see queue.json _completed_units. Landed as merge c6bc990a with 0 unlanded. Everything a VM can qualify is qualified; L-001's remaining acceptance word is 'Real' and both machines' TPMs are off-limits. The deliverable that replaces the dispatch is docs/boot-v2.md, 'The run somebody with hardware would have to do'. Re-open when a machine whose TPM somebody will clear exists."
   },
   "agents": [
-    {
-      "slug": "p2-b",
-      "items": [
-        "P2-003",
-        "P2-004"
-      ],
-      "repo": "both",
-      "worktree": "/var/tmp/apex-work/wt-p2-b4",
-      "branch": "task/p2-b-round30",
-      "second_worktree": "/var/tmp/apex-work/wt-p2-b4-sh",
-      "second_branch": "task/p2-b-round30",
-      "agent_id": "ae07dc61f913f92b2",
-      "dispatched": "2026-09-19T02:20+08:00",
-      "session": "round 30 orchestrator",
-      "queue_id": "p2-b",
-      "card": "ROADMAP/state/agents/p2-b.md",
-      "at_dispatch": "Fresh agent carrying the dead one's card; the NEXT it inherits is one experiment, not a survey. FOUND 14 — QQuickWindow::accessibleRoot() is null inside quickshell — currently ends in 'upstream' and should not. Everything is ruled out but one branch: the windows are top-level Qt::Window and QAccessible::isActive() is 1 in both processes (measured in gdb), so either qQuickAccessibleFactory is not in qAccessibleFactories() in this process or queryAccessibleInterface returns early on a class above QQuickWindow. The experiment is on the card: qQuickAccessibleFactory is not exported but _ZN22QAccessibleQuickWindowC1EP12QQuickWindow is, so an LD_PRELOAD constructor can installFactory and answer the question. Branch is task/p2-b-round30 and must exist and be PUSHED IN BOTH REPOS even if one gets no commits — apex-shell's CI matches on branch name."
-    },
     {
       "slug": "p2-f",
       "items": [
@@ -64,6 +47,40 @@
       "queue_id": "p2-f",
       "card": "ROADMAP/state/agents/p2-f.md",
       "at_dispatch": "Second dispatch of round 30, off the card its predecessor left. NEXT is msgraph, copied wholesale from the just-landed gdrive.rs because the shape transfers exactly. Three decisions flagged at dispatch rather than left to be discovered: Graph's /v1.0/me/drive/items/{id}/content REDIRECTS to a pre-authenticated URL, so `location` handling is a real choice and following it with the Authorization header is the thing not to do; MICROSOFT_OAUTH needs Files.Read and Microsoft is a public client (ClientSecret::None), so unlike Google its refresh should work on the client id alone; and once GRAPH_SCOPES fills, `empty == []` turns the 'providers with nothing grantable' assertion into a VACUOUS LOOP, which is this program's dominant defect family and needs a deliberate answer. Also carried forward: `cargo test --workspace` STOPS AT THE FIRST FAILING TARGET, so a workspace mutation run is not evidence about crates that never ran. Told not to build a fleet daemon (P2-019 is a design item and the design landed) and not to reopen P2-018 criterion 2."
+    },
+    {
+      "slug": "p2-b",
+      "items": [
+        "P2-003",
+        "P2-004"
+      ],
+      "repo": "both",
+      "worktree": "/var/tmp/apex-work/wt-p2-b4-sh",
+      "branch": "task/p2-b-round31",
+      "second_worktree": "/var/tmp/apex-work/wt-p2-b4",
+      "second_branch": "task/p2-b-round31",
+      "agent_id": "a8476e4687a14b648",
+      "dispatched": "2026-09-19T03:25+08:00",
+      "session": "round 30 orchestrator",
+      "queue_id": "p2-b",
+      "card": "ROADMAP/state/agents/p2-b.md",
+      "at_dispatch": "Third dispatch of the session for this unit, off the card round 30 left. NEXT in the card's own order: (1) the RECOVERY screen, the last unaudited a11y surface in P2-003, now auditable for real rather than source-only because run-lockscreen-atspi-shim.sh is a working template for reading a quickshell surface back over AT-SPI with an in-run one-node control; (2) P2-004's RTL discriminator, still 17/3/2 with the cause unidentified and section 1 NOT to be turned into a SKIP. Told three things are NOT its: FOUND 22 belongs to p0-014 (P0-015 was reopened for it and an agent is on it this round) so LockedHintService.qml is off-limits; FOUND 20's qtdeclarative one-liner must NOT be filed anywhere, because filing on a public tracker is outward-facing and Andre's call; and FOUND 24 leaves mutate-lockscreen-atspi.sh on the old trap shape on purpose. Warned that check-quickshell-a11y-cause.sh is a PIN that goes red the day upstream fixes this, and that is intentional."
+    },
+    {
+      "slug": "p0-014",
+      "items": [
+        "P0-014",
+        "P0-015"
+      ],
+      "repo": "apex-shell",
+      "worktree": "/var/tmp/apex-work/wt-p0-015-shell",
+      "branch": "task/p0-015-repump",
+      "agent_id": "a4a00bfe762eb90a1",
+      "dispatched": "2026-09-19T03:25+08:00",
+      "session": "round 30 orchestrator",
+      "queue_id": "p0-014",
+      "card": "ROADMAP/state/agents/p0-014.md",
+      "at_dispatch": "UNIT REOPENED. P0-015 went done -> partial this round on a defect p2-b's mutation runs measured as a 2-in-9 flake and the ORCHESTRATOR VERIFIED AGAINST THE SOURCE before reopening: LockedHintService._succeeded() ends with _pump() and _failed() does not, so a setLocked() that arrives while a chain is in flight only updates _desired, and if that chain then fails the newer request is dropped and never retried. The existing comment argues against retrying the FAILED step, which is a different thing from acting on a NEWER one that was never tried. apex-agentd polls LockedHint, so a dropped lock is agents running through a lock the user engaged - criterion 1 verbatim. Dispatched with the design tension stated rather than hidden: a naive re-pump from _failed() is the call storm the _busy guard exists to prevent, so the fix must distinguish the two cases in CODE and say in its commit message why it cannot storm. Required to test both directions (a newer request during a failing chain reaches logind; a failure with no newer request does NOT retry) and to move P0-015 back to done only on an assertion that fails without the fix."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -126,7 +143,8 @@
     "pipefail turns a `grep -q` MATCH into exit 141, and it hid three security assertions": "Found twice in one day, independently. The orchestrator wrote it into apex-shell's new suite-coverage gate — `printf '%s' \"$wf\" | grep -qF \"$b\" && reach[...]` mis-seeded 5 of 63 suites and reported run-rtl-test.sh as unreachable while it sits at ci.yml:1599. followups-5 found the same shape in THREE negative leak assertions: `find TREE | grep -qF X` under pipefail, where grep exits on match, find takes SIGPIPE, the pipeline is 141, and `&& bad || ok` therefore reports CLEAN precisely when the canary is PRESENT. THE TREE'S SIZE decided whether a leak was detectable — proven 5 inversions in 5 on a 1.36 MB listing and correct 5-in-5 on a 717-byte one — and every fixture is small, so those assertions were green for their whole lives without ever being able to fail. Fix: `[[ \"$text\" == *\"$needle\"* ]]`, no pipe. The orchestrator's was caught only because a second measurement of the same question disagreed.",
     "the smallest mutation is the one that matters": "p2-d added SessionInfo.allowlist with four assertions around it; setting it to None broke NONE of them. The commit fixing that then claimed the new file caught a proxy handed the wrong list — and the SURGICAL mutation (change only the egress::start call site, leave the binding alone) passed all four as well. Both are covered now, the second by issuing a CONNECT directly to the session's egress proxy. p2-c found the same class twice in a harness: `case_says \"readable\"` is satisfied by the string 'present and unreadable', and a mutant that is different but UNOBSERVABLE (removing one of two equivalent arms) passes silently.",
     "a reader that states instead of reads, twice more": "FOUND 11: the system CA trust store check is a `[ -r ]` on one file and sat BELOW five 'could not look' returns in do_network — no Wi-Fi plugin, nmcli absent, nmcli timed out, profiles unreadable, and 'no saved profile uses it', which describes nearly every machine. The line whose job is to say a correct password still fails to associate therefore printed almost nowhere, and is missing from the evidence file's own 2026-09-13 image reading for exactly that reason. FOUND 12: `unit_active` used `systemctl is-active`, which needs the bus and exits 1 with an error in a container, while `is-enabled` reads unit files and answers — that asymmetry hid it, and six readers stated a NEGATIVE about a daemon nothing had asked about. Two of the six are safety claims, and the evidence file already carried a footnote telling readers not to believe the hotspot one: the caveat belonged in the tool.",
-    "status does not affect the ready queue": "p2-c set its three items to `blocked`, then checked resume.sh and found status is irrelevant to dispatch: finished() keys off all-items-done or the `closed` hatch in state/queue.json. It reverted the items to `partial` (the documented convention for 'unit finished, item honestly is not') and marked the UNIT closed with a reason. Worth knowing before anyone tries to steer the queue by editing statuses."
+    "status does not affect the ready queue": "p2-c set its three items to `blocked`, then checked resume.sh and found status is irrelevant to dispatch: finished() keys off all-items-done or the `closed` hatch in state/queue.json. It reverted the items to `partial` (the documented convention for 'unit finished, item honestly is not') and marked the UNIT closed with a reason. Worth knowing before anyone tries to steer the queue by editing statuses.",
+    "FOUND 20 — qtdeclarative one-liner, NOT FILED and not an agent's to file": "quickshell's empty AT-SPI tree is fixed upstream by one macro: qtdeclarative should install qQuickAccessibleFactory from Q_COREAPP_STARTUP_FUNCTION instead of Q_CONSTRUCTOR_FUNCTION, which round 30 MEASURED working (mode D of tests/quickshell-a11y-cause.cpp). Nobody has filed it. Both round-30 agents were told NOT to: filing on a public tracker is an outward-facing action and it is Andre's call. Until it lands, a real screen reader still gets one node from apex-shell, because the shim is test-only and ships nowhere. THIS IS THE ACTION THAT WOULD MAKE THE SHELL ACTUALLY ACCESSIBLE - everything in the repository is already correct all the way to the bus."
   },
   "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt — the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
   "_orchestrator": {
@@ -314,6 +332,26 @@
       "at_dispatch": "SCOPED, and the scope is the point. ROUTE B IS NOT STARTED: the card's own NEXT says there is no engineering next step on P2-012, only a question, and it is Andre's — may apex-agentd read the plaintext of a capsule's connection to its pinned destination to add a credential the capsule is never given ('The question, for Andre', docs/browser-capsule-auth.md). The agent is dispatched for gap 5 ONLY, the per-run CA bind, which the card calls smaller and genuinely independent and which closes without any of route B; round 29's probe is already its evidence, since the authenticated arm IS a capsule told to trust one CA. It is a protocol.rs field plus an apex-agentd change, because nothing populates SandboxSpec.ro/ro_at from the wire. WIRE-VERSION COLLISION FLAGGED AT DISPATCH: PROTOCOL_VERSION is 9 on the landed tip and route B has reserved 10, so if the CA bind needs a new wire field the agent must decide whether that is 10 or whether it rides 9, and write the decision at the TOP of its card so route B cannot silently reuse the number. The flag must name the file rather than default to anything.",
       "retired": "2026-09-19T03:15+08:00",
       "retired_why": "Finished cleanly at 02:57 with six commits pushed on task/p2-d-6; landed as merge da6fc0fb. NOT re-dispatched: the unit is closed to dispatch because its next action is Andre's answer, not engineering. See queue.json _completed_units.p2-d — both answers produce a dispatch, so re-open the moment one arrives."
+    },
+    {
+      "slug": "p2-b",
+      "items": [
+        "P2-003",
+        "P2-004"
+      ],
+      "repo": "both",
+      "worktree": "/var/tmp/apex-work/wt-p2-b4",
+      "branch": "task/p2-b-round30",
+      "second_worktree": "/var/tmp/apex-work/wt-p2-b4-sh",
+      "second_branch": "task/p2-b-round30",
+      "agent_id": "ae07dc61f913f92b2",
+      "dispatched": "2026-09-19T02:20+08:00",
+      "session": "round 30 orchestrator",
+      "queue_id": "p2-b",
+      "card": "ROADMAP/state/agents/p2-b.md",
+      "at_dispatch": "Fresh agent carrying the dead one's card; the NEXT it inherits is one experiment, not a survey. FOUND 14 — QQuickWindow::accessibleRoot() is null inside quickshell — currently ends in 'upstream' and should not. Everything is ruled out but one branch: the windows are top-level Qt::Window and QAccessible::isActive() is 1 in both processes (measured in gdb), so either qQuickAccessibleFactory is not in qAccessibleFactories() in this process or queryAccessibleInterface returns early on a class above QQuickWindow. The experiment is on the card: qQuickAccessibleFactory is not exported but _ZN22QAccessibleQuickWindowC1EP12QQuickWindow is, so an LD_PRELOAD constructor can installFactory and answer the question. Branch is task/p2-b-round30 and must exist and be PUSHED IN BOTH REPOS even if one gets no commits — apex-shell's CI matches on branch name.",
+      "retired": "2026-09-19T03:25+08:00",
+      "retired_why": "Finished cleanly at 03:05 with four commits pushed on apex-shell task/p2-b-round30 (apex-os branch pushed and empty); landed as merge 8eccbfa. FOUND 14 closed. Re-dispatched fresh on task/p2-b-round31 for the recovery screen and the RTL discriminator — never by SendMessage."
     }
   ],
   "_incident_idle_suspend": "Before doing anything else this round the orchestrator took a `sleep:idle` BLOCK inhibitor (systemd-inhibit --what=sleep:idle --mode=block, 6h). Only delay inhibitors were held — ModemManager, NetworkManager, UPower and hypridle's own before_sleep handler — so nothing was stopping hypridle's idle suspend, which the memory record names as the real killer of autonomous rounds (not the lid). Take one at the START of any round; it is the same primitive P1-063 ships.",
