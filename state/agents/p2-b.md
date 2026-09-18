@@ -97,7 +97,9 @@ this unit has been carrying since round 28 — unchanged, and not this branch's
 doing. The other was the new mutation step, and it was a REAL defect in the new
 harness, not an environment problem: see FOUND 18. Both are fixed in `e65d378`.
 
-Re-dispatched as **35362877551**, and this is the second-machine result:
+Re-dispatched as **35362877551** and again on the final tip as
+**35363876000** (both green on the two new steps), and this is the
+second-machine result:
 `run-lockscreen-atspi.sh` is **8 passed / 0 failed / 1 skipped on the Arch
 runner**. The whole §1 control passed there — labwc came up headless, the
 private a11y bus came up, `ScreenReaderEnabled` read back true, the frame came
