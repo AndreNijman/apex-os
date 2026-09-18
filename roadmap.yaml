@@ -4090,53 +4090,110 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED 2026-09-13 (round 24): apex-os roadmap/v2.2 11fd5832 -> 13d53c01 carries task/p2-b-round22 (5d070093,
-    638dc219, 2eff50b8, 719513fa, fe6cc17e). The Wi-Fi page is now inside the audited set: every network row was a
-    Tab stop that announced nothing, the ring is walked with the scanner stubbed so it runs on a machine with no
-    Wi-Fi card, four mutants hold it, and B11 and B13 were fixed after B11 was found breaking the GUI instead of
-    mutating it. check-no-conflict-markers.sh PASS on the landed tip. STILL PARTIAL for the unchanged reason: the
-    reader at the login screen end to end needs someone who can boot an ISO and listen. LANDED 2026-09-13: apex-os
-    merge 7ea639d2 carries round 21's installer work on top of round 20's - the Tab ring was walked on one page,
-    so a focus trap on any other was invisible, and it now runs on four audited pages with two more mutants
-    holding it, one of them a safety property. check-no-conflict-markers.sh PASS. STILL PARTIAL: the screen reader
-    at the login screen, end to end, needs someone who can boot an ISO and listen - orca as the greetd system
-    user, a writable HOME, speech-dispatcher with no audio session, and whether SELinux permits that context to
-    exec gnome_atspi_exec_t. The wrapper degrades safely if the exec is refused, so the failure mode is a silent
-    no-reader rather than a broken login, and that much IS asserted. Accessibility baseline. ROUND 20 on apex-os
-    task/p2-b-round19 (tip d12e9ef4), pushed, not yet merged; round 19 landed as merge 4b1e797f. ROUND 20 CLOSED
-    THE TWO THINGS THE CARD'S ## NEXT ITEM 4 ASKED FOR. (1) THE INSTALLER MUTATION SET WAS RE-TAKEN, which round
-    19's settle-window change had invalidated: installer/mutate-installer-a11y.sh, 8 applied, 8 CAUGHT, 0
-    survived, tree matches HEAD - then re-taken AGAIN at the end of the round with two new mutants, 10 applied, 0
-    failed-to-apply, 10 CAUGHT, 0 survived. (2) THE TAB RING WAS WALKED ON ONE PAGE AND NOW RUNS ON FOUR -
-    keyboard, secureboot, confirm and account. Every round before this name-audited the other pages, which answers
-    "can a reader say what this is" and not "can a keyboard user get to it", so a focus trap on any page but
-    account was invisible to the whole suite. installer/test-installer-a11y.sh is 68 assertions (was 51), 0
-    failed, 0 skipped here, and 63 passed 0 failed 5 skipped on the GitHub runner (run 34701797842, Installer
-    safety and UI green). THE RING WALK FOUND SOMETHING ON ITS FIRST RUN AND THE FINDING WAS THAT THE ASSERTION
-    WAS WRONG, NOT THE INSTALLER. A generic "Tab reaches at least three controls" went RED on confirm: the ring
-    has exactly two stops, Back and the ERASE field, where the audit counts three named controls. That is the page
-    working as designed - go = self.btn("Erase and install", ..., False) and only e_erase's changed handler turns
-    it on, when the text is exactly ERASE; an insensitive GTK button is not a tab stop. The floor was replaced by
-    the assertion the criterion actually needs, in both directions: the destructive button must NOT be in the ring
-    while the field is empty - a keyboard user must not be able to land on an irreversible action without having
-    confirmed it - and it MUST join the ring once ERASE is typed with the keyboard alone and read back over the
-    bus. Mutant B9 makes the button sensitive from the start and that assertion is the only thing in the suite
-    that catches it: the page audit cannot, because the button is named either way, and a ring walk that only
-    counts stops cannot either. B10 is the walk's own vacuity floor - press a key that moves nothing and every
-    stop recorded is the same control, which is what a focus trap looks like from outside. On the runner the
-    typed-ERASE half correctly says COULD-NOT-RUN ("the field reads [] after typing"), because that X server takes
-    Tab and Return and drops synthesised text; it does not pass about an empty field. STILL PARTIAL, and the
-    reasons are products and hardware rather than harness. THE READER AT THE LOGIN SCREEN IS UNPROVEN END TO END:
-    everything around it is asserted - greetd runs /usr/libexec/apex-greet-session which starts a session bus with
-    an empty service directory, execs at-spi-bus-launcher and at-spi2-registryd, then EXECS the compositor
-    (test-apex-greet-session-bus.sh 37 assertions, 13/13 mutants); SUPER+ALT+S starts orca on all three desktop
-    sessions and both greeter hosts; the tree is readable AND operable over AT-SPI on three machines
-    (test-apex-greet-atspi.sh 31 assertions, 8/8 mutants, identical totals on this laptop, in a bare fedora:43
-    container and on the GitHub runner), and the password never crosses the bus. What has NOT been shown is orca
-    running as the greetd system user - a writable HOME, and speech-dispatcher with no audio session - or whether
-    SELinux permits the greetd session context to exec gnome_atspi_exec_t. If that exec is refused the wrapper
-    degrades safely, which IS asserted, so the failure mode is a silent no-reader rather than a broken login.
-    NEEDS SOMEONE WHO CAN BOOT AN ISO AND LISTEN. Greeter audio is a second, separate gap: nothing in this
+    ROUND 28 (2026-09-18) on apex-shell task/p2-b-round23 (b7953e4 -> 9fe5e2a), pushed, NOT merged; apex-os got
+    the merge to 266dcc57 only, no commits. THE LOCK SCREEN HAD NO ACCESSIBLE MARKUP AT ALL AND NOW HAS IT, WITH A
+    SUITE AND A MUTATION PAIR, BOTH RUN ON A SECOND MACHINE. src/windows/Lockscreen.qml carried zero `Accessible.`
+    anything across 440 lines - the surface a user meets when they cannot get into their own machine. What that
+    cost, read off the source before the work: the password field announced nothing and had no `passwordEdit`, so
+    nothing told an assistive technology to stop echoing, logging or brailling what was typed into it (echoMode
+    hides text from the SCREEN and says nothing to the tree); a wrong password was reported by a red border, a
+    shake and an unroled line of text, all three things you have to be looking at; Caps Lock the same, and it is
+    the commonest reason a correct password is refused; and both nerd-font icons are private-use codepoints a
+    reader spells out before the words - the identical defect this unit measured on the installer's Wi-Fi page. A
+    DESCRIPTION IS NOT SPEECH, and that is the part that would have been easy to get wrong: a reader does not
+    generally speak a description-changed event on the object that already holds focus, so fail() and
+    onCapsOnChanged go through a say() helper and Qt 6.8's Accessible.announce(), guarded with a typeof and called
+    LAST in fail() because a future Qt dropping the method must still leave the user the border, the shake and the
+    text. Qt's version is MEASURED, not assumed: the suite RUNS a probe under -platform offscreen, and it is
+    6.10.3 here and 6.11.2 on the runner. SUITE tests/check-lockscreen-a11y.sh: 33 passed, 0 failed, 0 SKIPPED
+    under `env -i HOME PATH USER TMPDIR` here, and 33/0/0 on the GitHub Arch runner (run 35352450127) - it was
+    32/0/1 on run 35351983536 and that SKIP was a could-not-run, not a pass: the probe looked for qml on PATH and
+    Arch keeps the Qt 6 tools in /usr/lib/qt6/bin, so it now asks `qmake6 -query QT_HOST_BINS` first. Not a grep:
+    a grep for Accessible.name over this file is satisfied by a comment about accessibility and by markup on the
+    placeholder Text NESTED INSIDE the field, which announces a different thing, so object bodies are extracted by
+    brace depth and a binding counts only as a direct child. TWO OF ITS OWN CHECKS WERE GREEN FOR NOTHING AND
+    RUNNING IT IS WHAT SHOWED THAT: the icon scan read one line at a time and so found one of this file's two
+    glyphs, the other being on the second line of a ternary; and the keyboard-route check counted forceActiveFocus
+    SITES, of which three exist with one inside the click-anywhere MouseArea, so 'at least two' stayed green with
+    either keyboard route deleted - the exact regression it guards. Both are now self-tests (6 in total) and both
+    are mutants. A third defect went the other way: values are accumulated across following lines, so a COMMENT
+    under a `text:` binding was read as part of it, which would have made prose about an icon report as an
+    unaudited icon. There are now two masked copies - M for structure and code checks, C for values. MUTATION PAIR
+    tests/mutate-lockscreen-a11y.sh, 24 mutants, BOTH DIRECTIONS: 20 red applied, 20 CAUGHT, 0 SURVIVED, 0
+    MISSCORED; 4 green, 4 HELD, 0 FALSE-RED - identical totals here and on the runner. The green four add comments
+    and string literals quoting every forbidden binding, both private-use glyphs and
+    console.log-instead-of-announce, and the suite must stay green: a checker prose can turn red punishes people
+    for explaining themselves, and accessibility markup is not self-explanatory. The verdict is FOUR-way - CAUGHT
+    / MISSCORED / CRASHED / SURVIVED - because a mutant that makes the suite exit FATAL prints no totals line and
+    any harness that only counts failures reads that as 'nothing failed', reporting a working suite as a broken
+    one; all four are self-tested. IT RESTORES WITHOUT GIT, and that was measured rather than preferred: the first
+    CI run aborted at 'not a git work tree' because arch-validate runs Checkout BEFORE it installs git, so
+    actions/checkout falls back to the tarball API and the workspace has no .git at all - and a harness reading
+    `git diff`'s empty output as 'clean' would have stacked two dozen mutants and printed two dozen verdicts about
+    a tree nobody put back. It restores from a pristine copy in a per-run mktemp -d (never a shared scratch path:
+    that once put back another agent's file) and verifies sha256 against a baseline taken before anything was
+    touched, proving the mechanism on the real file before relying on it. WIRED: two steps in
+    .github/workflows/ci.yml, both `if: ${{ !cancelled() }}` so somebody else's red step cannot switch the
+    measurement off, and all three files added to the structure-check REQUIRED list. Note apex-os's
+    tests/check-suites-run-in-ci.sh globs tests/test-*.sh in apex-os ONLY and can neither see nor protect an
+    apex-shell suite; it is green (75 suites, 71 in CI, 4 exempt, 0 undeclared), as are
+    check-shellcheck-coverage.sh (165 scripts, 0 known-failing) and check-containerfile-assertions.sh. WHAT IS NOT
+    CLAIMED: this reads SOURCE. It does not bring the lock surface up and read the tree back over AT-SPI, and it
+    says so in its own header rather than implying otherwise. Round 28 did establish that the runtime half is now
+    POSSIBLE, which every earlier round recorded as blocked: labwc 0.9.6 advertises ext_session_lock_manager_v1,
+    so the existing headless harness can host a WlSessionLockSurface. The parse proof is qmllint-qt6 - its finding
+    set on Lockscreen.qml is byte-identical before and after and carries zero Error lines, and it RESOLVES
+    Quickshell's types (it warns about unqualified access inside the surface body), so it is a type check and not
+    merely a parse - plus a headless `run-nested-labwc.sh shell.qml` load with no QML error. That load
+    instantiates the WlSessionLock; it does NOT instantiate the WlSessionLockSurface, because LockState.locked is
+    false at startup. Nothing was tested against the live session and `qs -p` was never run. RECOVERY remains the
+    last unaudited a11y surface. LANDED 2026-09-13 (round 24): apex-os roadmap/v2.2 11fd5832 -> 13d53c01 carries
+    task/p2-b-round22 (5d070093, 638dc219, 2eff50b8, 719513fa, fe6cc17e). The Wi-Fi page is now inside the audited
+    set: every network row was a Tab stop that announced nothing, the ring is walked with the scanner stubbed so
+    it runs on a machine with no Wi-Fi card, four mutants hold it, and B11 and B13 were fixed after B11 was found
+    breaking the GUI instead of mutating it. check-no-conflict-markers.sh PASS on the landed tip. STILL PARTIAL
+    for the unchanged reason: the reader at the login screen end to end needs someone who can boot an ISO and
+    listen. LANDED 2026-09-13: apex-os merge 7ea639d2 carries round 21's installer work on top of round 20's - the
+    Tab ring was walked on one page, so a focus trap on any other was invisible, and it now runs on four audited
+    pages with two more mutants holding it, one of them a safety property. check-no-conflict-markers.sh PASS.
+    STILL PARTIAL: the screen reader at the login screen, end to end, needs someone who can boot an ISO and listen
+    - orca as the greetd system user, a writable HOME, speech-dispatcher with no audio session, and whether
+    SELinux permits that context to exec gnome_atspi_exec_t. The wrapper degrades safely if the exec is refused,
+    so the failure mode is a silent no-reader rather than a broken login, and that much IS asserted. Accessibility
+    baseline. ROUND 20 on apex-os task/p2-b-round19 (tip d12e9ef4), pushed, not yet merged; round 19 landed as
+    merge 4b1e797f. ROUND 20 CLOSED THE TWO THINGS THE CARD'S ## NEXT ITEM 4 ASKED FOR. (1) THE INSTALLER MUTATION
+    SET WAS RE-TAKEN, which round 19's settle-window change had invalidated: installer/mutate-installer-a11y.sh, 8
+    applied, 8 CAUGHT, 0 survived, tree matches HEAD - then re-taken AGAIN at the end of the round with two new
+    mutants, 10 applied, 0 failed-to-apply, 10 CAUGHT, 0 survived. (2) THE TAB RING WAS WALKED ON ONE PAGE AND NOW
+    RUNS ON FOUR - keyboard, secureboot, confirm and account. Every round before this name-audited the other
+    pages, which answers "can a reader say what this is" and not "can a keyboard user get to it", so a focus trap
+    on any page but account was invisible to the whole suite. installer/test-installer-a11y.sh is 68 assertions
+    (was 51), 0 failed, 0 skipped here, and 63 passed 0 failed 5 skipped on the GitHub runner (run 34701797842,
+    Installer safety and UI green). THE RING WALK FOUND SOMETHING ON ITS FIRST RUN AND THE FINDING WAS THAT THE
+    ASSERTION WAS WRONG, NOT THE INSTALLER. A generic "Tab reaches at least three controls" went RED on confirm:
+    the ring has exactly two stops, Back and the ERASE field, where the audit counts three named controls. That is
+    the page working as designed - go = self.btn("Erase and install", ..., False) and only e_erase's changed
+    handler turns it on, when the text is exactly ERASE; an insensitive GTK button is not a tab stop. The floor
+    was replaced by the assertion the criterion actually needs, in both directions: the destructive button must
+    NOT be in the ring while the field is empty - a keyboard user must not be able to land on an irreversible
+    action without having confirmed it - and it MUST join the ring once ERASE is typed with the keyboard alone and
+    read back over the bus. Mutant B9 makes the button sensitive from the start and that assertion is the only
+    thing in the suite that catches it: the page audit cannot, because the button is named either way, and a ring
+    walk that only counts stops cannot either. B10 is the walk's own vacuity floor - press a key that moves
+    nothing and every stop recorded is the same control, which is what a focus trap looks like from outside. On
+    the runner the typed-ERASE half correctly says COULD-NOT-RUN ("the field reads [] after typing"), because that
+    X server takes Tab and Return and drops synthesised text; it does not pass about an empty field. STILL
+    PARTIAL, and the reasons are products and hardware rather than harness. THE READER AT THE LOGIN SCREEN IS
+    UNPROVEN END TO END: everything around it is asserted - greetd runs /usr/libexec/apex-greet-session which
+    starts a session bus with an empty service directory, execs at-spi-bus-launcher and at-spi2-registryd, then
+    EXECS the compositor (test-apex-greet-session-bus.sh 37 assertions, 13/13 mutants); SUPER+ALT+S starts orca on
+    all three desktop sessions and both greeter hosts; the tree is readable AND operable over AT-SPI on three
+    machines (test-apex-greet-atspi.sh 31 assertions, 8/8 mutants, identical totals on this laptop, in a bare
+    fedora:43 container and on the GitHub runner), and the password never crosses the bus. What has NOT been shown
+    is orca running as the greetd system user - a writable HOME, and speech-dispatcher with no audio session - or
+    whether SELinux permits the greetd session context to exec gnome_atspi_exec_t. If that exec is refused the
+    wrapper degrades safely, which IS asserted, so the failure mode is a silent no-reader rather than a broken
+    login. NEEDS SOMEONE WHO CAN BOOT AN ISO AND LISTEN. Greeter audio is a second, separate gap: nothing in this
     repository configures a sound path for the greetd user. OTHER SUB-FEATURES, unchanged and named rather than
     implied: no magnifier, no sticky keys, no slow keys, no mouse keys, no on-screen keyboard anywhere in either
     repo. High contrast ships as six shaders applied through Hyprland only, as a visual effect and not an a11y
@@ -4165,11 +4222,32 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED 2026-09-13 (round 24): apex-shell roadmap/v2.2 1da66c7 -> 0a3824c carries 9f87fca, and
-    tests/run-rtl-test.sh was re-run ON THE LANDED TIP: 13 passed, 0 failed, 0 skipped. THE RTL ROW IS NO LONGER A
-    FONT QUESTION AND THE OLD CLAIM IS DEAD: measured through the real engine, Arabic falls out of the hardcoded
-    JetBrains Mono to DejaVu Sans Mono, Hebrew to DejaVu Sans, Thai to Droid Sans Thai and Devanagari to Droid
-    Sans Devanagari, all four image-owned. What was missing is LAYOUT, and CfgRow and CfgScroll now mirror off
+    ROUND 28 (2026-09-18): NO NEW i18n CODE, and one finding that matters more than code would have.
+    tests/run-rtl-test.sh IS RED ON THE GITHUB ARCH RUNNER AND HAS BEEN SINCE IT LANDED - 17 passed, 3 failed, 2
+    skipped - and nobody saw it because ci.yml was last dispatched on apex-shell on 2026-09-12 and the suite
+    landed after that. Every 'RTL is mutation-proved' line in the evidence below is true of THIS LAPTOP only
+    (30/0/0 here, mutate-rtl.sh 13/13). PROVEN NOT TO BE ANY BRANCH'S DOING: control run 35351740747 on
+    roadmap/v2.2, with none of round 28's lock screen work on it, gives the identical totals and the identical
+    three FAIL lines. All three are section 1, which is the section that makes the rest mean anything - it
+    requires a scrubbed run and an ar_EG run to DISAGREE about the application's layout direction, and on that
+    runner both answer LeftToRight, so the binding CfgRow actually ships is UNMEASURED there (the suite says
+    COULD-NOT-RUN rather than passing). CAUSE NOT IDENTIFIED. qt6ct was genuinely absent and the step now installs
+    it; qt6-translations, which owns qt_ar.qm and IS the mechanism round 23 measured, was ALREADY present at
+    6.11.2 - and run 35352450127 with both installed is still 17/3/2. So those two were necessary and not
+    sufficient. Unruled-out candidates, written into the workflow comment so the next reader does not re-derive
+    them: the runner is Qt 6.11.2 against this laptop's 6.10.3, and its qt6ct has no /etc/xdg/qt6ct/qt6ct.conf,
+    which the APEX image ships. RECORDED IN THE WORKFLOW AND ON THE CARD: do not close this by making section 1
+    SKIP - that section is the discriminator, and a suite that skipped it would print four green lines about a
+    constant. This is the only red step on task/p2-b-round23 and it is older than the branch. Also this round, and
+    it belongs to this row as much as to P2-003: the lock screen's two nerd-font icons are private-use codepoints
+    that a screen reader spells out before the words, which is a text-rendering defect of the same family as the
+    RTL work - guarded now in both directions by check-lockscreen-a11y.sh and four of its mutants. The
+    Internationalisation baseline step (run-i18n-test.sh) is GREEN on the runner in run 35352450127. LANDED
+    2026-09-13 (round 24): apex-shell roadmap/v2.2 1da66c7 -> 0a3824c carries 9f87fca, and tests/run-rtl-test.sh
+    was re-run ON THE LANDED TIP: 13 passed, 0 failed, 0 skipped. THE RTL ROW IS NO LONGER A FONT QUESTION AND THE
+    OLD CLAIM IS DEAD: measured through the real engine, Arabic falls out of the hardcoded JetBrains Mono to
+    DejaVu Sans Mono, Hebrew to DejaVu Sans, Thai to Droid Sans Thai and Devanagari to Droid Sans Devanagari, all
+    four image-owned. What was missing is LAYOUT, and CfgRow and CfgScroll now mirror off
     Qt.application.layoutDirection with childrenInherit - not off SettingsService, which imports Quickshell and
     qmltestrunner cannot load. The suite pins the remaining half in BOTH directions rather than claiming RTL is
     done: the shell paints from 14 window roots, 0 of them mirror, and 16 explicit numeric x: are outside
@@ -5255,7 +5333,58 @@ tasks:
     attestation and therefore depends on L-001's TPM work being partial. Gates: tests/check-doc-verbs.sh 235
     valid, 7 deliberate, 0 not a command, 0 undocumented and undeclared, 0 stale — the four apex fleet verbs went
     into tests/doc-verbs-allow, which is the file for commands a doc names on purpose because they do not exist,
-    and three entries left tests/doc-verbs-undocumented because this document names them.
+    and three entries left tests/doc-verbs-undocumented because this document names them. ROUND 28 (2026-09-18),
+    on task/p2-f-3 as 5e742f22, PUSHED, NOT yet merged. THE TWO GAPS THAT WERE CRITERION 1'S AND CRITERION 2'S OWN
+    SUBJECT MATTER ARE NOW DECIDED, in docs/fleet.md, with the reasoning rather than the conclusion. THE TRANSPORT
+    IS A POLL over ordinary HTTPS and relay/ is NOT in the fleet path at all. The decision falls out of the
+    permission list rather than a preference: with no remote exec, no fleet-side approval and no silent enrolment,
+    what a fleet may do to a machine is set its channel, set a ring ceiling and hold its updates, none of which
+    needs sub-minute latency - so a transport chosen for push would buy speed for actions this design does not
+    permit, and would charge twice. A machine holding a connection is continuously reachable, which turns 'an
+    unenrolled machine has no fleet code path to disable' from the shape of the thing into a flag; and a relay
+    carrying fleet traffic learns which machines are awake and when, which is a continuous liveness map - the
+    class of data docs/update-channels.md promises not to collect, reached by a side door. A poll response is a
+    DOCUMENT, NEVER A COMMAND, because a response naming something to run would be the never-build list's item 1
+    in a different hat. The interval is jittered off the stable 0-99 slot apex channel status already derives from
+    /etc/machine-id - reuse, because staging a rollout and staggering a poll need the same stable per-machine
+    number nobody configures. Cost stated rather than hidden: a hold takes effect at the next poll and a machine
+    that is off answers nothing. Trust is the SIGNATURE and not the transport - the response is signed by the
+    operator's key recorded at enrolment, so a hostile network or a misissued certificate can deny service and
+    cannot move a channel - plus the two things a signature alone does not give, named because they must be IN the
+    document: a monotonic counter (an old valid 'you are on edge' is otherwise a downgrade attack) and a freshness
+    bound (without one, a fleet that stops answering silently pins every machine to its last instruction). THE
+    SERVER SIDE IS WRITTEN AND IS DELIBERATELY NOT PART OF APEX: a fleet that only worked against one hosted
+    server would make 'optional' untrue for anybody who will not use it. Because a response is a signed document,
+    the smallest correct server has no always-on service and no database - one signed object per machine, served
+    from storage, runnable from a script for fifty machines; group membership is where that stops, at a few
+    thousand. TENANCY IS KEY SEPARATION, NOT ROWS: a fleet is a key pair and a machine is enrolled to a public
+    key, so a server separating tenants by partitioning rows would have one place at which every tenant's policy
+    could be rewritten and could not actually do it, because the client checks a signature. The machine pins the
+    ROOT key and accepts a delegated key chaining to it, which is what makes revoking a signer possible without
+    re-enrolling a fleet, and it is the shape apex trust and P1-047's cosign verification already use rather than
+    a second one. READ IS A SERVER PERMISSION AND WRITE IS A CRYPTOGRAPHIC ONE - the only action that changes a
+    machine needs the signing key, so a compromised operator console can see and cannot move anybody; the usual
+    one-admin-role arrangement makes the console the whole security boundary. The mirror of the never-build list
+    is structural rather than enforced, which is the argument for the transport: a poll of signed documents has no
+    message that would reach a machine between polls, run anything, approve a privilege request, enrol a machine
+    that did not run the verb, or stop one leaving. apex fleet report --dry-run is named as the machine-side
+    test-shaped guarantee (print what would be sent without sending it, the way apex channel report does) and
+    added to tests/doc-verbs-allow. THAT ENTRY IS LOAD-BEARING AND WAS MUTATION-CHECKED: removed,
+    check-doc-verbs.sh exits 1 and prints 'BAD apex fleet report'. Restored byte-identical with plain cp, cmp
+    silent. THE GAP LIST'S TWO ENTRIES ARE STRUCK THROUGH RATHER THAN DELETED and what remains under each is
+    narrowed to engineering: the interval and whether the freshness bound is an expiry in the document or a
+    maximum age the client enforces (neither changes the threat model - the direction of the connection was the
+    part that did), and the delegation format, which cannot be settled without a server to try it against. A THIRD
+    ENTRY WAS ADDED saying plainly that nothing here has been deployed or written: these are decisions with their
+    reasoning, not a client, a server or a line of code. relay/'s own README says src/index.js has never been
+    executed, and the fleet path now does not use it. STILL PARTIAL AND NOT DONE, and the reason has changed:
+    criterion 1 and criterion 2 are now covered by the DESIGN in every section, which is what this item asks for,
+    but three of the original five unsettled entries remain (what a ring ceiling costs to serve against
+    docs/update-cost.md, whether the fleet-assigned machine id can be rotated, and the evidence standard for
+    compliance, which wants attestation and therefore depends on L-001's TPM work being partial). NOT VERIFIED: no
+    fleet client, no server, no deployment, and no part of this has been run. Gates: tests/check-doc-verbs.sh 249
+    valid, 8 deliberate, 0 not a command; 191 documented, 114 declared undocumented, 0 undocumented and
+    undeclared, 0 stale.
 - id: L-001
   title: Real TPM and recovery qualification
   priority: Later

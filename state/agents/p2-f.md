@@ -5,19 +5,32 @@ worktree: /var/tmp/apex-work/wt-p2-f
 branch: task/p2-f-3   (cut from origin/roadmap/v2.2 @ 13d53c01)
 
 ## NEXT
-P2-019's two named gaps, which are the only ones left on this unit that are a
-DOCUMENT rather than a transport, and which its own evidence says are what
-keeps it partial: **the transport is undecided** (relay/ is an undeployed
-Noise_IK rendezvous, and whether a client polls, holds a connection or is
-pushed to changes the threat model) and **there is no server-side design at
-all** — everything in docs/fleet.md is written from the machine's point of
-view, and the operator's own access control is where a fleet's multi-tenancy
-lives. Write both sections into docs/fleet.md, then set-status P2-019.
+**P2-018 criterion 2, which is the last criterion on this unit that is neither
+a new transport nor blocked on another item.** It is STRUCTURAL today: the
+recovery menu names `apex recover status`, `apex doctor`,
+`apex-safe-graphics diagnose`, `sudo apex rollback`, `thunar` and `nmtui`, the
+build refuses if any is missing, and their binaries are asserted to exist —
+but NONE HAS BEEN RUN FROM INSIDE THE SESSION. The recipe:
+`tests/test-apex-safe-graphics.sh` already starts the real labwc session
+headless (`WLR_BACKENDS=headless`, private `XDG_RUNTIME_DIR`), so the missing
+step is executing each menu remedy as a client of THAT compositor and
+requiring an exit status and non-empty output — a remedy that needs a GPU, a
+polkit prompt or a real deployment has to be told apart from one that is
+simply broken, and saying which is which is most of the work.
+Constraints that are not negotiable: headless only (never a window on Andre's
+desktop), no polkit prompts (so `sudo apex rollback` is checked for
+`--help`/a dry path, never run), and greetd is boot-critical.
 
-DO NOT widen P2-018's session watchdog. The dispatch was explicit and nothing
-learned since argues for it: a compositor that stays up while the shell
-crashes in a loop is not a bounce, the detector will not see that, and a
+**DO NOT widen P2-018's session watchdog.** The dispatch was explicit and
+nothing learned since argues for it: a compositor that stays up while the
+shell crashes in a loop is not a bounce, the detector will not see that, and a
 counter wide enough to catch it can strand somebody at a login screen.
+
+Also open, in descending size: the `gdrive`/`msgraph` TRANSPORT in
+`apex-secretd` (P2-017 — until it exists, a Google or Microsoft token can be
+stored and renewed and spent on nothing, and `apex account add` says so); gvfs
+integration; and P2-019's three remaining unsettled entries, two of which
+depend on other roadmap items.
 
 ## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
 1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
@@ -92,7 +105,16 @@ Remaining, in the order this round takes them:
   host to its token endpoint from a hard-coded table, which is pin-consistent.
 
 ## DONE
-Round 7 (round 28 of the program), on task/p2-f-3, ALL FOUR PUSHED:
+Round 7 (round 28 of the program), on task/p2-f-3, ALL FIVE PUSHED:
+  5e742f22  P2-019's transport and server-side design, the two gaps its own
+            evidence said kept it partial. The transport is a POLL and
+            `relay/` is not in the fleet path — a relay carrying fleet traffic
+            learns which machines are awake, which is the liveness map
+            `docs/update-channels.md` promises not to collect. A response is a
+            signed DOCUMENT, never a command. Tenancy is key separation, not
+            rows; read is a server permission and write is a cryptographic
+            one. `apex fleet report` added to `tests/doc-verbs-allow` and the
+            entry mutation-checked (removed, the gate exits 1).
   bda510ed  `apex account rm` leaves no refresh token behind. The commit
             before it made `add` store one for the first time, which turned a
             dormant doc-comment claim into a criterion-3 failure: `rm` sent
@@ -148,13 +170,14 @@ Round 3, on task/p2-f-3 (pushed):
   c224eea7  a scope may not name an operation no provider offers — the
             cross-crate gate in apex-secretd, both mutants run and red.
 
-## IN PROGRESS (round 7)
-- `git status` run: worktree CLEAN at `bda510ed`, pushed, and the tip of
-  `roadmap/v2.2` (`266dcc57`) is merged in. Nothing half-written.
-- P2-017's set-status is DONE for this round. P2-018 and P2-019 were NOT
-  touched this round and set-status was deliberately NOT called on either —
-  it REPLACES evidence.
-- Nothing started on P2-019.
+## IN PROGRESS (round 7 — FINISHED)
+- Worktree CLEAN at `5e742f22`, pushed, with `roadmap/v2.2` (`266dcc57`)
+  merged in. Nothing half-written.
+- set-status.py was called for **P2-017 and P2-019**, both with the full text
+  rewritten and the earlier rounds' evidence preserved (checked by re-parsing).
+- **P2-018 was NOT touched this round and set-status was deliberately NOT
+  called on it** — it REPLACES evidence, and P2-018's record is long and
+  earned.
 
 ## ROUND 5 COMMIT SEQUENCE (settled with the advisor)
 1. ~~`supersedes_credentials` + the 64 `false` literals + the registry test~~
