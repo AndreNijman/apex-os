@@ -5,16 +5,21 @@ worktree: /var/tmp/apex-work/wt-p2-f
 branch: task/p2-f-3   (cut from origin/roadmap/v2.2 @ 13d53c01)
 
 ## NEXT
-Round 6 commit 1: add `apex cf refresh` (and/or `apex account refresh`) in
-`apexd/apex/src/cloudflare.rs` — send a `Use` for `oauth.token.refresh`
-against the stored `cloudflare-refresh` credential — and change
-`cloudflare.rs`'s status line that currently reads "a refresh token is
-stored too, and nothing spends it yet", which is now false. Before writing
-it, answer round-4 step 7 by READING `service.rs::use_capability`'s grant
-check: a `Use` needs a per-project grant, and `apex cf connect` records
-none for `oauth.token.refresh` — so either the CLI's own project counts,
-or `cf connect` must record that grant when it stores the refresh token.
-Whichever it is, say it in the status line.
+Round 7 commit 1 (IN PROGRESS, see IN PROGRESS below): extract the RFC 8628
+device grant out of `apexd/apex/src/cloudflare.rs` into a new
+`apexd/apex/src/oauth_device.rs`, behaviour-identical, tests moved with it,
+`cloudflare.rs` becomes a caller. Then commit 2 wires `apex account add` to
+run it for `Flow::DeviceCode` (google, microsoft) and commit 3 adds
+`apex account refresh`.
+
+ROUND 6 IS LANDED — do not redo it. `f3e5cbf5` ("apex cf refresh, and the two
+lines that said nothing spends a refresh token") is an ancestor of
+`roadmap/v2.2` @ `266dcc57`. Round-4 step 7 IS ANSWERED, in that commit:
+**the grant is deliberately NOT written by `cf connect`.** Connecting stores a
+credential; which project may spend it is the owner's decision, and a grant
+keyed on whatever directory `connect` ran in would be a capability nobody
+chose. So the first `apex cf refresh` refusal is a normal outcome and the
+daemon composes the `apex secret grant` line that fixes it.
 
 ## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
 1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
