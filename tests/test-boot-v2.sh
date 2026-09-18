@@ -407,6 +407,147 @@ mkuki_fails "a modules directory whose name disagrees with the kernel" \
     --cmdline "root=/dev/nowhere" --allow-no-ucode
 
 # ═════════════════════════════════════════════════════════════════════════════
+sec "the VM harness cannot report green for work it did not do"
+# Three ways the boot lab has already reported a pass it had not earned, all
+# three found by running it rather than reading it, and all three checked here
+# because none of them can be caught by the harness's own scenarios — the
+# scenarios are the thing being mis-reported.
+#
+#   1. A run that aborted printed NO summary line at all (fixed with an EXIT
+#      trap; the end-to-end case below is that trap).
+#   2. A run whose every check was a COULD-NOT-RUN printed "0 passed, 0 failed"
+#      and exited 0, which every caller reads as a pass of a run that never ran.
+#   3. A control decided with `cmp`, which the lab image does not ship.
+#
+# These run on any machine with bash: lib.sh has no side effects on source
+# beyond two path variables, so the counters can be driven directly.
+BOOTV2_LIB="$REPO/files/scripts/boot-v2/lib.sh"
+[[ -f "$BOOTV2_LIB" ]] || { echo "FATAL: missing $BOOTV2_LIB" >&2; exit 1; }
+
+# summary_case DESCRIPTION EXPECTED_RC SETUP_CODE — drives bootv2_summary in a
+# subshell and reports its exit status and its line.
+summary_case() {
+    local what="$1" want="$2" setup="$3" rc=0 out
+    out="$(bash -c '
+        set -euo pipefail
+        . "$1" >/dev/null 2>&1
+        # Fixture chatter is suppressed deliberately: ok and bad print
+        # "  ok  " and "  FAIL " lines, and a fixture FAIL scrolling past in
+        # the output of this file would read as this file failing.
+        eval "$2" 2>/dev/null
+        bootv2_summary "case" 2>&1
+    ' _ "$BOOTV2_LIB" "$setup")" || rc=$?
+    SUMMARY_OUT="$out"
+    eq "$want" "$rc" "$what: exit status"
+}
+
+summary_case "a run with nothing in it at all" 1 ':'
+grep -q 'asserted nothing' <<<"$SUMMARY_OUT" \
+    && ok "an empty run says so in words, not only in its exit status" \
+    || bad "an empty run's report does not say it asserted nothing: $SUMMARY_OUT"
+
+# THE CASE THAT WAS GREEN. Every check a could-not-run, nothing proved.
+summary_case "a run whose every check was COULD-NOT-RUN" 1 \
+    'cannot "no S3 on this kernel"; cannot "no second firmware build"'
+grep -q 'COULD-NOT-RUN' <<<"$SUMMARY_OUT" \
+    && ok "the all-could-not-run report still names the reasons it could not run" \
+    || bad "the all-could-not-run report lost its reasons: $SUMMARY_OUT"
+
+# And the other direction, which is what stops the fix above from turning
+# `cannot` into `bad` — a run that proved something and ALSO could not do part
+# of it is still a pass, because that is the distinction cannot() exists for.
+summary_case "a run that proved something and could not do the rest" 0 \
+    'ok "the volume unlocked"; cannot "no S3 on this kernel"'
+grep -q 'COULD-NOT-RUN' <<<"$SUMMARY_OUT" \
+    && ok "a passing run with a could-not-run still says COULD-NOT-RUN" \
+    || bad "a passing run swallowed its could-not-run: $SUMMARY_OUT"
+summary_case "a run with one passing check" 0 'ok "the volume unlocked"'
+summary_case "a run with one failing check" 1 'bad "the volume did not unlock"'
+
+# End to end, through the real entry point: run-scenarios outside the lab image
+# dies on the missing kver file. EXACTLY ONE summary line, and exit 1.
+rc=0
+bash "$REPO/files/scripts/boot-v2/run-scenarios" --work "$TMP/harness" prereq \
+    >"$TMP/harness.log" 2>&1 || rc=$?
+eq 1 "$rc" "run-scenarios that cannot start exits 1"
+n="$(grep -c '^== boot-v2 VM harness:' "$TMP/harness.log" || true)"
+eq 1 "$n" "an aborted run prints exactly one summary line"
+grep -q 'INCOMPLETE' "$TMP/harness.log" \
+    && ok "the aborted run calls itself INCOMPLETE" \
+    || bad "the aborted run printed a verdict that does not say it stopped early"
+
+# A KILLED RUN MUST NOT REPORT A PASS.
+#
+# The EXIT trap alone does not cover this, and the comment in run-scenarios
+# that once said it did cost a round. bash DOES run the EXIT trap on an
+# untrapped SIGTERM, but `$?` reads 0 inside it, so the `rc != 0` INCOMPLETE
+# branch never fires. MEASURED 2026-09-14: two detached scenario containers
+# were SIGTERM'd part-way through their second boot and both logs ended
+# `== boot-v2 VM harness: 6 passed, 0 failed ==`, which the next round was told
+# to collect as a result.
+#
+# The real trap block is lifted out of run-scenarios rather than restated, so
+# this test fails if someone deletes the signal traps from the script itself.
+sed -n '/^BOOTV2_SUMMARY_PRINTED=0$/,/^trap bootv2_report EXIT$/p' \
+    "$REPO/files/scripts/boot-v2/run-scenarios" >"$TMP/trapblock.sh"
+[[ -s "$TMP/trapblock.sh" ]] \
+    && ok "the trap block was found in run-scenarios to test against" \
+    || bad "could not extract the trap block from run-scenarios"
+{ printf '%s\n' 'set -uo pipefail' ". \"$BOOTV2_LIB\" >/dev/null 2>&1" \
+      'ok "a check that ran before the kill"'
+  cat "$TMP/trapblock.sh"
+  printf '%s\n' 'sleep 300'
+} >"$TMP/killme.sh"
+bash "$TMP/killme.sh" >"$TMP/killed.log" 2>&1 &
+killme=$!
+# Wait for the fixture to reach its sleep, then signal it AND its child — a
+# container kill hits the whole cgroup, and bash defers a trapped signal until
+# the foreground child is gone.
+for _ in $(seq 1 50); do
+    child="$(pgrep -P "$killme" 2>/dev/null | head -1)" && [[ -n "$child" ]] && break
+    sleep 0.1
+done
+kill -TERM "$killme" 2>/dev/null || true
+[[ -n "${child:-}" ]] && kill -TERM "$child" 2>/dev/null
+krc=0; wait "$killme" || krc=$?
+eq 143 "$krc" "a SIGTERM'd run exits 143"
+grep -q 'KILLED by SIGTERM' "$TMP/killed.log" \
+    && ok "a SIGTERM'd run says it was killed" \
+    || bad "a SIGTERM'd run did not name the signal: $(tail -2 "$TMP/killed.log" | tr '\n' ' ')"
+grep -qE '^== boot-v2 VM harness: [0-9]+ passed, 0 failed ==' "$TMP/killed.log" \
+    && bad "a SIGTERM'd run reported a clean pass — the killed-run defect is back" \
+    || ok "a SIGTERM'd run does not report 0 failed"
+
+# The lab image ships no diffutils (bootlab/Containerfile installs neither cmp
+# nor diff and asserts neither present). `if cmp -s A B; then ...` with no cmp
+# exits 127, which takes the same branch as "the files differ" — so a control
+# written that way passes whatever the files hold. Both halves are checked, so
+# the day diffutils IS installed this stops objecting rather than lying.
+if grep -qw diffutils "$REPO/bootlab/Containerfile"; then
+    ok "the boot lab image installs diffutils, so cmp/diff are available to it"
+else
+    uses="$(grep -nE '(^|[;&|(]|\b(if|then|else|elif|do|while|until|!)[[:space:]]+)[[:space:]]*(cmp|diff)[[:space:]]' \
+        "$REPO"/files/scripts/boot-v2/* 2>/dev/null | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' || true)"
+    [[ -z "$uses" ]] \
+        && ok "no boot-v2 script decides anything with cmp or diff, which the lab image does not ship" \
+        || bad "boot-v2 scripts call cmp/diff, absent from the lab image (exit 127 reads as 'they differ'): $uses"
+    # Both controls, because a scan that matches nothing anywhere reports the
+    # same clean as a scan over clean files — the exact defect this section is
+    # about, applied to this section.
+    DIFFUTILS_RE='(^|[;&|(]|\b(if|then|else|elif|do|while|until|!)[[:space:]]+)[[:space:]]*(cmp|diff)[[:space:]]'
+    printf '#!/bin/bash\nif cmp -s "$a" "$b"; then bad x; fi\n' > "$TMP/uses-cmp"
+    grep -qE "$DIFFUTILS_RE" "$TMP/uses-cmp" \
+        && ok "forward control: a real 'if cmp -s' line is found by the scan" \
+        || bad "forward control: the cmp scan does not match 'if cmp -s' — it proves nothing"
+    printf '#!/bin/bash\n# the two varstores differ, so do not cmp them\necho hi\n' > "$TMP/mentions-cmp"
+    if grep -nE "$DIFFUTILS_RE" "$TMP/mentions-cmp" | grep -v '^[0-9]*:[[:space:]]*#' | grep -q .; then
+        bad "inverse control: a comment mentioning cmp trips the scan (false red)"
+    else
+        ok "inverse control: a comment mentioning cmp does not trip the scan"
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
 if (( WITH_BINARY )); then
 sec "apex boot status reports the state, and does not invent the parts it cannot see"
 APEX_BIN="${APEX_BIN:-$REPO/apexd/target/debug/apex}"

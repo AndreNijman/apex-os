@@ -359,22 +359,33 @@ object Handoff {
     /**
      * Sending what is on the phone's clipboard to an agent.
      *
-     * ## Send is real. Receive is not, and this says so instead of pretending.
+     * ## Both directions are real now, and they are different code paths
      *
-     * There is **no verb on this socket that reads the machine's clipboard**.
-     * The full wire vocabulary is 28 verbs and none of them is a clipboard
-     * verb. `apex send --clipboard` is real and is a different feature wearing
-     * a similar name: `apexd/apex/src/dispatch.rs` shells out to `wl-paste`,
-     * ssh's the bytes to another **Linux host in the §20 registry** and runs
-     * `wl-copy` there. A phone is not an ssh destination running `wl-copy`, so
-     * that path is not reachable from here and adding it would mean a verb, a
-     * daemon-side clipboard reader and a Wayland session to read it from.
+     * **Receive** — what the COMPUTER copied, onto this phone — is the
+     * `clipboard` verb: [Agentd.clipboard] builds it, [Agentd.readClipboard]
+     * reads the answer, [MachineLink.clipboard] carries it, and
+     * `RemoteViewModel.pullMachineClipboard` puts the result on the phone's
+     * clipboard from the Agent Center. It is **not in this object**, because
+     * it is not a handoff into a session: it carries no session id, one
+     * Wayland seat having one clipboard, and it is offered as a machine
+     * action beside Projects rather than from the reply box.
      *
-     * What exists in the receive direction is the terminal's own copy: the
-     * session screen selects and copies what is on it, which covers "get that
-     * command off the machine" and does not cover "get what the machine
-     * copied". P1-059's third criterion is therefore half met, and it is
-     * recorded that way.
+     * Everything below is the **send** direction: this phone's clipboard into
+     * a waiting agent, through `input`. The two are one criterion pointing
+     * opposite ways, and the earlier version of this comment — which stated
+     * that no verb on this socket read the machine's clipboard, and that
+     * P1-059's third criterion was "half met" — was true when it was written
+     * and is not true now. Both sentences are kept here, struck, because the
+     * reason they were wrong is the trap: `apex send --clipboard` is a
+     * genuinely different feature wearing a similar name
+     * (`apexd/apex/src/dispatch.rs` shells out to `wl-paste`, ssh's the bytes
+     * to another **Linux host in the §20 registry** and runs `wl-copy`
+     * there), and three rounds of work read the similar name as the same
+     * feature and concluded the receive half was impossible.
+     *
+     * The terminal's own select-and-copy still exists and still covers "get
+     * that command off the machine". What it never covered was "get what the
+     * machine copied", and that is the gap the verb closes.
      *
      * ## Why a paste is not a reply
      *

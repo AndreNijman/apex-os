@@ -56,6 +56,27 @@ class AgentdRequestWireTest {
     }
 
     @Test
+    fun `clipboard reads the computer's clipboard and names no session`() {
+        expect("clipboard", Agentd.clipboard())
+        // The absence of an `id` is the assertion, not an accident of the
+        // fixture. One Wayland seat has one clipboard, so a version of this
+        // that carried a session id would be claiming a per-session clipboard
+        // that does not exist — and would invite the UI to hide the action
+        // behind a session, which is exactly where a user cannot reach it.
+        val built = json.parseToJsonElement(Agentd.clipboard()).jsonObject
+        assertEquals(setOf("cmd"), built.keys, "`clipboard` grew a field")
+
+        // It is the OPPOSITE direction from `input`, which is the confusion
+        // that kept this verb from being built for three rounds: `input`
+        // carries the phone's clipboard to the computer, this carries the
+        // computer's to the phone. Two requests, two directions, one criterion.
+        assertFalse(
+            Agentd.clipboard() == Agentd.input(7, "x"),
+            "the send half and the receive half are not the same request",
+        )
+    }
+
+    @Test
     fun `receive is the second takeover verb, and it never travels as a control frame`() {
         // It is in this fixture because the fixture is about what the daemon
         // PARSES, not about what goes on channel zero — `apex-remoted` refuses
@@ -160,6 +181,7 @@ class AgentdRequestWireTest {
         assertEquals(
             setOf(
                 "hello", "list", "info", "attach", "resize", "signal", "input",
+                "clipboard",
                 "receive", "receive_hostile_name",
                 "run_minimal", "run_full", "worktrees_all", "worktrees_one",
                 "requests", "grants", "system_grants",
