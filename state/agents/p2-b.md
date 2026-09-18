@@ -21,17 +21,22 @@ pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 apex-shell `task/p2-b-round31` from `8eccbfa`, apex-os `task/p2-b-round31`
 from `da6fc0fb`. Scratch `/var/tmp/apex-work/scratch-p2-b/round31/`.
 
-**The RTL half is DONE and pushed** — apex-shell `6c277ac`, apex-os
-`43ffce13`. See FOUND 26. Next action: add the accessibility markup to
-`src/services/config_tab/pages/RecoveryPage.qml`, starting with the loss list
-and the `Erase N item(s) now` Rectangle, which is the one control on the page
-that a keyboard or a reader cannot reach at all. Route its
-`Accessible.onPressAction` and its `MouseArea.onClicked` through ONE function,
-bind `activeFocusOnTab: RecoveryService.commitReady` and NOT `true`, and make
-the runtime suite's `apex` stub RECORD ITS ARGV so the suite can assert that a
-DoAction on that node BEFORE the loss list is rendered leaves no
-`recover reset --commit` in the log — exposing the button must not become a
-way around the gate `check-recovery-ui.sh` exists to protect.
+**RTL half DONE** (apex-shell `6c277ac`, apex-os `43ffce13`, FOUND 26).
+**Recovery markup DONE** (apex-shell `aafff20`) — 1 → 90 nodes on the bus, 96
+with the loss list rendered, tree grouped instead of flat, the Erase button
+reachable. FOUND 25 for the measurement.
+
+Next action: write `tests/check-recovery-a11y.sh` (source-level, the half the
+Arch runner can actually run — model it on `check-lockscreen-a11y.sh`) and
+`tests/mutate-recovery-a11y.sh` (model the TRAP SHAPE and the per-want baseline
+guard on `mutate-lockscreen-atspi-shim.sh`, round 30's fixed one, NOT on
+`mutate-lockscreen-atspi.sh`). The two invariants it exists to hold, neither
+visible in a diff: no private-use glyph on this page may ever acquire a role,
+and no `Accessible.role` on this page may exist without an explicit
+`Accessible.name`. Then `tests/run-recovery-atspi-shim.sh` +
+`tests/mutate-recovery-atspi-shim.sh`, from the working scratch probe at
+`scratch-p2-b/round31/probe-recovery.sh`. Then wire all four into `ci.yml`,
+the structure-check REQUIRED list, and re-run `check-suites-run-in-ci.sh`.
 
 **FOUND 25, measured at the top of this round and it changes the shape of the
 work:** `src/services/config_tab/pages/RecoveryPage.qml` contains **ZERO**
