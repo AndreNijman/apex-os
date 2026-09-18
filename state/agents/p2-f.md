@@ -24,14 +24,22 @@ ahead of the split. `msgraph.rs`'s module note rewritten — it said the defect
 was known and not fixed here. 8 mutations, all red, all restored.
 Workspace 3344 -> 3347 / 0 / 2, clippy exit 0.
 
-**NEXT ACTION: commit 3 — `max-filesize = broker::HTTP_MAX_BYTES` in
-`s3/mod.rs::call`'s config and in `cloudflare/api.rs`'s.** Both are the two
-sites with no cap at all: `run_curl`'s post-hoc `stdout.len() > HTTP_MAX_BYTES`
-refuses them only AFTER the whole reply has been buffered in this process, so
-the cap is enforced after the memory is spent. Adding it turns their oversize
-case into a pre-body abort (63) instead of a read-to-EOF; the two tests already
-assert `curl exited` rather than a number, so they survive it. Add an assertion
-per site that the configuration carries the cap.
+**COMMIT 3 IS DONE AND PUSHED: `2d7a4d72`** — `max-filesize` added to `s3`
+and `cloudflare::api`, the two sites that had none, so the cap is enforced
+before the reply is buffered rather than after. `curl exited 63` asserted at
+all six sites; 6 mutations, one per site, all red. The cloudflare test is two
+doubles now (40 KB proves the truncated document is dropped; 40 MB proves the
+cap fires before the body) — its first version claimed the second in a comment
+while asserting only the first, because 40 KB is not over a 3 MiB limit.
+Workspace 3347 / 0 / 2 unchanged (assertions, not new tests), clippy exit 0.
+
+**NEXT ACTION: commit 4 — the prose that this series made stale.** Check and
+fix `apexd/apex-backup-core/src/format.rs:30` ("`apex-secretd`'s
+`broker::HTTP_MAX_BYTES` caps a brokered *reply* at …") against what now
+happens, and grep `docs/online-accounts.md` for any sentence about oversized
+reads. Then run the shell suites (`tests/test-secret-broker.sh`, shellcheck,
+suites-in-CI, containerfile, doc verbs) and record P2-017 evidence with
+set-status.py — READ-APPEND-REPARSE, it REPLACES.
 
 Then commit 4 (prose: `apex-backup-core/src/format.rs:30` and
 `docs/online-accounts.md`). Details in ROUND 32 PLAN below.

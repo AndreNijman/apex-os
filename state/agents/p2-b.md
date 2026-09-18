@@ -661,6 +661,46 @@ than this branch.
     requiring the substituted glyph to be ONE character rather than the five of
     `@PUA@`.
 
+28. **THE FACTORY RESET CANNOT BE COMMITTED — BY ANYONE. `RecoveryService`
+    assigns `plan` before `resetPhase`, the loss list acknowledges itself on
+    the first of those, and `acknowledgeLossList()` refuses while the phase is
+    still `planning`. Nothing ever acknowledges again, so `commitReady` is
+    permanently false, so the Erase button is permanently invisible.** This is
+    not an accessibility defect. It is a product defect that an accessibility
+    read-back found, because the bus is the only place the button was visible
+    at all.
+
+    Measured, not reasoned. `src/services/RecoveryService.qml` `_onPlan()`:
+
+        root.plan = p                  // fires lossList.onPlanChanged -> _ack()
+        root.resetPhase = "planned"    // one line too late
+
+    QML property notifications are synchronous, so `_ack()` runs on line 1 with
+    the phase still `"planning"`, `acknowledgeLossList()` returns at its first
+    guard, and `_ackToken`/`_ackCount` stay `""`/`-1`. `_ack()` is wired to
+    `onPlanChanged`, `onShownChanged` and `Component.onCompleted` — none of
+    which fires again after line 2.
+
+    Instrumented in the live headless run (debug removed afterwards, tree
+    reverted): `APEXDBG ack: plan=true shown=0`, `APEXDBG ack: plan=true
+    shown=4`, then `APEXDBG press: commitReady=false phase=planned plan=true
+    shown=4 losses=4`. And `Rec.commitArgv(plan, 4, plan.confirmToken)`
+    evaluated against the same fixture in node returns a perfectly good
+    `["apex","recover","reset","--scope","desktop","--commit","--confirm",
+    "desktop:4:5d7f91ba"]`. So every input is right and the acknowledgement is
+    the only thing missing.
+
+    Why nothing caught it: `recovery-test.js` tests `recovery.js`, where
+    `commitArgv` is correct; `check-recovery-ui.sh` reads the source and
+    asserts the wiring EXISTS, which it does. Neither instantiates the QML, and
+    the ordering is the whole bug. It is the same shape as FOUND 22 — an
+    acknowledgement or a retry wired to triggers that do not include the one
+    that makes it valid.
+
+    Found only because the button, though never visible, IS on the
+    accessibility bus (FOUND 16) with a Press action, so it could be pressed
+    over AT-SPI and the refusal observed.
+
 ## BLOCKED ON
 
 Nothing this unit can act on. FOUND 14 is closed and the read-back is written
