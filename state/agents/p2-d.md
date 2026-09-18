@@ -23,13 +23,16 @@ branch: **task/p2-d-6** (off roadmap/v2.2 @ 6b531503)
 
 ## NEXT
 
-Add `--trust-ca FILE` to `apex browser run`: `apexd/apex/src/browser.rs`
-(`RunArgs` + `run_argv`, and the argv test at the bottom of that file), then
-`files/system/libexec/apex-browser` `cmd_run` — parse it, refuse a relative
-path and a path inside `$BROWSER_ROOT` (teardown deletes that tree), and pass
-`--trust-ca` through to the `apex agent run` line in `session_argv` (~L600).
-Then an assertion in `tests/test-apex-browser.sh` that the flag reaches that
-argv, mutation-tested by deleting the pass-through.
+Update the docs and then measure. Docs: `docs/browser-capsule.md` (the
+"not built" list still says a capsule cannot be told to trust a CA) and
+`docs/browser-capsule-auth.md` (the "What is not decided" bullet on the per-run
+CA bind is now decided — and **three places in it say route B takes protocol
+10, which is now wrong: route B takes 11**). Then the measurement: bring up a
+private daemon the way `apexd/apex-agentd/tests/session_allowlist.rs` does,
+point `APEX_BROWSER_APEX` at the built `apex`, and run two capsules against a
+loopback TLS server with a private CA — one with `--trust-ca` (renders) and one
+without (0 B, `UNKNOWN_CA`). If the daemon socket turns out not to be
+overridable, say so and write "live run NOT DONE, not claimed."
 
 ## THIS ROUND'S SCOPE (round 30), narrow on purpose
 
@@ -58,6 +61,17 @@ Design taken (advisor-reviewed) before any code:
 
 ## DONE (round 30, branch task/p2-d-6)
 
+- `2fff910f` — **`apex browser run --trust-ca FILE`**: the clap surface, the
+  engine, and 11 new suite assertions that the flag reaches the `apex agent
+  run` line and lands among the RUNTIME's flags rather than after the `--`
+  (after it, firefox has no such flag and the capsule fails naming the wrong
+  program). Engine refusals, each asserted to leave no session behind: a
+  relative path, a file that is not there, a file inside `$BROWSER_ROOT`.
+  Five mutations, all red, all restored byte-identically. One assertion was
+  written wrong first — `${#argv%%<pat>*}` is a bad substitution, so it
+  printed an error and asserted NOTHING, neither PASS nor FAIL. The dominant
+  defect family, inside a test written to avoid it.
+  116 passed / 0 failed (was 105); `shellcheck -S warning -x` clean.
 - `b0ef1b2c` — **the daemon half: `apex-agentd/src/browser_ca.rs`.** Copies the
   PEM where the session can read and not write it, merges a
   `Certificates.Install` into a copy of the MACHINE's own

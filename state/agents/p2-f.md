@@ -6,14 +6,18 @@ branch: task/p2-f-5   (cut from origin/roadmap/v2.2 @ 6b531503, which is round 2
           task/p2-f-4 landed; nothing of this unit's is unlanded)
 
 ## NEXT
-**ROUND 30 IS COMPLETE ON THE BRANCH. Both commits pushed on `task/p2-f-5`
+**ROUND 30 IS COMPLETE ON THE BRANCH. Three commits pushed on `task/p2-f-5`
 (cut from `roadmap/v2.2` @ `6b531503`):**
   `9f8d2468`  the `gdrive` provider
   `bdd9b51f`  `files.read -> gdrive.file.read`, `drive.file` at the sign-in,
               and the three places that said a Google token can be spent on
               nothing
-Worktree CLEAN, `git diff --exit-code` silent, every mutated file restored
-with plain `cp` and `cmp` silent.
+  `933bbee1`  the two things with no assertion behind them: `spend_advice`
+              (the `add` status line, previously an unreachable branch) and a
+              shell section that measures the grant THROUGH THE DAEMON and
+              proves the shipped binary has no `GdriveProvider::at`
+Worktree CLEAN at `933bbee1`, `git diff --exit-code` silent, all twenty
+mutations restored with plain `cp` and `cmp` silent.
 
 **NEXT ACTION: `msgraph`. Copy `apexd/apex-secretd/src/providers/gdrive.rs`
 and its tests wholesale — the shape transfers exactly. Differences, all
@@ -120,6 +124,22 @@ Remaining, in the order this round takes them:
 
 ## DONE
 Round 9 (round 30 of the program), on task/p2-f-5, BOTH PUSHED:
+  933bbee1  the two things in this round with NO assertion behind them, found
+            by asking rather than by a failure. `apex account add`'s closing
+            status line was an UNREACHABLE branch — it runs only after a real
+            device grant and there is no endpoint override, on purpose — so
+            the deciding half became `spend_advice()`, a pure function,
+            asserted in both directions. And every gdrive test until now was
+            DAEMON-DIRECT (`Service::use_capability` in process); a new
+            section in tests/test-secret-broker.sh grants `files.read` through
+            the real CLI and socket, checks the grant lands under the CANONICAL
+            `gdrive.file.read`, keeps Microsoft as the control, and proves the
+            SHIPPED binary has no `GdriveProvider::at` by having it refuse a
+            loopback-pinned Drive credential. 76 -> 84 passed. 4 mutations, all
+            red; the host-pin one showed `perform`'s duplicate check catching
+            what `bind` stopped catching, so nothing was dialled and only the
+            message changed — the assertion names both hosts and went red
+            anyway.
   9f8d2468  **the `gdrive` transport** — the thing every card since round 27
             has named as the biggest unblocked piece. One operation,
             `gdrive.file.read`, `ResourceKind::Name` because a Drive file is an
@@ -154,8 +174,8 @@ Round 9 (round 30 of the program), on task/p2-f-5, BOTH PUSHED:
             `-p apex-secretd`, because `cargo test --workspace` stops at the
             first failing target and the core-crate failure was hiding the
             cross-crate gate.
-  Workspace 3297 -> 3298 passed / 0 failed / 2 ignored. clippy --locked
-  --workspace --all-targets -D warnings exit 0. secret-broker 76/0;
+  Workspace 3297 -> 3299 passed / 0 failed / 2 ignored. clippy --locked
+  --workspace --all-targets -D warnings exit 0. secret-broker 76 -> 84/0;
   apex-verbs 65/0; doc-verbs 191 / 114 / 0 / 0; shellcheck 165 / 0 / 0;
   suites-in-CI 75 / 71 / 4 / 0; containerfile 194 / 0; no conflict markers.
   **NOT RUN AND NOT CLAIMED: no Google endpoint was contacted.** Whether
@@ -277,7 +297,7 @@ Round 3, on task/p2-f-3 (pushed):
             cross-crate gate in apex-secretd, both mutants run and red.
 
 ## IN PROGRESS (round 9 — FINISHED)
-- Worktree CLEAN at `bdd9b51f` on `task/p2-f-5`, pushed, cut from
+- Worktree CLEAN at `933bbee1` on `task/p2-f-5`, pushed, cut from
   `roadmap/v2.2` @ `6b531503`. Nothing half-written; `git diff --exit-code` is
   silent and every mutated file was restored with plain `cp`, `cmp` silent.
   Pristine copies of the mutated files are in
