@@ -53,8 +53,8 @@ Round 30 (2026-09-19). **FOUND 14 is closed**: named cause, standalone
 reproduction, in-situ confirmation, and the lock screen's markup read back off
 the bus for the first time. See FOUND 20–23.
 
-apex-shell `task/p2-b-round30`, two commits on `roadmap/v2.2`'s `d5c781a`,
-both pushed:
+apex-shell `task/p2-b-round30`, four commits on `roadmap/v2.2`'s `d5c781a`,
+all pushed:
 
 * `273c1fb` — `tests/quickshell-a11y-cause.cpp` (the five-mode reproduction),
   `tests/check-quickshell-a11y-cause.sh` (**14 passed / 0 failed / 0 skipped**)
@@ -74,10 +74,18 @@ both pushed:
   PASS, and every REQUIRED path stat-ed (110 checked, 0 missing).
 
 Both mutation harnesses now restore from their **trap**, not only after each
-mutant — proven by killing one mid-mutant and watching the tree come back
-clean. Before that, a CI step timeout would have left a mutated file in place
-for every later step in the same job, and because the file is in the REQUIRED
-list the structure check would still have passed.
+mutant: before that, a CI step timeout would have left a mutated file in place
+for every later step in the same job, and because these files are in the
+REQUIRED list the structure check would still have passed. The first version of
+that (in `b01a276`) restored correctly **by accident**, and `20a1613` fixes it —
+see FOUND 24. Do not repeat the claim `b01a276`'s message makes.
+
+* `20a1613` — `trap put_back EXIT INT TERM` does not END the script on a
+  signal. The kill test now asserts three things instead of one: the file is
+  restored, there is **no totals line** (it stopped rather than carrying on to
+  score a mutant it never ran) and there is **no `cp` error** (it stopped by
+  design rather than by choking). All three pass; the harness exits 143;
+  unkilled it is unchanged at 13 applied / 11 CAUGHT / 0 SURVIVED / 2 HELD.
 
 `56d7521` is prose only — comments, `echo` lines and skip reasons in
 `run-lockscreen-atspi.sh` — and it was verified as such rather than asserted:
@@ -453,6 +461,26 @@ than this branch.
     all — a mutant pointed at a string the bus never delivers proves nothing
     about the assertion it was aimed at, and a harness that scored it CAUGHT
     would have certified a check it never exercised.
+
+24. **A signal trap whose handler only RETURNS does not stop the script, and a
+    restore that works anyway is not a working restore.** `trap put_back EXIT
+    INT TERM` in a mutation harness looks right and restores the files, but
+    bash defers the signal until the running command substitution finishes,
+    runs the handler — which restores and then deletes the snapshot — and then
+    **resumes at the next line**: it scores a verdict for a mutant that was
+    killed, and only then dies inside `restore()` on the snapshot the handler
+    has just removed. The first kill test here reported "restored" and was
+    believed; its log has exactly one `cp: cannot stat` and **no totals line**,
+    which is what stopping-by-choking looks like. Fixed in `20a1613` with
+    separate exiting handlers (`trap 'put_back; exit 130' INT`,
+    `trap 'put_back; exit 143' TERM`, `trap put_back EXIT`) and a kill test
+    that asserts all three properties. **The general lesson is the one this
+    program keeps meeting from a different direction: a check with one
+    assertion cannot tell "it worked" from "it happened to end up that way".**
+    `tests/mutate-lockscreen-atspi.sh` (round 29) has the same `trap '…' EXIT
+    INT TERM` shape and is deliberately NOT changed on this branch — changing
+    it means re-running eleven full bring-ups to prove a change nobody has
+    measured a failure from. Whoever touches it next should fix it then.
 
 ## BLOCKED ON
 
