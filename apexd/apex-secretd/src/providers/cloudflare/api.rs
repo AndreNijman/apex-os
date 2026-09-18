@@ -400,24 +400,39 @@ pub fn call(
 
     let stdout = out.stdout.as_str();
     let stderr = out.stderr.as_str();
+    // `code` is CURL'S EXIT CODE, not an HTTP status, and it is read FIRST —
+    // before the status line, not only when there is no status line.
+    //
+    // It used to be read only in the `None` arm below, on the reasoning that a
+    // curl which failed had no status to report. That is false, and measured:
+    // curl's `write-out` runs when the transfer ENDS, whichever way it ended,
+    // so `max-time` expiring mid-body exits 28 and prints `"<partial>\n200"`,
+    // and a far end that closes early exits 18 and does the same. Read after
+    // the split, both of those are a 200 with a TRUNCATED JSON document under
+    // it — an api reply this build would go on to parse as a real one.
+    //
+    // A refused connection is the same branch and always was: `%{http_code}`
+    // is `000` there, which parses as `Some(0)`, so that case was reaching the
+    // `Some` arm and only LOOKED like it went through the `None` arm. Status 0
+    // is what `mod.rs`, `dns.rs`, `deploy.rs` and `temporary.rs` all key on to
+    // say "the api could not be reached", and it is the right answer for every
+    // way a transfer can fail to finish. curl's message travels in the body,
+    // where the framework scrubs it.
+    if out.code != 0 {
+        return Ok(Reply {
+            status: 0,
+            body: crate::broker::aborted_transfer(&out)
+                .unwrap_or_else(|| stderr.trim().to_string()),
+        });
+    }
     let (body, status) = match stdout.rsplit_once('\n') {
         Some((body, tail)) => (body.to_string(), tail.trim().parse::<u16>().ok()),
         None => (String::new(), stdout.trim().parse::<u16>().ok()),
     };
     let Some(status) = status else {
-        // `code` is CURL'S EXIT CODE, not an HTTP status. Zero means the
-        // transfer happened, so there should have been a status line, and its
-        // absence is output this build cannot read.
-        if out.code == 0 {
-            return Err(TransportError::Unreadable);
-        }
-        // curl failed before it had a status: a refused connection, a name that
-        // does not resolve, a TLS handshake. Its message is the only useful
-        // thing there is, and it belongs in the reply where it gets scrubbed.
-        return Ok(Reply {
-            status: 0,
-            body: stderr.trim().to_string(),
-        });
+        // The transfer finished and still produced no status line, so this is
+        // output this build cannot read rather than a request that failed.
+        return Err(TransportError::Unreadable);
     };
     let mut body = body;
     if !stderr.trim().is_empty() {
@@ -577,6 +592,92 @@ mod tests {
         // And the credential is not in it, which is the reason this comes back
         // as a Reply the framework scrubs rather than as an Err it does not.
         assert!(!reply.body.contains("apex-cf-unreachable-token"), "{}", reply.body);
+    }
+
+    /// A reply cut short is `status: 0`, not a truncated api document.
+    ///
+    /// The mixup this is about is the one the test above names: curl's EXIT
+    /// CODE is not an HTTP status. curl's `write-out` prints `%{http_code}`
+    /// when the transfer ENDS, whichever way it ended — measured in
+    /// `broker::tests::curls_write_out_still_prints_when_the_transfer_was_aborted`
+    /// — so a connection that dies partway through a large `/accounts` page
+    /// arrives here as a `200` with a PREFIX of the JSON under it. Read after
+    /// the split, that is a real reply with a real status, and every consumer
+    /// of `Reply` would have gone on to parse it.
+    ///
+    /// Status 0 rather than an `Err`, because `mod.rs`, `dns.rs`, `deploy.rs`
+    /// and `temporary.rs` all key on `status == 0` for "the api could not be
+    /// reached", and a transfer that did not finish is exactly that.
+    ///
+    /// The double promises forty kilobytes and sends four hundred bytes before
+    /// closing, so curl exits non-zero with a partial body and a `200` on the
+    /// last line.
+    #[test]
+    fn a_reply_that_was_cut_short_is_not_read_as_a_shorter_reply() {
+        use std::io::{BufRead, BufReader, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("addr").port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                    loop {
+                        let mut line = String::new();
+                        match reader.read_line(&mut line) {
+                            Ok(0) => return,
+                            Ok(_) => {}
+                            Err(_) => return,
+                        }
+                        if line.trim_end().is_empty() {
+                            break;
+                        }
+                    }
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                          Content-Length: 40000\r\nConnection: close\r\n\r\n",
+                    );
+                    // A prefix of a plausible api document, so a build without
+                    // the guard would hand back something that starts like one.
+                    let mut partial = br#"{"success":true,"errors":[],"result":["#.to_vec();
+                    partial.extend(std::iter::repeat_n(b'a', 400));
+                    let _ = stream.write_all(&partial);
+                });
+            }
+        });
+
+        // Safe: getuid cannot fail.
+        let owner = crate::broker::owner(unsafe { libc::getuid() }).expect("own uid");
+        let reply = call(
+            &Api::loopback(port),
+            &Call::new("GET", "/accounts".to_string(), Body::None),
+            &SecretValue::new(b"apex-cf-cutshort-token".to_vec()),
+            &owner,
+        )
+        .expect("a cut-short reply is a Reply, not an Err");
+
+        assert_eq!(
+            reply.status, 0,
+            "a truncated reply kept the status curl printed anyway: {}",
+            reply.body
+        );
+        assert!(!reply.ok());
+        // Not the prefix of the document. A caller that got `{"success":true`
+        // back would be reading a cut-short page as an api answer.
+        assert!(
+            !reply.body.contains("\"success\":true"),
+            "the truncated document came back as the reply: {}",
+            reply.body
+        );
+        // And it says what happened, in this build's own words plus curl's.
+        assert!(reply.body.contains("curl exited"), "{}", reply.body);
+        assert!(reply.body.contains("did not finish"), "{}", reply.body);
+        assert!(
+            !reply.body.contains("apex-cf-cutshort-token"),
+            "{}",
+            reply.body
+        );
     }
 
     /// The guard at the point where it matters, not the predicate behind it.
