@@ -465,10 +465,15 @@ named failure.
 
 * **Step 6, encryption by default: not implemented, deliberately.** §22 gates it
   on "once recovery and hardware edge cases are proven". A TPM clear, a PCR 7
-  change and an S3 cycle are now each measured, and each with the recovery path
-  demonstrated **failing** before it is demonstrated working — a refusal and the
-  recovery key in the same boot. But every one of them ran against `swtpm` in a
-  VM. No silicon TPM has been through an enrol-and-recover cycle; machines with
+  change and an S3 cycle are now each measured. Two of the three show the
+  recovery path **failing** before they show it working: after a TPM clear, and
+  on the PCR 7-bound control volume, the TPM unlock is refused and the recovery
+  key opens the volume in that same boot. The S3 scenario proves something
+  narrower and should not be read as a recovery test — it has no refusal arm and
+  never touches the recovery key, because the property it exists to check is
+  that the volume stays open across the suspend. Its negative control is the
+  same run with qemu's S3 support off. And every one of the three ran against
+  `swtpm` in a VM. No silicon TPM has been through an enrol-and-recover cycle; machines with
   no TPM at all are still not covered; and the installer cannot encrypt a disk
   in the first place — every `crypto_LUKS` branch in `installer/apex-install` is
   a refusal to overwrite an existing header, not a path that creates one. A
