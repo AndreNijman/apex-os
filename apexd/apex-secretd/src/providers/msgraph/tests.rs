@@ -1124,6 +1124,18 @@ fn a_graph_reply_this_build_will_not_carry_whole_is_refused_on_the_first_hop() {
         Response::Error { message, .. } => {
             assert!(message.contains("curl exited"), "{message}");
             assert!(message.contains("did not finish"), "{message}");
+            // 63 and not 18, which is the whole of what `max-filesize` buys.
+            // curl reads `Content-Length` BEFORE the body: told a limit, it
+            // stops there and exits 63 having written nothing; not told one, it
+            // reads to EOF and exits 18 only once the far side hangs up — by
+            // which time every byte is in this daemon's memory and the cap
+            // `broker::run_curl` applies afterwards is a cap on nothing. Both
+            // are refusals now, so the number is the only thing that can tell
+            // them apart.
+            assert!(
+                message.contains("curl exited 63"),
+                "the reply was read to the end before it was refused: {message}"
+            );
         }
         other => panic!("unexpected reply: {other:?}"),
     }
@@ -1154,6 +1166,13 @@ fn a_download_this_build_will_not_carry_whole_is_refused_without_curls_words() {
         Response::Error { message, .. } => {
             assert!(message.contains("curl exited"), "{message}");
             assert!(message.contains("did not finish"), "{message}");
+            // 63 and not 18: with `max-filesize` curl stops at the limit
+            // having written nothing; without it, it reads to EOF. See the
+            // longer note on hop one.
+            assert!(
+                message.contains("curl exited 63"),
+                "the reply was read to the end before it was refused: {message}"
+            );
             // The invariant this hop is built around, unchanged by the guard.
             assert!(
                 !message.contains(PREAUTH),

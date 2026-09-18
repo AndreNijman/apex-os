@@ -112,27 +112,17 @@
 //! loopback host reaches the table through a `#[cfg(test)]` constructor and
 //! through nothing that ships.
 //!
-//! # Why both hops read curl's exit code, and why they read it differently
+//! # A known defect this provider SHARES and does not fix
 //!
-//! curl's `write-out` runs when the transfer ENDS, whichever way it ended.
-//! Measured on curl 8.15.0: against a server answering `Content-Length:
-//! 4000000` with `max-filesize = 3145728`, **curl exits 63 and its `write-out`
-//! still prints**, so stdout is exactly `"\n200"` — which, read as a status
-//! and a body, is a 200 with an empty file under it. `max-time` expiring gives
-//! 28 and the far end closing early gives 18, both with a PARTIAL body in
-//! front of the same 200. So the status line cannot say whether the body under
-//! it is the body.
-//!
-//! Hop one goes through [`crate::broker::aborted_transfer`], like `gdrive`,
-//! `oauth`, `s3` and `cloudflare::api`. It may carry curl's own words because
-//! the URL it was handed is built from the STORED endpoint and the item id.
-//!
-//! [`download_outcome`] does its own check instead, on the `curl_code` it
-//! already receives, and composes its sentence out of the exit code and the
-//! target. That is the same argument the rest of this note makes about the
-//! pre-authenticated URL: curl quotes what it was given, so the download hop
-//! carries no curl output at all. Routing hop two through the shared helper is
-//! the natural simplification and it is wrong — a test refuses it.
+//! Neither [`MsgraphProvider::perform`] nor [`download_outcome`] reads curl's
+//! exit code on a 2xx, and neither does [`crate::providers::gdrive`]. Measured
+//! rather than reasoned: against a server answering `Content-Length: 4000000`
+//! with `max-filesize = 3145728`, **curl exits 63 and its `write-out` still
+//! runs**, so stdout is exactly `"\n200"` — a truncated read arrives as
+//! `code: 0` with an empty body, which is an empty file reported as a
+//! successful one. It is recorded in this unit's agent card rather than
+//! patched here, because `gdrive`, `s3` and `oauth` have the same shape and
+//! fixing one of four makes the family look handled.
 //!
 //! `printable`, `quoted`, `one_line` and `split_status` are a copy of the ones
 //! in `gdrive`, `s3` and `oauth`, which are already copies of each other. Four

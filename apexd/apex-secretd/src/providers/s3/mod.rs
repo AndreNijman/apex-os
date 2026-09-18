@@ -516,6 +516,16 @@ impl S3Provider {
         // goes next, and a SigV4 signature is bound to the host it was made for.
         config.push_str("silent\n");
         config.push_str("show-error\n");
+        // The cap, enforced BEFORE the bytes are spent rather than after.
+        //
+        // `broker::run_curl` already refuses a reply over `HTTP_MAX_BYTES` —
+        // but it does so by measuring `out.stdout` once the child has exited,
+        // which means an object of any size at all was read into this daemon's
+        // address space first. That is the thing the cap exists to prevent, and
+        // an object store is the one provider here whose replies are arbitrary
+        // user data. curl stops at the limit; the guard above turns its exit
+        // into a refusal the caller can see.
+        config.push_str(&format!("max-filesize = {}\n", broker::HTTP_MAX_BYTES));
         config.push_str("write-out = \"\\n%{http_code}\"\n");
 
         let out = broker::run_curl(&config, req.owner).map_err(ProviderError::Failed)?;

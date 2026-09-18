@@ -506,7 +506,7 @@ fn seen_after(f: &Fixture, method: &str) -> Seen {
         .expect("a request")
 }
 
-/// An object whose transfer was cut short must be a REFUSAL, not a short read.
+/// An object this build will not carry whole is a REFUSAL, not a short read.
 ///
 /// This is the worst shape of the family on this provider: `s3.object.read`
 /// hands the body back as the object, so a prefix of a backup blob is returned
@@ -516,7 +516,7 @@ fn seen_after(f: &Fixture, method: &str) -> Seen {
 /// so the 200 on the last line says nothing about whether the bytes above it
 /// are all the bytes.
 #[test]
-fn an_object_whose_transfer_was_cut_short_is_refused_rather_than_read_as_short() {
+fn an_object_larger_than_this_build_will_carry_is_refused_rather_than_read_as_short() {
     let f = Fixture::new("oversize", Mode::Oversize, &["s3.object.read"]);
 
     let reply = f.use_it(f.record("s3.object.read", &format!("{BUCKET}/big.bin")));
@@ -537,6 +537,18 @@ fn an_object_whose_transfer_was_cut_short_is_refused_rather_than_read_as_short()
             // its exits or rewords the sentence.
             assert!(message.contains("curl exited"), "{message}");
             assert!(message.contains("did not finish"), "{message}");
+            // 63 and not 18, which is the whole of what `max-filesize` buys.
+            // curl reads `Content-Length` BEFORE the body: told a limit, it
+            // stops there and exits 63 having written nothing; not told one, it
+            // reads to EOF and exits 18 only once the far side hangs up — by
+            // which time every byte is in this daemon's memory and the cap
+            // `broker::run_curl` applies afterwards is a cap on nothing. Both
+            // are refusals now, so the number is the only thing that can tell
+            // them apart.
+            assert!(
+                message.contains("curl exited 63"),
+                "the reply was read to the end before it was refused: {message}"
+            );
         }
         other => panic!("unexpected reply: {other:?}"),
     }

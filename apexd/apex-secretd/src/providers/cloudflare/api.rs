@@ -384,6 +384,16 @@ pub fn call(
     // goes next, and the host pin was applied to the URL above.
     config.push_str("silent\n");
     config.push_str("show-error\n");
+    // The cap, enforced BEFORE the bytes are spent rather than after.
+    //
+    // The note on `TransportError::NoCurl` says `broker::run_curl` carries
+    // "the reply it began to read was larger than `HTTP_MAX_BYTES`" — and it
+    // does, but by measuring the child's stdout after the child has exited, so
+    // the whole reply was in this daemon's memory before anything refused it.
+    // An R2 object read is a reply whose size nobody here chose. curl stops at
+    // the limit instead, and the exit-code check above turns that into a
+    // `Reply` with a status of 0.
+    config.push_str(&format!("max-filesize = {}\n", crate::broker::HTTP_MAX_BYTES));
     // The status arrives after the body, on its own line, so a body that
     // happens to end in digits cannot be mistaken for one.
     config.push_str("write-out = \"\\n%{http_code}\"\n");
@@ -609,75 +619,108 @@ mod tests {
     /// and `temporary.rs` all key on `status == 0` for "the api could not be
     /// reached", and a transfer that did not finish is exactly that.
     ///
-    /// The double promises forty kilobytes and sends four hundred bytes before
-    /// closing, so curl exits non-zero with a partial body and a `200` on the
-    /// last line.
+    /// **Two cases, and the difference between them is what `max-filesize`
+    /// buys.** Both are a server that promises more than it sends:
+    ///
+    ///   * promising forty KILObytes, which is under `HTTP_MAX_BYTES`, so the
+    ///     cap cannot fire: curl reads what arrives and exits **18** when the
+    ///     far end hangs up, with a partial document on stdout. This is the
+    ///     case that proves the truncated body is dropped rather than parsed.
+    ///   * promising forty MEGAbytes, which is over it: curl compares the
+    ///     promised length against the limit BEFORE the body and exits **63**
+    ///     having read none of it. Without `max-filesize` in the configuration
+    ///     this second case is an 18 as well — the whole reply read into this
+    ///     daemon first, and `run_curl`'s own length check refusing it only
+    ///     once the memory is spent.
     #[test]
     fn a_reply_that_was_cut_short_is_not_read_as_a_shorter_reply() {
         use std::io::{BufRead, BufReader, Write};
 
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let port = listener.local_addr().expect("addr").port();
-        std::thread::spawn(move || {
-            for stream in listener.incoming().flatten() {
-                std::thread::spawn(move || {
-                    let mut stream = stream;
-                    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
-                    loop {
-                        let mut line = String::new();
-                        match reader.read_line(&mut line) {
-                            Ok(0) => return,
-                            Ok(_) => {}
-                            Err(_) => return,
+        /// A server that promises `promised` bytes and sends four hundred.
+        fn overpromising(promised: usize) -> u16 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+            let port = listener.local_addr().expect("addr").port();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                        loop {
+                            let mut line = String::new();
+                            match reader.read_line(&mut line) {
+                                Ok(0) => return,
+                                Ok(_) => {}
+                                Err(_) => return,
+                            }
+                            if line.trim_end().is_empty() {
+                                break;
+                            }
                         }
-                        if line.trim_end().is_empty() {
-                            break;
-                        }
-                    }
-                    let _ = stream.write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                          Content-Length: 40000\r\nConnection: close\r\n\r\n",
-                    );
-                    // A prefix of a plausible api document, so a build without
-                    // the guard would hand back something that starts like one.
-                    let mut partial = br#"{"success":true,"errors":[],"result":["#.to_vec();
-                    partial.extend(std::iter::repeat_n(b'a', 400));
-                    let _ = stream.write_all(&partial);
-                });
-            }
-        });
+                        let _ = stream.write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {promised}\r\nConnection: close\r\n\r\n"
+                            )
+                            .as_bytes(),
+                        );
+                        // A prefix of a plausible api document, so a build
+                        // without the guard hands back something that starts
+                        // like one.
+                        let mut partial = br#"{"success":true,"errors":[],"result":["#.to_vec();
+                        partial.extend(std::iter::repeat_n(b'a', 400));
+                        let _ = stream.write_all(&partial);
+                    });
+                }
+            });
+            port
+        }
 
         // Safe: getuid cannot fail.
         let owner = crate::broker::owner(unsafe { libc::getuid() }).expect("own uid");
-        let reply = call(
-            &Api::loopback(port),
-            &Call::new("GET", "/accounts".to_string(), Body::None),
-            &SecretValue::new(b"apex-cf-cutshort-token".to_vec()),
-            &owner,
-        )
-        .expect("a cut-short reply is a Reply, not an Err");
 
-        assert_eq!(
-            reply.status, 0,
-            "a truncated reply kept the status curl printed anyway: {}",
-            reply.body
-        );
-        assert!(!reply.ok());
-        // Not the prefix of the document. A caller that got `{"success":true`
-        // back would be reading a cut-short page as an api answer.
-        assert!(
-            !reply.body.contains("\"success\":true"),
-            "the truncated document came back as the reply: {}",
-            reply.body
-        );
-        // And it says what happened, in this build's own words plus curl's.
-        assert!(reply.body.contains("curl exited"), "{}", reply.body);
-        assert!(reply.body.contains("did not finish"), "{}", reply.body);
-        assert!(
-            !reply.body.contains("apex-cf-cutshort-token"),
-            "{}",
-            reply.body
-        );
+        for (promised, expected_exit, what) in [
+            (40_000usize, 18, "read to EOF and cut short"),
+            (40_000_000usize, 63, "refused before the body, by the cap"),
+        ] {
+            let reply = call(
+                &Api::loopback(overpromising(promised)),
+                &Call::new("GET", "/accounts".to_string(), Body::None),
+                &SecretValue::new(b"apex-cf-cutshort-token".to_vec()),
+                &owner,
+            )
+            .expect("a cut-short reply is a Reply, not an Err");
+
+            assert_eq!(
+                reply.status, 0,
+                "{what}: a truncated reply kept the status curl printed anyway: {}",
+                reply.body
+            );
+            assert!(!reply.ok(), "{what}");
+            // Not the prefix of the document. A caller that got
+            // `{"success":true` back would be reading a cut-short page as an
+            // api answer.
+            assert!(
+                !reply.body.contains("\"success\":true"),
+                "{what}: the truncated document came back as the reply: {}",
+                reply.body
+            );
+            // And it says what happened, in this build's own words.
+            assert!(reply.body.contains("did not finish"), "{what}: {}", reply.body);
+            // The exit code is the measurement, not decoration: 63 on the
+            // second case is the only observable difference between a
+            // configuration that carries `max-filesize` and one that does not,
+            // because both end in a refusal either way.
+            assert!(
+                reply.body.contains(&format!("curl exited {expected_exit}")),
+                "{what}: expected curl to exit {expected_exit}: {}",
+                reply.body
+            );
+            assert!(
+                !reply.body.contains("apex-cf-cutshort-token"),
+                "{what}: {}",
+                reply.body
+            );
+        }
     }
 
     /// The guard at the point where it matters, not the predicate behind it.

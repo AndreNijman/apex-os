@@ -580,6 +580,13 @@ fn a_token_reply_this_build_stopped_reading_says_so_rather_than_blaming_the_serv
     let (_, message) = reply.as_error().expect("an aborted refresh was accepted");
     assert!(message.contains("curl exited"), "{message}");
     assert!(message.contains("did not finish"), "{message}");
+    // 63 and not 18: with `max-filesize` curl stops at the limit having
+    // written nothing; without it, it reads to EOF and the cap this build
+    // applies afterwards is a cap on memory already spent.
+    assert!(
+        message.contains("curl exited 63"),
+        "the reply was read to the end before it was refused: {message}"
+    );
     assert!(
         !message.contains("not JSON"),
         "the refusal blames the server for this build's own cap: {message}"
