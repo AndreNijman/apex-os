@@ -5959,7 +5959,18 @@ tasks:
     OF THE ACCEPTANCE WORD "REAL": every measurement in every round of this unit used swtpm in a VM. NO SILICON
     TPM HAS BEEN THROUGH AN ENROL-AND-RECOVER CYCLE, the L16's TPM is off-limits to this program, and L-002 and
     L-003 stay blocked behind that per state/queue.json. What a VM can qualify is now qualified; the rest is
-    written down as a procedure for whoever has a machine they are willing to clear.
+    written down as a procedure for whoever has a machine they are willing to clear. ROUND 29 ADDENDUM: the shared
+    fixture changed this round (guest-luks-probe.sh gained pcr0, the recovery-marker read-back, and MARKER moved
+    to file scope), so the PRE-EXISTING scenario that runs through it was re-measured rather than assumed:
+    luks-tpm-clear came back 20 passed / 0 failed, identical to round 27, container later-r7-tpmclear ExitCode 0.
+    Its refused boot also carried the new recovery-marker=found line, which the scenario read past without
+    asserting on; asserted now in both directions, and the scenario is 22 passed / 0 failed (later-r7-tpmclear2,
+    ExitCode 0, scratch-later/r7-tpmclear2.log). So the TPM-clear recovery is now a claim about the user's DATA
+    and not only about a keyslot opening, which is the same standard luks-no-tpm was built to. Also corrected: the
+    provenance header on docs/boot-v2.md's 'What was measured' said every figure below it came from the katana on
+    2026-09-03 at kernel 7.1.5-cachyos1, and four rounds of LUKS and TPM results have landed under it since, all
+    run on the L16 against a root staged from 7.2.3-cachyos2 as each run's own .apexinf line records. It now names
+    both machines and both dates. Branch tip is 0391b4ec.
 - id: L-002
   title: Enable LUKS2 by default
   priority: Later
@@ -6009,21 +6020,22 @@ tasks:
     ROUND 29 (2026-09-18), STATUS UNCHANGED, still blocked; recorded so the reason lives in the item rather than
     only in an agent card. THE ACCEPTANCE IS 'Measured boot + TPM unlock + recovery path validated', and all three
     are validated in a VM against swtpm. apex-os files/scripts/boot-v2/run-scenarios covers measured boot and TPM
-    unlock (luks-tpm), a TPM clear with recovery in the same boot (luks-tpm-clear, 20/0), both halves of a
-    firmware change (luks-firmware-change moves PCR 7, 18/0/1; luks-firmware-code moves PCR 0, 22/0/1, new this
-    round), suspend and resume (luks-s3, 17/0 on edk2-20250812), and a missing TPM with recovery in the same boot
-    (luks-no-tpm, 16/0/1, new this round). IT CANNOT BE TURNED ON BY DEFAULT FOR THE SHIPPED IMAGE, and the
-    measurement that says so is not about policy: PCR 11 IS ALL ZEROS ON THE L16 (measured 2026-09-13, read-only).
-    The shipped image boots GRUB through bootupd and only sd-stub extends PCR 11, so the signed PCR 11 policy that
-    boot-v2 chose has nothing to bind to on a default install. 'Where safe' is therefore nowhere until a machine
-    boots the UKI and sd-stub path, which is the human enrolment procedure in docs/boot-v2.md. Depends on L-001,
-    where no silicon TPM has done an enrol-and-recover cycle, and on L-002, where the installer cannot encrypt a
-    disk in the first place. NOTE FOR WHOEVER RECORDS AGAINST THIS ITEM NEXT: ROADMAP/set-status.py could not
-    write evidence to the LAST task in roadmap.yaml at all. Its body regex ran to the next '- id: ' line, which
-    for the final task means it swallowed the global_agent_rules block and produced a file that does not parse;
-    the guard refused to write, so nothing was corrupted and nothing could be recorded. Fixed this round to
-    capture the run of indented lines instead, verified by checking that both expressions capture identical bodies
-    for all 127 other tasks.
+    unlock (luks-tpm), a TPM clear with recovery in the same boot (luks-tpm-clear, 22/0, re-measured round 29
+    after the shared guest probe changed, and strengthened to assert the recovery key returns the same plaintext),
+    both halves of a firmware change (luks-firmware-change moves PCR 7, 18/0/1; luks-firmware-code moves PCR 0,
+    22/0/1, new this round), suspend and resume (luks-s3, 17/0 on edk2-20250812), and a missing TPM with recovery
+    in the same boot (luks-no-tpm, 16/0/1, new this round). IT CANNOT BE TURNED ON BY DEFAULT FOR THE SHIPPED
+    IMAGE, and the measurement that says so is not about policy: PCR 11 IS ALL ZEROS ON THE L16 (measured
+    2026-09-13, read-only). The shipped image boots GRUB through bootupd and only sd-stub extends PCR 11, so the
+    signed PCR 11 policy that boot-v2 chose has nothing to bind to on a default install. 'Where safe' is therefore
+    nowhere until a machine boots the UKI and sd-stub path, which is the human enrolment procedure in
+    docs/boot-v2.md. Depends on L-001, where no silicon TPM has done an enrol-and-recover cycle, and on L-002,
+    where the installer cannot encrypt a disk in the first place. NOTE FOR WHOEVER RECORDS AGAINST THIS ITEM NEXT:
+    ROADMAP/set-status.py could not write evidence to the LAST task in roadmap.yaml at all. Its body regex ran to
+    the next '- id: ' line, which for the final task means it swallowed the global_agent_rules block and produced
+    a file that does not parse; the guard refused to write, so nothing was corrupted and nothing could be
+    recorded. Fixed this round to capture the run of indented lines instead, verified by checking that both
+    expressions capture identical bodies for all 127 other tasks.
 global_agent_rules:
 - Inspect the current APEX-OS and APEX Shell source before changing anything.
 - Verify an existing implementation before reimplementing it.

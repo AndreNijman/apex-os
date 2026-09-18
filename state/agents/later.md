@@ -6,7 +6,7 @@ branch: task/later-2
 
 ## NEXT
 
-Nothing is running and nothing is half-finished. Branch tip 18a015ec is pushed
+Nothing is running and nothing is half-finished. Branch tip 0391b4ec is pushed
 and cut from roadmap/v2.2 1668ed9c. All containers from this unit are removed
 and no qemu process is left.
 
@@ -42,13 +42,21 @@ worktree stays editable while they run. `diff -rq` the two before every launch.
 
 ## DONE
 - Round 29. Branched task/later-2 from roadmap/v2.2 1668ed9c (round 28's work
-  is already merged, nothing to fold in), five commits, each pushed as it was
+  is already merged, nothing to fold in), six commits, each pushed as it was
   made: acc0a65c (the PCR 0 scenario), 79d26db1 (the no-TPM scenario), bc2538ab
   (static tests, 78 -> 105), f80d524f (the L-001 write-up), 18a015ec (stop-slop
-  plus two Recovery table rows).
-- Two real runs, both foreground-waited and both with ExitCode and FinishedAt
-  read before the logs were believed: `scratch-later/r7-fwcode.log` (22/0/1)
-  and `scratch-later/r7-notpm.log` (16/0/1).
+  plus two Recovery table rows), 0391b4ec (the TPM-clear marker assertion and a
+  provenance header that had gone stale).
+- Four real runs, every one foreground-waited with ExitCode and FinishedAt read
+  before the log was believed: `scratch-later/r7-fwcode.log` (22/0/1),
+  `r7-notpm.log` (16/0/1), `r7-tpmclear.log` (20/0) and `r7-tpmclear2.log`
+  (22/0).
+- THE SHARED FIXTURE CHANGED, SO THE SCENARIO THAT RUNS THROUGH IT WAS
+  RE-MEASURED. guest-luks-probe.sh gained pcr0, the recovery-marker read-back
+  and a top-level MARKER, so luks-tpm-clear was re-run rather than assumed:
+  20/0, identical to round 27. Its refused boot also carried the new
+  recovery-marker=found line unasserted, which is this repository's dominant
+  defect shape; asserting it both ways took the scenario to 22/0.
 - All four gates green: test-boot-v2 105/0; shellcheck 165 discovered, 0
   known-failing, 0 newly failing; suites 75 / 71 in CI / 4 exempt; doc verbs 250
   valid / 8 deliberate / 0 not a command, 191 documented / 114 declared
@@ -111,6 +119,11 @@ worktree stays editable while they run. `diff -rq` the two before every launch.
 - **A SCENARIO CAN BE WRITTEN AND NEVER REGISTERED**, and a default run then
   reports green without it. `tests/test-boot-v2.sh` now compares the
   `scenario_*` functions against `--list` as sets in both directions.
+- **docs/boot-v2.md's provenance header had gone stale by two machines and four
+  rounds.** It said every figure below it came from the katana on 2026-09-03 at
+  kernel 7.1.5-cachyos1. Every LUKS and TPM result since 2026-09-14 ran on the
+  L16 against a root staged from 7.2.3-cachyos2, which each run's own `.apexinf`
+  line records. It now names both.
 - Older, still true: the S3 failure is an edk2 regression, not Secure Boot and
   not SMM (20250812 resumes, 17/0; both 20260812 builds assert at
   `MemoryServices.c(203)`). TPM clear 20/0 with `tpm-unlock=REFUSED` ->

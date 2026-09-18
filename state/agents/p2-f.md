@@ -114,7 +114,15 @@ Remaining, in the order this round takes them:
   host to its token endpoint from a hard-coded table, which is pin-consistent.
 
 ## DONE
-Round 8 (round 29 of the program), on task/p2-f-4, BOTH PUSHED:
+Round 8 (round 29 of the program), on task/p2-f-4, ALL THREE PUSHED:
+  79027b51  which `apex` the remedies ran was ANNOUNCED, not measured:
+            `APEX_BIN=/nowhere` planted a dangling symlink, `command -v`
+            stepped over it, the remedies used the machine's own copy, and the
+            suite printed the path it had been handed. Now refused and named,
+            and the resolution line asks the session. Also probed the one CI
+            unknown in the error-channel assertion: re-run with a PATH of 2,777
+            symlinks minus `Xwayland`, still 86/0/0 with an empty startup log,
+            because wlroots starts Xwayland lazily.
   fb884d8f  the recovery session logged `[ERROR] Empty string is not allowed
             for name.theme` on EVERY start — `<theme><name></name></theme>` in
             the shipped rc.xml is not "labwc's built-in theme", omitting the
@@ -220,13 +228,14 @@ Round 3, on task/p2-f-3 (pushed):
             cross-crate gate in apex-secretd, both mutants run and red.
 
 ## IN PROGRESS (round 8 — FINISHED)
-- Worktree CLEAN at `af5f5625` on `task/p2-f-4`, pushed, cut from
-  `roadmap/v2.2` (`7f6fc44d`) with the newer tip `bde4d96c` merged in and the
-  suite re-run green afterwards (86/0/0). Nothing half-written; `git diff
-  --exit-code` is
-  silent and every mutated file was restored with plain `cp`.
+- Worktree CLEAN at `79027b51` on `task/p2-f-4`, pushed, cut from
+  `roadmap/v2.2` (`7f6fc44d`) with the newer tip `bde4d96c` merged in at
+  `af5f5625` and the suite re-run green afterwards (86/0/0). Nothing
+  half-written; `git diff --exit-code` is silent and every mutated file was
+  restored with plain `cp`.
 - set-status.py was called for **P2-018 only**, with the full text rebuilt
-  (14,471 stored chars kept verbatim, round 29 appended, 21,565 total) and
+  (14,471 stored chars kept verbatim, round 29 plus its addendum appended,
+  23,245 total) and
   round-by-round evidence checked by re-parsing the yaml afterwards.
 - P2-017 and P2-019 were NOT touched this round and set-status was
   deliberately NOT called on them — it REPLACES evidence.
