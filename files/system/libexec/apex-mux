@@ -254,11 +254,13 @@ zellij_build() {
     # way. So `build` returned success having built nothing — the session came
     # up with only zellij's own scratch tab, and the CI failure read as an
     # intermittent `mux-layouts` red on "the layout landed as a tab zellij can
-    # describe". Measured here on zellij 0.45.1, `build zellij` in a loop:
+    # describe". Measured on zellij 0.45.1 with the variants INTERLEAVED in one
+    # 20-round loop, so load drift cannot be read as a difference between them:
     #
-    #   send immediately after creating       0 bad / 10
-    #   send after a 1s pause                 3 bad / 10
-    #   send after waiting for `zellij_has`   5 bad / 16, every one rc=0
+    #   send immediately after creating       0 bad / 20
+    #   send after a 1s pause                 3 bad / 20, every one rc=0
+    #   send after waiting for `zellij_has`   5 bad / 20, every one rc=0
+    #   this function as it now stands        0 bad / 20
     #
     # So "wait for the session first" is not the cure, it is the trigger, and a
     # loaded CI runner is the slow caller that trips it. The real defect is
@@ -266,7 +268,9 @@ zellij_build() {
     # ANSWERS `dump-layout` and ACCEPTS a tab request — `action new-tab` returns
     # 0 and prints a tab id — and then discards it. Nothing in any exit code
     # says so, and disabling the startup-tip plugin does not change it (still
-    # 1 drop in 20), so it is not the About pane holding focus.
+    # 1 drop in 20), so it is not the About pane holding focus. Nor is it a
+    # slow arrival: a separate run polled `dump-layout` for 30s after each send
+    # and saw 5 of 12 never arrive at all.
     #
     # Three things together are what make this reliable, and each was measured:
     # wait for the server to answer at all; ask over the IPC bus with
