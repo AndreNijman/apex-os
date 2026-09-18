@@ -117,6 +117,24 @@ apex account grant nextcloud.home files.read
 `apex account revoke nextcloud.home files.read` takes it back, and takes back
 only that one: the account and its credential stay.
 
+## Renewing an OAuth account
+
+```sh
+apex secret grant account.google.work.refresh oauth.token.refresh
+apex account refresh google.work
+```
+
+Two lines, and the first one is not a formality. A refresh **spends** a stored
+credential, so it is a capability like every other: granted per project, and
+adding the account does not grant it. Signing in stores a credential; deciding
+which project may renew with it is a second decision and it is yours. The
+daemon performs the request and replaces both tokens — `apex account refresh`
+never sees either.
+
+An account whose flow yields nothing to renew (an app password, an access key)
+is refused here by name, with `apex account add` as the answer, rather than
+being sent to the daemon to fail.
+
 `files.read` is what you type; `webdav.file.read` is what is enforced. The
 grant is keyed `service:capability` for one project root, and the daemon
 performs the operation itself — the credential does not leave
@@ -150,15 +168,28 @@ otherwise would leave a live credential behind a screen that said it was gone.
 Written here rather than in a release note, because a layer whose limits are
 not stated gets trusted for things it never did.
 
-* **The device-code flow is not implemented for Google or Microsoft.** APEX has
-  a complete RFC 8628 device-authorization implementation already — `apex
-  cloudflare connect` uses it, and both its tokens land in this same store,
-  with the refresh token under a *separate* service pinned to a different host
-  so the endpoint pin makes it unspendable as an API token. That is the shape
-  P2-017's OAuth half should take, and it is not wired to these two providers
-  yet. Until it is, a Google or Microsoft account can be added only by pasting
-  an access token you obtained elsewhere, and `apex account add` says so before
-  it reads stdin.
+* ~~**The device-code flow is not implemented for Google or Microsoft.**~~
+  **Built, and `--client-id` is the honest part.** `apex account add
+  google.work --client-id <id>` runs RFC 8628 through `apex/src/oauth_device.rs`
+  — the same transport `apex cloudflare connect` uses, moved out of it and
+  given its client, scopes and wording as arguments — prints a code,
+  and files both halves: the access token pinned to the provider's API host,
+  the refresh token under a separate name pinned to the authorisation host,
+  where the endpoint pin makes it unspendable as an API token.
+
+  The client id is **required** and there is no default, because APEX registers
+  no OAuth application at either provider and will not sign your account in
+  under another project's — that would put their credential in this binary and
+  their name on the consent screen you approve. Register a limited-input-device
+  client of your own and pass its id. Google issues a client secret with it and
+  wants it on the poll; that comes from **stdin**, never argv, and there is no
+  `--client-secret` flag for the same reason there is no `--password` one.
+
+  What the token can be spent on today is **nothing**, and `add` says so rather
+  than sending you to a grant that will be refused: no `gdrive` or `msgraph`
+  transport exists, so every scope these providers list names an operation no
+  provider offers. Signing in, storing and renewing work end to end; using is
+  the next transport.
 * ~~**Nothing refreshes a token.**~~ **Built for Cloudflare only, and the
   "only" is the honest part.** An `oauth` provider offers
   `oauth.token.refresh` — RFC 6749 §6, performed in the daemon — and
@@ -167,14 +198,22 @@ not stated gets trusted for things it never did.
   operation declares no resource and no parameters, so no caller can aim one
   somewhere else.
 
-  Google and Microsoft are in the same table and are refused **with the
-  reason**, because §6 requires a refresh to present the same OAuth client the
-  grant was issued to, APEX registers no application at either, and the client
-  a person signed in with is not recorded anywhere. The way out is a change to
-  the *grant*, not to the refresher: whatever stores a refresh token has to
-  store its client id beside it, and the provider already reads the store's
-  non-secret half first for exactly that — `apex cloudflare connect` now
-  writes the client there, so `--client-id` survives a renewal.
+  Google and Microsoft used to be refused with the reason: §6 requires a
+  refresh to present the same OAuth client the grant was issued to, and the
+  client a person signed in with was recorded nowhere. The way out was always
+  a change to the *grant* rather than to the refresher, and that is what
+  landed — `apex account add` writes the client id into the store's non-secret
+  half beside the refresh token, which is the field the provider already read
+  first. `apex account refresh <account>` spends it.
+
+  Microsoft should renew on that alone: its table entry is
+  `ClientSecret::None`, a public client. **Google is the one to be careful
+  about.** Its guide lists `client_secret` as required on the poll and optional
+  on the refresh; this build stores no client secret, so if a renewal turns out
+  to want one it answers `invalid_client`, nothing is replaced, and signing in
+  again is the way through. `apex account add` says that at the time rather
+  than leaving it to be discovered, and neither case has been run against the
+  real Google — there is no account here.
 
   Two limits worth stating. A reply that rotates no refresh token leaves the
   stored one alone, because overwriting a still-good credential is the failure
