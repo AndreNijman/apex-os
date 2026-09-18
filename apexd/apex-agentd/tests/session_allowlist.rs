@@ -80,6 +80,15 @@ struct Harness {
     child: Child,
     socket: PathBuf,
     root: PathBuf,
+    /// Every session this harness started, so `Drop` can end them.
+    ///
+    /// Killing the daemon is not enough and that was measured rather than
+    /// assumed: an `allowlist` session's process is `bwrap`, whose child is
+    /// the egress bridge, and when the daemon dies they are reparented to init
+    /// and keep running. The first version of this file left one behind for
+    /// twenty-three minutes. A test that leaves a namespace on somebody's
+    /// machine is a defect in the test.
+    sessions: std::cell::RefCell<Vec<i64>>,
 }
 
 /// One `CONNECT` through a session's egress proxy, and whatever it answers.
@@ -137,6 +146,29 @@ fn connect_through(socket: &std::path::Path, target: &str) -> String {
 
 impl Drop for Harness {
     fn drop(&mut self) {
+        // The sessions first, and by the PROCESS GROUP of each pid this
+        // harness was told about by the daemon that started it. Never by
+        // name: `apex-agentd` is also the user's own running runtime AND the
+        // egress bridge is that same binary, so a pattern kill here would take
+        // out the machine's.
+        //
+        // The group, not the pid, and that is measured rather than tidy.
+        // `pty::spawn` calls `setsid`, so `SessionInfo.pid` is the group
+        // LEADER and `bwrap` is a separate process inside that group — a
+        // version of this that killed the pid alone left the namespace behind
+        // with `bwrap` reparented to init, which is what it did here before
+        // the negative sign. The pid is killed too, for the unconfined case
+        // where the two are the same and for a session whose group has
+        // already gone.
+        for pid in self.sessions.borrow().iter() {
+            for target in [format!("-{pid}"), pid.to_string()] {
+                let _ = Command::new("kill")
+                    .args(["-9", &target])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_dir_all(&self.root);
@@ -178,6 +210,7 @@ impl Harness {
             child,
             socket,
             root,
+            sessions: std::cell::RefCell::new(Vec::new()),
         };
         harness.wait_for_socket().then_some(harness)
     }
@@ -219,6 +252,17 @@ impl Harness {
     /// Ask for a session that sits still, with the network mode and the
     /// narrowing under test.
     fn run(&self, network: NetworkPolicy, allow: Option<Vec<String>>) -> serde_json::Value {
+        let reply = self.ask(network, allow);
+        // Recorded whether or not the assertions get that far: a test that
+        // panics must still not leave a namespace behind, and `Drop` runs on
+        // the unwind.
+        if let Some(pid) = reply["pid"].as_i64() {
+            self.sessions.borrow_mut().push(pid);
+        }
+        reply
+    }
+
+    fn ask(&self, network: NetworkPolicy, allow: Option<Vec<String>>) -> serde_json::Value {
         let sandbox = match network {
             // `allowlist` is refused outright on an unconfined session — the
             // proxy is the namespace's only route out — so the confined

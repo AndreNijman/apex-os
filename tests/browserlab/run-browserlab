@@ -102,7 +102,7 @@ LAB="${BROWSERLAB_ROOT:-/var/tmp/apex-browserlab}"
 # cleanup the moment the run ended, and a failing flow left nothing to read.
 OUT="${BROWSERLAB_OUT:-${LAB}-out}"
 KEEP=0
-FLOWS=(profile headless network downloads capability authentication teardown)
+FLOWS=(profile headless network narrowing downloads capability authentication teardown)
 
 # The value of the fixture credential, and the string every capsule is searched
 # for. It is stored through `apex secret add` like any other value, and the
@@ -252,6 +252,7 @@ start_daemon() {
 
 lab_teardown() {
     [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null
+    [[ -n "$SERVER2_PID" ]] && kill "$SERVER2_PID" 2>/dev/null
     if [[ -n "$SECRETD_PID" ]]; then
         # By pid. `pkill apex-secretd` would take a real one with it, and on a
         # machine where the shipped service is running that is the credential
@@ -279,12 +280,26 @@ lab_teardown() {
 # — which is fine, because what is under test is whether the CONNECT reached
 # the destination at all, not whether the lab can run a CA.
 PORT=0
-start_server() {
-    PORT="$(python3 - <<'PY'
+# The SECOND destination, and it is the whole of the narrowing flow's evidence.
+#
+# One destination cannot demonstrate a narrowing: "the capsule reached what it
+# named" and "the capsule reached everything the machine permits" are the same
+# observation when the machine permits one thing. So the lab runtime allows two
+# endpoints, both answering, and the flow varies only which of them a capsule
+# names.
+PORT2=0
+SERVER2_PID=""
+# A port nothing is listening on right now. One implementation, because two
+# servers need one and a second copy is a second thing to keep right.
+free_port() {
+    python3 - <<'PY'
 import socket
 s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()
 PY
-)"
+}
+
+start_server() {
+    PORT="$(free_port)"
     [[ "$PORT" =~ ^[0-9]+$ ]] || return 1
     openssl req -x509 -newkey rsa:2048 -nodes -keyout "$LAB/key.pem" -out "$LAB/cert.pem" \
         -days 1 -subj "/CN=127.0.0.1" \
@@ -319,9 +334,20 @@ srv.serve_forever()
 PY
     python3 "$LAB/server.py" "$PORT" "$LAB" > "$LAB/server.log" 2>&1 9>&- &   # 9>&-: see start_secretd
     SERVER_PID=$!
+    # The same program on a second port, so the narrowing flow's control is a
+    # destination that genuinely answers rather than one that merely is not
+    # refused. Same certificate: it is issued for IP:127.0.0.1 and says nothing
+    # about a port, and the capsule's curl passes -k anyway.
+    PORT2="$(free_port)"
+    [[ "$PORT2" =~ ^[0-9]+$ ]] && [[ "$PORT2" != "$PORT" ]] || return 1
+    python3 "$LAB/server.py" "$PORT2" "$LAB" > "$LAB/server2.log" 2>&1 9>&- &
+    SERVER2_PID=$!
     local waited=0
     while (( waited < 20 )); do
-        if openssl s_client -connect "127.0.0.1:$PORT" </dev/null >/dev/null 2>&1; then return 0; fi
+        if openssl s_client -connect "127.0.0.1:$PORT" </dev/null >/dev/null 2>&1 \
+           && openssl s_client -connect "127.0.0.1:$PORT2" </dev/null >/dev/null 2>&1; then
+            return 0
+        fi
         sleep 0.5; waited=$((waited + 1))
     done
     return 1
@@ -368,6 +394,11 @@ D="\$PWD"
     printf 'http_proxy=%s\n' "\${http_proxy:-unset}"
     # Through the proxy, to the address the rule wrote down.
     printf 'allowed-get=%s\n' "\$(curl -s --max-time 20 -k "https://127.0.0.1:${PORT}/ping" 2>&1 | head -c 60)"
+    # The SECOND endpoint, which the lab runtime allows and which a capsule
+    # reaches only if it named it. Same server program, same certificate, one
+    # port apart - so the only thing that can separate the two answers is the
+    # session's own allowlist.
+    printf 'other-port-get=%s\n' "\$(curl -s --max-time 20 -k "https://127.0.0.1:${PORT2}/ping" 2>&1 | head -c 60)"
     # The same host by a NAME that resolves to loopback. accepts_address must
     # refuse it: a rule that wrote a name did not mean this machine.
     printf 'named-loopback-get=%s\n' "\$(curl -s --max-time 20 -k "https://localhost:${PORT}/ping" 2>&1 | head -c 60; printf ' rc=%s' "\$?")"
@@ -557,6 +588,73 @@ flow_network() {
     local refused
     refused="$("$ENGINE" run --allow "never-allowed.invalid:443" -- "https://never-allowed.invalid/" 2>&1)"
     says "a destination the runtime has not allowed is refused at the call site" "apex agent allow" "$refused"
+}
+
+# A capsule reaches what it NAMED, not what the machine permits (P2-012).
+#
+# The shape is the vmlab's turned-around egress loop: the same request, on the
+# same machine, against the same runtime allowlist, run twice with one thing
+# different — and it succeeds in one run and is refused in the other. Without
+# the second run this flow would be indistinguishable from a capsule that
+# reached nothing, which is the failure mode a narrowing is most likely to
+# have.
+#
+# The lab runtime allows BOTH endpoints (see the `apex agent allow` lines in
+# `main`). So `127.0.0.1:$PORT2` is not a destination the machine forbids; it
+# is a destination this capsule did not ask for. That is the whole claim, and
+# before protocol 9 it could not be made: the daemon snapshotted the runtime's
+# list for every session, so both capsules below would have reached both
+# endpoints and the engine's `--allow` would have been a check in a shell
+# script.
+flow_narrowing() {
+    (( PORT2 > 0 )) || { cannot "the lab has no second endpoint, so a narrowing has nothing to be narrower than"; return; }
+
+    # ── the narrowed capsule ────────────────────────────────────────────────
+    capsule_run narrowing --allow "127.0.0.1:$PORT" \
+        --download observed.txt \
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
+    local obs="$OUT/narrowing/got/observed.txt"
+    [[ -f "$obs" ]] || { cannot "the narrowed capsule produced no observation file"; return; }
+    local seen; seen="$(cat "$obs")"
+    # It reaches the one it named. Stated first, because a capsule that reached
+    # nothing would satisfy the refusal below for the wrong reason.
+    says "the narrowed capsule reaches the destination it named" "APEX-BROWSERLAB-PONG" \
+         "$(grep '^allowed-get=' <<<"$seen")"
+    # And not the one the MACHINE permits and it did not name.
+    says_not "and not the other endpoint the runtime allows" "APEX-BROWSERLAB-PONG" \
+         "$(grep '^other-port-get=' <<<"$seen")"
+    # From the enforcer rather than from the enforced: the daemon logged the
+    # denial, naming the endpoint. A capsule reporting a failed request proves
+    # a failed request; this proves the destination policy is what failed it.
+    says "the daemon denied it by name" "127.0.0.1:$PORT2" "$(cat "$LAB/daemon.log" 2>/dev/null)"
+
+    # ── the control, which is the same run with the narrowing widened ───────
+    #
+    # Nothing else changes: same engine, same runtime allowlist, same observer,
+    # same server on the same port. If this does not answer, the assertion
+    # above was measuring a broken endpoint and not a boundary.
+    capsule_run narrowing-both --allow "127.0.0.1:$PORT" --allow "127.0.0.1:$PORT2" \
+        --download observed.txt \
+        -- --screenshot "{capsule}/shot.png" "data:text/html,<h1>APEX-BROWSERLAB</h1>"
+    local obs2="$OUT/narrowing-both/got/observed.txt"
+    [[ -f "$obs2" ]] || { cannot "the control capsule produced no observation file"; return; }
+    local seen2; seen2="$(cat "$obs2")"
+    says "a capsule that names BOTH endpoints reaches the second one" "APEX-BROWSERLAB-PONG" \
+         "$(grep '^other-port-get=' <<<"$seen2")"
+    says "and still reaches the first" "APEX-BROWSERLAB-PONG" \
+         "$(grep '^allowed-get=' <<<"$seen2")"
+
+    # ── and the narrowing cannot be used to widen ───────────────────────────
+    #
+    # `--allow` is a narrowing and only a narrowing: a destination the RUNTIME
+    # does not carry is refused, so the flag cannot be a second place the
+    # policy is written. Refused here by the engine, before a capsule exists;
+    # the daemon refuses it independently, which is asserted against a real
+    # daemon by `apexd/apex-agentd/tests/session_allowlist.rs` because a lab
+    # whose engine refused first could never see the daemon do it.
+    local refused
+    refused="$("$ENGINE" run --allow "127.0.0.1:1" -- "https://127.0.0.1:1/" 2>&1)"
+    says "a destination the runtime never allowed is refused" "apex agent allow" "$refused"
 }
 
 # Nomination-only egress, with the turned-around loop as the control.
@@ -902,6 +1000,11 @@ main() {
     # refused is the network flow's control.
     "$APEX_BIN" agent allow "127.0.0.1:$PORT" >/dev/null 2>&1 \
         || die "the lab runtime would not take its own allowlist entry"
+    # The second endpoint, allowed by the RUNTIME and named by only one capsule
+    # in the whole lab. That asymmetry is what `flow_narrowing` measures: a
+    # destination the machine permits and a capsule did not ask for.
+    "$APEX_BIN" agent allow "127.0.0.1:$PORT2" >/dev/null 2>&1 \
+        || die "the lab runtime would not take its second allowlist entry"
 
     # The lab's own secret service, if this build has one. Not fatal: a missing
     # apex-secretd makes the capability flow could-not-run and nothing else.
@@ -932,6 +1035,7 @@ main() {
             profile)    flow_profile ;;
             headless)   flow_headless ;;
             network)    flow_network ;;
+            narrowing)  flow_narrowing ;;
             downloads)  flow_downloads ;;
             capability)     flow_capability ;;
             authentication) flow_authentication ;;
