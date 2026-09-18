@@ -57,7 +57,17 @@ use apex_agent_core::protocol::{Request, RunRequest, SandboxPolicy};
 /// Two destinations, because one would make "the session got what it asked
 /// for" and "the session got the runtime's list" the same observation — which
 /// is exactly the defect this file exists to catch.
-const RUNTIME_ALLOW: [&str; 2] = ["api.example.com", "files.example.com"];
+///
+/// The first is an ADDRESS on a port nothing listens on, and that is not
+/// decoration. `the_proxy_enforces_the_narrowed_list_and_not_the_runtimes`
+/// needs a control — a destination the session DID name, which must get past
+/// the rule — and a name would send the proxy to the machine's resolver,
+/// making the control's answer depend on what DNS says today. An address
+/// literal matching its own rule resolves to itself, is accepted by
+/// `accepts_address` because the rule names that exact address, and then fails
+/// to connect. So the control is a 502 about a refused connection rather than
+/// a 403 about the policy, on any machine, with no lookup at all.
+const RUNTIME_ALLOW: [&str; 2] = ["127.0.0.1:19443", "files.example.com"];
 
 fn config() -> String {
     format!(
@@ -70,6 +80,59 @@ struct Harness {
     child: Child,
     socket: PathBuf,
     root: PathBuf,
+}
+
+/// One `CONNECT` through a session's egress proxy, and whatever it answers.
+///
+/// The daemon's side of the socket, which is where the allowlist is consulted
+/// — the bridge inside the namespace parses nothing and decides nothing, so
+/// speaking to it would measure a pipe. Reachable from this test for the
+/// reason `egress.rs` states about its own trust boundary: the socket is 0600
+/// in a 0700 directory, which separates this user's agents from other users
+/// and not from the user.
+fn connect_through(socket: &std::path::Path, target: &str) -> String {
+    let mut stream = UnixStream::connect(socket)
+        .unwrap_or_else(|e| panic!("the session's egress socket at {socket:?}: {e}"));
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .expect("timeout");
+    write!(stream, "CONNECT {target} HTTP/1.1\r\n\r\n").expect("write");
+    stream.flush().ok();
+    let mut answer = String::new();
+    // The head only. A 200 opens a tunnel that never closes on its own, so
+    // reading to EOF would hang on exactly the case that must not be treated
+    // as a refusal.
+    let mut reader = BufReader::new(&stream);
+    let mut length = 0usize;
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let blank = line.trim().is_empty();
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap_or(0);
+                }
+                answer.push_str(&line);
+                if blank {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    // Exactly `Content-Length` bytes, never to EOF: a refusal carries the
+    // reason in its body — which destination, and the command that would
+    // permit it — and that is what the assertions read. A 200 declares no
+    // length and opens a tunnel that stays open, so reading further would
+    // hang on the one answer that must not be read as a refusal.
+    if length > 0 {
+        let mut body = vec![0u8; length];
+        if std::io::Read::read_exact(&mut reader, &mut body).is_ok() {
+            answer.push_str(&String::from_utf8_lossy(&body));
+        }
+    }
+    answer
 }
 
 impl Drop for Harness {
@@ -117,6 +180,15 @@ impl Harness {
             root,
         };
         harness.wait_for_socket().then_some(harness)
+    }
+
+    /// Where the daemon's side of a session's egress proxy listens.
+    ///
+    /// `paths::scratch_dir(id)` is `$APEX_AGENT_SCRATCH_ROOT/<id>`, and the
+    /// harness sets that variable — so this is the same path `session::start`
+    /// built, derived the same way rather than guessed at.
+    fn egress_socket(&self, id: u32) -> PathBuf {
+        self.root.join("scratch").join(id.to_string()).join("egress.sock")
     }
 
     fn wait_for_socket(&self) -> bool {
@@ -251,6 +323,66 @@ fn a_narrowed_session_runs_under_its_own_allowlist_and_not_the_runtimes() {
         !got.iter().any(|d| d == RUNTIME_ALLOW[1]),
         "a narrowed session was given a destination the machine permits and it did not \
          ask for: {got:?}"
+    );
+}
+
+#[test]
+fn the_proxy_enforces_the_narrowed_list_and_not_the_runtimes() {
+    // THE ASSERTION THE RECORD CANNOT MAKE, and it is not a hypothetical: with
+    // only the `SessionInfo.allowlist` assertions above, a `start` that
+    // computed the narrowing, reported it, and then handed
+    // `egress::start(id, &socket, runtime_config.allowlist())` the machine's
+    // whole list passed every test in this file. The session would say
+    // `destinations api.example.com` in `apex agent status` while its proxy
+    // opened `files.example.com` on request — a confinement that is a display
+    // string.
+    //
+    // The egress proxy is the ONLY route out of a `--network allowlist`
+    // session: the namespace has no route, no resolver and no addresses. So
+    // asking it directly is asking the boundary.
+    let h = harness!("proxy");
+    let reply = h.run(
+        NetworkPolicy::Allowlist,
+        Some(vec![RUNTIME_ALLOW[0].to_string()]),
+    );
+    if !skip_unless_started(&reply, "proxy") {
+        return;
+    }
+    let id = reply["id"].as_u64().expect("a session id") as u32;
+    let socket = h.egress_socket(id);
+    if !socket.exists() {
+        // Not "the proxy refused" and not a pass. A session that reported
+        // `allowlist` with no proxy socket is a fixture this test cannot
+        // measure, and it says which.
+        eprintln!("SKIP: no egress socket at {socket:?} for session {id}");
+        return;
+    }
+
+    // The destination the RUNTIME allows and this session did not name.
+    // Refused at `Allowlist::decide` — question one, before anything is
+    // resolved — so this assertion opens no connection and looks nothing up.
+    let denied = connect_through(&socket, &format!("{}:443", RUNTIME_ALLOW[1]));
+    assert!(
+        denied.starts_with("HTTP/1.1 403 Forbidden"),
+        "the proxy let a narrowed session reach a destination it never named: {denied}"
+    );
+    assert!(denied.contains(RUNTIME_ALLOW[1]), "{denied}");
+    assert!(denied.contains("apex agent allow"), "{denied}");
+
+    // AND THE CONTROL, without which a proxy that refused everything would
+    // pass the assertion above and this whole file would be measuring a
+    // broken session rather than a narrowed one. The destination the session
+    // DID name gets past the rule and fails later, on the connection, so the
+    // answer is a 502 about reaching the endpoint rather than a 403 about the
+    // policy. What is asserted is the difference between them.
+    let allowed = connect_through(&socket, RUNTIME_ALLOW[0]);
+    assert!(
+        !allowed.starts_with("HTTP/1.1 403"),
+        "the proxy refused the destination the session was started for: {allowed}"
+    );
+    assert!(
+        !allowed.contains("apex agent allow"),
+        "the named destination was refused by the destination policy: {allowed}"
     );
 }
 
