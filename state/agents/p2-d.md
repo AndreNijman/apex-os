@@ -50,7 +50,7 @@ nothing populates `SandboxSpec.ro`/`ro_at` from the wire. Still listed as
 undecided on the page — the flag has to name the file rather than default to
 anything.
 
-## DONE (round 29, branch task/p2-d-5, 3 commits, all pushed)
+## DONE (round 29, branch task/p2-d-5, 4 commits, all pushed)
 
 - `12ee0cbf` — **the Containerfile gate could not see a `python3 -c` assertion
   at all.** `tests/check-containerfile-assertions.sh` resolved `grep` and
@@ -65,6 +65,11 @@ anything.
   failed.
 - `68f3e5c1` — **route B's join, measured**, and the question above written into
   `docs/browser-capsule-auth.md` under its own heading.
+- `67861c53` — the runner half of `12ee0cbf`'s own argument was **reasoned, not
+  measured**, in a file whose subject is that difference. Measured now: on a box
+  with no `/etc/firefox` the unrewritten handler fails six assertions with
+  `FileNotFoundError` and exits 1, and the shipped one reports 194 checked / 0
+  failed there. Comment only.
 
 ## FOUND (round 29)
 
@@ -72,9 +77,11 @@ anything.
   mutation is what proves it.** `/etc/firefox/policies/policies.json` EXISTS on
   an APEX machine. With the image-path-to-repo-path rewrite removed and the
   repository's own `policies.json` replaced by `{ "policies": }`, the checker
-  reports "193 checked, 0 failed" and exits 0 — it parsed the LIVE file — and
-  would then have failed on the CI runner, where the path is absent, for a
-  reason with nothing to do with the assertion. Four content mutations
+  reports "193 checked, 0 failed" and exits 0 — it parsed the LIVE file. The
+  mirror-image half is measured too (`67861c53`): on a box with no
+  `/etc/firefox` the same unrewritten handler fails SIX assertions with
+  `FileNotFoundError`, while the shipped one is clean there. Four content
+  mutations
   (`Certificates.Install`, `Proxy`, a `locked` Status, a bare value) all go red
   with the rewrite in place.
 - **The gate now EXECUTES repo scripts, so it has a second environment.** All

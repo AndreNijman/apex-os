@@ -5058,7 +5058,7 @@ tasks:
     calls setsid so SessionInfo.pid is the process GROUP leader and bwrap is a separate process inside that group.
     Drop now kills the group, by pid and never by name - apex-agentd is both the user's own runtime and the egress
     bridge, so a pattern kill in a test would take out the machine's. ROUND 29 (2026-09-18), apex-os branch
-    task/p2-d-5, 3 commits, all pushed, NOT merged; base roadmap/v2.2 7f6fc44d. TWO THINGS DONE AND ONE THING
+    task/p2-d-5, 4 commits, all pushed, NOT merged; base roadmap/v2.2 7f6fc44d. TWO THINGS DONE AND ONE THING
     DELIBERATELY NOT DONE. (1) THE policies.json SHAPE ASSERTION, which had been round 3's NEXT and round 4's, is
     in Containerfile.base (73861e55). /etc/firefox/policies/policies.json is read inside every capsule - the
     sandbox binds / read-only - and while it exists it is the ONLY policy file any Firefox on the machine reads,
@@ -5081,12 +5081,16 @@ tasks:
     LOAD-BEARING AND WAS MEASURED, NOT ASSUMED: /etc/firefox/policies/policies.json EXISTS on an APEX machine, so
     a handler that ran the script unmodified would parse the LIVE file. With the rewrite removed and the
     repository's own policies.json replaced by `{ "policies": }`, the checker reports "193 checked, 0 failed" and
-    exits 0 - and would then have failed on the CI runner, where the path is absent, for a reason with nothing to
-    do with the assertion. That is the surgical mutation, and it is the one that matters. Because the checker now
-    EXECUTES those scripts on the runner, all five newly-checked assertions were cross-run under python 3.12
-    (ubuntu-24.04's version) in a throwaway container: tomllib, both ast.parse checks and the new policy shape all
-    pass, so no 3.14-only behaviour was baked in. (3) ROUTE B WAS NOT BUILT, AND THAT IS A DECISION WITH A REASON
-    RATHER THAN AN OMISSION. What WAS done is the measurement that route B rested on without having it.
+    exits 0. The other half of that argument was reasoned rather than measured in the first commit and is measured
+    in the fourth (67861c53): on a box with no /etc/firefox - a python:3.12-slim container over this tree,
+    repository files left valid - the same unrewritten handler fails SIX assertions with FileNotFoundError and
+    exits 1, while the shipped handler reports 194 checked and 0 failed there. Which is the point: what is being
+    checked is the repository, and it must not matter what the machine underneath happens to have installed. That
+    is the surgical mutation, and it is the one that matters. Because the checker now EXECUTES those scripts on
+    the runner, all five newly-checked assertions were cross-run under python 3.12 (ubuntu-24.04's version) in a
+    throwaway container: tomllib, both ast.parse checks and the new policy shape all pass, so no 3.14-only
+    behaviour was baked in. (3) ROUTE B WAS NOT BUILT, AND THAT IS A DECISION WITH A REASON RATHER THAN AN
+    OMISSION. What WAS done is the measurement that route B rested on without having it.
     docs/browser-capsule-auth.md had two halves measured separately - a CA installed by a namespace-bound
     policies.json is trusted, and a capsule's egress is a CONNECT tunnel - and nobody had put them together.
     Whether Firefox accepts a leaf MINTED FOR THE REQUESTED NAME at the far end of a tunnel it opened itself was
