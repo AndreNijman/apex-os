@@ -17,30 +17,29 @@ pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 
 ## NEXT
 
-**Confirm FOUND 20 inside the real quickshell process**, then land it. Build
-`/var/tmp/apex-work/scratch-p2-b/round30/shim.cpp` as an `LD_PRELOAD` that
-interposes `QGuiApplication::exec()` (`_ZN15QGuiApplication4execEv`, `U` in
-`nm -D /usr/bin/quickshell`, so interposable; it MUST tail-call the real one via
-`dlsym(RTLD_NEXT, ...)` because `QGuiApplication::exec()` is what calls
-`QAccessible::setRootObject(qApp)`). Before installing, log
-`queryAccessibleInterface(w)` for each `QGuiApplication::topLevelWindows()` entry
-(expect NULL) — that is the direct in-process read of the empty factory list,
-which cannot be read any other way because the `Q_GLOBAL_STATIC` is not
-exported. Then install a factory covering `"QQuickWindow"`, `"QQuickItem"` and
-`"QQuickTextEdit"` (all three ctors are exported from libQt6Quick — window-only
-would give a frame with zero children and read as a false negative, because
-`QAccessibleQuickWindow::child()` re-enters `queryAccessibleInterface` for the
-root items), log again (expect NON-NULL), and walk the tree with the round-29
-harness. Scope the preload to the quickshell command inside `atspi_run_app`, NOT
-to the whole session — otherwise labwc and `at-spi-bus-launcher` load libQt6Quick
-too.
+**Land round 30's diagnosis**, in this order. (1) Commit `repro.cpp`, `shim.cpp`
+and `probe-shim.sh` from `/var/tmp/apex-work/scratch-p2-b/round30/` into
+apex-shell `task/p2-b-round30` as evidence under `tests/` — the suite-discovery
+glob is `tests/*test*.sh tests/check-*.sh tests/run-*.sh`, so a `.cpp` is not
+picked up, but anything added must also go in ci.yml's structure-check REQUIRED
+list if it is referenced there. (2) `set-status.py P2-003 partial --evidence`
+with round 29's text plus FOUND 20 and FOUND 21 appended — READ THE CURRENT
+EVIDENCE FIRST, it replaces. (3) Then the §4/§5 rewrite of
+`tests/run-lockscreen-atspi.sh`: the `nodes = 1` pin is now explained rather
+than mysterious, and under the shim the §5 read-back assertions can be made for
+real. Run `probe-shim.sh` with the lock engaged first to find out whether the
+round-28 lockscreen markup actually surfaces — the DESKTOP windows came back as
+four unnamed frames with no children, which may be honest (no markup on the bar)
+or may be a second layer of defect.
 
 ## IN PROGRESS
 
-FOUND 14's cause is **found and measured** (FOUND 20, below). `repro.cpp` is
-built and run; it is not yet committed to a branch and the in-situ confirmation
-in the real quickshell process is not yet written. Nothing is committed this
-round yet — both round-30 branches are pushed and empty.
+FOUND 14 is **closed** — named cause, standalone reproduction, and in-situ
+confirmation inside the real quickshell process (FOUND 20 and FOUND 21).
+**Nothing is committed yet.** The three artefacts live only in
+`/var/tmp/apex-work/scratch-p2-b/round30/` (`repro.cpp`, `shim.cpp`,
+`probe-shim.sh`, plus `repro-run2.log` and `out/`), and both round-30 branches
+are still empty at `roadmap/v2.2`. No roadmap evidence written yet either.
 
 ## DONE
 
@@ -284,6 +283,52 @@ than this branch.
     **Mode E is the shim** the `## NEXT` builds. `cleanupAdded` is a file-static
     bool that stays true after the first install, so the post routine is not
     even re-registered: the clear happens exactly once and is permanent.
+
+21. **FOUND 20 CONFIRMED INSIDE THE REAL QUICKSHELL PROCESS, and the whole
+    accessibility tree comes back the instant the factory is re-installed.**
+    `scratch-p2-b/round30/shim.cpp` is an `LD_PRELOAD` that interposes
+    `QGuiApplication::exec()` (`_ZN15QGuiApplication4execEv` is `U` in
+    `nm -D /usr/bin/quickshell`, so it is interposable; the interposer
+    tail-calls the real one through `dlsym(RTLD_NEXT, …)` because `exec()` is
+    what calls `QAccessible::setRootObject(qApp)`), arms a `singleShot` timer so
+    the measurement happens on the main thread AFTER the shell's windows exist,
+    and then does measure → `installFactory` → measure. The factory it installs
+    is a faithful copy of qtdeclarative's `qQuickAccessibleFactory`, including
+    the `QQuickItemPrivate::get(item)->isAccessible` filter, covering
+    `QQuickWindow`, `QQuickItem` and `QQuickTextEdit` — window-only would have
+    produced a frame with zero children and read as a false negative, because
+    `QAccessibleQuickWindow::child()` re-enters `queryAccessibleInterface` for
+    each root item. It compiles against Fedora's installed private headers
+    (`qt6-qtbase-private-devel` is present and
+    `/usr/include/qt6/QtQuick/6.10.3/QtQuick/private/qaccessiblequick*_p.h`
+    ship with `qt6-qtdeclarative-devel`), so no symbol aliasing was needed.
+    Run by `scratch-p2-b/round30/probe-shim.sh` — the round-29 bring-up, private
+    headless labwc, private session bus, private a11y bus, the SHIPPED
+    `shell.qml`, preload scoped to the one `quickshell` command so labwc and
+    `at-spi-bus-launcher` never see it:
+
+    ```
+    APEXSHIM before: topLevelWindows=4
+    APEXSHIM before: window[0..3] type=1 class=ProxiedWindow root=NULL
+    APEXSHIM before: appChildCount=0
+    APEXSHIM: installFactory(apexQuickFactory) called
+    APEXSHIM after:  window[0..3] type=1 class=ProxiedWindow root=NON-NULL
+    APEXSHIM after:  appChildCount=4
+    ```
+
+    and on the BUS, same process, no restart: **1 node before, 5 after** — the
+    application node plus four `role=frame` children with
+    `states=enabled,sensitive,showing,visible`. So the empty factory list is not
+    an inference from a standalone repro; it is read directly out of the live
+    quickshell, which is the only way to read it at all (`qAccessibleFactories`
+    is a `Q_GLOBAL_STATIC` and not an exported symbol, so gdb cannot reach it).
+    Two details worth keeping: quickshell's windows are class `ProxiedWindow`,
+    a `QQuickWindow` subclass, so the metaobject walk does reach `"QQuickWindow"`
+    and the round-29 "return early above QQuickWindow" branch is **eliminated**;
+    and the four frames came back with EMPTY names and ZERO children, which is a
+    separate question from this one and is NOT yet explained — the desktop
+    shell's bar may simply carry no `Accessible.*`, or there may be a second
+    layer. Do not report the shell as accessible on the strength of this.
 
 ## BLOCKED ON
 

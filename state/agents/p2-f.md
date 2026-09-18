@@ -24,8 +24,20 @@ branch: task/p2-f-5   (cut from origin/roadmap/v2.2 @ 6b531503, which is round 2
    `docs/online-accounts.md` (~188, ~246) and `apex/src/account.rs`'s module
    note (~51).
 
-**NEXT ACTION: cut nothing more — the branch is cut. Write
-`apexd/apex-secretd/src/providers/gdrive.rs`.**
+**Commit 1 is DONE: `9f8d2468`, pushed.** 11 gdrive tests, 8 mutations all
+red and restored byte-identically (cmp silent), apex-secretd 297 -> 308,
+workspace 3297/0/2, clippy -p apex-secretd exit 0.
+
+**NEXT ACTION: commit 2 — `DRIVE_SCOPES` gains
+`Scope { name: "files.read", operation: "gdrive.file.read", Effect::Read }`,
+`GOOGLE_OAUTH.scopes` gains `https://www.googleapis.com/auth/drive.file`,
+`providers/mod.rs`'s `empty` assertion becomes `vec!["microsoft"]`,
+`account.rs:1154`'s loop drops google AND gains the positive
+`google.operation("files.read") == "gdrive.file.read"`, `gdrive/tests.rs`'s
+`the_declaration_is_one_a_registry_will_take` gains `checked > 0`, and the
+three places that still say a Google token can be spent on nothing are
+corrected: `docs/online-accounts.md` (~188, ~246) and `apex/src/account.rs`'s
+module note (~51).**
 
 **P2-018 criterion 2 is CLOSED — do not reopen it, and do not widen the
 watchdog.** Round 29 ran every command in `menu.xml` from inside the real
