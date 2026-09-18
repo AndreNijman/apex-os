@@ -1,7 +1,7 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-18T16:20+08:00",
-  "_round": "Round 28. Picked up after a FOUR-DAY gap: all six of round 27's agents were dead with cards ~6130 minutes old. No work was lost \u2014 refs/wip had p2-d's 365 uncommitted lines byte-identical and two minutes old. Landed task/p2-c-2 and task/p2-f-3, then re-dispatched all six fresh off their cards. THE DEBT IS CLEAR: shellcheck known-failing 27 -> 0, and suites run in CI 62 -> 71 of 75, leaving only four exemptions that are each genuinely impossible on a runner.",
+  "updated": "2026-09-18T23:30+08:00",
+  "_round": "Round 28 closed. ALL SIX agents finished and landed: p2-b (lockscreen a11y), p2-f (oauth device grant + cf refresh), followups-5 (the zellij race + a SIGPIPE sweep), p2-d (per-session allowlist narrowing, PROTOCOL_VERSION 8 -> 9), p2-c (closed the unit), later (the edk2 S3 regression). apex-os tip 7f6fc44d, apex-shell 379eef8, all three gates green, clippy clean.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 654fa854 -> 266dcc57. task/p2-c-2 and task/p2-f-3.",
     "apex-shell": "b7953e4; nothing unlanded."
@@ -20,89 +20,7 @@
     "p1-063": "Still closed to dispatch as WORK. Both remaining criteria are Andre's physical actions. NOTE: this round's hypridle finding is adjacent but NOT the same thing \u2014 P1-063 is about the lid, and what is killing the run is the 15-minute idle timeout. Worth folding into the item: a lid inhibitor alone would not have saved any of round 26's agents.",
     "p1-053c": "CLOSED BY HAND this round \u2014 see queue.json. P1-059 done; P1-060 needs a device or a working emulator and this machine has neither (four consecutive emulator SIGSEGVs measured across rounds 1-3)."
   },
-  "agents": [
-    {
-      "slug": "p2-d",
-      "items": [
-        "P2-008",
-        "P2-009",
-        "P2-012"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p2-d",
-      "branch": "task/p2-d-2",
-      "agent_id": "a653e625b70f71ee7",
-      "dispatched": "2026-09-18T15:30+08:00",
-      "session": "round 28 orchestrator",
-      "queue_id": "p2-d",
-      "card": "ROADMAP/state/agents/p2-d.md",
-      "at_dispatch": "FIRST JOB IS A RESCUE: 365 insertions across 8 files were uncommitted when the limit hit \u2014 destination.rs, protocol.rs, session.rs, agent.rs and four test files. Verified safe in refs/wip/wt-p2-d- and told to finish rather than redo, and to commit to task/p2-d-2 because the worktree is sitting on roadmap/v2.2 itself. Owns protocol.rs uncontended; PROTOCOL_VERSION stays 8 unless it bumps it."
-    },
-    {
-      "slug": "p2-b",
-      "items": [
-        "P2-003",
-        "P2-004"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p2-b4",
-      "branch": "task/p2-b-round23",
-      "agent_id": "ae3ae142a2f5dd487",
-      "dispatched": "2026-09-18T15:30+08:00",
-      "session": "round 28 orchestrator",
-      "queue_id": "p2-b",
-      "card": "ROADMAP/state/agents/p2-b.md",
-      "at_dispatch": "Concrete NEXT: Lockscreen.qml's password TextInput and buttons have no Accessible.role/name/description. Told a lockscreen is boot-adjacent, to use the nested harnesses this unit built, and that the suite gate will fail if it adds a suite without wiring it."
-    },
-    {
-      "slug": "p2-f",
-      "items": [
-        "P2-016",
-        "P2-017",
-        "P2-018",
-        "P2-019"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p2-f",
-      "branch": "task/p2-f-3",
-      "agent_id": "a5ba53fc86806c504",
-      "dispatched": "2026-09-18T15:30+08:00",
-      "session": "round 28 orchestrator",
-      "queue_id": "p2-f",
-      "card": "ROADMAP/state/agents/p2-f.md",
-      "at_dispatch": "Its three commits landed in 266dcc57. NEXT opens with a question to answer by READING service.rs::use_capability's grant check \u2014 whether a Use for oauth.token.refresh can be granted at all \u2014 and cloudflare.rs still carries a status line ('nothing spends it yet') that is now FALSE, which is the same defect class as an assertion that cannot fail."
-    },
-    {
-      "slug": "followups-5",
-      "items": [],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-followups-5",
-      "branch": "task/followups-5",
-      "agent_id": "a10909360ec0a4528",
-      "dispatched": "2026-09-18T15:30+08:00",
-      "session": "round 28 orchestrator",
-      "queue_id": "followups-5",
-      "card": "ROADMAP/state/agents/followups-5.md",
-      "at_dispatch": "A real race with both ends named: apex-mux:220 runs `attach --create-background` then immediately --layout-string, and test-mux-layouts.sh:225 reads dump-layout after a fixed sleep 2. zellij 0.45.1 is installed here, the version CI pins, so told to REPRODUCE it before fixing \u2014 a race fixed by reasoning cannot be shown fixed. Its predecessor closed all seven persistent engine reds on the runner."
-    },
-    {
-      "slug": "p2-c",
-      "items": [
-        "P2-005",
-        "P2-006",
-        "P2-007"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p2-005",
-      "branch": "task/p2-c-2",
-      "agent_id": "a753851a51ca3ae15",
-      "dispatched": "2026-09-18T15:30+08:00",
-      "session": "round 28 orchestrator",
-      "queue_id": "p2-c",
-      "card": "ROADMAP/state/agents/p2-c.md",
-      "at_dispatch": "Its commit landed. NEXT names a METHOD rather than an answer: build the image and hunt more readers that STATE instead of READ \u2014 which has already paid twice. Told that closing the unit with an honest checklist for Andre is a legitimate outcome, because a container moves a reader to 'installed and not running', never to 'working', and a booted reading needs the boot path."
-    }
-  ],
+  "agents": [],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
   "_findings": {
     "nft -c cannot run in a build container": "netlink: Error: cache initialization failed: Operation not permitted. nft -c applies nothing, but libnftables opens a netlink socket and lists the LIVE ruleset before it will look at a file, and that needs CAP_NET_ADMIN over a real netns. The build had none, so the parser never ran and the step exited 1 at STEP 99/148. Fixed by giving it a netns of its own: unshare --user --map-root-user --net nft -c -f. Proved four ways with a fake unshare on PATH - parses / rejects a mutant at line 60 col 56-60 / unshare absent / unshare REFUSED - because the first draft classified unshare's own refusal as 'nft rejected the ruleset' and would have failed the build a second time on a false diagnosis.",
@@ -159,7 +77,11 @@
     "round24_ci_three_red_steps": "Run 34717723637 answered followups-4's one outstanding question \u2014 `P3 labwc \u2014 the shipped session, probed headless by real clients: success` \u2014 and confirmed its FOUND: exactly three steps fail (Validate Containerfile layer order, Run virtualization assertions, \u00a726 channels) plus the aggregate 'Require every applicable test'. Jobs: Static validation FAIL, Select tests OK, Package engine FAIL, Installer safety and UI OK, Android client OK, Rust validation FAIL. Those three gate ~45 downstream steps, which is the same defect followups-4 fixed once with `if: ${{ !cancelled() }}` \u2014 at a larger radius. Dispatched as followups-5.",
     "a killed run reported a pass, and the previous round believed it": "The `later` card's NEXT said to collect two firmware experiments with `podman wait`. Both containers were gone, both Exited(143), both FinishedAt the SAME NANOSECOND \u2014 a host-level kill \u2014 and both logs nevertheless ended '6 passed, 0 failed' with the S3 assertions never reached. Cause: run-scenarios' EXIT trap carried a comment claiming it survived a signal; it runs, but `$?` reads 0 inside it, so the INCOMPLETE branch never fired. Fixed and verified in situ with a real `podman kill -s TERM` (8 passed, 1 failed, exit 143), with a regression test that lifts the trap block out of run-scenarios so deleting the traps fails the suite. The assertion that did NOT move is exit 143 \u2014 proof the exit status was never the problem, the LOG was. Same family as the inert refusals and the stale binaries: the run reports success while having inspected nothing.",
     "the S3 failure is an upstream edk2 regression, isolated one variable at a time": "in-image secboot (edk2 20260812, SB+SMM on) asserts MemoryServices.c(203); in-image NON-secboot (20260812, SB+SMM off) asserts the same way; edk2 20250812 secboot RESUMES, luks-s3 17 passed / 0 failed. So it is neither Secure Boot nor SMM \u2014 it is the edk2 version. Provenance read out of each binary (edk2-d46aa46c8361 vs edk2-2970e5699ba6), not inferred from filenames. The volume stays open across S3 and a mapper created AFTER resume reads the marker back off disk rather than page cache, with QMP and the guest's suspend_stats agreeing and s3-mode=deep.",
-    "L-001 still needs silicon, and the agent said so rather than banking the VM result": "Shown on swtpm in a VM: TPM clear 20/0 with tpm-unlock=REFUSED -> recovery-unlock=SUCCESS in the same boot, and a PCR 7 change 18/0/1. NOT shown: any enrol-and-recover cycle on a real TPM, which is L-001's acceptance word \u2014 queue.json says 'on hardware' and the L16's TPM is off-limits. L-001 stays partial and L-002/L-003 stay blocked. The agent also withdrew one of its own earlier claims: it had written that all three edge cases demonstrate recovery failing before it works, and scenario_luks_s3 never touches a recovery key."
+    "L-001 still needs silicon, and the agent said so rather than banking the VM result": "Shown on swtpm in a VM: TPM clear 20/0 with tpm-unlock=REFUSED -> recovery-unlock=SUCCESS in the same boot, and a PCR 7 change 18/0/1. NOT shown: any enrol-and-recover cycle on a real TPM, which is L-001's acceptance word \u2014 queue.json says 'on hardware' and the L16's TPM is off-limits. L-001 stays partial and L-002/L-003 stay blocked. The agent also withdrew one of its own earlier claims: it had written that all three edge cases demonstrate recovery failing before it works, and scenario_luks_s3 never touches a recovery key.",
+    "pipefail turns a `grep -q` MATCH into exit 141, and it hid three security assertions": "Found twice in one day, independently. The orchestrator wrote it into apex-shell's new suite-coverage gate \u2014 `printf '%s' \"$wf\" | grep -qF \"$b\" && reach[...]` mis-seeded 5 of 63 suites and reported run-rtl-test.sh as unreachable while it sits at ci.yml:1599. followups-5 found the same shape in THREE negative leak assertions: `find TREE | grep -qF X` under pipefail, where grep exits on match, find takes SIGPIPE, the pipeline is 141, and `&& bad || ok` therefore reports CLEAN precisely when the canary is PRESENT. THE TREE'S SIZE decided whether a leak was detectable \u2014 proven 5 inversions in 5 on a 1.36 MB listing and correct 5-in-5 on a 717-byte one \u2014 and every fixture is small, so those assertions were green for their whole lives without ever being able to fail. Fix: `[[ \"$text\" == *\"$needle\"* ]]`, no pipe. The orchestrator's was caught only because a second measurement of the same question disagreed.",
+    "the smallest mutation is the one that matters": "p2-d added SessionInfo.allowlist with four assertions around it; setting it to None broke NONE of them. The commit fixing that then claimed the new file caught a proxy handed the wrong list \u2014 and the SURGICAL mutation (change only the egress::start call site, leave the binding alone) passed all four as well. Both are covered now, the second by issuing a CONNECT directly to the session's egress proxy. p2-c found the same class twice in a harness: `case_says \"readable\"` is satisfied by the string 'present and unreadable', and a mutant that is different but UNOBSERVABLE (removing one of two equivalent arms) passes silently.",
+    "a reader that states instead of reads, twice more": "FOUND 11: the system CA trust store check is a `[ -r ]` on one file and sat BELOW five 'could not look' returns in do_network \u2014 no Wi-Fi plugin, nmcli absent, nmcli timed out, profiles unreadable, and 'no saved profile uses it', which describes nearly every machine. The line whose job is to say a correct password still fails to associate therefore printed almost nowhere, and is missing from the evidence file's own 2026-09-13 image reading for exactly that reason. FOUND 12: `unit_active` used `systemctl is-active`, which needs the bus and exits 1 with an error in a container, while `is-enabled` reads unit files and answers \u2014 that asymmetry hid it, and six readers stated a NEGATIVE about a daemon nothing had asked about. Two of the six are safety claims, and the evidence file already carried a footnote telling readers not to believe the hotspot one: the caveat belonged in the tool.",
+    "status does not affect the ready queue": "p2-c set its three items to `blocked`, then checked resume.sh and found status is irrelevant to dispatch: finished() keys off all-items-done or the `closed` hatch in state/queue.json. It reverted the items to `partial` (the documented convention for 'unit finished, item honestly is not') and marked the UNIT closed with a reason. Worth knowing before anyone tries to steer the queue by editing statuses."
   },
   "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt \u2014 the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
   "_orchestrator": {
