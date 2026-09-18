@@ -207,7 +207,7 @@ mod tests {
             .collect();
         assert_eq!(
             empty,
-            vec!["google", "microsoft"],
+            vec!["microsoft"],
             "the set of account providers with nothing grantable changed. Each one is \
              a provider APEX can hold a credential for and spend on nothing; if a \
              transport landed, give it its scopes, and if one was added, say why here."
