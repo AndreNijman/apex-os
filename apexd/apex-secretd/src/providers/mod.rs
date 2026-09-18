@@ -18,6 +18,7 @@ use crate::provider::Registry;
 #[cfg(test)]
 pub mod bearer;
 pub mod cloudflare;
+pub mod gdrive;
 pub mod git;
 pub mod mcp;
 pub mod oauth;
@@ -38,6 +39,7 @@ pub fn default_registry(run_dir: std::path::PathBuf) -> Result<Registry, String>
     let mut registry = Registry::new();
     registry.register(Box::new(git::GitProvider))?;
     registry.register(Box::new(cloudflare::CloudflareProvider::new()))?;
+    registry.register(Box::new(gdrive::GdriveProvider::new()))?;
     registry.register(Box::new(mcp::McpProvider::new(run_dir.clone())))?;
     registry.register(Box::new(oauth::OAuthProvider::new()))?;
     registry.register(Box::new(s3::S3Provider))?;
@@ -94,6 +96,7 @@ mod tests {
                 "cloudflare.workers-ai.run",
             "cloudflare.wrangler.deploy",
             "cloudflare.wrangler.versions-upload",
+                "gdrive.file.read",
                 "git.fetch",
                 "git.ls-remote",
                 "git.push",
