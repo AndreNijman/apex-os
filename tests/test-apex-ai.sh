@@ -430,8 +430,13 @@ else
     ok "no apex-aid daemon was started by this suite"
 fi
 # No socket may have been created in the fixture runtime directory either.
-if find "$XDG_RUNTIME_DIR" -type s 2>/dev/null | grep -q .; then
-    bad "no socket was created" "$(find "$XDG_RUNTIME_DIR" -type s)"
+# Materialised, not piped: `find … | grep -q .` makes grep exit on the first
+# line, find dies of SIGPIPE, and under `pipefail` the pipeline is 141 — so the
+# `if` took the else branch and this said "no socket was created" exactly WHEN
+# one had been. Another assertion that could only fail open.
+find "$XDG_RUNTIME_DIR" -type s > "${WORK}/stray-sockets.txt" 2>/dev/null
+if [ -s "${WORK}/stray-sockets.txt" ]; then
+    bad "no socket was created" "$(cat "${WORK}/stray-sockets.txt")"
 else
     ok "no socket was created"
 fi

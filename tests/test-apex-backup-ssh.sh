@@ -277,7 +277,13 @@ else bad "\`apex backup run\` wrote a snapshot over ssh"; printf '      %s\n' "$
 
 # The objects really are on the "far side", under the prefix. `head.json` is
 # written LAST, so its presence is also the evidence that the run completed.
-find "$REMOTE" -type f -name 'head.json' | grep -q . \
+# Materialised rather than piped, for the same reason as the canary check
+# below, but failing in the opposite direction: `find … | grep -q .` dies of
+# SIGPIPE under `pipefail` precisely when there IS a match, so a far side big
+# enough to overflow the 64 KB pipe buffer would report the head MISSING while
+# it was there — a false red rather than a hidden leak.
+find "$REMOTE" -type f -name 'head.json' > "${WORK}/head-paths.txt"
+[ -s "${WORK}/head-paths.txt" ] \
     && ok "a completed snapshot's head is on the far side" \
     || { bad "a completed snapshot's head is on the far side"
          find "$REMOTE" | head -10; }
@@ -303,8 +309,16 @@ done < <(find "$REMOTE" -type f)
 [ "$found" -eq 0 ] \
     && ok "no byte written over ssh holds the plaintext" \
     || bad "no byte written over ssh holds the plaintext"
-# The object NAMES too, not only their contents.
-find "$REMOTE" | grep -qF "$CANARY" \
+# The object NAMES too, not only their contents — and materialised, never
+# piped. `find TREE | grep -qF X` makes grep exit at its first match, find then
+# dies of SIGPIPE, and under `pipefail` the PIPELINE is 141: this assertion
+# reported "no object NAME … holds the plaintext" exactly WHEN one did, and
+# passed only when the canary was absent and grep read to EOF. A negative leak
+# assertion that fails OPEN. Measured in bash on a 1.36 MB listing: 5
+# inversions in 5; over a 717-byte listing, correct 5 times in 5. The size of
+# the far side, not the code, decided whether a leak could be detected.
+find "$REMOTE" > "${WORK}/remote-names.txt"
+grep -qF "$CANARY" "${WORK}/remote-names.txt" \
     && bad "no object NAME written over ssh holds the plaintext" \
     || ok "no object NAME written over ssh holds the plaintext"
 
