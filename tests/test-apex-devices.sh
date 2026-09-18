@@ -649,6 +649,129 @@ case_says "and it is named, so the user can go and look" "$out" \
 case_says "the profile that DID read is still counted" "$(eline "$out")" "1 saved profile(s)" \
           "one unreadable neighbour must not cost the finding that was readable"
 
+# ── a daemon that did not answer must not take the filesystem with it ───────
+#
+# `do_network` used to `return` the moment `have nmcli` failed, and
+# `report_enterprise_wifi` used to `return` on each of its own three "could not
+# look" branches AND on a machine with no Wi-Fi plugin. The system CA trust
+# store — a `[ -r ]` on one file, needing no daemon at all — sat below all five.
+#
+# So the reading whose whole job is to say "a correct password still fails to
+# associate" was skipped by: a missing nmcli, an unreachable NetworkManager, a
+# wedged one, a NetworkManager with no Wi-Fi plugin, and — the case that
+# describes nearly every machine — simply having no enterprise profile saved.
+# It printed almost nowhere, and nothing in this suite had ever asserted it: it
+# is absent from the built-image reading in the evidence file for exactly this
+# reason. "I could not look at X" is not a reason to stop looking at Y.
+#
+# The TRUST-STORE LINE is read, not the whole report. `MISSING` appears in the
+# hotspot blocker "…50-apex-hotspot-firewall is missing" as well, so a grep over
+# the full output would be satisfied by a different line and could not fail —
+# the same trap `eline` exists for one section up.
+tline() { grep -E '^  system CA trust store' <<<"$1"; }
+
+# The VALUE off that line, and it is compared as text rather than grepped for.
+# `case_says … "readable"` is satisfied by "present and unreadable", so the case
+# that exists to prove the reader CAN read the file was green under a mutant
+# that made it never read anything — caught by `[ -r ] -> false`, which passed
+# 91/91 before this was exact. `item` prints a 26-wide name, then one space.
+tvalue()    { tline "$1" | sed -E 's/^  .{26} //'; }
+case_value() {  # $1 = name, $2 = value read, $3 = the answer it must be, $4 = why
+    if [ -n "$3" ] && [ "${2#"$3"}" != "$2" ]; then
+        ok "$1"
+    else
+        bad "$1" "the trust-store line read '$2', which does not begin '$3' — $4"
+    fi
+}
+echo
+echo "── the readings a daemon that did not answer must not take with it ────"
+
+# The common case, and the one that hid the defect: nmcli answers, there are no
+# enterprise profiles, and the reader used to stop there.
+reset_world
+out=$(devices network)
+[ -n "$(tline "$out")" ] \
+    && ok "a machine with no enterprise profile still gets a trust-store line" \
+    || bad "a machine with no enterprise profile still gets a trust-store line" \
+           "'no saved profile uses it' returned, and took the trust store with it"
+case_value "and a bundle that is not there is MISSING" "$(tvalue "$out")" "MISSING" \
+           "an EAP method with nothing to validate against fails a correct password"
+case_says "and what that costs is stated" "$out" "correct password still fails to associate" \
+          "'MISSING' means nothing to somebody whose Wi-Fi has always worked"
+
+# The true-negative control. Without it the fix could be "always print MISSING",
+# which satisfies every case above and reads the file never.
+reset_world
+mkdir -p "$WORK/etc/pki/tls/certs"
+printf '# not a real bundle\n' > "$WORK/etc/pki/tls/certs/ca-bundle.crt"
+out=$(devices network)
+case_value "a bundle that is there reads as readable" "$(tvalue "$out")" "readable" \
+           "a reader that can only say MISSING has stopped reading the file"
+
+# Present and unreadable is the third answer, and it is the one this whole suite
+# exists for. Root walks through 0000, so the seal is checked before anything is
+# asserted: a green run as root would be a green run that tested nothing.
+reset_world
+mkdir -p "$WORK/etc/pki/tls/certs"
+printf '# not a real bundle\n' > "$WORK/etc/pki/tls/certs/ca-bundle.crt"
+chmod 0000 "$WORK/etc/pki/tls/certs/ca-bundle.crt"
+if [ -r "$WORK/etc/pki/tls/certs/ca-bundle.crt" ]; then
+    skipped "a sealed bundle is refusal, not absence" "chmod 0000 did not take (root?)"
+else
+    out=$(devices network)
+    case_value "a sealed bundle is refusal, not absence" "$(tvalue "$out")" "present and unreadable" \
+               "a trust store you cannot read is a permissions bug, not a missing package"
+    case_silent "and a sealed bundle is never called MISSING" "$(tline "$out")" "MISSING" \
+                "that sends the user to install a package they already have"
+fi
+chmod 0644 "$WORK/etc/pki/tls/certs/ca-bundle.crt" 2>/dev/null
+
+# No nmcli at all. Everything below the links except the saved profiles comes
+# off the filesystem, and none of it was printed.
+reset_world
+PATH="$(path_without nmcli)"
+out=$(devices network)
+PATH=$REAL_PATH
+case_value "a missing nmcli does not cost the trust-store reading" "$(tvalue "$out")" "MISSING" \
+           "the bundle is a file on disk; nmcli was never going to be asked about it"
+case_says "nor the WireGuard reading" "$out" "WireGuard" \
+          "whether wg is installed is a \`command -v\`, not a question for NetworkManager"
+case_says "nor the hotspot reading" "$out" "hotspot / tethering" \
+          "the dispatcher and the policy are both files, and both are read without nmcli"
+case_says "and it says which questions cannot be answered here" "$out" \
+          "read off the filesystem and needs no daemon" \
+          "a reader that drops half its report silently is worse than one that says so"
+case_says "and the enterprise line names nmcli as what is absent" "$(eline "$out")" \
+          "unavailable — nmcli is not installed" \
+          "going silent on that line reads as a machine with nothing to report"
+
+# nmcli is installed and NetworkManager is not there to answer it. This is the
+# built image, and it is the state the previous round measured the defect in.
+reset_world
+printf 'Error: Could not create NMClient object: Could not connect: No such file or directory.\n' \
+    > "$STATE/nmcli"
+printf '1\n' > "$STATE/nmcli.rc"
+out=$(devices network)
+case_value "an unreachable NetworkManager does not cost the trust-store reading" \
+           "$(tvalue "$out")" "MISSING" \
+           "the daemon that did not answer was not asked about this file"
+
+# A wedged nmcli, which returns nothing at all rather than an error.
+reset_world
+printf '124\n' > "$STATE/nmcli.rc"
+out=$(devices network)
+case_value "a wedged nmcli does not cost the trust-store reading" "$(tvalue "$out")" "MISSING" \
+           "a timeout is the least informative failure and must cost the least"
+
+# The fifth return: no Wi-Fi plugin. A machine with no wireless device at all
+# still has a trust store, and a wired 802.1X port and every VPN read it.
+reset_world
+rm -f "$WORK/nmlib"/*/libnm-device-plugin-wifi.so
+out=$(devices network)
+case_value "a NetworkManager with no Wi-Fi plugin does not cost the trust-store reading" \
+           "$(tvalue "$out")" "MISSING" \
+           "wired 802.1X and every VPN validate against the same file"
+
 # ── hotplug ─────────────────────────────────────────────────────────────────
 echo
 echo "── hotplug, and the USB-C ports a missing controller used to hide ─────"
