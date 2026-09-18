@@ -27,8 +27,13 @@
     <gap>0</gap>
   </core>
 
+  <!-- No <name> element. An EMPTY one is not "labwc's built-in theme": labwc
+       refuses it with `[ERROR] Empty string is not allowed for name.theme`
+       on every single start, and this is the one session whose whole job is to
+       look like it is working on a machine that is not. Omitting the element
+       is what asks for the built-in theme. The font stays, because it is the
+       one thing here that has to be legible. -->
   <theme>
-    <name></name>
     <font place="ActiveWindow">
       <name>JetBrainsMono Nerd Font</name>
       <size>10</size>
