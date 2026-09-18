@@ -125,7 +125,35 @@ use crate::policy::{AgentPolicy, RequestOrigin};
 /// ([`crate::destination::Allowlist::narrow`]), so this field can only ever
 /// subtract. That is what makes it safe for a session to name its own
 /// destinations at all.
-pub const PROTOCOL_VERSION: u32 = 9;
+/// 10 — a session's browser may be told to trust ONE private CA (P2-012, the
+/// intranet gap).
+///
+/// [`RunRequest::trust_ca`], and the first entry on this list whose dropped
+/// key fails CLOSED. A daemon below this ignores the path, the capsule's
+/// browser keeps the machine's trust anchors, and the intranet host's
+/// certificate is refused. Nothing is widened by the drop — so the argument
+/// for a number of its own is not the usual one, and it is worth writing down
+/// rather than assuming:
+///
+/// [`RunRequest::second_factor`] is a wire field that deliberately did NOT
+/// take a revision, and its reason is that an old daemon which drops it still
+/// produces a loud refusal — the elevation fails for want of a local origin,
+/// in front of the person who asked. This field has no such refusal behind it.
+/// Firefox meets an untrusted chain by sitting on it: the measurement in
+/// `docs/browser-capsule-auth.md` recorded a control profile that refused the
+/// handshake and stayed refusing until it was killed. So a capsule whose
+/// `trust_ca` was dropped renders nothing, says nothing, and is stopped by
+/// `apex browser`'s `--timeout` minutes later — after which the caller is
+/// told their capsule "did not finish" and their screenshot was not produced.
+/// A silence that costs five minutes and names the wrong cause is worth a
+/// number, and the number is the only thing
+/// `check_daemon_understands` can consume: it runs BEFORE `Run`, which is the
+/// last moment at which nothing has been started.
+///
+/// Route B — the daemon terminating TLS for a pinned destination, if that
+/// question is ever answered yes — must therefore take **11**. It was written
+/// down as 10 while this field did not exist yet.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// The revision at which the credential store moved to `apex-secretd`.
 ///
@@ -210,6 +238,10 @@ const _: () = assert!(CONNECTOR_POLICY_VERSION < PLUGIN_POLICY_VERSION);
 // mean anything: a daemon can honour every dimension and still snapshot the
 // runtime's whole allowlist for a session that asked for one host.
 const _: () = assert!(PLUGIN_POLICY_VERSION < SESSION_ALLOWLIST_VERSION);
+// And later again: a daemon can narrow a session's allowlist to one host and
+// still know nothing about installing a CA for the browser that visits it.
+// The two arrived in consecutive revisions and are not the same wire change.
+const _: () = assert!(SESSION_ALLOWLIST_VERSION < BROWSER_CA_VERSION);
 
 /// The revision that first carried the six dimensions.
 ///
@@ -247,6 +279,18 @@ pub const PLUGIN_POLICY_VERSION: u32 = 8;
 /// Its own number rather than an alias of [`PLUGIN_POLICY_VERSION`], because a
 /// daemon can honour `--plugins none` and still know nothing about this.
 pub const SESSION_ALLOWLIST_VERSION: u32 = 9;
+
+/// The revision that first let a session's browser be told to trust one
+/// private CA (P2-012, [`RunRequest::trust_ca`]).
+///
+/// `apex agent run --trust-ca` and `apex browser run --trust-ca` check it. The
+/// only guard on this list whose field fails CLOSED when it is dropped, and
+/// the reason it exists anyway is written out at [`PROTOCOL_VERSION`]: the
+/// closed failure is a browser that sits silently on a refused handshake until
+/// a timeout kills it, which names the wrong cause for five minutes. Every
+/// other guard here is catching a session that ran WIDER than was asked for;
+/// this one is catching a session that ran narrower and could not say so.
+pub const BROWSER_CA_VERSION: u32 = 10;
 
 /// What a session is doing. The five user-facing values come straight from the
 /// roadmap's agent event protocol; `Starting` and `Exited` are the lifecycle
@@ -1284,6 +1328,52 @@ pub struct RunRequest {
     /// can actually reach.
     #[serde(default)]
     pub allow: Option<Vec<String>>,
+    /// One private CA this session's BROWSER should trust, as an absolute path
+    /// to a PEM file on the host (P2-012, protocol 10).
+    ///
+    /// The case it exists for is the intranet one: a capsule sent to a site
+    /// whose certificate is signed by an organisation's own root, which is not
+    /// in the machine's trust store and must not be added to it for the sake
+    /// of one automated run.
+    ///
+    /// ## It is the browser's trust, not the session's
+    ///
+    /// The name is deliberately narrow and the doc has to be narrower still,
+    /// because the obvious reading is wrong: `curl`, `git` and `python` in the
+    /// same sandbox keep using the system bundle and still refuse the host.
+    /// What this installs is a **Firefox enterprise-policy** root, which is
+    /// the only CA install route the image has — `nss-tools` is not
+    /// installed, so there is no `certutil` to add one to an NSS database.
+    /// See `docs/browser-capsule-auth.md`, where the mechanism is measured
+    /// with a control that refuses the same server.
+    ///
+    /// ## What the daemon does with it, and why the daemon does it
+    ///
+    /// It reads the file, refuses anything that is not certificates alone,
+    /// copies it where the session can read and not write, MERGES an
+    /// `Certificates.Install` entry into a copy of the machine's own
+    /// `/etc/firefox/policies/policies.json`, and binds that copy over the
+    /// real one inside the session's mount namespace. The host's file is never
+    /// touched and no other process on the machine sees the added root.
+    ///
+    /// The daemon rather than the caller, because the alternative shape — a
+    /// wire field naming a file and a path to bind it over — would let any
+    /// client shadow any path inside a session's namespace, which is a much
+    /// larger thing than trusting a CA and would be reviewed as one.
+    ///
+    /// Meaningless without a confined sandbox: an unconfined session has no
+    /// mount namespace to bind into, so the field would be accepted and mean
+    /// nothing. The daemon refuses the pair rather than ignoring it, for
+    /// [`RunRequest::ttl_ms`]'s reason.
+    ///
+    /// A `PROTOCOL_VERSION` bump of its own ([`BROWSER_CA_VERSION`]) even
+    /// though a dropped key fails CLOSED, which is the opposite of every other
+    /// guarded field here. The argument is at [`PROTOCOL_VERSION`]: a dropped
+    /// key here is a browser that sits silently on a refused handshake until
+    /// `apex browser`'s timeout kills it, and a five-minute silence naming the
+    /// wrong cause is worth the number.
+    #[serde(default)]
+    pub trust_ca: Option<String>,
     /// A security key's answer, for a session asking to elevate from an origin
     /// §7 does not give the local column to (P0-014).
     ///
@@ -1928,6 +2018,7 @@ mod tests {
             ttl_ms: None,
             capabilities: None,
             allow: Some(vec!["api.example.com".into(), "files.example.com:8443".into()]),
+            trust_ca: None,
             second_factor: None,
             cols: 80,
             rows: 24,
@@ -1962,6 +2053,55 @@ mod tests {
     }
 
     #[test]
+    fn a_browser_ca_travels_as_trust_ca_and_its_absence_is_none() {
+        // P2-012's gap 5, and the assertion is the KEY for the reason the one
+        // above it is: a rename passes every round trip in this file while
+        // making the field invisible to a daemon that reads the old name.
+        // Which for THIS field is not a widening — the capsule trusts less,
+        // not more — but it is a capsule that renders nothing and blames the
+        // timeout, so the silence is the cost.
+        let req = RunRequest {
+            agent: None,
+            prompt: None,
+            args: vec![],
+            cwd: "/home/t/p".into(),
+            policy: AgentPolicy::default(),
+            request_origin: None,
+            worktree: None,
+            checkpoint: false,
+            ttl_ms: None,
+            capabilities: None,
+            allow: None,
+            trust_ca: Some("/home/t/intranet-root.pem".into()),
+            second_factor: None,
+            cols: 80,
+            rows: 24,
+            env: vec![],
+            disposable: false,
+            copy_out: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&req).expect("serialize");
+        assert_eq!(
+            v["trust_ca"],
+            serde_json::json!("/home/t/intranet-root.pem"),
+            "the wire key is `trust_ca`; a daemon reading any other name installs nothing"
+        );
+
+        // The direction every older client exercises on every run: no key at
+        // all is `None`, which is a session whose browser trusts exactly what
+        // the machine trusts.
+        let mut without = v.clone();
+        without.as_object_mut().expect("object").remove("trust_ca");
+        let back: RunRequest = serde_json::from_value(without).expect("an older client's request");
+        assert_eq!(back.trust_ca, None);
+
+        let mut nulled = v.clone();
+        nulled["trust_ca"] = serde_json::Value::Null;
+        let back: RunRequest = serde_json::from_value(nulled).expect("an explicit null");
+        assert_eq!(back.trust_ca, None);
+    }
+
+    #[test]
     fn only_the_requests_that_authenticate_wait_on_a_person() {
         // The polkit dialog is on the desktop and the person may take a
         // minute or ten; the CLI must not give up on the socket and report a
@@ -1983,6 +2123,7 @@ mod tests {
                 ttl_ms: None,
                 capabilities: None,
                 allow: None,
+                trust_ca: None,
                 second_factor: None,
                 cols: 80,
                 rows: 24,
@@ -2029,6 +2170,7 @@ mod tests {
                 ttl_ms: None,
                 capabilities: None,
                 allow: None,
+                trust_ca: None,
                 // Carried through the round trip with a value, not `None`:
                 // the field is the one thing on this request that a daemon
                 // reads to decide whether root is handed out, and a
@@ -2063,6 +2205,7 @@ mod tests {
                 ttl_ms: None,
                 capabilities: None,
                 allow: None,
+                trust_ca: None,
                 second_factor: None,
                 cols: 80,
                 rows: 24,
@@ -2332,6 +2475,7 @@ mod tests {
             ("the connector policy", CONNECTOR_POLICY_VERSION),
             ("the plugin policy", PLUGIN_POLICY_VERSION),
             ("the session allowlist", SESSION_ALLOWLIST_VERSION),
+            ("the browser CA", BROWSER_CA_VERSION),
         ] {
             assert!(
                 since <= PROTOCOL_VERSION,
@@ -2341,7 +2485,7 @@ mod tests {
         }
         // The newest guard is the current revision: adding a wire field
         // without bumping the version is the fail-open these exist to catch.
-        assert_eq!(SESSION_ALLOWLIST_VERSION, PROTOCOL_VERSION);
+        assert_eq!(BROWSER_CA_VERSION, PROTOCOL_VERSION);
         // And every older guard stays strictly behind it. `<`, not
         // `== PROTOCOL_VERSION - 1`: three of these shipped as revision 5 and
         // scoped grants as 6, and none of them is going to move again, so
@@ -2354,6 +2498,7 @@ mod tests {
             ("scoped grants", SCOPED_GRANT_VERSION),
             ("the connector policy", CONNECTOR_POLICY_VERSION),
             ("the plugin policy", PLUGIN_POLICY_VERSION),
+            ("the session allowlist", SESSION_ALLOWLIST_VERSION),
         ] {
             assert!(
                 since < PROTOCOL_VERSION,

@@ -26,6 +26,11 @@
 //!   * `--capability` replaces the destination with a credential's pin. A
 //!     dropped one is a capsule that goes where the call site said instead of
 //!     where the capability said, which is the whole point of a pin.
+//!   * `--trust-ca` decides what the capsule's browser believes. A dropped one
+//!     is the quietest of the four: the capsule starts, refuses the intranet
+//!     certificate, and Firefox answers an untrusted chain by sitting on it —
+//!     so the run ends at the timeout with an empty screenshot and no cause
+//!     named anywhere.
 //!
 //! ## There is no way to open a window from this surface
 //!
@@ -51,7 +56,12 @@ pub enum BrowserCmd {
     /// Its own profile, its own cookie jar, its own download directory, and no
     /// route onto the network except the destinations named here. Everything
     /// after `--` goes to the browser.
-    Run(RunArgs),
+    ///
+    /// Boxed for `AgentCmd::Run`'s reason: `Doctor` carries no data at all, so
+    /// clippy's `large_enum_variant` is right about the pair. It crossed the
+    /// threshold when `--trust-ca` was added, which makes the box that flag's
+    /// cost rather than tidying somebody did along the way.
+    Run(Box<RunArgs>),
 }
 
 #[derive(Args)]
@@ -105,6 +115,22 @@ pub struct RunArgs {
     #[arg(long)]
     pub force: bool,
 
+    /// A PEM file of certificate authorities the capsule's browser trusts,
+    /// for this capsule only.
+    ///
+    /// The intranet case: a site behind an organisation's own root, which is
+    /// not in this machine's trust store and should not be added to it for
+    /// the sake of one automated run. Nothing outside the capsule is changed
+    /// — the machine's own Firefox policy is read, copied with the CA added,
+    /// and the copy is bound over the original inside the capsule's mount
+    /// namespace.
+    ///
+    /// It names a FILE and there is no default. Handing a capsule a CA it did
+    /// not have widens what it will believe, and a default would widen it
+    /// without anybody typing anything.
+    #[arg(long, value_name = "FILE")]
+    pub trust_ca: Option<String>,
+
     /// Name the capsule instead of generating one.
     #[arg(long)]
     pub name: Option<String>,
@@ -121,7 +147,7 @@ pub struct RunArgs {
 pub fn argv(cmd: BrowserCmd) -> Vec<String> {
     match cmd {
         BrowserCmd::Doctor => vec!["doctor".to_string()],
-        BrowserCmd::Run(a) => run_argv(a),
+        BrowserCmd::Run(a) => run_argv(*a),
     }
 }
 
@@ -138,6 +164,10 @@ fn run_argv(a: RunArgs) -> Vec<String> {
     if let Some(c) = a.capability {
         v.push("--capability".to_string());
         v.push(c);
+    }
+    if let Some(ca) = a.trust_ca {
+        v.push("--trust-ca".to_string());
+        v.push(ca);
     }
     for d in a.download {
         v.push("--download".to_string());
@@ -232,6 +262,42 @@ mod tests {
     fn a_capability_reaches_the_engine_so_the_pin_can_replace_the_destination() {
         let a = build(&["run", "--capability", "intranet", "--", "https://x/"]);
         assert!(a.windows(2).any(|w| w[0] == "--capability" && w[1] == "intranet"));
+    }
+
+    #[test]
+    fn a_trusted_ca_reaches_the_engine_and_stays_before_the_separator() {
+        // The quietest of the four flags this file pins. A dropped `--allow`
+        // is a capsule that reaches the wrong place and a dropped
+        // `--download` is a file the caller does not get; a dropped
+        // `--trust-ca` is a capsule that renders nothing and blames the
+        // timeout, because Firefox answers an untrusted chain by sitting on
+        // it rather than by failing.
+        let a = build(&[
+            "run",
+            "--allow",
+            "intranet.corp:443",
+            "--trust-ca",
+            "/home/u/corp-root.pem",
+            "--",
+            "https://intranet.corp/",
+        ]);
+        assert!(
+            a.windows(2)
+                .any(|w| w[0] == "--trust-ca" && w[1] == "/home/u/corp-root.pem"),
+            "the CA never reached the engine: {a:?}"
+        );
+        // Before the separator: after it, the word is one of the BROWSER's
+        // arguments, Firefox has no such flag, and the capsule would fail to
+        // start for a reason that names the wrong program.
+        let sep = a.iter().position(|x| x == "--").expect("a separator");
+        let at = a
+            .iter()
+            .position(|x| x == "--trust-ca")
+            .expect("the flag is there");
+        assert!(at < sep, "the CA landed in the browser's arguments: {a:?}");
+        // And it is not invented when nobody asked.
+        let plain = build(&["run", "--allow", "e.example", "--", "https://e/"]);
+        assert!(!plain.iter().any(|x| x == "--trust-ca"));
     }
 
     #[test]

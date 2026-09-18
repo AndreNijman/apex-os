@@ -18,7 +18,7 @@ use apex_agent_core::policy::{
     PolicyPreset, RequestOrigin, SecretPolicy, SystemAccess,
 };
 use apex_agent_core::protocol::{
-    AgentState, Request, Response, RunRequest, SandboxPolicy, SessionInfo,
+    AgentState, Request, Response, RunRequest, SandboxPolicy, SessionInfo, BROWSER_CA_VERSION,
     CONNECTOR_POLICY_VERSION, PLUGIN_POLICY_VERSION, POLICY_DIMENSIONS_VERSION,
     REQUEST_ORIGIN_VERSION, SCOPED_GRANT_VERSION, SESSION_ALLOWLIST_VERSION,
     SYSTEM_GRANT_VERSION,
@@ -50,7 +50,13 @@ pub enum AgentCmd {
     /// The real upstream binary runs in a real PTY; APEX owns the terminal so
     /// the session survives this window closing. Detach with the detach key
     /// (ctrl-] by default) and reattach later with `apex agent attach`.
-    Run(RunArgs),
+    ///
+    /// Boxed for `apexd_core::ai::Response::Status`'s reason: `RunArgs` is
+    /// four times the size of the next largest variant here and clippy's
+    /// `large_enum_variant` is right. It crossed the threshold when
+    /// `--trust-ca` was added, so the box is that flag's cost and is recorded
+    /// as one rather than as tidying somebody did along the way.
+    Run(Box<RunArgs>),
     /// List sessions.
     List {
         /// Include sessions that have already finished.
@@ -620,6 +626,29 @@ pub struct RunArgs {
     // spelling, which is also `apex browser --allow`'s.
     #[arg(long, value_name = "DESTINATION")]
     pub allow: Option<Vec<String>>,
+    /// A PEM file of certificate authorities this session's BROWSER trusts on
+    /// top of the machine's own, for this session only (P2-012).
+    ///
+    /// The intranet case: a site whose certificate is signed by an
+    /// organisation's own root, which is not in the machine's trust store and
+    /// should not be added to it for the sake of one automated run.
+    ///
+    /// It is the browser's trust and not the session's, and the difference is
+    /// not a detail: `curl`, `git` and `python` in the same sandbox keep using
+    /// the system bundle and still refuse the host. What is installed is a
+    /// Firefox enterprise-policy root, because that is the only CA install
+    /// route in the image — there is no `certutil`, since `nss-tools` is not
+    /// installed.
+    ///
+    /// It names a FILE and defaults to nothing. Handing a session a CA it did
+    /// not have widens what it will believe, and a default would widen it
+    /// without anybody typing anything.
+    ///
+    /// Only with a confined sandbox. An unconfined session has no mount
+    /// namespace to install the policy into, so the flag would be accepted and
+    /// mean nothing; the daemon refuses the pair too.
+    #[arg(long, value_name = "FILE")]
+    pub trust_ca: Option<PathBuf>,
     /// Run in a dedicated git worktree, creating it if needed.
     #[arg(long, short)]
     pub worktree: Option<String>,
@@ -911,7 +940,7 @@ pub fn agent(cmd: AgentCmd) -> i32 {
                 // owns the error printing.
                 crate::dispatch::agent_run_remote(&h, rp.as_deref(), ad, &forward).map(|()| 0)
             }
-            None => run(args),
+            None => run(*args),
         },
         AgentCmd::List { all, json, host } => match host {
             Some(h) => {
@@ -1231,6 +1260,34 @@ fn run(args: RunArgs) -> Result<i32> {
         }
     }
 
+    // P2-012's gap 5. Refused here as well as in the daemon for `--allow`'s
+    // reason — the message belongs in front of the person who typed the flag —
+    // and resolved here because the wire carries an absolute path: a relative
+    // one would be resolved against the DAEMON's working directory, which is
+    // not the caller's, and would name a different file or no file at all.
+    //
+    // `canonicalize` rather than a manual join, so a path that does not exist
+    // fails now, by name, instead of arriving at the daemon as a refusal about
+    // a file the user cannot see from the message.
+    let trust_ca = match args.trust_ca.as_ref() {
+        None => None,
+        Some(file) => {
+            if !policy.sandbox.is_confined() {
+                bail!(
+                    "`--trust-ca` installs a certificate authority inside the session's mount \
+                     namespace, and `--sandbox {}` does not build one — the flag would be \
+                     accepted and change nothing; add `--sandbox project`, or drop the \
+                     `--trust-ca`",
+                    policy.sandbox
+                );
+            }
+            let abs = file
+                .canonicalize()
+                .with_context(|| format!("--trust-ca {} cannot be read", file.display()))?;
+            Some(abs.to_string_lossy().into_owned())
+        }
+    };
+
     let size = term::stdout_window_size();
     let request = RunRequest {
         agent: args.agent.clone(),
@@ -1244,6 +1301,7 @@ fn run(args: RunArgs) -> Result<i32> {
         ttl_ms: args.ttl,
         capabilities: args.capabilities.clone(),
         allow: args.allow.clone(),
+        trust_ca,
         // Nothing to send yet: collecting an assertion needs a challenge to
         // have been asked for, and the command that asks for one is the next
         // commit. The daemon's reader landed with this one so that the gate
@@ -1263,6 +1321,7 @@ fn run(args: RunArgs) -> Result<i32> {
         args.origin,
         args.capabilities.is_some(),
         args.allow.is_some(),
+        args.trust_ca.is_some(),
     )?;
     let info = match c.call(&Request::Run(request))? {
         Response::Session(info) => *info,
@@ -1360,8 +1419,9 @@ fn check_daemon_understands(
     origin: Option<RequestOrigin>,
     scoped: bool,
     narrowed: bool,
+    browser_ca: bool,
 ) -> Result<()> {
-    let needs = settings_a_daemon_could_drop(policy, origin, scoped, narrowed);
+    let needs = settings_a_daemon_could_drop(policy, origin, scoped, narrowed, browser_ca);
     if needs.is_empty() {
         return Ok(());
     }
@@ -1400,6 +1460,7 @@ fn settings_a_daemon_could_drop(
     origin: Option<RequestOrigin>,
     scoped: bool,
     narrowed: bool,
+    browser_ca: bool,
 ) -> Vec<(&'static str, u32)> {
     let moved = non_default_dimensions(policy);
     let mut needs: Vec<(&'static str, u32)> = moved
@@ -1465,6 +1526,18 @@ fn settings_a_daemon_could_drop(
     // dimension says nothing about understanding this key.
     if narrowed {
         needs.push(("--allow", SESSION_ALLOWLIST_VERSION));
+    }
+    // The one entry here whose dropped key makes the session LESS capable
+    // rather than more, and it is on this table anyway (P2-012, gap 5). A
+    // daemon below this ignores `trust_ca`, the capsule's browser keeps the
+    // machine's trust anchors, and the intranet host's certificate is refused
+    // — nothing is widened. What is lost is the ability to SAY so: Firefox
+    // answers an untrusted chain by sitting on it, so the caller waits out
+    // `apex browser --timeout` and is then told the capsule did not finish.
+    // Every other entry is on this table to stop a silent widening; this one
+    // is here to stop a silent five minutes.
+    if browser_ca {
+        needs.push(("--trust-ca", BROWSER_CA_VERSION));
     }
     needs
 }
@@ -1993,6 +2066,11 @@ fn handoff(id: Option<u32>, to: &str, no_start: bool, transcript_bytes: usize) -
         // inheriting the old grant's verbs would be inheriting the grant.
         capabilities: None,
         allow: None,
+        // A handoff continues work in a terminal, not in a browser capsule,
+        // and the outgoing session's `SessionInfo` does not carry the CA it
+        // was given — so there is nothing here to inherit and nothing that
+        // could be inherited by accident.
+        trust_ca: None,
         cols: 80,
         rows: 24,
         env: vec![],
@@ -4448,6 +4526,7 @@ mod tests {
             ttl: None,
             capabilities: None,
             allow: None,
+            trust_ca: None,
             worktree: None,
             checkpoint: false,
             cwd: None,
@@ -4860,7 +4939,7 @@ mod tests {
         use clap::Parser;
         fn parse(argv: &[&str]) -> RunArgs {
             match crate::Cli::try_parse_from(argv).expect("parses").command {
-                crate::Cmd::Agent { cmd: AgentCmd::Run(a) } => a,
+                crate::Cmd::Agent { cmd: AgentCmd::Run(a) } => *a,
                 _ => panic!("not `agent run`"),
             }
         }
@@ -4923,7 +5002,7 @@ mod tests {
         let with = |f: fn(&mut AgentPolicy)| {
             let mut p = AgentPolicy::default();
             f(&mut p);
-            settings_a_daemon_could_drop(&p, None, false, false)
+            settings_a_daemon_could_drop(&p, None, false, false, false)
         };
 
         // Dimension 8. The flag name is what the refusal prints, so it is part
@@ -4964,7 +5043,7 @@ mod tests {
         );
         // `sandbox` predates every revision here and is never checked, so an
         // all-defaults run against an old daemon still starts.
-        assert!(settings_a_daemon_could_drop(&AgentPolicy::default(), None, false, false).is_empty());
+        assert!(settings_a_daemon_could_drop(&AgentPolicy::default(), None, false, false, false).is_empty());
 
         // And the two dimensions travel independently: asking for both names
         // both, at two revisions.
@@ -4974,7 +5053,7 @@ mod tests {
             ..AgentPolicy::default()
         };
         assert_eq!(
-            settings_a_daemon_could_drop(&both, None, false, false),
+            settings_a_daemon_could_drop(&both, None, false, false, false),
             vec![
                 ("--connectors", CONNECTOR_POLICY_VERSION),
                 ("--plugins", PLUGIN_POLICY_VERSION),
@@ -5003,7 +5082,7 @@ mod tests {
         // revisions. The dimension alone would be satisfied by a protocol-2
         // daemon.
         assert_eq!(
-            settings_a_daemon_could_drop(&allowlisted, None, false, true),
+            settings_a_daemon_could_drop(&allowlisted, None, false, true, false),
             vec![
                 ("network", POLICY_DIMENSIONS_VERSION),
                 ("--allow", SESSION_ALLOWLIST_VERSION),
@@ -5013,7 +5092,7 @@ mod tests {
         // Not narrowed: the same policy asks for nothing extra, so an
         // ordinary allowlisted session still starts against an old daemon.
         assert_eq!(
-            settings_a_daemon_could_drop(&allowlisted, None, false, false),
+            settings_a_daemon_could_drop(&allowlisted, None, false, false, false),
             vec![("network", POLICY_DIMENSIONS_VERSION)],
         );
         // That the revision is genuinely later than the one before it — so
@@ -5024,6 +5103,60 @@ mod tests {
         // clippy refuses a runtime assertion over two constants, and a test
         // that could be deleted without breaking the build is the weaker of
         // the two guards anyway.
+    }
+
+    /// A browser CA is checked against its own revision, and it is checked at
+    /// all even though its dropped key fails CLOSED (P2-012, gap 5).
+    ///
+    /// Every other entry on that table is stopping a session from running
+    /// WIDER than was asked for. This one is stopping a silence: a daemon
+    /// below the revision drops `trust_ca`, the capsule's browser refuses the
+    /// intranet certificate, and Firefox answers an untrusted chain by sitting
+    /// on it — so the caller learns nothing until `apex browser --timeout`
+    /// stops the capsule and reports that it did not finish. The refusal
+    /// happens before `Run`, which is the last moment at which nothing has
+    /// been started.
+    #[test]
+    fn a_browser_ca_is_checked_against_its_own_revision() {
+        // Confined, which is the only shape that can carry one, and nothing
+        // else moved: the CA is the whole of what this session asks for.
+        let confined = AgentPolicy::default();
+        assert!(
+            confined.sandbox.is_confined(),
+            "the default sandbox is the confined one; if that changes this test is asserting \
+             nothing about the pair the daemon refuses"
+        );
+        assert_eq!(
+            settings_a_daemon_could_drop(&confined, None, false, false, true),
+            vec![("--trust-ca", BROWSER_CA_VERSION)],
+            "--trust-ca must carry its own revision, and the flag name is what the refusal \
+             prints — `would ignore trust_ca` names nothing a user can type"
+        );
+        // Not asked for: the same policy needs nothing, so an ordinary session
+        // still starts against an older daemon.
+        assert!(settings_a_daemon_could_drop(&confined, None, false, false, false).is_empty());
+
+        // It travels independently of the narrowed allowlist it will almost
+        // always be used beside — a browser capsule sends both — and the two
+        // are two different revisions. An assertion that read one constant
+        // twice would hold with the table wrong.
+        let allowlisted = AgentPolicy {
+            network: NetworkPolicy::Allowlist,
+            ..AgentPolicy::default()
+        };
+        assert_eq!(
+            settings_a_daemon_could_drop(&allowlisted, None, false, true, true),
+            vec![
+                ("network", POLICY_DIMENSIONS_VERSION),
+                ("--allow", SESSION_ALLOWLIST_VERSION),
+                ("--trust-ca", BROWSER_CA_VERSION),
+            ],
+        );
+        assert_ne!(
+            SESSION_ALLOWLIST_VERSION, BROWSER_CA_VERSION,
+            "a capsule sends both keys, so a daemon that honours one and drops the other is a \
+             real machine; the two guards cannot be the same number"
+        );
     }
 
     #[test]

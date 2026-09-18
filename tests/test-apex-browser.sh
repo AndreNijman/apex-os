@@ -539,6 +539,76 @@ has   "an unreadable answer says exactly that"        'could not read the answer
 hasnt "and does not blame a stopped service"          'could not be asked' "$out"
 hasnt "and does not claim the credential is absent"   'has no credential named' "$out"
 
+echo "── the capsule's own trust anchors (P2-012, gap 5) ─────────────────────"
+
+# WHAT A DROPPED --trust-ca LOOKS LIKE, which is why these assertions exist.
+# A dropped `--allow` is a capsule that reaches the wrong place and a dropped
+# `--download` is a file the caller does not get; both are visible. A dropped
+# `--trust-ca` is a capsule that starts, refuses the intranet certificate, and
+# then does NOTHING — Firefox answers an untrusted chain by sitting on it — so
+# the run ends at the timeout with an empty screenshot and no cause named
+# anywhere. Nothing downstream of this line would notice.
+
+CA="$WORK/corp-root.pem"
+printf -- '-----BEGIN CERTIFICATE-----\nQUFBQQ==\n-----END CERTIFICATE-----\n' > "$CA"
+
+reset_calls
+out=$("$ENGINE" run --name cap-ca --allow intranet.example --trust-ca "$CA" \
+        -- https://intranet.example/ 2>&1); rc=$?
+argv=$(session_argv)
+exits "a capsule may be given one private CA"        0 "$rc"
+has   "and the CA reaches the agent runtime"         "<--trust-ca> <$CA>" "$argv"
+# Before the separator. After it the word is one of the BROWSER's arguments,
+# firefox has no such flag, and the capsule would fail to start for a reason
+# naming the wrong program.
+before_ca=${argv%%<--trust-ca>*}
+before_sep=${argv%%<-->*}
+if [ "$before_ca" != "$argv" ] && [ "${#before_ca}" -lt "${#before_sep}" ]; then
+    ok "and lands among the runtime's flags, not the browser's"
+else
+    bad "and lands among the runtime's flags, not the browser's" "$argv"
+fi
+
+# Not invented. A capsule that named no CA must produce an argv with no
+# `--trust-ca` at all: the daemon refuses an empty one, and a flag with an
+# empty value would turn every ordinary capsule into a refusal.
+reset_calls
+"$ENGINE" run --name cap-noca --allow e.example:443 -- https://e.example/ >/dev/null 2>&1
+hasnt "a capsule that named no CA carries no --trust-ca" '<--trust-ca>' "$(session_argv)"
+
+# ── the refusals, all of them BEFORE a capsule exists ───────────────────────
+
+reset_calls
+out=$("$ENGINE" run --allow e.example:443 --trust-ca corp-root.pem \
+        -- https://e.example/ 2>&1); rc=$?
+has   "a relative CA path is refused"                'absolute path' "$out"
+exits "and nothing is started for it"                1 "$rc"
+is    "and no session was asked for"                 "" "$(session_argv)"
+
+reset_calls
+out=$("$ENGINE" run --allow e.example:443 --trust-ca "$WORK/no-such-ca.pem" \
+        -- https://e.example/ 2>&1); rc=$?
+has   "a CA that is not there is refused by name"    'not a readable file' "$out"
+exits "and that is a failure, not a warning"         1 "$rc"
+is    "and again no session was asked for"           "" "$(session_argv)"
+
+# Inside the capsule tree: teardown deletes it, so a CA kept there would work
+# exactly once and the next run would fail with a message about a missing file
+# rather than about the deletion.
+reset_calls
+printf -- '-----BEGIN CERTIFICATE-----\nQUFBQQ==\n-----END CERTIFICATE-----\n' > "$ROOT/inside.pem"
+out=$("$ENGINE" run --allow e.example:443 --trust-ca "$ROOT/inside.pem" \
+        -- https://e.example/ 2>&1); rc=$?
+has   "a CA inside the capsule tree is refused"      'outside' "$out"
+exits "and that refusal stops the run too"           1 "$rc"
+rm -f "$ROOT/inside.pem"
+
+# The help says the flag names a file and does not default. The flag existing
+# with no documentation is how a security-relevant option gets used wrongly.
+out=$("$ENGINE" --help 2>/dev/null)
+has "--help documents the CA flag"                   '--trust-ca FILE' "$out"
+has "and says there is no default"                   'no default' "$out"
+
 echo "── teardown, and the fences on it ──────────────────────────────────────"
 
 reset_calls

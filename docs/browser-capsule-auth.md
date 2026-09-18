@@ -8,7 +8,14 @@ credential to a site**, and that is why the item is recorded `partial`.
 This page is the written decision the gap needs before anybody writes code for
 it. It says what the framework guarantees today, what each route would
 change, which measurement kills or permits each one, and what the chosen route
-would cost. Nothing here is built.
+would cost.
+
+**None of the four routes is built**, and the reason is at the bottom of this
+page: route B is blocked on a question nobody has answered, and the other
+three are rejected or need a package. One thing on this page IS built, and it
+is not a route — the **per-run CA bind** (`--trust-ca`, protocol 10), which
+lets a capsule automate an intranet site behind a private root. It closes a
+different gap with none of route B's machinery; see the last section.
 
 ## What is decided
 
@@ -151,9 +158,11 @@ same profile, the same server, with
 handshake and rendered the page. The machine's own file was untouched
 throughout and compared clean afterwards.
 
-That makes gap 5 on this unit's card — "a CA a capsule could be told to trust" —
-a per-session `--ro-bind` in `apex_agent_core::sandbox`, which is one field on
-the session request rather than a package that is not in the image.
+That made gap 5 on this unit's card — "a CA a capsule could be told to trust" —
+a per-session `--ro-bind` in `apex_agent_core::sandbox`, one field on the
+session request rather than a package that is not in the image. **It is built**
+(`--trust-ca`, protocol 10); the bottom of this page records what it cost and
+what the build found that this paragraph did not foresee.
 
 ### The join, measured — route B's engineering is settled, its decision is not
 
@@ -243,13 +252,16 @@ for any `python3 -c` assertion at all.
   daemon below the revision rather than letting a capsule run and fail at the
   far end with a 401 nobody can explain.
 
-  **Not revision 9.** Protocol 9 shipped for `RunRequest::allow` — the
-  per-session allowlist narrowing that makes `--capability`'s destination pin a
-  boundary rather than an announcement — and these fields need their own number
-  for exactly the reason every other guard on that list has one: a daemon can
-  understand a narrowed allowlist and know nothing at all about terminating TLS
-  for a destination. Reusing 9 would tell a protocol-9 daemon it understood a
-  key it drops, which is the fail-open the version table exists for.
+  **Revision 11, and this page said 10 until gap 5 took it.** Protocol 9
+  shipped for `RunRequest::allow` — the per-session allowlist narrowing that
+  makes `--capability`'s destination pin a boundary rather than an
+  announcement — and protocol **10** shipped for `RunRequest::trust_ca`, the
+  per-run browser CA below. These fields need a number of their own for
+  exactly the reason every other guard on that list has one: a daemon can
+  understand a narrowed allowlist, and install a CA for a capsule's browser,
+  and know nothing at all about terminating TLS for a destination. Reusing an
+  earlier number would tell that daemon it understood a key it drops, which is
+  the fail-open the version table exists for.
 * **A sentence in `docs/browser-capsule.md` stops being true.** "A tunnel is
   opaque. This is a destination policy" becomes false for the pinned
   destination: the daemon reads the plaintext of a connection it is itself
@@ -309,9 +321,10 @@ What a *yes* costs, itemised rather than waved at:
 
 * A TLS **server** in `apex-agentd`, per-run certificate minting, and a CA that
   exists for the length of one capsule.
-* `PROTOCOL_VERSION` **10** and two gated fields, with the CLI refusing to send
+* `PROTOCOL_VERSION` **11** and two gated fields, with the CLI refusing to send
   them to an older daemon — an old daemon would tunnel `CONNECT` untouched and
-  hand back a 401 nobody could explain.
+  hand back a 401 nobody could explain. (This page costed it at 10 before gap 5
+  was built; 10 is `RunRequest::trust_ca`.)
 * `docs/browser-capsule.md` stops being able to say "a tunnel is opaque". For
   the pinned destination it is not.
 * A guard in the daemon that the interception is only ever the pinned
@@ -331,13 +344,31 @@ written here and not taken by an agent.
 
 ## What is not decided, and belongs to whoever picks this up
 
-* **Whether the per-run CA bind lands on its own.** It closes gap 5 —
-  automating an intranet site behind a private CA — without any of Route B. It
-  is smaller than Route B and useful without it, and it carries its own
-  argument: handing a capsule a CA it did not have is widening what it will
-  believe, and the flag has to name the file rather than defaulting to
-  anything. Note that the probe above is *also* the evidence that this works:
-  its authenticated arm is exactly a capsule told to trust one CA.
+* ~~**Whether the per-run CA bind lands on its own.**~~ **Done, and it did.**
+  `apex browser run --trust-ca FILE` and `apex agent run --trust-ca FILE`,
+  `RunRequest::trust_ca` at protocol **10**, and
+  `apex-agentd/src/browser_ca.rs`. It closed gap 5 — automating an intranet
+  site behind a private CA — with none of route B, which is what made it
+  dispatchable while the question below has no answer.
+
+  The one decision inside it was taken the way this bullet asked: the flag
+  **names the file** and has no default, because handing a capsule a CA it did
+  not have widens what it will believe. Two things the build added that the
+  bullet did not foresee. The machine's own
+  `/etc/firefox/policies/policies.json` is **merged** rather than replaced — a
+  capsule handed a document containing only a CA would have different browser
+  defaults from every other browser on the machine, silently. And an absent
+  policy file **refuses**: `--ro-bind-try` over a path that is not there is a
+  no-op, so binding hopefully would produce a capsule that trusts nothing,
+  renders nothing, and blames its own timeout.
+
+  The probe above is the evidence that a real Firefox accepts such a root —
+  its authenticated arm is exactly a capsule told to trust one CA. What the
+  probe could not say is that the DAEMON builds the bind correctly, and
+  `apexd/apex-agentd/tests/browser_ca_bind.rs` does: the session copies out
+  what it sees at that path inside its own namespace, reads the path the
+  document names, and copies that out too, with a control that sees the
+  machine's own file byte for byte.
 * ~~**A guard on the shipped `policies.json`.**~~ **Done.**
   `Containerfile.base` now asserts the file's shape and not only its validity,
   positively: `policies` carries `Preferences` and nothing else, and every
@@ -363,3 +394,4 @@ written here and not taken by an agent.
 | a minted leaf is accepted at the far end of a `CONNECT` tunnel, and the credential reaches the site | the three-arm probe above, on Firefox 155.0 |
 | Firefox validates the chain through the tunnel | the no-CA control: `TLSV1_ALERT_UNKNOWN_CA`, no screenshot, no request at the origin |
 | and validates the name, not merely the signature | the wrong-name control: `SSLV3_ALERT_BAD_CERTIFICATE`, same |
+| the daemon's own bind puts the merged policy at that path inside a capsule, and the file it names is openable from in there | `apex-agentd/tests/browser_ca_bind.rs`, where the SESSION copies out what it sees; the control with no `--trust-ca` sees the machine's file byte for byte |
