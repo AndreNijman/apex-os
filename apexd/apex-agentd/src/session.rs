@@ -14,6 +14,7 @@ use apex_agent_core::client::SESSION_ENV;
 use apex_agent_core::paths;
 use apex_agent_core::pluginconf;
 use apex_agent_core::config;
+use apex_agent_core::destination::Allowlist;
 use apex_agent_core::policy::{NetworkPolicy, PolicyError};
 use apex_agent_core::profile;
 use apex_agent_core::project;
@@ -177,35 +178,16 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     // Validated against the runtime's list above and narrowed out of it here,
     // in that order, because the two questions are different: `validate_for`
     // refuses an allowlisted session whose RUNTIME list is empty — nobody has
-    // filled the policy in — and `narrow` refuses a session that named a
-    // destination the runtime does not cover. Collapsing them would answer the
-    // second question with the first one's message.
+    // filled the policy in — and `session_allowlist` refuses a session that
+    // named a destination the runtime does not cover. Collapsing them would
+    // answer the second question with the first one's message.
     //
-    // From here down `allowlist` is the SESSION's, and every use of it —
-    // the egress proxy, the recorded confinement §6.2 judges tool calls
-    // against, the refusal text a denied request is shown — is the narrowed
-    // one. One binding rather than two, so a later reader cannot pick the
-    // wrong one.
-    let allowlist = match &req.allow {
-        None => allowlist,
-        Some(_) if policy.effective_network() != NetworkPolicy::Allowlist => {
-            // `ttl_ms` on an ordinary session, one dimension over: refused
-            // rather than ignored, because a caller who listed destinations
-            // believes they asked for a boundary. An `open` session reaches
-            // everything, and silently accepting a list here would say
-            // otherwise in `apex agent status`.
-            return Err(AllowlistRefused(format!(
-                "--allow names destinations for a session whose network is `{}`, which \
-                 reaches everything; it narrows the `allowlist` mode and has nothing to \
-                 narrow here. re-run with `--network allowlist`, or drop --allow",
-                policy.effective_network().as_str()
-            ))
-            .into());
-        }
-        Some(lines) => allowlist
-            .narrow(lines)
-            .map_err(|e| AllowlistRefused(e.to_string()))?,
-    };
+    // From here down `allowlist` is the SESSION's, and every use of it — the
+    // egress proxy, the recorded confinement §6.2 judges tool calls against,
+    // the line `apex agent status` prints — is the narrowed one. One binding
+    // rather than two, so a later reader cannot pick the wrong one.
+    let allowlist =
+        session_allowlist(&allowlist, req.allow.as_deref(), policy.effective_network())?;
 
     // Dimension 1 is the agent's own, and only the adapter knows whether this
     // one can express it. Refused rather than dropped: a `--agent-bypass` that
@@ -694,6 +676,14 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
         detail: None,
         paused: false,
         policy,
+        // Read off the binding the egress proxy and the §6.2 confinement are
+        // built from, not off `req.allow`, so the three cannot disagree. Shown
+        // only when there is a boundary to show: an `open` session's list
+        // would be the runtime's, which says nothing about this session.
+        allowlist: match policy.effective_network() {
+            NetworkPolicy::Allowlist => Some(allowlist.lines()),
+            _ => None,
+        },
         request_origin: Some(session_origin.origin),
         origin_source: Some(session_origin.source),
         // Which remote device asked for this session, when the connection
@@ -1258,6 +1248,46 @@ impl std::fmt::Display for CapabilitiesRefused {
 
 impl std::error::Error for CapabilitiesRefused {}
 
+/// The allowlist ONE session runs under, out of the one the runtime carries
+/// (P2-012, [`apex_agent_core::protocol::RunRequest::allow`]).
+///
+/// Split out of [`start`] so the rule can be asserted without a daemon, a
+/// sandbox, a PTY or a network — the same reason the CLI's version table is
+/// split out of the call that uses it. A rule that can only be exercised by
+/// starting a real confined session is a rule nobody exercises, and this one
+/// decides where a session can connect.
+///
+/// Three answers, and the two refusals are refusals rather than repairs:
+///
+/// * no narrowing asked for — the runtime's list, unchanged, which is what
+///   every allowlisted session got before this existed;
+/// * a narrowing on a session with no allowlist to narrow — REFUSED. An
+///   `open` session reaches everything and an `offline` one reaches nothing,
+///   and in both the list means nothing at all. Silently accepting it would
+///   print a boundary in `apex agent status` that no proxy enforces, which is
+///   `ttl_ms` on an ordinary session one dimension over;
+/// * a narrowing — validated by [`Allowlist::narrow`], which refuses any line
+///   the runtime does not already cover.
+fn session_allowlist(
+    runtime: &Allowlist,
+    requested: Option<&[String]>,
+    network: NetworkPolicy,
+) -> Result<Allowlist, AllowlistRefused> {
+    let Some(lines) = requested else {
+        return Ok(runtime.clone());
+    };
+    if network != NetworkPolicy::Allowlist {
+        return Err(AllowlistRefused(format!(
+            "`allow` names destinations for a session whose network is `{}`, which has no \
+             allowlist to narrow. re-run with `--network allowlist`, or drop `--allow`",
+            network.as_str()
+        )));
+    }
+    runtime
+        .narrow(lines)
+        .map_err(|e| AllowlistRefused(e.to_string()))
+}
+
 /// A session allowlist that could not be narrowed out of the runtime's
 /// (P2-012, [`apex_agent_core::protocol::RunRequest::allow`]).
 ///
@@ -1712,6 +1742,85 @@ mod tests {
     }
 
     #[test]
+    fn a_session_with_no_narrowing_gets_the_runtime_allowlist_unchanged() {
+        // The behaviour every allowlisted session had before `allow` existed,
+        // asserted so that adding the field cannot quietly change it. A
+        // regression here is a machine where every existing capsule suddenly
+        // reaches nothing.
+        let runtime = Allowlist::parse(&["api.example.com", "files.example.com"]).expect("parse");
+        let got = session_allowlist(&runtime, None, NetworkPolicy::Allowlist).expect("unchanged");
+        assert_eq!(got.lines(), runtime.lines());
+        // And on a session with no allowlist at all, where the value is never
+        // enforced: still not an error, because nothing was asked for.
+        assert!(session_allowlist(&runtime, None, NetworkPolicy::Open).is_ok());
+    }
+
+    #[test]
+    fn a_narrowed_session_is_confined_to_what_it_named_and_cannot_widen() {
+        let runtime =
+            Allowlist::parse(&["api.example.com", "files.example.com", "other.test:8443"])
+                .expect("parse");
+        let named = ["api.example.com".to_string()];
+        let got =
+            session_allowlist(&runtime, Some(&named), NetworkPolicy::Allowlist).expect("narrow");
+        assert_eq!(got.lines(), vec!["api.example.com"]);
+        // The half that is the boundary rather than the bookkeeping: a
+        // destination the RUNTIME allows is refused for this session. Asserted
+        // through `decide`, which is the question the egress proxy asks, and
+        // not by counting the lines — a list of the right length pointing at
+        // the wrong hosts would pass that.
+        use apex_agent_core::destination::Destination;
+        assert!(got
+            .decide(&Destination::parse("api.example.com:443").expect("dest"))
+            .is_allowed());
+        assert!(!got
+            .decide(&Destination::parse("files.example.com:443").expect("dest"))
+            .is_allowed());
+
+        // And it can only subtract. A destination the runtime does not carry
+        // is refused rather than added, with the line that would add it.
+        let wider = ["evil.example.com".to_string()];
+        let e = session_allowlist(&runtime, Some(&wider), NetworkPolicy::Allowlist)
+            .expect_err("a widening");
+        assert!(e.to_string().contains("evil.example.com"), "{e}");
+        assert!(e.to_string().contains("apex agent allow"), "{e}");
+    }
+
+    #[test]
+    fn naming_destinations_for_a_session_with_no_allowlist_is_refused_not_ignored() {
+        // Three networks, because the failure differs in direction and the
+        // refusal has to cover both: `open` reaches everything the machine
+        // does and `offline`/`brokered` reach nothing through this list, so a
+        // narrowing on any of them is a boundary the caller believes they
+        // asked for and did not get.
+        let runtime = Allowlist::parse(&["api.example.com"]).expect("parse");
+        let named = ["api.example.com".to_string()];
+        for network in [
+            NetworkPolicy::Open,
+            NetworkPolicy::Offline,
+            NetworkPolicy::Brokered,
+        ] {
+            let e = match session_allowlist(&runtime, Some(&named), network) {
+                Err(e) => e,
+                Ok(list) => panic!(
+                    "`{}` accepted a session allowlist it will never enforce: {:?}",
+                    network.as_str(),
+                    list.lines()
+                ),
+            };
+            // The refusal names the network it refused, because the remedy
+            // depends on which one it was: the caller either wanted the
+            // allowlist mode or did not want the flag.
+            let text = e.to_string();
+            assert!(text.contains(network.as_str()), "{text}");
+            assert!(text.contains("--network allowlist"), "{text}");
+        }
+        // And the one network where it is honoured, so the loop above cannot
+        // pass by refusing everything.
+        assert!(session_allowlist(&runtime, Some(&named), NetworkPolicy::Allowlist).is_ok());
+    }
+
+    #[test]
     fn a_refused_narrowing_is_a_policy_answer_and_not_a_malformed_request() {
         // P2-012. The default arm of `run_error` is `BadRequest`, so a
         // refusal with no arm of its own reads to the caller as "your command
@@ -1788,6 +1897,7 @@ mod tests {
             detail: None,
             paused: false,
             policy: apex_agent_core::AgentPolicy::default(),
+            allowlist: None,
             request_origin: Some(apex_agent_core::policy::RequestOrigin::LocalTerminal),
             origin_source: Some(apex_agent_core::origin::OriginSource::Observed),
             grant: None,

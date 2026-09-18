@@ -1178,6 +1178,32 @@ mod tests {
     }
 
     #[test]
+    fn narrowing_compares_rules_and_not_the_text_they_were_written_as() {
+        // Both sides of `covered_by` go through `Rule::parse`, so the same
+        // destination spelled two ways is the same rule. Asserted rather than
+        // assumed, because the failure is a refusal a caller cannot act on:
+        // `--allow API.example.com` would be told its own destination is not
+        // covered by itself, and the suggested `apex agent allow` line would
+        // add a duplicate that did not help.
+        let runtime = list(&["api.example.com"]);
+        assert!(runtime.narrow(&["API.Example.COM"]).is_ok());
+        assert!(runtime.narrow(&["api.example.com."]).is_ok());
+        // A bare host means 443, on both sides of the comparison — so the two
+        // spellings narrow to each other and neither reads as a port
+        // widening. This is the pair the port check could break silently: a
+        // `covered_by` that compared text would refuse both.
+        assert!(runtime.narrow(&["api.example.com:443"]).is_ok());
+        let explicit = list(&["api.example.com:443"]);
+        assert!(explicit.narrow(&["api.example.com"]).is_ok());
+        // And the narrowed rule comes back in the canonical spelling, which is
+        // what `apex agent status` prints and what the egress proxy matches.
+        assert_eq!(
+            runtime.narrow(&["API.Example.COM:443"]).expect("narrow").lines(),
+            vec!["api.example.com"]
+        );
+    }
+
+    #[test]
     fn every_narrowing_refusal_says_what_to_do_next() {
         let runtime = list(&["api.example.com"]);
         let text = runtime.narrow(&["evil.example.com"]).expect_err("no").to_string();

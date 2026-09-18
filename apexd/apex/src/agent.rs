@@ -2348,6 +2348,14 @@ fn print_session(s: &SessionInfo) {
     for (name, value) in s.policy.dimensions() {
         println!("{name:<12} {value}");
     }
+    // Right under the dimensions, because it is the one that says what
+    // `network allowlist` MEANS for this session. A capsule started to visit
+    // one host and a session that can reach everything the machine permits
+    // print the same dimension line, and this is the line that tells them
+    // apart (P2-012).
+    if let Some(lines) = &s.allowlist {
+        println!("destinations {}", lines.join(", "));
+    }
     println!("cwd          {}", s.cwd);
     if let Some(p) = &s.project_name {
         println!("project      {p}");
@@ -4972,6 +4980,50 @@ mod tests {
                 ("--plugins", PLUGIN_POLICY_VERSION),
             ],
         );
+    }
+
+    /// A narrowed allowlist is checked against its own revision, and it is
+    /// checked AT ALL (P2-012).
+    ///
+    /// The second half is the one worth writing down. `--allow` only means
+    /// anything with `--network allowlist`, which is already on the table at
+    /// `POLICY_DIMENSIONS_VERSION` — so a table that leaned on the dimension
+    /// would pass this check against any daemon from revision 2 onwards, drop
+    /// the key, and give the session every destination the machine permits.
+    /// Nothing later catches it: the session starts, the page the capsule was
+    /// pointed at renders, and the widening is invisible because nothing in
+    /// the run tries the other destinations.
+    #[test]
+    fn a_narrowed_allowlist_is_checked_against_its_own_revision() {
+        let allowlisted = AgentPolicy {
+            network: NetworkPolicy::Allowlist,
+            ..AgentPolicy::default()
+        };
+        // Narrowed: both the dimension and the key, at two different
+        // revisions. The dimension alone would be satisfied by a protocol-2
+        // daemon.
+        assert_eq!(
+            settings_a_daemon_could_drop(&allowlisted, None, false, true),
+            vec![
+                ("network", POLICY_DIMENSIONS_VERSION),
+                ("--allow", SESSION_ALLOWLIST_VERSION),
+            ],
+            "--allow must carry its own revision, not the one `allowlist` shipped in"
+        );
+        // Not narrowed: the same policy asks for nothing extra, so an
+        // ordinary allowlisted session still starts against an old daemon.
+        assert_eq!(
+            settings_a_daemon_could_drop(&allowlisted, None, false, false),
+            vec![("network", POLICY_DIMENSIONS_VERSION)],
+        );
+        // That the revision is genuinely later than the one before it — so
+        // the assertion above cannot pass by reading the same constant twice
+        // — is a COMPILE-TIME assertion in `protocol.rs`
+        // (`const _: () = assert!(PLUGIN_POLICY_VERSION <
+        // SESSION_ALLOWLIST_VERSION)`), and is deliberately not restated here:
+        // clippy refuses a runtime assertion over two constants, and a test
+        // that could be deleted without breaking the build is the weaker of
+        // the two guards anyway.
     }
 
     #[test]

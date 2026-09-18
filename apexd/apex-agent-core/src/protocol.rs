@@ -423,6 +423,30 @@ pub struct SessionInfo {
     /// moved the key and silently reported every old session as `project`.
     #[serde(flatten)]
     pub policy: AgentPolicy,
+    /// The destinations this session may actually reach, when its network is
+    /// `allowlist` (P2-012).
+    ///
+    /// The point of the field is that a narrowing has to be VISIBLE. Dimension
+    /// 5 above says `allowlist` for a session that reaches every destination
+    /// the machine permits and for one started to visit a single host, and
+    /// those are very different sessions — so a user auditing a running
+    /// capsule could read the dimension, see `allowlist`, and learn nothing
+    /// about the boundary they asked for. `apex agent status <id>` prints it.
+    ///
+    /// The list the daemon ENFORCES, not the one the caller asked for: the
+    /// same value the egress proxy was started with and the same one §6.2's
+    /// policy point is answered against, taken from the one binding all three
+    /// come from. A field filled from the request would be a second account of
+    /// the confinement, and the case where the two differ is exactly the case
+    /// somebody is auditing.
+    ///
+    /// `None` for every session with no allowlist to show — an `open` or
+    /// `offline` one — and for a record written before this field existed.
+    /// Deliberately not an empty vector for those: an empty allowlist denies
+    /// everything, so "no list" and "a list of nothing" are opposite
+    /// statements about where the session can go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowlist: Option<Vec<String>>,
     /// Where this session is driven from (§7's `request_origin`).
     ///
     /// Established by the daemon when it forked the session, from the
@@ -1720,6 +1744,7 @@ mod tests {
             detail: None,
             paused: false,
             policy: AgentPolicy::default(),
+            allowlist: None,
             request_origin: Some(RequestOrigin::LocalTerminal),
             origin_source: Some(OriginSource::Observed),
             actor: Some("pixel-8-office".into()),
@@ -1879,6 +1904,61 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
         assert_eq!(v["reply"], "request");
         assert_eq!(v["verb"], "install");
+    }
+
+    #[test]
+    fn a_narrowed_allowlist_travels_as_allow_and_its_absence_is_none() {
+        // P2-012, and the assertion is the KEY, not the round trip. Serde
+        // round-trips agree with themselves whatever the key is called, so a
+        // rename would pass every other test in this file while making every
+        // request from an older `apex` unparseable — and the failure mode of
+        // a dropped `allow` is a session that reaches MORE than was asked for.
+        let req = RunRequest {
+            agent: None,
+            prompt: None,
+            args: vec![],
+            cwd: "/home/t/p".into(),
+            policy: AgentPolicy {
+                network: crate::policy::NetworkPolicy::Allowlist,
+                ..AgentPolicy::default()
+            },
+            request_origin: None,
+            worktree: None,
+            checkpoint: false,
+            ttl_ms: None,
+            capabilities: None,
+            allow: Some(vec!["api.example.com".into(), "files.example.com:8443".into()]),
+            second_factor: None,
+            cols: 80,
+            rows: 24,
+            env: vec![],
+            disposable: false,
+            copy_out: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&req).expect("serialize");
+        assert_eq!(
+            v["allow"],
+            serde_json::json!(["api.example.com", "files.example.com:8443"]),
+            "the wire key is `allow`; a daemon reading any other name narrows nothing"
+        );
+
+        // The other direction, which is the one an older client exercises on
+        // every single run: no key at all deserializes to `None`, not to an
+        // empty list. `Some(vec![])` is refused by the daemon, so a `default`
+        // that produced one would refuse every unnarrowed session on a
+        // machine where nothing is wrong.
+        let mut without = v.clone();
+        without.as_object_mut().expect("object").remove("allow");
+        let back: RunRequest = serde_json::from_value(without).expect("an older client's request");
+        assert_eq!(back.allow, None);
+
+        // And an explicit `null` — which is not what `apex` sends, but is
+        // what a hand-written client or a future language binding may — reads
+        // the same way rather than failing to parse.
+        let mut nulled = v.clone();
+        nulled["allow"] = serde_json::Value::Null;
+        let back: RunRequest = serde_json::from_value(nulled).expect("an explicit null");
+        assert_eq!(back.allow, None);
     }
 
     #[test]
@@ -2299,6 +2379,7 @@ mod tests {
             detail: None,
             paused: false,
             policy: AgentPolicy::default(),
+            allowlist: None,
             request_origin: None,
             origin_source: None,
             actor: None,
