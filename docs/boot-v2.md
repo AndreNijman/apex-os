@@ -56,7 +56,7 @@ Two consequences visible in the shipped image:
 | ephemeral keys | `files/scripts/boot-v2/apex-sb-keys` | Secure Boot, PCR-policy and deliberately-untrusted keypairs |
 | SB firmware vars | `files/scripts/boot-v2/apex-sb-vars` | an OVMF varstore with the APEX certificate as the only `db` entry |
 | LUKS2 + TPM | `files/scripts/boot-v2/apex-luks-enroll` | signed PCR 11 policy plus a recovery key, against a software TPM |
-| VM harness | `files/scripts/boot-v2/run-scenarios` | ten scenarios, all booting real guests under Secure Boot enforcing |
+| VM harness | `files/scripts/boot-v2/run-scenarios` | fifteen scenarios, all booting real guests under Secure Boot enforcing |
 | health gate | `files/system/libexec/apex-boot-health` | the `boot-complete.target` gate, and the rollback notice |
 | reporting | `apex boot status` | read-only; what verified this boot and what the counter believes |
 | CI | `.github/workflows/boot-v2.yml` | builds the lab, boots the scenarios, publishes nothing |
@@ -247,9 +247,10 @@ counted entry decrements and the blessed entry never grows a suffix.
   back in the second, so the volume really decrypted rather than a device
   merely appearing
 
-**TPM clear, firmware change and suspend/resume** — the three L-001 edge cases,
-all against the same software TPM. Counts come from the container logs with
-`State.FinishedAt` checked on each, so `Exited (0)` is not taken at face value.
+**TPM clear, firmware change, suspend/resume and a missing TPM** — L-001's
+edge cases and L-002's, all against the same software TPM. Counts come from the
+container logs with `State.FinishedAt` checked on each, so `Exited (0)` is not
+taken at face value.
 
 * **TPM clear — 20 passed, 0 failed.** Four boots, one UKI throughout, so a
   refusal cannot be the PCR policy in disguise. A real `TPM2_Clear` runs between
@@ -263,6 +264,49 @@ all against the same software TPM. Counts come from the container logs with
   in code, and the lab image's two 4 MB builds differ in Secure Boot enforcement
   as well, so swapping them would conflate "the firmware changed" with "Secure
   Boot was turned off".
+* **Firmware code change — 22 passed, 0 failed, 1 could-not-run.** The
+  could-not-run above is now answered. Two Fedora builds of OVMF that differ in
+  edk2 revision and in nothing else — `edk2-d46aa46c8361` (20250812) and
+  `edk2-2970e5699ba6` (20260812), both Secure Boot, both 4 MB, both booted from
+  a fresh copy of one varstore template — move PCR 0 from
+  `0FA5AE84ABAB76C8D…` to `0E33803144670784C…`. PCR 11 does not move
+  (`22C006FB6217982C0…` throughout), the signed PCR 11 policy still unlocks, and
+  a control volume bound **by value** to PCR 0 refuses in that same boot. The
+  512-byte marker written under the old firmware is read back under the new one.
+  PCR 7 is **identical** across the two revisions (`933DE452FF745C293…`), which
+  is worth knowing on its own: an edk2 version change moves the code register
+  and leaves the Secure Boot policy register alone.
+
+  The supplied firmware is not taken on trust. Its revision is read out of the
+  binary rather than off its filename, and it has to refuse an unsigned UKI
+  before anything rests on it — without that, a build with Secure Boot compiled
+  out would move PCR 0 for the obvious reason and the run would report that a
+  firmware update had not broken the policy, about a firmware that had stopped
+  checking signatures. This unit's scratch directory contains exactly that
+  trap: a non-Secure-Boot build saved as `OVMF_CODE_4M.secboot.fd`.
+
+  The could-not-run that remains is the honest one: an OVMF binary swap is not
+  a vendor UEFI capsule. No microcode, no ACPI tables, no option ROMs and no
+  management-engine firmware moved with it.
+* **No TPM at all — 16 passed, 0 failed, 1 could-not-run.** L-002's wording is
+  that the default must not strand users, and the case with no scenario was the
+  machine where nothing answers: a TPM switched off in firmware setup, a board
+  replaced under warranty, a disk moved. One volume, booted twice, with the TPM
+  device as the only difference. With it, the TPM unlocks and writes the marker.
+  Without it the guest reports `tpm-device=absent`, systemd says *"No TPM2
+  hardware discovered and EFI firmware does not see it either, falling back to
+  traditional unlocking"*, the recovery key opens the volume in that boot, and
+  the marker written through the TPM path comes back. The qemu exit status is
+  asserted and not merely reported, because a guest hanging on a TPM that will
+  never answer has stranded the user as thoroughly as one that refuses with no
+  fallback.
+
+  Two things that boot does not show. The guest ran with `headless=1`, which
+  turns a passphrase prompt into a refusal — on a real machine the same
+  situation shows the user a prompt, and whether that prompt is legible is a
+  plymouth question this lab does not touch. And a machine that has **never**
+  had a TPM is a different case: it could not carry a `systemd-tpm2` token at
+  all, so it never reaches either boot.
 * **Suspend/resume — 17 passed, 0 failed, on edk2-20250812.** The volume stays
   open across S3, and a mapper created *after* the resume reads the marker back,
   so the plaintext came off the disk and not out of the page cache of a device
@@ -309,6 +353,128 @@ signature JSON"* — which reads exactly like a broken PCR policy. Only
 `OVMF_CODE_4M.secboot.qcow2` measures (367 `Tcg2` lines in the firmware debug
 log). `lib.sh` converts the 4 MB pair to raw once and refuses to fall back to
 the 2 MB build.
+
+## L-001, criterion by criterion, and the part a VM cannot do
+
+L-001's acceptance is one sentence: *"Real TPM, firmware update, TPM clear,
+suspend/resume, recovery key paths tested"*. Four of those five are tested. The
+first is not, and cannot be from a VM, which is what keeps L-001 `partial` and
+L-002 and L-003 blocked behind it.
+
+| criterion | scenario | counts | firmware | what it shows |
+| --- | --- | --- | --- | --- |
+| **Real TPM** | — | — | — | **nothing. Every row below is `swtpm`.** |
+| firmware update, Secure Boot policy (PCR 7) | `luks-firmware-change` | 18 / 0 / 1 | shipped 20260812 | Fedora's real `DBXUpdate` moves PCR 7 (76 → 21340 bytes); the signed PCR 11 policy still unlocks; a by-value PCR 7 control refuses in the same boot |
+| firmware update, firmware code (PCR 0) | `luks-firmware-code` | 22 / 0 / 1 | 20250812 → 20260812 | two edk2 revisions differing only in code move PCR 0; PCR 11 and PCR 7 do not; the policy still unlocks; a by-value PCR 0 control refuses in the same boot |
+| TPM clear | `luks-tpm-clear` | 20 / 0 | shipped 20260812 | a real `TPM2_Clear` between boots, confirmed by the owner primary key's *name* changing; the next boot is refused and **the recovery key opens the volume in that boot** |
+| suspend/resume | `luks-s3` | 17 / 0 | **20250812 only** | the open volume survives S3 and a mapper created *after* the resume reads the plaintext back; two non-colluding witnesses; `s3-mode=deep` |
+| suspend/resume | `luks-s3` | could-not-run | shipped 20260812 | the firmware asserts in its own S3 resume path — an edk2 regression, isolated one variable at a time |
+| recovery key paths | `luks-tpm-clear`, `luks-no-tpm` | — | shipped 20260812 | refusal and recovery **in one boot**, twice, and the second reads the marker back so it is the same disk and not merely an opened keyslot |
+| no TPM at all (L-002's wording) | `luks-no-tpm` | 16 / 0 / 1 | shipped 20260812 | the TPM device is gone; the unlock is refused rather than hanging; the recovery key produces the same plaintext |
+
+Read the table with its one caveat in front of it: **an emulated TPM is the
+subject of every row.** `swtpm` is a faithful implementation of the TPM 2.0
+command set, so everything above is a real statement about APEX's policy, the
+LUKS2 header shape and systemd's behaviour. It is not a statement about
+anybody's silicon.
+
+### What silicon changes that no VM can substitute
+
+Each of these is a mechanism `swtpm` does not have, not a matter of degree.
+
+* **`Shutdown(STATE)` / `Startup(STATE)` across a real S3.** The TPM has to
+  save and restore its volatile state through a power transition it does not
+  control. Vendor fTPM bugs in exactly that pair are why suspend/resume is on
+  L-001's list at all. `swtpm` keeps its state in a file on a host that never
+  slept.
+* **A TPM clear issued from firmware setup under physical presence.** The lab
+  issues `TPM2_Clear` over an mssim TCP socket from the host. On a machine it is
+  the firmware asserting physical presence, usually behind a menu item that also
+  resets other platform state, and on some machines it is the only way to do it
+  at all.
+* **PCR 0 from a vendor UEFI capsule.** `luks-firmware-code` swaps one OVMF
+  binary for another. A real update ships microcode, ACPI tables, option ROMs
+  and often management-engine firmware in one capsule, applied by the firmware
+  to itself across a reboot it schedules. Both move PCR 0; only one of them can
+  fail halfway.
+* **Dictionary-attack lockout.** Real TPMs count failed authorisations and lock
+  out, with vendor-set thresholds and recovery times. Nothing above ever
+  triggered it. This matters the moment APEX adds a PIN to the unlock path.
+* **fTPM and PTT quirks.** AMD's fTPM has a documented stutter; a BIOS update
+  can reset an fTPM and take every sealed object with it — which is a TPM clear
+  the user did not ask for; Intel PTT is a different implementation again. A
+  discrete TPM chip is a fourth case.
+* **Machines that do not offer S3.** The guest selected `deep` by name out of
+  `/sys/power/mem_sleep`. Many current laptops offer only `s2idle`, and the
+  question "does the TPM come back" has a different answer when the platform
+  never fully slept. The L16 itself should be checked before it is assumed.
+
+### The run somebody with hardware would have to do
+
+This is written to be executed, not skimmed. It is destructive: it clears a
+TPM, which loses every sealed object on the machine.
+
+**Not the L16.** Andre's laptop is out of scope for this program: its TPM is not
+to be cleared and its boot path is not to be touched.
+
+**Before anything:**
+
+1. **The machine must already boot through a signed UKI.** The enrolment
+   procedure below this section is that work. The check is not optional:
+   `cat /sys/class/tpm/tpm0/pcr-sha256/11` must not be 64 zeros. On a stock
+   APEX install it **is** zeros — measured on the L16 on 2026-09-13 — because
+   the shipped image boots GRUB through bootupd and only `sd-stub` extends
+   PCR 11. A signed PCR 11 policy on a GRUB machine binds to nothing.
+2. **The recovery key is written down, stored off that disk, and has already
+   been used once.** Print it, reboot, decline the TPM unlock, type it in. A key
+   that has never been typed is a key that has never been tested.
+3. **Know what else on the machine is bound to that TPM.** BitLocker on a dual
+   boot, another Linux's LUKS, `systemd-creds` secrets, a TPM-backed SSH agent.
+   `systemd-cryptenroll --tpm2-device=list` and
+   `tpm2_getcap handles-persistent`, recorded before, is how you know what you
+   are about to break. A TPM clear takes all of it.
+4. **A live USB you have booted at least once**, and the key sequence for this
+   machine's firmware setup menu.
+
+**Run 1 — the baseline.** Reboot and confirm the TPM unlocks with no prompt.
+Record: `cat /sys/class/tpm/tpm0/pcr-sha256/{0,7,11}`, and
+`cryptsetup luksDump <dev>` showing exactly one `systemd-tpm2` token and one
+`systemd-recovery` token.
+
+**Run 2 — TPM clear.** Clear the TPM from firmware setup, not with `tpm2_clear`
+over the resource manager: the point is the path a user takes. Reboot. Record
+that the TPM unlock is **refused**, that the recovery key opens the volume in
+that same boot, and the three PCR values afterwards. Then re-enrol in **two
+separate invocations** — wipe the old slot, then enrol — and record that the
+`tpm2-blob` in the header changed. The single-command form reports success and
+changes nothing; see the Recovery table below.
+
+**Run 3 — a real firmware update.** `fwupdmgr get-updates`, then
+`fwupdmgr update`. Record PCR 0 and PCR 7 before and after, and whether the
+signed PCR 11 policy still unlocks with no prompt. **This is the run a VM
+cannot stand in for**, and the expected result is that unlock is unaffected,
+because the keyslot is bound to the PCR signing key and PCR 11 measures the UKI
+rather than the firmware. Anything else is a finding worth the whole exercise.
+
+**Run 4 — suspend and resume.** With the volume open:
+`cat /sys/power/mem_sleep` (record whether `deep` is even offered),
+`cat /sys/power/suspend_stats/success`, `systemctl suspend`, resume, then the
+same counter again. Record that the volume still reads, and separately that a
+**fresh** unseal works: close the mapper and reopen it through the TPM. Those
+two can fail independently, and the second is the one vendor firmware gets
+wrong.
+
+**Run 5 — the TPM goes away.** Disable the TPM (or fTPM/PTT) in firmware setup.
+Record that the boot **prompts for the recovery key rather than hanging**, that
+the data is intact, and how long the prompt took to appear. Re-enable it and
+record that TPM unlock returns with no re-enrolment — the sealed object is still
+bound to the same SRK, which a clear would have destroyed and a disable does
+not.
+
+Each run's output belongs in this document, under a heading naming the machine,
+its firmware version and its TPM (`tpm2_getcap properties-fixed | grep -i
+manufacturer`). Until at least runs 1, 2 and 5 exist for one machine, L-001's
+word "Real" is unsatisfied and L-002 and L-003 stay blocked.
 
 ## Enrolling a machine — the human procedure
 
@@ -429,10 +595,11 @@ designed behaviour and not a fault.
 | the new deployment will not boot | do nothing for three attempts; systemd-boot selects the previous blessed entry itself. `apex boot status` then shows the failed entry as `OUT OF TRIES` and announces the rollback. |
 | the machine boots but the desktop does not | `apex-boot-health.service` fails, the entry is never blessed, and the same automatic rollback happens. `journalctl -u apex-boot-health` names the unit that was not active. |
 | you want GRUB back | GRUB was never removed. Select it from the firmware boot menu, then `sudo efibootmgr` (as yourself, deliberately) to put it back at the front of `BootOrder`. Delete `/boot/efi/EFI/Linux/apex-*.efi` to stop offering the UKI path. |
-| TPM unlock stops working after a firmware update | the recovery key. Then re-check: with a **signed** PCR 11 policy a firmware update should not break unlock, because the keyslot is bound to the signing key and PCR 11 measures the UKI, not the firmware. If it did break, that is a finding worth recording here. |
+| TPM unlock stops working after a firmware update | the recovery key. Then re-check: with a **signed** PCR 11 policy a firmware update should not break unlock, because the keyslot is bound to the signing key and PCR 11 measures the UKI, not the firmware. Both halves of a firmware change have now been measured in the lab and neither breaks it — the Secure Boot policy register (`luks-firmware-change`, a real `DBXUpdate`) and the firmware code register (`luks-firmware-code`, two edk2 revisions). On silicon, with a vendor capsule, this is untested; if it breaks there, that is a finding worth recording here. |
 | TPM unlock stops working after a kernel update | this should not happen — it is the property the policy was chosen for, and it is measured in the `luks-tpm` scenario. Use the recovery key, then check that the new UKI carries a `.pcrsig` signed by the enrolled key: `python3 files/scripts/boot-v2/pe-section.py <uki> .pcrsig`. |
 | you rotated the PCR signing key | every existing keyslot is bound to the old public key. Enroll the new one with `systemd-cryptenroll --tpm2-public-key=<new>` **before** removing the old, and keep the recovery key usable throughout. |
 | the TPM was cleared, or the disk moved to another machine | the sealed object is gone: it was bound to that TPM's SRK. Only the recovery key opens the volume. Re-enroll afterwards **in two separate invocations** — wipe the old slot first, then enroll. Doing both in one command reports success and changes nothing; see below. |
+| the TPM is switched off in firmware setup, or the board was replaced | the recovery key, and the volume opens with the data intact — measured as `luks-no-tpm`. The sealed object is still in the header, so re-enabling the same TPM restores unlock with no re-enrolment; a *cleared* TPM is the row above and does need one. In a lab guest the refusal is immediate; on a machine the boot shows a passphrase prompt instead, and how legible that prompt is has not been checked. |
 | you lost the recovery key and the TPM state | the data is gone. This is why enrollment prints the key and this document says to store it off the encrypted disk. |
 
 **The one-command re-enrolment after a TPM clear is a no-op that exits 0.**
@@ -463,21 +630,29 @@ named failure.
 
 ## What §22 asks for and this does not do
 
-* **Step 6, encryption by default: not implemented, deliberately.** §22 gates it
-  on "once recovery and hardware edge cases are proven". A TPM clear, a PCR 7
-  change and an S3 cycle are now each measured. Two of the three show the
-  recovery path **failing** before they show it working: after a TPM clear, and
-  on the PCR 7-bound control volume, the TPM unlock is refused and the recovery
-  key opens the volume in that same boot. The S3 scenario proves something
-  narrower and should not be read as a recovery test — it has no refusal arm and
-  never touches the recovery key, because the property it exists to check is
-  that the volume stays open across the suspend. Its negative control is the
-  same run with qemu's S3 support off. And every one of the three ran against
-  `swtpm` in a VM. No silicon TPM has been through an enrol-and-recover cycle; machines with
-  no TPM at all are still not covered; and the installer cannot encrypt a disk
-  in the first place — every `crypto_LUKS` branch in `installer/apex-install` is
-  a refusal to overwrite an existing header, not a path that creates one. A
-  default that fails on any of those costs a user their disk. It stays opt-in.
+* **Step 6, encryption by default: not implemented, deliberately.** §22 gates
+  it on "once recovery and hardware edge cases are proven". A TPM clear, a PCR 7
+  change, a PCR 0 change, an S3 cycle and a missing TPM are now each measured.
+  **Two of the five show a recovery key opening a volume that had just been
+  refused, in the same boot: the TPM clear, and the missing TPM.** The two
+  firmware scenarios show a refusal and no recovery, because their control
+  volumes deliberately carry no recovery key — a fallback would hide the
+  refusal that is the entire point of an instrument. The S3 scenario shows
+  neither; it never touches a recovery key, and what it checks is that the
+  volume stays open across the suspend.
+
+  An earlier version of this paragraph said the PCR 7-bound control volume was
+  refused and then opened with the recovery key. **That was wrong and is
+  withdrawn.** The control has no recovery key by construction, the guest probe
+  has no recovery path for it, and no `recovery-unlock` line appears in any
+  serial log from any firmware-change boot. Checked against the logs rather
+  than against the source, because the source is what made the claim plausible.
+
+  And every one of the five ran against `swtpm` in a VM. No silicon TPM has been
+  through an enrol-and-recover cycle. The installer cannot encrypt a disk in the
+  first place — every `crypto_LUKS` branch in `installer/apex-install` is a
+  refusal to overwrite an existing header, not a path that creates one. A
+  default that fails on any of this costs a user their disk. It stays opt-in.
 * **No NVRAM management.** `apex-mkesp` writes `/EFI/BOOT/BOOTX64.EFI` so the
   VM boots by the removable-media path, because creating a real boot entry
   means `efibootmgr` and that is not something a script in this repository does
@@ -517,7 +692,27 @@ podman run --rm --device /dev/kvm -v ~/bootlab-work:/work:z \
     '/work/repo/files/scripts/boot-v2/run-scenarios --work /work/out apex-image luks-tpm'
 ```
 
-`run-scenarios --list` prints every scenario name. The toolchain-free
+`run-scenarios --list` prints every scenario name, and
+`tests/test-boot-v2.sh` fails if a scenario exists that `--list` does not name:
+an unregistered scenario is skipped by a default run, which reports green
+without it.
+
+One scenario takes an input the lab image cannot produce. `luks-firmware-code`
+needs a **second** Secure Boot OVMF build, a different edk2 revision from the
+image's, because moving PCR 0 needs two firmwares differing only in code:
+
+```bash
+# the older Fedora build, extracted from its rpm — any different revision works
+podman run --rm --device /dev/kvm -v ~/bootlab-work:/work:z \
+    -v "$PWD:/work/repo:z" -e APEX_BOOTLAB_FW_ALT=/work/OVMF_CODE_4M.secboot.qcow2 \
+    apex-bootlab -c \
+    '/work/repo/files/scripts/boot-v2/run-scenarios --work /work/out luks-firmware-code'
+```
+
+Without it the scenario records a could-not-run naming the package to fetch and
+the sha256 of a known-good image, and asserts nothing. With a firmware that is
+the same revision, or that does not enforce Secure Boot, it fails rather than
+reporting a result: both are checked before anything rests on the input. The toolchain-free
 assertions — unit conditions, the boot-path tripwire, the health gate's exit
 codes, the writer/reader schema parity — are `./tests/test-boot-v2.sh`, which
 needs no VM and runs on every pull request in `pr-validation.yml`'s `static`
