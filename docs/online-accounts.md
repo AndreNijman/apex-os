@@ -50,7 +50,7 @@ google       Google               device-code    www.googleapis.com
 microsoft    Microsoft 365        device-code    graph.microsoft.com
 ```
 
-Five providers, **three transports**. Nextcloud is WebDAV: a Nextcloud account
+Five providers, **four transports**. Nextcloud is WebDAV: a Nextcloud account
 and a bare WebDAV account differ in how you obtain the credential and in
 nothing the broker does afterwards. So a provider declares the operation
 namespace it routes into separately from its own id, and both route into
@@ -185,11 +185,13 @@ not stated gets trusted for things it never did.
   wants it on the poll; that comes from **stdin**, never argv, and there is no
   `--client-secret` flag for the same reason there is no `--password` one.
 
-  What the token can be spent on today is **nothing**, and `add` says so rather
-  than sending you to a grant that will be refused: no `gdrive` or `msgraph`
-  transport exists, so every scope these providers list names an operation no
-  provider offers. Signing in, storing and renewing work end to end; using is
-  the next transport.
+  **A Google token can now be spent.** `apex-secretd` ships a `gdrive`
+  provider, so `apex account grant google.<name> files.read` records a grant
+  for `gdrive.file.read` and the daemon performs it; `add` prints the grant
+  command for any provider whose table is not empty. A **Microsoft** token
+  still cannot be spent on anything — there is no `msgraph` transport, so its
+  scope table is empty and `add` says so rather than sending you to a grant
+  that will be refused.
 * ~~**Nothing refreshes a token.**~~ **Built for Cloudflare only, and the
   "only" is the honest part.** An `oauth` provider offers
   `oauth.token.refresh` — RFC 6749 §6, performed in the daemon — and
@@ -243,27 +245,37 @@ not stated gets trusted for things it never did.
   with no key, the same one-operation-for-both shape `cloudflare.r2.object.read`
   has, so there is one scope and its summary says both things it does.
 
-* **A Google or Microsoft account has no grantable scope at all.** Not a
-  caveat about quality — there is no `gdrive` and no `msgraph` provider in
-  `apex-secretd`, so there is no operation to grant. `apex account scopes
-  google` says so in those words rather than printing a header with no rows
-  under it.
+* **Google has one grantable scope; Microsoft has none.** `files.read` →
+  `gdrive.file.read`, performed by the `gdrive` provider in `apex-secretd`.
+  Microsoft has no `msgraph` transport, so there is no operation to grant and
+  `apex account scopes microsoft` says so in those words rather than printing
+  a header with no rows under it.
 
-  This bullet exists because the table used to claim otherwise. `apex account
-  grant google files.read` was accepted and recorded a grant for
-  `gdrive.file.read`, an operation no build has ever offered: a permission the
-  user was told they had, which fails later and somewhere else. It is now
-  checked rather than described —
+  This bullet exists because the table used to claim more than it could do.
+  `apex account grant google files.read` was accepted and recorded a grant for
+  `gdrive.file.read` **when no build had ever offered that operation**: a
+  permission the user was told they had, which fails later and somewhere else.
+  The table was emptied, and `files.read` came back only when the operation
+  did. It is checked rather than described —
   `every_account_scope_names_an_operation_some_provider_actually_offers` in
   `apex-secretd` is the only place the scope table and the shipped registry are
   both visible, and it fails the build if a scope names an operation no
   provider serves.
 
-  For Microsoft this is only a missing transport. **For Google it is a limit of
-  the flow itself**, and worth knowing before somebody writes that transport:
+  **What one scope buys, said plainly, because it is less than it sounds.**
   Google's limited-input-device grant accepts only `email`, `openid`,
   `profile`, `drive.appdata`, `drive.file`, `youtube` and `youtube.readonly` —
   full `drive` and `drive.readonly` are not on the list, and `drive.file` sees
-  only files the app itself created or the user individually picked. "List the
-  files in this Drive" is therefore not something a device-code Google account
-  can do at all.
+  only files the OAuth client itself created or the user individually picked.
+  So "list the files in this Drive" is not something a device-code Google
+  account can do at all, which is why there is no `files.list`; and on a Drive
+  APEX has never written to, **every file id answers 404**. That is the scope
+  working. The scope that makes the first file readable is `files.write`, and
+  it needs a transport before it needs a table entry: a Drive upload goes to
+  `/upload/drive/v3/files`, a different path from the `/drive/v3` an account is
+  stored with.
+
+  A token's scopes are fixed when it is issued and a refresh cannot widen them,
+  so an account signed in before `drive.file` was asked for holds a token
+  without it. Its reads answer 403 until `apex account add google.<name>` is
+  run again.

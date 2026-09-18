@@ -48,12 +48,18 @@
 //! [`account::OAuth::client_id`] for the whole argument. Google also wants a
 //! `client_secret`, which is read from stdin and never from argv.
 //!
-//! What a token obtained this way can be spent on today is **nothing**. No
-//! `gdrive` or `msgraph` transport exists in `apex-secretd`, so every scope in
-//! [`account::DRIVE_SCOPES`] and [`account::GRAPH_SCOPES`] names an operation
-//! no provider offers — `apex account grant` refuses them for exactly that
-//! reason. Signing in, storing, and renewing work end to end; using is the
-//! next transport, not the next flag.
+//! **A Google token can now be spent; a Microsoft one still cannot.**
+//! `apex-secretd` ships a `gdrive` provider, so `apex account grant
+//! google.<name> files.read` records a grant for `gdrive.file.read` and the
+//! daemon performs it. There is still no `msgraph` transport, so
+//! [`account::GRAPH_SCOPES`] is empty and `apex account grant` refuses a
+//! Microsoft scope for exactly that reason.
+//!
+//! What a Google account can reach is narrower than "your Drive", and
+//! [`account::DRIVE_SCOPES`] is where the reason is written down: the device
+//! grant only allows `drive.file`, which sees files this OAuth client created
+//! or the user individually picked. Until a write operation exists there is
+//! nothing for a read to find, and the status line below says so.
 
 use std::io::Read;
 
@@ -575,19 +581,50 @@ fn add_by_device_code(
         }
     }
 
-    // Honest rather than encouraging. The cross-crate scope gate refuses a
-    // grant for an operation no provider offers, and no `gdrive` or `msgraph`
-    // transport exists, so sending somebody to `apex account grant` here would
-    // send them to a refusal they did not earn.
-    println!(
-        "nothing can spend it yet: this build ships no {} transport, so every scope",
-        provider.transport
-    );
-    println!(
-        "`apex account scopes {}` lists names an operation no provider offers.",
-        provider.id
-    );
+    for line in spend_advice(provider, reference) {
+        println!("{line}");
+    }
     Ok(0)
+}
+
+/// What to tell somebody who has just signed in, about spending the token.
+///
+/// A function returning lines rather than a block of `println!`, and the
+/// reason is that nothing can reach the block: it runs only after a real
+/// device grant completes, and `Endpoints::for_oauth` takes the authorisation
+/// server off the shared table with no override — deliberately, since a caller
+/// who can aim a device grant is a caller who chooses where a credential comes
+/// from. So the code path is unreachable from any test that does not contact
+/// Google, and the only way to hold it to anything is to make the part that
+/// decides what it says a function with no side effects.
+///
+/// It READS the provider's own scope table rather than repeating a sentence
+/// about a missing transport. A provider with nothing grantable must not be
+/// sent to `apex account grant`: the cross-crate scope gate refuses a grant
+/// for an operation no provider offers, so that would be a refusal the user
+/// did not earn. A provider WITH scopes gets the command for each one.
+fn spend_advice(provider: &Provider, reference: &str) -> Vec<String> {
+    if provider.scopes.is_empty() {
+        return vec![
+            format!(
+                "nothing can spend it yet: this build ships no {} transport, so every scope",
+                provider.transport
+            ),
+            format!(
+                "`apex account scopes {}` lists names an operation no provider offers.",
+                provider.id
+            ),
+        ];
+    }
+    let mut lines = vec!["grant it what it may do, once per project:".to_string()];
+    for scope in provider.scopes {
+        lines.push(format!("  apex account grant {reference} {}", scope.name));
+    }
+    lines.push(format!(
+        "`apex account scopes {}` says what each one reaches.",
+        provider.id
+    ));
+    lines
 }
 
 /// Where the refresh half of a device-code grant is filed.
@@ -806,6 +843,54 @@ fn rm(reference: &str) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    /// What `apex account add` says at the end, held to the scope table.
+    ///
+    /// Two directions, because the branch got them backwards once already in
+    /// the other direction: for four rounds this printed "nothing can spend
+    /// it yet" unconditionally, which was true of every provider then and
+    /// became false for Google the moment `gdrive` landed. The rule is that
+    /// the sentence is READ off the table, so it cannot be true of the table
+    /// and false of the build.
+    #[test]
+    fn the_advice_after_signing_in_reads_the_providers_own_scope_table() {
+        let google = account::provider("google").expect("google");
+        let said = spend_advice(google, "google.work").join("\n");
+        assert!(
+            said.contains("apex account grant google.work files.read"),
+            "a provider with a transport must be sent to the grant: {said}"
+        );
+        assert!(
+            !said.contains("nothing can spend it"),
+            "a Google token can be spent now: {said}"
+        );
+        // Every scope, not just the first: a provider that gains a second one
+        // must not have it silently dropped from the advice.
+        for scope in google.scopes {
+            assert!(
+                said.contains(&format!("apex account grant google.work {}", scope.name)),
+                "scope {} is missing from the advice: {said}",
+                scope.name
+            );
+        }
+
+        let microsoft = account::provider("microsoft").expect("microsoft");
+        let said = spend_advice(microsoft, "microsoft.work").join("\n");
+        assert!(
+            said.contains("nothing can spend it yet"),
+            "a provider with no transport must say so: {said}"
+        );
+        assert!(
+            said.contains("msgraph"),
+            "and name the transport that is missing: {said}"
+        );
+        // And it must NOT send somebody to a grant the cross-crate scope gate
+        // will refuse.
+        assert!(
+            !said.contains("apex account grant"),
+            "sent to a grant that cannot be recorded: {said}"
+        );
+    }
+
     use super::*;
     use clap::Parser;
 
