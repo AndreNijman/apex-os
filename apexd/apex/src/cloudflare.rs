@@ -55,6 +55,7 @@ use apex_secret_core::capability::CapabilityRecord;
 use apex_secret_core::client::Client;
 use apex_secret_core::project::ProjectConfig;
 use apex_secret_core::protocol::{Request, Response};
+use apex_secret_core::store::Grants;
 use apex_secret_core::SecretValue;
 use clap::Subcommand;
 
@@ -751,12 +752,61 @@ fn refresh() -> Result<i32> {
     }
 }
 
+/// What `apex cf status` can honestly say about renewing.
+///
+/// Four states rather than the bool the line used to print, because three of
+/// them send the reader somewhere different and the one it printed was the
+/// answer to a question nobody asked. `apex cf refresh` is a `Use`, a `Use`
+/// needs a per-project grant, and **`apex cf connect` deliberately records
+/// none** — connecting stores a credential; which project may spend it is the
+/// owner's decision, and a grant keyed on whatever directory `connect` ran in
+/// would be a capability nobody chose. So "a refresh token is stored" and
+/// "this project may spend it" are different facts and the status line has to
+/// carry both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Renewal {
+    /// The grant carried no `offline_access`, so there is nothing to spend.
+    NoRefreshToken,
+    /// A grant is per project and this directory is not in one, so no grant
+    /// can match here and writing one would not help.
+    NotInAProject,
+    /// `apex cf refresh` will get as far as the authorisation server.
+    Granted,
+    /// It would be refused before the token is read.
+    NotGranted,
+}
+
+/// Decide it with the daemon's own rule.
+///
+/// [`Grants::allows`] rather than a lookup written again here: it is what
+/// `use_capability` will consult, including the [`apex_secret_core::store::
+/// ANY_PROJECT`] fallback, and a second copy of that rule is a status line
+/// that says "granted" about a request that is about to be refused.
+fn renewal(refresh_stored: bool, project: Option<&str>, grants: &Grants) -> Renewal {
+    if !refresh_stored {
+        return Renewal::NoRefreshToken;
+    }
+    let Some(project) = project else {
+        return Renewal::NotInAProject;
+    };
+    if grants.allows(Some(project), REFRESH_SERVICE, REFRESH_OPERATION) {
+        Renewal::Granted
+    } else {
+        Renewal::NotGranted
+    }
+}
+
 fn status(json: bool) -> Result<i32> {
-    let services = match Client::connect()
-        .context("apex-secretd is not answering; is it running?")?
-        .call(&Request::List)?
-    {
+    let mut client =
+        Client::connect().context("apex-secretd is not answering; is it running?")?;
+    let services = match client.call(&Request::List)? {
         Response::Services { services } => services,
+        other => bail!("unexpected reply: {}", other.variant()),
+    };
+    // Asked of the daemon rather than assumed, because the answer changes what
+    // the next line tells the reader to type.
+    let granted = match client.call(&Request::Grants)? {
+        Response::Grants { projects } => Grants { projects },
         other => bail!("unexpected reply: {}", other.variant()),
     };
     let stored = services.iter().find(|s| s.service == SERVICE);
@@ -774,10 +824,23 @@ fn status(json: bool) -> Result<i32> {
         .ok()
     });
 
+    let renewal = renewal(refresh, project.as_deref(), &granted);
+
     if json {
         let mut out = serde_json::Map::new();
         out.insert("connected".into(), stored.is_some().into());
         out.insert("refreshable".into(), refresh.into());
+        out.insert(
+            "refresh_granted".into(),
+            match renewal {
+                Renewal::Granted => true.into(),
+                Renewal::NotGranted => false.into(),
+                // Neither of these is "not granted", and `false` here would
+                // send a reader to write a grant that changes nothing: there
+                // is no refresh token to spend, or no project to spend it in.
+                Renewal::NoRefreshToken | Renewal::NotInAProject => serde_json::Value::Null,
+            },
+        );
         out.insert(
             "project".into(),
             project.clone().map(Into::into).unwrap_or(serde_json::Value::Null),
@@ -820,14 +883,29 @@ fn status(json: bool) -> Result<i32> {
     match stored {
         Some(info) => {
             println!("credential: stored for {}://{}", info.scheme, info.host);
-            if refresh {
-                println!("            a refresh token is stored too, for {AUTH_HOST}");
-                println!("            renew without signing in again:");
-                println!("              apex cf refresh");
-            } else {
+            match renewal {
                 // Worth saying: without `offline_access` there is nothing to
                 // renew, and the only way to get one is to connect again.
-                println!("            no refresh token — this one cannot be renewed");
+                Renewal::NoRefreshToken => {
+                    println!("            no refresh token — this one cannot be renewed");
+                }
+                Renewal::Granted => {
+                    println!("            a refresh token is stored too, for {AUTH_HOST}");
+                    println!("            this project may spend it — renew without signing in again:");
+                    println!("              apex cf refresh");
+                }
+                Renewal::NotGranted => {
+                    println!("            a refresh token is stored too, for {AUTH_HOST}");
+                    println!("            this project may NOT spend it yet. Connecting stored a");
+                    println!("            credential; which project may renew with it is yours to say:");
+                    println!("              apex secret grant {REFRESH_SERVICE} {REFRESH_OPERATION}");
+                    println!("              apex cf refresh");
+                }
+                Renewal::NotInAProject => {
+                    println!("            a refresh token is stored too, for {AUTH_HOST}");
+                    println!("            renewing spends it, and that is granted per project — run");
+                    println!("            `apex cf refresh` from inside the project that should renew");
+                }
             }
         }
         None => {

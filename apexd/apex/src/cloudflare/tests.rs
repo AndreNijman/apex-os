@@ -444,3 +444,54 @@ fn the_operation_the_cli_asks_for_is_the_one_the_provider_declares() {
     // spent — granting the operation on `cloudflare` would allow nothing.
     assert_ne!(SERVICE, REFRESH_SERVICE);
 }
+
+// ── what `status` says about renewing ───────────────────────────────────────
+
+#[test]
+fn what_status_says_about_renewing_is_the_grant_the_daemon_will_check() {
+    // The line this replaces printed `apex cf refresh` whenever a refresh
+    // token existed, and a refresh is a `Use`: it needs a per-project grant
+    // that `apex cf connect` deliberately does not write. So on every machine
+    // that had connected, the status line named a command that was about to be
+    // refused and said nothing about why.
+    let here = "/p";
+    let mut grants = Grants::default();
+    assert_eq!(renewal(true, Some(here), &grants), Renewal::NotGranted);
+
+    // No refresh token outranks the grant: writing one would change nothing.
+    assert_eq!(renewal(false, Some(here), &grants), Renewal::NoRefreshToken);
+    // And a grant is per project, so outside one none can match.
+    assert_eq!(renewal(true, None, &grants), Renewal::NotInAProject);
+
+    grants.allow(here, REFRESH_SERVICE, REFRESH_OPERATION);
+    assert_eq!(renewal(true, Some(here), &grants), Renewal::Granted);
+    // Still nothing to spend, even now that spending it is allowed.
+    assert_eq!(renewal(false, Some(here), &grants), Renewal::NoRefreshToken);
+    // Granted where it was written and nowhere else.
+    assert_eq!(renewal(true, Some("/other"), &grants), Renewal::NotGranted);
+}
+
+#[test]
+fn renewing_is_not_read_off_a_grant_for_the_other_credential_or_the_other_verb() {
+    // The two halves are stored separately on purpose — the access token under
+    // `cloudflare` for the API host, the refresh token under
+    // `cloudflare-refresh` for the auth host — and the whole value of that
+    // split is that a grant on one is not a grant on the other. A status line
+    // that matched on the operation alone, or on the service alone, would
+    // report "this project may spend it" off a grant to deploy a worker.
+    let here = "/p";
+
+    let mut wrong_credential = Grants::default();
+    wrong_credential.allow(here, SERVICE, REFRESH_OPERATION);
+    assert_eq!(
+        renewal(true, Some(here), &wrong_credential),
+        Renewal::NotGranted
+    );
+
+    let mut wrong_operation = Grants::default();
+    wrong_operation.allow(here, REFRESH_SERVICE, "cloudflare.worker.deploy");
+    assert_eq!(
+        renewal(true, Some(here), &wrong_operation),
+        Renewal::NotGranted
+    );
+}
