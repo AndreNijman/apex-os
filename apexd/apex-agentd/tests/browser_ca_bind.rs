@@ -255,15 +255,13 @@ fn sha_of(path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Everything this file needs from the machine, or the reason it is skipping.
-fn preflight() -> Option<String> {
-    if !Path::new(HOST_POLICY).exists() {
-        eprintln!(
-            "SKIP: this machine has no {HOST_POLICY}, which `browser_ca::install` refuses \
-             without — there is nothing to bind a copy over"
-        );
-        return None;
-    }
+/// A confined session can start here at all.
+///
+/// Its own function because one case below needs ONLY this: `install` refuses
+/// a PEM carrying a private key before it ever reads the machine's policy, so
+/// gating that case on Firefox being installed would skip the wire refusal on
+/// every CI runner — a test that never runs where it is needed most.
+fn have_bwrap() -> bool {
     if Command::new("bwrap")
         .arg("--version")
         .stdout(Stdio::null())
@@ -273,6 +271,21 @@ fn preflight() -> Option<String> {
         .unwrap_or(true)
     {
         eprintln!("SKIP: no usable bwrap, so no confined session can start");
+        return false;
+    }
+    true
+}
+
+/// Everything the BIND cases need from the machine, or the reason they skip.
+fn preflight() -> Option<String> {
+    if !Path::new(HOST_POLICY).exists() {
+        eprintln!(
+            "SKIP: this machine has no {HOST_POLICY}, which `browser_ca::install` refuses \
+             without — there is nothing to bind a copy over"
+        );
+        return None;
+    }
+    if !have_bwrap() {
         return None;
     }
     sha_of(Path::new(HOST_POLICY)).or_else(|| {
@@ -410,7 +423,14 @@ fn a_pem_carrying_a_private_key_starts_no_session_at_all() {
     // test proves `certificates_only` rejects the bytes, and this proves the
     // rejection reaches the caller as a refusal instead of a session that
     // started with a private key copied into its scratch directory.
-    let Some(_) = preflight() else { return };
+    //
+    // NOT gated on the machine's Firefox policy, and that is deliberate:
+    // `install` refuses the key before it reads that file, so a `preflight()`
+    // here would skip this case on every runner without Firefox — which is
+    // every CI runner, and this is the case most worth running there.
+    if !have_bwrap() {
+        return;
+    }
     let h = harness!("key");
 
     let bad = h.root.join("key-and-cert.pem");

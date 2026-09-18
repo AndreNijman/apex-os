@@ -55,6 +55,7 @@
 //! finish, and is given no reason at all. A refusal before the browser starts
 //! is the only diagnostic that reaches them.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -79,8 +80,17 @@ const POLICY_FILE: &str = "firefox-policies.json";
 /// A trust anchor file is a couple of kilobytes and a corporate bundle is tens
 /// of them. The cap is not a security boundary — the file is the caller's own
 /// and they could copy it into the session's working directory unaided — it is
-/// here so that `--trust-ca /dev/zero`, or a path that turns out to be a disk
-/// image, fails by name instead of filling the scratch directory.
+/// here so that a path which turns out to be a disk image fails by name
+/// instead of filling the scratch directory.
+///
+/// It is enforced TWICE and the first one is what matters, which is a
+/// correction rather than belt and braces. The first version of this checked
+/// `raw.len()` after `std::fs::read`, and wrote in this very comment that it
+/// stopped `--trust-ca /dev/zero` — a reasoned claim that was false. `fs::read`
+/// on a character device grows a `Vec` until the daemon is killed, and it never
+/// reaches the comparison. So [`install`] asks for metadata first, refuses
+/// anything that is not a regular file, and then reads through `take` anyway
+/// because the size it saw is a fact about a file the caller still owns.
 const MAX_CA_BYTES: usize = 256 * 1024;
 
 /// What was installed, so the caller binds the same paths it wrote.
@@ -254,13 +264,44 @@ pub fn merged_policy(host: &[u8], ca_path: &str) -> Result<Vec<u8>> {
 /// would be a function nobody tests.
 pub fn install(trust_ca: &str, scratch: &Path, host_policy: &Path) -> Result<Installed> {
     let src = Path::new(trust_ca);
-    let raw = std::fs::read(src)
+
+    // METADATA BEFORE BYTES, and this is a refusal rather than an ordering
+    // preference. `std::fs::read` on `/dev/zero` grows a `Vec` until the
+    // DAEMON is killed, and `File::open` on a FIFO with no writer blocks it —
+    // neither reaches a length check written after the read. `apex browser`
+    // refuses a non-file at the call site, but `apex agent run --trust-ca` and
+    // any client speaking the protocol directly arrive here, and a client is
+    // not a boundary.
+    let meta = std::fs::metadata(src)
         .with_context(|| format!("trust_ca names {trust_ca}, which cannot be read"))?;
-    if raw.len() > MAX_CA_BYTES {
+    if !meta.is_file() {
+        bail!(
+            "trust_ca names {trust_ca}, which is not a regular file. A device, a FIFO or a \
+             directory is not a certificate, and reading one would hang or exhaust this daemon \
+             rather than fail"
+        );
+    }
+    if meta.len() > MAX_CA_BYTES as u64 {
         bail!(
             "trust_ca names a {} byte file and the limit is {MAX_CA_BYTES}: a trust anchor is a \
              couple of kilobytes, so this is a path that is not the file it was meant to be",
-            raw.len()
+            meta.len()
+        );
+    }
+    // `take`, even though the size above already passed: the file is the
+    // caller's own and nothing stops it growing between the two calls. One
+    // byte over the cap is read so that the growth is REFUSED rather than
+    // silently truncated into a PEM that parses.
+    let mut raw = Vec::new();
+    std::fs::File::open(src)
+        .with_context(|| format!("trust_ca names {trust_ca}, which cannot be opened"))?
+        .take(MAX_CA_BYTES as u64 + 1)
+        .read_to_end(&mut raw)
+        .with_context(|| format!("reading {trust_ca}"))?;
+    if raw.len() > MAX_CA_BYTES {
+        bail!(
+            "trust_ca names a file that grew past the {MAX_CA_BYTES} byte limit while it was \
+             being read"
         );
     }
 
@@ -494,6 +535,64 @@ mod tests {
         .expect_err("a missing bind target must refuse");
         let said = err.to_string();
         assert!(said.contains("does-not-exist"), "{said}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_regular_file_is_refused_before_it_is_read() {
+        // The comment on MAX_CA_BYTES used to claim this and the code did not
+        // do it: the length was checked AFTER `std::fs::read`, which on
+        // /dev/zero grows a Vec until the daemon dies and never reaches the
+        // comparison. A reasoned claim that was false, in a module whose
+        // subject is refusing rather than hoping.
+        let dir = tmpdir("notafile");
+        let host = dir.join("policies.json");
+        std::fs::write(&host, APEX_POLICY).unwrap();
+
+        // A character device. /dev/null rather than /dev/zero on purpose: if
+        // this refusal is ever removed, the test fails in a second instead of
+        // taking the machine's memory with it.
+        let err = install("/dev/null", &dir, &host).expect_err("a device is not a certificate");
+        let said = err.to_string();
+        assert!(
+            said.contains("not a regular file"),
+            "the refusal must say WHICH kind of thing it was handed, because 'no certificate in \
+             it' sends the reader looking at the wrong file: {said}"
+        );
+
+        // A directory, which `std::fs::read` reports as an opaque IO error.
+        let err = install(dir.to_str().unwrap(), &dir, &host).expect_err("a directory");
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+
+        // And the cap, measured rather than asserted about the constant: one
+        // byte over is refused, and the message names the size so a caller can
+        // see they pointed at the wrong thing.
+        let big = dir.join("huge.pem");
+        std::fs::write(&big, vec![b'a'; MAX_CA_BYTES + 1]).unwrap();
+        let err = install(big.to_str().unwrap(), &dir, &host).expect_err("over the cap");
+        // The SIZE, not just the word "limit". The `take` below the metadata
+        // check refuses an oversize file too, with a message about the file
+        // growing — so an assertion on "limit" alone would hold with the
+        // metadata check deleted, and the metadata check is the one that stops
+        // a device being read at all. Naming the size is what tells the two
+        // refusals apart.
+        assert!(
+            err.to_string().contains(&format!("{} byte file", MAX_CA_BYTES + 1)),
+            "the size was refused by the wrong guard, or without saying how big it was: {err}"
+        );
+
+        // The control, without which every assertion above would hold for an
+        // `install` that refused everything: one byte UNDER the cap gets past
+        // the size check and is then refused for its contents, which is a
+        // different message.
+        let nearly = dir.join("nearly.pem");
+        std::fs::write(&nearly, vec![b'a'; MAX_CA_BYTES - 1]).unwrap();
+        let err = install(nearly.to_str().unwrap(), &dir, &host).expect_err("not a certificate");
+        assert!(
+            err.to_string().contains("no certificate"),
+            "a file under the cap was refused for its size: {err}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
