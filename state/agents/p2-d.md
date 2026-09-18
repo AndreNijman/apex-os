@@ -23,16 +23,13 @@ branch: **task/p2-d-6** (off roadmap/v2.2 @ 6b531503)
 
 ## NEXT
 
-Update the docs and then measure. Docs: `docs/browser-capsule.md` (the
-"not built" list still says a capsule cannot be told to trust a CA) and
-`docs/browser-capsule-auth.md` (the "What is not decided" bullet on the per-run
-CA bind is now decided — and **three places in it say route B takes protocol
-10, which is now wrong: route B takes 11**). Then the measurement: bring up a
-private daemon the way `apexd/apex-agentd/tests/session_allowlist.rs` does,
-point `APEX_BROWSER_APEX` at the built `apex`, and run two capsules against a
-loopback TLS server with a private CA — one with `--trust-ca` (renders) and one
-without (0 B, `UNKNOWN_CA`). If the daemon socket turns out not to be
-overridable, say so and write "live run NOT DONE, not claimed."
+Update the two docs, which are now the only thing gap 5 is missing.
+`docs/browser-capsule.md`: the "not built" list still says a capsule cannot be
+told to trust a CA. `docs/browser-capsule-auth.md`: the "What is not decided"
+bullet on the per-run CA bind is DECIDED now (strike it the way the
+`policies.json` guard bullet was struck), and **three places in that file say
+route B takes protocol 10, which is wrong as of `1fff2c45` — route B takes
+11.** Then `bash tests/check-doc-verbs.sh`.
 
 ## THIS ROUND'S SCOPE (round 30), narrow on purpose
 
@@ -61,6 +58,18 @@ Design taken (advisor-reviewed) before any code:
 
 ## DONE (round 30, branch task/p2-d-6)
 
+- `8e1ca9cc` — **the capsule itself says what it sees**:
+  `apexd/apex-agentd/tests/browser_ca_bind.rs`, a private daemon and a confined
+  session that copies out what it finds at
+  `/etc/firefox/policies/policies.json` INSIDE its namespace, reads the path
+  that document names, and copies that out too. Four cases, two controls that
+  fail differently. `/etc` is read and its sha256 asserted unchanged. Two
+  mutations red — deleting the `ro_at` push printed the LIVE machine policy in
+  the failure, which is how the file proves it reads through the namespace and
+  not through a fixture. **Also fixed a defect in my own `2fff910f`**:
+  `BrowserCmd::Run` crossed clippy's `large_enum_variant` threshold when the
+  flag was added and that commit was pushed without clippy having been run
+  over it. 56 suites green, clippy clean.
 - `2fff910f` — **`apex browser run --trust-ca FILE`**: the clap surface, the
   engine, and 11 new suite assertions that the flag reaches the `apex agent
   run` line and lands among the RUNTIME's flags rather than after the `--`

@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-19 02:14 AWST
+APEX ROADMAP — resume report — 2026-09-19 02:48 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -18,28 +18,33 @@ APEX ROADMAP — resume report — 2026-09-19 02:14 AWST
 ────────────────────────────────────────────────────────────────────────────
   p2-b       ALIVE      P2-003,P2-004                      task/p2-b-round30
              head 6b531503 Merge task/p2-f-4 into roadmap/v2.2
-             dirty 0 file(s), 0 unpushed, card 1m
-             NEXT **Measure FOUND 20** (the named cause, read out of source this rou
-
-  p2-f       ALIVE      P2-016,P2-017,P2-018,P2-019        task/p2-f-5
-             head 6b531503 Merge task/p2-f-4 into roadmap/v2.2
-             dirty 0 file(s), ? unpushed, card 0m
-             NEXT **ROUND 30 IN PROGRESS.** Building the `gdrive` transport in `apex
+             dirty 0 file(s), 0 unpushed, card 0m
+             NEXT **Write `tests/mutate-lockscreen-atspi-shim.sh`**, the mutation pa
 
   p2-d       ALIVE      P2-008,P2-009,P2-012               task/p2-d-6
-             head 67861c53 test(containerfile): the runner half of the rewrite a
-             dirty 0 file(s), ? unpushed, card 200m
-             NEXT **There is no engineering next step on P2-012. There is a question
+             head 8e1ca9cc test(agentd): the capsule itself says what it sees at
+             dirty 2 file(s), 0 unpushed, card 1m
+             NEXT Update the two docs, which are now the only thing gap 5 is missing
+
+  p2-f       ALIVE      P2-016,P2-017,P2-018,P2-019        task/p2-f-6
+             head 933bbee1 test(accounts): the gdrive scope, measured through th
+             dirty 0 file(s), ? unpushed, card 4m
+             NEXT **ROUND 30 IS COMPLETE ON THE BRANCH. Three commits pushed on `tas
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 6b531503 Merge task/p2-f-4 into roadmap/v2.2
-    (nothing — every task branch's content is on the integration tip)
+  int-os:  tip f40ffefe Merge task/p2-f-5 into roadmap/v2.2
+    task/p2-d-6
+      1fff2c45 feat(protocol): a session's browser may be told to trust one    [1/10 added lines on tip]
+      b0ef1b2c feat(agentd): install one private CA for a session's browser,   [0/10 added lines on tip]
+      2fff910f feat(browser): `apex browser run --trust-ca FILE`, the capsul   [0/10 added lines on tip]
+      8e1ca9cc test(agentd): the capsule itself says what it sees at the pol   [4/10 added lines on tip]
 
   int-shell:  tip d5c781a Merge task/p2-b-round29 into roadmap/v2.2
-    (nothing — every task branch's content is on the integration tip)
+    task/p2-b-round30
+      273c1fb test(a11y): name the cause of the empty accessibility tree, an   [2/10 added lines on tip]
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -59,11 +64,11 @@ APEX ROADMAP — resume report — 2026-09-19 02:14 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 2min 1s Sat
+  snapshot timer: active   last 02:48:10 AWST 10s
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    2784689  roadmap-state
+    apex-os    4a1fe3b  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -86,7 +91,7 @@ APEX ROADMAP — resume report — 2026-09-19 02:14 AWST
     apex-os    162d6fa  wt-p0-009-
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
-    apex-shell 0fd4244  apex-shell-
+    apex-shell d553551  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-

@@ -35,12 +35,22 @@ asserts. Restore from a pristine `mktemp -d` copy with sha256 verification, not
 ## IN PROGRESS
 
 apex-shell `task/p2-b-round30`: `273c1fb` is pushed (the named cause, its pin
-and its mutation pair). **UNCOMMITTED in the worktree right now**:
-`tests/quickshell-a11y-shim.cpp` and `tests/run-lockscreen-atspi-shim.sh` —
-the latter runs **23 passed / 0 failed / 1 skipped, five times in a row** under
-`env -i`. Not yet written: its mutation pair, and its ci.yml wiring. P2-003's
-roadmap evidence is written through `273c1fb` only; the shim suite is not in it
-yet. apex-os `task/p2-b-round30` is pushed and empty.
+and its mutation pair). **UNCOMMITTED in the worktree right now**, three files:
+`tests/quickshell-a11y-shim.cpp`, `tests/run-lockscreen-atspi-shim.sh`
+(**23 passed / 0 failed / 1 skipped, five runs in a row** under `env -i`) and
+`tests/mutate-lockscreen-atspi-shim.sh` (shellcheck clean, all seven anchors
+verified present, **running now** — 6 red mutants and 2 green, about a minute
+each). Still to do after it: the ci.yml step and structure-check REQUIRED
+entries for all three, the commit, and appending the shim half to P2-003's
+roadmap evidence (which currently stops at `273c1fb`). apex-os
+`task/p2-b-round30` is pushed and empty.
+
+**If you are a fresh agent and the harness was killed mid-run**: it restores
+`src/windows/Lockscreen.qml` and `tests/quickshell-a11y-shim.cpp` from a
+`mktemp -d` snapshot after every mutant, but a kill between the edit and the
+restore leaves one of them mutated. `git -C /var/tmp/apex-work/wt-p2-b4-sh
+status --short` first, and `git checkout -- <file>` for anything dirty that you
+did not write.
 
 ## DONE
 
