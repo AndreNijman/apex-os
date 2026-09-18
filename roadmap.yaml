@@ -4789,7 +4789,13 @@ tasks:
     tests. Making this `done` needs a manual run on a machine with a spare USB device somebody is willing to have
     detached - not more test code. What IS verified for USB remains what round 1 recorded: the refusal when lsusb
     cannot be run at all, the same refusal from create --usb, the malformed-id refusal, and that no hostdev
-    reached the domain in any of them.
+    reached the domain in any of them. ROUND 29 (2026-09-18): unchanged again, and again deliberately. p2-d's
+    round 29 was the policies.json Containerfile assertion, the `python3 -c` blindness in
+    tests/check-containerfile-assertions.sh, and a route-B feasibility measurement for P2-012. No virtualization
+    code was touched, no vmlab flow was run, and nothing here was re-verified. USB passthrough remains the one
+    flow of six never demonstrated end to end and it is not closable by any suite on any machine: it means
+    detaching a physical device from the machine running the tests. Making this `done` needs a manual run on a
+    machine with a spare USB device somebody is willing to have detached - not more test code.
 - id: P2-009
   title: Disposable VM agent execution
   priority: P2
@@ -4831,6 +4837,12 @@ tasks:
     nomination-only egress with the turned-around loop as its falsifying control, no network, and teardown - with
     an arbitrary command standing in for an agent task. docs/virtualization.md already records that building a
     guest carrying claude or codex is separate work, and no amount of assertion in this repository closes it.
+    ROUND 29 (2026-09-18): unchanged again, and again deliberately. p2-d's round 29 touched no virtualization code
+    and ran no vmlab flow; it was the policies.json Containerfile assertion, the `python3 -c` blindness in
+    tests/check-containerfile-assertions.sh, and a route-B feasibility measurement for P2-012. The gap is still a
+    guest image that carries an agent CLI, which is a build rather than a test. What is verified remains the
+    BOUNDARY - the read-only copy-in volume, nomination-only egress with the turned-around loop as its falsifying
+    control, no network, and teardown - with an arbitrary command standing in for an agent task.
 - id: P2-010
   title: Hardware qualification database
   priority: P2
@@ -5045,7 +5057,77 @@ tasks:
     apexd/apex-agentd/tests/session_allowlist.rs orphaned a bwrap namespace for 23 minutes, because pty::spawn
     calls setsid so SessionInfo.pid is the process GROUP leader and bwrap is a separate process inside that group.
     Drop now kills the group, by pid and never by name - apex-agentd is both the user's own runtime and the egress
-    bridge, so a pattern kill in a test would take out the machine's.
+    bridge, so a pattern kill in a test would take out the machine's. ROUND 29 (2026-09-18), apex-os branch
+    task/p2-d-5, 3 commits, all pushed, NOT merged; base roadmap/v2.2 7f6fc44d. TWO THINGS DONE AND ONE THING
+    DELIBERATELY NOT DONE. (1) THE policies.json SHAPE ASSERTION, which had been round 3's NEXT and round 4's, is
+    in Containerfile.base (73861e55). /etc/firefox/policies/policies.json is read inside every capsule - the
+    sandbox binds / read-only - and while it exists it is the ONLY policy file any Firefox on the machine reads,
+    so its contents are every capsule's trust surface. Until now nothing asserted anything beyond "it is valid
+    JSON and the homepage is about:home". The assertion is POSITIVE rather than a denylist of
+    Certificates/Proxy/locked, and that form was chosen for a recorded reason: the file carries //, //2 and //3
+    comment keys, so a grep refusal of '"Certificates"' would be the 706489ec defect again, firing the day
+    somebody explains in a comment why there is no Certificates block. It asserts that policies carries
+    Preferences and nothing else and that every preference is a dict at Status "default". Mutation-tested four
+    ways, each restored byte-identical with plain cp and sha256-compared: Certificates.Install added -> red; Proxy
+    added -> red; one Status flipped to locked -> red; a preference written as a bare value, which is the newer
+    schema's spelling of locked -> red on the subscript. Syntax-checked both ways buildah could read the stanza,
+    as written and with the comment lines stripped before the continuations are joined. (2) A DEFECT IN THE GATE
+    THAT WAS SUPPOSED TO CHECK IT (12ee0cbf). tests/check-containerfile-assertions.sh resolved grep and nothing
+    else: a `python3 -c` segment missed its regex and hit `continue` - not a failure, not UNRESOLVED, not counted
+    anywhere, which is the outcome that file's own header calls the worst of the three. It was doing that to seven
+    of its own assertions, two of which were the existing Firefox policy ones. Now 193 checked instead of 188 (194
+    with the new assertion), and the two remaining python segments are counted as unresolved rather than vanishing
+    - one builds its path from a `for` variable, one reads a pipe. THE IMAGE-PATH-TO-REPO-PATH REWRITE IS
+    LOAD-BEARING AND WAS MEASURED, NOT ASSUMED: /etc/firefox/policies/policies.json EXISTS on an APEX machine, so
+    a handler that ran the script unmodified would parse the LIVE file. With the rewrite removed and the
+    repository's own policies.json replaced by `{ "policies": }`, the checker reports "193 checked, 0 failed" and
+    exits 0 - and would then have failed on the CI runner, where the path is absent, for a reason with nothing to
+    do with the assertion. That is the surgical mutation, and it is the one that matters. Because the checker now
+    EXECUTES those scripts on the runner, all five newly-checked assertions were cross-run under python 3.12
+    (ubuntu-24.04's version) in a throwaway container: tomllib, both ast.parse checks and the new policy shape all
+    pass, so no 3.14-only behaviour was baked in. (3) ROUTE B WAS NOT BUILT, AND THAT IS A DECISION WITH A REASON
+    RATHER THAN AN OMISSION. What WAS done is the measurement that route B rested on without having it.
+    docs/browser-capsule-auth.md had two halves measured separately - a CA installed by a namespace-bound
+    policies.json is trusted, and a capsule's egress is a CONNECT tunnel - and nobody had put them together.
+    Whether Firefox accepts a leaf MINTED FOR THE REQUESTED NAME at the far end of a tunnel it opened itself was
+    the one engineering unknown, and a build would have found the answer at the expensive end. Measured on Firefox
+    155.0 in the capsule's own sandbox shape (headless bwrap, --ro-bind / /, --proc /proc, fresh profile, absolute
+    --screenshot path, policy bound over /etc/firefox/policies/policies.json inside the namespace only), with a
+    per-run openssl CA, a loopback CONNECT proxy that terminates TLS with a minted leaf and adds an Authorization
+    header, and a plain-HTTP origin that logs what it was sent; Firefox pointed at the proxy by network.proxy.type
+    1 rather than by the environment, which is also why the capsule needs no resolver - at type 1 it puts the NAME
+    in the CONNECT and never looks it up. THREE ARMS: authenticated (leaf intranet.example, CA installed) -> 10402
+    B screenshot and one request at the origin CARRYING THE CREDENTIAL; control with no CA ->
+    TLSV1_ALERT_UNKNOWN_CA, no screenshot, nothing at the origin; control with a leaf for other.example and the CA
+    installed -> SSLV3_ALERT_BAD_CERTIFICATE, same. The wrong-name control is what makes the first row mean
+    anything: without it the pass says only "Firefox rendered something", and with it Firefox is shown validating
+    the SAN THROUGH THE TUNNEL rather than accepting whatever the trusted CA signed. Also recorded: Firefox
+    reaches for mitmdetection.services.mozilla.com once an enterprise root is installed (refused by the probe's
+    proxy, and refused by a pinned capsule's allowlist), and re-origination TLS was deliberately NOT the question
+    - the origin is plain HTTP on loopback, so the daemon originating a validated connection to the real site is
+    not evidence from this probe. The probe is NOT shipped, the way this page's cookie measurement was not: it
+    needs a fixture CA, two servers and a browser for a question asked once, and putting a MITM harness in CI for
+    a feature that does not exist is the wrong trade. Nothing was left running and nothing on disk - probe root
+    removed, ports free, the user's own apex-agentd (pids 1365/1475) never signalled. SO THE ENGINEERING IS
+    SETTLED AND THE PRODUCT DECISION IS NOT, and the doc now says so under its own heading instead of burying it
+    in a list of loose ends. "The route is B" was a statement about SHAPE that read as a decision to build. THE
+    QUESTION FOR ANDRE, stated in docs/browser-capsule-auth.md: may apex-agentd read the plaintext of a capsule's
+    connection to the one destination that capsule was pinned to, in order to add a credential the capsule is
+    never given? A yes costs a TLS SERVER in apex-agentd plus per-run certificate minting, PROTOCOL_VERSION 10
+    with two gated fields and a CLI that refuses to send them to an older daemon, docs/browser-capsule.md losing
+    the sentence "a tunnel is opaque" for the pinned destination, and a guard IN THE DAEMON that the interception
+    is only ever the pinned destination - an absence is not a guard. A no costs the criterion permanently rather
+    than pending: route A is already rejected on that page for handing the value to the caller, route C needs
+    geckodriver in the image which is a separate decision about what APEX carries, route D covers presigned URLs
+    and nothing else, and there is no fifth route that neither gives the capsule the value nor lets the daemon see
+    the request. STILL PARTIAL for exactly that reason - a capsule still cannot authenticate to a site. GATES, run
+    on task/p2-d-5: check-containerfile-assertions.sh 194 checked / 0 failed / 116 unresolved / 0 inert, rc=0;
+    check-shellcheck-coverage.sh 165 discovered / 0 known-failing / 0 newly failing / 0 now clean;
+    check-suites-run-in-ci.sh 75 suites / 71 run / 4 exempt / 0 unrun and undeclared - no fifth exemption added;
+    check-doc-verbs.sh 250 valid / 8 deliberate / 0 not a command, 191 documented / 114 declared undocumented / 0
+    undocumented and undeclared / 0 stale; shellcheck -x on the changed script clean. NOT RUN THIS ROUND AND NOT
+    CLAIMED: cargo test, clippy and the browserlab. No Rust changed, no shell suite changed, and the browserlab's
+    authentication flow is still the could-not-run that IS this criterion.
 - id: P2-013
   title: Per-project identity binding
   priority: P2
