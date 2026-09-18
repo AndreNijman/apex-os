@@ -45,7 +45,8 @@ ALL=(prereq signed-uki reproducible negative-unsigned negative-foreign
 # Scenarios needing something the container cannot produce for itself. Kept OUT
 # of ALL so a default run cannot silently skip them and still report success:
 # they are requested by name and hard-fail when their input is missing.
-STAGED=(apex-image luks-tpm luks-tpm-clear luks-firmware-change luks-s3)
+STAGED=(apex-image luks-tpm luks-tpm-clear luks-firmware-change
+        luks-firmware-code luks-s3)
 if (( LIST )); then printf '%s\n' "${ALL[@]}" "${STAGED[@]}"; exit 0; fi
 (( ${#SCENARIOS[@]} )) || SCENARIOS=("${ALL[@]}")
 
@@ -270,8 +271,12 @@ scenario_reproducible() {
 
 # One helper for all three negative controls: the difference between them is
 # only how the UKI was (not) signed, and the expected outcome is identical.
+# Extra arguments after the UKI are passed through to vm_boot. The three
+# negative controls supply none; the firmware-code scenario supplies `--code`,
+# because "this firmware refuses an unsigned image" is the only check worth
+# anything on a Secure Boot build somebody handed the lab from outside.
 negative_boot() {
-    local name="$1" uki="$2"
+    local name="$1" uki="$2"; shift 2
     local disk="$WORK/disk-$name.img" vars="$WORK/vars-$name.fd" ser="$WORK/serial-$name.log"
     "$HERE/apex-mkesp" --disk "$disk" --size 96 \
         --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
@@ -281,7 +286,7 @@ negative_boot() {
     # A short timeout: the firmware refusing an image is immediate. sd-boot
     # then has nothing bootable and sits at its menu, so the timeout kill IS
     # the expected outcome here and the marker's absence is the assertion.
-    vm_boot --disk "$disk" --vars "$vars" --name "$name" --serial "$ser" --timeout 45 || rc=$?
+    vm_boot --disk "$disk" --vars "$vars" --name "$name" --serial "$ser" --timeout 45 "$@" || rc=$?
     assert_serial_lacks "$ser" "APEX-BOOTLAB: userspace-reached"
     if (( rc == 0 )); then
         bad "$name: the guest powered off cleanly, so something booted"
@@ -1353,8 +1358,212 @@ scenario_luks_firmware_change() {
 
     # The limitation, recorded in the run rather than only in a comment, so it
     # reaches whoever reads the log rather than only whoever reads the source.
-    cannot "PCR 0 (the firmware CODE measurement) was not changed: that needs a second OVMF build differing ONLY in code, and this lab image ships none. It carries two 4M builds, OVMF_CODE_4M.qcow2 and OVMF_CODE_4M.secboot.qcow2, but they differ in Secure Boot enforcement as well as in code, so swapping them would conflate 'the firmware changed' with 'Secure Boot was turned off'. A dbx update moves PCR 7, the Secure Boot POLICY register, and not PCR 0."
+    # PCR 0 is not this scenario's subject and never was: a dbx update moves
+    # PCR 7, the Secure Boot POLICY register. Which register was NOT exercised
+    # is said in the run rather than only in a comment, so it reaches whoever
+    # reads the log — and it now names the scenario that does exercise it
+    # instead of describing a limit as though nothing could be done about it.
+    cannot "PCR 0 (the firmware CODE measurement) was not changed by this scenario: a dbx update moves PCR 7, the Secure Boot POLICY register, and not PCR 0. Moving PCR 0 needs a second OVMF build differing ONLY in code, which this lab image does not ship — its OVMF_CODE_4M.qcow2 and OVMF_CODE_4M.secboot.qcow2 are one edk2 revision built with and without Secure Boot enforcement. The luks-firmware-code scenario does it with a second build supplied through \$APEX_BOOTLAB_FW_ALT."
     info "pcr11 stayed $pcr11_a across the whole scenario"
+}
+
+# ── the firmware CODE changes: PCR 0 ────────────────────────────────────────
+#
+# THE LIMIT THIS SCENARIO EXISTS TO REMOVE. luks-firmware-change moves PCR 7,
+# the Secure Boot POLICY register, with Fedora's real revocation list, and ends
+# by recording in the run that PCR 0 — the firmware CODE measurement — was not
+# moved, because moving it needs two firmware images differing in code and in
+# nothing else, and the lab image ships one edk2 revision.
+#
+# One build supplied from outside removes exactly that limit and nothing else:
+# $APEX_BOOTLAB_FW_ALT. The shape here is the PCR 7 scenario's on purpose —
+# learn the value, bind a control volume to it BY VALUE, change the thing,
+# require opposite outcomes in one boot — so the two read as one argument about
+# two registers rather than as two unrelated experiments.
+#
+# DIRECTION: THE OLDER FIRMWARE FIRST. Boots A and B run the supplied build and
+# boot C runs the one the lab image ships, so what is under test is a firmware
+# UPDATE — L-001's word, and the event a user actually meets. It also leaves
+# the run standing on the same firmware as every other scenario here.
+#
+# THE SUPPLIED BUILD IS NOT TRUSTED, and two of its properties are established
+# before any conclusion rests on it:
+#
+#   * it is a DIFFERENT edk2 revision, read out of the binary rather than off
+#     the filename. This unit's own scratch directory holds the trap: a build
+#     with Secure Boot and SMM compiled out, saved as `OVMF_CODE_4M.secboot.fd`.
+#   * it ENFORCES Secure Boot, proved the only way that means anything — an
+#     unsigned UKI is booted under it and the firmware must refuse. Without
+#     that, a build with SECURE_BOOT_ENABLE compiled out would move PCR 0
+#     (different code, so it must) and this scenario would report "a firmware
+#     update did not break the policy" about a firmware that had stopped
+#     checking signatures at all.
+#
+# WHAT IT STILL IS NOT. An OVMF binary swap is not a vendor UEFI capsule: no
+# microcode, no ACPI tables, no option ROMs, no management engine. It moves the
+# register a capsule moves, which is what APEX's policy has to survive, and the
+# write-up in docs/boot-v2.md says so rather than letting this scenario imply
+# otherwise.
+scenario_luks_firmware_code() {
+    log "luks-firmware-code: the firmware CODE changes (PCR 0); the PCR 11 policy must not care"
+    luks_require_root
+
+    # ── the second firmware build ──────────────────────────────────────────
+    # Three ways to not have one, and they are different facts about the run.
+    local alt="" rc_alt=0
+    alt="$(ovmf_code_alt)" || rc_alt=$?
+    local howto="Supply one with APEX_BOOTLAB_FW_ALT=<path to a 4 MB Secure Boot OVMF_CODE, .fd or .qcow2> — a DIFFERENT edk2 revision from the lab image's. Fedora's older build works and is what this was measured with: fetch edk2-ovmf-20250812-18.fc43.noarch.rpm from Koji, extract usr/share/edk2/ovmf/OVMF_CODE_4M.secboot.qcow2 (sha256 37e9fe553ee3a002f117fa92b41e17a64775ce7de29a3a845b724772fe8e14ac), whose raw conversion is sha256 7c9dd1fe76a922a0a36f943ea77c33ffd4b9ee2c548d563654d727e344b1931f."
+    case "$rc_alt" in
+        0) ;;
+        1) cannot "PCR 0 was not exercised: no second firmware build was named. $howto"; return ;;
+        2) cannot "PCR 0 was not exercised: APEX_BOOTLAB_FW_ALT='${APEX_BOOTLAB_FW_ALT:-}' is not a file. $howto"; return ;;
+        *) cannot "PCR 0 was not exercised: APEX_BOOTLAB_FW_ALT='${APEX_BOOTLAB_FW_ALT:-}' could not be converted to a raw image. $howto"; return ;;
+    esac
+
+    local def id_alt id_def
+    def="$(ovmf_code_secboot)"
+    id_alt="$(ovmf_build_id "$alt")"
+    id_def="$(ovmf_build_id "$def")"
+    if [[ -z "$id_alt" || -z "$id_def" ]]; then
+        # Never a failure: an unidentifiable firmware has disproved nothing
+        # about APEX. It has, however, made the experiment unreadable.
+        cannot "PCR 0 was not exercised: no edk2 revision string could be read out of $(basename "$alt") ('${id_alt:-<none>}') or $(basename "$def") ('${id_def:-<none>}'), so 'two different builds' could not be established from the binaries"
+        return
+    fi
+    if [[ "$id_alt" == "$id_def" ]]; then
+        bad "both firmware images are the same edk2 revision ($id_def) — a PCR 0 change measured across them would be measuring something other than the firmware code"
+        return
+    fi
+    ok "two distinct edk2 revisions: $id_alt (supplied) and $id_def (lab image)"
+
+    # ── and the supplied one really enforces Secure Boot ───────────────────
+    fixtures
+    mkuki "$WORK/uki-unsigned-altfw.efi" unsignedaltfw --unsigned
+    if sbverify --cert "$KEYS/sb/cert.pem" "$WORK/uki-unsigned-altfw.efi" >/dev/null 2>&1; then
+        bad "the 'unsigned' UKI verifies against the APEX certificate — the Secure Boot check on the supplied firmware is void"
+        return
+    fi
+    ok "the unsigned UKI does not verify against the APEX certificate"
+    local fail_before="$BOOTV2_FAIL"
+    negative_boot unsigned-altfw "$WORK/uki-unsigned-altfw.efi" --code "$alt"
+    if (( BOOTV2_FAIL > fail_before )); then
+        bad "the supplied firmware $id_alt did not refuse an unsigned UKI, so it is not enforcing Secure Boot: every result below would confound 'the code changed' with 'the checking stopped'"
+        return
+    fi
+    ok "the supplied firmware $id_alt enforces Secure Boot"
+
+    luks_enroll fwc || return
+    luks_hook "$WORK/luks-hook-fwc.cpio" yes
+    luks_uki fwc "$KEYS/pcr/key.pem" "$WORK/luks-hook-fwc.cpio" \
+        "apex.bootlab.luks=fwc apex.bootlab.control=1" || return
+
+    # ── boot A on the SUPPLIED firmware: learn PCR 0 ───────────────────────
+    # Same reasoning as the PCR 7 control: a bare --tpm2-pcrs=0 seals to what
+    # the TPM holds at ENROLMENT time, which on a freshly started emulator is
+    # unmeasured, so the control would refuse before anything changed and would
+    # look like a working control while proving nothing.
+    local rc ser
+    rc="$(luks_boot fwc --code "$alt")"; ser="$WORK/serial-luks-fwc.log"
+    assert_eq 0 "$rc" "baseline on $id_alt: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has "$ser" "APEX-BOOTLAB: control-unlock=<no /dev/vdc attached>"
+    local pcr0_a pcr7_a pcr11_a
+    pcr0_a="$(luks_serial_field "$ser" pcr0)"
+    pcr7_a="$(luks_serial_field "$ser" pcr7)"
+    pcr11_a="$(luks_serial_field "$ser" pcr11)"
+    if luks_pcr_is_real "$pcr0_a"; then
+        ok "the guest reported a real PCR 0 ($pcr0_a)"
+    else
+        bad "PCR 0 is absent or all zeros ('$pcr0_a') — a by-value control cannot be sealed to it"
+        return
+    fi
+    cp "$ser" "$WORK/serial-luks-fwc-learn.log"
+
+    # ── the control volume, bound BY VALUE to that PCR 0 ───────────────────
+    # Built here rather than through apex-luks-enroll for the same reason the
+    # PCR 7 control is: that script refuses anything but the APEX shape, and it
+    # should keep refusing. No recovery key either — a fallback would hide the
+    # refusal that is the entire point of the instrument.
+    local ctl="$WORK/luks-fwc-control.img"
+    rm -f "$ctl"
+    truncate -s 32M "$ctl"
+    printf '%s' apex-bootlab-passphrase | cryptsetup luksFormat --type luks2 \
+        --batch-mode --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
+        --label APEXCTLLAB "$ctl" - >/dev/null 2>&1 \
+        || { bad "could not create the by-value control volume"; return; }
+    local pcr0_lc; pcr0_lc="$(tr 'A-F' 'a-f' <<<"$pcr0_a")"
+    if swtpm_session "$LUKS_STATE" ctl-enrol bash -c '
+            PASSWORD=apex-bootlab-passphrase systemd-cryptenroll \
+                --tpm2-device="$SWTPM_TCTI" \
+                --tpm2-pcrs="0:sha256=$1" \
+                "$2" >/dev/null 2>&1' _ "$pcr0_lc" "$ctl"; then
+        ok "control volume enrolled, bound BY VALUE to PCR 0=$pcr0_lc"
+    else
+        bad "could not enrol the by-value control volume — without it the firmware change proves nothing"
+        return
+    fi
+
+    # ── boot B, still on the supplied firmware: both unlock ────────────────
+    rc="$(luks_boot fwc --code "$alt" --extra-disk "$ctl")"; ser="$WORK/serial-luks-fwc.log"
+    assert_eq 0 "$rc" "control check on $id_alt: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has "$ser" "APEX-BOOTLAB: control-unlock=SUCCESS"
+    local pcr0_b pcr7_b pcr11_b
+    pcr0_b="$(luks_serial_field "$ser" pcr0)"
+    pcr7_b="$(luks_serial_field "$ser" pcr7)"
+    pcr11_b="$(luks_serial_field "$ser" pcr11)"
+    cp "$ser" "$WORK/serial-luks-fwc-before.log"
+
+    # ── boot C: THE FIRMWARE UPDATE. Only the control may break. ───────────
+    # No --code, so this is the lab image's own firmware. The varstore is a
+    # fresh copy of the same template as the two boots above, so the Secure
+    # Boot keys, SecureBootEnable and dbx are identical and the only thing that
+    # differs between boot B and boot C is the firmware binary.
+    rc="$(luks_boot fwc --extra-disk "$ctl")"; ser="$WORK/serial-luks-fwc.log"
+    assert_eq 0 "$rc" "after the firmware update to $id_def: clean guest poweroff"
+    local pcr0_c pcr7_c pcr11_c
+    pcr0_c="$(luks_serial_field "$ser" pcr0)"
+    pcr7_c="$(luks_serial_field "$ser" pcr7)"
+    pcr11_c="$(luks_serial_field "$ser" pcr11)"
+
+    # 1. The firmware code really moved, measured by the firmware itself.
+    if [[ -n "$pcr0_b" && -n "$pcr0_c" && "$pcr0_b" != "$pcr0_c" ]]; then
+        ok "PCR 0 changed across the firmware update ($pcr0_b -> $pcr0_c)"
+    else
+        bad "PCR 0 did not change ('$pcr0_b' -> '$pcr0_c') — the firmware code change was not measured, so nothing below is meaningful"
+        return
+    fi
+    # 2. And the UKI did not, so the two are isolated.
+    if [[ -n "$pcr11_b" && "$pcr11_b" == "$pcr11_c" ]]; then
+        ok "PCR 11 is unchanged, so the only thing that moved is the firmware code"
+    else
+        bad "PCR 11 moved too ('$pcr11_b' -> '$pcr11_c') — the firmware change was not isolated"
+    fi
+    # 3. PCR 7 IS REPORTED AND ASSERTED ON BY NOBODY. Whether two edk2
+    #    revisions measure the same Secure Boot policy into PCR 7 is a fact
+    #    about edk2, not about APEX: if it moved, that is a real finding about
+    #    what a vendor firmware update does to a by-value PCR 7 binding, and it
+    #    belongs in the log rather than in a verdict this scenario is not
+    #    entitled to reach. The control here is bound to PCR 0 alone, so its
+    #    refusal below is attributable either way.
+    if [[ "$pcr7_b" == "$pcr7_c" ]]; then
+        info "pcr7 is identical across the two edk2 revisions ($pcr7_c)"
+    else
+        info "pcr7 ALSO moved across the two edk2 revisions ($pcr7_b -> $pcr7_c): same varstore, same keys, different firmware — a by-value PCR 7 binding would break on a firmware update too"
+    fi
+    # 4. THE RESULT. Opposite outcomes, same boot, same TPM.
+    assert_serial_has  "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has  "$ser" "APEX-BOOTLAB: control-unlock=REFUSED"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: control-unlock=SUCCESS"
+    # 5. Still the same volume, still decrypting. The marker was written on
+    #    boot A, through the TPM path, under the OTHER firmware.
+    assert_serial_has "$ser" "APEX-BOOTLAB: plaintext-marker=found"
+    cp "$ser" "$WORK/serial-luks-fwc-after.log"
+
+    info "pcr0 went $pcr0_a -> $pcr0_b (unchanged, same firmware) -> $pcr0_c"
+    info "pcr11 stayed $pcr11_a across the whole scenario"
+    # The honest boundary of what was just shown, in the run and not only here.
+    cannot "this was an OVMF binary swap, not a vendor UEFI capsule: no microcode update, no ACPI table change, no option ROM and no management-engine firmware moved with it. It changes the register a capsule changes, on an emulated TPM."
 }
 
 # ── suspend to RAM with the volume open ─────────────────────────────────────
