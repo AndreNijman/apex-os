@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-19 03:37 AWST
+APEX ROADMAP — resume report — 2026-09-19 03:41 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,28 +16,23 @@ APEX ROADMAP — resume report — 2026-09-19 03:37 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p2-f       ALIVE      P2-016,P2-017,P2-018,P2-019        task/p2-f-6
-             head a4907070 fix(secretd): a gate comment that credited it with a 
-             dirty 0 file(s), 0 unpushed, card 0m
-             NEXT **ROUND 31 IS COMPLETE ON THE BRANCH. Four commits pushed on `task
-
   p2-b       ALIVE      P2-003,P2-004                      task/p2-b-round31
              head 6c277ac test(rtl): the platform theme is the carrier, not the 
-             dirty 0 file(s), 0 unpushed, card 8m
+             dirty 3 file(s), 0 unpushed, card 3m
              NEXT **Round 31, in progress.** Branches cut and pushed empty in both r
+
+  p2-f       ALIVE      P2-016,P2-017,P2-018,P2-019        task/p2-f-7
+             head a4907070 fix(secretd): a gate comment that credited it with a 
+             dirty 0 file(s), ? unpushed, card 4m
+             NEXT **ROUND 31 IS COMPLETE ON THE BRANCH. Four commits pushed on `task
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip da6fc0fb Merge task/p2-d-6 into roadmap/v2.2
+  int-os:  tip bb229745 Merge task/p2-f-6 into roadmap/v2.2
     task/p2-b-round31
       43ffce13 test(rtl): guard link 4 — the library that actually loads the   [1/10 added lines on tip]
-    task/p2-f-6
-      25ce55ec feat(secretd): an msgraph provider, so a Microsoft token can    [3/10 added lines on tip]
-      0ae35a7c feat(account): microsoft's files.read names an operation that   [3/10 added lines on tip]
-      f6643031 test(accounts): the msgraph scope through the real daemon, an   [0/10 added lines on tip]
-      a4907070 fix(secretd): a gate comment that credited it with a property   [0/10 added lines on tip]
 
   int-shell:  tip f068f24 Merge task/p0-015-repump into roadmap/v2.2
     task/p2-b-round31
@@ -61,11 +56,11 @@ APEX ROADMAP — resume report — 2026-09-19 03:37 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 30s Sat 2026-09-19
+  snapshot timer: active   last 1min 41s Sat
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    445dcd1  roadmap-state
+    apex-os    0b342a2  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -88,7 +83,7 @@ APEX ROADMAP — resume report — 2026-09-19 03:37 AWST
     apex-os    162d6fa  wt-p0-009-
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
-    apex-shell e09d218  apex-shell-
+    apex-shell ddf563d  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-
