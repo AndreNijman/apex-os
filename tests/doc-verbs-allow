@@ -25,4 +25,8 @@ apex fleet
 apex fleet join
 apex fleet leave
 apex fleet status
+# The design's own test-shaped guarantee: "the client must be able to print
+# exactly what it would send without sending it, the way `apex channel report`
+# does today. `apex fleet report --dry-run` is that verb."
+apex fleet report
 
