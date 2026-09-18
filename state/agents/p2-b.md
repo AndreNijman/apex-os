@@ -56,8 +56,11 @@ trap shape on purpose.
 
 ## IN PROGRESS
 
-Nothing. Both worktrees clean, all four commits pushed, three CI runs read, both
-roadmap items' evidence written and re-parsed with every earlier round intact.
+Round 31. The measurement is done and is in
+`scratch-p2-b/round31/tree-recovery-{before,after,reset-open}.txt` with the
+probe that produced it (`probe-recovery.sh`) and the three `apex` fixtures.
+Next: the QML markup, then the two suite pairs. Nothing committed yet.
+
 
 ## DONE
 
@@ -493,6 +496,51 @@ than this branch.
     INT TERM` shape and is deliberately NOT changed on this branch — changing
     it means re-running eleven full bring-ups to prove a change nobody has
     measured a failure from. Whoever touches it next should fix it then.
+
+25. **The RECOVERY page has ZERO `Accessible.*` in 892 lines, and the
+    consequence measured over real AT-SPI is worse than "unlabelled": the
+    entire factory-reset evidence surface is INVISIBLE and its commit button
+    DOES NOT EXIST on the bus.** Measured 2026-09-19 with round 30's shim, a
+    private headless labwc, private session and a11y buses, the shipped
+    `shell.qml`, and an `apex` stub answering `recover status --json`,
+    `doctor --json` and `recover reset --scope desktop --json` from the
+    captured fixtures `tests/recovery-test.js` already carries. Control in the
+    same run: **1 node before the factory install, 42 after.** The shell log
+    confirms the page had real data —
+    `RecoveryService: 8 component row(s) - 1 needing attention; doctor: 6 of 7
+    pass, 1 to read`. What reached the bus:
+
+    * The shared `Cfg*` controls, correctly: `Re-check`, `Check`, `Open`, the
+      two scope radio buttons, `Show what would be lost`, and the four `CfgRow`
+      labels, each with its description and a `Press`/`SetFocus` action.
+    * **Nothing page-specific at all.** Not the headline status line
+      ("1 component needs attention"), not one of the 8 component rows, not one
+      of the 6 recovery routes, not one of the 7 doctor checks, not one section
+      title.
+    * **`Accessible.onPressAction` really drives it**: `atspi-walk.py
+      --do-action Open` returned True and the button's name flipped `Open` →
+      `Close` on the next dump, so the disclosure genuinely opened over the
+      bus. Then `--do-action "Show what would be lost"` also returned True —
+      and the tree was **byte-identical apart from that one Open/Close word**.
+      The dry run ran, the loss list rendered, and a screen reader learned
+      NOTHING: no row, no count, no "NOT backed up" flag, and no
+      `Erase N item(s) now` button, because that button is a bare
+      `Rectangle` + `MouseArea` with no role, no name, no action and no key
+      handling. So the most destructive verb in the product is, for a reader,
+      a path that can be walked three steps and then dead-ends with no
+      information — and for a keyboard user it cannot be pressed at all, while
+      every SAFE control on the page can be.
+    * Structural, and not specific to this page: the Nexus frame's children are
+      **FLAT at one depth and mix several pages' controls** — `bg`, `accent`,
+      `Rescan`, `tonal-spot`, `Night light`, `Temperature`, `Corner radius` are
+      Colour/Display page controls sitting beside Recovery's. There is no page
+      boundary and no heading, so a reader cannot tell which page is open.
+      `showing,visible` does not separate them either: only `Re-check` and a
+      scroll bar carry it, because everything else is below the fold in a
+      1280x720 window — the same state that would mean "on another page".
+    * Three of quickshell's five top-level windows publish a frame with ZERO
+      children (TopBar and the borders), which is the other half of FOUND 21's
+      unexplained empty frames: they have no `Accessible.*` either.
 
 ## BLOCKED ON
 

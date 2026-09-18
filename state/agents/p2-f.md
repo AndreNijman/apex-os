@@ -6,10 +6,34 @@ branch: task/p2-f-6   (cut from origin/roadmap/v2.2 @ f40ffefe, which is round 3
           task/p2-f-5 landed; nothing of this unit's is unlanded)
 
 ## NEXT
-**ROUND 31 IN PROGRESS. Commit 1 pushed: `25ce55ec`, the `msgraph` transport.**
+**ROUND 31 IN PROGRESS. Two commits pushed on `task/p2-f-6`:**
+  `25ce55ec`  the `msgraph` transport
+  `0ae35a7c`  `files.read -> msgraph.file.read`, `Files.Read` at the sign-in,
+              and the "providers with nothing grantable" set turned from a
+              vacuous loop into the positive claim that it is EMPTY
 
-**NEXT ACTION: commit 2 — the vocabulary, and it must land as ONE commit or an
-intermediate is red.** In `apexd/apex-secret-core/src/account.rs`: `GRAPH_SCOPES`
+**NEXT ACTION: commit 3 — the shell section in `tests/test-secret-broker.sh`,
+modelled on the `a Google account's grantable scope` section at ~line 645.**
+Add `a Microsoft account's grantable scope`: `apex account scopes microsoft`
+lists `files.read` and `msgraph.file.read`; `apex account grant
+microsoft.<name> files.read` is accepted and `apex secret grants` shows the
+CANONICAL `msgraph.file.read` (google->gdrive vs microsoft->msgraph makes each
+the other's routing control, which is the replacement for the control the
+commit below deleted); and a credential pinned to 127.0.0.1 is refused by the
+SHIPPED binary naming `graph.microsoft.com`, which proves `MsgraphProvider::at`
+is not in it. `grep <<<` not `printf | grep -q` — 141 on a match under
+pipefail. Then: rebuild, re-run the full gate set, and set-status on P2-017.
+
+**A CONTROL WEAKENED and it must be said in the commit, not papered over:**
+the existing google section asserts `! grep 'no grantable scopes'`, whose
+witness was `apex account scopes microsoft` printing exactly that. After
+`0ae35a7c` nothing in the suite emits that string, so that one negative now
+passes on any build. Either drop it or leave a comment saying the positive
+assertion beside it carries the claim.
+
+--- superseded, kept for the record ---
+**Commit 2 — the vocabulary, and it must land as ONE commit or an
+intermediate is red.** DONE as `0ae35a7c`. In `apexd/apex-secret-core/src/account.rs`: `GRAPH_SCOPES`
 gains `Scope { name: "files.read", operation: "msgraph.file.read", effect:
 Read, summary: ... }`; `MICROSOFT_OAUTH.scopes` gains `Files.Read`. In BOTH
 crates the `empty` assertion (`account.rs`'s
@@ -123,6 +147,18 @@ Remaining, in the order this round takes them:
 
 ## DONE
 Round 10 (round 31 of the program), on task/p2-f-6:
+  0ae35a7c  `GRAPH_SCOPES` gains `files.read`, `MICROSOFT_OAUTH.scopes` gains
+            `Files.Read`, and the vacuous loop the card predicted got a
+            deliberate answer rather than a quiet pass: BOTH crates' `empty ==
+            ["microsoft"]` assertions become `assert!(empty.is_empty())` — the
+            positive claim — and `apex-secretd`'s gains a second half an
+            empty-set assertion cannot make, that every provider was actually
+            VISITED. `NoScopesYet` and `spend_advice`'s empty branch are KEPT
+            and held to a `static NO_SCOPES: Provider` constructed in each
+            test, each with a control. 8 mutations, all red, run
+            `--workspace --no-fail-fast`; the one that matters is "a sixth
+            provider with no scopes", which reddens both crates' emptiness
+            assertions. Workspace 3299 -> 3323 / 0 / 2; clippy exit 0.
   25ce55ec  **the `msgraph` transport** — the last of P2-017's five providers
             to get one. gdrive's shape, with one real difference: Graph's
             `/content` answers `302` with a PRE-AUTHENTICATED `Location` on
@@ -316,8 +352,8 @@ Round 3, on task/p2-f-3 (pushed):
             cross-crate gate in apex-secretd, both mutants run and red.
 
 ## IN PROGRESS (round 31)
-- `task/p2-f-6` cut from `roadmap/v2.2` @ `f40ffefe`. Commit 1 (`25ce55ec`)
-  pushed; worktree clean at it. Pristine copies of every mutated file are in
+- `task/p2-f-6` cut from `roadmap/v2.2` @ `f40ffefe`. Commits `25ce55ec` and
+  `0ae35a7c` pushed; worktree clean at the tip. Pristine copies of every mutated file are in
   `/var/tmp/apex-work/scratch-p2-f/round31/*.orig`, and the mutation harness
   that produced the 16 red is `mutate.py` + `mut_c1.py` in that directory.
 - set-status.py has NOT been called yet this round. When it is, it is P2-017
