@@ -38,8 +38,10 @@ refusal, before locking anything.
 
 ## IN PROGRESS
 
-Nothing. Both worktrees clean, both branches pushed, both repos merged up to
-`roadmap/v2.2` (apex-os `266dcc57`, apex-shell `b7953e4`).
+Nothing. Both worktrees clean, both branches pushed. apex-os
+`task/p2-b-round23` is fast-forwarded to `roadmap/v2.2`'s tip `7548df46` and
+carries no commits of its own; apex-shell `task/p2-b-round23` is `9fe5e2a`, SEVEN
+commits on top of `roadmap/v2.2`'s `b7953e4`, awaiting a landing.
 
 ## DONE
 
@@ -51,10 +53,11 @@ and now carries the markup, its suite (`tests/check-lockscreen-a11y.sh`, 33/0/0)
 and its mutation pair (`tests/mutate-lockscreen-a11y.sh`, 24 mutants: 20 red
 CAUGHT / 0 SURVIVED / 0 MISSCORED, 4 green HELD / 0 FALSE-RED), both wired into
 `.github/workflows/ci.yml` and all three files added to the structure-check
-REQUIRED list. Six commits: `0b6845f` the suite landed red first, `3abfb32` the
-markup plus the two extractor defects running it exposed, `e38eb9b` the
+REQUIRED list. Seven commits: `0b6845f` the suite landed red first, `3abfb32`
+the markup plus the two extractor defects running it exposed, `e38eb9b` the
 comments-blanked value copy, `2239484` the mutation pair and the CI wiring,
-`170890c` the git-free restore, `a869a7d` the two things only the runner said.
+`170890c` the git-free restore, `a869a7d` the two things only the runner said,
+`9fe5e2a` the RTL packages recorded as necessary-and-not-sufficient.
 
 ## FOUND (still true; do not re-derive)
 
@@ -162,8 +165,8 @@ been since it landed**, proven not to be any branch's doing by a control run on
 `roadmap/v2.2` (35351740747) with identical totals. Section 1 cannot produce an
 RTL application direction there. `qt6ct` was genuinely absent and the step now
 installs it; `qt6-translations` was ALREADY present at 6.11.2 — and it is STILL
-17/3/2 (35352450127), so those two were necessary and not sufficient and the
-cause is NOT yet identified. Unruled-out candidates: the runner is Qt 6.11.2
+17/3/2 (35352450127, and again on the branch tip in 35353034100), so those two
+were necessary and not sufficient and the cause is NOT yet identified. Unruled-out candidates: the runner is Qt 6.11.2
 against this laptop's 6.10.3, and its qt6ct has no `/etc/xdg/qt6ct/qt6ct.conf`,
 which APEX ships. **Do not close it by making section 1 SKIP** — that section
 IS the discriminator. locale: deliberately NOT offered — image ships
