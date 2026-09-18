@@ -185,7 +185,45 @@ EOF
 
     # ── the private a11y bus ────────────────────────────────────────────────
     # Directly, NOT by activation. See the header.
-    "$ATSPI_BUS_LAUNCHER" >"$ATSPI_W/launcher.out" 2>"$ATSPI_W/launcher.err" &
+    #
+    # GSETTINGS_BACKEND=memory, and it is load-bearing rather than tidiness.
+    #
+    # at-spi-bus-launcher owns the org.a11y.Status properties this file sets a
+    # few lines below, and it does not hold them in a variable: it backs them
+    # with the GSettings key org.gnome.desktop.interface toolkit-accessibility.
+    # With the default dconf backend, WRITING that key needs the
+    # ca.desrt.dconf.Writer service — which cannot be activated here, because
+    # the private session bus above is deliberately given an EMPTY service
+    # directory. The write is then dropped and the D-Bus Set still returns
+    # success, so the properties read back false and Qt's bridge publishes
+    # nothing at all.
+    #
+    # Measured on a booted APEX desktop, 2026-09-18, with a private HOME (the
+    # one apex-shell's tests/lib/headless.sh creates, which has no dconf
+    # database):
+    #
+    #     dconf backend : Set IsEnabled <true> -> () ... GetAll -> false, false
+    #     memory backend: Set IsEnabled <true> -> () ... GetAll -> true, true
+    #
+    # The failure mode is the dangerous one. An empty accessibility tree looks
+    # exactly like a surface with no markup, so a suite built on the first line
+    # reports "this surface publishes nothing" and is believed.
+    #
+    # Scoped to the launcher on purpose: it is the only process whose GSettings
+    # backend these properties depend on, and the application under test keeps
+    # whatever backend it would really have. The memory backend starts from the
+    # schema default (false) and accepts the write, which is also strictly more
+    # hermetic than reading — or writing — the dconf database of whoever is
+    # logged in.
+    #
+    # It is a no-op where gsettings-desktop-schemas is absent, as in the bare
+    # fedora:43 container CI runs: with no schema the launcher keeps the value
+    # internally and the write always worked. That is why this was invisible
+    # until a suite ran the stack against a private HOME on a desktop machine.
+    #
+    # The copy of this file in apex-shell carries the same fix. FIX BOTH.
+    GSETTINGS_BACKEND=memory \
+        "$ATSPI_BUS_LAUNCHER" >"$ATSPI_W/launcher.out" 2>"$ATSPI_W/launcher.err" &
     ATSPI_LAUNCHER_PID=$!
 
     local i raw=""
