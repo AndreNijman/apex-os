@@ -17,23 +17,30 @@ pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 
 ## NEXT
 
-**Measure FOUND 20** (the named cause, read out of source this round and NOT yet
-measured): build `/var/tmp/apex-work/scratch-p2-b/round30/repro.cpp` — one
-binary, two modes under `QT_QPA_PLATFORM=offscreen`, mode A `new QCoreApplication
--> delete -> new QGuiApplication -> QQuickWindow`, mode B the same without the
-delete — and print `QQuickWindow::accessibleRoot()` in each. A null root in A and
-a non-null root in B is the whole proof. Then confirm it in the real process with
-an `LD_PRELOAD` that interposes `QGuiApplication::exec()` (exported, called
-through quickshell's PLT), re-installs a `"QQuickWindow"` factory returning
-`new QAccessibleQuickWindow(w)` (`_ZN22QAccessibleQuickWindowC1EP12QQuickWindow`
-is exported; the private header `/usr/include/qt6/QtQuick/6.10.3/QtQuick/private/
-qaccessiblequickview_p.h` IS installed so it can be compiled against normally),
-and then walk the tree with the round-29 harness.
+**Confirm FOUND 20 inside the real quickshell process**, then land it. Build
+`/var/tmp/apex-work/scratch-p2-b/round30/shim.cpp` as an `LD_PRELOAD` that
+interposes `QGuiApplication::exec()` (`_ZN15QGuiApplication4execEv`, `U` in
+`nm -D /usr/bin/quickshell`, so interposable; it MUST tail-call the real one via
+`dlsym(RTLD_NEXT, ...)` because `QGuiApplication::exec()` is what calls
+`QAccessible::setRootObject(qApp)`). Before installing, log
+`queryAccessibleInterface(w)` for each `QGuiApplication::topLevelWindows()` entry
+(expect NULL) — that is the direct in-process read of the empty factory list,
+which cannot be read any other way because the `Q_GLOBAL_STATIC` is not
+exported. Then install a factory covering `"QQuickWindow"`, `"QQuickItem"` and
+`"QQuickTextEdit"` (all three ctors are exported from libQt6Quick — window-only
+would give a frame with zero children and read as a false negative, because
+`QAccessibleQuickWindow::child()` re-enters `queryAccessibleInterface` for the
+root items), log again (expect NON-NULL), and walk the tree with the round-29
+harness. Scope the preload to the quickshell command inside `atspi_run_app`, NOT
+to the whole session — otherwise labwc and `at-spi-bus-launcher` load libQt6Quick
+too.
 
 ## IN PROGRESS
 
-Round 30 has a **named cause for FOUND 14, read out of source and not yet
-measured** — see FOUND 20. Next step is the measurement that proves it.
+FOUND 14's cause is **found and measured** (FOUND 20, below). `repro.cpp` is
+built and run; it is not yet committed to a branch and the in-situ confirmation
+in the real quickshell process is not yet written. Nothing is committed this
+round yet — both round-30 branches are pushed and empty.
 
 ## DONE
 
@@ -234,28 +241,49 @@ than this branch.
     to be reported with the same words as an absent package. The list is now six
     entries wide in both copies and the refusal prints every path it tried.
 
-20. **NAMED CAUSE FOR FOUND 14, read out of source on 2026-09-19 and NOT YET
-    MEASURED — do not report it as measured until the repro in `## NEXT` runs.**
-    `QAccessible::installFactory` (qtbase `src/gui/accessible/qaccessible.cpp`)
-    registers `qAccessibleCleanup` as a `qAddPostRoutine`, and that routine does
-    `qAccessibleFactories()->clear()`. Post routines run from
-    `~QCoreApplication`. quickshell's `src/launch/main.cpp:127` creates a
-    `QCoreApplication` to parse the command line and `src/launch/launch.cpp:282`
-    then does `delete coreApplication;` immediately before
-    `new QGuiApplication(...)` — a comment at `src/core/logging.cpp:426` calls
-    that window out by name ("while the event loop is destroyed between
-    QCoreApplication delete and Q(Gui)Application launch"). So:
-    libQt6Quick's `Q_CONSTRUCTOR_FUNCTION(QQuick_initializeModule)` installs
-    `qQuickAccessibleFactory` at LOAD time, the first `QCoreApplication`'s
-    destructor CLEARS the whole factory list, and nothing re-installs it,
-    because a library constructor runs once per load. Every
-    `queryAccessibleInterface` after that walks the metaobject chain against an
-    EMPTY factory list, returns null, `accessibleRoot()` is null for every
-    window, and `QAccessibleApplication::childCount()` is 0. That is exactly
-    what the bus reports. It also explains why the `qml-qt6` control publishes a
-    tree in the same harness: it never destroys an application object.
-    `cleanupAdded` is a file-static bool that stays true, so the routine is not
-    even re-registered — the clear happens once and is permanent.
+20. **FOUND 14's CAUSE, MEASURED 2026-09-19: quickshell destroys a
+    `QCoreApplication` before it creates its `QGuiApplication`, and that
+    destruction CLEARS Qt's accessibility factory list for the rest of the
+    process's life.** Not reasoned — reproduced in a 140-line standalone binary,
+    `scratch-p2-b/round30/repro.cpp`, five modes, one process each, under
+    `env -i` + `QT_QPA_PLATFORM=offscreen`, no AT-SPI bus needed (the symptom is
+    visible in-process, before any bridge):
+
+    | mode | shape | `accessibleRoot()` | `queryAccessibleInterface(qApp)->childCount()` |
+    |---|---|---|---|
+    | A | `new QCoreApplication` → `delete` → `new QGuiApplication` (**quickshell**) | **NULL** | **0** |
+    | B | `new QGuiApplication` only (**`qml-qt6`**, the round-29 control) | NON-NULL, name `QTROOT` | 1 |
+    | C | A + our own factory installed from a `Q_CONSTRUCTOR_FUNCTION` (**the shape qtdeclarative uses**) | **NULL** | **0** |
+    | D | A + our own factory installed from `Q_COREAPP_STARTUP_FUNCTION` | NON-NULL, name `APEX-CUSTOM-ROOT` | 1 |
+    | E | A + our own factory installed by hand after `new QGuiApplication` | NON-NULL, name `APEX-CUSTOM-ROOT` | 1 |
+
+    The chain, each link now checked in source AND measured: qtbase
+    `QAccessible::installFactory` registers `qAccessibleCleanup` with
+    `qAddPostRoutine`, and `qAccessibleCleanup` does
+    `qAccessibleFactories()->clear()`; post routines run from
+    `~QCoreApplication`; qtdeclarative installs `qQuickAccessibleFactory` from
+    `Q_CONSTRUCTOR_FUNCTION(QQuick_initializeModule)`, i.e. **once per library
+    load**, so nothing re-installs it; quickshell's `src/launch/main.cpp:127`
+    constructs a `QCoreApplication` to parse the command line and
+    `src/launch/launch.cpp:282` does `delete coreApplication;` on the line
+    before `new QGuiApplication(...)`. A comment at
+    `src/core/logging.cpp:426` names that window explicitly ("while the event
+    loop is destroyed between QCoreApplication delete and Q(Gui)Application
+    launch"), so the destroy-and-recreate is deliberate.
+    **Mode C is the load-bearing one**: a factory installed exactly the way
+    qtdeclarative installs it is gone after the delete, which reads the cleared
+    list directly instead of inferring it. **Mode D is the fix**, measured:
+    `Q_COREAPP_STARTUP_FUNCTION` runs from `QCoreApplicationPrivate::init()` on
+    EVERY application object — the log shows it firing twice, once per app — and
+    its list is not cleared, so the factory comes back. So the one-line upstream
+    change is in **qtdeclarative**, `Q_CONSTRUCTOR_FUNCTION` →
+    `Q_COREAPP_STARTUP_FUNCTION` for the accessibility factory install;
+    quickshell's `delete coreApplication` is the trigger, not the defect, and
+    Qt Widgets is immune for the same reason mode D is (it installs its factory
+    from `QApplicationPrivate::initialize()`, per instance, not per load).
+    **Mode E is the shim** the `## NEXT` builds. `cleanupAdded` is a file-static
+    bool that stays true after the first install, so the post routine is not
+    even re-registered: the clear happens exactly once and is permanent.
 
 ## BLOCKED ON
 
