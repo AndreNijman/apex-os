@@ -4275,7 +4275,13 @@ tasks:
     11 applied / 8 CAUGHT / 0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE / 3 HELD / 0 FALSE-RED, identical to round
     29's ledger, finishing with "every file matches the sha256 it started with". The prose edit changed no
     assertion text and disturbed nothing. Recovery screen still unaudited; orca as the greetd user still needs
-    hardware.
+    hardware. FINAL TIP VERIFIED: CI run 35384106245 on 20a1613 - check-quickshell-a11y-cause.sh 14/0/0,
+    mutate-quickshell-a11y-cause.sh 13 applied / 11 CAUGHT / 0 SURVIVED / 2 HELD, run-lockscreen-atspi-shim.sh
+    0/0/1 (named no-quickshell refusal), mutate-lockscreen-atspi-shim.sh applied=0 via its baseline guard, Repo
+    Structure Sanity and NixOS both success, and the ONLY failing step in the job is run-rtl-test.sh at 17/3/2,
+    which predates this branch. Three CI runs on this branch now agree. apex-shell task/p2-b-round30 is four
+    commits (273c1fb, b01a276, 56d7521, 20a1613); apex-os task/p2-b-round30 is empty at 6b531503 and exists only
+    because apex-shell's CI matches on branch name.
 - id: P2-004
   title: Internationalisation baseline
   priority: P2

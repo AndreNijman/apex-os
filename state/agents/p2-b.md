@@ -17,12 +17,12 @@ pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 
 ## NEXT
 
-**Read CI run 35384106245 on `20a1613`, then this round is ready to land.**
-Expect the same shape as `35383306764`: green everywhere except
-`run-rtl-test.sh` at 17/3/2, which predates this branch. If that holds, add one
-line to P2-003's evidence and hand the round over — apex-shell
-`task/p2-b-round30` is four commits, apex-os `task/p2-b-round30` is empty at
-`6b531503`, and both are pushed.
+**This round is finished and ready to land — nothing is outstanding on it.**
+apex-shell `task/p2-b-round30` is four commits at `20a1613`, pushed; apex-os
+`task/p2-b-round30` is empty at `6b531503`, pushed. CI on that exact tip
+(**35384106245**) is green on everything except `run-rtl-test.sh` at 17/3/2,
+which predates this branch and is item 6 of the standing queue. Both items'
+evidence is written and re-parsed.
 
 The next substantive work on this unit, in order, is what the ledger already
 names. **(1) The RECOVERY screen** — the last unaudited a11y surface in P2-003,
@@ -40,20 +40,14 @@ discriminator.**
 
 **Not this unit's, and written down so it is not lost:** FOUND 22
 (`LockedHintService._failed()` never re-pumps) belongs with P0-015, and FOUND
-20's one-line upstream fix belongs to qtdeclarative — nobody has filed it. See
-BLOCKED ON. FOUND 24 leaves `tests/mutate-lockscreen-atspi.sh` with the old
+20's one-line upstream fix belongs to qtdeclarative — **nobody has filed it**.
+See BLOCKED ON. FOUND 24 leaves `tests/mutate-lockscreen-atspi.sh` with the old
 trap shape on purpose.
 
 ## IN PROGRESS
 
-One thing in flight: **CI run 35384106245** on the final tip `20a1613` (the
-trap fix). Expect what `35383306764` gave on `56d7521` — everything green
-except `run-rtl-test.sh` at 17/3/2, which predates this branch. The only step
-`20a1613` can affect is `Quickshell accessibility — cause mutation pair`, and
-it is 13 applied / 11 CAUGHT / 0 SURVIVED / 2 HELD here after the change.
-
-Otherwise nothing: both worktrees clean, all four commits pushed, both roadmap
-items' evidence written and re-parsed with every earlier round intact.
+Nothing. Both worktrees clean, all four commits pushed, three CI runs read, both
+roadmap items' evidence written and re-parsed with every earlier round intact.
 
 ## DONE
 
@@ -133,9 +127,9 @@ important one is the first:
   that never ran (FOUND 18 working as intended on the machine that taught it).
 * `run-lockscreen-atspi.sh` — 8/0/1, unchanged by `56d7521`'s prose edit.
 
-The final-tip run **35383306764** gives the identical five lines and the
-identical single red step, so the round lands green apart from a failure that
-is older than it.
+Runs **35383306764** (`56d7521`) and **35384106245** (the final tip `20a1613`)
+give the identical lines and the identical single red step, so the round lands
+green apart from a failure older than it.
 
 Round 29 (2026-09-18).
 

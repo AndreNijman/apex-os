@@ -1,40 +1,41 @@
 # p2-f
-items: P2-017, P2-018, P2-019  (P2-016 — see NOTE at the bottom, unchanged)
+items: P2-016, P2-017, P2-018, P2-019
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-p2-f
-branch: task/p2-f-5   (cut from origin/roadmap/v2.2 @ 6b531503, which is round 29's
-          task/p2-f-4 landed; nothing of this unit's is unlanded)
+branch: task/p2-f-6   (cut from origin/roadmap/v2.2 @ f40ffefe, which is round 30's
+          task/p2-f-5 landed; nothing of this unit's is unlanded)
 
 ## NEXT
-**ROUND 30 IS COMPLETE ON THE BRANCH. Three commits pushed on `task/p2-f-5`
-(cut from `roadmap/v2.2` @ `6b531503`):**
-  `9f8d2468`  the `gdrive` provider
-  `bdd9b51f`  `files.read -> gdrive.file.read`, `drive.file` at the sign-in,
-              and the three places that said a Google token can be spent on
-              nothing
-  `933bbee1`  the two things with no assertion behind them: `spend_advice`
-              (the `add` status line, previously an unreachable branch) and a
-              shell section that measures the grant THROUGH THE DAEMON and
-              proves the shipped binary has no `GdriveProvider::at`
-Worktree CLEAN at `933bbee1`, `git diff --exit-code` silent, all twenty
-mutations restored with plain `cp` and `cmp` silent.
+**ROUND 31 IN PROGRESS. Commit 1 pushed: `25ce55ec`, the `msgraph` transport.**
 
-**NEXT ACTION: `msgraph`. Copy `apexd/apex-secretd/src/providers/gdrive.rs`
-and its tests wholesale — the shape transfers exactly. Differences, all
-known: the account table fixes `microsoft` to `graph.microsoft.com` with path
-`/v1.0/me`; Graph's file content endpoint is
-`GET /v1.0/me/drive/items/{item-id}/content` (an ITEM id, still
-`ResourceKind::Name`), which redirects to a pre-authenticated download URL —
-so unlike Drive's `alt=media` this one has to decide what to do about
-`location`, and following a redirect that carries the Authorization header is
-the thing not to do; and `MICROSOFT_OAUTH` needs `Files.Read` added to its
-scopes for the same reason Google needed `drive.file`. Microsoft is a public
-client (`ClientSecret::None`), so unlike Google its refresh is expected to
-work on the client id alone. Then `GRAPH_SCOPES` gains `files.read ->
-msgraph.file.read` and `empty` in both crates becomes `[]` — at which point
-the "providers with nothing grantable" assertion needs a deliberate decision
-about what an empty set means there, because an empty `empty` is exactly the
-vacuous-loop shape this program hunts.**
+**NEXT ACTION: commit 2 — the vocabulary, and it must land as ONE commit or an
+intermediate is red.** In `apexd/apex-secret-core/src/account.rs`: `GRAPH_SCOPES`
+gains `Scope { name: "files.read", operation: "msgraph.file.read", effect:
+Read, summary: ... }`; `MICROSOFT_OAUTH.scopes` gains `Files.Read`. In BOTH
+crates the `empty` assertion (`account.rs`'s
+`a_provider_with_no_transport_yet_says_so_instead_of_listing_nothing` and
+`apex-secretd/src/providers/mod.rs`'s
+`every_account_scope_names_an_operation_some_provider_actually_offers`) becomes
+`assert!(empty.is_empty(), ...)` — the POSITIVE claim that every shipped
+provider has something grantable — because with msgraph landed the old
+`assert_eq!(empty, vec!["microsoft"])` loop iterates zero times and proves
+nothing. `NoScopesYet` and `spend_advice`'s empty branch stay, held to a
+`static NO_SCOPES: Provider` constructed in the test (both `Provider` and
+`AccountRef` have pub fields, so `AccountRef { provider: &NO_SCOPES, name }`
+works) rather than to a table row. Also add `checked > 0` to msgraph's
+`the_declaration_is_one_a_registry_will_take` (deliberately omitted in commit 1
+so commit 1 was green on its own — the same sequencing bdd9b51f used), fix
+`apex/src/account.rs`'s module note line 54, and `docs/online-accounts.md`
+lines ~191 and ~250.
+
+Then commit 3: the shell section in `tests/test-secret-broker.sh`. NOTE the
+control weakens — "a Microsoft account still has nothing grantable" was the
+witness for the google negative, and after commit 2 nothing in the suite emits
+"no grantable scopes". Replace with: unknown scope on microsoft refused with
+"has no scope"; `grant microsoft.x files.read` recorded canonically as
+`msgraph.file.read` (google->gdrive vs microsoft->msgraph makes each the
+other's routing control); a loopback-pinned Graph credential refused by the
+SHIPPED binary naming `graph.microsoft.com`.
 
 After that, in descending size: gvfs — **a design paragraph only**, and
 P2-019's three remaining unsettled entries, two of which depend on other
@@ -46,9 +47,7 @@ follow-up that needs no screen and no boot.
 watchdog.** Round 29 ran every command in `menu.xml` from inside the real
 session. What is left on P2-018 needs an image build and a real boot, which
 this unit cannot do, plus one thing that needs synthetic pointer input: the
-menu is never OPENED (right-click -> ShowMenu -> Execute is not driven). What
-IS proved is that every command the menu would run does run, and that labwc
-accepts every action the menu names.
+menu is never OPENED (right-click -> ShowMenu -> Execute is not driven).
 
 ## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
 1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
@@ -123,6 +122,26 @@ Remaining, in the order this round takes them:
   host to its token endpoint from a hard-coded table, which is pin-consistent.
 
 ## DONE
+Round 10 (round 31 of the program), on task/p2-f-6:
+  25ce55ec  **the `msgraph` transport** — the last of P2-017's five providers
+            to get one. gdrive's shape, with one real difference: Graph's
+            `/content` answers `302` with a PRE-AUTHENTICATED `Location` on
+            another host, and Microsoft's own page says that URL needs no
+            Authorization header. So the redirect is decided rather than
+            defaulted: curl is never told to follow anything, the download is
+            a SECOND `run_curl` whose configuration has nowhere to put a token,
+            one hop only, scheme-pinned in Rust and again by `proto`, and the
+            pre-authenticated URL comes back nowhere — `download_outcome`,
+            which composes every word that hop returns, is NOT GIVEN IT, and
+            curl's stderr is not carried on that hop at all. 23 tests against
+            TWO loopback doubles; the download double's header records are what
+            prove the token does not follow. 16 mutations, all red, all
+            restored with plain cp and cmp silent. TWO of them found real gaps
+            rather than confirming cover: the failure message was not carrying
+            the far side's body at all (so its scrub was dead AND the reason
+            was thrown away), and the write-out parser test used a TWO-line
+            input, where front-split and back-split agree.
+
 Round 9 (round 30 of the program), on task/p2-f-5, BOTH PUSHED:
   933bbee1  the two things in this round with NO assertion behind them, found
             by asking rather than by a failure. `apex account add`'s closing
@@ -296,17 +315,14 @@ Round 3, on task/p2-f-3 (pushed):
   c224eea7  a scope may not name an operation no provider offers — the
             cross-crate gate in apex-secretd, both mutants run and red.
 
-## IN PROGRESS (round 9 — FINISHED)
-- Worktree CLEAN at `933bbee1` on `task/p2-f-5`, pushed, cut from
-  `roadmap/v2.2` @ `6b531503`. Nothing half-written; `git diff --exit-code` is
-  silent and every mutated file was restored with plain `cp`, `cmp` silent.
-  Pristine copies of the mutated files are in
-  `/var/tmp/apex-work/scratch-p2-f/round30/*.orig` if anything needs checking.
-- set-status.py was called for **P2-017 only**, with the full stored text kept
-  verbatim and round 30 appended, then re-parsed to confirm rounds 1-29 are
-  still there.
-- P2-018 and P2-019 were NOT touched this round and set-status was
-  deliberately NOT called on them — it REPLACES evidence.
+## IN PROGRESS (round 31)
+- `task/p2-f-6` cut from `roadmap/v2.2` @ `f40ffefe`. Commit 1 (`25ce55ec`)
+  pushed; worktree clean at it. Pristine copies of every mutated file are in
+  `/var/tmp/apex-work/scratch-p2-f/round31/*.orig`, and the mutation harness
+  that produced the 16 red is `mutate.py` + `mut_c1.py` in that directory.
+- set-status.py has NOT been called yet this round. When it is, it is P2-017
+  ONLY, read-append-write-reparse. P2-016, P2-018 and P2-019 must not be
+  touched — set-status REPLACES evidence.
 
 ## ROUND 5 COMMIT SEQUENCE (settled with the advisor)
 1. ~~`supersedes_credentials` + the 64 `false` literals + the registry test~~
@@ -321,6 +337,26 @@ Round 3, on task/p2-f-3 (pushed):
 4. `apex cf refresh` + the `cloudflare.rs` status line + the step-7 answer.
 
 ## FOUND
+- **A consumer OneDrive item id is `{driveId}!{n}` and `valid_name` refuses
+  `!`.** Not recalled — read off Microsoft's `driveItem: content` page, whose
+  own example response is `{"id": "12319191!11919"}`. Work and school ids
+  (`01BYE5RZ...`) are unaffected, so `msgraph.file.read` works for those and
+  refuses a personal-account id with a message that names the rule. The shared
+  resource vocabulary was NOT widened for one provider; lifting this needs a
+  `ResourceKind` that percent-encodes.
+- **curl 8.15.0 does not forward a custom `Authorization` header across a PORT
+  change on loopback.** Measured, by mutating hop one to add `location` and
+  reading the download double's recorded headers. Recorded because it is what
+  the design refuses to rely on: the structural assertion went red anyway.
+- **A two-line input cannot tell `split_once` from `rsplit_once`.** A parser
+  test that feeds `"body\nSTATUS"` passes identically whichever end is read.
+  Both msgraph write-out parsers now get three-line inputs. Worth checking
+  wherever else this repository splits curl's `write-out` off the end.
+- **`gdrive`'s 401/404 failure path carries the far side's body; msgraph's
+  download hop did not, and nothing noticed** until the mutation that removed
+  its scrub came back GREEN — because there was nothing to scrub. A scrub
+  applied to a value that is then discarded is the silent half of the
+  gate-that-inspects-nothing family.
 - **xmllint and labwc do not agree about what a configuration is.** Both the
   shipped rc.xml (an empty `<theme><name>`) and a menu `<action>` whose name
   labwc does not have are WELL-FORMED XML that labwc rejects with an `[ERROR]`
