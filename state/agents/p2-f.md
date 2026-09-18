@@ -105,7 +105,13 @@ Remaining, in the order this round takes them:
   host to its token endpoint from a hard-coded table, which is pin-consistent.
 
 ## DONE
-Round 7 (round 28 of the program), on task/p2-f-3, ALL FIVE PUSHED:
+Round 7 (round 28 of the program), on task/p2-f-3, ALL SIX PUSHED:
+  8f60dd5e  removing an account that never had a refresh token is not a
+            failure — the commoner path the commit below left untested, which
+            rested on the daemon answering `NoSuchService` for a `Remove` of a
+            missing service. It does; now asserted end to end. Plus the
+            transport correction: `client_secret` goes on the poll only, which
+            is the only place either provider documents one.
   5e742f22  P2-019's transport and server-side design, the two gaps its own
             evidence said kept it partial. The transport is a POLL and
             `relay/` is not in the fleet path — a relay carrying fleet traffic
@@ -138,7 +144,10 @@ Round 7 (round 28 of the program), on task/p2-f-3, ALL FIVE PUSHED:
   eeaf08ac  `apex cf status` asks whether this project may actually renew,
             through `Grants::allows` over `Request::Grants` rather than a
             second copy of the daemon's rule.
-  Thirteen mutations run, all red, all restored byte-identical with plain cp.
+  Fifteen mutations run, all red, all restored byte-identical with plain cp,
+  plus one on `tests/doc-verbs-allow`'s new entry (removed, the gate exits 1).
+  tests/test-secret-broker.sh 66 -> 76 passed; tests/test-apex-verbs.sh 65/0
+  including its reverse pass.
   Workspace 3267 passed / 0 failed / 2 ignored; clippy exit 0; doc-verbs 191
   documented / 0 undocumented and undeclared; shellcheck coverage 165 / 0
   newly failing; suite coverage 75 / 71 in CI / 0 unrun and undeclared.
@@ -171,7 +180,7 @@ Round 3, on task/p2-f-3 (pushed):
             cross-crate gate in apex-secretd, both mutants run and red.
 
 ## IN PROGRESS (round 7 — FINISHED)
-- Worktree CLEAN at `5e742f22`, pushed, with `roadmap/v2.2` (`266dcc57`)
+- Worktree CLEAN at `8f60dd5e`, pushed, with `roadmap/v2.2` (`266dcc57`)
   merged in. Nothing half-written.
 - set-status.py was called for **P2-017 and P2-019**, both with the full text
   rewritten and the earlier rounds' evidence preserved (checked by re-parsing).

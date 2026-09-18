@@ -5078,11 +5078,11 @@ tasks:
     replaces BOTH the access credential and the rotated refresh), and Replaced carries value only - no host,
     scheme or username - so a refresh structurally cannot repoint a credential's pin. The oauth PROVIDER itself is
     the next commit and was still uncommitted in the worktree at landing time; it is snapshotted to refs/wip and
-    handed to round 27's fresh agent as its first action. ROUND 28 (2026-09-18), on task/p2-f-3, four commits
-    PUSHED, NOT yet merged: eeaf08ac, 202ee465, 5b153599, bda510ed. CRITERION 1'S OAUTH HALF IS BUILT. apex
-    account add google.work --client-id <id> runs RFC 8628 and files both halves; apex account refresh <account>
-    spends the refresh token through the oauth provider that landed in round 27. THE DEVICE GRANT MOVED out of
-    apex/src/cloudflare.rs into apex/src/oauth_device.rs and takes what varies as arguments:
+    handed to round 27's fresh agent as its first action. ROUND 28 (2026-09-18), on task/p2-f-3, five commits
+    PUSHED, NOT yet merged: eeaf08ac, 202ee465, 5b153599, bda510ed, 8f60dd5e. CRITERION 1'S OAUTH HALF IS BUILT.
+    apex account add google.work --client-id <id> runs RFC 8628 and files both halves; apex account refresh
+    <account> spends the refresh token through the oauth provider that landed in round 27. THE DEVICE GRANT MOVED
+    out of apex/src/cloudflare.rs into apex/src/oauth_device.rs and takes what varies as arguments:
     Endpoints::for_oauth(&OAuth) off the shared table, OAuthClient{id, secret}, the scope list, and Prompt{label,
     retry} so the printed line names a provider a person recognises and an expiry names the command they actually
     ran rather than apex cf connect. THREE INTEROP DEFECTS FIXED THAT NO LOOPBACK DOUBLE COULD HAVE CAUGHT,
@@ -5108,36 +5108,48 @@ tasks:
     does not parse as an account) and unreachable by rm (which refuses a name that is not one). Deriving it from
     the account is the only way in. That is criterion 3 failing in the direction that matters, and it is fixed
     with names_to_remove plus an end-to-end section in tests/test-secret-broker.sh (66 -> 73 passed, 0 failed)
-    because no Rust test can reach a removal: removing needs a daemon and a store, and that suite has both.
-    MUTATIONS, THIRTEEN, each restored byte-identical with plain cp and cmp silent. Four on the transport
-    (dropping the verification_url fallback, dropping the client_secret field, the cap back to 4096, sending
-    scope= unconditionally), each red on its own test alone. Six on the CLI (the client id replaced by the store
-    placeholder, the auth host replaced, a borrowed client id as fallback, the form-value check dropped, the
-    refresh Use aimed at the access credential, the refusal losing the account name). Two on removal: the
-    derivation returning the access name twice reddens the unit test, and rm not sending the second Remove takes
-    the shell suite to 71/2 and prints the path of the file left behind. One on the status line below. AN
-    ASSERTION FIXED WHILE PROVING IT: the access-token check grepped account.google.work unanchored, which matches
-    the .refresh line, so under the mutation it failed for the refresh token's absence rather than its own - the
-    right verdict off the wrong evidence. Anchored, the mutation reddens exactly the two assertions about the
-    refresh token. A STALE STATUS LINE FIXED (eeaf08ac): apex cf status printed 'renew without signing in again:
-    apex cf refresh' whenever a refresh token existed, and on every machine that had connected that named a
-    command about to be refused - a refresh is a Use, a Use needs a per-project grant, and apex cf connect
-    deliberately records none. It is four states now, decided by Grants::allows over Request::Grants (the daemon's
-    own rule, not a second copy), with --json gaining refresh_granted true/false/null. WHAT IS STILL NOT DONE,
-    STATED PLAINLY. A token stored this way can be spent on NOTHING: no gdrive or msgraph transport exists in
-    apex-secretd, so every scope these two providers list names an operation no provider offers, and the
-    cross-crate gate from c224eea7 refuses those grants - apex account add prints that instead of sending somebody
-    to a refusal they did not earn. Signing in, storing and renewing work end to end; USING is the next transport,
-    not the next flag. Microsoft should renew on the client id alone (ClientSecret::None, a public client); GOOGLE
-    IS NOT PROVEN - its guide lists client_secret as required on the poll and optional on the refresh, this build
-    stores no secret, and rather than hardcode a refusal off a doc reading that cannot be checked from a machine
-    with no Google account, the daemon lets the server answer: a non-2xx replaces nothing and returns Google's own
-    error_description. add says that at the time. STILL NOT BUILT: gvfs/file-manager integration. NOT VERIFIED:
-    nothing in this round has run against a real Google, Microsoft or Cloudflare endpoint - there is no account at
-    any of them on this machine and every test is against a loopback double; and the one line that cannot be
-    tested from here is that connect_by_device_code and rm call their own derivations at all, because what follows
-    each is a store. GATES on the branch tip: cargo test --locked --workspace 3261 -> 3267 passed / 0 failed / 2
-    ignored; clippy --locked --workspace --all-targets -D warnings exit 0; tests/test-secret-broker.sh 73/0;
+    because no Rust test can reach a removal: removing needs a daemon and a store, and that suite has both. A
+    SECOND DEFECT IN THAT SAME FIX, FOUND BY ASKING WHAT THE UNTESTED BRANCH RESTED ON: rm treats NoSuchService as
+    'there was no refresh credential' and reports anything else loudly, and the commoner case - an app password,
+    which never has one - was untested. The daemon does answer NoSuchService (store::remove ->
+    StoreError::NoSuchService -> refuse_store), but had it answered anything else, EVERY non-OAuth account removal
+    would have exited 1 claiming a credential is still stored that never existed. Asserted end to end now
+    (8f60dd5e): exit 0, no 'still stored' in the output, credential gone. Mutating the arm to ErrorKind::Internal
+    takes the suite to 74/2 on exactly those two assertions. tests/test-secret-broker.sh 66 -> 76 passed. A
+    TRANSPORT CORRECTION IN THE SAME COMMIT: client_secret was sent on RFC 8628 3.1's DEVICE request as well as
+    the poll, and neither Google's nor Microsoft's documentation lists one there - both want it on the token
+    request. It is on the poll only now, the doc comment says so, and the test asserts the device request carries
+    none while every poll does. MUTATIONS, FIFTEEN, each restored byte-identical with plain cp and cmp silent.
+    Four on the transport (dropping the verification_url fallback, dropping the client_secret field, the cap back
+    to 4096, sending scope= unconditionally), each red on its own test alone. Six on the CLI (the client id
+    replaced by the store placeholder, the auth host replaced, a borrowed client id as fallback, the form-value
+    check dropped, the refresh Use aimed at the access credential, the refusal losing the account name). Two on
+    removal: the derivation returning the access name twice reddens the unit test, and rm not sending the second
+    Remove takes the shell suite to 71/2 and prints the path of the file left behind. One on the status line
+    below. Two more in 8f60dd5e, above. AN ASSERTION FIXED WHILE PROVING IT: the access-token check grepped
+    account.google.work unanchored, which matches the .refresh line, so under the mutation it failed for the
+    refresh token's absence rather than its own - the right verdict off the wrong evidence. Anchored, the mutation
+    reddens exactly the two assertions about the refresh token. A STALE STATUS LINE FIXED (eeaf08ac): apex cf
+    status printed 'renew without signing in again: apex cf refresh' whenever a refresh token existed, and on
+    every machine that had connected that named a command about to be refused - a refresh is a Use, a Use needs a
+    per-project grant, and apex cf connect deliberately records none. It is four states now, decided by
+    Grants::allows over Request::Grants (the daemon's own rule, not a second copy), with --json gaining
+    refresh_granted true/false/null. WHAT IS STILL NOT DONE, STATED PLAINLY. A token stored this way can be spent
+    on NOTHING: no gdrive or msgraph transport exists in apex-secretd, so every scope these two providers list
+    names an operation no provider offers, and the cross-crate gate from c224eea7 refuses those grants - apex
+    account add prints that instead of sending somebody to a refusal they did not earn. Signing in, storing and
+    renewing work end to end; USING is the next transport, not the next flag. Microsoft should renew on the client
+    id alone (ClientSecret::None, a public client); GOOGLE IS NOT PROVEN - its guide lists client_secret as
+    required on the poll and optional on the refresh, this build stores no secret, and rather than hardcode a
+    refusal off a doc reading that cannot be checked from a machine with no Google account, the daemon lets the
+    server answer: a non-2xx replaces nothing and returns Google's own error_description. add says that at the
+    time. STILL NOT BUILT: gvfs/file-manager integration. NOT VERIFIED: nothing in this round has run against a
+    real Google, Microsoft or Cloudflare endpoint - there is no account at any of them on this machine and every
+    test is against a loopback double; and the one line that cannot be tested from here is that
+    connect_by_device_code and rm call their own derivations at all, because what follows each is a store. GATES
+    on the branch tip: cargo test --locked --workspace 3261 -> 3267 passed / 0 failed / 2 ignored; clippy --locked
+    --workspace --all-targets -D warnings exit 0; tests/test-secret-broker.sh 76/0; tests/test-apex-verbs.sh 65/0
+    including its reverse pass, the one that catches a subcommand added to the binary and not to the list;
     check-doc-verbs.sh 191 documented, 0 undocumented and undeclared, 0 stale; check-shellcheck-coverage.sh 165
     discovered, 0 newly failing; check-suites-run-in-ci.sh 75 suites, 71 run by CI, 0 unrun and undeclared.
 - id: P2-018
