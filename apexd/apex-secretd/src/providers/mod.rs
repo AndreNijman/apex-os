@@ -139,7 +139,8 @@ mod tests {
     ///
     /// It was not hypothetical. Before this test, `apex account grant google
     /// files.read` succeeded and wrote a grant for `gdrive.file.read`; no
-    /// provider has ever offered `gdrive.*` or `msgraph.*`, and `S3_SCOPES`
+    /// provider HAD ever offered `gdrive.*` or `msgraph.*` — both do now, as of
+    /// rounds 30 and 31 — and `S3_SCOPES`
     /// named `s3.object.list` which the S3 provider landed in `5054be77`
     /// does not have either. Every one of those is a permission a user was
     /// told they had granted and which could never be exercised — the failure
@@ -222,18 +223,14 @@ mod tests {
              `a_provider_with_no_transport_yet_says_so_instead_of_listing_nothing` \
              holds them to it against a provider it builds itself."
         );
-        // And the other half of the same claim, which an empty-set assertion
-        // cannot make: every provider was actually VISITED. Without this,
-        // emptying `PROVIDERS` would satisfy both the count above and the
-        // emptiness here.
-        assert_eq!(
-            account::PROVIDERS
-                .iter()
-                .filter(|p| !p.scopes.is_empty())
-                .count(),
-            account::PROVIDERS.len(),
-            "some provider contributed no scope to the {checked} checked above"
-        );
+        // What stops an EMPTIED `PROVIDERS` passing this is the `checked >= 5`
+        // floor above, and nothing else — said here because the first draft of
+        // this block added a second assertion claiming to cover it
+        // (`count(with scopes) == PROVIDERS.len()`), which on an empty table is
+        // `0 == 0` and is the same predicate as the emptiness above. A comment
+        // crediting a gate with a property it does not have is the defect this
+        // whole test exists to prevent, so the assertion was removed rather
+        // than kept for the comfort of it.
     }
 
     #[test]
