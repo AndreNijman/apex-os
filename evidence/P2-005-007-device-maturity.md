@@ -478,7 +478,8 @@ comes back on the old image looking as though the update did nothing.
 After the reboot, confirm you are on the new one before trusting any reading:
 
 ```
-rpm-ostree status | head -20
+bootc status                 # the canonical one on APEX; `--json` if you want the fields
+rpm-ostree status | head -20 # still works on Fedora bootc, and is the readable one
 apex devices all
 ```
 
