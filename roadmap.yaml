@@ -902,7 +902,7 @@ tasks:
 - id: P0-015
   title: Lock-state policy for autonomous sessions
   priority: P0
-  status: done
+  status: partial
   area: remote-control
   depends_on:
   - P0-014
@@ -924,7 +924,24 @@ tasks:
     the session locked left LockedHint reading yes until somebody locked and unlocked by hand, and apex-agentd
     polls exactly that property. Criterion 2 ('short-lived root grants revoke on lock by default') is satisfied
     now that P0-007 provides a grant with a lifetime to revoke - it had no subject at all while
-    SystemAccess::Session and Unsafe were both refused.
+    SystemAccess::Session and Unsafe were both refused. REOPENED 2026-09-12->2026-09-19 (round 30): done ->
+    PARTIAL, on a defect measured by another unit and then VERIFIED AGAINST THE SOURCE by the integrator rather
+    than taken on report. p2-b's round-30 mutation runs hit a 2-in-9 flake and named it:
+    src/services/system/LockedHintService.qml's `_succeeded()` ends with `root._pump()` and `_failed()` does NOT -
+    it logs, sets `_busy = false`, and returns. Read the pump protocol next to it (lines 44-100 on apex-shell
+    8eccbfa) and the consequence is exact: `setLocked()` issued WHILE a chain is in flight only updates
+    `_desired`, because `_pump()` returns early on `_busy`; the in-flight chain is chasing the older `_target`. If
+    that chain then FAILS, `_failed()` clears `_busy` without pumping, so the newer `_desired` is never acted on
+    and never will be until some later lock or unlock calls `setLocked()` again. THE EXISTING COMMENT DOES NOT
+    COVER THIS. It argues, correctly, against retrying a step that just failed - 'the next real lock/unlock calls
+    setLocked() again on its own' - but the dropped request here is not the failed one, it is a NEWER one that
+    arrived meanwhile and has never been tried at all. WHY THIS IS A CRITERION AND NOT A NIT: apex-agentd polls
+    logind's LockedHint, which is this service's only output, so a lock silently not reported is agents continuing
+    to run through a lock the user engaged - which is criterion 1, 'user controls whether agents/Remote Control
+    continue on lock'. Reporting a lock seven times in nine is not that criterion being met. Criterion 2 is
+    unaffected. The fix is one line plus the test that fails without it; p2-b deliberately did not make it,
+    because it belongs to this item and not to the accessibility unit. Everything recorded above this paragraph
+    still stands and was not re-measured this round.
 - id: P0-016
   title: Add Agent Settings page with password-gated Always Unrestricted toggle
   priority: P0
@@ -4281,7 +4298,45 @@ tasks:
     Structure Sanity and NixOS both success, and the ONLY failing step in the job is run-rtl-test.sh at 17/3/2,
     which predates this branch. Three CI runs on this branch now agree. apex-shell task/p2-b-round30 is four
     commits (273c1fb, b01a276, 56d7521, 20a1613); apex-os task/p2-b-round30 is empty at 6b531503 and exists only
-    because apex-shell's CI matches on branch name.
+    because apex-shell's CI matches on branch name. LANDED round 30 (2026-09-19), second merge of the round for
+    this unit: task/p2-b-round30 merged onto apex-shell roadmap/v2.2 as 8eccbfa - four commits, 2,073 insertions
+    over 8 files. The apex-os branch of the same name was pushed and is EMPTY at 6b531503, which the unit requires
+    anyway because apex-shell's CI matches on branch name. On the merged apex-shell tip 8eccbfa, re-run rather
+    than inherited: check-no-conflict-markers.sh PASS; check-suites-run-in-ci.sh 66 suites / 66 reachable from CI
+    / 0 exempt / 0 unreachable and undeclared (was 64/64); the ci.yml structure-check REQUIRED list 112 paths / 0
+    missing (was 106), checked by extracting the list and stat-ing each; ci.yml parses; and
+    tests/check-quickshell-a11y-cause.sh re-run by the integrator on that tip, 14 passed / 0 failed / 0 skipped.
+    FOUND 14 IS CLOSED - it no longer ends in 'upstream'. The cause of the empty accessibility tree is a three-way
+    interaction in which no single party is obviously wrong: qtbase's QAccessible::installFactory registers
+    qAccessibleCleanup through qAddPostRoutine and that routine calls qAccessibleFactories()->clear(), post
+    routines run from ~QCoreApplication; qtdeclarative installs qQuickAccessibleFactory from a
+    Q_CONSTRUCTOR_FUNCTION, which is once per LIBRARY LOAD and never again; and quickshell builds a
+    QCoreApplication to parse its command line (src/launch/main.cpp:127) and then `delete coreApplication;` on the
+    line before `new QGuiApplication(...)` (src/launch/launch.cpp:282). So the first application object's
+    destructor empties Qt's factory list permanently: every accessibleRoot() is null,
+    QAccessibleApplication::childCount() is 0, and the bus shows one node. MEASURED FIVE WAYS in a standalone
+    offscreen binary with no bus and no compositor - A quickshell's shape null/0, B qml-qt6's shape non-null/1, C
+    a factory installed the way qtdeclarative installs its one is GONE after the delete (which reads the cleared
+    list directly, the only way to read it at all, because the Q_GLOBAL_STATIC is not exported), D
+    Q_COREAPP_STARTUP_FUNCTION SURVIVES and is the one-line upstream fix, measured working, and E the shim's
+    shape. CONFIRMED IN THE REAL PROCESS: an LD_PRELOAD interposing QGuiApplication::exec() took five windows from
+    all-null-rooted to all-non-null-rooted, childCount 0 -> 5 and the bus tree 1 node -> 8, in the same process
+    with no restart. That also eliminates round 29's other candidate branch - the windows are ProxiedWindow /
+    QsQuickWindowBase, so the metaobject walk does reach QQuickWindow and nothing returns early above it. The
+    round-28 lock-screen markup is real and arrives intact with a real ext-session-lock engaged: role=text,
+    desc='Type your password and press Enter to unlock.', editable/focusable/focused, SetFocus, empty name (Qt's
+    passwordEdit suppression, which is the only way that flag is observable) plus the status label. SECOND
+    MACHINE: check-quickshell-a11y-cause.sh is 14/0/0 on the Arch runner at Qt 6.11.2 across CI runs 35382910849 /
+    35383306764 / 35384106245, so the cause is neither a Fedora fact nor a 6.10.3 fact. New suites:
+    tests/check-quickshell-a11y-cause.sh (14/0/0) with mutate-quickshell-a11y-cause.sh (11 CAUGHT / 0 SURVIVED / 2
+    HELD) - it is a PIN, so mode A must stay null and the suite goes RED the day upstream fixes this; and
+    tests/run-lockscreen-atspi-shim.sh (23/0/1 over six runs) with mutate-lockscreen-atspi-shim.sh (6 CAUGHT / 0
+    SURVIVED / 2 HELD), whose control is INSIDE the run - one node before the install - so the tree after is
+    attributable to nothing else. WHAT THIS DOES NOT CLAIM: the shell is NOT accessible on a real machine. The
+    shim is test-only and ships nowhere, a screen reader still gets one node, and NOBODY HAS FILED THE
+    QTDECLARATIVE ONE-LINER UPSTREAM - that is the action that would make the shell actually accessible. What is
+    proved is that this repository's markup is correct all the way to the bus. Still open on this item and not
+    claimed: the recovery screen is unaudited, though the shim suite is now a working template for it.
 - id: P2-004
   title: Internationalisation baseline
   priority: P2
@@ -4329,7 +4384,11 @@ tasks:
     having no /etc/xdg/qt6ct/qt6ct.conf, which APEX ships. Section 1 was NOT touched and must not be made to SKIP
     - it is the discriminator. Also relevant from P2-003 and not yet acted on here: quickshell publishes nothing
     to AT-SPI without a test-only shim, so a mirrored or translated shell surface is still invisible to an
-    assistive technology even once the host QTranslator change (FOUND 3) lands.
+    assistive technology even once the host QTranslator change (FOUND 3) lands. LANDED round 30 (2026-09-19):
+    merge 8eccbfa (apex-shell). NOTHING ON THIS ITEM CHANGED AGAIN and nothing here was re-verified - round 30's
+    p2-b work was entirely P2-003's FOUND 14. The RTL discriminator is still 17/3/2 with the cause NOT identified;
+    it was the only red step in any of the three CI runs this round and it predates the branch, so it is not the
+    branch's doing. Section 1 was deliberately left untouched, because it is the discriminator.
 - id: P2-005
   title: Printing/scanning/network-share maturity
   priority: P2
