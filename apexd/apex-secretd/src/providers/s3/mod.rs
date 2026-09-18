@@ -519,6 +519,16 @@ impl S3Provider {
         config.push_str("write-out = \"\\n%{http_code}\"\n");
 
         let out = broker::run_curl(&config, req.owner).map_err(ProviderError::Failed)?;
+        // Before the status is read, because `write-out` prints it whether or
+        // not the transfer finished. An object whose transfer is cut short —
+        // `max-time` expiring, or the far end closing early — arrives as a 200
+        // with a PREFIX of the object under it, and `s3.object.read` hands
+        // that prefix back as the object. A short object is the failure this
+        // provider's own listing cap already refuses to produce. See
+        // `broker::aborted_transfer`.
+        if let Some(why) = broker::aborted_transfer(&out) {
+            return Err(ProviderError::Failed(why));
+        }
         let stdout = out.stdout.as_str();
         let (body, status) = match stdout.rsplit_once('\n') {
             Some((body, tail)) => (body.to_string(), tail.trim().parse::<u16>().ok()),

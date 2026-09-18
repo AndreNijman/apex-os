@@ -75,6 +75,16 @@ enum Mode {
     Normal,
     /// The token has expired. Drive's own shape for it.
     Expired,
+    /// A file bigger than this build will carry, as curl sees one: a `200`
+    /// whose `Content-Length` is far over `broker::HTTP_MAX_BYTES`, with a few
+    /// kilobytes behind it and then the connection closed.
+    ///
+    /// Not a real multi-megabyte body, on purpose. curl reads the length
+    /// BEFORE the body and aborts with none of it written, so a double that
+    /// actually sent three megabytes would be testing a different and already
+    /// visible case — one where `run_curl`'s own post-hoc length check happens
+    /// to fire because the body plus the `write-out` line is over the cap.
+    Oversize,
 }
 
 struct Fake {
@@ -137,6 +147,16 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
         Some((path, query)) => (path, query),
         None => (target.as_str(), ""),
     };
+
+    if mode == Mode::Oversize {
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\
+              Content-Length: 40000000\r\nConnection: close\r\n\r\n",
+        );
+        let _ = stream.write_all(&[b'x'; 4096]);
+        let _ = stream.flush();
+        return;
+    }
 
     let (status, content_type, payload) = if presented != format!("Bearer {TOKEN}") {
         (
@@ -454,6 +474,48 @@ fn a_granted_read_sends_a_bearer_get_for_alt_media_and_hands_back_the_file() {
     let trail = f.trail();
     assert!(trail.contains(FILE_ID), "{trail}");
     assert!(trail.contains(SERVICE), "{trail}");
+}
+
+/// A file this build will not carry must be a REFUSAL, not an empty file.
+///
+/// The defect this closes: `max-filesize` makes curl exit 63, but curl's
+/// `write-out` still prints, so stdout is exactly `"\n200"`. Split the way this
+/// provider splits it that is a 200 with an empty body — `exit_code: 0` and an
+/// empty `output`, which a caller cannot tell from a Drive file that really is
+/// empty. `broker::tests::curls_write_out_still_prints_when_the_transfer_was_aborted`
+/// is where that mechanism is measured; this is it reaching a caller.
+#[test]
+fn a_file_larger_than_this_build_will_carry_is_refused_rather_than_read_as_empty() {
+    let f = Fixture::new("oversize", Mode::Oversize, &["gdrive.file.read"]);
+
+    let reply = f.use_it(f.record("gdrive.file.read", FILE_ID));
+    // The request really happened — otherwise this would be a refusal from
+    // somewhere earlier on the path, which is the shape that reads green for
+    // the wrong reason.
+    let seen = f.fake.seen();
+    assert_eq!(seen.len(), 1, "the read never reached the double: {seen:?}");
+    assert_eq!(seen[0].method, "GET");
+
+    match &reply {
+        Response::Performed { exit_code, output, .. } => panic!(
+            "an oversized read was reported as a completed one: exit {exit_code},              output {output:?}"
+        ),
+        Response::Error { message, .. } => {
+            // The mechanism, not the symptom: the message has to name curl's
+            // exit code, so it still means something if curl renumbers or
+            // rewords "Maximum file size exceeded".
+            assert!(
+                message.contains("curl exited"),
+                "the refusal does not say the transfer was cut short: {message}"
+            );
+            assert!(
+                message.contains("did not finish"),
+                "the refusal does not say what went wrong: {message}"
+            );
+        }
+        other => panic!("unexpected reply: {other:?}"),
+    }
+    assert!(!f.trail().contains(TOKEN), "the token reached the audit trail");
 }
 
 /// A grant is per operation, and this provider offers exactly one.

@@ -869,6 +869,65 @@ pub(crate) fn run_curl(config: &str, owner: &Owner) -> Result<CurlOutput, String
     })
 }
 
+/// Whether curl stopped before it had the whole reply — and if so, in words.
+///
+/// ## The mechanism, not one symptom of it
+///
+/// curl's `write-out` runs when the transfer **ends**, and it does not care
+/// whether it ended the way it was meant to. Measured on curl 8.15.0, with a
+/// `write-out` of `"\n%{http_code}"` and a server that answers `200`:
+///
+/// | how the transfer ended | exit | stdout |
+/// |---|---|---|
+/// | `max-filesize`, and the size was in `Content-Length` | 63 | `"\n200"`, body EMPTY |
+/// | `max-time` expired mid-body | 28 | a PARTIAL body, then `"\n200"` |
+/// | the far end closed early | 18 | a PARTIAL body, then `"\n200"` |
+/// | nothing was listening | 7 | `"\n000"`, which parses as a status of 0 |
+///
+/// So the status line cannot say whether the body under it is the body, and a
+/// provider that reads only that line reports a refusal to read as a read: an
+/// empty file, or a short one. curl's **exit code** is the thing that knows,
+/// and this is the one place in the build that asks it.
+///
+/// ## Why a non-zero exit is always a refusal here, with no exceptions
+///
+/// The configurations this is for do not set `fail-with-body`, so an HTTP 404
+/// or 500 is a completed transfer and exits **0** — those still travel back to
+/// the caller as replies with their own reasons in them. A non-zero exit on
+/// such a configuration therefore never means "the server said no". It means
+/// the transfer did not finish, and there is no shape of that which is a whole
+/// reply.
+///
+/// ## Why this is not inside [`run_curl`]
+///
+/// [`perform_http`] and [`perform_webdav`] *do* set `fail-with-body`, where a
+/// plain 4xx exits 22 — complete, expected, and already carried out to the
+/// caller as [`Output::code`] by [`merged`]. Refusing every non-zero exit
+/// inside `run_curl` would turn each of their 404s into an error. The two
+/// halves need different rules, so the rule lives with the half it is true of.
+pub(crate) fn aborted_transfer(out: &CurlOutput) -> Option<String> {
+    if out.code == 0 {
+        return None;
+    }
+    let said: String = out
+        .stderr
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(400)
+        .collect();
+    Some(format!(
+        "the transfer did not finish — curl exited {}, so what arrived is not \
+         the whole reply and is not being reported as one: {}",
+        out.code,
+        if said.is_empty() {
+            "curl gave no reason"
+        } else {
+            said.as_str()
+        }
+    ))
+}
+
 /// Append what curl said on stderr to what it printed, the way [`Output`] has
 /// always carried a brokered reply.
 ///
@@ -1233,6 +1292,186 @@ mod tests {
         fn headers(&self) -> Vec<String> {
             self.seen.lock().expect("lock").clone()
         }
+    }
+
+    /// A server that answers `200` and then lies about how much is coming.
+    ///
+    /// `Content-Length` says forty megabytes; a few kilobytes arrive and the
+    /// connection closes. That is the shape a real oversized file has as far as
+    /// curl is concerned, and it is the one that matters most, because curl
+    /// reads the length BEFORE the body and aborts having written no body at
+    /// all — so what the caller sees is not a truncation it might notice but an
+    /// empty reply that looks complete.
+    struct Overpromising {
+        port: u16,
+    }
+
+    impl Overpromising {
+        fn start() -> Overpromising {
+            use std::io::BufRead;
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+            let port = listener.local_addr().expect("addr").port();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        let mut reader = std::io::BufReader::new(
+                            stream.try_clone().expect("clone"),
+                        );
+                        loop {
+                            let mut line = String::new();
+                            match reader.read_line(&mut line) {
+                                Ok(0) => return,
+                                Ok(_) => {}
+                                Err(_) => return,
+                            }
+                            if line.trim_end().is_empty() {
+                                break;
+                            }
+                        }
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\
+                              Content-Length: 40000000\r\nConnection: close\r\n\r\n",
+                        );
+                        let _ = stream.write_all(&[b'x'; 4096]);
+                    });
+                }
+            });
+            Overpromising { port }
+        }
+    }
+
+    /// The mechanism every `write-out` provider's abort guard rests on.
+    ///
+    /// Asserted here rather than only through the providers, because the thing
+    /// that makes those guards necessary is a property of **curl**, not of any
+    /// provider: `write-out` runs when the transfer ends, whichever way it
+    /// ended. If a future curl stops printing it on an abort, the provider
+    /// tests would keep passing — they would be refusing a reply that no longer
+    /// arrives — and nobody would learn that the guards had become dead weight.
+    /// This test is what fails in that world.
+    ///
+    /// Three claims, each of which has to hold for the defect to exist at all:
+    /// curl exits NON-ZERO; its `write-out` line is printed ANYWAY; and the
+    /// body in front of that line is EMPTY, so the status is the only thing a
+    /// reader of stdout has and it says 200.
+    #[test]
+    fn curls_write_out_still_prints_when_the_transfer_was_aborted() {
+        // Safe: getuid cannot fail.
+        let owner = owner(unsafe { libc::getuid() }).expect("own uid");
+        let server = Overpromising::start();
+
+        let config = format!(
+            "url = \"http://127.0.0.1:{}/big\"\nrequest = \"GET\"\n\
+             silent\nshow-error\nmax-filesize = {HTTP_MAX_BYTES}\n\
+             write-out = \"\\n%{{http_code}}\"\n",
+            server.port
+        );
+        let out = run_curl(&config, &owner).expect("curl runs");
+
+        // Not `{out:?}`: `CurlOutput` deliberately has no `Debug`, because
+        // the two strings in it are a far end's reply and a child's stderr.
+        let shown = format!("code {} stdout {:?} stderr {:?}", out.code, out.stdout, out.stderr);
+        assert_ne!(out.code, 0, "curl reported success: {shown}");
+        // The whole of stdout, so this cannot pass on a partial body that
+        // happens to end in a status line.
+        assert_eq!(
+            out.stdout, "\n200",
+            "write-out did not run, or a body arrived: {shown}"
+        );
+        // Split the way every one of those providers splits it, to show what
+        // they would conclude without the guard: a 200 and an empty file.
+        let (body, status) = match out.stdout.rsplit_once('\n') {
+            Some((body, tail)) => (body.to_string(), tail.trim().parse::<u16>().ok()),
+            None => (String::new(), out.stdout.trim().parse::<u16>().ok()),
+        };
+        assert_eq!(status, Some(200), "{shown}");
+        assert!(body.is_empty(), "{body:?}");
+
+        // And that is exactly what the guard turns into a refusal.
+        let why = aborted_transfer(&out).expect("an aborted transfer is refused");
+        assert!(
+            why.to_ascii_lowercase().contains("did not finish"),
+            "{why}"
+        );
+        // `contains("63")` alone would NOT do, and finding that out is what the
+        // mutation pass is for: curl's own message here is "curl: (63) Maximum
+        // file size exceeded", so a build that had stopped naming the exit code
+        // at all still contained "63" — borrowed from the text it quotes. The
+        // phrase this build composes is what is asserted.
+        assert!(
+            why.contains(&format!("curl exited {}", out.code)),
+            "the refusal does not name the exit code in its own words: {why}"
+        );
+    }
+
+    /// The same claim with curl taken out of it, so nothing can be borrowed.
+    ///
+    /// [`aborted_transfer`] quotes the child's stderr, and a real curl stderr
+    /// carries the exit code inside it — which is enough to satisfy a careless
+    /// `contains`. Here the stderr says nothing numeric, so the only way the
+    /// code can appear in the message is if this build put it there. The
+    /// `stdout` is the exact shape a provider would otherwise read as a
+    /// completed 200 with an empty body.
+    #[test]
+    fn the_refusal_names_the_exit_code_in_its_own_words() {
+        let out = CurlOutput {
+            code: 63,
+            stdout: "\n200".to_string(),
+            stderr: "the far side stopped talking".to_string(),
+        };
+        let why = aborted_transfer(&out).expect("a non-zero exit is an abort");
+        assert!(why.contains("curl exited 63"), "{why}");
+        // And what curl said travels with it, because "the transfer failed" on
+        // its own leaves a reader nothing to act on.
+        assert!(why.contains("the far side stopped talking"), "{why}");
+
+        // A child that said nothing gets a sentence rather than a dangling
+        // colon — the same reason `mod.rs` refuses an empty body on the
+        // cloudflare path.
+        let silent = CurlOutput {
+            code: 7,
+            stdout: String::new(),
+            stderr: "   \n".to_string(),
+        };
+        let why = aborted_transfer(&silent).expect("a non-zero exit is an abort");
+        assert!(why.contains("curl exited 7"), "{why}");
+        assert!(why.contains("no reason"), "{why}");
+
+        // Zero is not an abort, whatever is on stderr — curl writes progress
+        // and warnings there on runs that completed.
+        assert_eq!(
+            aborted_transfer(&CurlOutput {
+                code: 0,
+                stdout: "body\n200".to_string(),
+                stderr: "a warning".to_string(),
+            }),
+            None
+        );
+    }
+
+    /// The other direction, without which the guard could be `Some(_)` always.
+    ///
+    /// A transfer that really did finish must pass through it untouched — and
+    /// this one is a 200 from a server that sent what it promised, which is the
+    /// case every ordinary read is.
+    #[test]
+    fn a_transfer_that_finished_is_not_treated_as_an_abort() {
+        // Safe: getuid cannot fail.
+        let owner = owner(unsafe { libc::getuid() }).expect("own uid");
+        let server = HeaderRecorder::start();
+
+        let config = format!(
+            "url = \"http://127.0.0.1:{}/fine\"\nrequest = \"GET\"\n\
+             silent\nshow-error\nmax-filesize = {HTTP_MAX_BYTES}\n\
+             write-out = \"\\n%{{http_code}}\"\n",
+            server.port
+        );
+        let out = run_curl(&config, &owner).expect("curl runs");
+        let shown = format!("code {} stdout {:?} stderr {:?}", out.code, out.stdout, out.stderr);
+        assert_eq!(out.code, 0, "{shown}");
+        assert_eq!(out.stdout, "{}\n200", "{shown}");
+        assert_eq!(aborted_transfer(&out), None, "{shown}");
     }
 
     /// The owner's `~/.curlrc` must not configure a child this daemon spawns.

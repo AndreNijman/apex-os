@@ -82,6 +82,14 @@ enum Mode {
     ForeverTruncated,
     /// A far side that refuses. The status is real, unlike on the R2 path.
     Forbidden,
+    /// A `200` promising forty megabytes and sending four kilobytes before
+    /// closing — an object this build will not carry whole.
+    ///
+    /// curl stops either because the promised length is over the cap or
+    /// because the connection ended with bytes missing. Both are the same
+    /// defect, both exit non-zero, and both print the `write-out` line anyway,
+    /// so the provider sees a `200` with a PREFIX of the object under it.
+    Oversize,
 }
 
 struct Fake {
@@ -184,6 +192,19 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode, po
         body,
         signature_verified,
     });
+
+    // After the signature check and the recording, so this is a reply to a
+    // request that really was signed and really did arrive — not a short
+    // circuit that would also fire for a request this build got wrong.
+    if mode == Mode::Oversize && signature_verified {
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
+              Content-Length: 40000000\r\nConnection: close\r\n\r\n",
+        );
+        let _ = stream.write_all(&[b'x'; 4096]);
+        let _ = stream.flush();
+        return;
+    }
 
     let (status, payload) = if !signature_verified {
         (
@@ -483,6 +504,43 @@ fn seen_after(f: &Fixture, method: &str) -> Seen {
         .rev()
         .find(|s| s.method == method)
         .expect("a request")
+}
+
+/// An object whose transfer was cut short must be a REFUSAL, not a short read.
+///
+/// This is the worst shape of the family on this provider: `s3.object.read`
+/// hands the body back as the object, so a prefix of a backup blob is returned
+/// as the blob. curl's `write-out` prints the status even when the transfer was
+/// aborted — measured in
+/// `broker::tests::curls_write_out_still_prints_when_the_transfer_was_aborted` —
+/// so the 200 on the last line says nothing about whether the bytes above it
+/// are all the bytes.
+#[test]
+fn an_object_whose_transfer_was_cut_short_is_refused_rather_than_read_as_short() {
+    let f = Fixture::new("oversize", Mode::Oversize, &["s3.object.read"]);
+
+    let reply = f.use_it(f.record("s3.object.read", &format!("{BUCKET}/big.bin")));
+
+    // The request really happened, and it really was signed — so this is a
+    // refusal about the reply and not one from earlier on the path.
+    let got = seen_after(&f, "GET");
+    assert!(got.signature_verified, "the read's signature did not verify");
+    assert_eq!(got.target, format!("/{BUCKET}/big.bin"));
+
+    match &reply {
+        Response::Performed { exit_code, output, .. } => panic!(
+            "a cut-short read came back as a completed one: exit {exit_code},              {} bytes of object",
+            output.len()
+        ),
+        Response::Error { message, .. } => {
+            // The mechanism, so this still means something if curl renumbers
+            // its exits or rewords the sentence.
+            assert!(message.contains("curl exited"), "{message}");
+            assert!(message.contains("did not finish"), "{message}");
+        }
+        other => panic!("unexpected reply: {other:?}"),
+    }
+    assert!(!f.trail().contains(SECRET_KEY), "the trail holds the key");
 }
 
 /// The listing, rendered as the envelope the R2 operation answers with.

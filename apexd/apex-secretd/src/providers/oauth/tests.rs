@@ -65,6 +65,11 @@ enum Mode {
     NotJson,
     /// Answers 200 with JSON that has no `access_token` in it.
     NoToken,
+    /// A `200` whose `Content-Length` is far over `broker::HTTP_MAX_BYTES`,
+    /// with a few kilobytes behind it. curl reads the length before the body
+    /// and aborts with none of it written, so what this provider would see
+    /// without a guard is a 200 with an empty document under it.
+    Oversize,
 }
 
 /// One request the double saw.
@@ -140,6 +145,16 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
         form,
     });
 
+    if mode == Mode::Oversize {
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+              Content-Length: 40000000\r\nConnection: close\r\n\r\n",
+        );
+        let _ = stream.write_all(&[b'x'; 4096]);
+        let _ = stream.flush();
+        return;
+    }
+
     let (status, payload) = match mode {
         Mode::Rotating => (
             "200 OK",
@@ -165,6 +180,9 @@ fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode: Mode) {
         ),
         Mode::NotJson => ("200 OK", "<html>we moved</html>".to_string()),
         Mode::NoToken => ("200 OK", r#"{"token_type":"bearer"}"#.to_string()),
+        // Written and returned above, before anything here is composed: its
+        // whole point is a `Content-Length` that does not match the body.
+        Mode::Oversize => unreachable!("the oversized reply is written above"),
     };
     let reply = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
@@ -539,6 +557,35 @@ fn a_token_a_server_made_hostile_is_refused_rather_than_stored() {
 
     let (_, message) = reply.as_error().expect("a hostile token was accepted");
     assert!(message.contains("no usable access_token"), "{message}");
+    assert_eq!(f.value(ACCESS_SERVICE).as_deref(), Some(OLD_ACCESS));
+    assert_eq!(f.value(REFRESH_SERVICE).as_deref(), Some(OLD_REFRESH));
+}
+
+/// An aborted read of a token endpoint must say so, not blame the server.
+///
+/// This one refuses either way — an empty body is not JSON — so the assertion
+/// that matters is about the REASON. Without the guard the message is "…
+/// answered 200 with something that is not JSON", which points a reader at the
+/// authorisation server when the truth is that this build stopped reading. Its
+/// control is `Mode::NotJson` in the test below, which must keep saying exactly
+/// that, so this is not a test that any refusal satisfies.
+#[test]
+fn a_token_reply_this_build_stopped_reading_says_so_rather_than_blaming_the_server() {
+    let f = Fixture::new("oversize", Mode::Oversize);
+    let reply = f.refresh(REFRESH_SERVICE);
+
+    // It really went: the refusal is about the reply, not about the request.
+    assert_eq!(f.fake.seen().len(), 1, "the refresh never reached the double");
+
+    let (_, message) = reply.as_error().expect("an aborted refresh was accepted");
+    assert!(message.contains("curl exited"), "{message}");
+    assert!(message.contains("did not finish"), "{message}");
+    assert!(
+        !message.contains("not JSON"),
+        "the refusal blames the server for this build's own cap: {message}"
+    );
+    // Nothing was replaced, which is the property every failure on this path
+    // shares and the one that would hurt most to lose.
     assert_eq!(f.value(ACCESS_SERVICE).as_deref(), Some(OLD_ACCESS));
     assert_eq!(f.value(REFRESH_SERVICE).as_deref(), Some(OLD_REFRESH));
 }
