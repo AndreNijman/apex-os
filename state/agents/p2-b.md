@@ -629,6 +629,38 @@ than this branch.
     red — the second time this exact silent-loss shape has been found under
     this row.
 
+27. **A private-use character built by `printf '\U000f033e'` is TEN ASCII
+    BYTES under a C/POSIX locale — which is what `env -i` gives and what the CI
+    container gives — and that is the THIRD way this unit has lost one of these
+    characters in transit.** Measured with `od`, not reasoned:
+    `printf '\U000f033e'` gives `f3 b0 8c be` on a UTF-8 desk and
+    `5c 55 30 30 30 46 30 33 33 45` under `env -i`. FOUND 23 has the other two,
+    both from round 30, and both were fixed by building the character from a
+    NUMBER. This one WAS built from a number and lost it anyway, at the shell.
+
+    It reached a landed file: `tests/mutate-lockscreen-atspi-shim.sh`'s S4.
+    Round 30 scored it CAUGHT, and that verdict was only true because this
+    laptop's locale is UTF-8 — on the Arch runner S4 would have inserted the
+    plain letters `\U000F033E`, which the suite's private-use class correctly
+    does not match, and the harness would have reported a verdict about a
+    mutant that was never the mutant it claimed to be. Invisible forever,
+    because that harness skips on the runner for want of quickshell.
+
+    Fixed in `73566cd` and re-measured in full rather than assumed: eight
+    mutants, each a compile plus a complete bring-up, **8 applied, 6 CAUGHT /
+    0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE, 2 HELD / 0 FALSE-RED**, baseline
+    23/0/1 — identical to round 30, with S4's CAUGHT now earned against a
+    character that is really four bytes. Both harnesses now build it with
+    `python3 -c` and **ABORT** rather than scoring anything if the result is
+    not four bytes. An abort and not a skip, because a harness that quietly
+    downgraded here would be the thing it exists to prevent.
+
+    The general rule for this tree: **do not build a non-ASCII character in
+    bash.** `check-recovery-a11y.sh` writes its canned QML through python3 with
+    an `@PUA@` placeholder for the same reason, and carries a self-test
+    requiring the substituted glyph to be ONE character rather than the five of
+    `@PUA@`.
+
 ## BLOCKED ON
 
 Nothing this unit can act on. FOUND 14 is closed and the read-back is written
