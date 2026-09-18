@@ -17,29 +17,30 @@ pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 
 ## NEXT
 
-**Land round 30's diagnosis**, in this order. (1) Commit `repro.cpp`, `shim.cpp`
-and `probe-shim.sh` from `/var/tmp/apex-work/scratch-p2-b/round30/` into
-apex-shell `task/p2-b-round30` as evidence under `tests/` — the suite-discovery
-glob is `tests/*test*.sh tests/check-*.sh tests/run-*.sh`, so a `.cpp` is not
-picked up, but anything added must also go in ci.yml's structure-check REQUIRED
-list if it is referenced there. (2) `set-status.py P2-003 partial --evidence`
-with round 29's text plus FOUND 20 and FOUND 21 appended — READ THE CURRENT
-EVIDENCE FIRST, it replaces. (3) Then the §4/§5 rewrite of
-`tests/run-lockscreen-atspi.sh`: the `nodes = 1` pin is now explained rather
-than mysterious, and under the shim the §5 read-back assertions can be made for
-real. Run `probe-shim.sh` with the lock engaged first to find out whether the
-round-28 lockscreen markup actually surfaces — the DESKTOP windows came back as
-four unnamed frames with no children, which may be honest (no markup on the bar)
-or may be a second layer of defect.
+**Land the shim half**: commit `scratch-p2-b/round30/shim.cpp` as apex-shell
+`tests/quickshell-a11y-shim.cpp` (the suite comment in
+`tests/check-quickshell-a11y-cause.sh` §5 already names that path, so it is a
+dangling reference until it exists) and give
+`tests/run-lockscreen-atspi.sh` a **§6** that builds it, re-runs the locked
+bring-up with `LD_PRELOAD` scoped to the one `quickshell` command, and turns
+§5's vacuous SKIPs into real read-back assertions — measured working already:
+the lock frame appears and under it `role=text`
+`desc=Type your password and press Enter to unlock.`
+`states=editable,enabled,focusable,focused,sensitive,showing,visible`
+`actions=SetFocus`, plus a `role=label`. Both names come back EMPTY, which is
+Qt's `Accessible.passwordEdit` suppression for the field and is NOT yet
+explained for the label. §6 must SKIP with a named reason when there is no
+compiler or no Qt private headers, and each new assertion needs a mutant in
+`tests/mutate-lockscreen-atspi.sh`. Do NOT weaken §4's `nodes = 1` pin — it is
+still true without the shim and it is the thing that goes red when upstream is
+fixed.
 
 ## IN PROGRESS
 
-FOUND 14 is **closed** — named cause, standalone reproduction, and in-situ
-confirmation inside the real quickshell process (FOUND 20 and FOUND 21).
-**Nothing is committed yet.** The three artefacts live only in
-`/var/tmp/apex-work/scratch-p2-b/round30/` (`repro.cpp`, `shim.cpp`,
-`probe-shim.sh`, plus `repro-run2.log` and `out/`), and both round-30 branches
-are still empty at `roadmap/v2.2`. No roadmap evidence written yet either.
+apex-shell `task/p2-b-round30` has ONE commit pushed, `273c1fb` — the named
+cause, its pin and its mutation pair. The shim (`shim.cpp`) and its driver
+(`probe-shim.sh`) are still only in `scratch-p2-b/round30/`, and no roadmap
+evidence has been written yet. apex-os `task/p2-b-round30` is pushed and empty.
 
 ## DONE
 

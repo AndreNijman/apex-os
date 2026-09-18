@@ -4132,7 +4132,59 @@ tasks:
     check-containerfile-assertions.sh 194 checked / 0 failed / 116 unresolved / 0 inert, check-doc-verbs.sh 191
     documented / 114 declared undocumented / 0 undocumented and undeclared / 0 stale. unlanded.py reports nothing
     outstanding in either repo. Status unchanged: the recovery screen is still unaudited and orca as the greetd
-    user still needs hardware.
+    user still needs hardware. ROUND 30 (2026-09-19) CLOSED THE CAUSE. FOUND 14 ended in "upstream" with two
+    branches left; one is eliminated and the other is now a named cause with a reproduction, and the whole
+    accessibility tree has been made to come back inside the real quickshell process. The cause is a three-way
+    interaction and no one of the three is obviously wrong: qtbase's QAccessible::installFactory registers
+    qAccessibleCleanup with qAddPostRoutine and that routine does qAccessibleFactories()->clear(), post routines
+    run from ~QCoreApplication; qtdeclarative installs qQuickAccessibleFactory from a Q_CONSTRUCTOR_FUNCTION, once
+    per LIBRARY LOAD, so it can never run again; and quickshell src/launch/main.cpp:127 constructs a
+    QCoreApplication to parse the command line while src/launch/launch.cpp:282 does `delete coreApplication;` on
+    the line before `new QGuiApplication(...)` (a comment at src/core/logging.cpp:426 names that window
+    explicitly, so the destroy-and-recreate is deliberate). So the first application object's destructor empties
+    Qt's accessibility factory list, nothing refills it, and queryAccessibleInterface walks the metaobject chain
+    against an empty list for the rest of the process's life. MEASURED, not reasoned. apex-shell
+    tests/quickshell-a11y-cause.cpp, five modes, one process each, QT_QPA_PLATFORM=offscreen, no compositor and no
+    bus needed: mode A (QCoreApplication -> delete -> QGuiApplication, quickshell's shape) root NULL and
+    appChildCount 0; mode B (QGuiApplication only, qml-qt6's shape, the round-29 control) root NON-NULL and
+    appChildCount 1; mode C (A plus OUR OWN factory installed from a Q_CONSTRUCTOR_FUNCTION, the same registration
+    shape qtdeclarative uses) root NULL - which reads the cleared list DIRECTLY rather than inferring it, and is
+    the only way to read it at all because qAccessibleFactories() is a Q_GLOBAL_STATIC and not an exported symbol
+    so gdb cannot reach it; mode D (A plus the same factory from Q_COREAPP_STARTUP_FUNCTION) root NON-NULL with
+    the install line printed TWICE, once per application object - that is the one-line upstream fix, measured
+    working, and it belongs in qtdeclarative rather than quickshell; mode E (installed by hand after the
+    QGuiApplication exists) root NON-NULL. Qt Widgets is immune for mode D's reason: QApplicationPrivate installs
+    its factory per instance, not per library load. CONFIRMED IN THE REAL PROCESS. tests/quickshell-a11y-shim.cpp
+    is an LD_PRELOAD that interposes QGuiApplication::exec() (U in nm -D /usr/bin/quickshell, so interposable; it
+    tail-calls the real one through dlsym(RTLD_NEXT) because exec() is what calls
+    QAccessible::setRootObject(qApp)), arms a singleShot so the measurement happens on the main thread after the
+    shell's windows exist, and does measure -> installFactory -> measure with a faithful copy of
+    qQuickAccessibleFactory covering QQuickWindow, QQuickItem and QQuickTextEdit including the QQuickItemPrivate
+    isAccessible filter. Driven over the round-29 bring-up (private headless labwc, private session bus, private
+    a11y bus, the SHIPPED shell.qml, preload scoped to the one quickshell command): BEFORE, five top-level windows
+    (four ProxiedWindow, one QsQuickWindowBase), every root NULL, appChildCount 0, and the bus reporting ONE node;
+    AFTER, every root NON-NULL, appChildCount 5, and the bus reporting EIGHT nodes in the same process with no
+    restart. That also ELIMINATES the other round-29 branch: quickshell's windows are QQuickWindow subclasses
+    named ProxiedWindow and QsQuickWindowBase, so the metaobject walk does reach "QQuickWindow" and nothing is
+    returning early above it. AND THE ROUND-28 LOCK SCREEN MARKUP IS REAL: with a genuine ext-session-lock engaged
+    through the shipped IPC handler and acknowledged by labwc, the lock surface came back as role=frame with,
+    beneath it, role=text desc="Type your password and press Enter to unlock."
+    states=editable,enabled,focusable,focused,sensitive,showing,visible actions=SetFocus, plus a role=label. Both
+    names come back EMPTY - which is Qt's documented Accessible.passwordEdit suppression for the field, and is NOT
+    yet explained for the label. So the markup in apex-shell is correct and Qt cannot see it. LANDED apex-shell
+    273c1fb on task/p2-b-round30: tests/quickshell-a11y-cause.cpp, tests/check-quickshell-a11y-cause.sh (14 passed
+    / 0 failed / 0 skipped) and tests/mutate-quickshell-a11y-cause.sh (13 applied, 11 CAUGHT / 0 SURVIVED / 0
+    MISSCORED / 0 UNSCORABLE, 2 HELD / 0 FALSE-RED), both wired into ci.yml with all three files in the
+    structure-check REQUIRED list. check-suites-run-in-ci.sh 65 suites / 65 reachable / 0 exempt; shellcheck -x
+    clean on both new suites; the ci.yml REQUIRED list re-verified by stat-ing every path, 0 missing. The new
+    suite is a PIN and is meant to go red: mode A must produce a null root, so the day Qt or qtdeclarative fixes
+    this the suite fails and the message says to delete the pin and write the real read-back assertions. M1
+    exercises exactly that path rather than hoping for it, M2 breaks the control, M10 breaks the build, and G1
+    appends a comment quoting every asserted string to prove the suite runs the program instead of grepping it.
+    The step is worth more on the Arch runner than on this laptop, because the runner has no quickshell and so can
+    never run run-lockscreen-atspi.sh sections 2-5, but it can run every mode of this one. NOT RUN THIS ROUND AND
+    NOT CLAIMED: the new steps have not yet been exercised on the GitHub runner. Recovery screen still unaudited;
+    orca as the greetd user still needs hardware.
 - id: P2-004
   title: Internationalisation baseline
   priority: P2

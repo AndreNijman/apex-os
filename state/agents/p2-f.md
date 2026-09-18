@@ -6,50 +6,37 @@ branch: task/p2-f-5   (cut from origin/roadmap/v2.2 @ 6b531503, which is round 2
           task/p2-f-4 landed; nothing of this unit's is unlanded)
 
 ## NEXT
-**ROUND 30 IN PROGRESS.** Building the `gdrive` transport in `apex-secretd` on
-`task/p2-f-5`. Two commits, both independently green:
+**ROUND 30 IS COMPLETE ON THE BRANCH. Both commits pushed on `task/p2-f-5`
+(cut from `roadmap/v2.2` @ `6b531503`):**
+  `9f8d2468`  the `gdrive` provider
+  `bdd9b51f`  `files.read -> gdrive.file.read`, `drive.file` at the sign-in,
+              and the three places that said a Google token can be spent on
+              nothing
+Worktree CLEAN, `git diff --exit-code` silent, every mutated file restored
+with plain `cp` and `cmp` silent.
 
-1. `providers/gdrive.rs` + `gdrive/tests.rs` — ONE operation,
-   `gdrive.file.read`, `ResourceKind::Name` (a Drive file id), against a
-   loopback double that parses the request that actually arrived. Host pinned
-   to Google's API host READ OFF `account::provider("google")`'s `Host::Fixed`,
-   with a `#[cfg(test)]` injection point in oauth's `at(port)` shape, because a
-   double is `127.0.0.1` and the table has no entry for it by design.
-   Registered in `default_registry`; `operation_ids()` in `providers/mod.rs`
-   gains the id.
-2. `DRIVE_SCOPES` gains `files.read -> gdrive.file.read`, `GOOGLE_OAUTH.scopes`
-   gains `https://www.googleapis.com/auth/drive.file` (without it the token
-   cannot be spent), `empty` in the scope gate becomes `["microsoft"]`, and the
-   three places that say a Google token can be spent on nothing are corrected:
-   `docs/online-accounts.md` (~188, ~246) and `apex/src/account.rs`'s module
-   note (~51).
+**NEXT ACTION: `msgraph`. Copy `apexd/apex-secretd/src/providers/gdrive.rs`
+and its tests wholesale — the shape transfers exactly. Differences, all
+known: the account table fixes `microsoft` to `graph.microsoft.com` with path
+`/v1.0/me`; Graph's file content endpoint is
+`GET /v1.0/me/drive/items/{item-id}/content` (an ITEM id, still
+`ResourceKind::Name`), which redirects to a pre-authenticated download URL —
+so unlike Drive's `alt=media` this one has to decide what to do about
+`location`, and following a redirect that carries the Authorization header is
+the thing not to do; and `MICROSOFT_OAUTH` needs `Files.Read` added to its
+scopes for the same reason Google needed `drive.file`. Microsoft is a public
+client (`ClientSecret::None`), so unlike Google its refresh is expected to
+work on the client id alone. Then `GRAPH_SCOPES` gains `files.read ->
+msgraph.file.read` and `empty` in both crates becomes `[]` — at which point
+the "providers with nothing grantable" assertion needs a deliberate decision
+about what an empty set means there, because an empty `empty` is exactly the
+vacuous-loop shape this program hunts.**
 
-**Commit 1 is DONE: `9f8d2468`, pushed.** 11 gdrive tests, 8 mutations all
-red and restored byte-identically (cmp silent), apex-secretd 297 -> 308,
-workspace 3297/0/2, clippy -p apex-secretd exit 0.
-
-**Commit 2 is WRITTEN AND GREEN, mutations running, NOT YET COMMITTED.**
-Working tree carries: `DRIVE_SCOPES` with `files.read -> gdrive.file.read`,
-`GOOGLE_OAUTH.scopes` + `drive.file`, `empty == ["microsoft"]` in both crates,
-a new `googles_files_read_names_the_operation_the_gdrive_provider_performs`,
-`checked > 0` in gdrive's declaration test, a transport-count assertion, and
-the corrected prose in `docs/online-accounts.md` + `apex/src/account.rs`.
-`apex account add` now prints the grant command for a provider whose table is
-not empty. Workspace 3298/0/2, clippy --workspace --all-targets exit 0.
-If you are a fresh agent: pristine copies for mutation restore are in
-`/var/tmp/apex-work/scratch-p2-f/round30/*.orig`; `cmp` them before trusting
-the tree, then commit.
-
-(superseded plan, kept for the file list) **commit 2 — `DRIVE_SCOPES` gains
-`Scope { name: "files.read", operation: "gdrive.file.read", Effect::Read }`,
-`GOOGLE_OAUTH.scopes` gains `https://www.googleapis.com/auth/drive.file`,
-`providers/mod.rs`'s `empty` assertion becomes `vec!["microsoft"]`,
-`account.rs:1154`'s loop drops google AND gains the positive
-`google.operation("files.read") == "gdrive.file.read"`, `gdrive/tests.rs`'s
-`the_declaration_is_one_a_registry_will_take` gains `checked > 0`, and the
-three places that still say a Google token can be spent on nothing are
-corrected: `docs/online-accounts.md` (~188, ~246) and `apex/src/account.rs`'s
-module note (~51).**
+After that, in descending size: gvfs — **a design paragraph only**, and
+P2-019's three remaining unsettled entries, two of which depend on other
+roadmap items. P2-019 is a DESIGN item and a design landed; do not build a
+fleet daemon. P2-016's `ensure_private_dir` ownership check is the one P2-016
+follow-up that needs no screen and no boot.
 
 **P2-018 criterion 2 is CLOSED — do not reopen it, and do not widen the
 watchdog.** Round 29 ran every command in `menu.xml` from inside the real
@@ -58,13 +45,6 @@ this unit cannot do, plus one thing that needs synthetic pointer input: the
 menu is never OPENED (right-click -> ShowMenu -> Execute is not driven). What
 IS proved is that every command the menu would run does run, and that labwc
 accepts every action the menu names.
-
-After gdrive, in descending size: `msgraph` (the same shape, different host
-table entry), gvfs — **a design paragraph only**, and P2-019's three remaining
-unsettled entries, two of which depend on other roadmap items. P2-019 is a
-DESIGN item and a design landed; do not build a fleet daemon. P2-016's
-`ensure_private_dir` ownership check is the one P2-016 follow-up that needs no
-screen and no boot.
 
 ## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
 1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
@@ -139,6 +119,50 @@ Remaining, in the order this round takes them:
   host to its token endpoint from a hard-coded table, which is pin-consistent.
 
 ## DONE
+Round 9 (round 30 of the program), on task/p2-f-5, BOTH PUSHED:
+  9f8d2468  **the `gdrive` transport** — the thing every card since round 27
+            has named as the biggest unblocked piece. One operation,
+            `gdrive.file.read`, `ResourceKind::Name` because a Drive file is an
+            opaque id and not a path, and the count is Google's arithmetic:
+            the limited-input-device grant will not issue `drive` or
+            `drive.readonly`, and `drive.file` cannot list a Drive, so there
+            is no `gdrive.file.list` rather than one that returns an empty
+            listing and reads as an empty Drive. TWO PINS: the URL is the
+            stored record's own scheme/host/port/path with
+            `/files/<id>?alt=media` under it and the framework pins that, but
+            that pin only checks the provider agrees with the store — so
+            `bind` ALSO refuses any host but the one `account::PROVIDERS`
+            fixes `google` to, read off the table. A non-2xx travels with
+            Google's own words; a 401 and only a 401 also names
+            `apex account refresh <account>`. 11 tests against a loopback
+            double that reads method, target, query and Authorization off the
+            wire, and which answers a METADATA document with a 200 when
+            `alt=media` is missing — which is what a real Drive does and what
+            makes the dropped-`alt=media` mutant red instead of green.
+            8 mutations, all red.
+  bdd9b51f  `DRIVE_SCOPES` gains `files.read`, and with it the positive
+            assertion round 3 had to DELETE. `GOOGLE_OAUTH.scopes` gains
+            `https://www.googleapis.com/auth/drive.file` — the line between a
+            grant and a 403, deliberately absent while nothing could spend it.
+            `apex account add`'s closing status line now READS the provider's
+            table instead of being a fixed sentence about a missing transport.
+            A stale number found while editing around it:
+            `docs/online-accounts.md` said "three transports" while the table
+            held four, stale since `5b153599`; corrected and now computed in
+            `the_criterions_five_providers_are_all_present_and_unique`.
+            8 mutations, all red — including the two that only show up under
+            `-p apex-secretd`, because `cargo test --workspace` stops at the
+            first failing target and the core-crate failure was hiding the
+            cross-crate gate.
+  Workspace 3297 -> 3298 passed / 0 failed / 2 ignored. clippy --locked
+  --workspace --all-targets -D warnings exit 0. secret-broker 76/0;
+  apex-verbs 65/0; doc-verbs 191 / 114 / 0 / 0; shellcheck 165 / 0 / 0;
+  suites-in-CI 75 / 71 / 4 / 0; containerfile 194 / 0; no conflict markers.
+  **NOT RUN AND NOT CLAIMED: no Google endpoint was contacted.** Whether
+  Google accepts `drive.file` on a real limited-input-device client, and
+  whether its refresh works without the client secret this build has nowhere
+  to store, are both still unproven — card item 2 from round 29 is UNCHANGED.
+
 Round 8 (round 29 of the program), on task/p2-f-4, ALL THREE PUSHED:
   79027b51  which `apex` the remedies ran was ANNOUNCED, not measured:
             `APEX_BIN=/nowhere` planted a dangling symlink, `command -v`
@@ -252,17 +276,16 @@ Round 3, on task/p2-f-3 (pushed):
   c224eea7  a scope may not name an operation no provider offers — the
             cross-crate gate in apex-secretd, both mutants run and red.
 
-## IN PROGRESS (round 8 — FINISHED)
-- Worktree CLEAN at `79027b51` on `task/p2-f-4`, pushed, cut from
-  `roadmap/v2.2` (`7f6fc44d`) with the newer tip `bde4d96c` merged in at
-  `af5f5625` and the suite re-run green afterwards (86/0/0). Nothing
-  half-written; `git diff --exit-code` is silent and every mutated file was
-  restored with plain `cp`.
-- set-status.py was called for **P2-018 only**, with the full text rebuilt
-  (14,471 stored chars kept verbatim, round 29 plus its addendum appended,
-  23,245 total) and
-  round-by-round evidence checked by re-parsing the yaml afterwards.
-- P2-017 and P2-019 were NOT touched this round and set-status was
+## IN PROGRESS (round 9 — FINISHED)
+- Worktree CLEAN at `bdd9b51f` on `task/p2-f-5`, pushed, cut from
+  `roadmap/v2.2` @ `6b531503`. Nothing half-written; `git diff --exit-code` is
+  silent and every mutated file was restored with plain `cp`, `cmp` silent.
+  Pristine copies of the mutated files are in
+  `/var/tmp/apex-work/scratch-p2-f/round30/*.orig` if anything needs checking.
+- set-status.py was called for **P2-017 only**, with the full stored text kept
+  verbatim and round 30 appended, then re-parsed to confirm rounds 1-29 are
+  still there.
+- P2-018 and P2-019 were NOT touched this round and set-status was
   deliberately NOT called on them — it REPLACES evidence.
 
 ## ROUND 5 COMMIT SEQUENCE (settled with the advisor)
@@ -300,16 +323,25 @@ Round 3, on task/p2-f-3 (pushed):
 - ~~Nothing in this build refreshes any token~~ **DONE.** Cloudflare renews
   (round 27), Google and Microsoft sign in and renew (round 28), and the
   status line was corrected in `eeaf08ac`.
-- **A token stored for Google or Microsoft can be spent on NOTHING**, and
-  `apex account add` says so rather than sending somebody to a grant the
-  daemon will refuse: no `gdrive` or `msgraph` transport exists, so every
-  scope those two providers list names an operation no provider offers. That
-  transport is the next real piece of P2-017, and it is bigger than a round.
-- **Google's refresh is NOT proven.** Its guide lists `client_secret` as
-  required on the poll and optional on the refresh; this build stores no
-  secret. Rather than hardcode a refusal off a doc reading that cannot be
-  checked from here, the daemon lets Google answer — a non-2xx replaces
-  nothing and returns Google's own `error_description`.
+- ~~**A token stored for Google or Microsoft can be spent on NOTHING**~~
+  **HALF DONE, round 30.** Google can now be spent: `gdrive.file.read` exists
+  (`9f8d2468`) and `files.read` names it (`bdd9b51f`). **Microsoft still
+  cannot** — no `msgraph` transport, `GRAPH_SCOPES` still empty, and
+  `apex account add` still says so for that provider. What a Google token
+  reaches is narrower than "your Drive" and the narrowness is Google's:
+  `drive.file` sees only files this OAuth client created or the user picked, so
+  on a Drive APEX has never written to **every file id answers 404** — the
+  scope working, not the transport failing. `files.write` is what makes the
+  first file readable and it needs `/upload/drive/v3/files`, a different path
+  from the stored `/drive/v3`.
+- **Google's refresh is NOT proven, and round 30 did not change that.** Its
+  guide lists `client_secret` as required on the poll and optional on the
+  refresh; this build stores no secret. Rather than hardcode a refusal off a
+  doc reading that cannot be checked from here, the daemon lets Google
+  answer — a non-2xx replaces nothing and returns Google's own
+  `error_description`. NOT RUN THIS ROUND AND NOT CLAIMED: no Google endpoint
+  has ever been contacted from this repository, so whether Google accepts
+  `drive.file` on a real limited-input-device client is also unproven.
 
 ## BLOCKED ON
 (nothing)
