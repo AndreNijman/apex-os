@@ -44,18 +44,26 @@
 //! * **Cloudflare** works. [`apex_secret_core::account::CLOUDFLARE_OAUTH`]
 //!   carries Wrangler's `client_id`, so the daemon can present the same client
 //!   the grant was issued to — which §6 requires.
-//! * **Google and Microsoft** are refused with a reason. APEX registers no
-//!   OAuth application at either and will not borrow somebody else's, so their
-//!   `client_id` is `None`; the user supplies one at grant time and nothing in
-//!   this build records it. Google additionally wants a `client_secret`, which
-//!   the daemon has nowhere to hold. The refusal says which of those it is.
+//! * **Microsoft** should work. `apex account add microsoft.<name>
+//!   --client-id <id>` writes that client into `ServiceInfo::username` beside
+//!   the refresh token, which is the field [`OAuthProvider::client_id`] reads
+//!   first; `MICROSOFT_OAUTH` is `ClientSecret::None`, a public client, so the
+//!   id is the whole of what §6 needs. That happened with no change to this
+//!   file, which is what the note here used to predict it would take.
+//! * **Google is the one to watch.** Its client is recorded the same way, so
+//!   this no longer refuses before sending — but Google's guide lists
+//!   `client_secret` as required on the poll and optional on the refresh, and
+//!   this daemon has nowhere to hold one. If a refresh turns out to want it,
+//!   the reply is `invalid_client`, the stored credentials are left exactly as
+//!   they were, and Google's own `error_description` travels back to the
+//!   caller. Deliberate: a hardcoded refusal here would be this build guessing
+//!   at a requirement it cannot check from a machine with no Google account,
+//!   and letting the server answer costs one failed request and tells the
+//!   truth.
 //!
-//! The way out for both is the same and is a change to the **grant**, not to
-//! this file: whatever stores a refresh token has to store the client it was
-//! issued to beside it. [`OAuthProvider::client_id`] already reads
-//! `ServiceInfo::username` first for exactly that reason, so the day
-//! `apex account add` or `apex cf connect --client-id` writes one there, this
-//! starts working with no change here.
+//! A credential stored with no client recorded is still refused before
+//! anything is sent, because a request that can only earn `invalid_client` is
+//! not worth spending a refresh token on.
 //!
 //! # Nothing here reaches a real authorisation server
 //!
@@ -190,7 +198,9 @@ impl OAuthProvider {
     /// carries an S3 access key id and an Access service token's `client_id` —
     /// and an OAuth `client_id` is public by definition, so it is the right
     /// place for one and the only place a per-grant client could be recorded.
-    /// Nothing in this build writes it there yet; see the module note.
+    /// `apex cf connect --client-id` and `apex account add --client-id` both
+    /// write it there now; the fallback to the table is for a credential
+    /// stored before either did.
     fn client_id(info: &ServiceInfo, oauth: &'static OAuth) -> Result<String, ProviderError> {
         let stored = info.username.trim();
         if !stored.is_empty() && stored != NO_USERNAME {
