@@ -1920,3 +1920,50 @@ heartbeat under 45 minutes old as "an orchestrator is alive" and skips, pushing
 the next attempt five hours out. The live loop touches while `kill -0` on the
 orchestrator succeeds and then removes both `orchestrator.pid` and
 `orchestrator.heartbeat`. Round 26's shape, restored.
+
+### Round 30, later the same session — two more merges, and the wire version moved
+
+`task/p2-f-5` landed as **`f40ffefe`** (the `gdrive` transport: 1,353 insertions
+over 7 files, a Google token can be spent on something for the first time) and
+`task/p2-d-6` as **`da6fc0fb`** (gap 5, the per-run browser CA bind: 1,836
+insertions over 16 files, route B deliberately not started). Both diffs changed
+Rust, so unlike the round's first four merges the workspace was actually rebuilt
+on each merged tip: 3299 → **3314 passed / 0 failed / 2 ignored** across 56
+targets, clippy `--workspace --all-targets -D warnings` clean both times,
+`test-apex-browser.sh` 116/0, `test-secret-broker.sh` 84/0, and the four count
+gates unchanged at 75/71/4, 165/0/0, 194 checked / 0 failed, 191 documented.
+
+**`PROTOCOL_VERSION` is 10, and route B must take 11.** Gap 5 took it
+(`BROWSER_CA_VERSION = 10`); `docs/browser-capsule-auth.md` had reserved 10 for
+route B in three places and all three were rewritten. The bump was argued rather
+than assumed: this is the first guarded field whose dropped key fails **closed** —
+the capsule trusts *less*, never more — so `second_factor`'s in-tree no-bump
+precedent does not transfer. That precedent rests on an old daemon still
+producing a loud refusal, and Firefox answers an untrusted chain by *sitting* on
+it: five silent minutes, then "the capsule did not finish".
+`check_daemon_understands` runs before `Run` and a number is the only thing it
+consumes. **Any unit adding a wire field from here starts at 11 and must
+announce it.**
+
+`p2-d` is closed to dispatch, and for a different reason from `later`, `p2-c`
+and `p1-038-hardware`. Those wait on hardware; this one waits on a **decision** —
+Andre's answer to whether `apex-agentd` may read the plaintext of a capsule's
+connection to its pinned destination in order to add a credential the capsule
+never holds. Both answers produce a dispatch: yes is route B at protocol 11, no
+is a small round that records P2-012's capability auth as permanently unmet
+rather than pending. The one remaining piece of engineering — `SessionInfo`
+carrying `trust_ca`, so `apex agent status` can say a session trusts an extra
+root — is named in the closure rather than buried, because it appears in
+*neither* capsule doc (checked with `grep`, not assumed) and would otherwise
+exist only on a card.
+
+Three defects the CA-bind round found in **its own** work and recorded rather
+than quietly fixing: a suite assertion written `${#argv%%<pat>*}`, which bash
+rejects as a bad substitution, so it printed an error and asserted **nothing** —
+the dominant defect family, inside a test written to avoid it; a commit pushed
+without clippy, where `BrowserCmd::Run` crossed `large_enum_variant`; and
+`MAX_CA_BYTES`' doc comment claiming it stopped `--trust-ca /dev/zero` when the
+length was checked *after* `fs::read`, which on a character device grows a `Vec`
+until the daemon dies. That last one's mutation only went red once the assertion
+was strengthened — a redundant `take` guard had been hiding removal of the
+load-bearing one.

@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-19 02:48 AWST
+APEX ROADMAP — resume report — 2026-09-19 03:02 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -19,32 +19,25 @@ APEX ROADMAP — resume report — 2026-09-19 02:48 AWST
   p2-b       ALIVE      P2-003,P2-004                      task/p2-b-round30
              head 6b531503 Merge task/p2-f-4 into roadmap/v2.2
              dirty 0 file(s), 0 unpushed, card 0m
-             NEXT **Write `tests/mutate-lockscreen-atspi-shim.sh`**, the mutation pa
-
-  p2-d       ALIVE      P2-008,P2-009,P2-012               task/p2-d-6
-             head 8e1ca9cc test(agentd): the capsule itself says what it sees at
-             dirty 2 file(s), 0 unpushed, card 1m
-             NEXT Update the two docs, which are now the only thing gap 5 is missing
+             NEXT **Read the two in-flight results, then this round is ready to land
 
   p2-f       ALIVE      P2-016,P2-017,P2-018,P2-019        task/p2-f-6
-             head 933bbee1 test(accounts): the gdrive scope, measured through th
-             dirty 0 file(s), ? unpushed, card 4m
+             head f40ffefe Merge task/p2-f-5 into roadmap/v2.2
+             dirty 3 file(s), ? unpushed, card 18m
              NEXT **ROUND 30 IS COMPLETE ON THE BRANCH. Three commits pushed on `tas
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip f40ffefe Merge task/p2-f-5 into roadmap/v2.2
-    task/p2-d-6
-      1fff2c45 feat(protocol): a session's browser may be told to trust one    [1/10 added lines on tip]
-      b0ef1b2c feat(agentd): install one private CA for a session's browser,   [0/10 added lines on tip]
-      2fff910f feat(browser): `apex browser run --trust-ca FILE`, the capsul   [0/10 added lines on tip]
-      8e1ca9cc test(agentd): the capsule itself says what it sees at the pol   [4/10 added lines on tip]
+  int-os:  tip da6fc0fb Merge task/p2-d-6 into roadmap/v2.2
+    (nothing — every task branch's content is on the integration tip)
 
   int-shell:  tip d5c781a Merge task/p2-b-round29 into roadmap/v2.2
     task/p2-b-round30
       273c1fb test(a11y): name the cause of the empty accessibility tree, an   [2/10 added lines on tip]
+      b01a276 test(a11y): put Qt's factory back and read the lock screen off   [1/10 added lines on tip]
+      56d7521 docs(test): the pin had a shrug where it now has a cause   [0/10 added lines on tip]
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -64,11 +57,11 @@ APEX ROADMAP — resume report — 2026-09-19 02:48 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 02:48:10 AWST 10s
+  snapshot timer: active   last 30s Sat 2026-09-19
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    4a1fe3b  roadmap-state
+    apex-os    3cfd9c0  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -91,7 +84,7 @@ APEX ROADMAP — resume report — 2026-09-19 02:48 AWST
     apex-os    162d6fa  wt-p0-009-
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
-    apex-shell d553551  apex-shell-
+    apex-shell 0d815ad  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-
@@ -120,11 +113,10 @@ APEX ROADMAP — resume report — 2026-09-19 02:48 AWST
 ────────────────────────────────────────────────────────────────────────────
   next
 ────────────────────────────────────────────────────────────────────────────
-  3 agent(s) dispatched, ceiling 6
+  2 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
     p2-b           P2-003,P2-004                    Accessibility baseline and internationalisation baseline
-    p2-d           P2-008,P2-009,P2-012             First-party virtualization UX, disposable VM agent execution
     p2-f           P2-016,P2-017,P2-018,P2-019      Multi-user/guest/kiosk, APEX Online Accounts, guaranteed saf
 
   READY (dependencies believed satisfied — confirm against the agent table above):
@@ -146,6 +138,7 @@ APEX ROADMAP — resume report — 2026-09-19 02:48 AWST
     p1-053c — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-14 (round 27). P1-059 is DONE — its branch landed as merge d3ad8f7d and all four criteria are met; criterion 3 was the only one open and both its halves (the OS verb and the Android client) are now in. What remains on this unit is P1-060 C1 and C2, and those need a physical Android device or a working emulator, of which this machine has NEITHER — the predecessor measured four consecutive SIGSEGV crashes of the emulator across rounds 1-3. Same shape as p1-038-hardware: the work is real, it is not an agent's to do here. If a device appears, re-open and start with C2's headless-testable parts (backgrounding, battery saver, poor-network — LowBandwidthTest is the precedent) and leave talkback/rotation/foldables for the device. NOTE FOR WHOEVER TOUCHES THE WIRE: this unit did NOT bump PROTOCOL_VERSION; it stays 8, and p2-d now owns that file uncontended.
     base-partials — CLOSED BY HAND: Landed round 12 on both repos; `git merge-base --is-ancestor` confirms task/base-partials and task/base-partials-shell are both contained in roadmap/v2.2, zero unlanded commits. BASE-009 needs a disposable machine with a gaming userspace (the switch is `loginctl terminate-user`, which kills the session running the test) and katana is off-limits; BASE-010 needs non-zero spendable VRAM and this is an APU, so apexd falls to Backend::Cpu by design. Closed 2026-09-12 after a second agent was dispatched onto a finished unit.
     p2-c — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-18 (round 27) — and this says the work is ANDRE'S, not that it is done. The container sweep that found FOUND 3, 4, 11 and 12 is exhausted: every remaining reader needs a BOOTED machine, and reaching one needs `apex update` plus a reboot, which is the boot path and off-limits to agents. A container can move a reader to 'installed, and whether it runs was not answered' and no further. The step-by-step checklist for Andre is at the end of ROADMAP/evidence/P2-005-007-device-maturity.md. The three items stay `partial` because their acceptance criteria genuinely are not met — that is the state this hatch exists for. Re-open only after an image build lands and a NEW reader could have arrived with it.
+    p2-d — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-19 (round 30) — and unlike later, p2-c and p1-038-hardware, this one is not waiting on HARDWARE, it is waiting on a DECISION. Gap 5 landed as merge da6fc0fb and every bullet under 'What is not decided' in docs/browser-capsule-auth.md is now struck through. THE QUESTION, VERBATIM, from 'The question, for Andre' in that page: "May apex-agentd read the plaintext of a capsule's connection to the one destination that capsule was pinned to, in order to add a credential the capsule is never given?" YES -> route B is a round of its own and it takes PROTOCOL_VERSION 11, NOT 10 — gap 5 took 10 (BROWSER_CA_VERSION = 10) and the page's three old reservations of 10 were rewritten this round. Fold the SessionInfo.trust_ca follow-up into that round. NO -> that is still a dispatch, a small one: record P2-012's capability auth as PERMANENTLY UNMET rather than pending, say so in the item, and fold SessionInfo.trust_ca into the same round. Do not read 'no' as 'nothing to do'. THE ONE REMAINING PIECE OF ENGINEERING, named here so 'closed' is not read as 'finished': SessionInfo carries no trust_ca, so `apex agent status` cannot show that a session trusts an extra root. It is an additive optional field on a stability surface, it is in NEITHER capsule doc (checked with grep, not assumed), and it is too small to be a unit on its own. P2-008 and P2-009 stay partial on their own grounds, recorded in their own evidence: USB passthrough needs a physical device somebody will detach, and P2-009's gap is a guest image carrying an agent CLI, which is a build rather than a test. RE-OPEN the moment Andre answers, either way.
     later — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-19 (round 30) — and this says the remaining work is ANDRE'S, not that it is done. Round 29 landed as merge c6bc990a with 0 unlanded; test-boot-v2 is 105/0. Everything a VM can qualify is now qualified: the PCR 0 scenario earlier rounds called impossible exists (two Fedora edk2 revisions move PCR 0 and leave PCR 7 identical), the no-TPM arm exists, and the TPM-clear recovery is asserted against the user's DATA rather than a keyslot opening. What is left of L-001 is the acceptance word 'Real' — no silicon TPM has done an enrol-and-recover cycle, the L16's TPM is off-limits and katana is off-limits — so no agent can satisfy it from here. L-002 and L-003 are held behind exactly that by this unit's own note, and L-002 has an independent blocker: every crypto_LUKS branch in installer/apex-install is a refusal to overwrite an existing header, never a path that creates one. The deliverable that replaces the dispatch is written down rather than wished for: docs/boot-v2.md, 'The run somebody with hardware would have to do' — five numbered runs, four prerequisites, what to record at each step; runs 1, 2 and 5 are the minimum that moves L-001 off partial. Same shape as p1-038-hardware and p2-c. RE-OPEN the moment there is a machine whose TPM somebody is willing to clear.
     p1-063 — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-13 (round 24). Round 3 is finished, pushed AND landed — apex-os 619e764a, apex-shell 1da66c7 — and followups-4 wired its 60 lid assertions into CI runner-green. Both remaining criteria are ANDRE'S PHYSICAL ACTIONS and an agent must not fake either. Criterion 1: causation needs the external display physically unplugged. Re-measured 2026-09-13 — Docked=b true, card1-DP-1 connected — and with a display attached logind consults HandleLidSwitchDocked (default ignore) BEFORE any inhibitor, so the lid does nothing with or without APEX's block and the non-suspend cannot be attributed to APEX. The one command that closes it, undocked: `sudo ./tests/test-apex-lid-live.sh`. Criterion 3: 'draws measurably less' needs an undocked machine ON BATTERY that nobody is using — power_now reads CHARGING power on mains — and the runnable recipe is in docs/lid.md under 'What has NOT been measured'. Nothing here is waiting on an agent.
 

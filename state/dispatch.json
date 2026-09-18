@@ -1,9 +1,9 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-19T02:55+08:00",
+  "updated": "2026-09-19T03:15+08:00",
   "_round": "Round 30. All four of round 29's agents were dead at the resume, every worktree clean with nothing unpushed, so the round was a landing round: four merges, zero unlanded left in either repo. Three agents re-dispatched fresh from cards (never by SendMessage); `later` retired because its remainder is hardware. Three slots deliberately free — one still held for the Android unit, two headroom. No new unit was invented to fill them: the READY list was empty and the COMPLETE section is exhaustive.",
   "_landed_this_round": {
-    "apex-os": "roadmap/v2.2 bde4d96c -> 6b531503. Three merges, in order: c6bc990a (task/later-2, tip 0391b4ec, 741 insertions over 5 files), 7658fe1f (task/p2-b-round29, tip cb02019f, tests/lib/atspi.sh), 6b531503 (task/p2-f-4, tip 79027b51, 551 insertions over 2 files). Each merge --no-ff; check-no-conflict-markers.sh PASS after each; pushed once with --force-with-lease. FOURTH MERGE, later the same session: f40ffefe (task/p2-f-5, tip 933bbee1, 1,353 insertions over 7 files — the gdrive provider). Rust changed in this one, so the workspace was actually rebuilt on the merged tip: cargo test --locked --workspace --no-fail-fast 3299 passed / 0 failed / 2 ignored, clippy --workspace --all-targets -D warnings exit 0, tests/test-secret-broker.sh 84/0, and all four count gates unchanged. roadmap/v2.2 is now f40ffefe.",
+    "apex-os": "roadmap/v2.2 bde4d96c -> 6b531503. Three merges, in order: c6bc990a (task/later-2, tip 0391b4ec, 741 insertions over 5 files), 7658fe1f (task/p2-b-round29, tip cb02019f, tests/lib/atspi.sh), 6b531503 (task/p2-f-4, tip 79027b51, 551 insertions over 2 files). Each merge --no-ff; check-no-conflict-markers.sh PASS after each; pushed once with --force-with-lease. FOURTH MERGE, later the same session: f40ffefe (task/p2-f-5, tip 933bbee1, 1,353 insertions over 7 files — the gdrive provider). Rust changed in this one, so the workspace was actually rebuilt on the merged tip: cargo test --locked --workspace --no-fail-fast 3299 passed / 0 failed / 2 ignored, clippy --workspace --all-targets -D warnings exit 0, tests/test-secret-broker.sh 84/0, and all four count gates unchanged. roadmap/v2.2 is now f40ffefe. FIFTH MERGE: da6fc0fb (task/p2-d-6, tip 044fa254, 1,836 insertions over 16 files — gap 5, the per-run browser CA bind, with route B deliberately not started). Re-run on that tip: cargo test --locked --workspace --no-fail-fast 3314 passed / 0 failed / 2 ignored across 56 targets, clippy exit 0, tests/test-apex-browser.sh 116/0, tests/test-secret-broker.sh 84/0 (re-run because the same tip now also carries gdrive), and all four count gates unchanged. roadmap/v2.2 is now da6fc0fb. THE WIRE VERSION MOVED TO 10 — see _decisions.",
     "apex-shell": "roadmap/v2.2 379eef8 -> d5c781a. One merge: task/p2-b-round29 tip 5ae27c3, 2,013 insertions over 6 files. --no-ff DELIBERATELY: the branch was cut from 379eef8 and would have fast-forwarded, leaving no merge sha to cite in evidence.",
     "verification": "unlanded.py roadmap/v2.2 against both repos after the pushes: 'nothing — every task branch's content is on the integration tip', both repos. bde4d96c (task/p2-d-5) was already an ancestor: it was merged mid-round-29 and had never been recorded against P2-008/009/012, which round 30 fixed."
   },
@@ -17,12 +17,12 @@
     "P2-018": "partial (unchanged) - merge 6b531503. Criterion 2 closed; the remaining gap named honestly - the menu is never OPENED, only every command it would run is run.",
     "P2-008": "partial (unchanged) - merge bde4d96c recorded for the first time.",
     "P2-009": "partial (unchanged) - merge bde4d96c recorded for the first time.",
-    "P2-012": "partial (unchanged) - merge bde4d96c recorded, plus the round-30 scope: gap 5 only, route B waits on Andre's question.",
+    "P2-012": "partial (unchanged) - merge da6fc0fb. Gap 5 closed, route B not started, PROTOCOL_VERSION 10 taken and route B moved to 11. Unit closed to dispatch pending Andre's answer; both answers produce a dispatch.",
     "_no_status_advanced": "Deliberate. Counts stay 91 done / 35 partial / 2 blocked of 128. Every card said its items stay partial or blocked, and each says why in a sentence about the world rather than about effort.",
     "P2-017": "partial (unchanged) - merge f40ffefe. The gdrive provider exists, so a Google token can be spent on something for the first time. Stays partial for reasons recorded rather than softened: no Google endpoint was contacted, the refresh question is unchanged and NOT superseded, the agentd forwarding path is not exercised for gdrive, and a successful read through the socket cannot be measured against a loopback double because the host pin refuses loopback — the price of the pin, not a gap."
   },
   "_deliberately_held": {
-    "p2-d": "HOLD LIFTED AND DISPATCHED this round, after two rounds held. The reason it was held is gone: p1-053c is CLOSED and its round 6 did not touch protocol.rs at all — PROTOCOL_VERSION is still 8 on the landed tip. p2-d owns that file uncontended and was told it is free to take 8 -> 9 for Route-B capsule auth, and told to announce the bump at the top of its card the moment it makes it.",
+    "p2-d": "SUPERSEDED 2026-09-19 (round 30). The old text here said the hold was lifted and the unit was 'free to take 8 -> 9' — two rounds stale and wrong about the number. It took 9 in round 4 and 10 in round 30. The unit is now CLOSED TO DISPATCH pending Andre's answer; see queue.json _completed_units.p2-d.",
     "p1-038-hardware": "Still closed to dispatch — unchanged reason, the 18 labwc matrix rows need real applications on a real session.",
     "p1-063": "Still closed to dispatch as WORK. Both remaining criteria are Andre's physical actions. NOTE: this round's hypridle finding is adjacent but NOT the same thing — P1-063 is about the lid, and what is killing the run is the 15-minute idle timeout. Worth folding into the item: a lid inhibitor alone would not have saved any of round 26's agents.",
     "p1-053c": "CLOSED BY HAND this round — see queue.json. P1-059 done; P1-060 needs a device or a working emulator and this machine has neither (four consecutive emulator SIGSEGVs measured across rounds 1-3).",
@@ -46,23 +46,6 @@
       "queue_id": "p2-b",
       "card": "ROADMAP/state/agents/p2-b.md",
       "at_dispatch": "Fresh agent carrying the dead one's card; the NEXT it inherits is one experiment, not a survey. FOUND 14 — QQuickWindow::accessibleRoot() is null inside quickshell — currently ends in 'upstream' and should not. Everything is ruled out but one branch: the windows are top-level Qt::Window and QAccessible::isActive() is 1 in both processes (measured in gdb), so either qQuickAccessibleFactory is not in qAccessibleFactories() in this process or queryAccessibleInterface returns early on a class above QQuickWindow. The experiment is on the card: qQuickAccessibleFactory is not exported but _ZN22QAccessibleQuickWindowC1EP12QQuickWindow is, so an LD_PRELOAD constructor can installFactory and answer the question. Branch is task/p2-b-round30 and must exist and be PUSHED IN BOTH REPOS even if one gets no commits — apex-shell's CI matches on branch name."
-    },
-    {
-      "slug": "p2-d",
-      "items": [
-        "P2-008",
-        "P2-009",
-        "P2-012"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p2-d",
-      "branch": "task/p2-d-6",
-      "agent_id": "a51c164df40089750",
-      "dispatched": "2026-09-19T02:20+08:00",
-      "session": "round 30 orchestrator",
-      "queue_id": "p2-d",
-      "card": "ROADMAP/state/agents/p2-d.md",
-      "at_dispatch": "SCOPED, and the scope is the point. ROUTE B IS NOT STARTED: the card's own NEXT says there is no engineering next step on P2-012, only a question, and it is Andre's — may apex-agentd read the plaintext of a capsule's connection to its pinned destination to add a credential the capsule is never given ('The question, for Andre', docs/browser-capsule-auth.md). The agent is dispatched for gap 5 ONLY, the per-run CA bind, which the card calls smaller and genuinely independent and which closes without any of route B; round 29's probe is already its evidence, since the authenticated arm IS a capsule told to trust one CA. It is a protocol.rs field plus an apex-agentd change, because nothing populates SandboxSpec.ro/ro_at from the wire. WIRE-VERSION COLLISION FLAGGED AT DISPATCH: PROTOCOL_VERSION is 9 on the landed tip and route B has reserved 10, so if the CA bind needs a new wire field the agent must decide whether that is 10 or whether it rides 9, and write the decision at the TOP of its card so route B cannot silently reuse the number. The flag must name the file rather than default to anything."
     },
     {
       "slug": "p2-f",
@@ -194,7 +177,8 @@
     "the ChatGPT self-update repo is gone from this machine": "/etc/yum.repos.d/chatgpt.repo was live and enabled, owned by no rpm and never an image default, so ostree's /etc merge would have kept it across the update and the first post-landing test would have read as though the new Containerfile stanza failed. Removed 2026-09-12 with a copy in the session scratchpad; there was no chatgpt or codex timer, user or system, so the repo file was the whole side channel. CLAUDE.md updated in place.",
     "lid-closed continuous operation is P1-063": "Andre asked for the outcome, not the mechanism, so the mechanism was decided at dispatch. A handle-lid-switch block inhibitor held only while work is live; live work is MEASURED (an agent session; codex is an agent, so his own case needs no action from him) with a manual pin for the rest; thermal and battery guards suspend anyway and must name which fired, because lid closed means no airflow and 'it kept working until it died' is worse than suspending; and the VPN half is asserted rather than assumed, because wifi power saving and NM's reconnect logic can drop a long-lived tunnel with no suspend involved. Recorded in CLAUDE.md in his own words.",
     "P1-054 and P1-055 were recorded done and are now partial": "The Android agent's own report names an unmet criterion in each — no profile/projects/worktrees verb on the socket for P1-054, three of four TUIs and no gemini fixture for P1-055 — and it recorded done anyway. Corrected by the orchestrator rather than left, because the roadmap counts are the only thing anyone reads at the end. p1-053b was told at dispatch not to repeat it.",
-    "the READY queue offers units whose work is already landed": "p1-005 was offered by resume.sh's READY list and dispatched, and its branch turned out to be fully landed already — the queue offers a unit while ANY of its items is short of done, and P1-005/P1-007 are partial for reasons that belong to other items. Cost one dispatch and a redirect. Before dispatching a unit whose card says 'unit done', run `git log origin/roadmap/v2.2..origin/<branch>` and read the recorded evidence for WHY an item is partial; 'partial' is not the same as 'has work left here'."
+    "the READY queue offers units whose work is already landed": "p1-005 was offered by resume.sh's READY list and dispatched, and its branch turned out to be fully landed already — the queue offers a unit while ANY of its items is short of done, and P1-005/P1-007 are partial for reasons that belong to other items. Cost one dispatch and a redirect. Before dispatching a unit whose card says 'unit done', run `git log origin/roadmap/v2.2..origin/<branch>` and read the recorded evidence for WHY an item is partial; 'partial' is not the same as 'has work left here'.",
+    "PROTOCOL_VERSION 10 taken by gap 5; route B takes 11": "Round 30, apex-os merge da6fc0fb. PROTOCOL_VERSION is 10 on the landed tip and BROWSER_CA_VERSION = 10: the per-run browser CA bind (RunRequest::trust_ca) took it. ROUTE B'S TLS FIELDS MUST TAKE 11 — docs/browser-capsule-auth.md had reserved 10 for route B in three places and all three were rewritten. The bump was argued, not taken: this is the first guarded field whose dropped key fails CLOSED (the capsule trusts LESS, never more), so second_factor's in-tree no-bump precedent does not transfer — its argument rests on an old daemon still producing a loud refusal, and Firefox answers an untrusted chain by SITTING on it, which is five silent minutes and then 'the capsule did not finish'. check_daemon_understands runs before Run and a number is the only thing it consumes. ANY UNIT ADDING A WIRE FIELD FROM NOW ON STARTS AT 11 AND MUST ANNOUNCE IT."
   },
   "_incident_two_orchestrators": "At 03:06 the apex-roadmap-resume.timer started its OWN `claude -p` orchestrator (pid 3849364), correctly, because the 3am usage limit had killed every one of this session's agents and it saw nothing alive. It landed four branches at 03:11 (p1-061, p2-b, p1-053c, p2-a) — good work, verified green by all three gates and kept. It was about to dispatch six agents when this session came back. TWO ORCHESTRATORS IS ACTIVELY HARMFUL: both dispatch to a ceiling of six, both write this file, and both use the same worktree paths, so two agents in /var/tmp/apex-work/wt-p2-f would corrupt each other. The duplicate was terminated before it dispatched (autoresume.log: 'resume session ended (exit 143)'), so nothing was lost. ROADMAP/state/AUTORESUME was LEFT IN PLACE deliberately — the mechanism is correct and is the only rescue if this session dies; it skips while agents are alive, which is why it only fired during the window when all of them were dead. The lesson is to re-dispatch promptly after a limit so the next timer check sees live agents and skips.",
   "_retired_agents": [
@@ -311,6 +295,25 @@
       "at_dispatch": "Fresh agent on the dead one's card. Its NEXT is explicit and was taken as given: the gdrive transport in apex-secretd. It unlocks three things at once — a Google token that add/renew can store but no provider can spend, Google's still-unproven refresh (its guide lists client_secret as required on the poll and optional on the refresh), and the scopes GOOGLE_SCOPES names that map to no operation. Told twice, because the card says it twice: P2-018 criterion 2 is CLOSED — do not reopen it and do not widen the watchdog.",
       "retired": "2026-09-19T02:55+08:00",
       "retired_why": "Finished cleanly at 02:44 with three commits pushed on task/p2-f-5; landed as merge f40ffefe. Re-dispatched fresh on task/p2-f-6 for msgraph — never by SendMessage."
+    },
+    {
+      "slug": "p2-d",
+      "items": [
+        "P2-008",
+        "P2-009",
+        "P2-012"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p2-d",
+      "branch": "task/p2-d-6",
+      "agent_id": "a51c164df40089750",
+      "dispatched": "2026-09-19T02:20+08:00",
+      "session": "round 30 orchestrator",
+      "queue_id": "p2-d",
+      "card": "ROADMAP/state/agents/p2-d.md",
+      "at_dispatch": "SCOPED, and the scope is the point. ROUTE B IS NOT STARTED: the card's own NEXT says there is no engineering next step on P2-012, only a question, and it is Andre's — may apex-agentd read the plaintext of a capsule's connection to its pinned destination to add a credential the capsule is never given ('The question, for Andre', docs/browser-capsule-auth.md). The agent is dispatched for gap 5 ONLY, the per-run CA bind, which the card calls smaller and genuinely independent and which closes without any of route B; round 29's probe is already its evidence, since the authenticated arm IS a capsule told to trust one CA. It is a protocol.rs field plus an apex-agentd change, because nothing populates SandboxSpec.ro/ro_at from the wire. WIRE-VERSION COLLISION FLAGGED AT DISPATCH: PROTOCOL_VERSION is 9 on the landed tip and route B has reserved 10, so if the CA bind needs a new wire field the agent must decide whether that is 10 or whether it rides 9, and write the decision at the TOP of its card so route B cannot silently reuse the number. The flag must name the file rather than default to anything.",
+      "retired": "2026-09-19T03:15+08:00",
+      "retired_why": "Finished cleanly at 02:57 with six commits pushed on task/p2-d-6; landed as merge da6fc0fb. NOT re-dispatched: the unit is closed to dispatch because its next action is Andre's answer, not engineering. See queue.json _completed_units.p2-d — both answers produce a dispatch, so re-open the moment one arrives."
     }
   ],
   "_incident_idle_suspend": "Before doing anything else this round the orchestrator took a `sleep:idle` BLOCK inhibitor (systemd-inhibit --what=sleep:idle --mode=block, 6h). Only delay inhibitors were held — ModemManager, NetworkManager, UPower and hypridle's own before_sleep handler — so nothing was stopping hypridle's idle suspend, which the memory record names as the real killer of autonomous rounds (not the lid). Take one at the START of any round; it is the same primitive P1-063 ships.",

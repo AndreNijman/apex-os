@@ -4254,8 +4254,17 @@ tasks:
     failed=0 skipped=1 - the named refusal, as designed - and mutate-lockscreen-atspi-shim.sh printed applied=0
     and exited 0 because its baseline guard fired rather than scoring eight mutants against a suite that never ran
     (FOUND 18 behaving correctly on the very machine that taught it). run-lockscreen-atspi.sh is 8/0/1 there,
-    unchanged by the prose commit 56d7521. A second run, 35383306764, was dispatched on the final tip 56d7521 and
-    ITS result is not claimed here. Recovery screen still unaudited; orca as the greetd user still needs hardware.
+    unchanged by the prose commit 56d7521. CONFIRMED ON THE FINAL TIP: run 35383306764 on 56d7521 reproduces all
+    of it - check-quickshell-a11y-cause.sh 14/0/0 with "note: Qt 6.11.2, compiler g++",
+    mutate-quickshell-a11y-cause.sh 13 applied / 11 CAUGHT / 0 SURVIVED / 2 HELD, run-lockscreen-atspi-shim.sh
+    0/0/1 with its named no-quickshell refusal, mutate-lockscreen-atspi-shim.sh applied=0 via its baseline guard,
+    run-lockscreen-atspi.sh 8/0/1, Repo Structure Sanity and NixOS both success - and the ONLY failing step in the
+    whole job is again run-rtl-test.sh at 17/3/2, which predates this branch. LOCAL RE-CHECK OF THE ROUND-29 PAIR
+    after the prose-only commit 56d7521: run-lockscreen-atspi.sh 17/0/6 unchanged, and mutate-lockscreen-atspi.sh
+    11 applied / 8 CAUGHT / 0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE / 3 HELD / 0 FALSE-RED, identical to round
+    29's ledger, finishing with "every file matches the sha256 it started with". The prose edit changed no
+    assertion text and disturbed nothing. Recovery screen still unaudited; orca as the greetd user still needs
+    hardware.
 - id: P2-004
   title: Internationalisation baseline
   priority: P2
@@ -5201,7 +5210,53 @@ tasks:
     silent is a gap worth a follow-up (an additive optional field on a stability surface). OPERATIONAL NOTE FOR
     THIS MACHINE: the live apex-agentd on the L16 speaks protocol 9, so apex browser run --trust-ca will correctly
     refuse with the restart-apex-agentd message until an image carries these binaries. Nothing on the L16 was
-    changed this round.
+    changed this round. LANDED round 30 (2026-09-19), second merge of the round for this unit: task/p2-d-6 tip
+    044fa254 merged onto roadmap/v2.2 as da6fc0fb - six commits, 1,836 insertions over 16 files, including the new
+    apexd/apex-agentd/src/browser_ca.rs and apexd/apex-agentd/tests/browser_ca_bind.rs. GAP 5 IS CLOSED and route
+    B was not started. RE-RUN ON THE MERGED TIP da6fc0fb rather than inherited from the branch: cargo test
+    --locked --workspace --no-fail-fast 3314 passed / 0 failed / 2 ignored across 56 targets; cargo clippy
+    --locked --workspace --all-targets -D warnings exit 0; tests/test-apex-browser.sh 116 passed / 0 failed;
+    tests/test-secret-broker.sh 84 passed / 0 failed (re-run because the same tip now also carries the gdrive
+    provider); check-no-conflict-markers.sh PASS; check-suites-run-in-ci.sh 75 / 71 / 4 / 0;
+    check-shellcheck-coverage.sh 165 / 0 / 0; check-containerfile-assertions.sh 194 checked / 0 failed / 116
+    unresolved / 0 inert; check-doc-verbs.sh 191 documented / 114 declared undocumented / 0 undocumented and
+    undeclared / 0 stale. unlanded.py: nothing outstanding for apex-os. THE WIRE VERSION MOVED AND EVERY FUTURE
+    ROUND MUST READ THIS: PROTOCOL_VERSION is 10 on the landed tip and BROWSER_CA_VERSION is 10 - gap 5 TOOK 10,
+    so ROUTE B'S TLS FIELDS MUST TAKE 11. docs/browser-capsule-auth.md reserved 10 for route B and all three
+    places were rewritten this round. The bump was argued rather than taken: this is the first guarded field whose
+    dropped key fails CLOSED - the capsule trusts less, never more - so second_factor's in-tree no-bump precedent
+    does not transfer, because its argument rests on an old daemon still producing a loud refusal, and Firefox
+    answers an untrusted chain by SITTING on it: five silent minutes and then 'the capsule did not finish'.
+    check_daemon_understands runs before Run and consumes a number. WHAT GAP 5 DOES: --trust-ca FILE names a PEM,
+    the daemon copies it somewhere the session can read and not write, merges a Certificates.Install into a copy
+    of THE MACHINE'S OWN /etc/firefox/policies/policies.json and binds that copy over the real one inside the
+    namespace. /etc is never written, asserted by sha256. It is the BROWSER'S trust, not the session's - curl, git
+    and python in the same capsule still refuse the host. Four refusals rather than warnings: an absent host
+    policy (--ro-bind-try over a missing target is a silent no-op, so binding hopefully would give a capsule that
+    trusts nothing and blames its own timeout), non-CERTIFICATE PEM blocks, DER with the openssl conversion line,
+    and a machine that already installs certificates. 19 mutations, every file restored byte-identically with
+    sha256 compared. THREE DEFECTS THE ROUND FOUND IN ITS OWN WORK, all recorded rather than quietly fixed: a
+    suite assertion written with ${#argv%%<pat>*} which bash rejects as a bad substitution, so it printed an error
+    and asserted NOTHING - neither PASS nor FAIL - the dominant defect family of this repository, inside a test
+    written to avoid it; a commit pushed without clippy, where BrowserCmd::Run crossed large_enum_variant when the
+    flag was added; and MAX_CA_BYTES' doc comment claiming it stopped --trust-ca /dev/zero when the length was
+    checked AFTER fs::read, which on a character device grows a Vec until the daemon dies (metadata first now, and
+    its mutation only went red after the assertion was strengthened, because a redundant take guard was hiding
+    removal of the load-bearing one). NOT RUN THIS ROUND AND NOT CLAIMED: the browserlab, any live Firefox against
+    a real TLS server, any vmlab flow - that a real Firefox ACCEPTS a policy-installed root is round 29's
+    measurement, and what this round adds is that the daemon builds the bind correctly. TWO OPERATIONAL NOTES: the
+    L16's live daemon speaks protocol 9, so apex browser run --trust-ca will correctly refuse with the restart
+    message until an image carries these binaries, and nothing on the machine was changed; and SessionInfo carries
+    no trust_ca, so apex agent status cannot show that a session trusts an extra root - NOTED, NOT BUILT, an
+    additive optional field on a stability surface. THE UNIT IS NOW CLOSED TO DISPATCH, and closed for a DIFFERENT
+    REASON from later/p2-c/p1-038 - those need hardware, this needs a DECISION. Every bullet under 'What is not
+    decided' in docs/browser-capsule-auth.md is struck through and done. CHECKED RATHER THAN ASSUMED: the one
+    piece of engineering still named anywhere is SessionInfo carrying trust_ca, and `grep -n SessionInfo` finds it
+    in NEITHER capsule doc - it lives only on the card and in this field. It is too small to be a unit and folds
+    into whichever round the answer produces. What remains is Andre's answer to the question under 'The question,
+    for Andre' - may apex-agentd read the plaintext of a capsule's connection to the one destination that capsule
+    was pinned to, in order to add a credential the capsule is never given? Yes means route B at protocol 11; no
+    means this criterion is permanently unmet rather than pending and this item should say so.
 - id: P2-013
   title: Per-project identity binding
   priority: P2

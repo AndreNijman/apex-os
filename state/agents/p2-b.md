@@ -17,38 +17,35 @@ pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 
 ## NEXT
 
-**Read CI run 35382910849, then dispatch one on the final tip `56d7521`**
-(`gh workflow run ci.yml --ref task/p2-b-round30`; `gh` is authenticated here
-with its own `gho_` token — the note about Andre's PAT does not apply to it),
-and record the SECOND-MACHINE result in P2-003's evidence, which currently says
-the result is "NOT YET READ AND NOT CLAIMED". `check-quickshell-a11y-cause.sh`
-**should actually run** on the Arch runner — it needs no compositor, no bus and
-no quickshell, `base-devel` is installed by the setup job, and Arch ships Qt's
-headers in `qt6-base`/`qt6-declarative` rather than a separate `-devel`
-package — so this is the first time the FOUND 20 mechanism gets measured on a
-second distribution and a second Qt, and a mode-A null there makes the cause
-version-independent. `run-lockscreen-atspi-shim.sh` will SKIP (no quickshell,
-AUR): check it skips with its NAMED reason and that
-`mutate-lockscreen-atspi-shim.sh` prints its baseline guard and exits 0 instead
-of scoring eight mutants against a suite that never ran (FOUND 18). Do not land
-red.
+**This round is complete and ready to land.** apex-shell
+`task/p2-b-round30` is at `56d7521`, three commits, pushed; apex-os
+`task/p2-b-round30` is at `6b531503`, pushed, no commits. CI on the final tip
+(**35383306764**) is green on everything except `run-rtl-test.sh` at 17/3/2,
+which predates this branch. P2-003 and P2-004 evidence are both written and
+re-parsed. Nothing is unlanded and nothing is half-written.
+
+The next substantive work on this unit, in order, is what the ledger already
+names. **(1) The RECOVERY screen** — the last unaudited a11y surface in P2-003,
+and it can now be audited properly rather than source-only, because
+`tests/run-lockscreen-atspi-shim.sh` is a working template for reading a
+quickshell surface back over real AT-SPI: copy its shape, point it at the
+recovery window, and give it the same in-run one-node control.
+**(2) P2-004's RTL discriminator**, still 17/3/2 on the runner with the cause
+unidentified; the Qt difference is no longer a guess, because
+`check-quickshell-a11y-cause.sh` prints its toolchain and reported Qt
+**6.11.2** there against **6.10.3** here, and the other unruled-out difference
+is the runner's qt6ct having no `/etc/xdg/qt6ct/qt6ct.conf`, which APEX ships.
+**Do NOT close the RTL section by making section 1 SKIP — that section IS the
+discriminator.**
+
+**Not this unit's, and written down so it is not lost:** FOUND 22
+(`LockedHintService._failed()` never re-pumps) belongs with P0-015, and FOUND
+20's one-line upstream fix belongs to qtdeclarative. See BLOCKED ON.
 
 ## IN PROGRESS
 
-Nothing half-written; both worktrees clean, both branches pushed. Two things
-still in flight:
-
-* **CI run 35383306764** on the FINAL tip `56d7521`, dispatched and running.
-  Run **35382910849** on `b01a276` is already read and is in the DONE section.
-* **`./tests/mutate-lockscreen-atspi.sh` re-running locally** to prove
-  `56d7521`'s prose-only edit did not disturb round 29's pair (expect 8 CAUGHT /
-  0 SURVIVED / 3 HELD). Log:
-  `scratch-p2-b/round30/mutate-r29-recheck.log`. R1, R2 and R2b are already
-  CAUGHT.
-
-P2-003's roadmap evidence still says the second-machine result is "NOT YET READ
-AND NOT CLAIMED" — that sentence is now stale and must be replaced with the
-35382910849 numbers below.
+Nothing. Both worktrees clean, both branches pushed, both CI runs read, both
+roadmap items' evidence written and re-parsed with every earlier round intact.
 
 ## DONE
 
@@ -82,6 +79,12 @@ clean. Before that, a CI step timeout would have left a mutated file in place
 for every later step in the same job, and because the file is in the REQUIRED
 list the structure check would still have passed.
 
+`56d7521` is prose only — comments, `echo` lines and skip reasons in
+`run-lockscreen-atspi.sh` — and it was verified as such rather than asserted:
+the suite is 17/0/6 after it, unchanged, and round 29's whole mutation pair
+re-runs at **11 applied / 8 CAUGHT / 0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE /
+3 HELD / 0 FALSE-RED**, also unchanged.
+
 apex-os `task/p2-b-round30`: cut from `6b531503`, pushed, **no commits** —
 nothing this round needed apex-os. The branch exists because apex-shell's CI
 matches on branch name.
@@ -89,8 +92,9 @@ matches on branch name.
 P2-003's roadmap evidence carries the `273c1fb` half. The `b01a276` half and
 FOUND 22/23 go in next.
 
-**FROM THE GITHUB ARCH RUNNER, not this laptop.** CI run **35382910849** on
-`task/p2-b-round30` at `b01a276`: `Repo Structure Sanity` **success** (so all
+**FROM THE GITHUB ARCH RUNNER, not this laptop.** Two runs: **35382910849** on
+`b01a276` and **35383306764** on the final tip `56d7521`, which reproduces it
+exactly. Taking the first: `Repo Structure Sanity` **success** (so all
 110 REQUIRED paths exist there), `NixOS` **success**, and `arch-validate` red
 on **exactly one step — `run-rtl-test.sh` at 17/3/2**, the pre-existing red this
 unit has carried since round 28 and which a control run on `roadmap/v2.2`
@@ -112,6 +116,10 @@ important one is the first:
   0: its baseline guard fired rather than scoring eight mutants against a suite
   that never ran (FOUND 18 working as intended on the machine that taught it).
 * `run-lockscreen-atspi.sh` — 8/0/1, unchanged by `56d7521`'s prose edit.
+
+The final-tip run **35383306764** gives the identical five lines and the
+identical single red step, so the round lands green apart from a failure that
+is older than it.
 
 Round 29 (2026-09-18).
 
