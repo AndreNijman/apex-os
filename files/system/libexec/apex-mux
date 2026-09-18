@@ -273,11 +273,23 @@ zellij_build() {
     # and saw 5 of 12 never arrive at all.
     #
     # Three things together are what make this reliable, and each was measured:
-    # wait for the server to answer at all; ask over the IPC bus with
-    # `action new-tab`, which is the operation this actually is; and then VERIFY
-    # and RE-SEND, because a dropped request is cured by an identical one issued
-    # a moment later. If it never lands, this fails loudly rather than handing
+    # wait for the server to answer at all; send the layout; and then VERIFY and
+    # RE-SEND, because a dropped request is cured by an identical one issued a
+    # moment later. If it never lands, this fails loudly rather than handing
     # back a session the caller believes is set up.
+    #
+    # BOTH send forms are used, alternately, because the two environments this
+    # has to work in disagree about which is reliable. `action new-tab` is a
+    # request on the session server's IPC bus — the same channel `dump-layout`
+    # answers on, and the operation this actually is — and here it landed 20/20
+    # where the top-level form dropped 5/20. On a GitHub ubuntu-24.04 runner
+    # with the SAME zellij 0.45.1 the opposite held: run 35351419809 landed
+    # nothing in four `action new-tab` tries over twelve seconds, while the
+    # top-level form had been green on three of the four runs before it. The
+    # difference between the two machines is not understood and was not
+    # reproducible here under TERM=dumb. Neither form reports a refused layout
+    # in its exit code, so neither is trusted on its own and nothing is believed
+    # without reading the tab back.
     layout="$(zellij_kdl "$arrangement" "$plan")"
     waited=0
     while [ "$waited" -lt 300 ]; do
@@ -287,12 +299,17 @@ zellij_build() {
     done
     zellij_up "$session" || die "the zellij session '$session' never came up"
 
-    # The poll is long against a landing that is consistently under 300ms, so a
-    # re-send cannot race a slow first one into a second `apex` tab.
+    # 3s of polling against a landing that is consistently under 300ms, so a
+    # re-send cannot race a slow first one into a second `apex` tab — and the
+    # suite asserts there is exactly one, so that is checked rather than hoped.
     attempt=0
-    while [ "$attempt" -lt 4 ]; do
-        zellij --session "$session" action new-tab --layout-string "$layout" \
-            >/dev/null 2>&1
+    while [ "$attempt" -lt 6 ]; do
+        if [ "$((attempt % 2))" -eq 0 ]; then
+            zellij --session "$session" action new-tab --layout-string "$layout" \
+                >/dev/null 2>&1
+        else
+            zellij --session "$session" --layout-string "$layout" >/dev/null 2>&1
+        fi
         polled=0
         while [ "$polled" -lt 30 ]; do
             zellij_landed "$session" && return 0
