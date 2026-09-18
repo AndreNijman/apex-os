@@ -2,54 +2,101 @@
 items: P2-016, P2-017, P2-018, P2-019
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-p2-f
-branch: task/p2-f-6   (cut from origin/roadmap/v2.2 @ f40ffefe, which is round 30's
-          task/p2-f-5 landed; nothing of this unit's is unlanded)
+branch: task/p2-f-7   (cut from origin/roadmap/v2.2 @ bb229745, which is round 31's
+          task/p2-f-6 landed; nothing of this unit's is unlanded)
 
 ## NEXT
-**ROUND 31 IS COMPLETE ON THE BRANCH. Four commits pushed on `task/p2-f-6`
-(cut from `roadmap/v2.2` @ `f40ffefe`):**
-  `25ce55ec`  the `msgraph` transport
-  `0ae35a7c`  `files.read -> msgraph.file.read`, `Files.Read` at the sign-in,
-              and the "providers with nothing grantable" set turned from a
-              vacuous loop into the positive claim that it is EMPTY
-  `f6643031`  the same claims through the real CLI and socket, plus the one
-              control that died when the transport landed, replaced rather
-              than quietly lost
-  `a4907070`  a gate comment written in `0ae35a7c` that credited the gate with
-              a property it does not have, removed with the reasoning left in
-              place; plus the `max-filesize` finding written into the module
-              note, and a stale tense the previous round left
-Worktree CLEAN at `a4907070`, `git diff --exit-code` silent, all 28 mutations
-restored with plain `cp` and `cmp` silent (16 + 8 + 4 on the three feature
-commits, 3 more probing commit 4's claim). set-status.py was called for
-**P2-017 only**; rounds 1, 3, 25-28 and 30 re-read out of roadmap.yaml
-afterwards and all still there (29,594 -> 37,030 bytes). P2-016/018/019
-untouched.
+**ROUND 32 IN PROGRESS on `task/p2-f-7`.** Taking the whole aborted-transfer
+family in one series, per the dispatch, not the card's older `ensure_private_dir`
+line (which is still the follow-on and is now at the bottom of this section).
 
-**NEXT ACTION: P2-016's `ensure_private_dir` ownership check — the one P2-016
-follow-up that needs no screen and no boot.** Find it (it is in the multiuser
-work landed as merge `5eca2402`), establish what it checks today and whether a
-directory owned by another uid is refused or merely `chmod`-ed, and gate it
-both ways. Do NOT call set-status on P2-016 without reading its 8,724 bytes of
-evidence first — it belongs to unit `p2-016-multiuser-2` and set-status
+**NEXT ACTION: commit 1 — add `broker::aborted_transfer(&CurlOutput)` beside
+`run_curl` (non-zero curl exit => `Err(reason)` naming the exit code and
+`one_line(stderr)`), call it BEFORE `split_status` in `gdrive.rs:320`,
+`oauth.rs:369` and `s3/mod.rs:521`, and add the mechanism test in
+`broker.rs`'s tests: a double answering `Content-Length: 40000000` with a few
+KB makes curl exit 63 while its `write-out` still prints, so stdout is exactly
+`"\n200"`.** The helper must NOT go inside `run_curl`: `perform_http` and
+`perform_webdav` set `fail-with-body` and rely on exit 22 arriving as `code`.
+
+Then commit 2 (msgraph both hops + cloudflare), commit 3 (`max-filesize` on s3
+and cloudflare), commit 4 (prose). Details in ROUND 32 PLAN below.
+
+**AFTER the family closes, if there is room:** P2-016's `ensure_private_dir`
+ownership check (in the multiuser work landed as merge `5eca2402`) — establish
+whether a directory owned by another uid is refused or merely `chmod`-ed, and
+gate it both ways. Do NOT call set-status on P2-016 without reading its ~8.7 KB
+of evidence first — it belongs to unit `p2-016-multiuser-2` and set-status
 REPLACES.
 
-After that, in descending value: `gvfs` is **a design paragraph only**; P2-019
-is a DESIGN item and a design already landed, so **do not build a fleet
-daemon**; its three remaining unsettled entries, two of which depend on other
-roadmap items.
+## ROUND 32 PLAN (measured first, then settled with the advisor; do not re-litigate)
 
-**P2-018 criterion 2 is CLOSED — do not reopen it, and do not widen the
-watchdog.** Round 29 ran every command in `menu.xml` from inside the real
-session. What is left on P2-018 needs an image build and a real boot, which
-this unit cannot do, plus one thing that needs synthetic pointer input: the
-menu is never OPENED (right-click -> ShowMenu -> Execute is not driven).
+**The mechanism, measured on curl 8.15.0 this round, four ways** — the script
+is `/var/tmp/apex-work/scratch-p2-f/round32/probe.sh` + `probe_server.py`:
 
-**Still true and not superseded by anything this round did:** no Google
-endpoint and no Microsoft endpoint has ever been contacted from this
-repository. Google's refresh without a client secret is unproven; Graph's 302,
-`Files.Read`'s short form on the `common` tenant, and the public-client refresh
-are unproven. Do not let a later round's prose imply otherwise.
+| what ends the transfer          | curl exit | stdout             |
+|---------------------------------|-----------|--------------------|
+| `max-filesize`, size known up front | 63    | `"\n200"` (body EMPTY) |
+| `max-filesize`, chunked reply   | 63        | 3 MiB + `"\n200"` |
+| `max-time` mid-body             | 28        | partial + `"\n200"` |
+| server closes early             | 18        | partial + `"\n200"` |
+| connection refused              | 7         | `"\n000"`         |
+
+So it is NOT a `max-filesize` defect. **curl's `write-out` runs whenever curl
+stops after the status line is known**, and every one of those is a reply that
+is not the whole reply reported as a complete one.
+
+The chunked row is already refused today, but BY ACCIDENT: 3145728 body bytes
+plus the write-out line is over `HTTP_MAX_BYTES`, so `run_curl`'s post-hoc
+length check fires. A test pointed at the chunked case would stay green with
+the guard mutated away. The two silent cases are row 1 and rows 3/4.
+
+**The blast radius is SIX sites, not the four the dispatch named.** All six
+parse curl's `write-out` themselves; none of them refuses on a non-zero exit:
+
+1. `gdrive.rs:320` — `max-filesize` set, exit never read. Row 1 => `code: 0,
+   output: ""`. **Silent success on an empty read.**
+2. `oauth.rs:369` — `max-filesize` set, exit never read. Row 1's empty body
+   then fails `serde_json::from_str`, so it refuses — but says "not JSON",
+   which is the wrong reason and hides a truncation.
+3. `s3/mod.rs:521` — **no `max-filesize` at all**, exit never read. Rows 3/4
+   give `code: 0` with a TRUNCATED object body. And an oversized object is
+   buffered whole before `run_curl`'s post-hoc check refuses it.
+4. `msgraph.rs:411` (hop one, content) — `max-filesize` set, exit never read.
+5. `msgraph.rs:241` -> `download_outcome` (hop two) — the exit code IS passed
+   in and is used only in the no-status message; a 2xx ignores it.
+6. `cloudflare/api.rs:399` — **no `max-filesize`**; `out.code` is consulted
+   ONLY when no status parsed. Rows 3/4 give a truncated JSON API reply read
+   as a real one.
+
+**`mcp` and `webdav` are the CONTRAST, not exemptions.** They go through
+`broker::perform_http` / `perform_webdav`, whose `merged()` carries curl's exit
+code, and both callers pass it out as `Performed.code` — so an abort is already
+visible there. That is why the fix is "make the six behave like `merged()`",
+and why it must not go inside `run_curl`.
+
+**`\n000` — a behaviour change this round makes on purpose.** `"000"` parses
+as `Some(0)`, so today a refused connection on sites 1-4 returns
+`Ok(Performed { code: 1, output: "HTTP 0 from <host>: " })` with curl's reason
+DROPPED. The new guard fires first and returns an `Err` carrying the reason.
+Checked before changing anything: no test in the four provider test files
+asserts the old shape. Cloudflare's
+`a_connection_that_never_happens_is_a_status_of_zero_and_curls_own_message`
+passes today through the `Some(0)` branch while its own doc comment describes
+the `None` branch; the reorder makes the documented mechanism the real one.
+
+Commit series:
+1. `broker::aborted_transfer` + gdrive + oauth + s3 + the mechanism test.
+2. msgraph hop one through the helper; hop two's own check INSIDE
+   `download_outcome` using the `curl_code` it already has — it must NOT take
+   curl's stderr, because curl quotes the pre-authenticated URL and that
+   invariant is landed and load-bearing. Cloudflare's reorder:
+   `code != 0 => Reply { status: 0, body: stderr }` whether or not a status
+   parsed.
+3. `max-filesize` on s3 and cloudflare — the cap enforced before the memory is
+   spent rather than after.
+4. Prose: `msgraph.rs:120`'s module note becomes false and must be rewritten;
+   check `apex-backup-core/src/format.rs:30` and `docs/online-accounts.md`.
 
 ## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
 1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
