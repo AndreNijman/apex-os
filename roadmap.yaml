@@ -5971,7 +5971,44 @@ tasks:
     absence' shape. s3 and oauth look the same. The fix is one condition per provider plus a double mode sending
     an oversized Content-Length, and it should take all four in one round, because fixing one makes the family
     look handled. Written into msgraph's module note and this unit's agent card with the reproduction. Branch tip
-    is a4907070; workspace 3323 passed / 0 failed / 2 ignored and clippy exit 0 there too.
+    is a4907070; workspace 3323 passed / 0 failed / 2 ignored and clippy exit 0 there too. LANDED round 31
+    (2026-09-19): task/p2-f-6 tip a4907070 merged onto roadmap/v2.2 as bb229745 - four commits, 2,206 insertions
+    over 7 files including the new apexd/apex-secretd/src/providers/msgraph.rs and its tests.rs. Microsoft was the
+    last of the five providers without a transport. RE-RUN BY THE INTEGRATOR ON THE MERGED TIP bb229745: cargo
+    test --locked --workspace --no-fail-fast 3338 passed / 0 failed / 2 ignored (the branch reported 3323; the
+    merged tip also carries p2-d-6's browser-CA tests); clippy --workspace --all-targets -D warnings exit 0;
+    tests/test-secret-broker.sh 93 passed / 0 failed (was 84); tests/test-apex-browser.sh 116/0 re-run because the
+    same tip carries both; check-no-conflict-markers.sh PASS; suites-in-CI 75 / 71 / 4 / 0; shellcheck coverage
+    165 / 0 / 0; containerfile assertions 194 checked / 0 failed; doc verbs 191 documented / 0 undocumented and
+    undeclared / 0 stale. THE REDIRECT DECISION, RESOLVED STRUCTURALLY RATHER THAN BY A STRIPPED HEADER: Graph
+    answers 302 with a pre-authenticated Location on another host, and Microsoft's page says that URL needs no
+    Authorization header (read from the docs, not recalled). So curl is NEVER told to follow anything on either
+    hop; the download is a second run_curl whose config has nowhere to put a token. That is structural, because
+    cross-host header policy is a curl POLICY and has been a CVE. One hop only, scheme-pinned in Rust and again by
+    proto. The pre-authenticated URL comes back nowhere: download_outcome, which composes every word that hop
+    returns, is not given it, and curl's stderr is not carried on that hop because no loopback double can make
+    curl quote the URL - so 'carry it but scrub it' would have been unprovable. Measured anyway and recorded
+    precisely because the design refuses to rely on it: curl 8.15.0 does not forward Authorization across a port
+    change, and the structural assertion went red regardless. THE VACUOUS LOOP THE DISPATCH FLAGGED WAS ANSWERED,
+    NOT PASSED: both crates' `empty == ["microsoft"]` assertions became assert!(empty.is_empty()), the positive
+    claim, and NoScopesYet plus spend_advice's empty branch were KEPT, held to a static NO_SCOPES Provider
+    constructed in each test, each with a control. A control that lost its witness when msgraph landed is written
+    into the suite rather than papered over, and its replacement cannot be taken away: google->gdrive against
+    microsoft->msgraph off the same scope name, each the other's routing control. 28 mutations across the three
+    feature commits, all red, all restored with cmp silent; three of them found things reading would not have - a
+    scrub on a FAILED download that was dead because the failure message was not carrying the far side's body at
+    all (so nothing was scrubbed AND the reason was discarded), a write-out parser test whose two-line input made
+    split_once and rsplit_once agree so it proved nothing about which end was read, and a shell assertion about a
+    `!`-bearing OneDrive id that read GREEN under the mutation deleting the check, because the host pin fires
+    first. NEW DEFECT FOUND AND DELIBERATELY NOT FIXED, recorded here so it is not lost: A FILE OVER
+    HTTP_MAX_BYTES IS REPORTED AS A SUCCESSFUL READ OF AN EMPTY FILE. Measured - curl exits 63 but its write-out
+    still runs, so stdout is "\n200" and the caller gets code 0 with empty output. gdrive has it and s3/oauth look
+    the same; it was left for a round that takes all four, because fixing one makes the family look handled.
+    Reproduction is in the round's scratch dir. Also documented without widening the vocabulary: a consumer
+    OneDrive id is {driveId}!{n} (Microsoft's own example 12319191!11919) and valid_name refuses `!`. NOT RUN AND
+    NOT CLAIMED: no Microsoft endpoint and no Google endpoint has ever been contacted from this repository.
+    Graph's 302, Files.Read's short form on `common`, and the public-client refresh are all unproven, and GOOGLE'S
+    REFRESH IS EQUALLY UNPROVEN - this round did not supersede that.
 - id: P2-018
   title: Guaranteed Safe Graphics / desktop failover mode
   priority: P2
