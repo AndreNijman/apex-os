@@ -24,6 +24,15 @@ server in `apex-agentd`, both scoped below. It also changes a sentence
 is the sort of thing that should be seen before it is built rather than found
 in a diff.
 
+**And "the route is B" is a narrower statement than it reads as.** B is the
+chosen *shape* — of the four sketched here it is the only one that authenticates
+a capsule to an arbitrary header-auth site without the capsule ever holding the
+value. It is not a decision to build it, because building it means the daemon
+reads the plaintext of one connection, and whether that is acceptable is a
+product question nobody has answered. It is stated as a question with its costs
+at the bottom of this page. Until it has an answer, P2-012 stays `partial`, and
+this page is the reason rather than an excuse.
+
 ## What a capsule can and cannot be handed today, measured
 
 Two facts decide the shape of every route, and both were measured in
@@ -146,6 +155,58 @@ That makes gap 5 on this unit's card — "a CA a capsule could be told to trust"
 a per-session `--ro-bind` in `apex_agent_core::sandbox`, which is one field on
 the session request rather than a package that is not in the image.
 
+### The join, measured — route B's engineering is settled, its decision is not
+
+Two halves of route B were measured separately and never together: a CA
+installed by a namespace-bound `policies.json` is trusted (above), and a
+capsule's egress is a `CONNECT` tunnel through the daemon
+(`docs/browser-capsule.md`). Whether Firefox accepts a certificate **minted for
+the requested name and presented at the far end of a tunnel it opened itself**
+was the one engineering unknown left, and a build that discovered the answer
+halfway through would be the expensive place to find it.
+
+It is measured, on Firefox 155.0, in the capsule's own sandbox shape — headless
+`bwrap`, `--ro-bind / /`, `--proc /proc`, fresh profile, absolute
+`--screenshot` path, the policy bound over
+`/etc/firefox/policies/policies.json` inside the namespace only. A per-run
+`openssl` CA signs a leaf for `intranet.example`; a python `CONNECT` proxy on
+loopback answers `200`, terminates TLS with that leaf, adds
+`Authorization: Bearer <marker>`, and re-originates to a plain-HTTP origin that
+logs what it was sent. Firefox is pointed at the proxy by `network.proxy.type`
+1 rather than by the environment, which is also why the capsule needs no
+resolver: at type 1 it puts the NAME in the `CONNECT` and never looks it up.
+
+| arm | leaf | CA installed | screenshot | reached the site | credential at the site | what the client said |
+|---|---|---|---|---|---|---|
+| authenticated | `intranet.example` | yes | 10402 B | yes | **yes** | handshake completed |
+| control, no CA | `intranet.example` | no | 0 B | no | no | `TLSV1_ALERT_UNKNOWN_CA` |
+| control, wrong name | `other.example` | yes | 0 B | no | no | `SSLV3_ALERT_BAD_CERTIFICATE` |
+
+Both controls are needed and they fail differently, which is the point. Without
+the second, a pass means only "Firefox rendered something": it is the
+wrong-name arm that shows Firefox validating the **SAN** through the tunnel and
+not merely accepting whatever the trusted CA signed. And the site's log is the
+verdict alongside the screenshot — one request arrived, with the header, and it
+came from a browser that never held the value.
+
+So route B works, and what it costs in code is now the only engineering
+question left. Two things the probe recorded that the design has to carry:
+
+* **Firefox tells Mozilla.** With an enterprise root installed it reaches for
+  `mitmdetection.services.mozilla.com` — the probe's proxy refused it, and a
+  capsule under `--capability` refuses it too, because the pinned allowlist
+  does not contain it. Worth knowing before somebody discovers it in a capsule
+  that was allowed more.
+* **Re-origination TLS was not the question and was not measured.** The origin
+  here is plain HTTP on loopback. The daemon originating a validated TLS
+  connection to the real site is ordinary client work it already does
+  elsewhere, but it is not evidence from this probe.
+
+Probe kept out of the tree deliberately, the way this page's cookie
+measurement was: it needs a fixture CA, two servers and a browser for a
+question that is asked once, and shipping it as a suite would put a MITM
+harness in CI for a feature that does not exist.
+
 ### The thing it costs that is not code
 
 **`/etc/firefox/policies/policies.json` is read inside every capsule.** That is
@@ -154,8 +215,16 @@ sandbox binds `/` read-only, so the machine's enterprise policy is part of
 every capsule's trust surface. Today APEX's own file carries four preferences
 at `Status: "default"` and nothing else, so nothing is overridden. A future
 `Certificates.Install` there, or a `Proxy` at `Status: "locked"`, would change
-what every capsule believes or where it connects, silently, and no test asserts
-the file's shape. See "what is not decided" below.
+what every capsule believes or where it connects, silently and without an
+error anywhere.
+
+`Containerfile.base` now asserts the shape, positively — `policies` carries
+`Preferences` and nothing else, every preference at `Status: "default"` — so
+all three of those additions fail the image build rather than shipping. It is a
+build assertion and not a suite, because the file is dropped by the build and
+not by anything `apex browser` owns; `tests/check-containerfile-assertions.sh`
+runs it against this repository first, which before this round it could not do
+for any `python3 -c` assertion at all.
 
 ### What it would take
 
@@ -188,7 +257,12 @@ the file's shape. See "what is not decided" below.
   holds the credential and already decides where the capsule may go, and it is
   more trusted than the capsule — but it is a documented property changing,
   and it has to change in the documentation at the same time.
-* **Nothing new in the image.** `openssl` and `bwrap` are already there.
+* **Nothing new in the image.** `openssl` and `bwrap` are already there, and
+  the probe above minted its whole chain with the `openssl` that ships.
+* **Nothing unknown.** Before the probe, "Firefox accepts a minted leaf through
+  a CONNECT tunnel" was an assumption this page was resting a route on. It is
+  now a measurement with two controls. What remains is implementation and one
+  product decision, in that order of difficulty — the decision is harder.
 
 ### What it does not solve
 
@@ -217,24 +291,63 @@ termination, no CA. It is a paragraph rather than a route because it only ever
 covers that class, and "capability auth" as a criterion is not about object
 stores.
 
+## The question, for Andre
+
+Everything above is engineering that has been measured. This is the one thing
+that is not, and route B cannot be built past it:
+
+> **May `apex-agentd` read the plaintext of a capsule's connection to the one
+> destination that capsule was pinned to, in order to add a credential the
+> capsule is never given?**
+
+What a *yes* buys: `apex browser --capability <name>` authenticates to any site
+whose authentication is a header, with no per-site provider, and the six
+negative observations on this page keep holding — the capsule still cannot be
+made to hand a credential to its caller, because it never has one.
+
+What a *yes* costs, itemised rather than waved at:
+
+* A TLS **server** in `apex-agentd`, per-run certificate minting, and a CA that
+  exists for the length of one capsule.
+* `PROTOCOL_VERSION` **10** and two gated fields, with the CLI refusing to send
+  them to an older daemon — an old daemon would tunnel `CONNECT` untouched and
+  hand back a 401 nobody could explain.
+* `docs/browser-capsule.md` stops being able to say "a tunnel is opaque". For
+  the pinned destination it is not.
+* A guard in the daemon that the interception is only ever the pinned
+  destination — an absence is not a guard. A proxy that can read one connection
+  has the machinery to read any of them, and that is the honest argument
+  against, not a hypothetical.
+
+What a *no* costs: P2-012's "capability auth" stays unmet, permanently rather
+than pending. Route A is already rejected on this page for handing the value to
+the caller. Route C needs `geckodriver` in the image, which is a separate
+product decision about what APEX carries. Route D covers presigned URLs and
+nothing else. There is no fifth route that does not either give the capsule the
+value or let the daemon see the request.
+
+The decision is not urgent and it is not reversible cheaply, which is why it is
+written here and not taken by an agent.
+
 ## What is not decided, and belongs to whoever picks this up
 
-* **Whether the MITM is acceptable at all.** It is the load-bearing choice and
-  it is a product decision, not an engineering one. The argument for it is
-  above; the argument against it is that a proxy that can read one destination
-  is a proxy that has the machinery to read any of them, and the guard against
-  that is a check in the daemon rather than an absence.
-* **A guard on the shipped `policies.json`.** Nothing asserts that the file has
-  no `Certificates`, no `Proxy` and no `Status: "locked"` preference. It should,
-  and the assertion belongs beside the other Containerfile assertions rather
-  than in this unit's suite, because the file is dropped by the image build and
-  not by anything `apex browser` owns.
 * **Whether the per-run CA bind lands on its own.** It closes gap 5 —
   automating an intranet site behind a private CA — without any of Route B. It
   is smaller than Route B and useful without it, and it carries its own
   argument: handing a capsule a CA it did not have is widening what it will
   believe, and the flag has to name the file rather than defaulting to
-  anything.
+  anything. Note that the probe above is *also* the evidence that this works:
+  its authenticated arm is exactly a capsule told to trust one CA.
+* ~~**A guard on the shipped `policies.json`.**~~ **Done.**
+  `Containerfile.base` now asserts the file's shape and not only its validity,
+  positively: `policies` carries `Preferences` and nothing else, and every
+  preference is at `Status: "default"`. A denylist of `Certificates`, `Proxy`
+  and `locked` was the wrong form — the file carries `//` comment keys, so a
+  grep refusal would fire the day somebody explains in a comment why there is
+  no `Certificates` block. Mutation-tested four ways, and
+  `tests/check-containerfile-assertions.sh` runs it against this repository
+  before an image build does, which it could not do for any `python3 -c`
+  assertion until this round.
 
 ## What was measured for this page
 
@@ -247,3 +360,6 @@ stores.
 | a namespace-local `policies.json` installs a CA with no `certutil` | a self-signed loopback server, refused by the control profile and rendered by the policy one |
 | `certutil` is absent | `nss-tools` is not installed |
 | the host's enterprise policy is read inside a capsule | the same bind measurement, which is why it works |
+| a minted leaf is accepted at the far end of a `CONNECT` tunnel, and the credential reaches the site | the three-arm probe above, on Firefox 155.0 |
+| Firefox validates the chain through the tunnel | the no-CA control: `TLSV1_ALERT_UNKNOWN_CA`, no screenshot, no request at the origin |
+| and validates the name, not merely the signature | the wrong-name control: `SSLV3_ALERT_BAD_CERTIFICATE`, same |
