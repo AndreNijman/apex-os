@@ -1405,6 +1405,7 @@ mod lock_tests {
             detail: None,
             paused: false,
             policy: apex_agent_core::policy::AgentPolicy::default(),
+            allowlist: None,
             request_origin: origin,
             origin_source: None,
             actor: None,
