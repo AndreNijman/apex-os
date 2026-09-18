@@ -179,6 +179,7 @@ impl Harness {
             ttl_ms: None,
             capabilities: None,
             allow: None,
+            trust_ca: None,
             second_factor: None,
             cols: 80,
             rows: 24,
