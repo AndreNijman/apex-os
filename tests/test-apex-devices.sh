@@ -53,11 +53,24 @@ BIN="$WORK/bin"; mkdir -p "$BIN"
 STATE="$WORK/state"; mkdir -p "$STATE"
 shim() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$BIN/$1"; chmod +x "$BIN/$1"; }
 
+# `$STATE/systemctl.nobus` is the machine this suite could not previously
+# describe: systemctl is installed, the unit FILES are readable, and there is no
+# bus to ask whether anything is running. Measured inside base-d12d3450 —
+# `is-active` exits 1 with these two lines, while `is-enabled` answers normally
+# off the unit files, which is why only one of the two verbs is affected here.
+# (The real first line ends "Can't operate."; the apostrophe is dropped because
+# this shim body is single-quoted, and `tail -1` reads the second line anyway.)
 shim systemctl '
 verb=$1; unit=${2:-}
 case "$verb" in
   is-enabled) cat "$STATE/enabled.$unit" 2>/dev/null || echo "not-found" ;;
-  is-active)  cat "$STATE/active.$unit"  2>/dev/null || echo "inactive" ;;
+  is-active)  if [ -e "$STATE/systemctl.hang" ]; then sleep 60; fi
+              if [ -e "$STATE/systemctl.nobus" ]; then
+                echo "System has not been booted with systemd as init system (PID 1)."
+                echo "Failed to connect to system scope bus via local transport: Host is down"
+                exit 1
+              fi
+              cat "$STATE/active.$unit"  2>/dev/null || echo "inactive" ;;
   *) exit 1 ;;
 esac'
 shim lpstat      'cat "$STATE/lpstat" 2>/dev/null; exit "$(cat "$STATE/lpstat.rc" 2>/dev/null || echo 0)"'
@@ -135,6 +148,32 @@ case_says() {  # $1 = name, $2 = output, $3 = substring, $4 = why it matters
 }
 case_silent() {  # the opposite: it must NOT say this
     says "$2" "$3" && bad "$1" "output said '$3', and it must not — $4" || ok "$1"
+}
+
+# The VALUE off one named line, compared as text rather than grepped for.
+#
+# Two things a grep over the whole report cannot do. It cannot tell "this
+# machine serves" from "this machine serves SMB", and it cannot tell `readable`
+# from `present and unreadable` — the second of those had a case passing under a
+# mutant that made the reader never read the file at all. `item` prints two
+# spaces, the name in a 26-wide field, one space, then the value, so the NAME
+# FIELD is compared whole and the value is taken by position.
+lvalue() {  # $1 = the output, $2 = the item name exactly as item() got it
+    local want l
+    want=$(printf '%-26s' "$2")
+    while IFS= read -r l; do
+        [ "${l:2:26}" = "$want" ] || continue
+        printf '%s' "${l:29}"
+        return
+    done <<<"$1"
+}
+case_line() {  # $1 = name, $2 = output, $3 = item name, $4 = value it must begin, $5 = why
+    local got; got=$(lvalue "$2" "$3")
+    if [ -n "$4" ] && [ "${got#"$4"}" != "$got" ]; then
+        ok "$1"
+    else
+        bad "$1" "'$3' read '$got', which does not begin '$4' — $5"
+    fi
 }
 
 reset_world() {
@@ -675,7 +714,7 @@ tline() { grep -E '^  system CA trust store' <<<"$1"; }
 # that exists to prove the reader CAN read the file was green under a mutant
 # that made it never read anything — caught by `[ -r ] -> false`, which passed
 # 91/91 before this was exact. `item` prints a 26-wide name, then one space.
-tvalue()    { tline "$1" | sed -E 's/^  .{26} //'; }
+tvalue()    { lvalue "$1" "system CA trust store"; }
 case_value() {  # $1 = name, $2 = value read, $3 = the answer it must be, $4 = why
     if [ -n "$3" ] && [ "${2#"$3"}" != "$2" ]; then
         ok "$1"
@@ -791,6 +830,163 @@ case_says "no Thunderbolt controller no longer hides the USB-C ports" "$out" "US
           "a machine with no TB controller still has ports, and docks live on them"
 case_says "a plugged-in Type-C partner is counted" "$out" "1 with something plugged in" \
           "a partner appears on hotplug, so it is where hotplug can be seen working"
+
+# ── systemd that cannot be asked is not systemd answering "no" ─────────────
+#
+# `unit_active` was `[ "$(systemctl is-active X)" = active ]`, which has two
+# answers for a question with three. Measured inside base-d12d3450: `is-active`
+# exits 1 there with "Failed to connect to system scope bus via local
+# transport: Host is down", while `is-enabled` answers off the unit files and
+# says `enabled`. So six readers reported a definite negative about a daemon
+# nothing had asked about —
+#
+#   mDNS (avahi)            enabled, not running
+#       it is socket-activated, so this is normal until something asks
+#   auto-mount              udisks2 installed, not running
+#   paired devices          unavailable — bluetoothd is not running
+#   hotplug (udev)          systemd-udevd is NOT running
+#   this machine serves     nothing (no smbd, no nfs-server)
+#   hotspot / tethering     nothing known is in the way
+#
+# — and the last two are claims, not readings. "nothing is shared from here" is
+# a statement about what the rest of the network can reach; "nothing known is
+# in the way" of a hotspot was reached because apex-firewall read `inactive`,
+# which is the one thing most likely to be in the way, unasked. The evidence
+# file for this item had to carry a footnote warning the reader not to believe
+# that line. A footnote is not a fix.
+#
+# Every case below is paired with its bus-reachable control, so a reader that
+# answered "could not be asked" to everything would fail as loudly.
+echo
+echo "── systemd installed, no bus to ask: the third answer, six readers ────"
+
+reset_world
+echo enabled > "$STATE/enabled.avahi-daemon.service"
+out=$(devices print)
+case_line "with a bus, a stopped avahi still reads as not running" \
+          "$out" "mDNS (avahi)" "enabled, not running" \
+          "a reader that only ever says 'could not ask' has stopped reading"
+reset_world
+echo enabled > "$STATE/enabled.avahi-daemon.service"
+: > "$STATE/systemctl.nobus"
+out=$(devices print)
+case_line "no bus: whether avahi RUNS is not answered" \
+          "$out" "mDNS (avahi)" "enabled, and whether it RUNS could not be asked" \
+          "a printer that announces itself may or may not be found, and this cannot say"
+case_silent "and a daemon nobody asked about is not called not running" \
+            "$(lvalue "$out" "mDNS (avahi)")" "not running" \
+            "'normal until something asks' is reassurance about something unmeasured"
+
+reset_world
+out=$(devices share)
+case_line "with a bus, a machine sharing nothing says so" \
+          "$out" "this machine serves" "nothing (no smbd" \
+          "the true negative this reader exists for"
+reset_world
+: > "$STATE/systemctl.nobus"
+out=$(devices share)
+case_line "no bus: whether this machine shares anything is not answered" \
+          "$out" "this machine serves" "could not ask systemd" \
+          "what the rest of the network can reach is not knowable from an unasked question"
+
+reset_world
+echo enabled > "$STATE/enabled.udisks2.service"
+out=$(devices media)
+case_line "with a bus, a stopped udisks2 still reads as not running" \
+          "$out" "auto-mount" "udisks2 installed, not running" \
+          "the true negative this reader exists for"
+reset_world
+echo enabled > "$STATE/enabled.udisks2.service"
+: > "$STATE/systemctl.nobus"
+out=$(devices media)
+case_line "no bus: whether udisks2 RUNS is not answered" \
+          "$out" "auto-mount" "udisks2 installed; whether it RUNS could not be asked" \
+          "whether an inserted card would mount is the question, and it was not asked"
+
+reset_world
+out=$(devices bluetooth)
+case_line "with a bus, a stopped bluetoothd is still named" \
+          "$out" "paired devices" "unavailable — bluetoothd is not running" \
+          "the true negative this reader exists for"
+reset_world
+: > "$STATE/systemctl.nobus"
+out=$(devices bluetooth)
+case_line "no bus: bluetoothd is not declared down" \
+          "$out" "paired devices" "unavailable — systemd did not say whether bluetoothd runs" \
+          "both answers are 'unavailable', and they are unavailable for different reasons"
+
+reset_world
+out=$(devices dock)
+case_line "with a bus, a stopped udevd is still named" \
+          "$out" "hotplug (udev)" "systemd-udevd is NOT running" \
+          "the true negative this reader exists for"
+reset_world
+: > "$STATE/systemctl.nobus"
+out=$(devices dock)
+case_line "no bus: udevd is not declared down" \
+          "$out" "hotplug (udev)" "could not ask systemd whether systemd-udevd runs" \
+          "'every reader below would report an absence and be right to' is a strong claim"
+
+# The one that matters most, because it is a safety claim and because a
+# container is exactly where it was being read.
+reset_world
+echo enabled > "$STATE/enabled.apex-firewall.service"
+out=$(devices network)
+case_line "with a bus and a stopped firewall, the hotspot line still says so" \
+          "$out" "hotspot / tethering" "nothing known is in the way" \
+          "a reader that can only decline has stopped reading the mechanism"
+reset_world
+echo enabled > "$STATE/enabled.apex-firewall.service"
+: > "$STATE/systemctl.nobus"
+out=$(devices network)
+case_line "no bus: the hotspot is not declared clear" \
+          "$out" "hotspot / tethering" "not known — the firewall could not be asked" \
+          "the firewall is the likeliest thing in the way and it was not looked at"
+case_says "and it says which question went unanswered" "$out" \
+          "systemd could not be asked whether the firewall is running" \
+          "a headline that declines has to say what it declined to guess"
+
+# A unit that genuinely is not installed is still answerable without a bus:
+# `is-enabled` reads the unit files, so `absent` must not be lost to `unknown`.
+# This is the SAME world as the hotspot case above but for the unit file, so
+# the two together are the discrimination: with the unit present the reader
+# declines, and without it the reader answers.
+#
+# The first shape of this case asserted that a firewall_verdict sentence was
+# absent — and firewall_verdict is only ever called on a machine that is
+# serving, which a bus-less machine can never be read as doing. It could not
+# have failed.
+reset_world
+out=$(devices network)   # no enabled.apex-firewall.service: no such unit
+case_line "a firewall that is not installed is answered, not declined" \
+          "$out" "hotspot / tethering" "nothing known is in the way" \
+          "absent is a better answer than unknown when it is the true one"
+reset_world
+: > "$STATE/systemctl.nobus"
+out=$(devices network)
+case_line "and it stays answered when there is no bus either" \
+          "$out" "hotspot / tethering" "nothing known is in the way" \
+          "is-enabled needs no bus, so 'there is no such unit' stays answerable"
+
+# `failed` is not `inactive` and must survive the new reader: a policy that
+# failed to load leaves the machine unfiltered, which is the opposite of safe.
+reset_world
+echo failed  > "$STATE/active.smb.service"
+echo active  > "$STATE/active.nfs-server.service"
+echo failed  > "$STATE/active.apex-firewall.service"
+out=$(devices share)
+case_says "a FAILED firewall is still reported as failed, not as absent" "$out" \
+          "the APEX firewall FAILED to load" \
+          "'not running' would tell the user their traffic is filtered by something else"
+
+# Nothing waits forever, including a wedged systemd.
+reset_world
+: > "$STATE/systemctl.hang"
+out=$(devices dock)
+rm -f "$STATE/systemctl.hang"
+case_line "a systemd that never answers is the same third answer" \
+          "$out" "hotplug (udev)" "could not ask systemd whether systemd-udevd runs" \
+          "a diagnostic that hangs is worse than no diagnostic"
 
 echo
 printf 'apex-devices: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
