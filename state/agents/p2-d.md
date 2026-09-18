@@ -61,8 +61,17 @@ Design taken (advisor-reviewed) before any code:
   and a capsule that lost them would be a capsule with different defaults from
   every other browser on the machine.
 
-## DONE (round 30, branch task/p2-d-6)
+## DONE (round 30, branch task/p2-d-6) — six commits, all pushed
 
+- `044fa254` — **a defect in this round's own work, found by review**:
+  `MAX_CA_BYTES`' doc comment claimed it stopped `--trust-ca /dev/zero` and it
+  did not. `install` read the whole file and checked the length after, and
+  `fs::read` on a character device grows a `Vec` until the daemon dies. The
+  engine's `[ -f ]` covered the shipped path; `apex agent run --trust-ca` and
+  any raw client did not. Metadata first now, then `take(cap + 1)`. The
+  oversize assertion had to be strengthened before its mutation went red — it
+  checked the word "limit", which BOTH guards use, so the redundant guard was
+  hiding the removal of the load-bearing one.
 - `2fc59c6b` — **the docs**. `docs/browser-capsule.md`'s NOT BUILT list no
   longer says a capsule cannot be told to trust a CA; a section replaces it.
   `docs/browser-capsule-auth.md` reserved protocol 10 for route B while gap 5
@@ -160,6 +169,18 @@ Design taken (advisor-reviewed) before any code:
 
 ## FOUND (round 30)
 
+- **A redundant guard can hide the removal of the one that matters.** The
+  `take(cap + 1)` and the metadata size check both say "limit", so an
+  assertion on that word passed with the metadata check deleted. Assert on
+  what distinguishes them.
+- **`SessionInfo` does not carry `trust_ca`** — NOTED, NOT BUILT. `apex agent
+  status` cannot show that a session trusts an extra root, and for a widening
+  the docs call "widening what it will believe" the record being silent is a
+  gap. Additive optional field on a stability surface; a follow-up, not
+  started.
+- **On the L16 the live daemon speaks protocol 9**, so `apex browser run
+  --trust-ca` will correctly refuse with the restart message until an image
+  carries these binaries. Nothing on the machine was changed this round.
 - **Two defects in my own work, both caught by RUNNING a gate rather than
   reading.** The suite assertion "the CA lands before the separator" was first
   written with `${#argv%%<pat>*}` — bash rejects that as a bad substitution, so

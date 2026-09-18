@@ -4184,7 +4184,68 @@ tasks:
     The step is worth more on the Arch runner than on this laptop, because the runner has no quickshell and so can
     never run run-lockscreen-atspi.sh sections 2-5, but it can run every mode of this one. NOT RUN THIS ROUND AND
     NOT CLAIMED: the new steps have not yet been exercised on the GitHub runner. Recovery screen still unaudited;
-    orca as the greetd user still needs hardware.
+    orca as the greetd user still needs hardware. AND THE READ-BACK IS NOW A REAL SUITE, not a list of skips.
+    apex-shell tests/run-lockscreen-atspi-shim.sh: 23 passed / 0 failed / 1 skipped ON THE L16, six runs. It
+    builds tests/quickshell-a11y-shim.cpp, brings up the round-29 harness, runs the SHIPPED shell.qml under the
+    preload, engages a real ext-session-lock, and reads the tree back - and its CONTROL IS INSIDE THE RUN: it
+    walks the tree BEFORE installing anything and requires exactly ONE node, so the tree it then measures is
+    attributable to the factory install and to nothing else. Measured in that one run: 1 node before, 8 after; all
+    five top-level windows null-rooted before and non-null-rooted after; QAccessibleApplication::childCount() 0
+    before. The assertions §5 of run-lockscreen-atspi.sh could only SKIP are now made and can fail: the password
+    field reaches the bus as role=text; Accessible.passwordEdit reaches the tree, observable because Qt then
+    returns an EMPTY name for the item (Lockscreen.qml sets Accessible.name to "Password" and the bus never
+    carries it - a source-vs-runtime disagreement worth knowing, since check-lockscreen-a11y.sh asserts that name
+    is present in the source); the field's live description arrives verbatim as "Type your password and press
+    Enter to unlock."; the field is editable, focusable and exposes a SetFocus action, so a reader can reach it;
+    the status line arrives as role=label with the empty name Lockscreen.qml binds with no error and no Caps Lock;
+    a MAPPED frame is distinguished from a merely existing window object by states=showing,visible (FOUND 16); and
+    no accessible string anywhere in the tree carries a private-use codepoint. The announcement row stays a SKIP
+    with its reason - with WLR_LIBINPUT_NO_DEVICES=1 nothing can type, so neither fail() nor the Caps Lock
+    transition can be triggered. The suite does NOT claim the shell is accessible: the factory is put back by a
+    test-only LD_PRELOAD that is not shipped and is referenced by nothing outside tests/, and on a real machine a
+    screen reader still gets one node. What it claims is that the markup is correct all the way to the bus, so the
+    entire remaining defect is the upstream one and there is nothing else to write when it lands. LANDED
+    apex-shell b01a276 on task/p2-b-round30: tests/quickshell-a11y-shim.cpp, tests/run-lockscreen-atspi-shim.sh
+    and tests/mutate-lockscreen-atspi-shim.sh (8 applied, 6 CAUGHT / 0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE, 2
+    HELD / 0 FALSE-RED), all wired into ci.yml with all six of the round's new files in the structure-check
+    REQUIRED list. check-suites-run-in-ci.sh 66 suites / 66 reachable / 0 exempt; shellcheck -S warning -x clean
+    over tests/; check-no-conflict-markers.sh PASS; every REQUIRED path stat-ed, 110 checked and 0 missing. TWO
+    DEFECTS THE MUTANTS FOUND, both fixed in that commit rather than worked around. (1) S4 SURVIVED on its first
+    run and the survival was correct twice over: the private-use character written into the mutant had not
+    survived being written to the file - what landed was U+F033 followed by the letter E, a different codepoint in
+    a different plane - and the SUITE's own character class had lost its BMP bounds the same way, leaving a
+    literal hyphen plus the two supplementary planes, so a BMP private-use glyph could not have been caught even
+    if it had arrived. Both now build their characters from NUMBERS: the class is written entirely in escapes and
+    covers all three private-use planes, unit-checked against U+0041/E000/F033/F8FF/F033E/10FFFC and against the
+    old broken class for contrast, and the mutant uses printf '\U000f033e' (od says f3 b0 8c be). An unprintable
+    character in a source file is not reviewable. The same mutant had also been aimed at the field's
+    Accessible.name, which passwordEdit suppresses, so it targeted a string the bus never delivers - a mutant
+    pointed at a string the bus never sees proves nothing about the assertion it was aimed at. (2) Both mutation
+    harnesses now restore from their TRAP and not only after each mutant; a kill between an edit and its restore
+    had left a mutated file in place for every later step in the same CI job, and because these files are in the
+    REQUIRED list the structure check would still have passed. Proven by killing a harness mid-mutant and watching
+    the tree come back clean. A THIRD DEFECT, NOT FIXED HERE AND HANDED ON: LockedHintService._pump() returns
+    immediately while _busy, _succeeded() clears _busy and re-pumps, and _failed() clears _busy and deliberately
+    does NOT. So a setLocked(true) that arrives while a failing chain is in flight only updates _desired and
+    nothing ever acts on it - the lock engages, the surface comes up, and logind is never told. Lockscreen.qml's
+    Component.onCompleted starts exactly such a chain at startup. Measured: the new suite's lock-acknowledged
+    assertion went red on 2 runs in 9 while the lock had in fact engaged, and 5 runs in 5 once the suite waits for
+    the startup chain's refusal first; run-lockscreen-atspi.sh does not see it because its section 2 waits for
+    that same warning as an assertion of its own and closes the race BY ACCIDENT. On a live machine any transient
+    failure of the three steps that overlaps a lock loses the update, and P0-015's lock policy
+    (apexd/apex-agent-core/src/lock.rs) reads LockedHint. One line fixes it. It belongs to whoever owns P0-015 and
+    was deliberately left alone on this branch. WHAT IS STILL TRUE AND MUST NOT BE MISREAD: the shell is NOT
+    accessible on a real machine. The factory is restored by a test-only LD_PRELOAD referenced by nothing outside
+    tests/, and with no shim a screen reader still gets one node. The remaining work is a single upstream change -
+    qtdeclarative installing its accessibility factory from Q_COREAPP_STARTUP_FUNCTION instead of
+    Q_CONSTRUCTOR_FUNCTION, measured working as repro mode D, or quickshell not destroying its QCoreApplication at
+    src/launch/launch.cpp:282 - and neither is APEX's code. Nothing in either repository can route around it.
+    SECOND MACHINE: CI run 35382910849 was dispatched on task/p2-b-round30 (gh workflow run ci.yml --ref
+    task/p2-b-round30) and its result is NOT YET READ AND NOT CLAIMED. check-quickshell-a11y-cause.sh should
+    genuinely run there - it needs no compositor, no bus and no quickshell, base-devel is installed by the setup
+    job and Arch ships Qt's headers in qt6-base/qt6-declarative - which would make the FOUND 20 mechanism measured
+    on a second distribution and a second Qt. run-lockscreen-atspi-shim.sh will SKIP there because the runner has
+    no quickshell. Recovery screen still unaudited; orca as the greetd user still needs hardware.
 - id: P2-004
   title: Internationalisation baseline
   priority: P2
@@ -5095,7 +5156,28 @@ tasks:
     AND NOT CLAIMED: the browserlab, any live Firefox against a real TLS server, and any vmlab flow. That a real
     Firefox ACCEPTS a policy-installed root was measured in round 29 and is in docs/browser-capsule-auth.md; what
     round 30 adds is that the DAEMON builds that bind correctly, measured from inside the namespace. WHAT IS STILL
-    OPEN ON THIS ITEM: capability auth, which is route B, which is Andre's question and not engineering.
+    OPEN ON THIS ITEM: capability auth, which is route B, which is Andre's question and not engineering. ROUND 30,
+    sixth commit 044fa254 - A DEFECT IN THE ROUND'S OWN WORK, found by review rather than by a gate: MAX_CA_BYTES'
+    doc comment claimed it stopped --trust-ca /dev/zero filling the scratch directory, and it did not. install()
+    called std::fs::read and checked raw.len() AFTER, and fs::read on a character device grows a Vec until the
+    daemon is killed, so the comparison is never reached; File::open on a FIFO with no writer blocks the daemon
+    outright. apex browser refuses a non-file at the call site so the shipped path was covered, but apex agent run
+    --trust-ca and any raw protocol client were not, and a client is not a boundary. Now metadata first (refuse
+    anything that is not a regular file, by name; refuse an oversize file by its size), then read through
+    take(cap+1) so growth between the two is refused rather than silently truncated into a PEM that parses. Two
+    more mutations, restored byte-identically: the is_file refusal deleted (red - /dev/null is otherwise read as
+    an empty file and refused for having 'no certificate in it', which sends the reader to the wrong file), and
+    the metadata size check deleted (red, but ONLY after the assertion was strengthened - it first checked the
+    word 'limit', which both guards use, so it passed with the load-bearing guard gone; it now asserts the refusal
+    names the size the metadata saw). That brings the round to 19 mutations. Also ungated the private-key
+    wire-refusal case from the Firefox preflight: install refuses a key before it reads the machine's policy, so
+    gating it on /etc/firefox/policies/policies.json skipped it on every runner without Firefox, which is every CI
+    runner. NOTED, NOT BUILT: SessionInfo does not carry trust_ca, so apex agent status cannot show that a session
+    trusts an extra root - for a widening the docs describe as 'widening what it will believe', the record being
+    silent is a gap worth a follow-up (an additive optional field on a stability surface). OPERATIONAL NOTE FOR
+    THIS MACHINE: the live apex-agentd on the L16 speaks protocol 9, so apex browser run --trust-ca will correctly
+    refuse with the restart-apex-agentd message until an image carries these binaries. Nothing on the L16 was
+    changed this round.
 - id: P2-013
   title: Per-project identity binding
   priority: P2

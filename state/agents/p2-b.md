@@ -17,41 +17,66 @@ pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 
 ## NEXT
 
-**Write `tests/mutate-lockscreen-atspi-shim.sh`**, the mutation pair for the new
-read-back suite, then wire both the suite and the pair into `ci.yml` (step +
-structure-check REQUIRED list) and commit. The mutants that matter are the ones
-that break the QML and require the BUS to notice: remove
-`Accessible.passwordEdit` from `src/windows/Lockscreen.qml` (the field's name
-must then arrive and the suppression assertion must go red), change the idle
-`Accessible.description` text, drop `Accessible.role: Accessible.StaticText`
-from the status line, put a private-use codepoint into an accessible string, and
-break the shim's factory so only `QQuickWindow` is answered (the frame then has
-no children and the field assertions go red — that is the false negative the
-three-branch factory exists to avoid). Green holds: a comment in Lockscreen.qml
-quoting the asserted strings, and an `Accessible.*` added to an item nothing
-asserts. Restore from a pristine `mktemp -d` copy with sha256 verification, not
-`git checkout --` (FOUND 10), and carry the FOUND 18 baseline-asserted guard.
+**Read CI run 35382910849** (apex-shell `task/p2-b-round30`, dispatched
+2026-09-19 with `gh workflow run ci.yml --ref task/p2-b-round30`; `gh` is
+authenticated here with its own `gho_` token, the note about Andre's PAT does
+not apply to it) and record the SECOND-MACHINE result in P2-003's evidence,
+which currently says "NOT RUN THIS ROUND AND NOT CLAIMED" for both new steps.
+`check-quickshell-a11y-cause.sh` **should actually run** on the Arch runner —
+`base-devel` is installed by the setup job and Arch ships Qt's headers in
+`qt6-base`/`qt6-declarative` rather than a separate `-devel` package — so this
+is the first time the FOUND 20 mechanism gets measured on hardware other than
+this laptop, and a mode-A null there would make the cause distribution- and
+Qt-version-independent. `run-lockscreen-atspi-shim.sh` will SKIP there (no
+quickshell, AUR); check that it skips with its NAMED reason and that
+`mutate-lockscreen-atspi-shim.sh` prints its baseline guard and exits 0 rather
+than scoring eight mutants against a suite that never ran (FOUND 18).
+If anything is red, fix it on this branch — do not land red.
 
 ## IN PROGRESS
 
-apex-shell `task/p2-b-round30`: `273c1fb` pushed. **UNCOMMITTED in the worktree**:
-`tests/quickshell-a11y-shim.cpp`, `tests/run-lockscreen-atspi-shim.sh`
-(**23/0/1**, six runs, last one after the PUA-class fix),
-`tests/mutate-lockscreen-atspi-shim.sh`, and the ci.yml wiring for all three
-(step + structure-check REQUIRED entries; yaml parses,
-`check-suites-run-in-ci.sh` 66 suites / 66 reachable / 0 exempt). The mutation
-harness is **re-running now** after FOUND 23; its first run was
-8 applied / 5 CAUGHT / **1 SURVIVED** / 2 HELD, and that survival was real —
-see FOUND 23. Not yet done: the commit, and appending the shim half to P2-003's
-roadmap evidence (which currently stops at `273c1fb`). apex-os
-`task/p2-b-round30` is pushed and empty.
-
-**If the harness was killed mid-run**, `git -C /var/tmp/apex-work/wt-p2-b4-sh
-status --short` first: it restores `src/windows/Lockscreen.qml` and
-`tests/quickshell-a11y-shim.cpp` from a `mktemp -d` snapshot after every
-mutant, but a kill between the edit and the restore leaves one mutated.
+Nothing half-written. Both worktrees are clean and both branches are pushed.
+CI run **35382910849** is in flight on apex-shell `task/p2-b-round30`; its
+result is the `## NEXT` above and is NOT yet in the roadmap evidence.
 
 ## DONE
+
+Round 30 (2026-09-19). **FOUND 14 is closed**: named cause, standalone
+reproduction, in-situ confirmation, and the lock screen's markup read back off
+the bus for the first time. See FOUND 20–23.
+
+apex-shell `task/p2-b-round30`, two commits on `roadmap/v2.2`'s `d5c781a`,
+both pushed:
+
+* `273c1fb` — `tests/quickshell-a11y-cause.cpp` (the five-mode reproduction),
+  `tests/check-quickshell-a11y-cause.sh` (**14 passed / 0 failed / 0 skipped**)
+  and `tests/mutate-quickshell-a11y-cause.sh` (**13 applied, 11 CAUGHT /
+  0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE, 2 HELD / 0 FALSE-RED**). The suite
+  is a PIN: mode A must produce a null root, so the day Qt or qtdeclarative
+  fixes this it goes RED and says to delete the pin and write the real
+  read-back. It needs no compositor, no bus and no quickshell, which is why it
+  can run on the Arch runner where nothing else in this unit's shell half can.
+* `b01a276` — `tests/quickshell-a11y-shim.cpp` (the LD_PRELOAD),
+  `tests/run-lockscreen-atspi-shim.sh` (**23 passed / 0 failed / 1 skipped**,
+  six runs) and `tests/mutate-lockscreen-atspi-shim.sh` (**8 applied,
+  6 CAUGHT / 0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE, 2 HELD / 0 FALSE-RED**).
+  Both wired into `ci.yml`, all six new files in the structure-check REQUIRED
+  list, `check-suites-run-in-ci.sh` 66 suites / 66 reachable / 0 exempt,
+  `shellcheck -S warning -x tests/*.sh` clean, `check-no-conflict-markers.sh`
+  PASS, and every REQUIRED path stat-ed (110 checked, 0 missing).
+
+Both mutation harnesses now restore from their **trap**, not only after each
+mutant — proven by killing one mid-mutant and watching the tree come back
+clean. Before that, a CI step timeout would have left a mutated file in place
+for every later step in the same job, and because the file is in the REQUIRED
+list the structure check would still have passed.
+
+apex-os `task/p2-b-round30`: cut from `6b531503`, pushed, **no commits** —
+nothing this round needed apex-os. The branch exists because apex-shell's CI
+matches on branch name.
+
+P2-003's roadmap evidence carries the `273c1fb` half. The `b01a276` half and
+FOUND 22/23 go in next.
 
 Round 29 (2026-09-18).
 
@@ -388,9 +413,25 @@ than this branch.
 
 ## BLOCKED ON
 
-The §5 read-back assertions are blocked on FOUND 14, which is upstream of this
-repository. The NEXT above is the diagnosis that would unblock it, and it costs
-one LD_PRELOAD and no shipped file. Queue items 1–2 need hardware.
+Nothing this unit can act on. FOUND 14 is closed and the read-back is written
+and green under the shim (FOUND 20–21), so the §5 blocker is gone as a
+*measurement* problem. What remains is a genuine upstream change, and it is now
+one line rather than an open question: qtdeclarative should install
+`qQuickAccessibleFactory` from `Q_COREAPP_STARTUP_FUNCTION` instead of
+`Q_CONSTRUCTOR_FUNCTION`, measured working as repro mode D. Failing that,
+quickshell should stop destroying its `QCoreApplication`
+(`src/launch/launch.cpp:282`). **Neither is APEX's code and neither is this
+unit's to write.** Somebody should file it; nothing in this repository routes
+around it, and until it lands a real screen reader still gets one node from the
+shell on a real machine.
+
+**HANDED ON, not mine:** FOUND 22, the `LockedHintService._failed()` path that
+never re-pumps. It is a live-machine defect in the lock-state chain, it belongs
+with whoever owns **P0-015**, and it is deliberately NOT fixed on
+`task/p2-b-round30` — this round only worked around it in the new suite and
+wrote down why.
+
+Queue items 1–2 still need hardware.
 
 ## Ledger (per sub-feature; nothing green without a named suite + mutation pair)
 
@@ -415,7 +456,15 @@ HELD); RUNTIME READ-BACK ATTEMPTED AND BLOCKED round 29 —
 `run-lockscreen-atspi.sh` (17/0/6) engages a real ext-session-lock on a nested
 labwc, reads the tree back, and finds it empty; `mutate-lockscreen-atspi.sh`
 (11 mutants, 8 CAUGHT / 0 SURVIVED, 3 HELD) proves that result is not a broken
-harness.** recovery: NOT done.
+harness. RUNTIME READ-BACK DONE round 30 UNDER THE SHIM —
+`run-lockscreen-atspi-shim.sh` 23/0/1 + `mutate-lockscreen-atspi-shim.sh`
+6 CAUGHT / 0 SURVIVED / 2 HELD: with Qt's factory restored in-process the
+shipped markup arrives on the bus intact, so the markup is PROVEN and the only
+thing left is the upstream fix. Note what that does and does not mean — on a
+real machine, with no shim, a screen reader still gets one node.** the CAUSE of
+that is named and pinned: `check-quickshell-a11y-cause.sh` 14/0/0 +
+`mutate-quickshell-a11y-cause.sh` 11 CAUGHT / 0 SURVIVED / 2 HELD. recovery:
+NOT done.
 
 **P2-004.** layout before password: DONE, greeter and installer
 (`test-apex-greet-layout.sh` 25, `test-installer-keymap.sh` 43,
@@ -442,9 +491,9 @@ untouched.
 ## Standing queue (ordered; 1–2 need hardware, not mine)
 
 1. Orca at the login screen on real hardware; 2. greeter audio;
-3. **the quickshell accessibility defect (FOUND 14) — the `## NEXT` above. It
-   gates every a11y item in the product and nothing in this repo can route
-   around it;**
+3. ~~the quickshell accessibility defect (FOUND 14)~~ **DIAGNOSED AND CLOSED
+   round 30 (FOUND 20–21). What is left is not investigation: it is filing one
+   upstream change and waiting for it. See BLOCKED ON;**
 4. the QTranslator host change (FOUND 3) — costs a compiled artefact;
 5. the ~200 prose strings in `AgentHelpContent.qml`, PARKED until 4 (and
    `check-agent-help.sh` greps the exact shape `{ k: "kv", t: "$m"`, so it must
