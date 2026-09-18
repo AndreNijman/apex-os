@@ -649,14 +649,54 @@ report_enterprise_wifi() {
     # this allows man-in-the-middle attacks and is NOT recommended" — so the
     # network joins, works, and validates nothing. Every reader here would call
     # that a working connection, which is why it gets named.
-    local names ent=0 nocert=0 name d eap ca sysca
-    local findings=()
-    names=$(run 10 nmcli -t -f TYPE,NAME connection show \
-            | sed -n 's/^802-11-wireless://p' | sed 's/\\:/:/g')
+    # ── "no saved profile uses it" IS A SAFETY CLAIM, so it has to be read ──
+    #
+    # This reader threw the rc away and took nmcli's output at face value.
+    # `run` folds stderr into stdout, so with no daemon to ask `names` held
+    #
+    #     Error: Could not create NMClient object: Could not connect: No such
+    #     file or directory.
+    #
+    # the `sed` for 802-11-wireless matched none of it, ent stayed 0, and the
+    # line printed was "no saved profile uses it" — a positive statement that
+    # the machine carries no unvalidated enterprise profile, made without
+    # looking. Measured in the built image, where `links` and `connectivity`
+    # ten lines above BOTH correctly said "could not reach NetworkManager" and
+    # this one, reading the same daemon, answered as though it had.
+    #
+    # It is the worst line in this file to get wrong in that direction. The
+    # laptop this was written for has two saved 802.1X profiles that validate
+    # nothing, and the note below — the one about an access point standing in
+    # for the real one — is suppressed along with the count. A user whose
+    # nmcli cannot reach NetworkManager, or who has no nmcli at all, was told
+    # they did not have the problem they have.
+    local names ent=0 nocert=0 unread=0 name d eap ca sysca nrc drc
+    local findings=() unreadable=()
+    names=$(run 10 nmcli -t -f TYPE,NAME connection show); nrc=$?
+    if [ "$nrc" -eq 124 ]; then
+        item "enterprise Wi-Fi (802.1X)" "unavailable — nmcli did not answer in 10s"
+        return
+    elif [ "$nrc" -ne 0 ]; then
+        item "enterprise Wi-Fi (802.1X)" "unavailable — the saved profiles could not be read"
+        note "$(tail -1 <<<"$names")"
+        note "this is NOT the same as having no enterprise profile. A profile that joins"
+        note "a campus network and validates no certificate is still saved on this"
+        note "machine and will still be used; it just cannot be counted from here."
+        return
+    fi
+    names=$(sed -n 's/^802-11-wireless://p' <<<"$names" | sed 's/\\:/:/g')
     while IFS= read -r name; do
         [ -n "$name" ] || continue
         d=$(run 10 nmcli -t -f 802-1x.eap,802-1x.ca-cert,802-1x.system-ca-certs \
-                 connection show "$name")
+                 connection show "$name"); drc=$?
+        # Same trap one level down: a per-profile read that FAILED leaves `eap`
+        # empty, and empty is how a profile that is not enterprise at all looks.
+        # Silently sorting a failed read into "not enterprise" is the same wrong
+        # answer in miniature, so it is counted and named instead.
+        if [ "$drc" -ne 0 ]; then
+            unread=$((unread+1)); unreadable+=("$name")
+            continue
+        fi
         eap=$(sed -n 's/^802-1x\.eap://p' <<<"$d")
         case "$eap" in ''|'--') continue ;; esac
         ent=$((ent+1))
@@ -670,11 +710,17 @@ report_enterprise_wifi() {
         esac
     done <<<"$names"
 
-    if [ "$ent" -eq 0 ]; then
+    if [ "$ent" -eq 0 ] && [ "$unread" -eq 0 ]; then
         item "enterprise Wi-Fi (802.1X)" "no saved profile uses it"
         return
     fi
-    item "enterprise Wi-Fi (802.1X)" "$ent saved profile(s), $nocert validating nothing"
+    if [ "$unread" -gt 0 ]; then
+        item "enterprise Wi-Fi (802.1X)" \
+             "$ent saved profile(s), $nocert validating nothing, $unread not readable"
+        local u; for u in "${unreadable[@]}"; do note "$u: nmcli would not report its settings"; done
+    else
+        item "enterprise Wi-Fi (802.1X)" "$ent saved profile(s), $nocert validating nothing"
+    fi
     local g; for g in "${findings[@]:-}"; do [ -n "$g" ] && note "$g"; done
     if [ "$nocert" -gt 0 ]; then
         note "These connect. They trust whatever answers to the network's name, so an"

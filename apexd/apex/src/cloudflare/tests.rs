@@ -370,3 +370,77 @@ fn status_json_calls_an_environment_a_section_that_binds_a_worker() {
         .collect();
     assert_eq!(named, vec!["production"]);
 }
+
+#[test]
+fn the_credential_a_refresh_renews_is_the_one_this_cli_stored() {
+    // The whole refresh path rests on a derivation nothing else asserts. The
+    // daemon never takes a name from the caller: `oauth.token.refresh` binds
+    // by running `account::renewed_service` over the name the request is
+    // already against, so `cloudflare-refresh` has to derive `cloudflare` —
+    // this file's own `SERVICE`. Rename either constant and a refresh would
+    // renew a credential that is not there, or nothing at all, and every test
+    // in the provider would still pass because it uses its own fixture names.
+    assert_eq!(
+        apex_secret_core::account::renewed_service(REFRESH_SERVICE).as_deref(),
+        Some(SERVICE),
+        "the daemon would not derive '{SERVICE}' from '{REFRESH_SERVICE}'"
+    );
+    // And the host it is filed under is one the daemon can find a token
+    // endpoint for. A refresh token pinned to a host that is not in the table
+    // is refused with "not an authorisation server", which reads as though
+    // there were no refresh at all.
+    let oauth = apex_secret_core::account::oauth_for_auth_host(AUTH_HOST)
+        .expect("the host the refresh token is filed under has no token endpoint");
+    assert_eq!(oauth.token_url, "https://dash.cloudflare.com/oauth2/token");
+}
+
+#[test]
+fn the_client_the_grant_was_issued_to_is_recorded_where_the_daemon_reads_it() {
+    // RFC 6749 §6 requires a refresh to present the same client the grant was
+    // issued to, and `--client-id` lets somebody sign in as one that is not
+    // Wrangler's. The daemon reads that client out of the store's non-secret
+    // half and falls back to the table only when it holds the placeholder — so
+    // storing the placeholder for an overridden grant would renew as Wrangler
+    // and earn `invalid_client` with nothing to explain it.
+    let overridden = "0f8a1c22-1111-2222-3333-444455556666";
+    assert_eq!(username_for(REFRESH_SERVICE, overridden), overridden);
+    // The access token has no client half: it is presented as a bearer token,
+    // and `x-access-token` is the store's own "there is no name half".
+    assert_eq!(
+        username_for(SERVICE, overridden),
+        apex_secret_core::store::DEFAULT_USERNAME
+    );
+    assert_eq!(
+        username_for(SERVICE, overridden),
+        "x-access-token",
+        "the placeholder moved; the daemon's fallback reads this exact string"
+    );
+    // A default connect records Wrangler's id explicitly rather than leaving
+    // the daemon to infer it, so the two can never disagree about which client
+    // a stored grant belongs to.
+    assert_eq!(
+        username_for(REFRESH_SERVICE, WRANGLER_CLIENT_ID),
+        WRANGLER_CLIENT_ID
+    );
+    // ...and whatever is recorded has to be something the daemon will put in a
+    // form body. `connect_by_device_code` refuses a client id that is not,
+    // before any of this runs.
+    assert!(valid_form_value(WRANGLER_CLIENT_ID));
+    assert!(valid_form_value(overridden));
+}
+
+#[test]
+fn the_operation_the_cli_asks_for_is_the_one_the_provider_declares() {
+    // One constant in the crate the CLI and the daemon both link. The
+    // registry-side half of this — that a provider actually offers it — is
+    // `providers::tests::the_shipped_registry_builds_and_offers_every_
+    // provider_s_vocabulary`, which cannot be run from here.
+    assert_eq!(REFRESH_OPERATION, "oauth.token.refresh");
+    assert_eq!(
+        REFRESH_OPERATION,
+        apex_secret_core::account::REFRESH_OPERATION
+    );
+    // The grant is per credential, and it is the REFRESH credential that is
+    // spent — granting the operation on `cloudflare` would allow nothing.
+    assert_ne!(SERVICE, REFRESH_SERVICE);
+}
