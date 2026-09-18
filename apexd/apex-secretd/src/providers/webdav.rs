@@ -73,6 +73,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "webdav.file.read",
@@ -82,6 +83,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
         OperationSpec {
             id: "webdav.file.write",
@@ -91,6 +93,7 @@ pub const SPEC: ProviderSpec = ProviderSpec {
             params: &[],
             aliases: &[],
             same_everywhere: false,
+            supersedes_credentials: false,
         },
     ],
 };
@@ -141,6 +144,7 @@ impl Provider for WebdavProvider {
             ),
             // A file operation issues no credential.
             creates: None,
+            replaces: Vec::new(),
             // §13.8 is about environments — a production deploy against a
             // preview one. A WebDAV account has no such halves, and a per-file
             // approval prompt would be a prompt per file, which is how people
@@ -188,6 +192,7 @@ impl Provider for WebdavProvider {
             code: out.code,
             output: out.text,
             created: None,
+            replaced: Vec::new(),
         })
     }
 }

@@ -276,6 +276,46 @@ object Agentd {
         """{"cmd":"input","id":$id,"data":"${escape(data)}"}"""
 
     /**
+     * Read what is on the COMPUTER's clipboard (P1-059 criterion 3, receive).
+     *
+     * The only verb in this vocabulary that carries something out of the
+     * machine which no session produced — everything else either asks about
+     * sessions or pushes into one.
+     *
+     * **No `id`, and that is the design and not an omission.** One Wayland
+     * seat has one clipboard, so there is nothing to name. It follows that
+     * this is not a session action: it must not be offered from a screen that
+     * only exists while some session is waiting for input, because the moment
+     * a user wants the computer's clipboard is the moment they copied
+     * something on the computer, which has nothing to do with what an agent
+     * is doing.
+     *
+     * **It is not [input] with the phone's clipboard**, which is what the
+     * Paste button does and which travels the other way. It is also not
+     * `apex send --clipboard` — that is ssh to another Linux host in the §20
+     * registry, `wl-paste` here and `wl-copy` there. Three rounds of this app
+     * called this verb missing because the similar name was read as the same
+     * feature.
+     *
+     * A phone is allowed it. `privilege::refuse_clipboard` refuses exactly
+     * two callers — a connection that IS a managed session, and one whose
+     * origin could not be classified — and a paired device is neither. It is
+     * deliberately NOT `inject`'s gate, which also refuses a non-local
+     * origin: that would refuse the only caller this verb exists for.
+     *
+     * A plain control request, checked rather than assumed:
+     * `apex-remoted`'s `proxy::takes_over_the_channel` is `attach` and
+     * `receive` and nothing else, so unlike [receive] this rides the ordinary
+     * [com.apexos.remote.core.agent.MachineLink.request] door.
+     *
+     * The daemon caps the answer at 8 KiB so the reply fits one control
+     * frame; past that it refuses with the limit named rather than clipping,
+     * because half of what somebody copied is worse than being told to send a
+     * file.
+     */
+    fun clipboard(): String = """{"cmd":"clipboard"}"""
+
+    /**
      * Hand a file to a session whose bytes are on this phone.
      *
      * `Request::Receive { id, name, len }` is the second verb that takes a
@@ -535,6 +575,28 @@ object Agentd {
         val obj = require(reply, "session")
         return json.decodeFromJsonElement(AgentSession.serializer(), obj)
     }
+
+    /**
+     * The computer's clipboard, from a `clipboard` reply.
+     *
+     * **An empty string is a real answer** and means the computer's clipboard
+     * is empty. `Response::Clipboard`'s own documentation says so, and the
+     * caller has to keep the distinction: reporting "empty" as a failure
+     * sends the user looking for a permission to grant when the machine
+     * simply had nothing. Every genuine failure arrives as an [AgentError]
+     * through [require] instead — not text, over the cap, no compositor, a
+     * wedged application — each with a sentence the daemon wrote for a person
+     * to read, which callers should show rather than paraphrase.
+     *
+     * Read from the top level and not from a nested object, like
+     * [readSession]: `Response::Clipboard` is an internally-tagged variant.
+     * A missing `text` is treated as empty rather than thrown, because the
+     * one shape that could produce it is a daemon that renamed the field,
+     * and "the clipboard was empty" is a better failure for that than a
+     * parse error the user cannot act on.
+     */
+    fun readClipboard(reply: String): String =
+        require(reply, "clipboard")["text"]?.jsonPrimitive?.content.orEmpty()
 
     /**
      * The worktree rows, from a `worktrees` reply.

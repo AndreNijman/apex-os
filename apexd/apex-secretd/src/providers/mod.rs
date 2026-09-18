@@ -20,6 +20,7 @@ pub mod bearer;
 pub mod cloudflare;
 pub mod git;
 pub mod mcp;
+pub mod oauth;
 pub mod s3;
 pub mod webdav;
 
@@ -38,6 +39,7 @@ pub fn default_registry(run_dir: std::path::PathBuf) -> Result<Registry, String>
     registry.register(Box::new(git::GitProvider))?;
     registry.register(Box::new(cloudflare::CloudflareProvider::new()))?;
     registry.register(Box::new(mcp::McpProvider::new(run_dir.clone())))?;
+    registry.register(Box::new(oauth::OAuthProvider::new()))?;
     registry.register(Box::new(s3::S3Provider))?;
     registry.register(Box::new(webdav::WebdavProvider::new(run_dir)))?;
     Ok(registry)
@@ -96,12 +98,25 @@ mod tests {
                 "git.ls-remote",
                 "git.push",
                 "mcp.request",
+                "oauth.token.refresh",
                 "s3.object.read",
                 "s3.object.write",
                 "webdav.file.list",
                 "webdav.file.read",
                 "webdav.file.write",
             ]
+        );
+        // The one id another crate's CLI spells for itself. `apex cloudflare
+        // refresh` sends a `Use` for `account::REFRESH_OPERATION` and cannot
+        // see this registry to know whether anything offers it — this is the
+        // only place both are visible, which is the same reason the scope gate
+        // below lives here.
+        assert!(
+            registry
+                .operation_ids()
+                .iter()
+                .any(|id| id == apex_secret_core::account::REFRESH_OPERATION),
+            "`apex cf refresh` asks for an operation no provider offers"
         );
     }
 
@@ -248,6 +263,52 @@ mod tests {
             "the set of operations grantable in every project changed; each one \
              has to be true of the provider's `bind`, not just of its declaration"
         );
+    }
+
+    #[test]
+    fn the_set_of_operations_that_may_overwrite_a_stored_credential_is_spelled_out() {
+        // `the_everywhere_gate_reads_the_operations_own_declaration`'s twin,
+        // for the second static claim an operation makes about itself: whether
+        // it may overwrite a credential that is already in the store. The
+        // framework's own gate on the claim lands with the check that reads it;
+        // this is the review gate over the shipped vocabulary.
+        //
+        // The set is spelled out for that test's reason — the safety comes from
+        // the field being mandatory and from the framework refusing an
+        // undeclared replacement, and this is the review gate on top: adding an
+        // operation that may overwrite an owner's stored credential has to be a
+        // line somebody writes here on purpose.
+        //
+        // RFC 6749 §6 is the only thing in this build whose purpose is to
+        // supersede a credential. Everything else that writes a secret to the
+        // store CREATES one, and a create is refused if the name is taken.
+        let registry = default_registry(std::env::temp_dir()).expect("registry");
+        let mut supersedes = Vec::new();
+        for id in registry.operation_ids() {
+            let (_, op) = registry.lookup(&id).expect("declared");
+            if op.supersedes_credentials {
+                supersedes.push(id);
+            }
+        }
+        assert_eq!(
+            supersedes,
+            vec!["oauth.token.refresh"],
+            "the set of operations allowed to overwrite a stored credential \
+             changed. Each one is an operation that can replace a secret the \
+             owner is holding, so name it here and say why it is not a \
+             `creates` that skipped the free-name check."
+        );
+        // The framework's gate reads the declaration and computes nothing of
+        // its own, checked over the whole vocabulary rather than over the one
+        // operation it was written for.
+        for id in registry.operation_ids() {
+            let (_, op) = registry.lookup(&id).expect("declared");
+            assert_eq!(
+                crate::service::may_supersede_credentials(op),
+                op.supersedes_credentials,
+                "the gate on '{id}' disagrees with its own declaration"
+            );
+        }
     }
 
     /// The claim, asked of the provider instead of the declaration.

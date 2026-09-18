@@ -145,6 +145,43 @@ class MachineLink(
         Agentd.readOk(request(Agentd.input(id, data), retry = false))
 
     /**
+     * What is on the COMPUTER's clipboard right now (P1-059 criterion 3).
+     *
+     * **Retried**, unlike [input] directly above it, and the contrast is the
+     * point: `input` is an instruction whose replay types a user's sentence
+     * twice, and this is a question. Asking twice reads the clipboard twice
+     * and changes nothing at the machine. A caller who lost the reply is
+     * better served by a second ask than by an error.
+     *
+     * Takes no session id — one seat has one clipboard — so it is a property
+     * of the LINK, and the only precondition is that the link is up. It is
+     * `machine`-scoped in the same way [worktrees] is.
+     *
+     * Blocking, so callers run it inside `withContext(Dispatchers.IO)`. It
+     * cannot hang the phone for long even if the computer misbehaves: the
+     * daemon bounds its own read at five seconds and kills the tool, because
+     * a Wayland clipboard is served by the application that owns it and a
+     * wedged application never serves it. That bound is at the machine
+     * deliberately — `Mux.CONTROL_TIMEOUT_MS` is five minutes, so without it
+     * a frozen editor on the computer would freeze this phone's whole
+     * connection, terminal included.
+     *
+     * **Returns the EMPTY STRING when the computer's clipboard is empty, and
+     * that is a real answer rather than a failure** — `Response::Clipboard`
+     * says so in its own words. It is the one outcome callers keep getting
+     * wrong: reported as an error it sends somebody hunting for a permission
+     * to grant when the machine simply had nothing on it, and reported as
+     * nothing at all it reads as a button that does not work.
+     *
+     * Every genuine refusal arrives as an [AgentError] instead — not text,
+     * over the cap, no compositor, a wedged application — each carrying a
+     * sentence the daemon wrote for a person to read, which callers should
+     * show rather than paraphrase. `Agentd.isTooOld` names the one that means
+     * the computer's runtime predates the verb rather than that it refused.
+     */
+    fun clipboard(): String = Agentd.readClipboard(request(Agentd.clipboard()))
+
+    /**
      * Per-worktree status for every remembered project, or for one slug.
      *
      * Retried on a dropped connection like every other question here, and this

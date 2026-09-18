@@ -176,12 +176,18 @@ class HelpParityTest {
         val forbidden = listOf(
             "approve from your phone",
             "restore the checkpoint here",
-            // These two used to be here and are now things this build DOES,
+            // These used to be here and are now things this build DOES,
             // which is the whole point of asserting the inverse: the list is
             // not a list of forbidden words, it is a list of claims the code
             // cannot back, and it has to move when the code does. What
             // replaces them is the rest of P1-059 that is still not met.
-            "read the computer's clipboard",
+            //
+            // `read the computer's clipboard` left this list when
+            // `Request::Clipboard` landed: the guide now teaches it under
+            // "The computer's clipboard", and the assertion below would fail
+            // on that text if the claim were still forbidden. Removing it is
+            // the list moving when the code moved, which is what :179 says
+            // has to happen.
             "notify you when the app is closed",
         )
         for (claim in forbidden) {
