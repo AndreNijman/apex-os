@@ -53,13 +53,16 @@ Nothing. Both worktrees clean, both branches pushed.
 
 Round 29 (2026-09-18).
 
-apex-shell `task/p2-b-round29`, three commits on `roadmap/v2.2`'s `379eef8`,
+apex-shell `task/p2-b-round29`, four commits on `roadmap/v2.2`'s `379eef8`,
 pushed, NOT yet merged: `d710bfb` the AT-SPI read-back suite and the ported
 harness, `f66db73` the mutation pair and the CI wiring, `c81c421` the
-provenance self-check for the two copied files.
+provenance self-check for the two copied files, `e65d378` the harness guard the
+Arch runner made necessary (FOUND 18) plus the at-spi path list (FOUND 19).
 
-apex-os `task/p2-b-round29`, one commit on `roadmap/v2.2`'s `1668ed9c`, pushed:
-`4aae9249` the `GSETTINGS_BACKEND=memory` fix to `tests/lib/atspi.sh`.
+apex-os `task/p2-b-round29`, two commits on `roadmap/v2.2`'s `1668ed9c`, pushed:
+`4aae9249` the `GSETTINGS_BACKEND=memory` fix to `tests/lib/atspi.sh`, and
+`cb02019f` the same at-spi path list. The two copies of that file still diff
+empty apart from the provenance block.
 
 New in apex-shell:
 
@@ -80,6 +83,18 @@ New in apex-shell:
 apex-os, re-run after the `atspi.sh` change and unchanged from the ledger:
 `test-apex-greet-atspi.sh` 31/0/0, `mutate-greet-atspi.sh` 8 applied / 8 CAUGHT
 / 0 SURVIVED, `test-apex-greet-session-bus.sh` 37/0/0.
+
+**From the runner, not this laptop.** CI run 35361832221 on
+`task/p2-b-round29`: `structure-check` and the NixOS job green; `arch-validate`
+red on two steps. One is `run-rtl-test.sh` at **17/3/2**, the pre-existing red
+this unit has been carrying since round 28 — unchanged, and not this branch's
+doing. The other was the new mutation step, and it was a REAL defect in the new
+harness, not an environment problem: see FOUND 18. Both are fixed in `e65d378`
+and re-dispatched as 35362877551. Note what the runner still cannot do: it has
+no `quickshell` (AUR), so §2–§5 of the read-back suite cannot run there and the
+mutation harness now says NOTHING WAS MEASURED and exits 0. The §1 control
+should run there once at-spi resolves; that is the thing to read off the
+re-dispatch.
 
 ## FOUND (still true; do not re-derive)
 
