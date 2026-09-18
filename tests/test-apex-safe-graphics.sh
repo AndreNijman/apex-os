@@ -397,11 +397,21 @@ done
 # the menu does. WHICH binary that is gets printed rather than assumed: a suite
 # that quietly measured an installed /usr/bin/apex would be reporting the
 # shipped CLI's behaviour as this branch's.
+#
+# An APEX_BIN that is not executable is REFUSED rather than ignored. `ln -sf`
+# to a path that is not there makes a dangling symlink, `command -v` steps over
+# it, and the remedies then run whatever else PATH answers to `apex` while the
+# suite prints the name it was given — a checked fact that is false, which is
+# this repository's oldest defect and not one to add to.
 APEX_BIN="${APEX_BIN:-}"
-if [ -z "$APEX_BIN" ] && [ -x "${ROOT}/apexd/target/debug/apex" ]; then
+APEX_BIN_BAD=""
+if [ -n "$APEX_BIN" ] && [ ! -x "$APEX_BIN" ]; then
+    APEX_BIN_BAD="$APEX_BIN"
+    APEX_BIN=""
+fi
+if [ -z "$APEX_BIN" ] && [ -z "$APEX_BIN_BAD" ] && [ -x "${ROOT}/apexd/target/debug/apex" ]; then
     APEX_BIN="${ROOT}/apexd/target/debug/apex"
 fi
-[ -n "$APEX_BIN" ] || APEX_BIN="$(command -v apex 2>/dev/null)"
 [ -n "$APEX_BIN" ] && ln -sf "$APEX_BIN" "${WORK}/bin/apex"
 
 export PATH="${WORK}/bin:${PATH}"
@@ -685,10 +695,21 @@ in_session_have() {
         sh -c 'command -v "$1" >/dev/null 2>&1' sh "$1"
 }
 
-if [ -n "$APEX_BIN" ]; then
-    ok "the CLI the menu names resolves in the session ($APEX_BIN)"
+# Asked of the SESSION rather than answered from what this shell intended. If
+# no symlink was planted, `apex` on the session's PATH is whatever the machine
+# installed — which is a legitimate answer and a different one, so it is the
+# answer that gets printed.
+if [ -n "$APEX_BIN_BAD" ]; then
+    bad "APEX_BIN names a binary that can be run" \
+        "APEX_BIN=$APEX_BIN_BAD is not executable, so the remedies below would have run whatever else PATH answers to \`apex\`"
+fi
+session_apex="$(env -i "${CLIENT_KV[@]}" sh -c 'command -v apex 2>/dev/null')"
+if [ -z "$session_apex" ]; then
+    skp "no apex is on the session's PATH (set APEX_BIN, or build apexd/target/debug/apex); the CLI remedies cannot be run here"
+elif [ -L "$session_apex" ]; then
+    ok "the CLI the menu names resolves in the session: apex -> $(readlink -f "$session_apex")"
 else
-    skp "no apex binary was found (set APEX_BIN, or build apexd/target/debug/apex); the CLI remedies cannot be run here"
+    ok "the CLI the menu names resolves in the session: $session_apex"
 fi
 
 # The command lines, read out of the menu. Substitution is longest-first: the
