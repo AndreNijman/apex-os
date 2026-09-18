@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  check-containerfile-assertions.sh — run the image build's own grep
-#  assertions against this repository, before a 50-minute build runs them.
+#  check-containerfile-assertions.sh — run the image build's own grep and
+#  `python3 -c` assertions against this repository, before a 50-minute build
+#  runs them.
 #
 #  Four separate assertions on roadmap/v2.2 could never pass or never run, and
 #  each one was found the same way: by a `base` job failing at a later step than
@@ -127,6 +128,98 @@ for path in sys.argv[1:]:
             if under:
                 return under
         return None
+
+    def check_python(lineno, cmd, piped):
+        """Run a `python3 -c` build assertion here, against the repo source.
+
+        Until this existed the resolver below matched `grep` and nothing else,
+        so a `python3 -c` assertion fell through its `continue`: not checked,
+        and not counted as unchecked either -- the outcome this file's own
+        header calls the worst of the three. Containerfile.base carries seven
+        of them, and two guard the Firefox enterprise policy that every browser
+        capsule reads through the sandbox's read-only bind of `/`.
+
+        The path rewrite is the load-bearing part, not a convenience. These
+        assertions open absolute IMAGE paths, and the machine this usually runs
+        on is an APEX machine: `/etc/firefox/policies/policies.json` EXISTS
+        here. Running the script unmodified would parse the LIVE file, pass,
+        and have checked nothing about the repository at all -- and then fail
+        on the CI runner, where the path is absent, for a reason that has
+        nothing to do with the assertion. So every image path in the script and
+        in its argv is resolved through the same COPY map the greps use and
+        rewritten before it runs, and a script with one path that will not
+        resolve is UNRESOLVED rather than a pass.
+        """
+        global checked, failures, unresolved
+        if piped:
+            unresolved += 1
+            unresolved_examples.append(
+                f"{path}:{lineno} python3 -c reads a pipe -- only the build can check it")
+            return
+        try:
+            toks = shlex.split(cmd)
+        except ValueError:
+            unresolved += 1
+            unresolved_examples.append(f"{path}:{lineno} unparseable")
+            return
+        toks = [t for t in toks if t not in (';', '\\')]
+        if len(toks) < 3 or toks[0] != 'python3' or toks[1] != '-c':
+            unresolved += 1
+            unresolved_examples.append(
+                f"{path}:{lineno} a python3 form this resolver cannot follow")
+            return
+        script, argv = toks[2], toks[3:]
+        if 'sys.stdin' in script:
+            unresolved += 1
+            unresolved_examples.append(
+                f"{path}:{lineno} python3 -c reads a pipe -- only the build can check it")
+            return
+
+        # Every absolute image path the script opens, plus every one handed to
+        # it as an argument. A `$` anywhere makes the path a build-time value --
+        # `"/usr/libexec/$g"` inside a `for` is exactly the 43d98f10 shape --
+        # and there is nothing here to follow it with.
+        wanted = re.findall(r"""open\(\s*['"](/(?:usr|etc)/[^'"]+)['"]""", script)
+        for a in argv:
+            if a.startswith('/usr/') or a.startswith('/etc/'):
+                wanted.append(a)
+        if any('$' in t for t in [script] + argv):
+            unresolved += 1
+            unresolved_examples.append(
+                f"{path}:{lineno} python3 -c path is built from a shell variable")
+            return
+        if not wanted:
+            unresolved += 1
+            unresolved_examples.append(
+                f"{path}:{lineno} python3 -c names no image path to resolve")
+            return
+
+        rewritten, rargv = script, list(argv)
+        for img in wanted:
+            repos = [r for r in (to_repo(img) or []) if os.path.isfile(r)]
+            if len(repos) != 1:
+                unresolved += 1
+                unresolved_examples.append(f"{path}:{lineno} {img} has no COPY source here")
+                return
+            real = os.path.abspath(repos[0])
+            rewritten = rewritten.replace(img, real)
+            rargv = [real if a == img else a for a in rargv]
+
+        r = subprocess.run(['python3', '-c', rewritten] + rargv,
+                           capture_output=True, text=True)
+        checked += 1
+        if os.environ.get('APEX_CF_VERBOSE'):
+            print(f"  check {path}:{lineno} python3 -c over {' '.join(wanted)} -> "
+                  f"{'ok' if r.returncode == 0 else 'FAILED'}")
+        if r.returncode != 0:
+            failures += 1
+            print(f"FAIL  {path}:{lineno}")
+            print(f"      python3 -c over {' '.join(wanted)} exits {r.returncode} "
+                  f"against this repository's own copy of it")
+            for x in (r.stderr or r.stdout).strip().split('\n')[-3:]:
+                print(f"          {x[:150]}")
+            print(f"      This assertion can only ever FAIL the build.")
+
 
     # Walk stanza by stanza so a `f=/usr/libexec/...` assignment is in scope for
     # the greps below it. That is not a nicety: the fourth defect was found in a
@@ -268,6 +361,17 @@ for path in sys.argv[1:]:
             for kw in ('do ', 'then ', 'else '):
                 if s.startswith(kw):
                     s = s[len(kw):].lstrip()
+            # A `python3 -c` assertion. Validity -- does this JSON parse,
+            # does this Python file compile, does this policy have the shape it
+            # is supposed to have -- is written in python here rather than in
+            # grep, because a grep cannot answer any of the three. See
+            # check_python: these were invisible to this file until it existed.
+            pym = re.search(r'(?:^|\|\s*)(python3\s+-c\b.*)$', s)
+            if pym:
+                check_python(lineno, pym.group(1),
+                             piped=bool(re.search(r'\|\s*python3\s+-c\b', s)))
+                continue
+
             # `cmd | grep PATTERN` really does read stdin.
             piped = False
             if '|' in s:
@@ -393,6 +497,7 @@ if unresolved:
         if 'reads a pipe' in e:            reason['a pipe — only the build can run it'] += 1
         elif 'has no COPY source here' in e: reason['the build creates the file; no COPY to resolve'] += 1
         elif 'loop variable' in e:         reason['pattern built from a loop variable'] += 1
+        elif 'shell variable' in e:        reason['a path built from a shell variable'] += 1
         elif 'unparseable' in e:           reason['shell-unparseable'] += 1
         else:                              reason['a target this resolver cannot follow'] += 1
     for why, n in reason.most_common():
