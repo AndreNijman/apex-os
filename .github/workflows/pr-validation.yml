@@ -2232,7 +2232,34 @@ jobs:
       # value is on a machine that has them.
       - name: Run the Hyprland Lua config assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-hypr-lua.sh
+        run: |
+          # Run BARE, this step used to go green whatever the suite did — and on
+          # ubuntu-24.04 what it does is print `0 passed, 0 failed, 1 skipped`
+          # and exit 0, because labwc is not installed and there is no nested
+          # compositor to drive. A green check over nothing, with the reason
+          # visible only to someone who opened the log and read it. Both halves
+          # are fixed here: the skip is SAID, in the run summary, and the
+          # count is floored so the suite silently dropping assertions on a
+          # machine that CAN run it is an error rather than a smaller number
+          # nobody compares.
+          set -uo pipefail
+          rc=0; out="$(./tests/test-apex-hypr-lua.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::test-apex-hypr-lua.sh exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex hypr-lua: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::test-apex-hypr-lua.sh printed no summary line; nothing below can be believed"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-hypr-lua.sh's summary"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $3}')"
+          failed="$(printf '%s' "$summary" | awk '{print $5}')"
+          skipped="$(printf '%s' "$summary" | awk '{print $7}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed apex hypr-lua assertions failed"; exit 1; }
+          if [ "$passed" -eq 0 ]; then
+              [ "$skipped" -gt 0 ] || { echo "::error::test-apex-hypr-lua.sh asserted nothing and did not say why"; exit 1; }
+              echo "::warning::test-apex-hypr-lua.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
+          else
+              [ "$passed" -ge 22 ] || { echo "::error::only $passed apex hypr-lua assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
+          fi
 
       # The input half of the same argument. test-apex-input.sh proves each
       # compositor's validator ACCEPTS what is generated; only a running
@@ -2246,7 +2273,34 @@ jobs:
       # the same status-0 skip where the binaries are absent.
       - name: Run the live input-settings assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-apex-input-live.sh
+        run: |
+          # Run BARE, this step used to go green whatever the suite did — and on
+          # ubuntu-24.04 what it does is print `0 passed, 0 failed, 1 skipped`
+          # and exit 0, because labwc is not installed and there is no nested
+          # compositor to drive. A green check over nothing, with the reason
+          # visible only to someone who opened the log and read it. Both halves
+          # are fixed here: the skip is SAID, in the run summary, and the
+          # count is floored so the suite silently dropping assertions on a
+          # machine that CAN run it is an error rather than a smaller number
+          # nobody compares.
+          set -uo pipefail
+          rc=0; out="$(./tests/test-apex-input-live.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::test-apex-input-live.sh exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex input-live: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::test-apex-input-live.sh printed no summary line; nothing below can be believed"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-input-live.sh's summary"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $3}')"
+          failed="$(printf '%s' "$summary" | awk '{print $5}')"
+          skipped="$(printf '%s' "$summary" | awk '{print $7}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed apex input-live assertions failed"; exit 1; }
+          if [ "$passed" -eq 0 ]; then
+              [ "$skipped" -gt 0 ] || { echo "::error::test-apex-input-live.sh asserted nothing and did not say why"; exit 1; }
+              echo "::warning::test-apex-input-live.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
+          else
+              [ "$passed" -ge 22 ] || { echo "::error::only $passed apex input-live assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
+          fi
 
       # §17's fourth generator. The shell has written Hyprland .conf/.lua and
       # niri .kdl on every keybind edit for a long time; labwc got nothing,
