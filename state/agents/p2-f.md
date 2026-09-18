@@ -10,17 +10,24 @@ branch: task/p2-f-7   (cut from origin/roadmap/v2.2 @ bb229745, which is round 3
 family in one series, per the dispatch, not the card's older `ensure_private_dir`
 line (which is still the follow-on and is now at the bottom of this section).
 
-**NEXT ACTION: commit 1 — add `broker::aborted_transfer(&CurlOutput)` beside
-`run_curl` (non-zero curl exit => `Err(reason)` naming the exit code and
-`one_line(stderr)`), call it BEFORE `split_status` in `gdrive.rs:320`,
-`oauth.rs:369` and `s3/mod.rs:521`, and add the mechanism test in
-`broker.rs`'s tests: a double answering `Content-Length: 40000000` with a few
-KB makes curl exit 63 while its `write-out` still prints, so stdout is exactly
-`"\n200"`.** The helper must NOT go inside `run_curl`: `perform_http` and
-`perform_webdav` set `fail-with-body` and rely on exit 22 arriving as `code`.
+**COMMIT 1 IS DONE AND PUSHED: `3c6c104f`** — `broker::aborted_transfer`
+(non-zero curl exit => `Err`, naming the exit code in this build's own words
+and quoting curl's), adopted at `gdrive`, `oauth` and `s3`, plus the mechanism
+test in `broker`. 11 mutations, all red, all restored with `cp`/`cmp`.
+Workspace 3338 -> 3344 / 0 / 2, clippy exit 0.
 
-Then commit 2 (msgraph both hops + cloudflare), commit 3 (`max-filesize` on s3
-and cloudflare), commit 4 (prose). Details in ROUND 32 PLAN below.
+**NEXT ACTION: commit 2 — msgraph and cloudflare.** msgraph hop one
+(`msgraph.rs:411`) takes `broker::aborted_transfer` like the other three. Hop
+two must NOT: put the check at the top of `download_outcome` using the
+`curl_code` it already receives, composing the message in Rust with no curl
+stderr in it, because curl quotes the pre-authenticated URL and that invariant
+is landed. Cloudflare (`api.rs:399`): move the `out.code == 0` check OUT of the
+no-status branch so a non-zero exit is `Reply { status: 0, body: stderr }`
+whether or not a status parsed — the consumers in `deploy.rs`, `dns.rs` and
+`temporary.rs` all key on `status == 0`.
+
+Then commit 3 (`max-filesize` on s3 and cloudflare), commit 4 (prose).
+Details in ROUND 32 PLAN below.
 
 **AFTER the family closes, if there is room:** P2-016's `ensure_private_dir`
 ownership check (in the multiuser work landed as merge `5eca2402`) — establish
