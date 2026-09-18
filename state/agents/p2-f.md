@@ -28,7 +28,19 @@ branch: task/p2-f-5   (cut from origin/roadmap/v2.2 @ 6b531503, which is round 2
 red and restored byte-identically (cmp silent), apex-secretd 297 -> 308,
 workspace 3297/0/2, clippy -p apex-secretd exit 0.
 
-**NEXT ACTION: commit 2 — `DRIVE_SCOPES` gains
+**Commit 2 is WRITTEN AND GREEN, mutations running, NOT YET COMMITTED.**
+Working tree carries: `DRIVE_SCOPES` with `files.read -> gdrive.file.read`,
+`GOOGLE_OAUTH.scopes` + `drive.file`, `empty == ["microsoft"]` in both crates,
+a new `googles_files_read_names_the_operation_the_gdrive_provider_performs`,
+`checked > 0` in gdrive's declaration test, a transport-count assertion, and
+the corrected prose in `docs/online-accounts.md` + `apex/src/account.rs`.
+`apex account add` now prints the grant command for a provider whose table is
+not empty. Workspace 3298/0/2, clippy --workspace --all-targets exit 0.
+If you are a fresh agent: pristine copies for mutation restore are in
+`/var/tmp/apex-work/scratch-p2-f/round30/*.orig`; `cmp` them before trusting
+the tree, then commit.
+
+(superseded plan, kept for the file list) **commit 2 — `DRIVE_SCOPES` gains
 `Scope { name: "files.read", operation: "gdrive.file.read", Effect::Read }`,
 `GOOGLE_OAUTH.scopes` gains `https://www.googleapis.com/auth/drive.file`,
 `providers/mod.rs`'s `empty` assertion becomes `vec!["microsoft"]`,

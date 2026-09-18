@@ -23,13 +23,21 @@ branch: **task/p2-d-6** (off roadmap/v2.2 @ 6b531503)
 
 ## NEXT
 
-Edit `apexd/apex-agent-core/src/protocol.rs`: add `BROWSER_CA_VERSION = 10`,
-bump `PROTOCOL_VERSION` to 10, add `RunRequest::trust_ca: Option<String>`, add
-the `const _: () = assert!(SESSION_ALLOWLIST_VERSION < BROWSER_CA_VERSION)`
-ordering guard, move `SESSION_ALLOWLIST_VERSION` into the strictly-behind list
-in `every_version_guard_names_a_revision_that_exists` and make
-`BROWSER_CA_VERSION` the one asserted `== PROTOCOL_VERSION`. Then
-`cargo test --locked --workspace` from `apexd/`.
+Write `install_browser_ca` in `apexd/apex-agentd/src/session.rs`, called from
+`start` beside `install_redacted_settings` (~L466). Checklist, settled:
+refuse unless `policy.sandbox.is_confined()`; require an absolute path; copy
+the file into the scratch dir FIRST and validate the copy (TOCTOU); refuse a
+file carrying anything but `BEGIN CERTIFICATE` blocks (a combined key+cert
+file would put a private key inside the capsule); read the host's
+`/etc/firefox/policies/policies.json` and refuse if it is absent
+(`--ro-bind-try` over a missing target is a silent no-op) or does not parse or
+already carries `policies.Certificates`; MERGE `Certificates.Install =
+[<scratch copy>]` into it keeping `Preferences` and the `//` keys; then
+`spec.ro.push(copy)`, `spec.ro.push(policy)`,
+`spec.ro_at.push((policy, /etc/firefox/policies/policies.json))`. Watch
+session.rs ~L583 where `sandbox::real_target` rewrites the scratch path — the
+path written INSIDE the JSON has to be the one Firefox can open in the
+namespace.
 
 ## THIS ROUND'S SCOPE (round 30), narrow on purpose
 
@@ -58,7 +66,19 @@ Design taken (advisor-reviewed) before any code:
 
 ## DONE (round 30, branch task/p2-d-6)
 
-- nothing pushed yet.
+- `1fff2c45` — **PROTOCOL_VERSION 10, `RunRequest::trust_ca`, and the CLI's
+  refusal to send it to a daemon that would drop it.** The revision number was
+  the decision and it is argued in the commit and at `PROTOCOL_VERSION`: this
+  is the first guarded field whose dropped key fails CLOSED, and it gets a
+  number anyway because the closed failure is silent for `--timeout` seconds
+  and then blames the timeout. `AgentCmd::Run` is boxed — `RunArgs` crossed
+  clippy's `large_enum_variant` threshold when the flag was added, and that is
+  the flag's cost rather than tidying. Four mutations, each restored
+  byte-identically: the wire key renamed (key assertion red),
+  `BROWSER_CA_VERSION = 9` (compile-time ordering assert red),
+  `PROTOCOL_VERSION` left at 9 (same), the `--trust-ca` row deleted from
+  `settings_a_daemon_could_drop` (table test red, `left: []`).
+  55 suites green, clippy `--all-targets -D warnings` clean.
 
 ## DONE (round 29, branch task/p2-d-5, 4 commits, all merged as bde4d96c)
 
