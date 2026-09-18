@@ -642,5 +642,90 @@ printf '%s' "$out" | grep -q 'still stored' \
 printf '%s' "$("$APEX" secret list 2>&1)" | grep -q 'account.nextcloud.home' \
     && bad "and the credential is gone" || ok "and the credential is gone"
 
+# ── a Google account's one grantable scope, through the real daemon ──────────
+#
+# P2-017 round 30. Two halves of the same claim, and the second is the one no
+# Rust test can make.
+#
+# The FIRST half is that the vapour-scope refusal is gone in the only honest
+# direction. `apex account grant google.<name> files.read` was accepted before
+# round 3 and recorded a grant for `gdrive.file.read`, an operation nothing
+# offered; round 3 emptied the table so it was refused; round 30 built the
+# provider, so it is accepted again — and this time the grant that lands is one
+# the daemon can perform. Measured through the real CLI and the real daemon
+# socket, which is what the Rust tests cannot do: they call
+# `Service::use_capability` in process.
+#
+# The SECOND half is that the shipped daemon carries NO test injection. The
+# gdrive provider refuses any credential not pinned to Google's own API host,
+# and the loopback route a unit test uses is `GdriveProvider::at`, which is
+# `#[cfg(test)]`. A credential stored for 127.0.0.1 and used here goes through
+# the binary this suite built — if that binary had the injection, the refusal
+# below would not happen.
+#
+# NO NETWORK. The googleapis-pinned credential is granted and never USED; the
+# credential that is used is pinned to loopback and is refused at `bind`,
+# before a request is composed. Nothing is dialled either way.
+#
+# `grep <<<` rather than `printf | grep -q`: under `pipefail` a `grep -q` that
+# matches can return 141 when the writer is killed by SIGPIPE, which has
+# mis-seeded suites in this repository before. A herestring is not a pipeline.
+section "a Google account's grantable scope"
+DRIVE_SENTINEL="apex-drive-sentinel-7f3a19dc-do-not-leak"
+printf %s "$DRIVE_SENTINEL" | "$APEX" secret add account.google.drive \
+    --host www.googleapis.com --auth bearer --path /drive/v3 >/dev/null 2>&1
+
+out="$("$APEX" account scopes google 2>&1)"
+grep -q 'files.read' <<<"$out" && grep -q 'gdrive.file.read' <<<"$out" \
+    && ok "apex account scopes google lists the scope and the operation it names" \
+    || bad "apex account scopes google lists the scope and the operation it names"
+grep -q 'no grantable scopes' <<<"$out" \
+    && bad "and no longer says a Google account has nothing grantable" \
+    || ok "and no longer says a Google account has nothing grantable"
+
+out="$(cd "$PROJ" && "$APEX" account grant google.drive files.read 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] \
+    && ok "apex account grant google.drive files.read is accepted" \
+    || bad "apex account grant google.drive files.read is accepted (rc=${rc}): ${out}"
+
+# The grant is stored CANONICALLY. A scope recorded under its own name would
+# be a grant the daemon never matches — the defect the scope table's routing
+# rule exists to prevent, here as an end-to-end fact rather than a unit one.
+out="$(cd "$PROJ" && "$APEX" secret grants 2>&1)"
+grep -q 'gdrive.file.read' <<<"$out" \
+    && ok "and the grant is recorded under the canonical operation id" \
+    || bad "and the grant is recorded under the canonical operation id: ${out}"
+
+# Microsoft is the control: the same command, the same shape, and it must
+# still be refused, because no msgraph transport exists. Without this the
+# assertion above would pass on a build that accepted every scope.
+out="$("$APEX" account scopes microsoft 2>&1)"
+grep -q 'no grantable scopes' <<<"$out" \
+    && ok "a Microsoft account still has nothing grantable, and says so" \
+    || bad "a Microsoft account still has nothing grantable, and says so: ${out}"
+
+# The shipped binary has no loopback route into the Drive transport.
+printf %s "$DRIVE_SENTINEL" | "$APEX" secret add account.google.local \
+    --host 127.0.0.1 --scheme http --port 9 --auth bearer --path /drive/v3 \
+    >/dev/null 2>&1
+(cd "$PROJ" && "$APEX" secret grant account.google.local gdrive.file.read >/dev/null 2>&1)
+out="$(cd "$PROJ" && "$APEX" secret use account.google.local gdrive.file.read \
+    1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms 2>&1)"
+grep -q '127.0.0.1' <<<"$out" && grep -q 'www.googleapis.com' <<<"$out" \
+    && ok "the shipped daemon refuses a Drive credential pinned off Google" \
+    || bad "the shipped daemon refuses a Drive credential pinned off Google: ${out}"
+grep -q "$DRIVE_SENTINEL" <<<"$out" \
+    && bad "and the refusal carries no credential" \
+    || ok "and the refusal carries no credential"
+
+"$APEX" account rm google.drive >/dev/null 2>&1
+"$APEX" secret remove account.google.local >/dev/null 2>&1
+if grep -rq "$DRIVE_SENTINEL" "$SECRET_STORE" "$XDG_STATE_HOME" 2>/dev/null; then
+    printf '      still present in: %s\n' "$(grep -rl "$DRIVE_SENTINEL" "$SECRET_STORE" "$XDG_STATE_HOME" 2>/dev/null | tr '\n' ' ')"
+    bad "no trace of the Drive token remains on disk"
+else
+    ok "no trace of the Drive token remains on disk"
+fi
+
 printf '\nsecret-broker: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
