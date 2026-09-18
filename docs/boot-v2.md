@@ -258,7 +258,7 @@ all against the same software TPM. Counts come from the container logs with
   key opens the volume in that same boot.
 * **Firmware change — 18 passed, 0 failed, 1 could-not-run.** Fedora's real
   `DBXUpdate` blob moves PCR 7 (76 → 21340 bytes) and the signed PCR 11 policy
-  still unlocks, which is the property the policy was chosen for. The
+  still unlocks, which is why boot-v2 chose this policy. The
   could-not-run is PCR 0: moving it needs a second OVMF build differing **only**
   in code, and the lab image's two 4 MB builds differ in Secure Boot enforcement
   as well, so swapping them would conflate "the firmware changed" with "Secure
@@ -284,22 +284,22 @@ ASSERT_EFI_ERROR (Status = Not Found)
 ASSERT MemoryServices.c(203): !(((RETURN_STATUS)(Status)) >= 0x8000000000000000ULL)
 ```
 
-A DEBUG build deadloops on that assert, so qemu is killed at the timeout and the
-guest never prints anything at all. One variable was changed at a time to place
-it:
+A DEBUG build deadloops on that assert, so the harness kills qemu at the timeout
+and the guest never prints anything at all. Changing one variable at a time
+places it:
 
 | build | edk2 | Secure Boot + SMM | S3 resume |
 | --- | --- | --- | --- |
 | in-image `OVMF_CODE_4M.secboot` | 20260812 | on | asserts |
-| in-image `OVMF_CODE_4M` (non-secboot) | 20260812 | off | asserts, identically |
+| in-image `OVMF_CODE_4M` (non-secboot) | 20260812 | off | asserts the same way |
 | `OVMF_CODE_4M.secboot` from edk2-ovmf-20250812-18.fc43 | 20250812 | on | resumes, 17/0 |
 
 Turning Secure Boot and SMM off changes nothing; going back one edk2 version
 fixes it. So the S3 criterion is measurable, on the older firmware, and neither
 APEX nor the lab is at fault. `APEX_BOOTLAB_FW` points the harness at a
-pre-converted firmware cache, which is how the older build was substituted —
-the version each build reports is checked out of the binary itself
-(`strings … | grep edk2-`), not inferred from its filename.
+pre-converted firmware cache, which is how the harness takes the older build.
+Each build's version comes out of the binary itself (`strings … | grep edk2-`),
+not from its filename.
 
 **A firmware fact worth knowing before debugging anything here.** Fedora's 2 MB
 `/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd` does Secure Boot but has **no TCG2
@@ -448,7 +448,7 @@ $ echo $?
 
 The header is byte-identical afterwards. systemd de-duplicates against the token
 already in the header — it compares the public key and the PCR set, and the TPM
-plays no part — and that check runs **before** the wipe is acted on. So on a
+plays no part, and that check runs **before** it acts on the wipe. So on a
 cleared TPM the whole invocation does nothing while reporting success: the
 header keeps a blob sealed to a seed that no longer exists, and the next boot
 fails exactly as it did before the "recovery" (`Esys_Load rc 0x1df`, *"Key
