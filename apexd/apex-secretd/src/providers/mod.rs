@@ -21,6 +21,7 @@ pub mod cloudflare;
 pub mod gdrive;
 pub mod git;
 pub mod mcp;
+pub mod msgraph;
 pub mod oauth;
 pub mod s3;
 pub mod webdav;
@@ -41,6 +42,7 @@ pub fn default_registry(run_dir: std::path::PathBuf) -> Result<Registry, String>
     registry.register(Box::new(cloudflare::CloudflareProvider::new()))?;
     registry.register(Box::new(gdrive::GdriveProvider::new()))?;
     registry.register(Box::new(mcp::McpProvider::new(run_dir.clone())))?;
+    registry.register(Box::new(msgraph::MsgraphProvider::new()))?;
     registry.register(Box::new(oauth::OAuthProvider::new()))?;
     registry.register(Box::new(s3::S3Provider))?;
     registry.register(Box::new(webdav::WebdavProvider::new(run_dir)))?;
@@ -101,6 +103,7 @@ mod tests {
                 "git.ls-remote",
                 "git.push",
                 "mcp.request",
+                "msgraph.file.read",
                 "oauth.token.refresh",
                 "s3.object.read",
                 "s3.object.write",
