@@ -4853,39 +4853,48 @@ tasks:
     TO INSPECT NOTHING, by mutation and not by review: SessionInfo.allowlist set to None broke none of the four
     assertions written around it, and the commit message that claimed the fix caught a proxy handed the wrong list
     was false - the SURGICAL mutation (change only the egress::start call site, leave the binding alone) passed
-    everything. Both are covered now and both mutations fail. 21 mutations in total, each shown to fail the
-    assertions that name it and each file restored byte-identical with plain cp, sha256 compared: covered_by
-    always true (4), narrow returning the runtime's list (1), the empty-list refusal removed (2), the port check
-    removed (1), rules compared as text (1), an empty runtime list covering everything (1), Rule::parse not
-    normalising (2), a bare host meaning 8443 (10), session_allowlist ignoring the request (2), the network-mode
-    refusal short-circuited (1), AllowlistRefused's run_error arm deleted (1), SessionInfo.allowlist forced to
-    None (2), egress::start given the runtime's list (1), egress::start given an empty list (1), the --allow
-    version-gate entry deleted (1), that entry mapped onto POLICY_DIMENSIONS_VERSION (1), the wire key renamed
-    (1), PROTOCOL_VERSION left at 8 (1), apex-browser not forwarding --allow (4), forwarding the runtime's whole
-    list (2), forwarding one extra destination (2). ALSO: session_allowlist split out of session::start so the
-    rule is testable without a daemon, a sandbox, a PTY or a network; SessionInfo.allowlist printed by `apex agent
-    status <id>` as `destinations`, read off the binding the proxy and the 6.2 confinement are built from and
-    never off the request, because the case where the two differ is exactly the case somebody is auditing.
-    android/core/src/test/resources/requests.json was DELIBERATELY NOT extended, against the dispatch brief:
-    `allow` is a field on an existing request and not a new request, Sessions.kt's run builder sends no policy of
-    any kind so the phone cannot compose a narrowed session at all, and a Kotlin builder for it would be a builder
-    for a request the app has no way to make - the compatibility contract that does matter (the wire key is
-    `allow`, an absent key is None, an explicit null is None) is asserted in protocol.rs and shown to fail under a
-    serde rename. GATES: cargo test --locked --workspace 3270 passed 0 failed; cargo clippy --locked --workspace
-    --all-targets -D warnings clean; tests/test-apex-browser.sh 96 -> 102 passed 0 failed; shellcheck -S warning
-    -x clean; check-shellcheck-coverage.sh 165 discovered / 0 known-failing / 0 newly failing;
-    check-suites-run-in-ci.sh 75 suites / 71 run / 4 exempt / 0 unrun and undeclared;
-    check-containerfile-assertions.sh rc=0. Nothing left behind: no capsule, no session, no lab daemon, no lab
-    secret service, no container; the user's own apex-agentd was never signalled. docs/browser-capsule.md's
-    statement that "the allowlist agentd snapshots when the session starts is the runtime's" was TRUE AND IS NOT,
-    and is replaced; docs/browser-capsule-auth.md's scope for route B said "two protocol fields plus a
-    PROTOCOL_VERSION bump" and would now read as satisfied - it says explicitly that route B needs revision 10,
-    because a daemon can understand a narrowed allowlist and know nothing about terminating TLS. STILL PARTIAL,
-    and the unmet criterion is unchanged: route B is decided and scoped, not built, so a capsule still cannot
-    authenticate to a site. This round closed a fail-open in the pin that route B's own argument rests on. The
-    dispatch brief for this round was stale on two points, recorded on the card: the worktree was already on
-    task/p2-d-4 and not on roadmap/v2.2, and task/p2-d-2 is LANDED (it is in this evidence as round 24), so
-    committing there would have been committing onto a merged branch.
+    everything. Both are covered now and both mutations fail. 23 mutations in total - 22 unit-level and one on the
+    live lab - each shown to fail the assertions that name it and each file restored byte-identical with plain cp,
+    sha256 compared: covered_by always true (4), narrow returning the runtime's list (1), the empty-list refusal
+    removed (2), the port check removed (1), rules compared as text (1), an empty runtime list covering everything
+    (1), Rule::parse not normalising (2), a bare host meaning 8443 (10), session_allowlist ignoring the request
+    (2), the network-mode refusal short-circuited (1), AllowlistRefused's run_error arm deleted (1),
+    SessionInfo.allowlist forced to None (2), egress::start given the runtime's list (1), egress::start given an
+    empty list (1), the --allow version-gate entry deleted (1), that entry mapped onto POLICY_DIMENSIONS_VERSION
+    (1), the wire key renamed (1), PROTOCOL_VERSION left at 8 (1), apex-browser not forwarding --allow (4),
+    forwarding the runtime's whole list (2), forwarding one extra destination (2). ALSO: session_allowlist split
+    out of session::start so the rule is testable without a daemon, a sandbox, a PTY or a network;
+    SessionInfo.allowlist printed by `apex agent status <id>` as `destinations`, read off the binding the proxy
+    and the 6.2 confinement are built from and never off the request, because the case where the two differ is
+    exactly the case somebody is auditing. android/core/src/test/resources/requests.json was DELIBERATELY NOT
+    extended, against the dispatch brief: `allow` is a field on an existing request and not a new request,
+    Sessions.kt's run builder sends no policy of any kind so the phone cannot compose a narrowed session at all,
+    and a Kotlin builder for it would be a builder for a request the app has no way to make - the compatibility
+    contract that does matter (the wire key is `allow`, an absent key is None, an explicit null is None) is
+    asserted in protocol.rs and shown to fail under a serde rename. GATES: cargo test --locked --workspace 3270
+    passed 0 failed; cargo clippy --locked --workspace --all-targets -D warnings clean; tests/test-apex-browser.sh
+    96 -> 102 passed 0 failed; shellcheck -S warning -x clean; check-shellcheck-coverage.sh 165 discovered / 0
+    known-failing / 0 newly failing; check-suites-run-in-ci.sh 75 suites / 71 run / 4 exempt / 0 unrun and
+    undeclared; check-containerfile-assertions.sh rc=0. Nothing left behind: no capsule, no session, no lab
+    daemon, no lab secret service, no container; the user's own apex-agentd was never signalled.
+    docs/browser-capsule.md's statement that "the allowlist agentd snapshots when the session starts is the
+    runtime's" was TRUE AND IS NOT, and is replaced; docs/browser-capsule-auth.md's scope for route B said "two
+    protocol fields plus a PROTOCOL_VERSION bump" and would now read as satisfied - it says explicitly that route
+    B needs revision 10, because a daemon can understand a narrowed allowlist and know nothing about terminating
+    TLS. STILL PARTIAL, and the unmet criterion is unchanged: route B is decided and scoped, not built, so a
+    capsule still cannot authenticate to a site. This round closed a fail-open in the pin that route B's own
+    argument rests on. The dispatch brief for this round was stale on two points, recorded on the card: the
+    worktree was already on task/p2-d-4 and not on roadmap/v2.2, and task/p2-d-2 is LANDED (it is in this evidence
+    as round 24), so committing there would have been committing onto a merged branch. AND THE LIVE MUTATION:
+    apex-browser stopped forwarding the capsule's destinations - yesterday's behaviour - and the browserlab
+    `narrowing` flow FAILED, the narrowed capsule reaching the endpoint it never asked for and no denial in the
+    daemon's log; engine restored byte-identical. FULL LAB on the L16: 7 verified, 1 could-not-run, 0 failed; the
+    could-not-run is `authentication` and is the unmet criterion itself, correctly reported. A defect in this
+    round's OWN harness, found by looking at the process table rather than by a failing test:
+    apexd/apex-agentd/tests/session_allowlist.rs orphaned a bwrap namespace for 23 minutes, because pty::spawn
+    calls setsid so SessionInfo.pid is the process GROUP leader and bwrap is a separate process inside that group.
+    Drop now kills the group, by pid and never by name - apex-agentd is both the user's own runtime and the egress
+    bridge, so a pattern kill in a test would take out the machine's.
 - id: P2-013
   title: Per-project identity binding
   priority: P2

@@ -34,7 +34,7 @@ After that, P2-012's remaining work is route B (`docs/browser-capsule-auth.md`),
 which is a TLS server in `apex-agentd` plus protocol 10 — a round of its own,
 not a follow-up.
 
-## DONE (round 4, branch task/p2-d-4, 7 commits, all pushed)
+## DONE (round 4, branch task/p2-d-4, 8 commits, all pushed)
 The previous agent's 365 uncommitted lines were **finished, not redone**: they
 were a correct, incomplete implementation of per-session allowlist narrowing,
 four compile errors from green. What round 4 added is the CLI half, the daemon
@@ -53,7 +53,14 @@ error type, the version gate, the engine wiring, and every assertion.
   against a real daemon on its own socket, including a `CONNECT` through the
   session's own egress proxy.
 - `62a3854e` — docs.
-- the browserlab's `narrowing` flow, verified live.
+- `d5466e8f` — the browserlab's `narrowing` flow, verified live (6 observations),
+  and a fix to this round's own harness: it orphaned a `bwrap` namespace for 23
+  minutes, because `pty::spawn` calls `setsid` so `SessionInfo.pid` is the
+  process GROUP leader and `bwrap` is a separate process inside it.
+
+Full browserlab on the L16 afterwards: **7 verified, 1 could-not-run, 0
+failed**. The could-not-run is `authentication`, which IS P2-012's unmet
+criterion and is reported as such rather than skipped.
 
 ## FOUND (round 4)
 - **A test that inspected nothing, caught by mutation rather than by review.**
