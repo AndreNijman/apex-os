@@ -105,10 +105,11 @@ impl Endpoints {
 #[derive(Debug, Clone, Copy)]
 pub struct OAuthClient<'a> {
     pub id: &'a str,
-    /// Sent on the device request and the poll when the authorisation server
-    /// requires one — [`apex_secret_core::account::ClientSecret`] says which
-    /// do. `None` for a public client, where sending an empty one would be a
-    /// different request from sending none.
+    /// Sent on **the poll** when the authorisation server requires one —
+    /// [`apex_secret_core::account::ClientSecret`] says which do, and §3.1's
+    /// device request never carries it because neither provider documents one
+    /// there. `None` for a public client, where sending an empty one would be
+    /// a different request from sending none.
     pub secret: Option<&'a str>,
 }
 
@@ -241,9 +242,10 @@ pub fn device_grant(
     if !scope.is_empty() {
         pairs.push(("scope", &scope));
     }
-    if let Some(secret) = client.secret {
-        pairs.push(("client_secret", secret));
-    }
+    // No `client_secret` here. Neither Google's limited-input-device guide nor
+    // Microsoft's device-code documentation lists one on §3.1's request — both
+    // want it on the poll — and sending an undocumented field to an
+    // authorisation server is a request whose handling nobody has written down.
     let body = form(&pairs)
         .ok_or_else(|| DeviceError::Unusable("that client id cannot be sent".into()))?;
     let reply = post(&ends.device, &body).map_err(DeviceError::Unreachable)?;
