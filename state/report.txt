@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-19 03:16 AWST
+APEX ROADMAP — resume report — 2026-09-19 03:37 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -6,41 +6,42 @@ APEX ROADMAP — resume report — 2026-09-19 03:16 AWST
               done   partial      todo   blocked
   BASE          16         2         -         -
   L              -         1         -         2
-  P0            23         2         -         -
+  P0            24         1         -         -
   P1            44        19         -         -
   P2             7        12         -         -
-  ALL           90        36         -         2   of 128
+  ALL           91        35         -         2   of 128
 
-  P0 not done: P0-001(part), P0-015(part)
+  P0 not done: P0-001(part)
 
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
   p2-f       ALIVE      P2-016,P2-017,P2-018,P2-019        task/p2-f-6
-             head 25ce55ec feat(secretd): an msgraph provider, so a Microsoft to
-             dirty 5 file(s), 0 unpushed, card 6m
-             NEXT **ROUND 31 IN PROGRESS. Commit 1 pushed: `25ce55ec`, the `msgraph`
+             head a4907070 fix(secretd): a gate comment that credited it with a 
+             dirty 0 file(s), 0 unpushed, card 0m
+             NEXT **ROUND 31 IS COMPLETE ON THE BRANCH. Four commits pushed on `task
 
   p2-b       ALIVE      P2-003,P2-004                      task/p2-b-round31
-             head 20a1613 fix(test): the restore-on-kill worked by accident, whi
-             dirty 0 file(s), ? unpushed, card 5m
-             NEXT **This round is finished and ready to land — nothing is outstandin
-
-  p0-014     ALIVE      P0-014,P0-015                      task/p0-015-repump
-             head bbec072 test(lock): the fix that told logind about the lock ha
-             dirty 0 file(s), ? unpushed, card 10097m
-             NEXT **Round 12 (2026-09-12). COMMIT 5 IS DONE AND PUSHED — P0-014 is c
+             head 6c277ac test(rtl): the platform theme is the carrier, not the 
+             dirty 0 file(s), 0 unpushed, card 8m
+             NEXT **Round 31, in progress.** Branches cut and pushed empty in both r
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
   int-os:  tip da6fc0fb Merge task/p2-d-6 into roadmap/v2.2
+    task/p2-b-round31
+      43ffce13 test(rtl): guard link 4 — the library that actually loads the   [1/10 added lines on tip]
     task/p2-f-6
       25ce55ec feat(secretd): an msgraph provider, so a Microsoft token can    [3/10 added lines on tip]
+      0ae35a7c feat(account): microsoft's files.read names an operation that   [3/10 added lines on tip]
+      f6643031 test(accounts): the msgraph scope through the real daemon, an   [0/10 added lines on tip]
+      a4907070 fix(secretd): a gate comment that credited it with a property   [0/10 added lines on tip]
 
-  int-shell:  tip 8eccbfa Merge task/p2-b-round30 into roadmap/v2.2
-    (nothing — every task branch's content is on the integration tip)
+  int-shell:  tip f068f24 Merge task/p0-015-repump into roadmap/v2.2
+    task/p2-b-round31
+      6c277ac test(rtl): the platform theme is the carrier, not the mechanis   [1/10 added lines on tip]
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -60,11 +61,11 @@ APEX ROADMAP — resume report — 2026-09-19 03:16 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 1min 42s Sat
+  snapshot timer: active   last 30s Sat 2026-09-19
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    9683a6a  roadmap-state
+    apex-os    445dcd1  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -87,7 +88,7 @@ APEX ROADMAP — resume report — 2026-09-19 03:16 AWST
     apex-os    162d6fa  wt-p0-009-
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
-    apex-shell 324fbcf  apex-shell-
+    apex-shell e09d218  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-
@@ -96,7 +97,7 @@ APEX ROADMAP — resume report — 2026-09-19 03:16 AWST
     apex-shell 75049cf  wt-greeter-shell-
     apex-shell ed92eaa  wt-lockhint-
     apex-shell ad2d89d  wt-p0-005-shell-
-    apex-shell 6282c29  wt-p0-015-shell-
+    apex-shell 1bf2c2b  wt-p0-015-shell-
     apex-shell 2afecfc  wt-p0-016-
     apex-shell 5cf1789  wt-p0-017-
     apex-shell e1d8a82  wt-p0-017b-
@@ -116,10 +117,9 @@ APEX ROADMAP — resume report — 2026-09-19 03:16 AWST
 ────────────────────────────────────────────────────────────────────────────
   next
 ────────────────────────────────────────────────────────────────────────────
-  3 agent(s) dispatched, ceiling 6
+  2 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
-    p0-014         P0-014,P0-015                    Remote Control privilege policy and lock-state policy, wired
     p2-b           P2-003,P2-004                    Accessibility baseline and internationalisation baseline
     p2-f           P2-016,P2-017,P2-018,P2-019      Multi-user/guest/kiosk, APEX Online Accounts, guaranteed saf
 
@@ -131,7 +131,7 @@ APEX ROADMAP — resume report — 2026-09-19 03:16 AWST
   COMPLETE (nothing left to dispatch — not offered again).
   This says the WORK is done, not that it is landed — check the
   unlanded section above before assuming roadmap/v2.2 carries it:
-    p1-018, p1-020, p1-023, p1-025, p1-035, p1-040-per-output-scaling, p1-044, p1-061, p2-e
+    p0-014, p1-018, p1-020, p1-023, p1-025, p1-035, p1-040-per-output-scaling, p1-044, p1-061, p2-e
     p1-038-hardware — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-13 (round 24) — and this says the work is ANDRE'S, not that it is done. Offered as READY in four consecutive reports and correctly refused four times for the same reason, which is written in this unit's own note: the 18 remaining labwc matrix rows need real applications on a real session (portals, Firefox/Chromium screen sharing, OBS, Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling, rotation, refresh rate, VRR, suspend/resume, dock hotplug). It cannot be done headless, it cannot be done on the L16 while Andre is using it, and katana is off-limits. The step-by-step checklist is already written in state/agents/p1-038.md — it is ready for a human to run, which is the deliverable. Re-open it the moment there is a machine Andre is not sitting at.
     p1-005 — CLOSED BY HAND: Landed as merge 4f80746e; the range against roadmap/v2.2 is empty. P1-006 is done. P1-005 stays partial only because the token spent is account-wide — the per-task credential IS P1-011 — and P1-007 stays partial because no elevated class exists in apex-secret-core to require, which is its own item. Nothing left to dispatch here. Closed 2026-09-12 after a dispatched agent had to be redirected.
     p1-008 — CLOSED BY HAND: Landed as merge 230ee02a; 0 unlanded. P1-008 and P1-010 done. P1-009 stays partial because the third criterion turns on a schema question the pinned schema cannot settle either way — workers-ai-post-run-model declares two path parameters and no headers. A citation problem, not effort.

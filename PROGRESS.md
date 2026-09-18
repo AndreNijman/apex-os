@@ -2018,3 +2018,44 @@ mechanism working as designed, and an agent is on the fix with the design
 tension stated up front: a naive re-pump from `_failed()` is exactly the call
 storm the `_busy` guard exists to prevent, so the fix has to separate the two
 cases in code and say why it cannot storm.
+
+### Round 30, fourth pass — the demotion round-tripped, and the reopen was too broad
+
+`task/p0-015-repump` landed on apex-shell as **`f068f24`** (296 insertions over
+5 files). **P0-015 is back to `done`**, so the round's net change to the counts
+is zero — 91 done / 35 partial / 0 todo / 2 blocked — but the item is genuinely
+fixed rather than re-marked. Re-run by the integrator on the merged tip:
+`run-locked-hint-test.sh` **41/0** across both scenarios (main 31/0,
+`startup-drop` 10/0), `check-headless-runners.sh` 28/0, suites 66/66/0,
+structure-check 112 paths / 0 missing.
+
+**The reopen was broader than the truth, and the narrowing is what decided the
+fix.** The demotion said the drop applied whenever a newer `setLocked()` arrived
+during a failing chain. `_pump()` has a *second* guard, `_desired ===
+_confirmed`, and the state is boolean — so once `_confirmed` is a defined bool,
+a newer `_desired` that differs from the failed `_target` necessarily *equals*
+`_confirmed` and there is nothing to send. The drop is only observable while
+`_confirmed === undefined`: before the service has ever reached logind, which is
+shell startup, which is exactly when logind's Display session is most likely
+missing. The correction is recorded inside the item rather than edited away,
+because the reopen is what dispatched the fix.
+
+The same fact rules out the obvious patch. In that window an unconditional
+re-pump is an **infinite loop** — `undefined !== false` keeps `_pump()`'s guard
+open — measured as mutant B's *342 calls in 1.2 s*. The landed fix re-pumps only
+when `_desired !== _target`, and that cannot storm structurally rather than by
+promise: the only thing that can make `_desired` differ from the `_target` that
+just failed is another `setLocked()` from **outside**, so a failure can never
+generate work for itself and N external calls bound the follow-ups at N.
+
+The strongest number in the round is mutant A. With the pre-fix `_failed()`
+restored, the **existing** suite stays at 31/0 and only the new scenario goes
+7/3. That is the measured answer to "was the old suite enough" — it was not, and
+could not have been, because its `_confirmed` is defined from phase 0 onward.
+
+Two reusable lessons banked from the accessibility unit the same round: an
+unprintable character does not survive being written to a source file (it was
+wrong in the test *and* in the thing testing it), and `trap … EXIT INT TERM`
+does not end a script on a signal — a restore-on-kill written that way works by
+accident, and a one-assertion check cannot tell "it worked" from "it ended up
+that way".

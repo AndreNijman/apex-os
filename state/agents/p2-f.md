@@ -6,7 +6,7 @@ branch: task/p2-f-6   (cut from origin/roadmap/v2.2 @ f40ffefe, which is round 3
           task/p2-f-5 landed; nothing of this unit's is unlanded)
 
 ## NEXT
-**ROUND 31 IS COMPLETE ON THE BRANCH. Three commits pushed on `task/p2-f-6`
+**ROUND 31 IS COMPLETE ON THE BRANCH. Four commits pushed on `task/p2-f-6`
 (cut from `roadmap/v2.2` @ `f40ffefe`):**
   `25ce55ec`  the `msgraph` transport
   `0ae35a7c`  `files.read -> msgraph.file.read`, `Files.Read` at the sign-in,
@@ -15,8 +15,13 @@ branch: task/p2-f-6   (cut from origin/roadmap/v2.2 @ f40ffefe, which is round 3
   `f6643031`  the same claims through the real CLI and socket, plus the one
               control that died when the transport landed, replaced rather
               than quietly lost
-Worktree CLEAN at `f6643031`, `git diff --exit-code` silent, all 28 mutations
-restored with plain `cp` and `cmp` silent. set-status.py was called for
+  `a4907070`  a gate comment written in `0ae35a7c` that credited the gate with
+              a property it does not have, removed with the reasoning left in
+              place; plus the `max-filesize` finding written into the module
+              note, and a stale tense the previous round left
+Worktree CLEAN at `a4907070`, `git diff --exit-code` silent, all 28 mutations
+restored with plain `cp` and `cmp` silent (16 + 8 + 4 on the three feature
+commits, 3 more probing commit 4's claim). set-status.py was called for
 **P2-017 only**; rounds 1, 3, 25-28 and 30 re-read out of roadmap.yaml
 afterwards and all still there (29,594 -> 37,030 bytes). P2-016/018/019
 untouched.
@@ -120,6 +125,9 @@ Remaining, in the order this round takes them:
 
 ## DONE
 Round 10 (round 31 of the program), on task/p2-f-6:
+  a4907070  the self-correction: see FOUND, "A GATE'S COMMENT CREDITED IT WITH
+            A PROPERTY IT DID NOT HAVE". Also records the `max-filesize`
+            defect in the module note and fixes a stale present-perfect.
   f6643031  the shell half, and the honest part of it: the Google section's
             `! grep 'no grantable scopes'` had `apex account scopes microsoft`
             as its WITNESS, and `msgraph` landing killed it — so that negative
@@ -338,9 +346,11 @@ Round 3, on task/p2-f-3 (pushed):
 - `task/p2-f-6` cut from `roadmap/v2.2` @ `f40ffefe`. Three commits pushed
   (`25ce55ec`, `0ae35a7c`, `f6643031`); worktree clean at the tip, nothing
   half-written. Pristine copies of every mutated file are in
-  `/var/tmp/apex-work/scratch-p2-f/round31/*.orig`, and the harness that
-  produced the 28 red is `mutate.py` + `mut_c1.py` / `mut_c2.py` /
-  `mut_c3.py` / `mut_c3b.py` in that directory. Pristine copies of every mutated file are in
+  `/var/tmp/apex-work/scratch-p2-f/round31/*.orig`, refreshed to match the tip
+  `a4907070` and `cmp`-verified against every file this round touched. The
+  harness is `mutate.py` + `mut_c1.py` / `mut_c2.py` / `mut_c3.py` /
+  `mut_c3b.py` / `mut_c4.py` / `mut_c4b.py` in that directory, and
+  `bigserver.py` + `cfg.txt` there reproduce the `max-filesize` finding. Pristine copies of every mutated file are in
   `/var/tmp/apex-work/scratch-p2-f/round31/*.orig`, and the mutation harness
   that produced the 16 red is `mutate.py` + `mut_c1.py` in that directory.
 - set-status.py has NOT been called yet this round. When it is, it is P2-017
@@ -383,7 +393,7 @@ Round 3, on task/p2-f-3 (pushed):
   the same predicate. What actually catches an emptied `PROVIDERS` is the
   pre-existing `checked >= 5` floor, verified by emptying the const and running
   the gate ALONE (red, and it is the only assertion in it that can fire).
-  Removed in `f8a27e21` with the reasoning left in place.
+  Removed in `a4907070` with the reasoning left in place.
 - **AN ASSERTION THAT PASSED FOR THE WRONG REASON, caught only by mutating it.**
   `apex secret use account.microsoft.local msgraph.file.read '12319191!11919'`
   exits non-zero, so "a consumer OneDrive id is refused" read green — but the

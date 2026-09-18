@@ -21,13 +21,17 @@ pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 apex-shell `task/p2-b-round31` from `8eccbfa`, apex-os `task/p2-b-round31`
 from `da6fc0fb`. Scratch `/var/tmp/apex-work/scratch-p2-b/round31/`.
 
-Next action: read `src/services/config_tab/pages/RecoveryPage.qml`,
-`src/services/RecoveryService.qml` and `tests/lib/headless.sh` in full, then
-write an `apex` stub with a fixture JSON into `$HEADLESS_W/bin` and do ONE
-bring-up (shim + `ipc call nexus open recovery`) dumping the AT-SPI tree to
-`scratch-p2-b/round31/tree-recovery-before-markup.txt`. That dump is the
-measurement of what the recovery page publishes today, before anything is
-written.
+**The RTL half is DONE and pushed** — apex-shell `6c277ac`, apex-os
+`43ffce13`. See FOUND 26. Next action: add the accessibility markup to
+`src/services/config_tab/pages/RecoveryPage.qml`, starting with the loss list
+and the `Erase N item(s) now` Rectangle, which is the one control on the page
+that a keyboard or a reader cannot reach at all. Route its
+`Accessible.onPressAction` and its `MouseArea.onClicked` through ONE function,
+bind `activeFocusOnTab: RecoveryService.commitReady` and NOT `true`, and make
+the runtime suite's `apex` stub RECORD ITS ARGV so the suite can assert that a
+DoAction on that node BEFORE the loss list is rendered leaves no
+`recover reset --commit` in the log — exposing the button must not become a
+way around the gate `check-recovery-ui.sh` exists to protect.
 
 **FOUND 25, measured at the top of this round and it changes the shape of the
 work:** `src/services/config_tab/pages/RecoveryPage.qml` contains **ZERO**
@@ -56,10 +60,32 @@ trap shape on purpose.
 
 ## IN PROGRESS
 
-Round 31. The measurement is done and is in
+Round 31. The recovery MEASUREMENT is done and is in
 `scratch-p2-b/round31/tree-recovery-{before,after,reset-open}.txt` with the
 probe that produced it (`probe-recovery.sh`) and the three `apex` fixtures.
-Next: the QML markup, then the two suite pairs. Nothing committed yet.
+The QML markup and the two suite pairs are not written yet.
+
+The RTL half is finished:
+
+* apex-shell `6c277ac` — `tests/run-rtl-test.sh` grows three rows and its
+  round-23 "the theme supplies the direction" prose is corrected: the iff
+  (direction flips ⇔ the theme's plugin drags in a Qt translation loader), a
+  self-test proving that predicate can answer NO, and the mechanism pinned
+  past its carrier (no theme + `LD_PRELOAD` of libKF6I18n → RightToLeft).
+  **33 passed / 0 failed / 0 skipped** here under
+  `env -i HOME PATH USER TMPDIR` (was 30/0/0). Both new assertions were proven
+  able to fail by running the suite with a stubbed tool on PATH: an `ldd` that
+  prints nothing turns the iff red and correctly SKIPs the self-test; an
+  `ldconfig` that points libKF6I18n at `/lib64/libz.so.1` gives 32/1/0.
+  `shellcheck -S warning -x` clean. Section 1's three existing assertions are
+  untouched and it is NOT made to skip.
+* apex-os `43ffce13` — `tests/test-apex-platform-theme.sh` gains link 4 in its
+  live section, with the same can-it-answer-NO self-test.
+  **20 passed / 0 failed / 0 skipped** on this booted host (was 18/0/0), and
+  `mutate-platform-theme.sh` re-runs unchanged at **13 applied, 10 CAUGHT /
+  0 SURVIVED / 0 MISSCORED, 3 HELD / 0 FALSE-RED**. Note FOUND 10's corollary
+  bit again: that harness aborts "tree dirty" on an uncommitted edit, so it
+  has to be run after the commit.
 
 
 ## DONE

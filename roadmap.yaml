@@ -992,7 +992,29 @@ tasks:
     "$out" | grep -q` gradings became `[[ == * ]]`, because under set -o pipefail a grep -q that MATCHES can
     return 141. NO APEX-OS CHANGE WAS NEEDED OR MADE and no empty task/p0-014-repump branch was created; criterion
     2 was untouched this round and is not re-claimed. Everything recorded above this paragraph still stands and
-    was not re-measured.
+    was not re-measured. LANDED round 30 (2026-09-19): task/p0-015-repump tip f523a0b merged onto apex-shell
+    roadmap/v2.2 as f068f24 - three commits, 296 insertions over 5 files - no conflicts,
+    check-no-conflict-markers.sh PASS, pushed with --force-with-lease. So the fix is now ON the integration
+    branch; the agent correctly noted at hand-off that it was not yet. RE-RUN BY THE INTEGRATOR ON THE MERGED TIP
+    f068f24 rather than inherited from the branch: tests/run-locked-hint-test.sh 41 passed / 0 failed over both
+    scenarios (main 31/0, startup-drop 10/0, exit 0) with the new line 'a lock asked for during a chain that then
+    FAILED still reaches logind' present, and the three no-retry negative controls still passing;
+    tests/check-headless-runners.sh 28/0; check-suites-run-in-ci.sh 66 suites / 66 reachable / 0 exempt; the
+    ci.yml structure-check REQUIRED list 112 paths / 0 missing; ci.yml parses. A CORRECTION TO THIS ITEM'S OWN
+    REOPEN PARAGRAPH, kept rather than quietly edited because the reopen is what dispatched the fix: the
+    orchestrator's reopen said the drop applied whenever a newer setLocked() arrived during a failing chain. IT IS
+    NARROWER THAN THAT, and the narrowing is what decided the shape of the fix. _pump() has a SECOND guard,
+    _desired === _confirmed. The state is boolean, so once _confirmed is a defined bool a newer _desired that
+    differs from the failed _target necessarily EQUALS _confirmed and there is nothing to send. The drop is only
+    observable while _confirmed === undefined - before the service has ever reached logind, which is shell
+    startup, which is exactly when logind's Display session is most likely missing. The same fact is why an
+    unconditional re-pump would have been an INFINITE LOOP there (undefined !== false keeps the guard open),
+    measured as mutant B's '342 calls in 1.2s'. The landed fix re-pumps only when _desired !== _target, which
+    cannot storm structurally rather than by promise: the only thing that can make _desired differ from the
+    _target that just failed is another setLocked() from OUTSIDE, so a failure can never generate work for itself
+    and N external calls bound the follow-ups at N. Criterion 1 is met again, and on an assertion that fails
+    without the change: mutant A - the pre-fix _failed - leaves main at 31/0 and takes startup-drop to 7/3, which
+    is the measured answer to whether the existing suite could ever have caught this. It could not.
 - id: P0-016
   title: Add Agent Settings page with password-gated Always Unrestricted toggle
   priority: P0
@@ -5933,7 +5955,23 @@ tasks:
     AND THIS ROUND DID NOT SUPERSEDE THAT - no Google endpoint has ever been contacted either. A SUCCESSFUL
     msgraph.file.read through the socket cannot be measured against a double by construction, for gdrive's reason:
     the host pin refuses loopback. The agentd forwarding path is not exercised for msgraph, as round 1 recorded
-    for webdav.
+    for webdav. CORRECTION AND A FOURTH COMMIT, a4907070, made after the three above and before this round closed:
+    the gate rewrite in 0ae35a7c added a SECOND assertion (count-with-scopes == PROVIDERS.len()) with a comment
+    claiming it catches what assert!(empty.is_empty()) cannot. It does not - on an empty table both are the same
+    predicate, 0 == 0. What actually catches an emptied PROVIDERS is the pre-existing checked >= 5 floor, VERIFIED
+    by emptying the const and running every_account_scope_names_an_operation_some_provider_actually_offers ALONE
+    (red; the floor is the only assertion in it that can fire). The assertion is removed and the comment now names
+    the real guard. Recorded rather than quietly amended because a comment that overstates a gate is the same
+    defect in prose that this round spent three commits removing from code. A KNOWN DEFECT FOUND THIS ROUND,
+    MEASURED, AND DELIBERATELY NOT FIXED: neither msgraph's perform nor download_outcome reads curl's exit code on
+    a 2xx, and gdrive does not either. Against a loopback server answering Content-Length: 4000000 with
+    max-filesize = 3145728, curl exits 63, prints 'Maximum file size exceeded' on stderr, and ITS WRITE-OUT STILL
+    RUNS - stdout is exactly '\n200', so split_status yields ('', Some(200)) and the caller gets code: 0 with an
+    empty body. A TRUNCATED READ ARRIVES AS AN EMPTY FILE THAT SUCCEEDED, which is the 'permission denied is not
+    absence' shape. s3 and oauth look the same. The fix is one condition per provider plus a double mode sending
+    an oversized Content-Length, and it should take all four in one round, because fixing one makes the family
+    look handled. Written into msgraph's module note and this unit's agent card with the reproduction. Branch tip
+    is a4907070; workspace 3323 passed / 0 failed / 2 ignored and clippy exit 0 there too.
 - id: P2-018
   title: Guaranteed Safe Graphics / desktop failover mode
   priority: P2
