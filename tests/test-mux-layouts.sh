@@ -214,17 +214,46 @@ else
         && bad "a zellij session that does not exist is reported as absent" \
         || ok "a zellij session that does not exist is reported as absent"
 
-    timeout 90 "$MUX" build zellij "$Z" main-vertical "$PLAN" \
+    # No pause after `build`. It used to be `sleep 2`, and a fixed pause was
+    # never the right instrument: the layout either landed within ~300ms or it
+    # was dropped and never arrived at all, so two seconds bought nothing a
+    # tenth of a second would not have, and hid a real defect behind a flake.
+    # `build` now returns 0 only after it has SEEN the tab, so the assertions
+    # below are an independent second opinion rather than a wait.
+    timeout 120 "$MUX" build zellij "$Z" main-vertical "$PLAN" \
         && ok "build creates the zellij session" || bad "build creates the zellij session"
-    sleep 2
 
     "$MUX" has zellij "$Z" \
         && ok "and then reports it as present" || bad "and then reports it as present"
 
-    dump="$(timeout 30 zellij --session "$Z" action dump-layout 2>&1)"
+    # Retried only while the dump is EMPTY — that is the server not answering,
+    # which is a read failure and not an answer. A dump that comes back without
+    # the tab is an answer, and it must fail.
+    zdump() {
+        _d=""
+        _i=0
+        while [ "$_i" -lt 50 ]; do
+            _d="$(timeout 30 zellij --session "$1" action dump-layout 2>&1 </dev/null)"
+            [ -n "$_d" ] && break
+            _i=$((_i + 1))
+            sleep 0.1
+        done
+        printf '%s' "$_d"
+    }
+
+    dump="$(zdump "$Z")"
     printf '%s' "$dump" | grep -q 'tab name="apex"' \
         && ok "the layout landed as a tab zellij can describe" \
         || { bad "the layout landed as a tab zellij can describe"; printf '%s' "$dump" | head -5 | sed 's/^/      /'; }
+
+    # Exactly one. `build` verifies the tab and re-sends when it was dropped, so
+    # a send that was merely slow rather than lost would show up here as two
+    # `apex` tabs — the one failure the retry could introduce, and the one thing
+    # a "did it land" check on its own cannot see.
+    napex="$(printf '%s' "$dump" | grep -c 'tab name="apex"')"
+    [ "$napex" -eq 1 ] \
+        && ok "the layout landed exactly once" \
+        || bad "the layout landed exactly once (${napex} apex tabs)"
 
     # The commands are genuinely running, not declared and suspended. `apexed`
     # is the fixture editor, so a live process with that name is the proof.
@@ -233,9 +262,10 @@ else
         || bad "the pane commands are actually running"
 
     tabs_before="$(printf '%s' "$dump" | grep -c 'tab name=')"
-    timeout 90 "$MUX" build zellij "$Z" main-vertical "$PLAN" >/dev/null 2>&1
-    sleep 1
-    tabs_after="$(timeout 30 zellij --session "$Z" action dump-layout 2>&1 | grep -c 'tab name=')"
+    timeout 120 "$MUX" build zellij "$Z" main-vertical "$PLAN" >/dev/null 2>&1
+    # No pause: a rebuild short-circuits on `has`, so there is nothing to wait
+    # for. If it ever stops short-circuiting, the tab count is what says so.
+    tabs_after="$(zdump "$Z" | grep -c 'tab name=')"
     [ "$tabs_before" = "$tabs_after" ] \
         && ok "building an open zellij session adds nothing" \
         || bad "building an open zellij session adds nothing (${tabs_before} -> ${tabs_after})"

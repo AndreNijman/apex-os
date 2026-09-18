@@ -249,7 +249,18 @@ done < <(find "${WORK}/s3" -type f)
 [ "$found" -eq 0 ] \
     && ok "no byte stored in the bucket holds the plaintext" \
     || bad "no byte stored in the bucket holds the plaintext"
-find "${WORK}/s3" | grep -qF "$CANARY" \
+# Materialised, not piped. `find TREE | grep -qF X` makes grep exit at its
+# first match; find then dies of SIGPIPE, and under `pipefail` the PIPELINE is
+# 141 — so this assertion reported "no object NAME holds the plaintext" exactly
+# WHEN a name held it, and passed only because the canary was absent and grep
+# had to read to EOF. A negative leak assertion that fails OPEN. Measured in
+# bash on a 1.36 MB listing: 5 inversions in 5. It is invisible on a small
+# fixture — the same idiom over a 717-byte listing was correct 5 times in 5,
+# because find finishes writing into the 64 KB pipe buffer and exits before
+# grep closes the read end. So the bucket's size, not the code, decided whether
+# this could detect a leak at all.
+find "${WORK}/s3" > "${WORK}/s3-names.txt"
+grep -qF "$CANARY" "${WORK}/s3-names.txt" \
     && bad "no object NAME holds the plaintext" \
     || ok "no object NAME holds the plaintext"
 
