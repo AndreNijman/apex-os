@@ -6008,7 +6008,47 @@ tasks:
     OneDrive id is {driveId}!{n} (Microsoft's own example 12319191!11919) and valid_name refuses `!`. NOT RUN AND
     NOT CLAIMED: no Microsoft endpoint and no Google endpoint has ever been contacted from this repository.
     Graph's 302, Files.Read's short form on `common`, and the public-client refresh are all unproven, and GOOGLE'S
-    REFRESH IS EQUALLY UNPROVEN - this round did not supersede that.
+    REFRESH IS EQUALLY UNPROVEN - this round did not supersede that. ROUND 32 (task/p2-f-7, 4 commits off
+    roadmap/v2.2 bb229745, PUSHED): THE ABORTED-TRANSFER FAMILY, TAKEN WHOLE. 3c6c104f broker::aborted_transfer +
+    gdrive/oauth/s3; d8dce04e msgraph both hops + cloudflare::api; 2d7a4d72 max-filesize on the two sites that had
+    none; 0b827a8c the refusal through the real CLI, socket, agentd and curl. THE BLAST RADIUS WAS SIX SITES, NOT
+    THE FOUR THE PREVIOUS ROUND GUESSED, and it is not a max-filesize defect. Measured on curl 8.15.0 four ways:
+    max-filesize with the size in Content-Length exits 63 with stdout of exactly newline-200 and an EMPTY body;
+    max-time expiring mid-body exits 28 and a far end closing early exits 18, both with a PARTIAL body then
+    newline-200; a refused connection exits 7 and prints newline-000, which parses as Some(0). So curl's write-out
+    runs whenever the transfer ends, however it ended, and the status line says nothing about whether the body
+    under it is the body. Six sites parsed that line themselves and none read the exit code: gdrive (silent
+    success on an empty read), oauth (refused, but said 'not JSON', blaming the server for this build's cap), s3
+    (a truncated object returned AS the object), msgraph hop one, msgraph hop two (the exit code was already an
+    argument to download_outcome and was used only in the no-status message), and cloudflare::api (out.code
+    consulted ONLY when no status parsed - so a truncated JSON page read as a real one, and the refused-connection
+    case had always gone through the OTHER branch than its own doc comment described). mcp and webdav are the
+    CONTRAST and needed nothing: broker::perform_http and perform_webdav carry curl's exit code out through
+    merged() and both callers pass it on as Performed.code. That is why the guard is NOT inside run_curl - those
+    two set fail-with-body, where a plain 404 exits 22 and is a complete reply. msgraph hop two also does NOT use
+    the shared helper, because that helper quotes curl's stderr and curl quotes the pre-authenticated download
+    URL; its check is inside download_outcome, the function that is not given the URL, and a mutation that routes
+    it through the helper goes red on 'Maximum file size exceeded' appearing in the message. s3 and cloudflare had
+    NO max-filesize at all: run_curl's post-hoc stdout length check refused them only after the whole reply was
+    buffered in this daemon, so the cap was applied to memory already spent; adding it makes the abort a pre-body
+    63 instead of an 18, which is now asserted at all six sites and is the only observable difference between a
+    capped configuration and an uncapped one. 28 MUTATIONS, ALL RED, all restored with plain cp and cmp silent (11
+    + 8 + 6 + 3). THREE of them found real weaknesses rather than confirming cover: the mechanism test asserted
+    why.contains(out.code.to_string()) and stayed GREEN with the exit code removed from the message, because
+    curl's own stderr says 'curl: (63)' and the assertion was reading the number out of the text it quotes - it
+    now asserts the phrase this build composes, plus a second test against a synthetic CurlOutput whose stderr has
+    no digits; the cloudflare test claimed in a comment that its double proved the cap fires before the body while
+    promising only 40 KB, which is not over a 3 MiB limit, so it is two doubles now; and the first cloudflare
+    double had its Content-Length folded onto the Content-Type line by a stray line continuation, so curl never
+    saw a length - it failed loudly only because the test expects a refusal. COUNTS: workspace 3338 -> 3347 passed
+    / 0 failed / 2 ignored; clippy --locked --workspace --all-targets -D warnings exit 0; test-apex-backup-s3.sh
+    27 -> 34 passed / 0 failed; test-secret-broker.sh 93/0; shellcheck 165 discovered / 0 newly failing;
+    suites-in-CI 75 / 71 / 4 / 0; doc verbs 191 / 114 / 0 / 0; containerfile 194 checked / 0 failed; no conflict
+    markers. docs/online-accounts.md now states the 3 MiB reply cap as a limit and says what it used to do
+    instead; apex-backup-core/src/format.rs's chunk-size arithmetic was CHECKED against the change and needed
+    nothing. NOT RUN AND NOT CLAIMED: no Microsoft endpoint and no Google endpoint has ever been contacted from
+    this repository. Graph's 302, Files.Read's short form on `common`, the public-client refresh and Google's
+    refresh are all still unproven, and nothing this round touched them.
 - id: P2-018
   title: Guaranteed Safe Graphics / desktop failover mode
   priority: P2
