@@ -5371,7 +5371,75 @@ tasks:
     --workspace --all-targets -D warnings exit 0; tests/test-secret-broker.sh 76/0; tests/test-apex-verbs.sh 65/0
     including its reverse pass, the one that catches a subcommand added to the binary and not to the list;
     check-doc-verbs.sh 191 documented, 0 undocumented and undeclared, 0 stale; check-shellcheck-coverage.sh 165
-    discovered, 0 newly failing; check-suites-run-in-ci.sh 75 suites, 71 run by CI, 0 unrun and undeclared.
+    discovered, 0 newly failing; check-suites-run-in-ci.sh 75 suites, 71 run by CI, 0 unrun and undeclared. ROUND
+    30 (2026-09-19), on task/p2-f-5 cut from roadmap/v2.2 6b531503, two commits PUSHED, NOT yet merged: 9f8d2468,
+    bdd9b51f. CRITERION 2 NOW HOLDS FOR A SECOND TRANSPORT, AND THE VAPOUR-SCOPE FIX OF ROUND 3 IS REVERSED IN THE
+    ONLY HONEST DIRECTION - BY BUILDING THE OPERATION, NOT BY RE-ADDING THE SCOPE. 9f8d2468 is the gdrive
+    provider: ONE operation, gdrive.file.read, and the count is Google's arithmetic rather than this build's
+    ambition. The limited-input-device grant accepts only email, openid, profile, drive.appdata, drive.file,
+    youtube and youtube.readonly - full drive and drive.readonly are not on the list - and drive.file sees only
+    files the calling OAuth client created or the user individually picked. So there is no gdrive.file.list rather
+    than one that returns an empty listing and reads as an empty Drive, and no gdrive.file.write yet because a
+    Drive upload goes to /upload/drive/v3/files, a different path from the /drive/v3 an account is stored with.
+    THE RESOURCE IS ResourceKind::Name AND NOT Path: a Drive file is an opaque base64url id and there is no
+    directory to walk. Every byte valid_name accepts is URL-unreserved, so the id goes into the path with no
+    encoding; '?' cannot appear, so alt=media is the only query the request can carry; and a file id starting with
+    '-' is refused, which is the closed vocabulary's rule that a resource may never be read as an option. TWO PINS
+    DECIDE WHERE THE TOKEN GOES AND THE SECOND ONE IS THE POINT. The URL is the stored record's own scheme, host,
+    port and path with /files/<id>?alt=media under it, and the framework pins what bind returns against that
+    record - but that pin only checks the PROVIDER agrees with the STORE, and cannot check the store is Google. So
+    bind also refuses a credential pinned to any host but the one account::PROVIDERS fixes google to, read off
+    that table rather than spelled again in the provider. Host::Fixed stops apex account add storing another; apex
+    secret add is a lower-level command with no account vocabulary, and this is what stops a gdrive grant on such
+    a record putting a Google access token on somebody else's server. A non-2xx TRAVELS rather than being dropped,
+    because Drive's refusals are JSON documents carrying the only words that say whether the file is not yours,
+    the id is wrong or the token expired; a 401 and only a 401 also names apex account refresh <account>, derived
+    through AccountRef::parse so a credential that is not an account gets no suggestion rather than a wrong one.
+    ELEVEN TESTS AGAINST A LOOPBACK DOUBLE THAT READS THE REQUEST THAT ACTUALLY ARRIVED - method, request target,
+    query and Authorization come off the wire - and the double deliberately answers a METADATA document with a 200
+    when alt=media is missing, which is what a real Drive does and which is what makes the dropped-alt=media
+    mutant RED instead of green. bdd9b51f is the vocabulary: DRIVE_SCOPES gains files.read -> gdrive.file.read,
+    and with it the positive assertion round 3 had to DELETE, now true and cross-crate-gated. GOOGLE_OAUTH.scopes
+    GAINS https://www.googleapis.com/auth/drive.file, which is the line between a grant and a 403 - it was
+    deliberately absent while nothing could spend it, because asking for a permission this build cannot use is a
+    consent screen that overstates what APEX is about to do. A token's scopes are fixed when it is issued and RFC
+    6749 section 6 cannot widen them, so an account signed in before that line holds a token without it and its
+    reads answer 403 until apex account add google.<name> is run again; that is in the doc comment, in
+    docs/online-accounts.md, and asserted. THREE PLACES THAT SAID A GOOGLE TOKEN CAN BE SPENT ON NOTHING ARE
+    CORRECTED: apex/src/account.rs's module note and the two bullets in docs/online-accounts.md. The status line
+    apex account add prints at the end is no longer a fixed sentence about a missing transport - it READS the
+    provider's own table, so a provider with scopes gets apex account grant <account> <scope> for each one and a
+    provider without gets the honest refusal. Microsoft still gets the refusal and `empty` is now ["microsoft"] in
+    both crates that assert it. A NUMBER IN THE DOCUMENTATION THAT WAS ALREADY WRONG, found while editing around
+    it: docs/online-accounts.md said "Five providers, three transports" while the table held four namespaces
+    (webdav, s3, gdrive, msgraph), stale since 5b153599 added google and microsoft. Corrected, and the count is
+    now COMPUTED and spelled out in the_criterions_five_providers_are_all_present_and_unique, because a number in
+    a document that nothing computes is a number that goes stale silently. SIXTEEN MUTATIONS, ALL RED, each
+    restored byte-identically with plain cp and cmp silent. Eight on the provider: the Authorization header
+    dropped (3 red), alt=media dropped (2 red), the Google host pin dropped (1 red, and the token reaches the far
+    side), the valid_name check dropped from drive_url, a non-2xx reading as success (2), the 401 hint never
+    printed, the API host respelled instead of read off the account table (2), and the registry line removed.
+    Eight on the vocabulary: the scope pointed at gdrive.file.list, the scope routed into webdav.file.read,
+    drive.file dropped from the sign-in scopes, the scope declared a Write, DRIVE_SCOPES emptied again (4 red
+    across two crates), the transport set given a fifth member, `empty` put back to ["google","microsoft"], and
+    the gdrive registry line removed WITH the scope present - the commit-1-depends-on-commit-2 direction, where
+    the cross-crate gate names the scope and the operation it could not find. A MEASUREMENT ARTEFACT WORTH
+    RECORDING BECAUSE IT HID TWO RESULTS: cargo test --workspace STOPS AT THE FIRST FAILING TARGET, so two mutants
+    that redden apex-secretd's cross-crate gate and gdrive's own checked>0 assertion appeared to redden only
+    apex-secret-core. They were re-run with -p apex-secretd and both gates are red; a mutation run over a
+    workspace is not evidence about crates that never got to run. WHAT IS STILL NOT DONE, STATED PLAINLY.
+    Microsoft can still be spent on NOTHING: no msgraph transport, GRAPH_SCOPES empty, and add says so.
+    gvfs/file-manager integration is still not built. NOT RUN THIS ROUND AND NOT CLAIMED: no Google endpoint has
+    been contacted from this repository at any point. Whether Google accepts drive.file on a real
+    limited-input-device client, and whether a refresh of such a token succeeds without the client_secret this
+    build has nowhere to store, are BOTH still unproven - round 28's finding on that is unchanged, not superseded.
+    Every test in this round is against a loopback double. GATES on the branch tip: cargo test --locked
+    --workspace 3297 -> 3298 passed / 0 failed / 2 ignored; cargo clippy --locked --workspace --all-targets -D
+    warnings exit 0; tests/test-secret-broker.sh 76/0; tests/test-apex-verbs.sh 65/0 including its reverse pass;
+    check-doc-verbs.sh 191 documented, 114 declared undocumented, 0 undocumented and undeclared, 0 stale;
+    check-shellcheck-coverage.sh 165 discovered, 0 known-failing, 0 newly failing; check-suites-run-in-ci.sh 75
+    suites, 71 run by CI, 4 exempt, 0 unrun and undeclared; check-containerfile-assertions.sh 194 checked, 0
+    failed, 116 unresolved, 0 inert; check-no-conflict-markers.sh PASS.
 - id: P2-018
   title: Guaranteed Safe Graphics / desktop failover mode
   priority: P2

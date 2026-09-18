@@ -23,21 +23,13 @@ branch: **task/p2-d-6** (off roadmap/v2.2 @ 6b531503)
 
 ## NEXT
 
-Write `install_browser_ca` in `apexd/apex-agentd/src/session.rs`, called from
-`start` beside `install_redacted_settings` (~L466). Checklist, settled:
-refuse unless `policy.sandbox.is_confined()`; require an absolute path; copy
-the file into the scratch dir FIRST and validate the copy (TOCTOU); refuse a
-file carrying anything but `BEGIN CERTIFICATE` blocks (a combined key+cert
-file would put a private key inside the capsule); read the host's
-`/etc/firefox/policies/policies.json` and refuse if it is absent
-(`--ro-bind-try` over a missing target is a silent no-op) or does not parse or
-already carries `policies.Certificates`; MERGE `Certificates.Install =
-[<scratch copy>]` into it keeping `Preferences` and the `//` keys; then
-`spec.ro.push(copy)`, `spec.ro.push(policy)`,
-`spec.ro_at.push((policy, /etc/firefox/policies/policies.json))`. Watch
-session.rs ~L583 where `sandbox::real_target` rewrites the scratch path — the
-path written INSIDE the JSON has to be the one Firefox can open in the
-namespace.
+Add `--trust-ca FILE` to `apex browser run`: `apexd/apex/src/browser.rs`
+(`RunArgs` + `run_argv`, and the argv test at the bottom of that file), then
+`files/system/libexec/apex-browser` `cmd_run` — parse it, refuse a relative
+path and a path inside `$BROWSER_ROOT` (teardown deletes that tree), and pass
+`--trust-ca` through to the `apex agent run` line in `session_argv` (~L600).
+Then an assertion in `tests/test-apex-browser.sh` that the flag reaches that
+argv, mutation-tested by deleting the pass-through.
 
 ## THIS ROUND'S SCOPE (round 30), narrow on purpose
 
@@ -66,6 +58,21 @@ Design taken (advisor-reviewed) before any code:
 
 ## DONE (round 30, branch task/p2-d-6)
 
+- `b0ef1b2c` — **the daemon half: `apex-agentd/src/browser_ca.rs`.** Copies the
+  PEM where the session can read and not write it, merges a
+  `Certificates.Install` into a copy of the MACHINE's own
+  `/etc/firefox/policies/policies.json`, binds that copy over the real one in
+  the namespace (`spec.ro` twice + one `spec.ro_at`, which is
+  `install_redacted_settings`' shape). Four refusals, not comments: an absent
+  host policy REFUSES (a `--ro-bind-try` over a missing target is a silent
+  no-op); only `CERTIFICATE` blocks may go in (a key beside the cert is the
+  ordinary mistake and the copy lands where the agent can read it); DER is
+  refused with the `openssl` line; a machine that already installs
+  certificates refuses rather than merging two trust lists silently. Six
+  mutations, each restored byte-identically with sha256 checked. The install
+  test's scratch directory is reached through a SYMLINK on purpose — with a
+  plain path the canonical and literal strings are equal and the assertion
+  would be checking nothing.
 - `1fff2c45` — **PROTOCOL_VERSION 10, `RunRequest::trust_ca`, and the CLI's
   refusal to send it to a daemon that would drop it.** The revision number was
   the decision and it is argued in the commit and at `PROTOCOL_VERSION`: this
