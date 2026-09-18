@@ -200,7 +200,12 @@ export APEX_BROWSER_ROOT="$ROOT"
 export APEX_BROWSER_APEX="$BIN/apex"
 export APEX_BROWSER_BIN="$BIN/browser"
 
-printf 'e.example:443\n127.0.0.1:9443\nintranet.example\n' > "$WORK/allowlist"
+# The runtime's own allowlist, which is what a capsule narrows OUT OF.
+# 'other.example' is on it and is named by exactly one capsule in this file:
+# it is the destination the MACHINE permits and a capsule that did not ask for
+# it must not be handed, which is what makes the 'hasnt' in the session-argv
+# section mean something (P2-012).
+printf 'e.example:443\n127.0.0.1:9443\nintranet.example\nother.example\n' > "$WORK/allowlist"
 # The table, spelled the way the real CLI spells it: `scheme://host`, no port.
 printf '%-16s %-28s %s\n' intranet https://intranet.example x-access-token > "$WORK/secrets"
 printf '%-16s %-28s %s\n' labsrv   http://127.0.0.1          x-access-token >> "$WORK/secrets"
@@ -235,6 +240,29 @@ has "it detaches rather than taking a terminal"     '<--detach>'            "$ar
 hasnt "it never asks for the strict sandbox"        '<--sandbox> <strict>'  "$argv"
 hasnt "and never for an open network"               '<--network> <open>'    "$argv"
 hasnt "and never for an unconfined session"         '<unrestricted>'        "$argv"
+
+# ── the capsule's OWN allowlist, not the machine's (P2-012) ─────────────────
+#
+# `--network allowlist` on its own says only that there IS a destination
+# policy. Until `--allow` reached the daemon, the session got the RUNTIME's
+# whole list — every destination the machine had ever been told to permit —
+# and this suite could not assert otherwise, because there was nothing on the
+# session's command line to assert against.
+#
+# The pair is the assertion. `has` alone would hold for an engine that passed
+# every destination the runtime knows about; `hasnt` is what says this capsule
+# was confined to the one it named. The fixture runtime allowlist carries
+# `other.example` (see the stub's `agent allow`), so the second line is a
+# destination the machine permits and this capsule must not be given.
+has   "the capsule's destination reaches the daemon"  '<--allow> <e.example:443>' "$argv"
+hasnt "and nothing else the machine permits does"     '<other.example>'           "$argv"
+
+# Repeatable, and each occurrence is its own flag: `--allow a,b` would be one
+# host with a comma in it, and a destination is `host:port`.
+argv3=$(reset_calls; "$ENGINE" run --name cap-two --allow e.example:443 --allow other.example \
+            -- https://e.example/ >/dev/null 2>&1; session_argv)
+has "two destinations travel as two flags"          '<--allow> <e.example:443>' "$argv3"
+has "and the second one is there too"               '<--allow> <other.example>' "$argv3"
 
 echo "── the browser the session runs ────────────────────────────────────────"
 
@@ -471,12 +499,24 @@ has "a pinned PORT reaches the destination"     'pins this capsule to 127.0.0.1:
 # is the half a reader cannot see in the announcement. The fixture allowlist
 # holds `127.0.0.1:9443` and NOT `127.0.0.1`, so a pin that lost its port is
 # refused here rather than starting a capsule aimed at the wrong endpoint.
-# (There is no `--allow` on the session's own command line to assert against:
-# the daemon snapshots the runtime allowlist when a session starts and there is
-# no per-session allowlist on the wire at all. That is gap 3 on this unit's
-# card, and it is a protocol change rather than an omission here.)
 if [ -n "$argv" ]; then ok "and the runtime allowlist accepted it with the port on"
 else bad "and the runtime allowlist accepted it with the port on" "no session argv was recorded"; fi
+
+# ── AND THE PIN IS NOW A BOUNDARY RATHER THAN AN ANNOUNCEMENT (P2-012) ──────
+#
+# This is the assertion the note that used to stand here said could not be
+# written. Until `RunRequest::allow` existed, a pinned capsule was pinned only
+# in the sense that this file refused a `--allow` naming somewhere else; the
+# session it then started was handed the runtime's whole allowlist, so a
+# capsule holding a credential for 127.0.0.1:9443 could reach every other
+# destination the machine permits and nothing anywhere said so.
+#
+# The pin reaches the daemon as the session's OWN allowlist now. The pair is
+# what makes it evidence: the pinned destination is on the session's command
+# line, and `other.example` — a destination the runtime allows, which this
+# capsule never named — is not.
+has   "a pinned capsule's session carries the pin as its allowlist" '<--allow> <127.0.0.1:9443>' "$argv"
+hasnt "and not the rest of what the machine permits"                '<other.example>'            "$argv"
 
 reset_calls
 out=$("$ENGINE" run --name cap-same --capability labsrv --allow 127.0.0.1:9443 -- https://x/ 2>&1); rc=$?

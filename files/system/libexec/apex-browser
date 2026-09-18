@@ -484,9 +484,11 @@ cmd_run() {
         || die "no browser at $BROWSER_BIN; \`apex browser doctor\` says what is missing"
 
     # Every named destination must already be one the daemon will honour. The
-    # allowlist agentd snapshots when a session starts is the runtime's, so a
-    # capsule cannot widen it — checking here turns "the capsule silently
-    # reached nothing" into a refusal that names the line to add.
+    # daemon proves that again — it refuses a session allowlist it cannot
+    # narrow out of the runtime's — and this check is not that boundary and
+    # must not be read as one. It is here because the refusal is better BEFORE
+    # a capsule directory exists and a session is asked for: the message names
+    # the line to add, and nothing has to be torn down to show it.
     # THREE ANSWERS AGAIN. `apex agent allow` with no argument lists what the
     # runtime honours — but a runtime that cannot be asked returns nothing,
     # and an empty list read as "nothing is allowed" would refuse every
@@ -506,8 +508,9 @@ cmd_run() {
         printf '%s\n' "$allowed_now" | grep -Fxq -- "${d%%:*}" && continue
         die "'$d' is not on the runtime's allowlist, so this capsule could not reach it.
   Add it once with:  apex agent allow $d
-  A capsule cannot widen the allowlist by asking; the daemon snapshots the
-  runtime's own list when the session starts."
+  A capsule cannot widen the allowlist by asking. What it CAN do is narrow it:
+  this destination is sent to the daemon as the session's own allowlist, and
+  the daemon refuses any line the runtime's list does not already cover."
     done
 
     local dir; dir="$(capsule_dir "$name")"
@@ -573,11 +576,30 @@ cmd_run() {
     done
     browser_args=("${expanded[@]}")
 
+    # ── the capsule's OWN allowlist, not the machine's (P2-012) ─────────────
+    #
+    # `--allow` on this command line reaches the daemon as the session's
+    # allowlist, and the egress proxy — the only route out of a `--network
+    # allowlist` session — enforces that list and not the runtime's. Before
+    # this, a capsule started to visit one host could reach every destination
+    # the machine had ever been told to permit; the check above was a check in
+    # this file, which is not a boundary.
+    #
+    # It matters most for `--capability`: `allow` was replaced by the
+    # credential's pin further up, so a capsule holding a capability is now
+    # confined to the destination that capability is for, by the proxy.
+    #
+    # Repeated rather than comma-joined, because a destination is `host:port`
+    # and `apex agent run --allow` takes one per occurrence.
+    local -a allow_argv=()
+    for d in "${allow[@]}"; do allow_argv+=(--allow "$d"); done
+
     local -a session_argv=(
         "$APEX" agent run
         --agent generic
         --sandbox project
         --network allowlist
+        "${allow_argv[@]}"
         --cwd "$dir"
         --detach
         --
@@ -837,9 +859,11 @@ finishes. It is headless: there is no flag that opens a window, and no
 compositor socket in its namespace for one to appear on.
 
 Options for `run`:
-  --allow HOST[:PORT]   a destination this capsule may reach. Repeatable, and
-                        required unless --capability names one. Must already be
-                        on the runtime's allowlist (`apex agent allow`).
+  --allow HOST[:PORT]   a destination this capsule may reach, and the ONLY one
+                        it may reach. Repeatable, and required unless
+                        --capability names one. Must already be on the
+                        runtime's allowlist (`apex agent allow`): this narrows
+                        that list for one capsule and can never widen it.
   --capability NAME     take the destination from a stored credential's pinned
                         host instead. The capsule is never given the value.
   --download NAME       a plain filename the capsule produced that may leave

@@ -263,6 +263,7 @@ impl Harness {
             checkpoint: false,
             ttl_ms: None,
             capabilities: None,
+            allow: None,
             cols: 80,
             rows: 24,
             env: vec![],
