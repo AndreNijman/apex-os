@@ -17,6 +17,7 @@
 //! exactly what the kernel is good at.
 
 mod broker;
+mod browser_ca;
 mod budget;
 mod clipboard;
 mod disposable;
