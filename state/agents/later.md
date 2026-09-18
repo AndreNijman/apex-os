@@ -6,7 +6,7 @@ branch: task/later-tpm-qualification
 
 ## NEXT
 
-Nothing is running and nothing is half-finished. Branch tip fc0ac3f5 is pushed;
+Nothing is running and nothing is half-finished. Branch tip 985ae69a is pushed;
 roadmap/v2.2 266dcc57 is merged in. All containers from this unit are removed.
 
 L-001 cannot be closed from this machine. Its acceptance word is "Real TPM" and
@@ -31,9 +31,13 @@ from it. The containers run from a COPY at scratch-later/tree-exp, so the
 worktree stays editable while they run.
 
 ## DONE
-- Round 28. Merged roadmap/v2.2 266dcc57 into the branch, then three commits,
+- Round 28. Merged roadmap/v2.2 266dcc57 into the branch, then four commits,
   each pushed as it was made: a9c9ebe6 (the two harness defects), 8ad79870
-  (docs/boot-v2.md), fc0ac3f5 (stop-slop on the prose added this round).
+  (docs/boot-v2.md), fc0ac3f5 (stop-slop on the prose added this round),
+  985ae69a (the killed-run regression test, and an overclaim withdrawn).
+- tests/test-boot-v2.sh is 78 passed / 0 failed. All four gates green.
+- tree-exp WAS refreshed from the worktree at the end of this round, so it no
+  longer lags. Check `diff -rq` anyway before the next run.
 - L-001 evidence updated with round 28 appended, rounds 25/26/27 verified still
   present afterwards. L-002 and L-003 deliberately left `blocked`.
 - The r5 firmware experiments the card told me to collect were NOT results.
@@ -65,7 +69,13 @@ worktree stays editable while they run.
   survived "a signal". It does run on an untrapped SIGTERM, but `$?` reads 0
   inside it, so the INCOMPLETE branch never fired. Fixed in a9c9ebe6 by
   trapping TERM/INT/HUP by name; the same kill now yields "1 failed" plus a
-  named FAIL line. Reproduced in isolation BEFORE fixing.
+  named FAIL line. Reproduced in isolation BEFORE fixing, then verified IN SITU
+  (real container, `podman kill -s TERM` mid-boot -> `8 passed, 1 failed`,
+  ExitCode 143; proof at scratch-later/r6-trapcheck-sigterm-proof.log), and a
+  regression test now lifts the trap block out of run-scenarios so deleting the
+  signal traps fails the suite. Mutation-tested both ways; the assertion that
+  did NOT move is exit 143, because bash re-raises regardless — the exit status
+  was never the problem, the log was.
 - **A COULD-NOT-RUN THAT MISNAMED ITS OWN CAUSE.** luks-s3 said "the guest
   reported no s3 field at all" while the QMP record (suspended and resumed,
   both true) and the OVMF log (the ASSERT) sat unread in the same directory.
@@ -97,6 +107,14 @@ worktree stays editable while they run.
 - Older, still true: the lab image ships no diffutils; the APEX initramfs has no
   `sync` or `dd`; tpm2_createprimary's YAML has no `name:` line (use
   tpm2_readpublic); swtpm state does persist across host sessions.
+
+- **S3 IS NOT A RECOVERY TEST, AND I BRIEFLY SAID IT WAS.** scenario_luks_s3
+  has no reference to a recovery key; its negative arm is the same run with
+  qemu's S3 support off, and what it proves is that the volume stays open
+  across the suspend. Only luks-tpm-clear and luks-firmware-change demonstrate
+  a refusal followed by a recovery-key unlock in the same boot. Withdrawn from
+  docs/boot-v2.md in 985ae69a. If L-002's "does not strand users" is to cover
+  suspend/resume, a refusal arm for S3 does not exist yet.
 
 ## BLOCKED ON
 - L-001's "Real TPM" acceptance needs silicon. Not an agent decision.

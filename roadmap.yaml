@@ -5290,7 +5290,20 @@ tasks:
     one of these runs used swtpm in a VM. NO SILICON TPM HAS BEEN THROUGH AN ENROL-AND-RECOVER CYCLE. The L16's
     TPM is explicitly off-limits to this program, so this cannot be closed from here - it needs a machine someone
     is willing to clear the TPM on. Gates green: shellcheck 165 discovered / 0 known-failing / 0 newly failing;
-    suites 75 / 71 in CI / 4 exempt; doc verbs 246 valid / 0 undocumented and undeclared / 0 stale.
+    suites 75 / 71 in CI / 4 exempt; doc verbs 246 valid / 0 undocumented and undeclared / 0 stale. ROUND 28
+    ADDENDUM, two corrections to the above rather than new claims. (a) The signal fix is now verified IN SITU and
+    carries a regression test: the real harness in a real container, killed with `podman kill -s TERM` mid-boot,
+    ends `8 passed, 1 failed` with the named FAIL line and ExitCode 143
+    (scratch-later/r6-trapcheck-sigterm-proof.log), and tests/test-boot-v2.sh (985ae69a) lifts the trap block out
+    of run-scenarios itself and asserts a SIGTERM'd run names the signal and does not end `N passed, 0 failed`.
+    Mutation-tested both ways: removing the three signal traps makes the new assertions fail and reproduces `1
+    passed, 0 failed`; restored byte-identical with cp, confirmed by sha256. The assertion that did NOT move is
+    exit 143 - bash re-raises regardless - so the exit status was never the problem and the LOG was. test-boot-v2
+    is 78 passed / 0 failed. (b) AN OVERCLAIM IN 8ad79870 IS WITHDRAWN: it said all three edge cases show the
+    recovery path failing before it works. True of the TPM clear and of the PCR 7-bound control volume, which both
+    refuse the TPM unlock and then open with the recovery key in the same boot. NOT true of S3 - scenario_luks_s3
+    contains no reference to a recovery key at all; its negative arm is the same run with qemu's S3 support off,
+    and what it proves is that the volume stays open across the suspend. docs/boot-v2.md now says so.
 - id: L-002
   title: Enable LUKS2 by default
   priority: Later

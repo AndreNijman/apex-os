@@ -5,13 +5,39 @@ branch: task/followups-5
 repo: apex-os
 
 ## NEXT
-Reproduce the zellij race locally (zellij 0.45.1 IS installed here, the same
-version CI pins): `zellij_build` in `files/system/libexec/apex-mux:220` runs
-`attach --create-background` then IMMEDIATELY `--layout-string`, and the test
-`tests/test-mux-layouts.sh:225` reads `dump-layout` after a fixed `sleep 2`.
-Fix both ends (wait for the session, poll for the tab), commit, push.
+SIGPIPE sweep — the 4 sites in FOUND below. Idiom is `94a3a2ac`'s: materialise
+the listing to a file under $WORK, then grep the FILE. Prove the fail-open
+standalone at scale first (a small fixture tree fits in the 64 KB pipe buffer,
+so planting the canary in situ goes red under the OLD code too and proves
+nothing). Then the 0/0 skip visibility (`hypr-lua`, `input-live`).
 
 ## DONE
+- **ROUND 28 — THE ZELLIJ RACE IS CLOSED, AND THE CARD'S OWN PRESCRIPTION WAS
+  THE TRIGGER.** `fddc5710` + `746b1f78` + `d0be7f7b`. `zellij_build` sent the
+  layout with `zellij --session NAME --layout-string KDL` — the command that
+  STARTS a session, which against an existing one adds a tab and exits 0 either
+  way, so `build` returned success having built nothing. Interleaved 20-round
+  loop on zellij 0.45.1, all variants in ONE run so load drift cannot explain
+  the spread: send immediately `0 bad/20`; send after a 1s pause `3 bad/20`;
+  **send after waiting for `zellij_has` — this card's prescribed fix — `5
+  bad/20`, every one rc=0**; the fix `0 bad/20`. Underneath both: for a window
+  after creation the server ANSWERS `dump-layout` and ACCEPTS `action new-tab`
+  (rc=0, prints a tab id) and then discards it. Not the startup-tip About pane
+  (still 1 drop in 20 with it off). Not a slow arrival (30s poll, 5 of 12 never
+  arrived). Cure = wait for the server + `action new-tab` over the IPC bus +
+  verify + RE-SEND, then `die`. 24 consecutive builds: 24 ok, exactly one
+  `apex` tab each, 5 of them needed the re-send.
+- Test end: `sleep 2` and `sleep 1` gone (`build` now returns 0 only after
+  seeing the tab); `zdump` retries only while the dump is EMPTY, never while
+  the tab is missing; NEW assertion "the layout landed exactly once". Mutation
+  1 (send aimed at a nonexistent session) → 4 reds incl. the `die`. Mutation 2
+  (send the layout twice) → the new assertion is the ONLY red. Restored
+  byte-identical with `cp`, sha verified. Suite: 47 passed, 0 failed.
+- Gates held: `check-shellcheck-coverage.sh` 165 scripts / **0 known-failing**;
+  `check-suites-run-in-ci.sh` **71 of 75**, 4 exemptions, 0 undeclared.
+- Runner: dispatched **35351419809** on `746b1f78` (pushes do NOT trigger CI
+  here — every run on this branch is `workflow_dispatch`). Check `mux-layouts`
+  in it; it does NOT contain `d0be7f7b`.
 - **ROUND 27 VERIFICATION** — run 34803818557 job 103851638407 `Package
   engine` on `479105b6`: **62 steps green, 1 red**, and every count
   byte-matches what I measured locally last round: `inject 48/0`,
@@ -38,10 +64,8 @@ Fix both ends (wait for the session, poll for the tab), commit, push.
 - `69ef58cf` `cf7722d9` `2a8ada6f` `c07574b7` — see git log.
 
 ## IN PROGRESS
-- zellij race, above. Then the pipefail sweep, then the 0/0 skip visibility.
-- Run 34814935040 on tip `654fa854` in flight (dispatched by the landing push,
-  so it already IS the fresh run on the tip — do not dispatch another).
-  Check it for `apex-vm: 138 passed, 0 failed`.
+- The SIGPIPE sweep and the 0/0 skip visibility, per NEXT.
+- Run 35351419809 on `746b1f78` in flight.
 
 ## FOUND
 - **THE 1 → 8 IS NOT A REGRESSION.** `13e7ec84` (`!cancelled()`) is why the
