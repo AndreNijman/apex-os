@@ -352,6 +352,7 @@ EOF
     esac
 
     export AT_SPI_BUS_ADDRESS="$ATSPI_BUS"
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=$ATSPI_W/no-such-bus"
 
     # ── the registry ────────────────────────────────────────────────────────
     "$ATSPI_REGISTRYD" >"$ATSPI_W/registry.out" 2>"$ATSPI_W/registry.err" &
