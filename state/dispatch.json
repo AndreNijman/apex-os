@@ -1,7 +1,7 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-18T23:30+08:00",
-  "_round": "Round 28 closed. ALL SIX agents finished and landed: p2-b (lockscreen a11y), p2-f (oauth device grant + cf refresh), followups-5 (the zellij race + a SIGPIPE sweep), p2-d (per-session allowlist narrowing, PROTOCOL_VERSION 8 -> 9), p2-c (closed the unit), later (the edk2 S3 regression). apex-os tip 7f6fc44d, apex-shell 379eef8, all three gates green, clippy clean.",
+  "updated": "2026-09-18T23:45+08:00",
+  "_round": "Round 29. Round 28's six all finished and landed. Four re-dispatched; p2-c is CLOSED (its work is done and the rest needs a booted machine \u2014 its 7-step checklist for Andre is the last section of ROADMAP/evidence/P2-005-007-device-maturity.md). Two slots deliberately free: one for the Android unit the moment a phone is attached again, one for headroom.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 654fa854 -> 266dcc57. task/p2-c-2 and task/p2-f-3.",
     "apex-shell": "b7953e4; nothing unlanded."
@@ -20,7 +20,76 @@
     "p1-063": "Still closed to dispatch as WORK. Both remaining criteria are Andre's physical actions. NOTE: this round's hypridle finding is adjacent but NOT the same thing \u2014 P1-063 is about the lid, and what is killing the run is the 15-minute idle timeout. Worth folding into the item: a lid inhibitor alone would not have saved any of round 26's agents.",
     "p1-053c": "CLOSED BY HAND this round \u2014 see queue.json. P1-059 done; P1-060 needs a device or a working emulator and this machine has neither (four consecutive emulator SIGSEGVs measured across rounds 1-3)."
   },
-  "agents": [],
+  "agents": [
+    {
+      "slug": "p2-d",
+      "items": [
+        "P2-008",
+        "P2-009",
+        "P2-012"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p2-d",
+      "branch": "task/p2-d-5",
+      "agent_id": "a757e90dd8e4a0c71",
+      "dispatched": "2026-09-18T23:45+08:00",
+      "session": "round 29 orchestrator",
+      "queue_id": "p2-d",
+      "card": "ROADMAP/state/agents/p2-d.md",
+      "at_dispatch": "P2-012's only unmet criterion is capability auth, now SCOPED rather than vague: route B needs a TLS server in apex-agentd and PROTOCOL 10, not 9 \u2014 round 28 rewrote docs/browser-capsule-auth.md because the old 'plus a PROTOCOL_VERSION bump' read as nearly done. Told to read it first and to say so if route B is the wrong shape. Also carries the policies.json Containerfile assertion. Warned: kill process GROUPS by pid \u2014 pty::spawn calls setsid, so SessionInfo.pid is the group leader and a bwrap sits inside it."
+    },
+    {
+      "slug": "p2-b",
+      "items": [
+        "P2-003",
+        "P2-004"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p2-b",
+      "branch": "task/p2-b-round29",
+      "agent_id": "a2c44fb68753f7610",
+      "dispatched": "2026-09-18T23:45+08:00",
+      "session": "round 29 orchestrator",
+      "queue_id": "p2-b",
+      "card": "ROADMAP/state/agents/p2-b.md",
+      "at_dispatch": "The AT-SPI runtime read-back, newly possible because labwc 0.9.6 advertises ext_session_lock_manager_v1 \u2014 round 28's lockscreen markup was proved by 33 assertions and 24 mutants but NOTHING ever read it back and no lock was ever engaged. Told the password-in-the-tree assertion is the one that matters, to write it first, and to measure the LockedHintService/loginctl guard rather than assume it. Also told NOT to close the pre-existing run-rtl-test.sh red (17/3/2, cause unidentified) by making the section SKIP."
+    },
+    {
+      "slug": "p2-f",
+      "items": [
+        "P2-016",
+        "P2-017",
+        "P2-018",
+        "P2-019"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p2-f",
+      "branch": "task/p2-f-4",
+      "agent_id": "a1fbfb275cc9904e8",
+      "dispatched": "2026-09-18T23:45+08:00",
+      "session": "round 29 orchestrator",
+      "queue_id": "p2-f",
+      "card": "ROADMAP/state/agents/p2-f.md",
+      "at_dispatch": "P2-018 criterion 2: the Safe Graphics menu remedies and their binaries are asserted PRESENT but none has been RUN from inside the session. Told explicitly not to widen the session watchdog \u2014 round 28 kept it narrow on purpose because a counter that can strand someone at a login screen is worse than none \u2014 and that P2-018 was deliberately not set-status'd because its record is long and earned."
+    },
+    {
+      "slug": "later",
+      "items": [
+        "L-001",
+        "L-002",
+        "L-003"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-later",
+      "branch": "task/later-2",
+      "agent_id": "a37c04119a7f2e177",
+      "dispatched": "2026-09-18T23:45+08:00",
+      "session": "round 29 orchestrator",
+      "queue_id": "later",
+      "card": "ROADMAP/state/agents/later.md",
+      "at_dispatch": "The concrete lead from its own card: a 20250812/20260812 secboot firmware pair gives a controlled PCR 0 change for the first time, which is the last measurable gap in the VM arm. Told again that L-001's acceptance word is 'real TPM' and an emulated result must be named as emulated, and that writing up precisely what a VM proved versus what needs silicon is a GOOD outcome, not a failure."
+    }
+  ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
   "_findings": {
     "nft -c cannot run in a build container": "netlink: Error: cache initialization failed: Operation not permitted. nft -c applies nothing, but libnftables opens a netlink socket and lists the LIVE ruleset before it will look at a file, and that needs CAP_NET_ADMIN over a real netns. The build had none, so the parser never ran and the step exited 1 at STEP 99/148. Fixed by giving it a netns of its own: unshare --user --map-root-user --net nft -c -f. Proved four ways with a fake unshare on PATH - parses / rejects a mutant at line 60 col 56-60 / unshare absent / unshare REFUSED - because the first draft classified unshare's own refusal as 'nft rejected the ruleset' and would have failed the build a second time on a false diagnosis.",
