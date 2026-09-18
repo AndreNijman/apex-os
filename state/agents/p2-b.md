@@ -26,17 +26,29 @@ from `da6fc0fb`. Scratch `/var/tmp/apex-work/scratch-p2-b/round31/`.
 with the loss list rendered, tree grouped instead of flat, the Erase button
 reachable. FOUND 25 for the measurement.
 
-Next action: write `tests/check-recovery-a11y.sh` (source-level, the half the
-Arch runner can actually run — model it on `check-lockscreen-a11y.sh`) and
-`tests/mutate-recovery-a11y.sh` (model the TRAP SHAPE and the per-want baseline
-guard on `mutate-lockscreen-atspi-shim.sh`, round 30's fixed one, NOT on
-`mutate-lockscreen-atspi.sh`). The two invariants it exists to hold, neither
-visible in a diff: no private-use glyph on this page may ever acquire a role,
-and no `Accessible.role` on this page may exist without an explicit
-`Accessible.name`. Then `tests/run-recovery-atspi-shim.sh` +
-`tests/mutate-recovery-atspi-shim.sh`, from the working scratch probe at
-`scratch-p2-b/round31/probe-recovery.sh`. Then wire all four into `ci.yml`,
-the structure-check REQUIRED list, and re-run `check-suites-run-in-ci.sh`.
+The source-level pair is DONE and pushed (apex-shell `e640744`):
+`check-recovery-a11y.sh` 31/0/0, `mutate-recovery-a11y.sh` 14 applied /
+11 CAUGHT / 0 SURVIVED / 3 HELD, both wired into `ci.yml` and the REQUIRED
+list (67 suites / 67 reachable, 114 paths / 0 missing).
+
+Next action, in order:
+1. **Fix FOUND 27 in the landed `tests/mutate-lockscreen-atspi-shim.sh`** — its
+   S4 and G3 build a private-use character with `printf '\U000f033e'`, which
+   under a C/POSIX locale emits ten ASCII bytes instead of the character.
+   Replace with the `python3 -c` form plus the 4-byte abort guard now in
+   `mutate-recovery-a11y.sh`, then RE-RUN the whole harness (8 mutants, each a
+   full bring-up, ~10 min) — the round-30 verdicts were obtained on a UTF-8
+   desk and S4's CAUGHT has to be re-earned with a character that is really
+   there.
+2. Write `tests/run-recovery-atspi-shim.sh` + `tests/mutate-recovery-atspi-shim.sh`
+   from the working scratch probe `scratch-p2-b/round31/probe-recovery.sh`
+   (which already brings the page up, opens Nexus at it, drives it over
+   DoAction and records the stub `apex`'s argv). The assertion that makes
+   exposing the Erase button defensible: DoAction on it BEFORE "Show what would
+   be lost" must leave no `recover reset` `--commit` in the argv log.
+3. Dispatch CI on `task/p2-b-round31` and read it — the iff in
+   `run-rtl-test.sh` is what confirms FOUND 26's one inferred line (that Arch's
+   qt6ct 0.11-8 links no KF6I18n).
 
 **FOUND 25, measured at the top of this round and it changes the shape of the
 work:** `src/services/config_tab/pages/RecoveryPage.qml` contains **ZERO**
