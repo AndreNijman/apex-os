@@ -542,6 +542,50 @@ than this branch.
       children (TopBar and the borders), which is the other half of FOUND 21's
       unexplained empty frames: they have no `Accessible.*` either.
 
+26. **P2-004's RTL discriminator is SOLVED, and the answer is neither
+    candidate on the ledger. What supplies APEX's right-to-left layout
+    direction is `libKF6I18n.so.6`, which Fedora's qt6ct build links against —
+    not qt6ct, not the Qt version, not `/etc/xdg/qt6ct/qt6ct.conf`.** Four
+    measurements here on Qt 6.10.3, one process each, `qmltestrunner-qt6
+    -platform offscreen`, `LANG=LC_ALL=ar_EG.UTF-8`, everything else scrubbed,
+    with `strace -e openat` naming every `qt_*.qm` the process opened:
+
+    | case | `Qt.application.layoutDirection` | catalogues opened |
+    |---|---|---|
+    | `QT_QPA_PLATFORMTHEME=qt6ct` | **1 (RTL)** | `qt_ar.qm`, `qt_en.qm` |
+    | a BOGUS theme name | 0 | none |
+    | no platform theme | 0 | none |
+    | no platform theme **+ `LD_PRELOAD=/lib64/libKF6I18n.so.6`** | **1 (RTL)** | `qt_ar.qm`, `qt_en.qm` |
+
+    The last row is the one that settles it: with no platform theme at all,
+    merely loading KF6's i18n library into the process loads the Qt catalogue
+    and flips the direction. `ldd` on
+    `/usr/lib64/qt6/plugins/platformthemes/libqt6ct.so` shows why it is there —
+    Fedora's build is a post-release git snapshot
+    (`qt6ct-0.11-13.20250907git23a985f.fc43`) linked against **eight** KF6
+    libraries including `libKF6I18n.so.6`; the plugin's own binary contains no
+    QTranslator code at all (`nm -DC`, `strings`). The Arch runner has upstream
+    release **qt6ct 0.11-8**, read out of the CI log, which is the plain build.
+
+    **Both ledger candidates are eliminated, by measurement rather than by
+    argument.** The conf: repeating the ar_EG run with `XDG_CONFIG_DIRS` and
+    `XDG_CONFIG_HOME` both pointed at an empty directory — so qt6ct cannot find
+    `qt6ct.conf` anywhere — still gives RightToLeft. The Qt version: no longer
+    needed as an explanation, and the runner's own log shows it has 64
+    `qt_*.qm` including `qt_ar.qm`, and that `QLocale calls ar_EG.UTF-8
+    right-to-left` PASSES there. Nothing is missing on the runner except a
+    process that loads the catalogue. The runner's three reds are exactly the
+    three that need a right-to-left APPLICATION direction, and they are
+    truthful about that machine.
+
+    **The shipped consequence is bigger than the CI red and is the same family
+    as FOUND 2.** APEX's right-to-left layout does not depend on anything APEX
+    declares. It depends on a Fedora packaging choice to link qt6ct against
+    KF6I18n. If that build ever goes back to upstream's, or a slimming pass
+    drops KF6, every mirrored surface silently stops mirroring and nothing goes
+    red — the second time this exact silent-loss shape has been found under
+    this row.
+
 ## BLOCKED ON
 
 Nothing this unit can act on. FOUND 14 is closed and the read-back is written

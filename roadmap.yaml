@@ -5812,7 +5812,77 @@ tasks:
     host pin refuses loopback - that is the price of the pin, not a gap. Carried forward for the next round: cargo
     test --workspace STOPS AT THE FIRST FAILING TARGET, so two mutants that looked like they only reddened
     apex-secret-core were found to redden the cross-crate scope gate and gdrive's own checked>0 when re-run with
-    -p apex-secretd - a mutation run over a workspace is not evidence about crates that never ran.
+    -p apex-secretd - a mutation run over a workspace is not evidence about crates that never ran. ROUND 31
+    (2026-09-19, task/p2-f-6 cut from roadmap/v2.2 @ f40ffefe, three commits pushed): THE msgraph TRANSPORT, which
+    makes MICROSOFT THE LAST OF THE CRITERION'S FIVE PROVIDERS TO GET ONE - a Microsoft token could be stored,
+    refreshed forever and spent on nothing, exactly as a Google one could before round 30. 25ce55ec is the
+    provider: one operation, msgraph.file.read, ResourceKind::Name, GET {stored
+    endpoint}/drive/items/<id>/content. THE DESIGN DECISION THIS ROUND EXISTS TO MAKE IS THE REDIRECT. Graph's
+    /content answers 302 Found with a PRE-AUTHENTICATED Location on another host, and Microsoft's own page
+    (learn.microsoft.com/graph/api/driveitem-get-content, READ not recalled) says 'You don't need to include an
+    Authorization header when you access the download URL.' So: curl is never told to follow anything on either
+    hop; the download is a SECOND run_curl whose configuration has nowhere to put a token (download_config takes
+    none - structural, not checked, because whether curl carries a custom Authorization across a host boundary is
+    a POLICY that has been a CVE once and varies by version); one hop only, a 3xx from the download host comes
+    back as a status; the hop is scheme-pinned in Rust and again by proto=, so a Location of file:/// or ftp:// is
+    refused with a message; and THE PRE-AUTHENTICATED URL NEVER COMES BACK - without_the_download_url strips the
+    whole URL and its query from the far side's body before either outcome sees it (success path included),
+    download_outcome composes every word that hop returns and IS NOT GIVEN THE URL, and curl's own stderr is not
+    carried on that hop at all because curl quotes the URL it was handed and no loopback double can make it do so
+    - 'carry it but scrub it' would have been an unprovable claim. What the framework's pin covers is stated
+    rather than left as a gap: Bound::endpoint is the Graph URL and service.rs pins HOP ONE; nothing sees hop two,
+    which is why hop two carries no credential, cannot change scheme, cannot chain and is bounded by
+    HTTP_MAX_BYTES. 23 Rust tests against TWO loopback doubles - the API and the host it redirects to - both
+    recording the method, target and headers that ACTUALLY ARRIVED; the download double's records are what prove
+    the token does not follow (no authorization key, and no header carrying a byte of it), and the Host: header is
+    asserted on both because the doubles differ only by port. 0ae35a7c is the vocabulary: GRAPH_SCOPES gains
+    files.read -> msgraph.file.read and MICROSOFT_OAUTH.scopes gains Files.Read (Microsoft's own least-privileged
+    permission for driveItem: content, not Files.Read.All). THE VACUOUS LOOP THE CARD PREDICTED WAS ANSWERED
+    RATHER THAN PASSED QUIETLY: both crates asserted empty == ['microsoft'] over the providers with no scopes AND
+    THEN LOOPED OVER THAT SET; with msgraph landed the set is empty, the equality holds trivially and the loop
+    iterates zero times. Both become the POSITIVE claim assert!(empty.is_empty()) - there is no shipped provider
+    APEX can hold a credential for and spend on nothing - which FAILS when a provider is added before its
+    transport; apex-secretd's gate gains a second half an empty-set assertion cannot make, that every provider was
+    actually VISITED, because otherwise emptying PROVIDERS satisfies both; and AccountError::NoScopesYet plus
+    spend_advice's empty branch are KEPT and held to a 'static NO_SCOPES: Provider' CONSTRUCTED IN EACH TEST
+    (AccountRef::new goes through PROVIDERS and could not reach one), each with a control that a provider WITH
+    scopes gets UnknownScope instead. f6643031 measures it through the real CLI and socket: google files.read ->
+    gdrive.file.read and microsoft files.read -> msgraph.file.read, each asserted in apex secret grants, so EACH
+    IS THE OTHER'S ROUTING CONTROL - which is what replaces the control that died when the transport landed, and
+    that death is written into the suite rather than papered over (the Google section's '! grep no grantable
+    scopes' had Microsoft as its witness and now passes on any build; the comment says which assertion carries the
+    claim instead). MUTATIONS: 16 on commit 1, 8 on commit 2 (all run --workspace --no-fail-fast for the reason
+    round 30 recorded), 4 on commit 3. ALL RED, all restored byte-identically with plain cp and cmp silent. THREE
+    OF THEM FOUND REAL DEFECTS RATHER THAN CONFIRMING COVER, which is the point of running them: (a) the scrub on
+    a FAILED download was dead because the failure message did not carry the far side's body at all - so nothing
+    was being scrubbed AND the far side's reason was being thrown away, both fixed; (b) the write-out parser test
+    used a TWO-LINE input, where split_once and rsplit_once give the same answer, so it said nothing about which
+    end was read - three lines now, for both parsers, and worth checking wherever else this repository splits
+    curl's write-out off the end; (c) a shell assertion that a consumer OneDrive id with '!' is refused READ GREEN
+    under the mutation that dropped the check entirely, because the HOST pin fires first on the loopback
+    credential - it was REMOVED with the reasoning in its place and measured in Rust instead, since the only
+    credential whose host pin lets the id check run is one pinned to graph.microsoft.com and a build without the
+    check would then dial Microsoft. A NARROWING FOUND FROM PRIMARY SOURCE AND DOCUMENTED RATHER THAN DISCOVERED
+    LATER: a CONSUMER OneDrive item id is {driveId}!{n} - Microsoft's own example response on that same page is
+    {"id": "12319191!11919"} - and valid_name does not accept '!'. Work and school ids (01BYE5RZ...) are
+    unaffected. The shared resource vocabulary was NOT widened for one provider; lifting it needs a ResourceKind
+    that percent-encodes. MEASURED AND RECORDED BECAUSE THE DESIGN REFUSES TO RELY ON IT: with location added to
+    hop one, curl 8.15.0 on this machine does NOT forward the Authorization header to the loopback download PORT -
+    it treats a port change as a host change. The structural assertion went red anyway, which is the intent. GATES
+    ON THE BRANCH TIP f6643031: cargo test --locked --workspace --no-fail-fast 3299 -> 3323 passed / 0 failed / 2
+    ignored; cargo clippy --locked --workspace --all-targets -D warnings exit 0; tests/test-secret-broker.sh 84 ->
+    93 passed / 0 failed; check-shellcheck-coverage.sh 165 discovered / 0 known-failing / 0 newly failing;
+    check-suites-run-in-ci.sh 75 / 71 / 4 exempt / 0 unrun and undeclared; check-doc-verbs.sh 191 documented / 114
+    declared undocumented / 0 undocumented and undeclared / 0 stale; check-containerfile-assertions.sh 194 checked
+    / 0 failed / 116 unresolved / 0 inert; no conflict markers. STATUS STAYS partial AND THE REASONS ARE RECORDED
+    RATHER THAN SOFTENED: NO MICROSOFT ENDPOINT HAS EVER BEEN CONTACTED FROM THIS REPOSITORY, so whether Graph in
+    fact answers 302, whether the SHORT form 'Files.Read' resolves for a public client on the common tenant (if a
+    real sign-in answers invalid_scope, the fully-qualified spelling is the first thing to try), and whether the
+    public-client refresh works on the client id alone are all UNPROVEN HERE. GOOGLE'S REFRESH IS EQUALLY UNPROVEN
+    AND THIS ROUND DID NOT SUPERSEDE THAT - no Google endpoint has ever been contacted either. A SUCCESSFUL
+    msgraph.file.read through the socket cannot be measured against a double by construction, for gdrive's reason:
+    the host pin refuses loopback. The agentd forwarding path is not exercised for msgraph, as round 1 recorded
+    for webdav.
 - id: P2-018
   title: Guaranteed Safe Graphics / desktop failover mode
   priority: P2
