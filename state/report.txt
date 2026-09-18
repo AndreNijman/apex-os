@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-19 02:09 AWST
+APEX ROADMAP — resume report — 2026-09-19 02:14 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -17,18 +17,18 @@ APEX ROADMAP — resume report — 2026-09-19 02:09 AWST
   agents
 ────────────────────────────────────────────────────────────────────────────
   p2-b       ALIVE      P2-003,P2-004                      task/p2-b-round30
-             head cb02019f fix(test): at-spi is at a different path on Arch, and
-             dirty 0 file(s), ? unpushed, card 146m
-             NEXT **Find out why `QQuickWindow::accessibleRoot()` is null inside qui
+             head 6b531503 Merge task/p2-f-4 into roadmap/v2.2
+             dirty 0 file(s), 0 unpushed, card 1m
+             NEXT **Measure FOUND 20** (the named cause, read out of source this rou
 
   p2-f       ALIVE      P2-016,P2-017,P2-018,P2-019        task/p2-f-5
-             head 79027b51 test(safe-graphics): which apex the remedies ran is m
-             dirty 0 file(s), ? unpushed, card 184m
-             NEXT **P2-018 criterion 2 is CLOSED — do not reopen it, and do not wide
+             head 6b531503 Merge task/p2-f-4 into roadmap/v2.2
+             dirty 0 file(s), ? unpushed, card 0m
+             NEXT **ROUND 30 IN PROGRESS.** Building the `gdrive` transport in `apex
 
   p2-d       ALIVE      P2-008,P2-009,P2-012               task/p2-d-6
              head 67861c53 test(containerfile): the runner half of the rewrite a
-             dirty 0 file(s), ? unpushed, card 195m
+             dirty 0 file(s), ? unpushed, card 200m
              NEXT **There is no engineering next step on P2-012. There is a question
 
 
@@ -59,11 +59,11 @@ APEX ROADMAP — resume report — 2026-09-19 02:09 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 47s Sat 2026-09-19
+  snapshot timer: active   last 2min 1s Sat
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    9b081d0  roadmap-state
+    apex-os    2784689  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -86,7 +86,7 @@ APEX ROADMAP — resume report — 2026-09-19 02:09 AWST
     apex-os    162d6fa  wt-p0-009-
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
-    apex-shell 996824a  apex-shell-
+    apex-shell 0fd4244  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-
