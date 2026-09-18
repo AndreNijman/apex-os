@@ -438,79 +438,22 @@ do_media() {
 # ── network ─────────────────────────────────────────────────────────────────
 do_network() {
     head_ "Networking"
-    if ! have nmcli; then
+    local nmcli_ok=yes
+    if have nmcli; then
+        report_nm_links
+    else
+        # Not a reason to stop reading. Everything past this point except the
+        # saved 802.1X profiles comes off the filesystem — the VPN service
+        # files, wg, NetworkManager's Wi-Fi plugin, the backend named in
+        # conf.d, the CA trust store, dnsmasq, the hotspot dispatcher and the
+        # policy. `return` here answered "I could not look" to questions nmcli
+        # was never going to be asked, and one of them is whether the system CA
+        # trust store is MISSING.
         item "NetworkManager" "nmcli is not installed"
-        return
-    fi
-    local devs rc
-    devs=$(run 10 nmcli -t -f DEVICE,TYPE,STATE device); rc=$?
-    if [ "$rc" -eq 124 ]; then
-        item "links" "unavailable — nmcli did not answer in 10s"
-    elif [ "$rc" -ne 0 ]; then
-        item "links" "unavailable — could not reach NetworkManager"
-        note "$(head -1 <<<"$devs")"
-        note "this is not the same as having no network interfaces"
-    elif [ -z "$devs" ]; then
-        item "links" "none"
-    else
-        item "links" "$(grep -c . <<<"$devs")"
-        while IFS=: read -r d t s; do
-            [ -n "$d" ] && note "$(printf '%-14s %-10s %s' "$d" "$t" "$s")"
-        done <<<"$devs"
-    fi
-
-    # `nmcli networking connectivity` reads the cached state. `… connectivity
-    # check` re-runs it, and that is a polkit action; a status command must not
-    # be the thing that raises an authentication dialog.
-    #
-    # And `full` is only a measurement if NetworkManager checked. With no
-    # connectivity URI it answers FULL for any connected link without asking
-    # anybody — measured on the machine this was written on:
-    # ConnectivityCheckAvailable false, ConnectivityCheckEnabled false,
-    # ConnectivityCheckUri empty, `nmcli -t networking connectivity` full. That
-    # is this file's own bug wearing network clothes: "I did not look" arriving
-    # as a positive result.
-    local checking conn crc
-    checking=$(connectivity_checking)
-    conn=$(run 10 nmcli -t networking connectivity); crc=$?
-    conn=$(tail -1 <<<"$conn")
-    # `links` above already refuses to turn an unreachable NetworkManager into
-    # an answer, and this has to refuse the same way. It did not: the rc was
-    # thrown away, so with no daemon to ask, `conn` held nmcli's error text and
-    # it was printed as the connectivity state —
-    #
-    #   connectivity   Error: Could not create NMClient object: Could not
-    #                  connect: No such file or directory.
-    #
-    # measured in a built image with no D-Bus. The `else` branch is worse than
-    # the `*)` one, because it goes on to explain that NetworkManager "answers
-    # '<that error>' for any connected link", which is a confident account of
-    # something that never happened. Neither is an observation about this
-    # network; both are this file's own bug — "I could not look" arriving as a
-    # result — which is the defect it exists to report in other tools.
-    if [ "$crc" -eq 124 ]; then
-        item "connectivity" "unavailable — nmcli did not answer in 10s"
-    elif [ "$crc" -ne 0 ]; then
-        item "connectivity" "unavailable — could not reach NetworkManager"
-        note "$conn"
-        note "whether this network holds the connection is not known from here"
-    elif [ "$conn" = portal ]; then
-        item "captive portal" "YES — this network is holding the connection"
-        note "open any http:// page in a browser to reach the login form"
-    elif [ "$checking" = yes ]; then
-        case "$conn" in
-            full)    item "connectivity" "full, and checked" ;;
-            limited) item "connectivity" "limited — addressed, nothing beyond the LAN" ;;
-            none)    item "connectivity" "none" ;;
-            *)       item "connectivity" "$conn" ;;
-        esac
-    else
-        item "captive portal" "not detected, because nothing checked"
-        note "NetworkManager has no connectivity URI here, so it answers '$conn' for any"
-        note "connected link without asking anyone. A hotel or campus network that has"
-        note "addressed you and will answer nothing looks exactly like a working one."
-        note "APEX ships $ETCDIR/NetworkManager/conf.d/21-apex-connectivity.conf to turn"
-        note "the check on; on this machine it is not in effect."
+        note "the links, the connectivity state and the saved profiles are all read"
+        note "through nmcli, so none of those can be answered on this machine. What"
+        note "follows is read off the filesystem and needs no daemon."
+        nmcli_ok=no
     fi
 
     local vpn; vpn=$(dir_state "$NMVPNDIR")
@@ -531,7 +474,8 @@ do_network() {
         note "to import a provider's .conf with"
     fi
 
-    report_enterprise_wifi
+    report_enterprise_wifi "$nmcli_ok"
+    report_ca_trust
 
     # A hotspot needs three things and this machine may be missing all of them.
     local blockers=() caveats=()
@@ -643,6 +587,125 @@ report_enterprise_wifi() {
         note "so NetworkManager will bring up no wireless connection at all"
     fi
 
+    if [ "${1:-yes}" = yes ]; then
+        report_8021x_profiles
+    else
+        # Saying nothing here would leave the trust-store line standing alone
+        # with no statement about the profiles at all; saying "none" would be
+        # the exact lie this reader was rewritten to stop telling.
+        item "enterprise Wi-Fi (802.1X)" "unavailable — nmcli is not installed"
+        note "this is NOT the same as having no enterprise profile. A profile that joins"
+        note "a campus network and validates no certificate is still saved on this"
+        note "machine and will still be used; it just cannot be counted from here."
+    fi
+}
+
+# Whether a given AP authenticates cannot be answered from here. What can be
+# answered is whether the trust store an EAP method reads is present at all.
+#
+# This is a `[ -r ]` on one file and it lives in do_network rather than in
+# report_enterprise_wifi for one reason: FOUR separate `return`s stood above
+# it in that function — no Wi-Fi plugin, nmcli did not answer, the profiles
+# would not read, and "no saved profile uses it" — and every one of them took
+# this reading with it. The last of those is the COMMON case, so a line whose
+# whole job is to say "a correct password still fails to associate" printed on
+# almost no machine. A filesystem read has no business being conditional on
+# whether a daemon answered.
+report_ca_trust() {
+    local bundle="$ETCDIR/pki/tls/certs/ca-bundle.crt"
+    if [ -r "$bundle" ]; then
+        item "system CA trust store" "readable"
+    elif [ -e "$bundle" ]; then
+        item "system CA trust store" "present and unreadable — $bundle"
+    else
+        item "system CA trust store" "MISSING — $bundle"
+        note "every EAP method that checks the server's certificate has nothing to"
+        note "check it against, so a correct password still fails to associate"
+    fi
+}
+
+# The two readings that genuinely need nmcli: the links, and the connectivity
+# state. Split out of do_network so a machine with no nmcli loses exactly these
+# two and keeps the rest of the report, instead of losing all of it.
+report_nm_links() {
+    local devs rc
+    devs=$(run 10 nmcli -t -f DEVICE,TYPE,STATE device); rc=$?
+    if [ "$rc" -eq 124 ]; then
+        item "links" "unavailable — nmcli did not answer in 10s"
+    elif [ "$rc" -ne 0 ]; then
+        item "links" "unavailable — could not reach NetworkManager"
+        note "$(head -1 <<<"$devs")"
+        note "this is not the same as having no network interfaces"
+    elif [ -z "$devs" ]; then
+        item "links" "none"
+    else
+        item "links" "$(grep -c . <<<"$devs")"
+        while IFS=: read -r d t s; do
+            [ -n "$d" ] && note "$(printf '%-14s %-10s %s' "$d" "$t" "$s")"
+        done <<<"$devs"
+    fi
+
+    # `nmcli networking connectivity` reads the cached state. `… connectivity
+    # check` re-runs it, and that is a polkit action; a status command must not
+    # be the thing that raises an authentication dialog.
+    #
+    # And `full` is only a measurement if NetworkManager checked. With no
+    # connectivity URI it answers FULL for any connected link without asking
+    # anybody — measured on the machine this was written on:
+    # ConnectivityCheckAvailable false, ConnectivityCheckEnabled false,
+    # ConnectivityCheckUri empty, `nmcli -t networking connectivity` full. That
+    # is this file's own bug wearing network clothes: "I did not look" arriving
+    # as a positive result.
+    local checking conn crc
+    checking=$(connectivity_checking)
+    conn=$(run 10 nmcli -t networking connectivity); crc=$?
+    conn=$(tail -1 <<<"$conn")
+    # `links` above already refuses to turn an unreachable NetworkManager into
+    # an answer, and this has to refuse the same way. It did not: the rc was
+    # thrown away, so with no daemon to ask, `conn` held nmcli's error text and
+    # it was printed as the connectivity state —
+    #
+    #   connectivity   Error: Could not create NMClient object: Could not
+    #                  connect: No such file or directory.
+    #
+    # measured in a built image with no D-Bus. The `else` branch is worse than
+    # the `*)` one, because it goes on to explain that NetworkManager "answers
+    # '<that error>' for any connected link", which is a confident account of
+    # something that never happened. Neither is an observation about this
+    # network; both are this file's own bug — "I could not look" arriving as a
+    # result — which is the defect it exists to report in other tools.
+    if [ "$crc" -eq 124 ]; then
+        item "connectivity" "unavailable — nmcli did not answer in 10s"
+    elif [ "$crc" -ne 0 ]; then
+        item "connectivity" "unavailable — could not reach NetworkManager"
+        note "$conn"
+        note "whether this network holds the connection is not known from here"
+    elif [ "$conn" = portal ]; then
+        item "captive portal" "YES — this network is holding the connection"
+        note "open any http:// page in a browser to reach the login form"
+    elif [ "$checking" = yes ]; then
+        case "$conn" in
+            full)    item "connectivity" "full, and checked" ;;
+            limited) item "connectivity" "limited — addressed, nothing beyond the LAN" ;;
+            none)    item "connectivity" "none" ;;
+            *)       item "connectivity" "$conn" ;;
+        esac
+    else
+        item "captive portal" "not detected, because nothing checked"
+        note "NetworkManager has no connectivity URI here, so it answers '$conn' for any"
+        note "connected link without asking anyone. A hotel or campus network that has"
+        note "addressed you and will answer nothing looks exactly like a working one."
+        note "APEX ships $ETCDIR/NetworkManager/conf.d/21-apex-connectivity.conf to turn"
+        note "the check on; on this machine it is not in effect."
+    fi
+}
+
+# The saved-profile count, split out of report_enterprise_wifi for one reason:
+# its "I could not look" branches `return`, and while they sat in the parent
+# that return also skipped the system CA trust store — a filesystem read with
+# nothing to do with nmcli. An unreachable NetworkManager silently cost the
+# report the line that says the trust store is MISSING.
+report_8021x_profiles() {
     # An 802.1X profile with no CA certificate is the failure that never looks
     # like one. NetworkManager does not refuse it — nm-settings(5) says the
     # property "can be unset even if the EAP method supports CA certificates, but
@@ -727,19 +790,6 @@ report_enterprise_wifi() {
         note "access point standing in for the real one collects the MSCHAPv2 exchange,"
         note "and that is crackable offline at leisure. Set 802-1x.ca-cert on the"
         note "profile, or 802-1x.system-ca-certs=yes."
-    fi
-
-    # Whether a given AP authenticates cannot be answered from here. What can be
-    # answered is whether the trust store an EAP method reads is present at all.
-    local bundle="$ETCDIR/pki/tls/certs/ca-bundle.crt"
-    if [ -r "$bundle" ]; then
-        item "system CA trust store" "readable"
-    elif [ -e "$bundle" ]; then
-        item "system CA trust store" "present and unreadable — $bundle"
-    else
-        item "system CA trust store" "MISSING — $bundle"
-        note "every EAP method that checks the server's certificate has nothing to"
-        note "check it against, so a correct password still fails to associate"
     fi
 }
 
