@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-18 20:56 AWST
+APEX ROADMAP — resume report — 2026-09-19 01:56 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,50 +16,53 @@ APEX ROADMAP — resume report — 2026-09-18 20:56 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  later      unknown    L-001,L-002,L-003                  task/later-tpm-qualification
-             head c84b2f83 fix(boot-v2): `mem` is not S3, and a missing serial f
-             dirty 0 file(s), 0 unpushed, card 6117m
-             NEXT Collect the two firmware experiments, then land the diagnosis:
+  p2-d       dead 180m  P2-008,P2-009,P2-012               task/p2-d-5
+             head 67861c53 test(containerfile): the runner half of the rewrite a
+             dirty 0 file(s), 0 unpushed, card 181m
+             NEXT **There is no engineering next step on P2-012. There is a question
 
-  p2-c       unknown    P2-005,P2-006,P2-007               task/p2-c-2
-             head 1206730f fix(devices): "no saved profile uses it" is a safety 
-             dirty 1 file(s), 0 unpushed, card 6310m
-             NEXT In /var/tmp/apex-work/wt-p2-005 (apex-os): build the image and run
+  p2-b       dead 132m  P2-003,P2-004                      task/p2-b-round29
+             head 08f81ad ci(shell): allow a task branch to be validated before 
+             dirty 0 file(s), 0 unpushed, card 132m
+             NEXT **Find out why `QQuickWindow::accessibleRoot()` is null inside qui
 
-  p2-b       unknown    P2-003,P2-004                      task/p2-b-round23
-             head 77bbd712 test(i18n): the mutation pair for the platform theme,
-             dirty 0 file(s), 0 unpushed, card 6123m
-             NEXT In `/var/tmp/apex-work/wt-p2-b4-sh`, give `src/windows/Lockscreen.
+  p2-f       dead 169m  P2-016,P2-017,P2-018,P2-019        task/p2-f-4
+             head 79027b51 test(safe-graphics): which apex the remedies ran is m
+             dirty 0 file(s), 0 unpushed, card 170m
+             NEXT **P2-018 criterion 2 is CLOSED — do not reopen it, and do not wide
 
-  p2-f       unknown    P2-016,P2-017,P2-018,P2-019        task/p2-f-3
-             head f3e5cbf5 feat(cli): apex cf refresh, and the two lines that sa
-             dirty 0 file(s), 0 unpushed, card 6115m
-             NEXT Round 6 commit 1: add `apex cf refresh` (and/or `apex account refr
-
-  followups-5 unknown                                       task/followups-5
-             head df6c4797 test(vm): the one probe that could not be faked with 
-             dirty 1 file(s), 0 unpushed, card 6118m
-             NEXT Reproduce the zellij race locally (zellij 0.45.1 IS installed here
-
-  p2-d       unknown    P2-008,P2-009,P2-012               task/p2-d-2
-             head 654fa854 Merge remote-tracking branch 'origin/task/later-tpm-q
-             dirty 8 file(s), 108 unpushed, card 6119m
-             NEXT Add `RunRequest::allow: Option<Vec<String>>` + `SESSION_ALLOWLIST_
+  later      dead 166m  L-001,L-002,L-003                  task/later-2
+             head 0391b4ec test(boot-v2): the TPM clear recovers a disk, not a k
+             dirty 0 file(s), 0 unpushed, card 168m
+             NEXT Nothing is running and nothing is half-finished. Branch tip 0391b4
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 654fa854 Merge remote-tracking branch 'origin/task/later-tpm-q
-    task/p2-c-2
-      1206730f fix(devices): "no saved profile uses it" is a safety claim, a   [1/10 added lines on tip]
-    task/p2-f-3
-      0a8783e3 feat(secret-core): the credential a refresh credential renews   [0/10 added lines on tip]
-      33483c37 feat(secretd): an oauth provider that renews a token at the s   [2/10 added lines on tip]
-      f3e5cbf5 feat(cli): apex cf refresh, and the two lines that said nothi   [0/10 added lines on tip]
+  int-os:  tip bde4d96c Merge task/p2-d-5 into roadmap/v2.2
+    task/later-2
+      acc0a65c feat(boot-v2): a scenario that moves PCR 0, the register noth   [3/10 added lines on tip]
+      79d26db1 feat(boot-v2): the case with no scenario was the machine with   [1/10 added lines on tip]
+      bc2538ab test(boot-v2): a scenario nobody can ask for is a gate that i   [0/10 added lines on tip]
+      f80d524f docs(boot-v2): what a VM proved about L-001, and what silicon   [0/10 added lines on tip]
+      18a015ec docs(boot-v2): stop-slop pass on the prose added this round,    [0/10 added lines on tip]
+      0391b4ec test(boot-v2): the TPM clear recovers a disk, not a keyslot,    [0/10 added lines on tip]
+    task/p2-b-round29
+      4aae9249 fix(test): the a11y status flags cannot be written on a priva   [0/10 added lines on tip]
+      cb02019f fix(test): at-spi is at a different path on Arch, and "not in   [0/10 added lines on tip]
+    task/p2-f-4
+      653a6d5d test(safe-graphics): every remedy on the recovery menu is RUN   [0/10 added lines on tip]
+      fb884d8f fix(safe-graphics): the recovery session logged an error on e   [0/10 added lines on tip]
+      79027b51 test(safe-graphics): which apex the remedies ran is measured,   [0/10 added lines on tip]
 
-  int-shell:  tip b7953e4 Merge remote-tracking branch 'origin/task/p2-c-2-shell
-    (nothing — every task branch's content is on the integration tip)
+  int-shell:  tip 379eef8 test(ci): apex-shell had no suite-coverage gate, and o
+    task/p2-b-round29
+      d710bfb test(a11y): the lock screen read back over AT-SPI, and the tre   [1/10 added lines on tip]
+      f66db73 test(a11y): the AT-SPI read-back gets a mutation pair, and CI    [4/10 added lines on tip]
+      c81c421 docs(test): the two copied AT-SPI files say how to prove they    [0/10 added lines on tip]
+      e65d378 fix(test): the mutation harness scored eleven mutants against    [0/10 added lines on tip]
+      5ae27c3 fix(test): the guard's own claim was not true, and a stale sha   [0/10 added lines on tip]
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -79,11 +82,11 @@ APEX ROADMAP — resume report — 2026-09-18 20:56 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 20:56:04 AWST 18s
+  snapshot timer: active   last 01:56:04 AWST 19s
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    0f8ea99  roadmap-state
+    apex-os    4db8b4f  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -93,11 +96,11 @@ APEX ROADMAP — resume report — 2026-09-18 20:56 AWST
     apex-os    7ebac77  wt-followups-
     apex-os    0a2f642  wt-followups-3-
     apex-os    a6e9909  wt-followups-4-
-    apex-os    fcde57a  wt-followups-5-
+    apex-os    36ae373  wt-followups-5-
     apex-os    59b7328  wt-followups-int3-
     apex-os    884b151  wt-followups2-
     apex-os    0683355  wt-greeter-os-
-    apex-os    dd6bcaf  wt-later-
+    apex-os    5ad9db1  wt-later-
     apex-os    c74f38d  wt-multilib2-
     apex-os    0fd2d78  wt-p0-002-
     apex-os    e63b0e3  wt-p0-003-
@@ -106,9 +109,9 @@ APEX ROADMAP — resume report — 2026-09-18 20:56 AWST
     apex-os    162d6fa  wt-p0-009-
     apex-os    d4787a4  wt-p0-009b-
     apex-os    f30f7ca  wt-p0-011-
-    apex-shell b96da4c  apex-shell-
+    apex-shell 84bced0  apex-shell-
     apex-shell bcfe98f  base-
-    apex-shell 02674e0  int-shell-
+    apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-
     apex-shell c8f1e50  wt-editors2-shell-
     apex-shell 6e7aca4  wt-followups-3-shell-
@@ -135,11 +138,10 @@ APEX ROADMAP — resume report — 2026-09-18 20:56 AWST
 ────────────────────────────────────────────────────────────────────────────
   next
 ────────────────────────────────────────────────────────────────────────────
-  6 agent(s) dispatched, ceiling 6
+  4 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
     p2-b           P2-003,P2-004                    Accessibility baseline and internationalisation baseline
-    p2-c           P2-005,P2-006,P2-007             Printing/scanning/network-share, networking, Bluetooth/dock/
     p2-d           P2-008,P2-009,P2-012             First-party virtualization UX, disposable VM agent execution
     p2-f           P2-016,P2-017,P2-018,P2-019      Multi-user/guest/kiosk, APEX Online Accounts, guaranteed saf
     later          L-001,L-002,L-003                TPM and recovery qualification, then LUKS2 by default and TP
@@ -162,6 +164,7 @@ APEX ROADMAP — resume report — 2026-09-18 20:56 AWST
     p1-053a — CLOSED BY HAND: Landed as merge 4ae4cf22; 0 unlanded. P1-053 done. P1-054 is partial because the socket has no profile/projects/worktrees verb — adding them is a protocol change and p1-053b owns the decision. P1-055 is partial for want of a gemini fixture, and gemini is not installed on this machine.
     p1-053c — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-14 (round 27). P1-059 is DONE — its branch landed as merge d3ad8f7d and all four criteria are met; criterion 3 was the only one open and both its halves (the OS verb and the Android client) are now in. What remains on this unit is P1-060 C1 and C2, and those need a physical Android device or a working emulator, of which this machine has NEITHER — the predecessor measured four consecutive SIGSEGV crashes of the emulator across rounds 1-3. Same shape as p1-038-hardware: the work is real, it is not an agent's to do here. If a device appears, re-open and start with C2's headless-testable parts (backgrounding, battery saver, poor-network — LowBandwidthTest is the precedent) and leave talkback/rotation/foldables for the device. NOTE FOR WHOEVER TOUCHES THE WIRE: this unit did NOT bump PROTOCOL_VERSION; it stays 8, and p2-d now owns that file uncontended.
     base-partials — CLOSED BY HAND: Landed round 12 on both repos; `git merge-base --is-ancestor` confirms task/base-partials and task/base-partials-shell are both contained in roadmap/v2.2, zero unlanded commits. BASE-009 needs a disposable machine with a gaming userspace (the switch is `loginctl terminate-user`, which kills the session running the test) and katana is off-limits; BASE-010 needs non-zero spendable VRAM and this is an APU, so apexd falls to Backend::Cpu by design. Closed 2026-09-12 after a second agent was dispatched onto a finished unit.
+    p2-c — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-18 (round 27) — and this says the work is ANDRE'S, not that it is done. The container sweep that found FOUND 3, 4, 11 and 12 is exhausted: every remaining reader needs a BOOTED machine, and reaching one needs `apex update` plus a reboot, which is the boot path and off-limits to agents. A container can move a reader to 'installed, and whether it runs was not answered' and no further. The step-by-step checklist for Andre is at the end of ROADMAP/evidence/P2-005-007-device-maturity.md. The three items stay `partial` because their acceptance criteria genuinely are not met — that is the state this hatch exists for. Re-open only after an image build lands and a NEW reader could have arrived with it.
     p1-063 — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-13 (round 24). Round 3 is finished, pushed AND landed — apex-os 619e764a, apex-shell 1da66c7 — and followups-4 wired its 60 lid assertions into CI runner-green. Both remaining criteria are ANDRE'S PHYSICAL ACTIONS and an agent must not fake either. Criterion 1: causation needs the external display physically unplugged. Re-measured 2026-09-13 — Docked=b true, card1-DP-1 connected — and with a display attached logind consults HandleLidSwitchDocked (default ignore) BEFORE any inhibitor, so the lid does nothing with or without APEX's block and the non-suspend cannot be attributed to APEX. The one command that closes it, undocked: `sudo ./tests/test-apex-lid-live.sh`. Criterion 3: 'draws measurably less' needs an undocked machine ON BATTERY that nobody is using — power_now reads CHARGING power on mains — and the runnable recipe is in docs/lid.md under 'What has NOT been measured'. Nothing here is waiting on an agent.
 
 ────────────────────────────────────────────────────────────────────────────
