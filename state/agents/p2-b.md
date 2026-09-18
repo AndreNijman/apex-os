@@ -17,27 +17,38 @@ pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 
 ## NEXT
 
-**Read CI run 35382910849** (apex-shell `task/p2-b-round30`, dispatched
-2026-09-19 with `gh workflow run ci.yml --ref task/p2-b-round30`; `gh` is
-authenticated here with its own `gho_` token, the note about Andre's PAT does
-not apply to it) and record the SECOND-MACHINE result in P2-003's evidence,
-which currently says "NOT RUN THIS ROUND AND NOT CLAIMED" for both new steps.
-`check-quickshell-a11y-cause.sh` **should actually run** on the Arch runner —
-`base-devel` is installed by the setup job and Arch ships Qt's headers in
-`qt6-base`/`qt6-declarative` rather than a separate `-devel` package — so this
-is the first time the FOUND 20 mechanism gets measured on hardware other than
-this laptop, and a mode-A null there would make the cause distribution- and
-Qt-version-independent. `run-lockscreen-atspi-shim.sh` will SKIP there (no
-quickshell, AUR); check that it skips with its NAMED reason and that
-`mutate-lockscreen-atspi-shim.sh` prints its baseline guard and exits 0 rather
-than scoring eight mutants against a suite that never ran (FOUND 18).
-If anything is red, fix it on this branch — do not land red.
+**Read CI run 35382910849, then dispatch one on the final tip `56d7521`**
+(`gh workflow run ci.yml --ref task/p2-b-round30`; `gh` is authenticated here
+with its own `gho_` token — the note about Andre's PAT does not apply to it),
+and record the SECOND-MACHINE result in P2-003's evidence, which currently says
+the result is "NOT YET READ AND NOT CLAIMED". `check-quickshell-a11y-cause.sh`
+**should actually run** on the Arch runner — it needs no compositor, no bus and
+no quickshell, `base-devel` is installed by the setup job, and Arch ships Qt's
+headers in `qt6-base`/`qt6-declarative` rather than a separate `-devel`
+package — so this is the first time the FOUND 20 mechanism gets measured on a
+second distribution and a second Qt, and a mode-A null there makes the cause
+version-independent. `run-lockscreen-atspi-shim.sh` will SKIP (no quickshell,
+AUR): check it skips with its NAMED reason and that
+`mutate-lockscreen-atspi-shim.sh` prints its baseline guard and exits 0 instead
+of scoring eight mutants against a suite that never ran (FOUND 18). Do not land
+red.
 
 ## IN PROGRESS
 
-Nothing half-written. Both worktrees are clean and both branches are pushed.
-CI run **35382910849** is in flight on apex-shell `task/p2-b-round30`; its
-result is the `## NEXT` above and is NOT yet in the roadmap evidence.
+Nothing half-written; both worktrees clean, both branches pushed. Two things
+still in flight:
+
+* **CI run 35383306764** on the FINAL tip `56d7521`, dispatched and running.
+  Run **35382910849** on `b01a276` is already read and is in the DONE section.
+* **`./tests/mutate-lockscreen-atspi.sh` re-running locally** to prove
+  `56d7521`'s prose-only edit did not disturb round 29's pair (expect 8 CAUGHT /
+  0 SURVIVED / 3 HELD). Log:
+  `scratch-p2-b/round30/mutate-r29-recheck.log`. R1, R2 and R2b are already
+  CAUGHT.
+
+P2-003's roadmap evidence still says the second-machine result is "NOT YET READ
+AND NOT CLAIMED" — that sentence is now stale and must be replaced with the
+35382910849 numbers below.
 
 ## DONE
 
@@ -77,6 +88,30 @@ matches on branch name.
 
 P2-003's roadmap evidence carries the `273c1fb` half. The `b01a276` half and
 FOUND 22/23 go in next.
+
+**FROM THE GITHUB ARCH RUNNER, not this laptop.** CI run **35382910849** on
+`task/p2-b-round30` at `b01a276`: `Repo Structure Sanity` **success** (so all
+110 REQUIRED paths exist there), `NixOS` **success**, and `arch-validate` red
+on **exactly one step — `run-rtl-test.sh` at 17/3/2**, the pre-existing red this
+unit has carried since round 28 and which a control run on `roadmap/v2.2`
+already proved is nobody's branch's doing. Every new step passed, and the
+important one is the first:
+
+* `check-quickshell-a11y-cause.sh` — **14 passed / 0 failed / 0 skipped ON THE
+  ARCH RUNNER**, `note: Qt 6.11.2, compiler g++`. All five modes RAN there.
+  So FOUND 20 is not a Fedora fact or a Qt 6.10.3 fact: the same
+  `~QCoreApplication` clears the same factory list on a different
+  distribution and a different Qt minor. That is the whole reason this suite
+  was built to need no compositor, no bus and no quickshell.
+* `mutate-quickshell-a11y-cause.sh` — **13 applied, 11 CAUGHT / 0 SURVIVED /
+  0 MISSCORED / 0 UNSCORABLE, 2 HELD / 0 FALSE-RED** on the runner, identical
+  to here. The pin is mutation-proved on two machines.
+* `run-lockscreen-atspi-shim.sh` — `SKIP: no quickshell, so nothing here was
+  measured.` and `passed=0 failed=0 skipped=1`. The named refusal, as designed.
+* `mutate-lockscreen-atspi-shim.sh` — `applied=0 … held=0 false-red=0` and exit
+  0: its baseline guard fired rather than scoring eight mutants against a suite
+  that never ran (FOUND 18 working as intended on the machine that taught it).
+* `run-lockscreen-atspi.sh` — 8/0/1, unchanged by `56d7521`'s prose edit.
 
 Round 29 (2026-09-18).
 

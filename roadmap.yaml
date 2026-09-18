@@ -4239,13 +4239,23 @@ tasks:
     tests/, and with no shim a screen reader still gets one node. The remaining work is a single upstream change -
     qtdeclarative installing its accessibility factory from Q_COREAPP_STARTUP_FUNCTION instead of
     Q_CONSTRUCTOR_FUNCTION, measured working as repro mode D, or quickshell not destroying its QCoreApplication at
-    src/launch/launch.cpp:282 - and neither is APEX's code. Nothing in either repository can route around it.
-    SECOND MACHINE: CI run 35382910849 was dispatched on task/p2-b-round30 (gh workflow run ci.yml --ref
-    task/p2-b-round30) and its result is NOT YET READ AND NOT CLAIMED. check-quickshell-a11y-cause.sh should
-    genuinely run there - it needs no compositor, no bus and no quickshell, base-devel is installed by the setup
-    job and Arch ships Qt's headers in qt6-base/qt6-declarative - which would make the FOUND 20 mechanism measured
-    on a second distribution and a second Qt. run-lockscreen-atspi-shim.sh will SKIP there because the runner has
-    no quickshell. Recovery screen still unaudited; orca as the greetd user still needs hardware.
+    src/launch/launch.cpp:282 - and neither is APEX's code. Nothing in either repository can route around it. FROM
+    THE GITHUB ARCH RUNNER, NOT THIS LAPTOP. CI run 35382910849 on task/p2-b-round30 at b01a276: Repo Structure
+    Sanity SUCCESS (so all 110 REQUIRED paths exist there too), NixOS SUCCESS, and arch-validate red on EXACTLY
+    ONE STEP - run-rtl-test.sh at 17/3/2, the pre-existing red this unit has carried since round 28 and which a
+    control run on roadmap/v2.2 (35351740747) already proved is no branch's doing. Every new step passed, and the
+    first one is the important one: check-quickshell-a11y-cause.sh is 14 passed / 0 failed / 0 SKIPPED ON THE
+    RUNNER, reporting "note: Qt 6.11.2, compiler g++" - all five modes RAN there. So FOUND 20 is not a Fedora fact
+    and not a Qt 6.10.3 fact: the same ~QCoreApplication clears the same factory list on a different distribution
+    and a different Qt minor version, which is exactly why the suite was built to need no compositor, no bus and
+    no quickshell. mutate-quickshell-a11y-cause.sh on the runner: 13 applied, 11 CAUGHT / 0 SURVIVED / 0 MISSCORED
+    / 0 UNSCORABLE, 2 HELD / 0 FALSE-RED, identical to here, so the pin is mutation-proved on two machines.
+    run-lockscreen-atspi-shim.sh printed "SKIP: no quickshell, so nothing here was measured." and passed=0
+    failed=0 skipped=1 - the named refusal, as designed - and mutate-lockscreen-atspi-shim.sh printed applied=0
+    and exited 0 because its baseline guard fired rather than scoring eight mutants against a suite that never ran
+    (FOUND 18 behaving correctly on the very machine that taught it). run-lockscreen-atspi.sh is 8/0/1 there,
+    unchanged by the prose commit 56d7521. A second run, 35383306764, was dispatched on the final tip 56d7521 and
+    ITS result is not claimed here. Recovery screen still unaudited; orca as the greetd user still needs hardware.
 - id: P2-004
   title: Internationalisation baseline
   priority: P2
@@ -4279,7 +4289,21 @@ tasks:
     assistive technology even once the host change lands. LANDED round 30 (2026-09-19): merge 7658fe1f (apex-os)
     and d5c781a (apex-shell). NOTHING ON THIS ITEM CHANGED THIS ROUND and nothing here was re-verified - round
     29's p2-b work was entirely the P2-003 AT-SPI read-back. The RTL 17/3/2 discriminator and the Qt
-    6.11.2-vs-6.10.3 runner difference are still open exactly as recorded above.
+    6.11.2-vs-6.10.3 runner difference are still open exactly as recorded above. ROUND 30 (2026-09-19): NOTHING ON
+    THIS ITEM WAS CHANGED AND NOTHING WAS RE-VERIFIED - the round's work was entirely P2-003's AT-SPI cause. Two
+    things nevertheless bear on the open RTL row and are recorded because they were measured rather than assumed.
+    (1) run-rtl-test.sh is 17 passed / 3 failed / 2 skipped again, in CI run 35382910849 on task/p2-b-round30, and
+    it was the ONLY red step in the whole arch-validate job - four brand-new accessibility steps in the same job
+    were green. So the red is still older than any current branch and still not any branch's doing, now confirmed
+    a fourth time. (2) The unruled-out candidate "the runner is Qt 6.11.2 against this laptop's 6.10.3" had been
+    read off a package version; it is now MEASURED by an APEX suite running on the runner itself.
+    tests/check-quickshell-a11y-cause.sh prints the toolchain it built against and reported "note: Qt 6.11.2,
+    compiler g++" there against "note: Qt 6.10.3, compiler g++" here. The version difference is therefore a fact
+    rather than an inference, and it remains the leading unruled-out explanation together with the runner's qt6ct
+    having no /etc/xdg/qt6ct/qt6ct.conf, which APEX ships. Section 1 was NOT touched and must not be made to SKIP
+    - it is the discriminator. Also relevant from P2-003 and not yet acted on here: quickshell publishes nothing
+    to AT-SPI without a test-only shim, so a mirrored or translated shell surface is still invisible to an
+    assistive technology even once the host QTranslator change (FOUND 3) lands.
 - id: P2-005
   title: Printing/scanning/network-share maturity
   priority: P2
