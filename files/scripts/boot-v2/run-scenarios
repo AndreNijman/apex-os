@@ -61,16 +61,42 @@ if (( LIST )); then printf '%s\n' "${ALL[@]}" "${STAGED[@]}"; exit 0; fi
 # reports nothing is the same defect read from the other end.
 #
 # So the summary is printed from an EXIT trap and therefore survives `die`,
-# an unset variable, a `set -e` abort inside a scenario, and a signal. An abort
-# with no recorded failure is itself recorded as a failure, because a run that
-# stopped early has not passed — that is the case the old code reported as
-# silence.
+# an unset variable and a `set -e` abort inside a scenario. An abort with no
+# recorded failure is itself recorded as a failure, because a run that stopped
+# early has not passed — that is the case the old code reported as silence.
+#
+# A SIGNAL IS NOT COVERED BY THE EXIT TRAP ALONE, AND THE COMMENT THAT SAID IT
+# WAS COST A ROUND. MEASURED 2026-09-18: two detached runs were SIGTERM'd
+# mid-scenario (containers later-r5-s3-fw2025 / later-r5-s3-nosmm, both killed
+# at 15:01:38.115602736 and both recorded Exited (143)). bash DOES run the EXIT
+# trap on an untrapped SIGTERM, but `$?` inside it reads 0 — nothing had failed
+# yet — so the `rc != 0` branch below never fired and each log ended:
+#
+#     == boot-v2 VM harness: 6 passed, 0 failed ==
+#
+# for a run killed part-way through its second boot, with the s3 assertions
+# never reached. The exit status was still 143, so `$?` callers were told; the
+# LOG, which this whole block exists because it is how these runs are actually
+# read, said PASS. Reproduced in isolation before fixing, not theorised.
+#
+# So the signals are trapped by name and recorded. A killed run now prints a
+# FAIL line and can never read as green from either end.
 BOOTV2_SUMMARY_PRINTED=0
+BOOTV2_SIGNAL=""
+bootv2_on_signal() {
+    BOOTV2_SIGNAL="$1"
+    exit $(( 128 + $2 ))
+}
+trap 'bootv2_on_signal TERM 15' TERM
+trap 'bootv2_on_signal INT 2' INT
+trap 'bootv2_on_signal HUP 1' HUP
 bootv2_report() {
     local rc=$?
     (( BOOTV2_SUMMARY_PRINTED )) && return
     BOOTV2_SUMMARY_PRINTED=1
-    if (( rc != 0 )) && (( BOOTV2_FAIL == 0 )); then
+    if [[ -n "$BOOTV2_SIGNAL" ]]; then
+        bad "the harness was KILLED by SIG$BOOTV2_SIGNAL part-way through: the scenarios above are INCOMPLETE and the counts below are a transcript, not a verdict"
+    elif (( rc != 0 )) && (( BOOTV2_FAIL == 0 )); then
         bad "the harness aborted with exit status $rc before finishing: the scenarios above are INCOMPLETE"
     fi
     bootv2_summary "boot-v2 VM harness" || true
@@ -1352,6 +1378,46 @@ scenario_luks_firmware_change() {
 # support turned off — which is qemu's own q35 default. The guest must then NOT
 # report a resume. Without that arm, `s3=resumed` would be a string nobody has
 # ever seen absent, and this file's own header says what that is worth.
+
+# luks_s3_other_witnesses WAKEJSON OVMFLOG — one line naming what the two
+# witnesses OTHER than the guest's serial field say. Used only to make a
+# could-not-run precise; it asserts nothing itself, so it must never fail the
+# run and must stay readable when either file is missing.
+luks_s3_other_witnesses() {
+    local wake="$1" ovmf="$2" qmp="no QMP record" fw="no OVMF log"
+    if [[ -s "$wake" ]]; then
+        qmp="$(python3 -c '
+import json,sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception as e:
+    print("QMP record unreadable (%s)" % e); raise SystemExit(0)
+s, w, r = d.get("suspended_seen"), d.get("wakeup_sent"), d.get("resumed_seen")
+if s and w and r:
+    print("but qemu DID see it suspend and resume (suspended/woken/resumed all true, woke_at %s)" % d.get("woke_at"))
+elif s:
+    print("qemu saw it suspend but not resume (wakeup_sent=%s, resumed_seen=%s)" % (w, r))
+else:
+    print("qemu never saw it suspend (suspended_seen=%s)" % s)
+' "$wake" 2>/dev/null)" || qmp="QMP record unreadable"
+        [[ -n "$qmp" ]] || qmp="QMP record unreadable"
+    fi
+    if [[ -s "$ovmf" ]]; then
+        # Only what follows the S3 resume banner: a cold-boot ASSERT is a
+        # different bug and naming it here would misdirect the reader.
+        local a
+        a="$(awk '/SEC: S3 resume/{s=1} s && /^ASSERT /{print; exit}' "$ovmf" 2>/dev/null)"
+        if [[ -n "$a" ]]; then
+            fw="and the firmware stopped on the S3 resume path: ${a}"
+        elif grep -q 'SEC: S3 resume' "$ovmf" 2>/dev/null; then
+            fw="the firmware did reach 'SEC: S3 resume' and did not assert"
+        else
+            fw="the firmware never reached 'SEC: S3 resume'"
+        fi
+    fi
+    printf '%s %s' "$qmp" "$fw"
+}
+
 scenario_luks_s3() {
     log "luks-s3: suspend to RAM with the encrypted volume open, and the TPM afterwards"
     luks_require_root
@@ -1399,14 +1465,31 @@ scenario_luks_s3() {
     # A kernel that will not suspend has disproved nothing about LUKS. It is
     # recorded as could-not-run, with the reason the guest gave, and the
     # scenario stops rather than asserting on a resume that never happened.
+    #
+    # AND THE GUEST IS NOT THE ONLY WITNESS. Until 2026-09-18 these two
+    # branches reported "the guest reported no s3 field at all" and stopped,
+    # while TWO other witnesses sat unread in the same directory — and they
+    # contradicted the message. MEASURED, container later-r6-s3-nosmm: the
+    # QMP record said suspended_seen/wakeup_sent/resumed_seen all true (the
+    # guest suspended at 107.656 s and was woken at 108.161 s), and the OVMF
+    # log named the actual stop, an `ASSERT MemoryServices.c(203)` on the S3
+    # resume path that deadloops a DEBUG build until the timeout kill. The
+    # guest said nothing because the FIRMWARE never handed control back, not
+    # because it declined to suspend. A could-not-run that misnames its own
+    # cause sends the next round after the wrong thing, so both witnesses are
+    # read into the reason here.
     case "$s3_field" in
         resumed*)
             ok "the guest suspended to RAM and came back (s3=$s3_field)" ;;
-        "")
-            cannot "the guest reported no s3 field at all; serial log $ser"
-            cp "$ser" "$WORK/serial-luks-s3-attempt.log"; return ;;
-        *)
-            cannot "the guest could not suspend: s3=$s3_field"
+        ""|*)
+            local why
+            if [[ "$s3_field" == "" ]]; then
+                why="the guest reported no s3 field at all"
+            else
+                why="the guest could not suspend: s3=$s3_field"
+            fi
+            why="$why; $(luks_s3_other_witnesses "$wake" "${ser%.log}.ovmf.log")"
+            cannot "$why; serial log $ser"
             cp "$ser" "$WORK/serial-luks-s3-attempt.log"; return ;;
     esac
     assert_eq 0 "$rc" "S3: clean guest poweroff"
