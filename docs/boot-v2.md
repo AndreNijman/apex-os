@@ -247,6 +247,60 @@ counted entry decrements and the blessed entry never grows a suffix.
   back in the second, so the volume really decrypted rather than a device
   merely appearing
 
+**TPM clear, firmware change and suspend/resume** — the three L-001 edge cases,
+all against the same software TPM. Counts come from the container logs with
+`State.FinishedAt` checked on each, so `Exited (0)` is not taken at face value.
+
+* **TPM clear — 20 passed, 0 failed.** Four boots, one UKI throughout, so a
+  refusal cannot be the PCR policy in disguise. A real `TPM2_Clear` runs between
+  boots 1 and 2, confirmed by the owner primary key's *name* changing rather
+  than by `tpm2_clear` exiting 0. Boot 2 refuses the TPM unlock and the recovery
+  key opens the volume in that same boot.
+* **Firmware change — 18 passed, 0 failed, 1 could-not-run.** Fedora's real
+  `DBXUpdate` blob moves PCR 7 (76 → 21340 bytes) and the signed PCR 11 policy
+  still unlocks, which is why boot-v2 chose this policy. The
+  could-not-run is PCR 0: moving it needs a second OVMF build differing **only**
+  in code, and the lab image's two 4 MB builds differ in Secure Boot enforcement
+  as well, so swapping them would conflate "the firmware changed" with "Secure
+  Boot was turned off".
+* **Suspend/resume — 17 passed, 0 failed, on edk2-20250812.** The volume stays
+  open across S3, and a mapper created *after* the resume reads the marker back,
+  so the plaintext came off the disk and not out of the page cache of a device
+  that had been open since before the sleep. Two non-colluding witnesses: the
+  guest's own `/sys/power/suspend_stats`, and qemu asked separately over QMP.
+  `s3-mode=deep`, so it was S3 and not suspend-to-idle.
+
+**The shipped OVMF build cannot resume from S3, and it is an edk2 regression.**
+On `edk2-ovmf-20260812-4.fc43` the guest suspends and qemu wakes it — the QMP
+record has `suspended_seen`, `wakeup_sent` and `resumed_seen` all true, with the
+suspend at 107.656 s and the wake at 108.161 s — and then the firmware stops in
+its own resume path:
+
+```
+SEC: S3 resume
+PeiInstallPeiMemory MemoryBegin 0x7FF70000, MemoryLength 0x90000
+PopulateMemoryTypeInformation: No Memory Type Information HOB found, S4 resume is likely to fail
+ASSERT_EFI_ERROR (Status = Not Found)
+ASSERT MemoryServices.c(203): !(((RETURN_STATUS)(Status)) >= 0x8000000000000000ULL)
+```
+
+A DEBUG build deadloops on that assert, so the harness kills qemu at the timeout
+and the guest never prints anything at all. Changing one variable at a time
+places it:
+
+| build | edk2 | Secure Boot + SMM | S3 resume |
+| --- | --- | --- | --- |
+| in-image `OVMF_CODE_4M.secboot` | 20260812 | on | asserts |
+| in-image `OVMF_CODE_4M` (non-secboot) | 20260812 | off | asserts the same way |
+| `OVMF_CODE_4M.secboot` from edk2-ovmf-20250812-18.fc43 | 20250812 | on | resumes, 17/0 |
+
+Turning Secure Boot and SMM off changes nothing; going back one edk2 version
+fixes it. So the S3 criterion is measurable, on the older firmware, and neither
+APEX nor the lab is at fault. `APEX_BOOTLAB_FW` points the harness at a
+pre-converted firmware cache, which is how the harness takes the older build.
+Each build's version comes out of the binary itself (`strings … | grep edk2-`),
+not from its filename.
+
 **A firmware fact worth knowing before debugging anything here.** Fedora's 2 MB
 `/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd` does Secure Boot but has **no TCG2
 protocol**: sd-stub sets no `StubPcr*` variables, PCR 11 reads as 64 zeros, and
@@ -378,16 +432,52 @@ designed behaviour and not a fault.
 | TPM unlock stops working after a firmware update | the recovery key. Then re-check: with a **signed** PCR 11 policy a firmware update should not break unlock, because the keyslot is bound to the signing key and PCR 11 measures the UKI, not the firmware. If it did break, that is a finding worth recording here. |
 | TPM unlock stops working after a kernel update | this should not happen — it is the property the policy was chosen for, and it is measured in the `luks-tpm` scenario. Use the recovery key, then check that the new UKI carries a `.pcrsig` signed by the enrolled key: `python3 files/scripts/boot-v2/pe-section.py <uki> .pcrsig`. |
 | you rotated the PCR signing key | every existing keyslot is bound to the old public key. Enroll the new one with `systemd-cryptenroll --tpm2-public-key=<new>` **before** removing the old, and keep the recovery key usable throughout. |
-| the TPM was cleared, or the disk moved to another machine | the sealed object is gone: it was bound to that TPM's SRK. Only the recovery key opens the volume. Re-enroll afterwards. |
+| the TPM was cleared, or the disk moved to another machine | the sealed object is gone: it was bound to that TPM's SRK. Only the recovery key opens the volume. Re-enroll afterwards **in two separate invocations** — wipe the old slot first, then enroll. Doing both in one command reports success and changes nothing; see below. |
 | you lost the recovery key and the TPM state | the data is gone. This is why enrollment prints the key and this document says to store it off the encrypted disk. |
+
+**The one-command re-enrolment after a TPM clear is a no-op that exits 0.**
+Measured on systemd 258.10-1.fc43, and it is the command a user reaches for
+after a firmware TPM clear:
+
+```
+$ systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=… --tpm2-public-key=… VOLUME
+This PCR set is already enrolled, executing no operation.
+$ echo $?
+0
+```
+
+The header is byte-identical afterwards. systemd de-duplicates against the token
+already in the header — it compares the public key and the PCR set, and the TPM
+plays no part, and that check runs **before** it acts on the wipe. So on a
+cleared TPM the whole invocation does nothing while reporting success: the
+header keeps a blob sealed to a seed that no longer exists, and the next boot
+fails exactly as it did before the "recovery" (`Esys_Load rc 0x1df`, *"Key
+enrolled in superblock most likely does not belong to this TPM"*). Wiping in its
+own invocation first produces a new blob and a working unlock.
+
+The `luks-tpm-clear` scenario missed this at first, and why is worth keeping:
+every header assertion it already made — exactly one `systemd-tpm2` token, the
+public-key policy, PCR 11 — held true of the no-op character for character. It
+now compares the sealed **blob** before and after, and an unchanged blob is a
+named failure.
 
 ## What §22 asks for and this does not do
 
 * **Step 6, encryption by default: not implemented, deliberately.** §22 gates it
-  on "once recovery and hardware edge cases are proven". What is proven is one
-  software TPM in one VM. Real firmware updates, real TPM clears, real
-  suspend/resume, and machines with no TPM at all are not covered, and a
-  default that fails on any of them costs a user their disk. It stays opt-in.
+  on "once recovery and hardware edge cases are proven". A TPM clear, a PCR 7
+  change and an S3 cycle are now each measured. Two of the three show the
+  recovery path **failing** before they show it working: after a TPM clear, and
+  on the PCR 7-bound control volume, the TPM unlock is refused and the recovery
+  key opens the volume in that same boot. The S3 scenario proves something
+  narrower and should not be read as a recovery test — it has no refusal arm and
+  never touches the recovery key, because the property it exists to check is
+  that the volume stays open across the suspend. Its negative control is the
+  same run with qemu's S3 support off. And every one of the three ran against
+  `swtpm` in a VM. No silicon TPM has been through an enrol-and-recover cycle; machines with
+  no TPM at all are still not covered; and the installer cannot encrypt a disk
+  in the first place — every `crypto_LUKS` branch in `installer/apex-install` is
+  a refusal to overwrite an existing header, not a path that creates one. A
+  default that fails on any of those costs a user their disk. It stays opt-in.
 * **No NVRAM management.** `apex-mkesp` writes `/EFI/BOOT/BOOTX64.EFI` so the
   VM boots by the removable-media path, because creating a real boot entry
   means `efibootmgr` and that is not something a script in this repository does
