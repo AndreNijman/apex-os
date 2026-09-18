@@ -329,3 +329,232 @@ an-extension caveat. The L16 therefore cannot act as a positive control for the
 "firewall enforcing, dispatcher missing" branch; the fixture in
 `tests/test-apex-devices.sh` covers it. The same run reconfirms both 802.1X
 profiles validate nothing.
+
+---
+
+## 2026-09-18 — the sweep, and the checklist that closes the unit (round: p2-c)
+
+The method the card names — build the image, run `apex devices` inside it, and
+look for readers that **STATE instead of READ** — paid a third and fourth time,
+and then stopped paying. What is left needs a booted machine. The checklist for
+Andre is at the bottom of this section and the unit closes on it.
+
+Everything below was measured in
+`ghcr.io/andrenijman/apex-os:base-d12d34502f65c4e8704e82e1285ce103a415e4ab`
+with the working tree's `apex-devices` bind-mounted over the image's, run in the
+foreground (a backgrounded `podman run` gets SIGTERMed and truncates while still
+exiting 0). Two standing caveats about that vantage point: `/sys` inside the
+container is the HOST's, so the Thunderbolt, Type-C and bluetooth-adapter lines
+are readings of the L16 and not of the image — the USB-C partner count changed
+between two runs an hour apart for that reason — and the image has `nmcli`
+installed, so the no-nmcli path is exercised by the suite's `path_without`, not
+by the container.
+
+### FOUND 11 — five returns stood above a reading that needed no daemon
+
+`do_network` returned the moment `have nmcli` failed, and
+`report_enterprise_wifi` returned on each of its own "could not look" branches.
+Below all of them sat the **system CA trust store** — a `[ -r ]` on one file.
+
+The five: no Wi-Fi plugin; nmcli not installed; nmcli did not answer in 10s; the
+saved profiles would not read; and **"no saved profile uses it"**, which
+describes nearly every machine. So the line whose whole job is to say *a correct
+password still fails to associate* printed almost nowhere. It is absent from the
+2026-09-13 built-image reading higher up this file for exactly that reason, and
+nothing in `tests/test-apex-devices.sh` had ever asserted it: a grep for "trust
+store" matched one explanatory string and no assertion at all.
+
+This is the round-26 defect in a different costume. "no saved profile uses it"
+was a safety claim made without looking; this is a reading **not taken because a
+different question could not be answered**. A missing nmcli is a fact about
+nmcli, not about the filesystem.
+
+Fixed on `task/p2-c-2` as `0403786f`: `report_nm_links`, `report_8021x_profiles`
+and `report_ca_trust` split out, the trust store called from `do_network` where
+no return in the Wi-Fi reporter can reach it, and a machine with no nmcli told
+which three questions cannot be answered there rather than losing half the
+report in silence. 76 → 90 assertions, mutation-proved eleven ways.
+
+### FOUND 12 — "systemd could not be asked" arrived as "it is not running"
+
+`unit_active` was `[ "$(systemctl is-active X)" = active ]`: two answers for a
+question with three. Measured in the image:
+
+```
+$ systemctl is-active avahi-daemon.service    ; echo $?
+System has not been booted with systemd as init system (PID 1). Can't operate.
+Failed to connect to system scope bus via local transport: Host is down
+1
+$ systemctl is-enabled avahi-daemon.service   ; echo $?
+enabled
+0
+```
+
+`is-enabled` reads the unit files and needs no bus. That is what made the
+negatives look like readings: every unit answered `enabled`, and then six
+readers reported a definite negative about a daemon nothing had asked about.
+
+| reader | before (stated) | after (read) |
+|---|---|---|
+| `mDNS (avahi)` | `enabled, not running` + "this is normal until something asks" | `enabled, and whether it RUNS could not be asked` |
+| `auto-mount` | `udisks2 installed, not running` | `udisks2 installed; whether it RUNS could not be asked` |
+| `paired devices` | `unavailable — bluetoothd is not running` | `unavailable — systemd did not say whether bluetoothd runs` |
+| `hotplug (udev)` | `systemd-udevd is NOT running` | `could not ask systemd whether systemd-udevd runs` |
+| `this machine serves` | `nothing (no smbd, no nfs-server)` | `could not ask systemd` |
+| `hotspot / tethering` | `nothing known is in the way` | `not known — the firewall could not be asked` |
+
+The last two are claims rather than readings. "nothing is shared from here" is a
+statement about what the rest of the network can reach. And the hotspot line was
+reached because `apex-firewall` read `inactive` — the single thing most likely
+to be in the way, unasked. **The 2026-09-13 section of this very file had to
+carry a footnote telling anyone quoting that line not to believe it.** A
+footnote is not a fix; the caveat belonged in the tool, and now is.
+
+Fixed as `919b3b20`. `unit_active_state` echoes the word systemd answered or
+`unknown`; the boolean `unit_active` is gone because every caller needs the
+third answer; `firewall_state` keeps `failed` distinct and still answers
+`absent` for a unit that genuinely is not installed, since `is-enabled` needs no
+bus. 90 → 108 assertions, mutation-proved twelve ways.
+
+Two harness defects were caught before any of this was trusted, both of the
+family this program has spent a week removing:
+
+1. `case_says … "readable"` is satisfied by **"present and unreadable"**. The
+   case that exists to prove the reader CAN read the trust store passed 91/91
+   under a mutant (`[ -r ] -> false`) that made it never read the file. The
+   trust-store and per-line cases compare the VALUE off the named line as text
+   now — `lvalue`/`case_line` — which also stops "this machine serves" being
+   answered by the "this machine serves SMB" line.
+2. A mutant that is *different but unobservable* passes silently. Removing the
+   `unknown) unasked=1` arm from the SMB branch alone changed nothing, because
+   the NFS branch sets the same flag in the same fixture. Removing both fails
+   the case. The harness now also refuses a mutant it could not build (the first
+   one lost a mutant to shell quoting and reported the unmutated run as green)
+   and a mutant byte-identical to the original.
+
+### The sweep also cleared three suspects
+
+- `unit_state` (`is-enabled`) is **not** affected: it answers off the unit files
+  with no bus, which is measured above, and its `unknown` branch is reachable
+  only when `systemctl` itself is absent. Left alone.
+- `cups.socket`, `sharing a printer` and `connectivity` were already honest —
+  they say `could not ask cupsd` / `could not reach NetworkManager`.
+- The `rc = 124` arm in the new `unit_active_state` was written and then
+  **removed**: a `timeout`-killed systemd leaves an empty answer, which is
+  already `unknown`, so the arm was a branch no test could tell from its
+  neighbour. The 5s cap is proved instead by a `systemctl.hang` fixture.
+
+### What a container showed, and what only a booted L16 can
+
+A container has no D-Bus, no systemd as PID 1, no NetworkManager, no
+bluetoothd, no udevd and no seat. After this round the affected readers no
+longer move from "not installed" to a false "installed and not running" — they
+move to **"installed, and whether it runs was not answered"**, which is the true
+statement. That is as far as a container can take them. It cannot take any of
+them to "working".
+
+These still need a booted machine, and reaching it needs `apex update` plus a
+reboot — the boot path, which agents are not allowed near:
+
+`links`, `connectivity`, `paired devices`, `hotplug (udev)`, `sharing a
+printer`, `this machine serves`, `auto-mount`, `mDNS (avahi)` and the hotspot
+line.
+
+### THE CHECKLIST — Andre's, in order
+
+Nothing here can be done by an agent. Each step says what to run and what the
+right answer looks like, so a wrong one is recognisable without reading the
+source.
+
+**1. Get the new reader onto the machine.**
+
+```
+sudo apex update
+```
+then reboot cleanly — use the menu, not a lid close and not a hard power cut. A
+crash before a clean shutdown discards the staged deployment and the machine
+comes back on the old image looking as though the update did nothing.
+
+After the reboot, confirm you are on the new one before trusting any reading:
+
+```
+rpm-ostree status | head -20
+apex devices all
+```
+
+**2. Read the six lines that only a booted machine can answer.** They are the
+whole reason this step exists. What each should say on a healthy L16:
+
+| line | right answer |
+|---|---|
+| `links` | a count, then one row per interface — **not** "could not reach NetworkManager" |
+| `connectivity` | `full, and checked` (the `21-apex-connectivity.conf` ships now, so "not detected, because nothing checked" would mean it did not land) |
+| `hotplug (udev)` | `systemd-udevd is running` |
+| `paired devices` | a count or `none` — "could not ask" here means the bus is broken |
+| `this machine serves` | `nothing (no smbd, no nfs-server)`, unless you have started a share |
+| `auto-mount` | `udisks2 running` |
+
+If any of those still says "could not be asked" on a booted machine, that is a
+real finding about the machine, not about the tool.
+
+**3. The one line that is a safety claim.** `hotspot / tethering`. On the booted
+L16 with the firewall running it should either name a blocker or say
+`nothing known is in the way`. **`not known — the firewall could not be asked`
+must not appear on a booted machine.** If it does, `apex-firewall.service` could
+not be queried and that is worth chasing.
+
+Note for context: the L16's `apex-firewall.service` was **inactive** on the old
+image, so that machine could not act as a positive control for the
+"firewall enforcing, dispatcher missing" branch. After this update it should be
+active; check with `systemctl is-active apex-firewall`.
+
+**4. Unmask avahi.** Until this is done the machine can discover neither a
+printer nor a scanner, and no image update will change that — a mask lives in
+`/etc` and survives every update.
+
+```
+sudo systemctl unmask avahi-daemon.service avahi-daemon.socket
+sudo systemctl start avahi-daemon.socket
+apex devices print
+apex devices scan
+```
+`mDNS (avahi)` should read `running`. Then a driverless printer on the LAN
+should appear in `queues`, and `scanners` should find an eSCL/WSD device if one
+is on the network.
+
+**5. The hotspot, end to end.** This is the only way to settle P2-006's
+acceptance, and it needs a phone.
+
+```
+nmcli device wifi hotspot ifname <wifi-iface> ssid apextest password <something>
+sudo apex firewall hotspot list        # the shared link must be in the set
+```
+Join the hotspot from the phone and check it gets an address and can resolve a
+name. Then tear it down and confirm the link leaves the set:
+```
+nmcli connection down Hotspot
+sudo apex firewall hotspot list
+```
+A hotspot **cannot** work under the firewall policy as it shipped before
+P1-044 — that was measured with positive controls and is not worth re-deriving.
+This step is checking that the dispatcher plus the `hotspot_ifaces` exception
+put it right.
+
+**6. The 802.1X profiles, which are a real exposure and not a tool bug.** Both
+saved enterprise profiles on the L16 validate no certificate. `apex devices
+network` will say so, and now also prints `system CA trust store`. Fix each
+profile with one of:
+
+```
+nmcli connection modify <name> 802-1x.system-ca-certs yes
+# or, if the campus publishes its own CA:
+nmcli connection modify <name> 802-1x.ca-cert /path/to/ca.pem
+```
+Until then the password is offered to whatever answers the SSID.
+
+**7. Printing and scanning over the LAN, if you share a printer.** `apex devices
+share` names the firewall at the point of failure; if it says `THE FIREWALL IS
+WHY`, the command it prints is the fix (`sudo apex firewall allow ipp`, etc.).
+
+Step 1 is the only one with a prerequisite. Steps 2–7 can be done in any order
+once the machine is booted on the new image.

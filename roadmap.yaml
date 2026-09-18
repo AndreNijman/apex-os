@@ -4341,7 +4341,7 @@ tasks:
 - id: P2-005
   title: Printing/scanning/network-share maturity
   priority: P2
-  status: partial
+  status: blocked
   area: desktop
   depends_on: []
   acceptance:
@@ -4399,11 +4399,60 @@ tasks:
     PARTIAL. The remainder is hardware nobody here has -- a print job to a printer, a share mounted from a server,
     a card in a slot -- plus the L16's masked avahi, whose unmasking is Andre's call and without which that
     machine can discover neither a printer nor a scanner. The 'rebuilt image and a re-run of apex devices' item is
-    now DONE for the container half and named precisely for the half that needs metal.
+    now DONE for the container half and named precisely for the half that needs metal. ROUND p2-c 2026-09-18
+    (round 27) -- THE AGENT SIDE OF THIS ITEM IS CLOSED; status is blocked because what remains needs a BOOTED
+    machine and reaching one needs `apex update` plus a reboot, which is the boot path and off-limits to agents.
+    The step-by-step checklist for Andre is written at the end of ROADMAP/evidence/P2-005-007-device-maturity.md:
+    update + clean reboot and confirm the deployment took; the six lines only a booted machine can answer (links,
+    connectivity, hotplug, paired devices, this-machine-serves, auto-mount) with the right answer for each; the
+    hotspot safety line, which must NOT read "not known" on a booted machine; unmask avahi (a mask lives in /etc
+    and survives every update, so no update will fix printer/scanner discovery); the end-to-end hotspot test with
+    a phone joined; and fixing the two saved 802.1X profiles that validate no certificate. On task/p2-c-2, tip
+    919b3b20, pushed, merged off roadmap/v2.2 266dcc57. TWO MORE READERS THAT STATED INSTEAD OF READING, both
+    found by running `apex devices` inside base-d12d3450 with the working tree's helper bind-mounted, foreground.
+    FOUND 11 (0403786f): the system CA trust store is a `[ -r ]` on one file and sat BELOW five separate "could
+    not look" returns -- no Wi-Fi plugin, nmcli absent, nmcli timed out, the profiles would not read, and "no
+    saved profile uses it", which describes nearly every machine. So the line that says a correct password still
+    fails to associate printed almost nowhere; it is missing from this file's own 2026-09-13 image reading for
+    that reason, and no assertion had ever named it. report_nm_links, report_8021x_profiles and report_ca_trust
+    are split out and the trust store is called from do_network where no return can swallow it. 76 -> 90
+    assertions, eleven mutants. FOUND 12 (919b3b20): unit_active was `[ "$(systemctl is-active X)" = active ]` --
+    two answers for a question with three. Measured in the image: is-active needs the bus and exits 1 with "Failed
+    to connect to system scope bus via local transport: Host is down", while is-enabled reads the unit files and
+    answers `enabled`. So six readers stated a definite negative about a daemon nothing had asked about: avahi
+    "enabled, not running" (with "this is normal"), udisks2 "installed, not running", "bluetoothd is not running",
+    "systemd-udevd is NOT running", "this machine serves nothing (no smbd, no nfs-server)", and the hotspot's
+    "nothing known is in the way". The last two are CLAIMS, not readings, and this file's 2026-09-13 section had
+    to carry a footnote telling readers not to believe the hotspot line -- the caveat belonged in the tool.
+    unit_active_state echoes the word systemd answered or `unknown`; the boolean unit_active is gone because every
+    caller needs the third answer; firewall_state keeps `failed` distinct and still answers `absent` for a unit
+    that is genuinely not installed, since is-enabled needs no bus. 90 -> 108 assertions, twelve mutants. THREE
+    SUSPECTS CHECKED AND CLEARED: unit_state (is-enabled) is unaffected and was left alone, measured not assumed;
+    cups.socket, `sharing a printer` and `connectivity` were already honest; and an `rc = 124` arm in the new
+    unit_active_state was written and then REMOVED because a timeout-killed systemd leaves an empty answer that is
+    already `unknown`, so it was a branch no test could tell from its neighbour -- the 5s cap is proved by a
+    systemctl.hang fixture instead. TWO HARNESS DEFECTS CAUGHT BEFORE THE ASSERTIONS WERE TRUSTED: `case_says
+    "readable"` is satisfied by "present and unreadable", so the case proving the reader CAN read the trust store
+    was green 91/91 under a mutant that made it never read the file -- the per-line cases compare the VALUE as
+    text now (lvalue/case_line), which also stops "this machine serves" being answered by the "this machine serves
+    SMB" line; and a mutant that is different but UNOBSERVABLE passes silently -- removing the `unknown)
+    unasked=1` arm from the SMB branch alone changed nothing because the NFS branch sets the same flag in the same
+    fixture, and removing both fails the case. The harness now refuses a mutant it could not build and a mutant
+    byte-identical to the original. WHAT A CONTAINER SHOWED VERSUS WHAT IT CANNOT: after this round the affected
+    readers move to "installed, and whether it runs was not answered", which is the true statement and as far as a
+    container can take them; none of them can reach "working" without a boot. Standing caveats on that vantage
+    point: /sys inside the container is the HOST's, so the Thunderbolt, Type-C and bluetooth-adapter lines are
+    readings of the L16 rather than the image (the USB-C partner count changed between two runs an hour apart);
+    and the image HAS nmcli, so the no-nmcli path is exercised by the suite's path_without, not by the container.
+    GATES ALL GREEN: shellcheck clean on 0.11 and on the runner's 0.9.0; coverage 163 scripts, 0 known-failing;
+    suites-in-ci 75 suites, 71 run, 4 exempt with no fifth added; no conflict markers. NOT RE-DERIVED, both
+    previously measured with positive controls: a hotspot cannot work under the pre-P1-044 policy, and the L16
+    cannot be the positive control for "firewall enforcing + dispatcher missing" because its apex-firewall.service
+    is inactive on the old image.
 - id: P2-006
   title: Networking maturity
   priority: P2
-  status: partial
+  status: blocked
   area: network
   depends_on: []
   acceptance:
@@ -4507,11 +4556,60 @@ tasks:
     prose fallback for an apex too old to offer --json. tests/check-firewall-ui.sh re-run ON THE LANDED SHELL TIP,
     headless: 35 passed, 0 failed, including 'the sweep reads the machine-readable status, not the prose' and 'an
     apex too old for --json still gets read, through a prose fallback'. c6c4f15 also wired five apex-shell suites
-    that ran nowhere into CI.
+    that ran nowhere into CI. ROUND p2-c 2026-09-18 (round 27) -- THE AGENT SIDE OF THIS ITEM IS CLOSED; status is
+    blocked because what remains needs a BOOTED machine and reaching one needs `apex update` plus a reboot, which
+    is the boot path and off-limits to agents. The step-by-step checklist for Andre is written at the end of
+    ROADMAP/evidence/P2-005-007-device-maturity.md: update + clean reboot and confirm the deployment took; the six
+    lines only a booted machine can answer (links, connectivity, hotplug, paired devices, this-machine-serves,
+    auto-mount) with the right answer for each; the hotspot safety line, which must NOT read "not known" on a
+    booted machine; unmask avahi (a mask lives in /etc and survives every update, so no update will fix
+    printer/scanner discovery); the end-to-end hotspot test with a phone joined; and fixing the two saved 802.1X
+    profiles that validate no certificate. On task/p2-c-2, tip 919b3b20, pushed, merged off roadmap/v2.2 266dcc57.
+    TWO MORE READERS THAT STATED INSTEAD OF READING, both found by running `apex devices` inside base-d12d3450
+    with the working tree's helper bind-mounted, foreground. FOUND 11 (0403786f): the system CA trust store is a
+    `[ -r ]` on one file and sat BELOW five separate "could not look" returns -- no Wi-Fi plugin, nmcli absent,
+    nmcli timed out, the profiles would not read, and "no saved profile uses it", which describes nearly every
+    machine. So the line that says a correct password still fails to associate printed almost nowhere; it is
+    missing from this file's own 2026-09-13 image reading for that reason, and no assertion had ever named it.
+    report_nm_links, report_8021x_profiles and report_ca_trust are split out and the trust store is called from
+    do_network where no return can swallow it. 76 -> 90 assertions, eleven mutants. FOUND 12 (919b3b20):
+    unit_active was `[ "$(systemctl is-active X)" = active ]` -- two answers for a question with three. Measured
+    in the image: is-active needs the bus and exits 1 with "Failed to connect to system scope bus via local
+    transport: Host is down", while is-enabled reads the unit files and answers `enabled`. So six readers stated a
+    definite negative about a daemon nothing had asked about: avahi "enabled, not running" (with "this is
+    normal"), udisks2 "installed, not running", "bluetoothd is not running", "systemd-udevd is NOT running", "this
+    machine serves nothing (no smbd, no nfs-server)", and the hotspot's "nothing known is in the way". The last
+    two are CLAIMS, not readings, and this file's 2026-09-13 section had to carry a footnote telling readers not
+    to believe the hotspot line -- the caveat belonged in the tool. unit_active_state echoes the word systemd
+    answered or `unknown`; the boolean unit_active is gone because every caller needs the third answer;
+    firewall_state keeps `failed` distinct and still answers `absent` for a unit that is genuinely not installed,
+    since is-enabled needs no bus. 90 -> 108 assertions, twelve mutants. THREE SUSPECTS CHECKED AND CLEARED:
+    unit_state (is-enabled) is unaffected and was left alone, measured not assumed; cups.socket, `sharing a
+    printer` and `connectivity` were already honest; and an `rc = 124` arm in the new unit_active_state was
+    written and then REMOVED because a timeout-killed systemd leaves an empty answer that is already `unknown`, so
+    it was a branch no test could tell from its neighbour -- the 5s cap is proved by a systemctl.hang fixture
+    instead. TWO HARNESS DEFECTS CAUGHT BEFORE THE ASSERTIONS WERE TRUSTED: `case_says "readable"` is satisfied by
+    "present and unreadable", so the case proving the reader CAN read the trust store was green 91/91 under a
+    mutant that made it never read the file -- the per-line cases compare the VALUE as text now
+    (lvalue/case_line), which also stops "this machine serves" being answered by the "this machine serves SMB"
+    line; and a mutant that is different but UNOBSERVABLE passes silently -- removing the `unknown) unasked=1` arm
+    from the SMB branch alone changed nothing because the NFS branch sets the same flag in the same fixture, and
+    removing both fails the case. The harness now refuses a mutant it could not build and a mutant byte-identical
+    to the original. WHAT A CONTAINER SHOWED VERSUS WHAT IT CANNOT: after this round the affected readers move to
+    "installed, and whether it runs was not answered", which is the true statement and as far as a container can
+    take them; none of them can reach "working" without a boot. Standing caveats on that vantage point: /sys
+    inside the container is the HOST's, so the Thunderbolt, Type-C and bluetooth-adapter lines are readings of the
+    L16 rather than the image (the USB-C partner count changed between two runs an hour apart); and the image HAS
+    nmcli, so the no-nmcli path is exercised by the suite's path_without, not by the container. GATES ALL GREEN:
+    shellcheck clean on 0.11 and on the runner's 0.9.0; coverage 163 scripts, 0 known-failing; suites-in-ci 75
+    suites, 71 run, 4 exempt with no fifth added; no conflict markers. NOT RE-DERIVED, both previously measured
+    with positive controls: a hotspot cannot work under the pre-P1-044 policy, and the L16 cannot be the positive
+    control for "firewall enforcing + dispatcher missing" because its apex-firewall.service is inactive on the old
+    image.
 - id: P2-007
   title: Bluetooth/dock/peripheral maturity
   priority: P2
-  status: partial
+  status: blocked
   area: hardware
   depends_on: []
   acceptance:
@@ -4588,7 +4686,56 @@ tasks:
     deliberately dirty mode-644 probe that makes the new gate exit 1 naming it while the old predicate, with that
     same file present, reports every discovered script clean. STILL PARTIAL. The remainder is a paired headset and
     an attached dock -- hardware nobody here has -- and a booted reading on the L16 for everything behind D-Bus,
-    which is the boot path.
+    which is the boot path. ROUND p2-c 2026-09-18 (round 27) -- THE AGENT SIDE OF THIS ITEM IS CLOSED; status is
+    blocked because what remains needs a BOOTED machine and reaching one needs `apex update` plus a reboot, which
+    is the boot path and off-limits to agents. The step-by-step checklist for Andre is written at the end of
+    ROADMAP/evidence/P2-005-007-device-maturity.md: update + clean reboot and confirm the deployment took; the six
+    lines only a booted machine can answer (links, connectivity, hotplug, paired devices, this-machine-serves,
+    auto-mount) with the right answer for each; the hotspot safety line, which must NOT read "not known" on a
+    booted machine; unmask avahi (a mask lives in /etc and survives every update, so no update will fix
+    printer/scanner discovery); the end-to-end hotspot test with a phone joined; and fixing the two saved 802.1X
+    profiles that validate no certificate. On task/p2-c-2, tip 919b3b20, pushed, merged off roadmap/v2.2 266dcc57.
+    TWO MORE READERS THAT STATED INSTEAD OF READING, both found by running `apex devices` inside base-d12d3450
+    with the working tree's helper bind-mounted, foreground. FOUND 11 (0403786f): the system CA trust store is a
+    `[ -r ]` on one file and sat BELOW five separate "could not look" returns -- no Wi-Fi plugin, nmcli absent,
+    nmcli timed out, the profiles would not read, and "no saved profile uses it", which describes nearly every
+    machine. So the line that says a correct password still fails to associate printed almost nowhere; it is
+    missing from this file's own 2026-09-13 image reading for that reason, and no assertion had ever named it.
+    report_nm_links, report_8021x_profiles and report_ca_trust are split out and the trust store is called from
+    do_network where no return can swallow it. 76 -> 90 assertions, eleven mutants. FOUND 12 (919b3b20):
+    unit_active was `[ "$(systemctl is-active X)" = active ]` -- two answers for a question with three. Measured
+    in the image: is-active needs the bus and exits 1 with "Failed to connect to system scope bus via local
+    transport: Host is down", while is-enabled reads the unit files and answers `enabled`. So six readers stated a
+    definite negative about a daemon nothing had asked about: avahi "enabled, not running" (with "this is
+    normal"), udisks2 "installed, not running", "bluetoothd is not running", "systemd-udevd is NOT running", "this
+    machine serves nothing (no smbd, no nfs-server)", and the hotspot's "nothing known is in the way". The last
+    two are CLAIMS, not readings, and this file's 2026-09-13 section had to carry a footnote telling readers not
+    to believe the hotspot line -- the caveat belonged in the tool. unit_active_state echoes the word systemd
+    answered or `unknown`; the boolean unit_active is gone because every caller needs the third answer;
+    firewall_state keeps `failed` distinct and still answers `absent` for a unit that is genuinely not installed,
+    since is-enabled needs no bus. 90 -> 108 assertions, twelve mutants. THREE SUSPECTS CHECKED AND CLEARED:
+    unit_state (is-enabled) is unaffected and was left alone, measured not assumed; cups.socket, `sharing a
+    printer` and `connectivity` were already honest; and an `rc = 124` arm in the new unit_active_state was
+    written and then REMOVED because a timeout-killed systemd leaves an empty answer that is already `unknown`, so
+    it was a branch no test could tell from its neighbour -- the 5s cap is proved by a systemctl.hang fixture
+    instead. TWO HARNESS DEFECTS CAUGHT BEFORE THE ASSERTIONS WERE TRUSTED: `case_says "readable"` is satisfied by
+    "present and unreadable", so the case proving the reader CAN read the trust store was green 91/91 under a
+    mutant that made it never read the file -- the per-line cases compare the VALUE as text now
+    (lvalue/case_line), which also stops "this machine serves" being answered by the "this machine serves SMB"
+    line; and a mutant that is different but UNOBSERVABLE passes silently -- removing the `unknown) unasked=1` arm
+    from the SMB branch alone changed nothing because the NFS branch sets the same flag in the same fixture, and
+    removing both fails the case. The harness now refuses a mutant it could not build and a mutant byte-identical
+    to the original. WHAT A CONTAINER SHOWED VERSUS WHAT IT CANNOT: after this round the affected readers move to
+    "installed, and whether it runs was not answered", which is the true statement and as far as a container can
+    take them; none of them can reach "working" without a boot. Standing caveats on that vantage point: /sys
+    inside the container is the HOST's, so the Thunderbolt, Type-C and bluetooth-adapter lines are readings of the
+    L16 rather than the image (the USB-C partner count changed between two runs an hour apart); and the image HAS
+    nmcli, so the no-nmcli path is exercised by the suite's path_without, not by the container. GATES ALL GREEN:
+    shellcheck clean on 0.11 and on the runner's 0.9.0; coverage 163 scripts, 0 known-failing; suites-in-ci 75
+    suites, 71 run, 4 exempt with no fifth added; no conflict markers. NOT RE-DERIVED, both previously measured
+    with positive controls: a hotspot cannot work under the pre-P1-044 policy, and the L16 cannot be the positive
+    control for "firewall enforcing + dispatcher missing" because its apex-firewall.service is inactive on the old
+    image.
 - id: P2-008
   title: First-party virtualization UX
   priority: P2
