@@ -44,6 +44,11 @@ set -eu
 
 TAB="$(printf '\t')"
 
+# The name of the tab a built layout lands in. Named once because two things
+# have to agree on it: `zellij_kdl`, which writes it, and `zellij_landed`,
+# which is the only evidence that the layout was actually applied.
+ZTAB="apex"
+
 die() { printf 'apex-mux: %s\n' "$*" >&2; exit 1; }
 
 usage() {
@@ -177,7 +182,7 @@ zellij_pane() {
 # `tiled` is a flat container zellij fills itself.
 zellij_kdl() {
     arrangement=$1; plan=$2
-    printf 'layout {\n    tab name="apex" {\n'
+    printf 'layout {\n    tab name="%s" {\n' "$ZTAB"
     if [ "$arrangement" = "main-vertical" ]; then
         printf '        pane split_direction="vertical" {\n'
     else
@@ -217,6 +222,20 @@ zellij_kdl() {
     printf '        }\n    }\n}\n'
 }
 
+# Is the session's server answering yet? `attach --create-background` returns
+# as soon as it has forked, so the name can be listed before anything will take
+# an action for it. `dump-layout` is the cheapest read-only action there is.
+zellij_up() {
+    zellij --session "$1" action dump-layout >/dev/null 2>&1
+}
+
+# Did the layout actually become a tab? This is the ONLY honest evidence: every
+# client involved exits 0 whether or not the server applied what it was sent.
+zellij_landed() {
+    zellij --session "$1" action dump-layout 2>/dev/null \
+        | grep -q "tab name=\"${ZTAB}\""
+}
+
 zellij_build() {
     session=$1; arrangement=$2; plan=$3
     zellij_has "$session" && return 0
@@ -226,8 +245,59 @@ zellij_build() {
     # problem; the alternative was a separate code path for `build` and `open`,
     # and only one of them would ever have been tested.
     zellij attach --create-background "$session" >/dev/null 2>&1
-    zellij --session "$session" --layout-string "$(zellij_kdl "$arrangement" "$plan")" \
-        >/dev/null 2>&1
+
+    # THE LAYOUT USED TO BE DROPPED, SILENTLY, AND WAITING MADE IT WORSE.
+    #
+    # What this used to run was `zellij --session NAME --layout-string KDL`.
+    # That is the command that STARTS a session; against one that already exists
+    # zellij documents it as adding the layout as a tab, and it exits 0 either
+    # way. So `build` returned success having built nothing — the session came
+    # up with only zellij's own scratch tab, and the CI failure read as an
+    # intermittent `mux-layouts` red on "the layout landed as a tab zellij can
+    # describe". Measured here on zellij 0.45.1, `build zellij` in a loop:
+    #
+    #   send immediately after creating       0 bad / 10
+    #   send after a 1s pause                 3 bad / 10
+    #   send after waiting for `zellij_has`   5 bad / 16, every one rc=0
+    #
+    # So "wait for the session first" is not the cure, it is the trigger, and a
+    # loaded CI runner is the slow caller that trips it. The real defect is
+    # underneath both: for a window after a session is created, its server
+    # ANSWERS `dump-layout` and ACCEPTS a tab request — `action new-tab` returns
+    # 0 and prints a tab id — and then discards it. Nothing in any exit code
+    # says so, and disabling the startup-tip plugin does not change it (still
+    # 1 drop in 20), so it is not the About pane holding focus.
+    #
+    # Three things together are what make this reliable, and each was measured:
+    # wait for the server to answer at all; ask over the IPC bus with
+    # `action new-tab`, which is the operation this actually is; and then VERIFY
+    # and RE-SEND, because a dropped request is cured by an identical one issued
+    # a moment later. If it never lands, this fails loudly rather than handing
+    # back a session the caller believes is set up.
+    layout="$(zellij_kdl "$arrangement" "$plan")"
+    waited=0
+    while [ "$waited" -lt 300 ]; do
+        zellij_up "$session" && break
+        waited=$((waited + 1))
+        sleep 0.1
+    done
+    zellij_up "$session" || die "the zellij session '$session' never came up"
+
+    # The poll is long against a landing that is consistently under 300ms, so a
+    # re-send cannot race a slow first one into a second `apex` tab.
+    attempt=0
+    while [ "$attempt" -lt 4 ]; do
+        zellij --session "$session" action new-tab --layout-string "$layout" \
+            >/dev/null 2>&1
+        polled=0
+        while [ "$polled" -lt 30 ]; do
+            zellij_landed "$session" && return 0
+            polled=$((polled + 1))
+            sleep 0.1
+        done
+        attempt=$((attempt + 1))
+    done
+    die "the zellij layout never became a tab in session '$session'"
 }
 
 zellij_open() {
