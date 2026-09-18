@@ -3,45 +3,55 @@
 items: P2-003, P2-004
 repo: both
 worktree: /var/tmp/apex-work/wt-p2-b4
-branch: task/p2-b-round30
+branch: task/p2-b-round31
 second_worktree: /var/tmp/apex-work/wt-p2-b4-sh
-second_branch: task/p2-b-round30
-scratch: /var/tmp/apex-work/scratch-p2-b/round30/
+second_branch: task/p2-b-round31
+scratch: /var/tmp/apex-work/scratch-p2-b/round31/
 
-The branch name moved to `task/p2-b-round30` this round (both repos, both cut
-from `roadmap/v2.2` and pushed empty at the start: apex-os `6b531503`,
-apex-shell `d5c781a`). It must exist and be pushed in BOTH repos even when a
+The branch name moved to `task/p2-b-round31` this round (both repos, both cut
+from `roadmap/v2.2` and pushed empty at the start: apex-os `da6fc0fb`,
+apex-shell `8eccbfa`). It must exist and be pushed in BOTH repos even when a
 repo gets no commits, because apex-shell's CI looks for a matching branch name. Full
 pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 `scratch-p2-b/p2-b.card.pre-round28.md`.
 
 ## NEXT
 
-**This round is finished and ready to land — nothing is outstanding on it.**
-apex-shell `task/p2-b-round30` is four commits at `20a1613`, pushed; apex-os
-`task/p2-b-round30` is empty at `6b531503`, pushed. CI on that exact tip
-(**35384106245**) is green on everything except `run-rtl-test.sh` at 17/3/2,
-which predates this branch and is item 6 of the standing queue. Both items'
-evidence is written and re-parsed.
+**Round 31, in progress.** Branches cut and pushed empty in both repos:
+apex-shell `task/p2-b-round31` from `8eccbfa`, apex-os `task/p2-b-round31`
+from `da6fc0fb`. Scratch `/var/tmp/apex-work/scratch-p2-b/round31/`.
 
-The next substantive work on this unit, in order, is what the ledger already
-names. **(1) The RECOVERY screen** — the last unaudited a11y surface in P2-003,
-and it can now be audited properly rather than source-only, because
-`tests/run-lockscreen-atspi-shim.sh` is a working template for reading a
-quickshell surface back over real AT-SPI: copy its shape, point it at the
-recovery window, and give it the same in-run one-node control.
-**(2) P2-004's RTL discriminator**, still 17/3/2 on the runner with the cause
-unidentified; the Qt difference is no longer a guess, because
-`check-quickshell-a11y-cause.sh` prints its toolchain and reported Qt
-**6.11.2** there against **6.10.3** here, and the other unruled-out difference
-is the runner's qt6ct having no `/etc/xdg/qt6ct/qt6ct.conf`, which APEX ships.
-**Do NOT close the RTL section by making section 1 SKIP — that section IS the
-discriminator.**
+Next action: read `src/services/config_tab/pages/RecoveryPage.qml`,
+`src/services/RecoveryService.qml` and `tests/lib/headless.sh` in full, then
+write an `apex` stub with a fixture JSON into `$HEADLESS_W/bin` and do ONE
+bring-up (shim + `ipc call nexus open recovery`) dumping the AT-SPI tree to
+`scratch-p2-b/round31/tree-recovery-before-markup.txt`. That dump is the
+measurement of what the recovery page publishes today, before anything is
+written.
+
+**FOUND 25, measured at the top of this round and it changes the shape of the
+work:** `src/services/config_tab/pages/RecoveryPage.qml` contains **ZERO**
+`Accessible.*` — `grep -c` is 0 over 892 lines. Its only accessibility comes
+from the shared `Cfg*` controls it instantiates (`CfgButton`, `CfgRow`,
+`CfgSegmented` have markup; `CfgSection`, `CfgScroll`, `CfgCommit`,
+`CfgLifecycle` have none). So the recovery screen is where the lock screen was
+BEFORE round 28: it needs the source-level pass first and the AT-SPI read-back
+second. Pointing round 30's shim template at it today would find the Cfg
+buttons, green, and certify nothing — the vacuous-pass family.
+
+**(2) P2-004's RTL discriminator** is independent of all of the above and is
+cheap here: run `run-rtl-test.sh` with `XDG_CONFIG_DIRS` pointed away from
+`/etc/xdg` so qt6ct cannot read APEX's `qt6ct.conf`. Section 1 going red names
+the conf as the cause (fix: install it in the `arch-validate` step); staying
+green leaves Qt 6.11.2 as the remaining candidate. **Do NOT close the RTL
+section by making section 1 SKIP — that section IS the discriminator.**
 
 **Not this unit's, and written down so it is not lost:** FOUND 22
-(`LockedHintService._failed()` never re-pumps) belongs with P0-015, and FOUND
-20's one-line upstream fix belongs to qtdeclarative — **nobody has filed it**.
-See BLOCKED ON. FOUND 24 leaves `tests/mutate-lockscreen-atspi.sh` with the old
+(`LockedHintService._failed()` never re-pumps) belongs with P0-015 and an agent
+is on it — do not touch `src/services/system/LockedHintService.qml`. FOUND 20's
+one-line qtdeclarative fix is **deliberately unfiled**: filing on a public
+tracker is an outward-facing action and Andre's call, not an agent's. It is
+flagged to him. FOUND 24 leaves `tests/mutate-lockscreen-atspi.sh` with the old
 trap shape on purpose.
 
 ## IN PROGRESS
