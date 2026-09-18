@@ -6,72 +6,45 @@ branch: task/p2-f-6   (cut from origin/roadmap/v2.2 @ f40ffefe, which is round 3
           task/p2-f-5 landed; nothing of this unit's is unlanded)
 
 ## NEXT
-**ROUND 31 IN PROGRESS. Two commits pushed on `task/p2-f-6`:**
+**ROUND 31 IS COMPLETE ON THE BRANCH. Three commits pushed on `task/p2-f-6`
+(cut from `roadmap/v2.2` @ `f40ffefe`):**
   `25ce55ec`  the `msgraph` transport
   `0ae35a7c`  `files.read -> msgraph.file.read`, `Files.Read` at the sign-in,
               and the "providers with nothing grantable" set turned from a
               vacuous loop into the positive claim that it is EMPTY
+  `f6643031`  the same claims through the real CLI and socket, plus the one
+              control that died when the transport landed, replaced rather
+              than quietly lost
+Worktree CLEAN at `f6643031`, `git diff --exit-code` silent, all 28 mutations
+restored with plain `cp` and `cmp` silent. set-status.py was called for
+**P2-017 only**; rounds 1, 3, 25-28 and 30 re-read out of roadmap.yaml
+afterwards and all still there (29,594 -> 37,030 bytes). P2-016/018/019
+untouched.
 
-**NEXT ACTION: commit 3 — the shell section in `tests/test-secret-broker.sh`,
-modelled on the `a Google account's grantable scope` section at ~line 645.**
-Add `a Microsoft account's grantable scope`: `apex account scopes microsoft`
-lists `files.read` and `msgraph.file.read`; `apex account grant
-microsoft.<name> files.read` is accepted and `apex secret grants` shows the
-CANONICAL `msgraph.file.read` (google->gdrive vs microsoft->msgraph makes each
-the other's routing control, which is the replacement for the control the
-commit below deleted); and a credential pinned to 127.0.0.1 is refused by the
-SHIPPED binary naming `graph.microsoft.com`, which proves `MsgraphProvider::at`
-is not in it. `grep <<<` not `printf | grep -q` — 141 on a match under
-pipefail. Then: rebuild, re-run the full gate set, and set-status on P2-017.
+**NEXT ACTION: P2-016's `ensure_private_dir` ownership check — the one P2-016
+follow-up that needs no screen and no boot.** Find it (it is in the multiuser
+work landed as merge `5eca2402`), establish what it checks today and whether a
+directory owned by another uid is refused or merely `chmod`-ed, and gate it
+both ways. Do NOT call set-status on P2-016 without reading its 8,724 bytes of
+evidence first — it belongs to unit `p2-016-multiuser-2` and set-status
+REPLACES.
 
-**A CONTROL WEAKENED and it must be said in the commit, not papered over:**
-the existing google section asserts `! grep 'no grantable scopes'`, whose
-witness was `apex account scopes microsoft` printing exactly that. After
-`0ae35a7c` nothing in the suite emits that string, so that one negative now
-passes on any build. Either drop it or leave a comment saying the positive
-assertion beside it carries the claim.
-
---- superseded, kept for the record ---
-**Commit 2 — the vocabulary, and it must land as ONE commit or an
-intermediate is red.** DONE as `0ae35a7c`. In `apexd/apex-secret-core/src/account.rs`: `GRAPH_SCOPES`
-gains `Scope { name: "files.read", operation: "msgraph.file.read", effect:
-Read, summary: ... }`; `MICROSOFT_OAUTH.scopes` gains `Files.Read`. In BOTH
-crates the `empty` assertion (`account.rs`'s
-`a_provider_with_no_transport_yet_says_so_instead_of_listing_nothing` and
-`apex-secretd/src/providers/mod.rs`'s
-`every_account_scope_names_an_operation_some_provider_actually_offers`) becomes
-`assert!(empty.is_empty(), ...)` — the POSITIVE claim that every shipped
-provider has something grantable — because with msgraph landed the old
-`assert_eq!(empty, vec!["microsoft"])` loop iterates zero times and proves
-nothing. `NoScopesYet` and `spend_advice`'s empty branch stay, held to a
-`static NO_SCOPES: Provider` constructed in the test (both `Provider` and
-`AccountRef` have pub fields, so `AccountRef { provider: &NO_SCOPES, name }`
-works) rather than to a table row. Also add `checked > 0` to msgraph's
-`the_declaration_is_one_a_registry_will_take` (deliberately omitted in commit 1
-so commit 1 was green on its own — the same sequencing bdd9b51f used), fix
-`apex/src/account.rs`'s module note line 54, and `docs/online-accounts.md`
-lines ~191 and ~250.
-
-Then commit 3: the shell section in `tests/test-secret-broker.sh`. NOTE the
-control weakens — "a Microsoft account still has nothing grantable" was the
-witness for the google negative, and after commit 2 nothing in the suite emits
-"no grantable scopes". Replace with: unknown scope on microsoft refused with
-"has no scope"; `grant microsoft.x files.read` recorded canonically as
-`msgraph.file.read` (google->gdrive vs microsoft->msgraph makes each the
-other's routing control); a loopback-pinned Graph credential refused by the
-SHIPPED binary naming `graph.microsoft.com`.
-
-After that, in descending size: gvfs — **a design paragraph only**, and
-P2-019's three remaining unsettled entries, two of which depend on other
-roadmap items. P2-019 is a DESIGN item and a design landed; do not build a
-fleet daemon. P2-016's `ensure_private_dir` ownership check is the one P2-016
-follow-up that needs no screen and no boot.
+After that, in descending value: `gvfs` is **a design paragraph only**; P2-019
+is a DESIGN item and a design already landed, so **do not build a fleet
+daemon**; its three remaining unsettled entries, two of which depend on other
+roadmap items.
 
 **P2-018 criterion 2 is CLOSED — do not reopen it, and do not widen the
 watchdog.** Round 29 ran every command in `menu.xml` from inside the real
 session. What is left on P2-018 needs an image build and a real boot, which
 this unit cannot do, plus one thing that needs synthetic pointer input: the
 menu is never OPENED (right-click -> ShowMenu -> Execute is not driven).
+
+**Still true and not superseded by anything this round did:** no Google
+endpoint and no Microsoft endpoint has ever been contacted from this
+repository. Google's refresh without a client secret is unproven; Graph's 302,
+`Files.Read`'s short form on the `common` tenant, and the public-client refresh
+are unproven. Do not let a later round's prose imply otherwise.
 
 ## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
 1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
@@ -147,6 +120,16 @@ Remaining, in the order this round takes them:
 
 ## DONE
 Round 10 (round 31 of the program), on task/p2-f-6:
+  f6643031  the shell half, and the honest part of it: the Google section's
+            `! grep 'no grantable scopes'` had `apex account scopes microsoft`
+            as its WITNESS, and `msgraph` landing killed it — so that negative
+            now passes on any build, which is said in the file rather than
+            papered over. What replaces it cannot be taken away by a landing:
+            the two device-code providers offer the SAME scope name and must
+            route into DIFFERENT operations, each asserted through `apex secret
+            grants`, so each is the other's control. Own sentinel per provider.
+            84 -> 93 passed. One assertion was written, measured, FOUND VACUOUS
+            and removed with its reasoning in place — see FOUND.
   0ae35a7c  `GRAPH_SCOPES` gains `files.read`, `MICROSOFT_OAUTH.scopes` gains
             `Files.Read`, and the vacuous loop the card predicted got a
             deliberate answer rather than a quiet pass: BOTH crates' `empty ==
@@ -351,9 +334,13 @@ Round 3, on task/p2-f-3 (pushed):
   c224eea7  a scope may not name an operation no provider offers — the
             cross-crate gate in apex-secretd, both mutants run and red.
 
-## IN PROGRESS (round 31)
-- `task/p2-f-6` cut from `roadmap/v2.2` @ `f40ffefe`. Commits `25ce55ec` and
-  `0ae35a7c` pushed; worktree clean at the tip. Pristine copies of every mutated file are in
+## IN PROGRESS (round 31 — FINISHED)
+- `task/p2-f-6` cut from `roadmap/v2.2` @ `f40ffefe`. Three commits pushed
+  (`25ce55ec`, `0ae35a7c`, `f6643031`); worktree clean at the tip, nothing
+  half-written. Pristine copies of every mutated file are in
+  `/var/tmp/apex-work/scratch-p2-f/round31/*.orig`, and the harness that
+  produced the 28 red is `mutate.py` + `mut_c1.py` / `mut_c2.py` /
+  `mut_c3.py` / `mut_c3b.py` in that directory. Pristine copies of every mutated file are in
   `/var/tmp/apex-work/scratch-p2-f/round31/*.orig`, and the mutation harness
   that produced the 16 red is `mutate.py` + `mut_c1.py` in that directory.
 - set-status.py has NOT been called yet this round. When it is, it is P2-017
@@ -373,6 +360,14 @@ Round 3, on task/p2-f-3 (pushed):
 4. `apex cf refresh` + the `cloudflare.rs` status line + the step-7 answer.
 
 ## FOUND
+- **AN ASSERTION THAT PASSED FOR THE WRONG REASON, caught only by mutating it.**
+  `apex secret use account.microsoft.local msgraph.file.read '12319191!11919'`
+  exits non-zero, so "a consumer OneDrive id is refused" read green — but the
+  HOST pin fires before the id check, so it was measuring the pin. The mutation
+  that deleted the id check entirely left it GREEN. Removed, with the reasoning
+  in its place, and measured in Rust instead. **The generalisation worth
+  carrying: an assertion on an exit code alone, against a path with more than
+  one refusal on it, measures whichever refusal is first.**
 - **A consumer OneDrive item id is `{driveId}!{n}` and `valid_name` refuses
   `!`.** Not recalled — read off Microsoft's `driveItem: content` page, whose
   own example response is `{"id": "12319191!11919"}`. Work and school ids
