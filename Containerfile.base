@@ -500,7 +500,24 @@ RUN set -eux; \
     # SILENTLY, taking the dark-theme defaults down with it.
     python3 -c "import json,sys; json.load(open('/etc/firefox/policies/policies.json'))"; \
     python3 -c "import json; p=json.load(open('/etc/firefox/policies/policies.json'))['policies']['Preferences']; assert p['browser.startup.homepage']['Value']=='about:home', p"; \
-    echo "firefox: APEX prefs sort last; homepage override verified"
+    # And its SHAPE, which is a different question from its validity and a much
+    # more expensive one to get wrong. The agent sandbox binds / read-only, so
+    # THIS file is read inside every browser capsule as well as by the user's
+    # own Firefox -- measured, in docs/browser-capsule-auth.md, which is where
+    # the per-capsule CA bind comes from. A Certificates.Install added here
+    # would be a certificate authority every capsule on the machine trusts; a
+    # Proxy would decide where every capsule connects; a preference at
+    # Status 'locked' would be one no user can undo. None of the three is
+    # visible at runtime and none of them is an error.
+    #
+    # So the assertion is positive rather than a list of the three forbidden
+    # keys: `policies` carries Preferences and nothing else, and every
+    # preference is a dict at Status 'default'. A policy nobody has thought of
+    # yet then also has to be a deliberate edit to this line, and a bare value
+    # -- the newer schema's spelling of 'locked' -- fails on the subscript
+    # rather than passing as a preference with no Status at all.
+    python3 -c "import json; d=json.load(open('/etc/firefox/policies/policies.json'))['policies']; assert set(d)=={'Preferences'}, sorted(d); assert all(isinstance(v,dict) and v['Status']=='default' for v in d['Preferences'].values()), d['Preferences']"; \
+    echo "firefox: APEX prefs sort last; homepage override verified; policy carries preferences only, all user-changeable"
 
 # Templates seeded per-user by the provisioner (NOT /etc/skel: the provisioner
 # has to substitute the edition accent, and skel cannot).
