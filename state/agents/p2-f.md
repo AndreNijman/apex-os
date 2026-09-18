@@ -33,13 +33,21 @@ cap fires before the body) — its first version claimed the second in a comment
 while asserting only the first, because 40 KB is not over a 3 MiB limit.
 Workspace 3347 / 0 / 2 unchanged (assertions, not new tests), clippy exit 0.
 
-**NEXT ACTION: commit 4 — the prose that this series made stale.** Check and
-fix `apexd/apex-backup-core/src/format.rs:30` ("`apex-secretd`'s
-`broker::HTTP_MAX_BYTES` caps a brokered *reply* at …") against what now
-happens, and grep `docs/online-accounts.md` for any sentence about oversized
-reads. Then run the shell suites (`tests/test-secret-broker.sh`, shellcheck,
-suites-in-CI, containerfile, doc verbs) and record P2-017 evidence with
-set-status.py — READ-APPEND-REPARSE, it REPLACES.
+**COMMIT 4 IS DONE AND PUSHED: `0b827a8c`** — the refusal through the real
+CLI, socket, agentd and curl, in `tests/test-apex-backup-s3.sh` (the one
+transport of the family a loopback double can reach through the shipped
+binary; gdrive and msgraph refuse `127.0.0.1` by design). The double answers
+one key name with a lying `Content-Length`, so the successful read before it
+is a control in the same session. Suite starts an agentd of its OWN inside the
+fixture and kills it by pid; the machine's is never touched. 3 mutations, all
+red. `docs/online-accounts.md` gains the limit in its limits section.
+`apex-backup-core/src/format.rs`'s chunk arithmetic CHECKED and left alone.
+backup-s3 27 -> 34 / 0.
+
+**NEXT ACTION: record P2-017 evidence with set-status.py.** Read its current
+evidence out of `ROADMAP/roadmap.yaml` FIRST, append this round to it, pass the
+whole string, then re-read and confirm rounds 1, 3, 25-28, 30 and 31 all
+survived. P2-016/018/019 must NOT be touched.
 
 Then commit 4 (prose: `apex-backup-core/src/format.rs:30` and
 `docs/online-accounts.md`). Details in ROUND 32 PLAN below.

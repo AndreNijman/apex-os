@@ -610,6 +610,17 @@ than this branch.
     QTranslator code at all (`nm -DC`, `strings`). The Arch runner has upstream
     release **qt6ct 0.11-8**, read out of the CI log, which is the plain build.
 
+    **CONFIRMED FROM THE RUNNER, 2026-09-18 run 35388802498.** The iff added to
+    `run-rtl-test.sh` this round passed on the Arch runner in the OPPOSITE
+    branch to the one it passes in here, which is exactly what it was built
+    for: *"it did NOT flip, and
+    /usr/lib/qt6/plugins/platformthemes/libqt6ct.so links no libKF6I18n, so
+    this machine's red above is that build of qt6ct and not APEX."* Its
+    can-answer-NO control passed there too, and the LD_PRELOAD pin correctly
+    reported COULD-NOT-RUN because the runner has no libKF6I18n at all. So the
+    one line of this finding that was inferred rather than measured is now
+    measured, on the machine it was about.
+
     **Both ledger candidates are eliminated, by measurement rather than by
     argument.** The conf: repeating the ar_EG run with `XDG_CONFIG_DIRS` and
     `XDG_CONFIG_HOME` both pointed at an empty directory — so qt6ct cannot find
