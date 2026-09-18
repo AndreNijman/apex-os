@@ -48,18 +48,23 @@
 //! [`account::OAuth::client_id`] for the whole argument. Google also wants a
 //! `client_secret`, which is read from stdin and never from argv.
 //!
-//! **A Google token can now be spent; a Microsoft one still cannot.**
-//! `apex-secretd` ships a `gdrive` provider, so `apex account grant
-//! google.<name> files.read` records a grant for `gdrive.file.read` and the
-//! daemon performs it. There is still no `msgraph` transport, so
-//! [`account::GRAPH_SCOPES`] is empty and `apex account grant` refuses a
-//! Microsoft scope for exactly that reason.
+//! **Every provider in this table can now be spent.** `apex-secretd` ships a
+//! `gdrive` provider and an `msgraph` one, so `apex account grant
+//! google.<name> files.read` records a grant for `gdrive.file.read` and
+//! `apex account grant microsoft.<name> files.read` records one for
+//! `msgraph.file.read`, and the daemon performs both. Microsoft was the last
+//! provider whose token could be stored, refreshed forever and spent on
+//! nothing; that sentence has been deleted from here rather than edited,
+//! because it is no longer true of anything.
 //!
-//! What a Google account can reach is narrower than "your Drive", and
-//! [`account::DRIVE_SCOPES`] is where the reason is written down: the device
-//! grant only allows `drive.file`, which sees files this OAuth client created
-//! or the user individually picked. Until a write operation exists there is
-//! nothing for a read to find, and the status line below says so.
+//! What each account can reach is narrower than "your files", in different
+//! ways and for different reasons, and both are written down where the scope
+//! table is: Google's limit is Google's — the device grant only allows
+//! `drive.file`, which sees files this OAuth client created or the user
+//! individually picked, so until a write operation exists there is nothing for
+//! a read to find. Microsoft's limit is this build's — `Files.Read` really can
+//! read the account's own OneDrive, and there is one operation because one was
+//! written.
 
 use std::io::Read;
 
@@ -845,42 +850,69 @@ fn rm(reference: &str) -> Result<i32> {
 mod tests {
     /// What `apex account add` says at the end, held to the scope table.
     ///
-    /// Two directions, because the branch got them backwards once already in
-    /// the other direction: for four rounds this printed "nothing can spend
-    /// it yet" unconditionally, which was true of every provider then and
-    /// became false for Google the moment `gdrive` landed. The rule is that
-    /// the sentence is READ off the table, so it cannot be true of the table
-    /// and false of the build.
+    /// Two directions, because the branch got them backwards once already: for
+    /// four rounds this printed "nothing can spend it yet" unconditionally,
+    /// which was true of every provider then and became false for Google the
+    /// moment `gdrive` landed and for Microsoft when `msgraph` did. The rule is
+    /// that the sentence is READ off the table, so it cannot be true of the
+    /// table and false of the build.
+    ///
+    /// **No shipped provider takes the empty branch any more.** It is exercised
+    /// against a provider built in this test rather than deleted, for the same
+    /// reason `AccountError::NoScopesYet` is kept: the next provider added
+    /// before its transport must not be sent to a grant the cross-crate scope
+    /// gate will refuse. A branch whose only witness has just been deleted is a
+    /// branch that rots.
     #[test]
     fn the_advice_after_signing_in_reads_the_providers_own_scope_table() {
-        let google = account::provider("google").expect("google");
-        let said = spend_advice(google, "google.work").join("\n");
-        assert!(
-            said.contains("apex account grant google.work files.read"),
-            "a provider with a transport must be sent to the grant: {said}"
-        );
-        assert!(
-            !said.contains("nothing can spend it"),
-            "a Google token can be spent now: {said}"
-        );
-        // Every scope, not just the first: a provider that gains a second one
-        // must not have it silently dropped from the advice.
-        for scope in google.scopes {
+        // Both device-code providers, and every scope of each: a provider that
+        // gains a second one must not have it silently dropped.
+        let mut seen = 0;
+        for (id, reference, transport) in [
+            ("google", "google.work", "gdrive"),
+            ("microsoft", "microsoft.work", "msgraph"),
+        ] {
+            let p = account::provider(id).expect(id);
+            assert!(!p.scopes.is_empty(), "{id} has no scopes to advise about");
+            assert_eq!(p.transport, transport);
+            let said = spend_advice(p, reference).join("\n");
             assert!(
-                said.contains(&format!("apex account grant google.work {}", scope.name)),
-                "scope {} is missing from the advice: {said}",
-                scope.name
+                !said.contains("nothing can spend it"),
+                "{id} has a transport now: {said}"
             );
+            for scope in p.scopes {
+                assert!(
+                    said.contains(&format!("apex account grant {reference} {}", scope.name)),
+                    "scope {} is missing from {id}'s advice: {said}",
+                    scope.name
+                );
+                seen += 1;
+            }
         }
+        assert!(seen >= 2, "only {seen} scopes were advised about");
 
-        let microsoft = account::provider("microsoft").expect("microsoft");
-        let said = spend_advice(microsoft, "microsoft.work").join("\n");
+        // The other branch, on a provider built here — `account::provider`
+        // could not reach one, which is the point.
+        static NO_SCOPES: account::Provider = account::Provider {
+            id: "notyet",
+            label: "a provider whose transport is not written yet",
+            transport: "notyet",
+            flow: Flow::AppPassword,
+            presentation: Presentation::Basic,
+            host: account::Host::PerAccount,
+            path: "",
+            path_carries_username: false,
+            obtain: "nowhere: this provider exists only inside this test",
+            scopes: &[],
+            oauth: None,
+        };
+        let said = spend_advice(&NO_SCOPES, "notyet.work").join("\n");
         assert!(
             said.contains("nothing can spend it yet"),
             "a provider with no transport must say so: {said}"
         );
         assert!(
-            said.contains("msgraph"),
+            said.contains("notyet"),
             "and name the transport that is missing: {said}"
         );
         // And it must NOT send somebody to a grant the cross-crate scope gate

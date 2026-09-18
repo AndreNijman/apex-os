@@ -21,6 +21,7 @@ pub mod cloudflare;
 pub mod gdrive;
 pub mod git;
 pub mod mcp;
+pub mod msgraph;
 pub mod oauth;
 pub mod s3;
 pub mod webdav;
@@ -41,6 +42,7 @@ pub fn default_registry(run_dir: std::path::PathBuf) -> Result<Registry, String>
     registry.register(Box::new(cloudflare::CloudflareProvider::new()))?;
     registry.register(Box::new(gdrive::GdriveProvider::new()))?;
     registry.register(Box::new(mcp::McpProvider::new(run_dir.clone())))?;
+    registry.register(Box::new(msgraph::MsgraphProvider::new()))?;
     registry.register(Box::new(oauth::OAuthProvider::new()))?;
     registry.register(Box::new(s3::S3Provider))?;
     registry.register(Box::new(webdav::WebdavProvider::new(run_dir)))?;
@@ -101,6 +103,7 @@ mod tests {
                 "git.ls-remote",
                 "git.push",
                 "mcp.request",
+                "msgraph.file.read",
                 "oauth.token.refresh",
                 "s3.object.read",
                 "s3.object.write",
@@ -136,7 +139,8 @@ mod tests {
     ///
     /// It was not hypothetical. Before this test, `apex account grant google
     /// files.read` succeeded and wrote a grant for `gdrive.file.read`; no
-    /// provider has ever offered `gdrive.*` or `msgraph.*`, and `S3_SCOPES`
+    /// provider HAD ever offered `gdrive.*` or `msgraph.*` — both do now, as of
+    /// rounds 30 and 31 — and `S3_SCOPES`
     /// named `s3.object.list` which the S3 provider landed in `5054be77`
     /// does not have either. Every one of those is a permission a user was
     /// told they had granted and which could never be exercised — the failure
@@ -196,22 +200,37 @@ mod tests {
             "only {checked} account scopes were checked; this test ran on almost \
              nothing, which is how it would pass while the tables were empty"
         );
-        // The providers that deliberately offer NO scope yet, named one at a
-        // time. Adding a sixth provider with an empty table has to be a line
-        // somebody writes here on purpose, because "it has no scopes" is
-        // exactly what the loop above cannot notice.
+        // Every account scope must ALSO be reachable, and the loop above
+        // cannot notice a provider that offers none — it simply iterates
+        // nothing for that provider. This used to be
+        // `assert_eq!(empty, vec!["microsoft"])`; `msgraph` landed, the set
+        // became empty, and an equality against an empty vec with a loop over
+        // it is the vacuous shape this program hunts. So it is asserted as the
+        // positive claim it now is: **there is no shipped provider APEX can
+        // hold a credential for and spend on nothing.**
         let empty: Vec<&str> = account::PROVIDERS
             .iter()
             .filter(|p| p.scopes.is_empty())
             .map(|p| p.id)
             .collect();
-        assert_eq!(
-            empty,
-            vec!["microsoft"],
-            "the set of account providers with nothing grantable changed. Each one is \
-             a provider APEX can hold a credential for and spend on nothing; if a \
-             transport landed, give it its scopes, and if one was added, say why here."
+        assert!(
+            empty.is_empty(),
+            "{empty:?} can hold a credential and spend it on nothing. If a provider \
+             was added before its transport, either give it its scopes or turn this \
+             back into an equality naming it, with the reason — `apex account add` \
+             and `AccountError::NoScopesYet` still handle that case, and \
+             `apex-secret-core`'s \
+             `a_provider_with_no_transport_yet_says_so_instead_of_listing_nothing` \
+             holds them to it against a provider it builds itself."
         );
+        // What stops an EMPTIED `PROVIDERS` passing this is the `checked >= 5`
+        // floor above, and nothing else — said here because the first draft of
+        // this block added a second assertion claiming to cover it
+        // (`count(with scopes) == PROVIDERS.len()`), which on an empty table is
+        // `0 == 0` and is the same predicate as the emptiness above. A comment
+        // crediting a gate with a property it does not have is the defect this
+        // whole test exists to prevent, so the assertion was removed rather
+        // than kept for the comfort of it.
     }
 
     #[test]
