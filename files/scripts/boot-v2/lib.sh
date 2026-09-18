@@ -107,6 +107,62 @@ ovmf_code_secboot() {
     like a broken PCR policy."
 }
 
+# ovmf_build_id FILE — the edk2 revision this firmware binary was built from.
+#
+# PROVENANCE IS READ OUT OF THE BINARY, NEVER OFF THE FILENAME. The
+# alternate-firmware path below takes an operator-supplied file, and this
+# unit's own scratch directory already holds the trap it exists to catch: a
+# build with Secure Boot and SMM compiled OUT, saved under the name
+# `OVMF_CODE_4M.secboot.fd`. A scenario that trusted that name would report
+# "the firmware code changed" for a run in which Secure Boot had been switched
+# off instead, which is two variables moving and a conclusion about neither.
+#
+# The revision appears in the uncompressed SEC firmware volume, inside the
+# build path the rpm was compiled under
+# (/builddir/.../edk2-<12 hex>/Build/OvmfX64/...), so `grep -a` finds it with
+# no binutils — which the lab image does not install and must not start to.
+# Prints nothing and returns 0 when there is no such string: the caller
+# decides what an unidentifiable firmware means.
+ovmf_build_id() {
+    grep -aoE 'edk2-[0-9a-f]{12}' "$1" 2>/dev/null | head -1 || true
+}
+
+# A SECOND Secure Boot firmware build, supplied by whoever runs the lab, for
+# the one experiment the shipped lab image cannot perform on its own: changing
+# PCR 0.
+#
+# PCR 0 is the firmware CODE measurement. Moving it needs two firmware images
+# that differ in code and in nothing else, and the lab image ships exactly one
+# edk2 version — its `OVMF_CODE_4M.fd` and `OVMF_CODE_4M.secboot.qcow2` are the
+# same revision built with and without Secure Boot enforcement, so swapping
+# those two changes the enforcement as well as the code. A dbx update, which
+# the firmware-change scenario does use, moves PCR 7 and never PCR 0.
+#
+# So the second build is an INPUT, named by $APEX_BOOTLAB_FW_ALT: a raw `.fd`
+# or a `.qcow2` (converted here, once, like the discovered pair). It must be a
+# Secure Boot build of a different edk2 revision; the scenario that uses it
+# asserts both rather than trusting this comment.
+#
+# Return codes are distinct because the three ways this fails mean different
+# things to a reader: 1 nobody asked for one, 2 the path is wrong, 3 the
+# conversion failed.
+ovmf_code_alt() {
+    local p="${APEX_BOOTLAB_FW_ALT:-}"
+    [[ -n "$p" ]] || return 1
+    [[ -f "$p" ]] || return 2
+    case "$p" in
+        *.qcow2)
+            mkdir -p "$BOOTV2_FW_CACHE"
+            local out
+            out="$BOOTV2_FW_CACHE/alt-$(basename "${p%.qcow2}").fd"
+            if [[ ! -s "$out" ]]; then
+                qemu-img convert -O raw "$p" "$out" >&2 || return 3
+            fi
+            printf '%s\n' "$out" ;;
+        *)  printf '%s\n' "$p" ;;
+    esac
+}
+
 # The PRISTINE template — the one with no keys in it at all.
 #
 # This is not interchangeable with OVMF_VARS.secboot.fd, and the difference

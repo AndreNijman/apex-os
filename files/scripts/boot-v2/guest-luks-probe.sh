@@ -26,6 +26,12 @@ say() {
     printf '<0>APEX-BOOTLAB: %s\n' "$*" > /dev/kmsg 2>/dev/null || true
 }
 
+# The plaintext marker string. Defined here, once, rather than inside the
+# successful-unlock branch where it used to live: the recovery branch reads it
+# back too, and a variable that is only set on the path that is NOT taken
+# expands to the empty string, which `case` matches against everything.
+MARKER="APEX-BOOTLAB-PLAINTEXT-MARKER"
+
 MODE=unknown
 # Two opt-in behaviours, each off unless the UKI's SIGNED command line asks for
 # it. The command line is inside the signed image, so a scenario cannot turn
@@ -96,6 +102,18 @@ if [ -r /sys/class/tpm/tpm0/pcr-sha256/7 ]; then
 else
     say "pcr7=<unreadable>"
 fi
+# PCR 0 is the firmware CODE measurement: the platform firmware's own volumes,
+# extended by the firmware before anything else runs. It is reported for the
+# same reason PCR 7 is — the firmware-code scenario binds a CONTROL volume to
+# this value, and a control enrolled against a number nobody printed would be
+# bound to whatever the TPM happened to hold. It is also the register a vendor
+# UEFI update moves, which is the case a user meets and the reason L-001 lists
+# "firmware update" at all.
+if [ -r /sys/class/tpm/tpm0/pcr-sha256/0 ]; then
+    say "pcr0=$(cat /sys/class/tpm/tpm0/pcr-sha256/0)"
+else
+    say "pcr0=<unreadable>"
+fi
 [ -c /dev/tpmrm0 ] && say "tpm-device=present" || say "tpm-device=absent"
 
 # ── the unlock attempt ─────────────────────────────────────────────────────
@@ -159,7 +177,6 @@ if attach apexlab /dev/vdb - "$TPM_OPTS"; then
     # 511 characters and adds a newline: exactly 512 bytes, emitted by one
     # printf, and the trailing newline is what lets `read` stop after one
     # sector instead of scanning 64 MB for a line terminator.
-    MARKER="APEX-BOOTLAB-PLAINTEXT-MARKER"
     EXISTING=""
     read -r EXISTING < /dev/mapper/apexlab 2>/dev/null || true
     case "$EXISTING" in
@@ -307,6 +324,18 @@ else
     if [ -r /apex-bootlab-recovery-key ]; then
         if attach apexlab /dev/vdb /apex-bootlab-recovery-key headless=1; then
             say "recovery-unlock=SUCCESS"
+            # AND IT IS THE SAME DATA. A mapper appearing proves the recovery
+            # key satisfied a keyslot; it does not by itself say the user got
+            # their disk back, which is the whole claim behind "does not strand
+            # users". The marker was written through the TPM path on an earlier
+            # boot, so reading it here joins the two: refused by the TPM, opened
+            # with the recovery key, same plaintext.
+            RECOV=""
+            read -r RECOV < /dev/mapper/apexlab 2>/dev/null || true
+            case "$RECOV" in
+                "$MARKER"*) say "recovery-marker=found" ;;
+                *)          say "recovery-marker=absent" ;;
+            esac
             /usr/lib/systemd/systemd-cryptsetup detach apexlab >/dev/null 2>&1 || true
         else
             say "recovery-unlock=FAILED"
