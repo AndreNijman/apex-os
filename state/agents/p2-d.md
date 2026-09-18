@@ -23,13 +23,18 @@ branch: **task/p2-d-6** (off roadmap/v2.2 @ 6b531503)
 
 ## NEXT
 
-Update the two docs, which are now the only thing gap 5 is missing.
-`docs/browser-capsule.md`: the "not built" list still says a capsule cannot be
-told to trust a CA. `docs/browser-capsule-auth.md`: the "What is not decided"
-bullet on the per-run CA bind is DECIDED now (strike it the way the
-`policies.json` guard bullet was struck), and **three places in that file say
-route B takes protocol 10, which is wrong as of `1fff2c45` — route B takes
-11.** Then `bash tests/check-doc-verbs.sh`.
+**Round 30 is complete and everything is pushed.** Gap 5 is closed and recorded
+against P2-012, P2-008 and P2-009 (evidence re-parsed afterwards; every earlier
+round survived — P2-012 is 31.5 KB now).
+
+The next action for whoever picks this up is NOT engineering. It is getting
+Andre's answer to the question under "The question, for Andre" in
+`docs/browser-capsule-auth.md`: may `apex-agentd` read the plaintext of a
+capsule's connection to the one destination that capsule was pinned to, in
+order to add a credential the capsule is never given? If yes, route B is a
+round of its own and **it takes PROTOCOL_VERSION 11** — 10 is gone. If no,
+P2-012's "capability auth" is permanently unmet rather than pending and the
+item should say so.
 
 ## THIS ROUND'S SCOPE (round 30), narrow on purpose
 
@@ -58,6 +63,15 @@ Design taken (advisor-reviewed) before any code:
 
 ## DONE (round 30, branch task/p2-d-6)
 
+- `2fc59c6b` — **the docs**. `docs/browser-capsule.md`'s NOT BUILT list no
+  longer says a capsule cannot be told to trust a CA; a section replaces it.
+  `docs/browser-capsule-auth.md` reserved protocol 10 for route B while gap 5
+  did not exist — **route B is 11 now**, corrected in all three places with the
+  reason rather than silently. The "What is not decided" bullet is struck and
+  records the two things the build added that it did not foresee (the merge,
+  and the refusal on an absent policy file). One stale sentence fixed: the
+  shape of the shipped `policies.json` IS asserted, by round 29's
+  `Containerfile.base` addition.
 - `8e1ca9cc` — **the capsule itself says what it sees**:
   `apexd/apex-agentd/tests/browser_ca_bind.rs`, a private daemon and a confined
   session that copies out what it finds at
@@ -143,6 +157,25 @@ Design taken (advisor-reviewed) before any code:
   engine's pre-check at `apex-browser` ~L505 falls back to the bare host, so
   `--allow e.example:8443` passes it when only `e.example` is allowed and the
   DAEMON refuses it. Fail-closed; the two just do not agree.
+
+## FOUND (round 30)
+
+- **Two defects in my own work, both caught by RUNNING a gate rather than
+  reading.** The suite assertion "the CA lands before the separator" was first
+  written with `${#argv%%<pat>*}` — bash rejects that as a bad substitution, so
+  it printed an error and asserted NOTHING, neither PASS nor FAIL. And
+  `2fff910f` was pushed without `cargo clippy` over it: `BrowserCmd::Run`
+  crossed `large_enum_variant` exactly as `AgentCmd::Run` had. Run the gate
+  before the commit, not after the push.
+- **Nothing populated `SandboxSpec.ro`/`ro_at` from the wire before this
+  round.** That is why gap 5 was a code change rather than a flag, and it is
+  why the generic shape — a wire field naming a file AND a path to bind it over
+  — was rejected: it would let any client shadow any path in any session's
+  namespace.
+- **`--ro-bind-try` over a path that does not exist is a silent no-op.** It is
+  the whole reason `browser_ca::install` refuses when the machine has no
+  `/etc/firefox/policies/policies.json`, and it is worth knowing for anything
+  else that binds over `/etc`.
 
 ## BLOCKED ON
 

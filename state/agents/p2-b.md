@@ -34,23 +34,22 @@ asserts. Restore from a pristine `mktemp -d` copy with sha256 verification, not
 
 ## IN PROGRESS
 
-apex-shell `task/p2-b-round30`: `273c1fb` is pushed (the named cause, its pin
-and its mutation pair). **UNCOMMITTED in the worktree right now**, three files:
+apex-shell `task/p2-b-round30`: `273c1fb` pushed. **UNCOMMITTED in the worktree**:
 `tests/quickshell-a11y-shim.cpp`, `tests/run-lockscreen-atspi-shim.sh`
-(**23 passed / 0 failed / 1 skipped, five runs in a row** under `env -i`) and
-`tests/mutate-lockscreen-atspi-shim.sh` (shellcheck clean, all seven anchors
-verified present, **running now** — 6 red mutants and 2 green, about a minute
-each). Still to do after it: the ci.yml step and structure-check REQUIRED
-entries for all three, the commit, and appending the shim half to P2-003's
+(**23/0/1**, six runs, last one after the PUA-class fix),
+`tests/mutate-lockscreen-atspi-shim.sh`, and the ci.yml wiring for all three
+(step + structure-check REQUIRED entries; yaml parses,
+`check-suites-run-in-ci.sh` 66 suites / 66 reachable / 0 exempt). The mutation
+harness is **re-running now** after FOUND 23; its first run was
+8 applied / 5 CAUGHT / **1 SURVIVED** / 2 HELD, and that survival was real —
+see FOUND 23. Not yet done: the commit, and appending the shim half to P2-003's
 roadmap evidence (which currently stops at `273c1fb`). apex-os
 `task/p2-b-round30` is pushed and empty.
 
-**If you are a fresh agent and the harness was killed mid-run**: it restores
-`src/windows/Lockscreen.qml` and `tests/quickshell-a11y-shim.cpp` from a
-`mktemp -d` snapshot after every mutant, but a kill between the edit and the
-restore leaves one of them mutated. `git -C /var/tmp/apex-work/wt-p2-b4-sh
-status --short` first, and `git checkout -- <file>` for anything dirty that you
-did not write.
+**If the harness was killed mid-run**, `git -C /var/tmp/apex-work/wt-p2-b4-sh
+status --short` first: it restores `src/windows/Lockscreen.qml` and
+`tests/quickshell-a11y-shim.cpp` from a `mktemp -d` snapshot after every
+mutant, but a kill between the edit and the restore leaves one mutated.
 
 ## DONE
 
@@ -363,6 +362,29 @@ than this branch.
     logind, and P0-015's lock policy (`apexd/apex-agent-core/src/lock.rs`)
     reads `LockedHint`. One line fixes it — `_failed()` should re-pump, or the
     guard should be a trailing-edge timer. NOT this unit's item; hand it on.
+
+23. **A mutant that SURVIVES is worth more than ten that are caught, and this
+    round has one.** `mutate-lockscreen-atspi-shim.sh` S4 puts a private-use
+    codepoint into an accessible string and requires the tree-wide scan to find
+    it. It SURVIVED, and the survival was correct **twice over**, for two
+    independent defects that a green run would have hidden for good:
+    (a) the private-use character written into the mutant did not survive being
+    written to the file — what landed was `U+F033` followed by the letter `E`,
+    a different codepoint in a different plane — and nothing in the source made
+    that visible; (b) the SUITE's own character class had lost its BMP bounds
+    the same way, leaving `[-` plus the two supplementary planes, so a BMP
+    private-use glyph could not have been caught even if it had arrived. Both
+    now build their characters from NUMBERS: the class is written entirely in
+    `\uXXXX`/`\UXXXXXXXX` escapes and covers all three planes (unit-checked
+    against `U+0041`/`E000`/`F033`/`F8FF`/`F033E`/`10FFFC`, and against the old
+    broken class for contrast), and the mutant builds its character with
+    `printf '\U000f033e'` (`od` says `f3 b0 8c be`). **An unprintable character
+    in a source file is not reviewable.** A third thing came out of the same
+    mutant: it had been aimed at the field's `Accessible.name`, which
+    `passwordEdit` suppresses, so the glyph would never have reached the bus at
+    all — a mutant pointed at a string the bus never delivers proves nothing
+    about the assertion it was aimed at, and a harness that scored it CAUGHT
+    would have certified a check it never exercised.
 
 ## BLOCKED ON
 

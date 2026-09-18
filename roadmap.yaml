@@ -4680,7 +4680,12 @@ tasks:
     (2026-09-19), recording a merge made mid-round-29 and never written down: task/p2-d-5 tip 67861c53 merged onto
     roadmap/v2.2 as bde4d96c. It is an ancestor of this round's tip 6b531503. Nothing on this item changed - see
     the ROUND 29 note above; USB passthrough is still the one flow of six never demonstrated end to end and still
-    needs a machine with a spare USB device somebody will have detached.
+    needs a machine with a spare USB device somebody will have detached. ROUND 30 (2026-09-19): unchanged again,
+    and again deliberately. p2-d's round 30 was P2-012's gap 5 only - the per-run browser CA bind
+    (RunRequest::trust_ca at protocol 10, apex-agentd/src/browser_ca.rs, apex browser run --trust-ca). No
+    virtualization code was touched, no vmlab flow was run, and nothing here was re-verified. USB passthrough is
+    still the one flow of six never demonstrated end to end, and it is still not closable by any suite: it means
+    detaching a physical device from the machine running the tests.
 - id: P2-009
   title: Disposable VM agent execution
   priority: P2
@@ -4730,7 +4735,11 @@ tasks:
     control, no network, and teardown - with an arbitrary command standing in for an agent task. LANDED round 30
     (2026-09-19), recording a merge made mid-round-29 and never written down: task/p2-d-5 tip 67861c53 merged onto
     roadmap/v2.2 as bde4d96c, an ancestor of this round's tip 6b531503. Nothing on this item changed - the gap is
-    still a guest image carrying an agent CLI, which is a build rather than a test.
+    still a guest image carrying an agent CLI, which is a build rather than a test. ROUND 30 (2026-09-19):
+    unchanged again, and again deliberately. p2-d's round 30 was P2-012's gap 5 only - the per-run browser CA bind
+    (RunRequest::trust_ca at protocol 10, apex-agentd/src/browser_ca.rs, apex browser run --trust-ca). No
+    virtualization code was touched, no vmlab flow was run, and nothing here was re-verified. The gap is still a
+    guest image that carries an agent CLI, which is a build rather than a test.
 - id: P2-010
   title: Hardware qualification database
   priority: P2
@@ -5031,7 +5040,62 @@ tasks:
     question, written out with both answers costed under 'The question, for Andre' in docs/browser-capsule-auth.md
     - may apex-agentd read the plaintext of a capsule's connection to the one destination that capsule was pinned
     to, in order to add a credential the capsule is never given? If the answer is no, this criterion is
-    permanently unmet rather than pending and the item should say so.
+    permanently unmet rather than pending and the item should say so. ROUND 30 (2026-09-19), branch task/p2-d-6
+    off 6b531503, five commits, all pushed: GAP 5 IS CLOSED - a capsule can be told to trust one private CA, which
+    is the intranet case (a site behind an organisation's own root). Route B was NOT started and is still blocked
+    on Andre's question, unchanged. 1fff2c45 - PROTOCOL_VERSION 10, RunRequest::trust_ca, BROWSER_CA_VERSION=10,
+    and the CLI's refusal to send the key to a daemon below it. THE VERSION NUMBER WAS THE DECISION AND IT IS
+    ARGUED, NOT TAKEN: this is the first guarded field on that table whose dropped key fails CLOSED (the capsule
+    trusts less, never more), and second_factor is the in-tree precedent for adding a wire field with no bump. It
+    does not transfer - second_factor's argument is that an old daemon still produces a loud refusal, and here
+    Firefox answers an untrusted chain by SITTING on it, so a dropped key is five silent minutes and then 'the
+    capsule did not finish'. check_daemon_understands runs before Run and a number is the only thing it consumes.
+    ROUTE B'S TLS FIELDS MUST NOW TAKE 11, NOT 10 - docs/browser-capsule-auth.md had reserved 10 and all three
+    places are corrected. b0ef1b2c - the daemon half, apexd/apex-agentd/src/browser_ca.rs: the PEM is copied where
+    the session can read and not write it, a Certificates.Install is merged into a copy of the MACHINE's own
+    /etc/firefox/policies/policies.json, and that copy is bound over the real one inside the namespace (spec.ro
+    twice plus one spec.ro_at, install_redacted_settings' shape). Before this NOTHING populated
+    SandboxSpec.ro/ro_at from the wire, which is why gap 5 was code and not a flag. Four refusals rather than
+    comments: an absent host policy REFUSES (--ro-bind-try over a missing target is a silent no-op), only
+    CERTIFICATE blocks may go in (a private key beside the cert is the ordinary mistake and the copy lands where
+    the agent can read it), DER is refused with the openssl line that converts it, and a machine that already
+    installs certificates refuses rather than merging two trust lists silently. The copy is validated, not the
+    source. 2fff910f - apex browser run --trust-ca FILE and apex agent run --trust-ca FILE. The flag NAMES THE
+    FILE and has no default, which was the one decision gap 5 left open. 8e1ca9cc -
+    apexd/apex-agentd/tests/browser_ca_bind.rs: a private daemon, a confined session, and the SESSION doing the
+    measuring - it copies out what it sees at /etc/firefox/policies/policies.json INSIDE its own mount namespace,
+    reads the path that document names, and copies that out too. Four cases, two of them controls that fail
+    differently: with a CA the document carries exactly one Certificates.Install whose path is openable from in
+    there and whose bytes are the CA, and the machine's four preferences survived the merge; with no CA the
+    session sees the machine's own file byte for byte and there is no Certificates key at all; a PEM carrying a
+    private key is refused over the WIRE with no session started; an unconfined session is refused, and that case
+    needs neither Firefox nor bwrap. /etc is read and its sha256 asserted unchanged. Skips loudly with the reason
+    on a machine with no Firefox policy. 2fc59c6b - the docs. MUTATION-TESTED, 17 mutations, every source file
+    restored byte-identically with sha256 compared: protocol - the wire key renamed (key assertion red),
+    BROWSER_CA_VERSION=9 and PROTOCOL_VERSION left at 9 (the compile-time ordering assert fails the BUILD), the
+    --trust-ca row deleted from settings_a_daemon_could_drop (table test red, left: []). browser_ca - the
+    non-CERTIFICATE refusal deleted (2 red), the merge replaced by a fresh policy (3 red), the missing host policy
+    tolerated (1 red), the canonical path replaced by the literal scratch path (1 red), the existing-Certificates
+    refusal deleted (1 red), the unconfined refusal deleted (1 red). engine - the ca_argv pass-through deleted (2
+    suite assertions red), the absolute-path refusal deleted (1), the inside-the-tree refusal deleted (2), the
+    --trust-ca help lines deleted (2), run_argv parsing and dropping the flag (rust argv test red). e2e -
+    spec.ro_at.push deleted (red, and the failure printed the LIVE machine policy, which is how that file proves
+    it reads through the namespace and not through a fixture), and the policy pointed at a path that does not
+    exist (red on the bytes). TWO DEFECTS FOUND IN MY OWN WORK BY RUNNING GATES RATHER THAN READING: (1) the suite
+    assertion 'the CA lands before the separator' was first written with ${#argv%%<pat>*}, which bash rejects as a
+    bad substitution - it printed an error and asserted NOTHING, neither PASS nor FAIL. That is this repository's
+    dominant defect family, inside a test written to avoid it. (2) 2fff910f was pushed without cargo clippy having
+    been run over it: BrowserCmd::Run crossed clippy's large_enum_variant threshold when --trust-ca was added,
+    exactly as AgentCmd::Run had. Both variants are boxed now and that is recorded as the flag's cost. GATES, run
+    not inherited: cargo test --locked --workspace 56 suites green (was 55; browser_ca_bind is the new one),
+    clippy --locked --workspace --all-targets -D warnings clean, tests/test-apex-browser.sh 116 passed 0 failed
+    (was 105), shellcheck -S warning -x on the engine and the suite clean at the severity CI uses,
+    check-doc-verbs.sh 191 documented / 0 undocumented and undeclared / 0 stale, check-suites-run-in-ci.sh 75 / 71
+    / 4 / 0, check-no-conflict-markers.sh PASS, check-shellcheck-coverage.sh 165 / 0 / 0 / 0. NOT RUN THIS ROUND
+    AND NOT CLAIMED: the browserlab, any live Firefox against a real TLS server, and any vmlab flow. That a real
+    Firefox ACCEPTS a policy-installed root was measured in round 29 and is in docs/browser-capsule-auth.md; what
+    round 30 adds is that the DAEMON builds that bind correctly, measured from inside the namespace. WHAT IS STILL
+    OPEN ON THIS ITEM: capability auth, which is route B, which is Andre's question and not engineering.
 - id: P2-013
   title: Per-project identity binding
   priority: P2
