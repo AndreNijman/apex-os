@@ -4119,7 +4119,20 @@ tasks:
     scored 11 mutants against a suite that never ran on the Arch runner). Login screen unchanged and still
     measured on the L16: test-apex-greet-atspi.sh 31/0/0, mutate-greet-atspi.sh 8/8,
     test-apex-greet-session-bus.sh 37/0/0. Recovery screen still unaudited; orca as the greetd user still needs
-    hardware.
+    hardware. LANDED round 30 (2026-09-19): task/p2-b-round29 merged onto roadmap/v2.2 in BOTH repos, which this
+    unit requires because apex-shell's CI matches on branch name - apex-os 7658fe1f (tests/lib/atspi.sh, 79
+    insertions) and apex-shell d5c781a (run-lockscreen-atspi.sh, mutate-lockscreen-atspi.sh,
+    lockscreen-atspi-control.qml, the ported atspi-walk.py and lib/atspi.sh, and the CI wiring: 2,013 insertions
+    over 6 files). check-no-conflict-markers.sh PASS in both. On the merged apex-shell tip d5c781a:
+    check-suites-run-in-ci.sh 64 suites / 64 reachable from CI / 0 exempt / 0 unreachable and undeclared, and all
+    106 paths in the ci.yml structure-check REQUIRED list exist (checked by extracting the list and stat-ing each,
+    not by reading the diff). On the merged apex-os tip 6b531503, re-run rather than inherited:
+    check-no-conflict-markers.sh PASS, check-suites-run-in-ci.sh 75 suites / 71 run by CI / 4 exempt / 0 unrun and
+    undeclared, check-shellcheck-coverage.sh 165 discovered / 0 known-failing / 0 newly failing,
+    check-containerfile-assertions.sh 194 checked / 0 failed / 116 unresolved / 0 inert, check-doc-verbs.sh 191
+    documented / 114 declared undocumented / 0 undocumented and undeclared / 0 stale. unlanded.py reports nothing
+    outstanding in either repo. Status unchanged: the recovery screen is still unaudited and orca as the greetd
+    user still needs hardware.
 - id: P2-004
   title: Internationalisation baseline
   priority: P2
@@ -4150,7 +4163,10 @@ tasks:
     and its qt6ct has no /etc/xdg/qt6ct/qt6ct.conf, which APEX ships. Do not close it by making section 1 SKIP -
     that section is the discriminator. New this round and relevant to the whole item: quickshell publishes no
     windows to AT-SPI (see P2-003), so a translated or mirrored shell surface would also be invisible to an
-    assistive technology even once the host change lands.
+    assistive technology even once the host change lands. LANDED round 30 (2026-09-19): merge 7658fe1f (apex-os)
+    and d5c781a (apex-shell). NOTHING ON THIS ITEM CHANGED THIS ROUND and nothing here was re-verified - round
+    29's p2-b work was entirely the P2-003 AT-SPI read-back. The RTL 17/3/2 discriminator and the Qt
+    6.11.2-vs-6.10.3 runner difference are still open exactly as recorded above.
 - id: P2-005
   title: Printing/scanning/network-share maturity
   priority: P2
@@ -4608,7 +4624,11 @@ tasks:
     code was touched, no vmlab flow was run, and nothing here was re-verified. USB passthrough remains the one
     flow of six never demonstrated end to end and it is not closable by any suite on any machine: it means
     detaching a physical device from the machine running the tests. Making this `done` needs a manual run on a
-    machine with a spare USB device somebody is willing to have detached - not more test code.
+    machine with a spare USB device somebody is willing to have detached - not more test code. LANDED round 30
+    (2026-09-19), recording a merge made mid-round-29 and never written down: task/p2-d-5 tip 67861c53 merged onto
+    roadmap/v2.2 as bde4d96c. It is an ancestor of this round's tip 6b531503. Nothing on this item changed - see
+    the ROUND 29 note above; USB passthrough is still the one flow of six never demonstrated end to end and still
+    needs a machine with a spare USB device somebody will have detached.
 - id: P2-009
   title: Disposable VM agent execution
   priority: P2
@@ -4655,7 +4675,10 @@ tasks:
     tests/check-containerfile-assertions.sh, and a route-B feasibility measurement for P2-012. The gap is still a
     guest image that carries an agent CLI, which is a build rather than a test. What is verified remains the
     BOUNDARY - the read-only copy-in volume, nomination-only egress with the turned-around loop as its falsifying
-    control, no network, and teardown - with an arbitrary command standing in for an agent task.
+    control, no network, and teardown - with an arbitrary command standing in for an agent task. LANDED round 30
+    (2026-09-19), recording a merge made mid-round-29 and never written down: task/p2-d-5 tip 67861c53 merged onto
+    roadmap/v2.2 as bde4d96c, an ancestor of this round's tip 6b531503. Nothing on this item changed - the gap is
+    still a guest image carrying an agent CLI, which is a build rather than a test.
 - id: P2-010
   title: Hardware qualification database
   priority: P2
@@ -4944,7 +4967,19 @@ tasks:
     check-doc-verbs.sh 250 valid / 8 deliberate / 0 not a command, 191 documented / 114 declared undocumented / 0
     undocumented and undeclared / 0 stale; shellcheck -x on the changed script clean. NOT RUN THIS ROUND AND NOT
     CLAIMED: cargo test, clippy and the browserlab. No Rust changed, no shell suite changed, and the browserlab's
-    authentication flow is still the could-not-run that IS this criterion.
+    authentication flow is still the could-not-run that IS this criterion. LANDED round 30 (2026-09-19):
+    task/p2-d-5 tip 67861c53 merged onto roadmap/v2.2 as bde4d96c - made mid-round-29 and recorded here for the
+    first time; it is an ancestor of this round's tip 6b531503. On the merged apex-os tip 6b531503, re-run rather
+    than inherited: check-no-conflict-markers.sh PASS, check-suites-run-in-ci.sh 75 suites / 71 run by CI / 4
+    exempt / 0 unrun and undeclared, check-shellcheck-coverage.sh 165 discovered / 0 known-failing / 0 newly
+    failing, check-containerfile-assertions.sh 194 checked / 0 failed / 116 unresolved / 0 inert,
+    check-doc-verbs.sh 191 documented / 114 declared undocumented / 0 undocumented and undeclared / 0 stale.
+    unlanded.py reports nothing outstanding in either repo. The unit is re-dispatched this round for gap 5 ONLY -
+    the per-run CA bind, which closes without any of route B. Route B is NOT started: it waits on Andre's
+    question, written out with both answers costed under 'The question, for Andre' in docs/browser-capsule-auth.md
+    - may apex-agentd read the plaintext of a capsule's connection to the one destination that capsule was pinned
+    to, in order to add a credential the capsule is never given? If the answer is no, this criterion is
+    permanently unmet rather than pending and the item should say so.
 - id: P2-013
   title: Per-project identity binding
   priority: P2
@@ -5517,7 +5552,18 @@ tasks:
     and the compositor's startup log was empty both ways - wlroots advertises a DISPLAY and starts Xwayland
     lazily, so a startup snapshot never depends on it. Measured against labwc 0.9.6 (+xwayland +nls +rsvg
     +libsfdo); a runner's labwc is a different build and an error it logs there would come back as a failure with
-    the line printed, which is a deliberate allowlist decision rather than a silence.
+    the line printed, which is a deliberate allowlist decision rather than a silence. LANDED round 30
+    (2026-09-19): task/p2-f-4 tip 79027b51 merged onto roadmap/v2.2 as 6b531503
+    (files/desktop/safe-graphics/rc.xml and tests/test-apex-safe-graphics.sh, 551 insertions), no conflicts,
+    check-no-conflict-markers.sh PASS, pushed with --force-with-lease. On the merged apex-os tip 6b531503, re-run
+    rather than inherited: check-no-conflict-markers.sh PASS, check-suites-run-in-ci.sh 75 suites / 71 run by CI /
+    4 exempt / 0 unrun and undeclared, check-shellcheck-coverage.sh 165 discovered / 0 known-failing / 0 newly
+    failing, check-containerfile-assertions.sh 194 checked / 0 failed / 116 unresolved / 0 inert,
+    check-doc-verbs.sh 191 documented / 114 declared undocumented / 0 undocumented and undeclared / 0 stale.
+    unlanded.py reports nothing outstanding in either repo. Criterion 2 is closed and must not be reopened. What
+    remains needs an image build and a real boot, plus synthetic pointer input for the one gap named on the
+    branch: the menu is never OPENED (right-click to ShowMenu to Execute is not driven), only every command it
+    would run is run.
 - id: P2-019
   title: Design APEX Fleet / managed-device architecture
   priority: P2
@@ -5783,7 +5829,21 @@ tasks:
     provenance header on docs/boot-v2.md's 'What was measured' said every figure below it came from the katana on
     2026-09-03 at kernel 7.1.5-cachyos1, and four rounds of LUKS and TPM results have landed under it since, all
     run on the L16 against a root staged from 7.2.3-cachyos2 as each run's own .apexinf line records. It now names
-    both machines and both dates. Branch tip is 0391b4ec.
+    both machines and both dates. Branch tip is 0391b4ec. LANDED round 30 (2026-09-19): task/later-2 tip 0391b4ec
+    merged onto roadmap/v2.2 as c6bc990a (docs/boot-v2.md, guest-luks-probe.sh, boot-v2/lib.sh, run-scenarios,
+    tests/test-boot-v2.sh; 741 insertions over 5 files), no conflicts, check-no-conflict-markers.sh PASS, pushed
+    with --force-with-lease. On the merged apex-os tip 6b531503, re-run rather than inherited:
+    check-no-conflict-markers.sh PASS, check-suites-run-in-ci.sh 75 suites / 71 run by CI / 4 exempt / 0 unrun and
+    undeclared, check-shellcheck-coverage.sh 165 discovered / 0 known-failing / 0 newly failing,
+    check-containerfile-assertions.sh 194 checked / 0 failed / 116 unresolved / 0 inert, check-doc-verbs.sh 191
+    documented / 114 declared undocumented / 0 undocumented and undeclared / 0 stale. unlanded.py reports nothing
+    outstanding in either repo. STAYS PARTIAL and the dispatch unit `later` is now CLOSED TO DISPATCH (see
+    queue.json _completed_units): everything a VM can qualify is qualified, and the acceptance word left is Real -
+    no silicon TPM has done an enrol-and-recover cycle, the L16's TPM is off-limits and katana is off-limits. The
+    remaining work is a human procedure, already written down: docs/boot-v2.md, 'The run somebody with hardware
+    would have to do' - five numbered runs, four prerequisites, what to record at each step; runs 1, 2 and 5 are
+    the minimum that moves this item off partial. Reopen the unit the moment there is a machine whose TPM somebody
+    is willing to clear.
 - id: L-002
   title: Enable LUKS2 by default
   priority: Later
@@ -5815,7 +5875,10 @@ tasks:
     plymouth's message() is a no-op (apex-os.script:230), and cryptsetup is an unpinned transitive dependency
     asserted nowhere. Two SHIPPED files already assert LUKS2+TPM2 as settled fact (apex-session-select:18-22 and
     its sudoers :9-12), which is a defect regardless of when this lands. docs/boot-v2.md carries the five-run
-    hardware procedure that would satisfy (1).
+    hardware procedure that would satisfy (1). LANDED round 30 (2026-09-19): merge c6bc990a carries round 29's
+    boot-v2 work; nothing on this item changed and nothing here was re-verified. STAYS BLOCKED on L-001, and the
+    dispatch unit `later` is closed to dispatch from this round for the reason recorded on L-001 - the remainder
+    is Andre's five-run hardware procedure in docs/boot-v2.md, not an agent's.
 - id: L-003
   title: Enable TPM auto-unlock by default where safe
   priority: Later
@@ -5848,7 +5911,9 @@ tasks:
     the next '- id: ' line, which for the final task means it swallowed the global_agent_rules block and produced
     a file that does not parse; the guard refused to write, so nothing was corrupted and nothing could be
     recorded. Fixed this round to capture the run of indented lines instead, verified by checking that both
-    expressions capture identical bodies for all 127 other tasks.
+    expressions capture identical bodies for all 127 other tasks. LANDED round 30 (2026-09-19): merge c6bc990a;
+    nothing on this item changed and nothing here was re-verified. STAYS BLOCKED on L-001 and L-002. The dispatch
+    unit `later` is closed to dispatch from this round - see L-001.
 global_agent_rules:
 - Inspect the current APEX-OS and APEX Shell source before changing anything.
 - Verify an existing implementation before reimplementing it.
