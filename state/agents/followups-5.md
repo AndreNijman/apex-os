@@ -5,11 +5,10 @@ branch: task/followups-5
 repo: apex-os
 
 ## NEXT
-SIGPIPE sweep — the 4 sites in FOUND below. Idiom is `94a3a2ac`'s: materialise
-the listing to a file under $WORK, then grep the FILE. Prove the fail-open
-standalone at scale first (a small fixture tree fits in the 64 KB pipe buffer,
-so planting the canary in situ goes red under the OLD code too and proves
-nothing). Then the 0/0 skip visibility (`hypr-lua`, `input-live`).
+The 0/0 skip visibility: `hypr-lua` and `input-live` report `0 passed, 0
+failed, 1 skipped` on every runner and their CI steps run them BARE and go
+green. Make the step say so where a reader of the run will see it, the way the
+7 steps at pr-validation.yml:1116/1159/1208/2764/2862/2904/2975 already do.
 
 ## DONE
 - **ROUND 28 — THE ZELLIJ RACE IS CLOSED, AND THE CARD'S OWN PRESCRIPTION WAS
@@ -33,6 +32,20 @@ nothing). Then the 0/0 skip visibility (`hypr-lua`, `input-live`).
   1 (send aimed at a nonexistent session) → 4 reds incl. the `die`. Mutation 2
   (send the layout twice) → the new assertion is the ONLY red. Restored
   byte-identical with `cp`, sha verified. Suite: 47 passed, 0 failed.
+- **SIGPIPE SWEEP CLOSED** — `d9ce8ea5`. `find TREE | grep -qF X` under
+  `pipefail`: grep exits at its first match, find takes SIGPIPE, pipeline = 141.
+  Proven in bash with the canary PRESENT: 1.36 MB listing **5 inversions in 5**;
+  717-byte listing correct 5 in 5 (find fits the 64 KB pipe buffer and exits
+  first); materialised correct 3 in 3. The tree's SIZE, not the code, decided
+  whether a leak could be detected — and every fixture is small, so these were
+  green for their whole lives without ever being able to fail. Fixed all 4 the
+  94a3a2ac way. 3 were fail-OPEN negative leak assertions (s3 object names, ssh
+  object names, ai stray sockets), 1 was the false-red direction (ssh
+  head.json). Each mutation-tested by making the denied thing happen — socket
+  bound, canary planted as a name, head.json deleted — all red; sources
+  restored byte-identical, sha verified. Suites: ai 44/0, s3 27/0, ssh 32/0.
+  Repo-wide sweep says these 4 were all of it; `… | head -N` in a command
+  substitution under `set +e` is unaffected.
 - Gates held: `check-shellcheck-coverage.sh` 165 scripts / **0 known-failing**;
   `check-suites-run-in-ci.sh` **71 of 75**, 4 exemptions, 0 undeclared.
 - Runner: dispatched **35351419809** on `746b1f78` (pushes do NOT trigger CI
@@ -64,7 +77,7 @@ nothing). Then the 0/0 skip visibility (`hypr-lua`, `input-live`).
 - `69ef58cf` `cf7722d9` `2a8ada6f` `c07574b7` — see git log.
 
 ## IN PROGRESS
-- The SIGPIPE sweep and the 0/0 skip visibility, per NEXT.
+- The 0/0 skip visibility, per NEXT.
 - Run 35351419809 on `746b1f78` in flight.
 
 ## FOUND
