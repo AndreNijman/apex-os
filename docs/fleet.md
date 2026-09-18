@@ -100,6 +100,77 @@ What enrolment writes is one record under `/var/lib/apex-fleet/`, root-owned,
 `0700`: the fleet id, the endpoint, the operator's public key, and the time. The
 presence of that file is the only thing that makes any of the rest run.
 
+## The transport
+
+**Not built, and now decided.** The client **polls**, over ordinary HTTPS, and
+`relay/` is not in the fleet path at all.
+
+The decision falls out of the action list rather than out of a preference for
+polling. Read *What must never be built* first: no remote exec, no fleet-side
+approval, no silent enrolment. What is left that a fleet may actually do to a
+machine is set its channel, set a ring ceiling, and hold its updates — and the
+last of those is the only one anybody wants in a hurry. None of them needs
+sub-minute latency. **A transport chosen for push latency would buy speed for
+actions this design does not permit**, and would charge for it twice:
+
+* A machine that holds a connection is a machine that is continuously
+  reachable. An unenrolled machine has no fleet code path to disable *because
+  there is no socket*, and that is the rule that comes before the architecture
+  being kept by the shape of the thing rather than by a flag somebody can flip.
+* A relay that carries fleet traffic learns which machines are awake, and when.
+  That is a continuous liveness map — exactly the class of data
+  `docs/update-channels.md` promises not to collect, arrived at by a side door.
+  `relay/` was written for a phone talking to its owner's desktop, where both
+  ends belong to the same person; a fleet relay is a third party watching, and
+  "it only sees ciphertext" is not an answer to that.
+
+So the machine decides when it talks, and nothing reaches it in between.
+
+### What a poll is
+
+The same shape as `apex channel report`, which already composes a payload the
+machine sends and can print instead. Out goes the inventory row; back comes a
+**document, never a command**: channel, ring ceiling, a hold flag, a policy
+body. The client decides what to do with it, and everything it may do is
+something a local verb already does. A response that named a command to run
+would be remote exec through a data channel, which is item 1 of the list this
+design refuses, wearing a different hat.
+
+### When a poll happens
+
+On a jittered interval derived from the **stable slot 0–99** that `apex channel
+status` already computes from `/etc/machine-id`. That is reuse rather than
+coincidence: staging a rollout and staggering a poll both need a stable
+per-machine number in the same range that nobody has to configure, and a fleet
+of ten thousand machines polling on the hour is a self-inflicted outage.
+
+The cost is stated rather than hidden: **"hold this machine's updates" takes
+effect at the next poll.** An operator gets no answer faster than the interval
+and no answer at all from a machine that is off. Both are acceptable for the
+three actions above; neither would be if remote exec were on the list, which is
+another way of saying the transport and the permission list have to be chosen
+together.
+
+### What makes a response trustworthy
+
+Not the transport. The poll is authenticated with the machine's long-lived key
+— the identity enrolment already used, not a second one — and the **response is
+signed by the operator's key recorded at enrolment**. A hostile network, a
+compromised CDN or a misissued certificate can then deny service and cannot
+change a machine's channel, which is the property worth having: the signature
+is load-bearing and TLS is convenience.
+
+Two things a signature alone does not give, both of which have to be in the
+document rather than around it:
+
+* **Replay.** An old, validly signed "you are on `edge`" is a downgrade attack
+  unless the document carries the machine id and a monotonic counter the client
+  refuses to go backwards on.
+* **Expiry.** A document with no freshness bound means a fleet that stops
+  answering silently pins every machine to its last instruction. It should
+  expire, and an expired document should leave the machine on its own local
+  configuration rather than on the fleet's last word.
+
 ## Inventory
 
 **Partly built.** `apex channel report` already computes the payload and already
@@ -270,6 +341,75 @@ The one remote action worth designing is the narrow one: **hold this machine's
 updates.** It is reversible, it cannot brick anything, and it is what an
 operator actually wants in the hour after a bad release.
 
+## The server side
+
+**Not built, and deliberately not part of APEX.** APEX ships a client and a
+protocol. A fleet that only worked against one hosted server would make
+"optional" untrue for anybody who cannot or will not use it, so the server is a
+separate deliverable and this section is what it has to be, not what it is.
+
+### The smallest correct server is a signing tool and a bucket
+
+Because a poll response is a signed document and nothing else, the minimum
+viable fleet server has **no always-on service and no database**: one signed
+document per machine, served as a static object. An operator with fifty
+machines can run a fleet out of object storage and a script. That is not a
+toy — it is the same artefact the large version serves, and it means the
+promise that personal installs are not managed devices costs an operator
+nothing to keep.
+
+Where that stops is **group membership**: deciding which machine gets which
+document is the part that wants a database once the answer is not "one file per
+machine id". A few thousand machines is the honest edge of the static version.
+
+### Tenancy is key separation, not rows
+
+**The unit of authority is a signing key, not a login.** A fleet *is* a key
+pair; a machine is enrolled to a public key; two fleets are two keys. A server
+that separated tenants only by partitioning rows would have one place at which
+every tenant's policy could be rewritten — and since the client checks a
+signature, that server could not actually do it, which is the point. Tenancy
+that is cryptographic rather than administrative fails safe.
+
+What the operator side still has to support, and what that implies for the
+machine:
+
+* **More than one human, and a record of who signed what.** So the machine
+  records the fleet's **root** key at enrolment and accepts a document signed by
+  a delegated key whose delegation chains to that root — the shape `apex trust`
+  and P1-047's cosign verification already use, rather than a second one.
+* **Revoking a signer without re-enrolling every machine.** Which is the same
+  requirement stated from the other end, and the reason the root key is what
+  enrolment pins.
+
+### Read is a server permission; write is a cryptographic one
+
+The only server-side action that changes a machine is moving it between
+documents, and that needs the signing key. Everything else an operator console
+does — listing machines, reading inventory, seeing who rolled back — is read.
+So **a compromised console cannot change a fleet's policy**; it can only see.
+That split is worth designing for explicitly, because the usual arrangement
+(one admin role that can do both) makes the console the whole security boundary.
+
+### What the server may see, which bounds this more than what it may do
+
+Inventory rows are the machine's claim about itself, and the server keeps them.
+Retention is the operator's decision and this design does not get to make it —
+but the *machine's* half is not negotiable and is test-shaped: the client must
+be able to print exactly what it would send without sending it, the way `apex
+channel report` does today. `apex fleet report --dry-run` is that verb, and the
+suite that proves it is the one that asserts an absence — the pattern
+`tests/test-apex-channel.sh` already uses.
+
+### What the server must not be able to do
+
+The machine-side list has a mirror, and most of it is structural rather than
+enforced, which is the argument for the transport above. A poll of signed
+documents means the server **cannot** reach a machine between polls, cannot run
+anything, cannot approve a privilege request, cannot enrol a machine that did
+not run the verb, and cannot stop one leaving — not because it is forbidden to,
+but because there is no message in this protocol that would do it.
+
 ## What must never be built
 
 A list, because each item is something a fleet product normally ships and each
@@ -296,13 +436,22 @@ would break something APEX already guarantees.
 Named one at a time. A design document that ends with a summary instead of a gap
 list is the one that gets built wrong.
 
-* **The transport.** Pairing exists, and `relay/` is an untrusted Noise_IK
-  rendezvous that has never been deployed. Whether a fleet client polls, holds a
-  connection, or is pushed to through the relay is undecided, and the answer
-  changes the threat model.
-* **Multi-tenancy on the operator side.** Everything above is written from the
-  machine's point of view. There is no design here for the server, and the
-  server is where an operator's own access control lives.
+* ~~**The transport.**~~ **Settled above: the client polls, `relay/` is not in
+  the fleet path, and a response is a signed document rather than a command.**
+  What is still open is narrower and is engineering rather than design — the
+  interval, and whether the freshness bound is an expiry in the document or a
+  maximum age the client enforces. Neither changes the threat model; the
+  direction of the connection was the part that did.
+* ~~**Multi-tenancy on the operator side.**~~ **Settled above: tenancy is key
+  separation, read is a server permission and write is a cryptographic one.**
+  What is still open is the delegation format — whether the chain from the root
+  key reuses `apex trust`'s cosign machinery verbatim or only its shape — and
+  that cannot be settled without a server to try it against.
+* **Nothing here has been deployed or written.** The two sections above are
+  decisions with their reasoning, which is what a design item delivers; they
+  are not a client, a server, or a line of code. `relay/`'s own README says
+  `src/index.js` has never been executed, and the fleet path now does not use
+  it at all.
 * **What a ring ceiling costs to serve.** `docs/update-cost.md` records that
   core rebuilds cost the fleet about 5 GB each. A ramp changes when machines
   pull, not how much, but the interaction has not been worked out.

@@ -25,6 +25,7 @@ mod lid;
 mod mcp;
 mod migrate;
 mod mode;
+mod oauth_device;
 mod ops;
 mod permissions;
 mod provenance;

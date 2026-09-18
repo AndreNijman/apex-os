@@ -32,24 +32,43 @@
 //! * `rm` refuses a service that is not an account, so an accounts command
 //!   cannot delete a credential it had no business naming.
 //!
-//! ## The unmet half, said here rather than in a release note
+//! ## `Flow::DeviceCode`, and the half of it that is still the user's problem
 //!
-//! `Flow::DeviceCode` is **not implemented**. Google and Microsoft accounts can
-//! be added today only by pasting a token the user obtained elsewhere, and APEX
-//! cannot refresh it — so it stops working when it expires and the user is told
-//! that at `add` time instead of finding out. The provider table carries
-//! [`Flow::is_refreshable`] precisely so this is a value the code reads rather
-//! than a caveat in prose.
+//! Google and Microsoft sign in through RFC 8628 now: `apex account add
+//! google.work --client-id <id>` prints a code, the user approves it on a
+//! device that has a browser, and both tokens land in the same store — the
+//! access token pinned to the provider's API host, the refresh token under a
+//! separate name pinned to the authorisation host, where the endpoint pin
+//! makes it unspendable as an API token. The transport is
+//! [`crate::oauth_device`], shared with `apex cf connect`.
+//!
+//! `--client-id` is **required**, and that is the honest part rather than an
+//! oversight. APEX registers no OAuth application at either provider and will
+//! not borrow another project's, so there is no default to fall back to; see
+//! [`account::OAuth::client_id`] for the whole argument. Google also wants a
+//! `client_secret`, which is read from stdin and never from argv.
+//!
+//! What a token obtained this way can be spent on today is **nothing**. No
+//! `gdrive` or `msgraph` transport exists in `apex-secretd`, so every scope in
+//! [`account::DRIVE_SCOPES`] and [`account::GRAPH_SCOPES`] names an operation
+//! no provider offers — `apex account grant` refuses them for exactly that
+//! reason. Signing in, storing, and renewing work end to end; using is the
+//! next transport, not the next flag.
 
 use std::io::Read;
 
-use anyhow::{bail, Result};
-use apex_secret_core::account::{self, AccountError, AccountRef, Presentation, Provider};
+use anyhow::{bail, Context, Result};
+use apex_secret_core::account::{
+    self, AccountError, AccountRef, ClientSecret, Flow, OAuth, Presentation, Provider,
+};
+use apex_secret_core::capability::CapabilityRecord;
 use apex_secret_core::client::Client;
-use apex_secret_core::protocol::{Request, Response};
+use apex_secret_core::protocol::{ErrorKind, Request, Response};
 use apex_secret_core::store::ServiceInfo;
 use apex_secret_core::SecretValue;
 use clap::Subcommand;
+
+use crate::oauth_device::{self, device_grant, Endpoints, OAuthClient, Prompt};
 
 /// `apex account <verb>`.
 #[derive(Subcommand)]
@@ -93,6 +112,15 @@ pub enum AccountCmd {
         /// Port, when the endpoint is not on the scheme's own.
         #[arg(long)]
         port: Option<u16>,
+        /// The OAuth client to sign in as, for a device-code provider.
+        ///
+        /// Required for Google and Microsoft, because APEX registers no
+        /// application at either and will not sign your account in under
+        /// somebody else's. A client id is public — it is on the consent
+        /// screen you are about to read — so it may be typed here. A client
+        /// SECRET may not, and is read from stdin.
+        #[arg(long)]
+        client_id: Option<String>,
     },
     /// The accounts this user has. Never prints a credential.
     List {
@@ -110,6 +138,14 @@ pub enum AccountCmd {
     Revoke {
         account: String,
         scope: String,
+    },
+    /// Renew an account's access token with the refresh token beside it.
+    ///
+    /// Spends a credential, so it is a capability like any other: granted per
+    /// project, and `add` does not grant it. Nothing here ever sees either
+    /// token — the daemon performs the request and replaces both.
+    Refresh {
+        account: String,
     },
     /// Remove an account: the credential, and every grant that named it.
     Rm {
@@ -137,10 +173,19 @@ fn run(cmd: AccountCmd) -> Result<i32> {
             username,
             path,
             port,
-        } => add(&account, host.as_deref(), &username, path.as_deref(), port),
+            client_id,
+        } => add(
+            &account,
+            host.as_deref(),
+            &username,
+            path.as_deref(),
+            port,
+            client_id.as_deref(),
+        ),
         AccountCmd::List { json } => list(json),
         AccountCmd::Grant { account, scope } => grant(&account, &scope, false),
         AccountCmd::Revoke { account, scope } => grant(&account, &scope, true),
+        AccountCmd::Refresh { account } => refresh(&account),
         AccountCmd::Rm { account } => rm(&account),
     }
 }
@@ -249,10 +294,25 @@ fn add(
     username: &str,
     path: Option<&str>,
     port: Option<u16>,
+    client_id: Option<&str>,
 ) -> Result<i32> {
     let account = AccountRef::parse_ref(reference)?;
     let provider = account.provider;
     let host = provider.resolve_host(host.map(str::trim))?.to_ascii_lowercase();
+
+    if provider.flow == Flow::DeviceCode {
+        return add_by_device_code(reference, &account, &host, username, path, port, client_id);
+    }
+    // Refused rather than ignored: a flag that did nothing would read as a
+    // client id having been recorded, and the credential would be renewed —
+    // or not — under a client the user never chose.
+    if client_id.is_some() {
+        bail!(
+            "--client-id belongs to an OAuth sign-in and {} uses the {} flow,              which has no OAuth client",
+            provider.label,
+            provider.flow.as_str()
+        );
+    }
 
     // Basic auth is a PAIR. Stored without the username half, the provider
     // falls back to sending the value as a bare `Authorization:` — which the
@@ -265,19 +325,6 @@ fn add(
              required; without it APEX would send the password on its own and \
              the server would answer 401",
             provider.label
-        );
-    }
-
-    // Said BEFORE the credential is read, not after: a user who is about to
-    // paste a token that APEX cannot renew should find that out while they
-    // still have the provider's page open.
-    if provider.flow.is_refreshable() {
-        eprintln!(
-            "apex account: the {} sign-in flow ({}) is not implemented. Paste an access\n  \
-             token you already hold and APEX will store and broker it — but it cannot be\n  \
-             refreshed, so it stops working when the provider expires it.",
-            provider.label,
-            provider.flow.as_str()
         );
     }
 
@@ -322,6 +369,313 @@ fn add(
     println!("allow one for this project:");
     println!("  apex account grant {reference} <scope>");
     Ok(0)
+}
+
+/// Which OAuth client to sign in as, or why there is none to fall back to.
+///
+/// The table's own `client_id` when this build ships one — Cloudflare's entry
+/// does and it is Wrangler's, with that decision written down where a person
+/// reads it. Google's and Microsoft's are `None`, which does not mean "not
+/// filled in yet": APEX registers no application at either and will not put
+/// another project's credential in this binary or another project's name on
+/// the consent screen its users approve. So the refusal is the honest answer
+/// and it says what to do about it.
+fn client_for(provider: &Provider, oauth: &OAuth, asked: Option<&str>) -> Result<String> {
+    if let Some(given) = asked.map(str::trim).filter(|g| !g.is_empty()) {
+        // Checked here so a client id that cannot go in a form body is refused
+        // before a device code is issued against it, rather than after.
+        if !oauth_device::valid_form_value(given) {
+            bail!("'{}' is not an OAuth client id", given.escape_debug());
+        }
+        return Ok(given.to_string());
+    }
+    let Some(shipped) = oauth.client_id else {
+        bail!(
+            "--client-id is required for {}. APEX registers no OAuth application at \
+             {} and will not sign your account in under another project's — that \
+             would put their credential in this binary and their name on the \
+             consent screen you approve. Register a client of your own (the \
+             \"limited-input device\" or \"device code\" kind) and pass its id.{}",
+            provider.label,
+            oauth.auth_host,
+            match oauth.client_secret {
+                ClientSecret::RequiredToObtain =>
+                    " That server issues a client secret with it and wants it on the \
+                     poll; pipe the secret in on stdin.",
+                ClientSecret::None => "",
+            }
+        );
+    };
+    Ok(shipped.to_string())
+}
+
+/// Sign in by RFC 8628 and file both halves of what comes back.
+///
+/// The two credentials are stored under different names pinned to different
+/// hosts, which is `apex cloudflare connect`'s idea carried across rather than
+/// reinvented: the framework refuses a request whose endpoint is not the host
+/// its credential was stored for, so a refresh token filed under the
+/// authorisation host cannot be presented to the API as an access token, and
+/// granting an agent every scope on the account still cannot reach it.
+fn add_by_device_code(
+    reference: &str,
+    account: &AccountRef,
+    host: &str,
+    username: &str,
+    path: Option<&str>,
+    port: Option<u16>,
+    client_id: Option<&str>,
+) -> Result<i32> {
+    let provider = account.provider;
+    let Some(oauth) = provider.oauth else {
+        // `Provider::validate` refuses this combination at startup and a test
+        // runs it over the shipped table, so reaching it means the table
+        // changed without the gate. Answered rather than unwrapped, because
+        // the person running the command did nothing wrong.
+        bail!(
+            "{} signs in by device code and this build names no authorisation \
+             server for it, so there is nowhere to ask. That is a defect in the \
+             provider table, not in what you typed.",
+            provider.label
+        );
+    };
+    let client_id = client_for(provider, oauth, client_id)?;
+
+    let secret = match oauth.client_secret {
+        // From stdin, never argv: argv is world-readable through
+        // `/proc/<pid>/cmdline` while the command runs and is in the shell
+        // history afterwards. The same rule `apex secret add` follows, and the
+        // reason there is no `--client-secret` flag to find.
+        ClientSecret::RequiredToObtain => {
+            let mut value = String::new();
+            std::io::stdin()
+                .read_to_string(&mut value)
+                .context("reading the client secret from stdin")?;
+            let value = value.trim().to_string();
+            if value.is_empty() {
+                bail!(
+                    "nothing on stdin. {} wants the client secret issued with that \
+                     client id, so pipe it in:\n  \
+                     printf %s \"$CLIENT_SECRET\" | apex account add {reference} \
+                     --client-id {client_id}",
+                    provider.label
+                );
+            }
+            if !oauth_device::valid_form_value(&value) {
+                bail!(
+                    "that client secret has characters this build will not put in a \
+                     form body. Paste the secret on its own, with no surrounding \
+                     quotes or JSON"
+                );
+            }
+            Some(value)
+        }
+        // NOT read, and this is the branch that matters for a person at a
+        // terminal. A public client has no secret to send, and
+        // `read_to_string` on a tty waits for an end of file nobody has a
+        // reason to type — the command would look hung before it ever printed
+        // the code they are waiting for.
+        ClientSecret::None => None,
+    };
+
+    // Before the flow, not after. A daemon that is not answering should be
+    // found out now rather than once somebody has approved a code on their
+    // phone for a token this cannot store.
+    let mut client = Client::connect()?;
+
+    let retry = match oauth.client_secret {
+        // The secret comes from stdin, so the command to run again has to
+        // carry the pipe or it is a command that will stop and wait.
+        ClientSecret::RequiredToObtain => format!(
+            "printf %s \"$CLIENT_SECRET\" | apex account add {reference} --client-id {client_id}"
+        ),
+        ClientSecret::None => format!("apex account add {reference} --client-id {client_id}"),
+    };
+    let grant = device_grant(
+        &Endpoints::for_oauth(oauth),
+        &OAuthClient {
+            id: &client_id,
+            secret: secret.as_deref(),
+        },
+        // The table's list, asked for and no more — §13.5 at the only moment
+        // it can be applied, because a token's scopes are fixed when it is
+        // issued. Not the caller's: a flag here would let a grant be widened
+        // by whoever typed the command.
+        oauth.scopes,
+        &Prompt {
+            label: provider.label,
+            retry: &retry,
+        },
+        &mut std::io::stdout(),
+    )?;
+
+    let path = match path {
+        Some(p) => p.to_string(),
+        None => provider.path_for(username.trim()),
+    };
+    client.add(
+        &account.service(),
+        host,
+        "https",
+        Some(username),
+        &path,
+        provider.presentation.service_auth(),
+        port,
+        &SecretValue::new(grant.access_token.into_bytes()),
+    )?;
+    println!("stored {reference} (https://{host}{path})");
+    if let Some(seconds) = grant.expires_in {
+        println!("it stops working in about {}.", oauth_device::roughly(seconds));
+    }
+
+    match &grant.refresh_token {
+        Some(refresh) => {
+            let filed = refresh_record(account, oauth, &client_id);
+            client.add(
+                &filed.service,
+                filed.host,
+                "https",
+                Some(&filed.username),
+                "",
+                "bearer",
+                None,
+                &SecretValue::new(refresh.as_bytes().to_vec()),
+            )?;
+            println!(
+                "stored its refresh token for {}, where it cannot be spent as an \
+                 access token",
+                oauth.auth_host
+            );
+            println!("renew it without signing in again, once per project:");
+            println!(
+                "  apex secret grant {} {}",
+                account.refresh_service(),
+                account::REFRESH_OPERATION
+            );
+            println!("  apex account refresh {reference}");
+            if oauth.client_secret == ClientSecret::RequiredToObtain {
+                // Said now rather than discovered at renewal. Google lists the
+                // secret as optional on the refresh and required on the poll,
+                // and this build has nowhere to keep one — so if it turns out
+                // to want it, the renewal answers `invalid_client`, nothing is
+                // replaced, and signing in again is the way through.
+                println!(
+                    "note: {} may also want the client secret when renewing, and this",
+                    provider.label
+                );
+                println!("      build stores no secret. If a renewal answers `invalid_client`,");
+                println!("      nothing was replaced — sign in again with the same command.");
+            }
+        }
+        None => {
+            println!(
+                "this grant carried no refresh token, so it cannot be renewed — sign \
+                 in again when it expires"
+            );
+        }
+    }
+
+    // Honest rather than encouraging. The cross-crate scope gate refuses a
+    // grant for an operation no provider offers, and no `gdrive` or `msgraph`
+    // transport exists, so sending somebody to `apex account grant` here would
+    // send them to a refusal they did not earn.
+    println!(
+        "nothing can spend it yet: this build ships no {} transport, so every scope",
+        provider.transport
+    );
+    println!(
+        "`apex account scopes {}` lists names an operation no provider offers.",
+        provider.id
+    );
+    Ok(0)
+}
+
+/// Where the refresh half of a device-code grant is filed.
+///
+/// A struct rather than three arguments written out at the store call,
+/// because the store call cannot be tested from here — it needs the daemon —
+/// and these three values are the whole of what makes a renewal possible.
+struct RefreshRecord {
+    service: String,
+    host: &'static str,
+    /// **The OAuth client the grant was issued to.** RFC 6749 §6 requires a
+    /// refresh to present the same client, and `apex-secretd`'s `oauth`
+    /// provider reads it out of [`ServiceInfo::username`] — the store's field
+    /// for the half of a credential that is not a secret, which an OAuth
+    /// client id is by definition. Nothing wrote it for these two providers
+    /// before, and that, in one field, is why the daemon refused to renew
+    /// them: its module note says the day something records it here, the
+    /// refresh starts working with no change there.
+    username: String,
+}
+
+fn refresh_record(account: &AccountRef, oauth: &OAuth, client_id: &str) -> RefreshRecord {
+    RefreshRecord {
+        service: account.refresh_service(),
+        // The authorisation host, never the API host. The framework refuses a
+        // request whose endpoint is not the host its credential was stored
+        // for, so this pin is what stops a refresh token being spent as an
+        // access token however the account is granted.
+        host: oauth.auth_host,
+        username: client_id.to_string(),
+    }
+}
+
+/// The request `apex account refresh` sends, as a value a test can read.
+///
+/// The `Use` itself needs the daemon; what it asks for does not, and what it
+/// asks for is the part that can silently stop matching — a refresh filed
+/// under one name and requested under another fails as "not granted".
+fn refresh_request(account: &AccountRef, project: String) -> CapabilityRecord {
+    let mut record =
+        CapabilityRecord::new(&account.refresh_service(), account::REFRESH_OPERATION, "");
+    // Per project, like every other capability, and `add` does not write it:
+    // storing a credential and deciding which project may spend it are two
+    // decisions, and only the first one is "sign in".
+    record.project = Some(project);
+    record
+}
+
+/// Renew an account's access token with the refresh token beside it.
+fn refresh(reference: &str) -> Result<i32> {
+    let account = AccountRef::parse_ref(reference)?;
+    if !account.provider.flow.is_refreshable() {
+        bail!(
+            "a {} account signs in with {}, which yields nothing to renew. Replace \
+             the credential instead:\n  apex account add {reference}",
+            account.provider.label,
+            account.provider.flow.as_str()
+        );
+    }
+    let record = refresh_request(&account, crate::secret::current_project_root()?);
+    let reply = Client::connect()?.request(&Request::Use {
+        record: Box::new(record),
+        body_len: 0,
+    })?;
+    match reply {
+        // A non-zero exit code is the authorisation server refusing, which is
+        // not this command failing to run: the output carries `invalid_grant`
+        // or `invalid_client`, and that is the only thing that says whether the
+        // grant was revoked, the client was wrong, or the token had already
+        // been rotated.
+        Response::Performed {
+            exit_code, output, ..
+        } => {
+            println!("{}", output.trim_end());
+            if exit_code != 0 {
+                println!("sign in again to get a new one, the same way you did before:");
+                println!("  apex account add {reference} --client-id <id>");
+                if account.provider.oauth.map(|o| o.client_secret)
+                    == Some(ClientSecret::RequiredToObtain)
+                {
+                    println!("  ...with the client secret on stdin, as {} requires.", account.provider.label);
+                }
+            }
+            Ok(exit_code)
+        }
+        Response::Error { message, .. } => bail!("{message}"),
+        other => bail!("the secret service answered a refresh with {}", other.variant()),
+    }
 }
 
 /// Every stored service that is an account, with its provider resolved.
@@ -393,9 +747,19 @@ fn grant(reference: &str, scope: &str, revoke: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// Every stored name `apex account rm` has to remove.
+///
+/// Two, and the second is the one that cannot be reached any other way — so
+/// this is a function a test can read rather than two calls buried in `rm`.
+/// `add` and `rm` deriving the same name from the same account is the whole of
+/// why removal is complete, and nothing else checks that they agree.
+fn names_to_remove(account: &AccountRef) -> [String; 2] {
+    [account.service(), account.refresh_service()]
+}
+
 fn rm(reference: &str) -> Result<i32> {
     let account = AccountRef::parse_ref(reference)?;
-    let service = account.service();
+    let [service, refresh] = names_to_remove(&account);
     let mut client = Client::connect()?;
     // Refuse a name that is not stored, rather than reporting success for a
     // removal that removed nothing — which is the answer a user reads as "the
@@ -410,6 +774,33 @@ fn rm(reference: &str) -> Result<i32> {
         service: service.clone(),
     })?;
     println!("removed {reference}, and every grant that named it");
+
+    // The refresh credential is not an account and cannot be reached any other
+    // way: `.` is not legal in an account name, so `AccountRef::parse` does not
+    // see it, `apex account list` never shows it, and `rm` refuses to be
+    // pointed at it directly. Computing the name here is the only way in — and
+    // without this, removing a Google account would leave a live refresh token
+    // on disk that nothing in this command surface could find or delete. That
+    // is criterion 3, and it became reachable the moment `add` started storing
+    // one.
+    match client.request(&Request::Remove {
+        service: refresh.clone(),
+    })? {
+        // There was none. An app password has no refresh token, and neither
+        // has an OAuth grant the server returned without one.
+        Response::Error {
+            kind: ErrorKind::NoSuchService,
+            ..
+        } => {}
+        // Anything else is the failure this whole block exists to prevent, so
+        // it is reported rather than swallowed: the account is gone from the
+        // listing and a credential that can mint new access tokens is not.
+        Response::Error { message, .. } => bail!(
+            "{reference} is gone, but its refresh token is still stored as \
+             '{refresh}' and could not be removed: {message}"
+        ),
+        _ => println!("removed its refresh token too"),
+    }
     Ok(0)
 }
 
@@ -458,10 +849,168 @@ mod tests {
             let mut c = Harness::command();
             c.render_long_help().to_string()
         };
-        for forbidden in ["--token", "--password", "--secret", "--value", "--key"] {
+        // `--client-secret` is spelled out rather than left to `--secret`,
+        // which does not match it: the device-code flow needs one for Google,
+        // and a flag is exactly how somebody would add it without noticing
+        // that this is the file saying not to.
+        for forbidden in [
+            "--token",
+            "--password",
+            "--secret",
+            "--client-secret",
+            "--value",
+            "--key",
+        ] {
             assert!(
                 !help.contains(forbidden),
                 "{forbidden} appears in the argument surface; credentials come from stdin"
+            );
+        }
+    }
+
+    #[test]
+    fn every_device_code_provider_needs_a_client_id_and_says_why_it_has_none() {
+        // Not "not filled in yet". APEX registers no OAuth application at
+        // either provider and will not borrow one, so the refusal is the
+        // answer and it has to carry the reason and the way out — a bare
+        // "missing --client-id" would read as a flag somebody forgot.
+        let device: Vec<&Provider> = account::PROVIDERS
+            .iter()
+            .filter(|p| p.flow == Flow::DeviceCode)
+            .collect();
+        assert!(!device.is_empty(), "the table lost its OAuth providers");
+        for provider in device {
+            let oauth = provider.oauth.expect("a device-code flow has a server");
+            assert!(
+                oauth.client_id.is_none(),
+                "{} ships a client id; the refusal below is now unreachable and \
+                 this build is signing users in as somebody",
+                provider.id
+            );
+            let said = client_for(provider, oauth, None)
+                .expect_err("a missing client id is a refusal")
+                .to_string();
+            assert!(said.contains("--client-id"), "{said}");
+            assert!(said.contains(oauth.auth_host), "{said}");
+            assert!(said.contains("another project"), "{said}");
+            // Google wants a secret on the poll, and being told that after
+            // registering a client is worse than being told before.
+            if oauth.client_secret == ClientSecret::RequiredToObtain {
+                assert!(said.contains("client secret"), "{said}");
+                assert!(said.contains("stdin"), "{said}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_client_id_is_checked_before_a_device_code_is_issued_against_it() {
+        let google = account::provider("google").expect("google is in the table");
+        let oauth = google.oauth.expect("google has a server");
+        assert_eq!(
+            client_for(google, oauth, Some("  my-client.apps.example  ")).unwrap(),
+            "my-client.apps.example",
+            "the id is trimmed, because a pasted one carries whitespace"
+        );
+        // An id that could open a second form field is refused now rather than
+        // sent: the device request would otherwise carry a scope nobody asked
+        // for, and the user would approve it.
+        for evil in ["a&scope=admin", "a=b", "a\nb", " "] {
+            assert!(
+                client_for(google, oauth, Some(evil)).is_err(),
+                "'{}' was accepted",
+                evil.escape_debug()
+            );
+        }
+    }
+
+    #[test]
+    fn the_refresh_half_is_filed_where_the_daemon_will_look_for_it() {
+        // Three facts, and a renewal needs all three. The name is the one
+        // `account::renewed_service` inverts; the host is the authorisation
+        // host, so the pin stops the token being spent at the API; and the
+        // username is the client the grant was issued to, which is the field
+        // `apex-secretd`'s oauth provider reads and the one thing that was
+        // missing for these providers.
+        for provider in account::PROVIDERS.iter().filter(|p| p.flow == Flow::DeviceCode) {
+            let oauth = provider.oauth.expect("a device-code flow has a server");
+            let account = AccountRef::new(provider.id, "work").expect("a legal name");
+            let filed = refresh_record(&account, oauth, "my-client");
+
+            assert_eq!(filed.service, account.refresh_service());
+            assert_eq!(
+                account::renewed_service(&filed.service).as_deref(),
+                Some(account.service().as_str()),
+                "the daemon derives the credential to renew from this name"
+            );
+            assert_eq!(filed.host, oauth.auth_host);
+            assert_eq!(filed.username, "my-client");
+            // The pin is only worth something if the two hosts differ.
+            assert_ne!(
+                filed.host,
+                provider.resolve_host(None).expect("a fixed host"),
+                "{}'s refresh token is filed where its access token lives",
+                provider.id
+            );
+            // And the refresh credential is not an account, so no scope can be
+            // granted on it and `apex account list` never shows it.
+            assert!(AccountRef::parse(&filed.service).is_none());
+        }
+    }
+
+    #[test]
+    fn what_refresh_asks_for_matches_what_add_stored() {
+        // The silent failure this prevents: a refresh filed under one name and
+        // requested under another is not an error anywhere — it is "not
+        // granted", reported against a grant the user can see they wrote.
+        let account = AccountRef::new("microsoft", "work").expect("a legal name");
+        let record = refresh_request(&account, "/p".to_string());
+        assert_eq!(record.provider, account.refresh_service());
+        assert_eq!(record.operation, account::REFRESH_OPERATION);
+        assert_eq!(record.project.as_deref(), Some("/p"));
+        // No resource: the operation declares none, so this CLI has no field
+        // with which to aim a refresh at a host other than the pinned one.
+        assert!(record.resource.is_empty());
+    }
+
+    #[test]
+    fn refresh_refuses_an_account_whose_flow_yields_nothing_to_renew() {
+        // `Flow::is_refreshable` is a value the table carries so this is read
+        // rather than remembered. Telling somebody their Nextcloud app
+        // password "will refresh" is a lie they find out about when a backup
+        // stops running.
+        let said = refresh("nextcloud.home")
+            .expect_err("an app password cannot be renewed")
+            .to_string();
+        assert!(said.contains("apex account add nextcloud.home"), "{said}");
+        for p in account::PROVIDERS.iter().filter(|p| p.flow.is_refreshable()) {
+            assert_eq!(p.flow, Flow::DeviceCode, "{} would reach the daemon", p.id);
+        }
+    }
+
+    #[test]
+    fn removing_an_account_removes_the_refresh_token_add_stored() {
+        // Criterion 3 — "account removal revokes local capabilities cleanly" —
+        // and this is the half that only became reachable when `add` started
+        // storing a refresh token. The refresh credential is not an account:
+        // `.` is illegal in an account name, so it never appears in
+        // `apex account list` and `rm` refuses to be pointed at it. Computing
+        // it from the account is the only way in, and a `rm` that removed one
+        // name would leave a live credential that can mint access tokens on a
+        // machine whose owner was told the account was gone.
+        for provider in account::PROVIDERS.iter().filter(|p| p.flow == Flow::DeviceCode) {
+            let oauth = provider.oauth.expect("a device-code flow has a server");
+            let account = AccountRef::new(provider.id, "work").expect("a legal name");
+            let [access, refresh] = names_to_remove(&account);
+
+            assert_eq!(access, account.service());
+            // The name `add` writes IS the name `rm` deletes. Nothing else
+            // compares the two, and a rename on either side would be silent.
+            assert_eq!(refresh, refresh_record(&account, oauth, "my-client").service);
+            assert_ne!(access, refresh);
+            assert!(
+                AccountRef::parse(&refresh).is_none(),
+                "the refresh credential parses as an account, so `rm` could reach \
+                 it directly and this derivation is not the only way in"
             );
         }
     }
