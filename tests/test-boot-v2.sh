@@ -476,6 +476,48 @@ grep -q 'INCOMPLETE' "$TMP/harness.log" \
     && ok "the aborted run calls itself INCOMPLETE" \
     || bad "the aborted run printed a verdict that does not say it stopped early"
 
+# A KILLED RUN MUST NOT REPORT A PASS.
+#
+# The EXIT trap alone does not cover this, and the comment in run-scenarios
+# that once said it did cost a round. bash DOES run the EXIT trap on an
+# untrapped SIGTERM, but `$?` reads 0 inside it, so the `rc != 0` INCOMPLETE
+# branch never fires. MEASURED 2026-09-14: two detached scenario containers
+# were SIGTERM'd part-way through their second boot and both logs ended
+# `== boot-v2 VM harness: 6 passed, 0 failed ==`, which the next round was told
+# to collect as a result.
+#
+# The real trap block is lifted out of run-scenarios rather than restated, so
+# this test fails if someone deletes the signal traps from the script itself.
+sed -n '/^BOOTV2_SUMMARY_PRINTED=0$/,/^trap bootv2_report EXIT$/p' \
+    "$REPO/files/scripts/boot-v2/run-scenarios" >"$TMP/trapblock.sh"
+[[ -s "$TMP/trapblock.sh" ]] \
+    && ok "the trap block was found in run-scenarios to test against" \
+    || bad "could not extract the trap block from run-scenarios"
+{ printf '%s\n' 'set -uo pipefail' ". \"$BOOTV2_LIB\" >/dev/null 2>&1" \
+      'ok "a check that ran before the kill"'
+  cat "$TMP/trapblock.sh"
+  printf '%s\n' 'sleep 300'
+} >"$TMP/killme.sh"
+bash "$TMP/killme.sh" >"$TMP/killed.log" 2>&1 &
+killme=$!
+# Wait for the fixture to reach its sleep, then signal it AND its child — a
+# container kill hits the whole cgroup, and bash defers a trapped signal until
+# the foreground child is gone.
+for _ in $(seq 1 50); do
+    child="$(pgrep -P "$killme" 2>/dev/null | head -1)" && [[ -n "$child" ]] && break
+    sleep 0.1
+done
+kill -TERM "$killme" 2>/dev/null || true
+[[ -n "${child:-}" ]] && kill -TERM "$child" 2>/dev/null
+krc=0; wait "$killme" || krc=$?
+eq 143 "$krc" "a SIGTERM'd run exits 143"
+grep -q 'KILLED by SIGTERM' "$TMP/killed.log" \
+    && ok "a SIGTERM'd run says it was killed" \
+    || bad "a SIGTERM'd run did not name the signal: $(tail -2 "$TMP/killed.log" | tr '\n' ' ')"
+grep -qE '^== boot-v2 VM harness: [0-9]+ passed, 0 failed ==' "$TMP/killed.log" \
+    && bad "a SIGTERM'd run reported a clean pass — the killed-run defect is back" \
+    || ok "a SIGTERM'd run does not report 0 failed"
+
 # The lab image ships no diffutils (bootlab/Containerfile installs neither cmp
 # nor diff and asserts neither present). `if cmp -s A B; then ...` with no cmp
 # exits 127, which takes the same branch as "the files differ" — so a control
