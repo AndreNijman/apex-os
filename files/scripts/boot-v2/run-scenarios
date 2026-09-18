@@ -1072,6 +1072,13 @@ scenario_luks_tpm_clear() {
     # The same boot. "It refuses" and "it is recoverable" as two green checks
     # that never met would not be the property a user needs.
     assert_serial_has  "$ser" "APEX-BOOTLAB: recovery-unlock=SUCCESS"
+    # AND WITH THE DATA. A mapper appearing says the recovery key satisfied a
+    # keyslot; the marker written through the TPM path before the clear says
+    # the user got their disk back. The guest probe emits this line on every
+    # recovery-key unlock, and this scenario read it for two rounds without
+    # asserting on it.
+    assert_serial_has  "$ser" "APEX-BOOTLAB: recovery-marker=found"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: recovery-marker=absent"
     # And the UKI really is the same one: PCR 11 unchanged proves the refusal
     # is about the TPM's seeds, not about a different measurement.
     local pcr11_after; pcr11_after="$(luks_serial_field "$ser" pcr11)"

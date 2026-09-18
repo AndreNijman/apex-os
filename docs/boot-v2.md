@@ -184,10 +184,15 @@ enough.
 
 ## What was measured
 
-All figures below are from the katana on 2026-09-03 — a real APEX machine,
-`VARIANT_ID=gaming`, kernel `7.1.5-cachyos1.fc43.x86_64` — with guests under
-`OVMF_CODE_4M.secboot` and only the ephemeral APEX certificate enrolled as
-PK/KEK/db. Nothing here is a prediction.
+**Two machines and two dates, because one header covered both for four rounds
+and had stopped being true.** The UKI, Secure Boot, reproducibility and
+boot-counting figures are from the katana on 2026-09-03 — a real APEX machine,
+`VARIANT_ID=gaming`, kernel `7.1.5-cachyos1.fc43.x86_64`. The LUKS and TPM edge
+cases below them, from 2026-09-14 onward, ran on the L16 against a root staged
+from kernel `7.2.3-cachyos2.fc43.x86_64`, which is what each run's `.apexinf`
+line records. Every guest ran under `OVMF_CODE_4M.secboot` with only the
+ephemeral APEX certificate enrolled as PK/KEK/db. Nothing here is a
+prediction.
 
 **A UKI from the real APEX image boots.** Kernel 16,758,856 bytes, the real
 APEX initramfs 386,072,073 bytes, the signed UKI ~390 MB. sd-stub printed
@@ -252,11 +257,14 @@ edge cases and L-002's, all against the same software TPM. Counts come from the
 container logs with `State.FinishedAt` checked on each, so `Exited (0)` is not
 taken at face value.
 
-* **TPM clear — 20 passed, 0 failed.** Four boots, one UKI throughout, so a
+* **TPM clear — 22 passed, 0 failed.** Four boots, one UKI throughout, so a
   refusal cannot be the PCR policy in disguise. A real `TPM2_Clear` runs between
   boots 1 and 2, confirmed by the owner primary key's *name* changing rather
-  than by `tpm2_clear` exiting 0. Boot 2 refuses the TPM unlock and the recovery
-  key opens the volume in that same boot.
+  than by `tpm2_clear` exiting 0. Boot 2 refuses the TPM unlock, the recovery
+  key opens the volume in that same boot, and the plaintext marker written
+  before the clear comes back — so the user has their disk and not an opened
+  keyslot. It was 20 passed for two rounds: the guest emitted that marker line
+  and this scenario read past it without asserting on it.
 * **Firmware change — 18 passed, 0 failed, 1 could-not-run.** Fedora's real
   `DBXUpdate` blob moves PCR 7 (76 → 21340 bytes) and the signed PCR 11 policy
   still unlocks, which is why boot-v2 chose this policy. The
@@ -366,7 +374,7 @@ L-002 and L-003 blocked behind it.
 | **Real TPM** | — | — | — | **nothing. Every row below is `swtpm`.** |
 | firmware update, Secure Boot policy (PCR 7) | `luks-firmware-change` | 18 / 0 / 1 | shipped 20260812 | Fedora's real `DBXUpdate` moves PCR 7 (76 → 21340 bytes); the signed PCR 11 policy still unlocks; a by-value PCR 7 control refuses in the same boot |
 | firmware update, firmware code (PCR 0) | `luks-firmware-code` | 22 / 0 / 1 | 20250812 → 20260812 | two edk2 revisions differing only in code move PCR 0; PCR 11 and PCR 7 do not; the policy still unlocks; a by-value PCR 0 control refuses in the same boot |
-| TPM clear | `luks-tpm-clear` | 20 / 0 | shipped 20260812 | a real `TPM2_Clear` between boots, confirmed by the owner primary key's *name* changing; the TPM then refuses the next boot and **the recovery key opens the volume in it** |
+| TPM clear | `luks-tpm-clear` | 22 / 0 | shipped 20260812 | a real `TPM2_Clear` between boots, confirmed by the owner primary key's *name* changing; the TPM then refuses the next boot, **the recovery key opens the volume in it**, and the marker written before the clear reads back |
 | suspend/resume | `luks-s3` | 17 / 0 | **20250812 only** | the open volume survives S3 and a mapper created *after* the resume reads the plaintext back; two non-colluding witnesses; `s3-mode=deep` |
 | suspend/resume | `luks-s3` | could-not-run | shipped 20260812 | the firmware asserts in its own S3 resume path — an edk2 regression, isolated one variable at a time |
 | recovery key paths | `luks-tpm-clear`, `luks-no-tpm` | — | shipped 20260812 | refusal and recovery **in one boot**, twice, and the second reads the marker back, so it is the same disk and not an opened keyslot alone |
