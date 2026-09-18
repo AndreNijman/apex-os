@@ -354,6 +354,20 @@ Round 3, on task/p2-f-3 (pushed):
   scope working, not the transport failing. `files.write` is what makes the
   first file readable and it needs `/upload/drive/v3/files`, a different path
   from the stored `/drive/v3`.
+- **A SUCCESSFUL `gdrive.file.read` through the socket cannot be measured
+  against a double, by construction — do not treat this as a gap to close.**
+  The host pin refuses a credential on `127.0.0.1`, and a credential on
+  `www.googleapis.com` would reach Google. So criterion 2 for gdrive is
+  daemon-direct (the 11 in-process tests) plus, through the socket, the grant,
+  its canonical recording and the REFUSAL. Weaker than webdav's position, and
+  it is the price of the pin: a transport pointable at a test host through the
+  shipped binary is a transport pointable anywhere. Closing it needs a
+  resolver override, which is a bigger decision than a round.
+- The 401 hint names `apex account refresh <account>`, which is itself a `Use`
+  needing a per-project grant the hint does not check — the `cf status` shape
+  from `eeaf08ac`, deliberately left, because a provider reading `Grants` to
+  decide what to print is a second copy of the daemon's rule inside a
+  transport, and `add` already prints that grant command at sign-in.
 - **Google's refresh is NOT proven, and round 30 did not change that.** Its
   guide lists `client_secret` as required on the poll and optional on the
   refresh; this build stores no secret. Rather than hardcode a refusal off a

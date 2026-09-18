@@ -5477,7 +5477,23 @@ tasks:
     ignored; clippy --locked --workspace --all-targets -D warnings exit 0; shellcheck coverage 165 discovered / 0
     newly failing; suites in CI 75 / 71 / 4 exempt / 0 unrun and undeclared. STILL NOT MEASURED, AND NOT CLAIMED:
     the apex-agentd forwarding path a confined session would use is not exercised for gdrive, exactly as round 1
-    recorded for webdav; and no Google endpoint has been contacted at any point.
+    recorded for webdav; and no Google endpoint has been contacted at any point. TWO THINGS SAID OUTRIGHT RATHER
+    THAN LEFT TO BE INFERRED. (1) A SUCCESSFUL gdrive.file.read THROUGH THE SOCKET IS NOT MEASURED, AND CANNOT BE
+    AGAINST A DOUBLE, BY CONSTRUCTION. The host pin the shell suite proves is present is exactly what makes an
+    end-to-end SUCCESS against a loopback double impossible without a resolver override: a credential on 127.0.0.1
+    is refused, and a credential on www.googleapis.com would reach Google. So criterion 2 for gdrive is measured
+    DAEMON-DIRECT only - the eleven in-process tests - plus, through the socket, the grant, its canonical
+    recording and the refusal. That is a weaker position than webdav's, whose round-1 evidence also had only the
+    daemon-direct success, and it is the price of the pin rather than a gap somebody forgot: a transport that
+    could be pointed at a test host through the shipped binary would be a transport that could be pointed
+    anywhere. A later round deciding whether to call gdrive "measured" should read this sentence rather than the
+    assertion counts. (2) THE 401 HINT NAMES A COMMAND THAT CAN ITSELF BE REFUSED: apex account refresh <account>
+    is a Use, a Use needs a per-project grant on the .refresh credential, and the hint does not check whether one
+    exists - the same shape as the stale apex cf status line eeaf08ac fixed. It is left as it is deliberately and
+    the reasoning is recorded rather than assumed: a provider reaching into Grants to decide what to print would
+    be a second copy of the daemon's rule inside a transport, apex account add prints that exact grant command at
+    sign-in time, and apex account refresh says what is missing if it was not run. Softer than the cf status case,
+    and not silent.
 - id: P2-018
   title: Guaranteed Safe Graphics / desktop failover mode
   priority: P2

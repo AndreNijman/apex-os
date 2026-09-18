@@ -17,30 +17,30 @@ pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 
 ## NEXT
 
-**Land the shim half**: commit `scratch-p2-b/round30/shim.cpp` as apex-shell
-`tests/quickshell-a11y-shim.cpp` (the suite comment in
-`tests/check-quickshell-a11y-cause.sh` §5 already names that path, so it is a
-dangling reference until it exists) and give
-`tests/run-lockscreen-atspi.sh` a **§6** that builds it, re-runs the locked
-bring-up with `LD_PRELOAD` scoped to the one `quickshell` command, and turns
-§5's vacuous SKIPs into real read-back assertions — measured working already:
-the lock frame appears and under it `role=text`
-`desc=Type your password and press Enter to unlock.`
-`states=editable,enabled,focusable,focused,sensitive,showing,visible`
-`actions=SetFocus`, plus a `role=label`. Both names come back EMPTY, which is
-Qt's `Accessible.passwordEdit` suppression for the field and is NOT yet
-explained for the label. §6 must SKIP with a named reason when there is no
-compiler or no Qt private headers, and each new assertion needs a mutant in
-`tests/mutate-lockscreen-atspi.sh`. Do NOT weaken §4's `nodes = 1` pin — it is
-still true without the shim and it is the thing that goes red when upstream is
-fixed.
+**Write `tests/mutate-lockscreen-atspi-shim.sh`**, the mutation pair for the new
+read-back suite, then wire both the suite and the pair into `ci.yml` (step +
+structure-check REQUIRED list) and commit. The mutants that matter are the ones
+that break the QML and require the BUS to notice: remove
+`Accessible.passwordEdit` from `src/windows/Lockscreen.qml` (the field's name
+must then arrive and the suppression assertion must go red), change the idle
+`Accessible.description` text, drop `Accessible.role: Accessible.StaticText`
+from the status line, put a private-use codepoint into an accessible string, and
+break the shim's factory so only `QQuickWindow` is answered (the frame then has
+no children and the field assertions go red — that is the false negative the
+three-branch factory exists to avoid). Green holds: a comment in Lockscreen.qml
+quoting the asserted strings, and an `Accessible.*` added to an item nothing
+asserts. Restore from a pristine `mktemp -d` copy with sha256 verification, not
+`git checkout --` (FOUND 10), and carry the FOUND 18 baseline-asserted guard.
 
 ## IN PROGRESS
 
-apex-shell `task/p2-b-round30` has ONE commit pushed, `273c1fb` — the named
-cause, its pin and its mutation pair. The shim (`shim.cpp`) and its driver
-(`probe-shim.sh`) are still only in `scratch-p2-b/round30/`, and no roadmap
-evidence has been written yet. apex-os `task/p2-b-round30` is pushed and empty.
+apex-shell `task/p2-b-round30`: `273c1fb` is pushed (the named cause, its pin
+and its mutation pair). **UNCOMMITTED in the worktree right now**:
+`tests/quickshell-a11y-shim.cpp` and `tests/run-lockscreen-atspi-shim.sh` —
+the latter runs **23 passed / 0 failed / 1 skipped, five times in a row** under
+`env -i`. Not yet written: its mutation pair, and its ci.yml wiring. P2-003's
+roadmap evidence is written through `273c1fb` only; the shim suite is not in it
+yet. apex-os `task/p2-b-round30` is pushed and empty.
 
 ## DONE
 
@@ -330,6 +330,29 @@ than this branch.
     separate question from this one and is NOT yet explained — the desktop
     shell's bar may simply carry no `Accessible.*`, or there may be a second
     layer. Do not report the shell as accessible on the strength of this.
+
+22. **`LockedHintService` silently drops a lock whose hint chain overlaps a
+    FAILING one, and a flaky test is how it was found.** `_pump()` returns
+    immediately while `_busy`; `_succeeded()` clears `_busy` and re-pumps;
+    `_failed()` clears `_busy` and **deliberately does not** ("Deliberately no
+    retry here", `src/services/system/LockedHintService.qml`). So a
+    `setLocked(true)` that arrives while a failing chain is in flight only
+    updates `_desired`, and nothing ever acts on it — the lock engages, the
+    surface comes up, and logind is never told. `Lockscreen.qml`'s
+    `Component.onCompleted` starts exactly such a chain at startup, and on a
+    private runtime directory it always fails at step 1. Measured: the new
+    shim suite's lock-acknowledged assertion went red on **2 runs in 9** while
+    the lock had in fact engaged — §6 read the entire lock surface back in
+    those same runs — and 5 runs in 5 once the suite waits for the startup
+    chain's refusal before asking for a lock. `tests/run-lockscreen-atspi.sh`
+    does not see this because its §2 waits for that same warning as an
+    assertion of its own and closes the race **by accident**; delete that wait
+    and its §3 becomes intermittent. The shipped consequence is real and is not
+    a test problem: on a machine where any of the three steps fails
+    transiently, a lock that engages during the failure reports nothing to
+    logind, and P0-015's lock policy (`apexd/apex-agent-core/src/lock.rs`)
+    reads `LockedHint`. One line fixes it — `_failed()` should re-pump, or the
+    guard should be a trailing-edge timer. NOT this unit's item; hand it on.
 
 ## BLOCKED ON
 
