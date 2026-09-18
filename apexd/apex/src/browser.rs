@@ -56,7 +56,12 @@ pub enum BrowserCmd {
     /// Its own profile, its own cookie jar, its own download directory, and no
     /// route onto the network except the destinations named here. Everything
     /// after `--` goes to the browser.
-    Run(RunArgs),
+    ///
+    /// Boxed for `AgentCmd::Run`'s reason: `Doctor` carries no data at all, so
+    /// clippy's `large_enum_variant` is right about the pair. It crossed the
+    /// threshold when `--trust-ca` was added, which makes the box that flag's
+    /// cost rather than tidying somebody did along the way.
+    Run(Box<RunArgs>),
 }
 
 #[derive(Args)]
@@ -142,7 +147,7 @@ pub struct RunArgs {
 pub fn argv(cmd: BrowserCmd) -> Vec<String> {
     match cmd {
         BrowserCmd::Doctor => vec!["doctor".to_string()],
-        BrowserCmd::Run(a) => run_argv(a),
+        BrowserCmd::Run(a) => run_argv(*a),
     }
 }
 
