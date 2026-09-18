@@ -289,6 +289,57 @@ impl Rule {
         }
     }
 
+    /// Whether every destination this rule would allow is one `wider` allows
+    /// too.
+    ///
+    /// The question [`Allowlist::narrow`] asks of each line a session names,
+    /// and it is deliberately not "does `wider` match this rule's text". It is
+    /// a statement about the SETS: a rule is covered when the set of
+    /// `host:port` pairs it permits is a subset of the set `wider` permits.
+    /// Anything it cannot prove is refused, because the failure of a wrong
+    /// `true` here is a session reaching a destination the machine never
+    /// permitted, and the failure of a wrong `false` is a refusal the caller
+    /// can read and act on.
+    ///
+    /// The port is exact on both sides, which follows from the rules
+    /// themselves: each line is one port, so a rule on 8443 permits nothing a
+    /// rule on 443 permits.
+    fn covered_by(&self, wider: &Rule) -> bool {
+        if self.port != wider.port {
+            return false;
+        }
+        match (&self.host, &wider.host) {
+            // The same rule, written the same way.
+            (HostPattern::Exact(n), HostPattern::Exact(m)) => n == m,
+            (HostPattern::Address(a), HostPattern::Address(b)) => a == b,
+            // A name under a wildcard: `api.example.com` beneath
+            // `*.example.com`. Exactly `covers_host`'s subdomain arm, and it
+            // is spelled out here rather than routed through a synthesised
+            // `Destination` so the two cannot drift.
+            (HostPattern::Exact(n), HostPattern::Subdomains(suffix)) => n
+                .strip_suffix(suffix.as_str())
+                .and_then(|head| head.strip_suffix('.'))
+                .is_some_and(|head| !head.is_empty()),
+            // A wildcard under a wider wildcard: every host
+            // `*.eu.example.com` permits is `<head>.eu.example.com`, which
+            // ends in `.example.com` with a non-empty head, so
+            // `*.example.com` permits it too.
+            (HostPattern::Subdomains(inner), HostPattern::Subdomains(outer)) => inner
+                .strip_suffix(outer.as_str())
+                .and_then(|head| head.strip_suffix('.'))
+                .is_some_and(|head| !head.is_empty()),
+            // Everything else is refused, and each for a reason rather than
+            // for want of a branch. A wildcard is never covered by one exact
+            // name, because it permits names that one does not. An address
+            // literal is not covered by a name rule: `decide` matches the
+            // literal against `HostPattern::Address` only, and a name rule
+            // that happened to resolve there today is a fact about DNS at one
+            // moment, not a permission. And a name is not covered by an
+            // address rule, for the mirror of that reason.
+            _ => false,
+        }
+    }
+
     /// The line that would produce this rule, for `apex agent status` and for
     /// the refusal a session is shown.
     pub fn as_line(&self) -> String {
@@ -374,6 +425,53 @@ impl std::fmt::Display for RuleError {
 }
 
 impl std::error::Error for RuleError {}
+
+/// Why one session's allowlist could not be narrowed out of the runtime's.
+///
+/// Three variants because there are three different things to do about it, and
+/// a caller told only "refused" cannot tell a typo from a widening.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NarrowError {
+    /// A line the session named is not a rule at all.
+    Rule(RuleError),
+    /// The session named no destinations.
+    Nothing,
+    /// The session named a destination the runtime's allowlist does not cover.
+    NotCovered {
+        rule: String,
+        /// What the runtime does allow, so the refusal can say what the
+        /// session could have asked for instead of only what it could not.
+        runtime: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for NarrowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NarrowError::Rule(e) => write!(f, "{e}"),
+            NarrowError::Nothing => write!(
+                f,
+                "a session's allowlist cannot be empty; a session that should reach nothing \
+                 is `--network offline`, which says so in one place instead of two"
+            ),
+            NarrowError::NotCovered { rule, runtime } => write!(
+                f,
+                "'{}' is not covered by the runtime's allowlist, and a session cannot widen \
+                 it by asking. the runtime allows {}; add the destination once with \
+                 `apex agent allow {}` if it should be reachable at all",
+                rule.escape_debug(),
+                if runtime.is_empty() {
+                    "nothing at all".to_string()
+                } else {
+                    runtime.join(", ")
+                },
+                rule.escape_debug()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NarrowError {}
 
 /// Why a destination was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -467,6 +565,47 @@ impl Allowlist {
     /// The rules, as the lines that would produce them.
     pub fn lines(&self) -> Vec<String> {
         self.rules.iter().map(Rule::as_line).collect()
+    }
+
+    /// The allowlist for ONE session, named by its caller and proven to be a
+    /// subset of this one (P2-012, [`crate::protocol::RunRequest::allow`]).
+    ///
+    /// This is the whole of the narrowing guarantee, in one place, so there is
+    /// one implementation to read and one to test. Three refusals, and each is
+    /// a refusal rather than a silent repair:
+    ///
+    /// * a line that is not a rule — the parse error says which line and why,
+    ///   because the caller has to be able to find it;
+    /// * no lines at all — "reach nothing" is `--network offline`, and a
+    ///   second spelling of a policy is how two spellings drift apart;
+    /// * a rule this allowlist does not cover — a WIDENING, and the one this
+    ///   function exists to stop. Refused rather than dropped: a caller who
+    ///   named a destination and was quietly not given it finds out minutes
+    ///   later, inside the agent, as a network error with no cause attached.
+    ///
+    /// Coverage is [`Rule::covered_by`] — a statement about which `host:port`
+    /// pairs each rule permits, not about how the two lines are spelled. So a
+    /// session may name `api.example.com` under a runtime `*.example.com`, and
+    /// may not name `*.example.com` under a runtime `api.example.com`.
+    ///
+    /// The result is the session's rules, not an intersection: every one has
+    /// been proven to be a subset already, and handing back the caller's own
+    /// list is what makes `apex agent status` show the session the destinations
+    /// it was started with.
+    pub fn narrow<S: AsRef<str>>(&self, lines: &[S]) -> Result<Allowlist, NarrowError> {
+        let narrowed = Allowlist::parse(lines).map_err(NarrowError::Rule)?;
+        if narrowed.is_empty() {
+            return Err(NarrowError::Nothing);
+        }
+        for rule in &narrowed.rules {
+            if !self.rules.iter().any(|wider| rule.covered_by(wider)) {
+                return Err(NarrowError::NotCovered {
+                    rule: rule.as_line(),
+                    runtime: self.lines(),
+                });
+            }
+        }
+        Ok(narrowed)
     }
 
     /// Question one: may a connection to this name and port be opened at all.
@@ -930,5 +1069,122 @@ mod tests {
         let text = a.accepts_address(&d, local).explain(&d);
         assert!(text.contains("127.0.0.1"), "{text}");
         assert!(text.contains("allow the address"), "{text}");
+    }
+
+    // ── narrowing (P2-012) ──────────────────────────────────────────────────
+    //
+    // The half of `--allow` that is a security boundary. Every case below is
+    // paired: what a session may narrow to, and the nearest thing it may not,
+    // because a `narrow` that accepted everything would pass a test suite made
+    // only of the first half.
+
+    #[test]
+    fn a_session_may_name_fewer_destinations_than_the_runtime_allows() {
+        let runtime = list(&["api.example.com", "files.example.com", "other.test:8443"]);
+        let one = runtime.narrow(&["api.example.com"]).expect("narrow");
+        assert_eq!(one.lines(), vec!["api.example.com"]);
+        assert!(one.decide(&dest("api.example.com:443")).is_allowed());
+        // The narrowing is what is enforced, not the runtime's list: a
+        // destination the RUNTIME allows is refused for this session.
+        assert_eq!(
+            one.decide(&dest("files.example.com:443")),
+            Verdict::Deny(Denial::NoRule)
+        );
+        // And two of three is still a narrowing.
+        let two = runtime
+            .narrow(&["api.example.com", "other.test:8443"])
+            .expect("narrow");
+        assert_eq!(two.len(), 2);
+    }
+
+    #[test]
+    fn a_session_cannot_widen_the_allowlist_by_naming_a_destination() {
+        let runtime = list(&["api.example.com"]);
+        // A different name.
+        match runtime.narrow(&["evil.example.com"]) {
+            Err(NarrowError::NotCovered { rule, .. }) => assert_eq!(rule, "evil.example.com"),
+            other => panic!("a widening was accepted: {other:?}"),
+        }
+        // The SAME name on a port the runtime never allowed. Each line is one
+        // port, so this is as much a widening as a new host is.
+        match runtime.narrow(&["api.example.com:8443"]) {
+            Err(NarrowError::NotCovered { rule, .. }) => assert_eq!(rule, "api.example.com:8443"),
+            other => panic!("a port widening was accepted: {other:?}"),
+        }
+        // One good line does not carry a bad one: the whole list is refused,
+        // the way `parse` refuses a whole file for one bad line.
+        assert!(runtime
+            .narrow(&["api.example.com", "evil.example.com"])
+            .is_err());
+    }
+
+    #[test]
+    fn a_wildcard_covers_a_name_under_it_and_a_name_covers_no_wildcard() {
+        let runtime = list(&["*.example.com"]);
+        assert!(runtime.narrow(&["api.example.com"]).is_ok());
+        assert!(runtime.narrow(&["eu.api.example.com"]).is_ok());
+        // A narrower wildcard is genuinely narrower, and is allowed.
+        assert!(runtime.narrow(&["*.eu.example.com"]).is_ok());
+        // The apex itself is not under its own wildcard — `covers_host`
+        // requires a non-empty head — so narrowing may not reach it either.
+        assert!(runtime.narrow(&["example.com"]).is_err());
+        // The mirror: a wildcard is never covered by one exact name, because
+        // it permits names that name does not.
+        let exact = list(&["api.example.com"]);
+        assert!(exact.narrow(&["*.example.com"]).is_err());
+        // Nor may a wildcard widen to its own parent.
+        let inner = list(&["*.eu.example.com"]);
+        assert!(inner.narrow(&["*.example.com"]).is_err());
+    }
+
+    #[test]
+    fn an_address_rule_and_a_name_rule_do_not_cover_each_other() {
+        // `decide` matches a literal against `HostPattern::Address` only, so a
+        // name rule that resolves to an address today is a fact about DNS at
+        // one moment and not a permission. Both directions are refused.
+        let by_name = list(&["api.example.com"]);
+        assert!(by_name.narrow(&["127.0.0.1"]).is_err());
+        let by_address = list(&["127.0.0.1:8443"]);
+        assert!(by_address.narrow(&["api.example.com:8443"]).is_err());
+        // An address may still narrow to itself, which is the browserlab's
+        // own case.
+        assert!(by_address.narrow(&["127.0.0.1:8443"]).is_ok());
+    }
+
+    #[test]
+    fn a_session_allowlist_that_names_nothing_is_refused_rather_than_read_as_offline() {
+        let runtime = list(&["api.example.com"]);
+        let empty: [&str; 0] = [];
+        assert_eq!(runtime.narrow(&empty), Err(NarrowError::Nothing));
+        // A line that is not a rule comes back as the parse error itself, so
+        // the caller is told which line and why rather than "refused".
+        match runtime.narrow(&["https://api.example.com"]) {
+            Err(NarrowError::Rule(RuleError::HasScheme(s))) => {
+                assert_eq!(s, "https://api.example.com")
+            }
+            other => panic!("wrong refusal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn narrowing_an_empty_runtime_allowlist_refuses_every_destination() {
+        // The property that makes a fail-closed runtime stay fail-closed: an
+        // empty allowlist denies everything, so nothing can be narrowed out of
+        // it, and the refusal says the runtime allows nothing at all rather
+        // than listing an empty set.
+        let runtime = Allowlist::default();
+        let e = runtime.narrow(&["api.example.com"]).expect_err("refused");
+        assert!(e.to_string().contains("nothing at all"), "{e}");
+    }
+
+    #[test]
+    fn every_narrowing_refusal_says_what_to_do_next() {
+        let runtime = list(&["api.example.com"]);
+        let text = runtime.narrow(&["evil.example.com"]).expect_err("no").to_string();
+        assert!(text.contains("evil.example.com"), "{text}");
+        assert!(text.contains("api.example.com"), "{text}");
+        assert!(text.contains("apex agent allow"), "{text}");
+        let text = runtime.narrow(&[] as &[&str]).expect_err("no").to_string();
+        assert!(text.contains("--network offline"), "{text}");
     }
 }

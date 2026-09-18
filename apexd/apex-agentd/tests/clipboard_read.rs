@@ -224,6 +224,7 @@ impl Harness {
             checkpoint: false,
             ttl_ms: None,
             capabilities: None,
+            allow: None,
             second_factor: None,
             cols: 80,
             rows: 24,
