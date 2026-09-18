@@ -2,35 +2,44 @@
 items: P2-017, P2-018, P2-019  (P2-016 — see NOTE at the bottom, unchanged)
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-p2-f
-branch: task/p2-f-3   (cut from origin/roadmap/v2.2 @ 13d53c01)
+branch: task/p2-f-4   (cut from origin/roadmap/v2.2 @ 7f6fc44d; tip bde4d96c merged in at af5f5625)
 
 ## NEXT
-**P2-018 criterion 2, which is the last criterion on this unit that is neither
-a new transport nor blocked on another item.** It is STRUCTURAL today: the
-recovery menu names `apex recover status`, `apex doctor`,
-`apex-safe-graphics diagnose`, `sudo apex rollback`, `thunar` and `nmtui`, the
-build refuses if any is missing, and their binaries are asserted to exist —
-but NONE HAS BEEN RUN FROM INSIDE THE SESSION. The recipe:
-`tests/test-apex-safe-graphics.sh` already starts the real labwc session
-headless (`WLR_BACKENDS=headless`, private `XDG_RUNTIME_DIR`), so the missing
-step is executing each menu remedy as a client of THAT compositor and
-requiring an exit status and non-empty output — a remedy that needs a GPU, a
-polkit prompt or a real deployment has to be told apart from one that is
-simply broken, and saying which is which is most of the work.
-Constraints that are not negotiable: headless only (never a window on Andre's
-desktop), no polkit prompts (so `sudo apex rollback` is checked for
-`--help`/a dry path, never run), and greetd is boot-critical.
+**P2-018 criterion 2 is CLOSED — do not reopen it, and do not widen the
+watchdog.** Round 29 ran every command in `menu.xml` from inside the real
+session. What is left on P2-018 needs an image build and a real boot, which
+this unit cannot do, plus one thing that needs synthetic pointer input: the
+menu is never OPENED (right-click → ShowMenu → Execute is not driven). What IS
+proved is that every command the menu would run does run, and that labwc
+accepts every action the menu names.
 
-**DO NOT widen P2-018's session watchdog.** The dispatch was explicit and
-nothing learned since argues for it: a compositor that stays up while the
-shell crashes in a loop is not a bounce, the detector will not see that, and a
-counter wide enough to catch it can strand somebody at a login screen.
+**NEXT ACTION: the `gdrive` transport in `apex-secretd`.** It is the biggest
+unblocked piece left on this unit and it unlocks three things at once:
 
-Also open, in descending size: the `gdrive`/`msgraph` TRANSPORT in
-`apex-secretd` (P2-017 — until it exists, a Google or Microsoft token can be
-stored and renewed and spent on nothing, and `apex account add` says so); gvfs
-integration; and P2-019's three remaining unsettled entries, two of which
-depend on other roadmap items.
+  1. A Google token stored by `apex account add --client-id` can currently be
+     renewed and spent on NOTHING — no `gdrive` provider exists, so every
+     scope `GOOGLE_SCOPES` lists names an operation no provider offers, and
+     `add` prints that rather than sending somebody to a grant the daemon will
+     refuse.
+  2. **Google's refresh is still unproven.** Its guide lists `client_secret`
+     as required on the poll and optional on the refresh, and this build
+     stores none. The daemon deliberately lets Google answer — a non-2xx
+     replaces nothing and returns Google's own `error_description` — but
+     nothing has ever spent a refreshed Google token, because there is nothing
+     to spend it on.
+  3. It removes the `files.read` vapour scope for real rather than by the
+     cross-crate gate refusing it.
+
+Do ONE operation (`gdrive.file.read`), against a loopback double that parses
+the request that actually arrived — the shape `s3/mod.rs` and the `webdav`
+provider both use. `#[cfg(test)]` table injection is needed for the same
+reason the `oauth` provider needed it: a loopback double is `127.0.0.1` and
+the host table has no entry for it by design.
+
+After that, in descending size: `msgraph` (the same shape, different host
+table entry), gvfs — **a design paragraph only**, and P2-019's three remaining
+unsettled entries, two of which depend on other roadmap items. P2-019 is a
+DESIGN item and a design landed; do not build a fleet daemon.
 
 ## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
 1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
@@ -105,6 +114,37 @@ Remaining, in the order this round takes them:
   host to its token endpoint from a hard-coded table, which is pin-consistent.
 
 ## DONE
+Round 8 (round 29 of the program), on task/p2-f-4, BOTH PUSHED:
+  fb884d8f  the recovery session logged `[ERROR] Empty string is not allowed
+            for name.theme` on EVERY start — `<theme><name></name></theme>` in
+            the shipped rc.xml is not "labwc's built-in theme", omitting the
+            element is. Found by RUNNING the session, which is the point of
+            the round. The suite now requires the shipped configuration to put
+            nothing on the compositor's error channel, snapshotted at startup,
+            with a control: a menu naming `ApexNoSuchActionExists` must make
+            labwc complain, and it does. That control is what turns menu.xml
+            from "well-formed XML" into "actions labwc will perform" —
+            xmllint and labwc do not agree automatically.
+  653a6d5d  P2-018 criterion 2: every command in menu.xml is read out of the
+            file and RUN from inside the session, under `env -i` with the
+            environment the compositor handed a client its own autostart
+            started. Wrapped entries go through `apex-safe-graphics-terminal`,
+            which had no live coverage at all. `sudo apex rollback` is never
+            run (its verb is asked for `--help`, with sudo/pkexec tripwires on
+            the session's PATH); `nmtui` with no terminal exits ZERO having
+            drawn nothing, which is now an assertion and is why the menu wraps
+            it; labwc's `Exit` is not a command. `thunar` runs as a real
+            client with a negative control every time and a gate that refuses
+            to start it unless the client environment carries a DISPLAY that
+            is not the developer's and NO session bus address. Also fixed five
+            `printf | grep -q` sites — 141 on a MATCH under pipefail, one of
+            them the negative quickshell assertion.
+  59 -> 86 passed, 0 failed, 0 skipped. Fourteen mutations, all red, all
+  restored byte-identical with plain cp. Gates: shellcheck coverage 165 / 0
+  known-failing / 0 newly failing; suites-in-CI 75 / 71 / 4 exempt (no fifth).
+  P2-018's evidence was rewritten in full with set-status.py, rounds 1-28
+  preserved verbatim and checked by re-parsing.
+
 Round 7 (round 28 of the program), on task/p2-f-3, ALL SIX PUSHED:
   8f60dd5e  removing an account that never had a refresh token is not a
             failure — the commoner path the commit below left untested, which
@@ -179,14 +219,17 @@ Round 3, on task/p2-f-3 (pushed):
   c224eea7  a scope may not name an operation no provider offers — the
             cross-crate gate in apex-secretd, both mutants run and red.
 
-## IN PROGRESS (round 7 — FINISHED)
-- Worktree CLEAN at `8f60dd5e`, pushed, with `roadmap/v2.2` (`266dcc57`)
-  merged in. Nothing half-written.
-- set-status.py was called for **P2-017 and P2-019**, both with the full text
-  rewritten and the earlier rounds' evidence preserved (checked by re-parsing).
-- **P2-018 was NOT touched this round and set-status was deliberately NOT
-  called on it** — it REPLACES evidence, and P2-018's record is long and
-  earned.
+## IN PROGRESS (round 8 — FINISHED)
+- Worktree CLEAN at `af5f5625` on `task/p2-f-4`, pushed, cut from
+  `roadmap/v2.2` (`7f6fc44d`) with the newer tip `bde4d96c` merged in and the
+  suite re-run green afterwards (86/0/0). Nothing half-written; `git diff
+  --exit-code` is
+  silent and every mutated file was restored with plain `cp`.
+- set-status.py was called for **P2-018 only**, with the full text rebuilt
+  (14,471 stored chars kept verbatim, round 29 appended, 21,565 total) and
+  round-by-round evidence checked by re-parsing the yaml afterwards.
+- P2-017 and P2-019 were NOT touched this round and set-status was
+  deliberately NOT called on them — it REPLACES evidence.
 
 ## ROUND 5 COMMIT SEQUENCE (settled with the advisor)
 1. ~~`supersedes_credentials` + the 64 `false` literals + the registry test~~
@@ -201,6 +244,14 @@ Round 3, on task/p2-f-3 (pushed):
 4. `apex cf refresh` + the `cloudflare.rs` status line + the step-7 answer.
 
 ## FOUND
+- **xmllint and labwc do not agree about what a configuration is.** Both the
+  shipped rc.xml (an empty `<theme><name>`) and a menu `<action>` whose name
+  labwc does not have are WELL-FORMED XML that labwc rejects with an `[ERROR]`
+  line and then carries on with a default — up, apparently fine, not doing what
+  the file says. Anything in this repo that validates a labwc file with
+  `xmllint --noout` alone is checking the weaker of the two things. Start the
+  compositor and read its error channel, with a control so a clean log is a
+  measurement rather than a log nobody writes to.
 - **`5054be77` landed the S3 provider and SigV4 signer.** Round 2's card
   listed it as this round's item 1; it is done, and by somebody else.
 - **VAPOUR SCOPES — a real defect the S3 landing exposed.**

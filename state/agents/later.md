@@ -6,116 +6,125 @@ branch: task/later-2
 
 ## NEXT
 
-Nothing is running and nothing is half-finished. Branch tip 985ae69a is pushed;
-roadmap/v2.2 266dcc57 is merged in. All containers from this unit are removed.
+Nothing is running and nothing is half-finished. Branch tip 18a015ec is pushed
+and cut from roadmap/v2.2 1668ed9c. All containers from this unit are removed
+and no qemu process is left.
 
-L-001 cannot be closed from this machine. Its acceptance word is "Real TPM" and
-state/queue.json is explicit: L-002/L-003 "must stay blocked until a real TPM
-enrol-and-recover cycle has been done on hardware". Every measurement this unit
-has ever made used swtpm in a VM. The L16's TPM is off-limits to this program,
-so the next step is a decision by Andre, not a task an agent can pick up:
-nominate a machine somebody is willing to clear the TPM on, or accept the VM
-qualification and say so in the roadmap.
+**Everything a VM can qualify is now qualified.** The PCR 0 limit the previous
+card named as the next experiment is gone, and the no-TPM arm it named as the
+second candidate exists. What is left of L-001 is the acceptance word "Real",
+and no agent can satisfy it from here: state/queue.json holds L-002 and L-003
+behind "a real TPM enrol-and-recover cycle on hardware", the L16's TPM is
+off-limits, and katana is off-limits.
 
-If more VM work IS wanted, the two honest candidates, in order:
+So the next step is Andre's, not an agent's, and it is now written down as a
+procedure rather than as a wish: **docs/boot-v2.md, "The run somebody with
+hardware would have to do"** - five numbered runs, four prerequisites, what to
+record at each step. Hand that to whoever has a machine they are willing to
+clear the TPM on. Runs 1, 2 and 5 are the minimum that moves L-001 off
+`partial`.
+
+If more VM work is wanted anyway, what is honestly left is small:
+
   1. Re-run luks-tpm-clear and luks-firmware-change on the fw-2025 firmware.
-     They passed on the shipped one, but S3 did not, and nobody has checked
-     whether the older edk2 changes their results.
-  2. A no-TPM machine arm. `L-002 does not strand users` covers hardware with
-     no TPM at all, and no scenario models it.
+     They passed on the shipped build and S3 did not, and nobody has checked
+     whether the older edk2 changes their results. Still open from round 28.
+  2. `luks-no-tpm` runs the guest with `headless=1`, which turns a passphrase
+     prompt into a refusal. On a real machine the same situation shows a
+     prompt, and nobody has checked whether plymouth renders it legibly. That
+     needs a guest with a console, not a serial log.
 
 NEVER `nohup podman run &`. `podman run -d` then a FOREGROUND `podman wait`, and
 check `State.FinishedAt` and `State.ExitCode` before believing any log.
 NEVER edit files/scripts/boot-v2/** while a container executes run-scenarios
 from it. The containers run from a COPY at scratch-later/tree-exp, so the
-worktree stays editable while they run.
+worktree stays editable while they run. `diff -rq` the two before every launch.
 
 ## DONE
-- Round 28. Merged roadmap/v2.2 266dcc57 into the branch, then four commits,
-  each pushed as it was made: a9c9ebe6 (the two harness defects), 8ad79870
-  (docs/boot-v2.md), fc0ac3f5 (stop-slop on the prose added this round),
-  985ae69a (the killed-run regression test, and an overclaim withdrawn).
-- tests/test-boot-v2.sh is 78 passed / 0 failed. All four gates green.
-- tree-exp WAS refreshed from the worktree at the end of this round, so it no
-  longer lags. Check `diff -rq` anyway before the next run.
-- L-001 evidence updated with round 28 appended, rounds 25/26/27 verified still
-  present afterwards. L-002 and L-003 deliberately left `blocked`.
-- The r5 firmware experiments the card told me to collect were NOT results.
-  Both containers had exited 143 at the same nanosecond and both logs ended
-  "6 passed, 0 failed" anyway. Re-ran foreground as r6; logs saved at
-  scratch-later/r6-s3-fw2025.log and r6-s3-nosmm.log.
-- All later-* containers removed, and the r5/r6 work dirs' stale witnesses are
-  the only thing left in scratch-later.
+- Round 29. Branched task/later-2 from roadmap/v2.2 1668ed9c (round 28's work
+  is already merged, nothing to fold in), five commits, each pushed as it was
+  made: acc0a65c (the PCR 0 scenario), 79d26db1 (the no-TPM scenario), bc2538ab
+  (static tests, 78 -> 105), f80d524f (the L-001 write-up), 18a015ec (stop-slop
+  plus two Recovery table rows).
+- Two real runs, both foreground-waited and both with ExitCode and FinishedAt
+  read before the logs were believed: `scratch-later/r7-fwcode.log` (22/0/1)
+  and `scratch-later/r7-notpm.log` (16/0/1).
+- All four gates green: test-boot-v2 105/0; shellcheck 165 discovered, 0
+  known-failing, 0 newly failing; suites 75 / 71 in CI / 4 exempt; doc verbs 250
+  valid / 8 deliberate / 0 not a command, 191 documented / 114 declared
+  undocumented / 0 undocumented and undeclared / 0 stale.
+- L-001 evidence appended with ROUND 29, rounds 25/26/27/28 verified still
+  present afterwards. L-002 and L-003 kept `blocked` and given evidence for the
+  first time, so the reason no longer lives only in this card.
 
 ## IN PROGRESS
 - Nothing.
 
 ## FOUND
-- **THE S3 CRITERION IS MEASURABLE AND IT PASSES — ON edk2-20250812.**
-  luks-s3 gives 17 passed / 0 failed, exit 0, against
-  edk2-ovmf-20250812-18.fc43's 4M secboot build. Volume open across S3; a
-  mapper created AFTER the resume reads the marker back (so the plaintext came
-  off the disk, not the page cache); QMP and the guest's suspend_stats agree;
-  s3-mode=deep, so S3 and not suspend-to-idle.
-- **THE SHIPPED FIRMWARE'S S3 FAILURE IS AN EDK2 REGRESSION, AND ONE VARIABLE
-  AT A TIME PROVES IT.** in-image edk2-20260812 secboot: ASSERT
-  MemoryServices.c(203) on the S3 resume path, DEBUG build deadloops, timeout
-  kill. in-image NON-secboot, SAME edk2: asserts identically -> not Secure Boot
-  or SMM. edk2-20250812 secboot: resumes -> it is the edk2 version. Provenance
-  checked by reading the version string out of each binary
-  (edk2-d46aa46c8361 vs edk2-2970e5699ba6), not from filenames, and by
-  checksumming the cache against fresh qemu-img conversions.
-- **A KILLED RUN REPORTED A PASS.** The EXIT trap's own comment claimed it
-  survived "a signal". It does run on an untrapped SIGTERM, but `$?` reads 0
-  inside it, so the INCOMPLETE branch never fired. Fixed in a9c9ebe6 by
-  trapping TERM/INT/HUP by name; the same kill now yields "1 failed" plus a
-  named FAIL line. Reproduced in isolation BEFORE fixing, then verified IN SITU
-  (real container, `podman kill -s TERM` mid-boot -> `8 passed, 1 failed`,
-  ExitCode 143; proof at scratch-later/r6-trapcheck-sigterm-proof.log), and a
-  regression test now lifts the trap block out of run-scenarios so deleting the
-  signal traps fails the suite. Mutation-tested both ways; the assertion that
-  did NOT move is exit 143, because bash re-raises regardless — the exit status
-  was never the problem, the log was.
-- **A COULD-NOT-RUN THAT MISNAMED ITS OWN CAUSE.** luks-s3 said "the guest
-  reported no s3 field at all" while the QMP record (suspended and resumed,
-  both true) and the OVMF log (the ASSERT) sat unread in the same directory.
-  luks_s3_other_witnesses() now reads both; checked against five inputs so it
-  discriminates instead of emitting one fixed string.
-- THE DOCUMENTED TPM-CLEAR RECOVERY IS A NO-OP THAT REPORTS SUCCESS.
-  `systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=… --tpm2-public-key=… VOL`
-  prints "This PCR set is already enrolled, executing no operation", exits 0,
-  header byte-identical: systemd de-dups on the public key and PCR set before
-  acting on the wipe, so the TPM plays no part. Two invocations work. Now in
-  docs/boot-v2.md's Recovery table. systemd 258.10-1.fc43.
-- PCR 11 IS ALL ZEROS ON THE L16 (measured 2026-09-13, read-only). The shipped
-  image boots GRUB via bootupd and only sd-stub extends PCR 11, so the
-  signed-PCR-11 policy boot-v2 chose has nothing to bind to on a default
-  install. That is why L-003 cannot be flipped on for the shipped image.
-- L-002 IS NOT A DEFAULT TO FLIP: the installer cannot encrypt at all —
-  re-verified this round, every `crypto_LUKS` branch in installer/apex-install
-  is a refusal to overwrite an existing header, never a path that creates one
-  (:920-925, and CONTAINER_FS at apex-installer-gui:170). No in-place path, the
-  initramfs keymap is always `us` (Containerfile.core:2104-2107), plymouth's
-  `message()` is a no-op (apex-os.script:230), and `cryptsetup` is an unpinned
-  transitive dependency asserted nowhere. Two shipped files already assert
-  LUKS2+TPM2 as settled fact (apex-session-select:18-22 and its sudoers :9-12).
-- PCR 0 CANNOT BE MOVED IN THIS LAB, structurally: it needs a second OVMF build
-  differing ONLY in code, and the two 4M builds in the image differ in Secure
-  Boot enforcement too. NOTE, now that fw-2025 exists: a 20250812-vs-20260812
-  secboot pair DOES differ only in code, so this limit is worth re-testing.
-  The dbx update (PCR 7, 76 -> 21340 bytes) remains the faithful stand-in.
-- Older, still true: the lab image ships no diffutils; the APEX initramfs has no
-  `sync` or `dd`; tpm2_createprimary's YAML has no `name:` line (use
-  tpm2_readpublic); swtpm state does persist across host sessions.
-
-- **S3 IS NOT A RECOVERY TEST, AND I BRIEFLY SAID IT WAS.** scenario_luks_s3
-  has no reference to a recovery key; its negative arm is the same run with
-  qemu's S3 support off, and what it proves is that the volume stays open
-  across the suspend. Only luks-tpm-clear and luks-firmware-change demonstrate
-  a refusal followed by a recovery-key unlock in the same boot. Withdrawn from
-  docs/boot-v2.md in 985ae69a. If L-002's "does not strand users" is to cover
-  suspend/resume, a refusal arm for S3 does not exist yet.
+- **PCR 0 MOVES, AND THE POLICY DOES NOT CARE.** `luks-firmware-code`, 22
+  passed / 0 failed / 1 could-not-run. Two Fedora OVMF builds differing in edk2
+  revision and nothing else - `edk2-d46aa46c8361` (20250812, supplied through
+  the new `$APEX_BOOTLAB_FW_ALT`) and `edk2-2970e5699ba6` (20260812, the lab
+  image's) - both Secure Boot, both 4 MB, all three boots from a fresh copy of
+  ONE varstore template. PCR 0 `0FA5AE84...` -> `0E338031...`; PCR 11 stayed
+  `22C006FB...`; the signed PCR 11 policy still unlocked; a control volume bound
+  BY VALUE to PCR 0 refused in that same boot; the marker written under the old
+  firmware was read back under the new one. THE TPM IS EMULATED.
+- **PCR 7 IS IDENTICAL ACROSS THE TWO EDK2 REVISIONS** (`933DE452...`). Not
+  planned, and worth more than the thing that was: a firmware version change
+  moves the code register and leaves the Secure Boot policy register alone. The
+  scenario reports it and asserts nothing about it, because that is a fact
+  about edk2 rather than about APEX.
+- **THE SUPPLIED FIRMWARE IS CHECKED, NOT TRUSTED.** Its revision comes out of
+  the binary (`grep -a` for the rpm build path; the lab image has no binutils),
+  and it must refuse an unsigned UKI before anything rests on it. Without that,
+  a build with Secure Boot compiled out would move PCR 0 for the obvious reason
+  and the run would report that a firmware update had not broken the policy,
+  about a firmware that had stopped checking signatures. The trap is real and
+  sits in this unit's own scratch dir: `fw-nosmm/OVMF_CODE_4M.secboot.fd` is a
+  NON-secboot build under a secboot filename.
+- **A MISSING TPM DOES NOT STRAND THE USER.** `luks-no-tpm`, 16/0/1. One volume
+  booted twice with the TPM device as the only difference. Without it:
+  `tpm-device=absent`, systemd's own *"No TPM2 hardware discovered and EFI
+  firmware does not see it either, falling back to traditional unlocking"*,
+  `tpm-unlock=REFUSED`, `recovery-unlock=SUCCESS`, `recovery-marker=found`. The
+  qemu exit status is asserted, because a guest hanging on a TPM that will
+  never answer strands the user as surely as one that refuses. Again emulated,
+  and it does not model a machine that NEVER had a TPM - such a volume could
+  not carry a systemd-tpm2 token at all.
+- **A SECOND OVERCLAIM FROM ROUND 28 IS WITHDRAWN.** Round 28 said the PCR
+  7-bound control volume refuses the TPM unlock and then opens with the recovery
+  key in the same boot. It does not. The control carries no recovery key by
+  construction, `guest-luks-probe.sh`'s control branch has no recovery path, and
+  no `recovery-unlock` line appears in any serial log of any firmware-change
+  boot (checked in r3-luks-firmware-change and r7-fwcode). TWO scenarios show
+  refusal followed by recovery in one boot: `luks-tpm-clear` and the new
+  `luks-no-tpm`. Found by reading the logs, because the source is what made the
+  claim sound right.
+- **set-status.py COULD NOT WRITE EVIDENCE TO THE LAST TASK IN roadmap.yaml.**
+  Its body regex ran to the next `- id: ` line, so for the final task - L-003 -
+  it swallowed the whole `global_agent_rules` block and produced a file that
+  does not parse. The guard refused to write, so nothing was ever corrupted and
+  nothing could be recorded either. Fixed to capture the run of indented lines,
+  after checking that both expressions capture identical bodies for all 127
+  other tasks.
+- **A SCENARIO CAN BE WRITTEN AND NEVER REGISTERED**, and a default run then
+  reports green without it. `tests/test-boot-v2.sh` now compares the
+  `scenario_*` functions against `--list` as sets in both directions.
+- Older, still true: the S3 failure is an edk2 regression, not Secure Boot and
+  not SMM (20250812 resumes, 17/0; both 20260812 builds assert at
+  `MemoryServices.c(203)`). TPM clear 20/0 with `tpm-unlock=REFUSED` ->
+  `recovery-unlock=SUCCESS` in one boot. The documented one-command TPM-clear
+  recovery is a no-op that reports success; two invocations work. PCR 11 is all
+  zeros on the L16, so L-003 cannot be flipped on for the shipped image. L-002
+  is not a default to flip: the installer cannot encrypt at all. The lab image
+  ships no diffutils; the APEX initramfs has no `sync` or `dd`; swtpm state
+  persists across host sessions.
 
 ## BLOCKED ON
-- L-001's "Real TPM" acceptance needs silicon. Not an agent decision.
-- L-002 and L-003 stay blocked behind it, per state/queue.json.
+- L-001's "Real TPM" acceptance needs silicon. Not an agent decision. The
+  procedure is now written: docs/boot-v2.md, "The run somebody with hardware
+  would have to do".
+- L-002 and L-003 stay blocked behind it, per state/queue.json. L-002 has a
+  second blocker that silicon would not fix: the installer cannot encrypt a
+  disk at all.
