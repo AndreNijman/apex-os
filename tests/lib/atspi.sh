@@ -88,17 +88,45 @@ ATSPI_STATUS=""
 ATSPI_BUS_LAUNCHER=""
 ATSPI_REGISTRYD=""
 
-atspi_require() {
-    local missing=()
+# Where the two at-spi helpers live, spelled the way each distribution spells
+# it. They are NOT on $PATH anywhere: both are internal helpers a desktop starts
+# by absolute path or by D-Bus activation, so `command -v` never finds them and
+# this list is the whole search.
+#
+# The Arch entries are here because they were missing, and the way that failed
+# is the reason the list now ends with a `find`: Fedora puts both in
+# /usr/libexec, Arch puts them flat in /usr/lib (NOT in an at-spi2-core
+# subdirectory, which is what was guessed), and the suite reported "the
+# accessibility stack is not installed here" on a runner where the package was
+# installed and the binaries were 40 characters away. A wrong path and an absent
+# package are indistinguishable in that message, so the message now says where
+# it looked.
+ATSPI_LAUNCHER_PATHS="
+/usr/libexec/at-spi-bus-launcher
+/usr/lib/at-spi-bus-launcher
+/usr/lib64/at-spi-bus-launcher
+/usr/lib/at-spi2-core/at-spi-bus-launcher
+/usr/lib64/at-spi2-core/at-spi-bus-launcher
+/usr/libexec/at-spi2-core/at-spi-bus-launcher
+"
+ATSPI_REGISTRYD_PATHS="
+/usr/libexec/at-spi2-registryd
+/usr/lib/at-spi2-registryd
+/usr/lib64/at-spi2-registryd
+/usr/lib/at-spi2-core/at-spi2-registryd
+/usr/lib64/at-spi2-core/at-spi2-registryd
+/usr/libexec/at-spi2-core/at-spi2-registryd
+"
 
-    for c in /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher \
-             /usr/libexec/at-spi2-core/at-spi-bus-launcher; do
+atspi_require() {
+    local missing=() c
+
+    for c in $ATSPI_LAUNCHER_PATHS; do
         [ -x "$c" ] && { ATSPI_BUS_LAUNCHER="$c"; break; }
     done
     [ -n "$ATSPI_BUS_LAUNCHER" ] || missing+=("at-spi-bus-launcher (at-spi2-core)")
 
-    for c in /usr/libexec/at-spi2-registryd /usr/lib/at-spi2-core/at-spi2-registryd \
-             /usr/libexec/at-spi2-core/at-spi2-registryd; do
+    for c in $ATSPI_REGISTRYD_PATHS; do
         [ -x "$c" ] && { ATSPI_REGISTRYD="$c"; break; }
     done
     [ -n "$ATSPI_REGISTRYD" ] || missing+=("at-spi2-registryd (at-spi2-core)")
@@ -111,6 +139,13 @@ atspi_require() {
     if [ ${#missing[@]} -gt 0 ]; then
         printf 'SKIP: the accessibility stack is not installed here: %s\n' "${missing[*]}"
         printf '      This is a COULD-NOT-RUN, not a pass. Nothing below was measured.\n'
+        # Say WHERE it looked. Without this, a distribution that puts the
+        # helpers somewhere new reads exactly like one that does not ship them,
+        # and the suite is believed.
+        if [ -z "$ATSPI_BUS_LAUNCHER" ] || [ -z "$ATSPI_REGISTRYD" ]; then
+            printf '      paths tried:\n'
+            printf '        %s\n' $ATSPI_LAUNCHER_PATHS $ATSPI_REGISTRYD_PATHS
+        fi
         return 1
     fi
     return 0
@@ -185,7 +220,45 @@ EOF
 
     # ── the private a11y bus ────────────────────────────────────────────────
     # Directly, NOT by activation. See the header.
-    "$ATSPI_BUS_LAUNCHER" >"$ATSPI_W/launcher.out" 2>"$ATSPI_W/launcher.err" &
+    #
+    # GSETTINGS_BACKEND=memory, and it is load-bearing rather than tidiness.
+    #
+    # at-spi-bus-launcher owns the org.a11y.Status properties this file sets a
+    # few lines below, and it does not hold them in a variable: it backs them
+    # with the GSettings key org.gnome.desktop.interface toolkit-accessibility.
+    # With the default dconf backend, WRITING that key needs the
+    # ca.desrt.dconf.Writer service — which cannot be activated here, because
+    # the private session bus above is deliberately given an EMPTY service
+    # directory. The write is then dropped and the D-Bus Set still returns
+    # success, so the properties read back false and Qt's bridge publishes
+    # nothing at all.
+    #
+    # Measured on a booted APEX desktop, 2026-09-18, with a private HOME (the
+    # one apex-shell's tests/lib/headless.sh creates, which has no dconf
+    # database):
+    #
+    #     dconf backend : Set IsEnabled <true> -> () ... GetAll -> false, false
+    #     memory backend: Set IsEnabled <true> -> () ... GetAll -> true, true
+    #
+    # The failure mode is the dangerous one. An empty accessibility tree looks
+    # exactly like a surface with no markup, so a suite built on the first line
+    # reports "this surface publishes nothing" and is believed.
+    #
+    # Scoped to the launcher on purpose: it is the only process whose GSettings
+    # backend these properties depend on, and the application under test keeps
+    # whatever backend it would really have. The memory backend starts from the
+    # schema default (false) and accepts the write, which is also strictly more
+    # hermetic than reading — or writing — the dconf database of whoever is
+    # logged in.
+    #
+    # It is a no-op where gsettings-desktop-schemas is absent, as in the bare
+    # fedora:43 container CI runs: with no schema the launcher keeps the value
+    # internally and the write always worked. That is why this was invisible
+    # until a suite ran the stack against a private HOME on a desktop machine.
+    #
+    # The copy of this file in apex-shell carries the same fix. FIX BOTH.
+    GSETTINGS_BACKEND=memory \
+        "$ATSPI_BUS_LAUNCHER" >"$ATSPI_W/launcher.out" 2>"$ATSPI_W/launcher.err" &
     ATSPI_LAUNCHER_PID=$!
 
     local i raw=""
