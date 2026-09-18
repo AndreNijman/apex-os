@@ -2,7 +2,7 @@
 items: L-001, L-002, L-003
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-later
-branch: task/later-tpm-qualification
+branch: task/later-2
 
 ## NEXT
 
