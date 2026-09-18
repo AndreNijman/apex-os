@@ -112,17 +112,27 @@
 //! loopback host reaches the table through a `#[cfg(test)]` constructor and
 //! through nothing that ships.
 //!
-//! # A known defect this provider SHARES and does not fix
+//! # Why both hops read curl's exit code, and why they read it differently
 //!
-//! Neither [`MsgraphProvider::perform`] nor [`download_outcome`] reads curl's
-//! exit code on a 2xx, and neither does [`crate::providers::gdrive`]. Measured
-//! rather than reasoned: against a server answering `Content-Length: 4000000`
-//! with `max-filesize = 3145728`, **curl exits 63 and its `write-out` still
-//! runs**, so stdout is exactly `"\n200"` — a truncated read arrives as
-//! `code: 0` with an empty body, which is an empty file reported as a
-//! successful one. It is recorded in this unit's agent card rather than
-//! patched here, because `gdrive`, `s3` and `oauth` have the same shape and
-//! fixing one of four makes the family look handled.
+//! curl's `write-out` runs when the transfer ENDS, whichever way it ended.
+//! Measured on curl 8.15.0: against a server answering `Content-Length:
+//! 4000000` with `max-filesize = 3145728`, **curl exits 63 and its `write-out`
+//! still prints**, so stdout is exactly `"\n200"` — which, read as a status
+//! and a body, is a 200 with an empty file under it. `max-time` expiring gives
+//! 28 and the far end closing early gives 18, both with a PARTIAL body in
+//! front of the same 200. So the status line cannot say whether the body under
+//! it is the body.
+//!
+//! Hop one goes through [`crate::broker::aborted_transfer`], like `gdrive`,
+//! `oauth`, `s3` and `cloudflare::api`. It may carry curl's own words because
+//! the URL it was handed is built from the STORED endpoint and the item id.
+//!
+//! [`download_outcome`] does its own check instead, on the `curl_code` it
+//! already receives, and composes its sentence out of the exit code and the
+//! target. That is the same argument the rest of this note makes about the
+//! pre-authenticated URL: curl quotes what it was given, so the download hop
+//! carries no curl output at all. Routing hop two through the shared helper is
+//! the natural simplification and it is wrong — a test refuses it.
 //!
 //! `printable`, `quoted`, `one_line` and `split_status` are a copy of the ones
 //! in `gdrive`, `s3` and `oauth`, which are already copies of each other. Four
@@ -280,13 +290,30 @@ fn download_outcome(
     body: &str,
     curl_code: i32,
 ) -> Result<Performed, ProviderError> {
-    let Some(status) = status else {
+    // Before the status, and NOT through `broker::aborted_transfer`, which
+    // quotes curl's stderr — see the note on the signature. The sentence is
+    // composed here out of the exit code and the target, both of which this
+    // function already has and neither of which is the capability.
+    if curl_code != 0 {
         return Err(ProviderError::Failed(format!(
-            "curl produced no HTTP status for the download {api_host} redirected \
-             to, so nothing is known about whether it reached {target} (curl \
-             exited {curl_code}). curl's own message is not carried here: it \
-             quotes the URL it was given, and that URL reads the file for anyone \
-             who has it"
+            "the download {api_host} redirected this read to did not finish — \
+             curl exited {curl_code}, so what arrived is not the whole file and \
+             is not being reported as one. It was addressed at {target}. curl's \
+             own message is not carried here: it quotes the URL it was given, \
+             and that URL reads the file for anyone who has it"
+        )));
+    }
+    let Some(status) = status else {
+        // Reached only with `curl_code == 0` now, which is what makes it worth
+        // keeping: the transfer FINISHED and still produced no status line, so
+        // this is output this build cannot read rather than a transfer that
+        // was cut short. `cloudflare::api`'s `Unreadable` is the same branch
+        // for the same reason.
+        return Err(ProviderError::Failed(format!(
+            "the download {api_host} redirected this read to finished without \
+             an HTTP status, so nothing is known about whether it reached \
+             {target}. curl's own message is not carried here: it quotes the \
+             URL it was given, and that URL reads the file for anyone who has it"
         )));
     };
     if !(200..300).contains(&status) {
@@ -409,6 +436,14 @@ impl Provider for MsgraphProvider {
         let config = content_config(&url, &authorization, &req.service.scheme)?;
 
         let out = broker::run_curl(&config, req.owner).map_err(ProviderError::Failed)?;
+        // Before the status is read: `write-out` prints it whether or not the
+        // transfer finished. Hop one can carry curl's own words because the
+        // URL it was given is composed from the STORED endpoint and the item
+        // id, not from anything the far side named — which is exactly what is
+        // untrue of hop two. See `broker::aborted_transfer`.
+        if let Some(why) = broker::aborted_transfer(&out) {
+            return Err(ProviderError::Failed(why));
+        }
         let (body, status, location) = split_status_and_redirect(&out.stdout);
         let Some(status) = status else {
             return Err(ProviderError::Failed(format!(
