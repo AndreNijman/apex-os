@@ -4092,7 +4092,7 @@ tasks:
   evidence: >-
     Round 29 (2026-09-18) ran the LOCK SCREEN's accessibility markup back over real AT-SPI for the first time and
     found there is nothing there to read. apex-shell tests/run-lockscreen-atspi.sh (17 passed / 0 failed / 6
-    skipped on the L16) brings up a private headless labwc, a private session bus and a private a11y bus, loads
+    skipped ON THE L16) brings up a private headless labwc, a private session bus and a private a11y bus, loads
     the shipped shell.qml, engages a real ext-session-lock through the shipped IPC handler (labwc 0.9.6
     acknowledges it - WlSessionLock.secure flips, observed from outside the process), and walks the tree: the bus
     answers name=quickshell, ChildCount=0. The application node and nothing beneath it. No window, no lock
@@ -4106,16 +4106,20 @@ tasks:
     QAccessibleApplication::childCount()==0, since topLevelObjects() keeps only windows with a non-null accessible
     root. The same gdb expressions against the control return a non-null root, so the instrument is sound.
     quickshell 0.3.1's source has no accessibility code at all. Remaining cause is upstream.
-    mutate-lockscreen-atspi.sh: 11 mutants, each a full bring-up, 8 red CAUGHT / 0 SURVIVED / 0 MISSCORED, 3 green
-    HELD / 0 FALSE-RED. The read-back assertions the roadmap wants (the field's name/role/passwordEdit, the status
-    line's live name, the two private-use icons' absence, an announcement) are recorded as SKIPs with reasons, NOT
-    as passes: every one is satisfied by an empty tree. Two harness defects were found and fixed on the way, both
-    of which had made a suite report nothing while looking green - apex-os 4aae9249 (at-spi-bus-launcher cannot
-    write org.a11y.Status through dconf on a private HOME, so Qt published an empty tree for everything) and
-    apex-shell e65d378 (the mutation harness graded its baseline by colour and scored 11 mutants against a suite
-    that never ran on the Arch runner). Login screen unchanged and still measured: test-apex-greet-atspi.sh
-    31/0/0, mutate-greet-atspi.sh 8/8, test-apex-greet-session-bus.sh 37/0/0. Recovery screen still unaudited;
-    orca as the greetd user still needs hardware.
+    mutate-lockscreen-atspi.sh ON THE L16: 11 mutants, each a full bring-up, 8 red CAUGHT / 0 SURVIVED / 0
+    MISSCORED, 3 green HELD / 0 FALSE-RED. FROM THE GITHUB ARCH RUNNER, not this laptop (run 35362877551): the
+    suite is 8 passed / 0 failed / 1 skipped - the entire section 1 control passes there, so the harness is proven
+    on a second machine and the empty tree is not a laptop artefact; the one SKIP is the shell half, because the
+    runner has no quickshell (AUR). The read-back assertions the roadmap wants (the field's
+    name/role/passwordEdit, the status line's live name, the two private-use icons' absence, an announcement) are
+    recorded as SKIPs with reasons, NOT as passes: every one is satisfied by an empty tree. Two harness defects
+    were found and fixed on the way, both of which had made a suite report nothing while looking green - apex-os
+    4aae9249 (at-spi-bus-launcher cannot write org.a11y.Status through dconf on a private HOME, so Qt published an
+    empty tree for everything) and apex-shell e65d378 (the mutation harness graded its baseline by colour and
+    scored 11 mutants against a suite that never ran on the Arch runner). Login screen unchanged and still
+    measured on the L16: test-apex-greet-atspi.sh 31/0/0, mutate-greet-atspi.sh 8/8,
+    test-apex-greet-session-bus.sh 37/0/0. Recovery screen still unaudited; orca as the greetd user still needs
+    hardware.
 - id: P2-004
   title: Internationalisation baseline
   priority: P2

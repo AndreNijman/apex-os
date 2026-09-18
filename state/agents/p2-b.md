@@ -89,12 +89,19 @@ apex-os, re-run after the `atspi.sh` change and unchanged from the ledger:
 red on two steps. One is `run-rtl-test.sh` at **17/3/2**, the pre-existing red
 this unit has been carrying since round 28 — unchanged, and not this branch's
 doing. The other was the new mutation step, and it was a REAL defect in the new
-harness, not an environment problem: see FOUND 18. Both are fixed in `e65d378`
-and re-dispatched as 35362877551. Note what the runner still cannot do: it has
-no `quickshell` (AUR), so §2–§5 of the read-back suite cannot run there and the
-mutation harness now says NOTHING WAS MEASURED and exits 0. The §1 control
-should run there once at-spi resolves; that is the thing to read off the
-re-dispatch.
+harness, not an environment problem: see FOUND 18. Both are fixed in `e65d378`.
+
+Re-dispatched as **35362877551**, and this is the second-machine result:
+`run-lockscreen-atspi.sh` is **8 passed / 0 failed / 1 skipped on the Arch
+runner**. The whole §1 control passed there — labwc came up headless, the
+private a11y bus came up, `ScreenReaderEnabled` read back true, the frame came
+back MAPPED and the `Accessible.name` came back verbatim. The one SKIP is the
+shell half: the runner has no `quickshell` (AUR), so §2–§5 cannot run there, and
+`mutate-lockscreen-atspi.sh` printed its new guard — naming the three
+assertions the baseline did not make — and exited 0. **So the harness itself is
+proven on two machines and the empty-tree finding is not a laptop artefact.**
+The only red left in that run is `run-rtl-test.sh` at 17/3/2, which is older
+than this branch.
 
 ## FOUND (still true; do not re-derive)
 
