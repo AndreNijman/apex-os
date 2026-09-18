@@ -2747,9 +2747,15 @@ jobs:
               exit 1
           }
 
-      # tests/test-apex-devices.sh — 55 assertions over six device areas, and
+      # tests/test-apex-devices.sh — 108 assertions over six device areas, and
       # until this line no CI run had executed one of them. It was DEBT in
       # tests/suites-not-in-ci.txt, not a decision.
+      #
+      # The floor below is the point of the step as much as `failed = 0` is, and
+      # it had rotted: it still read 55 while 76 assertions were running, so a
+      # change that silently stopped half the suite executing would have passed
+      # it. Raise it with the suite. It is meant to be a tripwire on a suite
+      # that stopped looking, and a tripwire 21 assertions behind is not one.
       #
       # It is shell-only: it drives files/system/libexec/apex-devices against a
       # fixture tree under mktemp, with a $PATH of its own stubs, so it reaches
@@ -2763,7 +2769,7 @@ jobs:
       # places and it counts a `skipped` of its own. The step therefore fails on
       # skipped > 0 as well as on failed > 0, and separately on a bare `SKIP`
       # line, which would be an echo that bypassed the counter.
-      - name: P1 devices — 55 assertions over six device areas
+      - name: P1 devices — 108 assertions over six device areas
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
@@ -2779,7 +2785,7 @@ jobs:
           echo "measured: passed=$passed failed=$failed skipped=$skipped"
           [ "$failed" = 0 ] || { echo "::error::$failed device assertions failed"; exit 1; }
           [ "$skipped" = 0 ] || { echo "::error::$skipped device assertions could not run on this runner; a could-not-run is not a pass"; exit 1; }
-          [ "$passed" -ge 55 ] || { echo "::error::only $passed device assertions ran; 55 ran on 2026-09-13, so some no longer execute"; exit 1; }
+          [ "$passed" -ge 108 ] || { echo "::error::only $passed device assertions ran; 108 ran on 2026-09-18, so some no longer execute"; exit 1; }
           if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
               echo "::error::the devices suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
               exit 1
