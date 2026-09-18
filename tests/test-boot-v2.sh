@@ -548,6 +548,127 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
+sec "every scenario the harness defines can be asked for by name"
+# A SCENARIO NOBODY CAN RUN IS A GATE THAT INSPECTS NOTHING, and it fails
+# silently in the direction that reads as success: `run-scenarios` with no
+# arguments runs ALL and reports green, and the scenario that was written and
+# never registered is simply not in it. The two lists are compared as SETS in
+# both directions, so the failure mode "registered under a name with no
+# function" is caught too — that one dies at dispatch with "no such scenario",
+# which at least is loud, but only if somebody asks for it.
+RUNSC="$REPO/files/scripts/boot-v2/run-scenarios"
+defined="$(grep -oE '^scenario_[a-z0-9_]+\(\)' "$RUNSC" | sed 's/()$//; s/^scenario_//; s/_/-/g' | sort)"
+listed="$(bash "$RUNSC" --list | sort)"
+[[ -n "$defined" ]] \
+    && ok "run-scenarios defines $(wc -l <<<"$defined") scenario functions" \
+    || bad "no scenario_* functions found in run-scenarios — the comparison below proves nothing"
+[[ -n "$listed" ]] \
+    && ok "run-scenarios --list names $(wc -l <<<"$listed") scenarios" \
+    || bad "run-scenarios --list printed nothing"
+unreachable="$(comm -23 <(printf '%s\n' "$defined") <(printf '%s\n' "$listed") | tr '\n' ' ')"
+[[ -z "${unreachable// }" ]] \
+    && ok "no scenario is defined and unreachable by name" \
+    || bad "defined but not in --list, so a default run skips them silently: $unreachable"
+phantom="$(comm -13 <(printf '%s\n' "$defined") <(printf '%s\n' "$listed") | tr '\n' ' ')"
+[[ -z "${phantom// }" ]] \
+    && ok "no scenario is listed without a function behind it" \
+    || bad "listed but not defined, so asking for them dies at dispatch: $phantom"
+
+sec "the two registers a firmware change moves, and the guest that reports them"
+PROBE="$REPO/files/scripts/boot-v2/guest-luks-probe.sh"
+# PCR 0 is the firmware CODE measurement and PCR 7 the Secure Boot POLICY
+# register. luks-firmware-code seals a control volume to the value the guest
+# prints for PCR 0; a probe that stopped printing it would make that control
+# bind to whatever the TPM happened to hold, which is the failure the PCR 7
+# control's own comment was written about.
+for reg in 0 7 11; do
+    grep -q "/sys/class/tpm/tpm0/pcr-sha256/$reg" "$PROBE" \
+        && ok "the guest probe reads PCR $reg out of sysfs" \
+        || bad "the guest probe no longer reads PCR $reg — a control sealed to it would bind to nothing"
+done
+# The recovery path must read the marker back. "A mapper appeared" says a
+# keyslot was satisfied; only the marker says the user got their disk.
+sed -n '/recovery-unlock=SUCCESS/,/^        else$/p' "$PROBE" > "$TMP/recovbranch.sh"
+grep -q 'recovery-marker=found' "$TMP/recovbranch.sh" \
+    && ok "the recovery branch reads the plaintext marker back" \
+    || bad "the recovery branch reports SUCCESS without reading the marker: a keyslot opened is not a disk recovered"
+# MARKER is set unconditionally, not inside the branch that was NOT taken. A
+# variable that only exists on the TPM path expands to empty in the recovery
+# path, and `case "" in "$MARKER"*)` matches everything — a recovery-marker
+# check that can only say "found".
+awk '/^MARKER=/{print NR; exit}' "$PROBE" > "$TMP/markerline"
+awk '/tpm-unlock=SUCCESS/{print NR; exit}' "$PROBE" > "$TMP/successline"
+mline="$(cat "$TMP/markerline")"; sline="$(cat "$TMP/successline")"
+[[ -n "$mline" && -n "$sline" ]] && (( mline < sline )) \
+    && ok "MARKER is defined before either unlock path, so the recovery check can fail" \
+    || bad "MARKER is defined at line '${mline:-none}', not before the unlock paths (line '${sline:-none}'): the recovery-marker check would match an empty string and always pass"
+
+sec "the alternate firmware is identified by its contents, not by its name"
+# This unit's own scratch directory holds the trap: a build with Secure Boot
+# and SMM compiled out, saved as `OVMF_CODE_4M.secboot.fd`. ovmf_build_id is
+# what stops luks-firmware-code reading "Secure Boot was turned off" as "the
+# firmware code changed", so it is tested against contents rather than trusted.
+# lib.sh is driven through `bash -c` with its path as $1, the same way the
+# summary cases above do it: a `.` on a variable is unfollowable by ShellCheck,
+# and a directive would only silence the objection.
+fwid() { bash -c '. "$1" >/dev/null 2>&1; ovmf_build_id "$2"' _ "$BOOTV2_LIB" "$1"; }
+printf 'junk\x00/builddir/build/BUILD/edk2-20250812-build/edk2-d46aa46c8361/Build/OvmfX64/x\x00junk' > "$TMP/fw-a.fd"
+printf 'junk\x00/builddir/build/BUILD/edk2-20260812-build/edk2-2970e5699ba6/Build/OvmfX64/x\x00junk' > "$TMP/fw-b.fd"
+printf 'no revision string in here at all, edk2- and nothing after it' > "$TMP/fw-none.fd"
+eq "edk2-d46aa46c8361" "$(fwid "$TMP/fw-a.fd")" "ovmf_build_id reads the revision out of a binary"
+eq "edk2-2970e5699ba6" "$(fwid "$TMP/fw-b.fd")" "ovmf_build_id reads a different binary's revision"
+eq "" "$(fwid "$TMP/fw-none.fd")" "ovmf_build_id says nothing rather than guessing"
+eq "" "$(fwid "$TMP/does-not-exist.fd")" "ovmf_build_id on a missing file is empty, not an error string"
+# The inverse control: two files whose NAMES are identical and whose contents
+# are not must not be reported as the same build. This is the whole point.
+cp "$TMP/fw-a.fd" "$TMP/same-name-a"; cp "$TMP/fw-b.fd" "$TMP/same-name-b"
+[[ "$(fwid "$TMP/same-name-a")" != "$(fwid "$TMP/same-name-b")" ]] \
+    && ok "two identically shaped files with different contents get different revisions" \
+    || bad "ovmf_build_id cannot tell two different builds apart"
+
+altrc() { bash -c '
+    . "$1" >/dev/null 2>&1
+    if [[ "$2" == UNSET ]]; then unset APEX_BOOTLAB_FW_ALT; else export APEX_BOOTLAB_FW_ALT="$3"; fi
+    ovmf_code_alt >/dev/null 2>&1; printf "%s" "$?"' _ "$BOOTV2_LIB" "${1:+SET}${1-UNSET}" "${1-}"; }
+altout() { bash -c '. "$1" >/dev/null 2>&1; APEX_BOOTLAB_FW_ALT="$2" ovmf_code_alt' _ "$BOOTV2_LIB" "$1"; }
+# Three ways to not have a second firmware, and the scenario turns each into a
+# different could-not-run. One shared failure code would make "nobody asked for
+# this experiment" and "the path is wrong" the same sentence in the log.
+eq 1 "$(altrc)"                   "ovmf_code_alt with the variable unset"
+eq 1 "$(altrc '')"                "ovmf_code_alt with the variable empty"
+eq 2 "$(altrc "$TMP/nope.fd")"    "ovmf_code_alt with a path that is not a file"
+printf 'raw firmware' > "$TMP/alt-raw.fd"
+eq 0 "$(altrc "$TMP/alt-raw.fd")" "ovmf_code_alt with a raw .fd"
+eq "$TMP/alt-raw.fd" "$(altout "$TMP/alt-raw.fd")" "ovmf_code_alt hands a raw .fd straight back"
+
+sec "the no-TPM scenario asserts that the guest came back, not only what it said"
+# A guest that hangs waiting for a TPM that will never answer has stranded the
+# user as thoroughly as one that refuses with no fallback. vm_boot's timeout
+# kill is qemu rc=137, and the serial log written before the hang would still
+# carry every string the scenario greps for — so the exit status has to be an
+# assertion. Extracted from the scenario body rather than restated, so deleting
+# the check fails this test.
+sed -n '/^scenario_luks_no_tpm()/,/^}$/p' "$RUNSC" > "$TMP/notpm.sh"
+[[ -s "$TMP/notpm.sh" ]] \
+    && ok "scenario_luks_no_tpm was found to test against" \
+    || bad "could not extract scenario_luks_no_tpm from run-scenarios"
+grep -q 'luks_boot notpm --no-tpm' "$TMP/notpm.sh" \
+    && ok "the second boot attaches no TPM device" \
+    || bad "the no-TPM scenario no longer boots without a TPM, so both arms are the same guest"
+grep -qE 'assert_eq 0 "\$rc" "with no TPM' "$TMP/notpm.sh" \
+    && ok "the no-TPM boot asserts a clean poweroff, so a hang cannot pass" \
+    || bad "the no-TPM boot does not assert its exit status: a guest killed at the timeout would pass every remaining check"
+for want in 'tpm-device=absent' 'tpm-unlock=REFUSED' 'recovery-unlock=SUCCESS' 'recovery-marker=found'; do
+    grep -q "$want" "$TMP/notpm.sh" \
+        && ok "the no-TPM scenario asserts $want" \
+        || bad "the no-TPM scenario no longer asserts $want"
+done
+# And the positive arm, without which none of the above has a control.
+grep -q 'plaintext-marker=written' "$TMP/notpm.sh" \
+    && ok "the with-TPM arm writes the marker the recovery arm reads back" \
+    || bad "the with-TPM arm no longer writes the marker, so recovery-marker=found proves nothing about the data"
+
+# ═════════════════════════════════════════════════════════════════════════════
 if (( WITH_BINARY )); then
 sec "apex boot status reports the state, and does not invent the parts it cannot see"
 APEX_BIN="${APEX_BIN:-$REPO/apexd/target/debug/apex}"
