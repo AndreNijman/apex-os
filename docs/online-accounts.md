@@ -179,7 +179,11 @@ not stated gets trusted for things it never did.
   Two limits worth stating. A reply that rotates no refresh token leaves the
   stored one alone, because overwriting a still-good credential is the failure
   a refresh exists to prevent. And a refresh is a capability like any other:
-  it is granted per project, and connecting does not grant it.
+  it is granted per project, and connecting does not grant it. `apex cf
+  status` asks the daemon which of those two it is and prints the grant line
+  when it is missing, rather than naming `apex cf refresh` whenever a refresh
+  token exists — on every machine that had connected, that was a command about
+  to be refused for a reason the line did not mention.
 * **There is no file-manager integration.** APEX ships gvfs with its WebDAV,
   SMB and NFS backends, and `apex devices share` reports which of them are
   present, but no account here mounts anything and nothing hands GTK a
