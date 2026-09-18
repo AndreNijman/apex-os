@@ -558,5 +558,69 @@ else
     ok "no trace of the credential remains on disk"
 fi
 
+# ── an online account's two credentials ──────────────────────────────────────
+#
+# `apex account rm` has to delete BOTH halves of an OAuth account, and the
+# second one cannot be reached any other way: a refresh credential is filed as
+# `account.<provider>.<name>.refresh`, `.` is illegal in an account name, so it
+# does not parse as an account — `apex account list` never shows it and
+# `apex account rm` refuses to be pointed at it directly. Deriving the name
+# from the account is the only way in.
+#
+# This is an end-to-end test rather than a unit one on purpose. The unit test
+# beside `names_to_remove` pins the derivation; nothing in the Rust suite can
+# reach the removal itself, because removing needs a daemon and a store. Here
+# there is one of each. The two credentials are stored with `apex secret add`
+# rather than by signing in, because signing in needs Google.
+section "an online account's two credentials"
+ACCESS_SENTINEL="apex-access-sentinel-91b4c2ef-do-not-leak"
+REFRESH_SENTINEL="apex-refresh-sentinel-2d7e60aa-do-not-leak"
+printf %s "$ACCESS_SENTINEL" | "$APEX" secret add account.google.work \
+    --host www.googleapis.com --auth bearer >/dev/null 2>&1
+# The refresh half as `apex account add --client-id` files it: a separate name,
+# the AUTHORISATION host rather than the API host, and the OAuth client in the
+# non-secret username field where the daemon's refresher reads it.
+printf %s "$REFRESH_SENTINEL" | "$APEX" secret add account.google.work.refresh \
+    --host oauth2.googleapis.com --auth bearer --username my-client >/dev/null 2>&1
+
+out="$("$APEX" account list 2>&1)"
+printf '%s' "$out" | grep -q 'google.work' \
+    && ok "the account is listed" || bad "the account is listed"
+printf '%s' "$out" | grep -q 'refresh' \
+    && bad "the refresh credential is not listed as an account" \
+    || ok "the refresh credential is not listed as an account"
+
+# Pointed at directly it is refused, which is what makes the derivation the
+# only way in and this test worth having.
+"$APEX" account rm google.work.refresh >/dev/null 2>&1 \
+    && bad "the refresh credential cannot be removed by naming it" \
+    || ok "the refresh credential cannot be removed by naming it"
+
+"$APEX" account rm google.work >/dev/null 2>&1
+out="$("$APEX" secret list 2>&1)"
+printf '%s' "$out" | grep -q 'account.google.work.refresh' \
+    && bad "removing the account removed its refresh token too" \
+    || ok "removing the account removed its refresh token too"
+# Anchored so it cannot match the refresh line. Unanchored it did, and the
+# access assertion then failed for the refresh token's absence rather than its
+# own — a test that reports the right verdict off the wrong evidence.
+printf '%s' "$out" | grep -Eq 'account\.google\.work([^.]|$)' \
+    && bad "removing the account removed its access token" \
+    || ok "removing the account removed its access token"
+
+# And neither value survives anywhere the daemons write. A refresh token left
+# behind is worse than an access token left behind: it mints new ones.
+if grep -rq "$REFRESH_SENTINEL" "$SECRET_STORE" "$XDG_STATE_HOME" 2>/dev/null; then
+    printf '      still present in: %s\n' "$(grep -rl "$REFRESH_SENTINEL" "$SECRET_STORE" "$XDG_STATE_HOME" 2>/dev/null | tr '\n' ' ')"
+    bad "no trace of the refresh token remains on disk"
+else
+    ok "no trace of the refresh token remains on disk"
+fi
+if grep -rq "$ACCESS_SENTINEL" "$SECRET_STORE" "$XDG_STATE_HOME" 2>/dev/null; then
+    bad "no trace of the access token remains on disk"
+else
+    ok "no trace of the access token remains on disk"
+fi
+
 printf '\nsecret-broker: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
