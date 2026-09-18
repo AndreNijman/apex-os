@@ -211,10 +211,16 @@ fn a_client_secret_is_sent_when_there_is_one_and_is_absent_when_there_is_not() {
         &mut Vec::new(),
     );
     assert!(grant.is_ok(), "{grant:?}");
-    for sent in with.requests() {
+    let sent = with.requests();
+    // §3.1's device request does NOT carry it: neither Google's nor
+    // Microsoft's documentation lists one there, and an undocumented field at
+    // an authorisation server is a request whose handling nobody has written
+    // down.
+    assert!(!sent[0].contains("client_secret"), "{}", sent[0]);
+    for poll in &sent[1..] {
         assert!(
-            sent.contains(&format!("client_secret={SECRET}")),
-            "the secret is missing from {sent}"
+            poll.contains(&format!("client_secret={SECRET}")),
+            "the secret is missing from {poll}"
         );
     }
 

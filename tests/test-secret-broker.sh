@@ -622,5 +622,25 @@ else
     ok "no trace of the access token remains on disk"
 fi
 
+# The commoner case, and the one the block above could have broken: an account
+# with NO refresh credential. An app password has none, and neither has an
+# OAuth grant the server returned without one — so `rm` must treat "there was
+# no refresh credential" as a normal outcome and not as the failure it reports
+# loudly. Untested, this depends on the daemon answering a `Remove` of a
+# missing service with exactly `NoSuchService`; anything else and EVERY
+# non-OAuth removal would exit non-zero claiming a credential is still stored
+# that never existed.
+PLAIN_SENTINEL="apex-plain-sentinel-5c8d13bb-do-not-leak"
+printf %s "$PLAIN_SENTINEL" | "$APEX" secret add account.nextcloud.home \
+    --host cloud.example --auth raw --username me >/dev/null 2>&1
+out="$("$APEX" account rm nextcloud.home 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && ok "removing an account that has no refresh token succeeds" \
+                || bad "removing an account that has no refresh token succeeds (rc=${rc})"
+printf '%s' "$out" | grep -q 'still stored' \
+    && bad "and says nothing about a refresh token that never existed" \
+    || ok "and says nothing about a refresh token that never existed"
+printf '%s' "$("$APEX" secret list 2>&1)" | grep -q 'account.nextcloud.home' \
+    && bad "and the credential is gone" || ok "and the credential is gone"
+
 printf '\nsecret-broker: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
