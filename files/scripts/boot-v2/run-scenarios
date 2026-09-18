@@ -46,7 +46,7 @@ ALL=(prereq signed-uki reproducible negative-unsigned negative-foreign
 # of ALL so a default run cannot silently skip them and still report success:
 # they are requested by name and hard-fail when their input is missing.
 STAGED=(apex-image luks-tpm luks-tpm-clear luks-firmware-change
-        luks-firmware-code luks-s3)
+        luks-firmware-code luks-no-tpm luks-s3)
 if (( LIST )); then printf '%s\n' "${ALL[@]}" "${STAGED[@]}"; exit 0; fi
 (( ${#SCENARIOS[@]} )) || SCENARIOS=("${ALL[@]}")
 
@@ -748,16 +748,22 @@ luks_boot() {
     local disk="$WORK/disk-luks-$n.img"
     local vars="$WORK/vars-luks-$n.fd"
     local ser="$WORK/serial-luks-$n.log"
-    local rc=0 vars_src=""
+    local rc=0 vars_src="" no_tpm=0
     if [[ "${1:-}" == --vars ]]; then vars_src="$2"; shift 2; fi
+    # NO TPM AT ALL, which is a different guest from "a TPM that refuses".
+    # vm_boot attaches no tpm-tis device, so /dev/tpmrm0 never appears and
+    # sd-stub has nothing to measure into. Only luks-no-tpm passes this.
+    if [[ "${1:-}" == --no-tpm ]]; then no_tpm=1; shift; fi
 
     "$HERE/apex-mkesp" --disk "$disk" --size 1024 \
         --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
         --uki "luks$n:0:$WORK/uki-luks-$n.efi" --default "apex-luks$n*" >/dev/null
     if [[ -n "$vars_src" ]]; then cp "$vars_src" "$vars"; else fresh_vars "$vars"; fi
 
+    local -a tpm_arg=(--tpm-state "$LUKS_STATE")
+    (( no_tpm )) && tpm_arg=()
     vm_boot --disk "$disk" --vars "$vars" --name "luks-$n" --serial "$ser" \
-            --tpm-state "$LUKS_STATE" --extra-disk "$LUKS_IMG" \
+            ${tpm_arg[@]+"${tpm_arg[@]}"} --extra-disk "$LUKS_IMG" \
             --mem 4096 --timeout 240 "$@" || rc=$?
     printf '%s\n' "$rc"
 }
@@ -1564,6 +1570,82 @@ scenario_luks_firmware_code() {
     info "pcr11 stayed $pcr11_a across the whole scenario"
     # The honest boundary of what was just shown, in the run and not only here.
     cannot "this was an OVMF binary swap, not a vendor UEFI capsule: no microcode update, no ACPI table change, no option ROM and no management-engine firmware moved with it. It changes the register a capsule changes, on an emulated TPM."
+}
+
+# ── the TPM is gone ─────────────────────────────────────────────────────────
+#
+# L-002's acceptance is that an encryption default "does not strand users
+# across qualified hardware/recovery cases", and the case with no scenario was
+# the one with no TPM answering at all. It is not exotic: a TPM switched off in
+# firmware setup, a board replaced under warranty, a disk moved to another
+# machine, a fTPM a BIOS update reset. Every other LUKS scenario here boots
+# with a working software TPM and varies what it will agree to unseal.
+#
+# WHAT THIS DOES NOT MODEL, said plainly because the scenario's name invites
+# the wrong reading: a machine that has NEVER had a TPM cannot enrol a
+# systemd-tpm2 token in the first place, so it never reaches this boot. That is
+# a question about the installer and about apex-luks-enroll, not about the
+# unlock path, and docs/boot-v2.md answers it separately. What runs here is a
+# volume enrolled on a machine with a TPM, booted on one without.
+#
+# THE PAIR IS THE POINT. The same volume, the same UKI, the same recovery key,
+# booted twice, with the TPM device as the only difference: once it unlocks
+# through the TPM and writes the marker, once there is no TPM and the recovery
+# key has to produce the same plaintext. Without the first arm, "the recovery
+# key opened it" would be a string nobody had seen absent.
+#
+# AND THE BOOT MUST END. A guest that hangs waiting for a TPM that will never
+# answer has stranded the user just as thoroughly as one that refuses with no
+# fallback, so the qemu exit status is asserted and not merely reported: 0 is a
+# guest that powered itself off, 137 is the harness killing a hung one.
+scenario_luks_no_tpm() {
+    log "luks-no-tpm: the TPM is gone; the recovery key must produce the same disk"
+    luks_require_root
+    luks_enroll notpm || return
+
+    luks_hook "$WORK/luks-hook-notpm.cpio" yes
+    luks_uki notpm "$KEYS/pcr/key.pem" "$WORK/luks-hook-notpm.cpio" \
+        "apex.bootlab.luks=notpm" || return
+
+    # ── boot A: the TPM is there. The positive control. ────────────────────
+    local rc ser
+    rc="$(luks_boot notpm)"; ser="$WORK/serial-luks-notpm.log"
+    assert_eq 0 "$rc" "with a TPM: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-device=present"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    # The marker is written HERE, through the TPM path. Everything the second
+    # boot claims about recovering the user's data rests on that.
+    assert_serial_has "$ser" "APEX-BOOTLAB: plaintext-marker=written"
+    cp "$ser" "$WORK/serial-luks-notpm-with-tpm.log"
+
+    # ── boot B: no TPM device at all ───────────────────────────────────────
+    rc="$(luks_boot notpm --no-tpm)"; ser="$WORK/serial-luks-notpm.log"
+    # The guest reached userspace. Without this, every assertion below would be
+    # satisfied by a boot that never happened.
+    assert_serial_has "$ser" "APEX-BOOTLAB: apex-initramfs-reached"
+    # 1. There really is no TPM, reported by the guest and not by the lab.
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-device=absent"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: tpm-device=present"
+    # 2. The TPM unlock is refused rather than hanging or silently succeeding.
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-unlock=REFUSED"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    # 3. And the user gets in, in that same boot.
+    assert_serial_has "$ser" "APEX-BOOTLAB: recovery-unlock=SUCCESS"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: recovery-unlock=FAILED"
+    # 4. WITH THEIR DATA. A mapper appearing says a keyslot was satisfied; the
+    #    marker written through the TPM path on boot A says it is the same
+    #    disk, decrypted.
+    assert_serial_has "$ser" "APEX-BOOTLAB: recovery-marker=found"
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: recovery-marker=absent"
+    # 5. The boot ENDED. See the header: a hang strands the user too.
+    assert_eq 0 "$rc" "with no TPM: the guest powered off rather than hanging"
+    cp "$ser" "$WORK/serial-luks-notpm-no-tpm.log"
+
+    # What the guest saw of the measured state with no TPM, recorded because it
+    # is the reason the signed PCR 11 policy cannot help here: there is nothing
+    # to measure into and nothing to unseal from.
+    info "with no TPM the guest read pcr11='$(luks_serial_field "$ser" pcr11)' and pcr0='$(luks_serial_field "$ser" pcr0)'"
+    cannot "a machine that never had a TPM is not modelled by this scenario: it could not enrol a systemd-tpm2 token at all, so it never reaches either boot above. That is a question about the installer and apex-luks-enroll, and this scenario does not answer it."
 }
 
 # ── suspend to RAM with the volume open ─────────────────────────────────────
