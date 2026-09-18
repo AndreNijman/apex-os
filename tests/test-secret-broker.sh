@@ -679,6 +679,15 @@ out="$("$APEX" account scopes google 2>&1)"
 grep -q 'files.read' <<<"$out" && grep -q 'gdrive.file.read' <<<"$out" \
     && ok "apex account scopes google lists the scope and the operation it names" \
     || bad "apex account scopes google lists the scope and the operation it names"
+# WEAKENED, DELIBERATELY, AND SAID OUT LOUD. Until round 31 this negative had a
+# witness: `apex account scopes microsoft` printed exactly this string, asserted
+# twenty lines below, so a build that had stopped printing it anywhere would
+# have been caught. `msgraph` landed and no provider says it any more, so this
+# assertion now passes on any build and the POSITIVE one above it carries the
+# whole claim. Kept rather than deleted because the string is still what an
+# empty table prints and a regression would put it back — but it is no longer
+# evidence on its own, and the routing control that replaced it is in the
+# Microsoft section below.
 grep -q 'no grantable scopes' <<<"$out" \
     && bad "and no longer says a Google account has nothing grantable" \
     || ok "and no longer says a Google account has nothing grantable"
@@ -696,13 +705,89 @@ grep -q 'gdrive.file.read' <<<"$out" \
     && ok "and the grant is recorded under the canonical operation id" \
     || bad "and the grant is recorded under the canonical operation id: ${out}"
 
-# Microsoft is the control: the same command, the same shape, and it must
-# still be refused, because no msgraph transport exists. Without this the
-# assertion above would pass on a build that accepted every scope.
+# Microsoft is the control, and after round 31 it is a BETTER one than it was.
+# It used to be "the same command, refused, because no msgraph transport
+# exists" — a control that stopped existing the moment the transport landed.
+# What replaces it is a control the landing cannot take away: the two
+# device-code providers offer the SAME scope name and it must route into
+# DIFFERENT operations. `google files.read` -> `gdrive.file.read` above,
+# `microsoft files.read` -> `msgraph.file.read` here. A build that recorded
+# grants under the scope's own name, or that routed both into one transport —
+# which is exactly what a copied table entry does — fails one of the two.
+section "a Microsoft account's grantable scope"
 out="$("$APEX" account scopes microsoft 2>&1)"
+grep -q 'files.read' <<<"$out" && grep -q 'msgraph.file.read' <<<"$out" \
+    && ok "apex account scopes microsoft lists the scope and the operation it names" \
+    || bad "apex account scopes microsoft lists the scope and the operation it names: ${out}"
+grep -q 'gdrive' <<<"$out" \
+    && bad "and does not list Google's transport under Microsoft" \
+    || ok "and does not list Google's transport under Microsoft"
 grep -q 'no grantable scopes' <<<"$out" \
-    && ok "a Microsoft account still has nothing grantable, and says so" \
-    || bad "a Microsoft account still has nothing grantable, and says so: ${out}"
+    && bad "and no longer says a Microsoft account has nothing grantable" \
+    || ok "and no longer says a Microsoft account has nothing grantable"
+
+# An unknown scope is still refused, and with the OTHER message — the one that
+# sends the reader to the list rather than away from it. Without this, the
+# assertions above would pass on a build that accepted every scope name it was
+# handed.
+GRAPH_SENTINEL="apex-graph-sentinel-2b6e4401-do-not-leak"
+printf %s "$GRAPH_SENTINEL" | "$APEX" secret add account.microsoft.work \
+    --host graph.microsoft.com --auth bearer --path /v1.0/me >/dev/null 2>&1
+
+out="$(cd "$PROJ" && "$APEX" account grant microsoft.work nosuchscope 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] \
+    && ok "apex account grant microsoft.work nosuchscope is refused" \
+    || bad "apex account grant microsoft.work nosuchscope is refused (rc=${rc}): ${out}"
+grep -q 'no scope' <<<"$out" \
+    && ok "and the refusal is 'no such scope', not 'nothing to grant'" \
+    || bad "and the refusal is 'no such scope', not 'nothing to grant': ${out}"
+
+out="$(cd "$PROJ" && "$APEX" account grant microsoft.work files.read 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] \
+    && ok "apex account grant microsoft.work files.read is accepted" \
+    || bad "apex account grant microsoft.work files.read is accepted (rc=${rc}): ${out}"
+
+# Canonical, and into msgraph rather than gdrive. This is the routing control.
+out="$(cd "$PROJ" && "$APEX" secret grants 2>&1)"
+grep -q 'msgraph.file.read' <<<"$out" \
+    && ok "and the Microsoft grant is recorded as msgraph.file.read" \
+    || bad "and the Microsoft grant is recorded as msgraph.file.read: ${out}"
+
+# The shipped binary has no loopback route into the Graph transport either.
+# `MsgraphProvider::at` is `#[cfg(test)]`; if it were not, this would not be
+# refused. NO NETWORK: the credential that is used is pinned to loopback and
+# dies at `bind`, and the graph.microsoft.com one above is granted and never
+# used.
+printf %s "$GRAPH_SENTINEL" | "$APEX" secret add account.microsoft.local \
+    --host 127.0.0.1 --scheme http --port 9 --auth bearer --path /v1.0/me \
+    >/dev/null 2>&1
+(cd "$PROJ" && "$APEX" secret grant account.microsoft.local msgraph.file.read >/dev/null 2>&1)
+out="$(cd "$PROJ" && "$APEX" secret use account.microsoft.local msgraph.file.read \
+    01BYE5RZ6QN3ZWBTUFOFD3GSPGOHDJD36K 2>&1)"
+grep -q '127.0.0.1' <<<"$out" && grep -q 'graph.microsoft.com' <<<"$out" \
+    && ok "the shipped daemon refuses a Graph credential pinned off Microsoft" \
+    || bad "the shipped daemon refuses a Graph credential pinned off Microsoft: ${out}"
+grep -q "$GRAPH_SENTINEL" <<<"$out" \
+    && bad "and that refusal carries no credential" \
+    || ok "and that refusal carries no credential"
+
+# NOT ASSERTED HERE, AND THE REASON IS THE SAME ONE gdrive's FOUND ENTRY GIVES.
+# A consumer OneDrive id is {driveId}!{n} — Microsoft's own documented example
+# is 12319191!11919 — and `valid_name` refuses `!`. That refusal CANNOT be
+# measured through the shipped binary without dialling Microsoft: on the
+# loopback credential above the host pin fires first, so `secret use` exits
+# non-zero for a reason that has nothing to do with the id, and an assertion on
+# the exit code alone would pass on a build that had dropped the check entirely
+# — which is exactly what it did when it was tried, so it was taken out rather
+# than left reading green. The only credential whose host pin lets the id check
+# run is one pinned to graph.microsoft.com, and a build without the check would
+# then send a request to Microsoft. It is measured in Rust instead, twice:
+# `a_resource_is_a_onedrive_item_id_and_nothing_that_could_leave_the_endpoint`
+# through `OperationSpec::check`, and `the_url_is_the_stored_endpoint_with_the_
+# item_id_under_it` through `graph_url` itself.
+
+"$APEX" account rm microsoft.work >/dev/null 2>&1
+"$APEX" secret remove account.microsoft.local >/dev/null 2>&1
 
 # The shipped binary has no loopback route into the Drive transport.
 printf %s "$DRIVE_SENTINEL" | "$APEX" secret add account.google.local \
@@ -720,12 +805,17 @@ grep -q "$DRIVE_SENTINEL" <<<"$out" \
 
 "$APEX" account rm google.drive >/dev/null 2>&1
 "$APEX" secret remove account.google.local >/dev/null 2>&1
-if grep -rq "$DRIVE_SENTINEL" "$SECRET_STORE" "$XDG_STATE_HOME" 2>/dev/null; then
-    printf '      still present in: %s\n' "$(grep -rl "$DRIVE_SENTINEL" "$SECRET_STORE" "$XDG_STATE_HOME" 2>/dev/null | tr '\n' ' ')"
-    bad "no trace of the Drive token remains on disk"
-else
-    ok "no trace of the Drive token remains on disk"
-fi
+# Both device-code tokens, each with its own sentinel: a single one shared
+# between them could be removed by either `rm` and read as both being gone.
+for pair in "Drive:$DRIVE_SENTINEL" "Graph:$GRAPH_SENTINEL"; do
+    what="${pair%%:*}"; needle="${pair#*:}"
+    if grep -rq "$needle" "$SECRET_STORE" "$XDG_STATE_HOME" 2>/dev/null; then
+        printf '      still present in: %s\n' "$(grep -rl "$needle" "$SECRET_STORE" "$XDG_STATE_HOME" 2>/dev/null | tr '\n' ' ')"
+        bad "no trace of the ${what} token remains on disk"
+    else
+        ok "no trace of the ${what} token remains on disk"
+    fi
+done
 
 printf '\nsecret-broker: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
