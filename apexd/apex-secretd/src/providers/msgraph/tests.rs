@@ -439,6 +439,7 @@ fn the_declaration_is_one_a_registry_will_take() {
     // nothing implements is a grant that can never be used. The cross-crate
     // gate in `providers::tests` says the same thing over the whole table;
     // this says it for the provider whose file it is.
+    let mut checked = 0;
     for p in account::PROVIDERS.iter().filter(|p| p.transport == SPEC.id) {
         for scope in p.scopes {
             assert!(
@@ -448,8 +449,17 @@ fn the_declaration_is_one_a_registry_will_take() {
                 scope.name,
                 scope.operation
             );
+            checked += 1;
         }
     }
+    // A loop over an empty table proves nothing, and this provider exists
+    // precisely because `GRAPH_SCOPES` was empty for six rounds.
+    assert!(
+        checked > 0,
+        "no account scope routes into '{}', so it is unreachable from `apex \
+         account grant` and the loop above checked nothing",
+        SPEC.id
+    );
 }
 
 #[test]

@@ -199,21 +199,40 @@ mod tests {
             "only {checked} account scopes were checked; this test ran on almost \
              nothing, which is how it would pass while the tables were empty"
         );
-        // The providers that deliberately offer NO scope yet, named one at a
-        // time. Adding a sixth provider with an empty table has to be a line
-        // somebody writes here on purpose, because "it has no scopes" is
-        // exactly what the loop above cannot notice.
+        // Every account scope must ALSO be reachable, and the loop above
+        // cannot notice a provider that offers none — it simply iterates
+        // nothing for that provider. This used to be
+        // `assert_eq!(empty, vec!["microsoft"])`; `msgraph` landed, the set
+        // became empty, and an equality against an empty vec with a loop over
+        // it is the vacuous shape this program hunts. So it is asserted as the
+        // positive claim it now is: **there is no shipped provider APEX can
+        // hold a credential for and spend on nothing.**
         let empty: Vec<&str> = account::PROVIDERS
             .iter()
             .filter(|p| p.scopes.is_empty())
             .map(|p| p.id)
             .collect();
+        assert!(
+            empty.is_empty(),
+            "{empty:?} can hold a credential and spend it on nothing. If a provider \
+             was added before its transport, either give it its scopes or turn this \
+             back into an equality naming it, with the reason — `apex account add` \
+             and `AccountError::NoScopesYet` still handle that case, and \
+             `apex-secret-core`'s \
+             `a_provider_with_no_transport_yet_says_so_instead_of_listing_nothing` \
+             holds them to it against a provider it builds itself."
+        );
+        // And the other half of the same claim, which an empty-set assertion
+        // cannot make: every provider was actually VISITED. Without this,
+        // emptying `PROVIDERS` would satisfy both the count above and the
+        // emptiness here.
         assert_eq!(
-            empty,
-            vec!["microsoft"],
-            "the set of account providers with nothing grantable changed. Each one is \
-             a provider APEX can hold a credential for and spend on nothing; if a \
-             transport landed, give it its scopes, and if one was added, say why here."
+            account::PROVIDERS
+                .iter()
+                .filter(|p| !p.scopes.is_empty())
+                .count(),
+            account::PROVIDERS.len(),
+            "some provider contributed no scope to the {checked} checked above"
         );
     }
 
