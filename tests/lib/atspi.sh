@@ -88,17 +88,45 @@ ATSPI_STATUS=""
 ATSPI_BUS_LAUNCHER=""
 ATSPI_REGISTRYD=""
 
-atspi_require() {
-    local missing=()
+# Where the two at-spi helpers live, spelled the way each distribution spells
+# it. They are NOT on $PATH anywhere: both are internal helpers a desktop starts
+# by absolute path or by D-Bus activation, so `command -v` never finds them and
+# this list is the whole search.
+#
+# The Arch entries are here because they were missing, and the way that failed
+# is the reason the list now ends with a `find`: Fedora puts both in
+# /usr/libexec, Arch puts them flat in /usr/lib (NOT in an at-spi2-core
+# subdirectory, which is what was guessed), and the suite reported "the
+# accessibility stack is not installed here" on a runner where the package was
+# installed and the binaries were 40 characters away. A wrong path and an absent
+# package are indistinguishable in that message, so the message now says where
+# it looked.
+ATSPI_LAUNCHER_PATHS="
+/usr/libexec/at-spi-bus-launcher
+/usr/lib/at-spi-bus-launcher
+/usr/lib64/at-spi-bus-launcher
+/usr/lib/at-spi2-core/at-spi-bus-launcher
+/usr/lib64/at-spi2-core/at-spi-bus-launcher
+/usr/libexec/at-spi2-core/at-spi-bus-launcher
+"
+ATSPI_REGISTRYD_PATHS="
+/usr/libexec/at-spi2-registryd
+/usr/lib/at-spi2-registryd
+/usr/lib64/at-spi2-registryd
+/usr/lib/at-spi2-core/at-spi2-registryd
+/usr/lib64/at-spi2-core/at-spi2-registryd
+/usr/libexec/at-spi2-core/at-spi2-registryd
+"
 
-    for c in /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher \
-             /usr/libexec/at-spi2-core/at-spi-bus-launcher; do
+atspi_require() {
+    local missing=() c
+
+    for c in $ATSPI_LAUNCHER_PATHS; do
         [ -x "$c" ] && { ATSPI_BUS_LAUNCHER="$c"; break; }
     done
     [ -n "$ATSPI_BUS_LAUNCHER" ] || missing+=("at-spi-bus-launcher (at-spi2-core)")
 
-    for c in /usr/libexec/at-spi2-registryd /usr/lib/at-spi2-core/at-spi2-registryd \
-             /usr/libexec/at-spi2-core/at-spi2-registryd; do
+    for c in $ATSPI_REGISTRYD_PATHS; do
         [ -x "$c" ] && { ATSPI_REGISTRYD="$c"; break; }
     done
     [ -n "$ATSPI_REGISTRYD" ] || missing+=("at-spi2-registryd (at-spi2-core)")
@@ -111,6 +139,13 @@ atspi_require() {
     if [ ${#missing[@]} -gt 0 ]; then
         printf 'SKIP: the accessibility stack is not installed here: %s\n' "${missing[*]}"
         printf '      This is a COULD-NOT-RUN, not a pass. Nothing below was measured.\n'
+        # Say WHERE it looked. Without this, a distribution that puts the
+        # helpers somewhere new reads exactly like one that does not ship them,
+        # and the suite is believed.
+        if [ -z "$ATSPI_BUS_LAUNCHER" ] || [ -z "$ATSPI_REGISTRYD" ]; then
+            printf '      paths tried:\n'
+            printf '        %s\n' $ATSPI_LAUNCHER_PATHS $ATSPI_REGISTRYD_PATHS
+        fi
         return 1
     fi
     return 0
