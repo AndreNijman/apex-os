@@ -5687,9 +5687,24 @@ tasks:
     because that needs synthetic pointer input this suite does not inject, so what is proved is that every command
     the menu would run does run, and that labwc accepts every action the menu names; sudo apex rollback is
     deliberately never executed; nmtui's interface is never drawn; labwc's Exit is never taken. In CI the runner
-    has labwc but no apex, no thunar and no nmtui, so five of these become skips there and the live proof is the
-    L16's. THE SESSION WATCHDOG WAS NOT TOUCHED: round 28 left it narrow on purpose and nothing learned this round
-    argues for widening it.
+    has labwc but no apex and no thunar; whether it carries nmtui or dbus-run-session is the runner's to report
+    and is NOT claimed here, because nothing from this machine can check it. Those become SKIPS there, and a run
+    with every presence check forced to answer "absent" gives 0 failures, so a skip cannot cascade. The live proof
+    is the L16's. THE SESSION WATCHDOG WAS NOT TOUCHED: round 28 left it narrow on purpose and nothing learned
+    this round argues for widening it. ADDENDUM, same round, commit 79027b51, pushed: the line reporting WHICH
+    apex the remedies ran was itself a checked fact that could be false. `APEX_BIN=/nowhere` made `ln -sf` plant a
+    dangling symlink, `command -v` stepped over it, the remedies ran whatever else PATH answered to `apex`, and
+    the suite printed the path it had been handed. An APEX_BIN that is not executable is now refused and named,
+    and the resolution line asks the SESSION - `command -v apex` in the replayed client environment, symlink
+    resolved - rather than repeating what the suite intended. Mutation: APEX_BIN=/nonexistent-apex-binary gives 86
+    passed / 1 failed naming the path, while the resolution line correctly reports /usr/bin/apex as what actually
+    ran. ONE ENVIRONMENT UNKNOWN PROBED RATHER THAN ASSUMED: the error-channel assertion was measured on a machine
+    that has Xwayland, and the CI step installs only labwc and wtype. Re-run with a PATH built from every binary
+    in /usr/bin EXCEPT Xwayland (2,777 symlinks, Xwayland confirmed unfindable): 86 passed / 0 failed / 0 skipped,
+    and the compositor's startup log was empty both ways - wlroots advertises a DISPLAY and starts Xwayland
+    lazily, so a startup snapshot never depends on it. Measured against labwc 0.9.6 (+xwayland +nls +rsvg
+    +libsfdo); a runner's labwc is a different build and an error it logs there would come back as a failure with
+    the line printed, which is a deliberate allowlist decision rather than a silence.
 - id: P2-019
   title: Design APEX Fleet / managed-device architecture
   priority: P2
