@@ -3,51 +3,37 @@
 items: P2-003, P2-004
 repo: both
 worktree: /var/tmp/apex-work/wt-p2-b4
-branch: task/p2-b-round29
+branch: task/p2-b-round30
 second_worktree: /var/tmp/apex-work/wt-p2-b4-sh
-second_branch: task/p2-b-round29
-scratch: /var/tmp/apex-work/scratch-p2-b/round29/
+second_branch: task/p2-b-round30
+scratch: /var/tmp/apex-work/scratch-p2-b/round30/
 
-The branch name moved from `task/p2-b-round23` to `task/p2-b-round29` this
-round, and it must exist and be pushed in BOTH repos even when a repo gets no
-commits, because apex-shell's CI looks for a matching branch name. Full
+The branch name moved to `task/p2-b-round30` this round (both repos, both cut
+from `roadmap/v2.2` and pushed empty at the start: apex-os `6b531503`,
+apex-shell `d5c781a`). It must exist and be pushed in BOTH repos even when a
+repo gets no commits, because apex-shell's CI looks for a matching branch name. Full
 pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 `scratch-p2-b/p2-b.card.pre-round28.md`.
 
 ## NEXT
 
-**Find out why `QQuickWindow::accessibleRoot()` is null inside quickshell.**
-FOUND 14 is the largest thing this unit has measured and it currently ends in
-"upstream". It should not: one experiment closes it.
-
-Everything is ruled out but one branch. The windows are top-level, are
-`Qt::Window`, and `QAccessible::isActive()` is 1 — all measured in gdb, both
-processes. Qt's `queryAccessibleInterface` walks the metaobject chain calling
-every installed factory, and `qQuickAccessibleFactory` (qtdeclarative
-`src/quick/util/qquickglobal.cpp`, installed by the `Q_CONSTRUCTOR_FUNCTION`
-`QQuick_initializeModule`) is the one that answers for `"QQuickWindow"`. If it
-answered, `accessibleRoot()` could not be null. So either that factory is not
-in `qAccessibleFactories()` in this process, or the loop returns early on a
-class name above `QQuickWindow` — `queryAccessibleInterface` has a
-`return result;` inside the plugin branch that returns even when `create()`
-gave null.
-
-The experiment: `qQuickAccessibleFactory` is NOT exported (checked with
-`nm -D /usr/lib64/libQt6Quick.so.6`) so it cannot be called from gdb, but
-`_ZN22QAccessibleQuickWindowC1EP12QQuickWindow` IS. Write a tiny LD_PRELOAD
-whose constructor calls `QAccessible::installFactory` with a factory returning
-`new QAccessibleQuickWindow(...)` for `"QQuickWindow"`, run quickshell under it,
-and walk the tree. A tree that appears proves the factory was missing and hands
-upstream a one-line diagnosis; a tree that does not means the plugin branch is
-swallowing it, which is also a one-line diagnosis. Neither result changes any
-shipped file — this is diagnosis, not a fix.
-
-After that, and only after it, the §5 read-back assertions in
-`tests/run-lockscreen-atspi.sh` become writable. They are listed there already.
+**Measure FOUND 20** (the named cause, read out of source this round and NOT yet
+measured): build `/var/tmp/apex-work/scratch-p2-b/round30/repro.cpp` — one
+binary, two modes under `QT_QPA_PLATFORM=offscreen`, mode A `new QCoreApplication
+-> delete -> new QGuiApplication -> QQuickWindow`, mode B the same without the
+delete — and print `QQuickWindow::accessibleRoot()` in each. A null root in A and
+a non-null root in B is the whole proof. Then confirm it in the real process with
+an `LD_PRELOAD` that interposes `QGuiApplication::exec()` (exported, called
+through quickshell's PLT), re-installs a `"QQuickWindow"` factory returning
+`new QAccessibleQuickWindow(w)` (`_ZN22QAccessibleQuickWindowC1EP12QQuickWindow`
+is exported; the private header `/usr/include/qt6/QtQuick/6.10.3/QtQuick/private/
+qaccessiblequickview_p.h` IS installed so it can be compiled against normally),
+and then walk the tree with the round-29 harness.
 
 ## IN PROGRESS
 
-Nothing. Both worktrees clean, both branches pushed.
+Round 30 has a **named cause for FOUND 14, read out of source and not yet
+measured** — see FOUND 20. Next step is the measurement that proves it.
 
 ## DONE
 
@@ -247,6 +233,29 @@ than this branch.
     find either, so the hardcoded path list IS the search, and a wrong path used
     to be reported with the same words as an absent package. The list is now six
     entries wide in both copies and the refusal prints every path it tried.
+
+20. **NAMED CAUSE FOR FOUND 14, read out of source on 2026-09-19 and NOT YET
+    MEASURED — do not report it as measured until the repro in `## NEXT` runs.**
+    `QAccessible::installFactory` (qtbase `src/gui/accessible/qaccessible.cpp`)
+    registers `qAccessibleCleanup` as a `qAddPostRoutine`, and that routine does
+    `qAccessibleFactories()->clear()`. Post routines run from
+    `~QCoreApplication`. quickshell's `src/launch/main.cpp:127` creates a
+    `QCoreApplication` to parse the command line and `src/launch/launch.cpp:282`
+    then does `delete coreApplication;` immediately before
+    `new QGuiApplication(...)` — a comment at `src/core/logging.cpp:426` calls
+    that window out by name ("while the event loop is destroyed between
+    QCoreApplication delete and Q(Gui)Application launch"). So:
+    libQt6Quick's `Q_CONSTRUCTOR_FUNCTION(QQuick_initializeModule)` installs
+    `qQuickAccessibleFactory` at LOAD time, the first `QCoreApplication`'s
+    destructor CLEARS the whole factory list, and nothing re-installs it,
+    because a library constructor runs once per load. Every
+    `queryAccessibleInterface` after that walks the metaobject chain against an
+    EMPTY factory list, returns null, `accessibleRoot()` is null for every
+    window, and `QAccessibleApplication::childCount()` is 0. That is exactly
+    what the bus reports. It also explains why the `qml-qt6` control publishes a
+    tree in the same harness: it never destroys an application object.
+    `cleanupAdded` is a file-static bool that stays true, so the routine is not
+    even re-registered — the clear happens once and is permanent.
 
 ## BLOCKED ON
 

@@ -1831,3 +1831,92 @@ because the clipboard verbs deliberately did not bump — an older daemon answer
 that file uncontended, is free to take 8 → 9 for Route-B capsule auth, and was
 told to announce the bump at the top of its card because other units rebase onto
 it.
+
+## Round 30 — 2026-09-19, 01:56–02:20 AWST
+
+A landing round. All four of round 29's agents were dead at the resume, every
+worktree clean with nothing unpushed, so there was nothing to rescue and
+everything to land: **four merges, zero unlanded left in either repo**, nine
+status records, one unit retired, three agents re-dispatched fresh from cards.
+Counts unchanged at **91 done / 35 partial / 0 todo / 2 blocked** of 128, and
+that is deliberate — every card said its items stay where they are, and each
+says why in a sentence about the world rather than about effort.
+
+| repo | from | to | merges |
+| --- | --- | --- | --- |
+| apex-os | `bde4d96c` | `6b531503` | `c6bc990a` later-2, `7658fe1f` p2-b-round29, `6b531503` p2-f-4 |
+| apex-shell | `379eef8` | `d5c781a` | `d5c781a` p2-b-round29 |
+
+The apex-shell merge was `--no-ff` **deliberately**: the branch was cut from
+`379eef8` and would have fast-forwarded, leaving no merge sha to cite in
+evidence. `unlanded.py` against both repos afterwards: "nothing — every task
+branch's content is on the integration tip", twice.
+
+Gates were re-run **on the merged tips**, not inherited from the branches,
+because a count gate is exactly what a merge of two independently-green branches
+can break. apex-os `6b531503`: suites-in-CI 75 / 71 / 4, shellcheck coverage
+165 / 0 / 0, containerfile assertions 194 checked / 0 failed, doc verbs 191
+documented / 0 undocumented and undeclared / 0 stale. apex-shell `d5c781a`:
+64 suites / 64 reachable / 0 exempt, and all 106 paths in the `ci.yml`
+structure-check REQUIRED list confirmed present by extracting the list and
+stat-ing each one.
+
+`bde4d96c` (task/p2-d-5) turned out to have been merged mid-round-29 and
+**never recorded** against P2-008, P2-009 or P2-012. Round 30 recorded it.
+
+### `later` retired — and the key that actually retires a unit
+
+`later` (L-001/L-002/L-003) is closed to dispatch. Everything a VM can qualify
+is qualified; what is left of L-001 is the acceptance word *Real*, both machines'
+TPMs are off-limits, and the deliverable that replaces the dispatch is already
+written: `docs/boot-v2.md`, "The run somebody with hardware would have to do".
+Same shape as `p1-038-hardware` and `p2-c`.
+
+Closing it the obvious way did not work, and the trap is worth recording.
+`queue.json` has a top-level `_completed_units` map that reads like the
+authoritative list — every closed unit has an entry there, in the same prose.
+**`resume.sh` never reads it.** `finished()` obeys a `closed` key set on the unit
+object inside `units`. With only `_completed_units` written, the regenerated
+report put `later` straight back into **READY**, where the next orchestrator
+would have dispatched an agent onto work no agent can do. Set both; regenerate
+the report; confirm the id has moved out of READY before believing the edit.
+
+### Three dispatched, three slots left empty on purpose
+
+`p2-b` on `task/p2-b-round30` (both repos — apex-shell's CI matches on branch
+name), `p2-f` on `task/p2-f-5`, `p2-d` on `task/p2-d-6`.
+
+`p2-d` is **scoped**, and the scoping is the point. Its card's own NEXT says
+there is no engineering next step on P2-012, only a question, and it is Andre's:
+*may `apex-agentd` read the plaintext of a capsule's connection to its pinned
+destination in order to add a credential the capsule is never given?* So route B
+is not started. The agent has gap 5 only — the per-run CA bind, which closes
+without any of route B — plus an explicit instruction to decide and announce
+whether a new wire field is `PROTOCOL_VERSION` 10 or rides 9, since route B has
+reserved 10 and nothing may silently reuse it.
+
+The three empty slots were left empty rather than filled with invented work: the
+READY list was empty, the COMPLETE section is exhaustive, and the Android slot
+was **checked rather than assumed** — `adb devices` lists nothing and `lsusb`
+shows no android/google/samsung device, so `p1-053c` stays closed.
+
+### Session hygiene, both of which were wrong when this round started
+
+`state/orchestrator.pid` held a **dead** pid from round 26 and the heartbeat was
+five days old, so the file said "no orchestrator" while one was starting. Fixed
+before any merge.
+
+Round 29's idle hold was `systemd-inhibit … sleep 21600` — a fixed six-hour
+sleep, started 04:54 earlier, so it would have expired at ~03:06, *inside* this
+session. Replaced with a guarded hold on `handle-lid-switch:sleep:idle` that
+releases when the orchestrator pid exits, when any hwmon temp reaches 90 °C, or
+when the battery drops below 20 % while discharging.
+
+The heartbeat refresher was started unguarded and then replaced, because that
+shape is actively harmful rather than merely sloppy. `timeout 4h` guarantees the
+session cannot outlive its wall, so a heartbeat still ticking afterwards does not
+protect the run — it **blocks the rescue**, since `autoresume.sh` treats a
+heartbeat under 45 minutes old as "an orchestrator is alive" and skips, pushing
+the next attempt five hours out. The live loop touches while `kill -0` on the
+orchestrator succeeds and then removes both `orchestrator.pid` and
+`orchestrator.heartbeat`. Round 26's shape, restored.

@@ -2,44 +2,45 @@
 items: P2-017, P2-018, P2-019  (P2-016 — see NOTE at the bottom, unchanged)
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-p2-f
-branch: task/p2-f-4   (cut from origin/roadmap/v2.2 @ 7f6fc44d; tip bde4d96c merged in at af5f5625)
+branch: task/p2-f-5   (cut from origin/roadmap/v2.2 @ 6b531503, which is round 29's
+          task/p2-f-4 landed; nothing of this unit's is unlanded)
 
 ## NEXT
+**ROUND 30 IN PROGRESS.** Building the `gdrive` transport in `apex-secretd` on
+`task/p2-f-5`. Two commits, both independently green:
+
+1. `providers/gdrive.rs` + `gdrive/tests.rs` — ONE operation,
+   `gdrive.file.read`, `ResourceKind::Name` (a Drive file id), against a
+   loopback double that parses the request that actually arrived. Host pinned
+   to Google's API host READ OFF `account::provider("google")`'s `Host::Fixed`,
+   with a `#[cfg(test)]` injection point in oauth's `at(port)` shape, because a
+   double is `127.0.0.1` and the table has no entry for it by design.
+   Registered in `default_registry`; `operation_ids()` in `providers/mod.rs`
+   gains the id.
+2. `DRIVE_SCOPES` gains `files.read -> gdrive.file.read`, `GOOGLE_OAUTH.scopes`
+   gains `https://www.googleapis.com/auth/drive.file` (without it the token
+   cannot be spent), `empty` in the scope gate becomes `["microsoft"]`, and the
+   three places that say a Google token can be spent on nothing are corrected:
+   `docs/online-accounts.md` (~188, ~246) and `apex/src/account.rs`'s module
+   note (~51).
+
+**NEXT ACTION: cut nothing more — the branch is cut. Write
+`apexd/apex-secretd/src/providers/gdrive.rs`.**
+
 **P2-018 criterion 2 is CLOSED — do not reopen it, and do not widen the
 watchdog.** Round 29 ran every command in `menu.xml` from inside the real
 session. What is left on P2-018 needs an image build and a real boot, which
 this unit cannot do, plus one thing that needs synthetic pointer input: the
-menu is never OPENED (right-click → ShowMenu → Execute is not driven). What IS
-proved is that every command the menu would run does run, and that labwc
+menu is never OPENED (right-click -> ShowMenu -> Execute is not driven). What
+IS proved is that every command the menu would run does run, and that labwc
 accepts every action the menu names.
 
-**NEXT ACTION: the `gdrive` transport in `apex-secretd`.** It is the biggest
-unblocked piece left on this unit and it unlocks three things at once:
-
-  1. A Google token stored by `apex account add --client-id` can currently be
-     renewed and spent on NOTHING — no `gdrive` provider exists, so every
-     scope `GOOGLE_SCOPES` lists names an operation no provider offers, and
-     `add` prints that rather than sending somebody to a grant the daemon will
-     refuse.
-  2. **Google's refresh is still unproven.** Its guide lists `client_secret`
-     as required on the poll and optional on the refresh, and this build
-     stores none. The daemon deliberately lets Google answer — a non-2xx
-     replaces nothing and returns Google's own `error_description` — but
-     nothing has ever spent a refreshed Google token, because there is nothing
-     to spend it on.
-  3. It removes the `files.read` vapour scope for real rather than by the
-     cross-crate gate refusing it.
-
-Do ONE operation (`gdrive.file.read`), against a loopback double that parses
-the request that actually arrived — the shape `s3/mod.rs` and the `webdav`
-provider both use. `#[cfg(test)]` table injection is needed for the same
-reason the `oauth` provider needed it: a loopback double is `127.0.0.1` and
-the host table has no entry for it by design.
-
-After that, in descending size: `msgraph` (the same shape, different host
+After gdrive, in descending size: `msgraph` (the same shape, different host
 table entry), gvfs — **a design paragraph only**, and P2-019's three remaining
 unsettled entries, two of which depend on other roadmap items. P2-019 is a
-DESIGN item and a design landed; do not build a fleet daemon.
+DESIGN item and a design landed; do not build a fleet daemon. P2-016's
+`ensure_private_dir` ownership check is the one P2-016 follow-up that needs no
+screen and no boot.
 
 ## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
 1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
