@@ -5,26 +5,24 @@ branch: task/followups-5
 repo: apex-os
 
 ## NEXT
-**Read run 35353055680 on `0e839f6e`** — dispatched at the end of round 28 and
-carrying everything below. Two things to check in it, neither yet confirmed on
-a runner:
-1. `Run terminal layout template assertions`. The previous run 35351419809 went
-   RED there: on the runner `action new-tab --layout-string` landed NOTHING in
-   four tries over twelve seconds, while here it lands 20/20 and the top-level
-   `--layout-string` is the one that drops. `0e839f6e` alternates BOTH forms,
-   six attempts, verifying after each. If it is still red, the runner cannot
-   land this layout by any route and the next move is to capture what the
-   runner's zellij server actually says (drop the `2>&1` on the send, dump
-   `zellij list-sessions` and the server log) rather than guess again.
-2. `Run the Hyprland Lua config assertions` / `Run the live input-settings
-   assertions` must now be GREEN WITH A `::warning::` in the run summary saying
-   they asserted nothing. Green and SILENT means the parse is wrong.
+Nothing from round 28 is outstanding — run **35353055680** on `0e839f6e` is
+**completely green** and every claim below was read back out of it, not
+inferred. Candidates for round 29, in the order they look worth doing:
 
-Then: `Run secret-broker assertions` was RED on 35351419809 with `FAIL the
-session's script actually ran` (after `unable to access
-https://127.0.0.1:1/demo.git/`). The card records it CLOSED at 66/0 on run
-34803818557, so this is new, a flake, or arrived with the `roadmap/v2.2` merge
-at the top of round 28. Nothing in round 28 goes near it.
+1. **`apex-mux`'s zellij path deserves the diagnosis it still lacks.** It is
+   reliable now, but WHY the runner and this laptop disagree about which send
+   form works is unknown. Dropping `2>/dev/null` on the sends and dumping the
+   session server's own log on a failure would turn the next disagreement into
+   evidence instead of another round trip.
+2. **The same "green over nothing" audit, widened.** `hypr-lua` and
+   `input-live` were found by reading the FOUND list; nothing systematically
+   looks for a CI step that runs a suite bare. `check-suites-run-in-ci.sh`
+   proves a suite is INVOKED; nothing proves the step reads what it said. A
+   fifth checker in the `check-*.sh` family — "every step that runs a
+   tests/*.sh parses its summary" — would close the class rather than the two
+   instances.
+3. The `## FOUND` general class below is still open: gates reading state owned
+   by the environment they run in.
 
 ## DONE
 - **ROUND 28 — THE ZELLIJ RACE IS CLOSED, AND THE CARD'S OWN PRESCRIPTION WAS
@@ -84,7 +82,18 @@ at the top of round 28. Nothing in round 28 goes near it.
   forms are now sent alternately, 6 attempts, verified after each. Locally
   16/16 with one apex tab each, mux-layouts 47/0.
 - Gates held: `check-shellcheck-coverage.sh` 165 scripts / **0 known-failing**;
-  `check-suites-run-in-ci.sh` **71 of 75**, 4 exemptions, 0 undeclared.
+  `check-suites-run-in-ci.sh` **71 of 75**, 4 exemptions, 0 undeclared. No
+  fifth exemption was added and neither number moved.
+- **CONFIRMED ON A RUNNER, run 35353055680 @ `0e839f6e`, whole run GREEN**
+  (the run before it was a failure). Read out of its logs and annotations:
+  `mux-layouts: 47 passed, 0 failed, 0 skipped` including "the layout landed
+  exactly once"; `backup-s3: 27 passed, 0 failed`; `backup-ssh: 32 passed,
+  0 failed`; `apex ai: 44 passed, 0 failed` with `PASS no socket was created`;
+  `Run secret-broker assertions` green again, so 35351419809's red there was a
+  flake. Both skip warnings render as real GitHub **annotations** on the run —
+  "test-apex-hypr-lua.sh asserted NOTHING on this runner (1 skipped)…" and the
+  same for input-live — which is the whole point of `d00745db`: visible without
+  opening a log.
 - Runner: dispatched **35351419809** on `746b1f78` (pushes do NOT trigger CI
   here — every run on this branch is `workflow_dispatch`). Check `mux-layouts`
   in it; it does NOT contain `d0be7f7b`.
@@ -114,7 +123,7 @@ at the top of round 28. Nothing in round 28 goes near it.
 - `69ef58cf` `cf7722d9` `2a8ada6f` `c07574b7` — see git log.
 
 ## IN PROGRESS
-- Run 35353055680 on `0e839f6e` in flight — see NEXT.
+- nothing
 
 ## FOUND
 - **THE 1 → 8 IS NOT A REGRESSION.** `13e7ec84` (`!cancelled()`) is why the

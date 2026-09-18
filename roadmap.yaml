@@ -4631,7 +4631,14 @@ tasks:
     --workspace --all-targets -D warnings clean; shellcheck -S warning -x clean. Branch task/p2-virt-2, five
     commits, all pushed. PARTIAL rather than done because one of the six named flows was never demonstrated end to
     end: making it done needs a manual run on a machine with a spare USB device somebody is willing to have
-    detached.
+    detached. ROUND 26 (2026-09-18): unchanged, and deliberately so. p2-d's round 4 was entirely P2-012
+    (per-session allowlist narrowing, protocol 9); it touched no virtualization code, ran no vmlab flow, and
+    re-verified nothing here. USB passthrough is still the one flow of six never demonstrated end to end, and it
+    is not closable by any suite on any machine: it means detaching a physical device from the machine running the
+    tests. Making this `done` needs a manual run on a machine with a spare USB device somebody is willing to have
+    detached - not more test code. What IS verified for USB remains what round 1 recorded: the refusal when lsusb
+    cannot be run at all, the same refusal from create --usb, the malformed-id refusal, and that no hostdev
+    reached the domain in any of them.
 - id: P2-009
   title: Disposable VM agent execution
   priority: P2
@@ -4666,7 +4673,13 @@ tasks:
     engine and the docs both had. PARTIAL rather than done because no guest image carrying an agent CLI exists:
     what is verified is the BOUNDARY - the read-only copy-in volume, nomination-only egress, no network, and
     teardown - with an arbitrary command as the task. docs/virtualization.md states that building a guest that
-    carries claude or codex is separate work. Branch task/p2-virt-2.
+    carries claude or codex is separate work. Branch task/p2-virt-2. ROUND 26 (2026-09-18): unchanged, and
+    deliberately so. p2-d's round 4 was entirely P2-012 (per-session allowlist narrowing, protocol 9); it touched
+    no virtualization code and ran no vmlab flow. The gap is still a guest image that carries an agent CLI, which
+    is a build rather than a test: what is verified is the BOUNDARY - the read-only copy-in volume,
+    nomination-only egress with the turned-around loop as its falsifying control, no network, and teardown - with
+    an arbitrary command standing in for an agent task. docs/virtualization.md already records that building a
+    guest carrying claude or codex is separate work, and no amount of assertion in this repository closes it.
 - id: P2-010
   title: Hardware qualification database
   priority: P2
@@ -4811,7 +4824,68 @@ tasks:
     capsule, no session, no lab daemon, no container, the virt stack never installed, the user's agent runtime
     still active. Card: ROADMAP/state/agents/p2-d.md. Docs: docs/browser-capsule.md. LANDED 2026-09-14 (round 25):
     apex-os 13d53c01 -> fdf0a8e6 carries task/p2-d-3 (be9844cc). Two lab defects found by running it twice: two
-    concurrent browserlab runs deleted each other's tree, and a dead run's child kept the lock.
+    concurrent browserlab runs deleted each other's tree, and a dead run's child kept the lock. ROUND 26
+    (2026-09-18), apex-os branch task/p2-d-4, 8 commits, all pushed, NOT merged; base roadmap/v2.2 266dcc57 merged
+    in. THE DESTINATION PIN IS NOW A BOUNDARY INSTEAD OF AN ANNOUNCEMENT. Until this round the daemon snapshotted
+    the RUNTIME's whole allowlist when a session started and there was no way on the wire to ask for less - so
+    `apex browser run --allow HOST` checked the host against the runtime's list in a shell script and then started
+    a session that could reach every destination the machine had ever been told to permit, and `--capability
+    NAME`, which prints "pins this capsule to intranet.example", pinned only what the engine would accept on its
+    own command line. PROTOCOL_VERSION 8 -> 9 with SESSION_ALLOWLIST_VERSION beside it, for RunRequest::allow; the
+    CLI refuses to send it to a daemon below 9 because this dropped key WIDENS and nothing downstream catches it -
+    the session starts, the page renders, and the other destinations are silently reachable because nothing in the
+    run tries them. Allowlist::narrow proves every named line is covered by a rule the runtime already carries,
+    where covered is a statement about which host:port pairs each rule permits and not about spelling: a name
+    narrows under a wildcard, a wildcard may not widen to its parent, an address rule and a name rule never cover
+    each other (a name that resolves somewhere today is a fact about DNS, not a permission), and an uncovered line
+    is REFUSED rather than dropped. Empty list refused too - "reach nothing" is --network offline. THE LIVE HALF,
+    browserlab flow `narrowing`, 6 observations verified on the L16 against a real agentd, a real bwrap namespace
+    and a real browser: the lab runtime now allows TWO endpoints, both answering, both the same server program on
+    the same certificate one port apart, so that "the capsule reached what it named" and "the capsule reached
+    everything the machine permits" stop being the same observation. A capsule naming only the first reaches it,
+    does NOT reach the second, and the DAEMON's own log carries the denial by name; the turned-around control -
+    the identical run with both endpoints named - reaches the second. cargo integration:
+    apexd/apex-agentd/tests/session_allowlist.rs, 5 cases against a real daemon on its own socket/state/config,
+    killed by pid, including a CONNECT issued directly to the session's egress proxy (403 naming the destination
+    and `apex agent allow` for the one it did not name; 502 for the one it did - an address literal on a port
+    nothing listens on, chosen because a NAME would send the proxy to the machine's resolver and make the control
+    depend on what DNS says today, which is how the first draft failed). TWO OF THIS ROUND'S OWN TESTS WERE FOUND
+    TO INSPECT NOTHING, by mutation and not by review: SessionInfo.allowlist set to None broke none of the four
+    assertions written around it, and the commit message that claimed the fix caught a proxy handed the wrong list
+    was false - the SURGICAL mutation (change only the egress::start call site, leave the binding alone) passed
+    everything. Both are covered now and both mutations fail. 21 mutations in total, each shown to fail the
+    assertions that name it and each file restored byte-identical with plain cp, sha256 compared: covered_by
+    always true (4), narrow returning the runtime's list (1), the empty-list refusal removed (2), the port check
+    removed (1), rules compared as text (1), an empty runtime list covering everything (1), Rule::parse not
+    normalising (2), a bare host meaning 8443 (10), session_allowlist ignoring the request (2), the network-mode
+    refusal short-circuited (1), AllowlistRefused's run_error arm deleted (1), SessionInfo.allowlist forced to
+    None (2), egress::start given the runtime's list (1), egress::start given an empty list (1), the --allow
+    version-gate entry deleted (1), that entry mapped onto POLICY_DIMENSIONS_VERSION (1), the wire key renamed
+    (1), PROTOCOL_VERSION left at 8 (1), apex-browser not forwarding --allow (4), forwarding the runtime's whole
+    list (2), forwarding one extra destination (2). ALSO: session_allowlist split out of session::start so the
+    rule is testable without a daemon, a sandbox, a PTY or a network; SessionInfo.allowlist printed by `apex agent
+    status <id>` as `destinations`, read off the binding the proxy and the 6.2 confinement are built from and
+    never off the request, because the case where the two differ is exactly the case somebody is auditing.
+    android/core/src/test/resources/requests.json was DELIBERATELY NOT extended, against the dispatch brief:
+    `allow` is a field on an existing request and not a new request, Sessions.kt's run builder sends no policy of
+    any kind so the phone cannot compose a narrowed session at all, and a Kotlin builder for it would be a builder
+    for a request the app has no way to make - the compatibility contract that does matter (the wire key is
+    `allow`, an absent key is None, an explicit null is None) is asserted in protocol.rs and shown to fail under a
+    serde rename. GATES: cargo test --locked --workspace 3270 passed 0 failed; cargo clippy --locked --workspace
+    --all-targets -D warnings clean; tests/test-apex-browser.sh 96 -> 102 passed 0 failed; shellcheck -S warning
+    -x clean; check-shellcheck-coverage.sh 165 discovered / 0 known-failing / 0 newly failing;
+    check-suites-run-in-ci.sh 75 suites / 71 run / 4 exempt / 0 unrun and undeclared;
+    check-containerfile-assertions.sh rc=0. Nothing left behind: no capsule, no session, no lab daemon, no lab
+    secret service, no container; the user's own apex-agentd was never signalled. docs/browser-capsule.md's
+    statement that "the allowlist agentd snapshots when the session starts is the runtime's" was TRUE AND IS NOT,
+    and is replaced; docs/browser-capsule-auth.md's scope for route B said "two protocol fields plus a
+    PROTOCOL_VERSION bump" and would now read as satisfied - it says explicitly that route B needs revision 10,
+    because a daemon can understand a narrowed allowlist and know nothing about terminating TLS. STILL PARTIAL,
+    and the unmet criterion is unchanged: route B is decided and scoped, not built, so a capsule still cannot
+    authenticate to a site. This round closed a fail-open in the pin that route B's own argument rests on. The
+    dispatch brief for this round was stale on two points, recorded on the card: the worktree was already on
+    task/p2-d-4 and not on roadmap/v2.2, and task/p2-d-2 is LANDED (it is in this evidence as round 24), so
+    committing there would have been committing onto a merged branch.
 - id: P2-013
   title: Per-project identity binding
   priority: P2
