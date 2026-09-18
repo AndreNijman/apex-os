@@ -5255,7 +5255,42 @@ tasks:
     luks-s3 ran twice, r3 at 4 passed / 1 failed (finished 11:43:21) and r4 at 6 passed / 0 failed / 1
     COULD-NOT-RUN (finished 11:53:15), the could-not-run being 'the guest reported no s3 field at all'. So two of
     the three scenarios the card calls outstanding are in fact complete, and only the QMP waker path in luks-s3
-    has still never executed.
+    has still never executed. ROUND 28 (2026-09-18): apex-os task/later-tpm-qualification a9c9ebe6, 8ad79870,
+    fc0ac3f5 on top of roadmap/v2.2 266dcc57. THE CARD'S NEXT WOULD HAVE READ A KILLED RUN AS A PASS. It said to
+    collect later-r5-s3-fw2025 and later-r5-s3-nosmm with `podman wait`; both were already gone, both recorded
+    Exited (143), and both FinishedAt were the same nanosecond (15:01:38.115602736) - a host-level kill, not a
+    result. Both logs nevertheless ended `== boot-v2 VM harness: 6 passed, 0 failed ==`, with the s3=1 boot's
+    assertions never reached and r5's own wake.json showing suspended_seen=false at 0.031 s. Re-run in the
+    foreground as r6 instead. THE S3 CRITERION IS MEASURABLE AND IT PASSES: luks-s3 on
+    edk2-ovmf-20250812-18.fc43's 4M secboot build gives 17 passed / 0 failed, exit 0, FinishedAt 21:22:24 checked.
+    The volume stays open across S3; a mapper created AFTER the resume reads the marker back, so the plaintext
+    came off the disk and not out of the page cache of a device open since before the sleep; two non-colluding
+    witnesses agree (the guest's suspend_stats and qemu asked over QMP: suspended/woken/resumed all true); and
+    s3-mode=deep, so it was S3 and not suspend-to-idle. THE SHIPPED FIRMWARE IS WHY IT LOOKED UNMEASURABLE, AND IT
+    IS AN EDK2 REGRESSION, NOT AN APEX OR LAB DEFECT. On the in-image edk2-ovmf-20260812-4.fc43 the guest suspends
+    and qemu wakes it (QMP: suspended at 107.656 s, woken at 108.161 s, resumed_seen true) and OVMF then stops in
+    its own resume path on `ASSERT MemoryServices.c(203)` after `SEC: S3 resume` and
+    `PopulateMemoryTypeInformation: No Memory Type Information HOB found`; a DEBUG build deadloops there, so qemu
+    is killed at the 240 s timeout and the guest prints nothing. ONE VARIABLE AT A TIME: the in-image NON-secboot
+    4M build at the SAME edk2 version asserts identically (so it is not Secure Boot or SMM), and the 20250812
+    secboot build with Secure Boot ON resumes (so it is the edk2 version). Firmware provenance was verified rather
+    than assumed - each build's version was read out of the binary itself (edk2-20250812-build/edk2-d46aa46c8361
+    vs edk2-20260812-build/edk2-2970e5699ba6) and the cache files were checksummed against fresh qemu-img
+    conversions of their sources. TWO DEFECTS OF THE SAME FAMILY FIXED IN a9c9ebe6, both mutation-tested. (1) The
+    EXIT trap's comment claimed it survived a signal; it runs on an untrapped SIGTERM but `$?` reads 0 inside it,
+    so the INCOMPLETE branch never fired and a killed run printed a pass. Reproduced in isolation first;
+    TERM/INT/HUP are now trapped by name, and the same kill that produced `6 passed, 0 failed` now produces `6
+    passed, 1 failed` with a named FAIL line. (2) luks-s3's could-not-run said "the guest reported no s3 field at
+    all" while the QMP record and the OVMF log sat unread in the same directory contradicting it;
+    luks_s3_other_witnesses() now folds both into the reason and was checked against five inputs (broken firmware,
+    working firmware, a truncated run, missing files, corrupt JSON) to confirm it discriminates rather than
+    emitting one fixed string. docs/boot-v2.md (8ad79870) now records all three scenarios, the edk2 table, and the
+    measured fact that the one-command re-enrolment after a TPM clear is a no-op that exits 0 - its Recovery row
+    now says two invocations. WHAT IS STILL NOT DONE, AND IT IS THE WHOLE OF L-001'S ACCEPTANCE WORD "REAL": every
+    one of these runs used swtpm in a VM. NO SILICON TPM HAS BEEN THROUGH AN ENROL-AND-RECOVER CYCLE. The L16's
+    TPM is explicitly off-limits to this program, so this cannot be closed from here - it needs a machine someone
+    is willing to clear the TPM on. Gates green: shellcheck 165 discovered / 0 known-failing / 0 newly failing;
+    suites 75 / 71 in CI / 4 exempt; doc verbs 246 valid / 0 undocumented and undeclared / 0 stale.
 - id: L-002
   title: Enable LUKS2 by default
   priority: Later

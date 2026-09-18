@@ -5,21 +5,32 @@ worktree: /var/tmp/apex-work/wt-p2-f
 branch: task/p2-f-3   (cut from origin/roadmap/v2.2 @ 13d53c01)
 
 ## NEXT
-Round 7 commit 1 (IN PROGRESS, see IN PROGRESS below): extract the RFC 8628
-device grant out of `apexd/apex/src/cloudflare.rs` into a new
-`apexd/apex/src/oauth_device.rs`, behaviour-identical, tests moved with it,
-`cloudflare.rs` becomes a caller. Then commit 2 wires `apex account add` to
-run it for `Flow::DeviceCode` (google, microsoft) and commit 3 adds
-`apex account refresh`.
+Round 7 commit 3: wire `apex account add` to run the device grant for
+`Flow::DeviceCode` (google, microsoft) — `--client-id` required because the
+table ships none for either, the client SECRET from stdin (never argv) when
+`ClientSecret::RequiredToObtain`, **no stdin read at all** for a public
+client (`read_to_string` on a TTY blocks forever), the access token stored at
+`account.<p>.<n>` on the provider's API host and the refresh token at
+`account.<p>.<n>.refresh` on `oauth.auth_host` **with the client id in the
+username field** — that last part is what makes the daemon's existing `oauth`
+provider able to renew Google and Microsoft with NO daemon change, which its
+own module note says in as many words. Then commit 4: `apex account refresh`.
+Delete every sentence that says this is unbuilt: `apex/src/account.rs`'s
+module note, the `add()` eprintln, `providers/oauth.rs`'s module note,
+`docs/online-accounts.md`.
 
-ROUND 6 IS LANDED — do not redo it. `f3e5cbf5` ("apex cf refresh, and the two
-lines that said nothing spends a refresh token") is an ancestor of
+ROUND 7 SO FAR (both pushed):
+  eeaf08ac  `apex cf status` asks whether this project may actually renew.
+  202ee465  the device grant moved to `apexd/apex/src/oauth_device.rs` and
+            takes its client, scopes and words as arguments. Three interop
+            defects fixed that no double could catch.
+
+ROUND 6 IS LANDED — do not redo it. `f3e5cbf5` is an ancestor of
 `roadmap/v2.2` @ `266dcc57`. Round-4 step 7 IS ANSWERED, in that commit:
 **the grant is deliberately NOT written by `cf connect`.** Connecting stores a
-credential; which project may spend it is the owner's decision, and a grant
-keyed on whatever directory `connect` ran in would be a capability nobody
-chose. So the first `apex cf refresh` refusal is a normal outcome and the
-daemon composes the `apex secret grant` line that fixes it.
+credential; which project may spend it is the owner's decision. So the first
+`apex cf refresh` refusal is a normal outcome — and as of `eeaf08ac`
+`apex cf status` says which of the two states the machine is in.
 
 ## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
 1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
