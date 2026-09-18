@@ -315,6 +315,89 @@ which is the thing the framework exists to prevent; the route that keeps it out
 of the capsule is for the daemon to present the header itself, and that is a
 change to the proxy rather than a flag on this command.
 
+## One private CA, for one capsule (P2-012, gap 5)
+
+```
+apex browser run --allow intranet.corp:443 --trust-ca ~/corp-root.pem \
+    --download page.png --download-to ~/results \
+    -- --screenshot {capsule}/page.png https://intranet.corp/
+```
+
+The intranet case: a site whose certificate is signed by an organisation's own
+root. Without this, a capsule refused it — a fresh profile has a fresh
+`cert9.db` and trusts the system store, and the alternative was adding the
+root to the machine, permanently, for the sake of one automated run.
+
+**It is the BROWSER's trust and not the session's**, and the distinction is
+not a detail: `curl`, `git` and `python` in the same capsule keep using the
+system bundle and still refuse the host. What is installed is a Firefox
+enterprise policy, which is the only CA install route the image has —
+`nss-tools` is not installed, so there is no `certutil`.
+
+**The flag names a file and there is no default.** Handing a capsule a CA it
+did not have widens what it will believe, and a default would widen it without
+anybody typing anything.
+
+### What actually happens, and what does not
+
+The daemon — not this command, and not the capsule — reads the PEM, copies it
+where the session can read and not write it, adds a `Certificates.Install` to
+a copy of **the machine's own** `/etc/firefox/policies/policies.json`, and
+binds that copy over the real one inside the session's mount namespace. The
+machine's file is never written and no other browser on it sees the root.
+
+The machine's policy is MERGED rather than replaced, and that is the half a
+simpler implementation would get wrong while still trusting the CA: the
+shipped file carries four preferences at `Status: "default"`, so a capsule
+handed a document containing only a CA would be a browser with different
+defaults from every other browser on the machine, for a reason nobody could
+see.
+
+Four things refuse rather than warn, because a capsule that asked to trust a
+CA and did not get one fails **silently** — Firefox answers an untrusted chain
+by sitting on it, so the run ends at `--timeout` with an empty screenshot and
+no cause named anywhere:
+
+* a PEM carrying anything but certificates. `cat key.pem cert.pem >
+  bundle.pem` is ordinary, the copy lands where the agent can read it, and a
+  trust anchor is public while the key beside it is not;
+* DER instead of PEM, refused with the `openssl x509 -inform DER` line that
+  converts it;
+* a machine with no `/etc/firefox/policies/policies.json`. `--ro-bind-try`
+  over a path that is not there is a **silent no-op**, so binding hopefully
+  would produce exactly the five quiet minutes above;
+* a machine whose policy already installs certificates. Merging two trust
+  lists silently, or dropping somebody else's, is not a decision to take for
+  them.
+
+### How it is measured
+
+`apexd/apex-agentd/tests/browser_ca_bind.rs` starts a private daemon and lets
+the SESSION do the measuring: it copies out what it finds at
+`/etc/firefox/policies/policies.json` inside its own namespace, reads the path
+that document names, and copies that out too. The assertions are about bytes a
+confined process produced.
+
+The control is half of it. A session started the same way with no `--trust-ca`
+must see the machine's own file byte for byte, with no `Certificates` key —
+without that, "the capsule sees a policy with a CA in it" would also hold for
+a daemon that installed one into every session on the machine. `/etc` is read
+and its hash asserted unchanged afterwards.
+
+That a real Firefox then *accepts* such a root is measured separately, against
+a real browser and a real TLS server, in `docs/browser-capsule-auth.md`. It is
+not in CI: it needs a fixture CA, a server and a browser for a question that
+is asked once.
+
+### The wire
+
+`RunRequest::trust_ca`, **protocol 10**, and the CLI refuses to send it to a
+daemon below that revision. It is the first guarded field on that list whose
+dropped key fails CLOSED — the capsule trusts less, never more — and it has a
+number anyway, because the closed failure is the silence above rather than a
+refusal anybody sees. `apex-agent-core/src/protocol.rs` argues it at
+`PROTOCOL_VERSION`.
+
 ## What is not built
 
 * **A capsule cannot authenticate to a site.** The paragraph above says why,
@@ -330,35 +413,15 @@ change to the proxy rather than a flag on this command.
   not. Driving a page needs a driver in the capsule, which needs a package that
   is not in the image.
 * **The proxy is `CONNECT`-only**, so a plain-http site cannot be automated.
-* **A capsule trusts the system CA store and nothing else, and there is no way
-  to add to it.** A fresh profile has a fresh `cert9.db`, so a site behind a
-  private or self-signed certificate is refused by the browser before any of
-  this page's boundaries come into it. Measured rather than reasoned: the live
-  lab's own HTTPS server is self-signed, and pointing a capsule's browser at it
-  produced no page and no screenshot — the browser sat on the refusal until the
-  capsule timed out. The lab now renders from a `data:` URL for anything that
-  needs a page, and reaches its server with `curl -k`, so that what it measures
-  is the capsule rather than a certificate.
-
-  **The mechanism is known and it is not `certutil`.** `nss-tools` is not in
-  the image, which was recorded as closing the question, and it does not: a
-  `policies.json` bound over `/etc/firefox/policies/policies.json` inside the
-  capsule's namespace installs a CA into a fresh profile with no `certutil` at
-  all. Measured with a control — the same server, the same profile, refused
-  without the policy and rendered with it, and the machine's own file untouched.
-  So this is a per-session `--ro-bind` on the sandbox rather than a package
-  that does not exist here. See `docs/browser-capsule-auth.md`.
-
-  It is still not built, and adding it is a real flag with a real argument
-  behind it — a CA is trust, and handing a capsule a CA it did not have is
-  widening what it will believe. A capsule silently trusting more than the
-  system does would be worse than the gap.
-
 * **The machine's own Firefox enterprise policy is read inside every capsule**,
   because the sandbox binds `/` read-only — which is exactly why the bind above
   works. Today `/etc/firefox/policies/policies.json` carries four preferences at
   `Status: "default"` and nothing else, so nothing a capsule does is overridden.
   A `Certificates.Install` there, or a `Proxy` at `Status: "locked"`, would
-  change what every capsule believes or where it connects, and nothing asserts
-  the file's shape. Recorded here rather than guarded, because the file belongs
-  to the image build and not to this command.
+  change what every capsule believes or where it connects. `Containerfile.base`
+  now asserts the file's shape positively — `policies` carries `Preferences`
+  and nothing else, every preference at `Status: "default"` — so all three of
+  those additions fail the image build instead of shipping. A build assertion
+  rather than a check in this command, because the file belongs to the image
+  build; `tests/check-containerfile-assertions.sh` runs it against the
+  repository first.

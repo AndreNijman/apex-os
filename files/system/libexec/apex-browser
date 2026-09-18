@@ -318,13 +318,14 @@ cmd_doctor() {
 # ── run ─────────────────────────────────────────────────────────────────────
 
 cmd_run() {
-    local name="" download_to="" console_to="" force=0 timeout=300 capability=""
+    local name="" download_to="" console_to="" force=0 timeout=300 capability="" trust_ca=""
     local -a allow=() download=() browser_args=()
     while [ $# -gt 0 ]; do
         case "$1" in
             --name)        shift; name="${1:-}" ;;
             --allow)       shift; allow+=("${1:-}") ;;
             --capability)  shift; capability="${1:-}" ;;
+            --trust-ca)    shift; trust_ca="${1:-}" ;;
             --download)    shift; download+=("${1:-}") ;;
             --download-to) shift; download_to="${1:-}" ;;
             --console-to)  shift; console_to="${1:-}" ;;
@@ -415,6 +416,34 @@ cmd_run() {
             || die "--console-to needs an absolute path outside $BROWSER_ROOT
   (teardown deletes that tree, so a log written into it would not survive)"
     fi
+    # ── the CA, if one was named ────────────────────────────────────────────
+    #
+    # A capsule that trusts a private root is the intranet case, and the flag
+    # NAMES A FILE rather than defaulting to anything: handing a capsule a CA
+    # it did not have widens what it will believe, and a default would widen
+    # it without anybody typing anything.
+    #
+    # Checked here for the reason every other refusal in this file is checked
+    # here — the message is better before a capsule directory exists — and the
+    # daemon checks the file's CONTENTS again on the copy the capsule actually
+    # reads, which is the boundary. This is not that boundary.
+    if [ -n "$trust_ca" ]; then
+        case "$trust_ca" in
+            /*) ;;
+            *)  die "--trust-ca needs an absolute path (got '$trust_ca')
+  The path travels to the agent runtime, which resolves it against ITS working
+  directory and not yours, so a relative one names a different file or none." ;;
+        esac
+        [ -f "$trust_ca" ] || die "--trust-ca names '$trust_ca', which is not a readable file"
+        # Inside the capsule tree is refused for `--download-to`'s reason
+        # turned around: teardown deletes that tree, so a CA kept there would
+        # work once and then be gone, and the second run would fail with a
+        # message about a missing file rather than about the deletion.
+        valid_download_dest "$trust_ca" \
+            || die "--trust-ca must name a file outside $BROWSER_ROOT
+  (teardown deletes that tree, so the CA would survive exactly one capsule)"
+    fi
+
     if [ -n "$download_to" ]; then
         valid_download_dest "$download_to" \
             || die "--download-to needs an absolute directory outside $BROWSER_ROOT
@@ -594,12 +623,27 @@ cmd_run() {
     local -a allow_argv=()
     for d in "${allow[@]}"; do allow_argv+=(--allow "$d"); done
 
+    # ── the capsule's OWN trust anchors (P2-012, gap 5) ─────────────────────
+    #
+    # `--trust-ca` reaches the daemon, which copies the PEM where the session
+    # can read it, merges a Certificates.Install into a COPY of the machine's
+    # own /etc/firefox/policies/policies.json, and binds that copy over the
+    # real one inside the session's namespace. Nothing outside the capsule
+    # changes and no other browser on the machine sees the root.
+    #
+    # An empty array when no CA was named, so the argv is byte-identical to
+    # what it was before this flag existed for every capsule that does not use
+    # it.
+    local -a ca_argv=()
+    [ -n "$trust_ca" ] && ca_argv=(--trust-ca "$trust_ca")
+
     local -a session_argv=(
         "$APEX" agent run
         --agent generic
         --sandbox project
         --network allowlist
         "${allow_argv[@]}"
+        "${ca_argv[@]}"
         --cwd "$dir"
         --detach
         --
@@ -866,6 +910,12 @@ Options for `run`:
                         that list for one capsule and can never widen it.
   --capability NAME     take the destination from a stored credential's pinned
                         host instead. The capsule is never given the value.
+  --trust-ca FILE       a PEM of certificate authorities this capsule's
+                        browser trusts, for this capsule only — the intranet
+                        case. The machine's trust store is not changed and no
+                        other browser sees the root. There is no default: the
+                        flag names the file or the capsule trusts what the
+                        machine trusts.
   --download NAME       a plain filename the capsule produced that may leave
                         it — a download, or anything the browser wrote next to
                         it. Repeatable. A name starting with a dot is refused,

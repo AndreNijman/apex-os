@@ -237,6 +237,13 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
         req.worktree.is_some(),
         req.checkpoint,
     )?;
+    // P2-012 gap 5, checked here with the pair above and for the same reason:
+    // the half of `trust_ca` that can be decided from the request alone costs
+    // nothing and belongs before anything exists to clean up. The file's
+    // CONTENTS are checked later, against the copy the capsule will actually
+    // read — see `browser_ca`'s own note on why that order is the one that
+    // means something.
+    crate::browser_ca::check(req.trust_ca.as_deref(), policy.sandbox.is_confined())?;
 
     let wanted_grant = policy.needs_grant();
     if wanted_grant.is_none() && req.ttl_ms.is_some() {
@@ -470,6 +477,29 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
         // could edit — and both files should have the same story.
         spec.ro.push(from.clone());
         spec.ro_at.push((from, at));
+    }
+
+    // P2-012's gap 5: one private CA, trusted by this session's browser and by
+    // nothing else on the machine.
+    //
+    // `?` and not a warning, which is the difference between this and every
+    // other installer around it. A session that did not get its redacted
+    // settings still runs; a capsule that asked to trust a CA and did not get
+    // one does not, and it fails by sitting silently on a refused handshake
+    // until `apex browser --timeout` stops it. The refusal has to arrive
+    // before the browser starts or it does not arrive at all.
+    //
+    // Both files go on the read-only list for the reason the redacted copy
+    // does — the scratch is bound writable — and here it is a boundary rather
+    // than tidiness: a policy document the session could rewrite is one it
+    // could point at a CA of its own, and the whole claim being made is that
+    // the capsule trusts exactly the root the caller named.
+    if let Some(ca) = req.trust_ca.as_deref() {
+        let installed =
+            crate::browser_ca::install(ca, &scratch, Path::new(crate::browser_ca::FIREFOX_POLICY))?;
+        spec.ro.push(installed.ca);
+        spec.ro.push(installed.policy.clone());
+        spec.ro_at.push((installed.policy, installed.at));
     }
 
     // The profile's writable directories have to exist before the sandbox binds
