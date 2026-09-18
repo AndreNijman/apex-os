@@ -63,7 +63,7 @@ use apex_secret_core::account::{
 };
 use apex_secret_core::capability::CapabilityRecord;
 use apex_secret_core::client::Client;
-use apex_secret_core::protocol::{Request, Response};
+use apex_secret_core::protocol::{ErrorKind, Request, Response};
 use apex_secret_core::store::ServiceInfo;
 use apex_secret_core::SecretValue;
 use clap::Subcommand;
@@ -478,7 +478,19 @@ fn add_by_device_code(
         ClientSecret::None => None,
     };
 
-    let retry = format!("apex account add {reference} --client-id {client_id}");
+    // Before the flow, not after. A daemon that is not answering should be
+    // found out now rather than once somebody has approved a code on their
+    // phone for a token this cannot store.
+    let mut client = Client::connect()?;
+
+    let retry = match oauth.client_secret {
+        // The secret comes from stdin, so the command to run again has to
+        // carry the pipe or it is a command that will stop and wait.
+        ClientSecret::RequiredToObtain => format!(
+            "printf %s \"$CLIENT_SECRET\" | apex account add {reference} --client-id {client_id}"
+        ),
+        ClientSecret::None => format!("apex account add {reference} --client-id {client_id}"),
+    };
     let grant = device_grant(
         &Endpoints::for_oauth(oauth),
         &OAuthClient {
@@ -501,7 +513,6 @@ fn add_by_device_code(
         Some(p) => p.to_string(),
         None => provider.path_for(username.trim()),
     };
-    let mut client = Client::connect()?;
     client.add(
         &account.service(),
         host,
@@ -652,8 +663,13 @@ fn refresh(reference: &str) -> Result<i32> {
         } => {
             println!("{}", output.trim_end());
             if exit_code != 0 {
-                println!("sign in again to get a new one:");
+                println!("sign in again to get a new one, the same way you did before:");
                 println!("  apex account add {reference} --client-id <id>");
+                if account.provider.oauth.map(|o| o.client_secret)
+                    == Some(ClientSecret::RequiredToObtain)
+                {
+                    println!("  ...with the client secret on stdin, as {} requires.", account.provider.label);
+                }
             }
             Ok(exit_code)
         }
@@ -731,9 +747,19 @@ fn grant(reference: &str, scope: &str, revoke: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// Every stored name `apex account rm` has to remove.
+///
+/// Two, and the second is the one that cannot be reached any other way — so
+/// this is a function a test can read rather than two calls buried in `rm`.
+/// `add` and `rm` deriving the same name from the same account is the whole of
+/// why removal is complete, and nothing else checks that they agree.
+fn names_to_remove(account: &AccountRef) -> [String; 2] {
+    [account.service(), account.refresh_service()]
+}
+
 fn rm(reference: &str) -> Result<i32> {
     let account = AccountRef::parse_ref(reference)?;
-    let service = account.service();
+    let [service, refresh] = names_to_remove(&account);
     let mut client = Client::connect()?;
     // Refuse a name that is not stored, rather than reporting success for a
     // removal that removed nothing — which is the answer a user reads as "the
@@ -748,6 +774,33 @@ fn rm(reference: &str) -> Result<i32> {
         service: service.clone(),
     })?;
     println!("removed {reference}, and every grant that named it");
+
+    // The refresh credential is not an account and cannot be reached any other
+    // way: `.` is not legal in an account name, so `AccountRef::parse` does not
+    // see it, `apex account list` never shows it, and `rm` refuses to be
+    // pointed at it directly. Computing the name here is the only way in — and
+    // without this, removing a Google account would leave a live refresh token
+    // on disk that nothing in this command surface could find or delete. That
+    // is criterion 3, and it became reachable the moment `add` started storing
+    // one.
+    match client.request(&Request::Remove {
+        service: refresh.clone(),
+    })? {
+        // There was none. An app password has no refresh token, and neither
+        // has an OAuth grant the server returned without one.
+        Response::Error {
+            kind: ErrorKind::NoSuchService,
+            ..
+        } => {}
+        // Anything else is the failure this whole block exists to prevent, so
+        // it is reported rather than swallowed: the account is gone from the
+        // listing and a credential that can mint new access tokens is not.
+        Response::Error { message, .. } => bail!(
+            "{reference} is gone, but its refresh token is still stored as \
+             '{refresh}' and could not be removed: {message}"
+        ),
+        _ => println!("removed its refresh token too"),
+    }
     Ok(0)
 }
 
@@ -931,6 +984,34 @@ mod tests {
         assert!(said.contains("apex account add nextcloud.home"), "{said}");
         for p in account::PROVIDERS.iter().filter(|p| p.flow.is_refreshable()) {
             assert_eq!(p.flow, Flow::DeviceCode, "{} would reach the daemon", p.id);
+        }
+    }
+
+    #[test]
+    fn removing_an_account_removes_the_refresh_token_add_stored() {
+        // Criterion 3 — "account removal revokes local capabilities cleanly" —
+        // and this is the half that only became reachable when `add` started
+        // storing a refresh token. The refresh credential is not an account:
+        // `.` is illegal in an account name, so it never appears in
+        // `apex account list` and `rm` refuses to be pointed at it. Computing
+        // it from the account is the only way in, and a `rm` that removed one
+        // name would leave a live credential that can mint access tokens on a
+        // machine whose owner was told the account was gone.
+        for provider in account::PROVIDERS.iter().filter(|p| p.flow == Flow::DeviceCode) {
+            let oauth = provider.oauth.expect("a device-code flow has a server");
+            let account = AccountRef::new(provider.id, "work").expect("a legal name");
+            let [access, refresh] = names_to_remove(&account);
+
+            assert_eq!(access, account.service());
+            // The name `add` writes IS the name `rm` deletes. Nothing else
+            // compares the two, and a rename on either side would be silent.
+            assert_eq!(refresh, refresh_record(&account, oauth, "my-client").service);
+            assert_ne!(access, refresh);
+            assert!(
+                AccountRef::parse(&refresh).is_none(),
+                "the refresh credential parses as an account, so `rm` could reach \
+                 it directly and this derivation is not the only way in"
+            );
         }
     }
 
