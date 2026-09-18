@@ -46,8 +46,6 @@
 //! with the account.
 
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use apex_secret_core::account::CLOUDFLARE_OAUTH;
@@ -58,6 +56,10 @@ use apex_secret_core::protocol::{Request, Response};
 use apex_secret_core::store::Grants;
 use apex_secret_core::SecretValue;
 use clap::Subcommand;
+
+use crate::oauth_device::{
+    self, device_grant, roughly, valid_token, Endpoints, OAuthClient, Prompt,
+};
 
 /// The service name the credential is stored under, and the one the provider's
 /// operations are granted against.
@@ -97,9 +99,6 @@ pub const AUTH_HOST: &str = CLOUDFLARE_OAUTH.auth_host;
 /// here. One constant, in the crate both link.
 pub const WRANGLER_CLIENT_ID: &str = apex_secret_core::account::WRANGLER_CLIENT_ID;
 
-/// RFC 8628's grant type.
-const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
-
 /// The scopes asked for, and no more.
 ///
 /// One per operation this build's provider can actually perform, which is the
@@ -113,7 +112,7 @@ const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 /// message rather than holding a write scope for a read operation. And nothing
 /// for DNS, R2, D1, KV or Access, because no operation in this build touches
 /// them; P1-005 onwards each add their own.
-const SCOPES: &[&str] = &[
+pub(crate) const SCOPES: &[&str] = &[
     "account:read",
     "user:read",
     "workers:read",
@@ -226,21 +225,6 @@ pub fn main(cmd: CloudflareCmd) -> i32 {
 
 // ── the manual half ─────────────────────────────────────────────────────────
 
-/// Whether a pasted string is a Cloudflare token.
-///
-/// Checked here as well as in the daemon, because a token that is only refused
-/// at use time is one somebody stored, granted, and then watched fail with a
-/// message about the far side rather than about their paste. The commonest bad
-/// paste is a trailing newline, which `trim` handles, and the second commonest
-/// is the whole `Authorization: Bearer …` line, which this catches.
-pub fn valid_token(token: &str) -> bool {
-    !token.is_empty()
-        && token.len() <= 4096
-        && token.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'+' | b'/' | b'=')
-        })
-}
-
 fn connect_with_a_pasted_token() -> Result<i32> {
     let mut value = String::new();
     std::io::stdin().read_to_string(&mut value)?;
@@ -319,93 +303,49 @@ fn whats_next() {
     println!("  apex secret grant {SERVICE} cloudflare.worker.deploy");
 }
 
-// ── the device grant ────────────────────────────────────────────────────────
-
-/// The two endpoints the flow uses.
-///
-/// A struct rather than constants so the poll loop can be run against a
-/// loopback server that serves RFC 8628's states in order. Without that the
-/// only way to exercise this code is to have a Cloudflare account.
-#[derive(Debug, Clone)]
-pub struct Endpoints {
-    pub device: String,
-    pub token: String,
-    /// Shortest gap between polls. Cloudflare's `interval` wins when it is
-    /// larger; a test sets this low so the loop does not take a minute.
-    pub floor: Duration,
-    /// How long to keep asking, whatever the server said.
-    pub limit: Duration,
-    /// What `slow_down` adds to the interval. RFC 8628 §3.5 says five seconds
-    /// and that is what the real one uses; it is a field for the same reason
-    /// `floor` is, so a test can exercise the branch without waiting out three
-    /// real intervals to do it.
-    pub backoff: Duration,
-}
-
 impl Endpoints {
+    /// Cloudflare's, read out of workers-sdk rather than reconstructed and now
+    /// taken off the shared table rather than rebuilt from a host: the device
+    /// endpoint has to live on the same auth domain as the token endpoint it is
+    /// paired with, and `Provider::validate` is what holds the table to that.
     pub fn cloudflare() -> Endpoints {
-        Endpoints {
-            // Read out of workers-sdk rather than reconstructed, and now off
-            // the shared table rather than rebuilt from a host: the device
-            // endpoint has to live on the same auth domain as the token
-            // endpoint it is paired with, and `Provider::validate` is what
-            // holds the table to that.
-            device: CLOUDFLARE_OAUTH.device_url.to_string(),
-            token: CLOUDFLARE_OAUTH.token_url.to_string(),
-            floor: Duration::from_secs(5),
-            limit: Duration::from_secs(300),
-            backoff: Duration::from_secs(5),
-        }
+        Endpoints::for_oauth(&CLOUDFLARE_OAUTH)
     }
 }
 
-/// What the token endpoint gave back.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Grant {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    /// Seconds. Printed, because a token that expires this afternoon and a
-    /// token that expires next year are different things to be handed.
-    pub expires_in: Option<u64>,
-    pub scope: Option<String>,
-}
-
-/// Why the flow stopped.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeviceError {
-    /// The person said no.
-    Denied,
-    /// The code ran out before it was approved.
-    Expired,
-    /// The server said something RFC 8628 does not define, or nothing usable.
-    Unusable(String),
-    /// The endpoint could not be reached.
-    Unreachable(String),
-}
-
-impl std::fmt::Display for DeviceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DeviceError::Denied => f.write_str(
-                "the request was declined in the browser, so nothing was stored",
-            ),
-            DeviceError::Expired => f.write_str(
-                "the code ran out before it was approved. Run `apex cf connect` \
-                 again",
-            ),
-            DeviceError::Unusable(what) => write!(
-                f,
-                "the authorisation server answered with something this build \
-                 cannot use: {what}"
-            ),
-            DeviceError::Unreachable(what) => {
-                write!(f, "the authorisation server could not be reached: {what}")
-            }
-        }
+/// What the device grant prints and what it tells somebody to run again.
+///
+/// Cloudflare's half of a flow that is now shared. `apex cf connect` rather
+/// than `apex cloudflare connect` because that is the spelling the rest of
+/// this file's output uses.
+fn prompt() -> Prompt<'static> {
+    Prompt {
+        label: "Cloudflare",
+        retry: "apex cf connect",
     }
 }
 
-impl std::error::Error for DeviceError {}
+/// Everything the shared transport needs in order to run as Cloudflare.
+///
+/// One function rather than four arguments written out at the call site,
+/// because the call site cannot be tested — `connect_by_device_code` stores
+/// what it gets, and storing needs the daemon — while this can. Before the
+/// transport moved, the scope list was asserted off the wire; now the wire
+/// belongs to `oauth_device`'s double and this is where Cloudflare's own
+/// inputs are pinned.
+fn grant_inputs(client_id: &str) -> (OAuthClient<'_>, &'static [&'static str], Prompt<'static>) {
+    (
+        // No `client_secret`: Cloudflare's device flow is a public client, and
+        // `CLOUDFLARE_OAUTH.client_secret` is the `ClientSecret::None` that
+        // says so.
+        OAuthClient {
+            id: client_id,
+            secret: None,
+        },
+        SCOPES,
+        prompt(),
+    )
+}
 
 /// Run the device grant and store what it produces.
 pub fn connect_by_device_code(
@@ -413,10 +353,11 @@ pub fn connect_by_device_code(
     client_id: &str,
     out: &mut impl Write,
 ) -> Result<i32> {
-    if !valid_form_value(client_id) {
+    if !oauth_device::valid_form_value(client_id) {
         bail!("'{}' is not an OAuth client id", client_id.escape_debug());
     }
-    let grant = device_grant(ends, client_id, out)?;
+    let (client, scopes, prompt) = grant_inputs(client_id);
+    let grant = device_grant(ends, &client, scopes, &prompt, out)?;
 
     store(
         SERVICE,
@@ -467,173 +408,6 @@ pub fn connect_by_device_code(
     }
     whats_next();
     Ok(0)
-}
-
-/// How long to wait between polls.
-///
-/// RFC 8628 §3.5: the server's `interval` is honoured when it is given, and a
-/// client that ignored it would be told `slow_down` for the rest of the flow.
-/// The floor applies when the server said nothing, or said something smaller
-/// than the floor — it is the only value under this build's control, so it is
-/// where a test can make the loop run at a speed a test can wait for.
-fn poll_interval(server: Option<u64>, floor: Duration) -> Duration {
-    match server.map(Duration::from_secs) {
-        Some(given) if given > floor => given,
-        _ => floor,
-    }
-}
-
-/// Seconds as something a person reads.
-///
-/// Plural handled rather than fudged with "(s)", and the boundaries are on the
-/// units they name: 3600 seconds is an hour, not sixty minutes.
-fn roughly(seconds: u64) -> String {
-    let (count, unit) = match seconds {
-        0..=90 => (seconds, "second"),
-        91..=3599 => (seconds / 60, "minute"),
-        3600..=172_799 => (seconds / 3600, "hour"),
-        _ => (seconds / 86_400, "day"),
-    };
-    if count == 1 {
-        format!("1 {unit}")
-    } else {
-        format!("{count} {unit}s")
-    }
-}
-
-/// Ask for a code, print it, and poll until something decides.
-pub fn device_grant(
-    ends: &Endpoints,
-    client_id: &str,
-    out: &mut impl Write,
-) -> Result<Grant, DeviceError> {
-    let body = form(&[("client_id", client_id), ("scope", &SCOPES.join(" "))])
-        .ok_or_else(|| DeviceError::Unusable("that client id cannot be sent".into()))?;
-    let reply = post(&ends.device, &body).map_err(DeviceError::Unreachable)?;
-    let json = parse(&reply.body)
-        .ok_or_else(|| DeviceError::Unusable(describe(reply.status, &reply.body)))?;
-
-    let device_code = text(&json, "device_code")
-        .ok_or_else(|| DeviceError::Unusable(describe(reply.status, &reply.body)))?;
-    let user_code = text(&json, "user_code")
-        .ok_or_else(|| DeviceError::Unusable("no user code".into()))?;
-    let uri = text(&json, "verification_uri")
-        .ok_or_else(|| DeviceError::Unusable("no verification address".into()))?;
-    let expires_in = number(&json, "expires_in").unwrap_or(300);
-    let interval = poll_interval(number(&json, "interval"), ends.floor);
-
-    // Printed, never opened. A browser here is the thing the whole flow exists
-    // to avoid, and this machine may not have one.
-    let _ = writeln!(out, "To connect Cloudflare, open this on any device:");
-    let _ = writeln!(out, "  {uri}");
-    let _ = writeln!(out, "and enter the code:");
-    let _ = writeln!(out, "  {user_code}");
-    if let Some(complete) = text(&json, "verification_uri_complete") {
-        let _ = writeln!(out, "or open this, which fills the code in:");
-        let _ = writeln!(out, "  {complete}");
-    }
-    let _ = writeln!(
-        out,
-        "waiting up to {} for you to approve it.",
-        roughly(expires_in.min(ends.limit.as_secs()))
-    );
-    let _ = out.flush();
-
-    poll(ends, client_id, &device_code, interval, expires_in)
-}
-
-/// RFC 8628 §3.4: ask the token endpoint until it stops saying "not yet".
-fn poll(
-    ends: &Endpoints,
-    client_id: &str,
-    device_code: &str,
-    mut interval: Duration,
-    expires_in: u64,
-) -> Result<Grant, DeviceError> {
-    let started = Instant::now();
-    let deadline = ends.limit.min(Duration::from_secs(expires_in));
-    let Some(body) = form(&[
-        ("client_id", client_id),
-        ("device_code", device_code),
-        ("grant_type", DEVICE_GRANT),
-    ]) else {
-        // The device code came from the server, so a shape this cannot send is
-        // the server's, not the caller's.
-        return Err(DeviceError::Unusable(
-            "the device code it issued is not a shape this build can send".into(),
-        ));
-    };
-
-    loop {
-        std::thread::sleep(interval);
-        if started.elapsed() > deadline {
-            return Err(DeviceError::Expired);
-        }
-        let reply = match post(&ends.token, &body) {
-            Ok(reply) => reply,
-            // A poll that could not be sent is not a decision. Keep going
-            // until the deadline rather than failing a login because one
-            // request lost a race with a sleeping wifi card.
-            Err(_) => continue,
-        };
-        let Some(json) = parse(&reply.body) else {
-            if reply.status >= 500 || reply.status == 429 {
-                continue;
-            }
-            return Err(DeviceError::Unusable(describe(reply.status, &reply.body)));
-        };
-
-        // The error is checked BEFORE the token, because a body carrying both
-        // is a body this build does not understand, and reading the token out
-        // of it would be reading the half that suits us.
-        if let Some(error) = text(&json, "error") {
-            match error.as_str() {
-                "authorization_pending" => continue,
-                // §3.5: add five seconds and carry on, permanently.
-                "slow_down" => {
-                    interval += ends.backoff;
-                    continue;
-                }
-                "access_denied" => return Err(DeviceError::Denied),
-                "expired_token" => return Err(DeviceError::Expired),
-                other => {
-                    let detail = text(&json, "error_description").unwrap_or_else(|| other.to_string());
-                    return Err(DeviceError::Unusable(detail));
-                }
-            }
-        }
-
-        if let Some(access_token) = text(&json, "access_token") {
-            if !valid_token(&access_token) {
-                return Err(DeviceError::Unusable(
-                    "the token it issued is not a shape this build will send".into(),
-                ));
-            }
-            return Ok(Grant {
-                access_token,
-                refresh_token: text(&json, "refresh_token").filter(|t| valid_token(t)),
-                expires_in: number(&json, "expires_in"),
-                scope: text(&json, "scope"),
-            });
-        }
-
-        // Neither an error nor a token. A proxy or a WAF, most likely — and
-        // falling through to the success path here is how a login page gets
-        // stored as a credential.
-        if reply.status >= 500 || reply.status == 429 {
-            continue;
-        }
-        return Err(DeviceError::Unusable(describe(reply.status, &reply.body)));
-    }
-}
-
-fn describe(status: u16, body: &str) -> String {
-    let first: String = body.chars().take(120).filter(|c| !c.is_control()).collect();
-    if first.trim().is_empty() {
-        format!("HTTP {status}, with an empty body")
-    } else {
-        format!("HTTP {status}")
-    }
 }
 
 // ── status ──────────────────────────────────────────────────────────────────
@@ -990,154 +764,6 @@ fn print_example() {
     println!();
     println!("  [cloudflare.production]");
     println!("  worker = \"my-worker\"");
-}
-
-// ── http, the same shape the daemon uses ────────────────────────────────────
-
-/// A reply from the authorisation server.
-struct Reply {
-    status: u16,
-    body: String,
-}
-
-/// Whether a value can go in a form body without being escaped.
-///
-/// Everything this sends is a client id, a device code, a grant-type URN or a
-/// space-separated scope list, all of which are already this shape. A value
-/// that is not is refused rather than encoded, so there is no encoder here to
-/// get wrong — and no `&` or `=` means no way to turn one field into two.
-fn valid_form_value(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 4096
-        && value.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b':' | b'/' | b' ')
-        })
-}
-
-/// The same set once the pairs have been joined: `&` and `=` separate them and
-/// `+` is the one substitution [`form`] makes.
-fn valid_form_body(body: &str) -> bool {
-    !body.is_empty()
-        && body.len() <= 8192
-        && body.bytes().all(|b| {
-            b.is_ascii_alphanumeric()
-                || matches!(b, b'-' | b'_' | b'.' | b'~' | b':' | b'/' | b'+' | b'&' | b'=')
-        })
-}
-
-/// Build a form body, refusing any value that is not [`valid_form_value`].
-///
-/// `None` rather than an escaped body: a caller that produced an unexpected
-/// value has a bug, and encoding around it would hide the bug and send the
-/// request anyway.
-fn form(pairs: &[(&str, &str)]) -> Option<String> {
-    if pairs.iter().any(|(_, v)| !valid_form_value(v)) {
-        return None;
-    }
-    Some(
-        pairs
-            .iter()
-            .map(|(k, v)| format!("{k}={}", v.replace(' ', "+")))
-            .collect::<Vec<_>>()
-            .join("&"),
-    )
-}
-
-/// POST a form, through a `curl` this process owns.
-///
-/// The same arrangement `apex-secretd` uses and for the same reasons: the whole
-/// request goes down the child's stdin as a config file, so nothing
-/// caller-shaped reaches an option parser, and `-q` first so a `~/.curlrc`
-/// cannot choose a proxy for a request that carries an authorisation code.
-/// It is forty lines copied rather than shared, because the daemon's copy is
-/// inside a binary crate this cannot link.
-fn post(url: &str, body: &str) -> Result<Reply, String> {
-    if !valid_form_body(body) {
-        return Err("that request cannot be sent as written".to_string());
-    }
-    // The scheme comes from the URL rather than being pinned to https, so a
-    // loopback double is reachable. `Endpoints::cloudflare()` is https and
-    // nothing but a test ever builds anything else.
-    let scheme = url.split("://").next().unwrap_or("https");
-    let config = format!(
-        "url = \"{url}\"\nrequest = \"POST\"\nproto = \"={scheme}\"\n\
-         header = \"Content-Type: application/x-www-form-urlencoded\"\n\
-         header = \"Accept: application/json\"\n\
-         header = \"Expect:\"\n\
-         data = \"{body}\"\n\
-         max-time = 30\nconnect-timeout = 15\nsilent\nshow-error\n\
-         write-out = \"\\n%{{http_code}}\"\n"
-    );
-
-    let mut child = Command::new("/usr/bin/curl")
-        .arg("-q")
-        .arg("-K")
-        .arg("-")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(config.as_bytes()).map_err(|e| e.to_string())?;
-    }
-    drop(child.stdin.take());
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let (body, status) = match stdout.rsplit_once('\n') {
-        Some((body, tail)) => (body.to_string(), tail.trim().parse::<u16>().ok()),
-        None => (String::new(), None),
-    };
-    match status {
-        Some(status) => Ok(Reply { status, body }),
-        None => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
-    }
-}
-
-fn parse(body: &str) -> Option<serde_json::Value> {
-    serde_json::from_str(body).ok()
-}
-
-fn text(value: &serde_json::Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-fn number(value: &serde_json::Value, key: &str) -> Option<u64> {
-    value.get(key).and_then(|v| v.as_u64()).filter(|n| *n > 0)
-}
-
-/// Read a whole HTTP request off a stream and answer it. Test-only, but shaped
-/// here so the double and the client agree on framing.
-#[cfg(test)]
-pub(crate) fn read_request(stream: &mut std::net::TcpStream) -> (String, String) {
-    use std::io::{BufRead, BufReader};
-    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
-    let mut first = String::new();
-    let _ = reader.read_line(&mut first);
-    let mut length = 0usize;
-    loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(_) => break,
-        }
-        if line.trim().is_empty() {
-            break;
-        }
-        if let Some(value) = line.trim().strip_prefix("Content-Length: ") {
-            length = value.trim().parse().unwrap_or(0);
-        }
-    }
-    let mut body = vec![0u8; length];
-    if length > 0 {
-        let _ = reader.read_exact(&mut body);
-    }
-    (first, String::from_utf8_lossy(&body).into_owned())
 }
 
 #[cfg(test)]
