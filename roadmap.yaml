@@ -4223,33 +4223,44 @@ tasks:
     pointed at a string the bus never sees proves nothing about the assertion it was aimed at. (2) Both mutation
     harnesses now restore from their TRAP and not only after each mutant; a kill between an edit and its restore
     had left a mutated file in place for every later step in the same CI job, and because these files are in the
-    REQUIRED list the structure check would still have passed. Proven by killing a harness mid-mutant and watching
-    the tree come back clean. A THIRD DEFECT, NOT FIXED HERE AND HANDED ON: LockedHintService._pump() returns
-    immediately while _busy, _succeeded() clears _busy and re-pumps, and _failed() clears _busy and deliberately
-    does NOT. So a setLocked(true) that arrives while a failing chain is in flight only updates _desired and
-    nothing ever acts on it - the lock engages, the surface comes up, and logind is never told. Lockscreen.qml's
-    Component.onCompleted starts exactly such a chain at startup. Measured: the new suite's lock-acknowledged
-    assertion went red on 2 runs in 9 while the lock had in fact engaged, and 5 runs in 5 once the suite waits for
-    the startup chain's refusal first; run-lockscreen-atspi.sh does not see it because its section 2 waits for
-    that same warning as an assertion of its own and closes the race BY ACCIDENT. On a live machine any transient
-    failure of the three steps that overlaps a lock loses the update, and P0-015's lock policy
-    (apexd/apex-agent-core/src/lock.rs) reads LockedHint. One line fixes it. It belongs to whoever owns P0-015 and
-    was deliberately left alone on this branch. WHAT IS STILL TRUE AND MUST NOT BE MISREAD: the shell is NOT
-    accessible on a real machine. The factory is restored by a test-only LD_PRELOAD referenced by nothing outside
-    tests/, and with no shim a screen reader still gets one node. The remaining work is a single upstream change -
-    qtdeclarative installing its accessibility factory from Q_COREAPP_STARTUP_FUNCTION instead of
-    Q_CONSTRUCTOR_FUNCTION, measured working as repro mode D, or quickshell not destroying its QCoreApplication at
-    src/launch/launch.cpp:282 - and neither is APEX's code. Nothing in either repository can route around it. FROM
-    THE GITHUB ARCH RUNNER, NOT THIS LAPTOP. CI run 35382910849 on task/p2-b-round30 at b01a276: Repo Structure
-    Sanity SUCCESS (so all 110 REQUIRED paths exist there too), NixOS SUCCESS, and arch-validate red on EXACTLY
-    ONE STEP - run-rtl-test.sh at 17/3/2, the pre-existing red this unit has carried since round 28 and which a
-    control run on roadmap/v2.2 (35351740747) already proved is no branch's doing. Every new step passed, and the
-    first one is the important one: check-quickshell-a11y-cause.sh is 14 passed / 0 failed / 0 SKIPPED ON THE
-    RUNNER, reporting "note: Qt 6.11.2, compiler g++" - all five modes RAN there. So FOUND 20 is not a Fedora fact
-    and not a Qt 6.10.3 fact: the same ~QCoreApplication clears the same factory list on a different distribution
-    and a different Qt minor version, which is exactly why the suite was built to need no compositor, no bus and
-    no quickshell. mutate-quickshell-a11y-cause.sh on the runner: 13 applied, 11 CAUGHT / 0 SURVIVED / 0 MISSCORED
-    / 0 UNSCORABLE, 2 HELD / 0 FALSE-RED, identical to here, so the pin is mutation-proved on two machines.
+    REQUIRED list the structure check would still have passed. The first version of that restored correctly BY
+    ACCIDENT, and the claim that it was "proven by killing a harness mid-mutant" was itself too weak - fixed in
+    apex-shell 20a1613. `trap put_back EXIT INT TERM` does not END the script on a signal: bash defers the signal
+    until the running command substitution finishes, runs the handler (which restores the files and deletes the
+    snapshot), and then RESUMES at the next line, scoring a verdict for a mutant that was killed and only then
+    dying inside restore() on the snapshot the handler just removed. The original kill test's log has exactly one
+    "cp: cannot stat" and NO totals line, which is what stopping-by-choking looks like. INT and TERM now get
+    separate exiting handlers (130 and 143), and the kill test asserts three things instead of one - the file is
+    restored, there is no totals line, and there is no cp error - all three passing, with the harness exiting 143
+    and unkilled behaviour unchanged at 13 applied / 11 CAUGHT / 0 SURVIVED / 2 HELD. A check with ONE assertion
+    cannot tell "it worked" from "it happened to end up that way". tests/mutate-lockscreen-atspi.sh carries the
+    same trap shape from round 29 and is deliberately not changed on this branch. A THIRD DEFECT, NOT FIXED HERE
+    AND HANDED ON: LockedHintService._pump() returns immediately while _busy, _succeeded() clears _busy and
+    re-pumps, and _failed() clears _busy and deliberately does NOT. So a setLocked(true) that arrives while a
+    failing chain is in flight only updates _desired and nothing ever acts on it - the lock engages, the surface
+    comes up, and logind is never told. Lockscreen.qml's Component.onCompleted starts exactly such a chain at
+    startup. Measured: the new suite's lock-acknowledged assertion went red on 2 runs in 9 while the lock had in
+    fact engaged, and 5 runs in 5 once the suite waits for the startup chain's refusal first;
+    run-lockscreen-atspi.sh does not see it because its section 2 waits for that same warning as an assertion of
+    its own and closes the race BY ACCIDENT. On a live machine any transient failure of the three steps that
+    overlaps a lock loses the update, and P0-015's lock policy (apexd/apex-agent-core/src/lock.rs) reads
+    LockedHint. One line fixes it. It belongs to whoever owns P0-015 and was deliberately left alone on this
+    branch. WHAT IS STILL TRUE AND MUST NOT BE MISREAD: the shell is NOT accessible on a real machine. The factory
+    is restored by a test-only LD_PRELOAD referenced by nothing outside tests/, and with no shim a screen reader
+    still gets one node. The remaining work is a single upstream change - qtdeclarative installing its
+    accessibility factory from Q_COREAPP_STARTUP_FUNCTION instead of Q_CONSTRUCTOR_FUNCTION, measured working as
+    repro mode D, or quickshell not destroying its QCoreApplication at src/launch/launch.cpp:282 - and neither is
+    APEX's code. Nothing in either repository can route around it. FROM THE GITHUB ARCH RUNNER, NOT THIS LAPTOP.
+    CI run 35382910849 on task/p2-b-round30 at b01a276: Repo Structure Sanity SUCCESS (so all 110 REQUIRED paths
+    exist there too), NixOS SUCCESS, and arch-validate red on EXACTLY ONE STEP - run-rtl-test.sh at 17/3/2, the
+    pre-existing red this unit has carried since round 28 and which a control run on roadmap/v2.2 (35351740747)
+    already proved is no branch's doing. Every new step passed, and the first one is the important one:
+    check-quickshell-a11y-cause.sh is 14 passed / 0 failed / 0 SKIPPED ON THE RUNNER, reporting "note: Qt 6.11.2,
+    compiler g++" - all five modes RAN there. So FOUND 20 is not a Fedora fact and not a Qt 6.10.3 fact: the same
+    ~QCoreApplication clears the same factory list on a different distribution and a different Qt minor version,
+    which is exactly why the suite was built to need no compositor, no bus and no quickshell.
+    mutate-quickshell-a11y-cause.sh on the runner: 13 applied, 11 CAUGHT / 0 SURVIVED / 0 MISSCORED / 0
+    UNSCORABLE, 2 HELD / 0 FALSE-RED, identical to here, so the pin is mutation-proved on two machines.
     run-lockscreen-atspi-shim.sh printed "SKIP: no quickshell, so nothing here was measured." and passed=0
     failed=0 skipped=1 - the named refusal, as designed - and mutate-lockscreen-atspi-shim.sh printed applied=0
     and exited 0 because its baseline guard fired rather than scoring eight mutants against a suite that never ran
