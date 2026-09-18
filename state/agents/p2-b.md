@@ -53,11 +53,16 @@ Nothing. Both worktrees clean, both branches pushed.
 
 Round 29 (2026-09-18).
 
-apex-shell `task/p2-b-round29`, four commits on `roadmap/v2.2`'s `379eef8`,
+apex-shell `task/p2-b-round29`, five commits on `roadmap/v2.2`'s `379eef8`,
 pushed, NOT yet merged: `d710bfb` the AT-SPI read-back suite and the ported
 harness, `f66db73` the mutation pair and the CI wiring, `c81c421` the
 provenance self-check for the two copied files, `e65d378` the harness guard the
-Arch runner made necessary (FOUND 18) plus the at-spi path list (FOUND 19).
+Arch runner made necessary (FOUND 18) plus the at-spi path list (FOUND 19), and
+`5ae27c3` the per-mutant half of that guard — the WANTS array's comment claimed
+a property only an array nobody forgets to update would have, so `mutate()` now
+asks the same question about its own `want` and scores UNSCORABLE, which fails
+the run. Final harness run: 11 mutants, **8 red CAUGHT / 0 SURVIVED /
+0 MISSCORED / 0 UNSCORABLE, 3 green HELD / 0 FALSE-RED**.
 
 apex-os `task/p2-b-round29`, two commits on `roadmap/v2.2`'s `1668ed9c`, pushed:
 `4aae9249` the `GSETTINGS_BACKEND=memory` fix to `tests/lib/atspi.sh`, and
@@ -71,7 +76,8 @@ New in apex-shell:
   a11y bus, loads the shipped `shell.qml`, engages the lock through the shipped
   IPC handler, and reads the tree back over D-Bus.
 * `tests/mutate-lockscreen-atspi.sh` — 11 mutants, each a full bring-up:
-  **8 red CAUGHT / 0 SURVIVED / 0 MISSCORED, 3 green HELD / 0 FALSE-RED.**
+  **8 red CAUGHT / 0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE, 3 green HELD /
+  0 FALSE-RED.**
 * `tests/lockscreen-atspi-control.qml` — the control fixture.
 * `tests/lib/atspi.sh` and `tests/atspi-walk.py`, ported from apex-os with a
   PROVENANCE header carrying the `diff` command that proves they are still
