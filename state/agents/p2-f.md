@@ -5,32 +5,19 @@ worktree: /var/tmp/apex-work/wt-p2-f
 branch: task/p2-f-3   (cut from origin/roadmap/v2.2 @ 13d53c01)
 
 ## NEXT
-Round 7 commit 3: wire `apex account add` to run the device grant for
-`Flow::DeviceCode` (google, microsoft) — `--client-id` required because the
-table ships none for either, the client SECRET from stdin (never argv) when
-`ClientSecret::RequiredToObtain`, **no stdin read at all** for a public
-client (`read_to_string` on a TTY blocks forever), the access token stored at
-`account.<p>.<n>` on the provider's API host and the refresh token at
-`account.<p>.<n>.refresh` on `oauth.auth_host` **with the client id in the
-username field** — that last part is what makes the daemon's existing `oauth`
-provider able to renew Google and Microsoft with NO daemon change, which its
-own module note says in as many words. Then commit 4: `apex account refresh`.
-Delete every sentence that says this is unbuilt: `apex/src/account.rs`'s
-module note, the `add()` eprintln, `providers/oauth.rs`'s module note,
-`docs/online-accounts.md`.
+P2-019's two named gaps, which are the only ones left on this unit that are a
+DOCUMENT rather than a transport, and which its own evidence says are what
+keeps it partial: **the transport is undecided** (relay/ is an undeployed
+Noise_IK rendezvous, and whether a client polls, holds a connection or is
+pushed to changes the threat model) and **there is no server-side design at
+all** — everything in docs/fleet.md is written from the machine's point of
+view, and the operator's own access control is where a fleet's multi-tenancy
+lives. Write both sections into docs/fleet.md, then set-status P2-019.
 
-ROUND 7 SO FAR (both pushed):
-  eeaf08ac  `apex cf status` asks whether this project may actually renew.
-  202ee465  the device grant moved to `apexd/apex/src/oauth_device.rs` and
-            takes its client, scopes and words as arguments. Three interop
-            defects fixed that no double could catch.
-
-ROUND 6 IS LANDED — do not redo it. `f3e5cbf5` is an ancestor of
-`roadmap/v2.2` @ `266dcc57`. Round-4 step 7 IS ANSWERED, in that commit:
-**the grant is deliberately NOT written by `cf connect`.** Connecting stores a
-credential; which project may spend it is the owner's decision. So the first
-`apex cf refresh` refusal is a normal outcome — and as of `eeaf08ac`
-`apex cf status` says which of the two states the machine is in.
+DO NOT widen P2-018's session watchdog. The dispatch was explicit and nothing
+learned since argues for it: a compositor that stays up while the shell
+crashes in a loop is not a bounce, the detector will not see that, and a
+counter wide enough to catch it can strand somebody at a login screen.
 
 ## ROUND 4 PLAN (settled with the advisor; do not re-litigate)
 1. ~~OAuth vocabulary + tests~~ **DONE, `9e0a8c7d`, pushed.** Tip merged in.
@@ -105,6 +92,37 @@ Remaining, in the order this round takes them:
   host to its token endpoint from a hard-coded table, which is pin-consistent.
 
 ## DONE
+Round 7 (round 28 of the program), on task/p2-f-3, ALL FOUR PUSHED:
+  bda510ed  `apex account rm` leaves no refresh token behind. The commit
+            before it made `add` store one for the first time, which turned a
+            dormant doc-comment claim into a criterion-3 failure: `rm` sent
+            ONE `Remove`, and the refresh credential cannot be reached any
+            other way (`.` is illegal in an account name, so it does not parse
+            as an account — `list` never shows it, `rm` refuses to be pointed
+            at it). `names_to_remove` + an end-to-end section in
+            tests/test-secret-broker.sh, 66 -> 73 passed.
+  5b153599  `apex account add --client-id` signs Google and Microsoft in by
+            device code, files the refresh token pinned to the auth host WITH
+            THE CLIENT ID IN THE USERNAME FIELD — which is what makes the
+            daemon's oauth provider able to renew them WITH NO DAEMON CHANGE,
+            exactly as its module note predicted — and `apex account refresh`
+            spends it. `--client-secret` is now in the forbidden-flag gate;
+            it did not match `--secret`.
+  202ee465  the device grant moved to `apexd/apex/src/oauth_device.rs`, taking
+            client, scopes and wording as arguments. Three interop defects no
+            loopback double could catch: `verification_url` (Google's
+            spelling), no `client_secret` slot on the poll, and a 4096 token
+            cap a Microsoft JWT exceeds.
+  eeaf08ac  `apex cf status` asks whether this project may actually renew,
+            through `Grants::allows` over `Request::Grants` rather than a
+            second copy of the daemon's rule.
+  Thirteen mutations run, all red, all restored byte-identical with plain cp.
+  Workspace 3267 passed / 0 failed / 2 ignored; clippy exit 0; doc-verbs 191
+  documented / 0 undocumented and undeclared; shellcheck coverage 165 / 0
+  newly failing; suite coverage 75 / 71 in CI / 0 unrun and undeclared.
+  P2-017's evidence was updated with set-status.py (full text rewritten,
+  round-1 text preserved).
+
 Round 6 (round 27 of the program), on task/p2-f-3 (pushed):
   33483c37  the `oauth` provider — RFC 6749 §6 against the server that
             issued the token — registered in `default_registry`,
@@ -130,11 +148,13 @@ Round 3, on task/p2-f-3 (pushed):
   c224eea7  a scope may not name an operation no provider offers — the
             cross-crate gate in apex-secretd, both mutants run and red.
 
-## IN PROGRESS (round 6)
-- `git status` run: worktree CLEAN at `33483c37`, pushed. Nothing
-  half-written. Round 5's commit sequence is FINISHED through step 3.
-- About to touch: `apexd/apex/src/cloudflare.rs` (the status line and a
-  `refresh` verb). Nothing started.
+## IN PROGRESS (round 7)
+- `git status` run: worktree CLEAN at `bda510ed`, pushed, and the tip of
+  `roadmap/v2.2` (`266dcc57`) is merged in. Nothing half-written.
+- P2-017's set-status is DONE for this round. P2-018 and P2-019 were NOT
+  touched this round and set-status was deliberately NOT called on either —
+  it REPLACES evidence.
+- Nothing started on P2-019.
 
 ## ROUND 5 COMMIT SEQUENCE (settled with the advisor)
 1. ~~`supersedes_credentials` + the 64 `false` literals + the registry test~~
@@ -160,9 +180,19 @@ Round 3, on task/p2-f-3 (pushed):
   this today because `apex-secret-core` cannot see the registry — but
   `apex-secretd` depends on `apex-secret-core`, so a test THERE can, and that
   is where the gate belongs.
-- Nothing in this build refreshes any token, Cloudflare's included, and
-  `apex cf status` prints that fact ("a refresh token is stored too, and
-  nothing spends it yet") — so if refresh lands, that line has to change.
+- ~~Nothing in this build refreshes any token~~ **DONE.** Cloudflare renews
+  (round 27), Google and Microsoft sign in and renew (round 28), and the
+  status line was corrected in `eeaf08ac`.
+- **A token stored for Google or Microsoft can be spent on NOTHING**, and
+  `apex account add` says so rather than sending somebody to a grant the
+  daemon will refuse: no `gdrive` or `msgraph` transport exists, so every
+  scope those two providers list names an operation no provider offers. That
+  transport is the next real piece of P2-017, and it is bigger than a round.
+- **Google's refresh is NOT proven.** Its guide lists `client_secret` as
+  required on the poll and optional on the refresh; this build stores no
+  secret. Rather than hardcode a refusal off a doc reading that cannot be
+  checked from here, the daemon lets Google answer — a non-2xx replaces
+  nothing and returns Google's own `error_description`.
 
 ## BLOCKED ON
 (nothing)
