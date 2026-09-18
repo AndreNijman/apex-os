@@ -109,7 +109,23 @@ use crate::policy::{AgentPolicy, RequestOrigin};
 /// with every plugin the machine has enabled — so `--plugins none` would read
 /// as a session with no plugins while every one of their `SessionStart` hooks
 /// ran. The CLI refuses to send it to a daemon below [`PLUGIN_POLICY_VERSION`].
-pub const PROTOCOL_VERSION: u32 = 8;
+/// 9 — a session may reach LESS than the runtime allowlist allows (P2-012).
+///
+/// [`RunRequest::allow`], and the fourth widening on this list. Until this
+/// revision the daemon snapshotted the runtime's whole allowlist when a
+/// session started and there was no way on the wire to ask for less, so every
+/// confined session could reach every destination the machine had ever been
+/// told to permit — including a browser capsule started to visit exactly one
+/// host. A daemon below this drops the field and does precisely that, which is
+/// the caller asking to give something up and being handed it anyway. The CLI
+/// refuses to send it to a daemon below [`SESSION_ALLOWLIST_VERSION`].
+///
+/// The narrowing is validated rather than trusted: every line has to be
+/// covered by a rule the runtime already carries
+/// ([`crate::destination::Allowlist::narrow`]), so this field can only ever
+/// subtract. That is what makes it safe for a session to name its own
+/// destinations at all.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// The revision at which the credential store moved to `apex-secretd`.
 ///
@@ -190,6 +206,10 @@ const _: () = assert!(SCOPED_GRANT_VERSION < CONNECTOR_POLICY_VERSION);
 // And dimension 8 is later again: a daemon can confine the connectors it keeps
 // and still know nothing about which plugins the session was meant to load.
 const _: () = assert!(CONNECTOR_POLICY_VERSION < PLUGIN_POLICY_VERSION);
+// Later again, and the ordering is what makes the CLI's per-setting refusal
+// mean anything: a daemon can honour every dimension and still snapshot the
+// runtime's whole allowlist for a session that asked for one host.
+const _: () = assert!(PLUGIN_POLICY_VERSION < SESSION_ALLOWLIST_VERSION);
 
 /// The revision that first carried the six dimensions.
 ///
@@ -214,6 +234,19 @@ pub const CONNECTOR_POLICY_VERSION: u32 = 7;
 /// over: dimension 7 arrived in revision 7 and this did not, so a daemon can
 /// honour `--connectors none` and still load every plugin's hooks.
 pub const PLUGIN_POLICY_VERSION: u32 = 8;
+
+/// The revision that first let a session narrow its own allowlist (P2-012).
+///
+/// `apex agent run --allow` and `apex browser run --allow` check it, and it
+/// belongs beside [`SCOPED_GRANT_VERSION`] rather than beside the dimensions:
+/// its dropped key makes the session reach MORE than was asked for, not less.
+/// A daemon below this ignores the list and snapshots the runtime's whole
+/// allowlist, so a capsule started to visit one host runs with every
+/// destination the machine permits and nothing anywhere says so.
+///
+/// Its own number rather than an alias of [`PLUGIN_POLICY_VERSION`], because a
+/// daemon can honour `--plugins none` and still know nothing about this.
+pub const SESSION_ALLOWLIST_VERSION: u32 = 9;
 
 /// What a session is doing. The five user-facing values come straight from the
 /// roadmap's agent event protocol; `Starting` and `Exited` are the lifecycle
@@ -390,6 +423,30 @@ pub struct SessionInfo {
     /// moved the key and silently reported every old session as `project`.
     #[serde(flatten)]
     pub policy: AgentPolicy,
+    /// The destinations this session may actually reach, when its network is
+    /// `allowlist` (P2-012).
+    ///
+    /// The point of the field is that a narrowing has to be VISIBLE. Dimension
+    /// 5 above says `allowlist` for a session that reaches every destination
+    /// the machine permits and for one started to visit a single host, and
+    /// those are very different sessions — so a user auditing a running
+    /// capsule could read the dimension, see `allowlist`, and learn nothing
+    /// about the boundary they asked for. `apex agent status <id>` prints it.
+    ///
+    /// The list the daemon ENFORCES, not the one the caller asked for: the
+    /// same value the egress proxy was started with and the same one §6.2's
+    /// policy point is answered against, taken from the one binding all three
+    /// come from. A field filled from the request would be a second account of
+    /// the confinement, and the case where the two differ is exactly the case
+    /// somebody is auditing.
+    ///
+    /// `None` for every session with no allowlist to show — an `open` or
+    /// `offline` one — and for a record written before this field existed.
+    /// Deliberately not an empty vector for those: an empty allowlist denies
+    /// everything, so "no list" and "a list of nothing" are opposite
+    /// statements about where the session can go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowlist: Option<Vec<String>>,
     /// Where this session is driven from (§7's `request_origin`).
     ///
     /// Established by the daemon when it forked the session, from the
@@ -1199,6 +1256,34 @@ pub struct RunRequest {
     /// `apex request` and therefore has no verbs to narrow.
     #[serde(default)]
     pub capabilities: Option<Vec<String>>,
+    /// The destinations THIS session may reach, when it should be fewer than
+    /// the runtime allows (P2-012, protocol 9).
+    ///
+    /// `None` is every rule in the runtime's own allowlist, which is what
+    /// every allowlisted session got before this field existed. `Some` is a
+    /// narrowing and nothing else: each line is parsed, and then checked to be
+    /// covered by a rule the runtime already carries
+    /// ([`crate::destination::Allowlist::narrow`]). A line the runtime does
+    /// not cover is REFUSED rather than dropped — a session that could name a
+    /// destination the machine never permitted would make the allowlist
+    /// advisory, and a session silently given less than it named would fail
+    /// minutes later as a network error inside the agent.
+    ///
+    /// `Some(vec![])` is refused too. An empty list would mean "no
+    /// destinations", which is `--network offline` written a second way, and
+    /// two spellings of one policy is how they drift apart.
+    ///
+    /// Meaningless without `network = allowlist`, and the daemon refuses the
+    /// pair rather than ignoring it, for [`RunRequest::ttl_ms`]'s reason: a
+    /// caller who listed destinations for an `open` session believes they
+    /// asked for a boundary they did not get.
+    ///
+    /// The narrowed list — not the runtime's — is what the egress proxy
+    /// enforces and what is recorded as the session's confinement, so §6.2's
+    /// policy point judges a tool call against the destinations the session
+    /// can actually reach.
+    #[serde(default)]
+    pub allow: Option<Vec<String>>,
     /// A security key's answer, for a session asking to elevate from an origin
     /// §7 does not give the local column to (P0-014).
     ///
@@ -1659,6 +1744,7 @@ mod tests {
             detail: None,
             paused: false,
             policy: AgentPolicy::default(),
+            allowlist: None,
             request_origin: Some(RequestOrigin::LocalTerminal),
             origin_source: Some(OriginSource::Observed),
             actor: Some("pixel-8-office".into()),
@@ -1821,6 +1907,61 @@ mod tests {
     }
 
     #[test]
+    fn a_narrowed_allowlist_travels_as_allow_and_its_absence_is_none() {
+        // P2-012, and the assertion is the KEY, not the round trip. Serde
+        // round-trips agree with themselves whatever the key is called, so a
+        // rename would pass every other test in this file while making every
+        // request from an older `apex` unparseable — and the failure mode of
+        // a dropped `allow` is a session that reaches MORE than was asked for.
+        let req = RunRequest {
+            agent: None,
+            prompt: None,
+            args: vec![],
+            cwd: "/home/t/p".into(),
+            policy: AgentPolicy {
+                network: crate::policy::NetworkPolicy::Allowlist,
+                ..AgentPolicy::default()
+            },
+            request_origin: None,
+            worktree: None,
+            checkpoint: false,
+            ttl_ms: None,
+            capabilities: None,
+            allow: Some(vec!["api.example.com".into(), "files.example.com:8443".into()]),
+            second_factor: None,
+            cols: 80,
+            rows: 24,
+            env: vec![],
+            disposable: false,
+            copy_out: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&req).expect("serialize");
+        assert_eq!(
+            v["allow"],
+            serde_json::json!(["api.example.com", "files.example.com:8443"]),
+            "the wire key is `allow`; a daemon reading any other name narrows nothing"
+        );
+
+        // The other direction, which is the one an older client exercises on
+        // every single run: no key at all deserializes to `None`, not to an
+        // empty list. `Some(vec![])` is refused by the daemon, so a `default`
+        // that produced one would refuse every unnarrowed session on a
+        // machine where nothing is wrong.
+        let mut without = v.clone();
+        without.as_object_mut().expect("object").remove("allow");
+        let back: RunRequest = serde_json::from_value(without).expect("an older client's request");
+        assert_eq!(back.allow, None);
+
+        // And an explicit `null` — which is not what `apex` sends, but is
+        // what a hand-written client or a future language binding may — reads
+        // the same way rather than failing to parse.
+        let mut nulled = v.clone();
+        nulled["allow"] = serde_json::Value::Null;
+        let back: RunRequest = serde_json::from_value(nulled).expect("an explicit null");
+        assert_eq!(back.allow, None);
+    }
+
+    #[test]
     fn only_the_requests_that_authenticate_wait_on_a_person() {
         // The polkit dialog is on the desktop and the person may take a
         // minute or ten; the CLI must not give up on the socket and report a
@@ -1841,6 +1982,7 @@ mod tests {
                 checkpoint: false,
                 ttl_ms: None,
                 capabilities: None,
+                allow: None,
                 second_factor: None,
                 cols: 80,
                 rows: 24,
@@ -1886,6 +2028,7 @@ mod tests {
                 checkpoint: true,
                 ttl_ms: None,
                 capabilities: None,
+                allow: None,
                 // Carried through the round trip with a value, not `None`:
                 // the field is the one thing on this request that a daemon
                 // reads to decide whether root is handed out, and a
@@ -1919,6 +2062,7 @@ mod tests {
                 checkpoint: false,
                 ttl_ms: None,
                 capabilities: None,
+                allow: None,
                 second_factor: None,
                 cols: 80,
                 rows: 24,
@@ -2187,6 +2331,7 @@ mod tests {
             ("scoped grants", SCOPED_GRANT_VERSION),
             ("the connector policy", CONNECTOR_POLICY_VERSION),
             ("the plugin policy", PLUGIN_POLICY_VERSION),
+            ("the session allowlist", SESSION_ALLOWLIST_VERSION),
         ] {
             assert!(
                 since <= PROTOCOL_VERSION,
@@ -2196,7 +2341,7 @@ mod tests {
         }
         // The newest guard is the current revision: adding a wire field
         // without bumping the version is the fail-open these exist to catch.
-        assert_eq!(PLUGIN_POLICY_VERSION, PROTOCOL_VERSION);
+        assert_eq!(SESSION_ALLOWLIST_VERSION, PROTOCOL_VERSION);
         // And every older guard stays strictly behind it. `<`, not
         // `== PROTOCOL_VERSION - 1`: three of these shipped as revision 5 and
         // scoped grants as 6, and none of them is going to move again, so
@@ -2208,6 +2353,7 @@ mod tests {
             ("system-access grants", SYSTEM_GRANT_VERSION),
             ("scoped grants", SCOPED_GRANT_VERSION),
             ("the connector policy", CONNECTOR_POLICY_VERSION),
+            ("the plugin policy", PLUGIN_POLICY_VERSION),
         ] {
             assert!(
                 since < PROTOCOL_VERSION,
@@ -2233,6 +2379,7 @@ mod tests {
             detail: None,
             paused: false,
             policy: AgentPolicy::default(),
+            allowlist: None,
             request_origin: None,
             origin_source: None,
             actor: None,
