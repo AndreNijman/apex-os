@@ -296,11 +296,30 @@ pub const GOOGLE_OAUTH: OAuth = OAuth {
 ///
 /// `offline_access` is what makes a refresh token come back at all, so it is
 /// not optional for a flow whose whole point is that it can be renewed.
+///
+/// `Files.Read` is the one that can be spent, and it is asked for **because**
+/// [`GRAPH_SCOPES`] now names an operation a provider performs. It was
+/// deliberately absent while nothing could spend it: asking for a permission
+/// this build cannot use is a consent screen that overstates what APEX is
+/// about to do. It is Microsoft's least-privileged permission for
+/// `driveItem: content`, read off that page rather than chosen — `Files.Read`,
+/// not `Files.Read.All`, which would reach other people's shared files too.
+///
+/// The short form and not `https://graph.microsoft.com/Files.Read`: the v2.0
+/// endpoint resolves an unqualified permission against the resource the other
+/// scopes name. **NOT VERIFIED AGAINST MICROSOFT** — no endpoint of theirs has
+/// been contacted from this repository — so if a real sign-in answers
+/// `invalid_scope`, the fully-qualified spelling is the first thing to try.
+///
+/// A token's scopes are fixed when it is issued, so an account signed in
+/// before this line existed holds a token with no Files scope in it: its reads
+/// answer 403 until `apex account add microsoft.<name>` is run again. A
+/// refresh cannot widen a grant, by RFC 6749 §6's design.
 pub const MICROSOFT_OAUTH: OAuth = OAuth {
     device_url: "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode",
     token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
     auth_host: "login.microsoftonline.com",
-    scopes: &["openid", "profile", "offline_access"],
+    scopes: &["openid", "profile", "offline_access", "Files.Read"],
     client_secret: ClientSecret::None,
     client_id: None,
 };
@@ -635,16 +654,38 @@ const DRIVE_SCOPES: &[Scope] = &[Scope {
     summary: "read a file from this Google Drive, by its file id",
 }];
 
-/// Microsoft Graph: **none yet**, for the plainer reason.
+/// Microsoft Graph: **one**, and unlike Google the limit is this build's.
 ///
-/// Unlike Google, nothing about the device grant narrows this: a public client
-/// may ask for `Files.Read`, `Files.ReadWrite` and `Mail.Read`. What is missing
-/// is the transport — there is no `msgraph` provider in `default_registry()` —
-/// and a scope table that names operations no provider serves is the defect
-/// described on [`DRIVE_SCOPES`]. The four names this used to carry
-/// (`msgraph.file.{list,read,write}`, `msgraph.mail.read`) are the right
-/// vocabulary for that provider when somebody writes it.
-const GRAPH_SCOPES: &[Scope] = &[];
+/// This table used to name `msgraph.file.{list,read,write}` and
+/// `msgraph.mail.read`. No provider in `apex-secretd` offered any of them, so
+/// `apex account grant microsoft files.read` recorded a grant for an operation
+/// that could never be performed — a permission the user was told they had. It
+/// was emptied for that reason, and [`crate::account::PROVIDERS`] is now
+/// checked against the shipped registry by a test in `apex-secretd`, the only
+/// crate that can see both. `files.read` is back because the operation it
+/// names now exists: `providers::msgraph` in that crate performs it.
+///
+/// Nothing about the device grant narrows this the way Google's does — a
+/// public client may ask for `Files.Read`, `Files.ReadWrite` and `Mail.Read`,
+/// and a `Files.Read` token really can read any file in the account's own
+/// OneDrive. **The narrowing here is APEX's**: one transport operation, so one
+/// scope. `files.list` and `mail.read` are the right next names and each needs
+/// its own Graph endpoint written first — `/drive/root/children` and
+/// `/messages` are different paths from the `/drive/items/<id>/content` the
+/// read uses.
+///
+/// One limitation belongs with the vocabulary rather than the transport, and
+/// is stated here because this is where a person meets it: a **consumer**
+/// OneDrive item id is `{driveId}!{n}` — Microsoft's own example is
+/// `12319191!11919` — and [`crate::operation::valid_name`] does not accept
+/// `!`. Work and school ids do not carry one. See `providers::msgraph` in
+/// `apex-secretd` for why the shared resource vocabulary was not widened.
+const GRAPH_SCOPES: &[Scope] = &[Scope {
+    name: "files.read",
+    operation: "msgraph.file.read",
+    effect: Effect::Read,
+    summary: "read a file from this OneDrive, by its item id",
+}];
 
 const S3_SCOPES: &[Scope] = &[
     Scope {
@@ -1169,51 +1210,89 @@ mod tests {
     /// This test exists because of what it replaced. Until P2-017's round 3
     /// the line above read `AccountRef::new("microsoft", "work")
     /// .operation("mail.read").unwrap() == "msgraph.mail.read"` — a green
-    /// assertion about a mapping into an operation **no provider has ever
+    /// assertion about a mapping into an operation **no provider had ever
     /// offered**. The test was true about the table and said nothing about
     /// whether the grant it produced could be spent, which is the only
     /// question that matters. `apex-secretd`'s
     /// `every_account_scope_names_an_operation_some_provider_actually_offers`
     /// is the one that can ask it; this one holds the other half — that the
-    /// refusal a user now meets tells them the truth.
+    /// refusal a user meets tells them the truth.
     ///
-    /// Google has left this set. `gdrive.file.read` is an operation
-    /// `apex-secretd` performs, so `google` is asserted the other way round
-    /// below — which is the first time since round 3 that a positive
-    /// assertion about a Google scope has been allowed to exist here.
+    /// **No shipped provider is in this state any more.** Google left it in
+    /// round 30 when `gdrive` landed and Microsoft left it in round 31 when
+    /// `msgraph` did, so the set is now empty — and that is asserted as the
+    /// positive claim it is, because a loop over an empty set proves nothing
+    /// and "the loop found no counter-examples" is exactly the shape this
+    /// program keeps finding in its own tests.
+    ///
+    /// The behaviour itself is still here, and is therefore held to a provider
+    /// **constructed in this test** rather than to a row in the table. That is
+    /// deliberate: [`AccountError::NoScopesYet`] exists so that the NEXT
+    /// provider added before its transport says the true thing, and a guard
+    /// whose only witness has just been deleted is a guard that rots silently.
     #[test]
     fn a_provider_with_no_transport_yet_says_so_instead_of_listing_nothing() {
-        // COMPUTED from the table and then spelled out, in that order. The
-        // loop runs over what the table actually says rather than over a name
-        // written a second time here, and the equality is what makes a
-        // provider joining or leaving this set a line somebody writes on
-        // purpose. An empty set would make the loop prove nothing, which the
-        // assertion catches.
+        // COMPUTED from the table and then asserted EMPTY. Adding a provider
+        // without a transport fails here, which is the line somebody should
+        // have to write on purpose.
         let empty: Vec<&str> = PROVIDERS
             .iter()
             .filter(|p| p.scopes.is_empty())
             .map(|p| p.id)
             .collect();
-        assert_eq!(
-            empty,
-            vec!["microsoft"],
-            "the set of account providers with nothing grantable changed"
+        assert!(
+            empty.is_empty(),
+            "{empty:?} can hold a credential and spend it on nothing. Every \
+             shipped provider has a transport now; if one was added without \
+             its scopes, give it them, and if that is not possible yet, say so \
+             here and give this test back its loop over the set."
         );
-        for id in &empty {
-            let a = AccountRef::new(id, "mine").unwrap();
-            // `files.read` is the name somebody would reach for first, and it
-            // is the exact scope that used to be accepted here.
-            let e = a.operation("files.read").unwrap_err();
-            assert!(
-                matches!(e, AccountError::NoScopesYet { .. }),
-                "{id}: {e:?} — an empty table must not read as 'not that one'"
-            );
-            let said = e.to_string();
-            assert!(said.contains("no operation to grant"), "{id}: {said}");
-            // And it must not send the reader to a command that prints a
-            // header and no rows without warning them that is what it does.
-            assert!(said.contains("nothing can spend the credential"), "{id}: {said}");
-        }
+        // ...and the loop has something to run on regardless, because the
+        // provider it runs on is built here.
+        static NO_SCOPES: Provider = Provider {
+            // Not a shipped id: the refusal quotes this, and a message naming
+            // a provider that does work would be a worse answer than none.
+            id: "notyet",
+            label: "a provider whose transport is not written yet",
+            transport: "notyet",
+            flow: Flow::AppPassword,
+            presentation: Presentation::Basic,
+            host: Host::PerAccount,
+            path: "",
+            path_carries_username: false,
+            obtain: "nowhere: this provider exists only inside this test",
+            scopes: &[],
+            oauth: None,
+        };
+        // Built by hand rather than looked up, which is the whole point.
+        // `AccountRef::new` goes through `PROVIDERS` and could not reach this.
+        let a = AccountRef {
+            provider: &NO_SCOPES,
+            name: "mine".to_string(),
+        };
+        // `files.read` is the name somebody would reach for first, and it is
+        // the exact scope that used to be accepted for Microsoft.
+        let e = a.operation("files.read").unwrap_err();
+        assert!(
+            matches!(e, AccountError::NoScopesYet { .. }),
+            "{e:?} — an empty table must not read as 'not that one'"
+        );
+        let said = e.to_string();
+        assert!(said.contains("no operation to grant"), "{said}");
+        // And it must not send the reader to a command that prints a header
+        // and no rows without warning them that is what it does.
+        assert!(said.contains("nothing can spend the credential"), "{said}");
+
+        // The control, and it is the assertion that makes the one above mean
+        // something: a provider WITH scopes gets the other error, which sends
+        // the reader to the list rather than away from it.
+        let real = AccountRef::new("microsoft", "mine").expect("microsoft");
+        let e = real.operation("no.such.scope").unwrap_err();
+        assert!(
+            matches!(e, AccountError::UnknownScope { .. }),
+            "{e:?} — a provider with a transport must not claim to have none"
+        );
+        assert!(e.to_string().contains("lists them"), "{e}");
     }
 
     /// The assertion round 3 had to delete, now true.
@@ -1243,6 +1322,44 @@ mod tests {
                 .contains(&"https://www.googleapis.com/auth/drive.file"),
             "a Drive scope is offered that the sign-in never asks for: {:?}",
             GOOGLE_OAUTH.scopes
+        );
+    }
+
+    /// The same assertion for the provider that got its transport last.
+    ///
+    /// `apex account grant microsoft.<name> files.read` records a grant for
+    /// `msgraph.file.read`, and — this is the half this crate cannot check —
+    /// `apex-secretd`'s `providers::msgraph` performs it. The cross-crate gate
+    /// `every_account_scope_names_an_operation_some_provider_actually_offers`
+    /// is what holds the two together.
+    #[test]
+    fn microsofts_files_read_names_the_operation_the_msgraph_provider_performs() {
+        let microsoft = AccountRef::new("microsoft", "work").unwrap();
+        assert_eq!(
+            microsoft.operation("files.read").unwrap(),
+            "msgraph.file.read"
+        );
+        // Read, not write: `apex secret capabilities` prints this, and an
+        // operation that reads a file must not be presented as one that
+        // changes it.
+        let scope = provider("microsoft").unwrap().scope("files.read").unwrap();
+        assert_eq!(scope.effect, Effect::Read);
+        // And the scope that made the token spendable is asked for at the
+        // grant. Without it the stored token carries no Files permission and
+        // every read answers 403 — a failure that arrives an hour later,
+        // somewhere else.
+        assert!(
+            MICROSOFT_OAUTH.scopes.contains(&"Files.Read"),
+            "a OneDrive scope is offered that the sign-in never asks for: {:?}",
+            MICROSOFT_OAUTH.scopes
+        );
+        // The two device-code providers route into DIFFERENT transports off
+        // the same scope name, which is the thing a copied table entry would
+        // silently get wrong.
+        let google = AccountRef::new("google", "work").unwrap();
+        assert_ne!(
+            google.operation("files.read").unwrap(),
+            microsoft.operation("files.read").unwrap()
         );
     }
 

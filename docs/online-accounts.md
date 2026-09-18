@@ -185,13 +185,17 @@ not stated gets trusted for things it never did.
   wants it on the poll; that comes from **stdin**, never argv, and there is no
   `--client-secret` flag for the same reason there is no `--password` one.
 
-  **A Google token can now be spent.** `apex-secretd` ships a `gdrive`
-  provider, so `apex account grant google.<name> files.read` records a grant
-  for `gdrive.file.read` and the daemon performs it; `add` prints the grant
-  command for any provider whose table is not empty. A **Microsoft** token
-  still cannot be spent on anything — there is no `msgraph` transport, so its
-  scope table is empty and `add` says so rather than sending you to a grant
-  that will be refused.
+  **Every provider's token can now be spent.** `apex-secretd` ships a `gdrive`
+  provider and an `msgraph` one, so `apex account grant google.<name>
+  files.read` records a grant for `gdrive.file.read`, `apex account grant
+  microsoft.<name> files.read` records one for `msgraph.file.read`, and the
+  daemon performs both; `add` prints the grant command for each scope the
+  provider's table has. Microsoft was the last provider whose token could be
+  stored, refreshed forever and spent on nothing.
+
+  The two route into **different** transports off the same scope name, which is
+  what a copied table entry would silently get wrong, so it is asserted rather
+  than described.
 * ~~**Nothing refreshes a token.**~~ **Built for Cloudflare only, and the
   "only" is the honest part.** An `oauth` provider offers
   `oauth.token.refresh` — RFC 6749 §6, performed in the daemon — and
@@ -245,22 +249,47 @@ not stated gets trusted for things it never did.
   with no key, the same one-operation-for-both shape `cloudflare.r2.object.read`
   has, so there is one scope and its summary says both things it does.
 
-* **Google has one grantable scope; Microsoft has none.** `files.read` →
-  `gdrive.file.read`, performed by the `gdrive` provider in `apex-secretd`.
-  Microsoft has no `msgraph` transport, so there is no operation to grant and
-  `apex account scopes microsoft` says so in those words rather than printing
-  a header with no rows under it.
+* **Google and Microsoft have one grantable scope each, and no provider now
+  has none.** `files.read` → `gdrive.file.read` for Google, performed by the
+  `gdrive` provider in `apex-secretd`; `files.read` → `msgraph.file.read` for
+  Microsoft, performed by the `msgraph` one.
 
   This bullet exists because the table used to claim more than it could do.
   `apex account grant google files.read` was accepted and recorded a grant for
   `gdrive.file.read` **when no build had ever offered that operation**: a
   permission the user was told they had, which fails later and somewhere else.
-  The table was emptied, and `files.read` came back only when the operation
-  did. It is checked rather than described —
+  The table was emptied, and each `files.read` came back only when its
+  operation did. It is checked rather than described —
   `every_account_scope_names_an_operation_some_provider_actually_offers` in
   `apex-secretd` is the only place the scope table and the shipped registry are
   both visible, and it fails the build if a scope names an operation no
   provider serves.
+
+  The "a provider can be stored and refreshed and spent on nothing" case has
+  **no shipped example left**, and the refusal that covers it
+  (`AccountError::NoScopesYet`, and the sentence `apex account add` prints) was
+  kept rather than deleted, held to a provider the tests construct. The set of
+  providers with an empty scope table is asserted EMPTY in both crates — the
+  positive claim — because an equality against an empty list, with a loop over
+  it, proves nothing.
+
+  **What one Microsoft scope buys, and the one thing it cannot address.**
+  `Files.Read` is Microsoft's own least-privileged permission for
+  `driveItem: content`, and unlike Google's `drive.file` it really does read
+  the account's own OneDrive — the narrowing is APEX's, not Microsoft's: there
+  is one operation because one was written. `msgraph.file.read` takes a
+  driveItem id, and a **consumer** OneDrive id is `{driveId}!{n}` (Microsoft's
+  own documented example is `12319191!11919`), which the shared resource
+  vocabulary refuses because it does not accept `!`. Work and school ids
+  (`01BYE5RZ…`) are unaffected. The vocabulary was not widened for one
+  provider; lifting this needs a resource kind that percent-encodes.
+
+  Graph's `/content` answers `302` with a **pre-authenticated** download URL on
+  another host, which APEX follows exactly once, with no credential on the
+  second request and no `Location` chain, and that URL comes back in nothing —
+  no reply, no error, no audit line. It is a bearer capability for as long as
+  it lives. See the module note on `providers/msgraph.rs` for the whole
+  decision.
 
   **What one scope buys, said plainly, because it is less than it sounds.**
   Google's limited-input-device grant accepts only `email`, `openid`,
