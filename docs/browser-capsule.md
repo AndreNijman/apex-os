@@ -168,9 +168,30 @@ policy is a mode that lies.
 
 Each `--allow` destination must already be on the runtime's allowlist
 (`apex agent allow <host>`), and the refusal names the exact line to add. This
-is a declaration checked against the set the daemon enforces, not a second
-grant path: the allowlist agentd snapshots when the session starts is the
-runtime's, and `apex browser` cannot widen it.
+is a narrowing of the set the daemon enforces, not a second grant path.
+
+**The destinations a capsule names are the only ones it can reach** (P2-012,
+protocol 9). They travel to the daemon as `RunRequest::allow`, the daemon
+proves every line is covered by a rule the runtime's own list already carries,
+and the narrowed list — not the runtime's — is what the egress proxy enforces
+and what `apex agent status <id>` prints as `destinations`. Until protocol 9
+the daemon snapshotted the runtime's whole allowlist for every session, so a
+capsule started to visit one host could reach every destination the machine had
+ever been told to permit, and the check in `apex browser` was a check in a
+shell script rather than a boundary. The engine's check is still there, because
+a refusal before a capsule directory exists names the line to add and costs
+nothing to show — but it is no longer the thing that confines the capsule.
+
+It can only ever subtract. A line the runtime does not cover is refused rather
+than dropped: a caller quietly given less than they named finds out minutes
+later, inside the capsule, as a network error with no cause attached. An empty
+list is refused too — "reach nothing" is `--network offline`, and one policy
+should have one spelling.
+
+This is what makes `--capability` a boundary rather than an announcement. The
+pinned `host:port` from the credential replaces the capsule's destinations, so
+a capsule holding a capability is confined by the proxy to the endpoint that
+capability is for.
 
 The browser is pointed at the in-namespace bridge with profile preferences
 rather than `HTTP_PROXY`, because Firefox does not read the environment

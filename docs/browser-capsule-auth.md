@@ -98,7 +98,8 @@ Route A breaks that in two places at once:
 
 A short lease and the destination pin bound the damage — the capsule can only
 reach the host the credential is for, because the same capability sets its
-allowlist — but they bound it *after* accepting that the caller ends up
+allowlist, and since protocol 9 that pin is enforced by the egress proxy rather
+than checked by the engine — but they bound it *after* accepting that the caller ends up
 holding a credential they were never supposed to see. That is a different
 product from the one the framework describes, and it should not arrive as a
 flag.
@@ -163,15 +164,23 @@ the file's shape. See "what is not decided" below.
   Certificate minting has no crate in the tree — `rcgen` is not a dependency —
   and `openssl` is in the image, which is how the browserlab already makes its
   own certificate.
-* **Two protocol fields, and a `PROTOCOL_VERSION` bump.** The session request
-  would have to carry which destination is intercepted and which stored
-  credential is presented. Both must be gated the way `--network offline` is
-  gated, and `protocol.rs`'s own note says why: a daemon that predates a field
-  ignores it. Here an old daemon would tunnel `CONNECT` untouched, present
-  nothing, and hand back whatever the site says to an unauthenticated request —
-  so the CLI must refuse to send the fields to a daemon below the revision
-  rather than letting a capsule run and fail at the far end with a 401 nobody
-  can explain.
+* **Two protocol fields, and a `PROTOCOL_VERSION` bump of their own.** The
+  session request would have to carry which destination is intercepted and
+  which stored credential is presented. Both must be gated the way `--network
+  offline` is gated, and `protocol.rs`'s own note says why: a daemon that
+  predates a field ignores it. Here an old daemon would tunnel `CONNECT`
+  untouched, present nothing, and hand back whatever the site says to an
+  unauthenticated request — so the CLI must refuse to send the fields to a
+  daemon below the revision rather than letting a capsule run and fail at the
+  far end with a 401 nobody can explain.
+
+  **Not revision 9.** Protocol 9 shipped for `RunRequest::allow` — the
+  per-session allowlist narrowing that makes `--capability`'s destination pin a
+  boundary rather than an announcement — and these fields need their own number
+  for exactly the reason every other guard on that list has one: a daemon can
+  understand a narrowed allowlist and know nothing at all about terminating TLS
+  for a destination. Reusing 9 would tell a protocol-9 daemon it understood a
+  key it drops, which is the fail-open the version table exists for.
 * **A sentence in `docs/browser-capsule.md` stops being true.** "A tunnel is
   opaque. This is a destination policy" becomes false for the pinned
   destination: the daemon reads the plaintext of a connection it is itself
