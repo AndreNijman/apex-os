@@ -48,12 +48,18 @@
 //! [`account::OAuth::client_id`] for the whole argument. Google also wants a
 //! `client_secret`, which is read from stdin and never from argv.
 //!
-//! What a token obtained this way can be spent on today is **nothing**. No
-//! `gdrive` or `msgraph` transport exists in `apex-secretd`, so every scope in
-//! [`account::DRIVE_SCOPES`] and [`account::GRAPH_SCOPES`] names an operation
-//! no provider offers — `apex account grant` refuses them for exactly that
-//! reason. Signing in, storing, and renewing work end to end; using is the
-//! next transport, not the next flag.
+//! **A Google token can now be spent; a Microsoft one still cannot.**
+//! `apex-secretd` ships a `gdrive` provider, so `apex account grant
+//! google.<name> files.read` records a grant for `gdrive.file.read` and the
+//! daemon performs it. There is still no `msgraph` transport, so
+//! [`account::GRAPH_SCOPES`] is empty and `apex account grant` refuses a
+//! Microsoft scope for exactly that reason.
+//!
+//! What a Google account can reach is narrower than "your Drive", and
+//! [`account::DRIVE_SCOPES`] is where the reason is written down: the device
+//! grant only allows `drive.file`, which sees files this OAuth client created
+//! or the user individually picked. Until a write operation exists there is
+//! nothing for a read to find, and the status line below says so.
 
 use std::io::Read;
 
@@ -575,18 +581,27 @@ fn add_by_device_code(
         }
     }
 
-    // Honest rather than encouraging. The cross-crate scope gate refuses a
-    // grant for an operation no provider offers, and no `gdrive` or `msgraph`
-    // transport exists, so sending somebody to `apex account grant` here would
-    // send them to a refusal they did not earn.
-    println!(
-        "nothing can spend it yet: this build ships no {} transport, so every scope",
-        provider.transport
-    );
-    println!(
-        "`apex account scopes {}` lists names an operation no provider offers.",
-        provider.id
-    );
+    // Read off the table rather than written twice. A provider whose scopes
+    // are empty has no transport in this build, and sending somebody to
+    // `apex account grant` would send them to a refusal they did not earn —
+    // the cross-crate scope gate refuses a grant for an operation no provider
+    // offers. A provider with scopes gets the command that uses them.
+    if provider.scopes.is_empty() {
+        println!(
+            "nothing can spend it yet: this build ships no {} transport, so every scope",
+            provider.transport
+        );
+        println!(
+            "`apex account scopes {}` lists names an operation no provider offers.",
+            provider.id
+        );
+    } else {
+        println!("grant it what it may do, once per project:");
+        for scope in provider.scopes {
+            println!("  apex account grant {reference} {}", scope.name);
+        }
+        println!("`apex account scopes {}` says what each one reaches.", provider.id);
+    }
     Ok(0)
 }
 

@@ -257,16 +257,30 @@ pub struct OAuth {
 
 /// Google's limited-input-device flow.
 ///
-/// Scopes are `openid` and `profile` and nothing else, which is not an
-/// oversight: no `gdrive` transport exists, so there is no operation that
-/// could spend a Drive scope, and asking for one would be holding a permission
-/// this build cannot use. See [`DRIVE_SCOPES`] for the harder limit underneath
-/// that one.
+/// `openid` and `profile` name the user; `drive.file` is the one that can be
+/// spent, and it is asked for **because** [`DRIVE_SCOPES`] now names an
+/// operation a provider performs. It was deliberately absent while nothing
+/// could spend it: asking for a permission this build cannot use is a consent
+/// screen that overstates what APEX is about to do.
+///
+/// `drive.file` and not `drive` or `drive.readonly`, and that is Google's
+/// rule rather than a choice — the limited-input-device grant does not accept
+/// either of those. See [`DRIVE_SCOPES`] for what `drive.file` can and cannot
+/// see.
+///
+/// A token's scopes are fixed when it is issued, so an account signed in
+/// before this line existed holds a token with no Drive scope in it: its
+/// reads answer 403 until `apex account add google.<name>` is run again. A
+/// refresh cannot widen a grant, by RFC 6749 §6's design.
 pub const GOOGLE_OAUTH: OAuth = OAuth {
     device_url: "https://oauth2.googleapis.com/device/code",
     token_url: "https://oauth2.googleapis.com/token",
     auth_host: "oauth2.googleapis.com",
-    scopes: &["openid", "profile"],
+    scopes: &[
+        "openid",
+        "profile",
+        "https://www.googleapis.com/auth/drive.file",
+    ],
     client_secret: ClientSecret::RequiredToObtain,
     client_id: None,
 };
@@ -583,19 +597,20 @@ const WEBDAV_SCOPES: &[Scope] = &[
     },
 ];
 
-/// Google Drive: **none**, and the reason is a property of the flow rather
-/// than a gap somebody forgot to fill.
+/// Google Drive: **one**, and the count is Google's arithmetic rather than
+/// this build's ambition.
 ///
 /// This table used to name `gdrive.file.list`, `gdrive.file.read` and
-/// `gdrive.file.write`. No provider in `apex-secretd` offers any of them, so
+/// `gdrive.file.write`. No provider in `apex-secretd` offered any of them, so
 /// `apex account grant google files.read` recorded a grant for an operation
 /// that could never be performed — a permission the user was told they had
-/// made. [`crate::account::PROVIDERS`] is now checked against the shipped
-/// registry by a test in `apex-secretd`, which is the only crate that can see
-/// both.
+/// made. It was emptied for that reason, and [`crate::account::PROVIDERS`] is
+/// now checked against the shipped registry by a test in `apex-secretd`, the
+/// only crate that can see both. `files.read` is back because the operation it
+/// names now exists: `providers::gdrive` in that crate performs it.
 ///
-/// It is empty rather than repointed because of what Google's limited-input
-/// flow allows, read from
+/// It is ONE scope and not three because of what Google's limited-input flow
+/// allows, read from
 /// `developers.google.com/identity/protocols/oauth2/limited-input-device`
 /// rather than from memory: the device grant accepts **only** `email`,
 /// `openid`, `profile`, `drive.appdata`, `drive.file`, `youtube` and
@@ -603,10 +618,22 @@ const WEBDAV_SCOPES: &[Scope] = &[
 /// `drive.file` sees only files the calling app itself created or the user
 /// individually picked — so "list the files in a folder on this Drive" is not
 /// a thing a device-code Google account can do **at all**, whatever transport
-/// is written for it. A `gdrive` provider is worth building against
-/// `drive.file` for APEX's own files; it is not worth pretending it can read
-/// the user's Drive.
-const DRIVE_SCOPES: &[Scope] = &[];
+/// is written for it, and there is no `files.list` here rather than one that
+/// returns an empty listing and reads as an empty Drive.
+///
+/// `files.write` is the scope worth adding next, and it is not a line in this
+/// table on its own: a Drive upload goes to `/upload/drive/v3/files`, which is
+/// a different path from the `/drive/v3` an account is stored with, so it
+/// needs the transport before it needs the vocabulary. Until it exists, a
+/// Drive that APEX has never written to has no file `files.read` can reach —
+/// which is the scope working, and is said out loud in `apex account scopes
+/// google` rather than left to be discovered as a 404.
+const DRIVE_SCOPES: &[Scope] = &[Scope {
+    name: "files.read",
+    operation: "gdrive.file.read",
+    effect: Effect::Read,
+    summary: "read a file from this Google Drive, by its file id",
+}];
 
 /// Microsoft Graph: **none yet**, for the plainer reason.
 ///
@@ -1149,9 +1176,30 @@ mod tests {
     /// `every_account_scope_names_an_operation_some_provider_actually_offers`
     /// is the one that can ask it; this one holds the other half — that the
     /// refusal a user now meets tells them the truth.
+    ///
+    /// Google has left this set. `gdrive.file.read` is an operation
+    /// `apex-secretd` performs, so `google` is asserted the other way round
+    /// below — which is the first time since round 3 that a positive
+    /// assertion about a Google scope has been allowed to exist here.
     #[test]
     fn a_provider_with_no_transport_yet_says_so_instead_of_listing_nothing() {
-        for id in ["google", "microsoft"] {
+        // COMPUTED from the table and then spelled out, in that order. The
+        // loop runs over what the table actually says rather than over a name
+        // written a second time here, and the equality is what makes a
+        // provider joining or leaving this set a line somebody writes on
+        // purpose. An empty set would make the loop prove nothing, which the
+        // assertion catches.
+        let empty: Vec<&str> = PROVIDERS
+            .iter()
+            .filter(|p| p.scopes.is_empty())
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(
+            empty,
+            vec!["microsoft"],
+            "the set of account providers with nothing grantable changed"
+        );
+        for id in &empty {
             let a = AccountRef::new(id, "mine").unwrap();
             // `files.read` is the name somebody would reach for first, and it
             // is the exact scope that used to be accepted here.
@@ -1166,6 +1214,36 @@ mod tests {
             // header and no rows without warning them that is what it does.
             assert!(said.contains("nothing can spend the credential"), "{id}: {said}");
         }
+    }
+
+    /// The assertion round 3 had to delete, now true.
+    ///
+    /// `apex account grant google files.read` records a grant for
+    /// `gdrive.file.read`, and — this is the half this crate cannot check —
+    /// `apex-secretd`'s `providers::gdrive` performs it. The cross-crate gate
+    /// `every_account_scope_names_an_operation_some_provider_actually_offers`
+    /// is what holds the two together; without it this would be exactly the
+    /// green-assertion-about-vapour the test above describes.
+    #[test]
+    fn googles_files_read_names_the_operation_the_gdrive_provider_performs() {
+        let google = AccountRef::new("google", "work").unwrap();
+        assert_eq!(google.operation("files.read").unwrap(), "gdrive.file.read");
+        // Read, not write: `apex secret capabilities` prints this, and an
+        // operation that reads a file must not be presented as one that
+        // changes it.
+        let scope = provider("google").unwrap().scope("files.read").unwrap();
+        assert_eq!(scope.effect, Effect::Read);
+        // And the scope that made the token spendable is asked for at the
+        // grant. Without it the stored token carries no Drive permission and
+        // every read answers 403 — a failure that arrives an hour later,
+        // somewhere else.
+        assert!(
+            GOOGLE_OAUTH
+                .scopes
+                .contains(&"https://www.googleapis.com/auth/drive.file"),
+            "a Drive scope is offered that the sign-in never asks for: {:?}",
+            GOOGLE_OAUTH.scopes
+        );
     }
 
     #[test]
@@ -1195,6 +1273,18 @@ mod tests {
         let before = ids.len();
         ids.dedup();
         assert_eq!(before, ids.len(), "two providers share an id");
+
+        // The operation namespaces those five route into, spelled out. It is
+        // a smaller set than the providers, which is the module's claim about
+        // Nextcloud and WebDAV, and `docs/online-accounts.md` states the
+        // count in prose — it said "three transports" while the table held
+        // four, from the round `google` and `microsoft` were added until the
+        // round `gdrive` was built. A number in a document that nothing
+        // computes is a number that goes stale silently.
+        let mut transports: Vec<&str> = PROVIDERS.iter().map(|p| p.transport).collect();
+        transports.sort_unstable();
+        transports.dedup();
+        assert_eq!(transports, vec!["gdrive", "msgraph", "s3", "webdav"]);
     }
 
     #[test]
