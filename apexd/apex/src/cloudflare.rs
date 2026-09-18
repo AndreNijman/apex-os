@@ -4,6 +4,7 @@
 //! apex cf connect            # OAuth, by device code, with no browser here
 //! apex cf connect --token    # paste a scoped token instead; stdin only
 //! apex cf status             # what is stored, and what this project binds
+//! apex cf refresh            # renew the access token without signing in again
 //! ```
 //!
 //! §13.1 asks for exactly these three things: an OAuth or scoped-token
@@ -50,6 +51,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use apex_secret_core::account::CLOUDFLARE_OAUTH;
+use apex_secret_core::capability::CapabilityRecord;
 use apex_secret_core::client::Client;
 use apex_secret_core::project::ProjectConfig;
 use apex_secret_core::protocol::{Request, Response};
@@ -67,6 +69,13 @@ pub const SERVICE: &str = "cloudflare";
 /// token filed under `dash.cloudflare.com` **cannot be spent as an API token**
 /// against `api.cloudflare.com`, whatever asks for it.
 pub const REFRESH_SERVICE: &str = "cloudflare-refresh";
+
+/// The operation that spends it, read off the crate the daemon declares it in.
+///
+/// Not a string spelled here. `apex-secretd`'s `oauth` provider declares its
+/// one operation with this same constant, so `apex cf refresh` cannot ask for
+/// an operation no provider offers.
+pub const REFRESH_OPERATION: &str = apex_secret_core::account::REFRESH_OPERATION;
 
 /// Cloudflare's API host — where the access token is valid.
 pub const API_HOST: &str = "api.cloudflare.com";
@@ -142,6 +151,15 @@ pub enum CloudflareCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Renew the stored access token with the refresh token beside it.
+    ///
+    /// The refresh runs in `apex-secretd`: nothing here ever sees either
+    /// token, and the request names no host, no resource and no parameters —
+    /// where it goes is decided by the host the refresh token was pinned to
+    /// when `apex cf connect` stored it.
+    ///
+    /// It is a capability, so it is granted per project like every other one.
+    Refresh,
     /// §13.13: what this worktree owns at Cloudflare, and how to let it go.
     ///
     /// Ownership is read out of the audit trail rather than a manifest, so it
@@ -190,6 +208,7 @@ pub fn main(cmd: CloudflareCmd) -> i32 {
             }
         }
         CloudflareCmd::Status { json } => status(json),
+        CloudflareCmd::Refresh => refresh(),
         CloudflareCmd::Preview { cmd } => match cmd {
             PreviewCmd::Plan { json } => preview_plan(json),
             PreviewCmd::Destroy { yes, json } => preview_destroy(yes, json),
@@ -238,20 +257,48 @@ fn connect_with_a_pasted_token() -> Result<i32> {
              the whole `Authorization:` line"
         );
     }
-    store(SERVICE, API_HOST, "https", value)?;
+    // A pasted token is a dashboard-scoped API token, not an OAuth grant.
+    // There is no client to record and no refresh token beside it.
+    store(
+        SERVICE,
+        API_HOST,
+        "https",
+        username_for(SERVICE, WRANGLER_CLIENT_ID),
+        value,
+    )?;
     println!("stored a Cloudflare token for {API_HOST}");
     whats_next();
     Ok(0)
 }
 
-fn store(service: &str, host: &str, scheme: &str, value: &str) -> Result<()> {
+/// The non-secret half each of the two credentials is filed with.
+///
+/// The access token has none, and the store's placeholder says so. The refresh
+/// token's is **the OAuth client the grant was issued to**, because RFC 6749
+/// §6 requires a refresh to present the same client — and `--client-id` lets
+/// somebody sign in as a client that is not Wrangler's. Recording it is the
+/// whole of making that work: the daemon reads
+/// `providers::oauth::OAuthProvider::client_id` out of exactly this field and
+/// falls back to the table's default only when it holds the placeholder. A
+/// build that stored the placeholder here would renew an overridden grant as
+/// Wrangler and get `invalid_client` from Cloudflare with nothing to explain
+/// it.
+fn username_for<'a>(service: &str, client_id: &'a str) -> &'a str {
+    if service == REFRESH_SERVICE {
+        client_id
+    } else {
+        apex_secret_core::store::DEFAULT_USERNAME
+    }
+}
+
+fn store(service: &str, host: &str, scheme: &str, username: &str, value: &str) -> Result<()> {
     Client::connect()
         .context("apex-secretd is not answering; is it running?")?
         .add(
             service,
             host,
             scheme,
-            Some("x-access-token"),
+            Some(username),
             "",
             // A Cloudflare API token is presented as `Authorization: Bearer
             // <token>`, which is what the provider builds and what `bearer`
@@ -370,24 +417,49 @@ pub fn connect_by_device_code(
     }
     let grant = device_grant(ends, client_id, out)?;
 
-    store(SERVICE, API_HOST, "https", &grant.access_token)?;
+    store(
+        SERVICE,
+        API_HOST,
+        "https",
+        username_for(SERVICE, client_id),
+        &grant.access_token,
+    )?;
     let mut stored = format!("stored a Cloudflare token for {API_HOST}");
     if let Some(refresh) = &grant.refresh_token {
         // Filed against the host that issued it, so the host pin stops it ever
-        // being sent to the API as though it were an access token.
-        store(REFRESH_SERVICE, AUTH_HOST, "https", refresh)?;
+        // being sent to the API as though it were an access token — and with
+        // the client the grant was issued to in the non-secret half, which is
+        // where the daemon's refresh reads it from.
+        store(
+            REFRESH_SERVICE,
+            AUTH_HOST,
+            "https",
+            username_for(REFRESH_SERVICE, client_id),
+            refresh,
+        )?;
         stored.push_str(&format!(", and its refresh token for {AUTH_HOST}"));
     }
     writeln!(out, "{stored}")?;
     if let Some(seconds) = grant.expires_in {
         writeln!(out, "it stops working in about {}.", roughly(seconds))?;
-        // Said plainly because it is the thing that will go wrong: nothing in
-        // this build spends the refresh token.
-        writeln!(
-            out,
-            "this build does not refresh it — run `apex cf connect` again when \
-             it expires."
-        )?;
+        // What to do about it, which is now a thing rather than "connect
+        // again". Said with the grant it needs, because a refresh is a
+        // capability like any other and is not granted by connecting.
+        if grant.refresh_token.is_some() {
+            writeln!(
+                out,
+                "renew it before then with `apex cf refresh`, once per project:"
+            )?;
+            writeln!(out, "  apex secret grant {REFRESH_SERVICE} {REFRESH_OPERATION}")?;
+            writeln!(out, "  apex cf refresh")?;
+        } else {
+            // No `offline_access` in the grant, so there is nothing to spend.
+            writeln!(
+                out,
+                "this grant carries no refresh token — run `apex cf connect` \
+                 again when it expires."
+            )?;
+        }
     }
     if let Some(scope) = &grant.scope {
         writeln!(out, "scopes: {scope}")?;
@@ -618,6 +690,67 @@ fn preview_destroy(yes: bool, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// The project a capability would be granted for, if this is inside one.
+///
+/// The same answer `apex cf status` prints, so a refusal that names a project
+/// and the line that told you which project you were in cannot disagree.
+fn project_root() -> Option<String> {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| apex_agent_core::project::detect(&cwd))
+        .map(|p| p.root)
+}
+
+/// `apex cf refresh` — RFC 6749 §6, performed in the daemon.
+///
+/// Nothing here sees either token. The request carries a service name, an
+/// operation and a project and **nothing else**: `oauth.token.refresh`
+/// declares no resource and no parameters, so there is no field on this
+/// request that could aim a refresh at a host other than the one the refresh
+/// token was pinned to.
+///
+/// A grant is required and is deliberately not written by `apex cf connect`.
+/// Connecting stores a credential; deciding which project may spend it is the
+/// owner's, and a grant silently keyed on whatever directory `connect`
+/// happened to run in would be a capability nobody chose. So the refusal below
+/// is a normal outcome the first time, and the daemon's own message already
+/// spells the `apex secret grant` line that fixes it.
+fn refresh() -> Result<i32> {
+    let Some(root) = project_root() else {
+        bail!(
+            "this directory is not inside a git repository, and a capability is \
+             granted per project. Run this from inside the project the account \
+             is bound to."
+        );
+    };
+    let mut record = CapabilityRecord::new(REFRESH_SERVICE, REFRESH_OPERATION, "");
+    record.project = Some(root);
+    let reply = Client::connect()
+        .context("apex-secretd is not answering; is it running?")?
+        .request(&Request::Use {
+            record: Box::new(record),
+            body_len: 0,
+        })?;
+    match reply {
+        // A non-zero exit code is the authorisation server refusing, which is
+        // not this command failing to run: the output carries `invalid_grant`
+        // or whatever else it said, and that is the only thing that says
+        // whether the grant was revoked or the token had already been rotated.
+        Response::Performed {
+            exit_code, output, ..
+        } => {
+            println!("{}", output.trim_end());
+            if exit_code != 0 {
+                println!("connect again to get a new one:");
+                println!("  apex cf connect");
+            }
+            Ok(exit_code)
+        }
+        Response::Error { message, .. } => bail!("{message}"),
+        other => bail!("the secret service answered a refresh with {}", other.variant()),
+    }
+}
+
 fn status(json: bool) -> Result<i32> {
     let services = match Client::connect()
         .context("apex-secretd is not answering; is it running?")?
@@ -631,10 +764,7 @@ fn status(json: bool) -> Result<i32> {
 
     // Display only. What a name MEANS is decided in the daemon, by the
     // provider, and this cannot reach that code — see the report.
-    let project = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| apex_agent_core::project::detect(&cwd))
-        .map(|p| p.root);
+    let project = project_root();
     let config = project.as_ref().and_then(|root| {
         ProjectConfig::read(
             std::path::Path::new(root),
@@ -691,7 +821,13 @@ fn status(json: bool) -> Result<i32> {
         Some(info) => {
             println!("credential: stored for {}://{}", info.scheme, info.host);
             if refresh {
-                println!("            a refresh token is stored too, and nothing spends it yet");
+                println!("            a refresh token is stored too, for {AUTH_HOST}");
+                println!("            renew without signing in again:");
+                println!("              apex cf refresh");
+            } else {
+                // Worth saying: without `offline_access` there is nothing to
+                // renew, and the only way to get one is to connect again.
+                println!("            no refresh token — this one cannot be renewed");
             }
         }
         None => {
