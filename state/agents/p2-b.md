@@ -195,6 +195,29 @@ apex-os, re-run after the `atspi.sh` change and unchanged from the ledger:
     does not stub `busctl` at all, so `PowerProfileService` talks to the real
     system bus in every headless suite in this tree that does not add one.
 
+18. **A mutation harness must check that the baseline ASSERTED what each mutant
+    is aimed at, not merely that it was green.** Measured the hard way on the
+    GitHub Arch runner, 2026-09-18: the a11y helpers were at a path
+    `atspi.sh` did not know, `run-lockscreen-atspi.sh` skipped out before its
+    first assertion and printed `passed=0 failed=0 skipped=0`, and
+    `mutate-lockscreen-atspi.sh` read that as a clean baseline and scored
+    ELEVEN mutants against it — 8 SURVIVED, 3 HELD, a red CI step full of
+    confident verdicts about nothing. "Is the baseline green" is not the
+    question; "did the baseline print an `ok` line containing this mutant's
+    `want` string" is. The harness now checks exactly that, for every want,
+    and names the missing ones. Negative control run here: with `quickshell`
+    hidden from `PATH` it lists the three assertions that did not run and exits
+    0 instead of scoring anything. **This is the gate-on-the-gate version of the
+    defect family this program keeps meeting, and it will be in every mutation
+    harness in both repos that only asks whether the baseline was green.**
+19. **The two at-spi helpers are never on `$PATH` and their directory differs by
+    distribution.** Fedora: `/usr/libexec/at-spi-bus-launcher`. Arch: FLAT in
+    `/usr/lib/at-spi-bus-launcher` and `/usr/lib/at-spi2-registryd` — checked
+    against the Arch package's own file list, not guessed. `command -v` cannot
+    find either, so the hardcoded path list IS the search, and a wrong path used
+    to be reported with the same words as an absent package. The list is now six
+    entries wide in both copies and the refusal prints every path it tried.
+
 ## BLOCKED ON
 
 The §5 read-back assertions are blocked on FOUND 14, which is upstream of this
