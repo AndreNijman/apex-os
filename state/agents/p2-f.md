@@ -16,18 +16,25 @@ and quoting curl's), adopted at `gdrive`, `oauth` and `s3`, plus the mechanism
 test in `broker`. 11 mutations, all red, all restored with `cp`/`cmp`.
 Workspace 3338 -> 3344 / 0 / 2, clippy exit 0.
 
-**NEXT ACTION: commit 2 — msgraph and cloudflare.** msgraph hop one
-(`msgraph.rs:411`) takes `broker::aborted_transfer` like the other three. Hop
-two must NOT: put the check at the top of `download_outcome` using the
-`curl_code` it already receives, composing the message in Rust with no curl
-stderr in it, because curl quotes the pre-authenticated URL and that invariant
-is landed. Cloudflare (`api.rs:399`): move the `out.code == 0` check OUT of the
-no-status branch so a non-zero exit is `Reply { status: 0, body: stderr }`
-whether or not a status parsed — the consumers in `deploy.rs`, `dns.rs` and
-`temporary.rs` all key on `status == 0`.
+**COMMIT 2 IS DONE AND PUSHED: `d8dce04e`** — msgraph hop one through the
+shared helper; hop two's own check inside `download_outcome` (no curl stderr,
+enforced by a mutation that routes it through the helper and goes red on
+`Maximum file size exceeded` appearing); cloudflare's `out.code` check moved
+ahead of the split. `msgraph.rs`'s module note rewritten — it said the defect
+was known and not fixed here. 8 mutations, all red, all restored.
+Workspace 3344 -> 3347 / 0 / 2, clippy exit 0.
 
-Then commit 3 (`max-filesize` on s3 and cloudflare), commit 4 (prose).
-Details in ROUND 32 PLAN below.
+**NEXT ACTION: commit 3 — `max-filesize = broker::HTTP_MAX_BYTES` in
+`s3/mod.rs::call`'s config and in `cloudflare/api.rs`'s.** Both are the two
+sites with no cap at all: `run_curl`'s post-hoc `stdout.len() > HTTP_MAX_BYTES`
+refuses them only AFTER the whole reply has been buffered in this process, so
+the cap is enforced after the memory is spent. Adding it turns their oversize
+case into a pre-body abort (63) instead of a read-to-EOF; the two tests already
+assert `curl exited` rather than a number, so they survive it. Add an assertion
+per site that the configuration carries the cap.
+
+Then commit 4 (prose: `apex-backup-core/src/format.rs:30` and
+`docs/online-accounts.md`). Details in ROUND 32 PLAN below.
 
 **AFTER the family closes, if there is room:** P2-016's `ensure_private_dir`
 ownership check (in the multiuser work landed as merge `5eca2402`) — establish
