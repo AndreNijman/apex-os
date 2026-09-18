@@ -184,10 +184,15 @@ enough.
 
 ## What was measured
 
-All figures below are from the katana on 2026-09-03 — a real APEX machine,
-`VARIANT_ID=gaming`, kernel `7.1.5-cachyos1.fc43.x86_64` — with guests under
-`OVMF_CODE_4M.secboot` and only the ephemeral APEX certificate enrolled as
-PK/KEK/db. Nothing here is a prediction.
+**Two machines and two dates, because one header covered both for four rounds
+and had stopped being true.** The UKI, Secure Boot, reproducibility and
+boot-counting figures are from the katana on 2026-09-03 — a real APEX machine,
+`VARIANT_ID=gaming`, kernel `7.1.5-cachyos1.fc43.x86_64`. The LUKS and TPM edge
+cases below them, from 2026-09-14 onward, ran on the L16 against a root staged
+from kernel `7.2.3-cachyos2.fc43.x86_64`, which is what each run's `.apexinf`
+line records. Every guest ran under `OVMF_CODE_4M.secboot` with only the
+ephemeral APEX certificate enrolled as PK/KEK/db. Nothing here is a
+prediction.
 
 **A UKI from the real APEX image boots.** Kernel 16,758,856 bytes, the real
 APEX initramfs 386,072,073 bytes, the signed UKI ~390 MB. sd-stub printed
