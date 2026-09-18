@@ -172,6 +172,41 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
         )
         .map_err(PolicyRefused)?;
 
+    // P2-012: this session may reach fewer destinations than the runtime does.
+    //
+    // Validated against the runtime's list above and narrowed out of it here,
+    // in that order, because the two questions are different: `validate_for`
+    // refuses an allowlisted session whose RUNTIME list is empty — nobody has
+    // filled the policy in — and `narrow` refuses a session that named a
+    // destination the runtime does not cover. Collapsing them would answer the
+    // second question with the first one's message.
+    //
+    // From here down `allowlist` is the SESSION's, and every use of it —
+    // the egress proxy, the recorded confinement §6.2 judges tool calls
+    // against, the refusal text a denied request is shown — is the narrowed
+    // one. One binding rather than two, so a later reader cannot pick the
+    // wrong one.
+    let allowlist = match &req.allow {
+        None => allowlist,
+        Some(_) if policy.effective_network() != NetworkPolicy::Allowlist => {
+            // `ttl_ms` on an ordinary session, one dimension over: refused
+            // rather than ignored, because a caller who listed destinations
+            // believes they asked for a boundary. An `open` session reaches
+            // everything, and silently accepting a list here would say
+            // otherwise in `apex agent status`.
+            return Err(AllowlistRefused(format!(
+                "--allow names destinations for a session whose network is `{}`, which \
+                 reaches everything; it narrows the `allowlist` mode and has nothing to \
+                 narrow here. re-run with `--network allowlist`, or drop --allow",
+                policy.effective_network().as_str()
+            ))
+            .into());
+        }
+        Some(lines) => allowlist
+            .narrow(lines)
+            .map_err(|e| AllowlistRefused(e.to_string()))?,
+    };
+
     // Dimension 1 is the agent's own, and only the adapter knows whether this
     // one can express it. Refused rather than dropped: a `--agent-bypass` that
     // silently did nothing would leave the user believing confirmations were
@@ -1223,6 +1258,27 @@ impl std::fmt::Display for CapabilitiesRefused {
 
 impl std::error::Error for CapabilitiesRefused {}
 
+/// A session allowlist that could not be narrowed out of the runtime's
+/// (P2-012, [`apex_agent_core::protocol::RunRequest::allow`]).
+///
+/// Its own type for the reason [`CapabilitiesRefused`] is its own type: the
+/// remedy is specific and nothing else's remedy fits it. A refused narrowing
+/// is answered by `apex agent allow <destination>` — adding the destination to
+/// the runtime's list once, deliberately — or by not naming it. It is never
+/// answered by authorising anything, because the session already has every
+/// permission it needs; it asked for FEWER destinations than the machine
+/// permits and named one the machine does not permit at all.
+#[derive(Debug)]
+pub struct AllowlistRefused(pub String);
+
+impl std::fmt::Display for AllowlistRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for AllowlistRefused {}
+
 /// A resource budget that cannot be delivered (§P2-011).
 ///
 /// Its own type rather than a bare `anyhow!` because the kind is the point: a
@@ -1270,6 +1326,14 @@ pub fn run_error(e: anyhow::Error) -> Response {
         return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
     }
     if e.downcast_ref::<BudgetRefused>().is_some() {
+        return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
+    }
+    // A refused narrowing is a policy answer and not a `BadRequest`: the
+    // request was well formed and the destination policy is what refused it.
+    // Falling through to the default arm would tell a capsule's caller their
+    // request was malformed, and send them to look at their own command line
+    // instead of at `apex agent allow`.
+    if e.downcast_ref::<AllowlistRefused>().is_some() {
         return Response::error(ErrorKind::PolicyRefused, format!("{e:#}"));
     }
     // A project binding is policy, not a privilege decision: nothing about
@@ -1645,6 +1709,27 @@ mod tests {
             "break-glass caps at 1h".into(),
         )));
         assert_eq!(ttl.as_error().map(|(k, _)| k), Some(ErrorKind::PolicyRefused));
+    }
+
+    #[test]
+    fn a_refused_narrowing_is_a_policy_answer_and_not_a_malformed_request() {
+        // P2-012. The default arm of `run_error` is `BadRequest`, so a
+        // refusal with no arm of its own reads to the caller as "your command
+        // line was wrong" — and the remedy for this one is on the MACHINE
+        // (`apex agent allow`), not in the command they typed. The two are
+        // asserted together because the only way this assertion can fail is by
+        // the arm being deleted, and then it falls through to `BadRequest`.
+        let refused = run_error(anyhow::Error::new(AllowlistRefused(
+            "'evil.example' is not covered by the runtime's allowlist".into(),
+        )));
+        assert_eq!(
+            refused.as_error().map(|(k, _)| k),
+            Some(ErrorKind::PolicyRefused)
+        );
+        // And the message survives the mapping, because it is the half that
+        // names the destination and the command that would permit it.
+        let (_, message) = refused.as_error().expect("error");
+        assert!(message.contains("evil.example"), "{message}");
     }
 
     #[test]

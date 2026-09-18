@@ -20,7 +20,8 @@ use apex_agent_core::policy::{
 use apex_agent_core::protocol::{
     AgentState, Request, Response, RunRequest, SandboxPolicy, SessionInfo,
     CONNECTOR_POLICY_VERSION, PLUGIN_POLICY_VERSION, POLICY_DIMENSIONS_VERSION,
-    REQUEST_ORIGIN_VERSION, SCOPED_GRANT_VERSION, SYSTEM_GRANT_VERSION,
+    REQUEST_ORIGIN_VERSION, SCOPED_GRANT_VERSION, SESSION_ALLOWLIST_VERSION,
+    SYSTEM_GRANT_VERSION,
 };
 use apex_agent_core::hook::{self as hook_core, HookEvent};
 use apex_agent_core::paths;
@@ -595,6 +596,30 @@ pub struct RunArgs {
     // The comma delimiter is how more than one is given.
     #[arg(long, value_name = "VERBS", value_delimiter = ',')]
     pub capabilities: Option<Vec<String>>,
+    /// Where THIS session may connect: `api.example.com`, `intranet:8443`.
+    /// Repeatable, and only with `--network allowlist` (P2-012).
+    ///
+    /// Omitted, an allowlisted session reaches every destination in the
+    /// runtime's own list — which is what a browser capsule started to visit
+    /// one host got before this flag existed. Given, the session reaches these
+    /// and nothing else.
+    ///
+    /// It can only ever SUBTRACT. Every line has to be covered by a rule the
+    /// runtime already carries, and a line it does not cover is refused with
+    /// the `apex agent allow` that would permit it — a session that could name
+    /// a destination the machine never permitted would make the runtime's list
+    /// advisory. So this is not a second place to write the policy; it is a
+    /// narrowing of the one place it is written.
+    ///
+    /// Refused with an empty value for the same reason `--network offline`
+    /// exists: "reach nothing" already has a spelling, and two spellings of one
+    /// policy is how they drift apart.
+    // No `value_delimiter`: a destination is `host:port`, and a comma-split
+    // flag invites `--allow a.example,b.example` to be read as a host with a
+    // comma in it on the day the delimiter is removed. Repetition is the
+    // spelling, which is also `apex browser --allow`'s.
+    #[arg(long, value_name = "DESTINATION")]
+    pub allow: Option<Vec<String>>,
     /// Run in a dedicated git worktree, creating it if needed.
     #[arg(long, short)]
     pub worktree: Option<String>,
@@ -1180,6 +1205,32 @@ fn run(args: RunArgs) -> Result<i32> {
 
     let policy = resolve_policy(&cfg, &args)?;
 
+    // P2-012. The daemon refuses this pair too, and has to: a client is not a
+    // boundary. It is refused here as well because the message is better in
+    // front of the user who typed the flag, and because the local check is
+    // what stops an `open` session being started, running, and only then
+    // being told the destinations it named meant nothing.
+    //
+    // `effective_network()`, not `policy.network`, and the same call the
+    // daemon makes: `--sandbox strict` forces `Offline` whatever `--network`
+    // said, and a check that read the field would accept `--allow` for a
+    // session with no network at all.
+    if let Some(lines) = args.allow.as_ref() {
+        if policy.effective_network() != NetworkPolicy::Allowlist {
+            bail!(
+                "`--allow` names destinations for a session whose network is `{}`, which \
+                 has no allowlist to narrow; add `--network allowlist`, or drop `--allow`",
+                policy.effective_network()
+            );
+        }
+        if lines.is_empty() {
+            bail!(
+                "`--allow` with nothing on it would mean a session that reaches nothing, \
+                 which is `--network offline`; one policy should have one spelling"
+            );
+        }
+    }
+
     let size = term::stdout_window_size();
     let request = RunRequest {
         agent: args.agent.clone(),
@@ -1192,6 +1243,7 @@ fn run(args: RunArgs) -> Result<i32> {
         checkpoint: args.checkpoint,
         ttl_ms: args.ttl,
         capabilities: args.capabilities.clone(),
+        allow: args.allow.clone(),
         // Nothing to send yet: collecting an assertion needs a challenge to
         // have been asked for, and the command that asks for one is the next
         // commit. The daemon's reader landed with this one so that the gate
@@ -1205,7 +1257,13 @@ fn run(args: RunArgs) -> Result<i32> {
     };
 
     let mut c = Client::connect()?;
-    check_daemon_understands(&mut c, &policy, args.origin, args.capabilities.is_some())?;
+    check_daemon_understands(
+        &mut c,
+        &policy,
+        args.origin,
+        args.capabilities.is_some(),
+        args.allow.is_some(),
+    )?;
     let info = match c.call(&Request::Run(request))? {
         Response::Session(info) => *info,
         other => bail!("unexpected reply: {other:?}"),
@@ -1301,8 +1359,9 @@ fn check_daemon_understands(
     policy: &AgentPolicy,
     origin: Option<RequestOrigin>,
     scoped: bool,
+    narrowed: bool,
 ) -> Result<()> {
-    let needs = settings_a_daemon_could_drop(policy, origin, scoped);
+    let needs = settings_a_daemon_could_drop(policy, origin, scoped, narrowed);
     if needs.is_empty() {
         return Ok(());
     }
@@ -1340,6 +1399,7 @@ fn settings_a_daemon_could_drop(
     policy: &AgentPolicy,
     origin: Option<RequestOrigin>,
     scoped: bool,
+    narrowed: bool,
 ) -> Vec<(&'static str, u32)> {
     let moved = non_default_dimensions(policy);
     let mut needs: Vec<(&'static str, u32)> = moved
@@ -1391,6 +1451,20 @@ fn settings_a_daemon_could_drop(
     // `--system-access` and still not understand this.
     if scoped {
         needs.push(("--capabilities", SCOPED_GRANT_VERSION));
+    }
+    // And the second entry whose dropped key WIDENS, a revision later again
+    // (P2-012). A daemon below this ignores `allow` and snapshots the
+    // runtime's whole allowlist, so a capsule started to visit one host runs
+    // with every destination the machine permits — and unlike `--capabilities`
+    // there is no later refusal to catch it: the session starts, the browser
+    // renders the page it was pointed at, and the widening is invisible
+    // because nothing in the run tries the other destinations.
+    //
+    // Checked on `narrowed` rather than on `policy.network`, because
+    // `--network allowlist` is on `moved` already and understanding that
+    // dimension says nothing about understanding this key.
+    if narrowed {
+        needs.push(("--allow", SESSION_ALLOWLIST_VERSION));
     }
     needs
 }
@@ -1918,6 +1992,7 @@ fn handoff(id: Option<u32>, to: &str, no_start: bool, transcript_bytes: usize) -
         // its own human decision. There is nothing to narrow here, and
         // inheriting the old grant's verbs would be inheriting the grant.
         capabilities: None,
+        allow: None,
         cols: 80,
         rows: 24,
         env: vec![],
@@ -4364,6 +4439,7 @@ mod tests {
             unsafe_everything: false,
             ttl: None,
             capabilities: None,
+            allow: None,
             worktree: None,
             checkpoint: false,
             cwd: None,
@@ -4839,7 +4915,7 @@ mod tests {
         let with = |f: fn(&mut AgentPolicy)| {
             let mut p = AgentPolicy::default();
             f(&mut p);
-            settings_a_daemon_could_drop(&p, None, false)
+            settings_a_daemon_could_drop(&p, None, false, false)
         };
 
         // Dimension 8. The flag name is what the refusal prints, so it is part
@@ -4880,7 +4956,7 @@ mod tests {
         );
         // `sandbox` predates every revision here and is never checked, so an
         // all-defaults run against an old daemon still starts.
-        assert!(settings_a_daemon_could_drop(&AgentPolicy::default(), None, false).is_empty());
+        assert!(settings_a_daemon_could_drop(&AgentPolicy::default(), None, false, false).is_empty());
 
         // And the two dimensions travel independently: asking for both names
         // both, at two revisions.
@@ -4890,7 +4966,7 @@ mod tests {
             ..AgentPolicy::default()
         };
         assert_eq!(
-            settings_a_daemon_could_drop(&both, None, false),
+            settings_a_daemon_could_drop(&both, None, false, false),
             vec![
                 ("--connectors", CONNECTOR_POLICY_VERSION),
                 ("--plugins", PLUGIN_POLICY_VERSION),
