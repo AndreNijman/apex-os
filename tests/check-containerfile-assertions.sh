@@ -139,16 +139,28 @@ for path in sys.argv[1:]:
         of them, and two guard the Firefox enterprise policy that every browser
         capsule reads through the sandbox's read-only bind of `/`.
 
-        The path rewrite is the load-bearing part, not a convenience. These
-        assertions open absolute IMAGE paths, and the machine this usually runs
-        on is an APEX machine: `/etc/firefox/policies/policies.json` EXISTS
-        here. Running the script unmodified would parse the LIVE file, pass,
-        and have checked nothing about the repository at all -- and then fail
-        on the CI runner, where the path is absent, for a reason that has
-        nothing to do with the assertion. So every image path in the script and
-        in its argv is resolved through the same COPY map the greps use and
-        rewritten before it runs, and a script with one path that will not
-        resolve is UNRESOLVED rather than a pass.
+        The path rewrite is the load-bearing part, not a convenience, and both
+        halves of that were measured rather than argued. These assertions open
+        absolute IMAGE paths, and the two places this runs disagree about
+        whether those paths exist.
+
+        On an APEX machine `/etc/firefox/policies/policies.json` EXISTS. With
+        the rewrite removed and the repository's own `policies.json` replaced
+        by `{ "policies": }`, this file reports "193 checked, 0 failed" and
+        exits 0: it parsed the LIVE file and learned nothing about the repo.
+
+        On a machine without the image -- a runner -- the same unrewritten
+        handler fails all six resolvable assertions with `FileNotFoundError`
+        and exits 1, for a reason that has nothing to do with what any of them
+        assert. Measured in a python:3.12-slim container over this tree, with
+        the repository's files left valid.
+
+        With the rewrite, that same container reports 194 checked and 0 failed,
+        which is the point: what is being checked is the repository, and it
+        should not matter what the machine underneath happens to have. So every
+        image path in the script and in its argv is resolved through the same
+        COPY map the greps use and rewritten before it runs, and a script with
+        one path that will not resolve is UNRESOLVED rather than a pass.
         """
         global checked, failures, unresolved
         if piped:
