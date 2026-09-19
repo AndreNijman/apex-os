@@ -767,7 +767,8 @@ Two runs exist and they are kept apart by tag:
 | `qual-gaming-new` | 18:34:01 | 20:45:01, by the dead-man restore timer | 144 187 |
 | `qual-gaming-r2` | 22:00:40 | 22:03:49, by a deliberate `SIGTERM` to gamescope | 3 789 |
 
-The first is the **long** run — Steam stayed up for 2 h 06 m — and it is what
+The first is the **long** run — the session was up 2 h 11 m and Steam was still
+working 2 h 06 m in — and it is what
 answers "does this survive". The second is the **instrumented** run: the machine
 was measured live while it was up, which the first could not be. They agree line
 for line on everything §6 asks.
@@ -950,10 +951,12 @@ and live at 22:03, the UI process itself:
 committing buffers, i.e. something is being composited, not an empty root.
 
 **The long run is the durability half.** `qual-gaming-new` held the same stack
-up from 18:34:02 to 20:45:00 — 2 h 06 m — with Steam's background update loop
+up from 18:34:02 to 20:45:00 — **2 h 11 m** — with Steam's background update loop
 completing normally at 18:36:07 (`HTTP 304 Not Modified`, `Nothing to do`) and
 Fossilize shader-cache replay ticking on the dGPU right through to 20:40:32.
-It ended only because this unit's own dead-man timer restarted greetd.
+That last Fossilize line is 2 h 06 m after Steam started and 4 m 28 s before
+the teardown, so the client was still working when the run was cut. It ended
+only because this unit's own dead-man timer restarted greetd.
 
 **§6.3 PASSES. The row can be closed.** For the record, `bwrap` still takes
 SIGSYS core dumps during pressure-vessel's seccomp probing (16 this boot, and
