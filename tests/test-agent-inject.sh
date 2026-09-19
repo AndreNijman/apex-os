@@ -111,6 +111,16 @@ git -C "$PROJ" config user.name t
 # suite. APEX_AGENT_SCRATCH_ROOT is what closes that, and the two assertions
 # below are what say it is closed rather than that it was intended to be.
 export APEX_AGENT_SCRATCH_ROOT="${WORK}/scratch"
+# Pre-created, and 0755 deliberately. The scratch root is the one agent path
+# whose parent is world-writable, so another account can pre-create it in /tmp
+# and own it — and the daemon used to ensure only the session LEAF under it,
+# which is genuinely its own, while walking past whatever the root was. A root
+# the daemon MAKES is 0700 either way now, so a root it FINDS is the only shape
+# that can tell the boundary call from its absence. See
+# `paths::SCRATCH_ROOT_PREFIX` for what was measured with a second account.
+mkdir -p "$APEX_AGENT_SCRATCH_ROOT"
+chmod 0755 "$APEX_AGENT_SCRATCH_ROOT"   # not `mkdir -m`: SC2174, and the mode
+                                        # is the whole point of this fixture
 PRE_SCRATCH="$(ls /tmp/apex-agent 2>/dev/null | sort -n | tr '\n' ' ')"
 
 section "the daemon"
@@ -189,6 +199,21 @@ else
     echo "      this suite would otherwise share /tmp/apex-agent with the real daemon" >&2
     printf '\ninject: %d passed, %d failed\n' "$pass" "$fail"
     exit 1
+fi
+
+# The root, and not only the session directory inside it (P2-016). The control
+# is the line above: the session directory landing where the fixture said is
+# what makes this a measurement of THIS daemon's root rather than of a chmod
+# nobody ran.
+ROOT_MODE="$(stat -c '%a' "$APEX_AGENT_SCRATCH_ROOT" 2>/dev/null)"
+LEAF_MODE="$(stat -c '%a' "${APEX_AGENT_SCRATCH_ROOT}/${A}" 2>/dev/null)"
+if [ "$ROOT_MODE" = "700" ] && [ "$LEAF_MODE" = "700" ]; then
+    ok "the scratch ROOT was made private too, not only the session directory"
+else
+    bad "the scratch ROOT was made private too, not only the session directory"
+    echo "      root ${APEX_AGENT_SCRATCH_ROOT} is ${ROOT_MODE:-<absent>}, wanted 700" >&2
+    echo "      leaf is ${LEAF_MODE:-<absent>}, wanted 700" >&2
+    echo "      a root another account pre-created is left in place by a leaf-only call" >&2
 fi
 
 # The source lives outside the project, which is the case the feature is for:

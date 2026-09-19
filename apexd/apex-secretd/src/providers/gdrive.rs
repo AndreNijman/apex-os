@@ -318,6 +318,14 @@ impl Provider for GdriveProvider {
         config.push_str("write-out = \"\\n%{http_code}\"\n");
 
         let out = broker::run_curl(&config, req.owner).map_err(ProviderError::Failed)?;
+        // Before the status is read, because the status is printed by
+        // `write-out` whether or not the transfer finished. A file over
+        // `max-filesize` makes curl exit 63 with stdout of exactly `"\n200"`,
+        // which reads as a successful read of an empty Drive file. See
+        // `broker::aborted_transfer`.
+        if let Some(why) = broker::aborted_transfer(&out) {
+            return Err(ProviderError::Failed(why));
+        }
         let (body, status) = split_status(&out.stdout);
         let Some(status) = status else {
             return Err(ProviderError::Failed(format!(

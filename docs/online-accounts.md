@@ -229,6 +229,28 @@ not stated gets trusted for things it never did.
   when it is missing, rather than naming `apex cf refresh` whenever a refresh
   token exists — on every machine that had connected, that was a command about
   to be refused for a reason the line did not mention.
+* **No account transport will carry a reply over 3 MiB, and none of them is a
+  way to move a large file.** `apex-secretd`'s `broker::HTTP_MAX_BYTES` is the
+  cap; a read over it is refused, naming curl's exit code, and nothing partial
+  comes back. Stated here because until round 32 it was not refused at all: a
+  file whose `Content-Length` was over the cap arrived as **a successful read
+  of an empty file**, and a transfer cut short by a timeout or by the far end
+  hanging up arrived as a successful read of a PREFIX.
+
+  The cause was one property of curl, and it had nothing to do with any of
+  these providers: **curl's `write-out` runs when a transfer ends, whichever
+  way it ended**, so `%{http_code}` printed `200` under an abort and every
+  transport that read the status off that line believed it. Six sites had it.
+  Two more — `mcp` and `webdav` — did not, because they go through the
+  broker's own helpers, which had always carried curl's exit code out to the
+  caller.
+
+  What this is not: a chunking layer. Reading a large file through an account
+  is still not something this build does, and the refusal says so rather than
+  returning part of one. `apex-backup`'s R2 path is the one place that reads
+  blobs back, and it sizes its chunks against this cap on purpose — see the
+  format module's note.
+
 * **There is no file-manager integration.** APEX ships gvfs with its WebDAV,
   SMB and NFS backends, and `apex devices share` reports which of them are
   present, but no account here mounts anything and nothing hands GTK a

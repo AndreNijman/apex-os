@@ -82,6 +82,14 @@ def object_path(bucket, key):
     return os.path.join(ROOT, bucket, key)
 
 
+#: The one object key this double answers with more than it sends.
+#:
+#: Spelled here rather than in the suite so the two cannot drift: a suite that
+#: asked for some other name would get a plain 404 and the assertion would be
+#: measuring a missing object instead of an aborted transfer.
+OVERSIZE_KEY = "apex-oversize-probe.bin"
+
+
 def safe(segment):
     return segment not in ("", ".", "..") and "/" not in segment
 
@@ -173,6 +181,30 @@ class Handler(BaseHTTPRequestHandler):
             return self.answer(400, b"<Error><Code>InvalidRequest</Code></Error>")
 
         key = "/".join(parts[1:])
+
+        # One key name behaves as an object too large for this build to carry.
+        #
+        # The suite reads it to prove that an aborted transfer reaches the CLI
+        # as a refusal rather than as a short object. It is keyed on the NAME
+        # rather than on a mode flag so the same running double serves it and
+        # every ordinary read in the same session — which is what makes the
+        # successful read just above it a control rather than a separate run.
+        #
+        # Forty megabytes promised, four kilobytes sent. curl compares the
+        # promised length against `max-filesize` BEFORE the body and stops
+        # there, so what the provider sees is curl's `write-out` line and
+        # nothing else: a `200` with an empty body under it.
+        if key == OVERSIZE_KEY:
+            self.log_message("overpromising for %s/%s", bucket, key)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", "40000000")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"x" * 4096)
+            self.close_connection = True
+            return
+
         path = object_path(bucket, key)
         if not os.path.isfile(path):
             return self.answer(

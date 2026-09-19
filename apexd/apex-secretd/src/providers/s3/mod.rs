@@ -516,9 +516,29 @@ impl S3Provider {
         // goes next, and a SigV4 signature is bound to the host it was made for.
         config.push_str("silent\n");
         config.push_str("show-error\n");
+        // The cap, enforced BEFORE the bytes are spent rather than after.
+        //
+        // `broker::run_curl` already refuses a reply over `HTTP_MAX_BYTES` —
+        // but it does so by measuring `out.stdout` once the child has exited,
+        // which means an object of any size at all was read into this daemon's
+        // address space first. That is the thing the cap exists to prevent, and
+        // an object store is the one provider here whose replies are arbitrary
+        // user data. curl stops at the limit; the guard above turns its exit
+        // into a refusal the caller can see.
+        config.push_str(&format!("max-filesize = {}\n", broker::HTTP_MAX_BYTES));
         config.push_str("write-out = \"\\n%{http_code}\"\n");
 
         let out = broker::run_curl(&config, req.owner).map_err(ProviderError::Failed)?;
+        // Before the status is read, because `write-out` prints it whether or
+        // not the transfer finished. An object whose transfer is cut short —
+        // `max-time` expiring, or the far end closing early — arrives as a 200
+        // with a PREFIX of the object under it, and `s3.object.read` hands
+        // that prefix back as the object. A short object is the failure this
+        // provider's own listing cap already refuses to produce. See
+        // `broker::aborted_transfer`.
+        if let Some(why) = broker::aborted_transfer(&out) {
+            return Err(ProviderError::Failed(why));
+        }
         let stdout = out.stdout.as_str();
         let (body, status) = match stdout.rsplit_once('\n') {
             Some((body, tail)) => (body.to_string(), tail.trim().parse::<u16>().ok()),
