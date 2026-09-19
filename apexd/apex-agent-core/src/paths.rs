@@ -342,6 +342,31 @@ pub fn scratch_dir(id: u32) -> PathBuf {
     scratch_root().join(id.to_string())
 }
 
+/// The scratch directory for session `id`, with its ROOT ensured FIRST.
+///
+/// Callers must use this rather than [`ensure_private_dir`] on
+/// [`scratch_dir`], and the difference is not tidiness. The scratch root is
+/// the one directory in this module whose parent is world-writable, so it is a
+/// boundary and has to be a directory this account made — see
+/// [`SCRATCH_ROOT_PREFIX`] for what was measured when it was not. Ensuring
+/// only the leaf reads as safe and is not: the leaf is genuinely this
+/// account's, created inside whatever the attacker left there, and only the
+/// owner of a `0700` directory can rename the entries in it, so the leaf's
+/// privacy rests on the root's.
+pub fn ensure_scratch_dir(id: u32) -> io::Result<PathBuf> {
+    ensure_scratch_dir_in(&scratch_root(), id)
+}
+
+/// [`ensure_scratch_dir`] with the root passed in — the `_in` shape the rest
+/// of this module uses, and what lets a test give it a root of its own without
+/// `set_var`, which is process-global and races every other test.
+pub fn ensure_scratch_dir_in(root: &Path, id: u32) -> io::Result<PathBuf> {
+    ensure_private_dir(root)?;
+    let dir = root.join(id.to_string());
+    ensure_private_dir(&dir)?;
+    Ok(dir)
+}
+
 /// The default scratch root for one account, as a function of the uid alone.
 ///
 /// Split out for the reason every `*_in` in this module is: a test process has
@@ -685,6 +710,66 @@ mod tests {
                 .is_symlink(),
             "the link itself was replaced"
         );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn the_scratch_root_is_ensured_as_a_boundary_and_not_only_the_session_leaf() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Case B of the measurement in `SCRATCH_ROOT_PREFIX`: the ROOT is a
+        // directory this call did not make. Here it is one this account owns
+        // but left loose, which is the single-uid half of the same shape —
+        // a root the call must tighten rather than walk past.
+        let base = std::env::temp_dir().join(format!(
+            "apex-agent-boundary-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let leaf = ensure_scratch_dir_in(&root, 1).expect("create");
+        assert_eq!(leaf, root.join("1"));
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "the root was left as it was found"
+        );
+        assert_eq!(
+            std::fs::metadata(&leaf).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_scratch_root_that_is_a_symlink_is_refused_before_the_session_leaf_exists() {
+        // The half a mode check cannot make. Another account that pre-created
+        // the root owns it, and what it can then put there is a symlink — so
+        // the leaf is created somewhere else entirely and the call still
+        // reports success, because the leaf IS this account's. Ensuring the
+        // root is what refuses, and the target having gained nothing is what
+        // says the refusal happened before any of it.
+        let base = std::env::temp_dir().join(format!(
+            "apex-agent-boundary-link-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let elsewhere = base.join("elsewhere");
+        let root = base.join("root");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, &root).expect("symlink");
+
+        let err = ensure_scratch_dir_in(&root, 1).expect_err("a symlinked root must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert!(
+            !elsewhere.join("1").exists(),
+            "the session directory was created through the symlink"
+        );
+
         std::fs::remove_dir_all(&base).ok();
     }
 
