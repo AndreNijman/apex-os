@@ -19,165 +19,81 @@ pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 
 **Round 31 is COMPLETE and pushed in both repos.** Nothing on it is half-done.
 apex-shell tip `1003192` on `task/p2-b-round31`; apex-os tip `43ffce13` on the
-same branch name (the branch exists in apex-os because apex-shell's CI matches
-on branch name; apex-os got one commit this round, the RTL link-4 guard).
+same branch name (the branch has to exist in both repos because apex-shell's CI
+matches on branch name; apex-os got one commit this round, the RTL link-4
+guard). CI run 35415236747 is read and recorded at the end of the DONE section.
 
 Do NOT re-run any of the following on this laptop. Each is CLOSED here and the
-numbers are in `## DONE`: the RTL mirror suite (`run-rtl-test.sh` 30/0/0,
+numbers are in the DONE section: the RTL mirror suite (`run-rtl-test.sh` 30/0/0,
 `mutate-rtl.sh` 13/13), `mutate-lockscreen-atspi-shim.sh` (8 applied / 6 CAUGHT
-/ 2 HELD, re-earned in `73566cd`), and the recovery read-back pair
+/ 0 SURVIVED / 2 HELD, re-earned in `73566cd`), and the recovery read-back pair
 (`run-recovery-atspi-shim.sh` 33/0/1, `mutate-recovery-atspi-shim.sh` 15 applied
 / 12 CAUGHT / 0 SURVIVED / 3 HELD). Each mutation harness costs eight to ten
-minutes of full bring-ups.
+minutes of full bring-ups, because every mutant is a complete compositor,
+two-bus, whole-shell bring-up.
 
 Next action for whoever picks this up, in order:
 
 1. **Decide what CI should do about `run-rtl-test.sh`'s Arch-runner red, which
-   is no longer an open question.** It has been 17/3/2 there since it landed and
+   is no longer an open question.** That step has been red since it landed and
    the standing queue has carried it as "cause unknown" for four rounds. FOUND
-   26 closed that, and the closing line was CONFIRMED FROM THE RUNNER in CI run
-   35388802498: Arch's upstream `qt6ct 0.11-8` links no `libKF6I18n.so.6`, and
+   26 closed the cause, and the one line of it that had been inferred rather
+   than measured is now CONFIRMED FROM THE RUNNER, twice (CI 35388802498 and
+   35415236747): Arch's upstream `qt6ct 0.11-8` links no `libKF6I18n.so.6`, and
    that library is what loads the Qt catalogue and flips the layout direction.
-   Fedora's build (`qt6ct-0.11-13.20250907git23a985f.fc43`) links it; APEX
-   inherits right-to-left from that packaging choice and from nothing APEX
-   declares. So the runner's three reds are TRUTHFUL ABOUT THAT MACHINE — they
-   are the three rows that need a right-to-left application direction, and that
-   machine has no process that loads the catalogue.
+   Fedora's build (`qt6ct-0.11-13.20250907git23a985f.fc43`) links it, so APEX
+   inherits right-to-left from a packaging choice and from nothing APEX
+   declares. The runner's three reds are therefore **truthful about that
+   machine** — they are exactly the three rows that need a right-to-left
+   application direction, and that machine has no process that loads the
+   catalogue. It is now 19 passed / 3 failed / 3 skipped there (was 17/3/2):
+   same three reds, two more assertions passing.
 
-   That makes it a decision, not an investigation, and it is worth taking to
-   the orchestrator rather than guessing:
+   So this is a decision, not an investigation, and it is worth taking to the
+   orchestrator rather than guessing:
    * leave it red, and accept a permanent red step in `arch-validate`; or
-   * make the runner's configuration match APEX's — install `ki18n` there and
-     `LD_PRELOAD=/usr/lib/libKF6I18n.so.6` for that step only. This is
-     defensible because it reproduces what APEX actually ships rather than
-     hiding a gap, and the LD_PRELOAD route is already MEASURED to work (FOUND
-     26's fourth row: no platform theme at all + that preload → RightToLeft).
-     It must be written so the suite still says which mechanism supplied the
-     direction, or it becomes a gate that inspects nothing.
+   * make the runner's configuration match what APEX actually ships — install
+     `ki18n` there and `LD_PRELOAD=/usr/lib/libKF6I18n.so.6` for that step only.
+     That is defensible because it reproduces APEX rather than hiding a gap, and
+     the route is already MEASURED to work (FOUND 26's fourth row: no platform
+     theme at all + that preload gives RightToLeft). It has to be written so the
+     suite still reports WHICH mechanism supplied the direction, or it becomes a
+     gate that inspects nothing.
 
    **Do NOT close it by making section 1 SKIP.** That section IS the
-   discriminator; making it skip destroys the only instrument and has been
+   discriminator; making it skip destroys the only instrument, and it has been
    refused three times.
 
 2. **Standing queue item 7 — the honest remaining half of RTL.** 0 of 14 window
    roots carry `LayoutMirroring` or `layoutDirection`, so the shell's own
-   windows do not mirror even though the shared settings surface does. This is
-   untouched and nothing measures it yet.
+   windows do not mirror even though the shared settings surface does. Untouched,
+   and nothing measures it yet.
 
-3. **Queue items 1 and 2 need HARDWARE and are not reachable from this
-   machine** — Orca at the login screen, and greeter audio. Say so rather than
-   simulating them. On 2026-09-19 katana was owned by two other agents (a
-   hardware qualification and a TPM run) and was explicitly off limits.
-
-**Two things to hand on rather than to do here.**
-
-* **FOUND 28 is a PRODUCT defect, not an accessibility one**, and it is fixed
-  on this branch (`5327bc6`): the factory reset could not be committed by
-  anybody — mouse, keyboard or screen reader — for as long as that code has
-  existed. Whoever owns the recovery flow should know it was found and how, and
-  should read `mutate-recovery-atspi-shim.sh`'s R12 before touching
-  `RecoveryService._onPlan()` or the page's phase-change re-ack: the guard is
-  now two-deep on purpose and either half alone is sufficient.
-* **The qtdeclarative one-liner (FOUND 20) is still unfiled**, deliberately.
-  Filing on a public tracker is an outward-facing action and Andre's call, not
-  an agent's. It is flagged to him. Until it lands, a real screen reader still
-  gets ONE node from the shell on a real machine, and every read-back in this
-  unit is under a test-only LD_PRELOAD that ships nowhere.
-
-## IN PROGRESS
-
-Nothing. Round 31 is finished and pushed in both repos.
-
-## DONE`: the RTL mirror suite (`run-rtl-test.sh` 30/0/0,
-`mutate-rtl.sh` 13/13), `mutate-lockscreen-atspi-shim.sh` (8 applied / 6 CAUGHT
-/ 2 HELD, re-earned in `73566cd`), and the recovery read-back pair
-(`run-recovery-atspi-shim.sh` 33/0/1, `mutate-recovery-atspi-shim.sh` 15 applied
-/ 12 CAUGHT / 0 SURVIVED / 3 HELD). Each mutation harness costs eight to ten
-minutes of full bring-ups.
-
-Next action for whoever picks this up, in order:
-
-1. **Decide what CI should do about `run-rtl-test.sh`'s Arch-runner red, which
-   is no longer an open question.** It has been 17/3/2 there since it landed and
-   the standing queue has carried it as "cause unknown" for four rounds. FOUND
-   26 closed that, and the closing line was CONFIRMED FROM THE RUNNER in CI run
-   35388802498: Arch's upstream `qt6ct 0.11-8` links no `libKF6I18n.so.6`, and
-   that library is what loads the Qt catalogue and flips the layout direction.
-   Fedora's build (`qt6ct-0.11-13.20250907git23a985f.fc43`) links it; APEX
-   inherits right-to-left from that packaging choice and from nothing APEX
-   declares. So the runner's three reds are TRUTHFUL ABOUT THAT MACHINE — they
-   are the three rows that need a right-to-left application direction, and that
-   machine has no process that loads the catalogue.
-
-   That makes it a decision, not an investigation, and it is worth taking to
-   the orchestrator rather than guessing:
-   * leave it red, and accept a permanent red step in `arch-validate`; or
-   * make the runner's configuration match APEX's — install `ki18n` there and
-     `LD_PRELOAD=/usr/lib/libKF6I18n.so.6` for that step only. This is
-     defensible because it reproduces what APEX actually ships rather than
-     hiding a gap, and the LD_PRELOAD route is already MEASURED to work (FOUND
-     26's fourth row: no platform theme at all + that preload → RightToLeft).
-     It must be written so the suite still says which mechanism supplied the
-     direction, or it becomes a gate that inspects nothing.
-
-   **Do NOT close it by making section 1 SKIP.** That section IS the
-   discriminator; making it skip destroys the only instrument and has been
-   refused three times.
-
-2. **Standing queue item 7 — the honest remaining half of RTL.** 0 of 14 window
-   roots carry `LayoutMirroring` or `layoutDirection`, so the shell's own
-   windows do not mirror even though the shared settings surface does. This is
-   untouched and nothing measures it yet.
-
-3. **Queue items 1 and 2 need HARDWARE and are not reachable from this
-   machine** — Orca at the login screen, and greeter audio. Say so rather than
-   simulating them. On 2026-09-19 katana was owned by two other agents (a
-   hardware qualification and a TPM run) and was explicitly off limits.
+3. **Queue items 1 and 2 need HARDWARE and were not reachable** — Orca at the
+   login screen, and greeter audio. Say so rather than simulating them. On
+   2026-09-19 katana was owned by two other agents (a hardware qualification and
+   a TPM run) and was explicitly off limits.
 
 **Two things to hand on rather than to do here.**
 
-* **FOUND 28 is a PRODUCT defect, not an accessibility one**, and it is fixed
-  on this branch (`5327bc6`): the factory reset could not be committed by
-  anybody — mouse, keyboard or screen reader — for as long as that code has
-  existed. Whoever owns the recovery flow should know it was found and how, and
-  should read `mutate-recovery-atspi-shim.sh`'s R12 before touching
+* **FOUND 28 is a PRODUCT defect, not an accessibility one**, and it is fixed on
+  this branch (`5327bc6`): the factory reset could not be committed by anybody —
+  mouse, keyboard or screen reader — for as long as that code has existed.
+  Whoever owns the recovery flow should know it was found and how, and should
+  read `mutate-recovery-atspi-shim.sh`'s R12 before touching
   `RecoveryService._onPlan()` or the page's phase-change re-ack: the guard is
-  now two-deep on purpose and either half alone is sufficient.
+  now two-deep on purpose and either half alone is sufficient, which is why that
+  mutant needs two edits (FOUND 30).
 * **The qtdeclarative one-liner (FOUND 20) is still unfiled**, deliberately.
   Filing on a public tracker is an outward-facing action and Andre's call, not
   an agent's. It is flagged to him. Until it lands, a real screen reader still
-  gets ONE node from the shell on a real machine, and every read-back in this
-  unit is under a test-only LD_PRELOAD that ships nowhere.
+  gets ONE node from the shell on a real machine, and every read-back this unit
+  has ever done is under a test-only LD_PRELOAD that ships nowhere.
 
 ## IN PROGRESS
 
-Round 31. The recovery MEASUREMENT is done and is in
-`scratch-p2-b/round31/tree-recovery-{before,after,reset-open}.txt` with the
-probe that produced it (`probe-recovery.sh`) and the three `apex` fixtures.
-The QML markup and the two suite pairs are not written yet.
-
-The RTL half is finished:
-
-* apex-shell `6c277ac` — `tests/run-rtl-test.sh` grows three rows and its
-  round-23 "the theme supplies the direction" prose is corrected: the iff
-  (direction flips ⇔ the theme's plugin drags in a Qt translation loader), a
-  self-test proving that predicate can answer NO, and the mechanism pinned
-  past its carrier (no theme + `LD_PRELOAD` of libKF6I18n → RightToLeft).
-  **33 passed / 0 failed / 0 skipped** here under
-  `env -i HOME PATH USER TMPDIR` (was 30/0/0). Both new assertions were proven
-  able to fail by running the suite with a stubbed tool on PATH: an `ldd` that
-  prints nothing turns the iff red and correctly SKIPs the self-test; an
-  `ldconfig` that points libKF6I18n at `/lib64/libz.so.1` gives 32/1/0.
-  `shellcheck -S warning -x` clean. Section 1's three existing assertions are
-  untouched and it is NOT made to skip.
-* apex-os `43ffce13` — `tests/test-apex-platform-theme.sh` gains link 4 in its
-  live section, with the same can-it-answer-NO self-test.
-  **20 passed / 0 failed / 0 skipped** on this booted host (was 18/0/0), and
-  `mutate-platform-theme.sh` re-runs unchanged at **13 applied, 10 CAUGHT /
-  0 SURVIVED / 0 MISSCORED, 3 HELD / 0 FALSE-RED**. Note FOUND 10's corollary
-  bit again: that harness aborts "tree dirty" on an uncommitted edit, so it
-  has to be run after the commit.
-
+Nothing. Round 31 is finished and pushed in both repos, and the two worktrees
+(`wt-p2-b4`, `wt-p2-b4-sh`) are clean with their HEADs matching their remotes.
 
 ## DONE
 
@@ -914,6 +830,13 @@ than this branch.
     accessibility bus (FOUND 16) with a Press action, so it could be pressed
     over AT-SPI and the refusal observed.
 
+    **FIXED in apex-shell `5327bc6`, both ways round**, so the description
+    above is of the defect AS FOUND and not of the shipped code: the two
+    assignments are the right way round, and the page re-acknowledges on a
+    phase change so the order stops being load-bearing. That makes the guard
+    two-deep, which is why its regression mutant needs two edits — see FOUND
+    30. The gate is `mutate-recovery-atspi-shim.sh` R12, CAUGHT.
+
 29. **A suite that calls one assertion by TWO names — one when it passes and
     another when it fails — breaks every instrument pointed at it, and the
     breakage reads as a wrong expectation rather than as a defect.** Found by
@@ -968,6 +891,19 @@ than this branch.
     "pressing Erase before the loss list exists commits NOTHING" is three-deep,
     so the harness records it as deliberately unmutated in its own totals
     output rather than quietly omitting it.
+
+31. **Carrying roadmap evidence forward means READING it back correctly, and
+    the obvious regex drops the last line.** `set-status.py` REPLACES evidence,
+    so every round here has to read the existing block and append to it. Slicing
+    the task's block as `s[i:s.find("\n- id:", i)]` leaves the final evidence
+    line WITHOUT its trailing newline, so a `(?:    .*\n)+` match stops one line
+    short. On 2026-09-19 that made a correct `set-status.py` write look like a
+    66-character truncation, and the next step would have been to "fix" a tool
+    that had done nothing wrong. Append the newline back before matching, then
+    compare the stored text against the intended text character for character —
+    both items here round-trip exactly and the file parses at 128 tasks. Checked
+    against the raw file, not against the reader, which is the only reason the
+    false alarm did not become a bug report.
 
 ## BLOCKED ON
 
