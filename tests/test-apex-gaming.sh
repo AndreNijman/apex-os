@@ -191,6 +191,30 @@ apex_env() {
         "$APEX" "$@" 2>&1
 }
 
+# `apex_env` with stderr DISCARDED rather than merged.
+#
+# Everything else in this suite wants both streams, because a refusal printed
+# on stderr is as much a result as a report printed on stdout. One verb is the
+# exception: `--gamescope-device-args` is consumed by a script, so what lands
+# on stdout has to be exactly the arguments and nothing else — and a suite that
+# merged the reasoning line into it could not tell a clean separation from a
+# broken one.
+apex_stdout() {
+    local h="$1"; shift
+    local -a extra=()
+    while [ "${1:-}" != "--" ]; do extra+=("$1"); shift; done
+    shift
+    env -i \
+        HOME="$h" \
+        XDG_CONFIG_HOME="${h}/.config" \
+        XDG_STATE_HOME="${h}/.local/state" \
+        PATH="${BIN}:/usr/bin:/bin" \
+        DBUS_SYSTEM_BUS_ADDRESS="$DEAD_BUS" \
+        APEX_TEST_CALLS="$CALLS" \
+        "${extra[@]}" \
+        "$APEX" "$@" 2>/dev/null
+}
+
 want() {  # name, expected substring, actual text
     local name=$1 substr=$2 text=$3
     if grep -qF -- "$substr" <<<"$text"; then ok "$name"
@@ -652,6 +676,105 @@ is "a session script that is not executable blocks" "False" \
    "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["ready"])')"
 want "…and says it is not executable" "not executable" \
      "$(jget "$j" 'import json,sys; print(" | ".join(json.load(sys.stdin)["blockers"]))')"
+
+# ─────────────────────────────────────────────────────────────────────────────
+section "a refused read is neither present nor absent"
+# ─────────────────────────────────────────────────────────────────────────────
+# THE DEFECT, from §6 of the katana qualification. The report said
+#
+#   sudoers rule    : not measured — could not read the path: Permission denied
+#
+# and `sudo apex gaming` answered `yes` for exactly that file. /etc/sudoers.d is
+# 0750 root:root, so EACCES arrives whether or not the file exists — the probe
+# genuinely cannot tell, and the thing that was missing was the sentence naming
+# the command that can. Treated as a defect of the RENDERER and not of that one
+# row: every filesystem-read row goes through the same helper and had the same
+# three-way answer collapsed into two.
+EACCES="${WORK}/root-eacces"; mkgaming "$EACCES"
+chmod 0000 "$EACCES/etc/sudoers.d"
+if [ -r "$EACCES/etc/sudoers.d/040-apex-session-select" ]; then
+    # root, or CAP_DAC_OVERRIDE: the seal does not hold and the assertions
+    # below would pass vacuously.
+    chmod 0755 "$EACCES/etc/sudoers.d"
+    printf 'SKIP  this account can read a 0000 directory; the refusal cannot be staged\n'
+else
+    j="$(apex_env "$H" "APEX_ROOT=$EACCES" -- gaming --json)"
+    txt="$(apex_env "$H" "APEX_ROOT=$EACCES" -- gaming 2>&1)"
+    chmod 0755 "$EACCES/etc/sudoers.d"
+
+    is "a refused row is not reported as absent" "None" \
+       "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["checks"]["switch_sudoers"]["value"])')"
+    # A machine reader needs the distinction as much as a person does, so it is
+    # a key rather than a substring of the reason.
+    is "…and the JSON says it was a refusal, not a gap" "True" \
+       "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["checks"]["switch_sudoers"]["permission_denied"])')"
+    is "…which a measured row does not claim" "False" \
+       "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["checks"]["session_desktop"].get("permission_denied", False))')"
+    want "…the row reads as unknown, not as unmeasured" "unknown" "$txt"
+    want "…and names the command that answers it" "sudo apex gaming" "$txt"
+    want "…and the footer says which rows need it" "sudoers rule" "$txt"
+    # It is still not a blocker: a rule that could not be read has not been
+    # shown to be missing, so Gaming Mode is still reported as able to start.
+    is "…and a refusal does not turn into a blocker" "True" \
+       "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["ready"])')"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+section "which screen Gaming Mode will use"
+# ─────────────────────────────────────────────────────────────────────────────
+# §6.1. The rule itself is held by apexd-core/tests/gpu_parity.rs over the same
+# fixtures; what is asserted here is that `apex gaming` surfaces it, that
+# --gamescope-device-args prints the form the session consumes, and that it
+# still spawns nothing to work it out.
+KAT="${WORK}/root-katana"; mkgaming "$KAT"
+mkdir -p "$KAT/sys/class/drm/card1/device" "$KAT/sys/class/drm/card2/device" \
+         "$KAT/sys/class/drm/card1-eDP-1" "$KAT/sys/class/drm/card2-HDMI-A-1"
+printf '0x8086\n' > "$KAT/sys/class/drm/card1/device/vendor"
+printf '0x46a6\n' > "$KAT/sys/class/drm/card1/device/device"
+printf '1\n'      > "$KAT/sys/class/drm/card1/device/boot_vga"
+printf '0x10de\n' > "$KAT/sys/class/drm/card2/device/vendor"
+printf '0x249d\n' > "$KAT/sys/class/drm/card2/device/device"
+printf '0\n'      > "$KAT/sys/class/drm/card2/device/boot_vga"
+printf 'connected\n' > "$KAT/sys/class/drm/card1-eDP-1/status"
+printf 'connected\n' > "$KAT/sys/class/drm/card2-HDMI-A-1/status"
+
+j="$(apex_env "$H" "APEX_ROOT=$KAT" -- gaming --json)"
+is "the monitor's connector is what Gaming Mode will ask for" "HDMI-A-1" \
+   "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["display"]["output"])')"
+is "…on the card it is actually wired to" "card2" \
+   "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["display"]["card"])')"
+is "…and that card's PCI id is what gamescope gets" "10de:249d" \
+   "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["display"]["pci_id"])')"
+is "…with no problem to report" "None" \
+   "$(jget "$j" 'import json,sys; print(json.load(sys.stdin)["display"]["problem"])')"
+
+# The exact line the session script splices into its gamescope command.
+sel="$(apex_stdout "$H" "APEX_ROOT=$KAT" -- gaming --gamescope-device-args | tr '\n' ' ')"
+is "--gamescope-device-args prints the flags on stdout, one per line, and nothing else" \
+   "--prefer-vk-device 10de:249d --prefer-output HDMI-A-1 " "$sel"
+# …and the reasoning is on stderr, where the session script logs it. Without
+# this the row above would pass just as well if the explanation were dropped.
+want "…with the reasoning on stderr" "is an external display" \
+     "$(apex_env "$H" "APEX_ROOT=$KAT" -- gaming --gamescope-device-args)"
+rc_out="$(apex_env "$H" "APEX_ROOT=$KAT" -- gaming --gamescope-device-args >/dev/null 2>&1; echo $?)"
+is "…and exits 0 on a complete answer" 0 "$rc_out"
+
+# Its exit status is about the SELECTION, not about readiness — a machine can
+# be perfectly ready and have nothing useful to say about which card to pin,
+# and a session script keying off the wrong one would refuse to start on it.
+DARK="${WORK}/root-dark"; mkgaming "$DARK"
+mkdir -p "$DARK/sys/class/drm/card1/device" "$DARK/sys/class/drm/card1-eDP-1"
+printf '0x8086\n' > "$DARK/sys/class/drm/card1/device/vendor"
+printf '0x46a6\n' > "$DARK/sys/class/drm/card1/device/device"
+printf 'disconnected\n' > "$DARK/sys/class/drm/card1-eDP-1/status"
+rc_out="$(apex_env "$H" "APEX_ROOT=$DARK" -- gaming --gamescope-device-args >/dev/null 2>&1; echo $?)"
+is "…and non-zero when no screen could be chosen" 1 "$rc_out"
+rc_out="$(apex_env "$H" "APEX_ROOT=$DARK" -- gaming >/dev/null 2>&1; echo $?)"
+is "…while the readiness verb still says the machine is ready" 0 "$rc_out"
+want "a machine with no usable choice is warned about, not left quiet" \
+     "may open the wrong GPU" \
+     "$(jget "$(apex_env "$H" "APEX_ROOT=$DARK" -- gaming --json)" \
+        'import json,sys; print(" | ".join(json.load(sys.stdin)["warnings"]))')"
 
 # ─────────────────────────────────────────────────────────────────────────────
 section "controllers, read from sysfs and not from /dev"
