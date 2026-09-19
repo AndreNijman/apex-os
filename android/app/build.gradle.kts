@@ -160,6 +160,11 @@ dependencies {
     // and then discovers zero tests — which reports success. The two source
     // sets therefore use different frameworks on purpose.
     androidTestImplementation(libs.androidx.test.runner)
+    // Not imported anywhere. It is here to raise the floor, exactly as
+    // `fragment` is above: Compose's test rule reaches `Espresso.onIdle()` on
+    // every `waitForIdle`, the transitive resolution is 3.5.0, and 3.5.0 is
+    // broken on every Android from 14 up. See the note in libs.versions.toml.
+    androidTestImplementation(libs.androidx.test.espresso.core)
     androidTestImplementation(libs.androidx.test.rules)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.uiautomator)

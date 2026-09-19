@@ -32,6 +32,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.apexos.remote.core.agent.AgentNames
@@ -267,14 +269,23 @@ fun StartAgentScreen(
 
             Spacer(Modifier.height(16.dp))
             Label("Checkpoint")
+            val checkpointLabel = "Capture the project before the agent starts"
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Switch(checked = checkpoint, onCheckedChange = { checkpoint = it })
+                Switch(
+                    checked = checkpoint,
+                    onCheckedChange = { checkpoint = it },
+                    // Its words are in the Column BESIDE it, which is a sibling
+                    // and not a descendant, so the merged node a screen reader
+                    // reads carried no name at all — TalkBack announced this as
+                    // "off, switch" and nothing else. Found by walking the
+                    // semantics tree on a Pixel 7a; the Accessibility Test
+                    // Framework passed the same screen, because an unnamed
+                    // switch is not one of the rules ATF has.
+                    modifier = Modifier.semantics { contentDescription = checkpointLabel },
+                )
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(
-                        "Capture the project before the agent starts",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
+                    Text(checkpointLabel, style = MaterialTheme.typography.bodySmall)
                     // What it does AND what it does not, before it is chosen —
                     // which is as close as this app can get to P1-056's
                     // "checkpoint/undo actions show consequences before
