@@ -531,7 +531,101 @@ hardcoded — the two machines produce different ids from the same code path.
 
 ## 1. The rebase
 
-*(pending — the per-SHA tag had not been published at 17:20 AWST)*
+```
+$ sudo bootc switch --transport registry \
+      ghcr.io/andrenijman/apex-os:apex-7f647470e222cfa23e0853cac45ef3f7e74c252e
+layers already present: 69; layers needed: 44 (6.2 GB)
+Deploying...done (11 seconds)
+Queued for next boot: ghcr.io/andrenijman/apex-os:apex-7f647470e222cfa23e0853cac45ef3f7e74c252e
+  Digest: sha256:be3bdd0c63848811fbbd3a76f17a50f40e90b1eeb8614b93993ec69419f3aafb
+$ sudo systemctl reboot        # clean reboot, never a hard reset
+```
+
+The tag was published at **18:18:30 AWST**; CI 35433705393's tiers finished
+`rust` → `changes` → `core` (~53 min) → `base` → `image`. `bootc switch` did
+**not** refuse despite the rollback deployment being `Unlocked: hotfix`, so the
+2026-09-17 hand-copied `/usr` overlay needed no special handling.
+
+**Landed, read back after the reboot:**
+
+```
+$ rpm-ostree status
+* ostree-unverified-registry:ghcr.io/andrenijman/apex-os:apex-7f647470e222cfa23e0853cac45ef3f7e74c252e
+                   Digest: sha256:be3bdd0c63848811fbbd3a76f17a50f40e90b1eeb8614b93993ec69419f3aafb
+                  Version: apex (2026-09-19T10:09:10Z)
+  ostree-unverified-registry:ghcr.io/andrenijman/apex-os:apex-266dcc572c51bdf9ec421d79eaa8784583184cd2   (rollback)
+                   Digest: sha256:ba263890b69619532b13b9c64e0ac5dcb8eced78bffdc9fd542ccac92607503d
+```
+
+Up at 18:29:42, `State: idle`, the previous deployment kept as the rollback.
+
+### 1.1 The five controls, flipped — and the two that must not
+
+Same commands as §0.5, same machine, 18:30 AWST:
+
+| reading | old image | new image |
+|---|---|---|
+| `apex gaming --gamescope-device-args` | `error: unexpected argument`, rc 2 | `--prefer-vk-device 10de:249d` / `--prefer-output HDMI-A-1`, **rc 0** |
+| `grep -c 'prefer-vk-device\|prefer-output'` in the session script | 0 | **3** |
+| `grep -c 'CapEff\|CapPrm\|CapAmb'` in the session script | 0 | **7** |
+| `getcap $(command -v gamescope)` | empty, rc 0 | empty, rc 0 — **unchanged, as required** |
+| any `vrr_capable` in sysfs | none | none — **unchanged, as required** |
+
+**The selector's answer on the real machine is byte-identical to the prediction
+§0.10 made from the sysfs snapshot**, including the prose:
+
+```
+── the screen Gaming Mode will use ──
+output             : HDMI-A-1 on card2 (NVIDIA)
+gamescope device   : --prefer-vk-device 10de:249d
+why                : HDMI-A-1 on card2 is an external display; 2 connected output(s) across 2 card(s)
+adaptive sync      : not published — no connector on this machine has vrr_capable
+```
+
+and §6.2's two rows already read the way the run-book wants, from ssh, before
+any session is started:
+
+```
+realtime limit     : yes
+realtime capability: no (/proc/self/status)
+```
+
+`pam_cap` is still absent from `/etc/pam.d/{greetd,system-auth,postlogin,login}`
+on the new image and `/etc/security/capability.conf` still does not exist, so
+§0.6's fidelity argument for the `initial_session` route holds here too.
+
+### 1.2 §0.2 CONFIRMED ON THE MACHINE — the image update delivered the fix to nobody
+
+This is the first thing measured after the reboot, before anything was touched:
+
+```
+$ sudo journalctl -u apex-sysext-rebuild -b
+Sep 19 18:29:40 apex systemd[1]: Starting apex-sysext-rebuild.service - Rebuild APEX user packages…
+Sep 19 18:29:40 apex systemd[1]: Finished apex-sysext-rebuild.service - Rebuild APEX user packages…
+$ systemctl show apex-sysext-rebuild -p Result -p ExecMainStatus
+Result=success   ExecMainStatus=0
+```
+
+Started and finished **in the same second**, successfully, having done nothing.
+The proof that it did nothing is the extension itself:
+
+```
+$ sudo sha256sum /var/lib/extensions/apex-user.raw
+99749240e8762e2b4eaf0c3840a07beba249961e1cad86f798805c22c58282ed   <- byte-identical to §0.1
+$ sudo jq -r '{os_version_id,pkg_compat_level,built,image_sha256}' /var/lib/apex/pkg/state.json
+{ "os_version_id": "43", "pkg_compat_level": 2, "built": "2026-09-19T01:43:06Z",
+  "image_sha256": "99749240e8762e2b4eaf0c3840a07beba249961e1cad86f798805c22c58282ed" }
+$ systemd-sysext status
+/usr   apex-user   Sat 2026-09-19 18:29:33 AWST      <- the OLD extension, re-merged
+$ ls /usr/share/vulkan/icd.d/ | grep -c i686
+0
+```
+
+**A machine that takes this image update still has zero 32-bit Vulkan ICDs.**
+The engine on disk is fixed; the extension built by the old engine is what is
+merged over `/usr`, and nothing in the update path rebuilds it. §0.2 predicted
+this from reading the two guards; this is the measurement.
+
 
 ## 2. pkg-share
 
