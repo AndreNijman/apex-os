@@ -4,7 +4,7 @@ repo: apex-os
 worktree: /var/tmp/apex-work/wt-pkg-etc-label
 branch: task/pkg-etc-label
 base: roadmap/v2.2 @ 777ba028
-commits: 3ce33791 — pushed to origin/task/pkg-etc-label, **NOT landed**
+commits: b18cc705 — pushed to origin/task/pkg-etc-label, **NOT landed**
 
 ## NEXT
 
@@ -17,15 +17,30 @@ for it.** Two things remain, and only one of them is anybody's job right now.
 touching three files, all of which this unit owned:
 
 ```
-files/system/libexec/apex-pkg            +80/-1     the fix (install_etc + relabel_etc)
+files/system/libexec/apex-pkg            +90/-1     the fix (install_etc + relabel_etc)
 tests/test-apex-pkg-etc-label.sh         new suite, 21 assertions
 .github/workflows/pr-validation.yml      new step in the `engine` job, floor 9
 ```
 
-Landings are merges, not rebases. Check for drift on `apex-pkg` before merging —
-`pkg-share` and `pkg-update` also live in that file and this unit did not touch
-anything either of them touched (`relabel_etc` is new, and the only edits inside
-`install_etc` are added lines).
+Landings are merges, not rebases. `roadmap/v2.2` moved to `faa1992d` while this
+ran; checked rather than assumed — `git log 777ba028..origin/roadmap/v2.2 --`
+over the three files above prints **nothing**, and
+`git merge-tree --write-tree origin/roadmap/v2.2 task/pkg-etc-label` writes a
+tree, so the merge is clean as of that tip. `pkg-share` and `pkg-update` also
+live in `apex-pkg`; `relabel_etc` is new and every edit inside `install_etc` is
+an added line.
+
+**If the `engine` job goes red on the first run, read `PROBE_MODE` and
+`PROBE_CAPABILITY` before anything else.** This suite has never run on an
+ubuntu-24.04 runner — it was built and measured on an SELinux workstation, and
+coverage mode was produced there by forcing it. `mode coverage` with **9 passed
+/ 0 failed is the correct result on the runner**, not a degradation: the floor
+is 9 for that reason. `PROBE_CAPABILITY bind-failed` means rootless-privileged
+`mount --bind` did not work there; that is already the designed fallback
+(coverage mode uses the container's own `/etc` and needs no bind), so it should
+still be green — but it is the line that tells you which path was taken. A
+`SKIP` means podman, the repository or the policy rpm was unavailable and
+nothing ran at all.
 
 ### 2. What a real machine still has to confirm, and it is short
 
@@ -99,10 +114,13 @@ ran knows what it actually wrote:
   parent's type by transition, which is wrong wherever policy has an opinion
   (`/etc/cron.d` is `system_cron_spool_t`); one that was already there is not
   ours to relabel;
-* the removal pass records the paths it **declines** to delete.
-  `/etc/security/limits.d/10-gamemode.conf` on katana was exactly that —
-  tracked, no longer shipped, still mislabelled, and the same defect rather than
-  a separate accident.
+* the removal pass records the paths it **declines** to delete **and that no
+  installed package owns**. `/etc/security/limits.d/10-gamemode.conf` on katana
+  was exactly that — tracked, no longer shipped, owned by no package, still
+  mislabelled, and the same defect rather than a separate accident. An
+  image-owned survivor is deliberately excluded: it reaches `etc.list` because a
+  32-bit rpm shipped the same path, but `install_etc` never wrote it and its
+  label is the image's.
 
 `$ETC_SAVE` gets one `restorecon -F -R`: that tree is engine-owned top to
 bottom, so `-R` is unambiguous there in a way it could never be under `/etc`.

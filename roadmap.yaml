@@ -686,7 +686,7 @@ tasks:
     greetd byte-identical to its backup with zero timers armed, and ~/apex-pre-rebase-20260919 intact. The NVMe
     controllers swapped across this reboot AGAIN -- the APEX Micron 220534D1CB81 moved from nvme0n1 to nvme1n1 --
     so address disks by serial or label, never by device name. || 2026-09-20, unit pkg-etc-label, the /etc
-    mislabel FIXED on branch task/pkg-etc-label (commit 3ce33791, not landed). install_etc now collects every path
+    mislabel FIXED on branch task/pkg-etc-label (commit b18cc705, not landed). install_etc now collects every path
     it creates or overwrites as it goes and hands the list to restorecon -F -i -f, so the label comes from the
     LOADED POLICY instead of from cp -a preserving the extraction tree's rpm_var_lib_t. Each branch records only
     what it actually wrote (the two .apexnew branches leave the original alone, a directory that already existed
