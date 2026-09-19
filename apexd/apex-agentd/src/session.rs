@@ -526,6 +526,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
                     session_origin.origin,
                     session_origin.source,
                 ),
+                apex_secret_core::paths::socket(),
             )
             .map_err(|e| anyhow!("{e}"))?;
             let ca = minted.ca.to_string_lossy().into_owned();

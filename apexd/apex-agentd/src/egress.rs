@@ -559,6 +559,514 @@ fn couple(tcp: TcpStream, unix: UnixStream) {
 mod tests {
     use super::*;
 
+    // ── P2-012 route B: what the daemon terminates, and what it cannot ──────
+    //
+    // The property this section exists for cannot be asserted from inside the
+    // daemon, because a daemon that intercepted everything would look exactly
+    // like one that intercepted the pin — from in here. So it is asserted from
+    // the CAPSULE's side, by the only thing a capsule can actually observe:
+    // WHICH CERTIFICATE it was handed.
+    //
+    // Two loopback origins, each with a certificate signed by a CA of its own,
+    // and a client that trusts exactly one root set at a time. A tunnelled
+    // `CONNECT` reaches the origin's own certificate; a terminated one reaches
+    // the minted leaf, which the origin's CA did not sign and could not.
+    //
+    // The pair is what gives either half meaning. "The handshake succeeded"
+    // alone says nothing — it succeeds on both arms, against different roots.
+
+    /// A certificate authority and one server certificate under it.
+    struct Pki {
+        ca: PathBuf,
+        leaf: PathBuf,
+        key: PathBuf,
+    }
+
+    fn openssl(args: &[&str]) {
+        let out = std::process::Command::new("openssl")
+            .args(args)
+            .output()
+            .expect("openssl is in the image and is what mints these");
+        assert!(
+            out.status.success(),
+            "openssl {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Mint a CA and a `127.0.0.1` server certificate under it.
+    fn pki(dir: &Path, tag: &str) -> Pki {
+        let ca_key = dir.join(format!("{tag}-ca.key"));
+        let ca = dir.join(format!("{tag}-ca.pem"));
+        let key = dir.join(format!("{tag}.key"));
+        let csr = dir.join(format!("{tag}.csr"));
+        let leaf = dir.join(format!("{tag}.pem"));
+        let ext = dir.join(format!("{tag}.ext"));
+        openssl(&[
+            "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+            "-days", "1", "-subj", &format!("/CN={tag} authority"),
+            "-addext", "basicConstraints=critical,CA:TRUE",
+            "-addext", "keyUsage=critical,keyCertSign",
+            "-keyout", &ca_key.to_string_lossy(), "-out", &ca.to_string_lossy(),
+        ]);
+        openssl(&[
+            "req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+            "-subj", "/CN=127.0.0.1",
+            "-keyout", &key.to_string_lossy(), "-out", &csr.to_string_lossy(),
+        ]);
+        std::fs::write(
+            &ext,
+            "subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\nbasicConstraints=critical,CA:FALSE\n",
+        )
+        .expect("ext");
+        openssl(&[
+            "x509", "-req", "-days", "1", "-set_serial", "2",
+            "-in", &csr.to_string_lossy(),
+            "-CA", &ca.to_string_lossy(), "-CAkey", &ca_key.to_string_lossy(),
+            "-extfile", &ext.to_string_lossy(), "-out", &leaf.to_string_lossy(),
+        ]);
+        Pki { ca, leaf, key }
+    }
+
+    /// A TLS origin on loopback that records the `Authorization` it was sent
+    /// and echoes it back in the body.
+    ///
+    /// Echoing is deliberate: it is the one way a capsule could end up holding
+    /// the credential without APEX handing it one, so the scrub has to be
+    /// exercised by a site that really does send it back.
+    struct Origin {
+        port: u16,
+        seen: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Origin {
+        fn start(pki: &Pki) -> Origin {
+            let config = crate::intercept::server_config(&pki.leaf, &pki.key).expect("server config");
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorder = Arc::clone(&seen);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(stream) = stream else { continue };
+                    let config = Arc::clone(&config);
+                    let recorder = Arc::clone(&recorder);
+                    std::thread::spawn(move || {
+                        let Ok(mut conn) = rustls::ServerConnection::new(config) else {
+                            return;
+                        };
+                        let mut sock = stream;
+                        while conn.is_handshaking() {
+                            if conn.complete_io(&mut sock).is_err() {
+                                return;
+                            }
+                        }
+                        let mut head = Vec::new();
+                        let mut byte = [0u8; 1];
+                        let mut tls = rustls::Stream::new(&mut conn, &mut sock);
+                        while !head.ends_with(b"\r\n\r\n") {
+                            match tls.read(&mut byte) {
+                                Ok(0) | Err(_) => return,
+                                Ok(_) => head.push(byte[0]),
+                            }
+                        }
+                        let text = String::from_utf8_lossy(&head).into_owned();
+                        let authorization: Vec<String> = text
+                            .split("\r\n")
+                            .filter(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+                            .map(|l| l.split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default())
+                            .collect();
+                        recorder.lock().expect("lock").extend(authorization.iter().cloned());
+                        let body = format!("you sent [{}]\n", authorization.join(" AND "));
+                        let answer = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = tls.write_all(answer.as_bytes());
+                        let _ = tls.flush();
+                        conn.send_close_notify();
+                        let _ = conn.complete_io(&mut sock);
+                    });
+                }
+            });
+            Origin { port, seen }
+        }
+
+        fn authorizations(&self) -> Vec<String> {
+            self.seen.lock().expect("lock").clone()
+        }
+    }
+
+    fn roots(pems: &[&Path]) -> rustls::RootCertStore {
+        use rustls::pki_types::pem::PemObject;
+        let mut store = rustls::RootCertStore::empty();
+        for pem in pems {
+            for cert in rustls::pki_types::CertificateDer::pem_file_iter(pem).expect("pem") {
+                store.add(cert.expect("cert")).expect("add");
+            }
+        }
+        store
+    }
+
+    /// What a capsule saw when it opened one `CONNECT`.
+    struct Seen {
+        established: bool,
+        handshake: Result<(), String>,
+        body: String,
+    }
+
+    /// Open one `CONNECT` through `serve` and speak TLS over it.
+    ///
+    /// This is the capsule's side of the tunnel, which is the side the whole
+    /// property is about: it trusts exactly the roots it is given and nothing
+    /// else, the way a capsule's browser trusts exactly what was installed in
+    /// its profile.
+    fn through_the_proxy(
+        allow: &Allowlist,
+        intercept: Option<&crate::intercept::Intercept>,
+        target: &str,
+        trust: rustls::RootCertStore,
+    ) -> Seen {
+        let (server, client) = UnixStream::pair().expect("socketpair");
+        std::thread::scope(|scope| {
+            scope.spawn(|| serve(1, server, allow, intercept));
+
+            let mut capsule = client;
+            capsule
+                .write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+                .expect("connect line");
+            capsule.set_read_timeout(Some(ANSWER_DEADLINE)).ok();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                match (&capsule).read(&mut byte) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => head.push(byte[0]),
+                }
+            }
+            let answer = String::from_utf8_lossy(&head).into_owned();
+            if !answer.starts_with("HTTP/1.1 200") {
+                return Seen {
+                    established: false,
+                    handshake: Err(answer),
+                    body: String::new(),
+                };
+            }
+
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let config = rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .expect("versions")
+                .with_root_certificates(trust)
+                .with_no_client_auth();
+            let name = rustls::pki_types::ServerName::try_from("127.0.0.1").expect("name");
+            let mut conn =
+                rustls::ClientConnection::new(Arc::new(config), name).expect("client connection");
+            while conn.is_handshaking() {
+                if let Err(e) = conn.complete_io(&mut capsule) {
+                    return Seen {
+                        established: true,
+                        handshake: Err(e.to_string()),
+                        body: String::new(),
+                    };
+                }
+            }
+            let mut tls = rustls::Stream::new(&mut conn, &mut capsule);
+            let _ = tls.write_all(b"GET /page HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+            let _ = tls.flush();
+            let mut body = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match tls.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => body.extend_from_slice(&buf[..n]),
+                }
+            }
+            Seen {
+                established: true,
+                handshake: Ok(()),
+                body: String::from_utf8_lossy(&body).into_owned(),
+            }
+        })
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("apex-egress-{}-{tag}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("scratch");
+        dir
+    }
+
+    fn capsule_record(service: &str) -> apex_secret_core::capability::CapabilityRecord {
+        let mut rec = apex_secret_core::capability::CapabilityRecord::new(
+            service,
+            apex_secret_core::operation::BROWSER_PRESENT,
+            "",
+        );
+        rec.project = Some("/tmp/capsule".into());
+        rec
+    }
+
+    /// The whole of "which destination is read and which is not", from the
+    /// only place it can be observed.
+    #[test]
+    fn the_pinned_destination_is_terminated_and_every_other_stays_an_opaque_tunnel() {
+        let dir = scratch("terminate");
+        let pinned_pki = pki(&dir, "pinned");
+        let other_pki = pki(&dir, "other");
+        let pinned = Origin::start(&pinned_pki);
+        let other = Origin::start(&other_pki);
+
+        let allow = Allowlist::parse(&[
+            format!("127.0.0.1:{}", pinned.port),
+            format!("127.0.0.1:{}", other.port),
+        ])
+        .expect("allowlist");
+        let pin = Destination::parse(&format!("127.0.0.1:{}", pinned.port)).expect("pin");
+        // A socket nothing is listening on: the certificate a capsule is shown
+        // is decided before the secret service is ever contacted, and this
+        // test is about the certificate.
+        let minted = crate::intercept::mint(
+            &dir,
+            &pin,
+            capsule_record("intranet"),
+            dir.join("no-such-secret-service.sock"),
+        )
+        .expect("mint");
+        let intercept = &minted.intercept;
+
+        let per_run = || roots(&[&minted.ca]);
+        let pinned_own = || roots(&[&pinned_pki.ca]);
+        let other_own = || roots(&[&other_pki.ca]);
+
+        // THE PIN IS TERMINATED. The capsule is handed a leaf the daemon
+        // minted, so the root that verifies it is the per-run CA and the
+        // origin's own authority does not.
+        let seen = through_the_proxy(&allow, Some(intercept), &pin.to_string(), per_run());
+        assert!(seen.established, "the tunnel was refused: {:?}", seen.handshake);
+        assert!(
+            seen.handshake.is_ok(),
+            "the capsule did not accept the minted leaf: {:?}",
+            seen.handshake
+        );
+        let seen = through_the_proxy(&allow, Some(intercept), &pin.to_string(), pinned_own());
+        assert!(
+            seen.handshake.is_err(),
+            "the ORIGIN's own authority verified this handshake, so the daemon did not \
+             terminate it"
+        );
+
+        // EVERY OTHER DESTINATION IS A TUNNEL. The capsule reaches the
+        // origin's own certificate, which the daemon holds no key for and
+        // could not have presented.
+        let elsewhere = format!("127.0.0.1:{}", other.port);
+        let seen = through_the_proxy(&allow, Some(intercept), &elsewhere, other_own());
+        assert!(
+            seen.handshake.is_ok(),
+            "a destination that is not the pin did not reach its own certificate: {:?}",
+            seen.handshake
+        );
+        assert!(seen.body.contains("200 OK"), "{}", seen.body);
+        let seen = through_the_proxy(&allow, Some(intercept), &elsewhere, per_run());
+        assert!(
+            seen.handshake.is_err(),
+            "the per-run CA verified a destination that was supposed to be tunnelled, which \
+             means the daemon terminated it"
+        );
+
+        // AND A SESSION THAT ASKED FOR NOTHING GETS WHAT IT ALWAYS GOT. The
+        // control that separates "the pin is terminated" from "this daemon
+        // terminates whatever it is given".
+        let seen = through_the_proxy(&allow, None, &pin.to_string(), pinned_own());
+        assert!(
+            seen.handshake.is_ok(),
+            "a session with no credential had its connection terminated: {:?}",
+            seen.handshake
+        );
+        assert!(seen.body.contains("200 OK"), "{}", seen.body);
+        let seen = through_the_proxy(&allow, None, &pin.to_string(), per_run());
+        assert!(
+            seen.handshake.is_err(),
+            "a session with no credential was handed a minted leaf"
+        );
+
+        // Nothing was authenticated anywhere in this test: the secret service
+        // it was pointed at does not exist. The origins agree.
+        assert!(
+            pinned.authorizations().iter().all(|a| a.is_empty()),
+            "{:?}",
+            pinned.authorizations()
+        );
+        assert!(
+            other.authorizations().iter().all(|a| a.is_empty()),
+            "{:?}",
+            other.authorizations()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The secret service, on a private socket and store, started by this test
+    /// and killed with it.
+    ///
+    /// The binary is found beside this test's own executable rather than
+    /// through `CARGO_BIN_EXE_apex-secretd`, which cargo defines only for
+    /// integration tests of the package that declares the binary — and `serve`
+    /// is private to this one. It PANICS when the binary is not there rather
+    /// than skipping: a fixture that cannot tell "not built" from "passed" is
+    /// a defect this repository has shipped before.
+    ///
+    /// **It can be STALE, and nothing here can tell.** `cargo test -p
+    /// apex-agentd` does not rebuild another package's binary, so this test
+    /// runs against whatever `apex-secretd` was last compiled. Two mutations
+    /// of `present.rs` were measured as GREEN before that was noticed and were
+    /// red the moment the binary was rebuilt. `cargo test --workspace` — what
+    /// CI runs — builds every package's binaries first and does not have the
+    /// problem; anyone mutating `apex-secretd` and running this file alone
+    /// must `cargo build -p apex-secretd` between the edit and the run.
+    struct SecretService {
+        child: std::process::Child,
+        socket: PathBuf,
+    }
+
+    impl SecretService {
+        fn start(dir: &Path, trust: &Path) -> SecretService {
+            let binary = std::env::current_exe()
+                .expect("the test's own path")
+                .parent()
+                .and_then(|deps| deps.parent())
+                .map(|target| target.join("apex-secretd"))
+                .expect("a target directory above this test");
+            assert!(
+                binary.exists(),
+                "{} is not built, so this test would assert nothing. Run `cargo build -p \
+                 apex-secretd` or `cargo test --workspace`",
+                binary.display()
+            );
+            let socket = dir.join("secretd.sock");
+            let child = std::process::Command::new(&binary)
+                .arg("--socket")
+                .arg(&socket)
+                .arg("--store")
+                .arg(dir.join("store"))
+                // The origin's certificate is signed by a CA this test minted
+                // a moment ago, so the machine's own trust store knows nothing
+                // about it. This is the variable `rustls-native-certs` reads
+                // first, and it is the same one `curl` and `git` honour — not
+                // a hook this test asked for.
+                .env("SSL_CERT_FILE", trust)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("start apex-secretd");
+            let service = SecretService { child, socket };
+            for _ in 0..200 {
+                if apex_secret_core::client::Client::connect_at(&service.socket).is_ok() {
+                    return service;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            panic!("apex-secretd did not come up on {}", service.socket.display());
+        }
+
+        fn client(&self) -> apex_secret_core::client::Client {
+            apex_secret_core::client::Client::connect_at(&self.socket).expect("connect")
+        }
+    }
+
+    impl Drop for SecretService {
+        fn drop(&mut self) {
+            // Only ever this test's own child.
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// The whole chain, from the capsule's socket to the site's log.
+    ///
+    /// Three claims in one run, and none of them is worth anything without the
+    /// other two: the site was sent the credential, the capsule was not, and
+    /// the capsule is the thing that asked.
+    #[test]
+    fn a_capsules_request_reaches_the_site_with_a_credential_it_is_never_given() {
+        const SENTINEL: &str = "apex-egress-4b71ef03-do-not-leak";
+
+        let dir = scratch("chain");
+        let site_pki = pki(&dir, "site");
+        let site = Origin::start(&site_pki);
+        let service = SecretService::start(&dir, &site_pki.ca);
+
+        service
+            .client()
+            .add(
+                "intranet",
+                "127.0.0.1",
+                "https",
+                Some("x-access-token"),
+                "",
+                "bearer",
+                Some(site.port),
+                &apex_secret_core::SecretValue::new(SENTINEL.into()),
+            )
+            .expect("add");
+        service
+            .client()
+            .call(&apex_secret_core::protocol::Request::Grant {
+                // What an owner types for a capsule: `--everywhere`, because a
+                // capsule's working directory is a throwaway tree that will
+                // not exist the next time one runs.
+                project: apex_secret_core::store::ANY_PROJECT.to_string(),
+                service: "intranet".into(),
+                capability: apex_secret_core::operation::BROWSER_PRESENT.into(),
+                revoke: false,
+            })
+            .expect("grant");
+
+        let allow = Allowlist::parse(&[format!("127.0.0.1:{}", site.port)]).expect("allowlist");
+        let pin = Destination::parse(&format!("127.0.0.1:{}", site.port)).expect("pin");
+        let minted = crate::intercept::mint(
+            &dir,
+            &pin,
+            capsule_record("intranet"),
+            service.socket.clone(),
+        )
+        .expect("mint");
+
+        let seen = through_the_proxy(
+            &allow,
+            Some(&minted.intercept),
+            &pin.to_string(),
+            roots(&[&minted.ca]),
+        );
+        assert!(seen.established, "the tunnel was refused: {:?}", seen.handshake);
+        assert!(seen.handshake.is_ok(), "{:?}", seen.handshake);
+        assert!(seen.body.starts_with("HTTP/1.1 200 OK"), "{}", seen.body);
+
+        // The site was sent the credential — so this run is about
+        // authentication and not about a tunnel that happened to work.
+        assert_eq!(
+            site.authorizations(),
+            vec![format!("Bearer {SENTINEL}")],
+            "the site was not authenticated"
+        );
+
+        // And the capsule was not, even though the site sent it straight back.
+        // Same length, because the site declared a `Content-Length` the
+        // browser is going to read to the end of.
+        assert!(
+            !seen.body.contains(SENTINEL),
+            "the credential reached the capsule: {}",
+            seen.body
+        );
+        assert!(
+            seen.body.contains(&format!("you sent [Bearer {}]", "x".repeat(SENTINEL.len()))),
+            "the echo was not redacted in place: {}",
+            seen.body
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// How long a test will wait for the proxy's answer before calling it a
     /// defect. Generous: the work behind every one of these is microseconds.
     const ANSWER_DEADLINE: Duration = Duration::from_secs(10);
