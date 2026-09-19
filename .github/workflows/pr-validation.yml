@@ -1032,6 +1032,25 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-apex-gaming.sh
 
+      # What the Gaming Mode session actually hands gamescope, measured by
+      # RUNNING the session script with a fake gamescope that records its argv.
+      # Before this, the only thing behind apex-gaming-session was `bash -n` in
+      # Containerfile.apex — a parser, which accepted every version of the
+      # script that produced the 2026-09-19 katana failures: gamescope on the
+      # Intel iGPU with the external monitor dark, and `--rt` passed to a
+      # gamescope that logged "No CAP_SYS_NICE" and ran at normal priority.
+      #
+      # Both of those are now decisions the script makes from sysfs and
+      # /proc/self/status, so both are reachable on a runner with no GPU: the
+      # suite feeds it katana's exact DRM topology as a fixture tree. It uses
+      # the REAL apex binary for the selection rule, through APEX_ROOT, so what
+      # is under test is the code that ships rather than a fake that agrees
+      # with the test.
+      - name: Run Gaming Mode session assertions
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-apex-gaming-session.sh
+
       # §22's `apex boot status`, driven against fixture roots that stand in
       # for a GRUB machine and for a systemd-boot machine mid-rollback. The
       # sd-boot fixture's entry list is the document `bootctl list --json`
@@ -2881,6 +2900,8 @@ jobs:
             tests/test-apex-greet-session-bus.sh tests/test-apex-a11y-stack.sh \
             tests/test-labwc-keybind-reload.sh \
             tests/test-apex-safe-graphics.sh \
+            tests/test-apex-gaming-session.sh \
+            files/system/libexec/apex-gaming-session \
             files/system/libexec/apex-safe-graphics \
             files/system/libexec/apex-safe-graphics-terminal \
             tests/test-apex-chaos.sh tests/test-apex-vm.sh

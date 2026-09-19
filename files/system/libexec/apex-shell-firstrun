@@ -792,6 +792,99 @@ NIRIAPEX
         log "seeded niri autostart -> ${NIRI_CONF}"
     fi
 
+    # Resolved, not assumed on PATH. Step 6's own guard is
+    # `command -v niri || [ -x /usr/bin/niri ]`, and the second half is there
+    # because a per-user systemd unit is exactly where a binary is installed but
+    # not on PATH. A bare `niri` there exits 127, `! niri validate` reads that
+    # as "invalid", and both blocks below would take the refusal branch and
+    # never act — silently, on every login, forever. That is the failure this
+    # whole section exists to remove, so it must not be reintroduced inside it.
+    NIRI_BIN="$(command -v niri 2>/dev/null || echo /usr/bin/niri)"
+
+    # ── 6a-pre. undo the ONE thing niri's stock config starts that APEX
+    #           replaces: waybar ──────────────────────────────────────────────
+    #
+    # MEASURED ON KATANA 2026-09-19 (evidence §5.4): the niri session ran TWO
+    # bars.
+    #
+    #     $ pgrep -a -u andre waybar     -> 21723 waybar
+    #     $ pgrep -a -u andre quickshell -> 21730 quickshell -c /usr/share/apex-shell
+    #
+    # The cause is upstream's own example config. Line 271 of
+    # niri's default-config.kdl is
+    #
+    #     // This line starts waybar, a commonly used bar for Wayland compositors.
+    #     spawn-at-startup "waybar"
+    #
+    # and that file is what lands in ~/.config/niri/config.kdl — whether niri
+    # writes it on first run or the block above copies it. Then step 6 appends
+    # the APEX autostarts, which start quickshell. Both bars, every login, on
+    # every niri machine.
+    #
+    # WHY THIS EDITS THE USER'S FILE RATHER THAN SHIPPING AN APEX CONFIG
+    # Shipping /usr/share/apex/niri/config.kdl, the way Hyprland and labwc are
+    # seeded, would fix the NEXT install and nothing else: every machine that
+    # already has a config.kdl — which is every machine niri has ever started
+    # on, including the one the defect was measured on — keeps its waybar line
+    # forever, because the seeding block above only writes a file that is
+    # absent. The defect is in files that already exist, so the fix has to be
+    # too. It also avoids vendoring 27 KB of someone else's GPL config into
+    # this repository and then owning it.
+    #
+    # WHAT IS AND IS NOT TOUCHED
+    # Exactly one line, matched in full, and only when it is upstream's own
+    # spelling at column 0 with no modifications. A user who edited that line
+    # meant it and keeps it. Nothing else in the file is changed — asserted
+    # below by hashing the file with that line removed and requiring the two
+    # hashes to be equal, which no substitution elsewhere could survive.
+    #
+    # Other things upstream's default turns on are deliberately NOT changed
+    # here; they are recorded in docs/gaming-and-sessions.md for a decision
+    # rather than taken silently: the "Important Hotkeys" pop-up at startup,
+    # and stock binds for alacritty, fuzzel, swaylock and orca. Those binds
+    # matter more than they look, because ApexShellKeybinds.kdl is created
+    # EMPTY and stays empty until APEX Settings writes it — so on a fresh
+    # machine the stock binds are the only binds there are.
+    NIRI_BAR_MARKER='disabled by APEX: quickshell is this system'"'"'s bar'
+    NIRI_STOCK_WAYBAR='spawn-at-startup "waybar"'
+    if [ -f "${NIRI_CONF}" ] && ! grep -qF "${NIRI_BAR_MARKER}" "${NIRI_CONF}"; then
+        _bar_line="$(grep -nxF "${NIRI_STOCK_WAYBAR}" "${NIRI_CONF}" | cut -d: -f1)"
+        _bar_count="$(printf '%s' "${_bar_line}" | grep -c . || true)"
+        if [ -z "${_bar_line}" ]; then
+            : # nothing to do: no stock waybar spawn in this config
+        elif [ "${_bar_count}" != "1" ]; then
+            # Two of them is not a config this block wrote or understands.
+            log "WARN: ${NIRI_CONF} has ${_bar_count} stock waybar spawns; leaving it alone"
+        elif ! "${NIRI_BIN}" validate --config "${NIRI_CONF}" >/dev/null 2>&1; then
+            # Already broken. Editing it would make this provisioner look like
+            # the cause of a failure it did not create.
+            log "WARN: ${NIRI_CONF} does not validate; refusing to disable the waybar spawn"
+        else
+            cp -a "${NIRI_CONF}" "${NIRI_CONF}.pre-apex-bar.bak" 2>/dev/null || true
+            _bar_before="$(sed "${_bar_line}d" "${NIRI_CONF}" | sha256sum | cut -d' ' -f1)"
+            _bar_lines="$(wc -l < "${NIRI_CONF}")"
+            # One line in, one line out. No line is added or removed, which is
+            # what makes the hash comparison below a complete check rather than
+            # a partial one.
+            _bar_tmp="${NIRI_CONF}.apexnew.$$"
+            awk -v n="${_bar_line}" -v repl="// ${NIRI_STOCK_WAYBAR}   // ${NIRI_BAR_MARKER}" \
+                'NR == n { print repl; next } { print }' \
+                "${NIRI_CONF}" > "${_bar_tmp}" && mv -f "${_bar_tmp}" "${NIRI_CONF}"
+            rm -f "${_bar_tmp}"
+            _bar_after="$(sed "${_bar_line}d" "${NIRI_CONF}" | sha256sum | cut -d' ' -f1)"
+            _bar_now="$(wc -l < "${NIRI_CONF}")"
+            if [ "${_bar_before}" != "${_bar_after}" ] || [ "${_bar_now}" -ne "${_bar_lines}" ]; then
+                cp -a "${NIRI_CONF}.pre-apex-bar.bak" "${NIRI_CONF}"
+                log "ERROR: ${NIRI_CONF} changed somewhere this block did not intend; restored the backup"
+            elif ! "${NIRI_BIN}" validate --config "${NIRI_CONF}" >/dev/null 2>&1; then
+                cp -a "${NIRI_CONF}.pre-apex-bar.bak" "${NIRI_CONF}"
+                log "ERROR: niri rejected config.kdl without the waybar spawn; restored the backup"
+            else
+                log "disabled niri's stock waybar spawn (line ${_bar_line}) -> ${NIRI_CONF}"
+            fi
+        fi
+    fi
+
     # ── 6a. the generated configs must actually be INCLUDED ──────────────────
     # This is niri's equivalent of the three `source =` lines the Hyprland
     # template carries, and without it APEX Settings is a lie on niri: both
@@ -811,14 +904,6 @@ NIRIAPEX
     # already has the autostart block predates these includes and still needs
     # them. This block only ever APPENDS — there is no substitution here, so
     # there is no regex that can eat the file.
-    # Resolved, not assumed on PATH. Step 6's own guard is
-    # `command -v niri || [ -x /usr/bin/niri ]`, and the second half is there
-    # because a per-user systemd unit is exactly where a binary is installed but
-    # not on PATH. A bare `niri` there exits 127, `! niri validate` reads that
-    # as "invalid", and the block would take the refusal branch and never add
-    # the includes — silently, on every login, forever. That is the failure this
-    # whole section exists to remove, so it must not be reintroduced inside it.
-    NIRI_BIN="$(command -v niri 2>/dev/null || echo /usr/bin/niri)"
     NIRI_INC_MARKER='APEX generated configs (apex-shell-firstrun)'
     if [ -f "${NIRI_CONF}" ] && ! grep -qF "${NIRI_INC_MARKER}" "${NIRI_CONF}"; then
         if [ ! -f "${CFG_DIR}/ApexShellInput.kdl" ] || \
