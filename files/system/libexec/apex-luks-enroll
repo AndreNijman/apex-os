@@ -555,11 +555,24 @@ if (( WITH_PIN )); then
     # refuses the capability read must not stop an enrolment the user asked for.
     # What must NOT happen is inventing the numbers, so an unreadable part says
     # so instead.
+    #
+    # It must be asked of THE SAME TPM the slot is being enrolled against.
+    # tpm2-tools reads TPM2TOOLS_TCTI and otherwise falls back to /dev/tpmrm0 —
+    # which is the right answer for `auto` and the wrong one for every explicit
+    # device, and the symptom was this branch printing "would not report its
+    # lockout properties" for a TPM that reports them perfectly well.
+    getcap_env=()
+    [[ "$TPM2_DEVICE" == auto ]] || getcap_env=(TPM2TOOLS_TCTI="$TPM2_DEVICE")
     if command -v tpm2_getcap >/dev/null 2>&1 \
-       && caps="$(tpm2_getcap properties-variable 2>/dev/null)"; then
+       && caps="$(env "${getcap_env[@]}" tpm2_getcap properties-variable 2>/dev/null)"; then
+        # Both output shapes. tpm2-tools 5.7 prints `TPM2_PT_X: 0x20` on one
+        # line; older builds print the name then an indented `raw:` line. A
+        # parser that knew only one of them reported `unknown` for real numbers.
         for p in TPM2_PT_MAX_AUTH_FAIL TPM2_PT_LOCKOUT_INTERVAL TPM2_PT_LOCKOUT_RECOVERY; do
-            v="$(printf '%s\n' "$caps" | grep -A2 "^$p:" | grep -m1 'raw:' \
-                 | tr -d ' ' | cut -d: -f2)"
+            v="$(awk -v k="$p:" '
+                $1 == k { if (NF > 1) { print $2; exit } want = 1; next }
+                want && $1 == "raw:" { print $2; exit }
+            ' <<<"$caps")"
             note "$p = ${v:-unknown}"
         done
         note ""
