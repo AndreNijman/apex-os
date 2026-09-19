@@ -126,6 +126,33 @@ answers it from the session log alone.
 
 ---
 
+## 3a. Adaptive sync is asked about the right screen, and the silence is named (§7.2)
+
+`vrr_capable` does not exist anywhere on katana. The NVIDIA connector publishes
+seven sysfs attributes and that is not one of them; the Intel connector
+publishes fifteen and also lacks it. The old probe globbed every connector on
+the machine, matched nothing, passed nothing and **said nothing** — so on a
+240 Hz monitor, "this machine has no VRR" and "this driver does not publish the
+property" produced identical silence. They are different answers and only one
+of them is about the hardware.
+
+Two changes. The probe now runs *after* the device selection and asks about the
+connector this session is actually going to use — the old glob would have
+enabled adaptive sync on the strength of the laptop panel while the session ran
+on the monitor. And all three outcomes are logged distinctly: the output says
+`1`, the output says `0`, and nothing on this machine publishes the property at
+all.
+
+```sh
+for p in /sys/class/drm/*/vrr_capable; do [ -e "$p" ] && echo "$p = $(cat "$p")"; done
+```
+
+Empty on katana. If VRR matters for Gaming Mode on NVIDIA, the property has to
+come from somewhere other than this sysfs attribute — that is a separate piece
+of work and this row stays COULD NOT RUN.
+
+---
+
 ## 4. Safe Graphics and a screen on the second GPU (§5.5)
 
 The pixman software renderer cannot import DMA-BUFs, and wlroots' multi-GPU

@@ -38,6 +38,9 @@
 #                          set to 1 to let gamescope pick its own GPU, which is
 #                          the behaviour this script had before 2026-09-19 and
 #                          the one that put Gaming Mode on the wrong screen
+#    APEX_ROOT, VRR_SYS    fixture roots, for the tests. APEX_ROOT is the one
+#                          `apex gaming` already honours; VRR_SYS stands in for
+#                          /sys. Neither is set in a real session.
 # ─────────────────────────────────────────────────────────────────────────────
 # Deliberately NOT `set -e`: every optimisation below is best-effort, and none of
 # them may prevent the session from starting. The hard requirements are checked
@@ -185,19 +188,6 @@ else
     log "  load is worse; nothing else is affected. See evidence §6.2."
 fi
 
-# ── VRR ─────────────────────────────────────────────────────────────────────
-# Only ask for adaptive sync if a connected output actually advertises it.
-# Passing it blindly is harmless on paper but muddies the failure diagnosis.
-VRR_ARGS=()
-for p in /sys/class/drm/card*-*/vrr_capable; do
-    [ -r "$p" ] || continue
-    if [ "$(cat "$p" 2>/dev/null)" = "1" ]; then
-        VRR_ARGS=(--adaptive-sync)
-        log "VRR-capable output found — enabling adaptive sync"
-        break
-    fi
-done
-
 # ── HDR ─────────────────────────────────────────────────────────────────────
 # Left OFF on purpose. gamescope's HDR path needs the WSI layer and a display
 # that genuinely supports it, and getting it wrong washes out every colour on
@@ -267,9 +257,25 @@ else
     fi
     [ "${_sel_err}" = /dev/null ] || rm -f "${_sel_err}"
     if [ "${_sel_rc}" -eq 0 ] && [ -n "${_sel_out}" ]; then
+        _prev=""
         while IFS= read -r _line; do
-            [ -n "${_line}" ] && DEVICE_ARGS+=("${_line}")
+            [ -n "${_line}" ] || continue
+            DEVICE_ARGS+=("${_line}")
+            # The VRR probe below needs the connector by name, and the card it
+            # is on, so it can ask about THIS screen rather than any screen.
+            # Taken from the flags themselves rather than parsed a second time
+            # out of the selector's prose, so the two cannot disagree.
+            [ "${_prev}" = "--prefer-output" ] && DEVICE_OUTPUT="${_line}"
+            _prev="${_line}"
         done <<< "${_sel_out}"
+        if [ -n "${DEVICE_OUTPUT:-}" ]; then
+            for _n in "${VRR_SYS:-/sys}"/class/drm/card*-"${DEVICE_OUTPUT}"; do
+                [ -d "${_n}" ] || continue
+                _n="${_n##*/}"
+                DEVICE_CARD="${_n%%-*}"
+                break
+            done
+        fi
         log "GPU/output: ${DEVICE_ARGS[*]}"
     else
         log "ERROR: no complete GPU/output selection (apex exited ${_sel_rc})."
@@ -277,6 +283,45 @@ else
         log "  laptop that is the iGPU, and the external monitor will stay dark."
         log "  Override with APEX_GAMESCOPE_ARGS=\"--prefer-vk-device <vendor>:<device>\"."
     fi
+fi
+
+# ── VRR ─────────────────────────────────────────────────────────────────────
+# Only ask for adaptive sync if the output this session is actually going to
+# use advertises it. This runs AFTER the selection above for that reason: the
+# old version globbed every connector on the machine and would have enabled
+# adaptive sync for the panel's sake on a session running on the monitor.
+#
+# MEASURED ON KATANA 2026-09-19 (§7.2) and the reason the silent case now
+# speaks: `vrr_capable` does not exist anywhere on that machine. The NVIDIA
+# connector publishes seven sysfs attributes and that is not one of them; the
+# Intel connector publishes fifteen and also lacks it. So the loop matched
+# nothing, `--adaptive-sync` was never passed, and NOTHING SAID SO — on a
+# 240 Hz monitor, the reading "this machine has no VRR" and the reading "this
+# driver does not publish the property" produce exactly the same silence.
+# They are different answers and only one of them is about the hardware.
+VRR_ARGS=()
+vrr_any="no"
+for p in "${VRR_SYS:-/sys}"/class/drm/card*-*/vrr_capable; do
+    [ -e "$p" ] && vrr_any="yes" && break
+done
+vrr_path=""
+if [ -n "${DEVICE_OUTPUT:-}" ] && [ -n "${DEVICE_CARD:-}" ]; then
+    vrr_path="${VRR_SYS:-/sys}/class/drm/${DEVICE_CARD}-${DEVICE_OUTPUT}/vrr_capable"
+fi
+if [ -n "${vrr_path}" ] && [ -r "${vrr_path}" ]; then
+    if [ "$(cat "${vrr_path}" 2>/dev/null)" = "1" ]; then
+        VRR_ARGS=(--adaptive-sync)
+        log "VRR: ${DEVICE_OUTPUT} advertises vrr_capable=1 — enabling adaptive sync"
+    else
+        log "VRR: ${DEVICE_OUTPUT} publishes vrr_capable=0 — not enabling adaptive sync"
+    fi
+elif [ "${vrr_any}" = "no" ]; then
+    log "VRR: no connector on this machine publishes vrr_capable at all, so this is"
+    log "  'the driver does not say', NOT 'the display has no VRR'. On NVIDIA that is"
+    log "  expected — the property has to come from somewhere else. Evidence §7.2."
+else
+    log "VRR: ${DEVICE_OUTPUT:-the chosen output} publishes no vrr_capable, though other"
+    log "  connectors on this machine do — not enabling adaptive sync for a different screen"
 fi
 
 # ── gamescope ───────────────────────────────────────────────────────────────
