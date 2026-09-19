@@ -497,7 +497,16 @@
       "id": "sbom-attest",
       "items": [],
       "after": [],
-      "title": "cosign cannot post the SBOM attestation to Rekor"
+      "title": "cosign cannot post the SBOM attestation to Rekor",
+      "closed": "CLOSED 2026-09-20 (round 32) -- SOLVED, VERIFIED AND LANDED as merge 97c9e8f2. The whole image job is green for the first time, INCLUDING the two steps that had been skipped and therefore unproved in every failing run: promoting the published tags and asserting they all resolve to this digest. REKOR WAS NOT RETURNING 413 AND THE CEILING IS NOT 16 MB. Sixteen direct posts at ascending sizes, each retested: at or below 25,000,092 B Rekor answers 400 having FULLY PROCESSED the body; at or above 25,165,916 B it answers 502 with size_upload=0 in ~0.43 s, refused by the fronting proxy on Content-Length before a byte is sent. The boundary brackets 24 MiB exactly and was re-confirmed from a GitHub runner. That also explains the message: 502 is in go-retryablehttp's RETRYABLE class, so cosign retried a refusal that can never succeed and said `giving up after 4 attempt(s)` -- structurally incapable of naming its cause -- and size_upload=0 is why four attempts fit in 3.86 s. CHOSEN: trim the predicate, KEEP the transparency log. Published is the complete package inventory (9830 packages, every version, 9830 purls, 55,652 CPEs, both Electron trees); file rows and the 16,463-edge dependency graph are dropped. Same signature, same keyless identity, same spdxjson type, same public Rekor entry. The cost is in docs/trust-enforcement.md: the SBOM is a flat list and no longer says which files are in the image -- structure, reproducible from the published digest with one syft run, where identity is not reproducible from anything smaller. THE OCI-ARTEFACT OPTION WOULD HAVE BEEN ACTIVELY HARMFUL: verify.rs:540 requires predicateType to contain spdx, and a FAILED provenance check is refused even at provenance=warn, so it would have refused updates on every machine in the field. DO NOT, per the unit's own warning: tighten provenance=warn to enforce, or edit the `no published APEX image has an SBOM attestation yet` sentences in docs/ or verify.rs. Both are STILL TRUE -- this was a task branch and the PUBLISH guard moved no tracked tag. They belong to the first green main build. THREE THINGS THAT COST REAL TIME, recorded so they do not again: SYFT_FILE_METADATA_SELECTION=none is NOT the lever (13%, not 64%) and does not reduce RSS; `local a=\"$1\" b=\"${a}\"` is an unbound-variable error under set -u and threw away 915 s; and a workflow `run:` block is capped at 21,000 characters, which surfaces as a JOBLESS FAILED RUN, not a failing step."
+    },
+    {
+      "id": "integrated-image",
+      "items": [
+        "P0-001"
+      ],
+      "after": [],
+      "title": "Build the integrated image and qualify it on katana (the L16 half is Andre's)"
     }
   ],
   "_completed_units": {
