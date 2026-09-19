@@ -4,6 +4,30 @@ Repo: apex-os. Branch `task/integrated-image`, cut 2026-09-19T18:32Z off
 `roadmap/v2.2` @ `97c9e8f2`. Worktree `/var/tmp/apex-work/wt-integrated-image`.
 Tip `d6bea820` = 97c9e8f2 + ONE evidence-only commit (no image content).
 
+## THE IMAGE EXISTS AND IS GREEN END TO END
+**Run 35461554871 completed `success` at 2026-09-19T19:45Z, 1 h 12 m.**
+`changes` success, `rust` success, `core` success (13 steps, none skipped),
+`base` success, `image` success (17 steps, none skipped), `installer-iso` and
+`qcow2` skipped because their dispatch inputs default false.
+
+```
+ghcr.io/andrenijman/apex-os:apex-97c9e8f25ee55593a97502505f51c6115ebbee7c
+  digest sha256:55fc9e4ee9b2c1b27045cba5a594a40e97fb0d73c70170cfbe0003f5cd4d73b0
+```
+and the log says `not publishing from refs/heads/task/integrated-image:
+per-SHA tags written` — no floating tag moved, the fleet is untouched.
+
+**Two of the four rows are already answered BY THE BUILD** (hardware still
+owes the other half of each):
+- p2-b: `catalogue: compiled 1 catalogue(s) from apex-shell 03d77f96…`,
+  `Apex.I18n built and proved to load: 29776 bytes`, `Apex.I18n stage
+  complete`, `catalogue: apex-shell_de.qm loads under LANG=de`. The in-build
+  offscreen probe's `APEXI18N: registerTypes uri=Apex.I18n` grep passed. This
+  is the FIRST full base build ever to carry the catalogue stage.
+- coredump: STEP 137 copies the drop-in, STEP 138 asserts the merged config
+  and prints `coredump storage bounded: MaxUse=256M KeepFree=2G (default was
+  a 4 GiB cap)`.
+
 ## IMAGE BUILD — THE RUN ID, RECORDED FIRST
 - **Run 35461554871**, workflow_dispatch on `task/integrated-image` @ 97c9e8f2,
   queued 2026-09-19T18:33:05Z.
@@ -121,12 +145,29 @@ deliberately NOT made here and the one read-only command to check the L16:
     `/usr/lib64/qt6/bin/qml -platform offscreen` with
     `QML_IMPORT_PATH=/usr/lib64/apex-shell/qml` — which `post-boot.sh` does.
 
+## SWITCH DONE, REBOOT PENDING
+`bootc switch` is COMPLETE and the new deployment is **staged**; `ostree admin
+status` shows three deployments and the rollback still `Pinned: yes`.
+
+**A trap that cost 15 minutes here, write it down:** `bootc switch` run
+straight over ssh is SIGHUPed when the ssh channel closes, and the Bash tool's
+600 s cap closes it. The pull (6.3 GB, 67 of 113 layers) survived in the image
+store but nothing was staged, and `bootc status` said `staged: none` — which
+reads exactly like a failed pull. Re-run it as a detached transient unit:
+`sudo systemd-run --unit=intimg-switch --collect
+--property=TimeoutStartSec=infinity --service-type=oneshot /usr/bin/bootc
+switch --transport registry <IMG>`, then poll `journalctl -u intimg-switch`.
+The second run found `No changes` and staged in 10 s.
+
+Next step is a CLEAN `systemctl reboot` — a crash before a clean shutdown
+discards a staged update and it reads as "updated but nothing changed".
+
 ## NEXT
-Monitor `bdxfncpqo` is watching run 35461554871 and emits each job result.
-When it is green: `sudo bootc switch --transport registry
-ghcr.io/andrenijman/apex-os:apex-97c9e8f2…` on katana, `systemctl reboot`,
-then wait with a BOUNDED ssh retry loop (the in-boot rebuild makes first boot
-slow) and work the four rows above in that order. `apex update` is not the
+After the reboot: wait with a BOUNDED ssh retry loop (the in-boot rebuild
+makes first boot slow), wait for `apex-sysext-rebuild.service` to reach a
+TERMINAL state (`active` or `failed`) before running `post-boot.sh` — while it
+is `activating`, `state.json` still reads 2 and the ICD count can read 0 — and
+work the four rows above in that order. `apex update` is not the
 route — katana tracks a per-SHA tag that never moves and a non-main dispatch
 moves no floating tag; the unit's re-open condition is "an image built from a
 tip carrying b512cf12, taken by a machine that already has an extension", and
