@@ -68,7 +68,17 @@ installs a QTranslator into the real quickshell process, and the SHIPPED
 `AgentHelpContent` singleton reads back **German inside quickshell itself**,
 offscreen, with no compositor. Scratch: `scratch-p2-b/round33/spike/`.
 
-Next action: turn the spike into the landed pair —
+**UNCOMMITTED WORK EXISTS in `/var/tmp/apex-work/wt-p2-b6-sh`**: five new
+files (`tests/apex-i18n-plugin.cpp`, `tests/apex-i18n-host.cpp`,
+`tests/apex-i18n-qmldir`, `tests/run-i18n-host-test.sh`,
+`tests/mutate-i18n-host.sh`) plus `ci.yml` wiring and REQUIRED entries. The
+suite is **24 passed / 0 failed / 0 skipped** on this laptop under
+`env -i HOME PATH USER TMPDIR`; `check-suites-run-in-ci.sh` 69/69,
+`check-headless-runners.sh` 28/0, `check-no-conflict-markers.sh` PASS,
+`shellcheck -S warning -x` clean, `ci.yml` re-parses as YAML. Next action:
+`mutate-i18n-host.sh` is running / needs running, then COMMIT.
+
+Original plan, kept for the rest of the round: turn the spike into the landed pair —
 `tests/apex-i18n-plugin.cpp` (the artefact), `tests/run-i18n-host-test.sh`
 (build + bare-`QQmlEngine` host half that RUNS on the Arch runner + in-situ
 quickshell half that skips by name there), `tests/mutate-i18n-host.sh`, CI

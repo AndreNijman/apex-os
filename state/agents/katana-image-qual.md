@@ -195,6 +195,17 @@ Blocks, in order, all from §6:
 - 17:12 — pre-rebase baseline captured (see plan step P).
 - 17:15 — read §6 of `docs/gaming-and-sessions.md` end to end and §§3, 4, 6 of
   the round-31 evidence; plan above written.
+- **17:30 — THE GREETD ROUTE IS PROVEN AND §6.3 IS ANSWERED ON THE LOGIN PATH.**
+  A greetd-launched process running as andre has
+  `CapPrm=0 CapEff=0 CapAmb=0`, `CapInh=0000000800000000` (= `cap_wake_alarm`
+  only, inherited from greetd's own ambient set and dropped to inheritable on
+  the uid change), `Seat=seat0 TTY=tty1 Class=user`, and **`bwrap --ro-bind / /
+  --dev /dev /bin/true` returns 0**. Per §6.3's own rule, a zero permitted set
+  means the bwrap cause is NOT the session's capabilities — round 31's
+  `systemd-run --property=PAMName=login` harness was the source. Evidence §0.6,
+  commit `431f0e84`, pushed. Re-run on the new image through the real Gaming
+  Mode session, which logs the same three values itself.
+  `/etc/greetd/config.toml` restored, `diff` identical, greeter back on tty1.
 - 17:28 — advisor pass before the rebase; three corrections folded (the
   compat-level remedy is self-hiding, greetd's stderr goes to the VT not the
   journal, `cmd_install` has no refusal). Evidence §0.2 rewritten,
@@ -264,6 +275,13 @@ Blocks, in order, all from §6:
     to `extract_rpms`. Keep the requested set as it is (chromium, gamemode,
     gamescope, libgcc.i686, libSM.i686, mangohud, steam, steam-devices) so the
     177 shadow count is like-for-like with round 31.
+- **THE GREETD RUNFILE IS THE SILENT TRAP.** `greetd(5)`: the initial session
+  runs only on the first greetd start since boot, "checked through the presence
+  of the runfile" (`/run/greetd.run`). A `systemctl restart greetd` with
+  `[initial_session]` armed but the runfile present starts the **greeter**
+  instead and logs nothing unusual — it looks exactly like the config being
+  ignored. `rm -f /run/greetd.run` before every restart; it is now inside
+  `greetd-set.sh`.
 - **greetd does NOT send the session's stderr to the journal.** greetd's
   `terminal.rs` dup2s the VT onto the session's stdin/stdout/stderr, so
   `[apex-gaming-session]` lines would be painted on tty1 and invisible over
