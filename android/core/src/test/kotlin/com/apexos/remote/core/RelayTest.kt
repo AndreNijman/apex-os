@@ -80,10 +80,16 @@ class RelayTest {
         for (role in Rendezvous.Role.entries) {
             assertTrue(room.contains("\"${role.text}\""), "the Worker does not know the role $role")
         }
-        // The frame cap is a number both ends allocate against.
-        assertTrue(
-            rust.contains("pub const MAX_FRAME: usize = 256 * 1024"),
-            "apex-remote-core's MAX_FRAME is no longer 256 KiB, so ${Relay.MAX_FRAME} is wrong",
+        // The frame cap is a number both ends allocate against, so it is read
+        // out of the Rust source and COMPARED — an assertion that merely found
+        // the literal there would pass against any value on this side, which
+        // is the defect this whole file exists to avoid.
+        val cap = Regex("pub const MAX_FRAME: usize = (\\d+) \\* (\\d+);").find(rust)
+        assertTrue(cap != null, "apex-remote-core no longer declares MAX_FRAME where this can read it")
+        assertEquals(
+            cap!!.groupValues[1].toInt() * cap.groupValues[2].toInt(),
+            Relay.MAX_FRAME,
+            "the two ends cap a frame at different sizes",
         )
         assertTrue(rust.contains("pub const GUID: &str = \"${Relay.GUID}\""), "the GUID drifted")
     }
@@ -544,6 +550,24 @@ class RelayTest {
         ) {}
         assertEquals("abcdefghi", String(link.input.readBytes()))
         assertTrue(link.sawPaired, "the relay said paired and the link did not notice")
+    }
+
+    @Test
+    fun `nothing arrives after the relay says the far end has gone`() {
+        // The mutation this catches: treating `peer-gone` as a word to ignore.
+        // The test above would still pass, because its double had nothing left
+        // to send — so this one puts bytes AFTER the notice. They are not the
+        // desktop's: it has gone. Handing them up would feed the Noise decoder
+        // frames from whatever the relay does next.
+        val wire = serverFrames("before".toByteArray(), chunk = 64) +
+            textFrame(Notice.PEER_GONE.frame()) +
+            serverFrames("after the far end was gone".toByteArray(), chunk = 64)
+        val link = RelayLink(
+            WsReceiver(ByteArrayInputStream(wire)),
+            WsSender(ByteArrayOutputStream()),
+        ) {}
+        assertEquals("before", String(link.input.readBytes()))
+        assertEquals(-1, link.input.read(), "the stream did not end when the far end went")
     }
 
     @Test
