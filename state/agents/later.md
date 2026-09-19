@@ -6,6 +6,38 @@ branch: task/later-2
 
 ## NEXT
 
+**SUPERSEDED 2026-09-19 (round 31) — read `later-silicon.md` instead.** The
+card below said the remaining work was Andre's five-run hardware procedure and
+that no agent could satisfy L-001's word "Real" from here. A machine appeared:
+katana. Unit `later-silicon` ran the procedure on branch `task/later-silicon`
+(`17252b16`, pushed).
+
+What changed, in one line each:
+
+- **Runs 1 and 4 PASS on real silicon** (Intel PTT fTPM). Enrol, TPM unlock at
+  0.29 s, recovery-key unlock, the same plaintext through both, suspend/resume
+  with a fresh unseal afterwards and all 24 PCRs intact.
+- **The signed PCR 11 policy works on Intel PTT**, forged signature refused by
+  the part itself — the mechanism this program chose, first run outside swtpm.
+- **Run 2 (TPM clear) is now one decision, not an absent machine.** Katana's
+  TPM is owned by a live Windows install with Windows Hello provisioned. No
+  BitLocker, so no data is at risk; the cost is his PIN. The PPI procedure is
+  two commands and needs nobody at the machine.
+- **Runs 3 and 5 are COULD-NOT-RUN** with hard reasons (no firmware capsule
+  exists; disabling the TPM is not symmetric with enabling it).
+- **Four defects found that no VM could produce** — see `later-silicon.md`
+  FOUND. The one that matters most: `systemd-pcrextend` is a silent no-op on a
+  GRUB machine, exit 0, so a boot-phase PCR 11 policy can never be satisfied on
+  a default APEX install.
+
+L-002 and L-003 are **still blocked**, and `state/queue.json`'s note for this
+unit was rewritten because the gate it named is now met and is not sufficient.
+
+The historical NEXT follows, kept because it is the record of what was true
+before the hardware existed.
+
+### Historical NEXT (round 29)
+
 Nothing is running and nothing is half-finished. Branch tip 0391b4ec is pushed
 and cut from roadmap/v2.2 1668ed9c. All containers from this unit are removed
 and no qemu process is left.

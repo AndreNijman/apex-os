@@ -4,18 +4,18 @@ repo: apex-os
 worktree: /var/tmp/apex-work/wt-p2-f
 branch: task/p2-f-7   (cut from origin/roadmap/v2.2 @ bb229745, which is round 31's
           task/p2-f-6 landed)
-unlanded: SEVEN commits on task/p2-f-7, rounds 32 and 33, tip f37f095c, all
+unlanded: EIGHT commits on task/p2-f-7, rounds 32 and 33, tip ac5c8ece, all
           pushed. roadmap/v2.2 was at 36535383 when round 33 ended.
 
 ## NEXT
 
 **ROUND 33 IS FINISHED AND EVERYTHING IS PUSHED.** `task/p2-f-7` is at
-`f37f095c`, the worktree `/var/tmp/apex-work/wt-p2-f` is clean, nothing is
+`ac5c8ece`, the worktree `/var/tmp/apex-work/wt-p2-f` is clean, nothing is
 unpushed, and both rounds 32 and 33 have their evidence recorded. There is
 nothing half-written to pick up. Read ROUND 33 in DONE for what it did.
 
-Rounds 32 and 33 are BOTH unlanded on `task/p2-f-7` — seven commits on top of
-`bb229745`. `roadmap/v2.2`'s tip was `36535383` when round 33 ended. This unit
+Rounds 32 and 33 are BOTH unlanded on `task/p2-f-7` — EIGHT commits on top of
+`bb229745` (four from round 32, four from round 33). `roadmap/v2.2`'s tip was `36535383` when round 33 ended. This unit
 does not land its own branch.
 
 **Where to start, in value order. Nothing below is started.**
@@ -42,7 +42,7 @@ does not land its own branch.
 **Two traps this unit has paid for twice, repeated because set-status REPLACES
 evidence and there is no append flag:**
 
-- **P2-016's evidence is 14,599 bytes and most of it is unit
+- **P2-016's evidence is 16,510 bytes and most of it is unit
   `p2-016-multiuser-2`'s**, which landed 2026-09-12 as merge `5eca2402`.
   Round 33 appended to it with `/var/tmp/apex-work/scratch-p2-f/round33/append-p2-016.py`,
   which reads the current evidence, appends, writes the whole string through
@@ -226,12 +226,34 @@ already handled was FALSE, and had never been measured.
             leaf-only call, caught by the shell suite.
   f37f095c  prose. `docs/multi-user.md` gains the before/after table and the
             reasoning, beside the paragraph about the old shared root.
+  ac5c8ece  `ensure_private_dir_as` is `pub(crate)`, not `pub` — "production
+            callers never reach this" was a comment asking to be believed, and
+            every crate in the workspace links `apex-agent-core`, so a `pub`
+            entry point letting a caller choose which account an ownership
+            check compares against IS the check. Plus the comparand question
+            settled by measurement, because a ROOT process ensuring a
+            user-owned directory would now be REFUSED where it used to
+            succeed: agentd and remoted are per-user USER services, the three
+            `ensure_private_dir` sites in the `apex` CLI (`host.rs`,
+            `agent.rs`, `task.rs`) all derive from a `paths::*` root and never
+            from an argument, and **under `sudo` on this machine HOME is
+            `/root` with `XDG_STATE_HOME` and `XDG_RUNTIME_DIR` both cleared**,
+            so `sudo apex` resolves them under root's own tree. No caller is
+            affected.
+  **`session.rs` sits in EVERY session start, so the other six suites that
+  fixture `APEX_AGENT_SCRATCH_ROOT` and start a real agentd were run too, each
+  ALONE** (this repo's suites interfere in a sequential loop): disposable 58/0
+  — the interesting one, it swaps the root mid-run to a SECOND daemon's —
+  worktrees 61/0, shell-agent 58/0/0, privilege-requests 39/0, project-layout
+  23/0, mux-layouts 47/0/0. 286 assertions, 0 failed. No flake this round:
+  `a_stale_socket_from_a_dead_daemon_is_replaced` passed in all three full
+  `--workspace` runs.
   Workspace 3347 -> 3354 passed / 0 failed / 2 ignored; clippy --locked
   --workspace --all-targets -D warnings exit 0; test-agent-inject.sh 48 -> 49
   passed / 0 failed; shellcheck 165 discovered / 0 known-failing / 0 newly
   failing; suites-in-CI 75 / 71 / 4 / 0; doc verbs 191 / 114 / 0 / 0; no
   conflict markers. 11 mutations total, all red, all restored with plain `cp`
-  and `cmp` silent. P2-016's evidence was APPENDED to, 8,724 -> 14,599 bytes,
+  and `cmp` silent. P2-016's evidence was APPENDED to, 8,724 -> 16,510 bytes across two appends,
   and the original checked to be still a prefix.
   The probes are `/var/tmp/apex-work/scratch-p2-f/round33/probe.sh` (the four
   hostile shapes) and `probe2.sh` (the boundary call), both against a REAL
@@ -644,7 +666,7 @@ alone before believing it.
 Round 31's dispatch named **P2-016** as this unit's, so the `items:` line at the
 top now carries it and the queue question below is settled. Round 33 did real
 P2-016 work and recorded it. The warning stands and is repeated in NEXT:
-**8,724 of P2-016's now 14,599 bytes of evidence belong to unit
+**8,724 of P2-016's now 16,510 bytes of evidence belong to unit
 `p2-016-multiuser-2`** (landed 2026-09-12 as merge 5eca2402). set-status.py
 REPLACES. Read it before writing it, or use
 `/var/tmp/apex-work/scratch-p2-f/round33/append-p2-016.py`, which does the

@@ -255,7 +255,13 @@ tasks:
     the switch itself cannot be run on the machine hosting the agent. TO UNBLOCK: a machine with gamescope and
     steam installed, idle, with no session that matters, where `loginctl terminate-user` may be run - and a human
     present to see the switch land, since the test necessarily kills its own session. katana is that machine and
-    is off-limits by Andre's instruction of 2026-09-11.
+    is off-limits by Andre's instruction of 2026-09-11. || 2026-09-19: katana became available as the disposable
+    machine this item has been waiting for (Andre: 'you can use msi as automated test machine'), and was rebased
+    onto the roadmap image. The Desktop<->Gaming switch is recorded at
+    ROADMAP/evidence/katana-qualification-20260919.md section 6.7, and Gaming Mode cleanup does work (6.6). The
+    switch COULD NOT be driven to completion: it needs a password at the greeter and nobody was at the machine.
+    That is a could-not-run, not a pass. Gaming Mode itself is a FAIL for reasons independent of the switch,
+    recorded under P1-043.
 - id: BASE-010
   title: Preserve local AI service abstraction
   priority: P0
@@ -548,7 +554,19 @@ tasks:
     has been in use for gaming whenever it was free, and its rollback slot currently holds the same digest as the
     booted one because the hotfix unlock created a second deployment of the same commit, so a reboot into it would
     prove very little. Two findings stand: Secure Boot is disabled on katana against the stated end-state of both
-    machines enforcing, and suspend has never run there against 40 resumes on the L16.
+    machines enforcing, and suspend has never run there against 40 resumes on the L16. || 2026-09-19, katana,
+    first run of this path from a BUILT image (see ROADMAP/evidence/katana-qualification-20260919.md, sections 2,
+    3, 6.5, 7): `sudo apex install steam gamescope mangohud gamemode steam-devices` -> 219 packages, exit 0; the
+    app-twin EVR rule fired from an image for the first time and the /etc removal pass did not eat image-owned
+    files. TWO new defects in one line of extract_rpms. (a) /usr/libexec was not excluded from the 32-bit pass, so
+    14 i686 binaries shadowed image ones; gst-plugin-scanner among them, which left GStreamer with 2 of 1344
+    usable features and no playbin, and the greeter on a 32-bit accessibility bus. FIXED: landed as merge a869f033
+    with tests/test-apex-multilib-extract.sh, 6 passed / 0 failed, carrying a negative control that re-extracts
+    with the pre-fix list and finds 14 shadows, so the suite fails rather than going blind. (b) /usr/share is
+    blanket-excluded, which throws away every *_icd.i686.json while keeping the .so files they name: katana has 13
+    x86_64 Vulkan ICDs and ZERO i686, so Steam's 32-bit client dies with VK_ERROR_INCOMPATIBLE_DRIVER. NOT fixed;
+    unit pkg-share owns it. Also `apex resolve chromium` offers only the flatpak while `apex install chromium`
+    installs the rpm.
 - id: P0-002
   title: Introduce protected apex-secretd service
   priority: P0
@@ -2567,7 +2585,14 @@ tasks:
     contrary to expectation it is correctly guarded (private XDG_RUNTIME_DIR and HOME,
     WAYLAND_DISPLAY/DISPLAY/HYPRLAND_INSTANCE_SIGNATURE/NIRI_SOCKET unset, WLR_BACKENDS=headless, and a hard FAIL
     if WAYLAND_DISPLAY does not name a socket in the private dir) -- it is safe headless and was held only to run
-    once on a final tip.
+    once on a final tip. || 2026-09-19: all 18 labwc matrix rows attempted on katana with per-row evidence at
+    ROADMAP/evidence/katana-qualification-20260919.md section 7 -- the first time this item has had a machine.
+    Screen sharing under labwc offers MONITORS ONLY, never a window (AvailableSourceTypes = 1), and that is the
+    portal's ceiling rather than the client's: identical for Firefox and Chromium. Recording works on the NVIDIA
+    output (wf-recorder). VRR cannot be tested on this machine at all -- no connector exposes vrr_capable, so
+    Gaming Mode's VRR probe can never fire here. Physical output hotplug could not be done because nobody was at
+    the machine. OBS, Discord, VS Code, JetBrains, LibreOffice and Wine are not installed, so Qt/GTK3/Electron
+    proxies were run instead and the rows say so. The portal rows are labwc-only evidence by construction (7.5).
 - id: P1-039
   title: Compositor-neutral Night Light
   priority: P1
@@ -2759,7 +2784,16 @@ tasks:
     verification assertion: 'SmiOutcome::Ready is what a real loaded NVIDIA driver produces' needs the NVIDIA
     machine while it is NOT gaming - katana ran steam/proton throughout the session, so it stayed read-only.
     Functionally covered: 9b68be3 already measured nvidia-smi answering there, and 454ae3a does not touch that
-    path's parsing.
+    path's parsing. || 2026-09-19, katana (RTX 3070 Mobile + Intel Iris Xe; card1=i915->eDP-1,
+    card2=nvidia->HDMI-A-1). DESKTOP IS CORRECT: all three desktop sessions -- labwc, Hyprland, niri -- drive the
+    external monitor through the RTX 3070 at 239.964 Hz, and nvidia-smi lists each compositor as a graphics
+    client. The wrong-card failure does not happen on the desktop. GAMING MODE IS NOT: gamescope selects the Intel
+    iGPU, opens card1, and therefore sees only eDP-1, so the monitor is never lit. The fix is measured rather than
+    guessed -- `--prefer-vk-device 10de:249d` selects NVIDIA, opens card2 and lights HDMI-A-1 at 240 Hz -- and
+    WLR_DRM_DEVICES is IGNORED, because gamescope's DRM backend is its own. Separately `--rt` is requested and
+    never granted: gamescope wants CAP_SYS_NICE, not RLIMIT_RTPRIO. Unit gaming-gpu owns both, plus the harder
+    question of choosing the GPU on an arbitrary hybrid laptop without a hardcoded device id. Full detail at
+    ROADMAP/evidence/katana-qualification-20260919.md sections 5.1, 6.1 and 6.2.
 - id: P1-044
   title: Default incoming firewall
   priority: P1
@@ -4743,7 +4777,10 @@ tasks:
     suites, 71 run, 4 exempt with no fifth added; no conflict markers. NOT RE-DERIVED, both previously measured
     with positive controls: a hotspot cannot work under the pre-P1-044 policy, and the L16 cannot be the positive
     control for "firewall enforcing + dispatcher missing" because its apex-firewall.service is inactive on the old
-    image.
+    image. || 2026-09-19, katana, BOOTED readings -- the state this item's remaining criteria needed and a
+    container could never reach. All six of the lines only a booted machine can answer were obtained
+    (ROADMAP/evidence/katana-qualification-20260919.md section 8.1), the safety claim was checked (8.2), and the
+    firewall is active. Scanning found a real driverless eSCL device on the LAN, a Canon (8.4).
 - id: P2-006
   title: Networking maturity
   priority: P2
@@ -4901,7 +4938,9 @@ tasks:
     suites, 71 run, 4 exempt with no fifth added; no conflict markers. NOT RE-DERIVED, both previously measured
     with positive controls: a hotspot cannot work under the pre-P1-044 policy, and the L16 cannot be the positive
     control for "firewall enforcing + dispatcher missing" because its apex-firewall.service is inactive on the old
-    image.
+    image. || 2026-09-19, katana, BOOTED readings at ROADMAP/evidence/katana-qualification-20260919.md section 8.
+    avahi did NOT need unmasking on this machine (8.3); the hotspot was taken end to end (8.6); printer sharing
+    over the LAN was exercised (8.7). 802.1X: katana does not carry the L16's exposure (8.5).
 - id: P2-007
   title: Bluetooth/dock/peripheral maturity
   priority: P2
@@ -5032,7 +5071,9 @@ tasks:
     suites, 71 run, 4 exempt with no fifth added; no conflict markers. NOT RE-DERIVED, both previously measured
     with positive controls: a hotspot cannot work under the pre-P1-044 policy, and the L16 cannot be the positive
     control for "firewall enforcing + dispatcher missing" because its apex-firewall.service is inactive on the old
-    image.
+    image. || 2026-09-19, katana, BOOTED readings at ROADMAP/evidence/katana-qualification-20260919.md section 8,
+    including everything else the booted machine reported (8.8). These are the first readings for this item taken
+    on a machine rather than in a container.
 - id: P2-008
   title: First-party virtualization UX
   priority: P2
@@ -5929,7 +5970,25 @@ tasks:
     second account in the measurement is nobody under sudo, which is enough for the ownership question and is not
     a fast-user-switching test. An intermediate path component that is already a symlink is still followed by
     create_dir_all before either check sees it - the boundary call is what keeps that to directories this account
-    made, and it is said in the module rather than left for the next reader to find.
+    made, and it is said in the module rather than left for the next reader to find. ROUND 33 ADDENDUM, commit
+    ac5c8ece. The session.rs change sits in EVERY session start and the first pass measured it through ONE suite,
+    so the other six that fixture APEX_AGENT_SCRATCH_ROOT and start a real agentd were run too, each alone rather
+    than in a loop (this repository's suites interfere in a sequential loop and a spurious red there has cost
+    rounds before): test-agent-disposable 58/0, which is the interesting one because it swaps the scratch root
+    mid-run to a SECOND daemon's; test-agent-worktrees 61/0; test-shell-agent 58/0/0; test-privilege-requests
+    39/0; test-project-layout 23/0; test-mux-layouts 47/0/0. 286 assertions, 0 failed. ensure_private_dir_as is
+    now pub(crate) rather than pub: its doc comment said 'production callers never reach this', and every other
+    crate in the workspace links apex-agent-core, so a pub entry point letting a caller choose which account an
+    ownership check compares against IS the check. The visibility makes the sentence a property of the build, the
+    same move round 30 made asserting the shipped binary has no GdriveProvider::at. And the comparand question was
+    settled by measurement rather than left implied, because a ROOT process ensuring a user-owned directory would
+    now be REFUSED where it used to succeed: apex-agentd and apex-remoted are both per-user systemd USER services,
+    the three ensure_private_dir call sites in the apex CLI (host.rs, agent.rs, task.rs) all derive their
+    directory from a paths::* root and never from an argument, and on this machine under sudo HOME is /root with
+    XDG_STATE_HOME and XDG_RUNTIME_DIR both cleared, so sudo apex resolves every one of them under root's own
+    tree. No caller is affected. Also measured rather than inherited: remove_dir_all on a symlink unlinks the
+    SYMLINK and leaves the target and its contents intact, so the session reap at session.rs:1541 was never the
+    exposure and the root check is what closes this.
 - id: P2-017
   title: APEX Online Accounts and brokered cloud identity layer
   priority: P2

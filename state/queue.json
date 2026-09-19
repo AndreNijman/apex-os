@@ -1,6 +1,6 @@
 {
   "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
-  "updated": "2026-09-19T03:15+08:00",
+  "updated": "2026-09-19T10:15+08:00",
   "concurrency_ceiling": 6,
   "units": [
     {
@@ -371,7 +371,7 @@
         "p2-e"
       ],
       "conflicts": [],
-      "note": "L-002 and L-003 are blocked on L-001 and must stay blocked until a real TPM enrol-and-recover cycle has been done on hardware. Turning on full-disk encryption by default without a proven recovery path is how a user loses everything.",
+      "note": "L-002 and L-003 are blocked on L-001. THE GATE THIS NOTE USED TO NAME IS NOW MET AND IS NOT ENOUGH: round 31 (2026-09-19, unit later-silicon) did a real TPM enrol-and-recover cycle on real silicon - katana, Intel PTT fTPM - and it passed, together with suspend/resume and the signed PCR 11 policy. Do NOT read that as grounds to unblock either item. L-002 stays blocked because installer/apex-install still cannot create a LUKS header at all, and because systemd-cryptenroll's default on systemd 258.10 binds to NO PCRs, so a naive 'encrypt by default' would seal to the SRK and nothing else. L-003 stays blocked because systemd-pcrextend is a silent no-op (exit 0, PCR 11 unchanged) on a GRUB machine, so the signed PCR 11 policy cannot be satisfied at boot on a default APEX install - that needs the sd-stub/UKI path, not the Secure Boot switch. L-001 itself stays partial on two runs: the TPM clear, which is now one decision from Andre rather than an absent machine (a live Windows install owns katana's TPM; a clear costs his Windows Hello PIN and no data; the PPI procedure is two commands and needs nobody at the machine), and the TPM-removed case, which needs a hand in firmware setup. Turning on full-disk encryption by default without a proven recovery path is how a user loses everything.",
       "closed": "RE-OPENED 2026-09-19 (round 31) and an agent is on it — do not read the COMPLETE heading as 'finished'. The closure named one condition for re-opening, verbatim: 'the moment there is a machine whose TPM somebody is willing to clear.' Katana is that machine — real TPM 2.0, tpm2-tools present, and Andre is not using it. Every prior TPM result in this program is swtpm in a VM and L-001's acceptance word is 'Real'. Scope is bounded by two facts the agent was told to state on every affected row: Secure Boot is OFF on katana, which bounds PCR 7 ('we wil ltest secure boot later'), and katana's system disk is NOT encrypted and must not become so — enrol-and-recover goes on a loopback file or spare partition, never / or /var. Branch task/later-silicon."
     },
     {
