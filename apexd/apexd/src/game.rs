@@ -38,7 +38,7 @@ use apexd_core::game::{
     CGROUP_ROOT,
 };
 use apexd_core::irq;
-use apexd_core::syswriter::Outcome;
+use apexd_core::syswriter::{Outcome, ScxState};
 use apexd_core::tier::{Action, Tier};
 use apexd_core::topology::CoreTopology;
 use zvariant::{OwnedValue, Value};
@@ -74,6 +74,121 @@ impl IrqReport {
     }
 }
 
+/// What actually happened to the sched-ext scheduler the profile asked for.
+///
+/// The IRQ report above closed this defect for affinity writes; sched-ext had
+/// the same one and kept it for three shipped images. `apex game status`'s
+/// `notes` said "sched-ext: scx_lavd for the session" — which was a sentence
+/// copied out of the PLAN — while the journal line directly above it recorded
+/// `scxctl` refusing the call. Nobody could have noticed, because the only
+/// surface that reported it reported the intention.
+///
+/// So three fields, and they answer three different questions:
+/// what was asked for, what the command said, and what the kernel says. The
+/// last one is authoritative: a command's exit code is a fact about the
+/// command.
+#[derive(Debug, Clone, Default)]
+pub struct ScxReport {
+    /// The scheduler the profile asked for. `None` = it asked for none, which
+    /// is the default for every profile that is not a gaming one.
+    pub requested: Option<String>,
+    /// What applying [`Action::ScxSwitch`] returned, in the writer's words.
+    /// `None` only when nothing was asked for.
+    pub applied: Option<Outcome>,
+    /// What the kernel reported afterwards, read by the daemon rather than
+    /// inferred from `applied`.
+    pub observed: Option<ScxState>,
+}
+
+impl ScxReport {
+    /// One word: `not requested`, `loaded`, `not loaded` or `unknown`.
+    ///
+    /// **`loaded` requires a kernel reading.** A command that exited 0 with no
+    /// confirmable state is `unknown`, not `loaded` — that collapse is the
+    /// whole defect. And an `Unsupported` kernel is `not loaded` rather than
+    /// `unknown`, because "no scheduler can attach here" is a definite answer.
+    pub fn verdict(&self) -> &'static str {
+        if self.requested.is_none() {
+            return "not requested";
+        }
+        match &self.observed {
+            Some(st) => st.verdict(),
+            // No reading at all. The command's own word is the most that can
+            // be said, and it is never enough to say "loaded".
+            None => match &self.applied {
+                Some(Outcome::Refused(_)) => "not loaded",
+                _ => "unknown",
+            },
+        }
+    }
+
+    /// The sentence `apex game status` prints, naming both halves so a reader
+    /// can see which one disagreed.
+    pub fn detail(&self) -> String {
+        let Some(want) = &self.requested else {
+            return "this profile asks for no sched-ext scheduler".to_string();
+        };
+        let said = match &self.applied {
+            Some(Outcome::Landed) => "scxctl reported success".to_string(),
+            Some(Outcome::Refused(why)) => format!("scxctl refused: {why}"),
+            Some(Outcome::Unknown(why)) => format!("scxctl could not be confirmed: {why}"),
+            None => "the switch was never applied".to_string(),
+        };
+        let seen = match &self.observed {
+            Some(st) => st.describe(),
+            None => "and the kernel was not read back".to_string(),
+        };
+        // The mismatch is worth its own clause: "attached, but not the one
+        // asked for" is a different problem from "not attached", and the
+        // kernel's struct_ops name drops the `scx_` prefix, so the comparison
+        // has to be the forgiving one or it invents a failure.
+        let mismatch = match &self.observed {
+            Some(ScxState::Enabled { ops: Some(o) })
+                if !apexd_core::syswriter::scx_ops_matches(o, want) =>
+            {
+                format!(" — NOTE: '{o}' is not the scheduler that was asked for")
+            }
+            _ => String::new(),
+        };
+        format!("asked for {want}; {said}; {seen}{mismatch}")
+    }
+
+    /// The single note the session carries, or `None` when nothing was asked.
+    pub fn note(&self) -> Option<String> {
+        self.requested.as_ref()?;
+        Some(format!("sched-ext: {} — {}", self.verdict(), self.detail()))
+    }
+}
+
+/// What applying the NVIDIA clock-lock actions did.
+///
+/// The same shape as [`IrqReport`], and it is here for the same reason found
+/// the same way: `gpus_locked` in `apex game status` was
+/// `plan.gpus_locked.clone()` — the list of GPUs the plan MEANT to lock — and
+/// `run_nvidia_smi` has been returning a perfectly good `Outcome::Refused`
+/// that nothing read. A GPU whose clock lock `nvidia-smi` rejected was still
+/// listed as locked.
+#[derive(Debug, Clone, Default)]
+pub struct GpuLockReport {
+    /// GPUs the plan asked to lock.
+    pub attempted: Vec<u32>,
+    /// GPUs every one of whose lock writes landed.
+    pub landed: Vec<u32>,
+    /// The first refusal, so status can say why.
+    pub first_refusal: Option<String>,
+}
+
+impl GpuLockReport {
+    /// GPUs asked for whose locks did not all land.
+    pub fn refused(&self) -> Vec<u32> {
+        self.attempted
+            .iter()
+            .copied()
+            .filter(|g| !self.landed.contains(g))
+            .collect()
+    }
+}
+
 /// Everything needed to undo a session.
 pub struct GameSession {
     /// The exit plan, built at enter time.
@@ -88,9 +203,17 @@ pub struct GameSession {
     pub cpu_list: String,
     pub core_source: String,
     pub pids: Vec<u32>,
-    pub gpus_locked: Vec<u32>,
+    /// Measured at enter time from the writer's own outcomes, NOT copied from
+    /// the plan. See [`GpuLockReport`].
+    pub gpus: GpuLockReport,
     /// Measured at enter time from the writer's own outcomes.
     pub irqs: IrqReport,
+    /// What the sched-ext switch actually did. See [`ScxReport`].
+    pub scx: ScxReport,
+    /// What sched-ext looked like BEFORE this session, so the exit path can
+    /// say whether it is stopping something game mode started or something
+    /// that was already running.
+    pub prior_scx: ScxState,
     pub notes: Vec<String>,
     /// The process whose death ends this session, when the caller named one.
     ///
@@ -234,27 +357,96 @@ impl Ctx {
         // did with the plan, so it counts as it goes. An `Err` here is a hard
         // failure; an `Outcome::Refused` is the ordinary case this counting
         // exists for — a kernel-managed interrupt refusing an affinity write.
+        // Read BEFORE the enter plan runs. If something was already attached,
+        // the exit plan's `scxctl stop` removes a scheduler this session did
+        // not start, and the exit log should say so rather than call it a
+        // restore. (The plan cannot know: it is built without touching the
+        // machine, which is what makes it testable.)
+        let prior_scx = self.writer.scx_state();
+
         let mut irqs = IrqReport::default();
+        let mut gpus = GpuLockReport {
+            attempted: plan.gpus_locked.clone(),
+            ..Default::default()
+        };
+        // GPUs whose every clock-lock write landed. Tracked as "did any write
+        // for this GPU fail" rather than "did any succeed", because a card
+        // whose graphics clock locked and whose memory clock did not is not a
+        // locked card, and reporting it as one is the defect in miniature.
+        let mut gpu_failed: Vec<u32> = Vec::new();
+        let mut scx = ScxReport {
+            requested: plan.enter.iter().find_map(|a| match a {
+                Action::ScxSwitch { sched } => Some(sched.clone()),
+                _ => None,
+            }),
+            ..Default::default()
+        };
         for a in &plan.enter {
             let is_irq = matches!(a, Action::IrqAffinity { .. });
             if is_irq {
                 irqs.attempted += 1;
             }
-            match self.writer.apply(a) {
+            let gpu_of = match a {
+                Action::NvidiaLockGraphics { gpu, .. } | Action::NvidiaLockMemory { gpu, .. } => {
+                    Some(*gpu)
+                }
+                _ => None,
+            };
+            let outcome = self.writer.apply(a);
+            if matches!(a, Action::ScxSwitch { .. }) {
+                scx.applied = match &outcome {
+                    Ok(o) => Some(o.clone()),
+                    // A hard error is not a refusal and not an unknown: the
+                    // action blew up. Record it in the same shape so the
+                    // status surface has something to print.
+                    Err(e) => Some(Outcome::Refused(format!("{e:#}"))),
+                };
+            }
+            match outcome {
                 Ok(Outcome::Landed) => {
                     if is_irq {
                         irqs.landed += 1;
                     }
                 }
-                Ok(Outcome::Refused(why)) => {
+                Ok(Outcome::Refused(why)) | Ok(Outcome::Unknown(why)) => {
                     if is_irq && irqs.first_refusal.is_none() {
-                        irqs.first_refusal = Some(why);
+                        irqs.first_refusal = Some(why.clone());
+                    }
+                    if let Some(g) = gpu_of {
+                        if !gpu_failed.contains(&g) {
+                            gpu_failed.push(g);
+                        }
+                        if gpus.first_refusal.is_none() {
+                            gpus.first_refusal = Some(why);
+                        }
                     }
                 }
                 Err(e) => {
                     eprintln!("apexd: game action failed ({}): {e:#}", a.describe());
+                    if let Some(g) = gpu_of {
+                        if !gpu_failed.contains(&g) {
+                            gpu_failed.push(g);
+                        }
+                        if gpus.first_refusal.is_none() {
+                            gpus.first_refusal = Some(format!("{e:#}"));
+                        }
+                    }
                 }
             }
+        }
+        gpus.landed = gpus
+            .attempted
+            .iter()
+            .copied()
+            .filter(|g| !gpu_failed.contains(g))
+            .collect();
+
+        // Ask the KERNEL what sched-ext looks like now, independently of what
+        // `scxctl` said it did. This is a second party reading the same fact,
+        // which is the only thing that catches a command that succeeds and
+        // changes nothing — the exact shape of the defect on katana.
+        if scx.requested.is_some() {
+            scx.observed = Some(self.writer.scx_state());
         }
 
         let mut notes = plan.notes.clone();
@@ -269,6 +461,25 @@ impl Ctx {
                     .unwrap_or("no reason recorded")
             ));
         }
+        if let Some(n) = scx.note() {
+            // The plan's own sched-ext note is an INTENT — it says the profile
+            // asks for a scheduler and points at `scx_state` for the answer.
+            // Once there IS an answer, printing both leaves a user reading a
+            // pointer to a line directly beneath it. The measurement replaces
+            // the intent rather than joining it; `apex game profile`, which
+            // renders a plan nobody applied, still shows the intent, because
+            // there it is the only true thing available.
+            notes.retain(|existing: &String| !existing.starts_with("sched-ext:"));
+            notes.push(n);
+        }
+        if !gpus.refused().is_empty() {
+            notes.push(format!(
+                "GPU clock locks: {:?} of {:?} were refused — {}",
+                gpus.refused(),
+                gpus.attempted,
+                gpus.first_refusal.as_deref().unwrap_or("no reason recorded")
+            ));
+        }
 
         let session = GameSession {
             exit_actions: plan.exit.clone(),
@@ -280,13 +491,19 @@ impl Ctx {
             cpus: plan.cpus.clone(),
             core_source: topo.source.as_str().to_string(),
             pids: pids.to_vec(),
-            gpus_locked: plan.gpus_locked.clone(),
+            gpus,
             irqs,
+            scx,
+            prior_scx,
             notes,
             owner: owner_pid.and_then(|pid| owner_for_pid(&self.proc_root, pid)),
         };
+        // Every number in this line is now a measurement. `GPU(s) locked` used
+        // to be the plan's count and `sched-ext` was not reported at all; both
+        // said more than anyone had checked.
         eprintln!(
-            "apexd: game mode ON — cpus {} ({}), {}/{} IRQs steered, {} GPU(s) locked, tier {}",
+            "apexd: game mode ON — cpus {} ({}), {}/{} IRQs steered, {}/{} GPU(s) locked, \
+             sched-ext {}, tier {}",
             if session.cpu_list.is_empty() {
                 "(unpinned)"
             } else {
@@ -295,7 +512,9 @@ impl Ctx {
             session.core_source,
             session.irqs.landed,
             session.irqs.attempted,
-            session.gpus_locked.len(),
+            session.gpus.landed.len(),
+            session.gpus.attempted.len(),
+            session.scx.verdict(),
             session.tier
         );
         for n in &session.notes {
@@ -311,10 +530,54 @@ impl Ctx {
             return Ok(()); // not active: nothing to undo
         };
 
+        // The exit plan's outcomes used to be discarded wholesale — only a hard
+        // `Err` was logged, so a `Refused` restore was silent and the "game
+        // mode OFF" line below asserted a restoration nobody had read. That is
+        // the same defect as the enter path's, and it matters more here: this
+        // is the plan that puts the machine back.
+        let mut exit_refusals: Vec<String> = Vec::new();
         for a in &session.exit_actions {
-            if let Err(e) = self.writer.apply(a) {
-                eprintln!("apexd: game exit action failed ({}): {e:#}", a.describe());
+            match self.writer.apply(a) {
+                Ok(Outcome::Landed) => {}
+                Ok(Outcome::Refused(why)) => {
+                    eprintln!("apexd: game exit: {} refused — {why}", a.describe());
+                    exit_refusals.push(format!("{}: {why}", a.describe()));
+                }
+                Ok(Outcome::Unknown(why)) => {
+                    eprintln!("apexd: game exit: {} unconfirmed — {why}", a.describe());
+                    exit_refusals.push(format!("{}: {why}", a.describe()));
+                }
+                Err(e) => {
+                    eprintln!("apexd: game exit action failed ({}): {e:#}", a.describe());
+                    exit_refusals.push(format!("{}: {e:#}", a.describe()));
+                }
             }
+        }
+        if session.scx.requested.is_some() {
+            // Now that the switch actually works, the stop actually does
+            // something — and what it does depends on what was running BEFORE
+            // the session. On an APEX image nothing loads a scheduler at boot,
+            // so `stop` is the right verb and this is a restore. If something
+            // WAS already attached, `stop` removed a scheduler game mode did
+            // not start, which is a different event and is named as one rather
+            // than logged as a successful restore.
+            let after = self.writer.scx_state();
+            match &session.prior_scx {
+                ScxState::Enabled { ops } => eprintln!(
+                    "apexd: game: sched-ext was already running before this session ({}) \
+                     and exit STOPPED it rather than putting it back — scheduling is now: {}",
+                    ops.clone().unwrap_or_else(|| "name not published".into()),
+                    after.describe()
+                ),
+                _ => eprintln!("apexd: game: sched-ext after exit: {}", after.describe()),
+            }
+        }
+        if !exit_refusals.is_empty() {
+            eprintln!(
+                "apexd: game: {} exit action(s) did not land — first: {}",
+                exit_refusals.len(),
+                exit_refusals[0]
+            );
         }
 
         if let Some(prior) = session.prior_fan_mode {
@@ -440,11 +703,32 @@ impl Ctx {
                 insert(&mut m, "irqs_steered", Value::from(s.irqs.landed as u32));
                 insert(&mut m, "irqs_attempted", Value::from(s.irqs.attempted as u32));
                 insert(&mut m, "irqs_refused", Value::from(s.irqs.refused() as u32));
+                // Same correction as `irqs_steered`, one action family over:
+                // this used to be the plan's list. It is now the GPUs whose
+                // clock locks nvidia-smi actually accepted, with the asked-for
+                // list beside it so a partial result is legible instead of
+                // invisible.
+                insert(&mut m, "gpus_locked", Value::from(s.gpus.landed.clone()));
                 insert(
                     &mut m,
-                    "gpus_locked",
-                    Value::from(s.gpus_locked.clone()),
+                    "gpus_lock_attempted",
+                    Value::from(s.gpus.attempted.clone()),
                 );
+                // ── sched-ext, as three answers rather than one claim ───────
+                //
+                // `scx_state` is `loaded`, `not loaded`, `unknown` or `not
+                // requested`, and `loaded` requires a reading of
+                // /sys/kernel/sched_ext — never an exit code. Before this,
+                // Gaming Mode's only sched-ext surface was a `notes` line
+                // copied out of the plan, which said the scheduler was in
+                // force on three images where it had never once loaded.
+                insert(
+                    &mut m,
+                    "scx_requested",
+                    Value::from(s.scx.requested.clone().unwrap_or_default()),
+                );
+                insert(&mut m, "scx_state", Value::from(s.scx.verdict().to_string()));
+                insert(&mut m, "scx_detail", Value::from(s.scx.detail()));
                 insert(&mut m, "pids", Value::from(s.pids.clone()));
                 insert(&mut m, "notes", Value::from(s.notes.clone()));
                 // `owner_pid` is 0 when nothing is watching this session. It is
@@ -470,6 +754,19 @@ impl Ctx {
                     "nvidia_smi",
                     Value::from(apexd_core::gpu::nvidia_smi_available()),
                 );
+                // What sched-ext looks like with no session running, so
+                // "disabled here, disabled during the session" is visible as
+                // the non-answer it is rather than read as a passing row. The
+                // katana qualification quoted sched_ext/state as a release
+                // discriminator when it had read `disabled` throughout.
+                let live = apexd_core::syswriter::read_scx_state(&self.sys_root);
+                insert(
+                    &mut m,
+                    "scx_requested",
+                    Value::from(cfg.scx.trim().to_string()),
+                );
+                insert(&mut m, "scx_state", Value::from(live.verdict().to_string()));
+                insert(&mut m, "scx_detail", Value::from(live.describe()));
             }
         }
         m
@@ -585,6 +882,46 @@ mod tests {
             proc_irq_root,
             root.join("proc"),
             Arc::new(MockNvidiaSmi::default()),
+        )
+    }
+
+    /// [`build_ctx`] with an explicit `nvidia-smi`, for the tests that need a
+    /// GPU to exist before there is anything to lock.
+    fn build_ctx_smi(
+        root: &Path,
+        profile: &str,
+        proc_irq_root: &Path,
+        writer: Arc<dyn SysWriter>,
+        smi: Arc<dyn apexd_core::gpu::NvidiaSmi>,
+    ) -> Arc<Ctx> {
+        std::fs::create_dir_all(root.join("profiles")).unwrap();
+        std::fs::write(root.join("profiles/test-game.toml"), profile).unwrap();
+        let set = ProfileSet::load(Some(&root.join("profiles"))).unwrap();
+        let selection = Selection {
+            generic: "test-game".into(),
+            class: None,
+            device: Some("test-game".into()),
+            active: "test-game".into(),
+        };
+        let fingerprint = apexd_core::Fingerprint::detect_from(root, root);
+        Ctx::new(
+            set,
+            selection,
+            fingerprint,
+            writer,
+            false,
+            State {
+                tier: Tier::Balanced,
+                auto_switch: true,
+                on_ac: true,
+                travel_mode: false,
+                charge_start: 0,
+                charge_stop: 100,
+            },
+            root,
+            proc_irq_root,
+            root.join("proc"),
+            smi,
         )
     }
 
@@ -1108,5 +1445,354 @@ mod tests {
         assert_eq!(ctx2.game_owner().await, None);
         ctx2.game_enter_owned(&[], Some(4248)).await.unwrap();
         assert_eq!(ctx2.game_owner().await.unwrap().pid, 4248);
+    }
+
+    // ── sched-ext, as `apex game status` now answers it ─────────────────────
+    //
+    // Three states, three different words, and `loaded` is reachable ONLY from
+    // a kernel reading. The shipped behaviour was one word — a `notes` line
+    // copied out of the plan — which said the scheduler was in force on three
+    // images where `scxctl switch` had refused every call because nothing was
+    // running for it to switch. The engine defect is pinned in
+    // `apexd-core/src/syswriter.rs`'s `scx_tests`; these pin what the user is
+    // told, which is the half nobody could see.
+
+    /// Same as [`PROFILE_STEER`] but asking for a scheduler.
+    const PROFILE_SCX: &str = r#"
+        id = "test-game"
+        kind = "device"
+        [defaults]
+        ac = "balanced"
+        battery = "power-saver"
+        [tiers.performance]
+        governor = "performance"
+        [tiers.balanced]
+        governor = "powersave"
+        [tiers.power-saver]
+        governor = "powersave"
+        [gamemode]
+        tier = "performance"
+        cpuset = "p-cores"
+        cpuset_mems = "0"
+        irq = "off"
+        scx = "scx_lavd"
+        [gamemode.nvidia]
+        enabled = false
+    "#;
+
+    /// A writer whose `scxctl` returns `outcome` and whose kernel reads
+    /// `state`. The two are set INDEPENDENTLY on purpose: that is what lets a
+    /// test present a command that succeeded over a machine that did not move.
+    struct ScxWriter {
+        outcome: Outcome,
+        state: ScxState,
+    }
+
+    impl SysWriter for ScxWriter {
+        fn apply(&self, action: &Action) -> anyhow::Result<Outcome> {
+            Ok(match action {
+                Action::ScxSwitch { .. } | Action::ScxStop => self.outcome.clone(),
+                _ => Outcome::Landed,
+            })
+        }
+        fn scx_state(&self) -> ScxState {
+            self.state.clone()
+        }
+    }
+
+    fn str_of(m: &HashMap<String, OwnedValue>, key: &str) -> String {
+        let v = m
+            .get(key)
+            .unwrap_or_else(|| panic!("status has no '{key}' key: {:?}", m.keys()));
+        match &**v {
+            Value::Str(s) => s.to_string(),
+            other => panic!("'{key}' is not a string: {other:?}"),
+        }
+    }
+
+    async fn scx_status(
+        tag: &str,
+        outcome: Outcome,
+        state: ScxState,
+    ) -> HashMap<String, OwnedValue> {
+        let root = scratch(tag);
+        let irq_root = hybrid_machine(&root);
+        let ctx = build_ctx(
+            &root,
+            PROFILE_SCX,
+            &irq_root,
+            Arc::new(ScxWriter { outcome, state }),
+        );
+        ctx.game_enter(&[]).await.unwrap();
+        ctx.game_status().await
+    }
+
+    #[tokio::test]
+    async fn status_says_loaded_only_when_the_kernel_says_a_scheduler_is_attached() {
+        let st = scx_status(
+            "scx-loaded",
+            Outcome::Landed,
+            ScxState::Enabled {
+                ops: Some("lavd".into()),
+            },
+        )
+        .await;
+        assert_eq!(str_of(&st, "scx_state"), "loaded");
+        assert_eq!(str_of(&st, "scx_requested"), "scx_lavd");
+        let detail = str_of(&st, "scx_detail");
+        assert!(
+            detail.contains("root/ops reads 'lavd'"),
+            "the detail must quote what was read, not what was asked: {detail}"
+        );
+        assert!(
+            !detail.contains("not the scheduler that was asked for"),
+            "`lavd` IS scx_lavd — the struct_ops name drops the prefix: {detail}"
+        );
+        assert!(
+            notes_of(&st).iter().any(|n| n.starts_with("sched-ext: loaded")),
+            "{:?}",
+            notes_of(&st)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_session_shows_the_measurement_and_not_the_intent_beside_it() {
+        // The plan's sched-ext note points at `scx_state` for the answer. Once
+        // there IS an answer, keeping both leaves a user reading a pointer to
+        // the line directly beneath it — and, worse, reading a sentence about
+        // what was ASKED for next to one about what happened, which is exactly
+        // the pair this unit spent its time separating.
+        let st = scx_status(
+            "scx-one-note",
+            Outcome::Landed,
+            ScxState::Enabled {
+                ops: Some("lavd".into()),
+            },
+        )
+        .await;
+        let sched: Vec<String> = notes_of(&st)
+            .into_iter()
+            .filter(|n| n.starts_with("sched-ext:"))
+            .collect();
+        assert_eq!(
+            sched.len(),
+            1,
+            "exactly one sched-ext line in a live session: {sched:?}"
+        );
+        assert!(
+            sched[0].starts_with("sched-ext: loaded"),
+            "and it is the measured one, not the plan's: {}",
+            sched[0]
+        );
+        assert!(
+            !sched[0].contains("ASKS"),
+            "the intent must not survive into a session that has an answer: {}",
+            sched[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn status_says_not_loaded_when_scxctl_refused() {
+        // The katana case, in the shape the journal recorded it.
+        let st = scx_status(
+            "scx-refused",
+            Outcome::Refused(
+                "scxctl start -s scx_lavd: error: no scx scheduler running".into(),
+            ),
+            ScxState::Disabled,
+        )
+        .await;
+        assert_eq!(str_of(&st, "scx_state"), "not loaded");
+        let detail = str_of(&st, "scx_detail");
+        assert!(detail.contains("scxctl refused"), "{detail}");
+        assert!(
+            detail.contains("disabled"),
+            "and it must carry the kernel's own reading too: {detail}"
+        );
+        let notes = notes_of(&st);
+        assert!(
+            !notes.iter().any(|n| n.contains("sched-ext: loaded")),
+            "nothing may report a refused switch as loaded: {notes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_command_that_said_yes_over_a_kernel_that_says_disabled_is_not_loaded() {
+        // The collapse itself, at the status layer: `scxctl` exited 0 and
+        // nothing attached. If this ever reads `loaded` again, the defect is
+        // back regardless of which verb the engine sends.
+        let st = scx_status("scx-lied", Outcome::Landed, ScxState::Disabled).await;
+        assert_eq!(
+            str_of(&st, "scx_state"),
+            "not loaded",
+            "a command's exit code is a fact about the command, not about the kernel"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_says_unknown_when_the_machine_could_not_be_read() {
+        // The third answer. Neither a pass nor a failure — and it must not be
+        // rounded to either, which is what the whole program calls
+        // "permission denied is not absence".
+        let st = scx_status(
+            "scx-unknown",
+            Outcome::Unknown("could not be confirmed".into()),
+            ScxState::Unreadable("/sys/kernel/sched_ext/state: EACCES".into()),
+        )
+        .await;
+        assert_eq!(str_of(&st, "scx_state"), "unknown");
+        let detail = str_of(&st, "scx_detail");
+        assert!(detail.contains("EACCES"), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn a_kernel_without_sched_ext_is_not_loaded_rather_than_unknown() {
+        // "No scheduler can attach here" is a definite answer and reads as
+        // one. Only an unreadable machine is unknown.
+        let st = scx_status(
+            "scx-unsupported",
+            Outcome::Refused("scxctl: this kernel has no sched_ext support".into()),
+            ScxState::Unsupported,
+        )
+        .await;
+        assert_eq!(str_of(&st, "scx_state"), "not loaded");
+        assert!(str_of(&st, "scx_detail").contains("CONFIG_SCHED_CLASS_EXT"));
+    }
+
+    #[tokio::test]
+    async fn a_scheduler_that_is_not_the_one_asked_for_is_loaded_and_says_so() {
+        let st = scx_status(
+            "scx-wrong",
+            Outcome::Landed,
+            ScxState::Enabled {
+                ops: Some("rusty".into()),
+            },
+        )
+        .await;
+        assert_eq!(
+            str_of(&st, "scx_state"),
+            "loaded",
+            "something IS attached — that is a different problem from nothing being attached"
+        );
+        assert!(
+            str_of(&st, "scx_detail").contains("not the scheduler that was asked for"),
+            "but the disagreement has to be visible"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_profile_that_asks_for_no_scheduler_claims_nothing() {
+        // `scx = ""` must produce neither a claim nor a complaint.
+        let root = scratch("scx-none");
+        let irq_root = hybrid_machine(&root);
+        let ctx = build_ctx(&root, PROFILE_STEER, &irq_root, Arc::new(MockWriter::new()));
+        ctx.game_enter(&[]).await.unwrap();
+        let st = ctx.game_status().await;
+        assert_eq!(str_of(&st, "scx_state"), "not requested");
+        assert_eq!(str_of(&st, "scx_requested"), "");
+        assert!(
+            !notes_of(&st).iter().any(|n| n.contains("sched-ext")),
+            "a profile that asks for nothing must not mention it: {:?}",
+            notes_of(&st)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plan_applied_through_the_recording_mock_is_unknown_and_never_loaded() {
+        // The mock records intentions and touches nothing, so it cannot say a
+        // scheduler is attached. This is the guard against the whole class
+        // coming back through a convenience default: if `MockWriter` ever
+        // starts answering `Disabled` or `Enabled`, every test in the suite
+        // would silently start asserting against a fiction.
+        let root = scratch("scx-mock");
+        let irq_root = hybrid_machine(&root);
+        let ctx = build_ctx(&root, PROFILE_SCX, &irq_root, Arc::new(MockWriter::new()));
+        ctx.game_enter(&[]).await.unwrap();
+        let st = ctx.game_status().await;
+        assert_eq!(
+            str_of(&st, "scx_state"),
+            "unknown",
+            "a recorded intention is not a scheduler"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpus_locked_reports_what_nvidia_smi_accepted_and_not_what_was_planned() {
+        // The sibling defect, found by looking for the same shape: this key
+        // was `plan.gpus_locked.clone()`, so a GPU whose clock lock nvidia-smi
+        // rejected was still listed as locked.
+        let root = scratch("gpu-refused");
+        let irq_root = hybrid_machine(&root);
+
+        struct RefusesEveryGpuLock;
+        impl SysWriter for RefusesEveryGpuLock {
+            fn apply(&self, action: &Action) -> anyhow::Result<Outcome> {
+                Ok(match action {
+                    Action::NvidiaLockGraphics { .. } | Action::NvidiaLockMemory { .. } => {
+                        Outcome::Refused("nvidia-smi: exit status: 3 — Not Supported".into())
+                    }
+                    _ => Outcome::Landed,
+                })
+            }
+        }
+
+        let profile = PROFILE_SCX
+            .replace("scx = \"scx_lavd\"", "scx = \"\"")
+            .replace(
+                "[gamemode.nvidia]\n        enabled = false",
+                "[gamemode.nvidia]\n        enabled = true\n        \
+                 graphics_clock = [1200, 1620]\n        memory_clock = [6000, 7000]",
+            );
+        // One GPU that nvidia-smi reports and whose maxima let both clock
+        // locks resolve, so the plan really does contain two lock actions for
+        // the writer to refuse.
+        let smi = MockNvidiaSmi {
+            available: true,
+            gpus: vec![apexd_core::gpu::NvidiaGpu {
+                index: 0,
+                name: "NVIDIA GeForce RTX 3070 Laptop GPU".into(),
+                max_graphics_mhz: Some(1620),
+                max_memory_mhz: Some(7001),
+                persistence: Some(false),
+            }],
+            ..Default::default()
+        };
+        let ctx = build_ctx_smi(
+            &root,
+            &profile,
+            &irq_root,
+            Arc::new(RefusesEveryGpuLock),
+            Arc::new(smi),
+        );
+        ctx.game_enter(&[]).await.unwrap();
+        let st = ctx.game_status().await;
+
+        let attempted = u32_list_of(&st, "gpus_lock_attempted");
+        let locked = u32_list_of(&st, "gpus_locked");
+        assert!(
+            !attempted.is_empty(),
+            "the fixture must actually plan a lock, or this asserts nothing: {st:?}"
+        );
+        assert!(
+            locked.is_empty(),
+            "every lock was refused, so no GPU is locked — got {locked:?}"
+        );
+        assert!(
+            notes_of(&st).iter().any(|n| n.contains("Not Supported")),
+            "and status must say why: {:?}",
+            notes_of(&st)
+        );
+    }
+
+    fn u32_list_of(m: &HashMap<String, OwnedValue>, key: &str) -> Vec<u32> {
+        let v = m
+            .get(key)
+            .unwrap_or_else(|| panic!("status has no '{key}' key: {:?}", m.keys()));
+        let Value::Array(a) = &**v else {
+            panic!("'{key}' is not an array");
+        };
+        a.iter()
+            .map(|x| u32::try_from(x.try_clone().unwrap()).unwrap())
+            .collect()
     }
 }
