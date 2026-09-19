@@ -532,15 +532,21 @@ Four more things the lab could not have told us, from the Run 2 session:
    does.** And `--wipe-slot=tpm2 --tpm2-device=auto`'s *"executing no
    operation"* is a no-op on the LUKS header only — it creates and persists a
    key at `0x81000001`, a handle shared with every other OS on the machine.
-8. **A TPM clear moves PCR 1 permanently on this board** (three extra
-   `EV_EFI_VARIABLE_BOOT`-era events, stable across the next boot) while leaving
-   PCR 0, 4 and 7 byte-identical. Never bind a keyslot to PCR 1.
+8. **A TPM clear moves PCR 1 permanently on this board** — the firmware's own
+   log grew by three events on PCR 1, and the new value was identical again on
+   the next boot. Which three is unrecoverable: the earlier run kept the
+   per-register event count and not the event list. PCR 0, 4 and 7 stayed
+   byte-identical across all three boots. Never bind a keyslot to PCR 1.
 
 And one that is not about TPMs at all: **`/dev/nvme0n1` is not a stable name on
-this machine.** The two controllers are probed asynchronously and the indices
-swapped across the reboot, so the disk that was Windows's became APEX's name.
-Any procedure that protects a disk by device name protects the wrong one sooner
-or later — use the serial, the PARTUUID or the filesystem label.
+this machine.** Three boots were logged; the first two enumerated the two NVMe
+controllers one way and the third — an ordinary reboot with nothing special
+about it — enumerated them the other way, so the disk that had been Windows's
+took APEX's name. The controllers are probed asynchronously and the index falls
+out of the race. **Any procedure that protects a disk by device name protects
+the wrong one sooner or later** — use the serial, the PCI function, the PARTUUID
+or the filesystem label. This is not katana-specific advice; katana is just
+where it was caught.
 
 Four things the lab could not have told us, all measured here:
 
