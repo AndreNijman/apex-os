@@ -85,9 +85,12 @@ Anything you do must leave those where they are or better.
 
 ## NEXT
 
-**Write `android/core/.../Relay.kt`** — the RFC 6455 client half, ported from
-`apexd/apex-remote-core/src/relay.rs`, with the SAME test vectors — then
-`RelayTest.kt` in `:core`, then the connector in `:app`.
+**Write the connector**: `android/app/src/main/kotlin/com/apexos/remote/pairing/
+RelayDialler.kt` — TCP connect, `SSLSocket` when `endpoint.secure` with
+`sslParameters.endpointIdentificationAlgorithm = "HTTPS"` set BEFORE
+`startHandshake()` (without it `SSLSocket` validates the chain and NOT the
+name), write `Opening.request`, `Opening.accept`, return a `RelayLink`. Then a
+`:app` JVM test against a loopback double that does NOT use `Relay.kt`'s codec.
 
 ## THE SEAM — measured, and `PairingService.kt:21` is telling the truth
 
@@ -197,14 +200,22 @@ from the Rust one:
 
 ## DONE
 
-- nothing yet.
+| commit | what |
+| --- | --- |
+| `125e1d91` | `feat(android)` the RFC 6455 client the relay leg has never had — `:core` codec + `RelayLink` stream adapter, **35 tests, 0 failures** |
 
 ## IN PROGRESS
 
 - Worktree `/var/tmp/apex-work/wt-p1-052-android` on `task/p1-052-android-relay`
   off `roadmap/v2.2` @ `859cbb2b`. Read `relay.rs` (1145 lines), `room.js`,
   `index.js`, `Rendezvous.kt`, `Transport.kt`, `Client.kt`, `Storage.kt`,
-  `PairingService.kt`. Seam confirmed (above). Nothing written yet.
+  `PairingService.kt`. Seam confirmed (above).
+- Commit 1 of ~6 done and pushed. Sequence, so a cutoff at any point leaves a
+  complete artefact: (a) codec **DONE** (b) connector (c) `PairingService`
+  fallback + delete the apology string (d) `--relay` through
+  `run-device-suite.sh` `start_remoted` AND `broker.py` `restart_remoted`
+  (e) device test (f) `Help.kt` + `HelpParityTest` (g) the disclosure UI.
+  **Land only after (g).**
 
 ## FOUND — inherited from the dispatch
 
