@@ -567,30 +567,34 @@ tasks:
     x86_64 Vulkan ICDs and ZERO i686, so Steam's 32-bit client dies with VK_ERROR_INCOMPATIBLE_DRIVER. NOT fixed;
     unit pkg-share owns it. Also `apex resolve chromium` offers only the flatpak while `apex install chromium`
     installs the rpm. || 2026-09-19, unit pkg-share, both remaining apex-pkg defects FIXED on branch
-    task/pkg-share (commit c55f218e, not landed). (b) the /usr/share blanket exclusion is gone and so is the whole
-    --excludepath list: extract_rpms now unpacks the 32-bit set into a scratch root and merge_multilib carries a
-    path only when neither the running image (rpm -qal, the same rpmdb question install_etc's removal pass asks)
-    nor this transaction's native pass already provides it, failing CLOSED so a mute rpmdb stops the merge instead
-    of carrying everything. Measured in fedora:43 over gstreamer1 + at-spi2-core + mesa-vulkan-drivers, 91 rpms /
-    57 i686, new rule vs old on the same set: 23 files newly carried, 0 lost, +44KB; 12 of the 23 are the
-    *_icd.i686.json manifests, the rest are /usr/bin/gio-querymodules-32, six /usr/libexec/getconf/*ILP32* helpers
-    and four licence/gdb files, all arch-tagged or i686-only and unable to shadow anything.
-    tests/test-apex-multilib-extract.sh 6 -> 11 assertions, all derived from the rpms and the rpmdb rather than
-    from a list, with two controls: the pre-fix exclude list read twice (it must still produce a shadow AND must
-    contain none of the manifests) and the merge with the rpmdb clause removed, which must let an image-owned
-    32-bit file through, because in fedora:43 the native-pass clause would otherwise hide the leg katana actually
-    depends on. CI floor 6 -> 11. (c) `apex resolve` lost its entire rpm leg because probe_rpm passed `--` to
-    `dnf5 repoquery`, which refuses it (rc 2, no stdout, dnf5 5.2.18.0) -- so it returned nothing for EVERY
-    package, not just chromium. newer_satisfied_by_image carried the same `--`, so guard_rpms answered 'not
-    satisfied' for every versioned requirement it was ever asked about. Verified on the L16 with the shipped
-    engine as a control: /usr/libexec/apex-pkg still says 'APEX would use: flatpak' for chromium, the fixed engine
-    says rpm and lists chromium-152.0.7977.82-1.fc43. tests/test-apex-resolve.sh's fake dnf5 now refuses `--` like
-    the real one -- it ignored its arguments, which is why 88 assertions passed over this; with the fake fixed,
-    re-introducing `--` fails 11 of them. tests/test-apex-pkg.sh's two assertions that PINNED --excludepath
-    /usr/share and /usr/bin are replaced, since pinning the defect is why this suite could not see it. Suites:
-    extract 11/0, resolve 91/0, pkg 79/0, multilib 3/0, shellcheck clean. NOT confirmed on hardware: nothing was
-    installed on katana or the L16, so the ICDs reaching /usr/share/vulkan/icd.d and Steam initialising Vulkan
-    still need one `sudo apex install steam` from an image carrying this branch.
+    task/pkg-share (commits c55f218e + 11fbe2fc, not landed). (b) the /usr/share blanket exclusion is gone and so
+    is the whole --excludepath list: extract_rpms now unpacks the 32-bit set into a scratch root and
+    merge_multilib carries a path only when neither the running image (rpm -qal, the same rpmdb question
+    install_etc's removal pass asks) nor this transaction's native pass already provides it, failing CLOSED so a
+    mute rpmdb stops the merge instead of carrying everything. Measured in fedora:43 over gstreamer1 +
+    at-spi2-core + mesa-vulkan-drivers, 91 rpms / 57 i686, new rule vs old on the same set: 23 files newly
+    carried, 0 lost, +44KB; 12 of the 23 are the *_icd.i686.json manifests, the rest are
+    /usr/bin/gio-querymodules-32, six /usr/libexec/getconf/*ILP32* helpers and four licence/gdb files, all
+    arch-tagged or i686-only and unable to shadow anything. tests/test-apex-multilib-extract.sh 6 -> 11
+    assertions, all derived from the rpms and the rpmdb rather than from a list, with two controls: the pre-fix
+    exclude list read twice (it must still produce a shadow AND must contain none of the manifests) and the merge
+    with the rpmdb clause removed, which must let an image-owned 32-bit file through, because in fedora:43 the
+    native-pass clause would otherwise hide the leg katana actually depends on. CI floor 6 -> 11. (c) `apex
+    resolve` lost its entire rpm leg because probe_rpm passed `--` to `dnf5 repoquery`, which refuses it (rc 2, no
+    stdout, dnf5 5.2.18.0) -- so it returned nothing for EVERY package, not just chromium.
+    newer_satisfied_by_image carried the same `--`, so guard_rpms answered 'not satisfied' for every versioned
+    requirement it was ever asked about. Verified on the L16 with the shipped engine as a control:
+    /usr/libexec/apex-pkg still says 'APEX would use: flatpak' for chromium, the fixed engine says rpm and lists
+    chromium-152.0.7977.82-1.fc43. tests/test-apex-resolve.sh's fake dnf5 now refuses `--` like the real one -- it
+    ignored its arguments, which is why 88 assertions passed over this; with the fake fixed, re-introducing `--`
+    fails 11 of them. tests/test-apex-pkg.sh's two assertions that PINNED --excludepath /usr/share and /usr/bin
+    are replaced, since pinning the defect is why this suite could not see it. Second commit covers the
+    newer_satisfied_by_image `--` site, which the first fixed with no test behind it: the function is driven
+    directly with both tools stubbed in both directions, and a class-wide static guard requires no non-comment
+    line in the engine to pass `--` to dnf5 at all. Suites: extract 11/0, resolve 91/0, pkg 82/0, multilib 3/0,
+    shellcheck -S warning -x clean on all four scripts. NOT confirmed on hardware: nothing was installed on katana
+    or the L16, so the ICDs reaching /usr/share/vulkan/icd.d and Steam initialising Vulkan still need one `sudo
+    apex install steam` from an image carrying this branch.
 - id: P0-002
   title: Introduce protected apex-secretd service
   priority: P0
@@ -7260,105 +7264,113 @@ tasks:
     the PCR 23 both-ways test, the DA numbers, the event-log mechanism and the four findings are all independent
     of PCR 7. And a warning for that session: turning Secure Boot on does NOT make systemd-pcrextend start working
     - that needs the sd-stub/UKI boot path, not the Secure Boot switch. ROUND 32 (2026-09-19, unit
-    later-silicon-2, branch task/later-silicon-2, commit 16fe7ad3, cut from roadmap/v2.2 f602f1cb, PUSHED; full
-    record ROADMAP/evidence/L-001-katana-tpm-20260919.md sections 14-21). RUN 2 IS DONE ON SILICON, AND L-001 IS
-    NOW 4 OF 5 RUNS. ANDRE EXPLICITLY APPROVED CLEARING KATANA'S TPM; the authorised cost is his Windows Hello PIN
-    and nothing else, because there is no BitLocker on that disk (re-verified: blkid TYPE="ntfs", no -FVE-FS-
-    signature). Windows re-provisions the TPM by itself. THE CLEAR: echo 5 > /sys/class/tpm/tpm0/ppi/request, read
-    back as 5, then systemctl reboot at 10:28:27 AWST; the machine was gone 29 seconds (journal boot -2 ends
-    10:28:30, boot -1 begins 10:28:56, boot_id 96c7fbc3 -> c93168d6). Nobody was at the machine. VERIFIED FIVE
-    WAYS RATHER THAN INFERRED FROM THE REBOOT, because a firmware that silently declines looks identical from
-    outside: lockoutAuthSet 1 -> 0; handles-persistent five (0x81000001, 0x81000002, 0x81000009, 0x81010001,
-    0x810EAC00) -> NONE, HR_PERSISTENT 0x5 -> 0x0 and HR_PERSISTENT_AVAIL 0xF -> 0x15; handles-nv-index 13 -> 5;
-    NV_COUNTERS 0x4 -> 0x0; LOCKOUT_COUNTER 0x2 -> 0x0, which is unambiguous because the first 2-hour decay step
-    from 10:05 could not have landed before about 12:05. ownerAuthSet, endorsementAuthSet, disableClear and
-    tpmGeneratedEPS all correctly UNCHANGED - TPM2_Clear does not regenerate the endorsement seed, so an unchanged
-    tpmGeneratedEPS is NOT evidence a clear failed. THE HEADLINE, WHICH NO PHYSICAL PART HAD EVER DONE: a 128 MiB
-    loopback LUKS2 volume enrolled BEFORE the clear with one systemd-recovery token and one systemd-tpm2 token
-    bound DELIBERATELY TO NO PCRs (so only the clear could make it refuse, and the row is Secure-Boot-independent)
-    gave, in ONE BOOT, tpm-unlock=REFUSED (mapper absent, 65 ms) -> recovery-unlock=SUCCESS (mapper present, 76
-    ms) -> recovery-marker=MATCH (ffb1de0e629c408c7ce78e315d45ccab40b7d7adb076cc0c56574f2865a53a04, identical).
-    Pre-clear the same volume unlocked through the TPM in 281/288/286 ms and through the recovery key in 24 ms.
-    The LUKS header was byte-identical across the clear (tpm2-blob sha256 6bca6bfc76), and the throwaway
-    passphrase still opened it, rc=0: a clear destroys TPM state, not disk state. The clear-induced unseal failure
-    did NOT move the DA counter (0x0), matching the policy-failure result in section 3.4. NEW FINDING -
-    ppi/response IS NOT A DISCRIMINATOR: it reads "5 0: Success" the instant the request is written, BEFORE any
-    reboot, and after the reboot request reads 96 and response still reads "5 0: Success". Anything treating it as
-    proof reports success for a request the firmware has not looked at. NEW FINDING - THE PART RETURNS TWO
-    DIFFERENT CODES AND SYSTEMD PRINTS ONE SENTENCE FOR BOTH ("Failed to unseal secret using TPM2: State not
-    recoverable"): Esys_Load 0x18b decodes as tpm:handle(1) TPM_RC_HANDLE and means the SRK at 0x81000001 is
-    ABSENT, which is RECOVERABLE WITHOUT RE-ENROLMENT; Esys_Load 0x1df decodes as tpm:parameter(1)
-    TPM_RC_INTEGRITY and means the storage primary seed itself was rolled, which is not. Both hide in an
-    ERROR:esys: line a script reading systemd's message never sees. NEW FINDING - THE SRK IS DETERMINISTIC FROM
-    THE STORAGE SEED, AND systemd-cryptsetup NEVER CREATES IT. Measured by taking the handle away rather than
-    reasoned: tpm2_evictcontrol -C o -c 0x81000001 (owner auth is empty after a clear) evicted it; a subsequent
-    attach refused with 0x18b and left the count at 0; systemd-cryptenroll then recreated it and the SAME sealed
-    blob unlocked again. So an evicted SRK is a machine that refuses every TPM unlock at boot with no way to
-    repair itself from the initrd - the recovery key is the only way into that boot - while the key material was
-    never lost. The recreated SRK is ECC NIST P-256, name 000b38e620f17c92, NOT Windows's 000b4d8e76b8 from
-    section 2.2. NEW FINDING - "executing no operation" IS A NO-OP ON THE LUKS HEADER ONLY. systemd-cryptenroll
-    --wipe-slot=tpm2 --tpm2-device=auto after a real clear printed "This PCR set is already enrolled, executing no
-    operation.", rc=0, tpm2-blob unchanged, and the unlock STILL REFUSED - now with 0x1df instead of 0x18b,
-    because the invocation had meanwhile CREATED AND PERSISTED a new SRK at 0x81000001, a handle shared with every
-    other OS on the machine. That is the third and most relevant case of the round-26 trap (lab after a clear;
-    section 2.3 with the TPM intact; now silicon after a real firmware clear) and it is exactly the failure
-    docs/boot-v2.md's Recovery table warns about: rc=0, a cheerful message, and a machine that still cannot
-    unlock. Two separate invocations then worked: "Wiped slot 2." left no systemd-tpm2 token, "New TPM2 token
-    enrolled as key slot 2." changed tpm2-blob 6bca6bfc76 -> 3776db2851, and unlock succeeded in 298/330/321 ms
-    with the marker identical and the recovery key still working. RUN 1'S MISSING HALF IS ALSO DONE:
-    docs/boot-v2.md Run 1 asks for a reboot-and-unlock and section 2 never rebooted. A CONTROL REBOOT with no PPI
-    request (boot 9dad77b0) unlocked the re-enrolled volume with no prompt in 388/323/342 ms, marker identical,
-    recovery key still working, SRK still at 0x81000001. NEW FINDING - A TPM CLEAR MOVES PCR 1 PERMANENTLY ON THIS
-    BOARD. Across the clear, byte-identical: PCR 0, 2, 3, 4, 5, 6, 7, 8, 9, 14 - so PCR 0 and PCR 7 are now
-    measured STABLE ACROSS THREE BOOTS, the cheap extra section 13.1 skipped. PCR 1 went 68CBF16D0D9AE888 ->
-    AA21AE08404995C1 and STAYED at the new value on the control boot, and the firmware's own log grew with it:
-    42328 bytes / 80 events / 8 events on PCR 1 -> 42805 bytes / 83 events / 11 events on PCR 1, identical on both
-    post-clear boots. So a keyslot sealed by value to PCR 1 would be destroyed by a clear twice over. PCR 10 is
-    IMA and moves on its own; PCR 11 returned to zeros, which is the REBOOT and not the clear, exactly as section
-    13.1 predicted. The event log still replays to ALL ELEVEN live registers, 0 mismatch, after the clear and two
-    reboots. NEW FINDING, NOT ABOUT TPMs AT ALL, AND IT CORRECTS SECTION 0.1'S METHOD - /dev/nvme0n1 IS NOT A
-    STABLE NAME ON KATANA. The kernel probes the two NVMe controllers asynchronously (dmesg: nvme1 = 0000:02:00.0,
-    nvme0 = 0000:03:00.0) and the indices SWAPPED across the reboot. Micron_2450_MTFDKBA1T0TFK SN 220534D1CB81,
-    953.9 GB, the APEX disk (BIOS-BOOT, EFI-SYSTEM 512M vfat PARTUUID 99af3362-a7ab-4317-b608-5330058f74b6,
-    apex-root btrfs PARTUUID e76ee78f-bf9c-4714-80c6-98cb1beb13c9) was nvme1n1 before and is nvme0n1 now. SPCC M.2
-    PCIe SSD SN 240023925111005, 1.8 TB, the WINDOWS disk (200M vfat ESP PARTUUID
+    later-silicon-2, branch task/later-silicon-2, commits 16fe7ad3 and b5435034, cut from roadmap/v2.2 f602f1cb,
+    PUSHED; full record ROADMAP/evidence/L-001-katana-tpm-20260919.md sections 14-21). RUN 2 IS DONE ON SILICON,
+    AND L-001 IS NOW 4 OF 5 RUNS. ANDRE EXPLICITLY APPROVED CLEARING KATANA'S TPM; the authorised cost is his
+    Windows Hello PIN and nothing else, because there is no BitLocker on that disk (re-verified: blkid
+    TYPE="ntfs", no -FVE-FS- signature). Windows re-provisions the TPM by itself. THE CLEAR: echo 5 >
+    /sys/class/tpm/tpm0/ppi/request, read back as 5, then systemctl reboot at 10:28:27 AWST; the machine was gone
+    29 seconds (journal boot -2 ends 10:28:30, boot -1 begins 10:28:56, boot_id 96c7fbc3 -> c93168d6). Nobody was
+    at the machine. VERIFIED FIVE WAYS RATHER THAN INFERRED FROM THE REBOOT, because a firmware that silently
+    declines looks identical from outside: lockoutAuthSet 1 -> 0; handles-persistent five (0x81000001, 0x81000002,
+    0x81000009, 0x81010001, 0x810EAC00) -> NONE, HR_PERSISTENT 0x5 -> 0x0 and HR_PERSISTENT_AVAIL 0xF -> 0x15;
+    handles-nv-index 13 -> 5; NV_COUNTERS 0x4 -> 0x0; LOCKOUT_COUNTER 0x2 -> 0x0, which is unambiguous because the
+    first 2-hour decay step from 10:05 could not have landed before about 12:05. ownerAuthSet, endorsementAuthSet,
+    disableClear and tpmGeneratedEPS all correctly UNCHANGED - TPM2_Clear does not regenerate the endorsement
+    seed, so an unchanged tpmGeneratedEPS is NOT evidence a clear failed. THE HEADLINE, WHICH NO PHYSICAL PART HAD
+    EVER DONE: a 128 MiB loopback LUKS2 volume enrolled BEFORE the clear with one systemd-recovery token and one
+    systemd-tpm2 token bound DELIBERATELY TO NO PCRs (so only the clear could make it refuse, and the row is
+    Secure-Boot-independent) gave, in ONE BOOT, tpm-unlock=REFUSED (mapper absent, 65 ms) ->
+    recovery-unlock=SUCCESS (mapper present, 76 ms) -> recovery-marker=MATCH
+    (ffb1de0e629c408c7ce78e315d45ccab40b7d7adb076cc0c56574f2865a53a04, identical). Pre-clear the same volume
+    unlocked through the TPM in 281/288/286 ms and through the recovery key in 24 ms. The LUKS header was
+    byte-identical across the clear (tpm2-blob sha256 6bca6bfc76), and the throwaway passphrase still opened it,
+    rc=0: a clear destroys TPM state, not disk state. The clear-induced unseal failure did NOT move the DA counter
+    (0x0), matching the policy-failure result in section 3.4. NEW FINDING - ppi/response IS NOT A DISCRIMINATOR:
+    it reads "5 0: Success" the instant the request is written, BEFORE any reboot, and after the reboot request
+    reads 96 and response still reads "5 0: Success". Anything treating it as proof reports success for a request
+    the firmware has not looked at. NEW FINDING - THE PART RETURNS TWO DIFFERENT CODES AND SYSTEMD PRINTS ONE
+    SENTENCE FOR BOTH ("Failed to unseal secret using TPM2: State not recoverable"): Esys_Load 0x18b decodes as
+    tpm:handle(1) TPM_RC_HANDLE and means the SRK at 0x81000001 is ABSENT, which is RECOVERABLE WITHOUT
+    RE-ENROLMENT; Esys_Load 0x1df decodes as tpm:parameter(1) TPM_RC_INTEGRITY and means the storage primary seed
+    itself was rolled, which is not. Both hide in an ERROR:esys: line a script reading systemd's message never
+    sees. NEW FINDING - THE SRK IS DETERMINISTIC FROM THE STORAGE SEED, AND systemd-cryptsetup NEVER CREATES IT.
+    Measured by taking the handle away rather than reasoned: tpm2_evictcontrol -C o -c 0x81000001 (owner auth is
+    empty after a clear) evicted it; a subsequent attach refused with 0x18b and left the count at 0;
+    systemd-cryptenroll then recreated it and the SAME sealed blob unlocked again. So an evicted SRK is a machine
+    that refuses every TPM unlock at boot with no way to repair itself from the initrd - the recovery key is the
+    only way into that boot - while the key material was never lost. The recreated SRK is ECC NIST P-256, name
+    000b38e620f17c92, NOT Windows's 000b4d8e76b8 from section 2.2. NEW FINDING - "executing no operation" IS A
+    NO-OP ON THE LUKS HEADER ONLY. systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=auto after a real clear
+    printed "This PCR set is already enrolled, executing no operation.", rc=0, tpm2-blob unchanged, and the unlock
+    STILL REFUSED - now with 0x1df instead of 0x18b, because the invocation had meanwhile CREATED AND PERSISTED a
+    new SRK at 0x81000001, a handle shared with every other OS on the machine. That is the third and most relevant
+    case of the round-26 trap (lab after a clear; section 2.3 with the TPM intact; now silicon after a real
+    firmware clear) and it is exactly the failure docs/boot-v2.md's Recovery table warns about: rc=0, a cheerful
+    message, and a machine that still cannot unlock. Two separate invocations then worked: "Wiped slot 2." left no
+    systemd-tpm2 token, "New TPM2 token enrolled as key slot 2." changed tpm2-blob 6bca6bfc76 -> 3776db2851, and
+    unlock succeeded in 298/330/321 ms with the marker identical and the recovery key still working. RUN 1'S
+    MISSING HALF IS ALSO DONE: docs/boot-v2.md Run 1 asks for a reboot-and-unlock and section 2 never rebooted. A
+    CONTROL REBOOT with no PPI request (boot 9dad77b0) unlocked the re-enrolled volume with no prompt in
+    388/323/342 ms, marker identical, recovery key still working, SRK still at 0x81000001. NEW FINDING - A TPM
+    CLEAR MOVES PCR 1 PERMANENTLY ON THIS BOARD. Across the clear, byte-identical: PCR 0, 2, 3, 4, 5, 6, 7, 8, 9,
+    14 - so PCR 0 and PCR 7 are now measured STABLE ACROSS THREE BOOTS, the cheap extra section 13.1 skipped. PCR
+    1 went 68CBF16D0D9AE888 -> AA21AE08404995C1 and STAYED at the new value on the control boot, and the
+    firmware's own log grew with it: 42328 bytes / 80 events / 8 events on PCR 1 -> 42805 bytes / 83 events / 11
+    events on PCR 1, identical on both post-clear boots. WHICH three events were added is unrecoverable - round 31
+    kept the per-register count and not the event list. So a keyslot sealed by value to PCR 1 would be destroyed
+    by a clear twice over. PCR 10 is IMA and moves on its own; PCR 11 returned to zeros, which is the REBOOT and
+    not the clear, exactly as section 13.1 predicted. The event log still replays to ALL ELEVEN live registers, 0
+    mismatch, after the clear and two reboots. NEW FINDING, NOT ABOUT TPMs AT ALL, AND IT CORRECTS SECTION 0.1'S
+    METHOD - /dev/nvme0n1 IS NOT A STABLE NAME ON KATANA. Read out of the kernel log for ALL THREE boots rather
+    than the one that looked wrong: boot -2 at 08:43 had nvme0 = 0000:02:00.0 and nvme1 = 0000:03:00.0 with
+    apex-root on nvme1n1p3; the CLEAR boot at 10:28 had the SAME mapping; and the CONTROL boot at 10:34 - an
+    ordinary reboot with nothing special about it - had nvme1 = 0000:02:00.0 and nvme0 = 0000:03:00.0 with
+    apex-root on nvme0n1p3. SO THE SWAP HAPPENED ON THE THIRD BOOT, NOT ON THE CLEAR, which makes the finding
+    stronger rather than weaker: the names are not merely changeable, they are changeable by nothing at all. The
+    controllers are probed asynchronously and the index falls out of the race. Micron_2450_MTFDKBA1T0TFK SN
+    220534D1CB81, 953.9 GB, PCI 0000:03:00.0 is the APEX disk (BIOS-BOOT, EFI-SYSTEM 512M vfat PARTUUID
+    99af3362-a7ab-4317-b608-5330058f74b6, apex-root btrfs PARTUUID e76ee78f-bf9c-4714-80c6-98cb1beb13c9). SPCC M.2
+    PCIe SSD SN 240023925111005, 1.8 TB, PCI 0000:02:00.0 is the WINDOWS disk (200M vfat ESP PARTUUID
     2ba9a2ea-4865-4d02-bdee-e52a8bf8b037, MSR, 500G NTFS, 845M NTFS WinRE, 1.3T ext4 games mounted at
-    /var/home/andre/Games by fstab UUID a41fee21) was nvme0n1 before and is nvme1n1 now. So the standing
-    instruction "never write to nvme0n1, that is the Windows disk" PROTECTS THE WRONG DISK on half the boots; the
-    durable identifiers are the serials, the PARTUUIDs and the labels apex-root / EFI-SYSTEM / games. Section
-    0.1's CONCLUSION still holds - everything in this round lived in a loopback file on apex-root, and the Windows
-    disk recorded 7 writes / 24 sectors for the whole control boot, with neither ESP and no NTFS volume mounted at
-    any point - but its METHOD is not reusable. AND: APEX'S DEFAULT BOOT ENTRY LIVES ON THE WINDOWS DISK.
-    Boot0000* APEX-OS Primary is HD(1,GPT,2ba9a2ea)/\EFI\APEX\SHIMX64.EFI and that PARTUUID is the SPCC disk's 200
-    MB ESP, the same partition Boot0002* Windows Boot Manager boots from; BootCurrent was 0000 on all three boots;
-    Boot0001* APEX-OS is the APEX disk's own EFI-SYSTEM. Repairing or wiping the Windows ESP takes APEX's default
-    boot entry with it. BOUNDARIES, ASSERTED AFTER THE FACT: efibootmgr and efibootmgr -v captured before the
-    clear and again after and compared with cmp - 821 bytes IDENTICAL (sha256 035bc40b7853f8f2449499ef3f589c1a)
-    and 2358 bytes IDENTICAL (sha256 67b855b9375b426faabcb33e3a7eac14), BootCurrent 0000, BootOrder
-    0000,0001,0002,0003,0004,0005, all six entries including Boot0002's BCD object GUID; neither ESP mounted or
-    written; no NTFS volume mounted at all this round, unlike round 31; deployment apex-266dcc57 /
-    sha256:ba263890b696 unchanged through both reboots with State: idle, no rebase, no rollback, nothing staged;
-    mokutil --sb-state still "SecureBoot disabled". Windows was NOT booted from here and cannot be, so the honest
-    assertion is that its boot entry is byte-identical and its disk was not written, NOT "Windows boots". MACHINE
-    LEFT: /var/lib/apex-tpm-qual2 removed entirely, all nine run scripts removed, dmsetup ls "No devices found", 0
-    crypto_LUKS volumes, the SRK systemd created at 0x81000001 EVICTED so the TPM is exactly as the clear left it
-    (0 persistent handles, 5 NV indices, LOCKOUT_COUNTER 0x0 - better than round 31 left it), PCR 11 back to
-    zeros, apex-user.raw 540012544 bytes merged on BOTH post-clear boots with /usr/bin/steam present and fc-list
-    538 fonts and fc-match sans -> Noto Sans, greetd ACTIVE on VT 1 with sway/swaybg/qs alive, sshd active,
-    katana-ssh-tunnel and katana-vps-tunnel both active again, stock three delay inhibitors, 0 FAILED SYSTEM UNITS
-    AND 0 FAILED USER UNITS. L-001 STAYS partial: docs/boot-v2.md requires runs 1, 2 and 5, and RUN 5 IS STILL
-    COULD-NOT-RUN because PPI operation 2 takes /sys/class/tpm/tpm0/ppi with it and re-enabling needs somebody in
-    firmware setup - not symmetric, not attempted, twice now. Run 3 stays COULD-NOT-RUN (fwupdmgr offers nothing
-    for this board). DO NOT FLIP L-001 TO done ON 4 OF 5. SECURE BOOT: this round adds NO new rows to redo - the
-    Run 2 volume was bound to no PCRs precisely so a Secure Boot change could not be confused with a clear, and
-    section 18.2's replay is section 11's existing event-log row against the 83-event log. The three rows stay the
-    --tpm2-pcrs=7 volume, the PCR 7 value and the event-log replay. And PCR 11 read all zeros on both post-clear
-    boots, which is the systemd-pcrextend finding measured twice more. GATES: test-boot-v2 105/0; shellcheck 167
-    discovered, 0 known-failing, 0 newly failing; suites 76 / 72 in CI / 4 exempt; doc verbs 257 valid, 8
-    deliberate, 0 not a command, 191 documented, 114 declared undocumented, 0 undocumented and undeclared, 0
-    stale; no conflict markers. docs/boot-v2.md updated in the same commit: the katana table's Run 2 row now reads
-    PASS, the Run 2 procedure names the PPI path and says to verify the clear rather than infer it, the Recovery
-    table gains the evicted-SRK row and a silicon confirmation of the one-command no-op.
+    /var/home/andre/Games by fstab UUID a41fee21). So the standing instruction "never write to nvme0n1, that is
+    the Windows disk" PROTECTS THE WRONG DISK the moment the race lands the other way, and it did on the last boot
+    of this round; the durable identifiers are the serials, the PCI functions, the PARTUUIDs and the labels
+    apex-root / EFI-SYSTEM / games. Section 0.1's CONCLUSION still holds - everything in this round lived in a
+    loopback file on apex-root whatever the kernel called it, and resolved BY SERIAL the Windows disk recorded
+    exactly 7 writes / 24 sectors on EACH of the two post-clear boots, as nvme0n1 on one and nvme1n1 on the other,
+    with neither ESP and no NTFS volume mounted at any point - but its METHOD is not reusable. AND: APEX'S DEFAULT
+    BOOT ENTRY LIVES ON THE WINDOWS DISK. Boot0000* APEX-OS Primary is HD(1,GPT,2ba9a2ea)/\EFI\APEX\SHIMX64.EFI
+    and that PARTUUID is the SPCC disk's 200 MB ESP, the same partition Boot0002* Windows Boot Manager boots from;
+    BootCurrent was 0000 on all three boots; Boot0001* APEX-OS is the APEX disk's own EFI-SYSTEM. Repairing or
+    wiping the Windows ESP takes APEX's default boot entry with it. BOUNDARIES, ASSERTED AFTER THE FACT:
+    efibootmgr and efibootmgr -v captured before the clear and again after and compared with cmp - 821 bytes
+    IDENTICAL (sha256 035bc40b7853f8f2449499ef3f589c1a) and 2358 bytes IDENTICAL (sha256
+    67b855b9375b426faabcb33e3a7eac14), BootCurrent 0000, BootOrder 0000,0001,0002,0003,0004,0005, all six entries
+    including Boot0002's BCD object GUID; neither ESP mounted or written; no NTFS volume mounted at all this
+    round, unlike round 31; deployment apex-266dcc57 / sha256:ba263890b696 unchanged through both reboots with
+    State: idle, no rebase, no rollback, nothing staged; mokutil --sb-state still "SecureBoot disabled". Windows
+    was NOT booted from here and cannot be, so the honest assertion is that its boot entry is byte-identical and
+    its disk was not written, NOT "Windows boots". MACHINE LEFT: /var/lib/apex-tpm-qual2 removed entirely, all
+    nine run scripts removed, dmsetup ls "No devices found", 0 crypto_LUKS volumes, the SRK systemd created at
+    0x81000001 EVICTED so the TPM is exactly as the clear left it (0 persistent handles, 5 NV indices,
+    LOCKOUT_COUNTER 0x0 - better than round 31 left it), PCR 11 back to zeros, apex-user.raw 540012544 bytes
+    merged on BOTH post-clear boots with /usr/bin/steam present and fc-list 538 fonts and fc-match sans -> Noto
+    Sans, greetd ACTIVE on VT 1 with sway/swaybg/qs alive, sshd active, katana-ssh-tunnel and katana-vps-tunnel
+    both active again, stock three delay inhibitors, 0 FAILED SYSTEM UNITS AND 0 FAILED USER UNITS. L-001 STAYS
+    partial: docs/boot-v2.md requires runs 1, 2 and 5, and RUN 5 IS STILL COULD-NOT-RUN because PPI operation 2
+    takes /sys/class/tpm/tpm0/ppi with it and re-enabling needs somebody in firmware setup - not symmetric, not
+    attempted, twice now. Run 3 stays COULD-NOT-RUN (fwupdmgr offers nothing for this board). DO NOT FLIP L-001 TO
+    done ON 4 OF 5. SECURE BOOT: this round adds NO new rows to redo - the Run 2 volume was bound to no PCRs
+    precisely so a Secure Boot change could not be confused with a clear, and section 18.2's replay is section
+    11's existing event-log row against the 83-event log. The three rows stay the --tpm2-pcrs=7 volume, the PCR 7
+    value and the event-log replay. And PCR 11 read all zeros on both post-clear boots, which is the
+    systemd-pcrextend finding measured twice more. GATES: test-boot-v2 105/0; shellcheck 167 discovered, 0
+    known-failing, 0 newly failing; suites 76 / 72 in CI / 4 exempt; doc verbs 257 valid, 8 deliberate, 0 not a
+    command, 191 documented, 114 declared undocumented, 0 undocumented and undeclared, 0 stale; no conflict
+    markers. docs/boot-v2.md updated in the same commit: the katana table's Run 2 row now reads PASS, the Run 2
+    procedure names the PPI path and says to verify the clear rather than infer it, the Recovery table gains the
+    evicted-SRK row and a silicon confirmation of the one-command no-op.
 - id: L-002
   title: Enable LUKS2 by default
   priority: Later

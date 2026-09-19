@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-19T12:35+08:00",
+  "updated": "2026-09-19T12:55+08:00",
   "_round": "Round 30. All four of round 29's agents were dead at the resume, every worktree clean with nothing unpushed, so the round was a landing round: four merges, zero unlanded left in either repo. Three agents re-dispatched fresh from cards (never by SendMessage); `later` retired because its remainder is hardware. Three slots deliberately free — one still held for the Android unit, two headroom. No new unit was invented to fill them: the READY list was empty and the COMPLETE section is exhaustive.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 bde4d96c -> 6b531503. Three merges, in order: c6bc990a (task/later-2, tip 0391b4ec, 741 insertions over 5 files), 7658fe1f (task/p2-b-round29, tip cb02019f, tests/lib/atspi.sh), 6b531503 (task/p2-f-4, tip 79027b51, 551 insertions over 2 files). Each merge --no-ff; check-no-conflict-markers.sh PASS after each; pushed once with --force-with-lease. FOURTH MERGE, later the same session: f40ffefe (task/p2-f-5, tip 933bbee1, 1,353 insertions over 7 files — the gdrive provider). Rust changed in this one, so the workspace was actually rebuilt on the merged tip: cargo test --locked --workspace --no-fail-fast 3299 passed / 0 failed / 2 ignored, clippy --workspace --all-targets -D warnings exit 0, tests/test-secret-broker.sh 84/0, and all four count gates unchanged. roadmap/v2.2 is now f40ffefe. FIFTH MERGE: da6fc0fb (task/p2-d-6, tip 044fa254, 1,836 insertions over 16 files — gap 5, the per-run browser CA bind, with route B deliberately not started). Re-run on that tip: cargo test --locked --workspace --no-fail-fast 3314 passed / 0 failed / 2 ignored across 56 targets, clippy exit 0, tests/test-apex-browser.sh 116/0, tests/test-secret-broker.sh 84/0 (re-run because the same tip now also carries gdrive), and all four count gates unchanged. roadmap/v2.2 is now da6fc0fb. THE WIRE VERSION MOVED TO 10 — see _decisions. SIXTH MERGE: bb229745 (task/p2-f-6, tip a4907070, 2,206 insertions over 7 files — the msgraph transport). On that tip: workspace 3338 passed / 0 failed / 2 ignored, clippy exit 0, test-secret-broker.sh 93/0 (was 84), test-apex-browser.sh 116/0 re-run because the same tip carries both, and the four count gates unchanged. roadmap/v2.2 is now bb229745.",
@@ -48,21 +48,6 @@
       "queue_id": "p2-b",
       "card": "ROADMAP/state/agents/p2-b.md",
       "at_dispatch": "Round 32. Round 31 landed as b0e34371 (apex-os) and a8cd491 (apex-shell). Dispatched with a DECISION already taken on the RTL Arch-runner red, which has been 17/3/2 since it landed and which four rounds correctly refused to paper over: round 31 confirmed the cause from the runner twice -- Arch upstream qt6ct 0.11-8 links no libKF6I18n. Told to do BOTH halves, not one: (1) assert the precondition with a MEASURED discriminator (ldd or DT_NEEDED, never inferred from a distro name or version string) so section 1 reports a NAMED could-not-run carrying its reason rather than a SKIP or a silent pass, failing in both directions; and (2) install ki18n on the Arch validate job so the mechanism is actually exercised -- if it STILL fails after that, it is a real APEX defect, which is the outcome worth having. Told to separate `the runner was missing a library` from `APEX RTL works` in the write-up, because only one of those is a claim about APEX. Section 1 must NOT become a SKIP; it is the discriminator. Hardware queue items 1 and 2 stay out of reach -- katana is held by the TPM clear agent."
-    },
-    {
-      "slug": "pkg-share",
-      "items": [
-        "P0-001"
-      ],
-      "repo": "apex-os",
-      "worktree": "(agent creates)",
-      "branch": "task/pkg-share",
-      "agent_id": "ad30c63244b976116",
-      "dispatched": "2026-09-19T10:40+08:00",
-      "session": "round 31 orchestrator",
-      "queue_id": "pkg-share",
-      "card": "ROADMAP/state/agents/pkg-share.md",
-      "at_dispatch": "Owns files/system/libexec/apex-pkg EXCLUSIVELY this round. Two defects katana measured: (1) the 32-bit pass blanket-excludes /usr/share, which throws away every *_icd.i686.json while keeping the .so files they name -- katana has 13 x86_64 ICDs and ZERO i686, so Steam's 32-bit client dies with VK_ERROR_INCOMPATIBLE_DRIVER, and this is why the 2026-09-17 live recovery had to hand-write nvidia_icd.i686.json; (2) `apex resolve chromium` offers only the flatpak while `apex install chromium` installs the rpm, at cmd_resolve, apex-pkg:2238. The evidence prefers the rpm -qf image-owner rule over an arch-token heuristic, because it fixes this and the /usr/libexec sibling with one rule, and the engine already has that precedent in install_etc's removal pass. Handed tests/test-apex-multilib-extract.sh as the existing instrument to EXTEND, not rebuild. Told not to touch the gaming session files and not to ssh to katana."
     },
     {
       "slug": "build-verify",

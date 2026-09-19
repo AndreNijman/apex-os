@@ -4,7 +4,7 @@ repo: apex-os
 worktree: /var/tmp/apex-work/wt-pkg-share
 branch: task/pkg-share
 base: roadmap/v2.2 @ f666f5c1
-commit: c55f218e — pushed to origin/task/pkg-share, **NOT landed**
+commits: c55f218e (the fix) + 11fbe2fc (coverage for the second `--` site) — both pushed to origin/task/pkg-share, **NOT landed**
 
 ## NEXT
 
