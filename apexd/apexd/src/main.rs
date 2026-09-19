@@ -85,6 +85,7 @@ async fn main() -> Result<()> {
         initial,
         Path::new("/sys"),
         Path::new(apexd_core::irq::PROC_IRQ),
+        Path::new("/proc"),
         nvidia,
     );
 
@@ -122,6 +123,9 @@ async fn main() -> Result<()> {
 
     // AC/battery poll loop.
     tokio::spawn(ac_event_loop(ctx.clone(), conn.clone()));
+
+    // The watch that lets a destroyed Gaming Mode session release the machine.
+    tokio::spawn(game_owner_watch(ctx.clone(), conn.clone()));
 
     // Run until told to stop, then unwind in the reverse order of set-up.
     wait_for_shutdown().await;
@@ -169,6 +173,55 @@ async fn ac_event_loop(ctx: Arc<Ctx>, conn: zbus::Connection) {
                 eprintln!("apexd: emit TierChanged failed: {e}");
             }
             eprintln!("apexd: AC {} -> tier {}", if now { "on" } else { "off" }, target);
+        }
+    }
+}
+
+/// Release game mode when the process that asked for it has died.
+///
+/// THE DEFECT, measured on katana 2026-09-19 (evidence §3.4): Gaming Mode's
+/// session script releases game mode from an EXIT trap that runs
+/// `apex game stop`. That is polkit action `org.apexos.apexd.manage-power`,
+/// `allow_active=yes` and `auth_admin` otherwise, so the moment logind stops
+/// calling the session active — a `systemctl restart greetd`, a VT switch away,
+/// any logind-driven teardown — the trap's call is REFUSED and does nothing.
+/// The machine was left with a p-core cpuset, steered IRQs, the `performance`
+/// tier and `scx_lavd` loaded, with nothing able to undo them.
+///
+/// The daemon is root and asks polkit nothing about itself, so it is the one
+/// party that can still act after the session is gone. Two seconds is the same
+/// cadence [`ac_event_loop`] already runs at; a loop this cheap (one `read` of
+/// one small file, and only while a session with an owner is live) does not
+/// deserve an event mechanism, and a poll cannot miss an edge the way a dropped
+/// signal subscription can.
+///
+/// An UNREADABLE `/proc` is not a release. Releasing on it would let an I/O
+/// error change the machine's power state; it is logged once per run of
+/// failures and the session is left alone.
+async fn game_owner_watch(ctx: Arc<Ctx>, conn: zbus::Connection) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(2));
+    let mut complained = false;
+    loop {
+        ticker.tick().await;
+        match ctx.game_release_if_owner_gone().await {
+            Ok(None) => complained = false,
+            Ok(Some(_why)) => {
+                complained = false;
+                // Tell the bus, or apex-shell keeps drawing a session that is
+                // over and `apex game status` disagrees with the hardware.
+                if let Err(e) = dbus::emit_game_mode_changed(&conn, false).await {
+                    eprintln!("apexd: game: emitting the owner-driven release failed: {e}");
+                }
+            }
+            Err(e) => {
+                if !complained {
+                    eprintln!(
+                        "apexd: game: the session owner could not be read ({e:#}); \
+                         leaving the session alone"
+                    );
+                    complained = true;
+                }
+            }
         }
     }
 }

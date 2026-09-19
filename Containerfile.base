@@ -2329,6 +2329,31 @@ RUN set -eux; \
     rm -f /tmp/vconsole.orig; \
     echo "vconsole guard verified (bad config repaired, good config untouched)"
 
+# ── A crash loop must not be able to fill /var ─────────────────────────────
+# MEASURED ON KATANA 2026-09-19 (evidence §3.4): one crashing process respawned
+# at ~2 Hz left 15 376 core dumps in a single boot and 4.0 GB of stored dumps
+# on a /var that was already 94% full. systemd's vacuum was working the whole
+# time — `MaxUse=` defaults to 10% of the filesystem CAPPED AT 4 GiB, and 4.0 GB
+# is exactly that cap. The default is simply the wrong size for an ostree
+# machine, where /var is the only writable filesystem and also holds every
+# container image, the system extension `apex-pkg` builds, and the user's home.
+# See the drop-in itself for the full argument.
+COPY files/system/coredump/50-apex-coredump-limits.conf \
+     /usr/lib/systemd/coredump.conf.d/50-apex-coredump-limits.conf
+RUN set -eux; \
+    # The file landing somewhere is not the assertion. `systemd-analyze
+    # cat-config` resolves the SAME search path systemd-coredump resolves at
+    # runtime, so this fails if the drop-in is in a directory nothing reads —
+    # which is the only interesting way to get this wrong. Verified both ways
+    # against this image before it was written: with the drop-in these two
+    # lines appear, and without it the base image prints NEITHER, because
+    # Fedora ships every value commented out.
+    systemd-analyze cat-config systemd/coredump.conf > /tmp/coredump.merged; \
+    grep -qx 'MaxUse=256M' /tmp/coredump.merged; \
+    grep -qx 'KeepFree=2G' /tmp/coredump.merged; \
+    rm -f /tmp/coredump.merged; \
+    echo "coredump storage bounded: MaxUse=256M KeepFree=2G (default was a 4 GiB cap)"
+
 # One-shot de-branding migration for systems installed from a PRE-branding image.
 # The BLS entry titles, the EFI NVRAM label and a hand-written /etc/os-release
 # all live OUTSIDE the ostree deployment, so `bootc upgrade` never replaces them.

@@ -101,6 +101,9 @@ pub trait Fan {
 pub trait GameMode {
     fn set_active(&self, active: bool) -> zbus::Result<()>;
     fn start_for_pid(&self, pid: u32) -> zbus::Result<()>;
+    /// Enter game mode and hand apexd the process whose death ends the
+    /// session. The owner is watched, not pinned — see `apexd/src/dbus.rs`.
+    fn start_owned_by(&self, owner_pid: u32) -> zbus::Result<()>;
     fn attach_pid(&self, pid: u32) -> zbus::Result<()>;
     #[zbus(property)]
     fn active(&self) -> zbus::Result<bool>;
