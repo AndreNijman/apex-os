@@ -103,7 +103,7 @@ the other. Fan writes go through the same `SysWriter` as everything else, so
 |---|---|---|---|
 | `Active` | property (r) | `b` | A session is running |
 | `Supported` | property (r) | `b` | The active profile permits game mode |
-| `Status` | property (r) | `a{sv}` | `active`(b), `supported`(b), `tier`(s), `cgroup`(s), `cpuset_policy`(s), `irq_policy`(s); while active also `cpus`(s), `core_source`(s), `prior_tier`(s), `irqs_steered`(u), `irqs_attempted`(u), `irqs_refused`(u), `gpus_locked`(au), `pids`(au), `notes`(as), `owner_pid`(u); while idle also `pcores`(s), `ecores`(s), `nvidia_smi`(b) |
+| `Status` | property (r) | `a{sv}` | `active`(b), `supported`(b), `tier`(s), `cgroup`(s), `cpuset_policy`(s), `irq_policy`(s); while active also `cpus`(s), `core_source`(s), `prior_tier`(s), `irqs_steered`(u), `irqs_attempted`(u), `irqs_refused`(u), `gpus_locked`(au), `gpus_lock_attempted`(au), `scx_requested`(s), `scx_state`(s), `scx_detail`(s), `pids`(au), `notes`(as), `owner_pid`(u); while idle also `pcores`(s), `ecores`(s), `nvidia_smi`(b), `scx_requested`(s), `scx_state`(s), `scx_detail`(s) |
 | `SetActive` | method | `b → ()` | Enter/leave; idempotent both ways; polkit `manage-power` |
 | `StartForPid` | method | `u → ()` | Enter and pin a PID (its children inherit the cgroup); polkit `manage-power` |
 | `AttachPid` | method | `u → ()` | Attach another PID to a running session; `Failed` when inactive; polkit `manage-power` |
@@ -119,8 +119,14 @@ itself**. The session script's `EXIT` trap calls `SetActive(false)`, which is
 `manage-power` and therefore `allow_active = yes`; the instant logind stops
 calling that session active — a greetd restart, a VT switch, any logind-driven
 teardown — its own release is refused. Measured on katana 2026-09-19: the
-machine sat on a p-core cpuset with steered IRQs, the `performance` tier and
-`scx_lavd` for 75 minutes with nothing able to undo it.
+machine sat on a p-core cpuset with steered IRQs and the `performance` tier for
+75 minutes with nothing able to undo it.
+
+> **That account named `scx_lavd` as a fourth thing left running, and it was
+> wrong** — corrected 2026-09-20, because the correction is the point. No
+> scheduler was running, then or on any other boot: `apex game status` said one
+> was, `scxctl` had refused every call, and the status surface was repeating the
+> plan. The three things above were real. See the `scx_*` keys below.
 
 The daemon takes the job instead: `StartOwnedBy(pid)` records the PID **and
 its `/proc` start time**, a 2 s watch reads `/proc/<pid>/stat`, and when the
@@ -142,6 +148,38 @@ steered none. The plan's number now has its own key, `irqs_attempted`, and
 `irqs_refused` is the difference; a partial result is the normal case on real
 hardware, and `notes` carries the kernel's reason when there is one. Consumers
 that render `irqs_steered` need no change and now render a measurement.
+
+`gpus_locked` had the identical defect and the identical fix: it was the list
+of GPUs the plan MEANT to lock, so a card whose clock lock `nvidia-smi`
+rejected was still reported as locked. It now holds the GPUs every one of whose
+lock writes landed, with `gpus_lock_attempted` beside it.
+
+`scx_state` is **`loaded`, `not loaded`, `unknown` or `not requested`**, and
+the three that are not `not requested` are three different facts that this
+surface used to collapse into one. Before 2026-09-20 there was no sched-ext key
+at all: the only thing reported was a `notes` line reading `sched-ext: scx_lavd
+for the session`, copied out of the plan, printed on machines where the switch
+had refused every call since the feature landed.
+
+* **`loaded` requires a reading of `/sys/kernel/sched_ext`.** A `scxctl` that
+  exits 0 is a fact about `scxctl`. The daemon waits, bounded, for the
+  scheduler to attach and then reads the kernel; a command that succeeds and
+  changes nothing reports `not loaded`.
+* **`not loaded`** covers both "nothing attached" and "this kernel has no
+  `CONFIG_SCHED_CLASS_EXT`", because both are definite.
+* **`unknown`** is the third answer and is never rounded to either of the
+  others: `state` unreadable, or mid-transition (`enabling`/`disabling`).
+* `scx_detail` names both halves — what `scxctl` said and what the kernel says
+  — so a disagreement is visible rather than resolved in silence. It also
+  flags a scheduler that attached but is not the one that was asked for.
+  Note the kernel's `root/ops` publishes the **struct_ops** name, which drops
+  the prefix: `scx_lavd` reads as `lavd`.
+
+The three `scx_*` keys are also present **while game mode is off**, reporting
+the live reading. That is deliberate: on katana `sched_ext/state` read
+`disabled` before, during and after a session, so quoting it as a release
+discriminator proved nothing, and the surface should make that legible rather
+than leave a reader to infer it.
 
 ## Authorization
 
