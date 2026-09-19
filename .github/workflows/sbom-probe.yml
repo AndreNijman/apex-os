@@ -3,57 +3,59 @@ name: sbom-probe
 # TEMPORARY — a measurement, not a product. Delete this file once the SBOM step
 # in build-image.yml is green.
 #
-# ═══ WHAT THE PREVIOUS ROUNDS SETTLED, SO NOBODY RE-MEASURES IT ═══
+# ═══ WHAT IS ALREADY SETTLED — DO NOT RE-MEASURE ANY OF IT ═══
 #
-# Rounds 1 and 2 (runs 35437908023, 35447488777) settled syft's memory death:
-# GOMEMLIMIT=10GiB is the fix, the source is irrelevant, parallelism is
-# irrelevant, and swap buys 16 MB. Verified in a real build (35450175806): syft
-# catalogued the image in 742 s at 15,303,652 KB peak RSS and emitted 9830
-# packages. DO NOT RE-RUN THOSE ARMS.
+# Rounds 1-2 (runs 35437908023, 35447488777): GOMEMLIMIT=10GiB is the fix for
+# syft's memory death; the source, the parallelism and a swapfile are all
+# irrelevant. Verified in build 35450175806: 742 s, peak RSS 15,303,652 KB,
+# 9830 packages.
 #
-# ═══ ROUND 3 IS ABOUT THE PREDICATE'S SIZE, WHICH IS THE NEXT WALL ═══
+# Round 3 (run 35455459788) established two more things and then threw the rest
+# away on a bug in its own harness:
 #
-# Run 35450175806 then died one line later, in `cosign attest`:
+#  - THE REKOR CEILING HOLDS FROM A GITHUB RUNNER, not just from one home
+#    connection: body 25,000,000 B -> HTTP 400, fully uploaded and processed;
+#    body 25,166,008 B -> HTTP 502, size_upload=0, 0.26 s. The boundary is
+#    25,165,824 B, exactly 24 MiB, and the refusal is at header time.
+#  - The `full` arm ran clean: rc=0, 915 s, peak RSS 15,449,996 KB.
+#  - Then: `line 39: name: unbound variable`. `local name="$1" f="…${name}…"`
+#    expands ALL its words before it assigns ANY of them, so under `set -u` the
+#    second initialiser reads `name` while it is still unbound. 915 s of syft
+#    measurement, lost to a one-line bash rule. Every `local` below assigns on
+#    its own line.
 #
-#   Error: signing ghcr.io/andrenijman/apex-os@sha256:86225e1b…:
-#     Post "https://rekor.sigstore.dev/api/v1/log/entries": giving up after
-#     4 attempt(s)
+# ═══ ROUND 4: ONE ARM, THE ONE THE BUILD ACTUALLY USES ═══
 #
-# Sixteen direct probes against that endpoint on 2026-09-20 found the cause,
-# and it is NOT the 413 the previous round expected:
+# Round 3's arms were designed before the knobs were understood, and three of
+# the four are now known to be the wrong thing to run. Measured locally against
+# alpine:3.20 with this same pinned syft 1.52.0:
 #
-#   body <= 25,000,092 B   400 "invalid public key" — uploaded and PROCESSED
-#   body >= 25,165,916 B   502, size_upload=0, ~0.43 s — refused at header time
+#   default                            packages=15 files=77 rels=125  87,692 B
+#   FILE_METADATA_SELECTION=none       packages=15 files=77 rels=125  76,227 B
+#   RELATIONSHIPS_..._OWNERSHIP=false  packages=15 files=2  rels=48   31,767 B
+#   both                               packages=15 files=1  rels=48   31,130 B
 #
-# The boundary brackets 25,165,824 B = exactly 24 MiB. 502 is in
-# go-retryablehttp's retryable class, which is why cosign retried four times and
-# why its error cannot name the cause. syft's 166 MB predicate becomes ~222 MB
-# of base64 in the DSSE envelope: about 9x the ceiling.
+# So FILE_METADATA_SELECTION=none is NOT the lever — it drops each file's
+# DIGESTS, not the file rows, and saves 13%. The rows go with
+# RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP=false, at 64%. And the third switch,
+# ..._OWNERSHIP_OVERLAP=false, makes syft exit 1 outright:
 #
-# So the question this round answers is a size question with a hard pass mark:
-# does a PACKAGE-LEVEL SPDX document — every one of the 9830 packages, with the
-# per-file inventory dropped — fit under 24 MiB once cosign has wrapped and
-# base64'd it, and does Rekor then accept it. Four arms:
+#   invalid application config: cannot enable exclude-binary-overlap-by-ownership
+#   without enabling package-file-ownership-overlap
 #
-#   full      the baseline. What the failing build produced. Measured pretty
-#             AND compact, because cosign marshals the predicate compactly and
-#             the wire size is the compact one.
-#   jq-strip  the fallback the bluefin PR used: post-process the finished
-#             document. Costs a full syft run first and saves no RSS.
-#   nofiles   the real candidate: SYFT_FILE_METADATA_SELECTION=none, which cuts
-#             the work at source. Verified against syft 1.52.0's own `syft
-#             config` output, not a web search.
-#   norel     nofiles plus both package-file relationship switches off. Its own
-#             arm because turning off ownership-overlap could in principle
-#             change the PACKAGE set, and a smaller SBOM that quietly lost
-#             packages is the one outcome worse than a red step.
+# — and the knob it demands in exchange changes the PACKAGE set, which is the
+# one thing this step must never do quietly. It stays on.
 #
-# Every arm asserts the package count is still 9830 and that both Electron
-# trees survive. A predicate that fits by dropping packages is not a fix.
+# This round therefore runs exactly ONE arm: the two switches build-image.yml
+# now sets, against the digest a failing build already pushed. It answers the
+# only open question — does the real document fit under 24 MiB once cosign has
+# wrapped it, and does Rekor accept it — in about fifteen minutes and one
+# runner, independently of the verification build (35456273175) running the
+# same configuration end to end.
 #
-# The upload itself is proved with `cosign attest-blob`, NOT `cosign attest`
-# against the image digest: the latter would write a real `.att` signed by THIS
-# workflow's identity onto a real digest, which `apex trust` would read as a
+# The upload is proved with `cosign attest-blob`, NOT `cosign attest` against
+# the image digest: the latter would write a real `.att` signed by THIS
+# workflow's identity onto a real digest, which `apex trust` reads as a
 # provenance check that FAILED — and a failed provenance check is refused even
 # at `provenance=warn`. attest-blob walks the identical DSSE/Rekor path with the
 # identical body size and touches no image.
@@ -61,27 +63,24 @@ on:
   push:
     branches: [task/sbom-attest]
     paths: [".github/workflows/sbom-probe.yml"]
-  workflow_dispatch:
 
 permissions:
   contents: read
   packages: read
-  # cosign keyless. attest-blob mints a Fulcio certificate exactly as the real
+  # cosign keyless: attest-blob mints a Fulcio certificate exactly as the real
   # step does, so the upload path under test is the real one.
   id-token: write
 
 env:
-  # The digest run 35450175806 pushed, signed, and then failed to attest. It is
-  # a per-SHA tag from a task branch: nothing tracks it, so cataloguing it again
-  # costs one runner instead of the ~1 hour a build-image run costs.
+  # The digest build 35450175806 pushed, signed, and then failed to attest.
+  # A per-SHA tag from a task branch: nothing tracks it.
   REF: ghcr.io/andrenijman/apex-os@sha256:86225e1bc87a912624252fe4f81e33f1ac50646effdb0562dbb78a27ef9454c4
-  # Measured 2026-09-20, not assumed. See the header.
   REKOR_CEILING: 25165824
 
 jobs:
   probe:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -111,191 +110,94 @@ jobs:
           set -euo pipefail
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          cosign login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
 
-      # ── Does the 24 MiB ceiling hold from a GitHub runner too? ──────────────
-      # The bisection was done from one home connection. If the refusal were an
-      # artefact of that path, the whole design would be built on a local fault.
-      # Two requests, both deliberately invalid entries, which Rekor can never
-      # log.
-      - name: Confirm the Rekor ceiling from this runner
+      - name: Catalogue with the configuration build-image.yml uses
         run: |
-          # `bash -e {0}` is the default shell: -e is on before this line runs,
-          # and `set -uo pipefail` does not clear it. A refused POST is the
-          # measurement, so -e is turned OFF explicitly.
-          set +e
-          set -uo pipefail
-          post() {
-            printf '{"apiVersion":"0.0.1","kind":"intoto","spec":{"content":{"envelope":"' > /tmp/body.json
-            head -c "$1" /dev/zero | tr '\0' 'A' >> /tmp/body.json
-            printf '"},"publicKey":"QUFB"}}' >> /tmp/body.json
-            echo "body=$(stat -c%s /tmp/body.json) -> $(curl -sS -o /tmp/resp.txt \
-              -w 'http=%{http_code} sent=%{size_upload} t=%{time_total}' \
-              -X POST -H 'Content-Type: application/json' -H 'Expect: 100-continue' \
-              --max-time 300 --data-binary @/tmp/body.json \
-              https://rekor.sigstore.dev/api/v1/log/entries 2>&1)"
-            echo "  resp: $(head -c 160 /tmp/resp.txt | tr -d '\n')"
-            rm -f /tmp/body.json
-          }
-          echo "── under the measured ceiling (expect 400: uploaded and processed) ──"
-          post 24999908
-          echo "── over the measured ceiling (expect 502, size_upload=0) ──"
-          post 25165916
-
-      - name: Catalogue and measure every arm
-        run: |
-          # NOT set -e — and saying so is not enough: the default shell is
-          # `bash -e {0}`, so -e is already on and must be turned OFF. An arm
-          # dying is a measurement, not the end of the step.
+          # -e is ON by default (`bash -e {0}`) and saying "NOT set -e" in a
+          # comment does not clear it. syft dying is the measurement.
           set +e
           set -uo pipefail
           mkdir -p /tmp/sbom
+          echo "── runner ──"; nproc; free -m; df -h /
 
-          # Peak RSS, elapsed, and the two sizes that matter. cosign marshals
-          # the predicate with Go's json.Marshal, which is COMPACT, so the
-          # compact size is the one that predicts the wire.
-          run_syft() {
-            local name="$1"; shift
-            echo "════════ arm ${name} ════════"
-            echo "env: $*"
-            echo "disk before: $(df -BM --output=avail / | tail -1 | tr -d ' ')"
-            ( while true; do
-                echo "[${name} $(date +%T)] $(free -m | awk '/^Mem:/{printf "mem_used=%sM mem_avail=%sM", $3, $7}') root_avail=$(df -BM --output=avail / | tail -1 | tr -d ' ')"
-                sleep 30
-              done ) & local sp=$!
-            local t0; t0=$(date +%s)
-            timeout 2700 /usr/bin/time -v -o "/tmp/time-${name}.txt" \
-              env SYFT_PARALLELISM=4 GOMEMLIMIT=10GiB "$@" \
-              syft "registry:$REF" -o spdx-json > "/tmp/sbom/${name}.json"
-            local rc=$?
-            kill $sp 2>/dev/null || true
-            echo "──── ${name}: rc=${rc} elapsed=$(( $(date +%s) - t0 ))s"
-            grep -E 'Maximum resident|Command terminated|Elapsed \(wall' "/tmp/time-${name}.txt" || true
-            # Four arms share one runner. syft's scratch is ~15 GB per run and
-            # it does not always clean up after a kill.
-            sudo rm -rf /tmp/syft-* 2>/dev/null
-            echo "disk after: $(df -BM --output=avail / | tail -1 | tr -d ' ')"
-            return $rc
-          }
+          ( while true; do
+              echo "[sample $(date +%T)] $(free -m | awk '/^Mem:/{printf "mem_used=%sM mem_avail=%sM", $3, $7}') root_avail=$(df -BM --output=avail / | tail -1 | tr -d ' ')"
+              sleep 30
+            done ) & SPID=$!
 
-          # Everything the decision turns on, printed in one place per arm.
-          # Package count FIRST: a document that fits by losing packages is not
-          # a smaller SBOM, it is a worse one.
-          report() {
-            local name="$1" f="/tmp/sbom/${name}.json"
-            if ! [ -s "$f" ]; then echo "!!!! ${name}: NO OUTPUT"; return 1; fi
-            jq -c . "$f" > "/tmp/sbom/${name}.min.json" 2>/dev/null \
-              || { echo "!!!! ${name}: not valid JSON"; return 1; }
-            local pretty compact pkgs files rels b64
-            pretty=$(stat -c%s "$f")
-            compact=$(stat -c%s "/tmp/sbom/${name}.min.json")
-            pkgs=$(jq '.packages | length' "$f")
-            files=$(jq '(.files // []) | length' "$f")
-            rels=$(jq '(.relationships // []) | length' "$f")
-            # base64 of the compact predicate, which is the dominant term of
-            # the DSSE body cosign actually posts.
-            b64=$(( (compact + 2) / 3 * 4 ))
-            echo "RESULT ${name}: packages=${pkgs} files=${files} relationships=${rels}"
-            echo "RESULT ${name}: pretty=${pretty}B compact=${compact}B predicted_dsse_payload=${b64}B ceiling=${REKOR_CEILING}B"
-            if [ "$b64" -lt "$REKOR_CEILING" ]; then
-              echo "RESULT ${name}: FITS — $(( (REKOR_CEILING - b64) * 100 / REKOR_CEILING ))% of the ceiling spare"
-            else
-              echo "RESULT ${name}: OVER by $(( b64 - REKOR_CEILING ))B ($(( b64 / REKOR_CEILING ))x)"
-            fi
-            echo "RESULT ${name}: electron trees: $(jq -r '[.packages[] | select(.name|test("^(electron|chatgpt)$|claude-code";"i")) | .name] | unique | join(", ")' "$f")"
-          }
+          t0=$(date +%s)
+          timeout 2700 /usr/bin/time -v -o /tmp/time.txt \
+            env SYFT_PARALLELISM=4 GOMEMLIMIT=10GiB \
+                SYFT_FILE_METADATA_SELECTION=none \
+                SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP=false \
+            syft "registry:$REF" -o spdx-json > /tmp/sbom/ownership.json
+          rc=$?
+          kill $SPID 2>/dev/null
 
-          # ── arm 1: the baseline, exactly what the failing build produced ────
-          run_syft full
-          report full
-
-          # ── arm 2: the post-processing fallback ─────────────────────────────
-          # Drop the file inventory and every relationship with a file on either
-          # end. The file SPDXIDs are READ OFF THE DOCUMENT rather than matched
-          # against an assumed "SPDXRef-File-" prefix: syft's id scheme is not
-          # part of any contract, and a prefix that silently stops matching
-          # would leave dangling relationship edges in a document that still
-          # looked plausible.
-          if [ -s /tmp/sbom/full.json ]; then
-            echo "════════ arm jq-strip ════════"
-            t0=$(date +%s)
-            /usr/bin/time -v -o /tmp/time-jq.txt jq -c '
-              ([ (.files // [])[].SPDXID ] | map({key: ., value: true}) | from_entries) as $fid
-              | .relationships = [
-                  (.relationships // [])[]
-                  | select(($fid[.spdxElementId] // false) == false)
-                  | select(($fid[.relatedSpdxElement] // false) == false)
-                ]
-              | del(.files)
-            ' /tmp/sbom/full.json > /tmp/sbom/jq-strip.json
-            echo "──── jq-strip: rc=$? elapsed=$(( $(date +%s) - t0 ))s"
-            grep -E 'Maximum resident' /tmp/time-jq.txt || true
-            report jq-strip
+          echo "──── ownership: rc=${rc} elapsed=$(( $(date +%s) - t0 ))s"
+          grep -E 'Maximum resident|Command terminated|Elapsed \(wall' /tmp/time.txt
+          if [ "$rc" != 0 ]; then
+            echo "::error::syft failed (rc=$rc); nothing to measure"
+            exit 1
           fi
 
-          # ── arm 3: the candidate — cut the work at source ───────────────────
-          # `none` is one of the documented values of file.metadata.selection in
-          # syft 1.52.0's own `syft config` output:
-          #   "none", "": do not capture any files (env: SYFT_FILE_METADATA_SELECTION)
-          run_syft nofiles SYFT_FILE_METADATA_SELECTION=none
-          report nofiles
+          jq -c . /tmp/sbom/ownership.json > /tmp/sbom/ownership.min.json
+          # Each `local`-free, each on its own line: see the header.
+          PRETTY=$(stat -c%s /tmp/sbom/ownership.json)
+          COMPACT=$(stat -c%s /tmp/sbom/ownership.min.json)
+          PKGS=$(jq '.packages | length' /tmp/sbom/ownership.json)
+          FILES=$(jq '(.files // []) | length' /tmp/sbom/ownership.json)
+          RELS=$(jq '(.relationships // []) | length' /tmp/sbom/ownership.json)
+          DSSE=$(( (COMPACT + 2) / 3 * 4 ))
 
-          # ── arm 4: also drop the derived relationships ──────────────────────
-          # Separate from arm 3 on purpose. package-file-ownership-overlap is
-          # how syft decides that a binary it found and an RPM that owns it are
-          # the same thing; turning it off could change the PACKAGE set, and
-          # that has to be visible as its own number rather than folded into
-          # arm 3's.
-          run_syft norel \
-            SYFT_FILE_METADATA_SELECTION=none \
-            SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP=false \
-            SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP_OVERLAP=false
-          report norel
-
+          echo "RESULT packages=${PKGS} files=${FILES} relationships=${RELS}"
+          echo "RESULT pretty=${PRETTY}B compact=${COMPACT}B dsse=${DSSE}B ceiling=${REKOR_CEILING}B"
+          if [ "$DSSE" -lt "$REKOR_CEILING" ]; then
+            echo "RESULT FITS — at $(( DSSE * 100 / REKOR_CEILING ))% of the ceiling"
+          else
+            echo "RESULT OVER by $(( DSSE - REKOR_CEILING ))B"
+          fi
+          # A smaller document that lost packages is the one outcome worse than
+          # a red step, so the package count is the first thing printed and the
+          # Electron trees are named individually.
+          echo "RESULT electron trees: $(jq -r '[.packages[] | select(.name|test("^(electron|chatgpt)$|claude-code";"i")) | .name] | unique | join(", ")' /tmp/sbom/ownership.json)"
+          echo "RESULT relationship types: $(jq -c '[.relationships[].relationshipType] | group_by(.) | map({(.[0]): length}) | add' /tmp/sbom/ownership.json)"
           df -h /; free -m
           exit 0
 
-      # ── The only measurement that is not a prediction ───────────────────────
-      # Everything above computes what the body WOULD be. This posts it.
-      - name: Attest each surviving arm for real, against the public Rekor
+      - name: Post it to the real Rekor
         if: always()
         run: |
-          # -e off: a REFUSAL by Rekor is the result this step exists to record.
+          # -e off: a REFUSAL is the result this step exists to record.
           set +e
           set -uo pipefail
-          echo "the blob under test is irrelevant; the predicate is the payload" > /tmp/subject.txt
-          for name in nofiles norel jq-strip full; do
-            f="/tmp/sbom/${name}.min.json"
-            [ -s "$f" ] || { echo "════ ${name}: no document, skipped"; continue; }
-            sz=$(stat -c%s "$f")
-            echo "════════ cosign attest-blob: ${name} (predicate ${sz}B) ════════"
-            t0=$(date +%s)
-            cosign attest-blob --yes --type spdxjson \
-              --predicate "$f" \
-              --bundle "/tmp/bundle-${name}.json" \
-              /tmp/subject.txt 2>&1 | tail -20
-            rc=${PIPESTATUS[0]}
-            echo "──── ${name}: cosign rc=${rc} after $(( $(date +%s) - t0 ))s"
-            if [ "$rc" = 0 ] && [ -s "/tmp/bundle-${name}.json" ]; then
-              echo "REKOR ${name}: ACCEPTED — logIndex $(jq -r '.rekorBundle.Payload.logIndex // .verificationMaterial.tlogEntries[0].logIndex // "unknown"' "/tmp/bundle-${name}.json" 2>/dev/null)"
-            else
-              echo "REKOR ${name}: REFUSED (rc=${rc})"
-            fi
-          done
+          F=/tmp/sbom/ownership.min.json
+          if ! [ -s "$F" ]; then echo "no document to post"; exit 0; fi
+          echo "the blob is irrelevant; the predicate is the payload" > /tmp/subject.txt
+          echo "════ cosign attest-blob with a $(stat -c%s "$F")B predicate ════"
+          t0=$(date +%s)
+          cosign attest-blob --yes --type spdxjson \
+            --predicate "$F" --bundle /tmp/bundle.json /tmp/subject.txt 2>&1 | tail -20
+          rc=${PIPESTATUS[0]}
+          echo "──── cosign rc=${rc} after $(( $(date +%s) - t0 ))s"
+          # rc=0 is the proof. The bundle's shape varies by cosign version, so a
+          # missing index is not a refusal.
+          if [ "$rc" = 0 ]; then
+            echo "REKOR: ACCEPTED"
+            jq -r '.. | .logIndex? // empty' /tmp/bundle.json 2>/dev/null | head -1
+          else
+            echo "REKOR: REFUSED (rc=${rc})"
+          fi
           exit 0
 
-      # Keep the documents. A later round that needs to re-measure should not
-      # have to spend another 742 s of syft to get them back.
-      - name: Keep the measured documents
+      - name: Keep the document
         if: always()
         run: |
           set +e
-          set -uo pipefail
           mkdir -p /tmp/out
-          for name in full jq-strip nofiles norel; do
-            [ -s "/tmp/sbom/${name}.min.json" ] && gzip -9 -c "/tmp/sbom/${name}.min.json" > "/tmp/out/${name}.min.json.gz"
-          done
-          ls -l /tmp/out || true
+          [ -s /tmp/sbom/ownership.min.json ] && gzip -9 -c /tmp/sbom/ownership.min.json > /tmp/out/ownership.min.json.gz
+          ls -l /tmp/out
+          exit 0
 
       - name: Upload
         if: always()
