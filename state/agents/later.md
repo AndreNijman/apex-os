@@ -6,6 +6,32 @@ branch: task/later-2
 
 ## NEXT
 
+**SUPERSEDED TWICE. Read `later-silicon-2.md` first, then `later-silicon.md`.**
+Round 32 (2026-09-19, unit `later-silicon-2`, branch `task/later-silicon-2`,
+commit `16fe7ad3`, pushed) answered the one question round 31 ended on.
+
+**Andre said yes, katana's TPM was cleared, and Run 2 is PASS.** L-001 is now
+**4 of 5 runs** and still `partial`. In one boot on an Intel PTT fTPM, a volume
+enrolled before the clear gave `tpm-unlock=REFUSED` → `recovery-unlock=SUCCESS`
+→ marker identical. The clear was verified five ways rather than inferred from
+the reboot, because `ppi/response` reads `5 0: Success` before any reboot
+happens and proves nothing.
+
+**Do not dispatch a unit to "finish L-001".** Run 5 needs somebody in firmware
+setup — disabling the TPM takes the `ppi` directory that would re-enable it —
+and Run 3 has no firmware capsule to apply. Both are in `state/queue.json`
+under `_hardware_blocked`.
+
+**If you are going to touch katana: `/dev/nvme0n1` is not a stable name there.**
+The two NVMe controllers are probed asynchronously and the indices swapped
+across round 32's reboot, so the disk this programme is told never to write
+became the APEX disk. Use the serial, the PARTUUID or the label.
+
+The round-31 card follows, and the round-29 card after that. Both are still
+accurate about what was true when they were written.
+
+---
+
 **SUPERSEDED 2026-09-19 (round 31) — read `later-silicon.md` instead.** The
 card below said the remaining work was Andre's five-run hardware procedure and
 that no agent could satisfy L-001's word "Real" from here. A machine appeared:

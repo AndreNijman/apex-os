@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-19T12:15+08:00",
+  "updated": "2026-09-19T12:35+08:00",
   "_round": "Round 30. All four of round 29's agents were dead at the resume, every worktree clean with nothing unpushed, so the round was a landing round: four merges, zero unlanded left in either repo. Three agents re-dispatched fresh from cards (never by SendMessage); `later` retired because its remainder is hardware. Three slots deliberately free — one still held for the Android unit, two headroom. No new unit was invented to fill them: the READY list was empty and the COMPLETE section is exhaustive.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 bde4d96c -> 6b531503. Three merges, in order: c6bc990a (task/later-2, tip 0391b4ec, 741 insertions over 5 files), 7658fe1f (task/p2-b-round29, tip cb02019f, tests/lib/atspi.sh), 6b531503 (task/p2-f-4, tip 79027b51, 551 insertions over 2 files). Each merge --no-ff; check-no-conflict-markers.sh PASS after each; pushed once with --force-with-lease. FOURTH MERGE, later the same session: f40ffefe (task/p2-f-5, tip 933bbee1, 1,353 insertions over 7 files — the gdrive provider). Rust changed in this one, so the workspace was actually rebuilt on the merged tip: cargo test --locked --workspace --no-fail-fast 3299 passed / 0 failed / 2 ignored, clippy --workspace --all-targets -D warnings exit 0, tests/test-secret-broker.sh 84/0, and all four count gates unchanged. roadmap/v2.2 is now f40ffefe. FIFTH MERGE: da6fc0fb (task/p2-d-6, tip 044fa254, 1,836 insertions over 16 files — gap 5, the per-run browser CA bind, with route B deliberately not started). Re-run on that tip: cargo test --locked --workspace --no-fail-fast 3314 passed / 0 failed / 2 ignored across 56 targets, clippy exit 0, tests/test-apex-browser.sh 116/0, tests/test-secret-broker.sh 84/0 (re-run because the same tip now also carries gdrive), and all four count gates unchanged. roadmap/v2.2 is now da6fc0fb. THE WIRE VERSION MOVED TO 10 — see _decisions. SIXTH MERGE: bb229745 (task/p2-f-6, tip a4907070, 2,206 insertions over 7 files — the msgraph transport). On that tip: workspace 3338 passed / 0 failed / 2 ignored, clippy exit 0, test-secret-broker.sh 93/0 (was 84), test-apex-browser.sh 116/0 re-run because the same tip carries both, and the four count gates unchanged. roadmap/v2.2 is now bb229745.",
@@ -63,22 +63,6 @@
       "queue_id": "pkg-share",
       "card": "ROADMAP/state/agents/pkg-share.md",
       "at_dispatch": "Owns files/system/libexec/apex-pkg EXCLUSIVELY this round. Two defects katana measured: (1) the 32-bit pass blanket-excludes /usr/share, which throws away every *_icd.i686.json while keeping the .so files they name -- katana has 13 x86_64 ICDs and ZERO i686, so Steam's 32-bit client dies with VK_ERROR_INCOMPATIBLE_DRIVER, and this is why the 2026-09-17 live recovery had to hand-write nvidia_icd.i686.json; (2) `apex resolve chromium` offers only the flatpak while `apex install chromium` installs the rpm, at cmd_resolve, apex-pkg:2238. The evidence prefers the rpm -qf image-owner rule over an arch-token heuristic, because it fixes this and the /usr/libexec sibling with one rule, and the engine already has that precedent in install_etc's removal pass. Handed tests/test-apex-multilib-extract.sh as the existing instrument to EXTEND, not rebuild. Told not to touch the gaming session files and not to ssh to katana."
-    },
-    {
-      "slug": "gaming-gpu",
-      "items": [
-        "P1-043",
-        "P1-038"
-      ],
-      "repo": "apex-os",
-      "worktree": "(agent creates)",
-      "branch": "task/gaming-gpu",
-      "agent_id": "a4b349afeae6c48ff",
-      "dispatched": "2026-09-19T10:40+08:00",
-      "session": "round 31 orchestrator",
-      "queue_id": "gaming-gpu",
-      "card": "ROADMAP/state/agents/gaming-gpu.md",
-      "at_dispatch": "Six defects from the katana qualification, most with the fix already measured. The headline: gamescope picks the Intel iGPU, opens card1 and never sees the monitor -- `--prefer-vk-device 10de:249d` fixes it on katana (NVIDIA selected, card2, HDMI-A-1 at 240 Hz) and WLR_DRM_DEVICES is IGNORED because gamescope's DRM backend is its own. The hard part is choosing the right GPU on an arbitrary hybrid laptop without a hardcoded device id, failing loudly rather than falling back to the iGPU. Also: --rt wants CAP_SYS_NICE and APEX grants only RLIMIT_RTPRIO; the `apex gaming` status row reports the same string for a MISSING and an UNREADABLE sudoers rule; APEX Safe Graphics cannot light a dGPU output at all (DMA-BUF import unsupported, 60 swapchain failures on HDMI-A-1 vs 0 on eDP-1), which blanks the one session that exists for when things are broken; and the niri session runs two bars because APEX ships no niri config and upstream's default line 271 spawns waybar. Katana is NOT available -- the TPM agent owns it -- so hardware rows are a written runnable checklist, not a simulation."
     },
     {
       "slug": "build-verify",

@@ -7,6 +7,16 @@ machine: katana (MSI Katana GF76 12UG, Intel PTT fTPM)
 
 ## NEXT
 
+**ANSWERED 2026-09-19 — read `later-silicon-2.md`.** The question this card ends
+on was put to Andre and he said yes. Unit `later-silicon-2` cleared katana's TPM
+through PPI operation 5, verified it five ways, and showed
+`tpm-unlock=REFUSED` → `recovery-unlock=SUCCESS` → marker identical in one boot.
+**Run 2 is PASS and L-001 is 4 of 5 runs, still `partial`.** Run 5 stays
+COULD-NOT-RUN exactly as this card predicted. Everything below is the record of
+what was true before that; it is accurate and it is no longer the next step.
+
+---
+
 Nothing is running, nothing is half-finished, and katana is clean and released.
 Branch tip `f70d3ba8` is pushed, cut from `roadmap/v2.2` `36535383`.
 

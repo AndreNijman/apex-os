@@ -19,7 +19,7 @@ five files, all of which this unit owned:
 ```
 files/system/libexec/apex-pkg        +188/-…    the fix
 tests/test-apex-multilib-extract.sh  6 -> 11 assertions
-tests/test-apex-pkg.sh               2 stale assertions replaced by 3
+tests/test-apex-pkg.sh               2 stale assertions replaced by 6
 tests/test-apex-resolve.sh           the fake dnf5 made as strict as the real one
 .github/workflows/pr-validation.yml  extract-step floor 6 -> 11
 ```
@@ -42,10 +42,34 @@ cannot prove that a booted APEX machine then finds them. After this lands in an
 image build, on katana:
 
 ```
-sudo apex install steam
-ls /usr/share/vulkan/icd.d/ | grep -c i686        # was 0; must be >0
+sudo apex install steam 2>&1 | tee /tmp/install.log
+ls /usr/share/vulkan/icd.d/ | grep -c i686            # was 0; must be >0
+ls /usr/share/vulkan/implicit_layer.d/ | grep -c i686 # same class, same fix
 grep -c 'VK_ERROR_INCOMPATIBLE_DRIVER' ~/.local/share/Steam/logs/console-linux.txt
 ```
+
+Three readings out of that same log are worth more than the counts, because
+each one is a thing only a real machine can say:
+
+```
+grep 'multilib: carrying' /tmp/install.log
+```
+prints `carrying N of M file(s) … (X already owned by the image, Y already
+placed by this set's native packages)`. **X should dominate Y on katana.** That
+is the whole point of control 2 in the suite: in a container the native-pass
+clause does most of the work, and on a real machine the rpmdb clause does. If X
+comes back small, the rule is not doing there what it does here and something
+about the image's rpmdb needs looking at before anything else is believed.
+
+```
+grep -c "omitting '" /tmp/install.log     # was structurally 0
+grep -c "refusing '"  /tmp/install.log
+```
+That split is the **only** visible effect of the `newer_satisfied_by_image`
+fix, and it is invisible until a real set hits it. Before the fix the function
+could not return 0, so `omitting` was unreachable and every newer-than-image
+package became a `refusing` — compare against §2 of the 2026-09-19 evidence,
+which recorded the run that produced the 219-package set.
 
 and the §3 measurement alongside it, which this change must not regress:
 
@@ -112,6 +136,19 @@ files 4235 -> 4258   bytes 756065407 -> 756110047   newly carried 23, lost 0
 Nothing under `/usr/lib/{systemd,udev,tmpfiles.d,sysusers.d}` came back and no
 new `/etc` path did: the image owns those, so the rule drops them without ever
 being told their names.
+
+**"0 lost" counted files and symlinks, not directories** — deliberately, because
+that is what the katana measurement counted and what an overlay can actually
+hide. Directories were measured separately and they do move, in both directions:
+547 -> 548, 12 out and 13 in, every one of them empty. The 12 are i686 `%dir`
+entries the empty-directory prune now drops (`/usr/lib/gio/modules`,
+`/usr/lib/dri`, `/usr/lib/pkcs11`, six `/usr/lib/llvm21/*`, `/run/setrans`,
+`/var/cache/ldconfig`). Benign — GIO and mesa both tolerate a missing module
+directory, and nothing was placing files there. The 13 arriving are the
+mirror-image curiosity: `/usr/lib64/dri`, five `/usr/lib64/llvm21/*` and the
+getconf/gdb directories, which the OLD scheme had *erased*, because unpacking
+the i686 twin into the same rpmdb as its x86_64 sibling let rpm treat it as an
+upgrade and remove the sibling's empty directories. Two roots cannot do that.
 
 **Consequence for a future reader:** `/usr/bin/gio-querymodules-32` and the six
 getconf helpers are 32-bit ELF files outside a library directory, and that is now
@@ -205,7 +242,18 @@ mutations: blind control 1 both ways, blind control 2, blind both anti-blindness
 derivations, disable the fake's `--` refusal. Every one was caught by the
 intended assertion and only it; every restore was `cp` + `cmp`, byte-identical.
 
-Final: extract 11/0, resolve 91/0, pkg 79/0, multilib 3/0.
+`newer_satisfied_by_image`'s `--` had **no** coverage anywhere: the resolve
+fake never reaches `guard_rpms`, and the container suite that does run
+`guard_rpms` against a real repository cannot construct a newer-than-installed
+set on demand. Two things now cover it. A unit case drives the function
+directly with both tools stubbed, in **both** directions so the fix cannot be
+"always return 0", and its stub dnf5 refuses `--` exactly as the real one does.
+And a class-wide static guard requires that **no** non-comment line in the
+engine passes `--` to dnf5 — the defect is a property of dnf5, not of the two
+call sites anyone happened to notice, and a future third one is covered without
+edits.
+
+Final: extract 11/0, resolve 91/0, pkg 82/0, multilib 3/0.
 `shellcheck -S warning -x` clean on all four scripts (0.11.0, run in the
 container — shellcheck is not installed on the L16).
 
@@ -213,13 +261,19 @@ container — shellcheck is not installed on the L16).
 
 * **`tests/test-apex-resolve.sh` spuriously FATALs with "dnf5 resolves to
   '/bin/dnf5'" when it is run in the SAME Bash-tool invocation that also writes
-  files.** Observed 9 times in a row under that condition and 0 times in 12 runs
-  when run alone, for the stock branch version and the edited one alike. The
-  fake exists, is `-rwxr-xr-x`, `find -perm -u+x` finds it and executing it
-  directly works — but `env -i PATH="$BIN:…" bash -c 'command -v dnf5'` does not
-  see it. It is an artifact of this harness, not of the suite: **run the suite in
-  a call of its own** and it passes. Nothing was changed to work around it,
-  because CI does not run suites that way.
+  files.** Measured, and stated as measured: 9 FATALs, every one of them in a
+  call that had just written a file, and 0 FATALs in 12 runs of the same file
+  made in calls of their own. The stock `roadmap/v2.2` version was run 9 times
+  and never FATAL'd — but it was **never run under the write-in-same-call
+  condition**, so this is a correlation with the harness, not a demonstration
+  that the stock file is immune. When it fires, the fake exists, is
+  `-rwxr-xr-x`, `find -perm -u+x` finds it and executing it directly works, but
+  `env -i PATH="$BIN:…" bash -c 'command -v dnf5'` does not see it — which is
+  not a thing a shell script can do to itself. **Run the suite in a call of its
+  own** and it passes. Nothing was changed to work around it, because CI does
+  not run suites that way. If someone wants the mechanism, the discriminator to
+  try is whether `env -i` is what loses the file: run the same `command -v`
+  without it while the condition holds.
 * `--` is not a universal end-of-options separator. `dnf5` rejects it on every
   subcommand; `flatpak` accepts it (GOption), checked rather than assumed, so
   `probe_flatpak`'s `flatpak search -- "$1"` is left alone.

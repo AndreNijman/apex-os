@@ -1,6 +1,6 @@
 {
   "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
-  "updated": "2026-09-19T10:15+08:00",
+  "updated": "2026-09-19T10:50+08:00",
   "concurrency_ceiling": 6,
   "units": [
     {
@@ -415,7 +415,8 @@
         "P1-038"
       ],
       "after": [],
-      "title": "Gaming Mode picks the iGPU and the laptop panel; Safe Graphics cannot light a dGPU"
+      "title": "Gaming Mode picks the iGPU and the laptop panel; Safe Graphics cannot light a dGPU",
+      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 31) -- the CODE is done and landed as merge 78f04717; what is left is ONE HARDWARE RUN and the run-book for it is already written, at docs/gaming-and-sessions.md section 6, six blocks. Fixed and headlessly verified: the GPU/output selection rule (the OUTPUT decides the card, not 'prefer the discrete GPU' -- a dGPU with no connector attached is a session with no screen; external connectors beat the built-in panel, the chosen connector's card supplies the vulkan device id from sysfs, and nothing about 10de:249d is hardcoded); --rt passed only when CAP_SYS_NICE is reachable, with NOTHING granting it on purpose because setcap cannot write a read-only composefs /usr and pam_cap would break Steam's bwrap, which refuses to start with any permitted capability; the flag() helper now separates EACCES from NotFound on every filesystem-read row rather than only the sudoers one; Safe Graphics points wlroots at the card when every connected screen is on one non-primary card; and the niri two-bar defect as a guarded transform of the user's own config.kdl rather than a config APEX ships, because shipping one would only fix the next install. A VRR probe bug was found IN REVIEW and is not in the katana evidence: it globbed card*-*/vrr_capable, and DRM connector names are unique per card, so on a hybrid machine it answered about the wrong screen. STILL BLOCKED, and not on this unit: P1-038 row 6 (Steam Big Picture) needs the /usr/share ICD defect fixed, which unit pkg-share owns -- gate is `ls /usr/share/vulkan/icd.d/ | grep i686` non-empty. And section 6.3's bwrap cause is CLASSIFIED, NOT ATTRIBUTED: the qualification logged in via systemd-run --property=PAMName=login rather than greetd, so the session now logs CapEff/CapPrm/CapAmb unconditionally and the next greetd run answers it from the log alone. RE-OPEN the moment katana is free -- it is currently held by the TPM clear agent -- and start from the run-book. Note: task/p1-043-gpu-parity is ALREADY LANDED (it only looks unlanded because landings were cherry-picks then); do not re-fold it."
     },
     {
       "id": "build-verify",
@@ -445,6 +446,7 @@
   "_hardware_blocked": {
     "P1-042 tablet leg": "Four of five creator input/audio legs are landed. The fifth owes one assertion - 'a stylus enumerates, is classified tablet, and its settings reach the compositor' - and NO TABLET EXISTS on either machine: libwacom finds none on the L16 or on katana. This is NOT a katana-while-gaming wait, so no amount of patience clears it; somebody has to plug a tablet in. Not dispatchable unattended, and deliberately not left inside a queue unit where it would keep a finished unit READY.",
     "P1-043 NVIDIA verification": "GPU parity is landed for AMD, Intel and the hybrid case, and the nvidia-smi three-state fix closed test-apex-ai (43/1 -> 44/0). One verification assertion remains - 'SmiOutcome::Ready is what a real loaded NVIDIA driver produces' - and it needs katana while katana is NOT gaming. Functionally covered already: 9b68be3 measured nvidia-smi answering there, and 454ae3a does not touch that path's parsing. A katana job for an idle window, not a dispatchable unit.",
-    "P1-038 labwc matrix": "Unchanged and still held: the 18 matrix rows need real applications on a real session. Cannot be done headless and cannot be done on the L16 while Andre is using it. Still listed as its own unit (p1-038-hardware) because it is a whole item rather than a remainder."
+    "P1-038 labwc matrix": "Unchanged and still held: the 18 matrix rows need real applications on a real session. Cannot be done headless and cannot be done on the L16 while Andre is using it. Still listed as its own unit (p1-038-hardware) because it is a whole item rather than a remainder.",
+    "L-001 run 5, the TPM goes away": "L-001 is 4 of 5 runs after round 32 cleared katana's TPM and showed refusal-then-recovery in one boot. The last run disables the TPM and records that the boot prompts for the recovery key rather than hanging, then re-enables it and records that unlock returns with no re-enrolment. PPI operation 2 (Disable) reads 'User not required' and IS reachable over SSH - and must not be used, because once firmware hides the TPM, /sys/class/tpm/tpm0 and its ppi directory go with it, so re-enabling needs somebody in firmware setup. Disabling is not symmetric with enabling. Two units have now declined to create a state they cannot leave. Somebody at the keyboard, or L-001 stays partial. Not dispatchable."
   }
 }
