@@ -61,7 +61,6 @@ apex fan pwm
 apex fan restore
 
 apex game start
-apex game status
 apex game attach
 apex game profile
 
