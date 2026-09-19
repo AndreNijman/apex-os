@@ -2,100 +2,97 @@
 
 items: P2-003, P2-004
 repo: both
-worktree: /var/tmp/apex-work/wt-p2-b4
-branch: task/p2-b-round31
-second_worktree: /var/tmp/apex-work/wt-p2-b4-sh
-second_branch: task/p2-b-round31
-scratch: /var/tmp/apex-work/scratch-p2-b/round31/
+worktree: /var/tmp/apex-work/wt-p2-b5
+branch: task/p2-b-round32
+second_worktree: /var/tmp/apex-work/wt-p2-b5-sh
+second_branch: task/p2-b-round32
+scratch: /var/tmp/apex-work/scratch-p2-b/round32/
 
-The branch name moved to `task/p2-b-round31` this round (both repos, both cut
-from `roadmap/v2.2` and pushed empty at the start: apex-os `da6fc0fb`,
-apex-shell `8eccbfa`). It must exist and be pushed in BOTH repos even when a
-repo gets no commits, because apex-shell's CI looks for a matching branch name. Full
+The branch name moved to `task/p2-b-round32` this round (both repos, both cut
+from `roadmap/v2.2`: apex-os `b0e34371`, apex-shell `a8cd491`). It must exist
+and be pushed in BOTH repos even when a repo gets no commits, because
+apex-shell's CI looks for a matching branch name. Round 31's worktrees
+(`wt-p2-b4`, `wt-p2-b4-sh`) are finished and their work is merged. Full
 pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 `scratch-p2-b/p2-b.card.pre-round28.md`.
 
+**A tool worth reusing, built this round.** `archlinux:latest` in podman
+reproduces the GitHub Arch runner's RTL totals EXACTLY — 19 passed / 3 failed /
+3 skipped, same three FAIL titles, `qt6ct 0.11-8`, `qt6-base 6.11.2` — so a
+question about that runner no longer costs a CI round trip. The recipe is
+`scratch-p2-b/round32/` and the images are `p2b-arch:base` and
+`p2b-arch:ki18n`. Mount the worktree read-only with
+`--security-opt label=disable` (Fedora host, do NOT relabel Andre's tree) and
+run foreground, never backgrounded — a backgrounded podman is SIGTERMed,
+truncates its log and still exits 0.
+
 ## NEXT
 
-**Round 31 is COMPLETE and pushed in both repos.** Nothing on it is half-done.
-apex-shell tip `f9b189e` on `task/p2-b-round31` (`1003192` is the last commit
-that touches anything CI executes; `f9b189e` is a comment-only `ci.yml`
-correction); apex-os tip `43ffce13` on the
-same branch name (the branch has to exist in both repos because apex-shell's CI
-matches on branch name; apex-os got one commit this round, the RTL link-4
-guard). CI run 35415236747 is read and recorded at the end of the DONE section.
+**Round 32 is COMPLETE and pushed.** apex-shell `task/p2-b-round32` tip
+`ecc0e39` (two commits on `roadmap/v2.2`'s `a8cd491`); apex-os
+`task/p2-b-round32` pushed with **no commits** — nothing this round needed
+apex-os, and the reason is measured rather than assumed (FOUND 34). CI run
+**35417214107** was dispatched on the tip; its result is recorded at the end of
+the DONE section.
 
 Do NOT re-run any of the following on this laptop. Each is CLOSED here and the
-numbers are in the DONE section: the RTL mirror suite (`run-rtl-test.sh` 30/0/0,
-`mutate-rtl.sh` 13/13), `mutate-lockscreen-atspi-shim.sh` (8 applied / 6 CAUGHT
-/ 0 SURVIVED / 2 HELD, re-earned in `73566cd`), and the recovery read-back pair
-(`run-recovery-atspi-shim.sh` 33/0/1, `mutate-recovery-atspi-shim.sh` 15 applied
-/ 12 CAUGHT / 0 SURVIVED / 3 HELD). Each mutation harness costs eight to ten
-minutes of full bring-ups, because every mutant is a complete compositor,
-two-bus, whole-shell bring-up.
+numbers are in the DONE section: `run-rtl-test.sh` (37/0/0/0), `mutate-rtl.sh`
+(15 applied / 15 CAUGHT), `mutate-lockscreen-atspi-shim.sh` (8/6/0/2), the
+recovery read-back pair (`run-recovery-atspi-shim.sh` 33/0/1,
+`mutate-recovery-atspi-shim.sh` 15/12/0/3) and the recovery source pair
+(34/0/0, 17/14/0/3). Every mutation harness here costs eight to twenty minutes.
 
 Next action for whoever picks this up, in order:
 
-1. **Decide what CI should do about `run-rtl-test.sh`'s Arch-runner red, which
-   is no longer an open question.** That step has been red since it landed and
-   the standing queue has carried it as "cause unknown" for four rounds. FOUND
-   26 closed the cause, and the one line of it that had been inferred rather
-   than measured is now CONFIRMED FROM THE RUNNER, twice (CI 35388802498 and
-   35415236747): Arch's upstream `qt6ct 0.11-8` links no `libKF6I18n.so.6`, and
-   that library is what loads the Qt catalogue and flips the layout direction.
-   Fedora's build (`qt6ct-0.11-13.20250907git23a985f.fc43`) links it, so APEX
-   inherits right-to-left from a packaging choice and from nothing APEX
-   declares. The runner's three reds are therefore **truthful about that
-   machine** — they are exactly the three rows that need a right-to-left
-   application direction, and that machine has no process that loads the
-   catalogue. It is now 19 passed / 3 failed / 3 skipped there (was 17/3/2):
-   same three reds, two more assertions passing.
+1. **Queue items 1 and 2 still need HARDWARE** — Orca at the login screen, and
+   greeter audio. On 2026-09-19 katana was held by a TPM agent clearing the part
+   and rebooting, and was explicitly off limits, so they were not attempted and
+   were NOT simulated. They are the oldest open things on this card.
 
-   So this is a decision, not an investigation, and it is worth taking to the
-   orchestrator rather than guessing:
-   * leave it red, and accept a permanent red step in `arch-validate`; or
-   * make the runner's configuration match what APEX actually ships — install
-     `ki18n` there and `LD_PRELOAD=/usr/lib/libKF6I18n.so.6` for that step only.
-     That is defensible because it reproduces APEX rather than hiding a gap, and
-     the route is already MEASURED to work (FOUND 26's fourth row: no platform
-     theme at all + that preload gives RightToLeft). It has to be written so the
-     suite still reports WHICH mechanism supplied the direction, or it becomes a
-     gate that inspects nothing.
+2. **Queue item 4, the QTranslator host change (FOUND 3), costs a compiled
+   artefact** and item 5 (the ~200 prose strings in `AgentHelpContent.qml`) is
+   parked behind it. Nothing else on the queue is cheaper and untouched.
 
-   **Do NOT close it by making section 1 SKIP.** That section IS the
-   discriminator; making it skip destroys the only instrument, and it has been
-   refused three times.
+3. **Standing-queue item 7 is CLOSED as originally written, and what replaces
+   it is upstream.** See FOUND 32: `LayoutMirroring` cannot attach to any of the
+   14 window roots because none of them derives from `Item` or `Window`, and Qt
+   fails at that SILENTLY. The suite now goes red the day Quickshell gives those
+   types an Item or Window ancestor, which is the day the work becomes possible.
+   Until then the only routes are (a) wrapping every window's content in a
+   mirroring `Item`, which is a 14-file structural change nobody has costed, or
+   (b) upstream. **If anybody takes route (a), read the input-mask warning
+   first**: `TopBar.qml`'s `Region` mask entries are bucketed in section 3 as
+   "not an item's x at all" and mirroring is not applied to them, so mirrored
+   paint over an unmirrored hit region is the defect that change would ship.
 
-2. **Standing queue item 7 — the honest remaining half of RTL.** 0 of 14 window
-   roots carry `LayoutMirroring` or `layoutDirection`, so the shell's own
-   windows do not mirror even though the shared settings surface does. Untouched,
-   and nothing measures it yet.
-
-3. **Queue items 1 and 2 need HARDWARE and were not reachable** — Orca at the
-   login screen, and greeter audio. Say so rather than simulating them. On
-   2026-09-19 katana was owned by two other agents (a hardware qualification and
-   a TPM run) and was explicitly off limits.
+4. **`mutate-rtl.sh` is NOT a CI step and is not covered by
+   `check-suites-run-in-ci.sh`** — that gate globs `tests/*test*.sh`,
+   `tests/check-*.sh`, `tests/run-*.sh`, so no `mutate-*.sh` is in its scope at
+   all, including the several that ARE ci.yml steps. That is a real gap in a
+   shared gate and it is NOT this unit's to close mid-round. If anybody wires
+   `mutate-rtl.sh` into CI, give it FOUND 18's baseline-asserted guard first:
+   on the Arch runner R5 and R8's target rows report CANTRUN, and the harness
+   will correctly refuse to score them (verdict EXCUSED, which fails the run).
 
 **Two things to hand on rather than to do here.**
 
-* **FOUND 28 is a PRODUCT defect, not an accessibility one**, and it is fixed on
-  this branch (`5327bc6`): the factory reset could not be committed by anybody —
-  mouse, keyboard or screen reader — for as long as that code has existed.
-  Whoever owns the recovery flow should know it was found and how, and should
-  read `mutate-recovery-atspi-shim.sh`'s R12 before touching
-  `RecoveryService._onPlan()` or the page's phase-change re-ack: the guard is
-  now two-deep on purpose and either half alone is sufficient, which is why that
-  mutant needs two edits (FOUND 30).
+* **FOUND 28 is a PRODUCT defect, not an accessibility one**, fixed in
+  apex-shell `5327bc6`: the factory reset could not be committed by anybody —
+  mouse, keyboard or screen reader. Whoever owns the recovery flow should read
+  `mutate-recovery-atspi-shim.sh`'s R12 before touching `RecoveryService._onPlan()`
+  or the page's phase-change re-ack: the guard is two-deep on purpose and either
+  half alone is sufficient, which is why that mutant needs two edits (FOUND 30).
+  **Leave that guard alone.**
 * **The qtdeclarative one-liner (FOUND 20) is still unfiled**, deliberately.
   Filing on a public tracker is an outward-facing action and Andre's call, not
-  an agent's. It is flagged to him. Until it lands, a real screen reader still
-  gets ONE node from the shell on a real machine, and every read-back this unit
-  has ever done is under a test-only LD_PRELOAD that ships nowhere.
+  an agent's. Until it lands, a real screen reader still gets ONE node from the
+  shell on a real machine, and every read-back this unit has ever done is under
+  a test-only LD_PRELOAD that ships nowhere.
 
 ## IN PROGRESS
 
-Nothing. Round 31 is finished and pushed in both repos, and the two worktrees
-(`wt-p2-b4`, `wt-p2-b4-sh`) are clean with their HEADs matching their remotes.
+Nothing. Round 32 is finished and pushed in both repos, and both worktrees
+(`wt-p2-b5`, `wt-p2-b5-sh`) are clean with their HEADs matching their remotes.
 
 ## DONE
 
