@@ -2728,7 +2728,25 @@ tasks:
     on every exit (139), which predates this image; and section 6.2's check is ambiguous as written, because
     gamescope prints 'No CAP_SYS_NICE, falling back to regular-priority' whether or not --rt was passed, so only
     the 'starting: gamescope' line discriminates. greetd was restored byte-identical, the greeter is live on tty1,
-    no timers were left armed.
+    no timers were left armed. || ROUND gaming-release 2026-09-19 on apex-os task/gaming-release (de77ae5d ->
+    fc0a29d5, PUSHED NOT MERGED). The Gaming Mode half's two follow-up defects are fixed in the repository and
+    neither is confirmed on hardware, because both need an image build. Row 7 (gamescope) now has a release path
+    that does not depend on the session's own privileges: apexd watches the PID that asked for game mode and
+    releases it when that PID dies, so a greetd restart, a VT switch or a SIGKILL no longer leaves the machine
+    tuned with nothing able to undo it. The polkit rule was deliberately NOT loosened - allow_inactive is every
+    local session, and a SIGKILLed session runs no trap for a looser rule to permit. mangoapp's ~2 Hz crash loop
+    is removed at the cause: --expose-wayland puts WAYLAND_DISPLAY into mangoapp's environment, GLFW then takes
+    its Wayland backend, and mangoapp dereferences the NULL X11 display it gets back - proven by a controlled
+    headless A/B on katana (0 restarts in 22 s without the flag, 171 with it, environments read out of /proc) and
+    by the kept core dump's two-frame backtrace. --expose-wayland stays because rows 6.1 and 6.3 were qualified
+    WITH it; --mangoapp is gated on it and APEX_GAMING_EXPOSE_WAYLAND=0 brings it back. A coredump storage bound
+    now stops any 2 Hz crasher filling /var, and the reframe behind it is that the 4.0 GB was systemd's DEFAULT
+    cap (10 percent capped at 4 GiB) working correctly rather than an absent bound. Two matrix-adjacent doc
+    defects fixed because neither check could distinguish its two answers: section 6.2 told the reader to grep for
+    CAP_SYS_NICE, which gamescope prints whether or not --rt was passed, and section 6.5 claimed the niri bar
+    transform needs a niri login when it runs from apex-shell-firstrun.service at user-manager start - on katana
+    four hours before any niri session. New run-book rows 6.6 and 6.7 cover the teardown property and the absence
+    of the crash loop; both need the image first. Detail at ROADMAP/evidence/gaming-release-20260919.md.
 - id: P1-039
   title: Compositor-neutral Night Light
   priority: P1
@@ -2988,7 +3006,52 @@ tasks:
     does not publish one'. The acceptance line says 'Performance Lab AND SAFE CONTROLS work across tested GPU
     families', and that ambiguity is exactly the untested half: nothing here distinguishes 'left at default' from
     'no knob exists', on either vendor. Also still open from this round: Safe Graphics' automatic dGPU branch
-    needs the panel genuinely dark and could not be reached.
+    needs the panel genuinely dark and could not be reached. || ROUND gaming-release 2026-09-19 on apex-os
+    task/gaming-release (de77ae5d -> fc0a29d5, four commits, PUSHED NOT MERGED). The two material defects the
+    katana Gaming Mode run left open are fixed in the repository and NEITHER is confirmed on hardware, because
+    both need an image build. DEFECT 1, the serious one: Gaming Mode could not release itself. The session
+    script's EXIT trap calls apex game stop, which is polkit org.apexos.apexd.manage-power with allow_active=yes
+    and auth_admin otherwise, so the instant logind deactivates the session the release is refused; katana sat 75
+    minutes on a p-core cpuset with steered IRQs, the performance tier and scx_lavd, with nothing able to undo it
+    and NOT ONE LINE in its own log, because the trap was apex game stop >/dev/null 2>&1 && log. The polkit rule
+    was NOT loosened, and the reason is written down: allow_inactive is every local session, so any unprivileged
+    user could stop someone else's Gaming Mode, and a SIGKILLed session runs no trap for a looser rule to permit.
+    apexd takes the job instead - it is root and asks polkit nothing about itself. New GameMode.StartOwnedBy(pid)
+    records the owner PID AND its /proc start time (a bare-PID watch would hold game mode for as long as some
+    unrelated process held the number), a 2 s watch beside the existing AC loop releases when the owner is gone,
+    and it emits the same ActiveChanged/Status/ TierChanged set a D-Bus exit emits so apex-shell does not keep
+    drawing a dead session. Same polkit action: entering game mode is exactly as restricted as it was. The owner
+    is WATCHED, not pinned. An unreadable /proc is a third answer and never a release. Status gains owner_pid. The
+    trap survives as the second of two paths and can no longer fail in silence. DEFECT 2: mangoapp crash-looped ~2
+    Hz all session (15 376 dumps in a boot, 4.0 GB stored, overlay never drew). Diagnosed from the kept dumps: the
+    backtrace is two frames, XInternAtom called from main, i.e. XInternAtom(NULL). Preceded by libdecor plugin
+    failures (loaded only by GLFW's Wayland backend) and four Glfw Error 65550 X11: Platform not initialized
+    lines, which is glfwGetX11Display() returning NULL off-platform. PROVEN by a controlled headless A/B on katana
+    with the mangoapp environments read out of /proc: gamescope --backend headless --mangoapp gives DISPLAY=:0 +
+    GAMESCOPE_WAYLAND_DISPLAY and the same pid alive throughout, 0 restarts in 22 s; adding --expose-wayland adds
+    WAYLAND_DISPLAY and gives 171 restarts. APEX passed both flags unconditionally, so the combination is ours.
+    --expose-wayland stays (native Wayland games beat an overlay that has never rendered, and sections 6.1/6.3
+    were qualified WITH it) and --mangoapp is gated on it rather than deleted, so APEX_GAMING_EXPOSE_WAYLAND=0
+    brings it back - which is what makes the gate testable in both directions. Mangoapp's NULL dereference and
+    gamescopereaper's backoff-free --respawn are recorded as upstream, not worked around. Also: a coredump storage
+    bound (files/system/coredump/50-apex-coredump-limits.conf, MaxUse=256M KeepFree=2G), and the reframe that
+    earns it - the 4.0 GB was NOT a missing bound, MaxUse defaults to 10 percent of the filesystem CAPPED AT 4 GiB
+    and katana's /var is 954 GB, so systemd's vacuum was working correctly and 4 GiB is simply the wrong size for
+    an ostree machine whose /var is the only writable filesystem. Its build assertion resolves the same search
+    path systemd-coredump resolves at runtime and was verified BOTH WAYS against the real base image. gamescope's
+    exit segfault attributed with one read-only command: CVulkanDevice::~CVulkanDevice() under __run_exit_handlers
+    - upstream static-destruction order, recorded not chased. Gates: apexd-core gamemode 29/0, apexd 15/0, apex
+    656/0, test-apex-gaming-session 46/0, clippy clean, shellcheck clean, check-containerfile-assertions 195
+    checked 0 failed 0 inert, check-doc-verbs 0 stale, check-shellcheck-coverage 0 newly failing,
+    check-suites-run-in-ci 0 unrun. Every new assertion was mutation-tested and each mutation named the row it
+    turned red; sources restored with plain cp and verified with cmp. STILL PARTIAL: the property that matters -
+    that a machine comes back to its normal cpuset, scheduler and tier after its session is destroyed without
+    cooperation - is held by unit tests and a run-book (docs/gaming-and-sessions.md 6.6) and by nothing on
+    hardware. Note for that run: the CPU governor is NOT a discriminator on katana, whose default AC tier is
+    already performance, so scaling_governor reads the same before, during and after; the cgroup, sched_ext/state
+    and active are. Full detail at ROADMAP/evidence/gaming-release-20260919.md. katana was read-only this round
+    and ends it unchanged: greetd active, game status false, sched_ext disabled, coredump store 26M, /var 53G
+    free.
 - id: P1-044
   title: Default incoming firewall
   priority: P1
