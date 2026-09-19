@@ -1,56 +1,36 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-19T17:25+08:00",
-  "_round": "Round 33. Both of round 32's agents were dead at the resume with clean worktrees and nothing unpushed; `task/build-verify` was never even created on the remote. ONE branch was genuinely unlanded and it landed: apex-shell task/p2-b-round32. The round's real content was diagnostic. The dead build-verify agent's local build had failed at Containerfile.base STEP 157/180 in check-labwc-keybinds, and the orchestrator settled the cause before dispatching rather than handing a fresh agent the same hour-long build: apex-os roadmap/v2.2's rc.xml PASSES against apex-shell roadmap/v2.2 and FAILS against apex-shell main, and build-local.sh pins refs/heads/main UNCONDITIONALLY while build-image.yml and pr-validation.yml both pin the MATCHING branch and print which they used. Third instance of one defect. CI on the tip is nearly green -- run 35415266422 built rust, changes, core, base and image and died only in the SBOM step on `The runner has received a shutdown signal`, which is GitHub infrastructure, not ours; its per-SHA tag was pushed before it died and exists in GHCR. A fresh build of the tip was dispatched (35433705393). Katana was found FREE for the first time in two rounds, which met the RE-OPEN condition on two closures at once -- but its booted image is 131 commits behind the tip and predates both fixes it would qualify, so the run-books got a rebase as step 1 and one agent rather than two. Four dispatched of a ceiling of six; two slots left free deliberately, because every other katana claimant would fight the same reboots and READY was otherwise empty.",
+  "updated": "2026-09-19T13:10+08:00",
+  "_round": "Round 30. All four of round 29's agents were dead at the resume, every worktree clean with nothing unpushed, so the round was a landing round: four merges, zero unlanded left in either repo. Three agents re-dispatched fresh from cards (never by SendMessage); `later` retired because its remainder is hardware. Three slots deliberately free — one still held for the Android unit, two headroom. No new unit was invented to fill them: the READY list was empty and the COMPLETE section is exhaustive.",
   "_landed_this_round": {
-    "apex-os": "NOTHING LANDED -- 0 unlanded at the resume and 0 at the close. roadmap/v2.2 stays at 7f647470 (Merge task/later-silicon-2). Every round-31 branch was checked by ancestry rather than by the report's heuristic: task/katana-qual 1886a221, task/p1-053d-device fd316f60, task/p2-d-7 82b1efbc and task/p2-f-6 a4907070 are ALL contained in roadmap/v2.2. task/build-verify does not exist on the remote.",
-    "apex-shell": "roadmap/v2.2 a8cd491 -> 9df72cf. ONE merge: task/p2-b-round32 tip ecc0e39, 548 insertions over 3 files (.github/workflows/ci.yml, tests/run-rtl-test.sh, tests/mutate-rtl.sh). --no-ff DELIBERATELY: the branch is two commits straight on a8cd491 and would have fast-forwarded, leaving no merge sha to cite. tests/check-no-conflict-markers.sh PASS on the merged tree; ci.yml re-parsed as YAML and both suites are bash -n clean on the merged tip; pushed once with --force-with-lease. The RTL suite's own numbers were NOT re-run locally -- the card forbids it and records 37/0/0/0 here and 32 passed / 0 failed / 1 skipped / 3 could-not-run on the Arch runner (CI 35417214107)."
+    "apex-os": "roadmap/v2.2 bde4d96c -> 6b531503. Three merges, in order: c6bc990a (task/later-2, tip 0391b4ec, 741 insertions over 5 files), 7658fe1f (task/p2-b-round29, tip cb02019f, tests/lib/atspi.sh), 6b531503 (task/p2-f-4, tip 79027b51, 551 insertions over 2 files). Each merge --no-ff; check-no-conflict-markers.sh PASS after each; pushed once with --force-with-lease. FOURTH MERGE, later the same session: f40ffefe (task/p2-f-5, tip 933bbee1, 1,353 insertions over 7 files — the gdrive provider). Rust changed in this one, so the workspace was actually rebuilt on the merged tip: cargo test --locked --workspace --no-fail-fast 3299 passed / 0 failed / 2 ignored, clippy --workspace --all-targets -D warnings exit 0, tests/test-secret-broker.sh 84/0, and all four count gates unchanged. roadmap/v2.2 is now f40ffefe. FIFTH MERGE: da6fc0fb (task/p2-d-6, tip 044fa254, 1,836 insertions over 16 files — gap 5, the per-run browser CA bind, with route B deliberately not started). Re-run on that tip: cargo test --locked --workspace --no-fail-fast 3314 passed / 0 failed / 2 ignored across 56 targets, clippy exit 0, tests/test-apex-browser.sh 116/0, tests/test-secret-broker.sh 84/0 (re-run because the same tip now also carries gdrive), and all four count gates unchanged. roadmap/v2.2 is now da6fc0fb. THE WIRE VERSION MOVED TO 10 — see _decisions. SIXTH MERGE: bb229745 (task/p2-f-6, tip a4907070, 2,206 insertions over 7 files — the msgraph transport). On that tip: workspace 3338 passed / 0 failed / 2 ignored, clippy exit 0, test-secret-broker.sh 93/0 (was 84), test-apex-browser.sh 116/0 re-run because the same tip carries both, and the four count gates unchanged. roadmap/v2.2 is now bb229745.",
+    "apex-shell": "roadmap/v2.2 379eef8 -> d5c781a. One merge: task/p2-b-round29 tip 5ae27c3, 2,013 insertions over 6 files. --no-ff DELIBERATELY: the branch was cut from 379eef8 and would have fast-forwarded, leaving no merge sha to cite in evidence. SECOND MERGE: 8eccbfa (task/p2-b-round30, tip 20a1613, 2,073 insertions over 8 files — the FOUND 14 cause pin and the AT-SPI shim read-back). On that tip: suites 66/66/0 (was 64/64), structure-check REQUIRED 112 paths / 0 missing (was 106), ci.yml parses, and the integrator re-ran check-quickshell-a11y-cause.sh at 14/0/0. apex-shell roadmap/v2.2 is now 8eccbfa. THIRD MERGE: f068f24 (task/p0-015-repump, tip f523a0b, 296 insertions over 5 files — the LockedHintService re-pump). Re-run by the integrator on that tip: run-locked-hint-test.sh 41/0 across both scenarios (main 31/0, startup-drop 10/0), check-headless-runners.sh 28/0, suites 66/66/0, structure-check 112 paths / 0 missing. apex-shell roadmap/v2.2 is now f068f24.",
+    "verification": "unlanded.py roadmap/v2.2 against both repos after the pushes: 'nothing — every task branch's content is on the integration tip', both repos. bde4d96c (task/p2-d-5) was already an ancestor: it was merged mid-round-29 and had never been recorded against P2-008/009/012, which round 30 fixed."
   },
-  "_status_recorded_this_round": "P2-004 partial and P2-003 partial, both with the landing prepended to the EXISTING evidence rather than replacing it -- set-status.py has no append flag and a straight write would have erased 33,626 and 15,073 characters of prior rounds. Verified after writing: P2-003 33626 -> 34270 chars, P2-004 15073 -> 15694, file re-parses, 128 tasks, counts unchanged at 92 done / 34 partial / 0 todo / 2 blocked. P2-003 explicitly records that the landing carried NOTHING for that row, rather than letting a merge sha imply progress it did not make.",
-  "_deliberately_held": "TWO SLOTS of six, and the reason is contention rather than caution. Every remaining unit whose re-open condition is met wants katana's graphical session: p1-038-hardware (the 18 labwc matrix rows), p2-f (needs a free VT that nobody is sitting at -- katana has one), p2-b items 1-2 (Orca at the login screen, greeter audio), and p2-c (readers that need a booted machine). Dispatching a second would have two agents rebooting one machine. They are re-offerable the moment katana-image-qual reports. p2-d was NOT dispatched either: its own card says no criterion on it is closable by another round, and what is left is two pieces of engineering too small to be a unit, which fold into whichever round next touches SessionInfo. No unit was invented to fill a slot.",
+  "_status_recorded_this_round": {
+    "_how": "set-status.py REPLACES evidence — it has no append mode. Every entry below was written by reading the item's current evidence out of roadmap.yaml, appending the landing paragraph, and passing the whole string back; each write was then verified by re-parsing and checking that the last 120 characters of the PREVIOUS evidence still appear. L-001's round markers read back as 25, 26, 27, 28, 29, 30.",
+    "L-001": "partial (unchanged) - merge c6bc990a. Unit closed to dispatch; the remainder is the five-run hardware procedure in docs/boot-v2.md.",
+    "L-002": "blocked (unchanged) - merge c6bc990a; nothing on the item changed and nothing was re-verified.",
+    "L-003": "blocked (unchanged) - merge c6bc990a; same.",
+    "P2-003": "partial (unchanged) - merge 8eccbfa. FOUND 14 CLOSED: the empty accessibility tree has a named cause (qtbase clears the factory list from ~QCoreApplication; qtdeclarative installs its factory once per library load; quickshell deletes a QCoreApplication before constructing QGuiApplication), measured five ways offscreen, confirmed in the real process by LD_PRELOAD taking the bus tree from 1 node to 8, and reproduced on the Arch runner at Qt 6.11.2. Does NOT claim the shell is accessible - the shim is test-only.",
+    "P2-004": "partial (unchanged) - recorded again as NOT ADVANCED. The RTL discriminator is still 17/3/2 and was the only red CI step this round; it predates the branch.",
+    "P2-018": "partial (unchanged) - merge 6b531503. Criterion 2 closed; the remaining gap named honestly - the menu is never OPENED, only every command it would run is run.",
+    "P2-008": "partial (unchanged) - merge bde4d96c recorded for the first time.",
+    "P2-009": "partial (unchanged) - merge bde4d96c recorded for the first time.",
+    "P2-012": "partial (unchanged) - merge da6fc0fb. Gap 5 closed, route B not started, PROTOCOL_VERSION 10 taken and route B moved to 11. Unit closed to dispatch pending Andre's answer; both answers produce a dispatch.",
+    "_no_status_advanced": "Deliberate. Counts stay 91 done / 35 partial / 2 blocked of 128. Every card said its items stay partial or blocked, and each says why in a sentence about the world rather than about effort.",
+    "P2-017": "partial (unchanged) - merge f40ffefe. The gdrive provider exists, so a Google token can be spent on something for the first time. Stays partial for reasons recorded rather than softened: no Google endpoint was contacted, the refresh question is unchanged and NOT superseded, the agentd forwarding path is not exercised for gdrive, and a successful read through the socket cannot be measured against a loopback double because the host pin refuses loopback — the price of the pin, not a gap.",
+    "P0-015": "done -> partial -> DONE, all inside round 30, and the round trip is the point: the demotion dispatched a fix and the fix landed as apex-shell merge f068f24. Net change to the counts is ZERO (91 done / 35 partial / 2 blocked), but the item is now genuinely fixed rather than merely re-marked. THE ORCHESTRATOR'S REOPEN WAS BROADER THAN THE TRUTH and the correction is recorded in the item rather than quietly edited: _pump() has a second guard (_desired === _confirmed) and the state is boolean, so the drop is only observable while _confirmed is undefined - shell startup, before the service has ever reached logind, which is exactly when logind's Display session is most likely missing. The same fact makes an unconditional re-pump an infinite loop there, measured as 342 calls in 1.2s. The landed fix re-pumps only when _desired !== _target and cannot storm structurally. Mutant A (the pre-fix _failed) leaves the old scenario at 31/0 and takes the new one to 7/3 - the measured answer to whether the existing suite could ever have caught this.",
+    "P2-017 (round 31)": "partial (unchanged) - merge bb229745. msgraph lands and Microsoft was the last of the five providers without a transport. The Graph 302 was resolved STRUCTURALLY rather than by stripping a header: curl is never told to follow anything, the download is a second run_curl whose config has nowhere to put a token, because cross-host header policy is a curl policy and has been a CVE. The vacuous-loop risk the dispatch flagged was answered, not passed: `empty == [\"microsoft\"]` became assert!(empty.is_empty()), with NoScopesYet held to a static NO_SCOPES provider so the branches keep a witness. Stays partial: no Microsoft and no Google endpoint has ever been contacted."
+  },
+  "_deliberately_held": {
+    "p2-d": "SUPERSEDED 2026-09-19 (round 30). The old text here said the hold was lifted and the unit was 'free to take 8 -> 9' — two rounds stale and wrong about the number. It took 9 in round 4 and 10 in round 30. The unit is now CLOSED TO DISPATCH pending Andre's answer; see queue.json _completed_units.p2-d.",
+    "p1-038-hardware": "Still closed to dispatch — unchanged reason, the 18 labwc matrix rows need real applications on a real session.",
+    "p1-063": "Still closed to dispatch as WORK. Both remaining criteria are Andre's physical actions. NOTE: this round's hypridle finding is adjacent but NOT the same thing — P1-063 is about the lid, and what is killing the run is the 15-minute idle timeout. Worth folding into the item: a lid inhibitor alone would not have saved any of round 26's agents.",
+    "p1-053c": "CLOSED BY HAND this round — see queue.json. P1-059 done; P1-060 needs a device or a working emulator and this machine has neither (four consecutive emulator SIGSEGVs measured across rounds 1-3).",
+    "later": "CLOSED BY HAND 2026-09-19 (round 30) — see queue.json _completed_units. Landed as merge c6bc990a with 0 unlanded. Everything a VM can qualify is qualified; L-001's remaining acceptance word is 'Real' and both machines' TPMs are off-limits. The deliverable that replaces the dispatch is docs/boot-v2.md, 'The run somebody with hardware would have to do'. Re-open when a machine whose TPM somebody will clear exists."
+  },
   "agents": [
-    {
-      "slug": "build-verify",
-      "items": [],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-build-verify",
-      "branch": "task/build-verify",
-      "agent_id": "a43748c5b9c9ea285",
-      "dispatched": "2026-09-19T17:21+08:00",
-      "session": "round 33 orchestrator",
-      "queue_id": "build-verify",
-      "card": "ROADMAP/state/agents/build-verify.md",
-      "at_dispatch": "Re-dispatched fresh from a rewritten card, NOT by messaging the dead agent. Handed the diagnosis rather than the symptom: the quickshell --version question is CLOSED (confirmed byte-identical in a real build, no Containerfile.core change needed and none should be made), and the build failure is build-local.sh pinning apex-shell main unconditionally -- proved both ways by the orchestrator (os v2.2 rc.xml PASSES against shell v2.2, FAILS against shell main, exactly on W-A-s and W-A-v). Owns CI 35433705393 on roadmap/v2.2 @ 7f647470e222cfa23e0853cac45ef3f7e74c252e. Told to fix build-local.sh the way build-image.yml already does -- matching branch, main only as an announced fallback, unreachable remote still FATAL -- and to prove it fires in BOTH directions, because a gate that runs and inspects nothing is this repo's dominant CI defect family. Told a backgrounded podman is SIGTERMed and still exits 0. Told explicitly NOT to regenerate rc.xml against main: that reverts the accessibility and voice keybinds and is the wrong half of the pair to move."
-    },
-    {
-      "slug": "katana-image-qual",
-      "items": [],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-katana-qual2 (agent creates)",
-      "branch": "task/katana-image-qual",
-      "agent_id": "a365994b1d2f3341a",
-      "dispatched": "2026-09-19T17:22+08:00",
-      "session": "round 33 orchestrator",
-      "queue_id": "katana-image-qual",
-      "card": "ROADMAP/state/agents/katana-image-qual.md",
-      "at_dispatch": "NEW UNIT, and it is the merged execution of two closures whose RE-OPEN condition ('after an image build') became true this round: gaming-gpu (78f04717) and pkg-share (5de97037). One agent rather than two because both want exclusive control of one machine's reboots. Katana confirmed free at 17:00 AWST -- greetd on tty1, nobody logged in, no steam/gamescope/proton, rpm-ostree idle. THE FACT THAT ORDERS THE ROUND, and the reason this is not a straight re-open: katana boots apex-266dcc57, 131 commits behind the tip, and merge-base --is-ancestor says NO for BOTH merges -- so a run-book started before the rebase measures the old code and attributes the evidence to the wrong build. Told to poll GHCR for the per-SHA tag rather than the run's status (35415266422 proves the tag can land even when the run later fails), that build-verify owns the CI health question, to do pkg-share's confirmation FIRST because its i686 ICD count gates P1-038 row 6, and to do the greetd login rather than systemd-run --property=PAMName=login because section 6.3's bwrap cause is classified but not attributed and a real greetd session now answers it from the log alone. Handed the two katana traps: NVMe names reorder across ordinary reboots (a previous run's 'never write to nvme0n1' protected the wrong disk), and APEX's Boot0000 lives on the WINDOWS ESP."
-    },
-    {
-      "slug": "p1-053e",
-      "items": [
-        "P1-060 C1",
-        "P1-054..P1-058 on-device gaps"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p1-053e (agent creates)",
-      "branch": "task/p1-053e-device",
-      "agent_id": "ac50481d2d72cda16",
-      "dispatched": "2026-09-19T17:23+08:00",
-      "session": "round 33 orchestrator",
-      "queue_id": "p1-053e",
-      "card": "ROADMAP/state/agents/p1-053e.md",
-      "at_dispatch": "Round 2 of the device work. Round 1 (p1-053d) is landed -- task/p1-053d-device fd316f60 is an ancestor of roadmap/v2.2 -- and the unit's closure text still claimed an agent was on it; corrected in queue.json. Phone re-confirmed reachable BEFORE dispatch rather than assumed: Pixel 7a lynx, GrapheneOS, adb shows it bound twice so -s is not optional. Task order is round 1's own value ordering, and only item 2 closes a criterion (P1-060 C1's PTY read-back over an attach, plus the relay leg). Item 3 is a real regression with a measurement attached: main.rs binds 0.0.0.0, and binding :: moves every peer to ::ffff:a.b.c.d while State::path_of decides LAN-or-relay on is_loopback(), false for a v4-mapped loopback. Item 4 (the deprecated createAndroidComposeRule) was deliberately deferred by round 1 so a failure would stay attributable; that reason has expired, so it is takeable but last and in its own commit. Told P1-060 C2 is NOT takeable -- it names a tablet and a foldable and neither exists here -- and must not be faked."
-    },
     {
       "slug": "p2-b",
       "items": [
@@ -58,16 +38,29 @@
         "P2-004"
       ],
       "repo": "both",
-      "worktree": "(agent creates)",
-      "branch": "task/p2-b-round33",
-      "second_worktree": "(agent creates)",
-      "second_branch": "task/p2-b-round33",
-      "agent_id": "a1d847bbd382d4e58",
-      "dispatched": "2026-09-19T17:24+08:00",
-      "session": "round 33 orchestrator",
+      "worktree": "/var/tmp/apex-work/wt-p2-b4-sh",
+      "branch": "task/p2-b-round32",
+      "second_worktree": "/var/tmp/apex-work/wt-p2-b4",
+      "second_branch": "task/p2-b-round31",
+      "agent_id": "a5a6bd338f588764f",
+      "dispatched": "2026-09-19T12:15+08:00",
+      "session": "round 31 orchestrator",
       "queue_id": "p2-b",
       "card": "ROADMAP/state/agents/p2-b.md",
-      "at_dispatch": "Round 33, dispatched fresh from the card with a round-33 ORCHESTRATOR NOTE inserted above ## NEXT. Round 32 landed as apex-shell 9df72cf. Branch moves to task/p2-b-round33 in BOTH repos cut from apex-shell 9df72cf and apex-os 7f647470, pushed in both even where one gets no commits, because apex-shell's CI looks for a matching branch name. Told to take standing-queue item 4 (the QTranslator host change, FOUND 3, which costs a compiled artefact) then item 5 (the ~200 prose strings in AgentHelpContent.qml parked behind it, which must move together with check-agent-help.sh's exact grep shape). Told explicitly NOT to take items 1 and 2 this round: katana is free but is owned by katana-image-qual and boots an image 131 commits behind the tip that predates the accessibility round, so a greeter measurement there would describe the wrong build. Re-offer them once katana is rebased. Told not to re-run anything on the card's own Do-NOT-re-run list -- each harness there costs eight to twenty minutes and its numbers are recorded."
+      "at_dispatch": "Round 32. Round 31 landed as b0e34371 (apex-os) and a8cd491 (apex-shell). Dispatched with a DECISION already taken on the RTL Arch-runner red, which has been 17/3/2 since it landed and which four rounds correctly refused to paper over: round 31 confirmed the cause from the runner twice -- Arch upstream qt6ct 0.11-8 links no libKF6I18n. Told to do BOTH halves, not one: (1) assert the precondition with a MEASURED discriminator (ldd or DT_NEEDED, never inferred from a distro name or version string) so section 1 reports a NAMED could-not-run carrying its reason rather than a SKIP or a silent pass, failing in both directions; and (2) install ki18n on the Arch validate job so the mechanism is actually exercised -- if it STILL fails after that, it is a real APEX defect, which is the outcome worth having. Told to separate `the runner was missing a library` from `APEX RTL works` in the write-up, because only one of those is a claim about APEX. Section 1 must NOT become a SKIP; it is the discriminator. Hardware queue items 1 and 2 stay out of reach -- katana is held by the TPM clear agent."
+    },
+    {
+      "slug": "build-verify",
+      "items": [],
+      "repo": "apex-os",
+      "worktree": "(agent creates)",
+      "branch": "task/build-verify",
+      "agent_id": "a0ba5c475ca4eda39",
+      "dispatched": "2026-09-19T11:05+08:00",
+      "session": "round 31 orchestrator",
+      "queue_id": "build-verify",
+      "card": "ROADMAP/state/agents/build-verify.md",
+      "at_dispatch": "Not a roadmap item -- a guard. Two changes landed into the build path and NEITHER has been through a build: 36535383 switched Containerfile.core to the quickshell-git COPR package for the AT-SPI fix, and a869f033 changed apex-pkg's extraction and added a CI step. The quickshell commit added `grep -qE 'revision [0-9a-f]{7,}'` against a --version string nobody has observed from quickshell-git, which is the exact can-only-fail shape that cost this repo five days of image builds and is why check-containerfile-assertions.sh exists; and under pipefail that printf|grep returns 141 on a MATCH, which would invert the negation. Told to build locally, read what --version really prints, and fix the assertion against the observation rather than against what the release build used to print. Also told a skipped job counts as success here (six documented instances) so confirming the new multilib CI step RAN is not the same as the job being green. Bounded away from every machine: katana is the TPM agent's, the L16 is Andre's daily."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -135,7 +128,7 @@
     "HTTP_MAX_BYTES — an oversized read reports success with empty output": "Found round 31 by p2-f while building msgraph, MEASURED not inferred, and deliberately left unfixed so the whole family could be taken at once. curl exits 63 when it hits the cap, but its write-out still runs, so stdout is \"\\n200\" and the caller receives code 0 with empty output — a refusal that is indistinguishable from an empty file. Confirmed in gdrive; s3 and oauth 'look the same', which is a hypothesis and not a measurement. Reproduction in /var/tmp/apex-work/scratch-p2-f/round31/. Round 32's agent was dispatched at it with instructions to establish the real per-transport blast radius first, including msgraph.",
     "A consumer OneDrive item id contains `!` and valid_name refuses it": "Microsoft's own example is 12319191!11919 ({driveId}!{n}). Documented in round 31 WITHOUT widening the vocabulary, which was the right call — widening valid_name to admit `!` is a decision about the whole name surface, not about OneDrive."
   },
-  "_tip_verification": "apex-shell roadmap/v2.2 = 9df72cf after the merge, pushed with --force-with-lease and read back from origin. apex-os roadmap/v2.2 = 7f647470, untouched. The landing was done in the dedicated integration worktrees /var/tmp/apex-work/int-shell and int-os, NOT in the main checkouts -- apex-os's main checkout sits detached at bd310bcd with a large untracked tree and apex-shell's carries a modified tests/check-remote-agents.sh, and an earlier orchestrator's rc.xml check against that stale tree gave the diff in the wrong DIRECTION before it was caught.",
+  "_tip_verification": "ROADMAP/state/ci-suites-on-tip-1ab542c.txt — the full apex-os CI suite list run on roadmap/v2.2 @ 1ab542c: 27 of 30 green, 2 red (both pre-existing, see _findings), 1 skipped because its name ends -live. Plus cargo test --locked --workspace 1964 passed / 1 failed and run-clippy.sh rc=0. Recorded because integrate-4 chose its post-landing suites from memory rather than from CI's list; the list is now on disk.",
   "_orchestrator": {
     "session": "round 30 orchestrator",
     "registered": "2026-09-19T02:00+08:00. state/orchestrator.pid held a DEAD pid (16655, round 26) and the heartbeat was five days old, so the file said 'no orchestrator' while one was starting - fixed first, before any merge.",
