@@ -147,15 +147,33 @@ done
 # because "the desktop's service went away" cannot be asked of the service
 # itself. It restarts the daemon on the SAME port with the SAME state
 # directory, which is what a `systemctl --user restart` does.
+#
+# `file_privilege_request` and `decide_locally` are the other two, and they are
+# the HUMAN AT THIS MACHINE — the person a phone is not. §7 reserves deciding a
+# root operation for a local origin, `apex-agentd` enforces that on the wire,
+# and a phone therefore cannot produce the state an approvals screen exists to
+# show. These two produce it from the computer, where it belongs.
+#
+# They are deliberately two named verbs with fixed shapes rather than a general
+# "forward anything to apex-agentd", which would be a way for a test to borrow a
+# local origin for any request at all — and this suite's whole value is that the
+# phone's own origin is real.
 cat > "$root/broker.py" <<'PY'
 import json, os, socket, socketserver, subprocess, sys, time
 
 SOCK, PORT, ROOT, BIN = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
-DPORT = sys.argv[5]
+DPORT, AGENTD = sys.argv[5], sys.argv[6]
 
 def control(line):
     s = socket.socket(socket.AF_UNIX); s.settimeout(60); s.connect(SOCK)
     s.sendall((line + "\n").encode())
+    f = s.makefile("rb"); out = f.readline().decode().strip(); s.close()
+    return out
+
+def agentd(request):
+    """One request to apex-agentd, from THIS process — a local origin."""
+    s = socket.socket(socket.AF_UNIX); s.settimeout(60); s.connect(AGENTD)
+    s.sendall((json.dumps(request) + "\n").encode())
     f = s.makefile("rb"); out = f.readline().decode().strip(); s.close()
     return out
 
@@ -196,11 +214,22 @@ class H(socketserver.StreamRequestHandler):
             if not line:
                 continue
             try:
-                cmd = json.loads(line).get("cmd")
+                req = json.loads(line)
+                cmd = req.get("cmd")
             except Exception as e:
                 self.wfile.write((json.dumps({"reply": "error", "message": str(e)}) + "\n").encode())
                 continue
-            out = restart() if cmd == "restart_remoted" else control(line)
+            if cmd == "restart_remoted":
+                out = restart()
+            elif cmd == "file_privilege_request":
+                out = agentd({"cmd": "privilege_request",
+                              "verb": req["verb"],
+                              "args": req.get("args", []),
+                              "reason": req["reason"]})
+            elif cmd == "decide_locally":
+                out = agentd({"cmd": "decide", "id": req["id"], "decision": req["decision"]})
+            else:
+                out = control(line)
             self.wfile.write((out + "\n").encode())
             self.wfile.flush()
 
@@ -210,7 +239,7 @@ class S(socketserver.ThreadingTCPServer):
 S(("0.0.0.0", PORT), H).serve_forever()
 PY
 python3 "$root/broker.py" "$root/run/apex-remoted/control.sock" "$brokerport" "$root" "$bin" "$port" \
-  >"$root/broker.log" 2>&1 &
+  "$root/run/apex-agentd/control.sock" >"$root/broker.log" 2>&1 &
 broker_pid=$!
 
 # Which of this machine's addresses the PHONE can actually reach. Measured from
