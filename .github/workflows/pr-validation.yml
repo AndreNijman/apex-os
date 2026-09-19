@@ -3149,7 +3149,7 @@ jobs:
           echo "measured: passed=$passed failed=$failed skipped=$skipped"
           [ "$failed" = 0 ] || { echo "::error::$failed pkg-update assertions failed"; exit 1; }
           [ "$skipped" = 0 ] || { echo "::error::$skipped assertions could not run; leg B is the one that runs the service's real entrypoint, so a skip here is a green tick over the defect this suite exists for"; exit 1; }
-          [ "$passed" -ge 16 ] || { echo "::error::only $passed pkg-update assertions ran; 16 ran on 2026-09-19, so some no longer execute — and the two mutants among them are what stop a bare PKG_COMPAT_LEVEL bump reading as a fix"; exit 1; }
+          [ "$passed" -ge 17 ] || { echo "::error::only $passed pkg-update assertions ran; 17 ran on 2026-09-19, so some no longer execute — and the two mutants among them are what stop a bare PKG_COMPAT_LEVEL bump reading as a fix"; exit 1; }
           if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
               echo "::error::the pkg-update suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
               exit 1

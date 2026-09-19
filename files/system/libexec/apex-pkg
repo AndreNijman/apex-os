@@ -105,7 +105,18 @@ readonly LOCK="${PKG_ROOT}/.lock"
 #           `local:<NAME>` requested-list form. A level-1 state.json has neither,
 #           so its requested list rebuilds unchanged; the only effect is one
 #           extra rebuild on the first boot after the update.
-readonly PKG_COMPAT_LEVEL=2
+#   2 -> 3: pkg-share (merge 5de97037) changed what the 32-bit pass carries: a
+#           path now arrives only when neither the running image nor this
+#           transaction's own native pass already provides it. Every extension
+#           built before it therefore holds files the image owns. Measured on
+#           katana on 2026-09-19 against one built at level 2: 177 image paths
+#           shadowed, 14 of them a 32-bit binary over a 64-bit one, and zero
+#           i686 Vulkan ICDs where the fixed engine produces 13 — including
+#           nvidia_icd.i686.json, which a live recovery had to hand-write in
+#           September. Nothing else in that state.json moves across the image
+#           build that carries the fix, so this number is what makes the
+#           machine rebuild.
+readonly PKG_COMPAT_LEVEL=3
 
 # Packages that must never come from an extension. The first group needs an
 # initramfs/deployment; the second is the running userspace ABI floor — shadowing
