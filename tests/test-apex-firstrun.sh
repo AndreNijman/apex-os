@@ -585,9 +585,135 @@ else
     if python3 "$CHECK" "$SHELL_TREE" "${TMPL}/rc.xml" >/dev/null 2>&1; then
         ok "every shell popup bind matches KeybindService"
     else
-        python3 "$CHECK" "$SHELL_TREE" "${TMPL}/rc.xml" 2>&1 | head -12
+        # `| head -12` here used to END THE SUITE. This file is `set -euo
+        # pipefail`; the checker prints 13 lines, head took 12 and closed the
+        # pipe, python died of SIGPIPE, pipefail surfaced 141 and errexit
+        # exited — before `bad` ran, before the summary, and before every
+        # section below this one. So a genuine mismatch reported as a crash
+        # with no verdict, and any assertion added after this point silently
+        # never ran. `awk` reads its input to the end, so there is no early
+        # close and no SIGPIPE; `|| true` is for the checker's own non-zero
+        # exit, which is the thing being reported rather than an error.
+        python3 "$CHECK" "$SHELL_TREE" "${TMPL}/rc.xml" 2>&1 | awk 'NR <= 12' || true
         bad "every shell popup bind matches KeybindService"
     fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  niri: the stock waybar spawn
+#
+#  MEASURED ON KATANA 2026-09-19 (evidence §5.4): the niri session ran waybar
+#  AND quickshell. niri's upstream default-config.kdl — which is what lands in
+#  ~/.config/niri/config.kdl whether niri writes it or this script copies it —
+#  carries `spawn-at-startup "waybar"` at line 271, and this script only ever
+#  APPENDED to that file, so every niri user got two bars.
+#
+#  The block edits a file that belongs to the user, so the properties that
+#  matter are the ones the labwc section above cares about too: it changes one
+#  line and only that line, it is idempotent, it leaves a config the user
+#  edited alone, and it never leaves niri with something niri refuses.
+# ─────────────────────────────────────────────────────────────────────────────
+section "niri: one bar, not two"
+
+sed -n '/^    NIRI_BIN=/,/^    fi$/p' "$SRC" > "${WORK}/niri-bar-block.sh"
+grep -q 'NIRI_STOCK_WAYBAR' "${WORK}/niri-bar-block.sh" \
+    || { printf 'could not extract the niri waybar block\n' >&2; exit 1; }
+
+NIRI_BIN_T="$(command -v niri 2>/dev/null || echo /usr/bin/niri)"
+run_niri_bar() {  # <config path>
+    NIRI_CONF="$1" bash -c '
+        set -uo pipefail
+        log() { :; }
+        source "$1"
+    ' -- "${WORK}/niri-bar-block.sh"
+}
+
+# The real upstream default, not a hand-typed excerpt: a two-line paraphrase
+# would pass a test that the actual file fails.
+UPSTREAM=""
+for cand in /usr/share/doc/niri/default-config.kdl /usr/share/niri/default-config.kdl; do
+    [ -f "$cand" ] && { UPSTREAM="$cand"; break; }
+done
+
+if [ ! -x "$NIRI_BIN_T" ]; then
+    skip "niri is not installed; the waybar block is not exercised"
+elif [ -z "$UPSTREAM" ]; then
+    skip "niri's default-config.kdl is not on this machine; nothing to transform"
+else
+    c="${WORK}/niri-stock.kdl"
+    cp "$UPSTREAM" "$c"
+    before_lines="$(wc -l < "$c")"
+    # Proves the fixture really is the broken shape. Without it every
+    # assertion below could be measuring a file that never had the line.
+    grep -qxF 'spawn-at-startup "waybar"' "$c" \
+        && ok "the upstream default really does start waybar" \
+        || bad "the upstream default really does start waybar"
+    line="$(grep -nxF 'spawn-at-startup "waybar"' "$c" | cut -d: -f1)"
+
+    run_niri_bar "$c"
+
+    if grep -qxF 'spawn-at-startup "waybar"' "$c"; then
+        bad "the stock waybar spawn is disabled"
+    else
+        ok "the stock waybar spawn is disabled"
+    fi
+    [ "$(wc -l < "$c")" = "$before_lines" ] \
+        && ok "the file has exactly as many lines as before" \
+        || bad "the file has exactly as many lines as before"
+    # The whole file, minus the one line, byte for byte. A substitution
+    # anywhere else could not survive this.
+    a="$(sed "${line}d" "$UPSTREAM" | sha256sum)"
+    b="$(sed "${line}d" "$c" | sha256sum)"
+    [ "$a" = "$b" ] \
+        && ok "not one other byte of the user's config changed" \
+        || bad "not one other byte of the user's config changed"
+    "$NIRI_BIN_T" validate --config "$c" >/dev/null 2>&1 \
+        && ok "niri still accepts the config" \
+        || bad "niri still accepts the config" \
+               "$("$NIRI_BIN_T" validate --config "$c" 2>&1 | head -5)"
+    [ -f "${c}.pre-apex-bar.bak" ] \
+        && ok "a backup of the original is kept beside it" \
+        || bad "a backup of the original is kept beside it"
+    [ -z "$(find "${WORK}" -maxdepth 1 -name 'niri-stock.kdl.apexnew.*')" ] \
+        && ok "no temporary file is left behind" \
+        || bad "no temporary file is left behind"
+
+    # Idempotence: a per-login unit runs this every single login.
+    sum_once="$(sha256sum < "$c")"
+    run_niri_bar "$c"
+    run_niri_bar "$c"
+    [ "$(sha256sum < "$c")" = "$sum_once" ] \
+        && ok "running it again changes nothing" \
+        || bad "running it again changes nothing"
+
+    # A user who edited that line meant it. Only upstream's exact spelling at
+    # column 0 is touched.
+    c2="${WORK}/niri-user.kdl"
+    sed 's|^spawn-at-startup "waybar"$|spawn-at-startup "waybar" // I want this|' \
+        "$UPSTREAM" > "$c2"
+    cp "$c2" "${WORK}/niri-user.orig"
+    run_niri_bar "$c2"
+    cmp -s "$c2" "${WORK}/niri-user.orig" \
+        && ok "a waybar line the user edited is left alone" \
+        || bad "a waybar line the user edited is left alone"
+
+    # A config that is already broken is not this block's to make worse.
+    c3="${WORK}/niri-broken.kdl"
+    { cat "$UPSTREAM"; printf 'this-is-not-a-niri-node {\n'; } > "$c3"
+    cp "$c3" "${WORK}/niri-broken.orig"
+    run_niri_bar "$c3"
+    cmp -s "$c3" "${WORK}/niri-broken.orig" \
+        && ok "a config niri already rejects is not edited" \
+        || bad "a config niri already rejects is not edited"
+
+    # And a config that never had the line is not invented into one.
+    c4="${WORK}/niri-nobar.kdl"
+    grep -vxF 'spawn-at-startup "waybar"' "$UPSTREAM" > "$c4"
+    cp "$c4" "${WORK}/niri-nobar.orig"
+    run_niri_bar "$c4"
+    cmp -s "$c4" "${WORK}/niri-nobar.orig" \
+        && ok "a config with no stock waybar spawn is untouched" \
+        || bad "a config with no stock waybar spawn is untouched"
 fi
 
 printf '\napex-shell-firstrun: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
