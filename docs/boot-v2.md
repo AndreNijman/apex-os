@@ -483,6 +483,68 @@ its firmware version and its TPM (`tpm2_getcap properties-fixed | grep -i
 manufacturer`). Until runs 1, 2 and 5 exist for one machine, nothing
 satisfies L-001's word "Real", and L-002 and L-003 stay blocked behind it.
 
+### MSI Katana GF76 12UG · firmware E17L3IMS.110 (AMI, 2025-09-08) · Intel PTT (`INTC`/`ADL`, fw 0x2580012)
+
+2026-09-19. The first entry under that instruction. Full record, every row with
+its command and its output: `ROADMAP/evidence/L-001-katana-tpm-20260919.md`.
+
+Runs done on a **loopback LUKS volume**, because this machine's system disk is
+not encrypted and converting it was out of scope. Secure Boot is **OFF** here,
+so every PCR 7 row is provisional.
+
+| run | verdict |
+|---|---|
+| 1 — baseline enrol and unlock | **PASS.** One `systemd-tpm2` token, one `systemd-recovery` token. TPM unseal **0.29 s** (×3); recovery-key unlock 0.032 s; the same plaintext back through both |
+| 2 — TPM clear | **NOT RUN.** Not for want of hardware: PPI op 5 on this firmware is *"User not required"*, so `echo 5 > /sys/class/tpm/tpm0/ppi/request` + a reboot would do it unattended. A **live Windows install owns this TPM** — `lockoutAuthSet=1`, five persistent handles, eight OS NV indices, a Windows Hello NGC container from 2026-09-12. No BitLocker, so no data at risk, but the PIN is. Needs a yes, not a machine |
+| 3 — real firmware update | **COULD-NOT-RUN.** `fwupdmgr get-updates` offers nothing for System Firmware on this board |
+| 4 — suspend and resume | **PASS.** s2idle, 90 s, RTC wake. Open volume survived and still read; a **fresh** unseal after resume worked in 0.295 s; all 24 PCRs byte-identical across the cycle. `deep` is offered and untested |
+| 5 — the TPM goes away | **COULD-NOT-RUN.** PPI op 2 (Disable) is also *"User not required"*, but once firmware hides the TPM the `ppi` directory goes with it, so re-enabling needs somebody in firmware setup. Not symmetric; not attempted |
+
+Four things the lab could not have told us, all measured here:
+
+1. **`systemd-cryptenroll --tpm2-device=auto` binds to NO PCRs on systemd
+   258.10.** `tpm2-hash-pcrs` empty, `tpm2-policy-hash` 32 zero bytes. Not
+   PCR 7 — nothing. Always pass `--tpm2-pcrs=` or `--tpm2-public-key-pcrs=`
+   explicitly.
+2. **`systemd-pcrextend` is a silent no-op on a GRUB machine.** *"Kernel stub
+   did not measure kernel image into PCR 11, skipping userspace measurement,
+   too."* — **exit status 0**, PCR 11 unchanged. So the four phase policies
+   `systemd-measure sign --current` produces by default can never be reached on
+   a machine that has not been through the enrolment procedure below. Enrolling
+   a phase policy there yields a volume whose TPM unlock fails at boot, not at
+   enrolment.
+3. **A zero PCR 11 is a local denial-of-service.** `tpm2_pcrextend 11:…` works
+   from plain root, and `tpm2_pcrreset 11` answers `bad locality`. Every
+   PCR-11-bound keyslot then refuses until the next reboot. One more reason the
+   UKI path matters: after `sd-stub` has extended PCR 11, an attacker can no
+   longer choose the value.
+4. **The signed PCR 11 policy works on Intel PTT**, which is the mechanism this
+   document chose and which had only ever run against `swtpm`. A signature from
+   the wrong key is refused by systemd on the fingerprint; a **forged signature
+   under the right fingerprint is refused by the part itself**,
+   `Esys_VerifySignature … 0x2db` (`TPM_RC_SIGNATURE`). Moving PCR 11 breaks
+   unlock; re-signing for the new value restores it.
+
+Two corrections to the bullets above this section, now that a real part has been
+asked:
+
+* **Dictionary-attack lockout is no longer untriggered.** Intel PTT here:
+  `MAX_AUTH_FAIL` 32, `LOCKOUT_INTERVAL` 7200 s, `LOCKOUT_RECOVERY` 86400 s, and
+  **a successful authorisation does not clear the counter** — only the 2-hour
+  decay or `TPM2_DictionaryAttackLockReset`, which needs `lockoutAuth`. If APEX
+  ever ships `--tpm2-with-pin`, a user who mistypes 32 times over any span of
+  time locks the TPM for up to a day and APEX cannot reset it.
+* **`deep` being offered is not the same as `deep` working.** This machine lists
+  `[s2idle] deep` and suspends as s2idle. The TPM came back from s2idle intact.
+  S3 remains untested on silicon.
+
+One thing to add to the prerequisites, learned the hard way: **check
+`/sys/class/tpm/tpm0/ppi/tcg_operations` before trusting that a TPM clear needs
+physical presence.** Operation 5 reading `4: User not required` means any root
+process can schedule a clear that the firmware performs unattended at the next
+boot — a data-loss primitive reachable from a shell on a machine with a
+TPM-bound volume.
+
 ## Enrolling a machine — the human procedure
 
 **Read this whole section before running any of it.** There is no rollback for
@@ -602,11 +664,12 @@ designed behaviour and not a fault.
 | the new deployment will not boot | do nothing for three attempts; systemd-boot selects the previous blessed entry itself. `apex boot status` then shows the failed entry as `OUT OF TRIES` and announces the rollback. |
 | the machine boots but the desktop does not | `apex-boot-health.service` fails, the entry is never blessed, and the same automatic rollback happens. `journalctl -u apex-boot-health` names the unit that was not active. |
 | you want GRUB back | GRUB was never removed. Select it from the firmware boot menu, then `sudo efibootmgr` (as yourself, deliberately) to put it back at the front of `BootOrder`. Delete `/boot/efi/EFI/Linux/apex-*.efi` to stop offering the UKI path. |
-| TPM unlock stops working after a firmware update | the recovery key. Then re-check: with a **signed** PCR 11 policy a firmware update should not break unlock, because the keyslot is bound to the signing key and PCR 11 measures the UKI, not the firmware. The lab has now measured both halves of a firmware change and neither breaks it — the Secure Boot policy register (`luks-firmware-change`, a real `DBXUpdate`) and the firmware code register (`luks-firmware-code`, two edk2 revisions). Nobody has tried it on silicon with a vendor capsule; if it breaks there, that is a finding worth recording here. |
+| TPM unlock stops working after a firmware update | the recovery key. Then re-check: with a **signed** PCR 11 policy a firmware update should not break unlock, because the keyslot is bound to the signing key and PCR 11 measures the UKI, not the firmware. The lab has now measured both halves of a firmware change and neither breaks it — the Secure Boot policy register (`luks-firmware-change`, a real `DBXUpdate`) and the firmware code register (`luks-firmware-code`, two edk2 revisions). Still nobody has tried it on silicon with a vendor capsule: katana was asked on 2026-09-19 and `fwupdmgr get-updates` offers nothing for its System Firmware, so there was no capsule to apply. What katana *did* show is the half that matters — re-signing for a moved PCR 11 restores unlock on real Intel PTT. If a vendor capsule ever breaks it, that is a finding worth recording here. |
 | TPM unlock stops working after a kernel update | this should not happen — it is the property the policy was chosen for, and it is measured in the `luks-tpm` scenario. Use the recovery key, then check that the new UKI carries a `.pcrsig` signed by the enrolled key: `python3 files/scripts/boot-v2/pe-section.py <uki> .pcrsig`. |
 | you rotated the PCR signing key | every existing keyslot is bound to the old public key. Enroll the new one with `systemd-cryptenroll --tpm2-public-key=<new>` **before** removing the old, and keep the recovery key usable throughout. |
 | the TPM was cleared, or the disk moved to another machine | the sealed object is gone: it was bound to that TPM's SRK. Only the recovery key opens the volume. Re-enroll afterwards **in two separate invocations** — wipe the old slot first, then enroll. Doing both in one command reports success and changes nothing; see below. |
 | the TPM is switched off in firmware setup, or the board was replaced | the recovery key, and the volume opens with the data intact — measured as `luks-no-tpm`. The sealed object is still in the header, so re-enabling the same TPM restores unlock with no re-enrolment; a *cleared* TPM is the row above and does need one. In a lab guest the refusal is immediate; on a machine the boot shows a passphrase prompt instead, and nobody has checked how legible that prompt is. |
+| TPM unlock refuses and nothing about the machine changed | check PCR 11 before blaming the firmware. It can be extended from plain root and **cannot be reset** (`tpm2_pcrreset 11` → `bad locality`), so anything with root can deny every PCR-11-bound unlock until the next reboot. Measured on katana 2026-09-19. A reboot restores it; the recovery key works throughout. |
 | you lost the recovery key and the TPM state | the data is gone. This is why enrollment prints the key and this document says to store it off the encrypted disk. |
 
 **The one-command re-enrolment after a TPM clear is a no-op that exits 0.**
