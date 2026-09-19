@@ -919,6 +919,13 @@ pub struct Connector {
     pub unreadable: Option<String>,
     /// A panel built into the machine rather than a cable: `eDP`, `LVDS`, `DSI`.
     pub internal: bool,
+    /// `vrr_capable`, when the driver publishes it for this connector at all.
+    ///
+    /// `None` is not `Some(false)`. On katana NO connector has the file —
+    /// seven attributes on the NVIDIA one, fifteen on the Intel one, and
+    /// `vrr_capable` among neither — so "this driver does not say" and "this
+    /// display has no VRR" would otherwise be the same answer. They are not.
+    pub vrr_capable: Option<bool>,
 }
 
 /// Whether a connector name is the machine's own built-in panel.
@@ -960,12 +967,17 @@ pub fn connectors(sys: &Path) -> Vec<Connector> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (false, None),
             Err(e) => (false, Some(format!("{}: {e}", status_path.display()))),
         };
+        let vrr_capable = match std::fs::read_to_string(entry.path().join("vrr_capable")) {
+            Ok(v) => Some(v.trim() == "1"),
+            Err(_) => None,
+        };
         out.push(Connector {
             card: card.to_string(),
             name: name.to_string(),
             connected,
             unreadable,
             internal: is_internal_connector(name),
+            vrr_capable,
         });
     }
     out.sort_by(|a, b| a.card.cmp(&b.card).then_with(|| a.name.cmp(&b.name)));
@@ -1006,8 +1018,25 @@ pub struct DisplayChoice {
     /// How many cards carry a connected connector. `> 1` is the hybrid case
     /// this whole module exists for.
     pub cards_with_displays: usize,
+    /// Whether the CHOSEN connector advertises adaptive sync. `None` means the
+    /// driver publishes nothing for it — see [`Connector::vrr_capable`].
+    ///
+    /// Read here, from the connector that was picked, and NOT by globbing every
+    /// connector on the machine, which is what `apex-gaming-session` used to do.
+    /// A hybrid laptop has `card1-HDMI-A-1` and `card2-HDMI-A-1` — connector
+    /// names are unique per card, not per machine — so a glob answers about
+    /// whichever sorts first, which is the wrong screen in exactly the case
+    /// §6.1 is about.
+    pub vrr: Option<bool>,
+    /// Whether ANY connector on this machine publishes `vrr_capable`. Lets a
+    /// caller separate "this screen does not do VRR" from "nothing here says".
+    pub vrr_published_anywhere: bool,
     /// One line saying what was chosen and why, always populated.
     pub why: String,
+    /// One line about adaptive sync, always populated, and worth printing even
+    /// when the answer is "nothing to do": the old probe's whole defect was
+    /// that it found nothing and said nothing.
+    pub vrr_why: String,
     /// Set when no complete answer could be produced. Never `Some` and silent:
     /// the caller must print it.
     pub problem: Option<String>,
@@ -1030,6 +1059,9 @@ impl DisplayChoice {
             out.push("--prefer-output".to_string());
             out.push(name.clone());
         }
+        if self.vrr == Some(true) {
+            out.push("--adaptive-sync".to_string());
+        }
         out
     }
 
@@ -1048,7 +1080,11 @@ impl DisplayChoice {
 /// argument for it.
 pub fn choose_display(sys: &Path) -> DisplayChoice {
     let all = connectors(sys);
-    let mut choice = DisplayChoice::default();
+    let mut choice = DisplayChoice {
+        vrr_published_anywhere: all.iter().any(|c| c.vrr_capable.is_some()),
+        vrr_why: "no screen was chosen, so adaptive sync was not asked about".to_string(),
+        ..DisplayChoice::default()
+    };
 
     if all.is_empty() {
         choice.why = format!("{} lists no DRM connectors", sys.join("class/drm").display());
@@ -1123,6 +1159,20 @@ pub fn choose_display(sys: &Path) -> DisplayChoice {
     choice.card = Some(pick.card.clone());
     choice.vendor = vendor;
     choice.pci_id = pci;
+    choice.vrr = pick.vrr_capable;
+    choice.vrr_why = match (pick.vrr_capable, choice.vrr_published_anywhere) {
+        (Some(true), _) => format!("{} advertises vrr_capable=1 — asking for adaptive sync", pick.name),
+        (Some(false), _) => format!("{} publishes vrr_capable=0 — not asking for adaptive sync", pick.name),
+        (None, true) => format!(
+            "{} publishes no vrr_capable, though other connectors here do — not asking for \
+             adaptive sync on a screen this session is not using",
+            pick.name
+        ),
+        (None, false) => "no connector on this machine publishes vrr_capable at all, so this is \
+                          'the driver does not say' and NOT 'the display has no VRR'. On NVIDIA \
+                          that is expected; the property has to come from somewhere else"
+            .to_string(),
+    };
 
     if choice.pci_id.is_none() {
         choice.problem = Some(format!(

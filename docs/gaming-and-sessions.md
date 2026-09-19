@@ -70,6 +70,15 @@ It is deliberately **not fatal**. Refusing to start would regress every
 single-GPU machine over a probe that hiccupped, and gamescope's own default is
 correct on those.
 
+A **partial** answer is used rather than discarded. `apex gaming
+--gamescope-device-args` exits non-zero when it could not produce a complete
+answer — a screen *and* the card to drive it with — and the commonest way that
+happens is a DRM node with no PCI device behind it, where `--prefer-output` is
+perfectly good and only `--prefer-vk-device` is missing. Throwing the good half
+away would be a second silent regression on top of the one being fixed. What
+"fail loudly" requires is that the gap is said, not that the session gets less
+than it could have.
+
 `APEX_GAMING_NO_DEVICE_SELECT=1` restores the old behaviour, and says what it
 is giving up. `APEX_GAMESCOPE_ARGS` is appended after the computed flags, so a
 hand-set preference wins.
@@ -136,18 +145,34 @@ the machine, matched nothing, passed nothing and **said nothing** — so on a
 property" produced identical silence. They are different answers and only one
 of them is about the hardware.
 
-Two changes. The probe now runs *after* the device selection and asks about the
-connector this session is actually going to use — the old glob would have
-enabled adaptive sync on the strength of the laptop panel while the session ran
-on the monitor. And all three outcomes are logged distinctly: the output says
-`1`, the output says `0`, and nothing on this machine publishes the property at
-all.
+The probe now lives in `choose_display` beside the screen it is a question
+about, and asks only about the connector this session will actually use. Two
+things were wrong with the glob, and the second is the subtler one:
+
+* It would have enabled adaptive sync on the strength of the laptop panel while
+  the session ran on the monitor.
+* **DRM connector names are unique per card, not per machine.** A hybrid laptop
+  has `card1-HDMI-A-1` (the iGPU's own port, usually wired to nothing) *and*
+  `card2-HDMI-A-1`. Anything that resolves a connector by name alone answers
+  about whichever sorts first — the disconnected one on the wrong GPU. That is
+  §6.1's mistake wearing different clothes, and it is why the fixtures now carry
+  the namesake connector.
+
+All four outcomes are logged and reported distinctly: the output says `1`, the
+output says `0`, the output publishes nothing while other connectors here do,
+and nothing on this machine publishes the property at all.
+
+`--adaptive-sync` therefore arrives inside the same `--gamescope-device-args`
+output as the device flags, from the same selector, and the session script
+holds no DRM logic of its own.
 
 ```sh
 for p in /sys/class/drm/*/vrr_capable; do [ -e "$p" ] && echo "$p = $(cat "$p")"; done
+apex gaming | grep 'adaptive sync'
 ```
 
-Empty on katana. If VRR matters for Gaming Mode on NVIDIA, the property has to
+Empty on katana, and on the L16 too — amdgpu does not publish it for `eDP-1`
+there either, so `apex gaming` says `not published` rather than `no`. If VRR matters for Gaming Mode on NVIDIA, the property has to
 come from somewhere other than this sysfs attribute — that is a separate piece
 of work and this row stays COULD NOT RUN.
 
