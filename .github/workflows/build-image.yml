@@ -1587,13 +1587,22 @@ jobs:
           # digest themselves; the image is public and the digest is in the
           # signature. docs/trust-enforcement.md says so in those words.
           #
-          # A THIRD BENEFIT, AND IT IS NOT THE POINT BUT IT IS REAL: the
-          # per-file pass is also what drove the 15.3 GB peak RSS this step
-          # spent four builds learning about (anchore/syft#2159). GOMEMLIMIT
-          # STAYS anyway — it is the measured fix for a measured death, and
-          # removing it on the theory that the new flag makes it unnecessary
-          # would be exactly the kind of unmeasured change this step's history
-          # is a monument to.
+          # WHAT THE TWO SWITCHES BUY, AND WHAT THEY DO NOT.
+          # Probe run 35456401012 against the same digest: 335 s with them
+          # against 915 s without — a 63% cut, and that is the reason to keep
+          # them. They do NOT buy memory: peak RSS was 15,547,064 KB with the
+          # file inventory off against 15,449,996 KB with it on. An earlier
+          # revision of this comment claimed the file pass drove the RSS. It
+          # was measured and it is false, and it is corrected here rather than
+          # left for the next person to inherit. GOMEMLIMIT therefore STAYS —
+          # it is the measured fix for a measured death, and dropping it on the
+          # theory that these switches replace it is exactly the kind of
+          # unmeasured change this step's history is a monument to.
+          #
+          # THE SWITCHES ARE ALSO NOT ENOUGH ON THEIR OWN. With both set the
+          # document is still 28,259,405 B — 1.5x the ceiling — and Rekor
+          # refused it for real in that probe, with the same 3-second,
+          # four-attempt failure. The trim below is what makes it fit.
           #
           # The elapsed time is printed on SUCCESS too. Fifteen minutes was
           # picked without measurement and cost three builds to disprove; the
@@ -1691,7 +1700,80 @@ jobs:
           # build stays green — it just says so, while there is still room to do
           # something about it. Failing here instead would turn "the image grew"
           # into a red build for something that demonstrably still works.
-          jq -c . /tmp/sbom.spdx.json > /tmp/sbom.min.json
+          # ── WHAT IS PUBLISHED: THE PACKAGE INVENTORY, AND NOT THE GRAPH ──
+          #
+          # Measured on the real 28,259,405 B document (probe 35456401012's own
+          # artefact), every figure below built from it rather than estimated:
+          #
+          #   packages   9,830        14,076,102 B   49%
+          #     externalRefs             9,108,268 B  (cpe23Type 7,634,382)
+          #     sourceInfo               1,357,597 B
+          #   relationships  43,801   10,872,960 B   38%
+          #     OTHER           17,508  5,883,495 B
+          #     DEPENDENCY_OF   16,463  3,085,431 B
+          #     CONTAINS         9,829  1,860,087 B
+          #     DESCRIBES            1        145 B
+          #   files      7,049         3,298,838 B   12%
+          #
+          # Candidates, each measured, against the 25,165,824 B ceiling:
+          #
+          #   drop files + file-anchored edges        29,523,132  117%  OVER
+          #   + drop OTHER                            25,414,052  100%  OVER by 248 KB
+          #   + drop sourceInfo                       23,603,924   93%  fits
+          #   drop files + all edges but DESCRIBES    18,784,972   74%  fits  ← this
+          #   that, + drop cpe23Type                   8,531,592   33%  fits
+          #
+          # TWO OPTIONS WERE MEASURED AND REFUSED, so nobody re-derives them:
+          #
+          #  - Keeping the dependency graph and paying for it with `sourceInfo`
+          #    lands at 93% of the ceiling. Seven points of headroom on an image
+          #    that gains packages every release is not headroom; its failure
+          #    mode is the next Electron bump turning the build red.
+          #  - Dropping `cpe23Type` would be the cheapest 27% in the document,
+          #    and it is refused: CPEs are the matching key a vulnerability
+          #    scanner uses. Cutting them to save space would shrink the artefact
+          #    by making it worse at the single question it exists to answer.
+          #
+          # So the rule is: this document carries the complete package
+          # inventory — every package, every version, every purl and every CPE —
+          # and does NOT carry the file inventory or the relationship graph. The
+          # dropped parts are structure, and structure is reproducible from the
+          # image: `syft registry:<digest> -o spdx-json` regenerates all of it
+          # from the same bytes. Identity is not reproducible from anything
+          # smaller, so identity is what gets signed and logged.
+          jq -c 'del(.files)
+                 | .relationships = [ (.relationships // [])[]
+                                      | select(.relationshipType == "DESCRIBES") ]' \
+            /tmp/sbom.spdx.json > /tmp/sbom.min.json
+
+          # ── THE TRIM IS NOW LOAD-BEARING, SO IT IS CHECKED ────────────────
+          # A jq expression that silently ate packages would produce a smaller
+          # document that still looked like an SBOM, attested cleanly, and
+          # answered a CVE question with a confident absence. So the packages
+          # array is compared BEFORE and AFTER, canonically sorted and hashed:
+          # byte-identical or the build stops. Comparing counts would miss a
+          # substitution; comparing the trimmed document with itself would pass
+          # for free.
+          PRE="$(jq -S -c '.packages' /tmp/sbom.spdx.json | sha256sum | cut -d' ' -f1)"
+          POST="$(jq -S -c '.packages' /tmp/sbom.min.json | sha256sum | cut -d' ' -f1)"
+          KEPT="$(jq '.packages | length' /tmp/sbom.min.json)"
+          DESC="$(jq '[.relationships[] | select(.relationshipType == "DESCRIBES")] | length' /tmp/sbom.min.json)"
+          CPES="$(jq '[.packages[].externalRefs // [] | .[] | select(.referenceType == "cpe23Type")] | length' /tmp/sbom.min.json)"
+          echo "after the trim: packages ${KEPT}, cpe refs ${CPES}, DESCRIBES ${DESC}"
+          if [ "$PRE" != "$POST" ]; then
+            echo "::error::the trim altered the packages array (${PRE} -> ${POST}). It must remove files and"
+            echo "::error::  relationships and nothing else — the package inventory is the whole artefact."
+            exit 1
+          fi
+          if jq -e 'has("files")' /tmp/sbom.min.json > /dev/null; then
+            echo "::error::the trim left a files array behind; the size figures above no longer apply"
+            exit 1
+          fi
+          if [ "$DESC" != 1 ]; then
+            echo "::error::expected exactly one DESCRIBES relationship after the trim, got ${DESC}"
+            exit 1
+          fi
+
           PRED=$(stat -c%s /tmp/sbom.min.json)
           DSSE=$(( (PRED + 2) / 3 * 4 ))
           REKOR_CEILING=25165824
