@@ -1532,10 +1532,53 @@ jobs:
           # DSSE body: about 9x the ceiling. No retry setting, no timeout and no
           # runner size can move that.
           #
-          # What is actually big is the FILE inventory, not the packages: syft's
-          # default `owned-by-package` selection emits a row per file for an
-          # image with roughly 200k of them, plus a CONTAINS relationship edge
-          # for each. `none` drops those rows and keeps every package.
+          # What is actually big is the FILE inventory, not the packages: syft
+          # emits a row per file for an image with roughly 200k of them, plus a
+          # CONTAINS relationship edge from each to its owning package.
+          #
+          # ═══ WHICH KNOB ACTUALLY DROPS THEM — MEASURED, AND NOT THE OBVIOUS
+          # ONE ═══
+          #
+          # Run locally against docker.io/library/alpine:3.20 with this same
+          # syft 1.52.0, because a small image gives the same answer in seconds:
+          #
+          #   default                            packages=15 files=77 rels=125  87,692 B
+          #   FILE_METADATA_SELECTION=none       packages=15 files=77 rels=125  76,227 B
+          #   RELATIONSHIPS_..._OWNERSHIP=false  packages=15 files=2  rels=48   31,767 B
+          #   both of the above                  packages=15 files=1  rels=48   31,130 B
+          #
+          # `SYFT_FILE_METADATA_SELECTION=none` is NOT the lever, which is the
+          # reading a plain description of it invites: it drops each file's
+          # DIGESTS, not the file rows, and saves 13%. The rows and their
+          # ownership edges go with
+          # `SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP=false`, which is 64%.
+          # Both are set: the second is the size, the first also stops syft
+          # sha1/sha256-hashing every file, which is work this step does not
+          # need to do.
+          #
+          # THE PACKAGE SETS ARE IDENTICAL. Checked, not assumed — the sorted
+          # `name@version` list of all 15 alpine packages `diff`s clean between
+          # the default run and the stripped one. This drops files, not packages.
+          #
+          # THE THIRD SWITCH IS DELIBERATELY NOT SET.
+          # `SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP_OVERLAP=false` makes syft
+          # 1.52.0 exit 1 before it catalogues anything:
+          #
+          #   invalid application config: cannot enable
+          #   exclude-binary-overlap-by-ownership without enabling
+          #   package-file-ownership-overlap
+          #
+          # and the knob it demands you flip in exchange is the one that decides
+          # whether a binary syft found and the RPM that owns it are one package
+          # or two — i.e. it changes the PACKAGE set. That is the one thing this
+          # step must not quietly do, so the switch stays on and the overlap
+          # relationships stay in. They are a rounding error next to the file
+          # rows.
+          #
+          # A MISTYPED VALUE CANNOT SILENTLY SHRINK THE SBOM: syft exits 1 on a
+          # selection value it does not recognise (verified with `=nonsense`).
+          # The package-count floor below is the second line of defence, not the
+          # first.
           #
           # The cost, stated rather than buried: this SBOM answers "which
           # packages, at which versions, are in this image" — the CVE question —
@@ -1577,6 +1620,7 @@ jobs:
           # was measured is how this step ends up "fixed" and still dying.
           timeout 2700 "${_timer[@]}" env SYFT_PARALLELISM=4 GOMEMLIMIT=10GiB \
             SYFT_FILE_METADATA_SELECTION=none \
+            SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP=false \
             syft "registry:$REF" -o spdx-json > /tmp/sbom.spdx.json || {
             rc=$?
             _el=$(( $(date +%s) - _t0 ))
@@ -1610,10 +1654,10 @@ jobs:
           # healthy build can fall below and any broken one will.
           #
           # This floor is load-bearing in a NEW way now that the file inventory
-          # is off: `SYFT_FILE_METADATA_SELECTION=none` is one typo away from a
-          # value syft does not recognise, and the shape of that mistake is a
-          # smaller document. The count is what proves the shrink came out of
-          # the file rows and not out of the packages.
+          # is off. syft does exit 1 on a selection value it does not recognise,
+          # but the count is what proves the shrink came out of the file rows
+          # and not out of the packages — the failure this step must never ship
+          # quietly.
           COUNT="$(jq '.packages | length' /tmp/sbom.spdx.json)"
           FILES="$(jq '(.files // []) | length' /tmp/sbom.spdx.json)"
           echo "SBOM packages: $COUNT   file rows: $FILES"
