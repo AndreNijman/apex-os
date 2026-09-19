@@ -703,8 +703,9 @@ class RelayLink(
     private val onClose: () -> Unit,
 ) : Closeable {
     private val sender = WsSender(to)
-    private val reader = RelayInput(WsReceiver(from), sender)
-    private val writer = RelayOutput(sender)
+    private val reader = RelayInput(WsReceiver(from), sender) { close() }
+    private val writer = RelayOutput(sender) { close() }
+    private var closed = false
 
     /** The carried byte stream, inbound. End-of-stream when the relay says so. */
     val input: InputStream get() = reader
@@ -720,7 +721,26 @@ class RelayLink(
      */
     val sawPaired: Boolean get() = reader.sawPaired
 
+    /**
+     * Close once, whichever half is closed.
+     *
+     * Idempotent and reached from BOTH streams, because that is how the layer
+     * above releases a connection: `Session.close` closes its `output` and
+     * then its `input`, and on the LAN leg either of those closes the socket
+     * underneath. If these two were the default no-op `InputStream.close` —
+     * which they were, and every relayed session leaked a TCP connection to
+     * the relay — the phone would hold one open per session for the life of
+     * the process while the desktop kept a splice alive for a peer that had
+     * gone.
+     *
+     * The buffered bytes go first, then a Close frame so the relay can tell a
+     * hang-up from a dropped connection and free the room, then the socket.
+     */
+    @Synchronized
     override fun close() {
+        if (closed) return
+        closed = true
+        runCatching { writer.flush() }
         runCatching { sender.close() }
         onClose()
     }
@@ -737,6 +757,7 @@ class RelayLink(
 private class RelayInput(
     private val receiver: WsReceiver,
     private val sender: WsSender,
+    private val closer: () -> Unit,
 ) : InputStream() {
     private var payload = ByteArray(0)
     private var offset = 0
@@ -761,6 +782,12 @@ private class RelayInput(
     }
 
     override fun available(): Int = payload.size - offset
+
+    /** Closes the whole link: see [RelayLink.close]. */
+    override fun close() {
+        ended = true
+        closer()
+    }
 
     /** True when [payload] now holds bytes; false at end of stream. */
     private fun pump(): Boolean {
@@ -817,7 +844,10 @@ private class RelayInput(
  * travelling in a frame of its own — correct either way, since the stream is
  * a stream, but four bytes per frame is a poor use of somebody's mobile data.
  */
-private class RelayOutput(private val sender: WsSender) : OutputStream() {
+private class RelayOutput(
+    private val sender: WsSender,
+    private val closer: () -> Unit,
+) : OutputStream() {
     private var buffer = ByteArray(8 * 1024)
     private var used = 0
 
@@ -849,6 +879,11 @@ private class RelayOutput(private val sender: WsSender) : OutputStream() {
         // to be sent a second time by the close path.
         used = 0
         sender.binary(buffer, 0, n)
+    }
+
+    /** Closes the whole link: see [RelayLink.close]. */
+    override fun close() {
+        closer()
     }
 
     private fun ensure(more: Int) {

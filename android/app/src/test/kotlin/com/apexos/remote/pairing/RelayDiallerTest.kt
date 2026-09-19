@@ -202,6 +202,36 @@ class RelayDiallerTest {
         )
     }
 
+
+    @Test
+    fun `the handshake deadline is still on when the dialler hands the link over`() {
+        // The Noise handshake runs AFTER this, against a peer that has proved
+        // nothing yet. A relay that joined this guest to a host whose splice
+        // never answers would otherwise leave `Client.openSession` blocked for
+        // ever, and the symptom is a pairing screen that spins with nothing to
+        // cancel. `PairingService` clears it at the same line the LAN leg
+        // clears its own, which is after the handshake and not before.
+        val relay = Double()
+        try {
+            val dialled = RelayDialler.dial(
+                RelayEndpoint.parse("ws://127.0.0.1:${relay.port}"),
+                "rv",
+                handshakeTimeoutMs = 4_321,
+            )
+            assertEquals(
+                4_321,
+                dialled.socket.soTimeout,
+                "the dialler cleared the read deadline before the handshake it protects",
+            )
+            dialled.link.close()
+            // And closing the link really closed the socket, not just the
+            // streams over it.
+            assertTrue(dialled.socket.isClosed, "the link left its socket open")
+        } finally {
+            relay.close()
+        }
+    }
+
     // ── the double ───────────────────────────────────────────────────────
 
     /** `[u32 big-endian length][payload]`, which is what `Transport` writes. */
