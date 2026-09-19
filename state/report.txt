@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-19 11:57 AWST
+APEX ROADMAP — resume report — 2026-09-19 16:58 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,14 +16,14 @@ APEX ROADMAP — resume report — 2026-09-19 11:57 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  p2-b       dead 54m   P2-003,P2-004                      task/p2-b-round32
+  p2-b       dead 355m  P2-003,P2-004                      task/p2-b-round32
              head f9b189e docs(ci): the comment named the wrong mutant for the r
-             dirty 0 file(s), 0 unpushed, card 54m
+             dirty 0 file(s), 0 unpushed, card 355m
              NEXT **Round 32 is COMPLETE and pushed.** apex-shell `task/p2-b-round32
 
-  build-verify dead 53m                                      task/build-verify
+  build-verify dead 354m                                     task/build-verify
              head 
-             dirty 0 file(s), ? unpushed, card 82m
+             dirty 0 file(s), ? unpushed, card 383m
              NEXT Finish the local build (`/var/tmp/apex-work/build-verify.log`, uni
 
 
@@ -56,11 +56,11 @@ APEX ROADMAP — resume report — 2026-09-19 11:57 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 1min 9s Sat
+  snapshot timer: active   last 40s Sat 2026-09-19
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    ac7c84b  roadmap-state
+    apex-os    b43e4b0  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    6c9c17f  wt-clippy-
@@ -83,7 +83,7 @@ APEX ROADMAP — resume report — 2026-09-19 11:57 AWST
     apex-os    0fd2d78  wt-p0-002-
     apex-os    e63b0e3  wt-p0-003-
     apex-os    cb17b4e  wt-p0-004-
-    apex-shell c3dc60d  apex-shell-
+    apex-shell aafa3f1  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-
