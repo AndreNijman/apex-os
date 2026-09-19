@@ -195,6 +195,14 @@ Blocks, in order, all from §6:
 - 17:12 — pre-rebase baseline captured (see plan step P).
 - 17:15 — read §6 of `docs/gaming-and-sessions.md` end to end and §§3, 4, 6 of
   the round-31 evidence; plan above written.
+- 17:36 — **the old-image control column is complete and pushed (`5036a4f4`)**:
+  §6.4 (`apex-safe-graphics check` prints 4 lines, no GPU/output rows; 0
+  occurrences of `WLR_DRM_DEVICES`) and §6.5 (niri through greetd runs **waybar
+  31621 AND quickshell 31630** — two bars; `config.kdl` line 271 untouched, no
+  `.pre-apex-bar.bak`; old `apex-shell-firstrun` has 0 occurrences of
+  `pre-apex-bar`/`NIRI_STOCK_WAYBAR`, so the precondition is intact). Both
+  outputs live: `eDP-1` AU Optronics @144.028, `HDMI-A-1` Lenovo R25f-30
+  @239.964. Evidence §0.8/§0.9 hold the whole left-hand column.
 - **17:33 — §6.3 IS FULLY ATTRIBUTED, AND IT WAS NEVER THE IMAGE.** Ran Gaming
   Mode itself through greetd on the old deployment. Steam's `console-linux.txt`
   is append-only, so both runs sit in one file: **all three

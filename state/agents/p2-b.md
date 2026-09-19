@@ -68,28 +68,29 @@ installs a QTranslator into the real quickshell process, and the SHIPPED
 `AgentHelpContent` singleton reads back **German inside quickshell itself**,
 offscreen, with no compositor. Scratch: `scratch-p2-b/round33/spike/`.
 
-**UNCOMMITTED WORK EXISTS in `/var/tmp/apex-work/wt-p2-b6-sh`**: five new
-files (`tests/apex-i18n-plugin.cpp`, `tests/apex-i18n-host.cpp`,
-`tests/apex-i18n-qmldir`, `tests/run-i18n-host-test.sh`,
-`tests/mutate-i18n-host.sh`) plus `ci.yml` wiring and REQUIRED entries. The
-suite is **24 passed / 0 failed / 0 skipped** on this laptop under
-`env -i HOME PATH USER TMPDIR`; `check-suites-run-in-ci.sh` 69/69,
-`check-headless-runners.sh` 28/0, `check-no-conflict-markers.sh` PASS,
-`shellcheck -S warning -x` clean, `ci.yml` re-parses as YAML. Next action:
-`mutate-i18n-host.sh` is running / needs running, then COMMIT.
+**Round 33, two commits landed on the branch and pushed** (apex-shell
+`task/p2-b-round33`, on `roadmap/v2.2`'s `9df72cf`):
 
-Original plan, kept for the rest of the round: turn the spike into the landed pair —
-`tests/apex-i18n-plugin.cpp` (the artefact), `tests/run-i18n-host-test.sh`
-(build + bare-`QQmlEngine` host half that RUNS on the Arch runner + in-situ
-quickshell half that skips by name there), `tests/mutate-i18n-host.sh`, CI
-wiring, REQUIRED list. Then standing-queue item 5.
+* `b850df2` — the route. `tests/apex-i18n-plugin.cpp`,
+  `tests/apex-i18n-host.cpp`, `tests/apex-i18n-qmldir`,
+  `tests/run-i18n-host-test.sh` (**24 passed / 0 failed / 0 skipped** here under
+  `env -i HOME PATH USER TMPDIR`), `tests/mutate-i18n-host.sh` (**13 applied /
+  11 CAUGHT / 0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE / 2 HELD / 0 FALSE-RED**,
+  58 seconds), two `ci.yml` steps and five REQUIRED entries.
+* `07700b6` — `run-i18n-test.sh` sections 4 and 6, prose and note text only.
+  Still **23 passed / 0 failed / 0 skipped**, and `mutate-i18n.sh` re-runs at
+  **9 applied / 9 CAUGHT / 0 SURVIVED**, unchanged, which is what proves the
+  edit did not move a host-probe anchor.
 
-**FOUND 8 IS STALE.** `qt6-qttools` IS installed on this laptop now:
-`lupdate-qt6`, `lrelease-qt6`, `moc` (`/usr/lib64/qt6/libexec/moc`), `rcc`,
-`qmake6`, `cmake`, `g++` and the Qt6 devel headers are all present, so sections
-2 and 3 of `run-i18n-test.sh` really run here. Locate `moc` through
-`qmake6 -query QT_HOST_LIBEXECS`, never by hardcoding — Fedora
-`/usr/lib64/qt6/libexec`, Arch `/usr/lib/qt6`.
+Next action: **standing-queue item 5** — wrap the ~200 prose strings in
+`src/services/agents/AgentHelpContent.qml` in `qsTr()`. Wrap by BLOCK KIND
+(`h`, `p`, `kv`, `note`, `todo` bodies and each section `title:`), never
+`cmd` bodies (commands printed verbatim) and never `id:`/`icon:`. Do NOT
+hand-edit the ~20 greps in `check-agent-help.sh`: give it ONE normaliser that
+turns `t: qsTr("…")` back into `t: "…"` at load and inside every `recheck_*`
+path, so its existing self-mutants keep proving both directions. Then re-pin
+`EXPECT_TR` in `run-i18n-test.sh` from **lupdate's** extracted count, not from a
+grep, and check `mutate-i18n.sh` for mutants that hardcode 5.
 
 **Round 32 is COMPLETE and pushed.** apex-shell `task/p2-b-round32` tip
 `ecc0e39` (two commits on `roadmap/v2.2`'s `a8cd491`); apex-os
@@ -154,9 +155,10 @@ Next action for whoever picks this up, in order:
 
 ## IN PROGRESS
 
-Round 33, standing-queue item 4 (the QTranslator host change, FOUND 3).
-Branches cut and pushed, no commits yet. Spike running in
-`scratch-p2-b/round33/`.
+Round 33, standing-queue item 5 (the ~200 prose strings in
+`AgentHelpContent.qml`). Item 4 is DONE and pushed — see NEXT for the two
+commits and their numbers. Worktree `wt-p2-b6-sh` is clean at `07700b6`;
+apex-os `task/p2-b-round33` has no commits so far.
 
 Round 32 is finished and pushed in both repos, and both worktrees
 (`wt-p2-b5`, `wt-p2-b5-sh`) are clean with their HEADs matching their remotes.
