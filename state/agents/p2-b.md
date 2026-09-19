@@ -200,8 +200,13 @@ pushed:
   lacked. **1 → 90 nodes on the bus**, 96 with the loss list rendered, the tree
   grouped instead of flat, the Erase button reachable. FOUND 25 is the
   measurement it was written from.
-* `e640744` — the source-level pair. `check-recovery-a11y.sh` **31/0/0** and
-  `mutate-recovery-a11y.sh` **14 applied / 11 CAUGHT / 0 SURVIVED / 3 HELD**.
+* `e640744` — the source-level pair. `check-recovery-a11y.sh` and
+  `mutate-recovery-a11y.sh`. **Current numbers, re-measured on the final tip
+  and on the Arch runner, are 34/0/0 and 17 applied / 14 CAUGHT / 0 SURVIVED /
+  0 MISSCORED / 0 UNSCORABLE / 3 HELD / 0 FALSE-RED** — NOT the 31/0/0 and
+  14/11/3 this card carried mid-round, which were taken before `5327bc6` added
+  three assertions and three mutants for the FOUND 28 fix. Identical on both
+  machines.
 * `73566cd` — FOUND 27. `mutate-lockscreen-atspi-shim.sh`'s S4 and G3 built a
   private-use character with `printf '\U000f033e'`, which is TEN ASCII BYTES
   under the C/POSIX locale `env -i` and the CI container both give. Round 30's
@@ -264,6 +269,38 @@ on this booted host (was 18/0/0) — and `mutate-platform-theme.sh` re-runs
 unchanged at **13 applied, 10 CAUGHT / 0 SURVIVED / 0 MISSCORED, 3 HELD /
 0 FALSE-RED**. FOUND 10's corollary applies: that harness aborts "tree dirty" on
 an uncommitted edit, so run it after the commit.
+
+**FROM THE GITHUB ARCH RUNNER, not this laptop: CI run 35415236747** on the
+final tip `1003192`. `Repo Structure Sanity` **success** (so every REQUIRED path
+exists there, the two new ones included) and `NixOS` **success**. `arch-validate`
+red on **exactly one step — `Right-to-left layout baseline`** — the red this
+unit has carried since round 28, which a control run on `roadmap/v2.2`
+(35351740747) already proved is no branch's doing. Every other step passed, and
+the totals lines rather than the ticks:
+
+* `recovery-a11y: passed=34 failed=0 skipped=0` and
+  `mutate-recovery-a11y: applied=17 caught=14 survived=0 misscored=0
+  unscorable=0 held=3 false-red=0` — identical to this laptop, so the
+  source-level pair is proved on two machines.
+* `recovery-atspi-shim: passed=1 failed=0 skipped=1`. **The one pass is §0**,
+  and that is the whole reason §0 was put above the skip-outs: the runner has no
+  quickshell, so every other assertion in that suite is unreachable there, and
+  without §0 the step would have measured NOTHING on the machine the gate runs
+  on. It reported `every assertion is called by the same name whether it passes
+  or fails — 30 ok / 33 FAIL / 12 SKIP titles`.
+* `mutate-recovery-atspi-shim: applied=0 …` and exit 0 — the FOUND 18 baseline
+  guard fired rather than scoring fifteen mutants against a suite that made one
+  assertion. Working as intended on the machine that taught it.
+* `run-rtl-test: 19 passed, 3 failed, 3 skipped` — was 17/3/2. The same three
+  reds, and two more assertions passing. **The iff PASSED there, in the opposite
+  branch to the one it passes in here**: *"it did NOT flip, and
+  /usr/lib/qt6/plugins/platformthemes/libqt6ct.so links no libKF6I18n, so this
+  machine's red above is that build of qt6ct and not APEX."* The LD_PRELOAD pin
+  correctly reported COULD-NOT-RUN. So FOUND 26's one inferred line is measured
+  on the machine it is about, twice now (also run 35388802498).
+* The round-30 lock-screen shim pair reports its named refusals unchanged:
+  `lockscreen-atspi-shim: passed=0 failed=0 skipped=1` and the mutator's guard
+  at `applied=0`.
 
 **What round 31 does NOT claim.** Not that the shell is accessible. The factory
 is put back by a test-only `LD_PRELOAD` that ships nowhere, and on a real
@@ -985,8 +1022,9 @@ thing left is the upstream fix. Note what that does and does not mean — on a
 real machine, with no shim, a screen reader still gets one node.** the CAUSE of
 that is named and pinned: `check-quickshell-a11y-cause.sh` 14/0/0 +
 `mutate-quickshell-a11y-cause.sh` 11 CAUGHT / 0 SURVIVED / 2 HELD. **recovery:
-DONE round 31, both halves.** Source-level: `check-recovery-a11y.sh` 31/0/0 +
-`mutate-recovery-a11y.sh` 14 applied / 11 CAUGHT / 0 SURVIVED / 3 HELD. Runtime
+DONE round 31, both halves.** Source-level: `check-recovery-a11y.sh` 34/0/0 +
+`mutate-recovery-a11y.sh` 17 applied / 14 CAUGHT / 0 SURVIVED / 3 HELD, the same
+on this laptop and on the Arch runner. Runtime
 read-back AND drive: `run-recovery-atspi-shim.sh` **33/0/1** +
 `mutate-recovery-atspi-shim.sh` **15 applied / 12 CAUGHT / 0 SURVIVED /
 0 MISSCORED / 0 UNSCORABLE / 3 HELD / 0 FALSE-RED** — the whole destructive

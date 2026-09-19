@@ -4612,7 +4612,82 @@ tasks:
     shim is test-only and ships nowhere, a screen reader still gets one node, and NOBODY HAS FILED THE
     QTDECLARATIVE ONE-LINER UPSTREAM - that is the action that would make the shell actually accessible. What is
     proved is that this repository's markup is correct all the way to the bus. Still open on this item and not
-    claimed: the recovery screen is unaudited, though the shim suite is now a working template for it.
+    ROUND 31 (2026-09-19): THE RECOVERY SCREEN IS AUDITED, BOTH HALVES, AND THE AUDIT FOUND A PRODUCT DEFECT THAT
+    HAD NOTHING TO DO WITH ACCESSIBILITY. It was the last unaudited a11y surface named in this row. Starting
+    point, measured: src/services/config_tab/pages/RecoveryPage.qml contained ZERO Accessible.* in 892 lines, and
+    the consequence read back over real AT-SPI under round 30's shim was worse than "unlabelled" - the entire
+    factory-reset evidence surface was INVISIBLE and its commit button did not exist on the bus. The shared Cfg*
+    controls arrived correctly (Re-check, Check, Open, the two scope radio buttons, Show what would be lost, four
+    CfgRow labels), but nothing page-specific did: not the headline status line, not one of the 8 component rows,
+    not one of the 6 recovery routes, not one of the 7 doctor checks, not one section title. Pressing "Show what
+    would be lost" over the bus returned True, the dry run RAN, the loss list rendered, and the tree came back
+    byte-identical apart from one Open/Close word - no row, no count, no NOT-backed-up flag, and no Erase button,
+    because that button was a bare Rectangle + MouseArea with no role, name, action or key handling. So the most
+    destructive verb in the product was, for a reader, a path that could be walked three steps and then
+    dead-ended, while every SAFE control on the page could be pressed. FIXED AND MEASURED: apex-shell aafff20
+    gives the page its markup and gives CfgSection the group role every Config page lacked - 1 node before the
+    factory install, 90 after, 96 with the loss list rendered, the tree grouped instead of flat, the Erase button
+    reachable. SOURCE-LEVEL PAIR: tests/check-recovery-a11y.sh 34 passed / 0 failed / 0 skipped and
+    tests/mutate-recovery-a11y.sh 17 applied / 14 CAUGHT / 0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE / 3 HELD / 0
+    FALSE-RED, IDENTICAL on this laptop and on the GitHub Arch runner. RUNTIME READ-BACK AND DRIVE, which is what
+    this row has never had for any surface but the login screen: tests/run-recovery-atspi-shim.sh brings up a
+    private headless labwc, a private session bus and a private a11y bus, loads the SHIPPED shell.qml with the
+    round-30 LD_PRELOAD, opens Nexus at the recovery page over the shipped IPC handler, and then WALKS THE WHOLE
+    DESTRUCTIVE FLOW WITH NOTHING BUT DoAction - open the disclosure, choose the scope, run the dry run, commit.
+    The machine it interrogates is an apex stub answering from the payloads tests/recovery-test.js already
+    carried, and the stub RECORDS ITS ARGV, which is what makes both directions checkable: pressing Erase before
+    the loss list exists must leave no --commit in that log, and pressing it after must produce the exact argv
+    including the confirm token the plan printed. The control is INSIDE the run - section 4 walks the tree before
+    the shim installs anything and requires exactly ONE node - so everything measured after it is attributable to
+    the factory install and to nothing else. 33 passed / 0 failed / 1 skipped on this laptop, measured twice (once
+    interactive, once under env -i HOME PATH USER TMPDIR, identical). The one SKIP is Accessible.announce(): a
+    description changing is not speech, and that is recorded as a could-not-run, not a pass. MUTATION PAIR:
+    tests/mutate-recovery-atspi-shim.sh, fifteen mutants each a compile of the instrument plus a complete
+    bring-up, eight and a half minutes - applied=15 caught=12 survived=0 misscored=0 unscorable=0 held=3
+    false-red=0. THE PRODUCT DEFECT THE AUDIT FOUND: the factory reset could not be committed BY ANYBODY - mouse,
+    keyboard or screen reader - for as long as that code has existed. RecoveryService._onPlan() assigned plan
+    before resetPhase; QML property notifications are synchronous, so the loss list's onPlanChanged handler ran
+    acknowledgeLossList() while the phase was still "planning", which that function refuses at its first guard;
+    nothing ever acknowledged again because _ack() was wired only to onPlanChanged, onShownChanged and
+    Component.onCompleted; so commitReady was false for ever and the Erase button, whose visible binds to it, was
+    never on screen for anyone. Instrumented in the live headless run rather than reasoned about, and
+    Rec.commitArgv evaluated against the same fixture in node returns a perfectly good argv, so every input was
+    right and the acknowledgement was the only thing missing. Nothing caught it because recovery-test.js tests
+    recovery.js where commitArgv is correct, and check-recovery-ui.sh reads the source and asserts the wiring
+    EXISTS, which it did - neither instantiates the QML, and the ORDERING is the whole bug. It was found only
+    because the button, though never visible, IS on the accessibility bus (an invisible Qt Quick item still
+    publishes its whole subtree), so it could be pressed over AT-SPI and the refusal observed. Fixed in apex-shell
+    5327bc6, both ways round: the assignment order, and a phase-change re-ack on the page so the order stops being
+    load-bearing. The regression gate for it is mutate-recovery-atspi-shim.sh's R12, which applies BOTH edits and
+    says why - the guard is genuinely two-deep and either half alone restores a completable reset, so a
+    single-edit mutant would have been a false claim that the guard is one-deep. TWO HARNESS-LEVEL DEFECTS FOUND
+    AND FIXED ON THE WAY, both of the family this program keeps meeting. (1) A private-use character built by
+    printf '\U000f033e' is TEN ASCII BYTES under the C/POSIX locale that env -i and the CI container both give,
+    measured with od; it had reached the landed tests/mutate-lockscreen-atspi-shim.sh, whose round-30 CAUGHT for
+    S4 was true only because this laptop's locale is UTF-8, and it would have been invisible for ever because that
+    harness skips on the runner for want of quickshell. Fixed in 73566cd - both harnesses build the character with
+    python3 from its number and ABORT rather than scoring anything if the result is not four bytes - and the whole
+    harness re-run rather than assumed: 8 applied, 6 CAUGHT / 0 SURVIVED / 2 HELD, baseline 23/0/1, identical to
+    round 30 with S4's CAUGHT now earned against a character that is really there. (2) run-recovery-atspi-shim.sh
+    called one assertion by TWO names, one when it passed and another when it failed, which made the mutation
+    harness report a real defect as a broken expectation: it verifies a mutant's target against the ok wording and
+    then cannot find it in the FAIL wording. Four rows had drifted; only one had a mutant pointed at it. Fixed in
+    1003192, and the CLASS gated by a new section 0 asserting that every FAIL title is a substring of some ok or
+    SKIP title - proven to fail in both directions with a drifted probe copy (32/1/1, naming the offending title)
+    and carrying its own negative control. FROM THE GITHUB ARCH RUNNER, not this laptop, CI run 35415236747 on the
+    final tip: Repo Structure Sanity success, NixOS success, and arch-validate red on exactly one step, the
+    pre-existing Right-to-left layout baseline. recovery-a11y 34/0/0 and mutate-recovery-a11y 17 applied / 14
+    CAUGHT / 3 HELD there, identical to here. recovery-atspi-shim passed=1 failed=0 skipped=1, and the ONE pass is
+    section 0 - which is the whole reason it was placed above every skip-out, because the runner has no quickshell
+    and without it that step would have measured nothing on the machine the gate runs on.
+    mutate-recovery-atspi-shim applied=0 and exit 0: the baseline guard fired rather than scoring fifteen mutants
+    against a suite that made one assertion. WHAT THIS DOES NOT CLAIM, and it is the same caveat as the lock
+    screen: the shell is NOT accessible on a real machine. The factory is put back by a test-only LD_PRELOAD that
+    ships nowhere, a screen reader still gets ONE node, and the qtdeclarative one-liner is STILL UNFILED -
+    deliberately, because filing on a public tracker is an outward-facing action and Andre's call, not an agent's.
+    What is proved is that this page's markup is correct all the way to the bus and that its flows are completable
+    through it. Still out of reach and not simulated: Orca at the login screen and greeter audio both need
+    hardware, and katana was owned by two other agents on 2026-09-19.
 - id: P2-004
   title: Internationalisation baseline
   priority: P2
@@ -4664,7 +4739,52 @@ tasks:
     merge 8eccbfa (apex-shell). NOTHING ON THIS ITEM CHANGED AGAIN and nothing here was re-verified - round 30's
     p2-b work was entirely P2-003's FOUND 14. The RTL discriminator is still 17/3/2 with the cause NOT identified;
     it was the only red step in any of the three CI runs this round and it predates the branch, so it is not the
-    branch's doing. Section 1 was deliberately left untouched, because it is the discriminator.
+    ROUND 31 (2026-09-19): THE RTL DISCRIMINATOR IS SOLVED, AND THE ANSWER IS NEITHER CANDIDATE ON THIS LEDGER.
+    What supplies APEX's right-to-left layout direction is libKF6I18n.so.6, which Fedora's qt6ct build links
+    against - not qt6ct itself, not the Qt version, and not /etc/xdg/qt6ct/qt6ct.conf. Four measurements on this
+    laptop, one process each, qmltestrunner-qt6 -platform offscreen, LANG=LC_ALL=ar_EG.UTF-8, everything else
+    scrubbed, with strace -e openat naming every qt_*.qm the process opened: QT_QPA_PLATFORMTHEME=qt6ct gives
+    layoutDirection 1 (RTL) and opens qt_ar.qm; a bogus theme name gives 0 and opens none; no platform theme gives
+    0 and opens none; and NO PLATFORM THEME AT ALL plus LD_PRELOAD=/lib64/libKF6I18n.so.6 gives 1 (RTL) and opens
+    qt_ar.qm. The last row settles it: merely loading KF6's i18n library into the process loads the Qt catalogue
+    and flips the direction. ldd on /usr/lib64/qt6/plugins/platformthemes/libqt6ct.so shows why it is there -
+    Fedora ships a post-release git snapshot (qt6ct-0.11-13.20250907git23a985f.fc43) linked against eight KF6
+    libraries including libKF6I18n.so.6, while the plugin's own binary contains no QTranslator code at all (nm
+    -DC, strings). The Arch runner has upstream release qt6ct 0.11-8, read out of the CI log, which is the plain
+    build. BOTH LEDGER CANDIDATES ARE NOW ELIMINATED BY MEASUREMENT RATHER THAN BY ARGUMENT: the conf, because
+    repeating the ar_EG run with XDG_CONFIG_DIRS and XDG_CONFIG_HOME both pointed at an empty directory - so qt6ct
+    cannot find qt6ct.conf anywhere - still gives RightToLeft; and the Qt version, because it is no longer needed
+    as an explanation and the runner's own log shows it has 64 qt_*.qm including qt_ar.qm and that the row
+    "QLocale calls ar_EG.UTF-8 right-to-left" PASSES there. CONFIRMED FROM THE GITHUB ARCH RUNNER, not this
+    laptop, in CI run 35388802498: the iff added to run-rtl-test.sh passed there in the OPPOSITE branch to the one
+    it passes in here, which is exactly what it was built for, reporting "it did NOT flip, and
+    /usr/lib/qt6/plugins/platformthemes/libqt6ct.so links no libKF6I18n, so this machine's red above is that build
+    of qt6ct and not APEX". Its can-answer-NO control passed there too, and the LD_PRELOAD pin correctly reported
+    COULD-NOT-RUN because the runner has no libKF6I18n at all. So the one line of this finding that was inferred
+    is now measured on the machine it was about, and the runner's three reds are TRUTHFUL ABOUT THAT MACHINE -
+    they are exactly the three rows that need a right-to-left APPLICATION direction, and that machine has no
+    process that loads the catalogue. THE SHIPPED CONSEQUENCE IS BIGGER THAN THE CI RED and it is the same family
+    as the qt6-qttranslations weak-Recommends finding: APEX's right-to-left layout does not depend on anything
+    APEX declares, it depends on a Fedora packaging choice to link qt6ct against KF6I18n, and if that build ever
+    returns to upstream's, or a slimming pass drops KF6, then every mirrored surface silently stops mirroring and
+    nothing goes red. That is the second time this exact silent-loss shape has been found under this row. GUARDED,
+    and both guards were shown able to fail: apex-shell 6c277ac gives run-rtl-test.sh the iff, a self-test proving
+    that predicate can answer NO, and the mechanism pinned past its carrier - 33 passed / 0 failed / 0 skipped
+    here under env -i HOME PATH USER TMPDIR, was 30/0/0 - with both new assertions proven able to fail by running
+    the suite with a stubbed tool on PATH (an ldd that prints nothing turns the iff red and correctly SKIPs the
+    self-test; an ldconfig pointing libKF6I18n at /lib64/libz.so.1 gives 32/1/0). apex-os 43ffce13 gives
+    test-apex-platform-theme.sh link 4 in its live section with the same can-it-answer-NO self-test - 20 passed /
+    0 failed / 0 skipped on this booted host, was 18/0/0 - and mutate-platform-theme.sh re-runs unchanged at 13
+    applied, 10 CAUGHT / 0 SURVIVED / 0 MISSCORED, 3 HELD / 0 FALSE-RED. Section 1 was NOT touched and still must
+    not be made to SKIP: it IS the discriminator. WHAT IS NOW OPEN IS A DECISION, NOT AN INVESTIGATION - either
+    leave arch-validate permanently red on that step, or make the runner's configuration match what APEX actually
+    ships by installing ki18n there and preloading libKF6I18n for that step only, which the fourth measurement
+    above already proves works. Still open and unchanged on this item: 0 of 14 window roots carry LayoutMirroring
+    or layoutDirection, so the shell's own windows still do not mirror; IME/fcitx5 is in the image with no suite
+    asserting any of it; the installer has no locale picker and no gettext route; per-user language is absent; and
+    the translated shell is still blocked on the host, not on QML. The recovery flow row is no longer untouched in
+    the accessibility sense - the page was given markup and read back over AT-SPI this round, see P2-003 - but
+    nothing about it was internationalised and that row stays open.
 - id: P2-005
   title: Printing/scanning/network-share maturity
   priority: P2
