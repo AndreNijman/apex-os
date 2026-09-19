@@ -1,4 +1,4 @@
-# sbom-attest — the SBOM is generated, and cannot be transparency-logged as it stands
+# sbom-attest — Rekor caps a request body at 24 MiB, and the SBOM now fits under it
 
 items: none (a guard, like `sbom-oom` was) — it gates unit `final`
 repo: apex-os
@@ -9,9 +9,16 @@ scratch: `/tmp/claude-1000/-var-home-andre-Projects-apex/5717b375-fcad-4ae2-b07f
 ## THE ANSWER, in one line
 
 **Rekor's fronting proxy refuses any request body at or above 24 MiB with a
-bare HTTP 502 before a single body byte is uploaded** — not a 413 — and the
-predicate cosign posts for this image is roughly **222 MB**. No retry can ever
-succeed. The lever is the predicate, not the transport.
+bare HTTP 502 before a single body byte is uploaded** — not a 413, and 502 is
+retryable, which is why cosign said "giving up after 4 attempt(s)" and named
+nothing. The predicate was ~222 MB. No retry could ever have worked.
+
+**The fix keeps everything that matters.** The published SBOM is the complete
+package inventory — all 9,830 packages, every purl, all 55,652 CPEs, both
+Electron trees — with the file rows and the relationship graph dropped:
+14,087,745 B, **74% of the ceiling**, still signed, still `spdxjson`, still in
+the public transparency log. Nothing about the guarantee is weakened; what is
+lost is structure, which anyone can regenerate from the published digest.
 
 ## FOUND — measured 2026-09-20, not inherited
 
@@ -165,28 +172,17 @@ no output; that is explained, not a defect.**
 A value syft does not recognise also exits 1 (checked with `=nonsense`), so a
 typo cannot silently produce a smaller document.
 
-### 8. HOW TO READ THE PROBE'S `jq-strip` NUMBER — it is ~9% LOW
+### 8. SUPERSEDED — kept only so the number is not re-derived
 
-The probe was written before finding 7, so **no arm runs the configuration the
-build actually uses**. `nofiles` is the weak knob, `norel` cannot run, `full` is
-the baseline. Only `jq-strip` approximates package-level — and it is not
-equivalent, in a direction that matters:
-
-| on alpine:3.20 | packages | files | rels | compact |
-|---|---|---|---|---|
-| probe's `jq-strip` of the default doc | 15 | 0 | 34 | 28,552 B |
-| the build's real config (ownership+metadata off) | 15 | 1 | 48 | **31,130 B** |
-
-**`jq-strip` under-reports by about 9%** (1.090x). The difference is 14 `OTHER`
-relationships — the package-file-ownership-**overlap** edges, which finding 7
-says must stay. jq-strip deletes every file-anchored edge; `ownership=false`
-keeps the overlap ones.
-
-So: multiply the probe's `RESULT jq-strip: compact=` by ~1.1 before comparing it
-with the budget, and treat `REKOR jq-strip: ACCEPTED` as *"Rekor accepts a
-package-level document of roughly this size"* — **not** as "the fix is
-verified". Only a real build verifies the real document. The 1.09 comes from a
-15-package image and is indicative, not exact.
+Round 3's probe had no arm running the build's real configuration, so this
+section used to explain how to correct its `jq-strip` figure upward by ~9%
+(measured on alpine: `jq-strip` 28,552 B against the real config's 31,130 B, the
+difference being the `OTHER` overlap edges `jq-strip` deletes and
+`ownership=false` keeps). Round 4 ran the real configuration against the real
+image, so the correction factor is no longer needed for anything. It is left
+here because it is a measured fact about the two transformations, and because
+the final trim deletes `OTHER` too — which is where 5,883,495 B of the saving
+comes from.
 
 ### 9. MEASURED, 2026-09-20: THE PACKAGE-LEVEL DOCUMENT IS STILL OVER
 
@@ -251,32 +247,84 @@ Candidate documents, each built from that artefact and measured, not estimated
 | **E: drop `files` + every edge but `DESCRIBES`** | **14,088,728** | **18,784,972** | **74% fits** |
 | F: E + drop `cpe23Type` | 6,398,694 | 8,531,592 | 33% fits |
 
-## CHOSEN OPTION — shrink the predicate, keep the transparency log
+## CHOSEN OPTION — publish the package inventory, keep the transparency log
 
-Ranked, with what each costs:
+**What ships: the complete package inventory, with no file rows and no
+relationship graph.** 14,087,745 B compact, an 18,783,660 B DSSE body, **74% of
+the ceiling**. Produced by the two syft switches plus a `jq` trim that deletes
+`files` and every relationship except the single `DESCRIBES`.
 
-- **B. Shrink to a package-level SPDX document, keep `--type spdxjson`, keep the
-  tlog. CHOSEN.** Costs the *file-level* inventory (per-file paths, digests and
-  their relationship edges). Keeps all 9,830 packages, which is what answers a
-  CVE question. Gives up nothing in the signature or transparency claim, needs
-  no `verify.rs` change, and fixes finding 4 as a side effect.
-- **C. Small digest-committing predicate + full SBOM as an OCI artefact.**
-  Transparency guarantee fully intact and keeps the file level too, but breaks
-  `verify.rs:540` on every machine in the field unless landed in lockstep.
-  Fallback only if B does not fit.
-- **A. `--tlog-upload=false` (+ Sigstore TSA).** Signed and attached but **not
-  publicly logged**: an attacker with the OIDC identity leaves no artefact-
-  signature record. The Fulcio certificate is still in CT (the run verifies the
-  SCT), so what is lost is specifically the signature record, not all trace.
-  Last resort, and `docs/` would have to stop claiming a transparency log.
-- **D. A private Rekor.** Out of scope, stated rather than left unconsidered: it
+**What it keeps, in full:** all 9,830 packages, every version, all 9,830 purls,
+all 55,652 CPEs, both Electron trees. The signature, the keyless identity, the
+`spdxjson` predicate type and the public Rekor entry are all unchanged. Nothing
+about the *guarantee* is weakened — `cosign verify-attestation` answers exactly
+what it did before.
+
+**What it costs, stated plainly:** the published SBOM is a **flat list**. It
+does not say which files are in the image or what each one hashes to, and it
+does not carry the 16,463-edge `DEPENDENCY_OF` graph saying why a package is
+there. Both are *structure*, and structure is reproducible by anyone from the
+same bytes — `syft registry:<digest> -o spdx-json` regenerates all of it. Identity
+is not reproducible from anything smaller, so identity is what gets signed.
+
+**Two cheaper options were measured and refused:**
+
+- **Keeping `DEPENDENCY_OF` and paying for it by dropping `sourceInfo`** lands
+  at 93% of the ceiling. Seven points of headroom on an image that gains
+  packages every release is not headroom; the failure mode is the next Electron
+  bump turning the build red.
+- **Dropping `cpe23Type`** is the cheapest 27% in the document and is refused.
+  CPEs are the key a vulnerability scanner matches an advisory against;
+  shrinking the artefact by making it worse at its only question is not a saving.
+
+**The three other options from the brief, and why not:**
+
+- **`--tlog-upload=false`** (signed, attached, not publicly logged) — NOT taken.
+  It was never necessary, because the predicate could be made to fit. It would
+  have cost the one thing the docs claim, and the Fulcio certificate's CT entry
+  is not a substitute: what would be lost is the artefact-signature record.
+- **A small digest-committing predicate + the SBOM as a separate OCI artefact** —
+  NOT taken. `verify.rs:540` requires `predicateType` to contain `spdx`, and a
+  failed provenance check is refused even at `provenance=warn`, so shipping it
+  out of lockstep would refuse updates on every machine in the field.
+- **A private Rekor** — out of scope, and said rather than left unconsidered: it
   needs hosting, its own key management, and every APEX machine taught to trust
-  a second log — a larger surface than the problem.
+  a second log. A larger surface than the problem.
+
+**The trim is checked, not trusted.** The `packages` array is canonically
+sorted and SHA-256'd before and after and must be byte-identical; `files` must
+be absent; exactly one `DESCRIBES` must remain. Run against the real 28 MB
+document (green, 74%) and against two mutants — one that eats half the
+packages, one that forgets to drop `files` — both rc=1.
+
+**And the guard has two thresholds.** At the 24 MiB ceiling the build fails and
+names the cause. At 80% it warns and stays green, so growth is visible before it
+is fatal. All three branches exercised against real files of the right size.
 
 ## RUNS DISPATCHED — pick these up if I am cut short
 
-- **`35456273175`** — **`build-image` on `task/sbom-attest`, THE VERIFICATION
-  BUILD**, dispatched 2026-09-19T16:51Z. `core` is skipped (the paths filter
+- **`35457162588`** — **`build-image` on `task/sbom-attest`, THE VERIFICATION
+  BUILD THAT MATTERS**, dispatched 2026-09-19T17:05Z on `0b14e851`+, i.e. the
+  first commit that actually fits under the ceiling. ~85 min. **What confirms
+  the fix**, in the `image` job's `Generate and attest the SBOM` step (which
+  must be `success` AND not skipped):
+  - `SBOM packages: 9830   file rows: 7049`
+  - `after the trim: packages 9830, cpe refs 55652, DESCRIBES 1`
+  - `predicate 14087745B compact -> ~18783660B DSSE body; … at 74%`
+  - `tlog entry created with index: N`
+  and then `Verify the image and its SBOM are both retrievable` = success.
+
+- **`35457052441`** — NOT a build. Zero jobs, `completed/failure`: GitHub's
+  record of the workflow **failing to parse**. The SBOM step's `run:` block had
+  grown to 22,901 characters and a run block is capped at **21,000**
+  (`Exceeded max expression length 21000`). A dispatch returns HTTP 422 and a
+  push leaves a jobless failed run, neither of which looks like a workflow file
+  that never parsed. Fixed by moving every prose block of six lines or more
+  above the step as a YAML comment, where the cap does not apply: 22,901 → 6,236.
+
+- **`35456273175`** — the FIRST verification build, **cancelled deliberately**
+  once probe round 4 proved its configuration could not fit. Dispatched
+  2026-09-19T16:51Z. `core` is skipped (the paths filter
   deliberately excludes `build-image.yml`), so this is `base` ~16 min then
   `image` ~24 min, not the ~1 h a full build costs. **What confirms the fix:**
   step `Generate and attest the SBOM` = success *and not skipped* (a skipped
@@ -308,43 +356,44 @@ Ranked, with what each costs:
 
 ## NEXT
 
-**The diagnosis is complete and the fix is committed and pushed. What is
-outstanding is confirmation, and two runs are already in flight for it.**
+**The diagnosis is complete, the fix is committed and pushed, and the decision
+is made and written down. What is outstanding is one build.**
 
-1. **Read build `35456273175`.** In the `image` job, the step
-   `Generate and attest the SBOM` must be **success and not skipped** (a
-   skipped job counts as success in this repo — confirm the step *ran*), and
-   its log must contain, in this order:
-   - `SBOM packages: 9830   file rows: <small>` — the count must not have moved
-     from 9830. If it did, the shrink came out of the wrong place; stop.
-   - `predicate …B compact -> …B DSSE body; ceiling 25165824B, at N%`
-   - `tlog entry created with index: N`
-   Then `Verify the image and its SBOM are both retrievable` must be success.
-   That step's `cosign verify-attestation` is the end-to-end proof.
-2. **Read probe `35456401012`** for the same numbers a little sooner, and as
-   the independent cross-check. `RESULT ` and `REKOR ` are the lines.
-3. **If the guard fired** (`::error::the SBOM predicate is …`): the document is
-   still over 24 MiB at package level. Do **not** reach for `--tlog-upload=false`
-   as a reflex — read the CHOSEN OPTION section, and the next lever to measure
-   is the `externalRefs` array, where syft emits many `cpe23Type` entries per
-   package. Dropping CPEs while keeping purl is a real reduction (CPE-based
-   scanners match worse) and belongs in `docs/` if taken.
-4. **When the build is green**, three small things close this out:
-   - delete `.github/workflows/sbom-probe.yml` — it says TEMPORARY, and round 4
-     is recoverable from git history at the commit that added it;
-   - replace the estimates in `build-image.yml`'s comment block, in
-     `docs/trust-enforcement.md` and in this card's heading with the measured
-     figures the build printed (file-row count, compact size, tlog index);
-   - `docs/trust-enforcement.md` still says *"no published APEX image has an
-     SBOM attestation yet"* and `verify.rs`'s comments say the same. **Both are
-     still true until this lands on `main`** — the build above is a task
-     branch and the `PUBLISH` guard stops it moving any tag. Leave those
-     sentences to whoever lands the first green `main` build; changing them now
-     would make the docs claim something no published image has.
-   - `files/system/usr/share/apex-os/trust/enforcement.conf` keeps
-     `provenance=warn` for the same reason. Do not tighten it to `enforce`
-     before a published image carries an `.att`, or every machine in the field
-     refuses its next update.
+1. **Read build `35457162588`** (see RUNS DISPATCHED for exactly which lines
+   confirm it). If the `image` job is green through
+   `Verify the image and its SBOM are both retrievable`, this unit is done and
+   unit `final` is unblocked.
+2. **Then three small closing jobs:**
+   - delete `.github/workflows/sbom-probe.yml` — it says TEMPORARY. Round 4 is
+     recoverable from history, and its artefact (`sbom-size-probe`, the real
+     28 MB document, 14-day retention on run `35456401012`) is what a future
+     round would measure from;
+   - put the build's own measured figures into the card heading;
+   - **leave `docs/trust-enforcement.md`'s "no published APEX image has an SBOM
+     attestation yet" and `verify.rs`'s matching comments ALONE.** They are
+     still true: this is a task branch and the `PUBLISH` guard stops it moving
+     any tag. They belong to whoever lands the first green `main` build. Same
+     for `provenance=warn` in
+     `files/system/usr/share/apex-os/trust/enforcement.conf` — tightening it to
+     `enforce` before a published image carries an `.att` refuses every update
+     on every machine in the field.
+3. **If the step failed at the size guard anyway**, the document grew between
+   probe round 4 and the build. The measured remainders, in order of what they
+   buy: `sourceInfo` (1,357,597 B), then `cpe23Type` (7,634,382 B) — and the
+   second is a real reduction in CVE-matching power that has to reach `docs/`
+   if it is taken. Section 10 has the full byte breakdown.
+4. **If it failed anywhere else**, note that `35457052441` in the run list is
+   not a build: it is GitHub's record of the workflow not parsing, from the
+   21,000-character run-block cap. Any future jobless `completed/failure` on a
+   push is the same thing.
+
+### One thing NOT built, deliberately
+
+There is no gate on the 21,000-character run-block cap. It was considered: the
+failure is loud and immediate (a dispatch 422s, a push leaves a jobless failed
+run), so it announces itself rather than hiding, and the repo has no natural
+home for a workflow-lint test. Recorded here so the choice is visible rather
+than an oversight.
 
 ## BLOCKED ON
 
