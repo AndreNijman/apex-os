@@ -55,6 +55,9 @@ A=("$adb" -s "$serial")
 
 state=${APEX_DEVICE_SUITE_DIR:-$(mktemp -d /var/tmp/apex-device-suite-XXXXXX)}
 mkdir -p "$state"
+# `root` is declared here and set further down, so the EXIT trap below can
+# read it even when the script fails before the daemon root exists.
+root=""
 agentd_pid=""; remoted_pid=""; broker_pid=""; talkback_on=""
 
 # TalkBack, when this run turned it on, goes back off no matter how the script
@@ -72,8 +75,21 @@ cleanup() {
   local rc=$?
   restore_talkback
   [ -n "$broker_pid" ] && kill "$broker_pid" 2>/dev/null || true
-  [ -n "$remoted_pid" ] && kill "$remoted_pid" 2>/dev/null || true
-  [ -n "$agentd_pid" ] && kill "$agentd_pid" 2>/dev/null || true
+  # The CURRENT apex-remoted, which is not always the one this script started.
+  # `restart_remoted` — the verb the reconnect test uses — stops the daemon and
+  # starts another, and writes the new pid to `remoted.pid`. Killing the shell
+  # variable instead left the replacement running: measured on 2026-09-19, the
+  # previous round's worktree still held **seven** orphaned `apex-remoted`
+  # processes and one `apex-agentd`, the oldest nearly nine hours old, each
+  # holding a TCP listener. This script's own header says it stops its daemons
+  # by pid; the pid it has to use is the one on disk.
+  local current=""
+  if [ -n "$root" ] && [ -r "$root/remoted.pid" ]; then
+    current=$(cat "$root/remoted.pid" 2>/dev/null) || current=""
+  fi
+  for p in "$current" "$remoted_pid" "$agentd_pid"; do
+    [ -n "$p" ] && kill "$p" 2>/dev/null || true
+  done
   wait 2>/dev/null || true
   exit $rc
 }
@@ -147,15 +163,33 @@ done
 # because "the desktop's service went away" cannot be asked of the service
 # itself. It restarts the daemon on the SAME port with the SAME state
 # directory, which is what a `systemctl --user restart` does.
+#
+# `file_privilege_request` and `decide_locally` are the other two, and they are
+# the HUMAN AT THIS MACHINE — the person a phone is not. §7 reserves deciding a
+# root operation for a local origin, `apex-agentd` enforces that on the wire,
+# and a phone therefore cannot produce the state an approvals screen exists to
+# show. These two produce it from the computer, where it belongs.
+#
+# They are deliberately two named verbs with fixed shapes rather than a general
+# "forward anything to apex-agentd", which would be a way for a test to borrow a
+# local origin for any request at all — and this suite's whole value is that the
+# phone's own origin is real.
 cat > "$root/broker.py" <<'PY'
 import json, os, socket, socketserver, subprocess, sys, time
 
 SOCK, PORT, ROOT, BIN = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
-DPORT = sys.argv[5]
+DPORT, AGENTD = sys.argv[5], sys.argv[6]
 
 def control(line):
     s = socket.socket(socket.AF_UNIX); s.settimeout(60); s.connect(SOCK)
     s.sendall((line + "\n").encode())
+    f = s.makefile("rb"); out = f.readline().decode().strip(); s.close()
+    return out
+
+def agentd(request):
+    """One request to apex-agentd, from THIS process — a local origin."""
+    s = socket.socket(socket.AF_UNIX); s.settimeout(60); s.connect(AGENTD)
+    s.sendall((json.dumps(request) + "\n").encode())
     f = s.makefile("rb"); out = f.readline().decode().strip(); s.close()
     return out
 
@@ -196,11 +230,22 @@ class H(socketserver.StreamRequestHandler):
             if not line:
                 continue
             try:
-                cmd = json.loads(line).get("cmd")
+                req = json.loads(line)
+                cmd = req.get("cmd")
             except Exception as e:
                 self.wfile.write((json.dumps({"reply": "error", "message": str(e)}) + "\n").encode())
                 continue
-            out = restart() if cmd == "restart_remoted" else control(line)
+            if cmd == "restart_remoted":
+                out = restart()
+            elif cmd == "file_privilege_request":
+                out = agentd({"cmd": "privilege_request",
+                              "verb": req["verb"],
+                              "args": req.get("args", []),
+                              "reason": req["reason"]})
+            elif cmd == "decide_locally":
+                out = agentd({"cmd": "decide", "id": req["id"], "decision": req["decision"]})
+            else:
+                out = control(line)
             self.wfile.write((out + "\n").encode())
             self.wfile.flush()
 
@@ -210,7 +255,7 @@ class S(socketserver.ThreadingTCPServer):
 S(("0.0.0.0", PORT), H).serve_forever()
 PY
 python3 "$root/broker.py" "$root/run/apex-remoted/control.sock" "$brokerport" "$root" "$bin" "$port" \
-  >"$root/broker.log" 2>&1 &
+  "$root/run/apex-agentd/control.sock" >"$root/broker.log" 2>&1 &
 broker_pid=$!
 
 # Which of this machine's addresses the PHONE can actually reach. Measured from
@@ -242,6 +287,58 @@ PY
 done
 [ -n "$lan" ] || { echo "FAIL: the phone could not reach this machine on any address"; exit 1; }
 echo "desktop reachable from the phone at $lan (broker on $brokerport)"
+
+# ── can this process pair at all? ───────────────────────────────────────────
+#
+# Asked HERE, before the two-minute APK build, because the answer depends on
+# how this script was STARTED and not on anything in the tree.
+#
+# `apex-remoted` decides whether a human is at the machine by reading the
+# connecting peer's cgroup (`origin::classify`), and pairing is one of the
+# things §7 reserves for one — pairing hands a phone standing access to every
+# agent here. A suite launched from a terminal is observed `local-terminal` and
+# pairs; a suite launched by a systemd user unit — a timer, a dispatched agent,
+# CI — is observed `scheduled-job` and every offer is refused.
+#
+# Measured on 2026-09-19 from `apex-roadmap-resume.service`: 24 tests ran and 8
+# failed, all eight on `apex-remoted did not mint an offer`. Nothing was wrong
+# with the app, the phone or the daemon. The same commit from a login session
+# is OK (24 tests). That is two minutes of gradle and twenty seconds of
+# instrumentation spent to produce eight failures about the launcher, so the
+# question is asked once, up front, through the same broker the tests use.
+#
+# It is a FAILURE and not a skip, and it names the wrapper that fixes it.
+preflight=$(python3 - "$brokerport" <<'PY'
+import json, socket, sys
+try:
+    s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), 10)
+    s.sendall(b'{"cmd":"pair"}\n')
+    print(s.makefile("rb").readline().decode().strip())
+    s.close()
+except OSError as e:
+    print(json.dumps({"reply": "error", "message": f"the broker did not answer: {e}"}))
+PY
+)
+if [[ "$preflight" != *'"qr"'* ]]; then
+  echo "FAIL: apex-remoted will not mint a pairing offer for this process, so the"
+  echo "      end-to-end tests cannot run. It answered:"
+  echo "      $preflight"
+  if [[ "$preflight" == *scheduled-job* ]]; then
+    echo
+    echo "      This script is running under a systemd user unit — $(cat /proc/self/cgroup)"
+    echo "      — which apex-remoted observes as \`scheduled-job\`, not as a human at the"
+    echo "      keyboard. Run it inside a real login session instead:"
+    echo
+    echo "        tests/in-login-session.sh /bin/bash -c \\"
+    echo "          'export JAVA_HOME=\$JAVA_HOME ANDROID_HOME=\$ANDROID_HOME; \\"
+    echo "           exec android/tools/run-device-suite.sh $*'"
+    echo
+    echo "      The wrapper forwards PATH HOME LANG LC_ALL TMPDIR and APEX_*/CARGO_*/"
+    echo "      RUST*/XDG_*_HOME only, so JAVA_HOME and ANDROID_HOME must be exported"
+    echo "      inside it."
+  fi
+  exit 1
+fi
 
 # Build and install. Both APKs, every run: an instrumentation APK from a
 # previous build is the same stale-binary defect the Rust suite refuses.

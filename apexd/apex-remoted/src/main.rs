@@ -138,19 +138,44 @@ fn run(args: &[String]) -> Result<(), String> {
     let store_path = apex_remote_core::device::DeviceStore::path_in(&state_home);
     let machine = machine_name();
 
-    // IPv4 only, today. Left as it was rather than widened in the same change
-    // that stopped this machine advertising addresses it does not serve: a
-    // dual-stack bind moves every peer address to `::ffff:a.b.c.d`, and
-    // `State::path_of` decides LAN-or-relay on `is_loopback()`, which is false
-    // for a v4-mapped loopback. That is a real change with a real regression
-    // behind it and it needs its own measurement. What `bound` buys is that
-    // the pairing code now follows the listener instead of guessing.
-    let listener = TcpListener::bind(("0.0.0.0", port))
+    // Dual-stack, with IPv4 as the fallback and not as the intention.
+    //
+    // The regression this waited for has been measured and closed: a `::`
+    // listener hands every IPv4 peer to `accept(2)` as `::ffff:a.b.c.d`, and
+    // `Ipv6Addr::is_loopback` is false for `::ffff:127.0.0.1` — it answers
+    // only for `::1` — so `State::path_of` would have recorded every relayed
+    // session as a LAN one and told the owner nobody else was on the path.
+    // `state::canonical` flattens the address once where `serve.rs` reads it,
+    // and `arrived_by_relay` canonicalises again where the decision is made;
+    // `a_v4_mapped_relay_splice_is_a_relay_session` fails without either.
+    //
+    // `reachable_on` already knew what to do with a `::` listener, so the
+    // pairing code widens to this machine's IPv6 addresses by itself — which
+    // is the point: on an IPv6-only network a phone could not reach this
+    // daemon at all, and the firewall needs no change because `apex-firewall`'s
+    // table is `inet`, which is both families.
+    //
+    // The fallback is not decoration. A machine booted with `ipv6.disable=1`
+    // has no `AF_INET6` at all and `bind("[::]")` fails outright there; a
+    // daemon that refused to start on one would be a regression far worse than
+    // the one above. `net.ipv6.bindv6only` is 0 by default on Linux and this
+    // does not set `IPV6_V6ONLY`, so a `::` bind accepts both families; on a
+    // system where somebody has set it to 1 the IPv4 half is lost, which is
+    // why the address actually bound is read back below rather than assumed.
+    let listener = TcpListener::bind(("::", port))
+        .or_else(|_| TcpListener::bind(("0.0.0.0", port)))
         .map_err(|e| format!("cannot listen on port {port}: {e}"))?;
-    let bound = listener
+    // The ADDRESS AND THE PORT the listener actually got, not the ones asked
+    // for. They differ whenever `--port 0` is used — the kernel picks one, and
+    // the daemon then advertised `192.168.1.232:0` in the pairing code, told
+    // mDNS port 0, and dialled 127.0.0.1:0 for every relay splice. Measured on
+    // this tree before the change; every one of those three is a fact about
+    // the listener and every one of them read the request instead.
+    let local = listener
         .local_addr()
-        .map_err(|e| format!("the listener has no address: {e}"))?
-        .ip();
+        .map_err(|e| format!("the listener has no address: {e}"))?;
+    let bound = local.ip();
+    let port = local.port();
     let state = State::new(identity, machine, port, bound, relay, store_path, ping_interval)
         .map_err(|e| format!("the paired-device store is unusable: {e}"))?;
 
