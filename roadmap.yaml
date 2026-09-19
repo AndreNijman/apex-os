@@ -3217,14 +3217,19 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    TWO CORRECTIONS FROM A REAL PHONE, 2026-09-19 (task/p1-053e-device @ 9231f72a), and the status is left at done
-    deliberately — see the second. (1) THE DESKTOP BOUND IPv4 ONLY, AND WIDENING IT WOULD HAVE MISLABELLED EVERY
-    RELAYED SESSION. main.rs had bound 0.0.0.0 with a comment naming the regression that stopped it being widened,
-    and the regression was real: a :: listener hands every IPv4 peer to accept(2) as ::ffff:a.b.c.d, and
-    Ipv6Addr::is_loopback is FALSE for ::ffff:127.0.0.1 — it answers only for ::1. A relay splice reaches this
-    daemon over loopback, so State::path_of would have called every relayed session a LAN one and Path::disclosure
-    would have told the owner nobody else was on the path. Measured before anything changed: arrived_by_relay
-    extracted from path_of so the rule can be asserted without a State, then
+    LANDED 2026-09-19 (round 33): task/p1-053e-device @ 9231f72a is on apex-os roadmap/v2.2 as merge 859cbb2b
+    (7f647470 -> 859cbb2b, --no-ff, six commits, 914 insertions over 12 files). Rust changed in this merge, so the
+    workspace was actually rebuilt ON THE MERGED TIP rather than trusted from the branch: cargo test --locked
+    --workspace --no-fail-fast 3407 passed / 0 failed / 2 ignored across 57 targets, cargo clippy --workspace
+    --all-targets --locked -D warnings exit 0 with zero warnings, check-no-conflict-markers.sh PASS. Pushed with
+    --force-with-lease. TWO CORRECTIONS FROM A REAL PHONE, 2026-09-19 (task/p1-053e-device @ 9231f72a), and the
+    status is left at done deliberately — see the second. (1) THE DESKTOP BOUND IPv4 ONLY, AND WIDENING IT WOULD
+    HAVE MISLABELLED EVERY RELAYED SESSION. main.rs had bound 0.0.0.0 with a comment naming the regression that
+    stopped it being widened, and the regression was real: a :: listener hands every IPv4 peer to accept(2) as
+    ::ffff:a.b.c.d, and Ipv6Addr::is_loopback is FALSE for ::ffff:127.0.0.1 — it answers only for ::1. A relay
+    splice reaches this daemon over loopback, so State::path_of would have called every relayed session a LAN one
+    and Path::disclosure would have told the owner nobody else was on the path. Measured before anything changed:
+    arrived_by_relay extracted from path_of so the rule can be asserted without a State, then
     a_v4_mapped_relay_splice_is_a_relay_session FAILED on [::ffff:127.0.0.1]:41000 with that port armed.
     to_canonical() on both sides of the seam — once at the boundary where serve.rs reads peer_addr(), so the
     stored peer, apex remote status and the key unregister matches see one spelling, and once inside the rule so a
@@ -3439,18 +3444,23 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    ON A REAL PHONE, 2026-09-19 (task/p1-053e-device @ 9231f72a). C1 and C3 now have device evidence and not only
-    JVM evidence. android/app/src/androidTest/.../TerminalOnDeviceTest.kt composes the REAL TerminalScreen — not a
-    stub, not a half controller — against a real /bin/cat PTY on the computer through apex-remoted and
-    apex-agentd, and reads output back out of the Snapshot the repaint loop hands TerminalView. C1, streams real
-    PTY output: a per-run sentinel typed through TerminalController.sendText arrives on the screen twice, the
-    PTY's own echo and cat's output. C3, orientation changes: the phone is rotated to landscape before the
-    composition exists, LocalDensity is provided at fontScale 2.0, onSizeChanged measures a cell and calls resize,
-    and the PTY on the computer is then asserted to be running at the same grid — handle_attach (session.rs:1802)
-    and Request::Resize write the attaching terminal's size into SessionInfo. MEASURED: 63x7 on both sides. That
-    is worth stating plainly because this file's own doc says eighty columns is what these TUIs lay out for: at
-    Android's largest accessibility text size a landscape Pixel 7a terminal holds 63 columns, with the software
-    keyboard up. TWO THINGS THE DEVICE SETTLED THAT NO JVM COULD. TerminalScreen CANNOT be hosted by
+    LANDED 2026-09-19 (round 33): task/p1-053e-device @ 9231f72a is on apex-os roadmap/v2.2 as merge 859cbb2b
+    (7f647470 -> 859cbb2b, --no-ff, six commits, 914 insertions over 12 files). Rust changed in this merge, so the
+    workspace was actually rebuilt ON THE MERGED TIP rather than trusted from the branch: cargo test --locked
+    --workspace --no-fail-fast 3407 passed / 0 failed / 2 ignored across 57 targets, cargo clippy --workspace
+    --all-targets --locked -D warnings exit 0 with zero warnings, check-no-conflict-markers.sh PASS. Pushed with
+    --force-with-lease. ON A REAL PHONE, 2026-09-19 (task/p1-053e-device @ 9231f72a). C1 and C3 now have device
+    evidence and not only JVM evidence. android/app/src/androidTest/.../TerminalOnDeviceTest.kt composes the REAL
+    TerminalScreen — not a stub, not a half controller — against a real /bin/cat PTY on the computer through
+    apex-remoted and apex-agentd, and reads output back out of the Snapshot the repaint loop hands TerminalView.
+    C1, streams real PTY output: a per-run sentinel typed through TerminalController.sendText arrives on the
+    screen twice, the PTY's own echo and cat's output. C3, orientation changes: the phone is rotated to landscape
+    before the composition exists, LocalDensity is provided at fontScale 2.0, onSizeChanged measures a cell and
+    calls resize, and the PTY on the computer is then asserted to be running at the same grid — handle_attach
+    (session.rs:1802) and Request::Resize write the attaching terminal's size into SessionInfo. MEASURED: 63x7 on
+    both sides. That is worth stating plainly because this file's own doc says eighty columns is what these TUIs
+    lay out for: at Android's largest accessibility text size a landscape Pixel 7a terminal holds 63 columns, with
+    the software keyboard up. TWO THINGS THE DEVICE SETTLED THAT NO JVM COULD. TerminalScreen CANNOT be hosted by
     androidx.compose.ui.test.junit4's createAndroidComposeRule: the withFrameNanos repaint loop — the loop that
     keeps a fast cat to one repaint per displayed frame — leaves the Recomposer permanently busy, so
     ComposeTestRule.setContent never returns from its own waitForIdle. Measured: IdlingResourceTimeoutException,
@@ -3636,7 +3646,12 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    C3 MEASURED FROM A REAL PHONE, 2026-09-19 (task/p1-053e-device @ 9231f72a,
+    LANDED 2026-09-19 (round 33): task/p1-053e-device @ 9231f72a is on apex-os roadmap/v2.2 as merge 859cbb2b
+    (7f647470 -> 859cbb2b, --no-ff, six commits, 914 insertions over 12 files). Rust changed in this merge, so the
+    workspace was actually rebuilt ON THE MERGED TIP rather than trusted from the branch: cargo test --locked
+    --workspace --no-fail-fast 3407 passed / 0 failed / 2 ignored across 57 targets, cargo clippy --workspace
+    --all-targets --locked -D warnings exit 0 with zero warnings, check-no-conflict-markers.sh PASS. Pushed with
+    --force-with-lease. C3 MEASURED FROM A REAL PHONE, 2026-09-19 (task/p1-053e-device @ 9231f72a,
     android/app/src/androidTest/.../ApprovalsOnDeviceTest.kt). "Root/system-access remain local-approval-only by
     default" had been a property of source that nothing had ever tried to violate from a device. It has now been
     tried. A Pixel 7a, paired over Wi-Fi with a real apex-remoted, built the decide frame BY HAND — Agentd has no
@@ -4032,17 +4047,22 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    ROUND 2 ON THE PIXEL 7a, 2026-09-19 (task/p1-053e-device, six commits off roadmap/v2.2 @ 7f647470, tip
-    9231f72a). C1 IS NOW MET EXCEPT FOR THE RELAY, AND THE RELAY IS NOT A MISSING TEST — IT IS A MISSING FEATURE.
-    There is no relay client on Android at all: PairingService says so in its own error text ("and no relay client
-    has been written yet"), :core has no WebSocket code, core/build.gradle.kts carries bouncycastle and
-    kotlinx-serialization and nothing else, and Help.kt tells the user the relay has no deployment. Covering the
-    relay leg on a device means writing P1-052's Android half — an RFC 6455 client, a PairingService fallback, a
-    relay double the phone can dial, apex-remoted --relay carried through the suite's broker including
-    restart_remoted, a device test that makes the LAN unreachable so the relay is the leg under test, and
-    HelpParityTest's inverse list moved. That is its own unit and is recommended as its own card; a half relay
-    client would be worse than none. EVERYTHING ELSE C1 NAMES NOW RUNS ON THE PHONE. PTY INPUT/OUTPUT, the first
-    of the two gaps round 1 named: TerminalOnDeviceTest composes the real TerminalScreen with a real
+    LANDED 2026-09-19 (round 33): task/p1-053e-device @ 9231f72a is on apex-os roadmap/v2.2 as merge 859cbb2b
+    (7f647470 -> 859cbb2b, --no-ff, six commits, 914 insertions over 12 files). Rust changed in this merge, so the
+    workspace was actually rebuilt ON THE MERGED TIP rather than trusted from the branch: cargo test --locked
+    --workspace --no-fail-fast 3407 passed / 0 failed / 2 ignored across 57 targets, cargo clippy --workspace
+    --all-targets --locked -D warnings exit 0 with zero warnings, check-no-conflict-markers.sh PASS. Pushed with
+    --force-with-lease. ROUND 2 ON THE PIXEL 7a, 2026-09-19 (task/p1-053e-device, six commits off roadmap/v2.2 @
+    7f647470, tip 9231f72a). C1 IS NOW MET EXCEPT FOR THE RELAY, AND THE RELAY IS NOT A MISSING TEST — IT IS A
+    MISSING FEATURE. There is no relay client on Android at all: PairingService says so in its own error text
+    ("and no relay client has been written yet"), :core has no WebSocket code, core/build.gradle.kts carries
+    bouncycastle and kotlinx-serialization and nothing else, and Help.kt tells the user the relay has no
+    deployment. Covering the relay leg on a device means writing P1-052's Android half — an RFC 6455 client, a
+    PairingService fallback, a relay double the phone can dial, apex-remoted --relay carried through the suite's
+    broker including restart_remoted, a device test that makes the LAN unreachable so the relay is the leg under
+    test, and HelpParityTest's inverse list moved. That is its own unit and is recommended as its own card; a half
+    relay client would be worse than none. EVERYTHING ELSE C1 NAMES NOW RUNS ON THE PHONE. PTY INPUT/OUTPUT, the
+    first of the two gaps round 1 named: TerminalOnDeviceTest composes the real TerminalScreen with a real
     TerminalController attached to a real /bin/cat through apex-remoted and apex-agentd, types a per-run sentinel
     through TerminalController.sendText — the path a keystroke takes from the hidden BasicTextField, io thread
     included — and asserts it comes back in the Snapshot the repaint loop hands TerminalView. Mutated to print
