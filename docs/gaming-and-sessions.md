@@ -777,7 +777,9 @@ sudo apex game stop
 #    scheduler it found rather than restoring it. `scxctl restore` exists and
 #    would be the fix; it is not done here because no APEX image loads a
 #    scheduler at boot, so nothing has ever reached it.
-sudo scxctl stop     # leave the machine as you found it
+sudo scxctl stop
+#    expect: it REFUSES — `apex game stop` already stopped it, and nothing is
+#    running. That refusal is the row passing, not a loose end.
 ```
 
 **On the timing.** `scx_load` waits up to 2 s (`SCX_SETTLE`) for the scheduler
