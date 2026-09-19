@@ -1388,3 +1388,190 @@ as the preselected session along the bottom.
 /var/home/andre/qual/apptest.sh <tag> <settle> <cmd…>     # launch, diff the screen, classify the client
 /var/home/andre/qual/who-connects.py                      # Wayland vs XWayland by socket peer inode
 ```
+
+---
+
+## 11. Chromium — P1-038 row 2, closed
+
+Andre authorised installing what was needed. Chromium was installed **through
+`apex install`**, not around it, so the package engine got a second run on this
+machine.
+
+### 11.1 DEFECT — `apex resolve` and `apex install` disagree about Chromium
+
+```
+$ apex resolve chromium
+candidates for 'chromium':
+  flatpak  org.chromium.Chromium  (Chromium Web Browser on fedora,flathub)
+APEX would use: flatpak — ranked first for this system
+install:        sudo apex install org.chromium.Chromium
+```
+
+`apex resolve` lists **one** candidate and says APEX would use the flatpak. It
+is wrong on both counts — the rpm exists, in an enabled repo, and `apex search`
+finds it:
+
+```
+$ dnf5 repoquery --qf "%{name}.%{arch} %{evr} [%{reponame}]" chromium
+chromium.x86_64 141.0.7390.54-1.fc43  [Fedora 43 - x86_64]
+chromium.x86_64 142.0.7444.175-2.fc43 [Fedora 43 - x86_64 - Updates Archive]   … and more
+$ apex search chromium
+── repository packages ──
+Matched fields: name (exact)
+ chromium.x86_64   A WebKit (Blink) powered web browser that Google doesn't want you to use
+```
+
+and `apex install chromium` then installs **the rpm**, not the flatpak:
+
+```
+chromium-0:152.0.7977.82-1.fc43.x86_64   100% | 22.9 MiB/s | 129.5 MiB | 00m06s
+apex-pkg: done — 223 package(s), 515MB extension
+```
+
+So `apex resolve` — the verb whose whole job is "show which source APEX would
+install a name from, and why" — omits the rpm candidate entirely and predicts
+the wrong source. A user following `apex resolve`'s advice gets a different
+browser from the one `apex install` gives them. The ranking may well be right as
+a *policy*; the bug is that `resolve` does not see the rpm at all.
+
+### 11.2 The engine's second run — clean, and no new 32-bit damage
+
+```
+$ journalctl -u qual-chromium
+09:42:17 Started … apex install chromium
+09:43:07 Deactivated successfully.   Consumed 1min 22.644s CPU time, 3.3G memory peak.
+apex-pkg: warning: dropping 'steam-1.0.0.85-1.fc43.i686': a 32-bit copy of the application …
+apex-pkg: 223 package(s) verified against the repository keys
+apex-pkg: done — 223 package(s), 515MB extension
+```
+
+Exit 0 in 50 s. The app-twin rule fired again, identically.
+
+**i686 closure: unchanged.** Chromium pulled in four packages and all four are
+`x86_64`:
+
+```
+                      total   i686
+before  apex install    219    205
+after   apex install    223    205
+new: chromium-152.0.7977.82-1.fc43.x86_64
+     chromium-common-152.0.7977.82-1.fc43.x86_64
+     google-crc32c-1.1.2-12.fc43.x86_64
+     libXNVCtrl-580.82.09-1.fc43.x86_64
+```
+
+**Shadowing: unchanged at 177 paths / 14 32-bit ELF.** The extension grew from
+3 447 to 3 716 files and the shadow set did not move:
+
+```
+$ LC_ALL=C comm -12 /tmp/ext-c.txt /tmp/img-c.txt | wc -l
+177
+32-bit shadow count: 14      (the same 14 /usr/libexec paths as §3)
+$ file -b /usr/libexec/gstreamer-1.0/gst-plugin-scanner
+ELF 32-bit LSB pie executable, Intel i386
+```
+
+*(A first pass reported "0 32-bit shadows" and was wrong — the two sorted files
+had been produced under different collations, so `comm` printed
+"file 2 is not in sorted order" and silently under-reported. Re-run with
+`LC_ALL=C` on every `sort` and every `comm`. The 177/14 figures above are the
+LC_ALL=C ones. Recorded because the wrong number looked like good news.)*
+
+**GStreamer: unchanged, still broken.**
+
+```
+$ rm -rf ~/.cache/gstreamer-1.0; gst-inspect-1.0 | tail -1
+Total count: 240 plugins (239 blacklist entries not shown), 2 features
+```
+
+Identical before and after. §3 stands exactly as written.
+
+**32-bit Vulkan ICDs: still absent.** `ls /usr/share/vulkan/icd.d/ | grep -c i686`
+→ `0`, and `/mnt/apexext/usr/share/vulkan/icd.d/` still does not exist. §6.5
+stands.
+
+### 11.3 `apex install chromium` installs something you cannot run as `chromium`
+
+```
+$ command -v chromium          → (nothing)
+$ command -v chromium-browser  → /usr/bin/chromium-browser
+$ /usr/bin/chromium-browser --version
+Chromium 152.0.7977.82 Built from source for Fedora release 43 (Forty Three)
+```
+
+This is **Fedora's packaging, not an APEX defect** — the rpm ships only
+`/usr/bin/chromium-browser`:
+
+```
+$ dnf5 repoquery -l chromium-152.0.7977.82-1.fc43.x86_64 | grep '^/usr/bin/'
+/usr/bin/chromium-browser
+```
+
+Still worth a line in `apex install`'s output when the requested name is not a
+command afterwards: the user typed `chromium` and nothing called `chromium`
+exists when it finishes.
+
+### 11.4 Chromium runs, and row 2 is a PASS with the portal's ceiling
+
+Launched in the live labwc session and classified by socket-peer inode, not by
+environment variable:
+
+| run | client type | painted |
+|---|---|---|
+| default flags, harness env (`XDG_SESSION_TYPE=tty`) | **XWayland (X11)** — pids 39977, 40023 in the X11 set | 975 809 px (47.1 %), bbox (6,6,1802,1074) |
+| `--ozone-platform=wayland` | **native Wayland** — pid 40671, zero non-server X11 clients | 946 528 px (45.6 %) |
+| **no ozone flag, `XDG_SESSION_TYPE=wayland`** | **native Wayland** — pid 41603 | 946 420 px (45.6 %) |
+
+The third row is the control, and it settles it: **the X11 fallback in row one
+is this unit's harness, not the image.** Chromium ≥ 141 selects its backend with
+`--ozone-platform-hint=auto`, which reads `XDG_SESSION_TYPE`; §4 records that
+this harness leaves that variable at `tty` under labwc while logind records
+`Type=wayland`. Given `wayland` in the environment, Chromium picks Wayland by
+itself with no flag and no configuration.
+
+The image's own config is consistent with that and does **not** need changing:
+
+```
+$ grep -A6 NATIVE_WAYLAND /etc/chromium/chromium.conf
+# NATIVE_WAYLAND=[on|off]
+# chromium >=141 switched to --ozone-platform-hint=auto
+if [ ! -z "$WAYLAND_DISPLAY" ]; then NATIVE_WAYLAND=on; else NATIVE_WAYLAND=off; fi
+…
+if [ "$NATIVE_WAYLAND" == "on" ] ; then
+   ENABLE_FEATURES+=",WaylandLinuxDrmSyncobj,WaylandPerSurfaceScale,WaylandUiScale"
+```
+
+**One thing this could not settle and one real greetd login would:** whether a
+session started by greetd exports `XDG_SESSION_TYPE=wayland` to its children.
+logind classified this unit's sessions as `Type=wayland`, so it very probably
+does — but "very probably" is not a measurement, and Chromium's backend, the
+GTK backend selection and anything else keying off that variable all ride on it.
+**Recommend: one greetd login, then `sudo cat /proc/$(pgrep -x labwc)/environ | tr '\0' '\n' | grep XDG_SESSION_TYPE`.** That single command closes this.
+
+### 11.5 Screen sharing — the restriction is the portal's, not the client's
+
+The coordinator's question was whether Chromium sees the same "monitors only"
+ceiling as Firefox. It does, and the reason is structural:
+
+```
+$ busctl --user get-property org.freedesktop.portal.Desktop \
+    /org/freedesktop/portal/desktop org.freedesktop.portal.ScreenCast AvailableSourceTypes
+u 1
+```
+
+`AvailableSourceTypes` is a property of **the portal object**, not of a session
+or a client. Every application that asks gets the same `1` (= `MONITOR`;
+`WINDOW` is 2, `VIRTUAL` is 4). It is `xdg-desktop-portal-wlr`'s answer, and
+`labwc-portals.conf` selects that backend. Firefox, Chromium, Discord and Teams
+therefore all share one ceiling on APEX's Floating session: **share a screen,
+never share a window.**
+
+**P1-038 row 2: PASS** — Chromium installs, runs natively on Wayland, paints,
+and reaches the portal; with the same window-sharing limitation as row 1.
+
+**Caveat, same as §7.5:** the `xdg-desktop-portal` process that answered is pid
+9692, started at 09:00:42 under the *first* labwc session. Its ScreenCast
+backend binding was chosen then, under `labwc-portals.conf`, which is the right
+binding for this session — but a clean re-read needs a fresh user manager, i.e.
+a real greetd login. The value read `1` on both occasions, hours and several
+sessions apart.
