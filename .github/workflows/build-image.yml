@@ -1478,20 +1478,79 @@ jobs:
           # assumed: with the limit set, 32 GB of swap bought 16 MB of headroom
           # and only 1 GB was ever touched. Swap WITHOUT the limit does work and
           # works badly — 1958 s against 904 s, 8.7M major faults, 14.3 GB
-          # swapped, 72% of the timeout. It is a fallback, not a fix. If this
-          # step starts failing again after the image gains packages, the lever
-          # with real headroom is shrinking the predicate at source; a smaller
-          # number here will not help (4, 6 and 10 GiB all peak at 14.65-14.80
-          # GiB) and restricting the cataloguers is refused below.
+          # swapped, 72% of the timeout. It is a fallback, not a fix. A smaller
+          # GOMEMLIMIT is not a lever either: 4, 6 and 10 GiB all peak at
+          # 14.65-14.80 GiB, so the overshoot is not heap the limit can reach.
           #
-          # Restricting the cataloguers would be faster and would make the
-          # artefact worse: the two Electron trees are precisely where a CVE
-          # question lands, and an RPM-only SBOM would answer it with silence
-          # while looking authoritative. Time is the cheaper thing to spend.
+          # THE LEVER THAT PARAGRAPH POINTED AT HAS NOW BEEN PULLED — see the
+          # block below. `SYFT_FILE_METADATA_SELECTION=none` cuts the per-file
+          # inventory at source, which was both the predicate's bulk and the
+          # filetree/MIME pass that drives the RSS.
+          #
+          # Restricting the *cataloguers* is still refused, and that is a
+          # different thing from dropping the file inventory: the two Electron
+          # trees are precisely where a CVE question lands, and an RPM-only SBOM
+          # would answer it with silence while looking authoritative. Every
+          # package stays. Only the per-file rows go.
           #
           # SYFT_PARALLELISM because the default is one worker; this image has
           # thousands of packages across two app bundles. Kept at 4 because the
           # probe measured it as irrelevant to survival, and it is faster.
+          #
+          # ═══ WHY THE PER-FILE INVENTORY IS NOT IN THIS SBOM ═══════════════
+          #
+          # With the memory death fixed, run 35450175806 got one line further
+          # and died in `cosign attest`:
+          #
+          #   Post "https://rekor.sigstore.dev/api/v1/log/entries":
+          #   giving up after 4 attempt(s)
+          #
+          # That string is go-retryablehttp's generic retries-exhausted message.
+          # It names no status and no cause, and it is the shape of a network
+          # fault, which is how three rounds read it. It is not one. Measured
+          # 2026-09-20, sixteen direct POSTs to that endpoint at ascending
+          # sizes, each re-tested:
+          #
+          #   body <= 25,000,092 B   400, body uploaded and PROCESSED by Rekor
+          #   body >= 25,165,916 B   502, size_upload=0, ~0.43 s, deterministic
+          #
+          # The boundary brackets 25,165,824 B — exactly 24 MiB — and the
+          # refusal comes from the fronting proxy at header time, on
+          # Content-Length, before a single body byte is sent. Two things follow
+          # and both matter:
+          #
+          #  - 502 is in go-retryablehttp's RETRYABLE class (>= 500), unlike the
+          #    413 this was assumed to be. cosign therefore retried a refusal
+          #    that can never succeed, four times, and reported the retries
+          #    rather than the reason.
+          #  - size_upload=0 means no body ever went out. All four attempts fit
+          #    in 3.86 s of that run's log; posting a ~222 MB body four times
+          #    would have taken minutes. The timing in the real log is
+          #    independent confirmation of a header-time refusal.
+          #
+          # The full document was 166 MB, which cosign base64s into a ~222 MB
+          # DSSE body: about 9x the ceiling. No retry setting, no timeout and no
+          # runner size can move that.
+          #
+          # What is actually big is the FILE inventory, not the packages: syft's
+          # default `owned-by-package` selection emits a row per file for an
+          # image with roughly 200k of them, plus a CONTAINS relationship edge
+          # for each. `none` drops those rows and keeps every package.
+          #
+          # The cost, stated rather than buried: this SBOM answers "which
+          # packages, at which versions, are in this image" — the CVE question —
+          # and NOT "which files does this image contain, with what digests".
+          # Anyone who needs the second can run syft against the published
+          # digest themselves; the image is public and the digest is in the
+          # signature. docs/trust-enforcement.md says so in those words.
+          #
+          # A THIRD BENEFIT, AND IT IS NOT THE POINT BUT IT IS REAL: the
+          # per-file pass is also what drove the 15.3 GB peak RSS this step
+          # spent four builds learning about (anchore/syft#2159). GOMEMLIMIT
+          # STAYS anyway — it is the measured fix for a measured death, and
+          # removing it on the theory that the new flag makes it unnecessary
+          # would be exactly the kind of unmeasured change this step's history
+          # is a monument to.
           #
           # The elapsed time is printed on SUCCESS too. Fifteen minutes was
           # picked without measurement and cost three builds to disprove; the
@@ -1517,6 +1576,7 @@ jobs:
           # values the probe measured, and a variable that can drift from what
           # was measured is how this step ends up "fixed" and still dying.
           timeout 2700 "${_timer[@]}" env SYFT_PARALLELISM=4 GOMEMLIMIT=10GiB \
+            SYFT_FILE_METADATA_SELECTION=none \
             syft "registry:$REF" -o spdx-json > /tmp/sbom.spdx.json || {
             rc=$?
             _el=$(( $(date +%s) - _t0 ))
@@ -1548,12 +1608,75 @@ jobs:
           # CVE question with silence and looks authoritative doing it. The
           # image carries thousands of packages, so a hundred is a floor no
           # healthy build can fall below and any broken one will.
+          #
+          # This floor is load-bearing in a NEW way now that the file inventory
+          # is off: `SYFT_FILE_METADATA_SELECTION=none` is one typo away from a
+          # value syft does not recognise, and the shape of that mistake is a
+          # smaller document. The count is what proves the shrink came out of
+          # the file rows and not out of the packages.
           COUNT="$(jq '.packages | length' /tmp/sbom.spdx.json)"
-          echo "SBOM packages: $COUNT"
+          FILES="$(jq '(.files // []) | length' /tmp/sbom.spdx.json)"
+          echo "SBOM packages: $COUNT   file rows: $FILES"
           test "$COUNT" -gt 100
 
-          cosign attest --yes --predicate /tmp/sbom.spdx.json \
-            --type spdxjson "$REF"
+          # ── THE SIZE GUARD, AND WHY IT FAILS THE BUILD RATHER THAN COPING ──
+          #
+          # cosign marshals the predicate with Go's json.Marshal — compact — and
+          # base64s it into the DSSE envelope, so the body Rekor sees is about
+          # 4/3 of the COMPACT document. Measure that, not the pretty one syft
+          # wrote, or the guard checks a number nobody sends.
+          #
+          # The ceiling is 25,165,824 B (24 MiB), measured, not assumed. The
+          # budget below is deliberately well under it: this image grows, and a
+          # guard that only fires at the wall gives the next person a red build
+          # instead of a warning.
+          #
+          # It EXITS 1. It does not quietly drop --tlog-upload and carry on.
+          # A build that silently stops transparency-logging its SBOM while the
+          # docs still promise one is worse than a red step, because nobody
+          # finds out. If this fires, the options and what each costs are in
+          # ROADMAP/state/agents/sbom-attest.md; the decision is a person's.
+          jq -c . /tmp/sbom.spdx.json > /tmp/sbom.min.json
+          PRED=$(stat -c%s /tmp/sbom.min.json)
+          DSSE=$(( (PRED + 2) / 3 * 4 ))
+          REKOR_CEILING=25165824
+          REKOR_BUDGET=20000000
+          echo "predicate: ${PRED}B compact -> ~${DSSE}B on the wire (ceiling ${REKOR_CEILING}B)"
+          if [ "$DSSE" -ge "$REKOR_BUDGET" ]; then
+            echo "::error::the SBOM predicate is ${PRED}B compact, ~${DSSE}B once base64'd into the DSSE envelope."
+            echo "::error::rekor.sigstore.dev refuses any request body at or above ${REKOR_CEILING}B (24 MiB) with an"
+            echo "::error::  immediate HTTP 502 from its fronting proxy, before any body is sent. cosign retries that"
+            echo "::error::  four times and reports 'giving up after 4 attempt(s)', which names neither size nor status."
+            echo "::error::This is NOT a network fault and retrying will not help. The image has outgrown the"
+            echo "::error::  package-level SBOM. See ROADMAP/state/agents/sbom-attest.md for the options and their costs."
+            exit 1
+          fi
+
+          # ── ATTEST, AND PROVE THE TRANSPARENCY LOG ACTUALLY TOOK IT ────────
+          #
+          # `cosign attest` exits 0 on a path that never reaches Rekor if
+          # --tlog-upload is ever turned off by accident, and this project's
+          # docs claim a publicly verifiable log. So the claim is checked here,
+          # against cosign's own output, rather than assumed from an exit code.
+          #
+          # `if ! cmd` and not `cmd || ...`: set -e does not apply to an
+          # inverted command, and a bare `!` here would swallow a real failure.
+          if ! cosign attest --yes --predicate /tmp/sbom.min.json \
+               --type spdxjson "$REF" > /tmp/attest.log 2>&1; then
+            cat /tmp/attest.log
+            echo "::error::cosign attest failed. If the message is 'giving up after N attempt(s)' against"
+            echo "::error::  rekor.sigstore.dev, read the size guard above: a 502 at header time is indistinguishable"
+            echo "::error::  from a network fault in that message, and the predicate was ${PRED}B compact."
+            exit 1
+          fi
+          cat /tmp/attest.log
+          # No pipeline: `printf ... | grep -q` returns 141 on a match under
+          # pipefail, which has mis-seeded suites in this repo before.
+          if ! grep -F 'tlog entry created' /tmp/attest.log > /dev/null; then
+            echo "::error::the SBOM attestation was signed but no transparency-log entry was created."
+            echo "::error::  docs/trust-enforcement.md claims a publicly verifiable log; this build did not produce one."
+            exit 1
+          fi
 
       - name: Verify the image and its SBOM are both retrievable
         if: ${{ steps.push.outputs.digest != '' }}
