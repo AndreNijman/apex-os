@@ -68,6 +68,39 @@ an in-toto statement and DSSE-signs it, so the posted body is base64 of the
 statement — **×1.334, ≈ 222 MB**. To fit under 24 MiB the *predicate* must come
 in under roughly **17.5 MB**, and ≤ 15 MB to leave real headroom.
 
+### 3b. The expansion factor is exactly 4/3, measured offline, not reasoned about
+
+`cosign attest` was run locally (v2.5.2, the same version `cosign-installer@v3`
+puts on the runner) against a synthetic 20,000-package SPDX predicate of
+4,824,532 B compact, with a static key and `--tlog-upload=false` — no OIDC, no
+keyring prompt, no network:
+
+```
+predicate compact bytes  : 4824532
+statement bytes          : 4824753   (predicate + 221 B of in-toto wrapper)
+DSSE payload (base64)    : 6433004   factor 1.3334
+DSSE envelope            : 6433196   factor 1.3334
+predicateType            : https://spdx.dev/Document
+packages carried through : 20000
+```
+
+Three things this settles rather than assumes:
+
+- **cosign embeds the predicate whole.** All 20,000 packages came back out of
+  the envelope. It does not hash, trim or reference it.
+- **The factor is 4/3, not 16/9.** The bundle *file* base64s the envelope a
+  second time (1.7778), which is easy to mistake for the wire size. The body
+  Rekor sees is the envelope, so the size guard multiplies by 4/3. Getting this
+  wrong by 33% in either direction is the difference between a guard that fires
+  early and one that never fires.
+- **`--type spdxjson` produces `predicateType: https://spdx.dev/Document`**,
+  which contains `spdx` and therefore satisfies `verify.rs:540`. The machine
+  side needs no change for option B. (This is the check that rules option C out
+  of a single landing.)
+
+Measure the **compact** document: cosign marshals with Go's `json.Marshal`, so
+syft's pretty-printed output is not what goes on the wire.
+
 ### 4. This is not only a CI problem — the 166 MB attestation would land on users
 
 `apexd/apex/src/verify.rs::verify_provenance` fetches the `.att` layer with
