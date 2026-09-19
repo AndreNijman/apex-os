@@ -1575,3 +1575,110 @@ backend binding was chosen then, under `labwc-portals.conf`, which is the right
 binding for this session — but a clean re-read needs a fresh user manager, i.e.
 a real greetd login. The value read `1` on both occasions, hours and several
 sessions apart.
+
+---
+
+## 12. Final state, and the handover
+
+§10 was written before Chromium was installed. **These are the numbers that
+stand.** Everything in §10 that is not superseded here is still accurate.
+
+| | |
+|---|---|
+| deployment | unchanged: `apex-266dcc572c51bdf9ec421d79eaa8784583184cd2`, `sha256:ba263890b696…`. **No reboot, no rebase, no rollback, nothing pinned.** |
+| rollback slot | untouched: `:gaming-nvidia`, `sha256:308127d9cefe…` |
+| extension | `/var/lib/extensions/apex-user.raw`, **223 packages, 515 MB**, `sha256 99749240e8762e2b4eaf0c3840a07beba249961e1cad86f798805c22c58282ed`, merged 09:43:04 AWST |
+| extension backup | `/var/lib/apex/qual-backup-20260919/` — `apex-user.raw.sep06`, `state.json.sep06`, `requested.sep06`. The Sep-6 raw is byte-identical to this morning's (`sha256 85e1739b5768…`) |
+| `~/apex-pre-rebase-20260919/` | present, untouched |
+| `/home` | untouched |
+| active VT | 1 — the greeter |
+| greetd | `active`; `sway` pid 1637 and `qs -p /usr/share/apex-greet/shell.qml` pid 1907 both alive |
+| greeter paints | eDP-1 **and** HDMI-A-1: `1920x1080 colors=39579 mean=0.2577` on both |
+| outputs | `card1-eDP-1` and `card2-HDMI-A-1` both `connected / enabled / On` |
+| greeter preselect | `hyprland` — restored |
+| `apex game` | `active: false` |
+| test units | none — `systemctl list-units 'qual-*'` returns 0 rows |
+| loop mounts | none |
+| failed units | **0 system, 0 user** |
+
+New since §10: Chromium 152.0.7977.82 is installed into the extension, and the
+extension grew from 337 MB to 515 MB. To undo just that: `sudo apex remove chromium`.
+
+`xdg-desktop-portal-gtk.service` failed twice during the run — once per burst of
+session churn — and was `reset-failed` both times. It is a consequence of
+starting and stopping seven graphical sessions under one long-lived user
+manager, which only happens because this unit drove the machine over SSH. Not an
+image defect.
+
+### 12.1 This unit is finished with katana
+
+**Nothing further will be run on this machine by `katana-qual`.** The machine is
+on the roadmap image, the login path works on both displays, and there are no
+background jobs, timers or units left behind.
+
+### 12.2 For the TPM agent queued behind this one
+
+Facts it will want, measured just now, so it does not have to start by
+re-deriving them:
+
+```
+$ ls /dev/tpm*
+/dev/tpm0  /dev/tpmrm0
+$ cat /sys/class/tpm/tpm0/tpm_version_major
+2
+$ sudo tpm2_pcrread sha256:7
+  sha256:
+    7 : 0x3A83A2BA308CD891916761D852DBCBB9A3D378140BA103B2F2B448AFEEFF7F85
+$ sudo mokutil --sb-state
+SecureBoot disabled
+$ apex boot status
+Bootloader     : grub / GRUB 2.12
+Secure Boot    : disabled
+Signed UKI     : no — kernel and initramfs were loaded separately
+Measured boot  : TPM present, event log present, signed PCR policy not in effect
+Boot counting  : not in effect — grub has no boot counter
+```
+
+**Secure Boot is OFF on katana**, and that bounds what PCR 7 can attest: PCR 7
+records the Secure Boot policy — the state variable, the db/dbx/KEK contents and
+the signature verifications performed. With Secure Boot disabled it still
+measures a value (above), but it is the *disabled* policy, so a PCR-7-sealed
+policy made now would not survive Secure Boot later being enabled, and sealing
+against PCR 7 today attests nothing about signed-boot integrity. This is a
+different starting condition from the L16, where Secure Boot is **enabled
+(deployed)**.
+
+Other things worth knowing before it starts:
+
+- Two deployments are present and the rollback slot is a **different digest**
+  from the booted one, so a rollback reboot on katana is a real test — unlike
+  the degenerate slot this machine had in September.
+- `/var` is at 94 % (61 GiB free).
+- There is a system extension merged over `/usr`. If the TPM work rebuilds or
+  changes the deployment, `apex-user.raw` and the backup in
+  `/var/lib/apex/qual-backup-20260919/` are what to preserve.
+- `hypridle` locks the session at 5½ minutes idle and suspends at 15 (§5.3).
+  Unattended work needs that handled or it will lose the machine mid-run.
+- The helper scripts in `/var/home/andre/qual/` can start any of the five
+  sessions on a VT from SSH without a password (§4); reuse them rather than
+  editing greetd's config.
+
+---
+
+## Summary
+
+| area | verdict |
+|---|---|
+| Five sessions start | **4 PASS, 1 FAIL** — labwc, Hyprland, niri and Safe Graphics start; Gaming Mode exits |
+| On the monitor, on the NVIDIA card | **PASS for all three desktop sessions**, `nvidia-smi` listing each compositor; **FAIL for Gaming Mode**; **FAIL for Safe Graphics** (dGPU output never lit) |
+| Gaming Mode | **FAIL** — wrong GPU and wrong output by default (§6.1), `--rt` never granted (§6.2), Steam dies inside gamescope (§6.3). Cleanup and fail-safe behaviour **PASS** (§6.6) |
+| `apex install steam …` | **PASS** — first run from a built image, 219 packages, exit 0, app-twin EVR rule fires correctly (§2.1) |
+| Steam client | **PASS** — starts and renders on the NVIDIA-connected monitor (§6.4); **no 32-bit Vulkan at all** (§6.5) |
+| `apex install chromium` | **PASS** — second engine run, no new i686, no new shadows (§11.2) |
+| Multilib engine | **2 NEW DEFECTS**, same `--excludepath` line: `/usr/libexec` not excluded → GStreamer at 2 of 1344 features (§3); `/usr/share` blanket-excluded → zero 32-bit Vulkan ICDs (§6.5) |
+| P1-038 matrix | 11 answered, 7 could-not-run for want of an application or a hand on the hardware (§7) |
+| Screen sharing under labwc | **monitors only, never a window** — the portal's limit, identical for Firefox and Chromium (§7.1, §11.5) |
+| Suspend / resume | **PASS**, first in the program (§9) |
+| P2-005/006/007 booted readings | **6 of 6** checklist lines correct; firewall active; a real eSCL scanner discovered (§8) |
+| Desktop ↔ Gaming switch | preselect half **PASS**; the login half **COULD NOT RUN** (no password) (§6.7) |
+| Machine left | on the roadmap image, greeter up on both displays, 0 failed units (§12) |
