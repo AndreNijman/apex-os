@@ -319,6 +319,7 @@ cmd_doctor() {
 
 cmd_run() {
     local name="" download_to="" console_to="" force=0 timeout=300 capability="" trust_ca=""
+    local present=0
     local -a allow=() download=() browser_args=()
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -326,6 +327,7 @@ cmd_run() {
             --allow)       shift; allow+=("${1:-}") ;;
             --capability)  shift; capability="${1:-}" ;;
             --trust-ca)    shift; trust_ca="${1:-}" ;;
+            --present)     present=1 ;;
             --download)    shift; download+=("${1:-}") ;;
             --download-to) shift; download_to="${1:-}" ;;
             --console-to)  shift; console_to="${1:-}" ;;
@@ -442,6 +444,25 @@ cmd_run() {
         valid_download_dest "$trust_ca" \
             || die "--trust-ca must name a file outside $BROWSER_ROOT
   (teardown deletes that tree, so the CA would survive exactly one capsule)"
+    fi
+
+    # ── --present, which is an addition to --capability and not a twin ─────
+    #
+    # It takes no argument on purpose. The credential is already named by
+    # --capability, and the destination is already that credential's pin —
+    # naming either of them a second time would be a second thing that can
+    # disagree with the first. What this asks for is that the runtime
+    # AUTHENTICATE that one destination, which is the difference between a
+    # capsule confined to a site and a capsule logged in to it.
+    if [ "$present" = 1 ] && [ -z "$capability" ]; then
+        die "--present authenticates the destination a credential is pinned to, so it needs
+  --capability NAME to say which credential. \`apex secret list\` shows what is stored."
+    fi
+    if [ "$present" = 1 ] && [ -n "$trust_ca" ]; then
+        die "--present and --trust-ca cannot both be given.
+  --present pins this capsule to one destination and the runtime terminates that
+  connection itself, so a certificate authority for the capsule's own connection
+  to that site would never be used. The runtime refuses the pair too."
     fi
 
     if [ -n "$download_to" ]; then
@@ -637,6 +658,20 @@ cmd_run() {
     local -a ca_argv=()
     [ -n "$trust_ca" ] && ca_argv=(--trust-ca "$trust_ca")
 
+    # ── the credential the capsule spends and never holds (P2-012, route B) ─
+    #
+    # `--present NAME` reaches the daemon, which mints a certificate for the
+    # destination that credential is pinned to, installs its authority in this
+    # capsule's browser, and terminates that ONE connection — handing the
+    # plaintext to apex-secretd, which is the only process that holds the
+    # value. The capsule never has it, and neither does the agent runtime.
+    #
+    # Among the RUNTIME's flags and not after the `--`: firefox has no such
+    # flag, and a capsule that put it there would fail naming the wrong
+    # program.
+    local -a present_argv=()
+    [ "$present" = 1 ] && present_argv=(--present "$capability")
+
     local -a session_argv=(
         "$APEX" agent run
         --agent generic
@@ -644,6 +679,7 @@ cmd_run() {
         --network allowlist
         "${allow_argv[@]}"
         "${ca_argv[@]}"
+        "${present_argv[@]}"
         --cwd "$dir"
         --detach
         --
@@ -910,6 +946,13 @@ Options for `run`:
                         that list for one capsule and can never widen it.
   --capability NAME     take the destination from a stored credential's pinned
                         host instead. The capsule is never given the value.
+  --present             and authenticate that destination with it. Needs
+                        --capability, and a grant: `apex secret grant NAME
+                        browser.present --everywhere`. The runtime terminates
+                        that one connection and apex-secretd — the only process
+                        that holds credentials — adds the header. The capsule
+                        never holds the value and neither does the runtime.
+                        Cannot be combined with --trust-ca.
   --trust-ca FILE       a PEM of certificate authorities this capsule's
                         browser trusts, for this capsule only — the intranet
                         case. The machine's trust store is not changed and no
