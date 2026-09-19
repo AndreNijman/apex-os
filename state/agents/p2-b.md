@@ -16,7 +16,7 @@ apex-shell's CI looks for a matching branch name. Round 31's worktrees
 pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 `scratch-p2-b/p2-b.card.pre-round28.md`.
 
-**A tool worth reusing, built this round.** `archlinux:latest` in podman
+**A tool worth reusing, built in round 32.** `archlinux:latest` in podman
 reproduces the GitHub Arch runner's RTL totals EXACTLY — 19 passed / 3 failed /
 3 skipped, same three FAIL titles, `qt6ct 0.11-8`, `qt6-base 6.11.2` — so a
 question about that runner no longer costs a CI round trip. The recipe is
@@ -58,16 +58,6 @@ harness here costs eight to twenty minutes.
 
 ## NEXT
 
-**ROUND 33 IN FLIGHT.** Branches cut and pushed in both repos (apex-shell
-`task/p2-b-round33` from `9df72cf`, apex-os from `7f647470`); worktrees
-`wt-p2-b6-sh` and `wt-p2-b6`.
-
-**THE SPIKE SUCCEEDED — see FOUND 35. The route exists and it is APEX's to
-ship, not upstream's.** A compiled QML extension plugin on `QML_IMPORT_PATH`
-installs a QTranslator into the real quickshell process, and the SHIPPED
-`AgentHelpContent` singleton reads back **German inside quickshell itself**,
-offscreen, with no compositor. Scratch: `scratch-p2-b/round33/spike/`.
-
 **ROUND 33 IS COMPLETE AND PUSHED.** apex-shell `task/p2-b-round33` tip
 **`df17c34`**, three commits on `roadmap/v2.2`'s `9df72cf`. apex-os
 `task/p2-b-round33` cut from `7f647470` and pushed with **no commits** — see
@@ -98,6 +88,22 @@ HARDWARE** (Orca at the login screen, greeter audio) and are the oldest open
 things on this card. Katana was off limits again this round — a different agent
 owned it and it boots an image 131 commits behind the tip. Ask for it once that
 agent has rebased it.
+
+**DO NOT RE-RUN any of the following on this laptop.** Each is CLOSED here, the
+numbers are in DONE, and every one of them costs minutes to hours:
+`run-rtl-test.sh` (37/0/0/0), `mutate-rtl.sh` (15 applied / 15 CAUGHT),
+`mutate-lockscreen-atspi-shim.sh` (8/6/0/2), the recovery read-back pair
+(`run-recovery-atspi-shim.sh` 33/0/1, `mutate-recovery-atspi-shim.sh`
+15/12/0/3) and the recovery source pair (34/0/0, 17/14/0/3). Round 33's own
+pair is CHEAP by comparison and may be re-run when something near it changes:
+`run-i18n-host-test.sh` is about eight seconds and `mutate-i18n-host.sh` is 58.
+
+**Things the next round will need that were measured this round, so it does not
+re-derive them:** `moc` is found through `qmake6 -query QT_HOST_LIBEXECS`, not
+on `$PATH`; Fedora's Qt sends `qInfo()` to the JOURNAL unless
+`QT_FORCE_STDERR_LOGGING=1` is set, which is why a plugin can look silent while
+working; and a `QQmlEngineExtensionPlugin` looks fully loaded while registering
+nothing (FOUND 35).
 
 **Round 32 is COMPLETE and pushed.** apex-shell `task/p2-b-round32` tip
 `ecc0e39` (two commits on `roadmap/v2.2`'s `a8cd491`); apex-os
@@ -291,8 +297,10 @@ apex-shell's CI matches on branch name.
 `df17c34`, and ALL THREE JOBS ARE SUCCESS.** Not "green apart from a failure
 older than the branch" — green. `Repo Structure Sanity` success (so all 121
 REQUIRED paths exist there, the five new ones included), `NixOS` success, and
-`arch-validate` success with **zero red steps**, which is the first time this
-unit has landed a round with no inherited red since round 28. The totals lines
+`arch-validate` success with **zero red steps**. This is the SECOND
+consecutive fully green run for this unit, not the first — checked rather than
+claimed: round 32's own run **35417214107** on `ecc0e39` is `success` on all
+three jobs too, which is what closing the RTL red bought. The totals lines
 rather than the ticks:
 
 * `i18n-host: passed=21 failed=0 skipped=3` — **the bare-engine half runs in

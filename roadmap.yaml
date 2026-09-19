@@ -3217,6 +3217,38 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
+    TWO CORRECTIONS FROM A REAL PHONE, 2026-09-19 (task/p1-053e-device @ 89500813), and the status is left at done
+    deliberately — see the second. (1) THE DESKTOP BOUND IPv4 ONLY, AND WIDENING IT WOULD HAVE MISLABELLED EVERY
+    RELAYED SESSION. main.rs had bound 0.0.0.0 with a comment naming the regression that stopped it being widened,
+    and the regression was real: a :: listener hands every IPv4 peer to accept(2) as ::ffff:a.b.c.d, and
+    Ipv6Addr::is_loopback is FALSE for ::ffff:127.0.0.1 — it answers only for ::1. A relay splice reaches this
+    daemon over loopback, so State::path_of would have called every relayed session a LAN one and Path::disclosure
+    would have told the owner nobody else was on the path. Measured before anything changed: arrived_by_relay
+    extracted from path_of so the rule can be asserted without a State, then
+    a_v4_mapped_relay_splice_is_a_relay_session FAILED on [::ffff:127.0.0.1]:41000 with that port armed.
+    to_canonical() on both sides of the seam — once at the boundary where serve.rs reads peer_addr(), so the
+    stored peer, apex remote status and the key unregister matches see one spelling, and once inside the rule so a
+    later caller cannot forget — makes it pass; the lies in the other direction (loopback on an unarmed port, a
+    LAN phone written ::ffff:192.168.1.98) are asserted to stay LAN. The bind falls back to 0.0.0.0, because a
+    machine booted ipv6.disable=1 has no AF_INET6 and a daemon that refused to start there would be worse than the
+    bug. The firewall needs nothing: apex-firewall's table is inet, both families — checked. MEASURED ON THE
+    PHONE: the pairing code now carries ["192.168.1.232:44219", "[fd00:12b:83b0:c4de:a38b:4ef2:b234:3d31]:44219"]
+    where it carried only the first, and LanEndToEndTest's
+    every_address_the_offer_advertises_can_actually_be_dialled — which dials each through the app's own
+    splitHostPort — passes with both. On an IPv6-only network this daemon was unreachable. ALSO: the port
+    advertised was the port REQUESTED, not the port bound, so with --port 0 the daemon advertised :0 in the
+    pairing code, published port 0 over mDNS and dialled 127.0.0.1:0 for every relay splice; both halves now come
+    off listener.local_addr(). (2) NO CLIENT ON ANY PHONE CAN USE THE RELAY, so C2 and C3 are true of the desktop
+    half and of the Rust suite and of nothing a user holds. PairingService says it in its own error text — "and no
+    relay client has been written yet" — :core has no WebSocket code at all, core/build.gradle.kts carries
+    bouncycastle and kotlinx-serialization and nothing else, and Help.kt tells the user the relay has no
+    deployment. The status is NOT changed here because the desktop half genuinely is done and is covered end to
+    end by apex-remoted/tests/relay.rs against an independent double; what is missing is P1-052's ANDROID half —
+    an RFC 6455 client in :core, a PairingService fallback on Rendezvous.path, a relay double the phone can dial
+    standing in run-device-suite.sh, apex-remoted --relay carried through the broker's restart_remoted, a device
+    test that makes the LAN unreachable so the relay is the leg under test, and HelpParityTest's inverse list
+    moved off the no-deployment claim. That is a unit of work and is recommended as its own card; a half relay
+    client on a test branch would be worse than none. It is also the ONLY thing left between P1-060 C1 and met.
     APEX Remote relay, reconnect, mDNS discovery and connection quality — AND THE CLIENT CAN NOW DIAL IT. LANDED
     on apex-os roadmap/v2.2 2026-09-12 as merges b79838a4 (the relay, reconnect, mDNS, connection quality) and
     9b15ce3c (TLS), with the apex-shell pages at merge a36f1a4. The relay's server side is a Worker with a Durable
@@ -3407,58 +3439,78 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 4ae4cf22. PARTIAL, corrected from done: this item's own
-    evidence names an unmet criterion (three of four TUIs; no gemini fixture), and done was overstated. Android
-    full PTY/TUI remote terminal. Six commits on task/p1-053a-android-4 plus a merge of roadmap/v2.2. Verified
-    headless, NO device and NO emulator: 295 core JVM tests, 10 app JVM tests, a 43 MB debug APK, via ./gradlew
-    :core:test :app:testDebugUnitTest :app:assembleDebug with JAVA_HOME=/usr/lib/jvm/java-21-openjdk
-    ANDROID_HOME=/var/tmp/android-sdk. MET: real PTY output with ANSI 16/256/truecolor and attributes —
-    term/Palette.kt fills the hole Colour.resolveCube documents and leaves, and render() is the whole SGR decision
-    (bold brightens, inverse swaps AFTER resolution so an inverted default cell swaps the theme's two defaults
-    rather than two nulls, dim blends towards what is actually behind the ink, hidden wins over everything). Text
-    input plus Ctrl/Esc/Tab/arrows/function keys through onPreviewKeyEvent, with modifiers that ARM rather than
-    send (there is no chord on a touchscreen) and a hidden permanently-EMPTY text field — empty because an IME
-    with text in it tries to EDIT that text, and the consequence is that backspace then arrives only as a key
-    event, so a build handling only onValueChange ships a terminal you cannot correct a typo in. A CONFIGURABLE
-    accessory row stored on MachineStore and never in a preferences file, because a second write path into app
-    storage is one InsecureStorageTest's walk never looks at. Scrollback, search, selection and copy/paste in
-    term/Viewport.kt, with every position held as dropped+index rather than an absolute index, because Screen
-    evicts and a viewport remembering 'line 300' would creep through the output at the rate the scrollback
-    overflows. Orientation through one onSizeChanged that a rotation, a keyboard and a split-screen resize all
-    reach. THE LAST CRITERION IS TESTED HOSTILELY, NOT ASSERTED: a reconnect test that passes because the
-    connection was politely closed has proved nothing. A phone does not get a FIN — it goes into a lift, and
-    soTimeout is deliberately zero after the handshake, so the socket sits in read for hours while every layer
-    above sees exactly what an idle terminal looks like. FrameChannel.lastFrameNanos tells them apart (the desktop
-    pings every 15s and pings are consumed inside the channel, so the question is 'has any FRAME arrived' and it
-    can only be answered below the multiplexer); the watchdog closes after three missed pings, and answers null
-    for a transport that cannot report liveness so the attachment emits WatchdogUnavailable rather than arming
-    over nothing — a watchdog watching nothing being the exact failure it exists to prevent. LowBandwidthTest: a
-    17-byte-per-frame trickle paints the same screen as an unthrottled link with the throttle ASSERTED to have
-    applied (130 frames where an unthrottled link uses 1); one byte per frame still answers ESC[6n and ESC[c; a
-    silent machine is abandoned and re-attached; a PINGED silent machine is left alone; a link that trickles AND
-    drops recovers the identical screen. THREE DEFECTS FOUND. (1) PtyAttachment SILENTLY DROPPED the terminal's
-    answers to a replay's opening frames: the listener read the field meaning 'attached', which the attaching
-    thread sets after openChannel returns, while apex-agentd starts replaying the instant it answers — so a TUI's
-    ESC[6n was computed and thrown away and the TUI waited for ever, a remote terminal that hangs with nothing in
-    any log, against three of the four TUIs this criterion names. It raced, passing on an idle machine and failing
-    as a 20s timeout only under the full suite. Its regression test FORCES the ordering (the channel holds the
-    attaching thread inside send(Open)); twenty-five attachments went on passing against the reverted defect on a
-    quiet box. (2) SIX OF THE SIXTEEN ANSI COLOURS were the same hex as their normal twin — Catppuccin's own
-    mapping, deliberate there — so the app rendered TEN distinct colours where the criterion says sixteen and
-    git's 31 and 91 would have looked identical. Found because deleting the bold-brightening rule changed nothing
-    any test could see. (3) EVERY SOCKET WRITE WAS ON THE MAIN THREAD: Android installs
-    StrictMode.enableDeathOnNetwork() for every app targeting API 11 or later, not a flag and not relaxed by a
-    debug build, so the FIRST KEYSTROKE would have thrown NetworkOnMainThreadException and killed the process; a
-    rotation reached Mux.request, a blocking round trip with a 15s deadline, an ANR even without the throw.
-    'Supports normal text input' was FALSE on the target platform while every gate this project has was green.
-    Found by READING, because nothing here can find it — no JVM test reaches a Compose callback and assembleDebug
-    compiles code it never runs. Fixed with a single-thread executor (single because keystrokes must stay ordered;
-    a pool delivers ls as sl). Also fixed: start() guarded on thread.isAlive, and a FINISHED thread is also not
-    alive, so a second start threw IllegalThreadStateException; stop() during connect() had nothing to close, so a
-    screen left while connecting attached anyway; the renderer allocated a Cell and an Ink per cell per frame. NOT
-    MET: 'works with Claude/OpenCode/Codex/Gemini TUIs' is THREE OF FOUR — there is still no gemini fixture,
-    because gemini is not installed on this machine. NOT VERIFIED: every Compose behaviour, assembleDebug being
-    the only gate a machine with no phone has, and the IME path in particular (composition and suggestion
+    ON A REAL PHONE, 2026-09-19 (task/p1-053e-device @ 89500813). C1 and C3 now have device evidence and not only
+    JVM evidence. android/app/src/androidTest/.../TerminalOnDeviceTest.kt composes the REAL TerminalScreen — not a
+    stub, not a half controller — against a real /bin/cat PTY on the computer through apex-remoted and
+    apex-agentd, and reads output back out of the Snapshot the repaint loop hands TerminalView. C1, streams real
+    PTY output: a per-run sentinel typed through TerminalController.sendText arrives on the screen twice, the
+    PTY's own echo and cat's output. C3, orientation changes: the phone is rotated to landscape before the
+    composition exists, LocalDensity is provided at fontScale 2.0, onSizeChanged measures a cell and calls resize,
+    and the PTY on the computer is then asserted to be running at the same grid — handle_attach (session.rs:1802)
+    and Request::Resize write the attaching terminal's size into SessionInfo. MEASURED: 63x7 on both sides. That
+    is worth stating plainly because this file's own doc says eighty columns is what these TUIs lay out for: at
+    Android's largest accessibility text size a landscape Pixel 7a terminal holds 63 columns, with the software
+    keyboard up. TWO THINGS THE DEVICE SETTLED THAT NO JVM COULD. TerminalScreen CANNOT be hosted by
+    androidx.compose.ui.test.junit4's createAndroidComposeRule: the withFrameNanos repaint loop — the loop that
+    keeps a fast cat to one repaint per displayed frame — leaves the Recomposer permanently busy, so
+    ComposeTestRule.setContent never returns from its own waitForIdle. Measured: IdlingResourceTimeoutException,
+    hadRecomposerChanges = true, on all three tests. The composition is hosted through
+    ComponentActivity.setContent the way MainActivity hosts it, with polled waits. And TerminalView is a bare
+    Canvas, so nothing on this screen reaches the semantics tree: a screen reader has nothing to announce on a
+    terminal. That is recorded against P1-060 C2 rather than asserted away. C2, C4 and C5 are unchanged: the
+    accessory row, the key encodings and the low-bandwidth behaviour remain :core's suites, and no TUI was driven
+    on the phone this round. LANDED on apex-os roadmap/v2.2 2026-09-12 as merge 4ae4cf22. PARTIAL, corrected from
+    done: this item's own evidence names an unmet criterion (three of four TUIs; no gemini fixture), and done was
+    overstated. Android full PTY/TUI remote terminal. Six commits on task/p1-053a-android-4 plus a merge of
+    roadmap/v2.2. Verified headless, NO device and NO emulator: 295 core JVM tests, 10 app JVM tests, a 43 MB
+    debug APK, via ./gradlew :core:test :app:testDebugUnitTest :app:assembleDebug with
+    JAVA_HOME=/usr/lib/jvm/java-21-openjdk ANDROID_HOME=/var/tmp/android-sdk. MET: real PTY output with ANSI
+    16/256/truecolor and attributes — term/Palette.kt fills the hole Colour.resolveCube documents and leaves, and
+    render() is the whole SGR decision (bold brightens, inverse swaps AFTER resolution so an inverted default cell
+    swaps the theme's two defaults rather than two nulls, dim blends towards what is actually behind the ink,
+    hidden wins over everything). Text input plus Ctrl/Esc/Tab/arrows/function keys through onPreviewKeyEvent,
+    with modifiers that ARM rather than send (there is no chord on a touchscreen) and a hidden permanently-EMPTY
+    text field — empty because an IME with text in it tries to EDIT that text, and the consequence is that
+    backspace then arrives only as a key event, so a build handling only onValueChange ships a terminal you cannot
+    correct a typo in. A CONFIGURABLE accessory row stored on MachineStore and never in a preferences file,
+    because a second write path into app storage is one InsecureStorageTest's walk never looks at. Scrollback,
+    search, selection and copy/paste in term/Viewport.kt, with every position held as dropped+index rather than an
+    absolute index, because Screen evicts and a viewport remembering 'line 300' would creep through the output at
+    the rate the scrollback overflows. Orientation through one onSizeChanged that a rotation, a keyboard and a
+    split-screen resize all reach. THE LAST CRITERION IS TESTED HOSTILELY, NOT ASSERTED: a reconnect test that
+    passes because the connection was politely closed has proved nothing. A phone does not get a FIN — it goes
+    into a lift, and soTimeout is deliberately zero after the handshake, so the socket sits in read for hours
+    while every layer above sees exactly what an idle terminal looks like. FrameChannel.lastFrameNanos tells them
+    apart (the desktop pings every 15s and pings are consumed inside the channel, so the question is 'has any
+    FRAME arrived' and it can only be answered below the multiplexer); the watchdog closes after three missed
+    pings, and answers null for a transport that cannot report liveness so the attachment emits
+    WatchdogUnavailable rather than arming over nothing — a watchdog watching nothing being the exact failure it
+    exists to prevent. LowBandwidthTest: a 17-byte-per-frame trickle paints the same screen as an unthrottled link
+    with the throttle ASSERTED to have applied (130 frames where an unthrottled link uses 1); one byte per frame
+    still answers ESC[6n and ESC[c; a silent machine is abandoned and re-attached; a PINGED silent machine is left
+    alone; a link that trickles AND drops recovers the identical screen. THREE DEFECTS FOUND. (1) PtyAttachment
+    SILENTLY DROPPED the terminal's answers to a replay's opening frames: the listener read the field meaning
+    'attached', which the attaching thread sets after openChannel returns, while apex-agentd starts replaying the
+    instant it answers — so a TUI's ESC[6n was computed and thrown away and the TUI waited for ever, a remote
+    terminal that hangs with nothing in any log, against three of the four TUIs this criterion names. It raced,
+    passing on an idle machine and failing as a 20s timeout only under the full suite. Its regression test FORCES
+    the ordering (the channel holds the attaching thread inside send(Open)); twenty-five attachments went on
+    passing against the reverted defect on a quiet box. (2) SIX OF THE SIXTEEN ANSI COLOURS were the same hex as
+    their normal twin — Catppuccin's own mapping, deliberate there — so the app rendered TEN distinct colours
+    where the criterion says sixteen and git's 31 and 91 would have looked identical. Found because deleting the
+    bold-brightening rule changed nothing any test could see. (3) EVERY SOCKET WRITE WAS ON THE MAIN THREAD:
+    Android installs StrictMode.enableDeathOnNetwork() for every app targeting API 11 or later, not a flag and not
+    relaxed by a debug build, so the FIRST KEYSTROKE would have thrown NetworkOnMainThreadException and killed the
+    process; a rotation reached Mux.request, a blocking round trip with a 15s deadline, an ANR even without the
+    throw. 'Supports normal text input' was FALSE on the target platform while every gate this project has was
+    green. Found by READING, because nothing here can find it — no JVM test reaches a Compose callback and
+    assembleDebug compiles code it never runs. Fixed with a single-thread executor (single because keystrokes must
+    stay ordered; a pool delivers ls as sl). Also fixed: start() guarded on thread.isAlive, and a FINISHED thread
+    is also not alive, so a second start threw IllegalThreadStateException; stop() during connect() had nothing to
+    close, so a screen left while connecting attached anyway; the renderer allocated a Cell and an Ink per cell
+    per frame. NOT MET: 'works with Claude/OpenCode/Codex/Gemini TUIs' is THREE OF FOUR — there is still no gemini
+    fixture, because gemini is not installed on this machine. NOT VERIFIED: every Compose behaviour, assembleDebug
+    being the only gate a machine with no phone has, and the IME path in particular (composition and suggestion
     behaviour against a permanently-empty field is reasoned from the API, not observed); no relay leg, so LAN
     only. Mutation-checked: 17 mutations across the terminal, viewport, palette, watchdog and fixtures each turn a
     NAMED test red; every file restored byte-identical with plain cp. ON A DEVICE 2026-09-19
@@ -3584,58 +3636,75 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED on apex-os task/p1-053b-android-ux 2026-09-12 (abf76451, fdf31ace, a5f1d459, 183b6a34, e6f60563).
-    PARTIAL, and TWO of the four criteria are NOT MET because there is nothing on the wire for them. Verified
-    headless, NO device and NO emulator: 383 core JVM tests, 27 app JVM tests, a debug APK, 746 apex-agent-core
-    Rust tests; both android gates pass. THE GOVERNING FACT, measured rather than assumed: A PHONE CAN NEVER
-    APPROVE OR DENY A PRIVILEGE REQUEST, AND NO SETTING CHANGES THAT. apex-agentd/src/privilege.rs:1176 refuses
-    decide from any non-local origin unconditionally, and the check sits BEFORE the pending check, so a paired
-    device cannot even DENY. Request::Decide carries no second_factor field and decide never consults OriginPolicy
-    — the remote_elevation_allowed opt-in gates system-access grant ISSUANCE, a different path. apex-remoted
-    declares the origin claude-remote-control (proxy.rs:128), which is not local, and origin::may_declare forbids
-    narrowing back towards local. Pinned upstream by apex-agentd/tests/request_origin.rs:369. AND EVERY VERB IN
-    THE VOCABULARY IS ROOT: request.rs:290 maps all eight to Capability::RootCapability, deliberately, because the
-    vocabulary was chosen to be exactly apex's root-only subcommands — so there is no non-root approvable object
-    on this socket at all. NOT MET, criterion 1 (cloud/GitHub/preview capability requests approved or denied from
-    Android): impossible against this build. Capability NEVER APPEARS ON THE WIRE — GitHubPush,
-    CloudflarePreviewDeploy and ProductionDeploy exist only as rows in section 7's table (origin.rs:842) with no
-    serde derive, and nothing in this build performs them. NOT MET, criterion 2 (production deployment approvals
-    clear and auditable): production-deploy approval DOES exist, on a DIFFERENT daemon — apex-secretd, tag key
-    'op', kebab-case, apex-secret-core/src/protocol.rs — and apex-remoted NEVER CONNECTS TO IT: grep finds no
-    secretd socket path anywhere in its sources. A phone cannot reach it. MET, criterion 3 (root/system-access and
-    unsafe-everything remain local-approval-only by default): met by the runtime, and this unit's contribution is
-    to not undermine it. ApprovalsScreen has NO Approve and NO Deny button, and renders
-    PrivilegeRequest.DECIDE_IS_LOCAL_ONLY verbatim where they would sit, so the sentence the user reads is the
-    sentence they would get if the button existed and they pressed it. There is no decide builder in :core and
-    both halves of the shared request fixture assert there is none — adding it is the obvious move on seeing a
-    list of pending approvals, and it would be refused every time it was pressed. NOT MET, criterion 4 (optional
-    remote high-risk approval requiring WebAuthn/FIDO-equivalent and explicit owner configuration): the only path
-    in this build with the right shape is RenewSystemGrant with a SubmittedFactor (remote_elevation_allowed plus a
-    UV-verified key), and reaching it from Android is a SEPARATE UNIT, not an Android round.
-    SubmittedFactor.assertion is 'the four lines fido2-assert -G printed, verbatim'; enrolment is fido2-cred -M -t
-    es256 run on the machine and pasted into apex agent key add (apexd/apex/src/agent.rs:4173). An Android phone
-    would have to act as a FIDO2 authenticator producing that exact libfido2 text format and be enrolled out of
-    band. AppLock is a local Keystore biometric and is NOT a registered authenticator for the daemon. Named on the
-    card so it is not folded into an Android round by mistake. WHAT WAS BUILT, and it is the honest thing rather
-    than the asked-for thing: the phone lists pending and decided privilege requests, per-project standing grants
-    and live system-access grants, and can REVOKE both kinds. The asymmetry is the point and is the daemon's own
-    reasoning: privilege.rs:1289 applies NO origin check to revoke, because revocation only ever removes
-    authority, so a device that cannot grant anything can still take it back. Revoke is not retried — a lost reply
-    after a wide revoke would have the retry answer no_such_request, reporting failure for something that
-    succeeded — and every confirmation dialog says so before the press rather than after. TWO DISTINCTIONS THE
-    ROWS KEEP, both tested and both mutation-checked: allow_for_project does NOT mean the operation ran
-    (request.rs:410 — execution still goes through the approving human's own privilege at the machine), so a row
-    says 'allowed, but not run yet' and never 'done'; and an absent exit_code is not a zero, so a request that ran
-    with none recorded is not claimed to have succeeded. An empty capabilities list on a system grant means EVERY
-    root operation (break-glass) and is rendered as such, not as 'no operations', which would be exactly
-    backwards. NOT VERIFIED: every Compose behaviour on this screen, including the revoke confirmation dialog — no
-    device, no emulator, no Robolectric, and assembleDebug compiles code it never runs; and no revoke has been
-    performed against a live daemon. Mutation-checked: decisionLine reading an allowance as done, treating an
-    absent exit code as a zero, and describing a wide revoke as a narrow one each turn a NAMED ApprovalsTest red;
-    files restored byte-identical with plain cp. C3 OBSERVED FROM THE INSIDE ON A REAL DEVICE, 2026-09-19
-    (task/p1-053d-device). 'Root/system-access and unsafe-everything remain local-approval-only by default' now
-    has a measurement taken from the phone rather than from a daemon test: a session started BY THE PHONE, over a
-    Noise session through a real apex-remoted into a real apex-agentd, is recorded by the daemon as
+    C3 MEASURED FROM A REAL PHONE, 2026-09-19 (task/p1-053e-device @ 89500813,
+    android/app/src/androidTest/.../ApprovalsOnDeviceTest.kt). "Root/system-access remain local-approval-only by
+    default" had been a property of source that nothing had ever tried to violate from a device. It has now been
+    tried. A Pixel 7a, paired over Wi-Fi with a real apex-remoted, built the decide frame BY HAND — Agentd has no
+    builder for it and Approvals.kt records that as deliberate — and sent it down its own link against a REAL
+    pending request filed at the computer. The daemon answered permission_denied, naming claude-remote-control and
+    §7, and the request was still pending afterwards. The same frame for request 999999 got the IDENTICAL refusal,
+    which is the part worth keeping: privilege.rs puts the origin check before the lookup, so a local caller is
+    told no_such_request and a phone is told permission_denied, and the refusal cannot be used as an oracle for
+    which request ids exist on somebody's computer. The asymmetry Approvals.kt documents is measured too: revoke
+    and revoke_system_grant carry no origin check because they only ever remove authority, and from the phone they
+    answer no_such_request for something absent rather than permission_denied — "I looked and there was nothing"
+    instead of "you may not ask". C1 IS SEEN FROM THE PHONE AS FAR AS IT GOES: a privilege request filed at the
+    computer reaches the phone with its verb, its packages, its reason and a local request_origin intact, and a
+    decision taken at the computer is visible from the phone. Approving from the phone is not a policy setting
+    anywhere in this codebase and C1's "according to project policy" cannot be met for any root verb —
+    request.rs:290 maps all eight to Capability::RootCapability. C4 unchanged and still needs a hardware-enrolled
+    FIDO2 credential. LANDED on apex-os task/p1-053b-android-ux 2026-09-12 (abf76451, fdf31ace, a5f1d459,
+    183b6a34, e6f60563). PARTIAL, and TWO of the four criteria are NOT MET because there is nothing on the wire
+    for them. Verified headless, NO device and NO emulator: 383 core JVM tests, 27 app JVM tests, a debug APK, 746
+    apex-agent-core Rust tests; both android gates pass. THE GOVERNING FACT, measured rather than assumed: A PHONE
+    CAN NEVER APPROVE OR DENY A PRIVILEGE REQUEST, AND NO SETTING CHANGES THAT. apex-agentd/src/privilege.rs:1176
+    refuses decide from any non-local origin unconditionally, and the check sits BEFORE the pending check, so a
+    paired device cannot even DENY. Request::Decide carries no second_factor field and decide never consults
+    OriginPolicy — the remote_elevation_allowed opt-in gates system-access grant ISSUANCE, a different path.
+    apex-remoted declares the origin claude-remote-control (proxy.rs:128), which is not local, and
+    origin::may_declare forbids narrowing back towards local. Pinned upstream by
+    apex-agentd/tests/request_origin.rs:369. AND EVERY VERB IN THE VOCABULARY IS ROOT: request.rs:290 maps all
+    eight to Capability::RootCapability, deliberately, because the vocabulary was chosen to be exactly apex's
+    root-only subcommands — so there is no non-root approvable object on this socket at all. NOT MET, criterion 1
+    (cloud/GitHub/preview capability requests approved or denied from Android): impossible against this build.
+    Capability NEVER APPEARS ON THE WIRE — GitHubPush, CloudflarePreviewDeploy and ProductionDeploy exist only as
+    rows in section 7's table (origin.rs:842) with no serde derive, and nothing in this build performs them. NOT
+    MET, criterion 2 (production deployment approvals clear and auditable): production-deploy approval DOES exist,
+    on a DIFFERENT daemon — apex-secretd, tag key 'op', kebab-case, apex-secret-core/src/protocol.rs — and
+    apex-remoted NEVER CONNECTS TO IT: grep finds no secretd socket path anywhere in its sources. A phone cannot
+    reach it. MET, criterion 3 (root/system-access and unsafe-everything remain local-approval-only by default):
+    met by the runtime, and this unit's contribution is to not undermine it. ApprovalsScreen has NO Approve and NO
+    Deny button, and renders PrivilegeRequest.DECIDE_IS_LOCAL_ONLY verbatim where they would sit, so the sentence
+    the user reads is the sentence they would get if the button existed and they pressed it. There is no decide
+    builder in :core and both halves of the shared request fixture assert there is none — adding it is the obvious
+    move on seeing a list of pending approvals, and it would be refused every time it was pressed. NOT MET,
+    criterion 4 (optional remote high-risk approval requiring WebAuthn/FIDO-equivalent and explicit owner
+    configuration): the only path in this build with the right shape is RenewSystemGrant with a SubmittedFactor
+    (remote_elevation_allowed plus a UV-verified key), and reaching it from Android is a SEPARATE UNIT, not an
+    Android round. SubmittedFactor.assertion is 'the four lines fido2-assert -G printed, verbatim'; enrolment is
+    fido2-cred -M -t es256 run on the machine and pasted into apex agent key add (apexd/apex/src/agent.rs:4173).
+    An Android phone would have to act as a FIDO2 authenticator producing that exact libfido2 text format and be
+    enrolled out of band. AppLock is a local Keystore biometric and is NOT a registered authenticator for the
+    daemon. Named on the card so it is not folded into an Android round by mistake. WHAT WAS BUILT, and it is the
+    honest thing rather than the asked-for thing: the phone lists pending and decided privilege requests,
+    per-project standing grants and live system-access grants, and can REVOKE both kinds. The asymmetry is the
+    point and is the daemon's own reasoning: privilege.rs:1289 applies NO origin check to revoke, because
+    revocation only ever removes authority, so a device that cannot grant anything can still take it back. Revoke
+    is not retried — a lost reply after a wide revoke would have the retry answer no_such_request, reporting
+    failure for something that succeeded — and every confirmation dialog says so before the press rather than
+    after. TWO DISTINCTIONS THE ROWS KEEP, both tested and both mutation-checked: allow_for_project does NOT mean
+    the operation ran (request.rs:410 — execution still goes through the approving human's own privilege at the
+    machine), so a row says 'allowed, but not run yet' and never 'done'; and an absent exit_code is not a zero, so
+    a request that ran with none recorded is not claimed to have succeeded. An empty capabilities list on a system
+    grant means EVERY root operation (break-glass) and is rendered as such, not as 'no operations', which would be
+    exactly backwards. NOT VERIFIED: every Compose behaviour on this screen, including the revoke confirmation
+    dialog — no device, no emulator, no Robolectric, and assembleDebug compiles code it never runs; and no revoke
+    has been performed against a live daemon. Mutation-checked: decisionLine reading an allowance as done,
+    treating an absent exit code as a zero, and describing a wide revoke as a narrow one each turn a NAMED
+    ApprovalsTest red; files restored byte-identical with plain cp. C3 OBSERVED FROM THE INSIDE ON A REAL DEVICE,
+    2026-09-19 (task/p1-053d-device). 'Root/system-access and unsafe-everything remain local-approval-only by
+    default' now has a measurement taken from the phone rather than from a daemon test: a session started BY THE
+    PHONE, over a Noise session through a real apex-remoted into a real apex-agentd, is recorded by the daemon as
     request_origin=claude-remote-control and actor=<this device's id>, asserted by reading SessionInfo back over
     the same link. That is the property the refusal rests on - a phone cannot be mistaken for a human at the
     keyboard - and it is asserted positively rather than by watching one refusal. ApprovalsScreen also composes on
@@ -3963,6 +4032,62 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
+    ROUND 2 ON THE PIXEL 7a, 2026-09-19 (task/p1-053e-device, five commits off roadmap/v2.2 @ 7f647470, tip
+    89500813). C1 IS NOW MET EXCEPT FOR THE RELAY, AND THE RELAY IS NOT A MISSING TEST — IT IS A MISSING FEATURE.
+    There is no relay client on Android at all: PairingService says so in its own error text ("and no relay client
+    has been written yet"), :core has no WebSocket code, core/build.gradle.kts carries bouncycastle and
+    kotlinx-serialization and nothing else, and Help.kt tells the user the relay has no deployment. Covering the
+    relay leg on a device means writing P1-052's Android half — an RFC 6455 client, a PairingService fallback, a
+    relay double the phone can dial, apex-remoted --relay carried through the suite's broker including
+    restart_remoted, a device test that makes the LAN unreachable so the relay is the leg under test, and
+    HelpParityTest's inverse list moved. That is its own unit and is recommended as its own card; a half relay
+    client would be worse than none. EVERYTHING ELSE C1 NAMES NOW RUNS ON THE PHONE. PTY INPUT/OUTPUT, the first
+    of the two gaps round 1 named: TerminalOnDeviceTest composes the real TerminalScreen with a real
+    TerminalController attached to a real /bin/cat through apex-remoted and apex-agentd, types a per-run sentinel
+    through TerminalController.sendText — the path a keystroke takes from the hidden BasicTextField, io thread
+    included — and asserts it comes back in the Snapshot the repaint loop hands TerminalView. Mutated to print
+    what the screen held: the sentinel appears twice, the PTY's echo and cat's own output. APPROVALS, the third
+    gap, which the dispatch did not name and round 1's evidence did: ApprovalsOnDeviceTest. The round trip is the
+    wrong shape for this criterion and that is the finding rather than a shortcut — privilege.rs refuses decide
+    from any non-local origin and the check sits BEFORE the request is looked up, so a phone cannot approve,
+    cannot deny, and cannot learn from a refusal whether the request exists. Approvals.kt has recorded that since
+    it was written and nothing had ever sent the frame. This builds the decide line by hand, sends it against a
+    REAL pending request, and asserts permission_denied naming claude-remote-control and §7; then the same frame
+    for id 999999, which a local caller is told does not exist and a phone is told the identical thing, so the
+    refusal is not an oracle for request ids. What a phone MAY do is asserted too: a request filed at the computer
+    reaches the phone with verb, packages, reason and a local request_origin intact, a human at the computer
+    denies it and the phone sees denied, grants and system_grants both answer, and revoking something absent is
+    no_such_request and NOT permission_denied. C2 GAINS THE TERMINAL AND LOSES A CLAIM NOBODY HAD MADE. Landscape
+    at font scale 2.0 on this phone is a 63x7 terminal, and the PTY on the computer agrees at 63x7 — handle_attach
+    and Request::Resize write the attaching terminal's size into SessionInfo, so that number is the phone's own
+    measurement reaching the machine. Not 80x24: the largest accessibility text size costs 17 of the 80 columns
+    Settings.terminalTextSp says these TUIs lay out for. AND: TerminalView is a bare Canvas, so no glyph on the
+    terminal screen reaches the semantics tree and TalkBack has nothing to announce there. That is a real C2 gap
+    and it is written down rather than papered over. C2 still also lacks a tablet and a foldable, which do not
+    exist here. THREE THINGS MEASURED THAT CHANGE HOW THIS SUITE IS RUN. (1) A ROADMAP-DISPATCHED AGENT CANNOT
+    PAIR, AND THAT IS THE §7 GUARD WORKING. This agent's cgroup is
+    user@1000.service/app.slice/apex-roadmap-resume.service, so origin::observe_pid classifies the broker as
+    scheduled-job and apex-remoted refuses every offer. First run on the tip: 24 tests, 8 failures, all eight that
+    sentence, after two minutes of gradle. Round 1 ran inside an interactive session and got local-terminal, which
+    is why it never saw this. The runner now asks once, before building anything, and when the answer names
+    scheduled-job it names tests/in-login-session.sh and the two variables that wrapper does not forward. Every
+    number below was produced through that wrapper, in a real PAM login session. (2) TerminalScreen CANNOT BE
+    HOSTED BY createAndroidComposeRule. Its withFrameNanos repaint loop keeps the Recomposer permanently busy, so
+    ComposeTestRule.setContent never returns from its own waitForIdle — IdlingResourceTimeoutException,
+    hadRecomposerChanges = true, measured, all three tests. The file hosts the composition through
+    ComponentActivity.setContent, the way MainActivity does, and polls. (3) MachineLink.request returns an error
+    reply as a STRING and does not throw; the throw lives in the Agentd.readX parsers above it. A test that only
+    caught AgentError around the hand-built decide frame reported "a phone approved a root operation" — it had
+    not, the daemon had refused in writing and nothing read the writing. THE DEPRECATED RULE IS GONE:
+    androidx.compose.ui.test.junit4.v2.createAndroidComposeRule in the three files that use it
+    (TerminalOnDeviceTest does not and cannot), in its own commit because it swaps UnconfinedTestDispatcher for
+    StandardTestDispatcher; a --rerun-tasks compile no longer emits the deprecation. GATES ON THE TIP 89500813,
+    every number read out of a log: run-device-suite.sh OK (32 tests) TalkBack bound; :core:test 459/0;
+    :app:testDebugUnitTest 44/0; cargo test --locked --workspace 3407 passed 0 failed 2 ignored; cargo clippy
+    --workspace --all-targets --locked -D warnings zero; containerfile assertions 194 checked 0 failed 0 inert;
+    shellcheck coverage 168 discovered 0 known-failing 0 newly failing; suites-in-CI 77 suites 73 run 4 exempt 0
+    unrun-and-undeclared; no-conflict-markers PASS; doc-verbs 0 undocumented-and-undeclared; check-help-prose.sh
+    1705 words TOTAL 0 no allowlist. Device baseline restored and every value read back; both APKs uninstalled.
     Ship APEX Remote Android as a production-quality application. LANDED on apex-os roadmap/v2.2 2026-09-13 as
     merge 551e9e1a. THREE OF FIVE CRITERIA MET; the two that are not need a device or an emulator and this
     repository has neither. C3 SIGNED RELEASE PIPELINE DONE (8576b14e), and the first release build this project
