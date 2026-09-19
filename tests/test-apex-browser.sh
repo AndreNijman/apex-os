@@ -609,6 +609,66 @@ out=$("$ENGINE" --help 2>/dev/null)
 has "--help documents the CA flag"                   '--trust-ca FILE' "$out"
 has "and says there is no default"                   'no default' "$out"
 
+echo "── the credential a capsule spends and never holds (P2-012, route B) ──"
+
+# WHAT A DROPPED --present LOOKS LIKE. Worse than a dropped `--trust-ca`, which
+# at least renders nothing: a capsule that reaches the site unauthenticated
+# gets whatever that site serves an anonymous caller, which for plenty of sites
+# is a login page that screenshots perfectly well. Nothing in the run says the
+# credential was not presented.
+
+reset_calls
+out=$("$ENGINE" run --name cap-auth --capability intranet --present \
+        -- https://intranet.example/ 2>&1); rc=$?
+argv=$(session_argv)
+exits "a capsule may be told to authenticate its destination" 0 "$rc"
+has   "and the credential's NAME reaches the runtime"         '<--present> <intranet>' "$argv"
+# The destination is not sent twice. `--capability` already replaced the
+# allowlist with the credential's pin, and a second spelling of where to spend
+# it would be a second thing that can disagree with the first.
+has   "and the pin is still what the capsule may reach"       '<--allow> <intranet.example>' "$argv"
+# Before the separator, for `--trust-ca`'s reason: after it the word is one of
+# the BROWSER's arguments, firefox has no such flag, and the capsule would fail
+# naming the wrong program.
+before_present=${argv%%<--present>*}
+before_sep=${argv%%<-->*}
+if [ "$before_present" != "$argv" ] && [ "${#before_present}" -lt "${#before_sep}" ]; then
+    ok "and lands among the runtime's flags, not the browser's"
+else
+    bad "and lands among the runtime's flags, not the browser's" "$argv"
+fi
+
+# Not invented. A capsule that did not ask for it must produce an argv with no
+# `--present` at all: the flag names a credential, and an empty one would turn
+# every ordinary capsule into a refusal at the daemon.
+reset_calls
+"$ENGINE" run --name cap-noauth --capability intranet -- https://intranet.example/ >/dev/null 2>&1
+hasnt "a capsule that did not ask for it carries no --present" '<--present>' "$(session_argv)"
+
+# ── the refusals, both BEFORE a capsule exists ──────────────────────────────
+
+reset_calls
+out=$("$ENGINE" run --allow e.example:443 --present -- https://e.example/ 2>&1); rc=$?
+has   "--present without a credential is refused"    'needs' "$out"
+has   "and says which flag names one"                '--capability NAME' "$out"
+exits "and nothing is started for it"                1 "$rc"
+is    "and no session was asked for"                 "" "$(session_argv)"
+
+# The pair the daemon also refuses, refused here too so the message arrives
+# before a capsule directory exists. A capsule with --present is pinned to one
+# destination and the runtime terminates it, so a caller-supplied root would be
+# for a connection that no longer exists.
+reset_calls
+out=$("$ENGINE" run --capability intranet --present --trust-ca "$CA" \
+        -- https://intranet.example/ 2>&1); rc=$?
+has   "--present with --trust-ca is refused"         'cannot both be given' "$out"
+exits "and that refusal stops the run"               1 "$rc"
+is    "and no session was asked for either"          "" "$(session_argv)"
+
+out=$("$ENGINE" --help 2>/dev/null)
+has "--help documents the flag"                      '--present' "$out"
+has "and names the grant it needs"                   'browser.present' "$out"
+
 echo "── teardown, and the fences on it ──────────────────────────────────────"
 
 reset_calls

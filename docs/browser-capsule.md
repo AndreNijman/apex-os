@@ -215,8 +215,17 @@ Two consequences, stated because they are limits rather than holes:
 
 * **The proxy tunnels `CONNECT` only.** A plain `http://` URL is refused by the
   daemon with a 405, so a capsule talks to https sites.
-* **A tunnel is opaque.** This is a destination policy: a capsule allowed to
-  reach a host can send that host anything.
+* **A tunnel is opaque — with exactly one exception, and it is named at the
+  call site.** This is a destination policy: a capsule allowed to reach a host
+  can send that host anything, and nothing between the two reads it. The
+  exception is `--present` (P2-012, route B, protocol 11): a capsule that named
+  a credential has that credential's ONE pinned destination terminated by the
+  runtime instead of tunnelled, so for that destination the runtime reads the
+  request and `apex-secretd` reads the request and the answer. Every other
+  `CONNECT` the same capsule makes is opaque exactly as before — demonstrated
+  rather than asserted, by a test that asks which certificate the capsule was
+  handed. A capsule that names no credential has no terminated destination at
+  all.
 
 ## The browser talks to its vendor, and the allowlist is what stops it
 
@@ -293,27 +302,49 @@ and here the caller does not get to choose where the capsule can reach.
 the profile, not put in the environment, and not passed on the command line.
 `apex secret list` never prints a value and this engine never asks for one.
 
-What follows from that is the honest limit: **a capsule cannot log in to a
-site.** The framework exists so that an agent uses a credential without
-holding it, and it does that by performing the operation itself — which works
-for a git push and an MCP request and does not work for a browser, because
-agentd's proxy tunnels `CONNECT` and a TLS tunnel is opaque to the thing
-carrying it. There is nowhere for the daemon to insert a header.
+### And with `--present`, it can spend it (P2-012, route B)
 
-Presenting a minted, short-lived credential to a site from inside a capsule is
-therefore not built. **`docs/browser-capsule-auth.md` is the written decision**
-about how it would be: the two routes, what each one costs, the measurements
-that permit or reject each, and the protocol change the chosen one needs.
+`apex browser run --capability NAME --present` adds the second half: the
+capsule's requests to that credential's pinned destination **carry the
+credential**, and the capsule still never holds it.
 
-The short version, because it decides what this page promises. A capsule's
-**profile is the only thing an engine can put inside it** — a session's
-environment is built by the daemon and does not inherit the caller's, measured
-by a control that tried and reached nothing. And **anything a capsule can see,
-the caller can take home**, because `--download` is a path out of the capsule by
-design. So handing the capsule a session would hand the caller the credential,
-which is the thing the framework exists to prevent; the route that keeps it out
-of the capsule is for the daemon to present the header itself, and that is a
-change to the proxy rather than a flag on this command.
+The flag takes no argument, because `--capability` already names the credential
+and has already made that credential's pin the only destination this capsule
+can reach. What `--present` asks for is that the runtime authenticate it.
+
+What happens is written out in `docs/browser-capsule-auth.md` and is summarised
+here because it changes a property this page states above. The daemon mints a
+certificate authority and one leaf for that destination, installs the authority
+in this capsule's browser the way `--trust-ca` does, and **terminates that one
+`CONNECT`** rather than tunnelling it. The plaintext crosses to
+`apex-secretd` — the only process on the machine that holds credentials — which
+adds the `Authorization` header and opens its own validated TLS connection to
+the site.
+
+**Neither the capsule nor the agent runtime ever holds the value.** That second
+half is the design and not an accident of it: `apex-agentd` runs as the user,
+so a value it held an unconfined session of that user could read, and
+`apex-secretd`'s own note states the property this rests on — no verb in its
+protocol returns a credential. That sentence is still true.
+
+It needs a grant, like every other way of spending a credential:
+
+```
+apex secret grant NAME browser.present --everywhere
+```
+
+`--everywhere` and not a project, because a capsule's working directory is the
+throwaway capsule tree and a grant recorded against it would name a path that
+is gone the next time a capsule runs.
+
+The short version of what the route rests on. A capsule's **profile is the only
+thing an engine can put inside it** — a session's environment is built by the
+daemon and does not inherit the caller's, measured by a control that tried and
+reached nothing. And **anything a capsule can see, the caller can take home**,
+because `--download` is a path out of the capsule by design. So handing the
+capsule a session cookie would hand the caller the credential, which is why
+that route is rejected and this one is not: the value is never in the capsule
+to be carried out.
 
 ## One private CA, for one capsule (P2-012, gap 5)
 
@@ -400,8 +431,14 @@ refusal anybody sees. `apex-agent-core/src/protocol.rs` argues it at
 
 ## What is not built
 
-* **A capsule cannot authenticate to a site.** The paragraph above says why,
-  and it is the reason P2-012 is recorded `partial` rather than `done`.
+* **A capsule cannot log in to a site that asks for a FORM.** `--present` puts
+  a credential on a request and cannot fill in a login page or follow an OAuth
+  redirect chain. For those the answer is still a driver in the capsule, which
+  is the next bullet but two and needs a package that is not in the image.
+* **The response direction is scrubbed for the credential, and that is not a
+  guarantee about the site.** A site that echoes the header back has it
+  redacted in place; a site that transforms the value first does not. A
+  credential spent at a site is a credential that site has.
 * **No VM-tier capsule.** The three reasons are at the top of this page.
 * **No persistent profile.** Deliberate; see above.
 * **No browser other than Firefox.** The profile format, the proxy

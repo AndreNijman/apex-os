@@ -686,6 +686,17 @@ impl ProviderSpec {
 /// A map rather than typed fields, because typed fields are what forced every
 /// provider through this crate. Ordered so a serialised record is stable and
 /// two runs of the same request produce the same audit line.
+/// The operation a browser capsule's own connection is carried under
+/// (P2-012, route B).
+///
+/// Named in this crate rather than in `apex-secretd` because both ends of the
+/// wire need it and neither may guess: `apex-agentd` puts it on the
+/// [`crate::capability::CapabilityRecord`] it sends with
+/// [`crate::protocol::Request::Present`], and the secret service refuses that
+/// verb for any other operation. A literal on each side is a literal that can
+/// drift, and the drift would read as "that capability is not granted".
+pub const BROWSER_PRESENT: &str = "browser.present";
+
 pub type Params = BTreeMap<String, String>;
 
 // ── the scalar grammars ─────────────────────────────────────────────────────
