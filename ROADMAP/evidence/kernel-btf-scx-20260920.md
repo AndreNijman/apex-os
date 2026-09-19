@@ -364,6 +364,13 @@ scheduler. A `loaded` session is not argued with; a kernel with nothing wrong
 earns no sentence. The key is reported **while game mode is off**, so a user
 can learn that no session can carry a scheduler without starting one.
 
+**The exit path was deliberately left alone.** `game_exit` logs
+`sched-ext after exit: <ScxState::describe()>`, so on an affected kernel it
+still reads "disabled — nothing is attached" with no BTF clause. That is
+consistent with the rule above — the clause belongs where a load was attempted
+and refused, not on a stop that correctly found nothing — and repeating it
+there would put the same paragraph in the journal twice per session.
+
 `apex game status`'s **daemon-not-running** branch reports it too. That branch
 prints a local view assembled by the CLI rather than the daemon's `Status`
 map, and it said nothing about sched-ext at all — so the one surface a user
@@ -400,9 +407,22 @@ names 22. The extra 25 were `_impl` twins — `scx_bpf_dsq_insert_impl` and
 friends — which are *supposed* to carry the argument: they are the pre-strip
 originals `resolve_btfids` renames, and no BPF program references one.
 
-With `_impl` skipped the reader names **exactly the 22 `libbpf` named**, and 18
-of 68 on Fedora's kernel. The skip is now a named constant with a comment
-saying how it was found, and two tests pin it in both directions.
+With `_impl` skipped the reader names **exactly the 22 `libbpf` named**. The
+skip is now a named constant with a comment saying how it was found, and two
+tests pin it in both directions.
+
+Two things about that coincidence, stated rather than left to read better than
+it is:
+
+* **"Exactly the 22" validates the reader; it does not make 22 the number.**
+  `libbpf`'s list is the kfuncs *`scx_lavd`* declares as externs and which
+  mismatched. That every broken kfunc on katana is one `scx_lavd` uses is a
+  fact about katana. §3.1's other two kernels give 20 and 18, including names
+  `scx_lavd` never mentioned.
+* **The skip assumes `_impl` means "pre-strip twin".** That is the kernel's
+  naming convention for what `resolve_btfids` renames, and it holds across all
+  three kernels read here — but a public kfunc genuinely named `scx_bpf_*_impl`
+  would be skipped silently. Recorded as the assumption it is.
 
 ### 5.3 Gates
 
