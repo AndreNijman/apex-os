@@ -4467,34 +4467,46 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Round 29 (2026-09-18) ran the LOCK SCREEN's accessibility markup back over real AT-SPI for the first time and
-    found there is nothing there to read. apex-shell tests/run-lockscreen-atspi.sh (17 passed / 0 failed / 6
-    skipped ON THE L16) brings up a private headless labwc, a private session bus and a private a11y bus, loads
-    the shipped shell.qml, engages a real ext-session-lock through the shipped IPC handler (labwc 0.9.6
-    acknowledges it - WlSessionLock.secure flips, observed from outside the process), and walks the tree: the bus
-    answers name=quickshell, ChildCount=0. The application node and nothing beneath it. No window, no lock
-    surface, no password field, no status line. So round 28's markup (check-lockscreen-a11y.sh 33/0/0,
-    mutate-lockscreen-a11y.sh 20 CAUGHT/4 HELD) is source-correct and runtime-unreachable, and so is every other
-    Accessible.* in apex-shell including the Cfg* controls. Controlled, not inferred: the same harness, same
-    compositor, same buses, same run, publishes a full three-node tree for a plain Qt Quick Window under qml-qt6;
-    a plain Window created INSIDE quickshell is equally absent; QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 changes
-    nothing. Narrowed in gdb: QGuiApplication::topLevelWindows() has 2 entries, type(w0)==Qt::Window,
-    QAccessible::isActive()==1, and QQuickWindow::accessibleRoot(w0) returns NULL - which is exactly
-    QAccessibleApplication::childCount()==0, since topLevelObjects() keeps only windows with a non-null accessible
-    root. The same gdb expressions against the control return a non-null root, so the instrument is sound.
-    quickshell 0.3.1's source has no accessibility code at all. Remaining cause is upstream.
-    mutate-lockscreen-atspi.sh ON THE L16: 11 mutants, each a full bring-up, 8 red CAUGHT / 0 SURVIVED / 0
-    MISSCORED, 3 green HELD / 0 FALSE-RED. FROM THE GITHUB ARCH RUNNER, not this laptop (run 35362877551): the
-    suite is 8 passed / 0 failed / 1 skipped - the entire section 1 control passes there, so the harness is proven
-    on a second machine and the empty tree is not a laptop artefact; the one SKIP is the shell half, because the
-    runner has no quickshell (AUR). The read-back assertions the roadmap wants (the field's
-    name/role/passwordEdit, the status line's live name, the two private-use icons' absence, an announcement) are
-    recorded as SKIPs with reasons, NOT as passes: every one is satisfied by an empty tree. Two harness defects
-    were found and fixed on the way, both of which had made a suite report nothing while looking green - apex-os
-    4aae9249 (at-spi-bus-launcher cannot write org.a11y.Status through dconf on a private HOME, so Qt published an
-    empty tree for everything) and apex-shell e65d378 (the mutation harness graded its baseline by colour and
-    scored 11 mutants against a suite that never ran on the Arch runner). Login screen unchanged and still
-    measured on the L16: test-apex-greet-atspi.sh 31/0/0, mutate-greet-atspi.sh 8/8,
+    Round 32 (2026-09-19) added nothing to P2-003 and says so rather than padding: both reachable items on this
+    unit's queue this round were P2-004 (the RTL CI decision, and the window-root mirroring question). Queue items
+    1 and 2 - Orca at the login screen and greeter audio - still need HARDWARE, and on 2026-09-19 katana was held
+    by a TPM agent clearing the part and rebooting, so they were not attempted and were explicitly NOT simulated.
+    They are the oldest open things on this row. FOUND 28 stays fixed and guarded: the factory reset could not be
+    committed by anybody - mouse, keyboard or screen reader - for as long as that code existed, an
+    assignment-ordering bug in RecoveryService._onPlan() found only because the invisible button was still on the
+    accessibility bus. It is a PRODUCT defect, not an accessibility one; the fix is apex-shell 5327bc6, the
+    regression gate is mutate-recovery-atspi-shim.sh R12, and that mutant needs TWO edits because the guard is
+    deliberately two-deep (FOUND 30). Do not weaken it. The upstream qtdeclarative one-liner (FOUND 20) remains
+    unfiled, deliberately, because filing on a public tracker is Andre's call and not an agent's - so on a real
+    machine a screen reader still gets ONE node from the shell, and every read-back this unit has done is under a
+    test-only LD_PRELOAD that ships nowhere. Round 29 (2026-09-18) ran the LOCK SCREEN's accessibility markup back
+    over real AT-SPI for the first time and found there is nothing there to read. apex-shell
+    tests/run-lockscreen-atspi.sh (17 passed / 0 failed / 6 skipped ON THE L16) brings up a private headless
+    labwc, a private session bus and a private a11y bus, loads the shipped shell.qml, engages a real
+    ext-session-lock through the shipped IPC handler (labwc 0.9.6 acknowledges it - WlSessionLock.secure flips,
+    observed from outside the process), and walks the tree: the bus answers name=quickshell, ChildCount=0. The
+    application node and nothing beneath it. No window, no lock surface, no password field, no status line. So
+    round 28's markup (check-lockscreen-a11y.sh 33/0/0, mutate-lockscreen-a11y.sh 20 CAUGHT/4 HELD) is
+    source-correct and runtime-unreachable, and so is every other Accessible.* in apex-shell including the Cfg*
+    controls. Controlled, not inferred: the same harness, same compositor, same buses, same run, publishes a full
+    three-node tree for a plain Qt Quick Window under qml-qt6; a plain Window created INSIDE quickshell is equally
+    absent; QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 changes nothing. Narrowed in gdb:
+    QGuiApplication::topLevelWindows() has 2 entries, type(w0)==Qt::Window, QAccessible::isActive()==1, and
+    QQuickWindow::accessibleRoot(w0) returns NULL - which is exactly QAccessibleApplication::childCount()==0,
+    since topLevelObjects() keeps only windows with a non-null accessible root. The same gdb expressions against
+    the control return a non-null root, so the instrument is sound. quickshell 0.3.1's source has no accessibility
+    code at all. Remaining cause is upstream. mutate-lockscreen-atspi.sh ON THE L16: 11 mutants, each a full
+    bring-up, 8 red CAUGHT / 0 SURVIVED / 0 MISSCORED, 3 green HELD / 0 FALSE-RED. FROM THE GITHUB ARCH RUNNER,
+    not this laptop (run 35362877551): the suite is 8 passed / 0 failed / 1 skipped - the entire section 1 control
+    passes there, so the harness is proven on a second machine and the empty tree is not a laptop artefact; the
+    one SKIP is the shell half, because the runner has no quickshell (AUR). The read-back assertions the roadmap
+    wants (the field's name/role/passwordEdit, the status line's live name, the two private-use icons' absence, an
+    announcement) are recorded as SKIPs with reasons, NOT as passes: every one is satisfied by an empty tree. Two
+    harness defects were found and fixed on the way, both of which had made a suite report nothing while looking
+    green - apex-os 4aae9249 (at-spi-bus-launcher cannot write org.a11y.Status through dconf on a private HOME, so
+    Qt published an empty tree for everything) and apex-shell e65d378 (the mutation harness graded its baseline by
+    colour and scored 11 mutants against a suite that never ran on the Arch runner). Login screen unchanged and
+    still measured on the L16: test-apex-greet-atspi.sh 31/0/0, mutate-greet-atspi.sh 8/8,
     test-apex-greet-session-bus.sh 37/0/0. Recovery screen still unaudited; orca as the greetd user still needs
     hardware. LANDED round 30 (2026-09-19): task/p2-b-round29 merged onto roadmap/v2.2 in BOTH repos, which this
     unit requires because apex-shell's CI matches on branch name - apex-os 7658fe1f (tests/lib/atspi.sh, 79
@@ -4784,91 +4796,147 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Unchanged by round 29 except for one new fact that bears on it. Measured and closed on this laptop: layout
-    before password in greeter and installer (test-apex-greet-layout.sh 25, test-installer-keymap.sh 43,
-    test-installer-locale.sh 26); timezone picker from zone1970.tab, 312 zones, survives the compositor restart;
-    CJK (run-i18n-test.sh section 5); RTL on the shared settings surface (run-rtl-test.sh 30/0/0 here,
-    mutate-rtl.sh 13/13 - CLOSED on this laptop, do not re-run), with the mechanism guarded from apex-os by
-    test-apex-platform-theme.sh. Still open and honest about it: 0 of 14 window roots carry LayoutMirroring or
-    layoutDirection, so the shell's own windows do not mirror; IME/fcitx5 is in the image with no suite asserting
-    any of it; the installer has no gettext route and no locale picker (the image ships glibc-langpack-en only);
-    per-user language and the recovery flow are untouched. The translated shell remains blocked on the host, not
-    on QML: /usr/bin/quickshell builds a bare QQmlEngine and never calls installTranslator, so there is no route
-    to our catalogue (FOUND 3). run-rtl-test.sh is 17 passed / 3 failed / 2 skipped on the GitHub Arch runner and
-    has been since it landed - confirmed again on 2026-09-18 in run 35361832221, identical to the control run on
-    roadmap/v2.2 (35351740747), so it is not any branch's doing. qt6ct was genuinely absent and is now installed
-    by the step; qt6-translations was already present at 6.11.2; still 17/3/2, so those two were necessary and not
-    sufficient and the cause is NOT identified. Unruled-out: the runner is Qt 6.11.2 against this laptop's 6.10.3,
-    and its qt6ct has no /etc/xdg/qt6ct/qt6ct.conf, which APEX ships. Do not close it by making section 1 SKIP -
-    that section is the discriminator. New this round and relevant to the whole item: quickshell publishes no
-    windows to AT-SPI (see P2-003), so a translated or mirrored shell surface would also be invisible to an
-    assistive technology even once the host change lands. LANDED round 30 (2026-09-19): merge 7658fe1f (apex-os)
-    and d5c781a (apex-shell). NOTHING ON THIS ITEM CHANGED THIS ROUND and nothing here was re-verified - round
-    29's p2-b work was entirely the P2-003 AT-SPI read-back. The RTL 17/3/2 discriminator and the Qt
-    6.11.2-vs-6.10.3 runner difference are still open exactly as recorded above. ROUND 30 (2026-09-19): NOTHING ON
-    THIS ITEM WAS CHANGED AND NOTHING WAS RE-VERIFIED - the round's work was entirely P2-003's AT-SPI cause. Two
-    things nevertheless bear on the open RTL row and are recorded because they were measured rather than assumed.
-    (1) run-rtl-test.sh is 17 passed / 3 failed / 2 skipped again, in CI run 35382910849 on task/p2-b-round30, and
-    it was the ONLY red step in the whole arch-validate job - four brand-new accessibility steps in the same job
-    were green. So the red is still older than any current branch and still not any branch's doing, now confirmed
-    a fourth time. (2) The unruled-out candidate "the runner is Qt 6.11.2 against this laptop's 6.10.3" had been
-    read off a package version; it is now MEASURED by an APEX suite running on the runner itself.
-    tests/check-quickshell-a11y-cause.sh prints the toolchain it built against and reported "note: Qt 6.11.2,
-    compiler g++" there against "note: Qt 6.10.3, compiler g++" here. The version difference is therefore a fact
-    rather than an inference, and it remains the leading unruled-out explanation together with the runner's qt6ct
-    having no /etc/xdg/qt6ct/qt6ct.conf, which APEX ships. Section 1 was NOT touched and must not be made to SKIP
-    - it is the discriminator. Also relevant from P2-003 and not yet acted on here: quickshell publishes nothing
-    to AT-SPI without a test-only shim, so a mirrored or translated shell surface is still invisible to an
-    assistive technology even once the host QTranslator change (FOUND 3) lands. LANDED round 30 (2026-09-19):
-    merge 8eccbfa (apex-shell). NOTHING ON THIS ITEM CHANGED AGAIN and nothing here was re-verified - round 30's
-    p2-b work was entirely P2-003's FOUND 14. The RTL discriminator is still 17/3/2 with the cause NOT identified;
-    it was the only red step in any of the three CI runs this round and it predates the branch, so it is not the
-    ROUND 31 (2026-09-19): THE RTL DISCRIMINATOR IS SOLVED, AND THE ANSWER IS NEITHER CANDIDATE ON THIS LEDGER.
-    What supplies APEX's right-to-left layout direction is libKF6I18n.so.6, which Fedora's qt6ct build links
-    against - not qt6ct itself, not the Qt version, and not /etc/xdg/qt6ct/qt6ct.conf. Four measurements on this
-    laptop, one process each, qmltestrunner-qt6 -platform offscreen, LANG=LC_ALL=ar_EG.UTF-8, everything else
-    scrubbed, with strace -e openat naming every qt_*.qm the process opened: QT_QPA_PLATFORMTHEME=qt6ct gives
-    layoutDirection 1 (RTL) and opens qt_ar.qm; a bogus theme name gives 0 and opens none; no platform theme gives
-    0 and opens none; and NO PLATFORM THEME AT ALL plus LD_PRELOAD=/lib64/libKF6I18n.so.6 gives 1 (RTL) and opens
-    qt_ar.qm. The last row settles it: merely loading KF6's i18n library into the process loads the Qt catalogue
-    and flips the direction. ldd on /usr/lib64/qt6/plugins/platformthemes/libqt6ct.so shows why it is there -
-    Fedora ships a post-release git snapshot (qt6ct-0.11-13.20250907git23a985f.fc43) linked against eight KF6
-    libraries including libKF6I18n.so.6, while the plugin's own binary contains no QTranslator code at all (nm
-    -DC, strings). The Arch runner has upstream release qt6ct 0.11-8, read out of the CI log, which is the plain
-    build. BOTH LEDGER CANDIDATES ARE NOW ELIMINATED BY MEASUREMENT RATHER THAN BY ARGUMENT: the conf, because
-    repeating the ar_EG run with XDG_CONFIG_DIRS and XDG_CONFIG_HOME both pointed at an empty directory - so qt6ct
-    cannot find qt6ct.conf anywhere - still gives RightToLeft; and the Qt version, because it is no longer needed
-    as an explanation and the runner's own log shows it has 64 qt_*.qm including qt_ar.qm and that the row
-    "QLocale calls ar_EG.UTF-8 right-to-left" PASSES there. CONFIRMED FROM THE GITHUB ARCH RUNNER, not this
-    laptop, in CI run 35388802498: the iff added to run-rtl-test.sh passed there in the OPPOSITE branch to the one
-    it passes in here, which is exactly what it was built for, reporting "it did NOT flip, and
-    /usr/lib/qt6/plugins/platformthemes/libqt6ct.so links no libKF6I18n, so this machine's red above is that build
-    of qt6ct and not APEX". Its can-answer-NO control passed there too, and the LD_PRELOAD pin correctly reported
-    COULD-NOT-RUN because the runner has no libKF6I18n at all. So the one line of this finding that was inferred
-    is now measured on the machine it was about, and the runner's three reds are TRUTHFUL ABOUT THAT MACHINE -
-    they are exactly the three rows that need a right-to-left APPLICATION direction, and that machine has no
-    process that loads the catalogue. THE SHIPPED CONSEQUENCE IS BIGGER THAN THE CI RED and it is the same family
-    as the qt6-qttranslations weak-Recommends finding: APEX's right-to-left layout does not depend on anything
-    APEX declares, it depends on a Fedora packaging choice to link qt6ct against KF6I18n, and if that build ever
-    returns to upstream's, or a slimming pass drops KF6, then every mirrored surface silently stops mirroring and
-    nothing goes red. That is the second time this exact silent-loss shape has been found under this row. GUARDED,
-    and both guards were shown able to fail: apex-shell 6c277ac gives run-rtl-test.sh the iff, a self-test proving
-    that predicate can answer NO, and the mechanism pinned past its carrier - 33 passed / 0 failed / 0 skipped
-    here under env -i HOME PATH USER TMPDIR, was 30/0/0 - with both new assertions proven able to fail by running
-    the suite with a stubbed tool on PATH (an ldd that prints nothing turns the iff red and correctly SKIPs the
-    self-test; an ldconfig pointing libKF6I18n at /lib64/libz.so.1 gives 32/1/0). apex-os 43ffce13 gives
-    test-apex-platform-theme.sh link 4 in its live section with the same can-it-answer-NO self-test - 20 passed /
-    0 failed / 0 skipped on this booted host, was 18/0/0 - and mutate-platform-theme.sh re-runs unchanged at 13
-    applied, 10 CAUGHT / 0 SURVIVED / 0 MISSCORED, 3 HELD / 0 FALSE-RED. Section 1 was NOT touched and still must
-    not be made to SKIP: it IS the discriminator. WHAT IS NOW OPEN IS A DECISION, NOT AN INVESTIGATION - either
-    leave arch-validate permanently red on that step, or make the runner's configuration match what APEX actually
-    ships by installing ki18n there and preloading libKF6I18n for that step only, which the fourth measurement
-    above already proves works. Still open and unchanged on this item: 0 of 14 window roots carry LayoutMirroring
-    or layoutDirection, so the shell's own windows still do not mirror; IME/fcitx5 is in the image with no suite
-    asserting any of it; the installer has no locale picker and no gettext route; per-user language is absent; and
-    the translated shell is still blocked on the host, not on QML. The recovery flow row is no longer untouched in
-    the accessibility sense - the page was given markup and read back over AT-SPI this round, see P2-003 - but
-    nothing about it was internationalised and that row stays open.
+    Round 32 (2026-09-19) settled the RTL runner decision that four rounds had correctly refused to paper over,
+    and did BOTH halves of it because they answer different questions. run-rtl-test.sh had been red on the GitHub
+    Arch runner on exactly three assertions since the day it landed (19 passed / 3 failed / 3 skipped). (1) THE
+    PRECONDITION IS NOW MEASURED BEFORE ANYTHING IS CONCLUDED FROM IT: the plugin block moves above the three rows
+    it explains, ldd (not a distribution name, not a version string) says whether this machine's qt6ct plugin
+    carries a Qt translation loader, and when it measurably does not those three rows report a NAMED could-not-run
+    carrying the reason. CANTRUN is a fourth outcome with its own counter in the totals line, because the suite
+    had been printing absence (not a booted APEX host) and could-not-run (the probe printed no APEXDIR line) as
+    the same word. The gate has two hard limits: it is switched off entirely on a booted APEX host, because on the
+    machine APEX ships to a theme that cannot supply the direction IS the defect; and it cannot engage where the
+    direction flipped anyway, so an excuse whose own reason has stopped being true goes red instead of quiet. The
+    predicate is three-valued and a failed ldd excuses nothing - that arm is proved to fire by asking the
+    predicate about a file that is not an ELF. (2) ci.yml INSTALLS ki18n ON THE ARCH JOB, on its own line and not
+    under a || echo, because a failed install would silently take section 2's right-to-left half with it and still
+    tick green. Measured in an archlinux:latest container that reproduces the runner's own totals exactly (19/3/3,
+    same three FAIL titles, qt6ct 0.11-8, qt6-base 6.11.2): the gate alone gives 20 passed / 0 failed / 1 skipped
+    / 6 could-not-run and measures NOTHING about APEX's mirroring there; the gate plus ki18n gives 32 / 0 / 1 / 3.
+    The eleven-assertion difference is section 2 running its whole right-to-left fixture pass on that machine for
+    the first time - nine assertions about the SHIPPED CfgRow and CfgScroll under a real right-to-left application
+    direction, on a second distribution and a second Qt minor - and it PASSED, so no APEX defect was hiding behind
+    the red. Say which half produced the green: the gate turned three reds into three named could-not-runs, which
+    is a statement about the RUNNER; the library is what proved APEX's own mechanism on a second machine. Proved
+    to fail in both directions on both machines with a stubbed ldd that lies in one direction only: laptop with
+    KF6I18n hidden 33/1/0/0 (gate off, iff red on 'something ELSE loads qt_*.qm'), Arch with KF6I18n injected
+    28/5/1/0, Arch with ldd exiting 1 28/4/1/1, Arch with /run/ostree-booted present 31/3/0/0. Section 1 is NOT a
+    SKIP and must never become one. AND STANDING-QUEUE ITEM 7 IS NOT THE CHANGE THIS LEDGER DESCRIBED. '0 of 14
+    window roots carry LayoutMirroring' has read as a forgotten edit since round 23; it is not. Read out of
+    Quickshell's own type registry: PanelWindow -> PanelWindowInterface -> WindowInterface -> Reloadable ->
+    QObject, and FloatingWindow the same, with no Item and no Window anywhere. Qt's LayoutMirroring attached
+    property only works with Items and Windows, and when it does not it DOES NOT FAIL - measured in the engine
+    with a control: attached to a QtObject the object is still created, errorString() is EMPTY and the only trace
+    is one QWARN, while the identical declaration on a Window reads back enabled. So the two lines that work on
+    CfgRow are a silent no-op on all 14 roots. The worse half is what the suite would have done about it: section
+    3 counted FILES CONTAINING THE STRING, so the obvious edit would have moved the count from 0 to 14, turned the
+    pin green and mirrored nothing - the named remaining half of this row signed off on a grep. Section 3 now asks
+    the engine what it does with a non-Item (Window as the control, needing no quickshell so the Arch runner can
+    run it) and walks the prototype chain link by link out of the registry - link by link and never with a
+    substring test, because 'Window' appears inside PanelWindowInterface and WindowInterface themselves and a
+    *Window* match would answer yes on every chain including this one. Both fail in both directions: R15 makes the
+    walk find an ancestor where there is none and the suite must say THE ROUTE HAS OPENED, which is the day item 7
+    becomes a task instead of an impossibility. What remains is either a 14-file
+    wrap-each-window-in-a-mirroring-Item change nobody has costed - and whoever takes it must read the input-mask
+    warning, because TopBar's Region entries have explicit x: that mirroring does not reach, so mirrored paint
+    over an unmirrored hit region is what that change would ship - or upstream. Final round-32 numbers:
+    run-rtl-test.sh 37 passed / 0 failed / 0 skipped / 0 could-not-run on this laptop under env -i (was 33/0/0);
+    32 / 0 / 1 / 4 in the Arch container; mutate-rtl.sh 15 applied / 15 CAUGHT / 0 SURVIVED / 0 MISSCORED,
+    re-earned in full on the restructured suite rather than carried over, because round 31's 13/13 was void -
+    three mutants target the suite itself and R4 named a title that no longer exists. R5 and R8 are still CAUGHT,
+    which is the measurement proving the gate masks nothing here. apex-shell task/p2-b-round32 commits 9df5d92 and
+    ecc0e39. apex-os has NO commits this round and that is measured rather than lazy: rpm -q --whatrequires
+    kf6-ki18n answers 'no package requires kf6-ki18n', which reads like FOUND 2 one layer deeper and would have
+    justified a Containerfile line - but whatrequires matches on NAME and the dependency is on the SONAME. rpm -q
+    --whatrequires 'libKF6I18n.so.6()(64bit)' answers kf6-kcolorscheme and kf6-kiconthemes, which qt6ct does
+    require, so kf6-ki18n is a hard transitive dependency no slimming pass can drop and naming it would be
+    theatre. The real exposure is still qt6ct's build reverting to upstream's, which test-apex-platform-theme.sh
+    link 4 already guards on the booted image. Unchanged by round 29 except for one new fact that bears on it.
+    Measured and closed on this laptop: layout before password in greeter and installer (test-apex-greet-layout.sh
+    25, test-installer-keymap.sh 43, test-installer-locale.sh 26); timezone picker from zone1970.tab, 312 zones,
+    survives the compositor restart; CJK (run-i18n-test.sh section 5); RTL on the shared settings surface
+    (run-rtl-test.sh 30/0/0 here, mutate-rtl.sh 13/13 - CLOSED on this laptop, do not re-run), with the mechanism
+    guarded from apex-os by test-apex-platform-theme.sh. Still open and honest about it: 0 of 14 window roots
+    carry LayoutMirroring or layoutDirection, so the shell's own windows do not mirror; IME/fcitx5 is in the image
+    with no suite asserting any of it; the installer has no gettext route and no locale picker (the image ships
+    glibc-langpack-en only); per-user language and the recovery flow are untouched. The translated shell remains
+    blocked on the host, not on QML: /usr/bin/quickshell builds a bare QQmlEngine and never calls
+    installTranslator, so there is no route to our catalogue (FOUND 3). run-rtl-test.sh is 17 passed / 3 failed /
+    2 skipped on the GitHub Arch runner and has been since it landed - confirmed again on 2026-09-18 in run
+    35361832221, identical to the control run on roadmap/v2.2 (35351740747), so it is not any branch's doing.
+    qt6ct was genuinely absent and is now installed by the step; qt6-translations was already present at 6.11.2;
+    still 17/3/2, so those two were necessary and not sufficient and the cause is NOT identified. Unruled-out: the
+    runner is Qt 6.11.2 against this laptop's 6.10.3, and its qt6ct has no /etc/xdg/qt6ct/qt6ct.conf, which APEX
+    ships. Do not close it by making section 1 SKIP - that section is the discriminator. New this round and
+    relevant to the whole item: quickshell publishes no windows to AT-SPI (see P2-003), so a translated or
+    mirrored shell surface would also be invisible to an assistive technology even once the host change lands.
+    LANDED round 30 (2026-09-19): merge 7658fe1f (apex-os) and d5c781a (apex-shell). NOTHING ON THIS ITEM CHANGED
+    THIS ROUND and nothing here was re-verified - round 29's p2-b work was entirely the P2-003 AT-SPI read-back.
+    The RTL 17/3/2 discriminator and the Qt 6.11.2-vs-6.10.3 runner difference are still open exactly as recorded
+    above. ROUND 30 (2026-09-19): NOTHING ON THIS ITEM WAS CHANGED AND NOTHING WAS RE-VERIFIED - the round's work
+    was entirely P2-003's AT-SPI cause. Two things nevertheless bear on the open RTL row and are recorded because
+    they were measured rather than assumed. (1) run-rtl-test.sh is 17 passed / 3 failed / 2 skipped again, in CI
+    run 35382910849 on task/p2-b-round30, and it was the ONLY red step in the whole arch-validate job - four
+    brand-new accessibility steps in the same job were green. So the red is still older than any current branch
+    and still not any branch's doing, now confirmed a fourth time. (2) The unruled-out candidate "the runner is Qt
+    6.11.2 against this laptop's 6.10.3" had been read off a package version; it is now MEASURED by an APEX suite
+    running on the runner itself. tests/check-quickshell-a11y-cause.sh prints the toolchain it built against and
+    reported "note: Qt 6.11.2, compiler g++" there against "note: Qt 6.10.3, compiler g++" here. The version
+    difference is therefore a fact rather than an inference, and it remains the leading unruled-out explanation
+    together with the runner's qt6ct having no /etc/xdg/qt6ct/qt6ct.conf, which APEX ships. Section 1 was NOT
+    touched and must not be made to SKIP - it is the discriminator. Also relevant from P2-003 and not yet acted on
+    here: quickshell publishes nothing to AT-SPI without a test-only shim, so a mirrored or translated shell
+    surface is still invisible to an assistive technology even once the host QTranslator change (FOUND 3) lands.
+    LANDED round 30 (2026-09-19): merge 8eccbfa (apex-shell). NOTHING ON THIS ITEM CHANGED AGAIN and nothing here
+    was re-verified - round 30's p2-b work was entirely P2-003's FOUND 14. The RTL discriminator is still 17/3/2
+    with the cause NOT identified; it was the only red step in any of the three CI runs this round and it predates
+    the branch, so it is not the ROUND 31 (2026-09-19): THE RTL DISCRIMINATOR IS SOLVED, AND THE ANSWER IS NEITHER
+    CANDIDATE ON THIS LEDGER. What supplies APEX's right-to-left layout direction is libKF6I18n.so.6, which
+    Fedora's qt6ct build links against - not qt6ct itself, not the Qt version, and not /etc/xdg/qt6ct/qt6ct.conf.
+    Four measurements on this laptop, one process each, qmltestrunner-qt6 -platform offscreen,
+    LANG=LC_ALL=ar_EG.UTF-8, everything else scrubbed, with strace -e openat naming every qt_*.qm the process
+    opened: QT_QPA_PLATFORMTHEME=qt6ct gives layoutDirection 1 (RTL) and opens qt_ar.qm; a bogus theme name gives
+    0 and opens none; no platform theme gives 0 and opens none; and NO PLATFORM THEME AT ALL plus
+    LD_PRELOAD=/lib64/libKF6I18n.so.6 gives 1 (RTL) and opens qt_ar.qm. The last row settles it: merely loading
+    KF6's i18n library into the process loads the Qt catalogue and flips the direction. ldd on
+    /usr/lib64/qt6/plugins/platformthemes/libqt6ct.so shows why it is there - Fedora ships a post-release git
+    snapshot (qt6ct-0.11-13.20250907git23a985f.fc43) linked against eight KF6 libraries including libKF6I18n.so.6,
+    while the plugin's own binary contains no QTranslator code at all (nm -DC, strings). The Arch runner has
+    upstream release qt6ct 0.11-8, read out of the CI log, which is the plain build. BOTH LEDGER CANDIDATES ARE
+    NOW ELIMINATED BY MEASUREMENT RATHER THAN BY ARGUMENT: the conf, because repeating the ar_EG run with
+    XDG_CONFIG_DIRS and XDG_CONFIG_HOME both pointed at an empty directory - so qt6ct cannot find qt6ct.conf
+    anywhere - still gives RightToLeft; and the Qt version, because it is no longer needed as an explanation and
+    the runner's own log shows it has 64 qt_*.qm including qt_ar.qm and that the row "QLocale calls ar_EG.UTF-8
+    right-to-left" PASSES there. CONFIRMED FROM THE GITHUB ARCH RUNNER, not this laptop, in CI run 35388802498:
+    the iff added to run-rtl-test.sh passed there in the OPPOSITE branch to the one it passes in here, which is
+    exactly what it was built for, reporting "it did NOT flip, and /usr/lib/qt6/plugins/platformthemes/libqt6ct.so
+    links no libKF6I18n, so this machine's red above is that build of qt6ct and not APEX". Its can-answer-NO
+    control passed there too, and the LD_PRELOAD pin correctly reported COULD-NOT-RUN because the runner has no
+    libKF6I18n at all. So the one line of this finding that was inferred is now measured on the machine it was
+    about, and the runner's three reds are TRUTHFUL ABOUT THAT MACHINE - they are exactly the three rows that need
+    a right-to-left APPLICATION direction, and that machine has no process that loads the catalogue. THE SHIPPED
+    CONSEQUENCE IS BIGGER THAN THE CI RED and it is the same family as the qt6-qttranslations weak-Recommends
+    finding: APEX's right-to-left layout does not depend on anything APEX declares, it depends on a Fedora
+    packaging choice to link qt6ct against KF6I18n, and if that build ever returns to upstream's, or a slimming
+    pass drops KF6, then every mirrored surface silently stops mirroring and nothing goes red. That is the second
+    time this exact silent-loss shape has been found under this row. GUARDED, and both guards were shown able to
+    fail: apex-shell 6c277ac gives run-rtl-test.sh the iff, a self-test proving that predicate can answer NO, and
+    the mechanism pinned past its carrier - 33 passed / 0 failed / 0 skipped here under env -i HOME PATH USER
+    TMPDIR, was 30/0/0 - with both new assertions proven able to fail by running the suite with a stubbed tool on
+    PATH (an ldd that prints nothing turns the iff red and correctly SKIPs the self-test; an ldconfig pointing
+    libKF6I18n at /lib64/libz.so.1 gives 32/1/0). apex-os 43ffce13 gives test-apex-platform-theme.sh link 4 in its
+    live section with the same can-it-answer-NO self-test - 20 passed / 0 failed / 0 skipped on this booted host,
+    was 18/0/0 - and mutate-platform-theme.sh re-runs unchanged at 13 applied, 10 CAUGHT / 0 SURVIVED / 0
+    MISSCORED, 3 HELD / 0 FALSE-RED. Section 1 was NOT touched and still must not be made to SKIP: it IS the
+    discriminator. WHAT IS NOW OPEN IS A DECISION, NOT AN INVESTIGATION - either leave arch-validate permanently
+    red on that step, or make the runner's configuration match what APEX actually ships by installing ki18n there
+    and preloading libKF6I18n for that step only, which the fourth measurement above already proves works. Still
+    open and unchanged on this item: 0 of 14 window roots carry LayoutMirroring or layoutDirection, so the shell's
+    own windows still do not mirror; IME/fcitx5 is in the image with no suite asserting any of it; the installer
+    has no locale picker and no gettext route; per-user language is absent; and the translated shell is still
+    blocked on the host, not on QML. The recovery flow row is no longer untouched in the accessibility sense - the
+    page was given markup and read back over AT-SPI this round, see P2-003 - but nothing about it was
+    internationalised and that row stays open.
 - id: P2-005
   title: Printing/scanning/network-share maturity
   priority: P2

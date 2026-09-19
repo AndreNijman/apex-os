@@ -96,6 +96,97 @@ Nothing. Round 32 is finished and pushed in both repos, and both worktrees
 
 ## DONE
 
+Round 32 (2026-09-19). **The RTL runner red is decided, both halves, and the
+decision found that standing-queue item 7 is not the change the ledger says.**
+
+apex-shell `task/p2-b-round32`, two commits on `roadmap/v2.2`'s `a8cd491`,
+both pushed:
+
+* `9df5d92` — the RTL decision. Two things, deliberately not one, because
+  "the runner was missing a library" and "APEX's mechanism works" are
+  different claims.
+
+  **(1) The precondition is measured before anything is concluded from it.**
+  The plugin block moves ABOVE the three rows it explains; `ldd` — not a
+  distribution name, not a version string — says whether this machine's qt6ct
+  plugin carries a Qt translation loader; and when it measurably does not,
+  those three rows report a **named could-not-run carrying the reason**.
+  `CANTRUN` is a fourth outcome with its own counter in the totals line,
+  because this suite had been printing absence ("not a booted APEX host") and
+  could-not-run ("the probe printed no APEXDIR line") as the same word — the
+  collapse this program keeps meeting. The gate has two hard limits and both
+  are load-bearing: it is switched off ENTIRELY on a booted APEX host, and it
+  cannot engage on a machine where the direction flipped anyway, so an excuse
+  whose own reason has stopped being true goes red instead of quiet. The
+  predicate is now THREE-valued — a failed `ldd` used to land in the same arm
+  as an ELF that links no KF6I18n, which is the "permission denied is not
+  absence" defect the moment three assertions are gated on the answer — and
+  `err` excuses nothing. The suite proves that third value fires by asking the
+  predicate about a file that is not an ELF.
+
+  **(2) The runner is given what it was missing.** `ci.yml` installs `ki18n`,
+  on its OWN line and NOT under a `|| echo`, because a failed install would
+  silently take section 2's right-to-left half with it and still tick green.
+  The suite then takes a "preload" route it NAMES in every line it prints
+  (`[RTL/theme]` vs `[RTL/preload]`), guarded by a new control requiring that
+  the supplied library does NOT move the direction by itself.
+
+  **Which half produced what, measured rather than argued.** The container
+  numbers separate them exactly:
+
+  | | passed | failed | skipped | could-not-run |
+  |---|---|---|---|---|
+  | Arch, before this commit | 19 | **3** | 3 | – |
+  | Arch, gate only (no ki18n) | 20 | 0 | 1 | **6** |
+  | Arch, gate + ki18n | 32 | 0 | 1 | 3 |
+
+  The gate alone is green and measures **NOTHING** about APEX's mirroring on
+  that machine — that half is about the runner. The eleven-assertion
+  difference is section 2 running its whole right-to-left fixture pass there
+  for the first time: nine assertions about the SHIPPED `CfgRow` and
+  `CfgScroll` under a real right-to-left application direction, on a second
+  distribution and a second Qt minor. **It PASSED**, so no APEX defect was
+  hiding behind the red — which was the outcome worth having and the reason
+  the gate had to come first.
+
+* `ecc0e39` — standing-queue item 7, and it does not exist as written. FOUND
+  32. `LayoutMirroring` cannot attach to any of the 14 window roots, the
+  failure is SILENT, and section 3 counted the STRING — so the obvious edit
+  would have moved the count from 0 to 14, turned the pin green and mirrored
+  nothing. Section 3 now asks the engine what it does with a non-Item (Window
+  as the control, needing no quickshell so the Arch runner can run it) and
+  walks the prototype chain link by link out of Quickshell's own registry.
+
+**Final numbers, measured under `env -i HOME PATH USER TMPDIR`:**
+
+* `run-rtl-test.sh` on this laptop — **37 passed / 0 failed / 0 skipped /
+  0 could-not-run** (was 33/0/0). The gate provably cannot engage here at all,
+  because this is a booted APEX host.
+* `run-rtl-test.sh` in the Arch container — **32 / 0 / 1 / 4**.
+* `mutate-rtl.sh` — **15 applied / 15 CAUGHT / 0 SURVIVED / 0 MISSCORED**,
+  re-earned in full on the restructured suite rather than carried over. The
+  round-31 closure was void: R5, R8 and R9 mutate `run-rtl-test.sh` itself and
+  R4's expectation named a title that no longer exists. **R5 and R8 are still
+  CAUGHT**, which is the measurement proving the gate masks nothing here.
+  Two new mutants: R14 turns the attach probe's control into the same question
+  as its subject, R15 makes the chain walk find an ancestor where there is
+  none and the suite must say THE ROUTE HAS OPENED.
+
+**The gate is proved to fail in BOTH directions on BOTH machines**, with a
+stubbed `ldd` that lies in one direction only (kept in
+`scratch-p2-b/round32/stub-{hide,inject,err}/`):
+
+| control | result |
+|---|---|
+| laptop, ldd HIDES KF6I18n | 33/1/0/0 — gate off (booted APEX), iff RED "it flipped while it links none, something ELSE loads qt_*.qm" |
+| Arch, ldd INJECTS KF6I18n | 28/5/1/0 — gate off, three rows RED, iff RED "carrier present, catalogue not loaded", can-answer-NO control RED |
+| Arch, ldd exits 1 | 28/4/1/1 — `err` RED as a broken instrument, nothing excused |
+| Arch + `/run/ostree-booted` | 31/3/0/0 — the booted-APEX limit, three rows RED and ZERO could-not-runs |
+
+apex-os `task/p2-b-round32`: cut from `b0e34371`, pushed, **no commits**. That
+is a measured decision, not an omission — see FOUND 34. The branch exists
+because apex-shell's CI matches on branch name.
+
 Round 31 (2026-09-19). **The recovery screen is audited, both halves, and the
 audit found a product defect that had nothing to do with accessibility.**
 
@@ -919,6 +1010,102 @@ than this branch.
     against the raw file, not against the reader, which is the only reason the
     false alarm did not become a bug report.
 
+32. **Standing-queue item 7 cannot be closed the way the ledger describes, and
+    the obvious attempt is a SILENT no-op that the suite would have
+    certified.** "0 of 14 window roots carry `LayoutMirroring` or
+    `layoutDirection`" has read as a forgotten edit since round 23. It is not.
+    Read out of Quickshell's OWN type registry — the one the QML engine
+    resolves these names through, not the source and not a version number:
+
+        PanelWindow    -> PanelWindowInterface    -> WindowInterface
+                                                  -> Reloadable -> QObject
+        FloatingWindow -> FloatingWindowInterface -> WindowInterface
+                                                  -> Reloadable -> QObject
+
+    No `Item` and no `Window` anywhere in either chain. Qt's `LayoutMirroring`
+    attached property only works with Items and Windows — **and when it does
+    not, it does not fail.** Measured in the engine with a control: attached to
+    a `QtObject` the object is still CREATED, `errorString()` comes back
+    EMPTY, and the only trace is one `QWARN` on stderr; the identical
+    declaration on a `Window` reads back `enabled`. So the two lines that work
+    on `CfgRow` are, on all 14 roots, a declaration that does nothing and says
+    nothing.
+
+    **The worse half is what the suite would have done about it.** Section 3
+    measured this row by counting FILES CONTAINING THE STRING. The obvious
+    edit — the one a later round would certainly have made — would have moved
+    that count from 0 to 14, turned the assertion green and mirrored nothing:
+    the named remaining half of P2-004 signed off on a grep. Two rows now ask
+    what the count cannot: what the ENGINE does with a non-Item (needing no
+    quickshell, deliberately, so it is one of the few things about these types
+    the Arch runner CAN measure), and whether the shell's roots are such
+    types, walked **link by link** out of the registry. Link by link and never
+    with a substring test, because "Window" appears inside
+    `PanelWindowInterface` and `WindowInterface` themselves and
+    `case "$chain" in *Window*)` would answer YES on every chain including
+    this one — the row would have been a constant dressed as a measurement.
+    Mutants R14 and R15 prove both directions; R15 is the one that matters,
+    because it fires on the day Quickshell gives these types an Item or Window
+    ancestor, which is the day item 7 becomes a task instead of an
+    impossibility.
+
+    **The two routes that remain, and a warning about the cheaper one.** Wrap
+    each window's content in a mirroring `Item` (a 14-file structural change
+    nobody has costed), or upstream. If anybody takes the first, note that
+    `TopBar.qml`'s input mask is a set of `Region` entries with explicit `x:`,
+    bucketed in section 3 as "not an item's x at all" — mirroring does not
+    reach them, so mirrored paint over an unmirrored hit region is the defect
+    that change would ship.
+
+33. **FOUND 26's mechanism is NOT a Fedora fact and not a Qt 6.10.3 fact, and
+    that is what made the runner fixable.** Round 31 measured the KF6I18n
+    route on this laptop only, so "install `ki18n` on the runner" was a
+    proposal resting on an untested transfer. Measured 2026-09-19 in an
+    `archlinux:latest` container with `qt6ct 0.11-8` and `qt6-base 6.11.2`:
+    with `ki18n 6.30.0-1` installed and **no suite change at all**, the
+    existing preload pin went SKIP -> PASS —
+    `/usr/lib/libKF6I18n.so.6 preloaded gives RightToLeft where the same run
+    without it gives LeftToRight`. So the library installs the Qt catalogue on
+    a different distribution, a different KF6 minor and a different Qt minor.
+
+    That is the load-bearing measurement of round 32 and it was taken BEFORE
+    the suite was touched, deliberately: if it had come back LeftToRight the
+    whole "give the runner the library" half was dead and only the gate would
+    have been possible — which would have left the runner permanently excused
+    and measuring nothing about APEX's mirroring. **The order matters more
+    than the result.** The same container also reproduces the runner's
+    unchanged totals exactly (19/3/3, same three FAIL titles), which is what
+    makes it an instrument rather than an analogy.
+
+34. **`rpm -q --whatrequires <NAME>` does not match a package's PROVIDES, so
+    it answers "no package requires this" about packages that are hard
+    dependencies — and this unit nearly filed that as a finding.** Asked
+    whether `kf6-ki18n` is exposed the way `qt6-qttranslations` was (FOUND 2,
+    a weak `Recommends` that a slimming pass would have deleted along with
+    right-to-left support), `rpm -q --whatrequires kf6-ki18n` answers **"no
+    package requires kf6-ki18n"**. Read as written, that is FOUND 2 again one
+    layer deeper and the fix is a line in `Containerfile.core`.
+
+    It is false. `whatrequires` matches on NAME only; the dependency is on the
+    SONAME. `rpm -q --whatrequires 'libKF6I18n.so.6()(64bit)'` answers
+    **kf6-kcolorscheme, kf6-kiconthemes** (and ki18n itself), and `qt6ct`'s own
+    requires are `libKF6ColorScheme.so.6`, `libKF6ConfigCore.so.6` and
+    `libKF6IconThemes.so.6` — it never names KF6I18n directly. So the real
+    chain is `qt6ct -> kiconthemes/kcolorscheme -> ki18n`, a HARD transitive
+    rpm dependency that no slimming pass can drop while qt6ct is installed.
+    Naming `kf6-ki18n` in the Containerfile would have been theatre: a line
+    that looks like protection and protects against nothing.
+
+    **So there is no apex-os change to make this round, and that is why its
+    branch has no commits.** The real exposure remains what round 31 already
+    named — qt6ct's BUILD reverting to upstream's — and
+    `test-apex-platform-theme.sh` link 4 already guards exactly that on the
+    booted image, including the transitive case (its own note records that
+    `libKF6IconThemes.so.6`'s DT_NEEDED is what names `libKF6I18n.so.6`, so
+    ldd's closure is the right question). This is the same shape as the
+    memory note "a negative claim read off the wrong type", and it was caught
+    only because the second reading was taken before the first was believed.
+
 ## BLOCKED ON
 
 Nothing this unit can act on. FOUND 14 is closed and the read-back is written
@@ -988,30 +1175,41 @@ LD_PRELOAD and on a real machine a screen reader still gets one node.
 `test-installer-locale.sh` 26). timezone: DONE (installer). multiple layouts:
 greeter DONE; nothing in the shell switches layouts. IME/fcitx5: present in
 image, NO suite asserts any of it. CJK: MEASURED (`run-i18n-test.sh` §5). RTL:
-shared settings surface mirrors and is mutation-proved (`run-rtl-test.sh`
-30/0/0 here, `mutate-rtl.sh` 13/13 — **CLOSED on this laptop, do not re-run**);
-**0 of 14 window roots mirror** — the honest remaining half. Mechanism guarded
-from apex-os by `test-apex-platform-theme.sh`. **`run-rtl-test.sh` is red on the GitHub
-Arch runner and has been since it landed — now 19 passed / 3 failed / 3 skipped
-(was 17/3/2; round 31 added two passing assertions and one COULD-NOT-RUN, and
-the same three rows are still red).** Not any branch's doing — control run on
-`roadmap/v2.2` (35351740747), and red again on `roadmap/v2.2`-derived branches
-in 35352450127, 35353034100, 35382910849 and 35415236747. **THE CAUSE IS NO
-LONGER UNKNOWN: see FOUND 26.** It is `libKF6I18n.so.6`, which Fedora's qt6ct
-build links against and Arch's upstream `qt6ct 0.11-8` does not; that library
-is what loads `qt_ar.qm` and flips the layout direction. CONFIRMED FROM THE
-RUNNER in 35388802498 and again in 35415236747, where the iff PASSED in the
-opposite branch to the one it passes in here and said so in words. **Both
-candidates this row used to list are ELIMINATED BY MEASUREMENT**, not by
-argument: the conf, because the ar_EG run with `XDG_CONFIG_DIRS` and
-`XDG_CONFIG_HOME` both pointed at an empty directory still gives RightToLeft;
-and the Qt version, because it is no longer needed as an explanation and the
-runner has 64 `qt_*.qm` including `qt_ar.qm`. So the runner's three reds are
-TRUTHFUL ABOUT THAT MACHINE. What is open is a DECISION — leave it red, or make
-the runner match what APEX ships (install `ki18n`, preload it for that step
-only, a route already measured to work) — and it is written up as NEXT item 1.
-**Do not close it by making section 1 SKIP** — that section IS the
-discriminator. locale: deliberately NOT
+shared settings surface mirrors and is mutation-proved — **round 32 numbers,
+`run-rtl-test.sh` 37 passed / 0 failed / 0 skipped / 0 could-not-run here and
+`mutate-rtl.sh` 15 applied / 15 CAUGHT / 0 SURVIVED / 0 MISSCORED, CLOSED on
+this laptop, do not re-run** (the round-31 closure at 13/13 was VOID: three
+mutants target the suite itself and R4 named a title that no longer exists).
+**AND IT IS NOW PROVED ON A SECOND MACHINE** — with `ki18n` installed on the
+Arch CI job the suite takes its "preload" route and section 2 runs its whole
+right-to-left fixture pass there: nine assertions about the shipped `CfgRow`
+and `CfgScroll` under a real right-to-left application direction, on a second
+distribution and a second Qt minor, all passing. **0 of 14 window roots mirror,
+and that is no longer "the honest remaining half" — it is IMPOSSIBLE as
+written**: none of those types derives from `Item` or `Window` and Qt's
+`LayoutMirroring` fails on them SILENTLY, so the obvious edit is a no-op that
+the old string-counting pin would have certified (FOUND 32). Mechanism guarded
+from apex-os by `test-apex-platform-theme.sh`, and no apex-os change is
+outstanding — FOUND 34 says why the one that looked obvious is theatre. **`run-rtl-test.sh` WAS red on the GitHub Arch runner on exactly three
+assertions from the day it landed until round 32 (19 passed / 3 failed /
+3 skipped), and it is now 32 passed / 0 failed / 1 skipped / 3 could-not-run
+there.** The cause was never any branch's doing — control run on
+`roadmap/v2.2` (35351740747), red again in 35352450127, 35353034100,
+35382910849 and 35415236747 — and it is FOUND 26: Arch's upstream
+`qt6ct 0.11-8` links no `libKF6I18n`, the library that loads `qt_ar.qm` and
+flips the direction, confirmed from the runner itself in 35388802498 and
+35415236747. **Round 32 closed it with BOTH halves of the decision, and the
+two must not be collapsed into one sentence.** The GATE turned the three reds
+into named could-not-runs carrying the measured reason — that half is about
+the RUNNER, it is green, and on its own it measures NOTHING about APEX (20
+passed / 0 failed / 1 skipped / **6 could-not-run**). Installing `ki18n` there
+is what made the runner exercise the mechanism instead of being permanently
+excused, and that half is about APEX: eleven more assertions, nine of them the
+shipped row under a real right-to-left direction, all passing. Section 1 is NOT
+a SKIP and must never become one — that section IS the discriminator. The gate
+is off entirely on a booted APEX host and cannot engage where the direction
+flipped anyway, and it is proved to fail in both directions on both machines
+with a stubbed `ldd`.
 offered — image ships `glibc-langpack-en` only. translated shell: pipeline
 proven on two machines, blocker is the host (FOUND 3). translated installer: not
 present, route is gettext. per-user language: not present. recovery flow:
@@ -1027,16 +1225,15 @@ untouched.
 5. the ~200 prose strings in `AgentHelpContent.qml`, PARKED until 4 (and
    `check-agent-help.sh` greps the exact shape `{ k: "kv", t: "$m"`, so it must
    move with them);
-6. ~~**`run-rtl-test.sh` section 1 is RED on the GitHub Arch runner and the
-   cause is unknown**~~ **CAUSE IDENTIFIED round 31 (FOUND 26) and confirmed
-   from the runner itself: Arch's upstream qt6ct 0.11-8 links no libKF6I18n,
-   which is the library that loads the Qt catalogue and flips the direction.
-   The step is 19/3/3 there and the three reds are truthful about that machine.
-   What remains is a DECISION, not an investigation — see NEXT item 1. Still
-   older than any current branch, and still must NOT be closed by making
-   section 1 SKIP;**
-7. **RTL layout gap: 0 `LayoutMirroring` / 0 `layoutDirection` among the 14
-   window roots**;
+6. ~~**`run-rtl-test.sh` section 1 is RED on the GitHub Arch runner**~~
+   **DECIDED AND CLOSED round 32, both halves. The step is 32 passed / 0 failed
+   / 1 skipped / 3 could-not-run there. Section 1 is still NOT a SKIP;**
+7. ~~**RTL layout gap: 0 `LayoutMirroring` / 0 `layoutDirection` among the 14
+   window roots**~~ **CLOSED AS WRITTEN round 32 — not a forgotten edit but
+   IMPOSSIBLE on these types, and the obvious attempt is a silent no-op
+   (FOUND 32). The suite now goes red the day the route opens. What is left is
+   either a 14-file wrap-in-a-mirroring-Item change nobody has costed, or
+   upstream — and the input-mask warning in NEXT item 3 applies to the first;**
 8. ~~the RECOVERY screen, the last unaudited a11y surface named in the P2-003
    row~~ **DONE round 31, source-level and over the bus. It also turned up
    FOUND 28, a product defect that made the factory reset uncompletable by
