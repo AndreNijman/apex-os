@@ -91,7 +91,10 @@ impl From<std::io::Error> for ServeError {
 
 /// Handle one accepted TCP connection.
 pub fn connection(mut socket: TcpStream, state: Arc<State>, agentd: std::path::PathBuf) {
-    let peer = socket.peer_addr().ok();
+    // Flattened here, at the boundary, and nowhere else. The listener is
+    // dual-stack, so every IPv4 peer arrives as `::ffff:a.b.c.d`; see
+    // `state::canonical`.
+    let peer = crate::state::canonical(socket.peer_addr().ok());
     let mut hello = [0u8; 1];
     if socket.read_exact(&mut hello).is_err() {
         return;
@@ -223,7 +226,7 @@ fn session(
     // is nothing to read it from, and `unregister` would then match nothing.
     // It is also what says which path this session arrived on, so it is read
     // before the store is told.
-    let peer = socket.peer_addr().ok();
+    let peer = crate::state::canonical(socket.peer_addr().ok());
     let path = state.path_of(peer);
     let now = apex_remote_core::now_ms();
     {
