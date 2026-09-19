@@ -82,6 +82,87 @@ configured repository — so a gate built on it would have been dead code on eve
 machine APEX ships to. The verification above is done with `skopeo` and
 `openssl`, both of which are already in the image.
 
+## What the SBOM attestation actually contains
+
+The provenance half of the gate checks an SBOM that CI attaches to the image as
+a signed attestation. It is worth being precise about what that document covers,
+because "SBOM" is used for two quite different artefacts and APEX publishes the
+smaller one.
+
+**Tense, because the rest of this page is careful about it:** this section
+describes what the build produces *when the SBOM step runs*. No image published
+on `main` carries one yet — which is why `provenance` defaults to `warn` further
+down, and why `apex trust` says "none published" today. The two statements are
+not in conflict: one is about the pipeline, the other about what has actually
+shipped.
+
+**What is in it.** Every package syft finds in the image — 9,830 of them — with
+its name, version, purl and CPEs. That includes the RPM set, the npm trees inside
+the Claude and ChatGPT desktop apps, and the Go and Rust modules inside the
+binaries. It is an SPDX document, attested with `--type spdxjson`, signed by the
+same keyless GitHub identity as the image itself, and **published to the public
+Sigstore transparency log**. The build fails if no log entry is created, so that
+last claim cannot quietly stop being true.
+
+The CPEs matter more than they look: they are the key a vulnerability scanner
+matches a CVE advisory against. They are also 27% of the document, and they were
+kept rather than traded for headroom, because an SBOM that fits by matching
+worse is a smaller answer to the wrong question.
+
+**What is not in it: the file inventory, or the relationship graph.** Say it
+plainly — what is published is a **flat list of packages**. syft's full output
+also lists every file in the image with its digests, an edge from each file to
+the package that owns it, and a 16,463-edge `DEPENDENCY_OF` graph saying which
+package pulled in which. None of that is in the attestation.
+
+So this document answers *"which packages, at which versions, is this image
+built from"* — the question a CVE advisory makes you ask — and does **not**
+answer *"which files does this image contain, with what digests"* or *"why is
+this package here"*.
+
+**Why, since it is a real reduction.** `rekor.sigstore.dev` refuses any request
+body of 24 MiB or more outright, at its fronting proxy, before reading a byte.
+Measured 2026-09-20 across sixteen ascending POSTs: 25,000,092 bytes is accepted
+and processed; 25,165,916 bytes comes back HTTP 502 in 0.43 seconds having
+uploaded nothing. `cosign attest` base64-encodes the predicate into a DSSE
+envelope, so the ceiling on the document itself is about 18.8 MB.
+
+syft's full output for this image is 166 MB. The complete package inventory with
+its files and graph is 28.3 MB — still well over. Dropping the files and the
+graph brings it to 14.1 MB, about 74% of the ceiling, and that is what is
+published. It is not generous headroom, and it is package-count driven: the
+Electron bundles are the volatile part.
+
+So the choice was between a fuller SBOM that is signed but **not** in any public
+log, and the package inventory that is. APEX takes the second, because a
+transparency log that only covers the artefacts small enough to fit is not much
+of a guarantee, and because the dropped parts are *structure* — reproducible by
+anyone from the same bytes, where identity is not. If you want the full
+document, the image is public and its digest is in the signature:
+
+```bash
+syft "registry:ghcr.io/andrenijman/apex-os@sha256:..." -o spdx-json
+```
+
+That reproduces the full file-level document, with the dependency graph, from
+the same bytes CI catalogued. It needs roughly 16 GB of memory and about fifteen
+minutes.
+
+**Reading the attestation yourself:**
+
+```bash
+cosign verify-attestation \
+  ghcr.io/andrenijman/apex-os@sha256:... \
+  --type spdxjson \
+  --certificate-identity-regexp '^https://github\.com/AndreNijman/apex-os/\.github/workflows/build-image\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  | jq -r '.payload | @base64d | fromjson | .predicate.packages[] | "\(.name) \(.versionInfo)"'
+```
+
+Your machine does less than this, and says so — see the transparency-log note
+above. `cosign` is not installed on an APEX system and is not packaged for
+Fedora; the command above is for a workstation that has it.
+
 ## What is enforced, and how to change it
 
 Two checks, each set to `enforce`, `warn` or `off`:
