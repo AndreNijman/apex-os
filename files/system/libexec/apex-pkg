@@ -91,12 +91,32 @@ readonly WORK_ROOT="${PKG_ROOT}/work"
 readonly LOCK="${PKG_ROOT}/.lock"
 # Increment whenever a newly baked image package may overlap existing user
 # extensions, or whenever the on-disk layout under PKG_ROOT changes. A mismatch
-# triggers one rebuild even within the same VERSION_ID.
+# triggers one rebuild even within the same VERSION_ID — which is the whole
+# point, because VERSION_ID is `43` before and after an APEX image build and
+# nothing else in an extension's state notices that the image moved.
+#
+# BOTH guards read this, and until 2026-09-19 only one of them did:
+# cmd_rebuild --if-needed compares it before downloading anything, and
+# ext_up_to_date compares it again after the download, on the path every
+# install, remove, upgrade and rebuild funnels through. A bump is only as good
+# as the second one; see the comment on ext_up_to_date for what a bump without
+# it does.
 #   1 -> 2: added ${PKG_ROOT}/local (cached local .rpm files) and the
 #           `local:<NAME>` requested-list form. A level-1 state.json has neither,
 #           so its requested list rebuilds unchanged; the only effect is one
 #           extra rebuild on the first boot after the update.
-readonly PKG_COMPAT_LEVEL=2
+#   2 -> 3: pkg-share (merge 5de97037) changed what the 32-bit pass carries: a
+#           path now arrives only when neither the running image nor this
+#           transaction's own native pass already provides it. Every extension
+#           built before it therefore holds files the image owns. Measured on
+#           katana on 2026-09-19 against one built at level 2: 177 image paths
+#           shadowed, 14 of them a 32-bit binary over a 64-bit one, and zero
+#           i686 Vulkan ICDs where the fixed engine produces 13 — including
+#           nvidia_icd.i686.json, which a live recovery had to hand-write in
+#           September. Nothing else in that state.json moves across the image
+#           build that carries the fix, so this number is what makes the
+#           machine rebuild.
+readonly PKG_COMPAT_LEVEL=3
 
 # Packages that must never come from an extension. The first group needs an
 # initramfs/deployment; the second is the running userspace ABI floor — shadowing
@@ -1208,6 +1228,49 @@ write_state() {
     mv -f "${STATE}.tmp" "$STATE"
 }
 
+# Is the extension on disk already exactly what this transaction would build?
+# $1 = the state file to judge, $2 = the resolved NEVRA set this run produced,
+# already sorted. Returns 0 only when every one of five things agrees, and a
+# caller that gets 0 skips the whole build.
+#
+# The state path is a PARAMETER rather than $STATE so this decision can be run
+# against a file in a temp directory — tests/test-apex-pkg-update.sh holds the
+# resolved set constant and varies one field at a time, which is the only way to
+# tell a rebuild caused by the compat level from one caused by a package update.
+#
+# THE COMPAT-LEVEL CLAUSE IS LOAD-BEARING, and its absence was a shipped defect
+# (ROADMAP/evidence/katana-image-qual-20260919.md §0.2 and §1.2). `os_version`
+# is VERSION_ID out of /usr/lib/os-release, which is `43` before and after an
+# APEX image build, and the resolved set comes from Fedora's repositories, which
+# have nothing to do with what APEX baked. So when an image update changes what
+# the IMAGE provides — which is exactly what the extension's contents are
+# computed against, since extract_rpms carries a 32-bit path only when the
+# running image does not already own it — neither of the other two signals
+# moves, and PKG_COMPAT_LEVEL is the only thing left that can say so.
+#
+# Measured on katana on 2026-09-19: an existing machine took the image that
+# carried the pkg-share fix, apex-sysext-rebuild.service started and finished in
+# the same second reporting success, and re-merged a byte-identical extension
+# with 177 image paths shadowed and zero i686 Vulkan ICDs. Bumping the level
+# WITHOUT this clause is worse than doing nothing: `cmd_rebuild --if-needed`
+# checks the level, so it would announce a rebuild, re-download every rpm, stop
+# here on the unchanged set, and then write_state would stamp the new level into
+# state.json — consuming the marker without building anything, so the next boot
+# sees a match and no-ops for ever.
+ext_up_to_date() {
+    local state=$1 new_set=$2
+    [ -f "$state" ] || return 1
+    merged || return 1
+    [ -n "$(current_payload)" ] || return 1
+    [ "$(jq -r '.os_version_id // empty' "$state")" = "$(os_version)" ] || return 1
+    # `// 0` on purpose: a state.json written before the field existed must read
+    # as "older than anything this engine ships" and rebuild, not as a match.
+    [ "$(jq -r '.pkg_compat_level // 0' "$state")" = "$PKG_COMPAT_LEVEL" ] || return 1
+    local old_set
+    old_set="$(jq -r '.resolved[]?' "$state" | sort)"
+    [ "$new_set" = "$old_set" ]
+}
+
 # Build the one extension from the requested list. Every mutation funnels here,
 # so install, remove, upgrade and rebuild can never drift apart.
 # Takes the desired package set as arguments. The on-disk requested list is
@@ -1300,20 +1363,16 @@ rebuild_extension() {
     # `apex update` calls this on every run. Rebuilding an identical extension
     # would burn minutes and, worse, re-merge /usr underneath a running desktop
     # for no reason — so an unchanged package set stops here.
-    local new_set old_set
+    local new_set
     new_set="$(for f in "$rpms"/*.rpm; do
                    rpm -qp --nosignature --qf '%{NAME}-%{EVR}.%{ARCH}\n' "$f" 2>/dev/null
                done | sort)"
-    if [ -f "$STATE" ] && merged && [ -n "$(current_payload)" ] \
-       && [ "$(jq -r '.os_version_id // empty' "$STATE")" = "$(os_version)" ]; then
-        old_set="$(jq -r '.resolved[]?' "$STATE" | sort)"
-        if [ "$new_set" = "$old_set" ]; then
-            msg "already up to date"
-            save_requested "${want[@]}"
-            gc_local_cache
-            write_state "$rpms"
-            return 0
-        fi
+    if ext_up_to_date "$STATE" "$new_set"; then
+        msg "already up to date"
+        save_requested "${want[@]}"
+        gc_local_cache
+        write_state "$rpms"
+        return 0
     fi
 
     extract_rpms "$rpms" "$root"
