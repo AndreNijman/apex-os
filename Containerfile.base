@@ -61,6 +61,63 @@ RUN set -eux; cd /build/apexd; cargo build --release --locked; \
     install -Dm755 target/release/apex-secretd /out/usr/bin/apex-secretd; \
     install -Dm755 target/release/apex-aid    /out/usr/bin/apex-aid
 
+
+# ═══ Apex.I18n catalogue builder ═════════════════════════════════════════
+# Compiles apex-shell's translations/*.ts into the .qm files QTranslator can
+# actually load. This is a DISCARDED stage and that is the entire point.
+#
+# lrelease is not in the image (qt6-linguist: 1 MiB download, 4 MiB installed,
+# 3 packages — a sixth of the orca line in docs/update-cost.md). The package is
+# cheap; a `dnf` in the base tier is not. Measured with podman history on this
+# core image: install qt6-linguist, use lrelease, remove it, `dnf5 clean all`,
+# all in ONE layer and net of zero shipped files, leaves a **113 MB** layer —
+# the rewritten sqlite rpmdb docs/update-cost.md is about. Every machine, every
+# update, for ever, to run one command once at build time. Here the whole stage
+# is thrown away and only the .qm files are copied out.
+#
+# The other route considered and NOT taken: put qt6-linguist in
+# Containerfile.core. It is 4 MiB and it would also give a booted machine
+# lupdate/lrelease, which is what run-i18n-test.sh sections 2 and 3 need. It is
+# rejected here because touching Containerfile.core triggers a core rebuild, and
+# that is a multi-gigabyte update for every machine — a trade an agent should
+# not make on its own. If anybody ever wants it, this stage is what it replaces.
+#
+# It clones apex-shell a SECOND time rather than restructuring the vendoring
+# stanza into its own stage, deliberately: that stanza is the most load-bearing
+# thing in this file and a `--depth 1` clone is two seconds. The two clones are
+# then PROVED to agree — not assumed to — by carrying each .ts's sha256 out of
+# this stage and comparing it against the vendored copy below. If the ref moved
+# between the two clones, the build fails loudly instead of shipping a catalogue
+# compiled from a source nobody shipped.
+FROM ${CORE} AS apex-i18n-catalogue
+ARG APEX_SHELL_REF=main
+RUN set -eux; \
+    dnf5 -y install qt6-linguist; \
+    rm -rf /b; \
+    if git clone --depth 1 --branch "${APEX_SHELL_REF}" \
+         https://github.com/AndreNijman/apex-shell /b 2>/dev/null; then \
+        echo "catalogue: cloned apex-shell at ${APEX_SHELL_REF}"; \
+    else \
+        rm -rf /b; \
+        git clone https://github.com/AndreNijman/apex-shell /b; \
+        git -C /b checkout --detach "${APEX_SHELL_REF}"; \
+    fi; \
+    mkdir -p /out; \
+    n=0; \
+    for ts in /b/translations/*.ts; do \
+        [ -e "$ts" ] || continue; \
+        b="$(basename "$ts" .ts)"; \
+        lrelease-qt6 -silent "$ts" -qm "/out/$b.qm"; \
+        # lrelease exits 0 having written nothing for an unreadable .ts, so the
+        # file is required to be non-empty rather than merely present.
+        test -s "/out/$b.qm"; \
+        sha256sum "$ts" | cut -d' ' -f1 > "/out/$b.ts.sha256"; \
+        n=$((n + 1)); \
+    done; \
+    printf '%s\n' "$n" > /out/COUNT; \
+    rm -rf /b; \
+    echo "catalogue: compiled $n catalogue(s) from apex-shell ${APEX_SHELL_REF}"
+
 # ─────────────────────────────────────────────────────────────────────────
 FROM ${CORE}
 
@@ -882,6 +939,64 @@ RUN set -eux; \
     # reading a file the build has not copied yet: an assertion that could never
     # have passed, which is the exact class that gate was built for.
     echo "Apex.I18n stage complete"
+
+# ── Stage 5b2b: the catalogue the module loads ──────────────────────────────
+# The module built above is a route, not a translation. QTranslator::load()
+# finding nothing is a successful, silent no-op, so a shell with the plugin and
+# no .qm renders exactly like a shell with neither — which is the shape of
+# defect this repository keeps meeting. The .qm files come out of the discarded
+# apex-i18n-catalogue stage; nothing that built them is in this image.
+COPY --from=apex-i18n-catalogue /out/ /tmp/apex-i18n-cat/
+RUN set -eux; \
+    D=/usr/share/apex-shell/translations; \
+    n="$(cat /tmp/apex-i18n-cat/COUNT)"; \
+    if [ "$n" = 0 ]; then \
+        echo "apex-shell ref ${APEX_SHELL_REF} carries no translations/*.ts; no catalogue to ship"; \
+    else \
+        test -d "$D"; \
+        for sf in /tmp/apex-i18n-cat/*.ts.sha256; do \
+            b="$(basename "$sf" .ts.sha256)"; \
+            # THE TWO CLONES MUST AGREE. The catalogue stage cloned apex-shell
+            # separately, so this is the assertion that the .qm shipped here was
+            # compiled from the .ts shipped here and not from a ref that moved
+            # underneath the build.
+            want="$(cat "$sf")"; \
+            got="$(sha256sum "$D/$b.ts" | cut -d" " -f1)"; \
+            if [ "$want" != "$got" ]; then \
+                echo "FATAL: $b.qm was compiled from a different $b.ts than the one vendored."; \
+                echo "       catalogue stage saw $want, this tree has $got — the apex-shell"; \
+                echo "       ref ${APEX_SHELL_REF} moved between the two clones. Re-run the build,"; \
+                echo "       or pass APEX_SHELL_REF as a commit SHA to make it reproducible."; \
+                exit 1; \
+            fi; \
+            install -m0644 "/tmp/apex-i18n-cat/$b.qm" "$D/$b.qm"; \
+        done; \
+        # THE CATALOGUE IS PROVED TO LOAD, per language, in a real QML engine
+        # with the module on the import path — not stat-ed. A .qm that lrelease
+        # wrote and QTranslator declines is indistinguishable from no .qm at all
+        # in everything except this line.
+        mkdir -p /tmp/apex-i18n-probe /tmp/apex-i18n-xdg; \
+        chmod 700 /tmp/apex-i18n-xdg; \
+        printf '%s\n' 'import QtQml' 'import Apex.I18n' \
+            'QtObject { Component.onCompleted: Qt.exit(0) }' \
+            > /tmp/apex-i18n-probe/probe.qml; \
+        for qm in "$D"/apex-shell_*.qm; do \
+            lang="$(basename "$qm" .qm)"; lang="${lang#apex-shell_}"; \
+            LANG="${lang}.UTF-8" LC_ALL="${lang}.UTF-8" \
+            QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 \
+            XDG_RUNTIME_DIR=/tmp/apex-i18n-xdg \
+            QML_IMPORT_PATH=/usr/lib64/apex-shell/qml \
+            timeout 120 /usr/lib64/qt6/bin/qml -platform offscreen \
+                /tmp/apex-i18n-probe/probe.qml > /tmp/apex-i18n-probe/out 2>&1; \
+            if ! grep -q "APEXI18N: installed .*apex-shell_${lang}.qm" /tmp/apex-i18n-probe/out; then \
+                echo "FATAL: the shipped apex-shell_${lang}.qm is not loaded by the module under LANG=${lang}:"; \
+                sed 's/^/       /' /tmp/apex-i18n-probe/out; exit 1; \
+            fi; \
+            echo "catalogue: apex-shell_${lang}.qm loads under LANG=${lang}"; \
+        done; \
+        rm -rf /tmp/apex-i18n-probe /tmp/apex-i18n-xdg; \
+    fi; \
+    rm -rf /tmp/apex-i18n-cat
 
 # ── Stage 5b3: the two paths that assumed a WRITABLE shell tree ─────────────
 # /usr is a read-only ostree/composefs mount, so anything the shell writes inside
