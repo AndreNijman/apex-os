@@ -1476,10 +1476,12 @@ jobs:
       # GOMEMLIMIT is not a lever either: 4, 6 and 10 GiB all peak at
       # 14.65-14.80 GiB, so the overshoot is not heap the limit can reach.
       #
-      # THE LEVER THAT PARAGRAPH POINTED AT HAS NOW BEEN PULLED — see the
-      # block below. `SYFT_FILE_METADATA_SELECTION=none` cuts the per-file
-      # inventory at source, which was both the predicate's bulk and the
-      # filetree/MIME pass that drives the RSS.
+      # THE LEVER THAT PARAGRAPH POINTED AT HAS NOW BEEN PULLED, and it took
+      # three attempts to find which lever it actually was — see the blocks
+      # below. It is NOT `SYFT_FILE_METADATA_SELECTION=none`, which drops file
+      # digests and 13%. It is `SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP=false`
+      # for the bulk of the file rows, and then a `jq` trim for the rest. And
+      # none of it touches the RSS, which is measured and stated below.
       #
       # Restricting the *cataloguers* is still refused, and that is a
       # different thing from dropping the file inventory: the two Electron
@@ -1576,7 +1578,8 @@ jobs:
       #
       # The cost, stated rather than buried: this SBOM answers "which
       # packages, at which versions, are in this image" — the CVE question —
-      # and NOT "which files does this image contain, with what digests".
+      # and NOT "which files does this image contain, with what digests", nor
+      # "why is this package here". It is a flat list of packages.
       # Anyone who needs the second can run syft against the published
       # digest themselves; the image is public and the digest is in the
       # signature. docs/trust-enforcement.md says so in those words.
