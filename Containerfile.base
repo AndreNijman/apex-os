@@ -754,6 +754,135 @@ RUN set -eux; \
     echo "vendored apex-shell ${SHA}"
 LABEL org.apexos.apex-shell.ref="${APEX_SHELL_REF}"
 
+# ── Stage 5b2a: the Apex.I18n QML module — the shell's translations ─────────
+# APEX Shell marks 186 strings with qsTr(). qsTr() walks the list of installed
+# QTranslators, and quickshell constructs a bare QQmlEngine and installs none,
+# so every one of those strings comes back in English however good the
+# catalogue is. That was read for thirty roadmap rounds as a change somebody
+# else had to accept upstream. It is not: a bare QQmlEngine still loads QML
+# modules off QML_IMPORT_PATH, a QML module may carry a compiled plugin, and a
+# plugin runs C++ inside the shell's own process before a single binding is
+# evaluated. apex-shell's tests/run-i18n-host-test.sh measures the whole route
+# inside the real /usr/bin/quickshell.
+#
+# ── WHAT THIS COSTS, because that question gated the work ──────────────────
+# Nothing. Measured in this exact core image rather than reasoned about:
+# g++, pkg-config and qmake6 are on PATH, moc is at the path
+# `qmake6 -query QT_HOST_LIBEXECS` reports, and qt6-qtbase-devel and
+# qt6-qtdeclarative-devel are both installed here — the `dnf5 -y remove
+# 'qt6-*-devel'` in Containerfile.core does not survive the dev toolchain
+# stanza 600 lines later. So this adds NO package to any tier. The layer is
+# ~37 kB: a 29,776-byte .so and a qmldir.
+#
+# There is deliberately no `dnf` here, and that is the expensive part of the
+# decision rather than a tidiness preference. Measured with podman history on
+# this image: `dnf5 install qt6-linguist` + use it + `dnf5 remove` +
+# `dnf5 clean all`, all in ONE layer and net of zero shipped files, leaves a
+# **113 MB** layer — the rewritten sqlite rpmdb docs/update-cost.md describes.
+# That is 3,000x this artefact, on every machine, on every update, for ever.
+# Which is why the .qm catalogue is NOT compiled here: lrelease is not in the
+# image, and getting it through a base-tier dnf would cost more than everything
+# this stanza ships. It belongs in a discarded builder stage. Until it exists,
+# QTranslator::load() finds no catalogue and says so through qInfo() — which on
+# Fedora goes to the journal, so: journalctl --user -b | grep APEXI18N.
+#
+# ── THE SOURCE IS THE SUITE'S SOURCE, one file, no copy ────────────────────
+# tests/apex-i18n-plugin.cpp inside the vendored tree is compiled here as it
+# stands. A path under tests/ is a strange place to build a shipped artefact
+# from, and the alternative is worse: a second copy in this repository that
+# drifts from the one apex-shell's suite builds and measures, silently, with
+# nothing comparing them. One file, proved by that suite on two distributions,
+# is the honest arrangement.
+#
+# ── THE MERGE ORDER, ASSERTED HERE ─────────────────────────────────────────
+# Both halves live in apex-shell and both are checked, in both directions. A
+# ref that predates the module is rebuilt cleanly — the module is skipped and
+# so is the shell's import of it. A ref that imports a module whose source it
+# does not carry is a broken shell tree and fails the build loudly, because
+# that combination ships a desktop that can never be translated and says
+# nothing about why.
+RUN set -eux; \
+    S=/usr/share/apex-shell; \
+    PLUG="$S/tests/apex-i18n-plugin.cpp"; \
+    QMLD="$S/tests/apex-i18n-qmldir"; \
+    BOOT="$S/src/i18n/I18nBootstrap.qml"; \
+    if [ ! -f "$PLUG" ] || [ ! -f "$QMLD" ]; then \
+        if [ -f "$BOOT" ]; then \
+            echo "FATAL: apex-shell ref ${APEX_SHELL_REF} loads src/i18n/I18nBootstrap.qml"; \
+            echo "       but carries no tests/apex-i18n-plugin.cpp to build Apex.I18n from."; \
+            echo "       That ships a shell that imports a module nothing can provide."; \
+            exit 1; \
+        fi; \
+        echo "apex-shell ref ${APEX_SHELL_REF} predates the Apex.I18n module; skipping it"; \
+    else \
+        MOC="$(qmake6 -query QT_HOST_LIBEXECS)/moc"; \
+        test -x "$MOC"; \
+        D=/usr/lib64/apex-shell/qml/Apex/I18n; \
+        mkdir -p "$D" /tmp/apex-i18n-build; \
+        "$MOC" $(pkg-config --cflags-only-I Qt6Qml Qt6Core) "$PLUG" \
+            -o /tmp/apex-i18n-build/apex-i18n-plugin.moc; \
+        g++ -std=c++17 -fPIC -shared -O2 -Wl,-z,relro,-z,now \
+            -o "$D/libapexi18n.so" "$PLUG" \
+            -I/tmp/apex-i18n-build \
+            $(pkg-config --cflags Qt6Qml Qt6Core) \
+            $(pkg-config --libs Qt6Qml Qt6Core); \
+        install -m0644 "$QMLD" "$D/qmldir"; \
+        rm -rf /tmp/apex-i18n-build; \
+        # An unresolved DT_NEEDED is a module that dlopens into nothing, and the
+        # engine reports that as "module is not installed" — the same words as a
+        # missing directory.
+        if ldd "$D/libapexi18n.so" | grep 'not found'; then \
+            echo "FATAL: libapexi18n.so has unresolved shared libraries (above)"; exit 1; \
+        fi; \
+        # THE LOAD PROOF, and it is not a file test. FOUND 35: a QML plugin can
+        # be dlopened, have its qmldir read, and register NOTHING — everything
+        # looks loaded and the import still fails. The only honest check is to
+        # resolve the import in a real QML engine, so this does.
+        #
+        # `qml` and not `quickshell`, measured rather than assumed: the real
+        # quickshell loads this module correctly and then does not exit, so it
+        # returns 124 under any timeout and the assertion could never pass. It
+        # is the trap check-containerfile-assertions.sh exists for.
+        mkdir -p /tmp/apex-i18n-probe /tmp/apex-i18n-xdg; \
+        chmod 700 /tmp/apex-i18n-xdg; \
+        printf '%s\n' 'import QtQml' 'import Apex.I18n' \
+            'QtObject { Component.onCompleted: Qt.exit(0) }' \
+            > /tmp/apex-i18n-probe/probe.qml; \
+        if ! QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 \
+             XDG_RUNTIME_DIR=/tmp/apex-i18n-xdg \
+             QML_IMPORT_PATH=/usr/lib64/apex-shell/qml \
+             timeout 120 /usr/lib64/qt6/bin/qml -platform offscreen \
+                /tmp/apex-i18n-probe/probe.qml > /tmp/apex-i18n-probe/out 2>&1; then \
+            echo "FATAL: a QML engine could not import Apex.I18n from the installed module:"; \
+            sed 's/^/       /' /tmp/apex-i18n-probe/out; exit 1; \
+        fi; \
+        # The import resolving is not the same claim as the plugin having run.
+        # This is the line the plugin itself prints from registerTypes().
+        if ! grep -q 'APEXI18N: registerTypes uri=Apex.I18n' /tmp/apex-i18n-probe/out; then \
+            echo "FATAL: Apex.I18n imported without its plugin registering anything:"; \
+            sed 's/^/       /' /tmp/apex-i18n-probe/out; exit 1; \
+        fi; \
+        rm -rf /tmp/apex-i18n-probe /tmp/apex-i18n-xdg; \
+        # The shell half. A module nothing imports translates nothing, and it
+        # would be invisible: the image would be correct and the desktop still
+        # English.
+        if [ ! -f "$BOOT" ]; then \
+            echo "FATAL: apex-shell ref ${APEX_SHELL_REF} carries the Apex.I18n"; \
+            echo "       plugin source but no src/i18n/I18nBootstrap.qml, so nothing"; \
+            echo "       in the shell imports the module and no string is translated."; \
+            exit 1; \
+        fi; \
+        grep -q '^import Apex.I18n' "$BOOT"; \
+        grep -q 'src/i18n/I18nBootstrap.qml' "$S/shell.qml"; \
+        echo "Apex.I18n built and proved to load: $(stat -c%s "$D/libapexi18n.so") bytes"; \
+    fi; \
+    # The launcher half of this — that something puts the module on the engine's
+    # import path — is asserted where the launcher EXISTS, ~500 layers below.
+    # It was written here first, and tests/test-containerfile-order.sh caught it
+    # reading a file the build has not copied yet: an assertion that could never
+    # have passed, which is the exact class that gate was built for.
+    echo "Apex.I18n stage complete"
+
 # ── Stage 5b3: the two paths that assumed a WRITABLE shell tree ─────────────
 # /usr is a read-only ostree/composefs mount, so anything the shell writes inside
 # its own tree must be redirected into $HOME. An audit of the whole checkout found
@@ -2912,6 +3041,17 @@ RUN set -eux; \
     # The publisher is invoked from the session launcher (image content, so this
     # is always a hard failure) AND from the shell's wallpaper pipeline.
     grep -q 'apex-greet-wallpaper' /usr/libexec/apex-shell-autostart; \
+    # P2-004: the launcher is the only thing that puts the Apex.I18n module on
+    # the QML engine's import path (the module itself is built ~500 layers up,
+    # from the vendored shell tree). Without this line the shell loads, reports
+    # a missing module by name and runs untranslated — which is a silence, so
+    # it gets an assertion. Named rather than a bare `grep -q`: a silent
+    # non-zero inside a 3,000-line build file is undiagnosable.
+    if ! grep -q 'QML_IMPORT_PATH' /usr/libexec/apex-shell-autostart; then \
+        echo "FATAL: apex-shell-autostart no longer sets QML_IMPORT_PATH, so the"; \
+        echo "       shell would never find Apex.I18n and would run untranslated."; \
+        exit 1; \
+    fi; \
     # The shell half lives in a DIFFERENT repository. On the default ref this
     # must hold — a main that lost the call is a regression and shipping it
     # would quietly restore the original bug. But APEX_SHELL_REF exists so an
