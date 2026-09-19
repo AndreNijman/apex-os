@@ -694,12 +694,16 @@ class Opening private constructor(val key: String) {
  * here is the whole design: the relay's notices, its pings and its close are
  * consumed inside this class and no caller can branch on them.
  */
-class RelayLink internal constructor(
-    receiver: WsReceiver,
-    private val sender: WsSender,
+class RelayLink(
+    /** The bytes coming off the socket, after the upgrade response. */
+    from: InputStream,
+    /** The bytes going onto it. */
+    to: OutputStream,
+    /** What to do with the socket when the link is closed. */
     private val onClose: () -> Unit,
 ) : Closeable {
-    private val reader = RelayInput(receiver, sender)
+    private val sender = WsSender(to)
+    private val reader = RelayInput(WsReceiver(from), sender)
     private val writer = RelayOutput(sender)
 
     /** The carried byte stream, inbound. End-of-stream when the relay says so. */
