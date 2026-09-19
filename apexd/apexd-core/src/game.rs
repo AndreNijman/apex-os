@@ -314,8 +314,24 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
         // here: pushing it now would make ScxStop the FIRST exit action, i.e.
         // restore the scheduler while the game is still pinned. A test asserts
         // the ordering, and it caught exactly that mistake.
+        // ── This note is an INTENT, and it is worded as one ──────────────────
+        //
+        // It used to read "sched-ext: scx_lavd for the session, kernel
+        // scheduler restored on exit", and it was `apex game status`'s `notes`
+        // field. On katana it was printed directly underneath
+        //
+        //     scxctl switch -s scx_lavd failed: no scx scheduler running
+        //
+        // for three consecutive boots — asserting as a fact the thing the line
+        // above it had just reported as failed. A plan cannot know what the
+        // machine did with it; the daemon applies the plan and replaces this
+        // with what it measured. Anything that renders a plan WITHOUT applying
+        // it (`apex game profile`, the dry-run planner) shows this one, so it
+        // has to be true of a plan — which is that it asks.
         notes.push(format!(
-            "sched-ext: {} for the session, kernel scheduler restored on exit",
+            "sched-ext: this profile ASKS for {} and stops it again on exit. \
+             Whether it loaded is a separate fact, reported as `scx_state` once \
+             a session is running.",
             cfg.scx.trim()
         ));
     }
