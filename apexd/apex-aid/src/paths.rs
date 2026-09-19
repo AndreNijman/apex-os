@@ -80,7 +80,7 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
 ///
 /// A test process has exactly one uid and the claim worth asserting is about
 /// two. The `stat` is real; only the comparand is chosen.
-pub fn ensure_private_dir_as(dir: &Path, me: u32) -> io::Result<()> {
+pub(crate) fn ensure_private_dir_as(dir: &Path, me: u32) -> io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
     std::fs::DirBuilder::new()
