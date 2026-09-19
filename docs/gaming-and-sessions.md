@@ -237,6 +237,140 @@ machine — the stock binds are the only binds there are.
 
 ---
 
+## 5a. Leaving Gaming Mode is apexd's job, not the session's
+
+### What it did
+
+`apex-gaming-session` released game mode from an `EXIT` trap that ran
+`apex game stop`. On katana 2026-09-19 that worked on a clean gamescope exit
+and did nothing at all when greetd was restarted underneath it: `apex game
+status` still read `active: true` seventy-five minutes later, with a p-core
+cpuset, steered IRQs, the `performance` tier and `scx_lavd` still installed —
+and **not one line in the session's own log** to say so.
+
+The cause is not a bug in the trap. `apex game stop` goes through polkit action
+`org.apexos.apexd.manage-power`, whose defaults are
+
+```
+allow_any      auth_admin
+allow_inactive auth_admin
+allow_active   yes
+```
+
+The instant logind stops calling the session *active* — a greetd restart, a VT
+switch away, any logind-driven teardown — the session's own call is refused.
+Measured directly, from a session with no seat:
+
+```
+$ apex game stop
+apex: leaving game mode failed: org.freedesktop.DBus.Error.AccessDenied:
+      not authorized for org.apexos.apexd.manage-power
+$ sudo apex game stop
+apex: game mode OFF
+```
+
+So the process that is *supposed* to clean up loses the privilege to do it at
+exactly the moment it needs to.
+
+### Why the polkit rule was not loosened
+
+Giving the release path an `allow_inactive=yes` of its own is one line and it
+is the wrong line. `allow_inactive` is every local session, active or not, so
+any unprivileged user on the machine could switch Gaming Mode off while someone
+else is playing. And it still would not close the case it exists for: a session
+that is `SIGKILL`ed runs no trap at all, so there is no call to authorise.
+
+The problem is not "who may ask". It is that **the asking is done by something
+that may already be dead.**
+
+### The rule, and where it lives
+
+`apexd` is root, holds the session's exit plan in memory, and asks polkit
+nothing about itself. It is the only party that still exists after the session
+is destroyed, so it takes the job:
+
+* `GameMode.StartOwnedBy(owner_pid)` enters game mode **and** records the
+  process whose death ends the session. It is the same polkit action as before
+  — *entering* Gaming Mode is exactly as restricted as it was.
+* A 2 s watch in `apexd/src/main.rs` reads `/proc/<pid>/stat`; when the owner is
+  gone, apexd calls the same idempotent `game_exit()` a D-Bus request would,
+  and emits the same signals, so `apex game status` and apex-shell do not keep
+  showing a session that is over.
+* `apex-gaming-session` passes `--owner-pid $$`.
+
+Three details that are decisions rather than mechanics:
+
+* **A PID is not enough; the start time is recorded with it.** PIDs are reused.
+  A bare-PID watch would keep game mode engaged for as long as some unrelated
+  process held the number — the same failure, quieter. `starttime` (field 22 of
+  `/proc/<pid>/stat`, and read by splitting after the **last** `)`, because
+  `comm` may contain spaces and parentheses) is the kernel's own tiebreaker.
+* **An unreadable `/proc` is a third answer, and never a release.** Turning an
+  I/O error into a hardware change is not a fail-safe. It is logged once and the
+  session is left alone.
+* **The owner is watched, not pinned.** Putting the session script in the game
+  cpuset would put every Steam process on the p-cores, which is a behaviour
+  change nothing has measured. `StartForPid`/`AttachPid` remain the way to pin.
+
+The `EXIT` trap is still there, and is now the *second* of two paths: it is
+instant on the clean exit, where the watch would take up to a tick longer, and
+both call the same idempotent release so the two racing is harmless. What it
+can no longer do is fail in silence — it prints polkit's own message and names
+what will release the machine instead.
+
+## 5b. MangoHud and `--expose-wayland` cannot both be on
+
+### What it did
+
+`mangoapp` crash-looped at roughly 2 Hz for the whole of **every** Gaming Mode
+session on katana: 15 376 core dumps in one boot, 14 403 respawns and 57 612
+GLFW lines in a single two-hour session (144 187 journal lines for one login),
+and 4.0 GB of stored core dumps on a `/var` that was already 94 % full. The
+overlay never drew a pixel.
+
+### The cause, from the dumps and then from an A/B
+
+The backtrace off the kept core dump is two frames long:
+
+```
+#0  XInternAtom (libX11.so.6 + 0x17c50)
+#1  main (mangoapp + 0x1f79f)
+```
+
+— i.e. `XInternAtom(NULL, …)`. What precedes it in the session log names the
+reason: `libdecor` plugin failures, which only GLFW's **Wayland** backend loads,
+and four `Glfw Error 65550: X11: Platform not initialized` lines, which is
+`glfwGetX11Display()` refusing on a non-X11 platform and returning NULL.
+
+A controlled A/B on the same machine, headless, same binaries, one variable:
+
+| gamescope flags | `mangoapp` environment | result in 22 s |
+|---|---|---|
+| `--mangoapp` | `DISPLAY=:0`, `GAMESCOPE_WAYLAND_DISPLAY=gamescope-0` | same pid alive throughout, **0 restarts** |
+| `--expose-wayland --mangoapp` | the same **plus `WAYLAND_DISPLAY=gamescope-0`** | **171 restarts** |
+
+`--expose-wayland` is what puts `WAYLAND_DISPLAY` into the environment of
+gamescope's children. GLFW auto-selects its Wayland backend whenever that
+variable is set, and mangoapp then hands the NULL X11 display it gets back
+straight to Xlib.
+
+### The choice
+
+`--expose-wayland` stays and `--mangoapp` goes. Native Wayland (xdg-shell)
+games are worth more than an overlay that has never rendered on this system,
+§6.1 and §6.3 were qualified on hardware **with** `--expose-wayland`, and the
+overlay was costing a crash loop for nothing.
+
+It is gated on the flag rather than deleted, so `APEX_GAMING_EXPOSE_WAYLAND=0`
+brings the overlay back by itself — which is also what makes the gate testable
+in both directions in `tests/test-apex-gaming-session.sh`.
+
+Neither half is APEX's to fix: mangoapp should ask GLFW for the X11 platform
+(or refuse to dereference a NULL `Display`), and `gamescopereaper --respawn`
+has no backoff. Both are recorded rather than worked around. What APEX *does*
+own is that a 2 Hz crasher could take `/var` with it, and that is bounded
+separately in `files/system/coredump/50-apex-coredump-limits.conf`.
+
 ## 6. What still needs katana, and the exact commands
 
 None of the rows below can be answered by a machine with one GPU and no
@@ -277,12 +411,32 @@ grep -E '^Cap(Eff|Prm|Amb):' /proc/self/status     # in the Gaming Mode session
 getcap "$(command -v gamescope)"                    # expect: nothing, today
 apex gaming | grep -E 'realtime (limit|capability)'
 #    expect: realtime limit yes, realtime capability no
-#    and the session log to say "CAP_SYS_NICE: absent" and NOT pass --rt.
+
+# Whether --rt was passed. Read the session's OWN line, and nothing else:
+grep -m1 'starting: gamescope' <the session log>
+#    expect: no --rt in it, and the apex-gaming-session line above it saying
+#            "CAP_SYS_NICE: absent".
 ```
 
-If a later gamescope RPM does carry the capability, the same two commands
-should show `cap_sys_nice=ep` and `--rt` back in the `starting: gamescope …`
-line, with no code change.
+**Do not check this by grepping for `CAP_SYS_NICE`,** which is what an earlier
+version of this section invited. Measured on katana 2026-09-19 (§6.2 in
+`ROADMAP/evidence/katana-image-qual-20260919.md`): gamescope prints
+
+```
+No CAP_SYS_NICE, falling back to regular-priority compute and threads.
+```
+
+**whether or not `--rt` was passed** — it is gamescope's own start-up
+capability probe, and the identical two lines appear on an older image where
+`--rt` *was* passed unconditionally. So that message discriminates nothing, and
+a reader grepping for the string finds both the session's honest
+`CAP_SYS_NICE: absent` and gamescope's warning and can conclude the opposite of
+the truth. The `starting: gamescope …` line is the only witness to what was
+actually passed.
+
+If a later gamescope RPM does carry the capability, the same commands should
+show `cap_sys_nice=ep` and `--rt` back in the `starting: gamescope …` line,
+with no code change.
 
 ### 6.3 Steam inside gamescope — blocked, and on what
 
@@ -331,8 +485,19 @@ panel disabled in firmware, start Safe Graphics from the greeter and expect
 
 ### 6.5 The niri bar
 
+**The precondition is the user manager starting, not a niri login.** The
+transform runs from `apex-shell-firstrun.service`, which is a **user** unit and
+starts with `user@<uid>.service` — on a machine with lingering or an ssh login
+that is at boot, with no graphical session anywhere. Measured on katana
+2026-09-19: the line was rewritten at 18:29:35, five minutes after a reboot and
+four hours before any niri session (§3.6 of the evidence). So the check below
+**confirms** the end state; the niri login does not cause it, and on a machine
+whose user manager has already run once there is nothing left for a login to
+do.
+
 ```sh
-# After one login to the niri session on a machine that had the old config:
+# On a machine that had the old config, after its user manager has started
+# once — a niri login is sufficient but not necessary:
 grep -n 'waybar' ~/.config/niri/config.kdl
 #    expect exactly one line, commented, ending in the APEX marker.
 pgrep -a -u "$USER" waybar          # expect: nothing
@@ -340,3 +505,97 @@ pgrep -a -u "$USER" quickshell      # expect: one
 ls ~/.config/niri/config.kdl.pre-apex-bar.bak
 niri validate --config ~/.config/niri/config.kdl
 ```
+
+### 6.6 A Gaming Mode session destroyed *without cooperation*
+
+This is the row §5a exists for, and **it needs an image that carries the
+change**: the owner watch lives in `apexd`, so nothing on a machine running an
+older build will do anything differently. `apex game status` printing
+`owner_pid` is how you know the image is new enough.
+
+Arm a Gaming Mode session the way the qualification run did — the greetd
+helpers and the dead-man restore timer are in
+`ROADMAP/state/agents/katana-image-qual.md`, and **always arm the restore timer
+first.** Then, from ssh while the session is up:
+
+```sh
+apex game status
+#    expect: active : true, and owner_pid : <the apex-gaming-session pid>
+#    owner_pid : 0 means this image predates the watch — stop here, the row
+#    cannot pass and the session log says so too.
+pgrep -f '^/usr/libexec/apex-gaming-session'   # must equal that owner_pid
+```
+
+Record the three things that must come back, **while game mode is on**:
+
+```sh
+cat /sys/fs/cgroup/apex-game/cpuset.cpus    # the p-core list
+cat /sys/kernel/sched_ext/state             # expect: enabled
+apex game status | grep -E '^(tier|prior_tier)'
+```
+
+Now destroy the session the way nothing can cooperate with — no signal to the
+script, no `apex game stop`, no trap:
+
+```sh
+sudo systemctl restart greetd
+```
+
+Within a few seconds, with **nothing having asked**:
+
+```sh
+apex game status | head -3
+#    expect: active : false
+test -d /sys/fs/cgroup/apex-game && echo STILL THERE || echo removed
+#    expect: removed
+cat /sys/kernel/sched_ext/state             # expect: disabled
+sudo journalctl -u apexd -b -o cat | grep -m1 'session owner is gone'
+#    expect: apexd: game: the session owner is gone (/proc/<pid> is gone)
+#            — releasing game mode.
+```
+
+**The governor is NOT a discriminator on katana and must not be quoted as
+one.** Its profile's AC default tier is already `performance`, so `prior_tier`
+and `tier` are both `performance` and `scaling_governor` reads `performance`
+before, during and after. The readings that actually move on this machine are
+the cgroup, sched-ext and `active`. On a machine whose default tier is
+`balanced`, `scaling_governor` is a fourth witness.
+
+Two more worth taking while you are there:
+
+```sh
+# The trap's own failure is now visible instead of silent.
+sudo journalctl -b -t <session tag> -o cat | grep -A2 'could not release game mode'
+#    expect polkit's own AccessDenied message, and a line naming apexd as what
+#    releases it instead. BOTH lines, or the log is back to hiding the cause.
+
+# And the belt-and-braces path still works: end a session by SIGTERMing
+# gamescope instead, and the trap should release it immediately.
+```
+
+### 6.7 The overlay is gone and the dump store is bounded
+
+```sh
+grep -m1 'starting: gamescope' <the session log>
+#    expect: --expose-wayland present, --mangoapp ABSENT.
+grep -m1 'NOT passing --mangoapp' <the session log>
+#    expect: the explanation, naming WAYLAND_DISPLAY.
+
+# Nothing crashed, for the whole session — the number must not move.
+coredumpctl list --no-pager | grep -c mangoapp      # before and after
+journalctl -b -t <session tag> -o cat | grep -c 'Glfw Error'   # expect: 0
+journalctl -b -t <session tag> -o cat | wc -l
+#    for scale: the 2026-09-19 two-hour session took 144 187 lines.
+
+# And the guard that holds whatever crashes next:
+systemd-analyze cat-config systemd/coredump.conf | grep -E '^(MaxUse|KeepFree)='
+#    expect: MaxUse=256M and KeepFree=2G. Neither line appears on an image
+#    without the drop-in, because Fedora ships every value commented out.
+du -sh /var/lib/systemd/coredump
+```
+
+To confirm the gate works the other way on real hardware rather than only in
+the suite, arm one session with `APEX_GAMING_EXPOSE_WAYLAND=0` in the Exec
+environment: `--mangoapp` should be back in the `starting:` line,
+`--expose-wayland` gone, and the overlay should actually render — that is the
+one thing no machine has ever seen it do here.

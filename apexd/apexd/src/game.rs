@@ -33,7 +33,10 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use apexd_core::fan::FanMode;
-use apexd_core::game::{self, GameInputs, PidPlacement, CGROUP_ROOT};
+use apexd_core::game::{
+    self, owner_for_pid, owner_state, GameInputs, OwnerState, PidPlacement, SessionOwner,
+    CGROUP_ROOT,
+};
 use apexd_core::irq;
 use apexd_core::syswriter::Outcome;
 use apexd_core::tier::{Action, Tier};
@@ -89,6 +92,12 @@ pub struct GameSession {
     /// Measured at enter time from the writer's own outcomes.
     pub irqs: IrqReport,
     pub notes: Vec<String>,
+    /// The process whose death ends this session, when the caller named one.
+    ///
+    /// `None` is a session nothing is watching — `apex game start` typed by
+    /// hand, or the shell's power menu — and it behaves exactly as it always
+    /// has: it stays on until something asks for it to stop.
+    pub owner: Option<SessionOwner>,
 }
 
 impl Ctx {
@@ -105,14 +114,40 @@ impl Ctx {
     /// Enter game mode (idempotent). When a session is already running, extra
     /// PIDs are attached to the existing cpuset and nothing else changes.
     pub async fn game_enter(self: &Arc<Self>, pids: &[u32]) -> Result<()> {
+        self.game_enter_owned(pids, None).await
+    }
+
+    /// Enter game mode and, when `owner_pid` is given, record the process whose
+    /// death ends the session (see [`apexd_core::game::SessionOwner`]).
+    ///
+    /// **Ownership and cpuset placement are different questions and this does
+    /// not conflate them.** `owner_pid` is watched, not pinned: pinning the
+    /// Gaming Mode session script would put every Steam process on the p-core
+    /// cpuset, which is a behaviour change the katana run did not measure.
+    /// `StartForPid`/`AttachPid` remain the way to pin.
+    ///
+    /// **Adoption rule, stated because undefined is worse than either
+    /// choice:** a session that already has an owner keeps its first one. Two
+    /// callers claiming the same session is a bug in the callers; the first
+    /// claim is the one that entered game mode, so it wins.
+    pub async fn game_enter_owned(
+        self: &Arc<Self>,
+        pids: &[u32],
+        owner_pid: Option<u32>,
+    ) -> Result<()> {
         let cfg = self.profile().game_config();
         if !cfg.enabled {
             bail!("game mode is disabled for profile '{}'", self.selection.active);
         }
 
         {
-            let existing = self.game.lock().await;
-            if existing.is_some() {
+            let mut existing = self.game.lock().await;
+            if let Some(session) = existing.as_mut() {
+                if session.owner.is_none() {
+                    if let Some(pid) = owner_pid {
+                        session.owner = owner_for_pid(&self.proc_root, pid);
+                    }
+                }
                 drop(existing);
                 for pid in pids {
                     self.game_attach(*pid).await?;
@@ -248,6 +283,7 @@ impl Ctx {
             gpus_locked: plan.gpus_locked.clone(),
             irqs,
             notes,
+            owner: owner_pid.and_then(|pid| owner_for_pid(&self.proc_root, pid)),
         };
         eprintln!(
             "apexd: game mode ON — cpus {} ({}), {}/{} IRQs steered, {} GPU(s) locked, tier {}",
@@ -301,6 +337,43 @@ impl Ctx {
             if session.prior_auto_switch { "on" } else { "off" }
         );
         Ok(())
+    }
+
+    /// The live session's owner, if it has one.
+    pub async fn game_owner(&self) -> Option<SessionOwner> {
+        self.game.lock().await.as_ref().and_then(|s| s.owner)
+    }
+
+    /// One tick of the owner watch: release game mode if the process that
+    /// asked for it has died.
+    ///
+    /// This is the whole fix for the katana 2026-09-19 defect (evidence §3.4).
+    /// The session script's EXIT trap cannot release game mode once logind has
+    /// deactivated the session, because `apex game stop` is a polkit
+    /// `allow_active=yes` action. The daemon is root and asks polkit nothing
+    /// about itself, so it can — and it is the only party that still exists
+    /// after a `systemctl restart greetd` has taken the session away.
+    ///
+    /// Returns what it did, so the caller can log it and emit the same signals
+    /// a D-Bus-driven exit emits. `Ok(None)` is "nothing to do"; an
+    /// unanswerable reading is `Err` and NEVER a release.
+    pub async fn game_release_if_owner_gone(self: &Arc<Self>) -> Result<Option<String>> {
+        let Some(owner) = self.game_owner().await else {
+            return Ok(None);
+        };
+        match owner_state(&self.proc_root, &owner) {
+            OwnerState::Alive => Ok(None),
+            OwnerState::Unknown(why) => bail!("{why}"),
+            OwnerState::Gone(why) => {
+                eprintln!(
+                    "apexd: game: the session owner is gone ({why}) — releasing game mode. \
+                     Nothing else could: `apex game stop` from a deactivated session is \
+                     refused by polkit."
+                );
+                self.game_exit().await?;
+                Ok(Some(why))
+            }
+        }
     }
 
     /// Attach one more PID to a running session's cpuset.
@@ -374,6 +447,16 @@ impl Ctx {
                 );
                 insert(&mut m, "pids", Value::from(s.pids.clone()));
                 insert(&mut m, "notes", Value::from(s.notes.clone()));
+                // `owner_pid` is 0 when nothing is watching this session. It is
+                // reported because "can this session release itself if its
+                // login is destroyed" is the question the katana run could not
+                // answer from the outside, and it should be one property read
+                // away from now on.
+                insert(
+                    &mut m,
+                    "owner_pid",
+                    Value::from(s.owner.map(|o| o.pid).unwrap_or(0)),
+                );
             }
             None => {
                 // Not active: report what a session *would* look like.
@@ -500,6 +583,7 @@ mod tests {
             },
             root,
             proc_irq_root,
+            root.join("proc"),
             Arc::new(MockNvidiaSmi::default()),
         )
     }
@@ -840,5 +924,189 @@ mod tests {
             "status must not have touched an interrupt"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── the owner watch: releasing a session nobody can stop ────────────────
+    //
+    // The property these hold is the one the katana 2026-09-19 run could not
+    // get back (evidence §3.4): **the machine returns to its normal tier,
+    // scheduler and auto-switch after its Gaming Mode session is destroyed
+    // WITHOUT COOPERATION** — no trap ran, no `apex game stop`, nothing asked.
+    // Not "a function was called": every one below asserts the restore
+    // actually landed in the writer and in the daemon's own state.
+
+    /// A `/proc/<pid>/stat` line in the kernel's shape (field 2 is `(comm)`).
+    fn stat_line(pid: u32, starttime: u64, state: char) -> String {
+        let filler: Vec<String> = (4..=21).map(|n| n.to_string()).collect();
+        format!("{pid} (apex-gaming-ses) {state} {} {starttime} 0 0 0", filler.join(" "))
+    }
+
+    fn spawn_fake_owner(ctx: &Arc<Ctx>, pid: u32, starttime: u64) {
+        let dir = ctx.proc_root.join(pid.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("stat"), stat_line(pid, starttime, 'S')).unwrap();
+    }
+
+    fn kill_fake_owner(ctx: &Arc<Ctx>, pid: u32) {
+        std::fs::remove_dir_all(ctx.proc_root.join(pid.to_string())).unwrap();
+    }
+
+    /// `ctx()` plus a handle on the writer, so the restore can be read back.
+    fn ctx_with_writer(tag: &str) -> (Arc<Ctx>, Arc<MockWriter>) {
+        let root = scratch(tag);
+        let writer = Arc::new(MockWriter::new());
+        let ctx = build_ctx(&root, PROFILE, &root.join("no-irqs"), writer.clone());
+        (ctx, writer)
+    }
+
+    #[tokio::test]
+    async fn an_owner_that_dies_releases_the_machine_with_nothing_cooperating() {
+        let (ctx, writer) = ctx_with_writer("owner-release");
+        spawn_fake_owner(&ctx, 4242, 900_100);
+
+        ctx.game_enter_owned(&[], Some(4242)).await.unwrap();
+        assert!(ctx.game_active().await);
+        assert_eq!(
+            u32_of(&ctx.game_status().await, "owner_pid"),
+            4242,
+            "status must say who is being watched"
+        );
+        {
+            let st = ctx.state.lock().await;
+            assert_eq!(st.tier, Tier::Performance);
+            assert!(!st.auto_switch);
+        }
+        assert!(
+            writer.recorded().contains(&Action::ScxSwitch { sched: "scx_lavd".into() }),
+            "the session really did install the gaming scheduler"
+        );
+        writer.clear();
+
+        // The session is destroyed the way a `systemctl restart greetd`
+        // destroys it: the process is simply gone. No trap, no `game stop`.
+        kill_fake_owner(&ctx, 4242);
+
+        let why = ctx
+            .game_release_if_owner_gone()
+            .await
+            .expect("a vanished owner is an answerable reading")
+            .expect("and it must release");
+        assert!(why.contains("/proc/4242"), "why was {why:?}");
+
+        assert!(!ctx.game_active().await, "the session is over");
+        let st = ctx.state.lock().await;
+        assert_eq!(st.tier, Tier::Balanced, "the tier the session interrupted came back");
+        assert!(st.auto_switch, "and so did auto-switch");
+        drop(st);
+        assert!(
+            writer.recorded().contains(&Action::ScxStop),
+            "the gaming scheduler was actually stopped, not merely planned to be"
+        );
+        let idle = ctx.game_status().await;
+        assert!(
+            !bool::try_from(idle.get("active").expect("status always reports active")).unwrap(),
+            "and the status a user reads agrees with the hardware"
+        );
+        assert!(
+            !idle.contains_key("owner_pid"),
+            "an idle machine has no session, so nothing to watch and nothing to report"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_owner_is_never_released() {
+        // The other direction. Without this the test above passes just as well
+        // for a watch that releases on every tick.
+        let (ctx, writer) = ctx_with_writer("owner-alive");
+        spawn_fake_owner(&ctx, 4243, 900_200);
+        ctx.game_enter_owned(&[], Some(4243)).await.unwrap();
+        writer.clear();
+
+        for _ in 0..3 {
+            assert_eq!(
+                ctx.game_release_if_owner_gone().await.unwrap(),
+                None,
+                "a live owner must never be read as gone"
+            );
+        }
+        assert!(ctx.game_active().await);
+        assert!(writer.recorded().is_empty(), "a no-op tick must write nothing");
+        let st = ctx.state.lock().await;
+        assert_eq!(st.tier, Tier::Performance);
+    }
+
+    #[tokio::test]
+    async fn a_session_with_no_owner_is_left_exactly_as_it_was() {
+        // `apex game start` typed by hand, or the shell's power menu: nothing
+        // is watching, and the watch must not invent a reason to stop it.
+        let (ctx, _writer) = ctx_with_writer("owner-none");
+        ctx.game_enter(&[]).await.unwrap();
+        assert_eq!(ctx.game_owner().await, None);
+        assert_eq!(ctx.game_release_if_owner_gone().await.unwrap(), None);
+        assert!(ctx.game_active().await);
+        assert_eq!(
+            u32_of(&ctx.game_status().await, "owner_pid"),
+            0,
+            "an unwatched session reports owner_pid 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reused_owner_pid_is_a_release_and_not_a_reprieve() {
+        let (ctx, _writer) = ctx_with_writer("owner-reused");
+        spawn_fake_owner(&ctx, 4244, 900_300);
+        ctx.game_enter_owned(&[], Some(4244)).await.unwrap();
+
+        // Same number, different process.
+        std::fs::write(
+            ctx.proc_root.join("4244").join("stat"),
+            stat_line(4244, 999_999, 'S'),
+        )
+        .unwrap();
+
+        let why = ctx.game_release_if_owner_gone().await.unwrap().unwrap();
+        assert!(why.contains("reused"), "why was {why:?}");
+        assert!(!ctx.game_active().await);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_proc_leaves_the_session_alone_and_says_so() {
+        // Fail closed: an I/O error must not be able to change the machine's
+        // power state.
+        let (ctx, writer) = ctx_with_writer("owner-unreadable");
+        spawn_fake_owner(&ctx, 4245, 900_400);
+        ctx.game_enter_owned(&[], Some(4245)).await.unwrap();
+        writer.clear();
+
+        std::fs::remove_dir_all(&ctx.proc_root).unwrap();
+        let err = ctx
+            .game_release_if_owner_gone()
+            .await
+            .expect_err("an unreadable /proc is an error, not a release");
+        assert!(format!("{err:#}").contains("nothing was measured"), "err was {err:#}");
+        assert!(ctx.game_active().await, "the session survives an unanswerable reading");
+        assert!(writer.recorded().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_first_owner_of_a_session_keeps_it() {
+        // The adoption rule, asserted rather than assumed. A second enter with
+        // a different owner must not move the watch onto a process that did
+        // not start the session.
+        let (ctx, _writer) = ctx_with_writer("owner-adopt");
+        spawn_fake_owner(&ctx, 4246, 900_500);
+        spawn_fake_owner(&ctx, 4247, 900_600);
+        ctx.game_enter_owned(&[], Some(4246)).await.unwrap();
+        ctx.game_enter_owned(&[], Some(4247)).await.unwrap();
+        assert_eq!(ctx.game_owner().await.unwrap().pid, 4246);
+
+        // And a session that started WITHOUT an owner can be adopted by one,
+        // which is what lets a caller add the watch after the fact.
+        let (ctx2, _w2) = ctx_with_writer("owner-adopt-late");
+        spawn_fake_owner(&ctx2, 4248, 900_700);
+        ctx2.game_enter(&[]).await.unwrap();
+        assert_eq!(ctx2.game_owner().await, None);
+        ctx2.game_enter_owned(&[], Some(4248)).await.unwrap();
+        assert_eq!(ctx2.game_owner().await.unwrap().pid, 4248);
     }
 }

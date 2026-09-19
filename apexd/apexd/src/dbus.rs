@@ -462,6 +462,37 @@ impl GameModeIface {
         self.transition(true, &[pid], &ctxt, conn).await
     }
 
+    /// Enter game mode and record `owner_pid` as the process whose death ends
+    /// the session. polkit `manage-power` — *entering* stays exactly as
+    /// restricted as it was.
+    ///
+    /// The session's own release path cannot be relied on: it runs
+    /// `apex game stop`, and the instant logind deactivates the session (a
+    /// greetd restart, a VT switch, any logind-driven teardown) polkit refuses
+    /// it, leaving the machine on a p-core cpuset with steered IRQs, the
+    /// `performance` tier and `scx_lavd` and nothing able to undo them —
+    /// measured on katana 2026-09-19, evidence §3.4. This is the answer to
+    /// that, and it is deliberately NOT a looser polkit rule: a release that
+    /// `allow_inactive=yes` would authorise is a release any unprivileged local
+    /// caller can perform.
+    ///
+    /// `owner_pid` is WATCHED, not pinned. Use `StartForPid`/`AttachPid` to put
+    /// a process in the game cpuset.
+    async fn start_owned_by(
+        &self,
+        owner_pid: u32,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        authorize(conn, &hdr, ACTION_POWER).await?;
+        self.ctx
+            .game_enter_owned(&[], Some(owner_pid))
+            .await
+            .map_err(to_fdo)?;
+        self.announce(true, &ctxt, conn).await
+    }
+
     /// Attach one more PID to a running session. polkit `manage-power`.
     async fn attach_pid(
         &self,
@@ -493,6 +524,19 @@ impl GameModeIface {
         } else {
             self.ctx.game_exit().await.map_err(to_fdo)?;
         }
+        self.announce(active, ctxt, conn).await
+    }
+
+    /// Tell the bus what just happened. Split out of [`Self::transition`] so
+    /// the owner watch in `main.rs` emits *exactly* the same set — a release
+    /// nobody is told about leaves apex-shell showing a game session that is
+    /// over, which is a second bug wearing the first one's clothes.
+    async fn announce(
+        &self,
+        active: bool,
+        ctxt: &SignalContext<'_>,
+        conn: &Connection,
+    ) -> zbus::fdo::Result<()> {
         let tier = self.ctx.state.lock().await.tier;
         GameModeIface::active_changed_signal(ctxt, active).await?;
         self.active_changed(ctxt).await?;
@@ -504,6 +548,23 @@ impl GameModeIface {
         }
         Ok(())
     }
+}
+
+/// Emit the game-mode change signals from OUTSIDE a D-Bus method — the owner
+/// watch's path. Same set as [`GameModeIface::announce`], reached through the
+/// object server the way `emit_tier_changed` reaches the Power interface.
+pub async fn emit_game_mode_changed(conn: &Connection, active: bool) -> zbus::Result<()> {
+    let iref = conn
+        .object_server()
+        .interface::<_, GameModeIface>(OBJECT_PATH)
+        .await?;
+    let ctxt = iref.signal_context().clone();
+    // Bound and dropped explicitly: the interface deref borrows `iref`, and
+    // leaving it as the block's tail expression outlives the binding.
+    let iface = iref.get().await;
+    let out = iface.announce(active, &ctxt, conn).await;
+    drop(iface);
+    out.map_err(|e| zbus::Error::Failure(e.to_string()))
 }
 
 fn insert_value(m: &mut HashMap<String, OwnedValue>, key: &str, v: Value<'_>) {
