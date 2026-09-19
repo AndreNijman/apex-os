@@ -1626,23 +1626,34 @@ jobs:
           # 4/3 of the COMPACT document. Measure that, not the pretty one syft
           # wrote, or the guard checks a number nobody sends.
           #
-          # The ceiling is 25,165,824 B (24 MiB), measured, not assumed. The
-          # budget below is deliberately well under it: this image grows, and a
-          # guard that only fires at the wall gives the next person a red build
-          # instead of a warning.
+          # The ceiling is 25,165,824 B (24 MiB), measured, not assumed, and the
+          # 4/3 is measured too: cosign v2.5.2 was run offline against a
+          # synthetic 4,824,532 B predicate and produced a 6,433,196 B envelope,
+          # factor 1.3334, with every package carried through intact. (The
+          # BUNDLE file base64s the envelope a second time, factor 1.7778. That
+          # is not what goes on the wire, and confusing the two would put this
+          # guard 33% out.)
           #
-          # It EXITS 1. It does not quietly drop --tlog-upload and carry on.
-          # A build that silently stops transparency-logging its SBOM while the
-          # docs still promise one is worse than a red step, because nobody
-          # finds out. If this fires, the options and what each costs are in
+          # TWO THRESHOLDS, because they answer different questions.
+          #
+          # At the CEILING the upload cannot succeed, so the build fails. It
+          # does NOT quietly drop --tlog-upload and carry on: a build that
+          # silently stops transparency-logging its SBOM while the docs still
+          # promise a public log is worse than a red step, because nobody finds
+          # out. If this fires, the options and what each costs are in
           # ROADMAP/state/agents/sbom-attest.md; the decision is a person's.
+          #
+          # At the BUDGET (80% of the ceiling) the upload still works and the
+          # build stays green — it just says so, while there is still room to do
+          # something about it. Failing here instead would turn "the image grew"
+          # into a red build for something that demonstrably still works.
           jq -c . /tmp/sbom.spdx.json > /tmp/sbom.min.json
           PRED=$(stat -c%s /tmp/sbom.min.json)
           DSSE=$(( (PRED + 2) / 3 * 4 ))
           REKOR_CEILING=25165824
-          REKOR_BUDGET=20000000
-          echo "predicate: ${PRED}B compact -> ~${DSSE}B on the wire (ceiling ${REKOR_CEILING}B)"
-          if [ "$DSSE" -ge "$REKOR_BUDGET" ]; then
+          REKOR_BUDGET=20132659
+          echo "predicate ${PRED}B compact -> ~${DSSE}B DSSE body; ceiling ${REKOR_CEILING}B, at $(( DSSE * 100 / REKOR_CEILING ))%"
+          if [ "$DSSE" -ge "$REKOR_CEILING" ]; then
             echo "::error::the SBOM predicate is ${PRED}B compact, ~${DSSE}B once base64'd into the DSSE envelope."
             echo "::error::rekor.sigstore.dev refuses any request body at or above ${REKOR_CEILING}B (24 MiB) with an"
             echo "::error::  immediate HTTP 502 from its fronting proxy, before any body is sent. cosign retries that"
@@ -1650,6 +1661,10 @@ jobs:
             echo "::error::This is NOT a network fault and retrying will not help. The image has outgrown the"
             echo "::error::  package-level SBOM. See ROADMAP/state/agents/sbom-attest.md for the options and their costs."
             exit 1
+          elif [ "$DSSE" -ge "$REKOR_BUDGET" ]; then
+            echo "::warning::the SBOM attestation is at $(( DSSE * 100 / REKOR_CEILING ))% of Rekor's 24 MiB request ceiling"
+            echo "::warning::  (~${DSSE}B of ${REKOR_CEILING}B). It still uploads. When it stops, the step fails with the"
+            echo "::warning::  explanation above, and the remaining levers are in ROADMAP/state/agents/sbom-attest.md."
           fi
 
           # ── ATTEST, AND PROVE THE TRANSPARENCY LOG ACTUALLY TOOK IT ────────
