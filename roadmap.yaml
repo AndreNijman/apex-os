@@ -6910,7 +6910,94 @@ tasks:
     remaining work is a human procedure, already written down: docs/boot-v2.md, 'The run somebody with hardware
     would have to do' - five numbered runs, four prerequisites, what to record at each step; runs 1, 2 and 5 are
     the minimum that moves this item off partial. Reopen the unit the moment there is a machine whose TPM somebody
-    is willing to clear.
+    is willing to clear. ROUND 31 (2026-09-19) - THE MACHINE APPEARED. apex-os task/later-silicon 883b5bc0 +
+    17252b16 on roadmap/v2.2 36535383, PUSHED. Full record: ROADMAP/evidence/L-001-katana-tpm-20260919.md, plus
+    the section docs/boot-v2.md asked for, under a heading naming the machine. STILL PARTIAL, and the reason is
+    now one decision rather than an absent machine. THE HARDWARE: MSI Katana GF76 12UG, firmware E17L3IMS.110
+    (AMI, 2025-09-08), TPM = Intel PTT fTPM, TPM2_PT_MANUFACTURER 'INTC', vendor string 'ADL', firmware 0x2580012,
+    spec 1.38, sha256 the ONLY allocated PCR bank. Not swtpm. Every run on a LOOPBACK LUKS volume under
+    /var/lib/apex-tpm-qual: katana's system disk is not encrypted, was not encrypted, and was not converted -
+    re-asserted with blkid at the start of the run. No /etc, no ESP, no bootloader, no EFI variable was written,
+    and the machine was not rebooted. SECURE BOOT IS OFF on katana, so PCR 7 measures the DISABLED policy; every
+    PCR 7 row is marked SB-OFF and listed for redo. RUN 1 PASSES ON SILICON: one systemd-tpm2 token and one
+    systemd-recovery token; TPM unseal 0.285/0.297/0.293 s across three attempts, recovery-key unlock 0.032 s, and
+    the same plaintext marker (94256e38dd9968dc) back through both paths and through plain cryptsetup open. The
+    0.29 s is a silicon-only number - swtpm runs on the host CPU and cannot produce it. RUN 4 PASSES ON SILICON:
+    s2idle, 90 s, RTC wake, run as a transient unit so the dying SSH session could not truncate it. An open
+    TPM-unlocked volume survived and still read; a FRESH unseal after resume worked in 0.295 s - the second
+    question in docs/boot-v2.md Run 4, the one it says vendor firmware gets wrong, and this firmware does not; and
+    ALL 24 PCRs were byte-identical across the cycle. deep is offered ([s2idle] deep) and untested, because a
+    laptop that does not come back from S3 needs a power button nobody is next to. RUN 2 (TPM CLEAR) NOT RUN, AND
+    NOT FOR WANT OF HARDWARE. The prerequisite docs/boot-v2.md asks for - know what else is bound to this TPM -
+    came back NOT EMPTY: lockoutAuthSet=1, five persistent handles (0x81000001, 0x81000002, 0x81000009,
+    0x81010001, 0x810EAC00), eight OS-created NV indices beyond the manufacturer set, a Windows install in the
+    boot order whose registry hives were written 2026-09-12 18:01, PCPKSP WindowsAIK/WindowsEK containers, and a
+    Windows Hello NGC container {4048F9DC-2E2D-4D30-AD9B-DF343914A04C} created 2026-09-12. BitLocker is ABSENT -
+    blkid says TYPE=ntfs and neither NTFS boot sector carries the -FVE-FS- signature - so a clear costs NO DATA.
+    It costs Andre's Windows Hello PIN. That is a small price and it is not an agent's to spend. WHAT THE RUN DID
+    ESTABLISH IS THAT THE CLEAR NEEDS NOBODY AT THE MACHINE: ppi/version 1.3 and ppi/tcg_operations line '5 4:
+    User not required' mean MSI's firmware performs a PPI-requested TPM2_Clear unattended, so Run 2 is `echo 5 |
+    sudo tee /sys/class/tpm/tpm0/ppi/request` then `sudo systemctl reboot`. tpm2_clear over the resource manager
+    is unavailable anyway (lockoutAuthSet=1) and was NOT attempted, because a failed lockoutAuth disables that
+    hierarchy for LOCKOUT_RECOVERY = 24 h on a TPM Windows depends on. RUN 5 COULD-NOT-RUN: PPI operation 2
+    (Disable) is also 'User not required', but once firmware hides the TPM the ppi directory goes with it and
+    re-enabling needs somebody in firmware setup. Disable and enable are not symmetric; this unit will not create
+    a state it cannot leave. RUN 3 COULD-NOT-RUN: fwupdmgr get-updates offers nothing for System Firmware on this
+    board, so there is no capsule to apply and flashing Andre's laptop uninvited is not a substitute. FOUR THINGS
+    SILICON FOUND THAT NO VM COULD. (1) systemd-cryptenroll --tpm2-device=auto BINDS TO NO PCRs AT ALL on systemd
+    258.10-1.fc43: tpm2-hash-pcrs empty, tpm2-pcr-bank n/a, tpm2-policy-hash 32 zero bytes, tpm2-pcrs []. Not PCR
+    7 - nothing. --help documents no default either. Any APEX prose or script that assumes PCR 7 is the default is
+    wrong. (2) systemd-pcrextend IS A SILENT NO-OP ON A GRUB MACHINE: 'Kernel stub did not measure kernel image
+    into PCR 11, skipping userspace measurement, too.' with EXIT STATUS 0 and PCR 11 unchanged, for enter-initrd,
+    leave-initrd and sysinit alike. So the four boot-phase policies `systemd-measure sign --current` produces by
+    default can never be reached on a machine that has not been through the UKI enrolment procedure - enrolling
+    one there yields a volume whose TPM unlock fails AT BOOT, not at enrolment, and the tool that would have
+    warned you exits 0. (3) A ZERO PCR 11 IS A LOCAL DENIAL-OF-SERVICE: tpm2_pcrextend 11 works from plain root,
+    tpm2_pcrreset 11 answers 'bad locality', so any root process can deny every PCR-11-bound unlock until the next
+    reboot. Measured, not reasoned - the --tpm2-pcrs=11 volume then refused with 'TPM policy does not match
+    current system state' and the mapper was absent. (4) THE SIGNED PCR 11 POLICY WORKS ON INTEL PTT, which is the
+    mechanism this program chose and which had only ever run against swtpm. Seven rows on vol5.img: no signature
+    -> refused; correct key over the current PCR 11 -> UNLOCKED; a different RSA key -> refused by systemd on the
+    fingerprint; the right fingerprint with FORGED signature bytes -> refused BY THE PART, Esys_VerifySignature
+    ErrorCode 0x000002db = TPM_RC_SIGNATURE, so Intel PTT ran TPM2_VerifySignature and never issued the ticket
+    TPM2_PolicyAuthorize needs; PCR 11 moved with a stale signature -> refused; re-signed for the new value ->
+    UNLOCKED, which is the kernel-update property; and the recovery key throughout -> UNLOCKED. The policy digest
+    was cross-checked two ways: tpm2_startauthsession + tpm2_policypcr -l sha256:11 gave
+    6d73bb9de6c56800d5022d30cdcb7515 and systemd-measure policy-digest --current --phase= gave the same. ALSO
+    MEASURED. The firmware's own TCG event log (42328 bytes, 80 events) REPLAYS to all eleven live registers
+    byte-for-byte - the first event-log replay in this program against real firmware rather than edk2. PCR 11 IS
+    ZEROS ON KATANA TOO, for the same reason as the L16: shim -> GRUB, no sd-stub; that is now two machines.
+    systemd itself calls an all-zero PCR 'PCR policy effectively unenforced!' at enrolment, and printed it for PCR
+    11. The ROUND 26 one-command re-enrolment no-op REPRODUCES ON SILICON WITH THE TPM INTACT - 'This PCR set is
+    already enrolled, executing no operation.', exit 0, tpm2-blob sha256 531a9b31f55d7aa8 before and after - which
+    is more general than the lab's finding, which needed a cleared TPM. A PCR policy failure does NOT move the DA
+    counter (0x0 through a refused unseal). The real DA parameters: MAX_AUTH_FAIL 32, LOCKOUT_INTERVAL 7200 s,
+    LOCKOUT_RECOVERY 86400 s, and A SUCCESSFUL AUTHORISATION DOES NOT CLEAR THE COUNTER - measured with exactly
+    two deliberate wrong auths, 0x0 -> 0x1 -> 0x2, then a correct one, still 0x2. If APEX ever ships
+    --tpm2-with-pin, 32 mistypes over any span locks the TPM for up to a day and APEX cannot reset it, because
+    DictionaryAttackLockReset needs lockoutAuth and Windows holds it. APEX's enrolment COEXISTS with a
+    Windows-provisioned TPM without touching it: handles-persistent identical by name before and after, and
+    systemd kept its SRK in the LUKS token (tpm2-srk true, 328 bytes) rather than persisting one or reusing
+    Windows' 0x81000001 - not byte-identical, different names, verified against the control that reproduces
+    0x81000001's published name. THE MACHINE WAS LEFT CLEAN, CHECKED NOT ASSUMED: no mappers, five loop devices
+    detached and only the three apex-user.raw ones left, /var/lib/apex-tpm-qual removed, both transient units
+    stopped and reset-failed, inhibitors back to the stock three, deployment apex-266dcc57 / sha256:ba263890b696
+    unchanged with no reboot or rebase, the 540012544-byte apex-user.raw intact, qual-backup-20260919 and
+    apex-pre-rebase-20260919 untouched, greetd active on VT 1 with the same sway/quickshell pids as before, 0
+    failed system and user units. A full TPM snapshot before and after differs in EXACTLY TWO deliberate ways:
+    LOCKOUT_COUNTER 0x0 -> 0x2 of 32, decaying to 0 within 4 h, and PCR 11 zeros -> F226D37558876AA5 which the
+    next reboot restores because PCR 11 cannot be reset from locality 0. Five persistent handles, thirteen NV
+    indices, every permanent property and 23 of 24 PCRs identical. GATES: test-boot-v2 105/0; shellcheck 165
+    discovered, 0 known-failing, 0 newly failing; suites 75 / 71 in CI / 4 exempt; doc verbs 252 valid, 8
+    deliberate, 0 not a command, 191 documented, 114 declared undocumented, 0 undocumented and undeclared, 0
+    stale; no conflict markers. WHAT ANDRE MUST REDO WITH SECURE BOOT ON, precisely: only the --tpm2-pcrs=7 volume
+    (policy hash a2cfd56c5daefd24), the PCR 7 value itself, and the event-log replay - PCR 7's seven events are
+    SecureBoot(1 byte), PK(826), KEK(3066), db(7636), dbx(21556), EV_SEPARATOR and EV_EFI_VARIABLE_AUTHORITY
+    SbatLevel(18), and enabling Secure Boot changes the first and adds one authority event per verified image.
+    NOTHING ELSE needs redoing: Run 1, Run 4, the signed PCR 11 matrix, the PCR 23 both-ways test, the DA numbers,
+    the event-log mechanism and the four findings are all independent of PCR 7. And a warning for that session:
+    turning Secure Boot on does NOT make systemd-pcrextend start working - that needs the sd-stub/UKI boot path,
+    not the Secure Boot switch.
 - id: L-002
   title: Enable LUKS2 by default
   priority: Later
@@ -6945,7 +7032,27 @@ tasks:
     hardware procedure that would satisfy (1). LANDED round 30 (2026-09-19): merge c6bc990a carries round 29's
     boot-v2 work; nothing on this item changed and nothing here was re-verified. STAYS BLOCKED on L-001, and the
     dispatch unit `later` is closed to dispatch from this round for the reason recorded on L-001 - the remainder
-    is Andre's five-run hardware procedure in docs/boot-v2.md, not an agent's.
+    is Andre's five-run hardware procedure in docs/boot-v2.md, not an agent's. ROUND 31 (2026-09-19) - STATUS
+    UNCHANGED, still blocked, but ONE of the three blockers is now smaller and a FOURTH has appeared. Real silicon
+    was finally available (MSI Katana GF76 12UG, Intel PTT fTPM, INTC/ADL fw 0x2580012); see L-001 ROUND 31 and
+    ROADMAP/evidence/L-001-katana-tpm-20260919.md. BLOCKER (1) NARROWS: the acceptance is 'does not strand users
+    across qualified hardware/recovery cases', and the enrol-and-recover cycle itself now passes on real hardware
+    - a LUKS2 volume with one systemd-tpm2 token and one systemd-recovery token unlocked through the TPM in 0.29 s
+    and through the recovery key in 0.032 s, returning the same plaintext both ways, and survived a real
+    suspend/resume with a fresh unseal afterwards. What is still unqualified on silicon is the TPM CLEAR (not run
+    - a live Windows install owns katana's TPM and a clear costs Andre's Windows Hello PIN; it needs his yes, not
+    a machine, and the two-command PPI procedure is written down) and the TPM-REMOVED case (could-not-run - PPI
+    Disable is reachable but re-enabling needs somebody in firmware setup). BLOCKER (2) IS UNCHANGED AND UNTOUCHED
+    BY THIS ROUND: the installer still cannot encrypt a disk at all - every crypto_LUKS branch in
+    installer/apex-install is a refusal to overwrite an existing header, never a path that creates one. Nothing on
+    katana was encrypted either; the whole run was on loopback files, deliberately, because katana's system disk
+    must not become encrypted. BLOCKER (3) unchanged: initramfs keymap always 'us', plymouth message() a no-op,
+    cryptsetup an unpinned transitive dependency. NEW BLOCKER (4), and it is squarely in this item's subject
+    matter: `systemd-cryptenroll --tpm2-device=auto` ON SYSTEMD 258.10 BINDS TO NO PCRs AT ALL - tpm2-hash-pcrs
+    empty, tpm2-pcr-bank n/a, tpm2-policy-hash 32 zero bytes, measured on katana. A 'LUKS2 by default' built on
+    that default would seal the volume key to the SRK and nothing else, so any OS booted on the same hardware
+    could unseal it. Whatever turns encryption on must pass --tpm2-pcrs= or --tpm2-public-key-pcrs= explicitly,
+    and a test must assert the enrolled token actually carries a policy rather than that the command exited 0.
 - id: L-003
   title: Enable TPM auto-unlock by default where safe
   priority: Later
@@ -6980,7 +7087,31 @@ tasks:
     recorded. Fixed this round to capture the run of indented lines instead, verified by checking that both
     expressions capture identical bodies for all 127 other tasks. LANDED round 30 (2026-09-19): merge c6bc990a;
     nothing on this item changed and nothing here was re-verified. STAYS BLOCKED on L-001 and L-002. The dispatch
-    unit `later` is closed to dispatch from this round - see L-001.
+    unit `later` is closed to dispatch from this round - see L-001. ROUND 31 (2026-09-19) - STATUS UNCHANGED,
+    still blocked, and the reason is now MEASURED ON HARDWARE rather than inferred. The acceptance is 'Measured
+    boot + TPM unlock + recovery path validated'. On real silicon (MSI Katana GF76 12UG, Intel PTT, INTC/ADL fw
+    0x2580012) TPM unlock and the recovery path are now validated - see L-001 ROUND 31 - and so, for the first
+    time outside swtpm, is the SIGNED PCR 11 POLICY this item depends on: correct key unlocks, wrong key refused
+    on the fingerprint, a FORGED signature refused by the part itself (Esys_VerifySignature 0x2db =
+    TPM_RC_SIGNATURE), a moved PCR 11 refused, a re-signature for the new value accepted. The mechanism is sound
+    on Intel PTT. IT STILL CANNOT BE TURNED ON BY DEFAULT, and round 29's reason - PCR 11 is all zeros on a GRUB
+    machine - is now both confirmed on a SECOND machine (katana reads 64 zeros exactly as the L16 does, shim ->
+    GRUB, no sd-stub) and SUPERSEDED BY A WORSE ONE. `systemd-pcrextend` REFUSES TO RUN ON A GRUB MACHINE AND
+    EXITS 0 WHILE DOING SO: 'Kernel stub did not measure kernel image into PCR 11, skipping userspace measurement,
+    too.', PCR 11 unchanged, exit status 0, for enter-initrd, leave-initrd and sysinit alike. So the four
+    boot-phase policies `systemd-measure sign --current` signs by default are unreachable on a default APEX
+    install, and a machine enrolled that way would fail to unlock AT BOOT rather than at enrolment - the silent
+    kind of failure this repository keeps finding. 'Where safe' is therefore still nowhere until a machine boots
+    the UKI/sd-stub path, and turning Secure Boot on does NOT change this: the blocker is the stub, not the Secure
+    Boot switch. ALSO MEASURED, and it is an argument for the UKI path made from hardware: a zero PCR 11 is a
+    local denial-of-service. tpm2_pcrextend 11 succeeds from plain root and tpm2_pcrreset 11 answers 'bad
+    locality', so any root process can deny every PCR-11-bound unlock until the next reboot; after sd-stub has
+    extended PCR 11 an attacker can no longer choose the value. AND ONE MORE THING THIS ITEM MUST ACCOUNT FOR
+    BEFORE IT SHIPS: on real Intel PTT, MAX_AUTH_FAIL is 32, LOCKOUT_INTERVAL 7200 s, LOCKOUT_RECOVERY 86400 s,
+    and a successful authorisation does NOT clear the counter - so if 'where safe' ever includes --tpm2-with-pin,
+    32 mistypes over any span of time lock the TPM for up to a day, and on a machine whose lockoutAuth another OS
+    holds, APEX cannot reset it. Depends on L-001, where the TPM clear is now one decision rather than an absent
+    machine, and on L-002, where the installer still cannot encrypt a disk in the first place.
 global_agent_rules:
 - Inspect the current APEX-OS and APEX Shell source before changing anything.
 - Verify an existing implementation before reimplementing it.
