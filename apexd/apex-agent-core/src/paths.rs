@@ -252,13 +252,48 @@ pub fn data_home() -> PathBuf {
 /// directory in `/tmp`, which is world-writable, and never needs write
 /// permission on anything another account made.
 ///
-/// What this does NOT solve, because it cannot be solved by a path: a
-/// predictable name in a sticky directory can be pre-created by another
-/// account, and `ensure_private_dir` will then fail to chmod a directory it
-/// does not own. That is a loud refusal and a denial of service rather than a
-/// disclosure — the mode is never loosened and no data is written into a
-/// directory whose mode could not be set — and it takes a deliberate act,
-/// where the shared root above took only a second login.
+/// ## The pre-created root, which this paragraph used to get wrong
+///
+/// A predictable name in a sticky directory can be pre-created by another
+/// account, and the paragraph that stood here said `ensure_private_dir` "will
+/// then fail to chmod a directory it does not own", so the worst case was "a
+/// loud refusal and a denial of service rather than a disclosure". That was
+/// never measured, and it is false. Measured on 2026-09-19 against the real
+/// function, with a second account standing in for the attacker:
+///
+/// ```text
+/// nobody pre-creates the root 0755   -> Err(EACCES)        (the claim)
+/// nobody pre-creates the root 0777   -> Ok(())             (SILENT SUCCESS)
+/// nobody pre-creates the leaf 0777   -> Err(EPERM)
+/// nobody plants the leaf as a symlink-> Ok(()), and the SYMLINK TARGET
+///                                       was chmodded to 0700
+/// ```
+///
+/// The reason is the one this module already knew about the OLD shared root,
+/// repeated one level down: [`ensure_private_dir`] is called on the LEAF, so
+/// `create_dir_all` made the root along the way and nothing ever looked at it.
+/// `0755` is only the mode an attacker would not choose; at `0777` the session
+/// starts with its scratch root owned by another account, which can rename,
+/// remove or replace the session's own directory underneath it for as long as
+/// the session runs. And row 4 is what row 2 buys: `fs.protected_symlinks`
+/// stops a symlink planted directly in sticky `/tmp`, but the attacker-owned
+/// root is not sticky, so a symlink planted INSIDE it is followed — giving
+/// another account the choice of which of this user's directories gets
+/// chmodded `0700` and which one the session's build output lands in.
+///
+/// Two things close it, and both are needed:
+///
+///  * [`ensure_private_dir`] refuses a symlink and refuses a directory this
+///    account does not own, instead of chmodding whatever it finds; and
+///  * **the root is a boundary and is ensured FIRST**, by its own call, before
+///    the leaf under it — see `session.rs`. Hardening only the leaf is a check
+///    against a moving target: only the owner of a `0700` directory can rename
+///    the entries in it, so the leaf's guarantees rest on the root's.
+///
+/// What is still NOT solved by a path, stated so it is not mistaken for the
+/// above: an intermediate component that is already a symlink is followed by
+/// `create_dir_all` before either check sees it. The boundary call is what
+/// keeps that to directories this account made.
 pub const SCRATCH_ROOT_PREFIX: &str = "/tmp/apex-agent-";
 
 /// The environment variable that moves it.
@@ -307,6 +342,31 @@ pub fn scratch_dir(id: u32) -> PathBuf {
     scratch_root().join(id.to_string())
 }
 
+/// The scratch directory for session `id`, with its ROOT ensured FIRST.
+///
+/// Callers must use this rather than [`ensure_private_dir`] on
+/// [`scratch_dir`], and the difference is not tidiness. The scratch root is
+/// the one directory in this module whose parent is world-writable, so it is a
+/// boundary and has to be a directory this account made — see
+/// [`SCRATCH_ROOT_PREFIX`] for what was measured when it was not. Ensuring
+/// only the leaf reads as safe and is not: the leaf is genuinely this
+/// account's, created inside whatever the attacker left there, and only the
+/// owner of a `0700` directory can rename the entries in it, so the leaf's
+/// privacy rests on the root's.
+pub fn ensure_scratch_dir(id: u32) -> io::Result<PathBuf> {
+    ensure_scratch_dir_in(&scratch_root(), id)
+}
+
+/// [`ensure_scratch_dir`] with the root passed in — the `_in` shape the rest
+/// of this module uses, and what lets a test give it a root of its own without
+/// `set_var`, which is process-global and races every other test.
+pub fn ensure_scratch_dir_in(root: &Path, id: u32) -> io::Result<PathBuf> {
+    ensure_private_dir(root)?;
+    let dir = root.join(id.to_string());
+    ensure_private_dir(&dir)?;
+    Ok(dir)
+}
+
 /// The default scratch root for one account, as a function of the uid alone.
 ///
 /// Split out for the reason every `*_in` in this module is: a test process has
@@ -337,16 +397,80 @@ pub fn scratch_root() -> PathBuf {
     scratch_root_for(uid())
 }
 
-/// Create `dir` and every missing parent with `0700`.
+/// Create `dir` and every missing parent with `0700`, and refuse a directory
+/// this account does not own.
 ///
-/// [`std::fs::create_dir_all`] applies the process umask, which a user is free
-/// to loosen. Session logs are transcripts of the user's work, so the mode is
-/// set explicitly afterwards instead of being left to inherited state.
+/// Session logs are transcripts of the user's work, so the mode is not left to
+/// inherited state. Three things this used to get wrong, all of them measured
+/// rather than reasoned about — see [`SCRATCH_ROOT_PREFIX`] for the numbers:
+///
+///  * `create_dir_all` applies the process umask to EVERY component it makes
+///    and only the leaf was chmodded afterwards, so the parents were left at
+///    whatever the umask said (`0755` on this machine). `DirBuilder::mode`
+///    applies to every directory it creates, so they start private instead of
+///    being widened and then not narrowed.
+///  * [`std::fs::metadata`] FOLLOWS a symlink, so a symlink planted at `dir`
+///    by another account was followed and the chmod below landed on its
+///    target. The stat is `symlink_metadata` and a symlink is refused.
+///  * a directory owned by another account was chmodded if that happened to be
+///    permitted and reported as success if it did not need chmodding at all.
+///    Ownership is now checked, and it is checked against the caller's own uid
+///    rather than against a mode.
+///
+/// What it does not do, deliberately: walk the ancestors. Every other root in
+/// this module is under `$HOME` or `/run/user/<uid>`, and a check that climbed
+/// to `/` would refuse on `/var` in every one of them. The one root whose
+/// parent is world-writable is the scratch root, and that is why its caller
+/// ensures it as a boundary in its own right.
 pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+    ensure_private_dir_as(dir, uid())
+}
 
-    std::fs::create_dir_all(dir)?;
-    let mut perms = std::fs::metadata(dir)?.permissions();
+/// [`ensure_private_dir`] with the owner it checks against passed in.
+///
+/// Split out for the reason [`scratch_root_for`] is: a test process has
+/// exactly one uid, and the claim worth asserting — that a directory belonging
+/// to ANOTHER account is refused — is about two. The `stat` is a real one of a
+/// real directory; only the uid it is compared against is chosen.
+///
+/// **`pub(crate)`, and that is the point.** "Production callers use
+/// [`ensure_private_dir`] and never reach this" would otherwise be a comment
+/// asking to be believed; the visibility makes it a property of the build.
+/// Every other crate in the workspace links this one, so a `pub` here would be
+/// a way for a caller anywhere to choose which account an ownership check
+/// compares against — which is the check.
+pub(crate) fn ensure_private_dir_as(dir: &Path, me: u32) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+
+    // NOT `metadata`: that follows a symlink, and following one here is how a
+    // chmod of this account's choosing became a chmod of somebody else's.
+    let meta = std::fs::symlink_metadata(dir)?;
+    if meta.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is a symbolic link, so it is not a directory this account made",
+                dir.display()
+            ),
+        ));
+    }
+    if meta.uid() != me {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is owned by uid {}, not by uid {me}, so this account cannot make it private",
+                dir.display(),
+                meta.uid()
+            ),
+        ));
+    }
+
+    let mut perms = meta.permissions();
     if perms.mode() & 0o777 != 0o700 {
         perms.set_mode(0o700);
         std::fs::set_permissions(dir, perms)?;
@@ -531,6 +655,158 @@ mod tests {
         let mode = std::fs::metadata(&nested).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
 
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn every_component_it_creates_is_private_and_not_only_the_leaf() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The scratch ROOT is the directory this was wrong about: it was made
+        // by `create_dir_all` under the umask and never tightened, so on a
+        // default umask it stood at 0755 in world-writable /tmp while the
+        // session directory under it was 0700. Another account could list one
+        // user's session ids off it.
+        let base = std::env::temp_dir().join(format!(
+            "apex-agent-parents-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let leaf = base.join("root/1");
+        ensure_private_dir(&leaf).expect("create");
+        for dir in [base.as_path(), &base.join("root"), leaf.as_path()] {
+            let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{} was {:o}", dir.display(), mode);
+        }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_symlink_is_refused_and_its_target_is_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Measured on 2026-09-19: with `metadata` in place of
+        // `symlink_metadata` this returned Ok and chmodded the TARGET to 0700,
+        // which hands another account the choice of which of this user's
+        // directories gets its mode changed and where the session's scratch
+        // writes land. The target's surviving mode is the half that makes this
+        // a measurement rather than an exit-code check — see the unit's card:
+        // an assertion on a refusal alone measures whichever refusal is first.
+        let base = std::env::temp_dir().join(format!(
+            "apex-agent-symlink-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let target = base.join("target");
+        let link = base.join("link");
+        std::fs::create_dir_all(&target).expect("target");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let err = ensure_private_dir(&link).expect_err("a symlink must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert!(err.to_string().contains("symbolic link"), "{err}");
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "the symlink's target was chmodded to {mode:o}");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link itself was replaced"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn the_scratch_root_is_ensured_as_a_boundary_and_not_only_the_session_leaf() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Case B of the measurement in `SCRATCH_ROOT_PREFIX`: the ROOT is a
+        // directory this call did not make. Here it is one this account owns
+        // but left loose, which is the single-uid half of the same shape —
+        // a root the call must tighten rather than walk past.
+        let base = std::env::temp_dir().join(format!(
+            "apex-agent-boundary-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let leaf = ensure_scratch_dir_in(&root, 1).expect("create");
+        assert_eq!(leaf, root.join("1"));
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "the root was left as it was found"
+        );
+        assert_eq!(
+            std::fs::metadata(&leaf).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_scratch_root_that_is_a_symlink_is_refused_before_the_session_leaf_exists() {
+        // The half a mode check cannot make. Another account that pre-created
+        // the root owns it, and what it can then put there is a symlink — so
+        // the leaf is created somewhere else entirely and the call still
+        // reports success, because the leaf IS this account's. Ensuring the
+        // root is what refuses, and the target having gained nothing is what
+        // says the refusal happened before any of it.
+        let base = std::env::temp_dir().join(format!(
+            "apex-agent-boundary-link-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let elsewhere = base.join("elsewhere");
+        let root = base.join("root");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, &root).expect("symlink");
+
+        let err = ensure_scratch_dir_in(&root, 1).expect_err("a symlinked root must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert!(
+            !elsewhere.join("1").exists(),
+            "the session directory was created through the symlink"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_directory_another_account_owns_is_refused() {
+        // The stat is real and so is the directory; the uid it is compared
+        // against is the injected half, because a test process has one uid.
+        // See `ensure_private_dir_as`. The pair is the point: the SAME
+        // directory is accepted for its real owner and refused for anybody
+        // else, so a gate that always refused would fail the first half.
+        let base = std::env::temp_dir().join(format!(
+            "apex-agent-owner-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let leaf = base.join("1");
+
+        ensure_private_dir_as(&leaf, uid()).expect("its real owner is accepted");
+
+        let stranger = uid().wrapping_add(1);
+        let err = ensure_private_dir_as(&leaf, stranger)
+            .expect_err("a directory owned by another account must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert!(
+            err.to_string().contains(&format!("owned by uid {}", uid())),
+            "the refusal does not name the owner it found: {err}"
+        );
+        assert!(
+            err.to_string().contains(&stranger.to_string()),
+            "the refusal does not name the account that asked: {err}"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 }

@@ -367,6 +367,15 @@ impl Provider for OAuthProvider {
         config.push_str("write-out = \"\\n%{http_code}\"\n");
 
         let out = broker::run_curl(&config, req.owner).map_err(ProviderError::Failed)?;
+        // Before the status is read: `write-out` prints it whether or not the
+        // transfer finished, so an aborted read of a token endpoint's reply
+        // arrives here as a 200 with a truncated — or empty — JSON document
+        // under it. Without this the reply fails to parse and the refusal
+        // says "not JSON", which blames the server for this build's cap. See
+        // `broker::aborted_transfer`.
+        if let Some(why) = broker::aborted_transfer(&out) {
+            return Err(ProviderError::Failed(why));
+        }
         let (body, status) = split_status(&out.stdout);
         let Some(status) = status else {
             return Err(ProviderError::Failed(format!(

@@ -55,16 +55,61 @@ pub fn home() -> PathBuf {
     }
 }
 
-/// Create `dir` and every missing parent, then force `0700`.
+/// Create `dir` and every missing parent as `0700`, and refuse a directory
+/// this account does not own.
 ///
-/// [`std::fs::create_dir_all`] applies the process umask, which the user is
-/// free to loosen; the mode is set explicitly afterwards rather than left to
-/// inherited state.
+/// The duplication this module's own note explains is why this had to be fixed
+/// twice: the same three defects were measured in
+/// `apex_agent_core::paths::ensure_private_dir` on 2026-09-19 and that copy
+/// carries the numbers. In short — `create_dir_all` left every parent at the
+/// umask while only the leaf was tightened; [`std::fs::metadata`] FOLLOWS a
+/// symlink, so a symlink planted at `dir` by another account was followed and
+/// the chmod landed on its target; and a directory owned by another account
+/// was never noticed at all.
+///
+/// This daemon's roots are `$XDG_RUNTIME_DIR` and `$XDG_CONFIG_HOME`, neither
+/// of which has a world-writable parent — `runtime_dir`'s doc comment says
+/// refusing `/tmp` is the point. So the exposure here is smaller than the
+/// agent runtime's and the fix is the same one regardless: a daemon that
+/// writes prompts into a directory should not chmod one it does not own.
 pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+    ensure_private_dir_as(dir, unsafe { libc::getuid() })
+}
 
-    std::fs::create_dir_all(dir)?;
-    let mut perms = std::fs::metadata(dir)?.permissions();
+/// [`ensure_private_dir`] with the owner it checks against passed in.
+///
+/// A test process has exactly one uid and the claim worth asserting is about
+/// two. The `stat` is real; only the comparand is chosen.
+pub(crate) fn ensure_private_dir_as(dir: &Path, me: u32) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+
+    let meta = std::fs::symlink_metadata(dir)?;
+    if meta.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is a symbolic link, so it is not a directory this account made",
+                dir.display()
+            ),
+        ));
+    }
+    if meta.uid() != me {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is owned by uid {}, not by uid {me}, so this account cannot make it private",
+                dir.display(),
+                meta.uid()
+            ),
+        ));
+    }
+
+    let mut perms = meta.permissions();
     if perms.mode() & 0o777 != 0o700 {
         perms.set_mode(0o700);
         std::fs::set_permissions(dir, perms)?;
@@ -113,6 +158,53 @@ mod tests {
             0o700,
             "a loosened directory was not tightened back"
         );
+
+        // The parent, which this used to leave at the umask while tightening
+        // only the leaf it was handed.
+        assert_eq!(
+            std::fs::metadata(&base).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "the parent was left at the umask"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_symlink_is_refused_and_its_target_is_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!("apex-aid-symlink-{}", std::process::id()));
+        let target = base.join("target");
+        let link = base.join("link");
+        std::fs::create_dir_all(&target).expect("target");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let err = ensure_private_dir(&link).expect_err("a symlink must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        // The target's surviving mode, not the refusal alone: with `metadata`
+        // in place of `symlink_metadata` this call returns Ok and the target
+        // becomes 0700.
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "the symlink's target was chmodded"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_directory_another_account_owns_is_refused() {
+        let me = unsafe { libc::getuid() };
+        let base = std::env::temp_dir().join(format!("apex-aid-owner-{}", std::process::id()));
+
+        ensure_private_dir_as(&base, me).expect("its real owner is accepted");
+        let err = ensure_private_dir_as(&base, me.wrapping_add(1))
+            .expect_err("a directory owned by another account must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied, "{err}");
+        assert!(err.to_string().contains(&format!("owned by uid {me}")), "{err}");
 
         std::fs::remove_dir_all(&base).ok();
     }

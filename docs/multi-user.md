@@ -190,6 +190,42 @@ created by whoever logged in first and owned by them, and `/tmp` is sticky — s
 the **second** account on a machine could not start an agent at all. Session ids
 restart at 1 per daemon, so the two accounts also named the same directories.
 
+Putting the uid in the name does not by itself make the root this account's:
+`/tmp/apex-agent-1000` is a predictable name in a world-writable directory, so
+any account can create it first. `paths.rs` claimed that case was closed —
+"`ensure_private_dir` will then fail to chmod a directory it does not own … a
+loud refusal and a denial of service rather than a disclosure". That was never
+measured. Measured on 2026-09-19 against the shipped function, with a second
+real account playing the attacker:
+
+| what the other account pre-creates | before | after |
+|---|---|---|
+| the root, `0755` | `Err(EACCES)` — the claim | `Err`, naming uid and mode |
+| the root, `0777` | **`Ok(())`** | `Err`, naming the owner it found |
+| the session directory, `0777` | `Err(EPERM)` | `Err`, naming the owner it found |
+| the session directory as a **symlink** | **`Ok(())`, and the symlink's target was chmodded `0700`** | `Err`, target untouched |
+
+`0755` is the only mode an attacker would not choose. The reason is the one
+this page already gives for the old shared root, one level down:
+`ensure_private_dir` was called on the session directory, so `create_dir_all`
+made the root along the way and nothing looked at it — leaving the root at the
+umask (`0755`, enough to list another user's session ids) even with nobody
+attacking it. `fs.protected_symlinks` stops a symlink planted directly in
+sticky `/tmp`; an attacker-owned root is not sticky, so a symlink planted
+*inside* it is followed, which is how row 2 buys row 4.
+
+Two changes, and both are needed. `ensure_private_dir` stats with
+`symlink_metadata`, refuses a symlink, refuses a directory this account does
+not own, and creates every component `0700` rather than at the umask. And the
+root is ensured **first, as a directory in its own right** — only the owner of
+a `0700` directory can rename the entries in it, so hardening the session
+directory while another account owns the root is a check against a moving
+target. Asserted in `apex-agent-core::paths` (the refusals, and their
+accepting halves) and in `tests/test-agent-inject.sh`, which pre-creates its
+fixture root `0755` before the daemon starts — a root the daemon *makes* is
+`0700` either way, so only a root it *finds* can tell the boundary call from
+its absence.
+
 Measured on a two-account machine: every test binary in the workspace, run by
 the second account inside its own logind session, gives the same result as the
 owner's — 4339 passed, and the eight that fail fail identically for both.

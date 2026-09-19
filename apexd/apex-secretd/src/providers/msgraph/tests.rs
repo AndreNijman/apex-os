@@ -104,6 +104,13 @@ enum Mode {
     /// only way the SUCCESS path's scrub can be measured: a file does not
     /// contain its own download link, so nothing else would ever exercise it.
     DownloadEchoes,
+    /// Hop ONE answers `200` promising forty megabytes and sends four
+    /// kilobytes. A reply this build will not carry whole.
+    GraphOversize,
+    /// Hop one redirects as it always does, and the DOWNLOAD host is the one
+    /// that overpromises. The hop with no credential on it and no curl stderr
+    /// allowed in its message.
+    DownloadOversize,
 }
 
 struct Fake {
@@ -203,6 +210,19 @@ fn reply(stream: &mut TcpStream, status: &str, extra: &[(&str, String)], payload
     let _ = stream.flush();
 }
 
+/// A reply that promises far more than it sends, then closes.
+///
+/// curl reads `Content-Length` before the body and aborts having written none
+/// of it, so what the provider sees is the `write-out` line and nothing else.
+fn reply_overpromising(stream: &mut TcpStream) {
+    let _ = stream.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\
+          Content-Length: 40000000\r\nConnection: close\r\n\r\n",
+    );
+    let _ = stream.write_all(&[b'x'; 4096]);
+    let _ = stream.flush();
+}
+
 fn serve_graph(
     mut stream: TcpStream,
     recorder: &Arc<Mutex<Vec<Seen>>>,
@@ -248,8 +268,14 @@ fn serve_graph(
         );
     }
     match mode {
+        // The oversized reply is hop one's own, so there is no redirect here.
+        Mode::GraphOversize => reply_overpromising(&mut stream),
         // The documented answer, and the Location carries a capability.
-        Mode::Normal | Mode::DownloadRedirects | Mode::DownloadGone | Mode::DownloadEchoes => reply(
+        Mode::Normal
+        | Mode::DownloadRedirects
+        | Mode::DownloadGone
+        | Mode::DownloadEchoes
+        | Mode::DownloadOversize => reply(
             &mut stream,
             "302 Found",
             &[("Location", download)],
@@ -284,6 +310,7 @@ fn serve_download(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<Seen>>>, mode:
     let query = got.target.split_once('?').map(|(_, q)| q).unwrap_or("");
 
     match mode {
+        Mode::DownloadOversize => reply_overpromising(&mut stream),
         Mode::DownloadRedirects => reply(
             &mut stream,
             "302 Found",
@@ -638,6 +665,35 @@ fn what_the_download_hop_reports_is_built_without_the_url_in_scope() {
     let said = e.to_string();
     assert!(said.contains("curl exited 7"), "{said}");
     assert!(said.contains("https://files.example"), "{said}");
+
+    // A 2xx with a NON-ZERO exit is the one this function used to get wrong.
+    // curl's `write-out` prints the status even when the transfer was cut
+    // short, so `Some(200)` arrives with a truncated — here empty — body under
+    // it, and until now that was handed back as `code: 0` with that body as
+    // the file. The exit code was already an argument; it was simply not read
+    // on a 2xx.
+    for code in [63, 28, 18] {
+        let cut = download_outcome("https://files.example", "graph.microsoft.com", Some(200), "", code)
+            .expect_err("a cut-short download must not read as a complete file");
+        let said = cut.to_string();
+        assert!(said.contains(&format!("curl exited {code}")), "{said}");
+        assert!(said.contains("did not finish"), "{said}");
+        assert!(said.contains("https://files.example"), "{said}");
+    }
+    // Including when a partial body DID arrive, which is the shape that reads
+    // most like a real short file.
+    let partial = download_outcome(
+        "https://files.example",
+        "graph.microsoft.com",
+        Some(200),
+        "the quick brown",
+        18,
+    )
+    .expect_err("a partial file must not read as a whole one");
+    assert!(
+        !partial.to_string().contains("the quick brown"),
+        "the partial body was handed back as the file: {partial}"
+    );
 }
 
 #[test]
@@ -1040,6 +1096,102 @@ fn a_second_redirect_is_not_followed() {
     // redirect was not walked.
     assert_eq!(f.fake.download_seen().len(), 1);
     assert!(!text.contains(PREAUTH));
+}
+
+/// Hop one: a Graph reply this build will not carry whole is a refusal.
+///
+/// `write-out` prints the status even when the transfer was aborted — measured
+/// in `broker::tests::curls_write_out_still_prints_when_the_transfer_was_aborted`
+/// — so without the guard this arrives as a `200` with an empty body and is
+/// handed to `is_redirect` and then to the 2xx branch, which returns it as the
+/// file.
+#[test]
+fn a_graph_reply_this_build_will_not_carry_whole_is_refused_on_the_first_hop() {
+    let f = Fixture::new("hop1big", Mode::GraphOversize, &["msgraph.file.read"]);
+
+    let reply = f.use_it(f.record("msgraph.file.read", ITEM_ID));
+
+    // It really reached Graph — so the refusal is about the reply and not
+    // about the request.
+    assert_eq!(f.fake.graph_seen().len(), 1, "hop one never happened");
+    // And the download hop was never reached, because there was no redirect.
+    assert!(f.fake.download_seen().is_empty());
+
+    match &reply {
+        Response::Performed { exit_code, output, .. } => panic!(
+            "an aborted hop one read as a completed one: exit {exit_code}, {output:?}"
+        ),
+        Response::Error { message, .. } => {
+            assert!(message.contains("curl exited"), "{message}");
+            assert!(message.contains("did not finish"), "{message}");
+            // 63 and not 18, which is the whole of what `max-filesize` buys.
+            // curl reads `Content-Length` BEFORE the body: told a limit, it
+            // stops there and exits 63 having written nothing; not told one, it
+            // reads to EOF and exits 18 only once the far side hangs up — by
+            // which time every byte is in this daemon's memory and the cap
+            // `broker::run_curl` applies afterwards is a cap on nothing. Both
+            // are refusals now, so the number is the only thing that can tell
+            // them apart.
+            assert!(
+                message.contains("curl exited 63"),
+                "the reply was read to the end before it was refused: {message}"
+            );
+        }
+        other => panic!("unexpected reply: {other:?}"),
+    }
+    assert!(!f.trail().contains(TOKEN), "the token reached the audit trail");
+}
+
+/// Hop two: the same refusal, said without curl's words in it.
+///
+/// This is the hop whose URL is a capability, so its guard is inside
+/// `download_outcome` — a function that is not given the URL — rather than
+/// through `broker::aborted_transfer`, which quotes curl's stderr. curl names
+/// the host and port it was talking to in several of its abort messages, and
+/// the assertions below are what hold that line.
+#[test]
+fn a_download_this_build_will_not_carry_whole_is_refused_without_curls_words() {
+    let f = Fixture::new("hop2big", Mode::DownloadOversize, &["msgraph.file.read"]);
+
+    let reply = f.use_it(f.record("msgraph.file.read", ITEM_ID));
+
+    // Both hops really happened: hop one redirected and hop two was fetched.
+    assert_eq!(f.fake.graph_seen().len(), 1, "hop one never happened");
+    assert_eq!(f.fake.download_seen().len(), 1, "hop two never happened");
+
+    match &reply {
+        Response::Performed { exit_code, output, .. } => panic!(
+            "an aborted download read as a completed one: exit {exit_code}, {output:?}"
+        ),
+        Response::Error { message, .. } => {
+            assert!(message.contains("curl exited"), "{message}");
+            assert!(message.contains("did not finish"), "{message}");
+            // 63 and not 18: with `max-filesize` curl stops at the limit
+            // having written nothing; without it, it reads to EOF. See the
+            // longer note on hop one.
+            assert!(
+                message.contains("curl exited 63"),
+                "the reply was read to the end before it was refused: {message}"
+            );
+            // The invariant this hop is built around, unchanged by the guard.
+            assert!(
+                !message.contains(PREAUTH),
+                "the pre-authenticated URL came back in an abort: {message}"
+            );
+            assert!(!message.contains("tempauth"), "{message}");
+            // curl's own sentence is not carried on this hop at all, and
+            // "Maximum file size exceeded" is the one it would have been.
+            assert!(
+                !message.contains("Maximum file size"),
+                "curl's own words reached a message on the download hop: {message}"
+            );
+        }
+        other => panic!("unexpected reply: {other:?}"),
+    }
+    assert!(
+        !f.trail().contains(PREAUTH),
+        "the pre-authenticated URL reached the audit trail"
+    );
 }
 
 /// The failure path a pre-authenticated URL leaks through, if it leaks at all.
