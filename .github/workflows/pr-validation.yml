@@ -2985,6 +2985,53 @@ jobs:
               exit 1
           fi
 
+      # tests/test-apex-multilib-extract.sh — the same engine, one function
+      # later. The suite above stops at guard_rpms on purpose and says why: a
+      # full extraction through the install path needs the container's versions
+      # to match the repository, and when they do not the guard correctly
+      # refuses the whole transaction. So the decisions are the discriminating
+      # step there. They were not enough either. On katana on 2026-09-19 every
+      # decision was right and the machine still broke, because extract_rpms'
+      # 32-bit pass excluded /usr/bin, /usr/sbin, /usr/share and /etc and
+      # nothing else — while i686 packages also ship helpers under /usr/libexec.
+      # 14 image binaries were shadowed and GStreamer went from 1344 usable
+      # features to 2.
+      #
+      # This one calls extract_rpms DIRECTLY, which is what lets it run where
+      # the suite above would be refused: --nodeps --replacefiles into a
+      # throwaway root does not care about version skew. Same containment —
+      # everything happens inside `podman run --rm` with the repository mounted
+      # read-only, nothing is installed on the runner, no sysext is built.
+      #
+      # The floor below is 6 rather than 3 because two of its six assertions
+      # exist to stop it passing for free: one fails if no 32-bit ELF reached
+      # the tree at all, and one is a negative control that re-extracts the same
+      # set with the pre-fix exclude list and fails if that does NOT produce a
+      # shadow. If Fedora ever stops shipping 32-bit helpers in these packages,
+      # the control goes red and says the instrument has gone blind — which is
+      # the opposite of what a coverage drop usually does here.
+      - name: P1 multilib — where the 32-bit pass actually puts files
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          command -v podman >/dev/null || { echo "::error::podman is not on this runner; the extract suite would SKIP and exit 0, and a could-not-run is not a pass"; exit 1; }
+          rc=0; out="$(./tests/test-apex-multilib-extract.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the multilib extract suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex-multilib-extract: [0-9]+ passed, [0-9]+ failed$' || true)"
+          [ -n "$summary" ] || { echo "::error::the extract suite printed no summary line, which is what it does when podman is absent or no repository was reachable — it then exits 0, so this line is the only thing between that and a green tick"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^apex-multilib-extract: //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed extraction assertions failed"; exit 1; }
+          [ "$passed" -ge 6 ] || { echo "::error::only $passed extraction assertions ran; 6 ran on 2026-09-19, so some no longer execute — and two of the six are the guards that stop this suite passing for free"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the multilib extract suite printed a SKIP; its abstentions are failures by design, so a SKIP means a new one was added"
+              exit 1
+          fi
+
       # tests/test-labwc-session.sh — the APEX Floating session, probed by real
       # clients against a real labwc running the SHIPPED config. It was the last
       # DEBT line in tests/suites-not-in-ci.txt, and its note asked the right
