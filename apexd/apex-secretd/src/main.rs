@@ -33,9 +33,11 @@
 
 mod broker;
 mod peer;
+mod present;
 mod provider;
 mod providers;
 mod service;
+mod tls;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -252,20 +254,36 @@ fn serve(service: &Service, stream: UnixStream) {
         if line.trim().is_empty() {
             continue;
         }
-        let response = match serde_json::from_str::<Request>(line.trim_end()) {
-            Ok(request) => dispatch(
-                service,
-                peer,
-                handle.as_ref(),
-                request,
-                &mut reader,
-                &writer,
-            ),
-            Err(e) => Response::error(
-                ErrorKind::BadRequest,
-                format!("cannot parse that request: {e}"),
-            ),
+        let request = match serde_json::from_str::<Request>(line.trim_end()) {
+            Ok(request) => request,
+            Err(e) => {
+                let _ = write_response(
+                    &writer,
+                    &Response::error(
+                        ErrorKind::BadRequest,
+                        format!("cannot parse that request: {e}"),
+                    ),
+                );
+                let _ = writer.flush();
+                continue;
+            }
         };
+        // The one verb that consumes the connection. It is handled here and
+        // not in `dispatch` because everything after its reply is the
+        // capsule's own plaintext: a loop that came back here would read the
+        // first bytes of an HTTP request as a request line of this protocol.
+        if let Request::Present { record, destination } = request {
+            present::serve(service, peer, *record, &destination, writer);
+            return;
+        }
+        let response = dispatch(
+            service,
+            peer,
+            handle.as_ref(),
+            request,
+            &mut reader,
+            &writer,
+        );
         if write_response(&writer, &response).is_err() {
             return;
         }
@@ -273,7 +291,7 @@ fn serve(service: &Service, stream: UnixStream) {
     }
 }
 
-fn write_response(mut stream: &UnixStream, response: &Response) -> std::io::Result<()> {
+pub(crate) fn write_response(mut stream: &UnixStream, response: &Response) -> std::io::Result<()> {
     let mut line = serde_json::to_string(response)
         .unwrap_or_else(|_| r#"{"reply":"error","kind":"internal","message":"unserialisable"}"#.into());
     line.push('\n');
@@ -390,6 +408,19 @@ fn dispatch(
             };
             service.use_capability(peer, *record, body)
         }
+
+        // Handled in `serve`, which hands the whole connection to
+        // `present::serve` before this function is reached. Reaching it means
+        // somebody moved the hijack and did not move this — so it refuses, and
+        // the refusal is the fail-closed direction: a capsule gets an error
+        // instead of an unauthenticated tunnel it would spend minutes not
+        // understanding.
+        Request::Present { .. } => Response::error(
+            ErrorKind::Internal,
+            "a present request reached the ordinary dispatch path, which cannot carry one: \
+             it consumes the connection and is handled where connections are accepted"
+                .to_string(),
+        ),
     }
 }
 

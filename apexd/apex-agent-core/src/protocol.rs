@@ -150,10 +150,23 @@ use crate::policy::{AgentPolicy, RequestOrigin};
 /// `check_daemon_understands` can consume: it runs BEFORE `Run`, which is the
 /// last moment at which nothing has been started.
 ///
-/// Route B — the daemon terminating TLS for a pinned destination, if that
-/// question is ever answered yes — must therefore take **11**. It was written
-/// down as 10 while this field did not exist yet.
-pub const PROTOCOL_VERSION: u32 = 10;
+/// 11 — a session's ONE pinned destination is authenticated by the runtime,
+/// which the capsule is never given the credential for (P2-012, route B).
+///
+/// [`RunRequest::present`]. The question `docs/browser-capsule-auth.md` put to
+/// the owner — may the runtime read the plaintext of a capsule's connection to
+/// the one destination it was pinned to — was answered yes, and this is the
+/// number that answer costs. It was written down as 10 in that document while
+/// [`RunRequest::trust_ca`] did not exist yet; gap 5 took 10, so route B is 11.
+///
+/// The dropped key here fails OPEN, which is the ordinary reason a guard
+/// exists and is not the browser CA's reason one revision below: a daemon that
+/// ignores `present` tunnels the capsule's `CONNECT` untouched, presents
+/// nothing, and hands back whatever the site says to an unauthenticated
+/// request. That is a 401 in a screenshot, or — worse, for a site that serves
+/// a public page to anonymous callers — a capsule that renders something
+/// plausible and is not logged in at all.
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// The revision at which the credential store moved to `apex-secretd`.
 ///
@@ -242,6 +255,10 @@ const _: () = assert!(PLUGIN_POLICY_VERSION < SESSION_ALLOWLIST_VERSION);
 // still know nothing about installing a CA for the browser that visits it.
 // The two arrived in consecutive revisions and are not the same wire change.
 const _: () = assert!(SESSION_ALLOWLIST_VERSION < BROWSER_CA_VERSION);
+// And later again: a daemon can install a private CA for a capsule's browser
+// and still know nothing about terminating that capsule's TLS and asking the
+// secret service to put a credential on the request.
+const _: () = assert!(BROWSER_CA_VERSION < BROWSER_PRESENT_VERSION);
 
 /// The revision that first carried the six dimensions.
 ///
@@ -291,6 +308,21 @@ pub const SESSION_ALLOWLIST_VERSION: u32 = 9;
 /// other guard here is catching a session that ran WIDER than was asked for;
 /// this one is catching a session that ran narrower and could not say so.
 pub const BROWSER_CA_VERSION: u32 = 10;
+
+/// The revision that first let the runtime authenticate a session's one pinned
+/// destination (P2-012, [`RunRequest::present`]).
+///
+/// `apex agent run --present` and `apex browser run --present` check it. Its
+/// own number rather than an alias of [`BROWSER_CA_VERSION`], because a daemon
+/// can install a CA for a capsule's browser and know nothing about terminating
+/// TLS for a destination and asking `apex-secretd` to authenticate it — the
+/// two arrived in consecutive revisions and are not the same wire change.
+///
+/// Back to the ordinary direction after the exception one revision below: a
+/// dropped key here makes the session run WIDER than was asked for, in the
+/// sense that matters — it runs unauthenticated, against a site the caller
+/// believes it is logged in to.
+pub const BROWSER_PRESENT_VERSION: u32 = 11;
 
 /// What a session is doing. The five user-facing values come straight from the
 /// roadmap's agent event protocol; `Starting` and `Exited` are the lifecycle
@@ -1374,6 +1406,44 @@ pub struct RunRequest {
     /// wrong cause is worth the number.
     #[serde(default)]
     pub trust_ca: Option<String>,
+    /// The stored credential this session's ONE pinned destination should be
+    /// authenticated with (P2-012, route B, protocol 11).
+    ///
+    /// Named by the credential and nothing else. Where it is spent is not a
+    /// second field: it is the destination that credential is pinned to, which
+    /// the daemon reads out of the secret service and then requires the
+    /// session's narrowed allowlist to be — exactly one rule, that host, that
+    /// port. A second wire field naming the destination would be a second
+    /// thing that can disagree with the first, and the disagreement would be
+    /// resolved in favour of whichever one an attacker got to write.
+    ///
+    /// ## What the daemon does with it
+    ///
+    /// It mints a CA and one leaf for that destination, installs the CA in the
+    /// capsule's browser the way [`RunRequest::trust_ca`] does, and terminates
+    /// that one `CONNECT` instead of tunnelling it. The plaintext goes to
+    /// `apex-secretd`, which adds the credential's header and originates its
+    /// own connection to the site. **The session is never given the
+    /// credential, and neither is this daemon** — see
+    /// `apex-agentd/src/intercept.rs` for why that second half is the design
+    /// and not an accident of it.
+    ///
+    /// Every other destination stays an opaque tunnel. There are none, for a
+    /// session the daemon accepted: the guard requires the narrowed allowlist
+    /// to be that one destination.
+    ///
+    /// Meaningless without a confined sandbox and without `network =
+    /// allowlist`, and refused with [`RunRequest::trust_ca`] rather than
+    /// combined: a capsule with `present` has one destination and the daemon
+    /// terminates it, so a caller-supplied root would be a root for a
+    /// connection that no longer exists. The daemon refuses each pair rather
+    /// than ignoring it, for [`RunRequest::ttl_ms`]'s reason.
+    ///
+    /// A `PROTOCOL_VERSION` bump of its own ([`BROWSER_PRESENT_VERSION`]) for
+    /// the ordinary reason: a daemon below it drops the key, tunnels the
+    /// `CONNECT` untouched, and the capsule visits the site as nobody.
+    #[serde(default)]
+    pub present: Option<String>,
     /// A security key's answer, for a session asking to elevate from an origin
     /// §7 does not give the local column to (P0-014).
     ///
@@ -2019,6 +2089,7 @@ mod tests {
             capabilities: None,
             allow: Some(vec!["api.example.com".into(), "files.example.com:8443".into()]),
             trust_ca: None,
+            present: None,
             second_factor: None,
             cols: 80,
             rows: 24,
@@ -2073,6 +2144,7 @@ mod tests {
             capabilities: None,
             allow: None,
             trust_ca: Some("/home/t/intranet-root.pem".into()),
+            present: None,
             second_factor: None,
             cols: 80,
             rows: 24,
@@ -2102,6 +2174,62 @@ mod tests {
     }
 
     #[test]
+    fn a_presented_credential_travels_as_present_and_its_absence_is_none() {
+        // P2-012's route B, and the assertion is the KEY for the reason the
+        // one above it is — with the direction back the other way. A rename
+        // here is a daemon that tunnels the capsule's CONNECT untouched, so
+        // the capsule visits the site as nobody and the screenshot looks
+        // plausible. Nothing anywhere says the credential was not presented.
+        let req = RunRequest {
+            agent: None,
+            prompt: None,
+            args: vec![],
+            cwd: "/home/t/p".into(),
+            policy: AgentPolicy::default(),
+            request_origin: None,
+            worktree: None,
+            checkpoint: false,
+            ttl_ms: None,
+            capabilities: None,
+            allow: Some(vec!["intranet.example:443".into()]),
+            trust_ca: None,
+            present: Some("intranet".into()),
+            second_factor: None,
+            cols: 80,
+            rows: 24,
+            env: vec![],
+            disposable: false,
+            copy_out: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&req).expect("serialize");
+        assert_eq!(
+            v["present"],
+            serde_json::json!("intranet"),
+            "the wire key is `present`; a daemon reading any other name authenticates nothing"
+        );
+        // It names the CREDENTIAL and never the destination. A second key for
+        // where to spend it would be a second thing that can disagree with the
+        // first, and the request would settle the disagreement in favour of
+        // whichever one the caller wrote.
+        for forbidden in ["present_host", "present_destination", "intercept"] {
+            assert!(
+                v.get(forbidden).is_none(),
+                "the run request grew a {forbidden} field"
+            );
+        }
+
+        let mut without = v.clone();
+        without.as_object_mut().expect("object").remove("present");
+        let back: RunRequest = serde_json::from_value(without).expect("an older client's request");
+        assert_eq!(back.present, None);
+
+        let mut nulled = v.clone();
+        nulled["present"] = serde_json::Value::Null;
+        let back: RunRequest = serde_json::from_value(nulled).expect("an explicit null");
+        assert_eq!(back.present, None);
+    }
+
+    #[test]
     fn only_the_requests_that_authenticate_wait_on_a_person() {
         // The polkit dialog is on the desktop and the person may take a
         // minute or ten; the CLI must not give up on the socket and report a
@@ -2124,6 +2252,7 @@ mod tests {
                 capabilities: None,
                 allow: None,
                 trust_ca: None,
+            present: None,
                 second_factor: None,
                 cols: 80,
                 rows: 24,
@@ -2171,6 +2300,7 @@ mod tests {
                 capabilities: None,
                 allow: None,
                 trust_ca: None,
+            present: None,
                 // Carried through the round trip with a value, not `None`:
                 // the field is the one thing on this request that a daemon
                 // reads to decide whether root is handed out, and a
@@ -2206,6 +2336,7 @@ mod tests {
                 capabilities: None,
                 allow: None,
                 trust_ca: None,
+            present: None,
                 second_factor: None,
                 cols: 80,
                 rows: 24,
@@ -2476,6 +2607,7 @@ mod tests {
             ("the plugin policy", PLUGIN_POLICY_VERSION),
             ("the session allowlist", SESSION_ALLOWLIST_VERSION),
             ("the browser CA", BROWSER_CA_VERSION),
+            ("the presented credential", BROWSER_PRESENT_VERSION),
         ] {
             assert!(
                 since <= PROTOCOL_VERSION,
@@ -2485,7 +2617,7 @@ mod tests {
         }
         // The newest guard is the current revision: adding a wire field
         // without bumping the version is the fail-open these exist to catch.
-        assert_eq!(BROWSER_CA_VERSION, PROTOCOL_VERSION);
+        assert_eq!(BROWSER_PRESENT_VERSION, PROTOCOL_VERSION);
         // And every older guard stays strictly behind it. `<`, not
         // `== PROTOCOL_VERSION - 1`: three of these shipped as revision 5 and
         // scoped grants as 6, and none of them is going to move again, so
@@ -2499,6 +2631,7 @@ mod tests {
             ("the connector policy", CONNECTOR_POLICY_VERSION),
             ("the plugin policy", PLUGIN_POLICY_VERSION),
             ("the session allowlist", SESSION_ALLOWLIST_VERSION),
+            ("the browser CA", BROWSER_CA_VERSION),
         ] {
             assert!(
                 since < PROTOCOL_VERSION,

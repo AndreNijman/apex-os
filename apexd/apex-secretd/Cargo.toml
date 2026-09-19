@@ -30,6 +30,15 @@ libc.workspace = true
 sha2 = "0.10"
 hmac = "0.12"
 
+# The one TLS client in this daemon that is not `curl`. `present` carries a
+# browser's own connection rather than a request this daemon composed, so
+# there is no tool to drive: see `src/tls.rs`. Already in this workspace's
+# graph through `apex-remoted`, pinned to the same version so the two cannot
+# resolve to different rustls builds in one image.
+rustls = { version = "0.23.42", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-native-certs = "0.8"
+rustls-pki-types = { version = "1", features = ["std"] }
+
 [dev-dependencies]
 # Fixtures live under /var/tmp; see the git provider's §36 tests.
 tempfile = "3"

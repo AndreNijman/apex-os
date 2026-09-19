@@ -17,6 +17,7 @@ use crate::provider::Registry;
 /// service behind it would be worse than not having one.
 #[cfg(test)]
 pub mod bearer;
+pub mod browser;
 pub mod cloudflare;
 pub mod gdrive;
 pub mod git;
@@ -39,6 +40,7 @@ pub mod webdav;
 pub fn default_registry(run_dir: std::path::PathBuf) -> Result<Registry, String> {
     let mut registry = Registry::new();
     registry.register(Box::new(git::GitProvider))?;
+    registry.register(Box::new(browser::BrowserProvider))?;
     registry.register(Box::new(cloudflare::CloudflareProvider::new()))?;
     registry.register(Box::new(gdrive::GdriveProvider::new()))?;
     registry.register(Box::new(mcp::McpProvider::new(run_dir.clone())))?;
@@ -60,6 +62,7 @@ mod tests {
         assert_eq!(
             registry.operation_ids(),
             vec![
+                "browser.present",
                 "cloudflare.access.edit",
                 "cloudflare.access.read",
                 "cloudflare.access.service-token.create",
@@ -281,7 +284,7 @@ mod tests {
         }
         assert_eq!(
             everywhere,
-            vec!["mcp.request"],
+            vec!["browser.present", "mcp.request"],
             "the set of operations grantable in every project changed; each one \
              has to be true of the provider's `bind`, not just of its declaration"
         );
@@ -406,7 +409,12 @@ worker = "project"
         };
         let params = Params::new();
 
+        /// Operations that carry the `*` claim and are not reachable through
+        /// `use_capability` at all — see the branch that reads this.
+        const ONLY_OUTSIDE_THE_FRAMEWORK: &[&str] = &[browser::PRESENT];
+
         let mut checked = 0;
+        let mut outside = 0;
         for id in registry.operation_ids() {
             let (provider, op) = registry.lookup(&id).expect("declared");
             if !op.same_everywhere {
@@ -429,6 +437,42 @@ worker = "project"
                     audit_id: "test",
                 })
             };
+            // The framework cannot carry every operation that carries the
+            // claim. `browser.present` exists so that a grant can be written
+            // for it (`Service::grant` refuses an operation no provider
+            // offers); it is spent by `crate::present`, which never calls
+            // `bind`. For such an operation the claim is true in the strongest
+            // possible way — there is no project-shaped request at all — and
+            // the two `Err`s below would otherwise read as the fixture being
+            // wrong.
+            //
+            // Named on purpose rather than detected, for the reason the
+            // `everywhere` set above is spelled out: "its `bind` returned an
+            // error" is also what a mis-shaped fixture looks like, so the
+            // difference has to be a line somebody wrote and not a heuristic.
+            if ONLY_OUTSIDE_THE_FRAMEWORK.contains(&op.id) {
+                let refused_bound = bind(&bound_dir)
+                    .err()
+                    .unwrap_or_else(|| panic!("'{id}' is on the list of operations the \
+                        framework cannot carry, and its `bind` succeeded"));
+                let refused_bare = bind(&bare_dir)
+                    .err()
+                    .unwrap_or_else(|| panic!("'{id}' bound in the bare project"));
+                assert_eq!(
+                    refused_bound.to_string(),
+                    refused_bare.to_string(),
+                    "'{id}' refuses differently in two projects, so its refusal reads \
+                     the project and the claim it makes is not the one it declares"
+                );
+                assert!(
+                    matches!(refused_bound, crate::provider::ProviderError::Refused(_)),
+                    "'{id}' must REFUSE rather than fail: a failure is something that \
+                     could have worked, and this one never can"
+                );
+                outside += 1;
+                continue;
+            }
+
             let in_bound = bind(&bound_dir);
             let in_bare = bind(&bare_dir);
             match (&in_bound, &in_bare) {
@@ -463,6 +507,16 @@ worker = "project"
         // A loop over an empty set proves nothing, and the whole point of the
         // gate is that its set is small.
         assert!(checked > 0, "no operation carries the claim; this test ran on nothing");
+        // And the exception list is not allowed to rot into names nothing
+        // offers: an id that stopped existing would never be reached by the
+        // loop, so the branch above would silently cover nothing.
+        assert_eq!(
+            outside,
+            ONLY_OUTSIDE_THE_FRAMEWORK.len(),
+            "{outside} of {} operations on the outside-the-framework list were \
+             reached; a name on it that no provider offers covers nothing",
+            ONLY_OUTSIDE_THE_FRAMEWORK.len()
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
