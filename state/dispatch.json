@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-19T09:56+08:00",
+  "updated": "2026-09-19T10:42+08:00",
   "_round": "Round 30. All four of round 29's agents were dead at the resume, every worktree clean with nothing unpushed, so the round was a landing round: four merges, zero unlanded left in either repo. Three agents re-dispatched fresh from cards (never by SendMessage); `later` retired because its remainder is hardware. Three slots deliberately free — one still held for the Android unit, two headroom. No new unit was invented to fill them: the READY list was empty and the COMPLETE section is exhaustive.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 bde4d96c -> 6b531503. Three merges, in order: c6bc990a (task/later-2, tip 0391b4ec, 741 insertions over 5 files), 7658fe1f (task/p2-b-round29, tip cb02019f, tests/lib/atspi.sh), 6b531503 (task/p2-f-4, tip 79027b51, 551 insertions over 2 files). Each merge --no-ff; check-no-conflict-markers.sh PASS after each; pushed once with --force-with-lease. FOURTH MERGE, later the same session: f40ffefe (task/p2-f-5, tip 933bbee1, 1,353 insertions over 7 files — the gdrive provider). Rust changed in this one, so the workspace was actually rebuilt on the merged tip: cargo test --locked --workspace --no-fail-fast 3299 passed / 0 failed / 2 ignored, clippy --workspace --all-targets -D warnings exit 0, tests/test-secret-broker.sh 84/0, and all four count gates unchanged. roadmap/v2.2 is now f40ffefe. FIFTH MERGE: da6fc0fb (task/p2-d-6, tip 044fa254, 1,836 insertions over 16 files — gap 5, the per-run browser CA bind, with route B deliberately not started). Re-run on that tip: cargo test --locked --workspace --no-fail-fast 3314 passed / 0 failed / 2 ignored across 56 targets, clippy exit 0, tests/test-apex-browser.sh 116/0, tests/test-secret-broker.sh 84/0 (re-run because the same tip now also carries gdrive), and all four count gates unchanged. roadmap/v2.2 is now da6fc0fb. THE WIRE VERSION MOVED TO 10 — see _decisions. SIXTH MERGE: bb229745 (task/p2-f-6, tip a4907070, 2,206 insertions over 7 files — the msgraph transport). On that tip: workspace 3338 passed / 0 failed / 2 ignored, clippy exit 0, test-secret-broker.sh 93/0 (was 84), test-apex-browser.sh 116/0 re-run because the same tip carries both, and the four count gates unchanged. roadmap/v2.2 is now bb229745.",
@@ -31,56 +31,6 @@
     "later": "CLOSED BY HAND 2026-09-19 (round 30) — see queue.json _completed_units. Landed as merge c6bc990a with 0 unlanded. Everything a VM can qualify is qualified; L-001's remaining acceptance word is 'Real' and both machines' TPMs are off-limits. The deliverable that replaces the dispatch is docs/boot-v2.md, 'The run somebody with hardware would have to do'. Re-open when a machine whose TPM somebody will clear exists."
   },
   "agents": [
-    {
-      "slug": "p2-d",
-      "items": [
-        "P2-008",
-        "P2-009",
-        "P2-012"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p2-d",
-      "branch": "task/p2-d-7",
-      "agent_id": "a6808c20064154814",
-      "dispatched": "2026-09-19T08:30+08:00",
-      "session": "round 31 orchestrator",
-      "queue_id": "p2-d",
-      "card": "ROADMAP/state/agents/p2-d.md",
-      "at_dispatch": "RE-OPENED. The unit was closed to dispatch on 2026-09-19 waiting on a DECISION, not on hardware, and Andre answered it: YES, build route B. The question verbatim from docs/browser-capsule-auth.md: may apex-agentd read the plaintext of a capsule's connection to the one destination that capsule was pinned to, in order to add a credential the capsule is never given. Route B takes PROTOCOL_VERSION 11, NOT 10 -- gap 5 already took 10 as BROWSER_CA_VERSION. The SessionInfo.trust_ca follow-up folds into this round: it is an additive optional field on a stability surface and is in NEITHER capsule doc. Six commits pushed as of this write."
-    },
-    {
-      "slug": "p1-053d-device",
-      "items": [
-        "P1-060"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-p1-053d",
-      "branch": "task/p1-053d-device",
-      "agent_id": "ac2f1cb485bc1e1bd",
-      "dispatched": "2026-09-19T07:10+08:00",
-      "session": "round 31 orchestrator",
-      "queue_id": "p1-053c",
-      "card": "ROADMAP/state/agents/p1-053c.md",
-      "at_dispatch": "RE-OPENED because a device appeared. p1-053c was closed to dispatch on 2026-09-14 for exactly one reason -- P1-060 C1/C2 need a physical Android device or a working emulator and this machine had NEITHER (four consecutive emulator SIGSEGVs across rounds 1-3). Andre plugged in a SECOND phone, explicitly not his daily, explicitly disposable: 'you can do anything with this one but beware its grapheneOS not normal android'. GrapheneOS, not stock -- the permission model and the absent Play services are part of the test surface, not obstacles to route around. Reached over wireless debugging at 192.168.1.98. Does NOT bump PROTOCOL_VERSION; it stays with p2-d this round."
-    },
-    {
-      "slug": "katana-qual",
-      "items": [
-        "P1-038",
-        "P2-005",
-        "P2-006",
-        "P2-007"
-      ],
-      "repo": "apex-os",
-      "worktree": "/var/tmp/apex-work/wt-katana-qual",
-      "branch": "task/katana-qual",
-      "agent_id": "ab43bc5a0f63b2b26",
-      "dispatched": "2026-09-19T05:40+08:00",
-      "session": "round 31 orchestrator",
-      "queue_id": "p1-038-hardware",
-      "card": "ROADMAP/state/agents/p1-038.md",
-      "at_dispatch": "RE-OPENED because a machine appeared. p1-038-hardware was closed to dispatch on 2026-09-13 and refused as READY four times for one written reason: the 18 remaining labwc matrix rows need real applications on a real session, cannot be done headless, cannot be done on the L16 while Andre uses it, and katana was off-limits. Andre lifted that: 'you can use msi as automated test machine, update, reboot, do whatever you want. i wont use it today', then 'actually test everything on the katana, everything daily, everything gaming, and also the gaming modes should proprely boot and on the monitor and stuff'. Katana was rebased onto the roadmap image (apex-266dcc57 / apex-shell b7953e4f) -- the FIRST time any machine has booted an image carrying the shell work, since the image had been pinned to apex-shell main for 137-158 commits. Negative control on the L16's older image: 3 passed / 8 failed / 1 CNR against katana's 11 / 0 / 1. Later told to install Chromium via 'apex install' deliberately, that path being itself under test, and to diff rpm -qa i686 either side because /usr/libexec is NOT excluded from apex-pkg's 32-bit pass."
-    },
     {
       "slug": "later-silicon",
       "items": [
@@ -133,6 +83,37 @@
       "queue_id": "p2-b",
       "card": "ROADMAP/state/agents/p2-b.md",
       "at_dispatch": "Fresh agent off the card, NOT a revival -- the predecessor died 327m in, mid-round-31, leaving one untracked file in the shell worktree (tests/run-recovery-atspi-shim.sh) which is the start of its own step 2. Done and pushed already: the RTL half (FOUND 26), the recovery markup (1 -> 90 nodes on the bus, Erase button reachable), and check-recovery-a11y.sh 31/0/0 + mutate-recovery-a11y.sh 11 CAUGHT / 0 SURVIVED / 3 HELD wired into ci.yml. The card's numbered NEXT is the brief: fix FOUND 27 (printf '\\U000f033e' emits ten ASCII bytes under a C/POSIX locale, so S4's CAUGHT must be re-earned), write the recovery AT-SPI shim pair, dispatch CI. Told again NOT to close run-rtl-test.sh's Arch-runner red by making section 1 SKIP -- that section IS the discriminator -- and that katana is unavailable, being held by two other agents."
+    },
+    {
+      "slug": "pkg-share",
+      "items": [
+        "P0-001"
+      ],
+      "repo": "apex-os",
+      "worktree": "(agent creates)",
+      "branch": "task/pkg-share",
+      "agent_id": "ad30c63244b976116",
+      "dispatched": "2026-09-19T10:40+08:00",
+      "session": "round 31 orchestrator",
+      "queue_id": "pkg-share",
+      "card": "ROADMAP/state/agents/pkg-share.md",
+      "at_dispatch": "Owns files/system/libexec/apex-pkg EXCLUSIVELY this round. Two defects katana measured: (1) the 32-bit pass blanket-excludes /usr/share, which throws away every *_icd.i686.json while keeping the .so files they name -- katana has 13 x86_64 ICDs and ZERO i686, so Steam's 32-bit client dies with VK_ERROR_INCOMPATIBLE_DRIVER, and this is why the 2026-09-17 live recovery had to hand-write nvidia_icd.i686.json; (2) `apex resolve chromium` offers only the flatpak while `apex install chromium` installs the rpm, at cmd_resolve, apex-pkg:2238. The evidence prefers the rpm -qf image-owner rule over an arch-token heuristic, because it fixes this and the /usr/libexec sibling with one rule, and the engine already has that precedent in install_etc's removal pass. Handed tests/test-apex-multilib-extract.sh as the existing instrument to EXTEND, not rebuild. Told not to touch the gaming session files and not to ssh to katana."
+    },
+    {
+      "slug": "gaming-gpu",
+      "items": [
+        "P1-043",
+        "P1-038"
+      ],
+      "repo": "apex-os",
+      "worktree": "(agent creates)",
+      "branch": "task/gaming-gpu",
+      "agent_id": "a4b349afeae6c48ff",
+      "dispatched": "2026-09-19T10:40+08:00",
+      "session": "round 31 orchestrator",
+      "queue_id": "gaming-gpu",
+      "card": "ROADMAP/state/agents/gaming-gpu.md",
+      "at_dispatch": "Six defects from the katana qualification, most with the fix already measured. The headline: gamescope picks the Intel iGPU, opens card1 and never sees the monitor -- `--prefer-vk-device 10de:249d` fixes it on katana (NVIDIA selected, card2, HDMI-A-1 at 240 Hz) and WLR_DRM_DEVICES is IGNORED because gamescope's DRM backend is its own. The hard part is choosing the right GPU on an arbitrary hybrid laptop without a hardcoded device id, failing loudly rather than falling back to the iGPU. Also: --rt wants CAP_SYS_NICE and APEX grants only RLIMIT_RTPRIO; the `apex gaming` status row reports the same string for a MISSING and an UNREADABLE sudoers rule; APEX Safe Graphics cannot light a dGPU output at all (DMA-BUF import unsupported, 60 swapchain failures on HDMI-A-1 vs 0 on eDP-1), which blanks the one session that exists for when things are broken; and the niri session runs two bars because APEX ships no niri config and upstream's default line 271 spawns waybar. Katana is NOT available -- the TPM agent owns it -- so hardware rows are a written runnable checklist, not a simulation."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",

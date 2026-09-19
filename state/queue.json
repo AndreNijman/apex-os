@@ -398,6 +398,23 @@
       "conflicts": [],
       "note": "Andre's own request, in his words. The primitive is a handle-lid-switch BLOCK inhibitor, not an edit to HandleLidSwitch= - it is dynamic, it reverts the moment the holder dies, and it leaves a machine with no live work suspending exactly as it does now; a static HandleLidSwitch=ignore would turn every laptop bag into an oven. Guards are not optional and must say which one fired. Round 2 owns the apex-shell half and the seven undocumented `apex lid` verbs. Two criteria need hardware or Andre's own machine and must not be faked: re-running the live suite with every external display unplugged, and measuring that a powered-down lid-closed session draws measurably less.",
       "closed": "CLOSED TO DISPATCH 2026-09-13 (round 24). Round 3 is finished, pushed AND landed — apex-os 619e764a, apex-shell 1da66c7 — and followups-4 wired its 60 lid assertions into CI runner-green. Both remaining criteria are ANDRE'S PHYSICAL ACTIONS and an agent must not fake either. Criterion 1: causation needs the external display physically unplugged. Re-measured 2026-09-13 — Docked=b true, card1-DP-1 connected — and with a display attached logind consults HandleLidSwitchDocked (default ignore) BEFORE any inhibitor, so the lid does nothing with or without APEX's block and the non-suspend cannot be attributed to APEX. The one command that closes it, undocked: `sudo ./tests/test-apex-lid-live.sh`. Criterion 3: 'draws measurably less' needs an undocked machine ON BATTERY that nobody is using — power_now reads CHARGING power on mains — and the runnable recipe is in docs/lid.md under 'What has NOT been measured'. Nothing here is waiting on an agent."
+    },
+    {
+      "id": "pkg-share",
+      "items": [
+        "P0-001"
+      ],
+      "after": [],
+      "title": "The multilib pass drops 32-bit Vulkan ICDs, and resolve predicts the wrong source"
+    },
+    {
+      "id": "gaming-gpu",
+      "items": [
+        "P1-043",
+        "P1-038"
+      ],
+      "after": [],
+      "title": "Gaming Mode picks the iGPU and the laptop panel; Safe Graphics cannot light a dGPU"
     }
   ],
   "_completed_units": {
