@@ -542,6 +542,22 @@
       ],
       "after": [],
       "title": "No sched-ext scheduler can load: the baked kernel's BTF predates pahole 1.26"
+    },
+    {
+      "id": "luks-installer",
+      "items": [
+        "L-002"
+      ],
+      "after": [],
+      "title": "The installer cannot create a LUKS2 volume at all"
+    },
+    {
+      "id": "luks-enroll",
+      "items": [
+        "L-003"
+      ],
+      "after": [],
+      "title": "TPM auto-unlock by default, where safe is a measured precondition"
     }
   ],
   "_completed_units": {
