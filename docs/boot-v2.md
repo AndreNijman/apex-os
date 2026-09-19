@@ -449,13 +449,25 @@ Record: `cat /sys/class/tpm/tpm0/pcr-sha256/{0,7,11}`, and
 `cryptsetup luksDump <dev>` showing exactly one `systemd-tpm2` token and one
 `systemd-recovery` token.
 
-**Run 2 — TPM clear.** Clear the TPM from firmware setup, not with `tpm2_clear`
-over the resource manager: the point is the path a user takes. Reboot. Record
+**Run 2 — TPM clear.** Clear the TPM through the **firmware**, not with
+`tpm2_clear` over the resource manager: the point is the path a user takes. On a
+board whose `/sys/class/tpm/tpm0/ppi/tcg_operations` answers `5  4: User not
+required` that path is `echo 5 > …/ppi/request` plus a reboot, and it needs
+nobody at the machine; otherwise it is the firmware setup menu. Reboot. Record
 that the TPM unlock is **refused**, that the recovery key opens the volume in
 that same boot, and the three PCR values afterwards. Then re-enrol in **two
 separate invocations** — wipe the old slot, then enrol — and record that the
 `tpm2-blob` in the header changed. The single-command form reports success and
 changes nothing; see the Recovery table below.
+
+**Verify the clear; do not infer it from the reboot.** A firmware that silently
+declined the request looks identical from the outside, and `ppi/response` is no
+help — on the MSI board it reads `5 0: Success` the moment the request is
+written, before any reboot. Read TPM state instead: `lockoutAuthSet`,
+`tpm2_getcap handles-persistent`, `tpm2_getcap handles-nv-index`,
+`TPM2_PT_NV_COUNTERS` and `TPM2_PT_LOCKOUT_COUNTER` all move. `tpmGeneratedEPS`
+does **not** — `TPM2_Clear` leaves the endorsement seed alone, so an unchanged
+`tpmGeneratedEPS` is not evidence the clear failed.
 
 **Run 3 — a real firmware update.** `fwupdmgr get-updates`, then
 `fwupdmgr update`. Record PCR 0 and PCR 7 before and after, and whether the
@@ -495,10 +507,46 @@ so every PCR 7 row is provisional.
 | run | verdict |
 |---|---|
 | 1 — baseline enrol and unlock | **PASS.** One `systemd-tpm2` token, one `systemd-recovery` token. TPM unseal **0.29 s** (×3); recovery-key unlock 0.032 s; the same plaintext back through both |
-| 2 — TPM clear | **NOT RUN.** Not for want of hardware: PPI op 5 on this firmware is *"User not required"*, so `echo 5 > /sys/class/tpm/tpm0/ppi/request` + a reboot would do it unattended. A **live Windows install owns this TPM** — `lockoutAuthSet=1`, five persistent handles, eight OS NV indices, a Windows Hello NGC container from 2026-09-12. No BitLocker, so no data at risk, but the PIN is. Needs a yes, not a machine |
+| 2 — TPM clear | **PASS**, with Andre's explicit approval, 2026-09-19. PPI operation 5 + a reboot, unattended over SSH, 29 s of downtime. Verified five ways rather than assumed: `lockoutAuthSet` 1 → 0, five persistent handles → none, thirteen NV indices → five, four NV counters → zero, DA counter 2 → 0. A volume enrolled **before** the clear then gave `tpm-unlock=REFUSED` → `recovery-unlock=SUCCESS` → marker identical, **in one boot**. Cost, authorised in advance: Andre's Windows Hello PIN. No data — there is no BitLocker |
 | 3 — real firmware update | **COULD-NOT-RUN.** `fwupdmgr get-updates` offers nothing for System Firmware on this board |
 | 4 — suspend and resume | **PASS.** s2idle, 90 s, RTC wake. Open volume survived and still read; a **fresh** unseal after resume worked in 0.295 s; all 24 PCRs byte-identical across the cycle. `deep` is offered and untested |
 | 5 — the TPM goes away | **COULD-NOT-RUN.** PPI op 2 (Disable) is also *"User not required"*, but once firmware hides the TPM the `ppi` directory goes with it, so re-enabling needs somebody in firmware setup. Not symmetric; not attempted |
+
+Runs 1, 2 and 4 are done on this machine. **Run 5 is the only one left that
+satisfying L-001's word "Real" still needs**, and it needs a hand on the
+hardware — not another agent.
+
+Four more things the lab could not have told us, from the Run 2 session:
+
+5. **`ppi/response` is not a discriminator.** It reads `5 0: Success` the
+   instant the request is written, before any reboot. Only TPM state proves a
+   clear happened.
+6. **The part returns two different codes for "TPM unlock failed", and systemd
+   prints one sentence for both.** `0x18b` (`TPM_RC_HANDLE`) means the SRK at
+   `0x81000001` is absent and is recoverable — the SRK is deterministic from the
+   storage seed, so recreating it restores unlock with no re-enrolment. `0x1df`
+   (`TPM_RC_INTEGRITY`) means the seed itself was rolled, i.e. the TPM was
+   cleared, and re-enrolment is the only way back. Both surface as
+   `Failed to unseal secret using TPM2: State not recoverable`.
+7. **`systemd-cryptenroll` provisions the SRK; `systemd-cryptsetup` never
+   does.** And `--wipe-slot=tpm2 --tpm2-device=auto`'s *"executing no
+   operation"* is a no-op on the LUKS header only — it creates and persists a
+   key at `0x81000001`, a handle shared with every other OS on the machine.
+8. **A TPM clear moves PCR 1 permanently on this board** — the firmware's own
+   log grew by three events on PCR 1, and the new value was identical again on
+   the next boot. Which three is unrecoverable: the earlier run kept the
+   per-register event count and not the event list. PCR 0, 4 and 7 stayed
+   byte-identical across all three boots. Never bind a keyslot to PCR 1.
+
+And one that is not about TPMs at all: **`/dev/nvme0n1` is not a stable name on
+this machine.** Three boots were logged; the first two enumerated the two NVMe
+controllers one way and the third — an ordinary reboot with nothing special
+about it — enumerated them the other way, so the disk that had been Windows's
+took APEX's name. The controllers are probed asynchronously and the index falls
+out of the race. **Any procedure that protects a disk by device name protects
+the wrong one sooner or later** — use the serial, the PCI function, the PARTUUID
+or the filesystem label. This is not katana-specific advice; katana is just
+where it was caught.
 
 Four things the lab could not have told us, all measured here:
 
@@ -672,6 +720,7 @@ designed behaviour and not a fault.
 | you rotated the PCR signing key | every existing keyslot is bound to the old public key. Enroll the new one with `systemd-cryptenroll --tpm2-public-key=<new>` **before** removing the old, and keep the recovery key usable throughout. |
 | the TPM was cleared, or the disk moved to another machine | the sealed object is gone: it was bound to that TPM's SRK. Only the recovery key opens the volume. Re-enroll afterwards **in two separate invocations** — wipe the old slot first, then enroll. Doing both in one command reports success and changes nothing; see below. |
 | the TPM is switched off in firmware setup, or the board was replaced | the recovery key, and the volume opens with the data intact — measured as `luks-no-tpm`. The sealed object is still in the header, so re-enabling the same TPM restores unlock with no re-enrolment; a *cleared* TPM is the row above and does need one. In a lab guest the refusal is immediate; on a machine the boot shows a passphrase prompt instead, and nobody has checked how legible that prompt is. |
+| TPM unlock refuses with `Esys_Load … 0x18b` and the TPM was **not** cleared | the persistent SRK at `0x81000001` is missing, not the key material. `systemd-cryptsetup` only *uses* that handle; `systemd-cryptenroll` is what creates it, and the SRK is derived deterministically from the storage primary seed — so recreating it restores unlock with **no re-enrolment** and no change to the header. Measured on katana 2026-09-19 by evicting the handle and putting it back. From the initrd there is no way to do this, so the recovery key is the only way into that boot. |
 | TPM unlock refuses and nothing about the machine changed | check PCR 11 before blaming the firmware. It can be extended from plain root and **cannot be reset** (`tpm2_pcrreset 11` → `bad locality`), so anything with root can deny every PCR-11-bound unlock until the next reboot. Measured on katana 2026-09-19. A reboot restores it; the recovery key works throughout. |
 | you lost the recovery key and the TPM state | the data is gone. This is why enrollment prints the key and this document says to store it off the encrypted disk. |
 
@@ -694,6 +743,14 @@ header keeps a blob sealed to a seed that no longer exists, and the next boot
 fails exactly as it did before the "recovery" (`Esys_Load rc 0x1df`, *"Key
 enrolled in superblock most likely does not belong to this TPM"*). Wiping in its
 own invocation first produces a new blob and a working unlock.
+
+**Confirmed on silicon after a real firmware clear**, 2026-09-19, Intel PTT:
+`This PCR set is already enrolled, executing no operation.`, `rc=0`, `tpm2-blob`
+sha256 unchanged, and the next unlock still refused — with `0x1df` rather than
+the `0x18b` the first post-clear attempt gave, because the invocation had
+meanwhile persisted a fresh SRK at `0x81000001`. Two separate invocations then
+changed the blob and unlock worked in 298 ms. So the paragraph above is not a
+lab artefact: it is what a user gets.
 
 The `luks-tpm-clear` scenario missed this at first, and why is worth keeping:
 every header assertion it already made — exactly one `systemd-tpm2` token, the
