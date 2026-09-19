@@ -1,417 +1,221 @@
 # katana-image-qual — the two run-books that were waiting on an image
 
-items: units `gaming-gpu` and `pkg-share`, both RE-OPENED 2026-09-19 (round 33)
+items: units `gaming-gpu` (P1-043, P1-038) and `pkg-share` (P0-001), both
+RE-OPENED 2026-09-19 (round 33)
 repo: apex-os
-worktree: `/var/tmp/apex-work/wt-katana-qual2`, branch `task/katana-image-qual`
-  (created 2026-09-19 17:12 AWST off `roadmap/v2.2` @ 7f647470)
-evidence file: `ROADMAP/evidence/katana-image-qual-20260919.md` (new; the round-31
-run is `ROADMAP/evidence/katana-qualification-20260919.md` and is already landed —
-read it, do not overwrite it)
-scratch: `/var/tmp/apex-work/scratch-katana-image-qual/`
+worktree: `/var/tmp/apex-work/wt-katana-qual3`, branch `task/katana-image-qual-2`
+  (created 2026-09-19 21:57 AWST off `roadmap/v2.2` @ f8b8184d; the round-33
+  agent's own `task/katana-image-qual` @ 1375efa8 is ALREADY LANDED as merge
+  `c13ac17a` and its worktree `wt-katana-qual2` can be removed)
+evidence file: `ROADMAP/evidence/katana-image-qual-20260919.md` — now 1213
+  lines, §0 through §3, complete. The round-31 run is
+  `ROADMAP/evidence/katana-qualification-20260919.md` and is a different file;
+  read it, do not overwrite it.
+scratch: `/var/tmp/apex-work/scratch-katana-image-qual/` (on katana)
 
 ## NEXT
 
-**18:43 — REBASE AND pkg-share ARE DONE AND PUSHED. Now on §6.**
-Katana is booted on `apex-7f647470…`, digest
-`sha256:be3bdd0c63848811fbbd3a76f17a50f40e90b1eeb8614b93993ec69419f3aafb`,
-version `apex (2026-09-19T10:09:10Z)`; rollback is the old `apex-266dcc57`.
+**THE RUN-BOOK IS FINISHED. There is no next action on katana for this unit.**
+§0–§3 of the evidence are written, committed as `ef0b95b2` + `60074e42` on
+`task/katana-image-qual-2`, and pushed. P1-038 and P1-043 both carry the
+hardware readings in `roadmap.yaml`. Both stay `partial`, and §3.8 plus the two
+evidence fields say exactly which rows are left and why none of them is an
+agent's.
 
-Next action: **arm Gaming Mode through greetd and read its log.**
+**What a stranger should do with this card:** land
+`task/katana-image-qual-2` (two commits, evidence only, no code) and close the
+unit. Do **not** dispatch another agent at katana for §6 — every block has been
+run on the real machine through a real greetd login and the readings are in the
+file.
+
+**greetd was left restored and verified**, and this is the thing to check first
+if anything looks wrong:
+
+```
+sudo cmp /etc/greetd/config.toml /etc/greetd/config.toml.orig-qual2   -> identical
+sudo grep -c initial_session /etc/greetd/config.toml                  -> 0
+systemctl is-active greetd                                            -> active
+systemctl list-timers qual-greetd-restore.timer                       -> 0 timers listed
+loginctl show-seat seat0 -p ActiveSession                             -> ActiveSession=c5
+```
+
+The greeter (sway + quickshell) is live on tty1 and Andre can log in normally.
+`apex game status` is `active: false`; no gamescope, steam, niri or labwc is
+running. Cosmetic leftover: logind still lists closed greeter sessions `c1`–`c4`
+in `State=closing` from the repeated greetd restarts — they clear on the next
+boot and hold no device.
+
+**If you DO need to arm a session again** (a future run-book, not this one), the
+helpers are still on katana and they work:
 
 ```
 ssh katana
-sudo systemd-run --on-calendar='2026-09-19 20:45:00' --unit=qual-greetd-restore \
+sudo systemd-run --on-active=30min --unit=qual-greetd-restore \
     /usr/bin/bash -c 'cp /etc/greetd/config.toml.orig-qual2 /etc/greetd/config.toml && systemctl restart greetd'
-sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-set.sh apex-gaming "" qual-gaming-new
-sudo systemctl restart greetd     # greetd-set.sh already cleared /run/greetd.run
-# then, from ssh:
-sudo journalctl -b -t qual-gaming-new -o cat
-/var/tmp/apex-work/scratch-katana-image-qual/measure-session.sh gaming
+sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-set.sh <session-id> "<optional exec override>" <tag>
+sudo systemctl restart greetd            # greetd-set.sh already cleared /run/greetd.run
+sudo journalctl -b -t <tag> -o cat
+/var/tmp/apex-work/scratch-katana-image-qual/measure-session.sh <name>
+sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-restore.sh    # ALWAYS LAST
 ```
 
-Expected, stated before the run: `GPU/output: --prefer-vk-device 10de:249d
---prefer-output HDMI-A-1`; gamescope selecting `NVIDIA GeForce RTX 3070 Laptop
-GPU`, `/dev/dri/card2`, `HDMI-A-1`, `1920x1080@240Hz`; a
-`capabilities: CapEff=0 CapPrm=0 CapAmb=0` line; `CAP_SYS_NICE: absent` and no
-`--rt` in the `starting: gamescope …` line.
+Do **not** copy the old card's `--on-calendar='2026-09-19 20:45:00'`; it is in
+the past and `systemd-run` will fire it immediately. Keep the unit name
+`qual-greetd-restore` — `greetd-restore.sh` stops that timer by name.
 
-Then 6.3 (Steam inside gamescope — the ICDs are there now), 6.6 (cleanup),
-6.4 (safe graphics, forced device via the same mechanism), 6.5 (niri).
+## What was found, and what a follow-up round should pick up
 
-**ALWAYS FINISH WITH
-`sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-restore.sh`** — it
-restores `/etc/greetd/config.toml.orig-qual2`, `cmp`s it, stops the dead-man's
-timer and restarts greetd.
+Five things came out of §3 that are **not** matrix rows and want owners. None is
+fixed here; this unit qualifies, it does not patch.
 
-## The plan, written 2026-09-19 17:15 AWST while waiting for the tag
+1. **Gaming Mode cannot release itself when its session is torn down from
+   outside.** `cleanup()` in `files/system/libexec/apex-gaming-session` calls
+   `apex game stop`, and polkit action `org.apexos.apexd.manage-power` is
+   `allow_active=yes` / `allow_inactive=auth_admin` / `allow_any=auth_admin`.
+   The instant logind deactivates the session — a greetd restart, a VT switch,
+   any logind-driven teardown — the trap's own call is refused, and the machine
+   is left with a p-core cpuset, IRQ steering, the `performance` tier and
+   `scx_lavd` installed with nothing able to undo them and no prompt anyone will
+   see. Measured both ways: the trap logged `apexd game mode released` on a
+   clean `SIGTERM` to gamescope and never completed on the greetd restart, and
+   `apex game stop` from a seatless ssh session returns
+   `org.freedesktop.DBus.Error.AccessDenied: not authorized for
+   org.apexos.apexd.manage-power` while `sudo apex game stop` works.
+   Two candidate remedies, neither chosen here: have `apexd` release game mode
+   when the session that asked for it goes away (it already owns the cgroup), or
+   give the *release* path its own `allow_inactive=yes` separate from
+   *entering* game mode.
+2. **`mangoapp` crash-loops at ~2 Hz for the whole of every Gaming Mode
+   session.** 15 376 core dumps in one boot; 14 403 respawns and 57 612
+   `Glfw Error 65537/65550: X11: Platform not initialized` lines in a 2-hour
+   session (144 187 journal lines for one session). The overlay never renders.
+   `--mangoapp` is added unconditionally whenever `mangoapp` is on PATH.
+3. **gamescope segfaults on every exit** (`139`, core dumped). Cosmetic today —
+   the trap still runs on the clean path — but it predates this image
+   (`SIGSEGV` 2026-09-19 09:21 on the OLD image, `SIGABRT` 2026-08-23).
+4. **`docs/gaming-and-sessions.md` §6.2 is ambiguous as written.** gamescope
+   prints `No CAP_SYS_NICE, falling back to regular-priority` whether or not
+   `--rt` was passed, so grepping for `CAP_SYS_NICE` cannot tell the two apart.
+   Only the `starting: gamescope …` line discriminates. Worth one doc edit.
+5. **§6.5's precondition is stated too narrowly.** The niri bar transform runs
+   from `apex-shell-firstrun.service` at **user-manager start** (18:29:35 here,
+   four hours before any niri session), not at a niri login. The doc says "after
+   one login to the niri session".
 
-### R — rebase katana (step 1, not optional)
-
-Katana boots `ostree-unverified-registry:ghcr.io/andrenijman/apex-os:apex-266dcc57…`,
-digest `sha256:ba263890…`, and `bootc status --json` confirms the transport is
-`registry` with `store: ostreeContainer`. Rollback is the old `gaming-nvidia`
-tag, `sha256:308127d9…`, still `Unlocked: hotfix`.
-
-    ssh katana 'sudo bootc switch --transport registry \
-      ghcr.io/andrenijman/apex-os:apex-7f647470e222cfa23e0853cac45ef3f7e74c252e'
-
-then reboot and re-read `bootc status --json`; record the digest landed on.
-Keep the previous deployment as the rollback (bootc does by default).
-
-### P — pkg-share confirmation (gates one gaming-gpu row)
-
-State on the OLD image, measured 17:12 AWST, so the deltas are attributable:
-- `ls /usr/share/vulkan/icd.d/ | grep -c i686` → **0** (13 files, all x86_64)
-- `/var/lib/extensions/apex-user.raw` → 540 012 544 B, built 2026-09-19 09:43
-  by the round-31 run with the OLD engine. **It must be rebuilt by the new
-  engine or the measurement is of the old one.**
-
-1. Record the pre-state: extension size, `rpm -qal` intersect count (the §3.1
-   shadow measurement, `LC_ALL=C` on every `sort`/`comm`), i686 ICD count.
-2. `sudo apex install steam` on the NEW image, capturing the full log to
-   `/var/tmp/apex-work/scratch-katana-image-qual/apex-install-steam.log`
-   (foreground, or `systemd-run --wait`; a backgrounded long command is
-   SIGTERMed and still exits 0).
-3. Re-measure: i686 ICD count (must be non-zero — gate on P1-038 row 6), the
-   §3.1 shadow count (was 177), and `grep 'multilib: carrying'` in the log with
-   the image-owned vs native-pass split.
-4. Positive control for §3.3: `gst-inspect-1.0 | tail -1` — was "2 features"
-   with the shadowed i686 scanner, must be 1344.
-
-### G — the gaming run-book, docs/gaming-and-sessions.md §6
-
-**The greetd problem, and how this run answers it.** Round 31 could not log in
-through greetd: `apex-session-select` deliberately does not arm autologin and
-that unit did not have Andre's password. Neither do I, and I must not ask.
-`sudo -n` on katana IS passwordless, so the route is:
-
-- temporarily add an `initial_session` block to `/etc/greetd/config.toml`
-  (backed up first, byte-compared and restored afterwards), naming the Exec
-  line read out of `/usr/share/wayland-sessions/apex-gaming.desktop` and user
-  `andre`; reboot; greetd itself launches the session on VT 1 through its own
-  worker — same PAM service (`greetd`), same `pam_open_session`, same
-  `setresuid`, same exec. Only the auth conversation is skipped, and the
-  capability question §6.3 asks is about session *setup*, not about auth.
-- Divergence to state honestly in the evidence: no PAM `auth` stack ran.
-  Everything downstream of `pam_open_session` — which is where a capability
-  would be granted, e.g. by `pam_cap` — is identical.
-- Restore `/etc/greetd/config.toml` from the backup and `cmp` it before
-  finishing, and confirm the greeter comes back on tty1.
-
-Blocks, in order, all from §6:
-- **6.1** `apex gaming` + `apex gaming --gamescope-device-args` BEFORE any
-  reboot into anything. Expect `--prefer-vk-device 10de:249d --prefer-output
-  HDMI-A-1`, rc=0, and the report's screen block naming card2. Then the
-  greetd-launched Gaming Mode session, and the five log lines. Then the render
-  proof: the monitor is the screen that lit, not the panel (`grim` per output,
-  distinct-colour count, like round 31 §5).
-  Machine fact confirmed 17:12: only two connectors are `connected` —
-  `card1-eDP-1` (Intel) and `card2-HDMI-A-1` (NVIDIA).
-- **6.2** `grep -E '^Cap(Eff|Prm|Amb):' /proc/self/status` inside the session,
-  `getcap $(command -v gamescope)`, `apex gaming | grep -E 'realtime (limit|capability)'`.
-  Expect limit yes / capability no, and the session log saying
-  "CAP_SYS_NICE: absent" and NOT passing `--rt`.
-- **6.3** the row this whole unit exists for. Only retest after P shows a
-  non-zero i686 ICD count. Then read `CapEff/CapPrm/CapAmb` out of the session
-  log and the bwrap line out of `~/.local/share/Steam/logs/console-linux.txt`.
-  gaming-gpu's own closure says bwrap "refuses to start with any permitted
-  capability", so CapPrm=0 from greetd + bwrap still failing moves the hunt to
-  Steam's runtime; CapPrm non-zero attributes it to the image.
-- **6.4** `/usr/libexec/apex-safe-graphics check` runs fine over ssh; the
-  forced-device run needs a seat, so it goes through the same
-  `initial_session` mechanism with the env var set in the command.
-  `APEX_SAFE_GRAPHICS_DRM_DEVICE=/dev/dri/card2 /usr/libexec/apex-safe-graphics`.
-  The automatic branch needs the panel genuinely dark — record whether it could
-  be reached rather than claiming it.
-- **6.5** the niri bar: needs one login to the niri session, then the five
-  greps. Same `initial_session` mechanism, second reboot.
-- **6.6** — §6 has 6.1–6.5 in the doc plus §6.6 "Gaming Mode cleanup" in the
-  round-31 evidence numbering. Cover cleanup (`apex game status`, `pgrep -c -x
-  gamescope`) after each Gaming Mode attempt.
-
-### Rules, and the three that are about this machine
-
-- **Katana's NVMe device names are not stable** — identify disks by serial,
-  PCI function, PARTUUID or label. Never by `/dev/nvme*n1`.
-- **APEX's Boot0000 lives on the WINDOWS ESP.** Do not tidy EFI entries.
-- Reboots authorised; katana's own screen is the test. **Never open a window on
-  Andre's L16 desktop.** Never run `qs -p`. Never `pkill apex-agentd`.
-- `sudo` or `--user` only — no polkit or keyring prompts.
-- A backgrounded long command is SIGTERMed and still exits 0.
-- `ROADMAP/set-status.py` REPLACES evidence; read the existing text and prepend.
-- Never push `main`; never open a PR; push only `task/katana-image-qual`.
-
-## Orchestrator additions, round 33, folded 17:19 AWST
-
-1. **The old extension is the false-negative trap, and one of the
-   orchestrator's facts about it is stale.** The message said the `.raw` is the
-   2026-09-06 one, 219 packages / ~337 MB. It is not: measured 17:16 AWST it is
-   **540 012 544 B, built `2026-09-19T01:43:06Z`, 223 resolved packages**, i.e.
-   the round-31 run rebuilt it TODAY — but with the image's engine, which
-   predates pkg-share. The substance is unchanged and the warning stands: it
-   survives a rebase and re-merges at boot, so a premature
-   `ls /usr/share/vulkan/icd.d/ | grep -c i686` reads **0** and looks like
-   pkg-share failed.
-   **THE DISCRIMINATOR IS `multilib: carrying` IN THE INSTALL LOG** — only the
-   new engine emits it (`merge_multilib`, `apex-pkg` ~line 698). Its ABSENCE
-   means the September/round-31 extension was measured, not that the fix
-   failed. Establish which engine ran before believing any count.
-   *What I will do with the old `.raw`*: not delete it. `sudo systemd-sysext
-   unmerge` makes `merged` false so `apex install steam` falls through to a
-   real rebuild, and `activate_payload` replaces the file itself; the old
-   size/sha (`99749240e8762e2b4eaf0c3840a07beba249961e1cad86f798805c22c58282ed`,
-   540 012 544 B) are recorded above and in the evidence before anything moves.
-   The hand-copied-file manifest is `/var/lib/apex/steam-recovery-20260917/installed-files.jsonl`
-   (1 687 289 B, 2026-09-17) and is left untouched.
-2. **Disk checked rather than assumed** — `df -h /var` at 17:18:
-   `954G size, 890G used, 60G available, 94%`. `/var`, `/sysroot` and `/boot`
-   are the same filesystem. 60 G is ample for a multi-GB pull, so **no
-   `rpm-ostree cleanup -r`** — that would drop the `gaming-nvidia` rollback
-   deployment for no benefit, and `bootc switch` retires the oldest deployment
-   on its own.
-3. **HARD DEADLINE ~20:58 AWST** (orchestrator runs under `timeout 4h` from
-   16:58). Priority if short: (a) rebase + digest, (b) pkg-share's three
-   numbers, (c) the greetd login that attributes §6.3's bwrap cause, (d) 6.4-6.6.
-   Evidence is written **per block**, committed and pushed as measured.
+Untested and named rather than claimed: **Safe Graphics' automatic dGPU
+branch** (needs the panel genuinely dark — lid shut and docked, or disabled in
+firmware) and **any actual game launch** (none was started this round).
 
 ## DONE
 
-- 17:12 — worktree `/var/tmp/apex-work/wt-katana-qual2` on
-  `task/katana-image-qual` off `roadmap/v2.2` @ 7f647470.
-- 17:12 — katana confirmed free: uptime 6:37, greetd on seat0+tty1, nobody
-  logged in, no steam/gamescope/proton/wine process, `rpm-ostree status` idle.
-- 17:12 — pre-rebase baseline captured (see plan step P).
-- 17:15 — read §6 of `docs/gaming-and-sessions.md` end to end and §§3, 4, 6 of
-  the round-31 evidence; plan above written.
+- **22:07 — §3 WRITTEN, COMMITTED `ef0b95b2` (+ `60074e42`), PUSHED. gaming-gpu PASSES on
+  hardware.** §6.1, §6.2, §6.3, §6.4 (forced path) and §6.5 all read what the
+  run-book predicted, through real greetd logins on the rebased image.
+  §6.3 — the row the unit existed for — reached a Steam Big Picture UI inside
+  gamescope on the RTX 3070 for the first time on this machine.
+  P1-038 and P1-043 evidence extended with `set-status.py` (old text carried
+  forward whole; both stay `partial` on grounds §3.8 states).
+- **22:00–22:07 — the instrumented run.** Tag `qual-gaming-r2`, 3 789 lines.
+  Five gamescope lines verbatim (`NVIDIA GeForce RTX 3070 Laptop GPU`,
+  `/dev/dri/card2`, `HDMI-A-1`, `1920x1080@240Hz`); **0** occurrences of `card1`
+  or `eDP-1` in the whole log; `CapEff=CapPrm=CapAmb=0`; `--rt` not passed;
+  live `nvidia-smi` showing gamescope `C+G` and `steamwebhelper` `G` at 265 MiB;
+  `steamwebhelper -uimode=4`. Ended by `SIGTERM` to gamescope → trap released
+  game mode → greeter back on tty1 by itself. Then §6.4 (`qual-safegfx`:
+  `WLR_DRM_DEVICES=/dev/dri/card2 (forced …)`, labwc holds only card2,
+  `wlr-randr` lists HDMI-A-1 as the ONLY output, `grim` on eDP-1 says
+  `unknown output`, 699 distinct colours off the monitor, 0 DMA-BUF failures)
+  and §6.5 (`qual-niri`: waybar 0, quickshell 1, one commented `spawn-at-startup
+  "waybar"` with the APEX marker, `.pre-apex-bar.bak` present, `niri validate`
+  clean; niri drives BOTH cards, unlike Gaming Mode).
+- **21:55 — the predecessor's session was found already in the journal and it is
+  the long run.** Tag `qual-gaming-new`, 144 187 lines, 18:34:01 → 20:45:01
+  (2 h 11 m), ended by its own dead-man timer. It agrees line for line with the
+  instrumented run and is what proves Steam **survives**: the client stayed up
+  the whole 2 h 11 m, its background update loop completing and Fossilize
+  replay on the dGPU still going at 20:40:32, 4 m before the cut. Reading it first is what made a short second run enough.
+- 21:54 — greetd verified restored **before** anything was changed: the 20:45
+  dead-man timer had fired, `config.toml` was byte-identical to
+  `config.toml.orig-qual2`, no `initial_session`, greeter live. The fail-safe
+  worked; nothing was assumed either way.
+- (everything below this line is the round-33 agent's, kept verbatim)
 - **18:42 — pkg-share PASSES ON HARDWARE.** `multilib: carrying 2079 of 4382
   file(s) from the 32-bit set (2151 already owned by the image, 152 already
   placed by this set's native packages)` — the discriminator line is present,
   so the new engine built it, and the image-owned count dominates 14:1.
-  **Shadow count 177 → 0** (the `comm -12` set is empty, not merely smaller),
-  **32-bit ELF shadows 14 → 0**, **i686 ICDs 0 → 13 of 26** (including
-  `nvidia_icd.i686.json`, the file the Sep-17 recovery hand-wrote), **GStreamer
-  2 features → 1344** with the image's own 64-bit `gst-plugin-scanner`, fc-list
-  still 538. Evidence §2, commit `1375efa8`, pushed.
-  Caveat recorded rather than buried: it rebuilt because Fedora's repos had
-  drifted since 01:43, not because the update path asked — on a machine with
-  static repos it would have said `already up to date`. §0.2 stands.
+  **Shadow count 177 → 0**, **32-bit ELF shadows 14 → 0**, **i686 ICDs 0 → 13 of
+  26**, **GStreamer 2 features → 1344**, fc-list still 538. Evidence §2, commit
+  `1375efa8`.
 - **18:32 — REBASED.** `bootc switch` pulled 6.2 GB, deployed in 11 s, clean
-  `systemctl reboot`, up at 18:29:42. Booted digest
-  `sha256:be3bdd0c63848811fbbd3a76f17a50f40e90b1eeb8614b93993ec69419f3aafb`.
-  `bootc switch` did NOT refuse despite the `Unlocked: hotfix` rollback.
-  **§0.2 confirmed on the machine**: `apex-sysext-rebuild.service` started and
-  finished in the same second, `Result=success`, and the extension was still
-  byte-identical (`sha256:99749240…`) with **0 i686 ICDs** — the update
-  delivered the fix to nobody. Evidence §1, commit `86e68aab`.
-  All five controls flipped as predicted, and `apex gaming`'s screen block on
-  the real machine is byte-identical to §0.10's prediction.
-- 18:02 — **the landed selector, run on katana's REAL sysfs, answers exactly
-  `--prefer-vk-device 10de:249d --prefer-output HDMI-A-1`, rc 0**, with
-  `output: HDMI-A-1 on card2 (NVIDIA)` and
-  `why: HDMI-A-1 on card2 is an external display; 2 connected output(s) across
-  2 card(s)`. Built `apex` from this branch (`cargo build --bin apex` in
-  `apexd/`, 38 s) and pointed it at a copy of katana's `/sys/class/drm` — the
-  CLI honours **`APEX_ROOT`** (a root containing `sys/`), not `APEX_SYS_ROOT`,
-  which silently reads the real `/sys` and cost one confused run. Free parity
-  check: the same binary on the L16's own `/sys` says `eDP-1 on card1 (AMD)`,
-  `1002:1900` — so nothing about `10de:249d` is hardcoded. Evidence §0.10,
-  commit `ba41fd1c`. **§6.1 now has a stated expected value before the run.**
-- 17:36 — **the old-image control column is complete and pushed (`5036a4f4`)**:
-  §6.4 (`apex-safe-graphics check` prints 4 lines, no GPU/output rows; 0
-  occurrences of `WLR_DRM_DEVICES`) and §6.5 (niri through greetd runs **waybar
-  31621 AND quickshell 31630** — two bars; `config.kdl` line 271 untouched, no
-  `.pre-apex-bar.bak`; old `apex-shell-firstrun` has 0 occurrences of
-  `pre-apex-bar`/`NIRI_STOCK_WAYBAR`, so the precondition is intact). Both
-  outputs live: `eDP-1` AU Optronics @144.028, `HDMI-A-1` Lenovo R25f-30
-  @239.964. Evidence §0.8/§0.9 hold the whole left-hand column.
-- **17:33 — §6.3 IS FULLY ATTRIBUTED, AND IT WAS NEVER THE IMAGE.** Ran Gaming
-  Mode itself through greetd on the old deployment. Steam's `console-linux.txt`
-  is append-only, so both runs sit in one file: **all three
-  `bwrap: Unexpected capabilities but not setuid` lines are timestamped
-  09:19–09:21**, i.e. round 31's `systemd-run --property=PAMName=login`
-  attempts. The greetd run (line 37522 onward, 17:31:41) has **zero** bwrap
-  errors and reaches
-  `bus_name=com.steampowered.PressureVessel.LaunchAlongsideSteam`. The
-  requirements check that failed three times under the harness passes on the
-  real login path. What still fails in that run is the OTHER half of §6.3 —
-  `Vulkan missing requested extension 'VK_KHR_surface'` /
-  `BInit - Unable to initialize Vulkan!` — which is the ICD defect pkg-share
-  fixes. Evidence §0.7, commit `f6470e36`, pushed.
-  Same run is also a same-harness negative control for **§6.1** (gamescope
-  selects `Intel Iris Xe`, opens `/dev/dri/card1`, lists only `eDP-1`, picks
-  1920x1080@144; nothing touches card2) and **§6.2** (`No CAP_SYS_NICE,
-  falling back to regular-priority`, `--rt` passed unconditionally, no
-  capability line logged at all by the old script). Cleanup verified:
-  `apex game status` true → false, 0 gamescope processes, config identical,
-  greeter back on tty1 by itself.
-  Machine sysfs for the selector to be checked against:
-  `card1-eDP-1 = 0x8086:0x46a6`, `card2-HDMI-A-1 = 0x10de:0x249d`, and those
-  are the only two connectors that exist.
-- **17:30 — THE GREETD ROUTE IS PROVEN AND §6.3 IS ANSWERED ON THE LOGIN PATH.**
-  A greetd-launched process running as andre has
-  `CapPrm=0 CapEff=0 CapAmb=0`, `CapInh=0000000800000000` (= `cap_wake_alarm`
-  only, inherited from greetd's own ambient set and dropped to inheritable on
-  the uid change), `Seat=seat0 TTY=tty1 Class=user`, and **`bwrap --ro-bind / /
-  --dev /dev /bin/true` returns 0**. Per §6.3's own rule, a zero permitted set
-  means the bwrap cause is NOT the session's capabilities — round 31's
-  `systemd-run --property=PAMName=login` harness was the source. Evidence §0.6,
-  commit `431f0e84`, pushed. Re-run on the new image through the real Gaming
-  Mode session, which logs the same three values itself.
-  `/etc/greetd/config.toml` restored, `diff` identical, greeter back on tty1.
-- 17:28 — advisor pass before the rebase; three corrections folded (the
-  compat-level remedy is self-hiding, greetd's stderr goes to the VT not the
-  journal, `cmd_install` has no refusal). Evidence §0.2 rewritten,
-  `e3060b63`, pushed. Measurement scripts `measure-pkgshare.sh` and
-  `measure-session.sh` written to katana's scratch dir.
-- 17:22 — greetd arm/restore helpers written to
-  `/var/tmp/apex-work/scratch-katana-image-qual/greetd-{set,restore}.sh` on
-  katana (the restore one refuses without a backup and `cmp`s the result).
-- 17:21 — **evidence §0 written, committed `b00e2ae6`, branch pushed.**
-  §0.3 reproduces round 31's shadow count exactly on this deployment:
-  3 716 extension files, 266 030 image paths, **177 shadows, 14 of them 32-bit
-  ELF over a 64-bit image binary**, **0 i686 ICDs of 13**, extension has no
-  `/usr/share/vulkan/icd.d/` at all, `gst-inspect-1.0` → **2 features**.
-  That is the same-agent control the post-rebase numbers are a delta against.
-- 17:20 — negative control on the old image (see FOUND).
-- 17:18 — `df -h /var` on katana: 60 G available, no cleanup needed.
-- 17:17 — PAM capability audit on katana (no `pam_cap`), `apex-pkg` rebuild
-  short-circuit read out of the engine, extension/state baseline captured. See
-  FOUND.
-
-## IN PROGRESS
-
-- polling GHCR for the per-SHA tag. Everything below the tag is prepared.
+  reboot, up at 18:29:42. Booted digest
+  `sha256:be3bdd0c63848811fbbd3a76f17a50f40e90b1eeb8614b93993ec69419f3aafb`,
+  version `apex (2026-09-19T10:09:10Z)`, rollback `apex-266dcc57`.
+  **§0.2 confirmed on the machine**: `apex update` delivers the pkg-share fix to
+  nobody — the sysext rebuild service short-circuits and the old extension
+  re-merges with 0 i686 ICDs. Evidence §1, commit `86e68aab`.
+- 18:02 — the landed selector answers `--prefer-vk-device 10de:249d
+  --prefer-output HDMI-A-1` on katana's real sysfs (via `APEX_ROOT`, **not**
+  `APEX_SYS_ROOT`). Evidence §0.10, commit `ba41fd1c`.
+- 17:36 — old-image control column complete (`5036a4f4`): §6.4 printed 4 lines
+  with no GPU/output rows, §6.5 ran waybar **and** quickshell. Evidence
+  §0.8/§0.9.
+- **17:33 — §6.3's bwrap cause attributed to the round-31 harness, not the
+  image** (`f6470e36`). All three `bwrap: Unexpected capabilities` lines are
+  timestamped 09:19–09:21, i.e. `systemd-run --property=PAMName=login`.
+- **17:30 — the greetd route proven end to end** (`431f0e84`): a greetd-launched
+  process as `andre` has `CapPrm=CapEff=CapAmb=0`, `CapInh=cap_wake_alarm`,
+  `Seat=seat0 TTY=tty1`, and bare `bwrap` returns 0.
+- 17:21 — evidence §0 written (`b00e2ae6`): 3 716 extension files, 266 030 image
+  paths, **177 shadows**, 14 of them 32-bit ELF, **0 i686 ICDs**,
+  `gst-inspect-1.0` → **2 features**.
 
 ## FOUND
 
-- (orchestrator, round 33) katana's booted image is 131 commits behind the
-  integration tip and predates both fixes this unit is meant to qualify. Any
-  run-book executed before the rebase measures the wrong build.
-- katana has **passwordless `sudo`** for `andre` over ssh (`sudo -n true` → 0).
-  That is what makes the greetd route reachable without Andre's password.
-- `/etc/greetd/config.toml` has **no `initial_session`** today, so the greeter
-  is the only way in — hence the temporary, restored autologin above.
-- The extension on katana right now was built at 09:43 today by the **old**
-  engine. `apex install steam` must rebuild it after the rebase or the
-  pkg-share numbers measure the old rule.
-- **No `pam_cap` anywhere, and no `/etc/security/capability.conf`** — measured
-  on katana 17:17 AWST: `grep -i pam_cap /etc/pam.d/{greetd,system-auth,postlogin,login}`
-  is empty and the file does not exist. **This is the fidelity argument for the
-  `initial_session` route**: greetd's initial session skips `pam_authenticate`
-  but still runs `acct_mgmt` -> `setcred` -> `open_session`, and nothing in the
-  `auth` stack on this machine can grant a capability, so skipping it cannot
-  change `CapPrm`. Re-run the same grep on the NEW image before believing it.
-- The greeter's own process (`sway` as user `greetd`) already reads
-  `CapPrm: 0000000000000000` / `CapAmb: 0` with `CapBnd: 000001ffffffffff`. So
-  greetd hands down an empty permitted set before any of this.
-- **`apex install steam` will NOT rebuild the extension after the rebase, and
-  neither will the boot service.** `rebuild_extension` short-circuits with
-  "already up to date" when the resolved rpm set, `os_version_id` and
-  `pkg_compat_level` all match and the sysext is merged
-  (`files/system/libexec/apex-pkg` ~line 1300), and
-  `apex-sysext-rebuild.service` runs `rebuild --if-needed`, which returns 0 on
-  exactly the same three-way match (~line 1613). Measured on katana:
-  `VERSION_ID=43`, `state.json` `os_version_id: "43"`, `pkg_compat_level: 2`,
-  built `2026-09-19T01:43:06Z`, 8 requested / 223 resolved, extension
-  540 012 544 B, sha `99749240…`. **VERSION_ID does not move across an APEX
-  image build**, so none of the three changes.
-  - *Consequence to test and record*: pkg-share's fix does not reach an
-    existing machine through `sudo apex update` at all. The knob that exists
-    for this is `PKG_COMPAT_LEVEL` (2 today); an engine change that alters
-    WHICH FILES the extension carries is exactly the case it is documented for.
-    Likely a follow-up defect for this unit to file.
-  - *Method*: prove the no-op first (`sudo /usr/libexec/apex-pkg rebuild
-    --if-needed` and `sudo apex install steam` on the new image, both expected
-    to do nothing), then force it with `sudo systemd-sysext unmerge` followed
-    by `sudo apex install steam`, which makes `merged` false and falls through
-    to `extract_rpms`. Keep the requested set as it is (chromium, gamemode,
-    gamescope, libgcc.i686, libSM.i686, mangohud, steam, steam-devices) so the
-    177 shadow count is like-for-like with round 31.
-- **THE GREETD RUNFILE IS THE SILENT TRAP.** `greetd(5)`: the initial session
-  runs only on the first greetd start since boot, "checked through the presence
-  of the runfile" (`/run/greetd.run`). A `systemctl restart greetd` with
-  `[initial_session]` armed but the runfile present starts the **greeter**
-  instead and logs nothing unusual — it looks exactly like the config being
-  ignored. `rm -f /run/greetd.run` before every restart; it is now inside
-  `greetd-set.sh`.
-- **greetd does NOT send the session's stderr to the journal.** greetd's
-  `terminal.rs` dup2s the VT onto the session's stdin/stdout/stderr, so
-  `[apex-gaming-session]` lines would be painted on tty1 and invisible over
-  ssh. `greetd-set.sh` therefore wraps the Exec in
-  `/usr/bin/systemd-cat -t qual-<id>`; `systemd-cat` **execs** its target, so
-  the process chain, uid and capability sets are unchanged, and the log reads
-  back with `journalctl -b -t qual-<id>`. State the redirection as the one
-  divergence.
-- **`cmd_install` has no "already installed" refusal** — read to the end
-  (~line 1530): it merges `names` with `load_requested` and calls
-  `rebuild_extension`. So after `systemd-sysext unmerge`, the run-book's own
-  `sudo apex install steam` does reach a real rebuild. `sudo /usr/libexec/apex-pkg
-  rebuild` is the equivalent shorter path.
-- **`PKG_COMPAT_LEVEL` 2→3 would NOT fix §0.2** and would hide that it did not:
-  `cmd_rebuild --if-needed` checks the level, `rebuild_extension`'s own
-  short-circuit does not, and `write_state` stamps the new level while carrying
-  the old payload. Written up in evidence §0.2; not patched here.
-- `bootc switch` may refuse while a deployment is `Unlocked: hotfix` (the
-  `gaming-nvidia` rollback is). If it does, `rpm-ostree cleanup -r` clears it —
-  and then §1 must record that the 2026-09-17 hand-copied `/usr` hotfix
-  (3 269 files, manifest at
-  `/var/lib/apex/steam-recovery-20260917/installed-files.jsonl`) went with it.
-- Do **not** assert `card1-eDP-1/dpms = Off` for 6.1: nobody holds card1 once
-  the greeter is torn down and the panel may keep its last framebuffer. The
-  proof is gamescope holding `/dev/dri/card2` only, the five log lines, and
-  `nvidia-smi`.
-- **Negative control on the OLD image, so "the image changed" is a measurement
-  and not a hope** (17:20 AWST): `apex gaming --gamescope-device-args` → rc=2,
-  `error: unexpected argument`; `grep -c 'prefer-vk-device\|prefer-output'
-  /usr/libexec/apex-gaming-session` → 0; `grep -c 'CapEff\|CapPrm\|CapAmb'` →
-  0; `getcap $(command -v gamescope)` → empty, rc 0; no `vrr_capable` anywhere.
-  All five must flip (except getcap and vrr, which should not) on the new one.
-- The new session script's exact strings, read out of the branch:
-  `[apex-gaming-session] capabilities: CapEff=… CapPrm=… CapAmb=…`,
-  `CAP_SYS_NICE: absent; soft RLIMIT_RTPRIO is …`, `GPU/output: …`,
-  `starting: gamescope … -- steam …`. `log()` writes to **stderr**, so under
-  greetd the whole session log lands in `journalctl -u greetd -b`.
-- Session `Exec` lines are single commands, so greetd's `initial_session
-  command =` can take them verbatim: `apex-gaming` →
-  `/usr/libexec/apex-gaming-session`, `niri` → `niri --session`,
-  `apex-safe-graphics` → `/usr/libexec/apex-safe-graphics` (prefix with `env
-  VAR=…` for 6.4's forced device).
-- **Block 6.5's precondition is intact**: `~/.config/niri/config.kdl` still has
-  the untouched upstream `spawn-at-startup "waybar"` at line 271, there is no
-  `config.kdl.pre-apex-bar.bak`, and `/usr/bin/waybar` exists.
-  `apex-shell-firstrun` writes **no marker any more** and runs at every login,
-  so one niri login on the new image applies the transform.
-- Round 31's `/var/home/andre/qual/shot.py` (grim + distinct-colour/mean-RGB
-  per output) survives and is reused for render proof in 6.4/6.5.
-- `grim` and `wlr-randr` do not work under gamescope (its DRM/Wayland backend
-  is its own, not wlroots). Render proof for 6.1 is therefore the five
-  gamescope log lines + `nvidia-smi` listing gamescope as `G` + DRM sysfs
-  (`/sys/class/drm/card2-HDMI-A-1/{enabled,dpms}` vs `card1-eDP-1/dpms`).
-  `grim` is still the right tool for 6.4 (labwc) and 6.5 (niri).
-- Only two connectors are `connected`: `card1-eDP-1` (Intel) and
-  `card2-HDMI-A-1` (NVIDIA).
+Everything in the round-33 agent's FOUND list still holds and is not repeated.
+The ones a future run on this machine will need again:
 
+- **Katana's NVMe device names are not stable** — address disks by serial
+  (`220534D1CB81` = APEX Micron, `240023925111005` = Windows SPCC), PCI
+  function, PARTUUID or label. Never `/dev/nvme*n1`. **APEX's `Boot0000` lives
+  on the WINDOWS ESP**; do not tidy EFI entries.
+- **THE GREETD RUNFILE IS THE SILENT TRAP.** greetd runs an `initial_session`
+  only on the first start since boot, checked by `/run/greetd.run`. A restart
+  with the runfile present starts the **greeter** and logs nothing unusual.
+  `greetd-set.sh` removes it; do not restart greetd by hand instead.
+- **greetd does NOT send the session's stderr to the journal** — it dup2s the VT
+  onto the session's stdio. `greetd-set.sh` wraps the Exec in
+  `systemd-cat -t <tag>`; `systemd-cat` **execs** its target, so the process
+  chain, uid and capability sets are unchanged. That redirection is the one
+  divergence and it is stated in the evidence.
+- **`grim` and `wlr-randr` do not work under gamescope** (its DRM/Wayland
+  backend is its own, not wlroots). Render proof for Gaming Mode is therefore
+  who holds `/dev/dri/card2` plus `nvidia-smi`, never a screenshot. They work
+  fine under labwc (§6.4) and niri (§6.5); `/var/home/andre/qual/shot.py <tag>
+  <outputs…>` needs a tag argument and `XDG_RUNTIME_DIR=/run/user/1000` — and
+  read the socket name, it is `wayland-0` under labwc and `wayland-1` under
+  niri.
+- **Do NOT assert `card1-eDP-1/dpms = Off`** during Gaming Mode. It reads
+  `enabled=enabled dpms=On` the whole time, because nobody holds card1 once the
+  greeter is torn down and the panel keeps its last framebuffer. It is not a
+  failure and it is not proof of anything.
+- Only two connectors are `connected`: `card1-eDP-1` (`0x8086:0x46a6`) and
+  `card2-HDMI-A-1` (`0x10de:0x249d`, Lenovo R25f-30, 1920x1080@239.964).
+- `pgrep -x gamescope` finds nothing while Gaming Mode is up — the process
+  `comm` is `gamescope-wl`. Use `pgrep -f '^gamescope'`.
+- **`apex game stop` over ssh is refused by polkit** (seatless session →
+  `auth_admin`). `sudo -n apex game stop` works and raises no prompt, because no
+  polkit agent is registered on an ssh session. Use that to reset the baseline.
+- katana has **passwordless `sudo`** for `andre` over ssh, which is what makes
+  the whole greetd route reachable without Andre's password. No `pam_cap`
+  anywhere and no `/etc/security/capability.conf`, on the new image too — that
+  is the fidelity argument for skipping only the `auth` stack.
+- **`ROADMAP/set-status.py` REPLACES evidence.** Read the existing text and
+  carry it forward whole. Both P1-038 and P1-043 were extended that way and
+  checked afterwards for the `break_on_hyphens` corruption (none).
+- The Bash tool's 600 s cap silently backgrounds a longer command. Wait on the
+  journal instead: `timeout N sudo journalctl -b -f -t <tag> -o cat | grep -m1
+  '<marker>'` blocks without `sleep` and returns the moment the line appears.
 
 ## BLOCKED ON
 
-- CI 35433705393 producing
-  `ghcr.io/andrenijman/apex-os:apex-7f647470e222cfa23e0853cac45ef3f7e74c252e`.
-  Last poll **18:10 AWST: `manifest unknown`**. Tier progress: `rust` green,
-  `changes` green, `installer-iso` skipped, **`core` green (finished ~17:58,
-  53 min)**, **`base` green (~18:08)**, **`image` in_progress since ~18:08** —
-  that is the last tier before the tag is pushed. Health of the run is the
-  `build-verify` agent's question, not this unit's.
-  `rebase.sh` is staged on katana and runs `bootc switch --transport registry`,
-  prints booted/staged/rollback digests, then `systemctl reboot`.
-- **There is no shortcut around it.** All five per-SHA tags already on GHCR were
-  checked with `git merge-base --is-ancestor`: `26ea6a02`, `d12d3450`,
-  `61dd814c`, `266dcc57` and `bd0c41ce` (the newest, 2026-09-19 10:15, still
-  35 minutes older than the two merges) carry **neither** `78f04717` nor
-  `5de97037`. This CI run is the only image that can qualify either unit.
-- **Contingency, written down so a fresh agent does not improvise one.** Do
-  NOT live-patch katana's `apex-pkg` to get the pkg-share numbers without an
-  image: the repo `CLAUDE.md` forbids repeating the Sep-6 hotfix, and it would
-  contaminate the machine for the real test. If the tag has not landed by
-  ~20:15 AWST, land what exists — the old-image control column and the §6.3
-  attribution are already complete and pushed — and leave the rebase to the
-  next round with this card pointing at the tag.
+Nothing. The tag landed, the rebase happened, both run-books ran.

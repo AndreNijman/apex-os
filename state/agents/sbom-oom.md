@@ -119,6 +119,34 @@ The hedge for exactly this — `swap32` — **never ran**. It died in 0 s on
 the runner's **already-active** `/swapfile`. That is a probe bug, not a result
 about swap. Probe 2 fixes it by allocating a *new* file at `/swapfile.probe`.
 
+### Probe round 2 (run 35447488777) — SWAP IS NOT WORTH ADDING
+
+`gml10-swap32` — GOMEMLIMIT=10GiB plus a 32 GB swapfile at `/swapfile.probe`
+(total swap 35 GB) — **rc=0, 698 s, peak RSS 14.69 GiB, 9830 packages.** The
+`/swapfile.probe` path fixed round 1's `Text file busy`, so the arm genuinely
+ran this time.
+
+Compare it with round 1's plain `gomemlimit` arm, and the conclusion is the
+opposite of what was expected:
+
+| | `gomemlimit` (3 GB swap) | `gml10-swap32` (35 GB swap) |
+|---|---|---|
+| peak RSS | 14.65 GiB | 14.69 GiB |
+| `mem_avail` floor | 188 MB | **204 MB** |
+| peak `swap_used` | 973 MB | **1010 MB** |
+| elapsed | 904 s | 698 s |
+
+**Adding 32 GB of swap bought 16 MB of headroom.** Only ~1 GB of it was ever
+touched — the same ~1 GB the stock 3 GB swapfile already absorbed in round 1.
+The stock swap was never close to exhausted under GOMEMLIMIT, so the extra
+32 GB is insurance against a spike that does not happen while the limit is set.
+
+**Decision: do NOT add a swapfile to the SBOM step.** It is disk, a `sudo`
+mkswap/swapon, and extra step surface for no measured margin. If this ever does
+need more headroom, the lever to reach for is a larger runner, not swap. (The
+elapsed difference is not evidence of anything — these are separate VMs with
+different registry-fetch luck.)
+
 ### Two defects found in the fix that was waiting here
 
 - The predecessor's uncommitted `build-image.yml` draft referenced
@@ -165,7 +193,12 @@ about swap. Probe 2 fixes it by allocating a *new* file at `/swapfile.probe`.
   `gh api repos/AndreNijman/apex-os/actions/jobs/<id>/logs` per job id from
   `gh run view 35447488777 --json jobs`.
 - **Verification build: run `35447611644`** (workflow `build-image`,
-  `workflow_dispatch` on `task/sbom-oom`, commit `a40cf827`), started 14:04 UTC.
+  `workflow_dispatch` on `task/sbom-oom`, commit **`a40cf827`**), started
+  14:04 UTC. **It verifies the GOMEMLIMIT-only fix.** If a later commit lands on
+  this branch (e.g. the swap upgrade), this run does **not** cover it — dispatch
+  another. Checked: `build-image.yml` is `concurrency: apex-image-publish` with
+  **`cancel-in-progress: false`**, so a second dispatch QUEUES behind this one
+  rather than killing it. Dispatching again is safe; it just waits.
   ~1 hour. This is the one that matters. **A skipped job counts as success in
   this repo** — do not read a green `image` job as proof. Confirm the step
   *Generate and attest the SBOM* actually ran and printed

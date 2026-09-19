@@ -2661,27 +2661,28 @@ tasks:
     after the marker line, where every earlier attempt died there (2026-09-06 16:59, 2026-09-17 17:58, 2026-09-19
     09:25 and 17:31). Steam reports requirements are satisfied, reaches
     bus_name=com.steampowered.PressureVessel.LaunchAlongsideSteam, and steamwebhelper runs with -uimode4, which is
-    Big Picture. A parallel run held the same stack up for 2 h 06 m with Fossilize replay on the dGPU throughout.
-    The bwrap half needed no fix at all: zero Unexpected capabilities lines, CapPrm 0 from greetd, which confirms
-    section 0.7's attribution to the round-31 systemd-run harness. Section 6.4 Safe Graphics and 6.5 the niri bar
-    also pass; 6.5's transform had already run at 18:29:35 from apex-shell-firstrun.service at user-manager start,
-    not at the niri login, so the doc's precondition is stated too narrowly. STILL PARTIAL, and the remaining rows
-    are unchanged in kind: OBS, Discord, VS Code, JetBrains, LibreOffice and Wine are still not installed
-    anywhere; VRR still cannot be tested because no connector on either machine publishes vrr_capable; physical
-    output hotplug still needs a person at the machine; and Safe Graphics' AUTOMATIC dGPU branch could not be
-    reached because it needs the panel genuinely dark (lid shut and docked, or disabled in firmware) -- the
-    forced-device path is what was proven. TWO NEW DEFECTS FOUND BY RUNNING IT, neither of them a matrix row. (1)
-    Gaming Mode cannot release itself when its session is torn down from outside: cleanup() calls apex game stop,
-    whose polkit action org.apexos.apexd.manage-power is allow_active yes and auth_admin otherwise, so the moment
-    logind deactivates the session the trap's own call is refused -- measured both ways, the trap succeeded on a
-    clean gamescope exit and never completed on a greetd restart, leaving the p-core cpuset, IRQ steering, the
-    performance tier and scx_lavd installed with nothing able to undo them. (2) mangoapp crash-loops at about 2 Hz
-    for the whole of every Gaming Mode session: 15376 core dumps in one boot, 14403 respawns in a 2-hour session,
-    144187 journal lines, and the overlay never renders. --mangoapp is added unconditionally whenever mangoapp is
-    on PATH. Also recorded: gamescope segfaults on every exit (139), which predates this image; and section 6.2's
-    check is ambiguous as written, because gamescope prints 'No CAP_SYS_NICE, falling back to regular-priority'
-    whether or not --rt was passed, so only the 'starting: gamescope' line discriminates. greetd was restored
-    byte-identical, the greeter is live on tty1, no timers were left armed.
+    Big Picture. A parallel run held the same stack up for 2 h 11 m, with Fossilize replay on the dGPU still going
+    4 m before it was cut. The bwrap half needed no fix at all: zero Unexpected capabilities lines, CapPrm 0 from
+    greetd, which confirms section 0.7's attribution to the round-31 systemd-run harness. Section 6.4 Safe
+    Graphics and 6.5 the niri bar also pass; 6.5's transform had already run at 18:29:35 from
+    apex-shell-firstrun.service at user-manager start, not at the niri login, so the doc's precondition is stated
+    too narrowly. STILL PARTIAL, and the remaining rows are unchanged in kind: OBS, Discord, VS Code, JetBrains,
+    LibreOffice and Wine are still not installed anywhere; VRR still cannot be tested because no connector on
+    either machine publishes vrr_capable; physical output hotplug still needs a person at the machine; and Safe
+    Graphics' AUTOMATIC dGPU branch could not be reached because it needs the panel genuinely dark (lid shut and
+    docked, or disabled in firmware) -- the forced-device path is what was proven. TWO NEW DEFECTS FOUND BY
+    RUNNING IT, neither of them a matrix row. (1) Gaming Mode cannot release itself when its session is torn down
+    from outside: cleanup() calls apex game stop, whose polkit action org.apexos.apexd.manage-power is
+    allow_active yes and auth_admin otherwise, so the moment logind deactivates the session the trap's own call is
+    refused -- measured both ways, the trap succeeded on a clean gamescope exit and never completed on a greetd
+    restart, leaving the p-core cpuset, IRQ steering, the performance tier and scx_lavd installed with nothing
+    able to undo them. (2) mangoapp crash-loops at about 2 Hz for the whole of every Gaming Mode session: 15376
+    core dumps in one boot, 14403 respawns in a 2-hour session, 144187 journal lines, and the overlay never
+    renders. --mangoapp is added unconditionally whenever mangoapp is on PATH. Also recorded: gamescope segfaults
+    on every exit (139), which predates this image; and section 6.2's check is ambiguous as written, because
+    gamescope prints 'No CAP_SYS_NICE, falling back to regular-priority' whether or not --rt was passed, so only
+    the 'starting: gamescope' line discriminates. greetd was restored byte-identical, the greeter is live on tty1,
+    no timers were left armed.
 - id: P1-039
   title: Compositor-neutral Night Light
   priority: P1
