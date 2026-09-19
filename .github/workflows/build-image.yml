@@ -1601,6 +1601,27 @@ jobs:
       # refused it for real in that probe, with the same 3-second,
       # four-attempt failure. The trim below is what makes it fit.
       #
+      # ═══ VERIFIED END TO END — build 35457162588, 2026-09-19 ═══
+      #
+      #   syft catalogued the image in 314s
+      #   Maximum resident set size (kbytes): 14913824
+      #   SBOM packages: 9830   file rows: 7049
+      #   after the trim: packages 9830, cpe refs 55652, DESCRIBES 1
+      #   predicate 14087745B compact -> ~18783660B DSSE body; ceiling
+      #     25165824B, at 74%
+      #   tlog entry created with index: 2893110210
+      #   signature and SBOM attestation both verify against
+      #     …/build-image.yml@refs/heads/task/sbom-attest
+      #
+      # Every step of that `image` job was green, including `Promote to every
+      # published tag` and `Assert every published tag resolves to this digest`,
+      # which had been SKIPPED — i.e. unproved, not passing — in every run since
+      # this step started failing.
+      #
+      # The predicate was byte-identical to the one measured locally off the
+      # probe's artefact (14,087,745 B both times), so the candidate table above
+      # describes this document and not an approximation of it.
+      #
       # The elapsed time is printed on SUCCESS too. Fifteen minutes was
       # picked without measurement and cost three builds to disprove; the
       # real figure is 904 s for the registry source on a 16 GB runner.
