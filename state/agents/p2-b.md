@@ -287,6 +287,38 @@ adding the package to a Containerfile with nothing consuming it) would be the
 theatre FOUND 34 warns about. The branch exists and is pushed because
 apex-shell's CI matches on branch name.
 
+**FROM THE GITHUB ARCH RUNNER, not this laptop: CI run 35435459325 on the tip
+`df17c34`, and ALL THREE JOBS ARE SUCCESS.** Not "green apart from a failure
+older than the branch" — green. `Repo Structure Sanity` success (so all 121
+REQUIRED paths exist there, the five new ones included), `NixOS` success, and
+`arch-validate` success with **zero red steps**, which is the first time this
+unit has landed a round with no inherited red since round 28. The totals lines
+rather than the ticks:
+
+* `i18n-host: passed=21 failed=0 skipped=3` — **the bare-engine half runs in
+  full on the runner**, on Arch's `qt6-base 6.11.2` rather than this laptop's
+  Fedora 6.10.3. So the whole Apex.I18n route — the plugin builds, the module
+  registers, the translator installs, the SHIPPED singleton comes back in
+  German, and the three controls hold — is proved on a second distribution and
+  a second Qt minor. The three SKIPs are section 4's in-situ rows, each refusing
+  BY NAME: *"quickshell is not installed here (it is an AUR package on Arch), so
+  section 4 measured nothing."*
+* `mutate-i18n-host: applied=13 caught=11 survived=0 misscored=0 unscorable=0
+  held=2 false-red=0` — **identical to this laptop, line for line.** The FOUND
+  18 guard was not needed: every mutant's target was asserted in the runner's
+  baseline too, because none of them is aimed at a quickshell row.
+* `run-i18n-test: passed=19 failed=0 skipped=1` — **the 186 pin passes there**,
+  so the marked-string count is a property of the file and not of this machine's
+  lupdate.
+* `check-agent-help: passed=22 failed=0` and the new row reads *"the qsTr()
+  normaliser has 181 strings to unwrap and leaves none of them wrapped"*. (22
+  rather than 25 here: the runner has no apex-os checkout and no stop-slop
+  skill, so it names the transcribed vocabulary and skips two rows.)
+* `run-rtl-test: 32 passed, 0 failed, 1 skipped, 4 could-not-run` — round 32's
+  decision holds unchanged on the tip.
+
+Full log kept at `scratch-p2-b/round33/ci-35435459325.log`.
+
 Round 32 (2026-09-19). **The RTL runner red is decided, both halves, and the
 decision found that standing-queue item 7 is not the change the ledger says.**
 
