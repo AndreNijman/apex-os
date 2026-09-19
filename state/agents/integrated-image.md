@@ -96,6 +96,31 @@ deliberately NOT made here and the one read-only command to check the L16:
 4. **coredump drop-in** — `systemd-analyze cat-config systemd/coredump.conf`
    → `MaxUse=256M` and `KeepFree=2G`.
 
+## PREP ALREADY DONE ON KATANA (so a stranger does not redo it)
+- `/var/tmp/apex-work/scratch-integrated-image/` holds the PRE snapshot
+  (`ext-pre.txt` 3 564 paths, `image-pre.txt` 266 093, `shadow-pre.txt` 0,
+  `state-pre.json`, `ext-sha-pre.txt`) and **`post-boot.sh`**, which runs all
+  four rows plus the `.pwd.lock` recurrence audit. Run it AFTER the sysext
+  rebuild reaches a terminal state, not before — `state.json` reads 2 and the
+  ICD count can read 0 while it is still `activating`.
+- The greetd helpers from the last run are intact and were re-read:
+  `/var/tmp/apex-work/scratch-katana-image-qual/greetd-set.sh`,
+  `greetd-restore.sh`, `measure-session.sh`, `measure-pkgshare.sh`.
+  Session id for Gaming Mode is **`apex-gaming`**.
+  Do NOT copy the old card's `--on-calendar='2026-09-19 20:45:00'`; it is in
+  the past and fires immediately. Use `--on-active=30min`, unit name
+  `qual-greetd-restore` (that is the name `greetd-restore.sh` stops).
+- Two readings that will mislead a stranger, both checked in the source:
+  * `owner_pid` is inserted into `apex game status` ONLY while a session is
+    active (`apexd/apexd/src/game.rs` ~457). Its absence on an idle machine is
+    by design. The idle discriminator is
+    `strings -a /usr/bin/apexd | grep -c 'the session owner is gone'`.
+  * The greeter's stderr never reaches the journal (greetd dup2s the VT onto
+    the session stdio), so grepping the journal for `APEXI18N` proves nothing.
+    Use the Containerfile's own offscreen probe —
+    `/usr/lib64/qt6/bin/qml -platform offscreen` with
+    `QML_IMPORT_PATH=/usr/lib64/apex-shell/qml` — which `post-boot.sh` does.
+
 ## NEXT
 Monitor `bdxfncpqo` is watching run 35461554871 and emits each job result.
 When it is green: `sudo bootc switch --transport registry
