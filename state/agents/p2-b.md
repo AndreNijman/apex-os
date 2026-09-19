@@ -62,15 +62,17 @@ harness here costs eight to twenty minutes.
 `task/p2-b-round33` from `9df72cf`, apex-os from `7f647470`); worktrees
 `wt-p2-b6-sh` and `wt-p2-b6`.
 
-Next action: **spike whether quickshell's bare `QQmlEngine` honours a QML
-extension-plugin import path**, in `/var/tmp/apex-work/scratch-p2-b/round33/`.
-That is the go/no-go for standing-queue item 4 — the one route to a QTranslator
-that APEX can ship without an upstream change: a compiled
-`QQmlEngineExtensionPlugin` whose `initializeEngine()` calls
-`installTranslator`, reached by `import Apex.I18n` in `shell.qml` with
-`QML_IMPORT_PATH` set by whatever launches quickshell. If quickshell refuses
-the import path or the module, **that negative IS the round's deliverable**
-(the FOUND 32 shape) and it gets written down rather than routed around.
+**THE SPIKE SUCCEEDED — see FOUND 35. The route exists and it is APEX's to
+ship, not upstream's.** A compiled QML extension plugin on `QML_IMPORT_PATH`
+installs a QTranslator into the real quickshell process, and the SHIPPED
+`AgentHelpContent` singleton reads back **German inside quickshell itself**,
+offscreen, with no compositor. Scratch: `scratch-p2-b/round33/spike/`.
+
+Next action: turn the spike into the landed pair —
+`tests/apex-i18n-plugin.cpp` (the artefact), `tests/run-i18n-host-test.sh`
+(build + bare-`QQmlEngine` host half that RUNS on the Arch runner + in-situ
+quickshell half that skips by name there), `tests/mutate-i18n-host.sh`, CI
+wiring, REQUIRED list. Then standing-queue item 5.
 
 **FOUND 8 IS STALE.** `qt6-qttools` IS installed on this laptop now:
 `lupdate-qt6`, `lrelease-qt6`, `moc` (`/usr/lib64/qt6/libexec/moc`), `rcc`,
@@ -1160,6 +1162,51 @@ than this branch.
     ldd's closure is the right question). This is the same shape as the
     memory note "a negative claim read off the wrong type", and it was caught
     only because the second reading was taken before the first was believed.
+
+35. **FOUND 3's "a QTranslator needs a HOST change" is TRUE and was read one
+    step too pessimistically: the host change is APEX's to ship, not
+    upstream's, and it is a QML extension plugin on `QML_IMPORT_PATH`.**
+    Measured 2026-09-19 in `scratch-p2-b/round33/spike/`, inside the REAL
+    `/usr/bin/quickshell` 0.3.1, `QT_QPA_PLATFORM=offscreen`, no compositor,
+    under `env -i`:
+
+        APEXI18N: registerTypes uri=Apex.I18n
+        APEXI18N: initializeEngine uri=Apex.I18n
+        APEXI18N: installed …/tr/apex-shell_de.qm
+        qml: APEXPROBE entryLabel=Wie Agenten und Arbeitsbereiche funktionieren
+        qml: APEXPROBE cardRead=Anleitung lesen
+
+    That is the SHIPPED `src/services/agents/AgentHelpContent.qml` singleton,
+    read back in German, in the host the shell really runs in. No upstream
+    change, no `LD_PRELOAD`, no patch to quickshell.
+
+    **Three traps, each of which cost a run and each of which makes the
+    difference between working and a silent refusal.**
+
+    * **quickshell DOES honour `QML_IMPORT_PATH`** — measured, not assumed:
+      `QT_LOGGING_RULES=qt.qml.import.debug=true` shows it calling
+      `addImportPath` with the supplied directory, alongside
+      `/usr/lib64/qt6/qml` and its own `qs:@/`. `QML2_IMPORT_PATH` works too.
+    * **A `QQmlEngineExtensionPlugin` is NOT enough.** With
+      `Q_PLUGIN_METADATA(IID QQmlEngineExtensionInterface_iid)` the `.so` is
+      dlopened (proved with an `__attribute__((constructor))` that printed),
+      the qmldir is found and read — and the import STILL fails with
+      `module "Apex.I18n" is not installed`, because nothing registers the
+      module. `initializeEngine` is never called. Adding a plain QML type to
+      the qmldir does not fix it either. What fixes it is
+      **`QQmlExtensionPlugin` + `registerTypes()` calling
+      `qmlRegisterModule(uri, 1, 0)`**. The failure mode is the one this
+      program keeps meeting: everything looks loaded and the effect is absent.
+    * **`moc` is not on `$PATH` on either distribution** and its directory
+      differs: `qmake6 -query QT_HOST_LIBEXECS` answers `/usr/lib64/qt6/libexec`
+      on Fedora and `/usr/lib/qt6` on Arch. It also needs the Qt include paths
+      (`pkg-config --cflags-only-I Qt6Qml Qt6Core`) or it dies with
+      `Parse error at "IID"` — the IID is a macro it cannot expand blind.
+
+    **FOUND 8 is stale**: `qt6-qttools` IS installed on this laptop now, so
+    `lupdate-qt6`, `lrelease-qt6`, `moc`, `rcc`, `qmake6`, `cmake`, `g++` and
+    the Qt6 devel headers are all present and sections 2 and 3 of
+    `run-i18n-test.sh` really run here.
 
 ## BLOCKED ON
 

@@ -1,7 +1,7 @@
 # build-verify — does roadmap/v2.2 still build?
 
 repo: apex-os
-worktree: /var/tmp/apex-work/wt-build-verify  (exists, on `task/build-verify` @ f666f5c1)
+worktree: /var/tmp/apex-work/wt-build-verify  (on `task/build-verify`, reset onto roadmap/v2.2 @ 7f647470 in round 33)
 branch: **task/build-verify** — never pushed; nothing is committed on it yet
 
 > Re-dispatched fresh 2026-09-19 (round 33). The previous agent died with a
@@ -73,54 +73,97 @@ machine tracks.
 
 ## NEXT
 
-**Now:** reset `wt-build-verify` onto `roadmap/v2.2` @ 7f647470 (clean, nothing
-committed), then rewrite the `build-local.sh` shell-ref block (lines 105-127) to
-the 3-rung chain want -> roadmap/v2.2 -> main. CI run 35433705393 was at the
-`core` job as of ~09:11Z (rust/changes green, installer-iso skipped) — poll with
-`gh run view 35433705393`, never `gh run watch` (600s tool cap).
+**Now:** run the local build on the integration tip, `base` then `apex`, from
+`/var/tmp/apex-work/wt-build-verify` (which is `roadmap/v2.2` @ 7f647470 + the
+fix, and whose 3-rung chain auto-pins apex-shell `roadmap/v2.2`). **Detached**
+transient unit, never a foreground/`--pty` one — the Bash tool caps at 600 s and
+a backgrounded podman is SIGTERMed:
+
+    systemd-run --user --unit=apex-build-verify-2 \
+      --working-directory=/var/tmp/apex-work/wt-build-verify \
+      -p StandardOutput=file:/var/tmp/apex-work/scratch-build-verify/build.log \
+      -p StandardError=append:/var/tmp/apex-work/scratch-build-verify/build.log \
+      /var/tmp/apex-work/wt-build-verify/build-local.sh base apex
+
+Then poll `systemctl --user is-active apex-build-verify-2` and tail that log.
+Check first: `sudo -n true` (no tty inside the unit), `ls ~/.apex-signing`
+(else `--allow-unsigned`), and `sudo podman image exists
+localhost/apex-os-core:latest` — the previous agent's run got through `core`, so
+skipping it saves ~45 min.
+
+CI run 35433705393 was still in `core` at ~09:40Z (rust 3m7s green, changes 12s
+green, installer-iso skipped). `gh run view 35433705393` — never `gh run watch`.
 
 Then, in this order.
 
-1. **Watch 35433705393 to completion** (`gh run watch 35433705393`, or poll
-   `gh run view`). It is ~1 hour. Report per job, and if the SBOM step dies the
-   same way again, say whether it is the same runner-shutdown signature or
-   something of ours — those are different answers and the difference is the
-   whole point of this unit.
-2. **Fix `build-local.sh` to resolve the matching branch**, the way
-   `build-image.yml` does: try `refs/heads/$(git rev-parse --abbrev-ref HEAD)`,
-   fall back to `refs/heads/main`, **print which one it used and why**, and keep
-   the existing "cannot reach the remote is FATAL, never a silent fallback"
-   property — that property is right and is separately load-bearing. Note the
-   branch you are ON is `task/build-verify`, which apex-shell does not have, so
-   the fallback path is the one your own build will take unless you build from
-   `/var/tmp/apex-work/int-os` or pass `APEX_SHELL_REF=` explicitly. Say which
-   you did.
-3. **Make it fail in both directions before you believe it.** A gate that runs
-   and inspects nothing is the dominant CI defect family in this repo. Prove the
-   matching-branch path is taken on a roadmap branch AND that the main fallback
-   still fires (and still announces itself) on a branch apex-shell lacks.
-4. **Re-run the local build** on the integration tip with the shell ref pinned
-   to apex-shell `roadmap/v2.2`, foreground under `systemd-run --user
-   --unit=apex-build-verify-2 --pty` or equivalent. **A backgrounded podman is
-   SIGTERMed** — it truncates the log and still exits 0. Do NOT regenerate
-   `files/desktop/labwc/rc.xml` against apex-shell `main`: that reverts the
-   accessibility and voice keybinds and is the wrong half of the pair to move.
-5. Commit the `build-local.sh` fix on `task/build-verify`, push it, and put the
-   tip sha in this card's DONE so the orchestrator can land it.
-
 ## DONE
 
+- **Wired into CI and both gates re-run green.** The suite is a step in
+  `pr-validation.yml`'s `engine` job beside `check-suites-run-in-ci.sh`;
+  `./tests/check-suites-run-in-ci.sh` -> 78 suites, 74 run by CI, 4 exempt, 0
+  unrun; `./tests/check-shellcheck-coverage.sh` -> 169 discovered, 0 failing.
+  Linted with the RUNNER's shellcheck (0.9.0 in
+  `docker.io/koalaman/shellcheck-alpine:v0.9.0`, which disagrees with the local
+  0.11.0): both `build-local.sh` and the new suite are clean.
+- **The engine path selector now names `build-local\.sh`**, and that was proved
+  both ways too: a change to `build-local.sh` alone gave `engine=false` under the
+  old pattern and `engine=true` under the new one, while a docs-only change still
+  gives `false` under both — so the selector was widened, not defeated.
 - (round 32) the quickshell `--version` assertion, closed — see above.
+- **Reset `wt-build-verify` onto `roadmap/v2.2` @ `7f647470`** before editing.
+  Nothing was committed on the branch, so this cost nothing and avoids landing a
+  workflow edit a merge behind.
+- **COMMITTED AND PUSHED: `task/build-verify` @ `6e4174ee`** — one commit on top
+  of `roadmap/v2.2` @ `7f647470`, three files. **This is the sha for the
+  orchestrator to land.** Nothing else is outstanding on the branch.
+- **`build-local.sh` shell-ref block rewritten.** Three-rung chain `want -> roadmap/v2.2 -> main`,
+  which is **pr-validation.yml's chain, not build-image.yml's two-rung one** —
+  deliberate: build-image.yml only runs on branches apex-shell also has, while
+  this script is run from whatever worktree a human is standing in, and every
+  `task/*` worktree in this program has no apex-shell twin. Two rungs would send
+  all of them to `main` and reproduce the failure verbatim.
+- **`tests/test-build-local-shell-ref.sh` written, 25 assertions, 8 cases.**
+  Fixture bare repos through the new `APEX_SHELL_REMOTE` seam; no network, no
+  podman, no sudo. It runs the REAL `build-local.sh` with
+  `--allow-unsigned bogus-target`, which resolves the ref and then exits 2 at
+  dispatch before any podman call; every case asserts the `unknown target` line
+  on stderr too, so "reached dispatch" is proved rather than assumed.
+- **Proved in both directions.** New code: **25 passed, 0 failed**. Old block
+  restored via `git stash push -- build-local.sh`: **8 passed, 17 failed** —
+  every matching-branch, fallback-message, detached-HEAD and fatal-path
+  assertion went red, while the three "reached dispatch" assertions correctly
+  stayed green.
+- **Real-remote smoke test** from `wt-build-verify` (on `task/build-verify`):
+  `pinned apex-shell branch 'roadmap/v2.2' — apex-shell has no branch named
+  'task/build-verify'` / `vendoring 9df72cf2939345fea90db0af1fd35d2e6ebe4708`,
+  byte-equal to `git ls-remote … refs/heads/roadmap/v2.2`.
 
 ## IN PROGRESS
 
-- nothing; the previous agent's worktree is clean and nothing is committed.
+- The local `base`+`apex` build on the integration tip. Nothing else.
 
 ## FOUND
 
 - `build-local.sh` pins apex-shell `main` unconditionally while `build-image.yml`
   and `pr-validation.yml` both pin the matching branch. Third instance of one
   defect; the first two are already commented at length in those files.
+- **SECOND defect, underneath the first, and it was silent.** The property the
+  brief called load-bearing — "cannot reach the remote is FATAL, never a silent
+  fallback" — was UNREACHABLE CODE. `SHELL_REF="$(git ls-remote … 2>/dev/null |
+  awk …)"` under `set -euo pipefail`: pipefail gives the assignment ls-remote's
+  status, errexit kills the script ON that line, and the `[ -n … ] || FATAL`
+  below it never runs — with git's own message already thrown away by
+  `2>/dev/null`. Measured directly, not reasoned about:
+  `bash -c 'set -euo pipefail; S="$(git ls-remote https://github.invalid/nope
+  refs/heads/main 2>/dev/null | awk "{print \$1}")"; echo reached'` → **exit
+  128, "reached" never printed, not one word of output**. The FATAL could only
+  fire if the remote answered successfully and had no `main`, which does not
+  happen. It is now an ls-remote RETURN CODE decision (0 found / 2 absent /
+  anything else unreachable) and git's stderr is no longer suppressed.
+- `tests/check-shellcheck-coverage.sh` discovers scripts under `tests/`,
+  `files/` and `android/tools/` only. **`build-local.sh` at the repo root is
+  linted by nobody** — same hole the file's own header describes, one directory
+  up. Not this unit's to fix; recorded for whoever owns that gate.
 - build-image run 35415266422 died on a GitHub runner shutdown during syft/SBOM,
   after core+base+image had all built. Not an APEX defect.
 

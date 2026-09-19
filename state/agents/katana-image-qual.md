@@ -11,10 +11,34 @@ scratch: `/var/tmp/apex-work/scratch-katana-image-qual/`
 
 ## NEXT
 
-**Poll for the tag.** `skopeo inspect --no-tags
+**Waiting on the GHCR tag; everything that does not need it is already done.**
+Poll: `skopeo inspect --no-tags
 docker://ghcr.io/andrenijman/apex-os:apex-7f647470e222cfa23e0853cac45ef3f7e74c252e`
-— last checked 17:13 AWST, still `manifest unknown`. When it appears, run step R
-below.
+— last checked 17:22 AWST, still `manifest unknown` (build dispatched 17:04
+AWST, ~1 h). A background watcher is armed in this session; if you are a fresh
+agent, just poll.
+
+The moment the tag exists, in this order:
+
+1. `ssh katana 'sudo bootc switch --transport registry ghcr.io/andrenijman/apex-os:apex-7f647470e222cfa23e0853cac45ef3f7e74c252e'`
+   then `sudo systemctl reboot` (clean reboot, never a hard reset — a crash
+   discards a staged update). Re-read `bootc status --json`; record the digest.
+2. On the new image, prove the no-op first (evidence §0.2): `sudo
+   /usr/libexec/apex-pkg rebuild --if-needed` and `sudo apex install steam`
+   should both decline to rebuild. Then force it:
+   `sudo systemd-sysext unmerge` followed by `sudo apex install steam 2>&1 |
+   tee /var/tmp/apex-work/scratch-katana-image-qual/apex-install-steam.log`
+   (foreground; `systemd-run --wait` if it needs to outlive the ssh).
+   **Check `grep 'multilib: carrying'` in that log BEFORE believing any count**
+   — its absence means the old extension was measured.
+3. Re-run the §0.3 baseline block verbatim against the new `.raw` for the
+   shadow count, and `ls /usr/share/vulkan/icd.d/ | grep -c i686`.
+4. Then §6, using `/var/tmp/apex-work/scratch-katana-image-qual/greetd-set.sh
+   <session-id>` + `sudo systemctl restart greetd`.
+   **If you are a fresh agent and `/etc/greetd/config.toml` has an
+   `[initial_session]` block, katana is auto-logging in as andre — undo it with
+   `sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-restore.sh`,
+   which restores the backup, `cmp`s it and restarts greetd.**
 
 ## The plan, written 2026-09-19 17:15 AWST while waiting for the tag
 
@@ -156,6 +180,16 @@ Blocks, in order, all from §6:
 - 17:12 — pre-rebase baseline captured (see plan step P).
 - 17:15 — read §6 of `docs/gaming-and-sessions.md` end to end and §§3, 4, 6 of
   the round-31 evidence; plan above written.
+- 17:22 — greetd arm/restore helpers written to
+  `/var/tmp/apex-work/scratch-katana-image-qual/greetd-{set,restore}.sh` on
+  katana (the restore one refuses without a backup and `cmp`s the result).
+- 17:21 — **evidence §0 written, committed `b00e2ae6`, branch pushed.**
+  §0.3 reproduces round 31's shadow count exactly on this deployment:
+  3 716 extension files, 266 030 image paths, **177 shadows, 14 of them 32-bit
+  ELF over a 64-bit image binary**, **0 i686 ICDs of 13**, extension has no
+  `/usr/share/vulkan/icd.d/` at all, `gst-inspect-1.0` → **2 features**.
+  That is the same-agent control the post-rebase numbers are a delta against.
+- 17:20 — negative control on the old image (see FOUND).
 - 17:18 — `df -h /var` on katana: 60 G available, no cleanup needed.
 - 17:17 — PAM capability audit on katana (no `pam_cap`), `apex-pkg` rebuild
   short-circuit read out of the engine, extension/state baseline captured. See
@@ -163,7 +197,7 @@ Blocks, in order, all from §6:
 
 ## IN PROGRESS
 
-- polling GHCR for the per-SHA tag.
+- polling GHCR for the per-SHA tag. Everything below the tag is prepared.
 
 ## FOUND
 
@@ -210,6 +244,29 @@ Blocks, in order, all from §6:
     to `extract_rpms`. Keep the requested set as it is (chromium, gamemode,
     gamescope, libgcc.i686, libSM.i686, mangohud, steam, steam-devices) so the
     177 shadow count is like-for-like with round 31.
+- **Negative control on the OLD image, so "the image changed" is a measurement
+  and not a hope** (17:20 AWST): `apex gaming --gamescope-device-args` → rc=2,
+  `error: unexpected argument`; `grep -c 'prefer-vk-device\|prefer-output'
+  /usr/libexec/apex-gaming-session` → 0; `grep -c 'CapEff\|CapPrm\|CapAmb'` →
+  0; `getcap $(command -v gamescope)` → empty, rc 0; no `vrr_capable` anywhere.
+  All five must flip (except getcap and vrr, which should not) on the new one.
+- The new session script's exact strings, read out of the branch:
+  `[apex-gaming-session] capabilities: CapEff=… CapPrm=… CapAmb=…`,
+  `CAP_SYS_NICE: absent; soft RLIMIT_RTPRIO is …`, `GPU/output: …`,
+  `starting: gamescope … -- steam …`. `log()` writes to **stderr**, so under
+  greetd the whole session log lands in `journalctl -u greetd -b`.
+- Session `Exec` lines are single commands, so greetd's `initial_session
+  command =` can take them verbatim: `apex-gaming` →
+  `/usr/libexec/apex-gaming-session`, `niri` → `niri --session`,
+  `apex-safe-graphics` → `/usr/libexec/apex-safe-graphics` (prefix with `env
+  VAR=…` for 6.4's forced device).
+- **Block 6.5's precondition is intact**: `~/.config/niri/config.kdl` still has
+  the untouched upstream `spawn-at-startup "waybar"` at line 271, there is no
+  `config.kdl.pre-apex-bar.bak`, and `/usr/bin/waybar` exists.
+  `apex-shell-firstrun` writes **no marker any more** and runs at every login,
+  so one niri login on the new image applies the transform.
+- Round 31's `/var/home/andre/qual/shot.py` (grim + distinct-colour/mean-RGB
+  per output) survives and is reused for render proof in 6.4/6.5.
 - `grim` and `wlr-randr` do not work under gamescope (its DRM/Wayland backend
   is its own, not wlroots). Render proof for 6.1 is therefore the five
   gamescope log lines + `nvidia-smi` listing gamescope as `G` + DRM sysfs
