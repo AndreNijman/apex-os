@@ -1166,7 +1166,14 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun startAgent(cwd: String, agent: String?, worktree: String?, prompt: String?, checkpoint: Boolean = false) =
+    fun startAgent(
+        cwd: String,
+        agent: String?,
+        worktree: String?,
+        prompt: String?,
+        checkpoint: Boolean = false,
+        args: List<String> = emptyList(),
+    ) =
         viewModelScope.launch {
             val machine = _state.value.agents.machine ?: return@launch
             val link = links[machine.deviceId] ?: return@launch
@@ -1183,6 +1190,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                         prompt = prompt,
                         worktree = worktree,
                         checkpoint = checkpoint,
+                        args = args,
                     )
                 }
                 _state.update {

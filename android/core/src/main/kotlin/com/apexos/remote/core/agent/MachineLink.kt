@@ -119,10 +119,24 @@ class MachineLink(
         prompt: String? = null,
         worktree: String? = null,
         checkpoint: Boolean = false,
+        /**
+         * Extra arguments after the adapter's own — `RunRequest.args`.
+         *
+         * For `generic` this is the program, and it is not optional there: the
+         * daemon refuses a `generic` session with none. See
+         * [Agentd.commandIsRequired].
+         */
+        args: List<String> = emptyList(),
     ): AgentSession {
         require(cwd.startsWith("/")) { "a working directory must be absolute, and `$cwd` is not" }
+        require(!(Agentd.commandIsRequired(agent) && args.isEmpty())) {
+            "the $agent adapter runs a program you name, and none was given"
+        }
         return Agentd.readSession(
-            request(Agentd.run(cwd, cols, rows, agent, prompt, worktree, checkpoint), retry = false),
+            request(
+                Agentd.run(cwd, cols, rows, agent, prompt, worktree, checkpoint, args),
+                retry = false,
+            ),
         )
     }
 

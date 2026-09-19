@@ -186,6 +186,18 @@ fn run_carries_the_checkpoint_flag_and_omits_what_it_has_no_value_for() {
         }
         other => panic!("`run` parsed as {other:?}"),
     }
+    // The phone's `args`, parsed by the daemon's own serde. This is the half
+    // that could not be checked from Kotlin: that the key is spelled the way
+    // `RunRequest` spells it, and that the program lands FIRST — `session.rs`
+    // takes `req.args.first()` as the generic adapter's program and passes the
+    // rest through, so an order this end got wrong would run the arguments.
+    match parse("run_generic_with_args") {
+        Request::Run(r) => {
+            assert_eq!(r.agent.as_deref(), Some("generic"));
+            assert_eq!(r.args, vec!["/bin/cat".to_string(), "-v".to_string()]);
+        }
+        other => panic!("`run` with args parsed as {other:?}"),
+    }
 }
 
 #[test]

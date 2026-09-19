@@ -138,9 +138,20 @@ fn run(args: &[String]) -> Result<(), String> {
     let store_path = apex_remote_core::device::DeviceStore::path_in(&state_home);
     let machine = machine_name();
 
+    // IPv4 only, today. Left as it was rather than widened in the same change
+    // that stopped this machine advertising addresses it does not serve: a
+    // dual-stack bind moves every peer address to `::ffff:a.b.c.d`, and
+    // `State::path_of` decides LAN-or-relay on `is_loopback()`, which is false
+    // for a v4-mapped loopback. That is a real change with a real regression
+    // behind it and it needs its own measurement. What `bound` buys is that
+    // the pairing code now follows the listener instead of guessing.
     let listener = TcpListener::bind(("0.0.0.0", port))
         .map_err(|e| format!("cannot listen on port {port}: {e}"))?;
-    let state = State::new(identity, machine, port, relay, store_path, ping_interval)
+    let bound = listener
+        .local_addr()
+        .map_err(|e| format!("the listener has no address: {e}"))?
+        .ip();
+    let state = State::new(identity, machine, port, bound, relay, store_path, ping_interval)
         .map_err(|e| format!("the paired-device store is unusable: {e}"))?;
 
     let control_path = crate::state::control_socket();
