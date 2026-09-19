@@ -1283,7 +1283,10 @@ mod tests {
                 pci_id: Some("10de:249d".to_string()),
                 vendor: Some("NVIDIA".to_string()),
                 cards_with_displays: 2,
+                vrr: None,
+                vrr_published_anywhere: false,
                 why: "test fixture".to_string(),
+                vrr_why: "test fixture".to_string(),
                 problem: None,
             },
         }
