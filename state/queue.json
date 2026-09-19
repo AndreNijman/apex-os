@@ -472,7 +472,8 @@
       "conflicts": [
         "build-verify"
       ],
-      "title": "syft is SIGKILLed cataloguing the image — the last red step in build-image"
+      "title": "syft is SIGKILLed cataloguing the image — the last red step in build-image",
+      "closed": "CLOSED TO DISPATCH 2026-09-20 (round 32) -- SOLVED AND VERIFIED, landed as merge b7e28d87. The SIGKILL was Go heap growth under the default GOGC=100 driving a 16 GB runner through memory and swap; GOMEMLIMIT=10GiB fixes it and syft is now PINNED to 1.52.0, which it was not -- it had been installing whatever main served, which would have left a measured fix protecting an unmeasured binary. Verified in a real build (run 35450175806): catalogued in 742 s, peak RSS 15,303,652 KB, 9830 packages, mem_avail never below ~4.7 GiB. THE NEGATIVE RESULTS ARE WORTH MORE THAN THE FIX, across eleven arms: the image SOURCE is irrelevant (oci-dir on local disk died identically to registry), so the fix previously preferred on this card addressed a non-cause; PARALLELISM is irrelevant (par 1 died the same), which means the timeout-death that justified raising the timeout to 45 minutes was ALSO a memory death, misread; the limit's VALUE is irrelevant (4, 6 and 10 GiB all peak at 14.65-14.80 GiB); swap adds nothing while the limit is set (32 GB bought 16 MB, 1 GB ever touched) and was deliberately not committed; swap WITHOUT the limit works badly (1958 s vs 904 s, 8.7M major faults). THE OOM-KILLER CLAIM IS LEFT CALIBRATED, not upgraded: oom_kill was 0 in every arm that lived to read it, so it has still never been read from a kernel message. The step now prints the counter delta, dmesg, peak RSS and the NAMED signal so the next death settles it. sbom-probe.yml is deleted; it answered its question. WHAT REMAINS IS A DIFFERENT PROBLEM and is unit sbom-attest: cosign gives up posting the ~166 MB predicate to Rekor."
     },
     {
       "id": "pkg-update",
@@ -491,6 +492,12 @@
       "after": [],
       "title": "Gaming Mode cannot release itself, and mangoapp fills /var with core dumps",
       "closed": "CLOSED TO DISPATCH 2026-09-19 (round 32) -- code done and landed as merge b76339cb. BOTH FIXES NEED AN IMAGE BUILD before anything is confirmed on hardware; the run-book rows are written (docs/gaming-and-sessions.md 6.6 and 6.7). The release fix is in apexd, the mangoapp fix in files/system/libexec/apex-gaming-session. RELEASE: apexd owns it now, not the session -- apex-gaming-session starts with an owner pid, apexd records the pid AND its /proc start time, and a 2 s watch calls the same idempotent game_exit when the owner is gone, emitting the same ActiveChanged/Status/TierChanged set a D-Bus exit emits so the shell does not keep showing a dead session. The polkit rule was DELIBERATELY NOT LOOSENED: allow_inactive is every local session, so loosening it would let any unprivileged user stop somebody else's Gaming Mode, and a SIGKILLed session runs no trap for a looser rule to permit anyway. MANGOAPP: diagnosed, not guessed. Core dump backtrace is XInternAtom from main with a NULL display; controlled headless A/B with the environment read out of /proc -- `--mangoapp` alone gives 0 restarts in 22 s, adding `--expose-wayland` gives 171. APEX passed both unconditionally, so the combination is ours. --expose-wayland STAYS (the hardware qualification was done with it and the overlay has never drawn a pixel); --mangoapp is gated on it, and APEX_GAMING_EXPOSE_WAYLAND=0 brings it back, which is what makes the gate testable both ways. THE 4 GB WAS NOT A MISSING BOUND -- MaxUse defaults to 10 percent of the filesystem CAPPED AT 4 GiB and katana's /var is 954 GB, so systemd's vacuum was working exactly as designed and 4 GiB is the wrong size for an ostree machine; the drop-in sets MaxUse=256M and KeepFree=2G. WHAT IS NOT A DISCRIMINATOR, and the run-book says so: katana's default AC tier is already `performance`, so the governor reads the same before, during and after -- use `active: false`, the apex-game cgroup being gone, sched_ext/state disabled, and apexd's `the session owner is gone` line instead. STILL UNCONFIRMED: that the MangoHud overlay actually RENDERS with expose-wayland off (it never has here), Safe Graphics' automatic dGPU branch, and any real game launch. RE-OPEN after an image build."
+    },
+    {
+      "id": "sbom-attest",
+      "items": [],
+      "after": [],
+      "title": "cosign cannot post the SBOM attestation to Rekor"
     }
   ],
   "_completed_units": {
