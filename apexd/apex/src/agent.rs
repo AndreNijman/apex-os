@@ -19,6 +19,7 @@ use apex_agent_core::policy::{
 };
 use apex_agent_core::protocol::{
     AgentState, Request, Response, RunRequest, SandboxPolicy, SessionInfo, BROWSER_CA_VERSION,
+    BROWSER_PRESENT_VERSION,
     CONNECTOR_POLICY_VERSION, PLUGIN_POLICY_VERSION, POLICY_DIMENSIONS_VERSION,
     REQUEST_ORIGIN_VERSION, SCOPED_GRANT_VERSION, SESSION_ALLOWLIST_VERSION,
     SYSTEM_GRANT_VERSION,
@@ -649,6 +650,26 @@ pub struct RunArgs {
     /// mean nothing; the daemon refuses the pair too.
     #[arg(long, value_name = "FILE")]
     pub trust_ca: Option<PathBuf>,
+    /// Authenticate this session's ONE destination with a stored credential
+    /// the session is never given (P2-012, route B).
+    ///
+    /// It names the CREDENTIAL. Where it is spent is not a second flag: it is
+    /// the destination that credential is pinned to, and the daemon requires
+    /// `--allow` to be exactly that host and port — a session that names a
+    /// credential may reach the destination the credential is for and nothing
+    /// else.
+    ///
+    /// What happens is that the runtime terminates that one connection with a
+    /// certificate it mints for the run, hands the plaintext to
+    /// `apex-secretd`, and that daemon — the only one that holds credentials —
+    /// adds the header and connects to the site. Neither the session nor the
+    /// agent runtime ever holds the value.
+    ///
+    /// Needs a confined sandbox, `--network allowlist`, and a grant:
+    /// `apex secret grant <credential> browser.present --everywhere`. Cannot
+    /// be combined with `--trust-ca`.
+    #[arg(long, value_name = "CREDENTIAL")]
+    pub present: Option<String>,
     /// Run in a dedicated git worktree, creating it if needed.
     #[arg(long, short)]
     pub worktree: Option<String>,
@@ -1302,6 +1323,7 @@ fn run(args: RunArgs) -> Result<i32> {
         capabilities: args.capabilities.clone(),
         allow: args.allow.clone(),
         trust_ca,
+        present: args.present.clone(),
         // Nothing to send yet: collecting an assertion needs a challenge to
         // have been asked for, and the command that asks for one is the next
         // commit. The daemon's reader landed with this one so that the gate
@@ -1322,6 +1344,7 @@ fn run(args: RunArgs) -> Result<i32> {
         args.capabilities.is_some(),
         args.allow.is_some(),
         args.trust_ca.is_some(),
+        args.present.is_some(),
     )?;
     let info = match c.call(&Request::Run(request))? {
         Response::Session(info) => *info,
@@ -1420,8 +1443,9 @@ fn check_daemon_understands(
     scoped: bool,
     narrowed: bool,
     browser_ca: bool,
+    present: bool,
 ) -> Result<()> {
-    let needs = settings_a_daemon_could_drop(policy, origin, scoped, narrowed, browser_ca);
+    let needs = settings_a_daemon_could_drop(policy, origin, scoped, narrowed, browser_ca, present);
     if needs.is_empty() {
         return Ok(());
     }
@@ -1461,6 +1485,7 @@ fn settings_a_daemon_could_drop(
     scoped: bool,
     narrowed: bool,
     browser_ca: bool,
+    present: bool,
 ) -> Vec<(&'static str, u32)> {
     let moved = non_default_dimensions(policy);
     let mut needs: Vec<(&'static str, u32)> = moved
@@ -1538,6 +1563,16 @@ fn settings_a_daemon_could_drop(
     // is here to stop a silent five minutes.
     if browser_ca {
         needs.push(("--trust-ca", BROWSER_CA_VERSION));
+    }
+    // And back to the ordinary direction one revision later (P2-012, route B).
+    // A daemon below this drops `present`, tunnels the capsule's CONNECT
+    // untouched, and the capsule visits the site as nobody — which for a site
+    // that serves a public page to anonymous callers is a screenshot that
+    // looks right and is not logged in. Checked separately from `--trust-ca`
+    // because a daemon can install a CA for a capsule's browser and know
+    // nothing about terminating TLS for it.
+    if present {
+        needs.push(("--present", BROWSER_PRESENT_VERSION));
     }
     needs
 }
@@ -2071,6 +2106,7 @@ fn handoff(id: Option<u32>, to: &str, no_start: bool, transcript_bytes: usize) -
         // was given — so there is nothing here to inherit and nothing that
         // could be inherited by accident.
         trust_ca: None,
+        present: None,
         cols: 80,
         rows: 24,
         env: vec![],
@@ -4527,6 +4563,7 @@ mod tests {
             capabilities: None,
             allow: None,
             trust_ca: None,
+        present: None,
             worktree: None,
             checkpoint: false,
             cwd: None,
@@ -5002,7 +5039,7 @@ mod tests {
         let with = |f: fn(&mut AgentPolicy)| {
             let mut p = AgentPolicy::default();
             f(&mut p);
-            settings_a_daemon_could_drop(&p, None, false, false, false)
+            settings_a_daemon_could_drop(&p, None, false, false, false, false)
         };
 
         // Dimension 8. The flag name is what the refusal prints, so it is part
@@ -5043,7 +5080,7 @@ mod tests {
         );
         // `sandbox` predates every revision here and is never checked, so an
         // all-defaults run against an old daemon still starts.
-        assert!(settings_a_daemon_could_drop(&AgentPolicy::default(), None, false, false, false).is_empty());
+        assert!(settings_a_daemon_could_drop(&AgentPolicy::default(), None, false, false, false, false).is_empty());
 
         // And the two dimensions travel independently: asking for both names
         // both, at two revisions.
@@ -5053,7 +5090,7 @@ mod tests {
             ..AgentPolicy::default()
         };
         assert_eq!(
-            settings_a_daemon_could_drop(&both, None, false, false, false),
+            settings_a_daemon_could_drop(&both, None, false, false, false, false),
             vec![
                 ("--connectors", CONNECTOR_POLICY_VERSION),
                 ("--plugins", PLUGIN_POLICY_VERSION),
@@ -5082,7 +5119,7 @@ mod tests {
         // revisions. The dimension alone would be satisfied by a protocol-2
         // daemon.
         assert_eq!(
-            settings_a_daemon_could_drop(&allowlisted, None, false, true, false),
+            settings_a_daemon_could_drop(&allowlisted, None, false, true, false, false),
             vec![
                 ("network", POLICY_DIMENSIONS_VERSION),
                 ("--allow", SESSION_ALLOWLIST_VERSION),
@@ -5092,7 +5129,7 @@ mod tests {
         // Not narrowed: the same policy asks for nothing extra, so an
         // ordinary allowlisted session still starts against an old daemon.
         assert_eq!(
-            settings_a_daemon_could_drop(&allowlisted, None, false, false, false),
+            settings_a_daemon_could_drop(&allowlisted, None, false, false, false, false),
             vec![("network", POLICY_DIMENSIONS_VERSION)],
         );
         // That the revision is genuinely later than the one before it — so
@@ -5127,14 +5164,14 @@ mod tests {
              nothing about the pair the daemon refuses"
         );
         assert_eq!(
-            settings_a_daemon_could_drop(&confined, None, false, false, true),
+            settings_a_daemon_could_drop(&confined, None, false, false, true, false),
             vec![("--trust-ca", BROWSER_CA_VERSION)],
             "--trust-ca must carry its own revision, and the flag name is what the refusal \
              prints — `would ignore trust_ca` names nothing a user can type"
         );
         // Not asked for: the same policy needs nothing, so an ordinary session
         // still starts against an older daemon.
-        assert!(settings_a_daemon_could_drop(&confined, None, false, false, false).is_empty());
+        assert!(settings_a_daemon_could_drop(&confined, None, false, false, false, false).is_empty());
 
         // It travels independently of the narrowed allowlist it will almost
         // always be used beside — a browser capsule sends both — and the two
@@ -5145,7 +5182,7 @@ mod tests {
             ..AgentPolicy::default()
         };
         assert_eq!(
-            settings_a_daemon_could_drop(&allowlisted, None, false, true, true),
+            settings_a_daemon_could_drop(&allowlisted, None, false, true, true, false),
             vec![
                 ("network", POLICY_DIMENSIONS_VERSION),
                 ("--allow", SESSION_ALLOWLIST_VERSION),
@@ -5156,6 +5193,44 @@ mod tests {
             SESSION_ALLOWLIST_VERSION, BROWSER_CA_VERSION,
             "a capsule sends both keys, so a daemon that honours one and drops the other is a \
              real machine; the two guards cannot be the same number"
+        );
+    }
+
+    /// P2-012 route B. The entry whose omission would be worst on this table
+    /// since `--capabilities`: a daemon below the revision drops `present`,
+    /// tunnels the capsule's CONNECT untouched, and the capsule visits the
+    /// site as nobody. For a site that serves a public page to anonymous
+    /// callers that is a screenshot which looks right.
+    #[test]
+    fn a_presented_credential_is_checked_against_its_own_revision() {
+        let allowlisted = AgentPolicy {
+            network: NetworkPolicy::Allowlist,
+            ..AgentPolicy::default()
+        };
+        assert_eq!(
+            settings_a_daemon_could_drop(&allowlisted, None, false, true, false, true),
+            vec![
+                ("network", POLICY_DIMENSIONS_VERSION),
+                ("--allow", SESSION_ALLOWLIST_VERSION),
+                ("--present", BROWSER_PRESENT_VERSION),
+            ],
+            "--present must carry its own revision, and the flag name is what the refusal \
+             prints"
+        );
+        assert!(
+            settings_a_daemon_could_drop(&allowlisted, None, false, true, false, false)
+                .iter()
+                .all(|(name, _)| *name != "--present"),
+            "a session that did not ask for it must not be refused by a daemon that lacks it"
+        );
+        // The two browser guards are two revisions, so a daemon that installs
+        // a CA and cannot terminate a destination is refused for the second
+        // and not the first. An assertion reading one constant twice would
+        // hold with the table wrong.
+        assert_ne!(
+            BROWSER_CA_VERSION, BROWSER_PRESENT_VERSION,
+            "gap 5 and route B shipped in consecutive revisions; a guard that conflated them \
+             would tell a protocol-10 daemon it understood a key it drops"
         );
     }
 

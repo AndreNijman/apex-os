@@ -25,6 +25,7 @@ mod egress;
 mod elevation;
 mod grants;
 mod inject;
+mod intercept;
 mod origin;
 mod peer;
 mod privilege;
