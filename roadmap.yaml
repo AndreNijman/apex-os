@@ -3220,8 +3220,8 @@ tasks:
     running instead of restoring it (scxctl restore would be the fix; no APEX image loads one at boot so the
     branch has never been reached). Full detail at ROADMAP/evidence/gaming-scx-20260920.md. Agent card
     ROADMAP/state/agents/gaming-scx.md. || ROUND kernel-btf-scx 2026-09-20 on apex-os task/kernel-btf-scx
-    (303221d5 -> b5bea21f, two commits, PUSHED NOT MERGED; merge-tree --write-tree against origin/roadmap/v2.2 at
-    303221d5 exit 0, tree 9ec57a0d, 0 conflicts, re-fetched and run not assumed). SENT TO CONFIRM THE SCHED-EXT
+    (303221d5 -> 0fdfce6f, THREE commits, PUSHED NOT MERGED; merge-tree --write-tree against origin/roadmap/v2.2
+    at 303221d5 exit 0, tree 65fa44e6, 0 conflicts, re-fetched and run not assumed). SENT TO CONFIRM THE SCHED-EXT
     CAUSE FROM THE ARTEFACTS RATHER THAN INHERIT IT, AND BOTH INHERITED CAUSES ARE WRONG. The defect is real: no
     scx_* scheduler can load on an APEX image at all. CORRECTION 1: APEX DOES NOT BUILD THIS KERNEL.
     Containerfile.core lines 216-224 dnf5-installs the prebuilt kernel-cachyos RPM from COPR
@@ -3243,16 +3243,22 @@ tasks:
     patches - downloaded from koji, vmlinux extracted from the zstd bzImage, .BTF dumped with objcopy and read
     with the same reader: 18 of 68 affected, ten of them kfuncs scx_lavd needs (dsq_nr_queued, get_idle_cpumask,
     destroy_dsq, dispatch_cancel, test_and_clear_cpu_idle, pick_any_cpu, pick_any_cpu_node, cidperf_cur,
-    cidperf_set, dsq_insert___v2). SO SCX_LAVD WOULD FAIL ON FEDORA'S KERNEL TOO: this is the Fedora 43 toolchain
-    against a 7.2 tree, not CachyOS packaging, and switching to the stock kernel is not the escape it looks like -
-    it fixes nothing and costs BORE and 1000 Hz. NOT FIXABLE IN THIS REPO, and each alternative is named with its
-    cost: regenerating BTF in-image is NOT VIABLE (no vmlinux is shipped, only vmlinuz, and
-    CONFIG_MODULE_ALLOW_BTF_MISMATCH is not set, so a rewritten vmlinux BTF would be refused by every module
-    including the 14 MOK-signed out-of-tree ones); pinning an older kernel-cachyos has no evidence behind it
-    (three images never loaded a scheduler); building the kernel in APEX CI would certainly work but changes what
-    every machine boots, adds a kernel build to the core tier (already ~45 min and ~5 GB of fleet pull) and takes
-    on kernel maintenance permanently - THAT IS ANDRE'S DECISION AND IT WAS NOT STARTED. THE REALISTIC PATH is
-    upstream: dwarves-1.32-1.fc43 exists in Fedora 43 UPDATES-TESTING (stable is 1.30) and its changelog names
+    cidperf_set, dsq_insert___v2). SO SCX_LAVD WOULD FAIL ON FEDORA'S KERNEL TOO. AND A THIRD KERNEL, FOUND BY
+    SMOKE-TESTING THE NEW CLI LINE: the L16's own 7.2.3-cachyos2.fc43 - a DIFFERENT version from katana's, same
+    PAHOLE_VERSION=130 and gcc 15.3.1 - is affected at 20 of 68. Three kernels read, three DIFFERENT subsets,
+    every one broken, all three including scx_bpf_get_idle_cpumask: L16 7.2.3-cachyos2 20/68, katana
+    7.2.6-cachyos1 22/68 (exactly the 22 libbpf named), Fedora stock 7.2.6-100.fc43 18/68. Which kfuncs fall
+    through moves with the tree and config; THAT SOME FALL THROUGH IS INVARIANT. So this is the Fedora 43
+    toolchain against a 7.2 tree - not CachyOS packaging, not one bad COPR build, not one kernel version - and it
+    also puts a MEASUREMENT against 'pin an older kernel-cachyos' rather than only an absence of evidence.
+    Switching to the stock kernel fixes nothing and costs BORE and 1000 Hz. NOT FIXABLE IN THIS REPO, and each
+    alternative is named with its cost: regenerating BTF in-image is NOT VIABLE (no vmlinux is shipped, only
+    vmlinuz, and CONFIG_MODULE_ALLOW_BTF_MISMATCH is not set, so a rewritten vmlinux BTF would be refused by every
+    module including the 14 MOK-signed out-of-tree ones); pinning an older kernel-cachyos has no evidence behind
+    it (three images never loaded a scheduler); building the kernel in APEX CI would certainly work but changes
+    what every machine boots, adds a kernel build to the core tier (already ~45 min and ~5 GB of fleet pull) and
+    takes on kernel maintenance permanently - THAT IS ANDRE'S DECISION AND IT WAS NOT STARTED. THE REALISTIC PATH
+    is upstream: dwarves-1.32-1.fc43 exists in Fedora 43 UPDATES-TESTING (stable is 1.30) and its changelog names
     'fix kfunc bounds', 'Prefer strong function definitions for BTF generation' and 'Factor out BPF kfunc
     emission' - the right shape, and UNVERIFIED, because confirming it needs a kernel built against it. Sequence
     out: dwarves 1.32 reaches F43 stable -> COPR rebuilds kernel-cachyos -> APEX runs a core rebuild. NOTE the
@@ -3265,38 +3271,44 @@ tasks:
     no-sched-ext / absent / unreadable / not probed) and scx_detail gains a clause naming a kfunc and the
     proportion - only when the probe says loading is blocked AND no scheduler attached, so a loaded session is not
     argued with and a good kernel earns no sentence. Reported while game mode is OFF too, so a user learns no
-    session can carry a scheduler without starting one. VALIDATED AGAINST REAL KERNELS, NOT ONLY FIXTURES, AND
-    THAT CAUGHT A DEFECT: over katana's real 6.6 MB vmlinux BTF the first version named 47 affected kfuncs where
-    libbpf names 22 - the extra 25 were _impl twins, which are SUPPOSED to carry the argument (they are the
-    pre-strip originals resolve_btfids renames; no BPF program references one). With _impl skipped the reader
-    names EXACTLY the 22. GATES: cargo test --locked --workspace --no-fail-fast 3476 passed 0 failed (was 3450),
-    clippy -D warnings clean, test-apex-gaming 131/0, test-apex-modes 67/0, test-apex-gaming-session 46/0,
-    check-doc-verbs 0 stale, check-suites-run-in-ci 0 unrun, check-shellcheck-coverage 0 newly failing,
-    check-containerfile-assertions 195 checked 0 failed 0 inert, no conflict markers. 26 new assertions; TWELVE
-    mutations, each naming the row it turned red, sources restored with plain cp and verified with cmp. THREE
-    ESCAPED THE FIRST PASS and are recorded rather than tidied away: (MB4) folding a failed stat() into Absent
-    survived, because the existing row put a DIRECTORY where the file goes and metadata() on a directory SUCCEEDS
-    - permission-denied-is-not-absence inside the module written to stop reporting one thing as another; an
-    ENOTDIR fixture closes it. (MB8) dropping the zero-parameter guard survived and would have PANICKED apex game
-    status on any kernel with a zero-parameter sched-ext kfunc, which scx_bpf_locked_rq() on a CORRECTLY BUILT
-    kernel is. (MB9) appending the clause unconditionally survived, because the negative rows asserted only that
-    the alarming words were absent and the Usable sentence contains none of them - a gate that inspects nothing,
-    in this unit's own work; they now assert the clause is ABSENT. DOCS CORRECTED, and the instruction to treat
-    existing prose as suspect was right: gaming-and-sessions.md 6.8 told a tester to expect scx_state : loaded,
-    which CANNOT HAPPEN on any APEX image built to date, so whoever ran it next would have read a permanent kernel
-    defect as a regression in the round-before's fix. New Row 0 decides in one command whether Rows A and C are
-    runnable; new Row A-alt proves what IS provable on an affected kernel. New section 5d carries the finding; 5c
-    cross-references it; apexd-dbus.md documents scx_btf. STAYS PARTIAL: this item's original GPU-parity half is
-    untouched (safe GPU controls on AMD/Intel still cannot distinguish 'left at default' from 'no knob exists';
-    Safe Graphics' automatic dGPU branch still needs the panel genuinely dark), and the sched-ext half CANNOT BE
-    CLOSED FROM THIS REPOSITORY AT ALL. NOTE FOR WHOEVER READS THIS NEXT: this item is titled 'GPU parity across
-    NVIDIA/AMD/Intel' and now carries four sched-ext rounds; the sched-ext work wants its own item. NOT DONE ON
-    HARDWARE: apex game status has never printed scx_btf on any machine - that needs an image build and one was
-    not justified for a status key; the reading quoted in the evidence is the SHIPPED reader over katana's real
-    BTF blob, run on the build machine. katana was read-only and is unchanged: booted apex-661a9d80
-    (sha256:61f7935c), three deployments with the September 18 one pinned, greetd active and untouched, no
-    efibootmgr write, systemctl --failed empty, sched_ext/state disabled; three throwaway /tmp parser files
-    removed. Full detail at ROADMAP/evidence/kernel-btf-scx-20260920.md. Agent card
+    session can carry a scheduler without starting one. The CLI's DAEMON-NOT-RUNNING branch prints scx and scx_btf
+    as well - it had carried nothing about sched-ext at all, so the one surface a user reaches when apexd is down
+    was the one that could not tell them their kernel refuses every scheduler; that line has NO TEST, like the
+    nvidia-smi line beside it, and was smoke-run instead with both D-Bus addresses pointed at a nonexistent
+    socket. VALIDATED AGAINST REAL KERNELS, NOT ONLY FIXTURES, AND THAT CAUGHT A DEFECT: over katana's real 6.6 MB
+    vmlinux BTF the first version named 47 affected kfuncs where libbpf names 22 - the extra 25 were _impl twins,
+    which are SUPPOSED to carry the argument (they are the pre-strip originals resolve_btfids renames; no BPF
+    program references one). With _impl skipped the reader names EXACTLY the 22. GATES: cargo test --locked
+    --workspace --no-fail-fast 3476 passed 0 failed (was 3450), clippy -D warnings clean, test-apex-gaming 131/0,
+    test-apex-modes 67/0, test-apex-gaming-session 46/0, check-doc-verbs 0 stale, check-suites-run-in-ci 0 unrun,
+    check-shellcheck-coverage 0 newly failing, check-containerfile-assertions 195 checked 0 failed 0 inert, no
+    conflict markers. 26 new assertions; TWELVE mutations, each naming the row it turned red, sources restored
+    with plain cp and verified with cmp. THREE ESCAPED THE FIRST PASS and are recorded rather than tidied away:
+    (MB4) folding a failed stat() into Absent survived, because the existing row put a DIRECTORY where the file
+    goes and metadata() on a directory SUCCEEDS - permission-denied-is-not-absence inside the module written to
+    stop reporting one thing as another; an ENOTDIR fixture closes it. (MB8) dropping the zero-parameter guard
+    survived and would have PANICKED apex game status on any kernel with a zero-parameter sched-ext kfunc, which
+    scx_bpf_locked_rq() on a CORRECTLY BUILT kernel is. (MB9) appending the clause unconditionally survived,
+    because the negative rows asserted only that the alarming words were absent and the Usable sentence contains
+    none of them - a gate that inspects nothing, in this unit's own work; they now assert the clause is ABSENT.
+    DOCS CORRECTED, and the instruction to treat existing prose as suspect was right: gaming-and-sessions.md 6.8
+    told a tester to expect scx_state : loaded, which CANNOT HAPPEN on any APEX image built to date, so whoever
+    ran it next would have read a permanent kernel defect as a regression in the round-before's fix. New Row 0
+    decides in one command whether Rows A and C are runnable; new Row A-alt proves what IS provable on an affected
+    kernel. New section 5d carries the finding; 5c cross-references it; apexd-dbus.md documents scx_btf. STAYS
+    PARTIAL: this item's original GPU-parity half is untouched (safe GPU controls on AMD/Intel still cannot
+    distinguish 'left at default' from 'no knob exists'; Safe Graphics' automatic dGPU branch still needs the
+    panel genuinely dark), and the sched-ext half CANNOT BE CLOSED FROM THIS REPOSITORY AT ALL. NOTE FOR WHOEVER
+    READS THIS NEXT: this item is titled 'GPU parity across NVIDIA/AMD/Intel' and now carries four sched-ext
+    rounds; the sched-ext work wants its own item. NOT DONE ON HARDWARE: apex game status has never printed
+    scx_btf on any machine - that needs an image build and one was not justified for a status key; the reading
+    quoted in the evidence is the SHIPPED reader over katana's real BTF blob, run on the build machine. THE L16
+    WAS READ ONCE AND NOT TOUCHED - /sys/kernel/btf/vmlinux, uname -r and /proc/config.gz, through a binary built
+    in a scratch worktree that could reach no daemon and therefore no polkit action; nothing installed, written or
+    configured, and that read is where the third kernel row came from. katana was read-only and is unchanged:
+    booted apex-661a9d80 (sha256:61f7935c), three deployments with the September 18 one pinned, greetd active and
+    untouched, no efibootmgr write, systemctl --failed empty, sched_ext/state disabled; three throwaway /tmp
+    parser files removed. Full detail at ROADMAP/evidence/kernel-btf-scx-20260920.md. Agent card
     ROADMAP/state/agents/kernel-btf-scx.md.
 - id: P1-044
   title: Default incoming firewall

@@ -4,9 +4,11 @@
 Repo `apex-os`, branch `task/kernel-btf-scx`, worktree
 `/var/tmp/apex-work/wt-kernel-btf-scx`, from `roadmap/v2.2` (`303221d5`).
 
-Two commits, tip `b5bea21f`:
+Three commits, tip `0fdfce6f`:
 
 ```
+0fdfce6f feat(gaming): the local view says it too, and a third kernel confirms
+         the defect is general
 b5bea21f docs(gaming): sched-ext cannot load on any APEX kernel, and section
          6.8 asked for a reading no machine can give
 aafc6898 feat(gaming): say WHICH kind of 'not loaded' sched-ext is, by reading
@@ -14,13 +16,13 @@ aafc6898 feat(gaming): say WHICH kind of 'not loaded' sched-ext is, by reading
 ```
 
 `git merge-tree --write-tree origin/roadmap/v2.2 task/kernel-btf-scx` → exit
-0, tree `9ec57a0d`, **0 conflicts**, against `origin/roadmap/v2.2` at
+0, tree `65fa44e6`, **0 conflicts**, against `origin/roadmap/v2.2` at
 `303221d5` (re-fetched 2026-09-20; the tip had not moved). Run, not assumed.
 
 Evidence: `ROADMAP/evidence/kernel-btf-scx-20260920.md` (tracked, on the
 branch). P1-043 recorded `partial` with `set-status.py`: prior evidence read
 out with `yaml.safe_load` first and carried forward **whole** — verified
-afterwards by `prior in evidence` → True, 21 172 → 29 460 chars, a per-item
+afterwards by `prior in evidence` → True, 21 172 → 30 790 chars, a per-item
 diff showing P1-043 as the only row that changed, 128 tasks before and after,
 `global_agent_rules` intact, and 0 hyphen-space corruptions in the new text.
 
@@ -47,12 +49,20 @@ The measured defect is narrower: **22 of 68 `scx_bpf_*` kfuncs carry no
 implicit `struct bpf_prog_aux *`, and `libbpf` refuses every scheduler.
 `SCX_SETTLE` is not implicated.
 
-**The control that decides the recommendation:** Fedora's own stock
-`kernel-core-7.2.6-100.fc43` — same upstream version, same GCC 15.3.1, same
-pahole 1.30 — has **18 of 68 affected**, ten of them kfuncs `scx_lavd` needs.
-`scx_lavd` would fail there too. This is the Fedora 43 toolchain against a 7.2
-tree, not CachyOS packaging, and switching to the stock kernel fixes nothing
-while costing BORE and 1000 Hz.
+**The controls that decide the recommendation — three kernels read, not one:**
+
+| kernel | version | affected |
+|---|---|---|
+| L16 (`kernel-cachyos`) | `7.2.3-cachyos2.fc43` | 20 of 68 |
+| katana (`kernel-cachyos`) | `7.2.6-cachyos1.fc43` | **22 of 68** (exactly the 22 `libbpf` named) |
+| Fedora stock (`kernel-core`) | `7.2.6-100.fc43` | 18 of 68 |
+
+Three different subsets, all broken, all three including
+`scx_bpf_get_idle_cpumask`. So it is **not** CachyOS packaging (Fedora's own
+kernel, same GCC 15.3.1 and pahole 1.30, is affected), **not** one bad COPR
+build, and **not** one kernel version — which also puts a measurement against
+"pin an older `kernel-cachyos`". Switching to Fedora's stock kernel fixes
+nothing and costs BORE and 1000 Hz.
 
 ## What was done
 
@@ -62,7 +72,11 @@ while costing BORE and 1000 Hz.
 * `apex game status` gains `scx_btf` (`ok` / `implicit-args` / `no-sched-ext` /
   `absent` / `unreadable` / `not probed`) and `scx_detail` gains a clause — but
   only when loading is blocked **and** no scheduler attached. Reported while
-  game mode is off too.
+  game mode is off too. The CLI's **daemon-not-running** branch prints `scx`
+  and `scx_btf` as well; it had carried nothing about sched-ext at all.
+  **That one line has no test** — the branch has never had one, like the
+  `nvidia-smi:` line beside it — and was smoke-run instead with both D-Bus
+  addresses pointed at a nonexistent socket.
 * `docs/gaming-and-sessions.md` §5d new, §6.8 rewritten (its Rows A and C
   expected a reading **no APEX image can give**), §5c cross-referenced.
   `docs/apexd-dbus.md` documents the key. `final-image-20260920.md` §3
@@ -90,7 +104,11 @@ exactly the 22.
 
 ## Machines
 
-**The L16 was not touched.** **katana was read-only** and is unchanged: booted
+**The L16 was READ, once, and not touched** — `/sys/kernel/btf/vmlinux`,
+`uname -r`, `/proc/config.gz`, through a binary built in a scratch worktree
+that could reach no daemon and therefore no polkit action. Nothing installed,
+written or configured. That read is where the third kernel row above came from.
+**katana was read-only** and is unchanged: booted
 `apex-661a9d80` (`sha256:61f7935c…`), three deployments with the September 18
 one pinned, greetd active and untouched, no `efibootmgr` write,
 `systemctl --failed` empty, `sched_ext/state` `disabled`. Three throwaway
