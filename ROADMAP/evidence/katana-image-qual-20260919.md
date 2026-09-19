@@ -477,6 +477,56 @@ row in §2 and §3.
 | `apex game` cleanup | released every time, 0 gamescope left |
 
 
+### 0.10 What the landed selector says about katana, before katana has it
+
+The image was still building, so the selector was run against katana's **real
+sysfs**, copied off the machine, using the code from this branch. `choose_display`
+takes the sysfs root as an argument and the CLI honours `APEX_ROOT`, so this is
+the shipped rule on the shipped inputs — not a fixture somebody wrote to pass.
+
+The snapshot, every file of it (`/sys/class/drm` on katana at 17:59 AWST):
+
+```
+class/drm/card1-eDP-1/status     = connected      class/drm/card1/device/vendor = 0x8086
+class/drm/card1-eDP-1/enabled    = enabled        class/drm/card1/device/device = 0x46a6
+class/drm/card2-HDMI-A-1/status  = connected      class/drm/card2/device/vendor = 0x10de
+class/drm/card2-HDMI-A-1/enabled = enabled        class/drm/card2/device/device = 0x249d
+```
+
+```
+$ cargo build --bin apex                                   # branch task/katana-image-qual
+$ APEX_ROOT=<snapshot> ./target/debug/apex gaming --gamescope-device-args ; echo rc=$?
+HDMI-A-1 on card2 is an external display; 2 connected output(s) across 2 card(s)
+no connector on this machine publishes vrr_capable at all, so this is 'the driver does not
+say' and NOT 'the display has no VRR'. On NVIDIA that is expected; the property has to come
+from somewhere else
+--prefer-vk-device
+10de:249d
+--prefer-output
+HDMI-A-1
+rc=0
+
+$ APEX_ROOT=<snapshot> ./target/debug/apex gaming | grep -A4 'the screen Gaming Mode will use'
+── the screen Gaming Mode will use ──
+output             : HDMI-A-1 on card2 (NVIDIA)
+gamescope device   : --prefer-vk-device 10de:249d
+why                : HDMI-A-1 on card2 is an external display; 2 connected output(s) across 2 card(s)
+adaptive sync      : not published — no connector on this machine has vrr_capable
+```
+
+That is the §6.1 expectation stated as a number before the run, and the §7.2
+wording confirmed against hardware that genuinely publishes nothing.
+
+**A free single-GPU parity check fell out of it.** The same binary run against
+the L16's own `/sys` — one card, one connected output, an AMD Radeon 780M —
+answers `output: eDP-1 on card1 (AMD)`, `--prefer-vk-device 1002:1900`,
+`why: eDP-1 on card1 is the built-in panel; 1 connected output(s) across 1
+card(s)`. So the rule needs no special case for a machine with one GPU: it
+names the only card it can see and still emits a `--prefer-output`, which is
+the claim `docs/gaming-and-sessions.md` §1 makes. Nothing about `10de:249d` is
+hardcoded — the two machines produce different ids from the same code path.
+
+
 ---
 
 ## 1. The rebase
