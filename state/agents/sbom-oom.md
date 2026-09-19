@@ -187,7 +187,8 @@ needs re-deriving.** Two runs are in flight; read them in this order.
 
 1. **Verification build `35447611644`.** If the SBOM step ran and passed, this
    unit is done: say so, and `task/sbom-oom` is ready to land on `roadmap/v2.2`.
-   It carries three commits — two probe commits and the fix. **Delete
+   It carries four commits over `2e04fbcb` — `0386666a`, `87aa264e`, `531b6c96`
+   (the probe, built up over two rounds) and `a40cf827` (the fix). **Delete
    `.github/workflows/sbom-probe.yml` before or as part of the landing**: it is
    a temporary measurement, its header says so, and it triggers on pushes to
    `task/sbom-oom` only, so it is inert elsewhere but should not outlive the
@@ -196,6 +197,38 @@ needs re-deriving.** Two runs are in flight; read them in this order.
    `oom_kill` delta, dmesg, the journal, peak RSS and the named signal. Read
    those before changing anything. Do **not** respond by lowering GOMEMLIMIT or
    restricting cataloguers; see the arms below.
+
+   **Watch for a NEW failure mode one line further on, which nothing has ever
+   reached — and it is likely.** The SBOM syft produces is **166 MB** of
+   spdx-json. The next statement after the package-count assertion is
+   `cosign attest --yes --predicate /tmp/sbom.spdx.json --type spdxjson`, and no
+   build has ever got that far: every previous run died inside syft.
+
+   Researched rather than guessed, 2026-09-19: the **public Rekor instance has
+   an undocumented request-body size limit** and returns **HTTP 413** above it
+   (sigstore/rekor#2808); `cosign attest` uploads the *entire* predicate to the
+   transparency log, not just a digest of it (sigstore/cosign#3599). For scale,
+   GitHub's own `actions/attest` hardcodes a 16 MB predicate cap
+   (projectbluefin/actions#484). **APEX's predicate is 166 MB — an order of
+   magnitude over the nearest documented ceiling.** Another bootc desktop
+   project hit exactly this and made the SBOM attestation best-effort
+   (daytwo-bootc-workstation-base#19).
+
+   If the step fails at `cosign attest` rather than at syft, **that is progress,
+   not a regression of this fix.** Do not undo the GOMEMLIMIT change in response
+   to it. The remedies are a different problem from this unit's:
+   - `cosign attest --no-upload` (keep the attestation on the registry, skip
+     the tlog) — but check what `trust.rs` and
+     `tests/test-apex-trust-enforcement.sh` require before doing it, because the
+     verify step immediately below runs `cosign verify-attestation`.
+   - **Shrink the predicate**, which is the better lead and likely helps the
+     memory too. That 166 MB is not 9830 packages' worth of metadata: syft
+     emits package-to-file relationships by default, which on an image with
+     ~200k files produces 100k+ relationship edges. The same file-level work is
+     what drives the RSS this card is about. `SYFT_FILE_METADATA_SELECTION` /
+     the file cataloguer knobs cut the relationship explosion **without dropping
+     a single package**, so it is not the "restrict the cataloguers" trade the
+     comment block rightly refuses. Worth a probe arm of its own.
 
 2. **Probe round 2 `35447488777`** tells you what to do if the margin turns out
    too thin. Expected readings:
