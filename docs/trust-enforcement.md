@@ -82,6 +82,66 @@ configured repository — so a gate built on it would have been dead code on eve
 machine APEX ships to. The verification above is done with `skopeo` and
 `openssl`, both of which are already in the image.
 
+## What the SBOM attestation actually contains
+
+The provenance half of the gate checks an SBOM that CI attaches to the image as
+a signed attestation. It is worth being precise about what that document covers,
+because "SBOM" is used for two quite different artefacts and APEX publishes the
+smaller one.
+
+**What is in it.** Every package syft finds in the image — around 9,800 of them
+— with name, version and purl. That includes the RPM set, the npm trees inside
+the Claude and ChatGPT desktop apps, and the Go and Rust modules inside the
+binaries. It is an SPDX document, attested with `--type spdxjson`, signed by the
+same keyless GitHub identity as the image itself, and **published to the public
+Sigstore transparency log**. The build fails if no log entry is created, so that
+last claim cannot quietly stop being true.
+
+**What is not in it: the per-file inventory.** syft's default output also lists
+every file in the image with its digests, plus a relationship edge from each
+file to the package that owns it. APEX turns that off
+(`SYFT_FILE_METADATA_SELECTION=none`). So this document answers *"which
+packages, at which versions, is this image built from"* — the question a CVE
+advisory makes you ask — and does **not** answer *"which files does this image
+contain, and what is each one's SHA-256"*.
+
+**Why, since it is a real reduction.** The full document is about 166 MB, almost
+all of it those file rows; roughly 200,000 files across a Fedora bootc image and
+two Electron bundles. `cosign attest` base64-encodes the predicate into a DSSE
+envelope, making the request body about 222 MB — and `rekor.sigstore.dev`
+refuses any request body of 24 MiB or more outright, at its fronting proxy,
+before reading a byte. Measured 2026-09-20 across sixteen ascending POSTs:
+25,000,092 bytes is accepted and processed, 25,165,916 bytes comes back HTTP 502
+in 0.43 seconds having uploaded nothing.
+
+So the choice was between a file-level SBOM that is signed but **not** in any
+public log, and a package-level SBOM that is. APEX takes the second, because a
+transparency log that only covers the artefacts small enough to fit is not much
+of a guarantee, and because the file inventory is the part nobody was going to
+query. If you need it, the image is public and its digest is in the signature:
+
+```bash
+syft "registry:ghcr.io/andrenijman/apex-os@sha256:..." -o spdx-json
+```
+
+That reproduces the full file-level document from the same bytes CI catalogued.
+It needs roughly 16 GB of memory and twelve minutes.
+
+**Reading the attestation yourself:**
+
+```bash
+cosign verify-attestation \
+  ghcr.io/andrenijman/apex-os@sha256:... \
+  --type spdxjson \
+  --certificate-identity-regexp '^https://github\.com/AndreNijman/apex-os/\.github/workflows/build-image\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  | jq -r '.payload | @base64d | fromjson | .predicate.packages[] | "\(.name) \(.versionInfo)"'
+```
+
+Your machine does less than this, and says so — see the transparency-log note
+above. `cosign` is not installed on an APEX system and is not packaged for
+Fedora; the command above is for a workstation that has it.
+
 ## What is enforced, and how to change it
 
 Two checks, each set to `enforce`, `warn` or `off`:
