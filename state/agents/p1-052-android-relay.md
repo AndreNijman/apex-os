@@ -109,7 +109,7 @@ Everything else on the Android side is already written and was waiting for this:
 | `[u32 BE][ciphertext]` framing | `Transport.kt` | written — and it is what the WS carries |
 | the affordance | `MachinesScreen.kt:288` | written, unserviceable |
 
-## FOUND (this round, measured)
+## FOUND — this round, measured (the dispatch's own FOUND list is at the bottom)
 
 - **The deployed relay is live and reachable from the L16.**
   `GET https://apex-relay.andrenijman.com/r/<id>?role=guest` → **HTTP 426**,
@@ -206,7 +206,7 @@ from the Rust one:
   `index.js`, `Rendezvous.kt`, `Transport.kt`, `Client.kt`, `Storage.kt`,
   `PairingService.kt`. Seam confirmed (above). Nothing written yet.
 
-## FOUND
+## FOUND — inherited from the dispatch
 
 - (p1-053e, round 33) `TerminalScreen` can never be hosted by
   `createAndroidComposeRule` — its `withFrameNanos` loop keeps the Recomposer
