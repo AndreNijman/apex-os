@@ -2,9 +2,15 @@
 
 items: none (a guard, like `build-verify` was) — but it gates unit `final`
 repo: apex-os
-worktree: **make your own** — `/var/tmp/apex-work/wt-sbom-oom`, off
-`roadmap/v2.2` (now `2e04fbcb`), branch `task/sbom-oom`
+worktree: `/var/tmp/apex-work/wt-sbom-oom`, branch `task/sbom-oom` off
+`roadmap/v2.2` (`2e04fbcb`)
 scratch: `/var/tmp/apex-work/scratch-sbom-oom/` (per-agent)
+
+## THE ANSWER, in one line
+
+**`GOMEMLIMIT` is the whole fix.** Every probe arm without it died of memory
+exhaustion; both arms with it produced an identical, complete SBOM. Source
+location and parallelism changed nothing. Measured over seven arms, below.
 
 ## What is settled, measured by the round-33 `build-verify` agent
 
@@ -39,52 +45,141 @@ the `build-verify` card. It is not: `bd0c41ce` carried the identical wrapper, so
 the earlier run had the same inputs and lost the whole VM — the same exhaustion
 at a worse severity. **Every input here is APEX's.**
 
-## The thing nobody has noticed yet, and it is the shape of the fix
+## FOUND — probe run 35437908023, seven arms, read 2026-09-19
 
-Read the step's own comment block (`build-image.yml` ~1383-1428). It records a
-history of this step dying, and `SYFT_PARALLELISM=4` was added deliberately
-because the default is one worker and the image gained two Electron trees.
+All seven ran the same syft **1.52.0** against the same digest
+`sha256:be3bdd0c6384…` on the same `ubuntu-24.04` runner class (16 GB RAM,
+3 GB swap, 86 GB disk free). One variable separates every success from every
+failure.
 
-But look at what changed with it. **At parallelism 1 syft ran the FULL fifteen
-minutes and was killed by the timeout** — which is why the timeout was raised to
-45. **At parallelism 4 it dies in 209 seconds.** The raise did not fix a slow
-step; it traded a timeout for a much faster memory death. That is the hypothesis
-to test first, and it is cheap to test.
+| arm | GOMEMLIMIT | source | par | result |
+|---|---|---|---|---|
+| `repro` | unset | `registry:` | 4 | **died** — 15866M used / 123M avail / swap 3071M full |
+| `registry-par1` | unset | `registry:` | 1 | **died** — 15918M used / 70M avail / swap 3065M |
+| `ocidir` | unset | `oci-dir:` | 4 | **died** — 15967M used / 21M avail / swap 3071M full |
+| `ocidir-decompressed` | unset | `oci-dir:` (`--dest-decompress`) | 4 | **died** — 15832M used / swap 3059M; rc 143 |
+| `gomemlimit` | **10GiB** | `registry:` | 4 | **rc=0**, 904 s, peak RSS **14.65 GiB**, 9830 packages |
+| `ocidir-gomemlimit` | **10GiB** | `oci-dir:` | 4 | **rc=0**, 735 s, peak RSS **14.72 GiB**, 9830 packages |
+| `swap32` | — | — | — | **never ran syft** — probe bug, see below |
 
-## Calibration — one claim is inferred, not measured
+Both surviving arms emitted a 166 MB spdx-json with **9830 packages** and both
+Electron trees present (`@anthropic-ai/claude-code`,
+`@anthropic-ai/claude-code-linux-x64`, `chatgpt`, `electron`). The SBOM is
+complete; nothing was restricted to get it.
 
-*OOM killer* specifically is inferred from the SHAPE (SIGKILL, large image,
-bounded memory), **not read from a kernel message**. Confirm it or refute it
-before fixing on it: a GitHub runner will let you `sudo dmesg` in the same step,
-and a `free -m` sampled every few seconds alongside syft turns a guess into a
-measurement. If it turns out not to be memory, the whole fix changes — say so
-rather than making the numbers fit.
+### Three claims this measurement kills
+
+1. **The source is not the problem.** `ocidir` (layers already on local disk,
+   an OCI layout, no registry read during the catalogue) died exactly like
+   `registry:`. `ocidir-decompressed` — the zstd hedge — died too. The card's
+   earlier preferred fix, moving to a disk-backed layout, addresses something
+   that is not the cause. It is 170 s faster and that is all it buys.
+2. **Parallelism is not the problem.** `registry-par1` died the same way at one
+   worker. So the history in the step's comment block — *"at parallelism 1 syft
+   ran the full fifteen minutes and was killed by the timeout"* — was **also a
+   memory death**, not a slow catalogue. Raising the timeout to 45 minutes never
+   addressed anything; lowering parallelism would not either.
+3. **It is the live data structure, not the transport.** In `gomemlimit`, `/tmp`
+   stops growing at 14715M at 10:43:16 — every byte is already on disk — and
+   memory then spikes another 4 GB to 15.8 GB before settling to a flat ~11.2 GB
+   for the remaining nine minutes. The spike is the filetree squash / MIME pass
+   over the file count, matching anchore/syft#2159. A full Fedora bootc plus two
+   Electron trees is a very large file count.
+
+### The OOM killer: still not confirmed, and now less likely
+
+`vmstat oom_kill` was **0 before and after** in every arm that lived to read it,
+and `dmesg`/`journalctl` were clean in both survivors (`NO OOM LINES IN DMESG`,
+`NO OOM LINES IN JOURNAL`). The four dying arms did **not** get a SIGKILL — they
+drove the VM into swap-thrash until the host stopped getting a heartbeat and
+cancelled the job (`The runner has received a shutdown signal`).
+
+So the two manifestations are:
+
+- **probe VMs**: livelock → host cancels → `shutdown signal`. No OOM kill.
+- **CI run 35433705393**: bash reported `25574 Killed` / exit 137, a real
+  SIGKILL of a named pid — the kernel OOM killer winning the race the probe VMs
+  lost.
+
+Same cause, two severities. **Do not upgrade "the OOM killer fired" to a fact
+without a kernel message.** The instrumentation landed in `build-image.yml`
+reads `oom_kill` and dumps dmesg and the journal on failure, so the next CI
+death settles it either way.
+
+### The margin is thin, and the belt was never tested
+
+Both survivors peaked at **14.65–14.72 GiB RSS on a 16 GB box**, with
+`mem_avail` bottoming at **188 MB** and **125 MB** respectively. `GOMEMLIMIT` is
+a *soft* limit: syft blew through the 10 GiB setting by ~4.7 GiB. Two successes
+at ~1% headroom is a fix for today's image and a flake the moment the image
+gains packages.
+
+The hedge for exactly this — `swap32` — **never ran**. It died in 0 s on
+`fallocate: fallocate failed: Text file busy`: it tried to `fallocate -l 32G`
+the runner's **already-active** `/swapfile`. That is a probe bug, not a result
+about swap. Probe 2 fixes it by allocating a *new* file at `/swapfile.probe`.
+
+### Two defects found in the fix that was waiting here
+
+- The predecessor's uncommitted `build-image.yml` draft referenced
+  **`$SYFT_GOMEMLIMIT` and `$SYFT_SOURCE`, neither of which is defined anywhere
+  in the file**. Under the step's `set -euo pipefail` that is an unbound-variable
+  abort on the syft line. It was an unfinished edit, not a working fix. Both are
+  now inlined.
+- **syft was unpinned.** The step installs from `install.sh` on `main` — i.e.
+  whatever is latest — while the fix is measured against 1.52.0. Now pinned,
+  with the re-measure note in the comment.
+
+### Carried forward from build-verify, round 33 (not this unit's to fix)
+
+- `check-shellcheck-coverage.sh` discovers `tests/`, `files/` and
+  `android/tools/` only — **repo-root scripts are linted by nobody**.
+- The niri `Error:` at base STEP 139 is an intentional negative control. Do not
+  misread it in the log.
+
+## DONE
+
+- Worktree on `task/sbom-oom` off `2e04fbcb`.
+- Read the failing log of 35433705393 directly: after the prune the runner had
+  **86 GB disk free** and **14915 MB memory available**; syft 1.52.0 was
+  **Killed** 209 s in. Disk cannot be it.
+- Measured the image: **113 layers, 7.26 GB compressed**, largest layer 832 MB,
+  every layer `application/vnd.oci.image.layer.v1.tar+zstd`.
+- Built `.github/workflows/sbom-probe.yml` and ran it — run **35437908023**,
+  seven arms, all read. Table above.
+- Confirmed `build-image.yml` has `workflow_dispatch` and that a dispatch from a
+  non-main ref is **publish-guarded** (it builds, signs and verifies without
+  moving `:apex`, `:daily`, `:gaming-*`, `:core` or `:base`). The verification
+  path this card assumes therefore exists and is safe from `task/sbom-oom`.
+
+## IN PROGRESS
+
+<!-- RUNIDS -->
 
 ## NEXT
 
-Read the `swap32`, `gomemlimit` and `ocidir*` arms of probe run **35437908023**
-(`gh api repos/AndreNijman/apex-os/actions/jobs/<id>/logs` — `gh run view --log`
-refuses while the run is in progress, the API endpoint does not). Whichever of
-them completes with an SBOM, put that into `build-image.yml`'s SBOM step,
-commit, push `task/sbom-oom`, then
-`gh workflow run build-image.yml --ref task/sbom-oom` and record the run id here.
+<!-- NEXT -->
 
 ## The deadline, and what to do about it
 
-**The orchestrator runs under `timeout 4h` from 16:58 AWST, so everything stops
-~20:58.** One verification build may not fit. Commit and push the diagnosis and
-the fix as you go; if the build is still running when you are killed, the branch
-and this card carry it and the next round watches the run. **A correct diagnosis
-with an unverified fix is a good outcome; an unrecorded one is not.**
+**A correct diagnosis with an unverified fix is a good outcome; an unrecorded
+one is not.** Commit and push the diagnosis and the fix as you go; if a build is
+still running when you are killed, the branch and this card carry it and the
+next round watches the run.
 
-## Two tooling facts from the agent that just finished here
+## Tooling facts from the three agents that have been here
 
-- The Bash tool's 600 s cap **silently backgrounds** a longer command. What
-  worked for watching CI was `Monitor` at 3600000 ms with a bounded
-  `until … completed` loop.
-- For the build itself: a **detached** `systemd-run --user` unit (no `--pty`, no
+- The Bash tool's 600 s cap **silently backgrounds** a longer command. For
+  watching CI use `Monitor` at 3600000 ms with a bounded `until … completed`
+  loop.
+- `gh run view --log` **refuses while a run is in progress**;
+  `gh api repos/AndreNijman/apex-os/actions/jobs/<id>/logs` does not. Get job
+  ids from `gh run view <id> --json jobs`.
+- For a local build: a **detached** `systemd-run --user` unit (no `--pty`, no
   `--wait`) holding a `sleep:idle` inhibitor. A backgrounded podman is SIGTERMed,
   truncates its log and still exits 0.
+- A **skipped job counts as success** in this repo's workflows. Confirm a step
+  ran, not that a job was green.
 
 ## Rules
 
@@ -93,95 +188,10 @@ with an unverified fix is a good outcome; an unrecorded one is not.**
 - Never `pkill apex-agentd`. Do not touch katana or the phone — other agents own
   both.
 - Never push `main`; never open a PR. Push only `task/sbom-oom`.
+- `files/system/libexec/apex-pkg` is owned by another unit this round.
 - A Containerfile assertion that cannot pass has cost this repo five days of
   image builds; anything you assert must be run, not reasoned about.
 - **Write this card as you go, never at the end.** `NEXT` is load-bearing.
-
-## DONE
-
-- Worktree `/var/tmp/apex-work/wt-sbom-oom` on `task/sbom-oom` off `2e04fbcb`.
-- Read the failing log of 35433705393 directly. Measured, not inferred:
-  after the prune the runner had **86 GB disk free** and **14915 MB memory
-  available** (16 GB total, 3 GB swap, all free); syft 1.52.0 was **Killed**
-  209 s in; `##[error]syft exited 137`. Disk cannot be it — 86 GB consumed in
-  209 s is 411 MB/s sustained, and the image is only 7.3 GB on the wire.
-- Measured the image itself: **113 layers, 7.26 GB compressed**, largest layer
-  832 MB, and **every layer is `application/vnd.oci.image.layer.v1.tar+zstd`**
-  (zstd:chunked, from the push step). That matters: if a disk-backed OCI layout
-  ALSO dies, compression handling, not source location, becomes the suspect —
-  so the probe carries a `--dest-decompress` arm too.
-- Checked the other workflows' triggers: nothing in this repo fires on a push to
-  `task/*` (build-image is `branches: [main]`, pr-validation is
-  `[roadmap/v2.2]`), so a probe workflow with `on: push` scoped to its own path
-  on this branch is the cheap experiment — same `ubuntu-24.04` runner class,
-  same 16 GB, against the image digest that already exists in GHCR.
-
-## IN PROGRESS
-
-- **Probe run `35437829397`** (workflow `sbom-probe`, branch `task/sbom-oom`,
-  commit `0386666a`) — in progress since 18:35 AWST. Read it with
-  `gh run view 35437829397 --log | grep -E 'mode=|oom_kill|Maximum resident|dmesg|OOM|sample'`.
-- Probe workflow `.github/workflows/sbom-probe.yml` on `task/sbom-oom` against
-  `sha256:be3bdd0c6384…`, four arms in parallel, syft pinned to the same 1.52.0:
-  `repro` (registry:, SYFT_PARALLELISM=4 — the exact failing command),
-  `ocidir` (skopeo copy → OCI layout on disk → `syft oci-dir:`),
-  `ocidir-decompressed` (same but `--dest-decompress`, the zstd hedge),
-  `registry-par1` (the "was the 15-minute timeout also memory" answer).
-  Every arm samples `free -m` + `df` every 5 s, reads `/proc/vmstat oom_kill`
-  before and after, runs syft under `/usr/bin/time -v` for peak RSS, and dumps
-  `sudo dmesg` unconditionally.
-
-## FOUND
-
-### MEASURED, 18:35-18:38 AWST, probe run 35437829397, arm `repro`
-
-**It is memory, and it is not close.** The exact failing command, same runner
-class, same syft 1.52.0, against the same digest. `free -m` every 5 s:
-
-```
-10:35:46 mem_used=1379M  mem_avail=14609M swap_used=0M     tmp=1M
-10:36:26 mem_used=7071M  mem_avail=8918M  swap_used=0M     tmp=9173M
-10:36:52 mem_used=10788M mem_avail=5201M  swap_used=0M     tmp=14715M   <- /tmp stops growing
-10:37:07 mem_used=14580M mem_avail=1408M  swap_used=0M     tmp=14715M
-10:37:37 mem_used=15874M mem_avail=114M   swap_used=2720M  tmp=14715M
-10:38:08 mem_used=15953M mem_avail=35M    swap_used=3070M  tmp=14715M
-10:38:12 ##[error]The runner has received a shutdown signal.
-```
-
-Three things fall out of that, and they change the fix:
-
-1. **"The runner has received a shutdown signal" IS the memory exhaustion.** The
-   round-33 record read that message as GitHub infrastructure. Here it is
-   printed four seconds after the VM ran out of memory AND swap, with the whole
-   climb logged above it. Same failure as the 137, one notch more severe: when
-   the kernel's OOM killer gets there first you get `syft exited 137`; when the
-   VM stops responding first the host cancels the job and prints that line.
-2. **The OOM KILLER specifically is NOT what fired in this arm.** Nothing had
-   been killed when the runner went — `vmstat oom_kill` was still 0 at the start
-   and the job died before it could be re-read. So: *memory exhaustion*
-   confirmed with a measurement; *"the OOM killer"* as the precise mechanism
-   remains the likely reading of the 137 in CI but is still not read from a
-   kernel message. Do not upgrade it without one.
-3. **The layers are ALREADY on disk — `/tmp` grew to 14.7 GB — and syft was
-   holding ~11 GB of RAM at the same time.** The `registry:` source is not
-   keeping the image in memory. So the card's preferred fix, moving the source
-   to a disk-backed OCI layout, addresses something that is not the problem:
-   after `/tmp` stops growing at 10:36:52, memory climbs another 5 GB. This
-   matches anchore/syft#2159 — the memory tracks the FILE COUNT through the
-   filetree squash and MIME detection, not where the bytes were read from. A
-   full Fedora bootc plus two Electron trees is a very large file count.
-
-That is why three arms were added after the first push (`gomemlimit`, `swap32`,
-`ocidir-gomemlimit`): with the mechanism being the live data structure rather
-than the transport, the knobs that can work without restricting a cataloguer are
-a Go soft memory limit and real swap on the 86 GB of free disk.
-
-- (build-verify, round 33) `check-shellcheck-coverage.sh` discovers `tests/`,
-  `files/` and `android/tools/` only — **repo-root scripts are linted by
-  nobody**, the same hole as its own header one directory up. Not this unit's to
-  close, but it is real and it is written down here so it is not lost.
-- (build-verify, round 33) the niri `Error:` at base STEP 139 is an intentional
-  negative control, not a failure. Do not misread it in the log.
 
 ## BLOCKED ON
 
