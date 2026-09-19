@@ -548,13 +548,26 @@ is available before anyone starts a session that cannot work.
 > `not loaded` with `scx_btf : implicit-args` is a kernel to wait for, and no
 > amount of retrying, reconfiguring or reinstalling will move it.
 
+`apex game status`'s **daemon-not-running** branch prints `scx` and `scx_btf`
+as well. It is a local view assembled by the CLI, not the daemon's `Status`
+map, and it used to say nothing about sched-ext at all.
+
 `apexd/apexd-core/src/kernelbtf.rs` is the reader: a bounded BTF parser with no
 dependency, rooted at `sys_root` like `read_scx_state`, so every answer is
 reachable from a temp directory. Verified against the real thing as well as
-against fixtures — run over katana's own 6.6 MB `vmlinux` BTF it names
-**exactly the 22 kfuncs `libbpf` named**, and over Fedora's stock
-`7.2.6-100.fc43` it names 18 of the same population. That second reading is
-why "boot Fedora's kernel instead" is not the workaround it looks like.
+against fixtures, on **three** kernels:
+
+| kernel | version | `scx_bpf_*` kfuncs affected |
+|---|---|---|
+| L16 (`kernel-cachyos`) | `7.2.3-cachyos2.fc43` | 20 of 68 |
+| katana (`kernel-cachyos`) | `7.2.6-cachyos1.fc43` | **22 of 68** |
+| Fedora stock (`kernel-core`) | `7.2.6-100.fc43` | 18 of 68 |
+
+katana's 22 are **exactly the 22 `libbpf` named**, which is what validates the
+reader. The other two rows are what makes the problem general: three kernels,
+three different subsets, all broken, all three including
+`scx_bpf_get_idle_cpumask`. Neither "boot Fedora's kernel" nor "pin an older
+CachyOS kernel" is the workaround it looks like.
 
 
 ## 6. What still needs katana, and the exact commands
