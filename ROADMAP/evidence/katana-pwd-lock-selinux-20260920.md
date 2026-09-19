@@ -92,6 +92,40 @@ State: idle        (and systemctl is-active rpm-ostreed → active)
 `restorecon` changes labels, never content, so apex-pkg's removal pass — which
 compares sha(live) against sha(saved) — is unaffected.
 
+## Blast radius, measured rather than guessed
+
+`grep -l '^DynamicUser=yes' /usr/lib/systemd/system/*.service` on the booted
+image — **6 units**, and rpm-ostreed is the least interesting of them:
+
+```
+capsule@.service          <- APEX Capsules. Our own feature.
+chrony-wait.service
+fwupd-refresh.service
+rpm-ostree-countme.service
+rpm-ostreed.service
+wsdd.service
+```
+
+So the reading is not "rpm-ostreed broke". It is: **after `apex install`, APEX
+Capsules cannot start, firmware refresh cannot start, and the ostree daemon
+cannot start** — on a machine that reports nothing wrong until something tries.
+
+## EXPECTED TO RECUR, and that is the point
+
+The level 2 -> 3 rebuild this unit is about to trigger runs the SAME
+`install_etc` with the SAME `cp -a`. The dnf transaction re-runs the
+useradd/groupadd scriptlets, `.pwd.lock` reappears in the extraction tree, and
+`install_etc` writes it into the live `/etc` again — live sha and saved sha are
+both the empty-file sha, so the "user has not touched it" branch fires and
+overwrites. `post-boot.sh` therefore audits every `etc.list` path against
+`matchpathcon` and re-runs the `DynamicUser` probe **before** any `restorecon`,
+so a second occurrence is measured instead of quietly repaired. If it recurs,
+the finding is not "katana got a bad label once" but "every extension rebuild
+re-breaks DynamicUser", which is a different severity.
+
+`systemctl --failed` will NOT show it: `rpm-ostreed` is `Type=dbus` and
+on-demand, and nothing starts it at boot.
+
 ## What still needs doing, and by whom
 
 1. **A code fix in `files/system/libexec/apex-pkg`.** DELIBERATELY NOT MADE ON
