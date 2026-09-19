@@ -3,61 +3,54 @@ items: P2-016, P2-017, P2-018, P2-019
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-p2-f
 branch: task/p2-f-7   (cut from origin/roadmap/v2.2 @ bb229745, which is round 31's
-          task/p2-f-6 landed; nothing of this unit's is unlanded)
+          task/p2-f-6 landed)
+unlanded: SEVEN commits on task/p2-f-7, rounds 32 and 33, tip f37f095c, all
+          pushed. roadmap/v2.2 was at 36535383 when round 33 ended.
 
 ## NEXT
-**ROUND 32 IN PROGRESS on `task/p2-f-7`.** Taking the whole aborted-transfer
-family in one series, per the dispatch, not the card's older `ensure_private_dir`
-line (which is still the follow-on and is now at the bottom of this section).
 
-**COMMIT 1 IS DONE AND PUSHED: `3c6c104f`** — `broker::aborted_transfer`
-(non-zero curl exit => `Err`, naming the exit code in this build's own words
-and quoting curl's), adopted at `gdrive`, `oauth` and `s3`, plus the mechanism
-test in `broker`. 11 mutations, all red, all restored with `cp`/`cmp`.
-Workspace 3338 -> 3344 / 0 / 2, clippy exit 0.
+**ROUND 33 IS FINISHED AND EVERYTHING IS PUSHED.** `task/p2-f-7` is at
+`f37f095c`, the worktree `/var/tmp/apex-work/wt-p2-f` is clean, nothing is
+unpushed, and both rounds 32 and 33 have their evidence recorded. There is
+nothing half-written to pick up. Read ROUND 33 in DONE for what it did.
 
-**COMMIT 2 IS DONE AND PUSHED: `d8dce04e`** — msgraph hop one through the
-shared helper; hop two's own check inside `download_outcome` (no curl stderr,
-enforced by a mutation that routes it through the helper and goes red on
-`Maximum file size exceeded` appearing); cloudflare's `out.code` check moved
-ahead of the split. `msgraph.rs`'s module note rewritten — it said the defect
-was known and not fixed here. 8 mutations, all red, all restored.
-Workspace 3344 -> 3347 / 0 / 2, clippy exit 0.
+Rounds 32 and 33 are BOTH unlanded on `task/p2-f-7` — seven commits on top of
+`bb229745`. `roadmap/v2.2`'s tip was `36535383` when round 33 ended. This unit
+does not land its own branch.
 
-**COMMIT 3 IS DONE AND PUSHED: `2d7a4d72`** — `max-filesize` added to `s3`
-and `cloudflare::api`, the two sites that had none, so the cap is enforced
-before the reply is buffered rather than after. `curl exited 63` asserted at
-all six sites; 6 mutations, one per site, all red. The cloudflare test is two
-doubles now (40 KB proves the truncated document is dropped; 40 MB proves the
-cap fires before the body) — its first version claimed the second in a comment
-while asserting only the first, because 40 KB is not over a 3 MiB limit.
-Workspace 3347 / 0 / 2 unchanged (assertions, not new tests), clippy exit 0.
+**Where to start, in value order. Nothing below is started.**
 
-**COMMIT 4 IS DONE AND PUSHED: `0b827a8c`** — the refusal through the real
-CLI, socket, agentd and curl, in `tests/test-apex-backup-s3.sh` (the one
-transport of the family a loopback double can reach through the shipped
-binary; gdrive and msgraph refuse `127.0.0.1` by design). The double answers
-one key name with a lying `Content-Length`, so the successful read before it
-is a control in the same session. Suite starts an agentd of its OWN inside the
-fixture and kills it by pid; the machine's is never touched. 3 mutations, all
-red. `docs/online-accounts.md` gains the limit in its limits section.
-`apex-backup-core/src/format.rs`'s chunk arithmetic CHECKED and left alone.
-backup-s3 27 -> 34 / 0.
+1. **P2-016, fast user switching.** The named criterion-1 gap and the largest
+   thing still open on this item; P2-016's own evidence has listed it since
+   2026-09-12. It is not small: greetd has no second seat, so it means a
+   greeter on a spare VT plus `loginctl activate`. **It cannot be finished on
+   Andre's machine** — the `chvt` half takes his screen, and this program's
+   standing constraint is headless only, never open a window on his desktop.
+   So the reachable part is the design plus whatever can be asserted without
+   switching VTs; say in the evidence which half you did.
+2. **P2-016, a standard account offered at install time.** `installer/apex-install`
+   puts its one account in `wheel` unconditionally and the GUI offers no
+   choice — that is recorded in `tests/test-apex-user.sh`'s own header as the
+   reason the standard/administrator distinction was enforced but unreachable.
+   This is the smallest of the three remaining P2-016 follow-ups and does not
+   need a screen to design or to gate.
+3. **P2-016, a kiosk session actually booted.** Same screen problem as 1.
+4. If none of those are reachable, the standing queue for this unit is the
+   FOUND list below. Two entries there are explicitly NOT gaps and must not be
+   chased — read "do not treat this as a gap to close" and the FLAKE section.
 
-**NEXT ACTION: record P2-017 evidence with set-status.py.** Read its current
-evidence out of `ROADMAP/roadmap.yaml` FIRST, append this round to it, pass the
-whole string, then re-read and confirm rounds 1, 3, 25-28, 30 and 31 all
-survived. P2-016/018/019 must NOT be touched.
+**Two traps this unit has paid for twice, repeated because set-status REPLACES
+evidence and there is no append flag:**
 
-Then commit 4 (prose: `apex-backup-core/src/format.rs:30` and
-`docs/online-accounts.md`). Details in ROUND 32 PLAN below.
-
-**AFTER the family closes, if there is room:** P2-016's `ensure_private_dir`
-ownership check (in the multiuser work landed as merge `5eca2402`) — establish
-whether a directory owned by another uid is refused or merely `chmod`-ed, and
-gate it both ways. Do NOT call set-status on P2-016 without reading its ~8.7 KB
-of evidence first — it belongs to unit `p2-016-multiuser-2` and set-status
-REPLACES.
+- **P2-016's evidence is 14,599 bytes and most of it is unit
+  `p2-016-multiuser-2`'s**, which landed 2026-09-12 as merge `5eca2402`.
+  Round 33 appended to it with `/var/tmp/apex-work/scratch-p2-f/round33/append-p2-016.py`,
+  which reads the current evidence, appends, writes the whole string through
+  `set-status.py`, and then re-parses and asserts the original is still a
+  prefix. **Reuse that script rather than writing the string by hand.**
+- **P2-017's evidence is 47,112 bytes** and covers rounds 1, 3, 25-28 and
+  30-32. Same rule. P2-018 is 24,307 and P2-019 is 8,065; leave them alone
+  unless you did work on them.
 
 ## ROUND 32 PLAN (measured first, then settled with the advisor; do not re-litigate)
 
@@ -201,6 +194,62 @@ Remaining, in the order this round takes them:
   host to its token endpoint from a hard-coded table, which is pin-consistent.
 
 ## DONE
+Round 12 (round 33 of the program), on task/p2-f-7, ALL THREE PUSHED.
+**P2-016, and it started as the one-line follow-up P2-016's own evidence ends
+with — "ensure_private_dir still does not check ownership".** What it found is
+that the paragraph in `apex-agent-core/src/paths.rs` saying that case was
+already handled was FALSE, and had never been measured.
+  0c8acd53  `ensure_private_dir` stats with `symlink_metadata` rather than
+            `metadata` (which FOLLOWS the link), refuses a symlink, refuses a
+            directory this account does not own, and creates every component
+            `0700` with `DirBuilder::mode` instead of at the umask. In BOTH
+            copies — `apex-aid`'s duplication is deliberate and documented, and
+            it had the same three defects. The ownership comparand is
+            injectable (`ensure_private_dir_as`) for the reason
+            `scratch_root_for` is: a test process has one uid and the claim is
+            about two. The stat is real; only the comparand is chosen, and the
+            ACCEPTING half is asserted so a gate that always refused would
+            fail. 8 mutations, all red.
+  29938bc8  `paths::ensure_scratch_dir` — the scratch ROOT ensured as a
+            directory in its own right BEFORE the session directory under it,
+            and `session.rs` pointed at it. Ensuring only the leaf is a check
+            against a moving target: the leaf is genuinely this account's, and
+            only the owner of a `0700` directory can rename the entries in it.
+            The shell half is what says the DAEMON does this rather than that
+            the library can — `tests/test-agent-inject.sh` pre-creates its
+            fixture root `0755` before the daemon starts and asserts the mode
+            after a real session start. **The pre-creation is load-bearing:**
+            a root the daemon MAKES is `0700` either way after commit 1, so
+            only a root it FINDS can tell the boundary call from its absence.
+            3 mutations, all red, including the only one that matters and the
+            only one no Rust test can make — `session.rs` reverted to the
+            leaf-only call, caught by the shell suite.
+  f37f095c  prose. `docs/multi-user.md` gains the before/after table and the
+            reasoning, beside the paragraph about the old shared root.
+  Workspace 3347 -> 3354 passed / 0 failed / 2 ignored; clippy --locked
+  --workspace --all-targets -D warnings exit 0; test-agent-inject.sh 48 -> 49
+  passed / 0 failed; shellcheck 165 discovered / 0 known-failing / 0 newly
+  failing; suites-in-CI 75 / 71 / 4 / 0; doc verbs 191 / 114 / 0 / 0; no
+  conflict markers. 11 mutations total, all red, all restored with plain `cp`
+  and `cmp` silent. P2-016's evidence was APPENDED to, 8,724 -> 14,599 bytes,
+  and the original checked to be still a prefix.
+  The probes are `/var/tmp/apex-work/scratch-p2-f/round33/probe.sh` (the four
+  hostile shapes) and `probe2.sh` (the boundary call), both against a REAL
+  second account via `sudo -n -u nobody`; `zz_probe_private_dir.rs` is the
+  example they build, kept in scratch and NOT in the worktree.
+
+Round 11 (round 32 of the program), on task/p2-f-7, FOUR PUSHED — the whole
+aborted-transfer family. `3c6c104f` `broker::aborted_transfer` adopted at
+gdrive/oauth/s3; `d8dce04e` msgraph both hops and cloudflare; `2d7a4d72`
+`max-filesize` at the two sites that had none, so the cap is spent before the
+memory is; `0b827a8c` the refusal through the real CLI, socket, agentd and
+curl in `tests/test-apex-backup-s3.sh`. 28 mutations, all red. Workspace
+3338 -> 3347; backup-s3 27 -> 34. **P2-017's evidence WAS recorded for this
+round** — the card said it had not been, and the card was wrong; round 33
+checked `roadmap.yaml` rather than believing it, and found ROUND 32 already
+in place with rounds 1, 3, 25-28, 30 and 31 all intact. The full account is
+in P2-017's evidence and in ROUND 32 PLAN below.
+
 Round 10 (round 31 of the program), on task/p2-f-6:
   a4907070  the self-correction: see FOUND, "A GATE'S COMMENT CREDITED IT WITH
             A PROPERTY IT DID NOT HAVE". Also records the `max-filesize`
@@ -419,20 +468,17 @@ Round 3, on task/p2-f-3 (pushed):
   c224eea7  a scope may not name an operation no provider offers — the
             cross-crate gate in apex-secretd, both mutants run and red.
 
-## IN PROGRESS (round 31 — FINISHED)
-- `task/p2-f-6` cut from `roadmap/v2.2` @ `f40ffefe`. Three commits pushed
-  (`25ce55ec`, `0ae35a7c`, `f6643031`); worktree clean at the tip, nothing
-  half-written. Pristine copies of every mutated file are in
-  `/var/tmp/apex-work/scratch-p2-f/round31/*.orig`, refreshed to match the tip
-  `a4907070` and `cmp`-verified against every file this round touched. The
-  harness is `mutate.py` + `mut_c1.py` / `mut_c2.py` / `mut_c3.py` /
-  `mut_c3b.py` / `mut_c4.py` / `mut_c4b.py` in that directory, and
-  `bigserver.py` + `cfg.txt` there reproduce the `max-filesize` finding. Pristine copies of every mutated file are in
-  `/var/tmp/apex-work/scratch-p2-f/round31/*.orig`, and the mutation harness
-  that produced the 16 red is `mutate.py` + `mut_c1.py` in that directory.
-- set-status.py has NOT been called yet this round. When it is, it is P2-017
-  ONLY, read-append-write-reparse. P2-016, P2-018 and P2-019 must not be
-  touched — set-status REPLACES evidence.
+## IN PROGRESS
+Nothing. Round 33 finished clean: `task/p2-f-7` at `f37f095c`, worktree clean,
+everything pushed, P2-016's and P2-017's evidence both recorded.
+
+Scratch for round 33 is `/var/tmp/apex-work/scratch-p2-f/round33/`:
+`mutate.py` (refuses unless the pattern occurs exactly once),
+`run-muts-c1.sh` / `run-muts-c2.sh` (8 + 3 mutations, restore with plain `cp`
+and `cmp`), `*.orig` and `*.good*` pristine copies, `probe.sh` / `probe2.sh`
+(the real second-account measurements), `zz_probe_private_dir.rs` (the example
+they build — kept OUT of the worktree on purpose) and `append-p2-016.py`
+(the read-append-write-reparse wrapper around `set-status.py`).
 
 ## ROUND 5 COMMIT SEQUENCE (settled with the advisor)
 1. ~~`supersedes_credentials` + the 64 `false` literals + the registry test~~
@@ -447,6 +493,33 @@ Round 3, on task/p2-f-3 (pushed):
 4. `apex cf refresh` + the `cloudflare.rs` status line + the step-7 answer.
 
 ## FOUND
+- **A LANDED DOC COMMENT SAID A HOSTILE CASE WAS CLOSED. IT WAS NEVER
+  MEASURED, AND IT WAS FALSE IN TWO OF FOUR SHAPES.** `paths.rs` said a
+  pre-created scratch root means "`ensure_private_dir` will then fail to chmod
+  a directory it does not own … a loud refusal and a denial of service rather
+  than a disclosure". Measured 2026-09-19 with `nobody` as a real second
+  account: root at `0755` -> `Err(EACCES)` (the claim); **root at `0777` ->
+  `Ok(())`**; leaf at `0777` -> `Err(EPERM)`; **leaf as a SYMLINK -> `Ok(())`,
+  and the symlink's TARGET was chmodded `0755` -> `0700`**. `0755` is the only
+  mode an attacker would not choose. The generalisation worth carrying: **a
+  doc comment describing a failure mode is a prediction, and this repository
+  now has two of them that were wrong** (the other is the gate comment in round
+  31's FOUND). When a comment says what happens in a case nobody ran, run it.
+- **`fs.protected_symlinks` protects the STICKY directory, not the tree under
+  it.** It is `1` on this machine and stops a symlink planted directly in
+  `/tmp`. An attacker-owned directory inside `/tmp` is not sticky, so a symlink
+  planted inside THAT is followed normally. Any "we are safe because /tmp is
+  sticky and protected_symlinks is on" argument in this repo is only as strong
+  as the ownership of the directory the path actually resolves through.
+- **`std::fs::metadata` follows symlinks and `create_dir_all` applies the
+  umask to every component; only the leaf was ever tightened.** Both are
+  ordinary std behaviour and both were load-bearing here. `DirBuilder::new()
+  .recursive(true).mode(0o700)` applies the mode to EVERY directory it creates
+  — measured, not assumed — and re-creating over an existing tree is `Ok`.
+- **`remove_dir_all` on a symlink is NOT a deletion primitive** — measured
+  rather than inherited from the advisor's recollection: it unlinks the
+  symlink and leaves the target and its contents intact. So the session reap
+  at `session.rs:1541` was never the exposure; the root check is.
 - **A FILE LARGER THAN `HTTP_MAX_BYTES` IS REPORTED AS A SUCCESSFUL READ OF AN
   EMPTY FILE. Found this round, MEASURED, and deliberately NOT fixed here
   because it is not msgraph's — `gdrive` has it, and `s3`/`oauth` look the
@@ -569,10 +642,13 @@ alone before believing it.
 
 ## NOTE — card/dispatch mismatch, RESOLVED by round 31's dispatch
 Round 31's dispatch named **P2-016** as this unit's, so the `items:` line at the
-top now carries it and the queue question below is settled. The warning stands
-and is repeated in NEXT: P2-016's evidence belongs to unit
-`p2-016-multiuser-2` (landed 2026-09-12 as merge 5eca2402) and is 8,724 bytes.
-set-status.py REPLACES. Read it before writing it.
+top now carries it and the queue question below is settled. Round 33 did real
+P2-016 work and recorded it. The warning stands and is repeated in NEXT:
+**8,724 of P2-016's now 14,599 bytes of evidence belong to unit
+`p2-016-multiuser-2`** (landed 2026-09-12 as merge 5eca2402). set-status.py
+REPLACES. Read it before writing it, or use
+`/var/tmp/apex-work/scratch-p2-f/round33/append-p2-016.py`, which does the
+read-append-write and then asserts the original is still a prefix.
 
 --- the original note, kept for the record ---
 ## NOTE — card/dispatch mismatch, unresolved on purpose

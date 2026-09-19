@@ -5875,7 +5875,61 @@ tasks:
     switching (the named criterion-1 gap, and not small - greetd has no second seat, so it means a greeter on a
     spare VT plus loginctl activate, and the chvt half cannot be tested on Andre's machine without taking his
     screen); a standard account offered at install time; a kiosk session actually booted; ensure_private_dir still
-    does not check ownership.
+    does not check ownership. ROUND 33 (unit p2-f, branch task/p2-f-7, commits 0c8acd53 + 29938bc8 + f37f095c,
+    pushed, NOT yet merged) closes the last follow-up this evidence names for itself, 'ensure_private_dir still
+    does not check ownership', and found on the way that the paragraph in apex-agent-core/src/paths.rs which said
+    the pre-created-root case was ALREADY handled is FALSE. That paragraph said a predictable name in sticky /tmp
+    can be pre-created by another account 'and ensure_private_dir will then fail to chmod a directory it does not
+    own', so the worst case was 'a loud refusal and a denial of service rather than a disclosure'. It was never
+    measured. MEASURED 2026-09-19 against the real shipped function, with nobody (uid 99) as a real second account
+    and a 1777 stand-in for /tmp, four shapes. Root pre-created 0755 gives Err(EACCES), which is the claim. Root
+    pre-created 0777 gives Ok(()) - SILENT SUCCESS, the session starting with its scratch root owned by another
+    account which can rename, remove or replace the session directory under it for as long as the session runs.
+    Session directory pre-created 0777 gives Err(EPERM). Session directory planted as a SYMLINK gives Ok(()) AND
+    the symlink's target was chmodded from 0755 to 0700 - another account choosing which of this user's
+    directories gets its mode changed and where the session's build output lands. 0755 is the only mode an
+    attacker would not choose. The cause is the one the module already knew about the OLD shared root, repeated
+    one level down: ensure_private_dir is called on the LEAF, so create_dir_all made the root along the way under
+    the umask and nothing ever looked at it - which also left the root at 0755 in /tmp in the NORMAL case, enough
+    for another account to list a user's session ids. fs.protected_symlinks is 1 on this machine and stops a
+    symlink planted directly in sticky /tmp, but an attacker-owned root is not sticky, so the symlink planted
+    INSIDE it is followed: row 2 is what buys row 4. THE FIX IS TWO PARTS AND BOTH ARE NEEDED. 0c8acd53 makes
+    ensure_private_dir stat with symlink_metadata rather than metadata (which FOLLOWS the link), refuse a symlink,
+    refuse a directory this account does not own, and create every component 0700 with DirBuilder::mode rather
+    than at the umask - in BOTH copies of the function, because apex-aid's is deliberately duplicated and had the
+    same three defects. The ownership comparand is injectable (ensure_private_dir_as), for the reason
+    scratch_root_for is: a test process has one uid and the claim is about two; the stat is a real stat of a real
+    directory and only the uid it is compared against is chosen, and the ACCEPTING half is asserted too so a gate
+    that always refused would fail. 29938bc8 adds paths::ensure_scratch_dir, which ensures the ROOT as a directory
+    in its own right before the session directory under it, and points session.rs at it - because the leaf is
+    genuinely this account's, so ensuring only the leaf is a check against a moving target: only the owner of a
+    0700 directory can rename the entries in it. Re-measured after that commit with the same second account:
+    leaf-only call over nobody's 0777 root still Ok(()), boundary call refuses naming uid 99 and creates no
+    session directory, boundary call over nobody's root holding a symlink refuses and the victim directory stays
+    0755, and a root this account made is Ok. THE SHELL HALF IS WHAT SAYS THE DAEMON DOES THIS rather than that
+    the library can: tests/test-agent-inject.sh pre-creates its fixture scratch root at 0755 before the daemon
+    starts and asserts the mode after a real session start, and the pre-creation is load-bearing - a root the
+    daemon MAKES is 0700 either way after commit 1, so only a root it FINDS can tell the boundary call from its
+    absence. Verified rather than inherited: the scratch root is the ONLY production path in the agent stack whose
+    parent is world-writable (every other root is under $HOME or /run/user/<uid>; the disposable-capsule root is
+    under XDG state on purpose; the sandbox gives a session its own tmpfs /tmp), and no third copy of the
+    create_dir_all-then-chmod pattern exists. apex-agentd and apex-remoted are both per-user systemd USER
+    services, so geteuid is the right comparand and no root process ensures a user-owned directory. 11 MUTATIONS,
+    ALL RED, all restored with plain cp and cmp silent - 8 on commit 1 (each refusal removed, each stat weakened,
+    DirBuilder reverted to create_dir_all, and the ownership check forced to always refuse so the accepting half
+    is proved) and 3 on commit 2, the last of which is the one no Rust test can catch: session.rs reverted to the
+    leaf-only call, caught by the shell suite. f37f095c is prose - docs/multi-user.md gains the before/after table
+    and the reasoning, next to the paragraph about the old shared root it belongs with. COUNTS: workspace 3347 ->
+    3354 passed / 0 failed / 2 ignored; clippy --locked --workspace --all-targets -D warnings exit 0;
+    tests/test-agent-inject.sh 48 -> 49 passed / 0 failed; shellcheck coverage 165 discovered / 0 known-failing /
+    0 newly failing; suite coverage 75 / 71 in CI / 4 exempt / 0 unrun and undeclared; doc verbs 191 documented /
+    114 declared undocumented / 0 undocumented and undeclared / 0 stale; no conflict markers. NOT DONE AND NOT
+    CLAIMED: fast user switching, a standard account offered at install time, and a kiosk session actually booted
+    are all still open, exactly as this evidence listed them. Nothing here was run on a second logind session; the
+    second account in the measurement is nobody under sudo, which is enough for the ownership question and is not
+    a fast-user-switching test. An intermediate path component that is already a symlink is still followed by
+    create_dir_all before either check sees it - the boundary call is what keeps that to directories this account
+    made, and it is said in the module rather than left for the next reader to find.
 - id: P2-017
   title: APEX Online Accounts and brokered cloud identity layer
   priority: P2
