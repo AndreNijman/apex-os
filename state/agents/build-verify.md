@@ -73,28 +73,30 @@ machine tracks.
 
 ## NEXT
 
-**Now:** run the local build on the integration tip, `base` then `apex`, from
-`/var/tmp/apex-work/wt-build-verify` (which is `roadmap/v2.2` @ 7f647470 + the
-fix, and whose 3-rung chain auto-pins apex-shell `roadmap/v2.2`). **Detached**
-transient unit, never a foreground/`--pty` one — the Bash tool caps at 600 s and
-a backgrounded podman is SIGTERMed:
+**Now:** watch two things, neither of which needs any more decisions.
 
-    systemd-run --user --unit=apex-build-verify-2 \
-      --working-directory=/var/tmp/apex-work/wt-build-verify \
-      -p StandardOutput=file:/var/tmp/apex-work/scratch-build-verify/build.log \
-      -p StandardError=append:/var/tmp/apex-work/scratch-build-verify/build.log \
-      /var/tmp/apex-work/wt-build-verify/build-local.sh base apex
+1. **Local build** — transient user unit `apex-build-verify-2` is RUNNING,
+   started ~09:45 AWST from `/var/tmp/apex-work/wt-build-verify`
+   (`roadmap/v2.2` @ 7f647470 + the fix @ 6e4174ee), targets `base apex`, log at
+   `/var/tmp/apex-work/scratch-build-verify/build.log`. It reuses the cached
+   `localhost/apex-os-core:latest` (built 02:54Z from f666f5c1) — legitimate:
+   `git diff --quiet f666f5c1 7f647470 -- Containerfile.core` is EMPTY, so no
+   core input moved. Poll `systemctl --user is-active apex-build-verify-2` and
+   `tail` the log. On failure, `systemctl --user status apex-build-verify-2`
+   has the exit code. It holds a `sleep:idle` block inhibitor, so hypridle's
+   15-minute suspend cannot eat it.
+   **Already proved in that log, in a real build:**
+   `== shell == pinned apex-shell branch 'roadmap/v2.2' — apex-shell has no
+   branch named 'task/build-verify'`. The `check-labwc-keybinds` step that
+   killed the previous agent is at `Containerfile.base` STEP 157/180.
+2. **CI run 35433705393** — still in `core` at ~09:45Z. `gh run view
+   35433705393`; never `gh run watch` (600 s tool cap). When it ends, pull the
+   `image` job's SBOM step log and say whether the failure signature is the same
+   GitHub-runner shutdown as run 35415266422 or something of ours.
 
-Then poll `systemctl --user is-active apex-build-verify-2` and tail that log.
-Check first: `sudo -n true` (no tty inside the unit), `ls ~/.apex-signing`
-(else `--allow-unsigned`), and `sudo podman image exists
-localhost/apex-os-core:latest` — the previous agent's run got through `core`, so
-skipping it saves ~45 min.
+If both are green there is nothing left in this unit but to report.
 
-CI run 35433705393 was still in `core` at ~09:40Z (rust 3m7s green, changes 12s
-green, installer-iso skipped). `gh run view 35433705393` — never `gh run watch`.
-
-Then, in this order.
+Then, in this order (items 2, 3 and 5 are DONE — kept for the record).
 
 ## DONE
 
@@ -140,7 +142,9 @@ Then, in this order.
 
 ## IN PROGRESS
 
-- The local `base`+`apex` build on the integration tip. Nothing else.
+- Local `base`+`apex` build, unit `apex-build-verify-2`, log
+  `/var/tmp/apex-work/scratch-build-verify/build.log`.
+- CI run 35433705393, in `core`.
 
 ## FOUND
 
@@ -165,7 +169,22 @@ Then, in this order.
   linted by nobody** — same hole the file's own header describes, one directory
   up. Not this unit's to fix; recorded for whoever owns that gate.
 - build-image run 35415266422 died on a GitHub runner shutdown during syft/SBOM,
-  after core+base+image had all built. Not an APEX defect.
+  after core+base+image had all built. Not an APEX defect — **but read the log
+  before repeating that flatly.** Pulled with `gh run view 35415266422
+  --log-failed`, the step's real shape is:
+
+      03:23:46  installed /usr/local/bin/syft   (syft 1.52.0)
+      03:23:57  after prune: /dev/root 145G, 86G avail; free 14161 MB of 15989
+      03:26:30  ##[error]The runner has received a shutdown signal…
+      03:26:31  ##[error]The operation was canceled.
+
+  So it went quiet for **2m33s inside a syft scan of a ~13 GB image on a 16 GB
+  runner**, and then the runner went away. "Runner shutdown signal" is what
+  GitHub reports for its own reclaim AND for a VM that stopped answering, so the
+  position of the silence is not nothing. One occurrence is infrastructure; the
+  same stall at the same step on run 35433705393 would be a repeatable pattern
+  and the "not ours" reading would be the weaker one. That distinction is the
+  deliverable of this unit's NEXT item 1 — do not collapse it.
 
 ## BLOCKED ON
 
