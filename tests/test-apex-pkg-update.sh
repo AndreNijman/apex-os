@@ -205,6 +205,22 @@ expect "control: no extension payload on disk — must rebuild" 1 \
 expect "control: no state.json — must rebuild" 1 \
        "$WORK/no-such-state.json" "$NEWSET" 0 "$MERGED_PAYLOAD" 43
 
+# katana's measured state, as a literal. Level 2 is what
+# /var/lib/apex/pkg/state.json held on 2026-09-19 on a machine with 177 image
+# paths shadowed and zero i686 Vulkan ICDs merged over /usr. This is the only
+# hardcoded number in the file and it is deliberate: it is a fact about a
+# machine, not about this build. An engine that carries the pkg-share fix and
+# is still at level 2 leaves every such machine exactly where katana was, so
+# going back to 2 must fail here rather than pass quietly.
+if [ "$LEVEL" -gt 2 ]; then
+    mkstate "$WORK/a-katana.json" 2 43 "${SET[@]}"
+    expect "katana's level-2 state against this engine — must rebuild" 1 \
+           "$WORK/a-katana.json" "$NEWSET" 0 "$MERGED_PAYLOAD" 43
+else
+    bad "katana's level-2 state against this engine — must rebuild" \
+        "PKG_COMPAT_LEVEL is ${LEVEL}: an engine carrying the pkg-share fix must be past 2, or every machine that measured 2 keeps its old extension"
+fi
+
 # ── the mutant: prove the clause is what produced the answers above ──────────
 judge "$WORK/a-behind.json" "$NEWSET" 0 "$MERGED_PAYLOAD" 43 mutant
 mrc=$?
