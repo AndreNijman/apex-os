@@ -1951,8 +1951,15 @@ enroll_root() {
     # A regular file is enough to prove the branch is not taken; the node test
     # is `-c`, so the scenario that wants "TPM present" names its device
     # explicitly instead of relying on this.
+    # The production script's test is `-c`, so the fixture has to satisfy `-c`
+    # or the present-node arm of that check never runs. podman drops CAP_MKNOD,
+    # so mknod fails here — a SYMLINK TO /dev/null is a character device by
+    # every test `-c` makes, cannot be mistaken for a TPM by anything that
+    # opens it, and needs no capability. mknod is still tried first, so a lab
+    # with the capability gets the real thing.
     if [[ "$tpmnode" == yes ]]; then
-        mknod "$root/dev/tpmrm0" c 10 224 2>/dev/null || : > "$root/dev/tpmrm0"
+        mknod "$root/dev/tpmrm0" c 10 224 2>/dev/null \
+            || ln -sf /dev/null "$root/dev/tpmrm0"
     fi
     printf '%s\n' "$root"
 }
@@ -2138,10 +2145,19 @@ scenario_enroll_sb_on() {
             *" pin=yes") ok "enroll-sb-on: --with-pin really sets a PIN" ;;
             *) bad "enroll-sb-on: --with-pin did not produce pin=yes" ;;
         esac
-        if grep -q 'TPM2_PT_MAX_AUTH_FAIL' "$WORK/enroll-pin.err"; then
-            ok "enroll-sb-on: --with-pin printed the lockout arithmetic it commits the user to"
+        # The numbers, read off the part, and not the word "unknown" beside
+        # them: the script has an honest fallback for a TPM that will not
+        # answer, and a check that accepted the fallback would pass a script
+        # that had stopped asking.
+        if grep -qE 'TPM2_PT_MAX_AUTH_FAIL = 0x[0-9A-Fa-f]+' "$WORK/enroll-pin.err" \
+           && grep -qE 'TPM2_PT_LOCKOUT_INTERVAL = 0x[0-9A-Fa-f]+' "$WORK/enroll-pin.err" \
+           && grep -qE 'TPM2_PT_LOCKOUT_RECOVERY = 0x[0-9A-Fa-f]+' "$WORK/enroll-pin.err"; then
+            ok "enroll-sb-on: --with-pin read this part's lockout arithmetic off the chip"
+            info "$(grep -m1 'TPM2_PT_MAX_AUTH_FAIL' "$WORK/enroll-pin.err")"
+        elif grep -q 'would not report its lockout properties' "$WORK/enroll-pin.err"; then
+            cannot "enroll-sb-on: the software TPM would not report its lockout properties, so --with-pin could only say so"
         else
-            bad "enroll-sb-on: --with-pin said nothing about the lockout counter"
+            bad "enroll-sb-on: --with-pin said nothing about the lockout counter at all"
         fi
         enroll_assert_recovery "$pimg" "$prec" "enroll-sb-on --with-pin"
     else
