@@ -33,12 +33,27 @@ The moment the tag exists, in this order:
    — its absence means the old extension was measured.
 3. Re-run the §0.3 baseline block verbatim against the new `.raw` for the
    shadow count, and `ls /usr/share/vulkan/icd.d/ | grep -c i686`.
-4. Then §6, using `/var/tmp/apex-work/scratch-katana-image-qual/greetd-set.sh
-   <session-id>` + `sudo systemctl restart greetd`.
+3a. **Before touching anything on the first new-image boot**, capture
+   `journalctl -u apex-sysext-rebuild -b` — that is the REAL-WORLD no-op for
+   evidence §0.2; the manual `rebuild --if-needed` is only its reproduction.
+4. Then §6, using `sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-set.sh
+   <session-id>` + `sudo systemctl restart greetd`, and **arm the dead-man's
+   switch first** (transient timers do not survive a reboot, so arm it AFTER
+   the rebase reboot):
+   `sudo systemd-run --on-calendar='2026-09-19 20:45:00' --unit=qual-greetd-restore /usr/bin/bash -c 'cp /etc/greetd/config.toml.orig-qual2 /etc/greetd/config.toml && systemctl restart greetd'`
+   — test it once with an `--on-active=30s` copy and watch it fire.
    **If you are a fresh agent and `/etc/greetd/config.toml` has an
    `[initial_session]` block, katana is auto-logging in as andre — undo it with
    `sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-restore.sh`,
-   which restores the backup, `cmp`s it and restarts greetd.**
+   which restores `/etc/greetd/config.toml.orig-qual2`, `cmp`s it, stops the
+   dead-man's timer and restarts greetd. The backup is deliberately in `/etc`
+   (etc_t) so a systemd timer can exec the restore.**
+
+**Cut order if time runs short** (hard stop 20:58 AWST): rebase + digest,
+pkg-share's three numbers, the greetd login that attributes §6.3 — that row has
+been open two rounds and is cheap — then 6.4's forced run and 6.5. Write and
+commit per block; a partial run with evidence beats a complete one that was
+never written down.
 
 ## The plan, written 2026-09-19 17:15 AWST while waiting for the tag
 
@@ -180,6 +195,11 @@ Blocks, in order, all from §6:
 - 17:12 — pre-rebase baseline captured (see plan step P).
 - 17:15 — read §6 of `docs/gaming-and-sessions.md` end to end and §§3, 4, 6 of
   the round-31 evidence; plan above written.
+- 17:28 — advisor pass before the rebase; three corrections folded (the
+  compat-level remedy is self-hiding, greetd's stderr goes to the VT not the
+  journal, `cmd_install` has no refusal). Evidence §0.2 rewritten,
+  `e3060b63`, pushed. Measurement scripts `measure-pkgshare.sh` and
+  `measure-session.sh` written to katana's scratch dir.
 - 17:22 — greetd arm/restore helpers written to
   `/var/tmp/apex-work/scratch-katana-image-qual/greetd-{set,restore}.sh` on
   katana (the restore one refuses without a backup and `cmp`s the result).
@@ -244,6 +264,32 @@ Blocks, in order, all from §6:
     to `extract_rpms`. Keep the requested set as it is (chromium, gamemode,
     gamescope, libgcc.i686, libSM.i686, mangohud, steam, steam-devices) so the
     177 shadow count is like-for-like with round 31.
+- **greetd does NOT send the session's stderr to the journal.** greetd's
+  `terminal.rs` dup2s the VT onto the session's stdin/stdout/stderr, so
+  `[apex-gaming-session]` lines would be painted on tty1 and invisible over
+  ssh. `greetd-set.sh` therefore wraps the Exec in
+  `/usr/bin/systemd-cat -t qual-<id>`; `systemd-cat` **execs** its target, so
+  the process chain, uid and capability sets are unchanged, and the log reads
+  back with `journalctl -b -t qual-<id>`. State the redirection as the one
+  divergence.
+- **`cmd_install` has no "already installed" refusal** — read to the end
+  (~line 1530): it merges `names` with `load_requested` and calls
+  `rebuild_extension`. So after `systemd-sysext unmerge`, the run-book's own
+  `sudo apex install steam` does reach a real rebuild. `sudo /usr/libexec/apex-pkg
+  rebuild` is the equivalent shorter path.
+- **`PKG_COMPAT_LEVEL` 2→3 would NOT fix §0.2** and would hide that it did not:
+  `cmd_rebuild --if-needed` checks the level, `rebuild_extension`'s own
+  short-circuit does not, and `write_state` stamps the new level while carrying
+  the old payload. Written up in evidence §0.2; not patched here.
+- `bootc switch` may refuse while a deployment is `Unlocked: hotfix` (the
+  `gaming-nvidia` rollback is). If it does, `rpm-ostree cleanup -r` clears it —
+  and then §1 must record that the 2026-09-17 hand-copied `/usr` hotfix
+  (3 269 files, manifest at
+  `/var/lib/apex/steam-recovery-20260917/installed-files.jsonl`) went with it.
+- Do **not** assert `card1-eDP-1/dpms = Off` for 6.1: nobody holds card1 once
+  the greeter is torn down and the panel may keep its last framebuffer. The
+  proof is gamescope holding `/dev/dri/card2` only, the five log lines, and
+  `nvidia-smi`.
 - **Negative control on the OLD image, so "the image changed" is a measurement
   and not a hope** (17:20 AWST): `apex gaming --gamescope-device-args` → rc=2,
   `error: unexpected argument`; `grep -c 'prefer-vk-device\|prefer-output'

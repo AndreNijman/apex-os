@@ -2,7 +2,7 @@
 
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-build-verify  (on `task/build-verify`, reset onto roadmap/v2.2 @ 7f647470 in round 33)
-branch: **task/build-verify** — never pushed; nothing is committed on it yet
+branch: **task/build-verify** @ `6e4174ee`, PUSHED 2026-09-19 — one commit on top of `roadmap/v2.2` @ `7f647470`. This is the sha to land.
 
 > Re-dispatched fresh 2026-09-19 (round 33). The previous agent died with a
 > clean worktree and nothing pushed. Its measurements are kept below because
@@ -115,6 +115,13 @@ Then, in this order (items 2, 3 and 5 are DONE — kept for the record).
 - **Reset `wt-build-verify` onto `roadmap/v2.2` @ `7f647470`** before editing.
   Nothing was committed on the branch, so this cost nothing and avoids landing a
   workflow edit a merge behind.
+- **`6e4174ee` CHANGES NOTHING THAT ENTERS THE IMAGE.** No Containerfile COPYs
+  `tests/`, `.github/` or `build-local.sh`, none copies the whole context, and
+  there is no `.containerignore`/`.dockerignore`. So the local build's image is
+  content-identical to one built from `7f647470`; only the
+  `org.opencontainers.image.revision` label differs, because `REV` is
+  `git rev-parse HEAD` in this worktree. Do not read that label as "a different
+  tree was built".
 - **COMMITTED AND PUSHED: `task/build-verify` @ `6e4174ee`** — one commit on top
   of `roadmap/v2.2` @ `7f647470`, three files. **This is the sha for the
   orchestrator to land.** Nothing else is outstanding on the branch.
@@ -135,6 +142,21 @@ Then, in this order (items 2, 3 and 5 are DONE — kept for the record).
   every matching-branch, fallback-message, detached-HEAD and fatal-path
   assertion went red, while the three "reached dispatch" assertions correctly
   stayed green.
+- **The suite discriminates the MIDDLE RUNG specifically, not just old-vs-new.**
+  In a throwaway copy (never in the build's context), `for cand in "$want"
+  roadmap/v2.2 main` was cut down to build-image.yml's two rungs. Result:
+  **23 passed, 2 failed** — and the two are exactly the ones that should be,
+  `task/* -> roadmap/v2.2` and `detached HEAD`, both now pinning the `main` sha.
+  So the deviation from the card (three rungs, pr-validation's chain) is held by
+  assertions that go red the moment someone reverts it to two.
+- **Core reuse is justified on INPUTS, not just on the recipe.** `Containerfile.core`
+  is unchanged f666f5c1..7f647470, and so are both of the only two repo files it
+  COPYs — `files/system/src/quickshell-argc-shim.c` and
+  `files/system/libexec/apex-screen-reader`. (Its other two directives are a
+  pinned nerd-fonts URL and a `--from=` stage copy.) None of the 41 changed files
+  is a core input; every one is base/image-tier. So the cached
+  `localhost/apex-os-core:latest` is not a stale core, which is the failure mode
+  build-local.sh's own header warns about.
 - **Real-remote smoke test** from `wt-build-verify` (on `task/build-verify`):
   `pinned apex-shell branch 'roadmap/v2.2' — apex-shell has no branch named
   'task/build-verify'` / `vendoring 9df72cf2939345fea90db0af1fd35d2e6ebe4708`,
