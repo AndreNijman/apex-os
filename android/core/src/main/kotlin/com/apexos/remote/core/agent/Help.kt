@@ -225,8 +225,9 @@ object Help {
                         "empty you are told so, and what you had copied here is left alone.",
                 ),
                 p(
-                    "Long text is refused rather than cut short: past eight kilobytes the " +
-                        "computer says so instead of handing over part of what you copied.",
+                    "The computer refuses long text rather than cutting it short: past " +
+                        "eight kilobytes it says so instead of handing over part of what " +
+                        "you copied.",
                 ),
                 h("Taking this phone's access away"),
                 p(
