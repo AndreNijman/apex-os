@@ -154,6 +154,7 @@ run_session() {  # <fixture-root> [extra env assignments...]
         PATH="${BIN}:/usr/bin:/bin" \
         HOME="${WORK}/home" \
         APEX_ROOT="$1" \
+        VRR_SYS="$1/sys" \
         APEX_GAMING_NO_APEXD=1 \
         "${@:2}" \
         bash "$SESSION" > "${WORK}/out" 2> "${WORK}/log"
@@ -338,6 +339,58 @@ else
     bad "and the log says where the capability came from" "log: ${log}"
 fi
 make_fake getcap   # back to the shipped reality
+
+# ── §7.2: VRR, asked about the right screen and never silently ─────────────
+section "adaptive sync"
+
+rc="$(run_session "$KATANA")"
+argv="$(gs_argv)"
+log="$(session_log)"
+# The katana fixture has no vrr_capable anywhere, which is katana. The old code
+# globbed, matched nothing, passed nothing and printed nothing — and on a 240 Hz
+# monitor "this machine has no VRR" and "this driver does not publish the
+# property" then looked identical.
+if [[ "$argv" != *"--adaptive-sync"* ]]; then
+    ok "with no vrr_capable anywhere, adaptive sync is not requested"
+else
+    bad "with no vrr_capable anywhere, adaptive sync is not requested" "argv: ${argv}"
+fi
+if [[ "$log" == *"does not say"* ]]; then
+    ok "…and the log distinguishes 'the driver does not say' from 'no VRR here'"
+else
+    bad "…and the log distinguishes 'the driver does not say' from 'no VRR here'" \
+        "log: $(printf '%s' "$log" | grep VRR)"
+fi
+
+# A machine where the CHOSEN output does advertise it.
+printf '1\n' > "${KATANA}/sys/class/drm/card2-HDMI-A-1/vrr_capable"
+rc="$(run_session "$KATANA")"
+argv="$(gs_argv)"
+if [[ "$argv" == *"--adaptive-sync"* ]]; then
+    ok "an output that advertises vrr_capable=1 gets adaptive sync"
+else
+    bad "an output that advertises vrr_capable=1 gets adaptive sync" "argv: ${argv}"
+fi
+
+# …and the case the old global glob got wrong: VRR on the PANEL, on a session
+# that is running on the monitor. Asking for adaptive sync there is asking on
+# behalf of a screen this session is not using.
+rm -f "${KATANA}/sys/class/drm/card2-HDMI-A-1/vrr_capable"
+printf '1\n' > "${KATANA}/sys/class/drm/card1-eDP-1/vrr_capable"
+rc="$(run_session "$KATANA")"
+argv="$(gs_argv)"
+log="$(session_log)"
+if [[ "$argv" != *"--adaptive-sync"* ]]; then
+    ok "VRR on a screen this session is NOT using does not turn it on"
+else
+    bad "VRR on a screen this session is NOT using does not turn it on" "argv: ${argv}"
+fi
+if [[ "$log" == *"a different screen"* ]]; then
+    ok "…and the log says that is what happened"
+else
+    bad "…and the log says that is what happened" "log: $(printf '%s' "$log" | grep VRR)"
+fi
+rm -f "${KATANA}/sys/class/drm/card1-eDP-1/vrr_capable"
 
 # ── §6.3: the capability reading that explains Steam's bwrap ────────────────
 section "the capability sets are logged whatever they are"
