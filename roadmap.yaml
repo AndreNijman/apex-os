@@ -707,7 +707,46 @@ tasks:
     plain-write branch wrote turns coverage red for the 44 paths that branch handles. What only hardware can still
     confirm, and is therefore still open on this task: that a DynamicUser=yes unit starts after an apex install
     (there is no PID 1 in a container), and that restorecon resolves against the APEX image's loaded policy rather
-    than Fedora 43's policy rpm. Neither katana nor the L16 was touched.
+    than Fedora 43's policy rpm. Neither katana nor the L16 was touched. || 2026-09-20, unit final-image, an image
+    built from roadmap/v2.2's tip 661a9d80 and BOTH remaining fixes confirmed on katana; see
+    ROADMAP/evidence/final-image-20260920.md. Run 35469530380 (workflow_dispatch on task/final-image), success in
+    1h20m: ghcr.io/andrenijman/apex-os:apex-661a9d80d2239d848676d97e1e633d3f7325e853 at
+    sha256:61f7935c259fa90362c09158fd355f32230e0ab21925340c3c2acf4f879bffcc. Every job's STEPS read rather than
+    its conclusion (core 12/12, base 13/13, image 17/17; installer-iso and qcow2 skipped by dispatch default).
+    apex-shell pinned to roadmap/v2.2 03d77f96, the same shell apex-97c9e8f2 carried, so this is not a main-shell
+    build; no floating tag moved, so the L16 cannot take it through apex update by accident. THE /etc LABELLING
+    FIX IS HARDWARE-CONFIRMED and the two questions left open above are now answered. A real sudo apex install
+    wrote 56 /etc paths in a before/after ctime window; 55 match the LOADED policy exactly, 40 of them wanting a
+    non-etc_t type, and the single difference is /etc/ld.so.cache, which ldconfig writes after the relabel pass,
+    which no tracked list names, and which differs only in the SELinux user field. The DynamicUser=yes probe
+    finishes with result success, rpm-ostreed and capsule@ both reach active with Result=success, systemctl
+    --failed is empty and /etc/.pwd.lock reads passwd_file_t. The machine was made to fail first so that a pass is
+    not just the clean baseline: an install run through a bash -c wrapper inside a transient unit lands in
+    initrc_t, where restorecon's transition to setfiles_t cannot open an initrc_tmp_t list file, and six of eight
+    fresh /etc paths came out wrong with rpm-ostreed hitting 217/USER -- the original defect, reproduced live and
+    then cured by the next install. Three contexts were measured side by side: the real
+    apex-sysext-rebuild.service (unconfined_service_t) and interactive sudo both work; only a shell-wrapped unit
+    does not, and APEX takes neither such path. The unattended path was then run for real, not inferred:
+    pkg_compat_level was dropped to 2 and apex-sysext-rebuild.service restarted, the same level-2-to-3 rebuild
+    that re-broke /etc under the old engine, and it wrote 44 paths with 0 mismatched and no AVC. Follow-up
+    recorded, measured not guessed: handing the list to restorecon on stdin (restorecon -F -i -f -) succeeds even
+    in the denied domain, which would remove the sensitivity entirely; it was deliberately NOT made, because an
+    engine change now would invalidate the image this evidence is about. THE SCHED-EXT FIX IS ALSO CONFIRMED, and
+    the honest answer on katana is not loaded. docs/gaming-and-sessions.md 6.8 rows A and B pass; zero 'no scx
+    scheduler running' refusals this boot, because the verb is now read off /sys/kernel/sched_ext/state. Nothing
+    can attach on this image at all: the kernel's BTF was generated with pahole < 1.26, so every scx_* scheduler
+    dies on func_proto incompatible with vmlinux, scx_loader retries five times and gives up. That is a separate
+    item and it is NOT the SCX_SETTLE budget, since state never read enabling. Row C's branch was reached through
+    a better condition than the scripted one: scx_loader's own bookkeeping claimed 'running Lavd in Auto mode'
+    while the kernel said disabled, APEX chose start from the kernel reading, was refused, retried with switch off
+    scx_loader's own error text, and still refused to claim a scheduler that is not there. root/ops remains unread
+    on any machine and 6.6 was not re-run. katana left clean: efibootmgr byte-identical by cmp, three deployments
+    with the September 18 one still pinned and apex-97c9e8f2 now the rollback, greetd cmp-identical and never
+    edited, package set restored to its original eight requests, no failed units, and /etc clean without anything
+    having been restorecon'd by hand. STILL OPEN on this task and unchanged: fresh install, the rollback reboot
+    (now finally meaningful, since the rollback slot holds a genuinely different image), per-compositor workflow
+    passes, multi-monitor, and Secure Boot still disabled on katana. NOT merged to main, no PR opened, and the L16
+    was not touched.
 - id: P0-002
   title: Introduce protected apex-secretd service
   priority: P0
