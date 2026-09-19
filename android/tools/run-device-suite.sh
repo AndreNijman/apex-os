@@ -243,6 +243,58 @@ done
 [ -n "$lan" ] || { echo "FAIL: the phone could not reach this machine on any address"; exit 1; }
 echo "desktop reachable from the phone at $lan (broker on $brokerport)"
 
+# ── can this process pair at all? ───────────────────────────────────────────
+#
+# Asked HERE, before the two-minute APK build, because the answer depends on
+# how this script was STARTED and not on anything in the tree.
+#
+# `apex-remoted` decides whether a human is at the machine by reading the
+# connecting peer's cgroup (`origin::classify`), and pairing is one of the
+# things §7 reserves for one — pairing hands a phone standing access to every
+# agent here. A suite launched from a terminal is observed `local-terminal` and
+# pairs; a suite launched by a systemd user unit — a timer, a dispatched agent,
+# CI — is observed `scheduled-job` and every offer is refused.
+#
+# Measured on 2026-09-19 from `apex-roadmap-resume.service`: 24 tests ran and 8
+# failed, all eight on `apex-remoted did not mint an offer`. Nothing was wrong
+# with the app, the phone or the daemon. The same commit from a login session
+# is OK (24 tests). That is two minutes of gradle and twenty seconds of
+# instrumentation spent to produce eight failures about the launcher, so the
+# question is asked once, up front, through the same broker the tests use.
+#
+# It is a FAILURE and not a skip, and it names the wrapper that fixes it.
+preflight=$(python3 - "$brokerport" <<'PY'
+import json, socket, sys
+try:
+    s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), 10)
+    s.sendall(b'{"cmd":"pair"}\n')
+    print(s.makefile("rb").readline().decode().strip())
+    s.close()
+except OSError as e:
+    print(json.dumps({"reply": "error", "message": f"the broker did not answer: {e}"}))
+PY
+)
+if [[ "$preflight" != *'"qr"'* ]]; then
+  echo "FAIL: apex-remoted will not mint a pairing offer for this process, so the"
+  echo "      end-to-end tests cannot run. It answered:"
+  echo "      $preflight"
+  if [[ "$preflight" == *scheduled-job* ]]; then
+    echo
+    echo "      This script is running under a systemd user unit — $(cat /proc/self/cgroup)"
+    echo "      — which apex-remoted observes as \`scheduled-job\`, not as a human at the"
+    echo "      keyboard. Run it inside a real login session instead:"
+    echo
+    echo "        tests/in-login-session.sh /bin/bash -c \\"
+    echo "          'export JAVA_HOME=\$JAVA_HOME ANDROID_HOME=\$ANDROID_HOME; \\"
+    echo "           exec android/tools/run-device-suite.sh $*'"
+    echo
+    echo "      The wrapper forwards PATH HOME LANG LC_ALL TMPDIR and APEX_*/CARGO_*/"
+    echo "      RUST*/XDG_*_HOME only, so JAVA_HOME and ANDROID_HOME must be exported"
+    echo "      inside it."
+  fi
+  exit 1
+fi
+
 # Build and install. Both APKs, every run: an instrumentation APK from a
 # previous build is the same stale-binary defect the Rust suite refuses.
 export ANDROID_HOME=${ANDROID_HOME:-/var/tmp/android-sdk}
