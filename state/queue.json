@@ -558,6 +558,12 @@
       ],
       "after": [],
       "title": "TPM auto-unlock by default, where safe is a measured precondition"
+    },
+    {
+      "id": "windows-installer",
+      "items": [],
+      "after": [],
+      "title": "A portable Windows app that installs APEX into an empty partition"
     }
   ],
   "_completed_units": {
