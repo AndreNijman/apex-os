@@ -214,6 +214,87 @@ present — it reads `not measured — could not read the path: Permission denie
 (os error 13)`, not a bare `no`.
 
 
+### 0.6 The greetd route, proven end to end — and §6.3's capability question answered
+
+Run on the old deployment at 17:29 AWST, before the rebase, to de-risk the
+mechanism. It answered more than it was meant to.
+
+**The trap that made the first attempt look like a failure**, worth writing
+down because it is silent: greetd starts the initial session **only on the
+first greetd start since boot**, and `greetd(5)` says this "is checked through
+the presence of the runfile". A `systemctl restart greetd` with
+`[initial_session]` armed and `/run/greetd.run` present starts the **greeter**
+instead, logs nothing unusual, and looks exactly like the config being ignored.
+`rm -f /run/greetd.run` before each restart is the whole trick, and it is now
+inside `greetd-set.sh`.
+
+The second detail: greetd dup2s the VT onto the session's stdin/stdout/stderr,
+so a session's own log is painted on tty1 and is unreadable over ssh. The
+armed command is therefore wrapped in `/usr/bin/systemd-cat -t <tag>`, which
+**execs** its target — the process chain, uid and capability sets are unchanged
+— and the log reads back with `journalctl -b -t <tag>`. That redirection is the
+only divergence from an ordinary greetd login, and it is downstream of
+everything §6.3 asks about.
+
+With that, a greetd-launched process running as `andre`:
+
+```
+Sep 19 17:29:08 apex qual-probe[…]: id: uid=1000(andre) gid=1000(andre) groups=1000(andre),10(wheel)
+                                    context=unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023
+CapInh: 0000000800000000      <- cap_wake_alarm, and only that
+CapPrm: 0000000000000000
+CapEff: 0000000000000000
+CapBnd: 000001ffffffffff
+CapAmb: 0000000000000000
+NoNewPrivs: 0   Seccomp: 0
+--- its parent, greetd itself ---
+Name: greetd   Uid: 0
+CapPrm: 000001ffffffffff   CapEff: 000001ffffffffff   CapAmb: 0000000800000000
+```
+
+`capsh --decode=0000000800000000` → `cap_wake_alarm`. greetd runs as root with
+`cap_wake_alarm` in its **ambient** set; ambient is dropped when it drops to
+uid 1000, and what survives into the session is an *inheritable* bit and
+nothing else.
+
+logind classifies the result on the seat the greeter had:
+
+```
+Id=309 User=1000 Name=andre Seat=seat0 TTY=tty1 Class=user Active=yes State=active
+```
+
+**and bwrap runs:**
+
+```
+$ getcap /usr/bin/bwrap                                   -> (nothing)
+$ bwrap --ro-bind / / --dev /dev /bin/true ; echo rc=$?    -> rc=0
+```
+
+#### What this attributes
+
+`docs/gaming-and-sessions.md` §6.3 states the test: "A zero `CapPrm` with the
+bwrap message still present means the cause is not the session's capabilities
+and the hunt moves to Steam's runtime. A non-zero `CapPrm` means it is."
+
+**`CapPrm` is zero on the real login path, and a plain `bwrap` succeeds in it.**
+So the permitted set round 31 suspected is not a property of an APEX login —
+the session it measured was started by `systemd-run --property=PAMName=login`,
+which is where any non-zero permitted set came from. The remaining candidate is
+the bwrap inside Steam's own runtime, which is a different binary from
+`/usr/bin/bwrap`. §3 re-runs this on the new image through the actual Gaming
+Mode session, whose script now logs the same three values itself.
+
+Also confirmed here, and consistent with round 31 §4: `XDG_SESSION_TYPE=tty` in
+the process environment even with `Seat=seat0`/`TTY=tty1`, because `pam_systemd`
+sets it for a session that has not yet declared a compositor. That is a
+property of the environment variable, not of the session; the logind `Type`
+field is the real one.
+
+`/etc/greetd/config.toml` was restored from `/etc/greetd/config.toml.orig-qual2`
+and `diff` reports the two identical; greetd is `active` with the greeter back
+on tty1.
+
+
 ---
 
 ## 1. The rebase
