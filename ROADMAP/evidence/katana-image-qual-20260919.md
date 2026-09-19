@@ -295,6 +295,116 @@ and `diff` reports the two identical; greetd is `active` with the greeter back
 on tty1.
 
 
+### 0.7 §6.3's bwrap failure is ATTRIBUTED — it was the round-31 harness, not the image
+
+The probe in §0.6 said the permitted set is zero. This is the same question
+asked the expensive way: **Gaming Mode itself, launched by greetd**, on the old
+deployment, at 17:31 AWST. It is a same-harness negative control for §6.1 and
+§6.2 as well, so it is worth all of its lines.
+
+`greetd-set.sh apex-gaming` → `[initial_session] command = "/usr/bin/systemd-cat
+-t qual-gaming-old /usr/libexec/apex-gaming-session"`, `rm /run/greetd.run`,
+`systemctl restart greetd`.
+
+**§6.1 reproduced through the real login path** (round 31 saw this under
+`systemd-run`; it is not an artefact of that):
+
+```
+[apex-gaming-session] starting: gamescope -e -f --expose-wayland --rt --mangoapp -- steam -gamepadui
+[gamescope] vulkan: Intel device detected, forcing general queue family instead of compute-only queue
+[gamescope] vulkan: selecting physical device 'Intel(R) Iris(R) Xe Graphics (ADL GT2)': queue family 0
+[gamescope] drm: opening DRM node '/dev/dri/card1'
+[gamescope] drm: Connector eDP-1 -> AUO -
+[gamescope] drm: Connectors:
+[gamescope] drm:   eDP-1 (connected)
+[gamescope] drm: selecting connector eDP-1
+[gamescope] drm: selecting mode 1920x1080@144Hz
+```
+
+`HDMI-A-1` is not in gamescope's connector list at all, because it belongs to
+card2. Who held a DRM node while the session ran:
+
+```
+Xwayland      /dev/dri/card1
+gamescope-wl  /dev/dri/card1
+systemd-logind /dev/dri/card1
+```
+
+Nothing touched card2. The machine's own sysfs says what the selector has to
+work from, and it is unambiguous:
+
+```
+card1-eDP-1     connected   card1  vendor=0x8086 device=0x46a6   (Intel Iris Xe)
+card2-HDMI-A-1  connected   card2  vendor=0x10de device=0x249d   (RTX 3070 Laptop)
+```
+
+Those are the only two connectors that exist on this machine, connected or not.
+
+**§6.2 reproduced**: `No CAP_SYS_NICE, falling back to regular-priority compute
+and threads. Performance will be affected.` — the old script passes `--rt`
+unconditionally and the old image logs no capability line at all.
+
+#### And the row this unit was sent to answer
+
+Steam's log is append-only, so the two runs are side by side in one file.
+**Every** bwrap/user-namespace line in it belongs to round 31:
+
+```
+$ grep -nE 'bwrap|user namespaces' ~/.local/share/Steam/logs/console-linux.txt
+37218:[2026-09-19 09:19:06] steam-runtime-check-requirements[24113]: W: Child process exited with code 1:
+                            bwrap: Unexpected capabilities but not setuid, old file caps config?
+37220:[2026-09-19 09:19:06] steam.sh[23995]: Error: Steam now requires user namespaces to be enabled.
+37230:[2026-09-19 09:20:32]  … same, second attempt
+37242:[2026-09-19 09:21:26]  … same, third attempt
+```
+
+Three lines, three timestamps, all of them 09:19–09:21 — the
+`systemd-run --property=PAMName=login` runs. The greetd run starts at line
+37522:
+
+```
+37522:[2026-09-19 17:31:41+0800] srt-logger[19379]: Log opened
+37523:[2026-09-19 17:31:41] steam.sh[19367]: Running Steam on fedora 43 64-bit
+…
+[2026-09-19 17:31:44] bus_name=com.steampowered.PressureVessel.LaunchAlongsideSteam
+```
+
+**Not one bwrap error, and pressure-vessel came up.** The requirements check
+that failed three times under the harness passes on the real login path.
+
+**Verdict: §6.3's bwrap cause is the harness.** `systemd-run
+--property=PAMName=login` gave the session a non-empty permitted set; a greetd
+login gives it `CapPrm=0` (§0.6) and Steam's runtime is satisfied. Nothing in
+the image needed fixing for this, and the row can stop being carried as an open
+defect. The instruction in `docs/gaming-and-sessions.md` §6.3 — "run everything
+from a greetd login, not from `systemd-run`" — is the finding, now with the
+measurement behind it.
+
+What still fails in the same run is the **other** half of §6.3, exactly as
+predicted:
+
+```
+[2026-09-19 17:31:46] Vulkan missing requested extension 'VK_KHR_surface'.
+[2026-09-19 17:31:46] Vulkan missing requested extension 'VK_KHR_xlib_surface'.
+[2026-09-19 17:31:46] BInit - Unable to initialize Vulkan!
+```
+
+That is the 32-bit ICD defect pkg-share fixes, and §2 is where it is retested.
+
+#### Cleanup, again
+
+```
+$ apex game status        (during)  -> active : true   cgroup /sys/fs/cgroup/apex-game
+$ apex game status        (after)   -> active : false
+$ pgrep -c -u andre -x gamescope    -> 0
+$ diff /etc/greetd/config.toml /etc/greetd/config.toml.orig-qual2   -> identical
+$ systemctl is-active greetd        -> active
+```
+
+The `trap cleanup EXIT HUP INT TERM` released game mode on the greetd path too,
+and the greeter came back on tty1 by itself.
+
+
 ---
 
 ## 1. The rebase
