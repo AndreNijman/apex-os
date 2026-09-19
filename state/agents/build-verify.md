@@ -164,9 +164,8 @@ Then, in this order (items 2, 3 and 5 are DONE — kept for the record).
 
 ## IN PROGRESS
 
-- Local `base`+`apex` build, unit `apex-build-verify-2`, log
-  `/var/tmp/apex-work/scratch-build-verify/build.log`.
-- CI run 35433705393, in `core`.
+- CI run 35433705393 only: `image` job still running; `rust`, `changes`, `core`,
+  `base` all green, `installer-iso` skipped. The local build is DONE and green.
 
 ## FOUND
 

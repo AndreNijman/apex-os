@@ -386,10 +386,13 @@ Blocks, in order, all from §6:
 
 - CI 35433705393 producing
   `ghcr.io/andrenijman/apex-os:apex-7f647470e222cfa23e0853cac45ef3f7e74c252e`.
-  Last poll **17:46 AWST: `manifest unknown`**. The `core` tier has been
-  `in_progress` since 17:05 (41 min) and `base` + `image` still follow it;
-  `rust` and `changes` are green, `installer-iso` skipped. Health of the run is
-  the `build-verify` agent's question, not this unit's.
+  Last poll **18:10 AWST: `manifest unknown`**. Tier progress: `rust` green,
+  `changes` green, `installer-iso` skipped, **`core` green (finished ~17:58,
+  53 min)**, **`base` green (~18:08)**, **`image` in_progress since ~18:08** —
+  that is the last tier before the tag is pushed. Health of the run is the
+  `build-verify` agent's question, not this unit's.
+  `rebase.sh` is staged on katana and runs `bootc switch --transport registry`,
+  prints booted/staged/rollback digests, then `systemctl reboot`.
 - **There is no shortcut around it.** All five per-SHA tags already on GHCR were
   checked with `git merge-base --is-ancestor`: `26ea6a02`, `d12d3450`,
   `61dd814c`, `266dcc57` and `bd0c41ce` (the newest, 2026-09-19 10:15, still
