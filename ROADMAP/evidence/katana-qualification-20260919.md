@@ -9,7 +9,8 @@ Unit: `katana-qual`. Machine: MSI Katana GF76 12UG, hostname `apex`, user `andre
 | version | `apex (2026-09-18T14:33:05Z)` |
 | vendored apex-shell | `b7953e4f` |
 | rollback slot | `:gaming-nvidia`, `sha256:308127d9…`, 2026-09-05, `Unlocked: hotfix` |
-| kernel | 7.2.3 |
+| kernel | `7.2.5-cachyos1.fc43.x86_64` (`kernel-cachyos`; katana is NOT on the L16's 7.2.3) |
+| firmware | `E17L3IMS.110`, 12th Gen Core i7-12700H |
 | GPUs | `card1` = i915 (Intel Alder Lake-P Iris Xe) → `eDP-1`; `card2` = nvidia (RTX 3070 Mobile) → `HDMI-A-1` |
 | NVIDIA driver | 580.178.04, CUDA 13.0 |
 
@@ -862,9 +863,176 @@ is LUKS2 + TPM2 full-disk encryption, and quietly adding a passwordless
 graphical login to that is a security change nobody asked for. Switching modes
 costs one password entry at the greeter."
 
-**Verified:** the preselect half, and that the helper validates its argument.
+**Verified — run, not read:**
+
+```
+$ sudo cat /var/lib/apex-greet/last-session                 → hyprland
+$ sudo /usr/libexec/apex-session-select --list
+apex-gaming   apex-labwc   apex-safe-graphics   hyprland   niri
+$ sudo /usr/libexec/apex-session-select apex-gaming
+apex-session-select: next session: apex-gaming
+$ sudo cat /var/lib/apex-greet/last-session                 → apex-gaming
+$ apex gaming | grep "boots to game"
+boots to game   : yes — the greeter will preselect Gaming Mode
+$ sudo /usr/libexec/apex-session-select 'bogus;id'
+apex-session-select: refusing suspicious session id 'bogus;id'          rc=1
+$ sudo /usr/libexec/apex-session-select '../../etc/passwd'
+apex-session-select: refusing suspicious session id '../../etc/passwd'  rc=1
+$ sudo /usr/libexec/apex-session-select 'not-a-session'
+apex-session-select: 'not-a-session' is not an installed session        rc=1
+$ sudo cat /var/lib/apex-greet/last-session                 → apex-gaming  (unchanged by the three refusals)
+$ sudo /usr/libexec/apex-session-select hyprland            # RESTORED
+$ apex gaming | grep "boots to game"
+boots to game   : no — the greeter will preselect 'hyprland'
+```
+
+**PASS** for the preselect half: it writes, `apex gaming` reads the change back,
+all three hostile ids are refused without touching the state file, and the
+sudoers-safe validation the header claims is the validation that runs. Andre's
+preselect was restored to `hyprland` before this unit finished.
 **COULD NOT RUN:** the half that needs a password at the greeter — this unit
 does not have Andre's password, and `--switch` calls `loginctl terminate-user`,
 which the script's own comment warns "ends EVERY session belonging to the
 caller — including an SSH login." Running it would have ended this unit's own
 connection to the machine. Marked COULD-NOT-RUN with the reason, not FAIL.
+
+---
+
+## 7. The P1-038 labwc matrix — all 18 rows, with what stopped each one
+
+Run in the `apex-labwc` session on VT 2. Applications were launched with
+`~/qual/apptest.sh`, which screenshots before and after, diffs the two in
+PIL to get a painted-pixel count and a bounding box, and resolves Wayland vs
+XWayland by matching **unix-socket peer inodes** in `ss -xp` rather than
+guessing from environment variables (`~/qual/who-connects.py`).
+
+| # | row | verdict | evidence |
+|---|---|---|---|
+| 1 | Firefox screen sharing | **PARTIAL — see §7.1** | Firefox 155.0 runs as a **native Wayland client** (socket-peer match, not env). The portal offers **monitors only** |
+| 2 | Chromium screen sharing | **COULD NOT RUN** | no Chromium on the machine; `command -v chromium chromium-browser google-chrome` all empty, and none is a flatpak here |
+| 3 | OBS | **COULD NOT RUN** | OBS is not installed. The capture primitive underneath it was tested instead — see row "recording" |
+| 4 | Discord — Go Live | **COULD NOT RUN** | Discord is not installed. `~/.local/bin/equibop` exists as a launcher stub but the app does not |
+| 5 | Flatpak portals | **PARTIAL PASS** | four sandboxed flatpaks launched and painted (rows 9–12 below); the portal's file-chooser and openURI paths need a human clicking and were not exercised |
+| 6 | Steam desktop + Big Picture | **desktop PASS / Big Picture FAIL** | §6.4 and §6.3 |
+| 7 | gamescope | **FAIL** | §6.1 — wrong GPU, wrong output |
+| 8 | Wine / XWayland | **PARTIAL PASS** | Wine is not installed, but three real XWayland clients ran under labwc and painted: `steam`, `steamwebhelper` (x2) and `FreeCAD`. FreeCAD's window bbox is `(6,6,1808,1074)` — it starts 6 px down, i.e. **not** under the bar mask |
+| 9 | VS Code (Electron/Ozone) | **COULD NOT RUN as such** | no VS Code. Closest proxy run: **Spotify** (Electron flatpak) — it started but mapped **no window** in 35 s; the only screen change was `129 px` at bbox `(1864,13)-(1875,27)`, which is its tray icon appearing in the APEX bar. Recorded as a StatusNotifierItem PASS and an Electron-window NOT-ESTABLISHED |
+| 10 | JetBrains | **COULD NOT RUN as such** | no JetBrains IDE. Qt proxy run: **FreeCAD** — painted 89.4 % of the screen, via **XWayland** |
+| 11 | LibreOffice (gtk3 / qt6 VCL) | **COULD NOT RUN as such** | no LibreOffice. GTK3 proxy run: **darktable** — **native Wayland**, painted 100.0 % (bbox `(0,0,1920,1080)`) |
+| 12 | Blender | **PASS** | flatpak `org.blender.Blender`, **native Wayland**, painted 95.2 % (bbox `(6,6,1914,1074)`), own decorations, `bwrap→bwrap→blender` |
+| 13 | fractional scaling | **PASS** | `wlr-randr --output HDMI-A-1 --scale 1.25 / 1.5 / 1.0` — each applied and read back; `quickshell` survived all three |
+| 14 | rotation 90/180/270 | **PASS** | transform applied and read back at each; capture geometry follows (`1080x1920` at 90 and 270, `1920x1080` at 180 and normal) and the content is not black — 207 714 / 215 988 distinct colours |
+| 15 | refresh-rate switching | **PASS** | HDMI-A-1 239.964 Hz → 60.000 Hz → 239.964 Hz on the NVIDIA output; the bar survived without a restart (`pgrep -c quickshell` = 1 throughout) |
+| 16 | VRR | **COULD NOT RUN** | see §7.2 — no connector on this machine exposes `vrr_capable` at all |
+| 17 | suspend / resume | see §8 | |
+| 18 | dock / output hotplug | **PARTIAL — see §7.3** | |
+| + | screenshots | **PASS** | `grimblast save output` under Hyprland dispatched to `grim -t png -o eDP-1` and wrote a valid 1920x1080 PNG |
+| + | recording | **PASS** | §7.4 |
+| + | multi-monitor | **PASS** | §5, and the differing-mode capture that settled per-output targeting |
+| + | lock / idle | **PASS** | §5.3 — the lock is compositor-enforced |
+
+### 7.1 Screen sharing under labwc can share an output, never a window
+
+```
+$ busctl --user get-property org.freedesktop.portal.Desktop \
+    /org/freedesktop/portal/desktop org.freedesktop.portal.ScreenCast AvailableSourceTypes
+u 1
+```
+
+`1` is `MONITOR`. `WINDOW` is `2` and `VIRTUAL` is `4`; neither is offered. That
+is `xdg-desktop-portal-wlr`, which the image selects for labwc:
+
+```
+$ cat /usr/share/xdg-desktop-portal/labwc-portals.conf
+[preferred]
+default=wlr;*
+org.freedesktop.impl.portal.Inhibit=none
+```
+
+So rows 1–4 all share the same ceiling on this session: a user can share a
+**screen**, and the "share a window" option Firefox, Chromium, Discord and Teams
+all present will have nothing behind it. Whether that is acceptable is a product
+call, but it should be a decided one rather than a discovered one.
+
+`ScreenCast` version 5 and `Screenshot` version 2 are both exported and the
+portal service is up.
+
+### 7.2 VRR cannot be tested on this machine, and Gaming Mode's probe can never fire
+
+```
+$ for p in /sys/class/drm/*/vrr_capable; do [ -e "$p" ] && echo "$p = $(cat $p)"; done
+        (nothing)
+$ ls /sys/class/drm/card2-HDMI-A-1/
+edid  enabled  modes  power  status  subsystem  uevent
+$ wlr-randr --output HDMI-A-1 --adaptive-sync enabled
+failed to apply configuration
+$ wlr-randr | grep -i adaptive
+  Adaptive Sync: disabled
+```
+
+The NVIDIA connector exposes **seven** sysfs attributes and `vrr_capable` is not
+among them (the Intel connector exposes fifteen and also lacks it). This is a
+`COULD NOT RUN`, not a FAIL — the monitor is a 240 Hz Lenovo R25f-30, but
+nothing in this driver stack publishes the property.
+
+**Consequence worth recording for BASE-009:** `apex-gaming-session` decides
+whether to pass `--adaptive-sync` by globbing exactly this path —
+
+```bash
+for p in /sys/class/drm/card*-*/vrr_capable; do
+    [ -r "$p" ] || continue
+    if [ "$(cat "$p" 2>/dev/null)" = "1" ]; then VRR_ARGS=(--adaptive-sync); …
+```
+
+— so on this machine the branch is unreachable and the log line "VRR-capable
+output found" can never print. The probe is correct and safe; it simply cannot
+answer on an NVIDIA output. If VRR matters for Gaming Mode on NVIDIA, the
+property has to come from somewhere else.
+
+### 7.3 Output hotplug — what could and could not be done
+
+A real hotplug needs a hand on the cable and there was nobody at the machine, so
+the physical row is **COULD NOT RUN**. What was done instead, and what it does
+and does not prove:
+
+- The compositor was made to reconfigure the NVIDIA output repeatedly —
+  three scale changes, four transforms, three mode changes, one 1280x720
+  resize that changed the whole desktop from 3840x1080 to 3200x1080. The bar
+  process survived every one (`pgrep -c -u andre quickshell` = 1 throughout)
+  and the per-output capture followed the new geometry each time.
+- That covers "the bar survives an output reconfiguration". It does **not**
+  cover connector removal — no `hotplug` uevent was generated, per-output
+  surfaces were never destroyed, and the dashboard was not open on an output
+  that went away. Those three remain untested.
+
+### 7.4 Recording works, on the NVIDIA output
+
+`ScreenRecService` reaches the compositor through `wf-recorder`, which is
+wlr-screencopy:
+
+```
+$ wf-recorder -o HDMI-A-1 -f /tmp/qual-rec.mp4 -x yuv420p   # ~6 s, then SIGINT
+$ ffprobe -show_entries format=duration,size -show_entries stream=codec_name,width,height /tmp/qual-rec.mp4
+codec_name=vp9   width=1920   height=1080   duration=5.452756   size=53354
+```
+
+A real 5.45-second 1920x1080 VP9 file off the discrete-GPU output. **PASS** —
+the P1-038 "read but not run" recording row is now run.
+
+### 7.5 Harness caveat — the portal rows are labwc-only evidence
+
+This unit's SSH login kept the user manager (`systemd --user`, pid 1563) alive
+across every session change, so `xdg-desktop-portal` (pid 9692), started under
+**labwc** with the `wlr` backend selected, outlived labwc and went on serving
+Hyprland and niri with the wrong backend:
+
+```
+labwc   portals: xdg-desktop-portal, -gtk, -wlr, -hyprland
+hyprland portals: xdg-desktop-portal        (only — the backends died with labwc)
+niri     portals: xdg-desktop-portal        (same)
+```
+
+Under greetd this cannot happen: `loginctl terminate-user` takes the user
+manager with it and the next session starts its own portal. **Do not read §7.1
+as a statement about Hyprland or niri** — it is labwc's number, measured in
+labwc's session. The Hyprland and niri portal rows are untested.
