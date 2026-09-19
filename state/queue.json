@@ -508,6 +508,22 @@
       "after": [],
       "title": "Build the integrated image and qualify it on katana (the L16 half is Andre's)",
       "closed": "CLOSED 2026-09-20 (round 34) -- DONE, and it is the first time the whole thing has been built and put on hardware together. Image build run 35461554871, workflow_dispatch on task/integrated-image @ 97c9e8f2, green end to end in 1h12m, every job's STEPS read rather than assumed. Tag ghcr.io/andrenijman/apex-os:apex-97c9e8f25ee55593a97502505f51c6115ebbee7c at digest sha256:55fc9e4ee9b2c1b27045cba5a594a40e97fb0d73c70170cfbe0003f5cd4d73b0; it pinned apex-shell roadmap/v2.2 03d77f96 through the ordered fallback and moved NO floating tag, so nothing but katana saw it. katana was switched and rebooted onto it and ALL FOUR rows this unit owed are confirmed: pkg-update, gaming-release, p2-b and the coredump drop-in. Each unit's own `closed` note carries its numbers. TWO DEFECTS FOUND AND NOT FIXED HERE, deliberately, because the image under qualification was already built and on the machine: (a) apex-pkg's install_etc writes /etc with cp -a and never relabels, so /etc/.pwd.lock lands mislabelled and breaks DynamicUser=yes for six units including capsule@.service and rpm-ostreed, with NO AVC logged - and it RECURS on every extension rebuild with whatever wrong type the extraction tree carried, so it breaks the machine only sometimes; (b) apexd runs `scxctl switch` where the machine needs `scxctl start`, so sched-ext has never loaded while apex game status claims it did. Both want their own unit, and (a) should land BEFORE the main merges because the L16 rebuilds its clippy extension on first boot. THE L16 HALF IS ANDRE'S and was not touched. Merge order when he does it: apex-shell roadmap/v2.2 -> main FIRST (Containerfile.base carries ARG APEX_SHELL_REF=main), THEN apex-os. Evidence ROADMAP/evidence/integrated-image-20260920.md and katana-pwd-lock-selinux-20260920.md; card ROADMAP/state/agents/integrated-image.md."
+    },
+    {
+      "id": "pkg-etc-label",
+      "items": [
+        "P0-001"
+      ],
+      "after": [],
+      "title": "apex install mislabels every /etc file it writes, silently, with no AVC"
+    },
+    {
+      "id": "gaming-scx",
+      "items": [
+        "P1-043"
+      ],
+      "after": [],
+      "title": "Gaming Mode never loads a scheduler, and status claims it did"
     }
   ],
   "_completed_units": {
