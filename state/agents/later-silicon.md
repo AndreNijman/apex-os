@@ -8,7 +8,7 @@ machine: katana (MSI Katana GF76 12UG, Intel PTT fTPM)
 ## NEXT
 
 Nothing is running, nothing is half-finished, and katana is clean and released.
-Branch tip `f72e41f1` is pushed, cut from `roadmap/v2.2` `36535383`.
+Branch tip `f70d3ba8` is pushed, cut from `roadmap/v2.2` `36535383`.
 
 **L-001 is no longer waiting on a machine. It is waiting on one sentence from
 Andre**, and the whole question is:
@@ -57,7 +57,10 @@ make `systemd-pcrextend` start working** — that needs the sd-stub/UKI boot pat
   commits, all pushed: `883b5bc0` (the evidence record), `17252b16` (the
   `docs/boot-v2.md` hardware section the document asked for, plus a
   Recovery-table row and a correction to the firmware-update row) and
-  `f72e41f1` (the dual-boot boundary assertions — §0.1).
+  `f72e41f1` (the dual-boot boundary assertions — §0.1) and `f70d3ba8` (two
+  record-accuracy corrections: a piped exit status was being quoted as the
+  attach's, and the no-PCR-default finding is a guardrail — all four enrolment
+  call sites in the tree already name their PCRs).
 - Eight foreground runs on katana, each logged to
   `/var/tmp/apex-work/scratch-later-silicon/run{1..8}.log`, plus `s3.log`
   (suspend/resume, run as a transient unit so the dying SSH session could not

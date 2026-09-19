@@ -356,7 +356,8 @@
       "after": [
         "p2-a"
       ],
-      "conflicts": []
+      "conflicts": [],
+      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 31) -- and this says the remaining work is ANDRE'S, not that it is done. Rounds 32 and 33 landed as merge bd0c41ce; 0 unlanded. The aborted-transfer family is finished, and round 33 found and fixed a real privilege defect nobody was looking for: ensure_private_dir was called on the leaf, so create_dir_all made the scratch ROOT under the umask and nothing checked it -- a root pre-created 0777 succeeded silently, and a leaf planted as a symlink succeeded and chmodded the symlink's target to 0700. Both copies fixed (apex-aid duplicates it deliberately and had all three defects). What is left of P2-016 is three follow-ups that need a SPARE VT and would take Andre's screen: fast user switching, a standard account created at install time, and a kiosk session actually booted. Nothing ran on a second logind session this round and the card says so -- `sudo -u nobody` settles ownership, it is not a fast-user-switching test. P2-017, P2-018 and P2-019 stay partial on their own recorded grounds. RE-OPEN when there is a machine with a free VT that nobody is sitting at."
     },
     {
       "id": "later",
