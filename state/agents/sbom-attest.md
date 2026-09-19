@@ -1,10 +1,51 @@
-# sbom-attest — Rekor caps a request body at 24 MiB, and the SBOM now fits under it
+# sbom-attest — DONE. Rekor caps a request body at 24 MiB; the SBOM now fits, and is logged
 
 items: none (a guard, like `sbom-oom` was) — it gates unit `final`
 repo: apex-os
 worktree: `/var/tmp/apex-work/wt-sbom-attest`, branch `task/sbom-attest` off
 `roadmap/v2.2` (`b7e28d87`)
 scratch: `/tmp/claude-1000/-var-home-andre-Projects-apex/5717b375-fcad-4ae2-b07f-9e8456f318ee/scratchpad/sbom-attest/` (per-agent)
+
+## VERIFIED — build `35457162588`, every step of `image` green
+
+```
+syft catalogued the image in 314s
+Maximum resident set size (kbytes): 14913824
+SBOM packages: 9830   file rows: 7049
+after the trim: packages 9830, cpe refs 55652, DESCRIBES 1
+predicate 14087745B compact -> ~18783660B DSSE body; ceiling 25165824B, at 74%
+tlog entry created with index: 2893110210
+signature and SBOM attestation both verify against
+  https://github.com/AndreNijman/apex-os/.github/workflows/build-image.yml@refs/heads/task/sbom-attest
+```
+
+`tlog entry created with index: 2893110210` is the line this unit existed to
+produce, and `cosign verify-attestation` passing in the same job is the proof
+that it is retrievable and binds to this digest.
+
+**Confirmed independently of the build**, with `skopeo` against the registry
+rather than by trusting the job's own verify step:
+
+```
+skopeo inspect --raw docker://ghcr.io/andrenijman/apex-os:sha256-9e532b06….att
+  layers[0].mediaType = application/vnd.dsse.envelope.v1+json
+  layers[0].size      = 18,811,140
+```
+
+That is the exact media type `verify.rs::verify_provenance` looks for
+(`MEDIA_DSSE`), and the size matches the predicted 18,783,660 B body to within
+the envelope's own signature block. The artefact exists, on the digest, in the
+shape the machine-side gate expects.
+
+Two things beyond the step itself:
+
+- **`Promote to every published tag` and `Assert every published tag resolves to
+  this digest` are green.** They had been **skipped** in every failing run since
+  the SBOM step was added — unproved, not passing, and this repo counts a
+  skipped job as success. This is the first run that actually exercised them.
+- The predicate came out **byte-identical** to the document measured locally
+  from probe round 4's artefact — 14,087,745 B both times — so the candidate
+  table in section 10 describes this exact document, not an approximation.
 
 ## THE ANSWER, in one line
 
@@ -356,45 +397,49 @@ is fatal. All three branches exercised against real files of the right size.
 
 ## NEXT
 
-**The diagnosis is complete, the fix is committed and pushed, and the decision
-is made and written down. What is outstanding is one build.**
+**This unit is finished and verified. Unit `final` is unblocked.** What is left
+belongs to whoever lands `roadmap/v2.2` on `main`, and none of it is this
+branch's to do:
 
-1. **Read build `35457162588`** (see RUNS DISPATCHED for exactly which lines
-   confirm it). If the `image` job is green through
-   `Verify the image and its SBOM are both retrievable`, this unit is done and
-   unit `final` is unblocked.
-2. **Then three small closing jobs:**
-   - delete `.github/workflows/sbom-probe.yml` — it says TEMPORARY. Round 4 is
-     recoverable from history, and its artefact (`sbom-size-probe`, the real
-     28 MB document, 14-day retention on run `35456401012`) is what a future
-     round would measure from;
-   - put the build's own measured figures into the card heading;
-   - **leave `docs/trust-enforcement.md`'s "no published APEX image has an SBOM
-     attestation yet" and `verify.rs`'s matching comments ALONE.** They are
-     still true: this is a task branch and the `PUBLISH` guard stops it moving
-     any tag. They belong to whoever lands the first green `main` build. Same
-     for `provenance=warn` in
-     `files/system/usr/share/apex-os/trust/enforcement.conf` — tightening it to
-     `enforce` before a published image carries an `.att` refuses every update
-     on every machine in the field.
-3. **If the step failed at the size guard anyway**, the document grew between
-   probe round 4 and the build. The measured remainders, in order of what they
-   buy: `sourceInfo` (1,357,597 B), then `cpe23Type` (7,634,382 B) — and the
-   second is a real reduction in CVE-matching power that has to reach `docs/`
-   if it is taken. Section 10 has the full byte breakdown.
-4. **If it failed anywhere else**, note that `35457052441` in the run list is
-   not a build: it is GitHub's record of the workflow not parsing, from the
-   21,000-character run-block cap. Any future jobless `completed/failure` on a
-   push is the same thing.
+1. **Merge `task/sbom-attest` into `roadmap/v2.2` — the orchestrator's job, not
+   this agent's.** The brief forbade committing to `roadmap/v2.2`, and
+   `sbom-oom` landed the same way: the unit pushed its branch and the
+   orchestrator merged it (`b7e28d87`). The branch is ready. Ten commits off
+   `b7e28d87`,
+   touching only `.github/workflows/build-image.yml` and
+   `docs/trust-enforcement.md` (`.github/workflows/sbom-probe.yml` was added and
+   retired on the branch). No Rust, no `files/`, no Containerfile — nothing that
+   can conflict with another unit.
+2. **Do NOT tighten `provenance=warn` yet.** `files/system/usr/share/apex-os/
+   trust/enforcement.conf` must stay `warn` until a build **on `main`** has
+   published an image carrying an `.att`. Build `35457162588` is a task branch
+   and the `PUBLISH` guard stopped it moving any tracked tag, so no machine in
+   the field can fetch an attestation yet. Setting `enforce` before then refuses
+   every update on every machine.
+3. **Do NOT edit the "no published APEX image has an SBOM attestation yet"
+   sentences** in `docs/trust-enforcement.md` or `apexd/apex/src/verify.rs`.
+   Still true for the same reason. The first green `main` build is what makes
+   them false, and that build's author should be the one to change them.
+4. **When that `main` build lands**, `apexd/apex/src/verify.rs::verify_provenance`
+   meets a real attestation for the first time. It has never been exercised
+   against one — its own comments say so — and it will now download ~18.8 MB and
+   hold roughly three copies in memory (see section 4). Worth a look then; it is
+   not a defect today.
+
+### Watch item, not a defect
+
+74% of the ceiling is not generous, and growth is package-count driven — the
+Electron bundles are the volatile part. The guard warns at 80% and fails at
+100%, so this announces itself. When it warns, section 10 has the measured byte
+breakdown and the two refused options with their costs.
 
 ### One thing NOT built, deliberately
 
-There is no gate on the 21,000-character run-block cap. It was considered: the
-failure is loud and immediate (a dispatch 422s, a push leaves a jobless failed
-run), so it announces itself rather than hiding, and the repo has no natural
-home for a workflow-lint test. Recorded here so the choice is visible rather
-than an oversight.
+No gate on the 21,000-character run-block cap that cost one dispatch. The
+failure is loud and immediate — a dispatch returns HTTP 422 and a push leaves a
+jobless `completed/failure` run — and the repo has no natural home for a
+workflow lint. Recorded so the choice is visible rather than an oversight.
 
 ## BLOCKED ON
 
-- nothing.
+- nothing. Done.
