@@ -91,6 +91,13 @@ pub struct Intercept {
     /// at session start, from what the daemon recorded about the session —
     /// never from anything the capsule can reach.
     record: CapabilityRecord,
+    /// Where the secret service is, resolved ONCE when the session started.
+    ///
+    /// A field rather than `paths::socket()` per connection, so that what a
+    /// session talks to is decided at the moment the rest of its confinement
+    /// is — and so a test can stand a private service up without touching a
+    /// process-wide environment variable that other threads are reading.
+    secret_socket: PathBuf,
 }
 
 /// Where the minted files live, so the caller can bind the CA into the capsule.
@@ -130,7 +137,7 @@ impl Intercept {
                 .map_err(|e| format!("the capsule's TLS handshake failed: {e}"))?;
         }
 
-        let peer = Client::connect()
+        let peer = Client::connect_at(&self.secret_socket)
             .map_err(|e| {
                 format!(
                     "{e:#}\nthe secret service holds this capsule's credential; without it \
@@ -165,6 +172,37 @@ fn pump(conn: &mut ServerConnection, client: &mut UnixStream, mut peer: UnixStre
     let mut buf = [0u8; 16 * 1024];
 
     loop {
+        // Plaintext first, and OUTSIDE the readable branch. rustls can consume
+        // application data during the handshake — a TLS 1.3 client may send
+        // its first request in the same flight as its `Finished` — so bytes
+        // can already be buffered before this loop has polled anything. A
+        // drain that only ran when the socket was readable would leave that
+        // first request sitting in rustls for ever, and the capsule would wait
+        // out its timeout for an answer to a request nothing had forwarded.
+        // That is not hypothetical: it is what this function did first.
+        loop {
+            match conn.reader().read(&mut buf) {
+                Ok(0) => {
+                    client_eof = true;
+                    break;
+                }
+                Ok(n) => peer
+                    .write_all(&buf[..n])
+                    .map_err(|e| format!("handing the request to the secret service: {e}"))?,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => {
+                    client_eof = true;
+                    break;
+                }
+            }
+        }
+        // The capsule is finished asking. Telling the far side so is what lets
+        // a site that reads to end-of-request answer at all.
+        if client_eof && !half_closed {
+            let _ = peer.shutdown(std::net::Shutdown::Write);
+            half_closed = true;
+        }
+
         while conn.wants_write() {
             conn.write_tls(client)
                 .map_err(|e| format!("writing to the capsule: {e}"))?;
@@ -211,29 +249,6 @@ fn pump(conn: &mut ServerConnection, client: &mut UnixStream, mut peer: UnixStre
             }
             conn.process_new_packets()
                 .map_err(|e| format!("the capsule sent something TLS could not read: {e}"))?;
-            loop {
-                match conn.reader().read(&mut buf) {
-                    Ok(0) => {
-                        client_eof = true;
-                        break;
-                    }
-                    Ok(n) => peer
-                        .write_all(&buf[..n])
-                        .map_err(|e| format!("handing the request to the secret service: {e}"))?,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                    Err(e) => {
-                        client_eof = true;
-                        let _ = e;
-                        break;
-                    }
-                }
-            }
-            // The capsule is finished asking. Telling the far side so is what
-            // lets a site that reads to end-of-request answer at all.
-            if client_eof && !half_closed {
-                let _ = peer.shutdown(std::net::Shutdown::Write);
-                half_closed = true;
-            }
         }
 
         if fds[1].revents != 0 {
@@ -270,6 +285,7 @@ pub fn mint(
     scratch: &Path,
     dest: &Destination,
     record: CapabilityRecord,
+    secret_socket: PathBuf,
 ) -> Result<Minted, String> {
     let dir = scratch.join("present");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -366,6 +382,7 @@ pub fn mint(
             dest: dest.clone(),
             config,
             record,
+            secret_socket,
         },
     })
 }
@@ -443,7 +460,7 @@ mod tests {
     fn the_pin_is_compared_exactly_and_not_through_the_allowlist() {
         let dir = scratch("covers");
         let dest = Destination::parse("intranet.example:8443").expect("dest");
-        let minted = mint(&dir, &dest, record()).expect("mint");
+        let minted = mint(&dir, &dest, record(), PathBuf::from("/nonexistent")).expect("mint");
         let i = &minted.intercept;
         assert!(i.covers(&Destination::parse("intranet.example:8443").unwrap()));
         // The same host on another port is another endpoint, and the same port
@@ -462,7 +479,7 @@ mod tests {
         // trusts. The key has one job and it is done before the session starts.
         let dir = scratch("cakey");
         let dest = Destination::parse("intranet.example:443").expect("dest");
-        let minted = mint(&dir, &dest, record()).expect("mint");
+        let minted = mint(&dir, &dest, record(), PathBuf::from("/nonexistent")).expect("mint");
         assert!(minted.ca.exists(), "the CA certificate is what the capsule installs");
         assert!(
             !dir.join("present/ca.key").exists(),
@@ -477,7 +494,7 @@ mod tests {
     fn a_client_that_trusts_the_minted_ca_completes_a_handshake_and_one_that_does_not_fails() {
         let dir = scratch("handshake");
         let dest = Destination::parse("intranet.example:443").expect("dest");
-        let minted = mint(&dir, &dest, record()).expect("mint");
+        let minted = mint(&dir, &dest, record(), PathBuf::from("/nonexistent")).expect("mint");
         let config = Arc::clone(&minted.intercept.config);
 
         let (server_side, client_side) = UnixStream::pair().expect("socketpair");
@@ -551,7 +568,7 @@ mod tests {
     fn the_same_leaf_is_refused_by_a_client_that_was_not_given_the_per_run_ca() {
         let dir = scratch("nocontrol");
         let dest = Destination::parse("intranet.example:443").expect("dest");
-        let minted = mint(&dir, &dest, record()).expect("mint");
+        let minted = mint(&dir, &dest, record(), PathBuf::from("/nonexistent")).expect("mint");
         let config = Arc::clone(&minted.intercept.config);
 
         let (server_side, client_side) = UnixStream::pair().expect("socketpair");
@@ -611,7 +628,7 @@ mod tests {
     fn an_address_pin_is_checked_as_an_address() {
         let dir = scratch("ip");
         let dest = Destination::parse("127.0.0.1:9443").expect("dest");
-        let minted = mint(&dir, &dest, record()).expect("mint");
+        let minted = mint(&dir, &dest, record(), PathBuf::from("/nonexistent")).expect("mint");
         let text = String::from_utf8_lossy(
             &Command::new("openssl")
                 .args(["x509", "-noout", "-text", "-in"])
