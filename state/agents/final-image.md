@@ -1,9 +1,9 @@
 # final-image — DONE. The image is built from the v2.2 tip and both fixes are
 # confirmed on katana.
 
-repo: apex-os · branch **`task/final-image`** (tip `f1fdf207`), cut from
-`roadmap/v2.2` @ `661a9d80`. Its one commit is an evidence file ONLY; the image
-content is exactly `roadmap/v2.2`'s tree.
+repo: apex-os · branch **`task/final-image`** (tip `40ebf4cb`), cut from
+`roadmap/v2.2` @ `661a9d80`. Its two commits are an evidence file ONLY; the
+image content is exactly `roadmap/v2.2`'s tree.
 worktree: `/var/tmp/apex-work/wt-final-image`
 evidence: `ROADMAP/evidence/final-image-20260920.md` (tracked, on the branch)
 P0-001 recorded `partial` with `set-status.py`; prior evidence read out with
@@ -64,7 +64,10 @@ evidence §2.4–§2.6.
 **Why `not loaded` is a pass, and it is not the `SCX_SETTLE` budget.** No
 sched-ext scheduler can attach on this image at all: the kernel's BTF was built
 with `pahole < 1.26`, so every `scx_*` scheduler dies on
-`func_proto incompatible with vmlinux` / `failed to load BPF skeleton`.
+`func_proto incompatible with vmlinux` / `failed to load BPF skeleton`. The
+kernel is **`7.2.6-cachyos1.fc43.x86_64`** and `rpm -q kernel` says *not
+installed* — it is the CachyOS kernel this repo bakes from `kernel/**`, which is
+where the BTF is generated and where the follow-up has to land.
 `scx_loader` retries five times and gives up. `state` never read `enabling` and
 `scx_state` never read `unknown`, so raising `SCX_SETTLE` would fix nothing.
 **This is a separate, unfiled item.** `root/ops` is therefore still unread on
@@ -82,9 +85,15 @@ open that file depends on the domain `apex-pkg` runs in. Measured three ways:
 | interactive `sudo apex install` | `unconfined_t` | `user_tmp_t` | works |
 
 `restorecon` execs `setfiles` and transitions to `setfiles_t`, which cannot read
-an `initrc_tmp_t` file. Both real callers are in the working rows. The
-fragility is real all the same: a future caller reaching `apex-pkg` through a
-shell inside a unit loses the relabel and the install still exits 0.
+an `initrc_tmp_t` file. **Every caller in the tree was enumerated, not sampled**:
+the rebuild unit execs the `bin_t` script directly; `ops.rs:563` uses
+`Command::new(PKG_ENGINE).args()`; `recover.rs:211` and `blueprint.rs:1113` pass
+argv arrays; `apexd` itself runs `unconfined_service_t` (`ps -eo label` on the
+machine). None goes through a shell. `apex-boot-health`, `apex-env` and the
+flatpak unit name `apex-pkg` in comments only.
+
+The fragility is real all the same: a future caller reaching `apex-pkg` through
+a shell inside a unit loses the relabel and the install still exits 0.
 
 **The hardening is one line and it was measured, not guessed:**
 `printf '%s\n' … | restorecon -F -i -f -` succeeds from the denied domain,
@@ -110,7 +119,11 @@ underneath (a stranger reading only `bootc status` will think it is gone).
 - `~/apex-pre-rebase-20260919/` intact, 4 files, 2.1 M.
 - Package set back to its original eight requests; 223 packages, 512 MB
   extension. `cronie`, `vim-enhanced`, `nginx` were added for the measurement
-  and removed.
+  and removed — **removals verified by `ls`, not by the ctime diff, which cannot
+  see a deletion**. Every removed file gone, no image-owned `/etc` file taken
+  with them, `etc.list` back to the same 11 entries as baseline with **0
+  mismatched**. The removal pass leaves empty directories behind; all seven were
+  `rmdir`'d after `rpm -qf` confirmed no package owned them.
 - `systemctl --failed` empty, `/var` 51 G free, all transient probe units
   collected, scratch removed. `/etc` clean — and unlike last round, **nothing
   was `restorecon`ed by hand to make it so**; the last thing to touch it was
@@ -134,12 +147,28 @@ committed, P0-001 is recorded. What remains is Andre's, in this order:
    `systemd-run --wait --collect --property=DynamicUser=yes --unit=du /usr/bin/id`
    must say `result: success`.
 
+Two things Andre will hit on that path and should expect rather than debug:
+
+* **The `main` build will rebuild `core`,** because paths-filter diffs against a
+  `main` that is 137 commits behind. His `apex update` is a ~6 GB pull, not tens
+  of MiB. `docs/update-cost.md` records the tension.
+* **`apex-sysext-rebuild.service` will rebuild the extension on the L16's first
+  boot** if that machine carries one: its `state.json` predates
+  `pkg_compat_level`, and `// 0` never equals 3. That is the unattended path
+  measured clean in evidence §2.6 — it re-downloads over the network and takes
+  longer than katana's cached 54 s. Let it finish; it is not a hang. And reboot
+  cleanly, or the staged update is discarded.
+
 Open, and none of it belongs to this unit:
 
 * **The `pahole < 1.26` kernel BTF.** No sched-ext scheduler can load on any
   APEX image until the kernel's BTF is regenerated. Needs its own item.
 * **`restorecon` on stdin**, the hardening above. One line, with the measurement
   already in the evidence.
+* **`install_etc` never relabels a directory it did not create** — the right
+  rule, with a consequence: a directory created by a run whose relabel failed is
+  never self-healed by a later install. Seen on the three cron directories the
+  broken run of §2.4 left as `etc_t`.
 * **P0-001's remaining acceptance rows**, unchanged: fresh install, the rollback
   reboot (now finally meaningful — the rollback slot holds a genuinely different
   image), per-compositor workflow passes, multi-monitor. **Secure Boot is still
