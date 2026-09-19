@@ -188,6 +188,69 @@ package-level document of roughly this size"* — **not** as "the fix is
 verified". Only a real build verifies the real document. The 1.09 comes from a
 15-package image and is indicative, not exact.
 
+### 9. MEASURED, 2026-09-20: THE PACKAGE-LEVEL DOCUMENT IS STILL OVER
+
+Probe round 4 (`35456401012`) ran the exact two switches with syft 1.52.0
+against the pushed digest. **335 s** (down from 915 s), peak RSS
+**15,547,064 KB**, and:
+
+```
+RESULT packages=9830 files=7049 relationships=43801
+RESULT pretty=28259405B compact=28259405B dsse=37679208B ceiling=25165824B
+RESULT OVER by 12513384B
+RESULT electron trees: @anthropic-ai/claude-code, @anthropic-ai/claude-code-linux-x64, chatgpt, electron
+RESULT relationship types: {"CONTAINS":9829,"DEPENDENCY_OF":16463,"DESCRIBES":1,"OTHER":17508}
+──── cosign rc=1 after 3s      REKOR: REFUSED
+```
+
+**1.5x over the ceiling, and Rekor refused it for real** — the same 3-second,
+four-attempt refusal the build saw. The two syft switches are necessary and not
+sufficient.
+
+Three corrections to earlier claims on this card and in the workflow comment:
+
+- **`pretty` == `compact`.** syft's `spdx-json` is ALREADY compact, so there was
+  never a third of the size to win by minifying, and the original document's
+  166 MB was a compact 166 MB — the ~222 MB DSSE figure stands.
+- **THE FILE PASS IS NOT WHAT DRIVES THE RSS.** Peak RSS with the file inventory
+  off is **15,547,064 KB** against **15,449,996 KB** with it on. Identical. The
+  workflow comment claimed this as a side benefit; it is false and is corrected.
+  What the switches do buy is **time**: 915 s → 335 s, a 63% cut.
+- `files` is 7,049, not 0: `ownership=false` leaves the rows the binary and
+  executable cataloguers produce.
+
+### 10. WHERE THE 28,259,405 BYTES ACTUALLY ARE
+
+Measured off the probe's own artefact (`sbom-size-probe`, 14-day retention on
+run `35456401012`), so this is the real document and not an estimate:
+
+| | bytes | share |
+|---|---:|---:|
+| `packages` (9,830) | 14,076,102 | 49% |
+| — of which `externalRefs` | 9,108,268 | 32% |
+| — — `cpe23Type` (55,652 refs) | **7,634,382** | 27% |
+| — — `purl` (9,830 refs) | 1,241,294 | 4% |
+| — of which `sourceInfo` | 1,357,597 | 5% |
+| `relationships` (43,801) | 10,872,960 | 38% |
+| — `OTHER` (17,508) | **5,883,495** | 21% |
+| — `DEPENDENCY_OF` (16,463) | 3,085,431 | 11% |
+| — `CONTAINS` (9,829) | 1,860,087 | 7% |
+| — `DESCRIBES` (1) | 145 | 0% |
+| `files` (7,049) | 3,298,838 | 12% |
+
+Candidate documents, each built from that artefact and measured, not estimated
+(ceiling 25,165,824 B on the DSSE body):
+
+| | compact | DSSE | vs ceiling |
+|---|---:|---:|---|
+| as probed | 28,260,388 | 37,680,520 | 149% OVER |
+| A: drop `files` + file-anchored edges | 22,142,348 | 29,523,132 | 117% OVER |
+| B: A + drop `OTHER` | 19,060,538 | 25,414,052 | **100% OVER by 248 KB** |
+| C: B + drop `sourceInfo` | 17,702,941 | 23,603,924 | 93% fits |
+| D: B + drop `cpe23Type` | 11,370,504 | 15,160,672 | 60% fits |
+| **E: drop `files` + every edge but `DESCRIBES`** | **14,088,728** | **18,784,972** | **74% fits** |
+| F: E + drop `cpe23Type` | 6,398,694 | 8,531,592 | 33% fits |
+
 ## CHOSEN OPTION — shrink the predicate, keep the transparency log
 
 Ranked, with what each costs:
