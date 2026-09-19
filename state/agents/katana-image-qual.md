@@ -195,6 +195,29 @@ Blocks, in order, all from §6:
 - 17:12 — pre-rebase baseline captured (see plan step P).
 - 17:15 — read §6 of `docs/gaming-and-sessions.md` end to end and §§3, 4, 6 of
   the round-31 evidence; plan above written.
+- **17:33 — §6.3 IS FULLY ATTRIBUTED, AND IT WAS NEVER THE IMAGE.** Ran Gaming
+  Mode itself through greetd on the old deployment. Steam's `console-linux.txt`
+  is append-only, so both runs sit in one file: **all three
+  `bwrap: Unexpected capabilities but not setuid` lines are timestamped
+  09:19–09:21**, i.e. round 31's `systemd-run --property=PAMName=login`
+  attempts. The greetd run (line 37522 onward, 17:31:41) has **zero** bwrap
+  errors and reaches
+  `bus_name=com.steampowered.PressureVessel.LaunchAlongsideSteam`. The
+  requirements check that failed three times under the harness passes on the
+  real login path. What still fails in that run is the OTHER half of §6.3 —
+  `Vulkan missing requested extension 'VK_KHR_surface'` /
+  `BInit - Unable to initialize Vulkan!` — which is the ICD defect pkg-share
+  fixes. Evidence §0.7, commit `f6470e36`, pushed.
+  Same run is also a same-harness negative control for **§6.1** (gamescope
+  selects `Intel Iris Xe`, opens `/dev/dri/card1`, lists only `eDP-1`, picks
+  1920x1080@144; nothing touches card2) and **§6.2** (`No CAP_SYS_NICE,
+  falling back to regular-priority`, `--rt` passed unconditionally, no
+  capability line logged at all by the old script). Cleanup verified:
+  `apex game status` true → false, 0 gamescope processes, config identical,
+  greeter back on tty1 by itself.
+  Machine sysfs for the selector to be checked against:
+  `card1-eDP-1 = 0x8086:0x46a6`, `card2-HDMI-A-1 = 0x10de:0x249d`, and those
+  are the only two connectors that exist.
 - **17:30 — THE GREETD ROUTE IS PROVEN AND §6.3 IS ANSWERED ON THE LOGIN PATH.**
   A greetd-launched process running as andre has
   `CapPrm=0 CapEff=0 CapAmb=0`, `CapInh=0000000800000000` (= `cap_wake_alarm`
