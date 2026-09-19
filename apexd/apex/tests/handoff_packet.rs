@@ -265,6 +265,7 @@ impl Harness {
             capabilities: None,
             allow: None,
             trust_ca: None,
+            present: None,
             cols: 80,
             rows: 24,
             env: vec![],

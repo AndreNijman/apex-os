@@ -5,7 +5,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use apex_agent_core::adapter;
 use apex_agent_core::checkpoint;
 use apex_agent_core::hook;
@@ -14,8 +14,9 @@ use apex_agent_core::client::SESSION_ENV;
 use apex_agent_core::paths;
 use apex_agent_core::pluginconf;
 use apex_agent_core::config;
-use apex_agent_core::destination::Allowlist;
-use apex_agent_core::policy::{NetworkPolicy, PolicyError};
+use apex_agent_core::destination::{Allowlist, Destination};
+use apex_agent_core::origin::OriginSource;
+use apex_agent_core::policy::{NetworkPolicy, PolicyError, RequestOrigin};
 use apex_agent_core::profile;
 use apex_agent_core::project;
 use apex_secret_core::identity;
@@ -244,6 +245,16 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     // read — see `browser_ca`'s own note on why that order is the one that
     // means something.
     crate::browser_ca::check(req.trust_ca.as_deref(), policy.sandbox.is_confined())?;
+    // P2-012 route B, the half that is a fact about the request. The pin — and
+    // therefore whether the narrowed allowlist is the one destination this
+    // credential may be spent at — needs the secret service and is checked
+    // below, where the answer can be turned into a certificate.
+    present_check(
+        req.present.as_deref(),
+        req.trust_ca.as_deref(),
+        policy.sandbox.is_confined(),
+        policy.effective_network(),
+    )?;
 
     let wanted_grant = policy.needs_grant();
     if wanted_grant.is_none() && req.ttl_ms.is_some() {
@@ -494,7 +505,36 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     // than tidiness: a policy document the session could rewrite is one it
     // could point at a CA of its own, and the whole claim being made is that
     // the capsule trusts exactly the root the caller named.
-    if let Some(ca) = req.trust_ca.as_deref() {
+    //
+    // Route B mints its own CA here rather than taking one from the caller,
+    // and the two are refused together above: a capsule with `--present` is
+    // pinned to one destination and this daemon terminates it, so a
+    // caller-supplied root would be a root for a connection that no longer
+    // exists. One `install` call either way, because it binds one policy
+    // document over one path and a second call would bind over its own bind.
+    let mut intercept: Option<Arc<crate::intercept::Intercept>> = None;
+    let trust_ca: Option<String> = match (req.trust_ca.as_deref(), req.present.as_deref()) {
+        (Some(ca), _) => Some(ca.to_string()),
+        (None, Some(service)) => {
+            let minted = crate::intercept::mint(
+                &scratch,
+                &present_pin(service, &allowlist)?,
+                present_record(
+                    service,
+                    &project_root,
+                    id,
+                    session_origin.origin,
+                    session_origin.source,
+                ),
+            )
+            .map_err(|e| anyhow!("{e}"))?;
+            let ca = minted.ca.to_string_lossy().into_owned();
+            intercept = Some(Arc::new(minted.intercept));
+            Some(ca)
+        }
+        (None, None) => None,
+    };
+    if let Some(ca) = trust_ca.as_deref() {
         let installed =
             crate::browser_ca::install(ca, &scratch, Path::new(crate::browser_ca::FIREFOX_POLICY))?;
         spec.ro.push(installed.ca);
@@ -541,7 +581,7 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     if policy.effective_network() == NetworkPolicy::Allowlist {
         let program = bridge_program()?;
         let socket = scratch.join("egress.sock");
-        egress::start(id, &socket, allowlist.clone())
+        egress::start(id, &socket, allowlist.clone(), intercept.clone())
             .with_context(|| format!("starting the egress proxy for session {id}"))?;
         spec.egress = Some(EgressBridge {
             program,
@@ -1318,6 +1358,174 @@ fn session_allowlist(
         .map_err(|e| AllowlistRefused(e.to_string()))
 }
 
+/// P2-012 route B: the refusals that are facts about the request alone.
+///
+/// Separated from [`present_pin`] for [`crate::browser_ca::check`]'s reason:
+/// these three cost nothing and a session refused here has not had a scratch
+/// directory, a worktree or a certificate made for it.
+fn present_check(
+    present: Option<&str>,
+    trust_ca: Option<&str>,
+    confined: bool,
+    network: NetworkPolicy,
+) -> Result<()> {
+    let Some(service) = present else {
+        return Ok(());
+    };
+    if !confined {
+        // `--ttl` on a session with no grant, one field over. An unconfined
+        // session has no mount namespace, so the minted CA could not be
+        // installed in its browser — the capsule would refuse the very
+        // connection this was asked for, and blame its own timeout.
+        bail!(
+            "present authenticates one destination by terminating its TLS with a certificate \
+             installed inside the session's mount namespace, and an unconfined session does \
+             not have one. Ask for a confined sandbox, or drop the present"
+        );
+    }
+    if network != NetworkPolicy::Allowlist {
+        // The interception lives in the egress proxy, and the egress proxy is
+        // the allowlist's only route out. Without it there is no proxy, the
+        // session reaches the host's network directly, and the field would be
+        // accepted and mean nothing.
+        bail!(
+            "present is enforced by the egress proxy, which only exists for `--network \
+             allowlist`. This session asked for {network}, so the capsule would reach the \
+             site itself and carry no credential"
+        );
+    }
+    if trust_ca.is_some() {
+        // Refused rather than combined, and the reason is not that it is hard.
+        // A session with `present` is pinned to ONE destination and this
+        // daemon terminates that one, so there is no connection left for a
+        // caller-supplied root to be about; a caller who passed both believes
+        // one of the two is doing something it is not.
+        bail!(
+            "trust_ca and present cannot both be asked for: present pins this session to the \
+             one destination '{service}' is stored for and terminates it here, so a \
+             certificate authority for the capsule's own connection to that site would never \
+             be used. Drop one"
+        );
+    }
+    Ok(())
+}
+
+/// The destination a credential is pinned to, and the proof that it is the
+/// only one this session can reach.
+///
+/// The pin comes from the SECRET SERVICE, not from the caller. That is the
+/// whole of why `present` is one field: a wire field naming the destination
+/// would be a second thing that can disagree with the credential, and the
+/// disagreement would be settled in favour of whichever one the caller wrote.
+///
+/// The allowlist comparison is against a list PARSED from the pin rather than
+/// against a string, because `Rule::as_line` drops a default port — so
+/// `intranet.example:443` and `intranet.example` are the same rule and would
+/// not be the same string.
+fn present_pin(service: &str, allowlist: &Allowlist) -> Result<Destination> {
+    use apex_secret_core::client::Client as SecretClient;
+    use apex_secret_core::protocol::{Request as SecretRequest, Response as SecretResponse};
+
+    let answer = SecretClient::connect()
+        .and_then(|mut c| c.call(&SecretRequest::List))
+        .with_context(|| {
+            format!(
+                "present names the stored credential '{service}', and the secret service \
+                 could not be asked what it is pinned to"
+            )
+        })?;
+    let SecretResponse::Services { services } = answer else {
+        bail!("the secret service answered a list with something else");
+    };
+    let Some(info) = services.into_iter().find(|s| s.service == service) else {
+        bail!(
+            "no credential named '{service}' is stored, so there is no destination for this \
+             capsule to be authenticated to. `apex secret list` shows what is stored"
+        );
+    };
+    let Some(port) = info.port.or(match info.scheme.as_str() {
+        "https" => Some(443),
+        "http" => Some(80),
+        _ => None,
+    }) else {
+        bail!(
+            "'{service}' is stored for scheme '{}', which has no port a capsule could be \
+             pinned to",
+            info.scheme
+        );
+    };
+    let pin = Destination::new(&info.host, port).with_context(|| {
+        format!("'{service}' is pinned to a host this cannot be a destination for")
+    })?;
+
+    present_allowlist_is_only(&pin, allowlist)?;
+    Ok(pin)
+}
+
+/// The session must be able to reach the pin and nothing else.
+///
+/// Not "the allowlist covers it". A wildcard rule covering the pin would leave
+/// the capsule able to reach hosts the credential was never for, through
+/// tunnels this daemon does not read — so a caller who asked for one
+/// authenticated destination would have got several unauthenticated ones
+/// beside it, and the screenshot would not say which was which.
+///
+/// Compared against a list PARSED from the pin rather than against a string,
+/// because `Rule::as_line` drops a default port: `intranet.example:443` and
+/// `intranet.example` are the same rule and are not the same string.
+///
+/// Split from [`present_pin`] so it can be exercised without a secret service,
+/// which is the half of that function that needs one.
+fn present_allowlist_is_only(pin: &Destination, allowlist: &Allowlist) -> Result<()> {
+    let want = Allowlist::parse(&[pin.to_string()])
+        .map_err(|e| anyhow!("{pin} is not a destination this can be an allowlist for: {e}"))?;
+    if allowlist.lines() != want.lines() {
+        bail!(
+            "present pins this session to {pin}, and its allowlist is [{}]. A session that \
+             names a credential may reach exactly the destination that credential is for: \
+             pass `--allow {pin}` and nothing else",
+            allowlist.lines().join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// The capability record every intercepted connection is opened with.
+///
+/// Built ONCE, here, out of what this daemon knows about the session it is
+/// starting — never out of anything the capsule can reach. The capsule has no
+/// way to ask for an interception at all: it opens a `CONNECT` like any other,
+/// and whether that `CONNECT` is terminated was decided before the browser
+/// existed.
+///
+/// The project is `detect`-or-cwd, the same rule the capsule binding at the
+/// top of this function uses and the same rule `apex secret` grants are keyed
+/// on. For a browser capsule that is the throwaway capsule directory, which is
+/// why `browser.present` is an operation an owner grants with `--everywhere`:
+/// a grant recorded against one capsule's directory would name a path that is
+/// gone by the time a second capsule runs.
+fn present_record(
+    service: &str,
+    project: &Path,
+    session: u32,
+    origin: RequestOrigin,
+    source: OriginSource,
+) -> apex_secret_core::capability::CapabilityRecord {
+    let mut record = apex_secret_core::capability::CapabilityRecord::new(
+        service,
+        apex_secret_core::operation::BROWSER_PRESENT,
+        "",
+    );
+    record.project = Some(project.to_string_lossy().into_owned());
+    // Attribution and not authentication, exactly as `broker::use_capability`
+    // says: `apex-secretd` cannot re-derive either of these, so it records the
+    // claim and authorises on what it can establish for itself.
+    record.agent_session = Some(session);
+    record.request_origin = origin.as_str().to_string();
+    record.origin_source = source.as_str().to_string();
+    record
+}
+
 /// A session allowlist that could not be narrowed out of the runtime's
 /// (P2-012, [`apex_agent_core::protocol::RunRequest::allow`]).
 ///
@@ -1714,6 +1922,94 @@ pub(crate) fn write_response(writer: &mut UnixStream, response: &Response) -> Re
 
 #[cfg(test)]
 mod tests {
+
+    /// P2-012 route B: the three refusals that are facts about the request.
+    ///
+    /// Each one is a setting that would otherwise be accepted and mean
+    /// nothing, which is the failure mode `--ttl` on a session with no grant
+    /// established the shape of.
+    #[test]
+    fn present_is_refused_where_it_would_be_accepted_and_do_nothing() {
+        use apex_agent_core::policy::SandboxPolicy;
+
+        // Nothing asked for is always fine, including on a session that could
+        // not have carried it.
+        assert!(present_check(None, None, false, NetworkPolicy::Open).is_ok());
+
+        // The shape that works.
+        assert!(present_check(Some("intranet"), None, true, NetworkPolicy::Allowlist).is_ok());
+
+        // Unconfined: no mount namespace, so the minted CA could not be
+        // installed and the capsule would refuse the very connection this was
+        // asked for — and blame its own timeout.
+        let e = present_check(Some("intranet"), None, false, NetworkPolicy::Allowlist)
+            .expect_err("unconfined");
+        assert!(e.to_string().contains("mount namespace"), "{e}");
+
+        // No allowlist: no egress proxy, so nothing would intercept anything
+        // and the capsule would reach the site itself, as nobody.
+        for network in [NetworkPolicy::Open, NetworkPolicy::Offline, NetworkPolicy::Brokered] {
+            let e = present_check(Some("intranet"), None, true, network).expect_err("network");
+            assert!(
+                e.to_string().contains("egress proxy"),
+                "{network}: {e}"
+            );
+        }
+
+        // Both: the capsule has one destination and this daemon terminates it,
+        // so a caller-supplied root would be for a connection that no longer
+        // exists. A caller who passed both believes one of them is doing
+        // something it is not.
+        let e = present_check(
+            Some("intranet"),
+            Some("/etc/pki/root.pem"),
+            true,
+            NetworkPolicy::Allowlist,
+        )
+        .expect_err("the pair");
+        assert!(e.to_string().contains("cannot both be asked for"), "{e}");
+
+        let _ = SandboxPolicy::default();
+    }
+
+    /// The allowlist a session with `present` may have is the pin, exactly.
+    #[test]
+    fn a_session_that_names_a_credential_may_reach_that_destination_and_no_other() {
+        let pin = Destination::parse("intranet.example:443").expect("pin");
+
+        // The same destination, spelled with and without the default port,
+        // because `Rule::as_line` drops 443 and a string comparison would
+        // refuse the spelling `apex browser` actually sends.
+        for line in ["intranet.example", "intranet.example:443"] {
+            let allow = Allowlist::parse(&[line]).expect("parse");
+            assert!(
+                present_allowlist_is_only(&pin, &allow).is_ok(),
+                "--allow {line} is the pin and was refused"
+            );
+        }
+
+        // A wildcard that COVERS the pin is not the pin: everything else it
+        // covers would be a tunnel this daemon does not read, beside one
+        // destination it does.
+        let wildcard = Allowlist::parse(&["*.intranet.example"]).expect("parse");
+        let pin = Destination::parse("eu.intranet.example:443").expect("pin");
+        let e = present_allowlist_is_only(&pin, &wildcard).expect_err("wildcard");
+        assert!(e.to_string().contains("exactly the destination"), "{e}");
+
+        let pin = Destination::parse("intranet.example:443").expect("pin");
+        // One extra destination is one unauthenticated destination.
+        let two = Allowlist::parse(&["intranet.example", "elsewhere.example"]).expect("parse");
+        assert!(present_allowlist_is_only(&pin, &two).is_err());
+
+        // Another port on the same host is another endpoint.
+        let other_port = Allowlist::parse(&["intranet.example:8443"]).expect("parse");
+        assert!(present_allowlist_is_only(&pin, &other_port).is_err());
+
+        // And a list that does not contain it at all.
+        let elsewhere = Allowlist::parse(&["elsewhere.example"]).expect("parse");
+        assert!(present_allowlist_is_only(&pin, &elsewhere).is_err());
+    }
+
     use super::*;
     use std::os::fd::AsRawFd;
     use std::os::unix::io::RawFd;

@@ -287,6 +287,7 @@ impl Harness {
             capabilities: None,
             allow,
             trust_ca: None,
+            present: None,
             second_factor: None,
             cols: 80,
             rows: 24,

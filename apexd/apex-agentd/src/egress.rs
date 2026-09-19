@@ -64,6 +64,7 @@ use std::time::Duration;
 use apex_agent_core::destination::{Allowlist, Destination, Verdict};
 use apex_agent_core::sandbox::BRIDGE_FLAG;
 
+use crate::intercept::Intercept;
 use crate::pty;
 
 /// How long the accept loop sleeps between checks that the session is still
@@ -89,7 +90,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// to the configuration afterwards does not widen a session that is already
 /// running: what a session may reach is decided once, when the user starts it,
 /// which is also the only moment they were asked.
-pub fn start(id: u32, socket: &Path, allow: Allowlist) -> std::io::Result<()> {
+pub fn start(
+    id: u32,
+    socket: &Path,
+    allow: Allowlist,
+    intercept: Option<Arc<Intercept>>,
+) -> std::io::Result<()> {
     // A socket left by a daemon that died would make bind fail with EADDRINUSE
     // and take the session down with it.
     let _ = std::fs::remove_file(socket);
@@ -100,7 +106,7 @@ pub fn start(id: u32, socket: &Path, allow: Allowlist) -> std::io::Result<()> {
     let socket = socket.to_path_buf();
     std::thread::Builder::new()
         .name(format!("apex-agentd-egress-{id}"))
-        .spawn(move || accept_loop(id, listener, socket, Arc::new(allow)))?;
+        .spawn(move || accept_loop(id, listener, socket, Arc::new(allow), intercept))?;
     Ok(())
 }
 
@@ -111,7 +117,13 @@ pub fn start(id: u32, socket: &Path, allow: Allowlist) -> std::io::Result<()> {
 /// poll interval. A stop flag threaded through the registry would be one more
 /// thing for a future edit to forget to set, and forgetting it would leak a
 /// thread per session for the life of the daemon.
-fn accept_loop(id: u32, listener: UnixListener, socket: PathBuf, allow: Arc<Allowlist>) {
+fn accept_loop(
+    id: u32,
+    listener: UnixListener,
+    socket: PathBuf,
+    allow: Arc<Allowlist>,
+    intercept: Option<Arc<Intercept>>,
+) {
     let fd = listener.as_raw_fd();
     loop {
         if !socket.exists() {
@@ -123,9 +135,10 @@ fn accept_loop(id: u32, listener: UnixListener, socket: PathBuf, allow: Arc<Allo
         match listener.accept() {
             Ok((stream, _)) => {
                 let allow = Arc::clone(&allow);
+                let intercept = intercept.clone();
                 let spawned = std::thread::Builder::new()
                     .name(format!("apex-agentd-egress-{id}-conn"))
-                    .spawn(move || serve(id, stream, &allow));
+                    .spawn(move || serve(id, stream, &allow, intercept.as_deref()));
                 if spawned.is_err() {
                     // No thread means no connection. Saying so is better than
                     // dropping it silently, which reads inside the agent as a
@@ -144,7 +157,7 @@ fn accept_loop(id: u32, listener: UnixListener, socket: PathBuf, allow: Arc<Allo
 }
 
 /// One proxy connection, from its request line to the end of its tunnel.
-fn serve(id: u32, client: UnixStream, allow: &Allowlist) {
+fn serve(id: u32, client: UnixStream, allow: &Allowlist, intercept: Option<&Intercept>) {
     let _ = client.set_read_timeout(Some(HEAD_TIMEOUT));
     let head = match read_head(&client) {
         Ok(h) => h,
@@ -181,6 +194,41 @@ fn serve(id: u32, client: UnixStream, allow: &Allowlist) {
         eprintln!("apex-agentd: session {id} denied {dest}");
         reply(&client, 403, "Forbidden", &why);
         return;
+    }
+
+    // P2-012 route B: the ONE destination this session was told to
+    // authenticate is terminated here rather than tunnelled.
+    //
+    // After `decide` and before the resolve, and both halves of that placement
+    // are deliberate. After, because a destination the allowlist refuses is
+    // refused whatever else was asked for. Before, because this path never
+    // opens a connection of its own — `apex-secretd` dials the credential's
+    // own pinned host — so the resolve and `accepts_address` below have nothing
+    // to check. What replaces them is that daemon's pin check, which is a
+    // boundary this one is not: `apex-agentd` runs as the user.
+    //
+    // `covers` is exact equality on host and port, NOT a question for the
+    // allowlist. A narrowed list may hold a wildcard, and a rule that covers
+    // the pin is not the pin.
+    if let Some(intercept) = intercept {
+        if intercept.covers(&dest) {
+            let _ = client.set_read_timeout(None);
+            if client
+                .try_clone()
+                .and_then(|mut w| w.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n"))
+                .is_err()
+            {
+                return;
+            }
+            if let Err(why) = intercept.serve(client) {
+                // Said out loud rather than dropped: the capsule sees a
+                // connection that closed, and the reason — a grant that is not
+                // there, a secret service that is not running — is only
+                // visible here.
+                eprintln!("apex-agentd: session {id} could not authenticate {dest}: {why}");
+            }
+            return;
+        }
     }
 
     // Resolve once, check every answer, and connect to an address that was
@@ -652,7 +700,7 @@ mod tests {
         // this test is ever looked up.
         let allow = Allowlist::parse(&["api.example.com"]).expect("allowlist");
         let (client, server) = UnixStream::pair().expect("socketpair");
-        let worker = std::thread::spawn(move || serve(1, server, &allow));
+        let worker = std::thread::spawn(move || serve(1, server, &allow, None));
 
         let mut client_w = client.try_clone().unwrap();
         client_w
@@ -670,7 +718,7 @@ mod tests {
     fn plain_http_through_the_proxy_is_refused_rather_than_rewritten() {
         let allow = Allowlist::parse(&["api.example.com"]).expect("allowlist");
         let (client, server) = UnixStream::pair().expect("socketpair");
-        let worker = std::thread::spawn(move || serve(1, server, &allow));
+        let worker = std::thread::spawn(move || serve(1, server, &allow, None));
 
         let mut client_w = client.try_clone().unwrap();
         client_w
@@ -690,7 +738,7 @@ mod tests {
     fn a_head_that_never_ends_is_abandoned_rather_than_held_open() {
         let allow = Allowlist::parse(&["api.example.com"]).expect("allowlist");
         let (client, server) = UnixStream::pair().expect("socketpair");
-        let worker = std::thread::spawn(move || serve(1, server, &allow));
+        let worker = std::thread::spawn(move || serve(1, server, &allow, None));
 
         let mut client_w = client.try_clone().unwrap();
         // No blank line, ever, and more than the cap allows.
@@ -705,7 +753,7 @@ mod tests {
     fn a_destination_that_is_not_a_host_and_port_is_a_bad_request() {
         let allow = Allowlist::parse(&["api.example.com"]).expect("allowlist");
         let (client, server) = UnixStream::pair().expect("socketpair");
-        let worker = std::thread::spawn(move || serve(1, server, &allow));
+        let worker = std::thread::spawn(move || serve(1, server, &allow, None));
 
         let mut client_w = client.try_clone().unwrap();
         client_w

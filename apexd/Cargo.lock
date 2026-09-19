@@ -133,6 +133,9 @@ dependencies = [
  "apex-remote-core",
  "apex-secret-core",
  "libc",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "serde",
  "serde_json",
 ]

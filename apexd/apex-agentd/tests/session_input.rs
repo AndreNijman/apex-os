@@ -125,6 +125,7 @@ impl Harness {
             capabilities: None,
             allow: None,
             trust_ca: None,
+            present: None,
             second_factor: None,
             cols: 80,
             rows: 24,
