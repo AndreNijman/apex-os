@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+#
+# Run the on-device suite: P1-060's first two criteria, which are claims about
+# what Android does with this code and which no JVM test can make.
+#
+# It stands up `apex-agentd` and `apex-remoted` FROM THIS WORKTREE in their own
+# XDG root, puts a line-JSON broker in front of `apex-remoted`'s control socket
+# so the phone can ask the real daemon for a real pairing offer, builds both
+# APKs, installs them, and runs the instrumentation.
+#
+# It NEVER touches the live runtime. Both daemons get their own
+# XDG_RUNTIME_DIR, XDG_STATE_HOME and APEX_AGENT_SCRATCH_ROOT, and both are
+# stopped by the pid this script started — nothing here looks a process up by
+# name, because `pkill apex-agentd` would take out the session its owner is
+# working in.
+#
+# Usage:
+#   android/tools/run-device-suite.sh [-s <adb serial>] [-c <test class>]
+#
+# A device is required and its absence is a FAILURE, not a skip: a suite that
+# reports success when it could not look is the defect this program has
+# shipped more than once.
+set -euo pipefail
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+android=$(dirname "$here")
+repo=$(dirname "$android")
+
+serial=${APEX_ADB_SERIAL:-}
+classes=""
+while getopts "s:c:" opt; do
+  case $opt in
+    s) serial=$OPTARG ;;
+    c) classes=$OPTARG ;;
+    *) echo "usage: $0 [-s serial] [-c class]" >&2; exit 2 ;;
+  esac
+done
+
+adb=${ADB:-${ANDROID_HOME:-/var/tmp/android-sdk}/platform-tools/adb}
+[ -x "$adb" ] || { echo "FAIL: no adb at $adb"; exit 1; }
+
+# A serial is not optional when more than one transport is attached. A phone on
+# wireless debugging is bound twice — by IP and by mDNS — so a bare `adb shell`
+# answers "more than one device" and every command in this script would fail
+# for a reason that has nothing to do with the code.
+if [ -z "$serial" ]; then
+  mapfile -t attached < <("$adb" devices | awk '/\tdevice$/ {print $1}')
+  if [ "${#attached[@]}" -ne 1 ]; then
+    echo "FAIL: ${#attached[@]} devices are attached (${attached[*]:-none}); pass -s <serial>"
+    exit 1
+  fi
+  serial=${attached[0]}
+fi
+A=("$adb" -s "$serial")
+
+state=${APEX_DEVICE_SUITE_DIR:-$(mktemp -d /var/tmp/apex-device-suite-XXXXXX)}
+mkdir -p "$state"
+agentd_pid=""; remoted_pid=""; broker_pid=""
+
+cleanup() {
+  local rc=$?
+  [ -n "$broker_pid" ] && kill "$broker_pid" 2>/dev/null || true
+  [ -n "$remoted_pid" ] && kill "$remoted_pid" 2>/dev/null || true
+  [ -n "$agentd_pid" ] && kill "$agentd_pid" 2>/dev/null || true
+  wait 2>/dev/null || true
+  exit $rc
+}
+trap cleanup EXIT
+
+bin=$repo/apexd/target/debug
+for b in apex-agentd apex-remoted; do
+  if [ ! -x "$bin/$b" ]; then
+    echo "FAIL: $bin/$b is not built. Run: (cd $repo/apexd && cargo build --workspace)"
+    exit 1
+  fi
+done
+
+# A binary older than the sources it was built from would make this suite run a
+# daemon that predates the code under test and report success for it. The Rust
+# end-to-end suite refuses the same thing for the same reason.
+newest_rs=$(find "$repo/apexd/apex-agentd/src" "$repo/apexd/apex-agent-core/src" \
+              "$repo/apexd/apex-remoted/src" "$repo/apexd/apex-remote-core/src" \
+              -name '*.rs' -newer "$bin/apex-remoted" -print -quit 2>/dev/null || true)
+if [ -n "$newest_rs" ]; then
+  echo "FAIL: $newest_rs is newer than $bin/apex-remoted. Rebuild first."
+  exit 1
+fi
+
+root=$state/daemons
+rm -rf "$root"; mkdir -p "$root"/run "$root"/state "$root"/scratch
+
+# A free port, taken by binding one and letting it go, so two runs on one
+# machine do not fight over a hardcoded number.
+port=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));print(s.getsockname()[1]);s.close()')
+brokerport=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));print(s.getsockname()[1]);s.close()')
+
+XDG_RUNTIME_DIR=$root/run XDG_STATE_HOME=$root/state \
+  APEX_AGENT_SCRATCH_ROOT=$root/scratch \
+  "$bin/apex-agentd" >"$root/agentd.log" 2>&1 &
+agentd_pid=$!
+
+start_remoted() {
+  XDG_RUNTIME_DIR=$root/run XDG_STATE_HOME=$root/state \
+    "$bin/apex-remoted" --port "$port" --allow-foreground >>"$root/remoted.log" 2>&1 &
+  remoted_pid=$!
+  echo "$remoted_pid" > "$root/remoted.pid"
+}
+start_remoted
+
+ready=0
+for _ in $(seq 1 80); do
+  if [ -S "$root/run/apex-agentd/control.sock" ] && [ -S "$root/run/apex-remoted/control.sock" ]; then
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then ready=1; break; fi
+  fi
+  sleep 0.25
+done
+[ "$ready" = 1 ] || { echo "FAIL: the daemons did not come up"; tail -20 "$root"/*.log; exit 1; }
+
+# The broker. `apex-remoted`'s control socket is a unix socket on this machine
+# and a phone can never touch one, so this forwards a line of JSON to it and
+# forwards the answer back. It decides NOTHING: every offer, every device list
+# and every revocation is the daemon's.
+#
+# `restart_remoted` is the one verb that is not a forward, and it is here
+# because "the desktop's service went away" cannot be asked of the service
+# itself. It restarts the daemon on the SAME port with the SAME state
+# directory, which is what a `systemctl --user restart` does.
+cat > "$root/broker.py" <<'PY'
+import json, os, socket, socketserver, subprocess, sys, time
+
+SOCK, PORT, ROOT, BIN = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+DPORT = sys.argv[5]
+
+def control(line):
+    s = socket.socket(socket.AF_UNIX); s.settimeout(60); s.connect(SOCK)
+    s.sendall((line + "\n").encode())
+    f = s.makefile("rb"); out = f.readline().decode().strip(); s.close()
+    return out
+
+def restart():
+    pidfile = os.path.join(ROOT, "remoted.pid")
+    with open(pidfile) as f:
+        old = int(f.read().strip())
+    try:
+        os.kill(old, 15)
+    except ProcessLookupError:
+        pass
+    for _ in range(80):
+        try:
+            os.kill(old, 0); time.sleep(0.05)
+        except ProcessLookupError:
+            break
+    env = dict(os.environ,
+               XDG_RUNTIME_DIR=os.path.join(ROOT, "run"),
+               XDG_STATE_HOME=os.path.join(ROOT, "state"))
+    log = open(os.path.join(ROOT, "remoted.log"), "ab")
+    p = subprocess.Popen([os.path.join(BIN, "apex-remoted"), "--port", DPORT,
+                          "--allow-foreground"], env=env, stdout=log, stderr=log)
+    with open(pidfile, "w") as f:
+        f.write(str(p.pid))
+    for _ in range(200):
+        try:
+            c = socket.create_connection(("127.0.0.1", int(DPORT)), 0.25); c.close()
+            return json.dumps({"reply": "ok", "pid": p.pid})
+        except OSError:
+            time.sleep(0.05)
+    return json.dumps({"reply": "error", "message": "apex-remoted did not come back"})
+
+class H(socketserver.StreamRequestHandler):
+    timeout = 120
+    def handle(self):
+        for raw in self.rfile:
+            line = raw.decode().strip()
+            if not line:
+                continue
+            try:
+                cmd = json.loads(line).get("cmd")
+            except Exception as e:
+                self.wfile.write((json.dumps({"reply": "error", "message": str(e)}) + "\n").encode())
+                continue
+            out = restart() if cmd == "restart_remoted" else control(line)
+            self.wfile.write((out + "\n").encode())
+            self.wfile.flush()
+
+class S(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+
+S(("0.0.0.0", PORT), H).serve_forever()
+PY
+python3 "$root/broker.py" "$root/run/apex-remoted/control.sock" "$brokerport" "$root" "$bin" "$port" \
+  >"$root/broker.log" 2>&1 &
+broker_pid=$!
+
+# Which of this machine's addresses the PHONE can actually reach. Measured from
+# the phone rather than guessed from `ip addr`: a laptop can hold half a dozen
+# addresses and the one a phone on the same Wi-Fi can dial is a fact about the
+# network, not about the interface list.
+lan=""
+for ip in $(python3 - <<'PY'
+import socket, subprocess
+out = subprocess.run(["ip", "-o", "addr", "show"], capture_output=True, text=True).stdout
+for line in out.splitlines():
+    parts = line.split()
+    if parts[2] in ("inet", "inet6"):
+        a = parts[3].split("/")[0]
+        if a.startswith(("127.", "::1", "fe80")):
+            continue
+        print(a)
+PY
+); do
+  case $ip in *:*) probe="[$ip]" ;; *) probe=$ip ;; esac
+  if "${A[@]}" shell "echo | toybox nc -w 2 $ip $brokerport >/dev/null 2>&1 && echo up" 2>/dev/null | grep -q up; then
+    lan="$ip:$port"; break
+  fi
+done
+[ -n "$lan" ] || { echo "FAIL: the phone could not reach this machine on any address"; exit 1; }
+echo "desktop reachable from the phone at $lan (broker on $brokerport)"
+
+# Build and install. Both APKs, every run: an instrumentation APK from a
+# previous build is the same stale-binary defect the Rust suite refuses.
+export ANDROID_HOME=${ANDROID_HOME:-/var/tmp/android-sdk}
+( cd "$android" && ./gradlew --console=plain :app:assembleDebug :app:assembleDebugAndroidTest )
+"${A[@]}" install -r "$android/app/build/outputs/apk/debug/app-debug.apk" >/dev/null
+"${A[@]}" install -r "$android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk" >/dev/null
+
+brokeraddr=$(echo "$lan" | sed "s/:[0-9]*\$/:$brokerport/")
+args=(-e lan "$lan" -e broker "$brokeraddr")
+[ -n "$classes" ] && args+=(-e class "$classes")
+
+out=$state/instrument.txt
+set +e
+"${A[@]}" shell am instrument -w -r "${args[@]}" \
+  com.apexos.remote.test/androidx.test.runner.AndroidJUnitRunner | tee "$out"
+set -e
+
+# `am instrument` exits 0 whatever happens inside it, so the verdict is read out
+# of the stream. `OK (n tests)` and nothing else is a pass; anything with a
+# FAILURES!! line, and a run that produced no verdict at all, are failures.
+if grep -q '^FAILURES!!' "$out" || grep -q 'INSTRUMENTATION_RESULT: shortMsg' "$out"; then
+  echo "DEVICE SUITE: FAILED"; exit 1
+fi
+if ! grep -qE '^OK \([0-9]+ tests?\)' "$out"; then
+  echo "DEVICE SUITE: produced no verdict — treating that as a failure"; exit 1
+fi
+count=$(grep -oE '^OK \([0-9]+ tests?\)' "$out" | grep -oE '[0-9]+')
+echo "DEVICE SUITE: $count tests passed on $serial"
