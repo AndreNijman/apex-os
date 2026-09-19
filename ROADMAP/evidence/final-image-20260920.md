@@ -201,11 +201,25 @@ one probe script run three ways:
 | interactive `sudo apex install` | `unconfined_t` | `user_tmp_t` | **works** |
 
 `restorecon` execs `/usr/bin/setfiles` and transitions to `setfiles_t`, which
-policy does not let read an `initrc_tmp_t` file. **No path APEX itself takes hits
-this** — both real callers are in the working rows, and that was confirmed on
-the machine and not inferred (§2.6). It is a live fragility all the same: any
-future caller that reaches `apex-pkg` through a shell inside a unit loses the
-relabel, and the install still exits 0.
+policy does not let read an `initrc_tmp_t` file.
+
+**No path APEX itself takes hits this, and that is enumerated rather than
+asserted.** Every caller of the engine in the tree was read:
+
+| caller | how it execs | domain |
+|---|---|---|
+| `apex-sysext-rebuild.service` | `ExecStart=/usr/libexec/apex-pkg rebuild --if-needed` | `unconfined_service_t` — **measured** (§2.6) |
+| `apex install/remove/upgrade` etc. | `Command::new(PKG_ENGINE).args(args)`, `apexd/apex/src/ops.rs:563` — absolute path, no shell | the caller's own domain; a terminal user is `unconfined_t` — **measured** (§2.2) |
+| `apex recover`'s `rebuild-package-extension` step | `argv: &["/usr/libexec/apex-pkg", "rebuild", "--if-needed"]`, `apexd/apexd-core/src/recover.rs:211` — an argv array, no shell | `apexd` itself runs `system_u:system_r:unconfined_service_t:s0`, read off `ps -eo label` on katana |
+| `apex blueprint`/`apply` | `run(crate::ops::PKG_ENGINE, &args)`, `apexd/apex/src/blueprint.rs:1113` | as above |
+
+`apex-boot-health`, `apex-env` and `apex-flatpak-preinstall.service` name
+`apex-pkg` only in **comments** and never exec it; `grep -rn 'sh", "-c'` over
+both Rust call sites finds nothing. The only shell-wrapped invocations anywhere
+are in CI, inside a container, where `/etc` is not a real machine's.
+
+It is a live fragility all the same: any future caller that reaches `apex-pkg`
+through a shell inside a unit loses the relabel, and the install still exits 0.
 
 **A one-line hardening exists and was measured rather than guessed:** the same
 denied context succeeds when the list arrives on **stdin** —
@@ -241,7 +255,32 @@ back at level 3 on its own.
 
 `sudo apex remove nginx cronie vim-enhanced` put katana back to its original
 eight-package request. 15 paths in the window, **0 mismatched** (`ld.so.cache`
-again, and again only in the user field).
+again, and again only in the user field). `etc.list` is back to the **same 11
+entries** it held at baseline, and every one of them matches policy.
+
+A ctime diff cannot see a deletion, so the removals were checked by hand rather
+than assumed. Every file gone: `/etc/crontab`, `/etc/cron.deny`,
+`/etc/anacrontab`, `/etc/vimrc`, `/etc/profile.d/vim.sh`, `/etc/sysconfig/crond`,
+`/etc/pam.d/crond`, `/etc/logrotate.d/nginx`. **Nothing image-owned was taken
+with them** — the 26-file class was spot-checked and intact
+(`/etc/fonts/fonts.conf`, `/etc/ld.so.conf`, `/etc/krb5.conf`,
+`/etc/pki/tls/openssl.cnf`, `/etc/rpc`, `/etc/pulse/client.conf`,
+`/etc/asound.conf`, `/etc/profile.d/steam.sh`).
+
+**The removal pass takes files and leaves directories.** `/etc/nginx` (plus
+`conf.d` and `default.d`), `/etc/cron.d`, `/etc/cron.daily`, `/etc/cron.hourly`
+and `/etc/systemd/system/nginx.service.d` were left behind empty, owned by no
+package. `/etc/nginx/*` and the nginx drop-in dir were correctly labelled; the
+three cron directories were **`etc_t` where policy wants `system_cron_spool_t`
+and `bin_t`** — and that is not a hole in the fix, it is the fix declining
+correctly. Those three were created by the **broken** first install of §2.4,
+whose relabel never ran; every later install then found them already present and
+left them alone, because `install_etc` records a directory only when *it*
+creates one. Which is the right rule — but it means a directory created by a run
+whose relabel failed stays wrong for ever, and no later install self-heals it.
+Worth knowing, given the self-heal is otherwise the machine's safety net. All
+seven were `rmdir`'d as this unit's own litter, after `rpm -qf` confirmed no
+package owned any of them.
 
 The third question the container could not answer — *what type does the source
 tree actually carry here* — reads **`var_lib_t`**, not the `rpm_var_lib_t` the
@@ -316,7 +355,11 @@ Error: the running kernel's BTF has malformed scx kfunc prototype(s): …
 **No sched-ext scheduler can load on this image at all**, for a kernel-build
 reason that has nothing to do with apexd: APEX's kernel BTF was generated with
 `pahole < 1.26`, so every `scx_*` scheduler fails with
-`func_proto incompatible with vmlinux`. `nr_rejected` stays `0` — the kernel
+`func_proto incompatible with vmlinux`. The kernel is
+**`7.2.6-cachyos1.fc43.x86_64`** — `rpm -q kernel` says *not installed*, so it
+is the CachyOS kernel this repo bakes from `kernel/**` rather than a Fedora one,
+and that is where the BTF is generated and where a follow-up item has to land.
+`scx-scheds-1.1.3-3.fc43` is the userspace side and it is not at fault. `nr_rejected` stays `0` — the kernel
 never sees an attach to reject; the BPF program will not load. A separate item,
 and it is what `SCX_SETTLE` would have been blamed for: the 2 s budget is **not**
 the cause. `scx_state` never read `unknown` and `state` never read `enabling`,
@@ -408,7 +451,10 @@ the exact class of defect this unit was sent to look for.
 * `systemctl --failed` empty. `/var` 51 G free. All transient probe units
   collected, scratch files removed.
 * `/etc` is clean and, unlike last round, **nothing was `restorecon`ed by hand
-  to make it so** — the last thing to touch it was `apex remove`.
+  to make it so** — the last thing to touch it was `apex remove`. Final reading:
+  `etc.list` 11 tracked paths, **0 mismatched**; `/etc/.pwd.lock`
+  `passwd_file_t`; `DynamicUser` probe `result: success`; `systemctl --failed`
+  empty.
 
 ## 5. What this does not say
 
