@@ -848,3 +848,299 @@ pub fn plan_sysfs_exit(prior: &SysfsGpuPrior) -> Vec<Action> {
     }
     actions
 }
+
+// ─── Which GPU and which screen a full-screen session should use ─────────────
+//
+// ## The defect this exists for
+//
+// Measured on katana, 2026-09-19 (`ROADMAP/evidence/katana-qualification-20260919.md`
+// §6.1): `apex-gaming-session` passed gamescope no device preference, gamescope
+// took its default — the first DRM node — and on a hybrid laptop that is the
+// Intel iGPU. It opened `card1`, saw only `eDP-1`, and the RTX 3070 driving the
+// user's only external monitor through `card2` was never touched. Gaming Mode
+// came up on the laptop panel at 144 Hz instead of the monitor at 240 Hz, and
+// then died on `drmModeAddFB2WithModifiers`.
+//
+// Also measured there, and the reason this is not solved with an environment
+// variable: **gamescope ignores `WLR_DRM_DEVICES`.** Its DRM backend is its own,
+// not wlroots', so the variable that steers labwc steers nothing here. The flag
+// that moves both the Vulkan device AND the DRM node is `--prefer-vk-device`,
+// and `10de:249d` was measured to move gamescope onto `card2` and `HDMI-A-1`.
+//
+// ## The rule, and why it is this one
+//
+// **The output decides the card, not the other way round.**
+//
+// The tempting rule is "use the discrete GPU" — and it is wrong. A discrete GPU
+// with no connector attached is a GPU with nothing to display on; pinning
+// gamescope to it produces a session with no screen, which is a worse failure
+// than the one being fixed. What the user asked for is a screen ("the gaming
+// modes should properly boot and on the monitor"), so a screen is what gets
+// chosen first, and its card follows from it.
+//
+// Ranking of connected connectors:
+//
+//   1. **external before internal.** `eDP-*`, `LVDS-*` and `DSI-*` are the panel
+//      built into a laptop; everything else is a cable the user plugged in. A
+//      docked laptop with the lid shut still reports `eDP-1` connected, so
+//      "external first" is also what makes the dock case work.
+//   2. **by connector name**, so the answer is deterministic on a machine with
+//      two monitors. Which of two external monitors is "the" gaming monitor is
+//      not knowable from sysfs; `APEX_GAMESCOPE_ARGS` overrides it, and the
+//      session says out loud that a choice was made.
+//
+// This rule needs no special case for a single-GPU machine or an all-AMD one:
+// there, every connector belongs to the only card, so the same code emits that
+// card's PCI id — which is what gamescope would have picked anyway — plus a
+// `--prefer-output` that still moves the session onto the monitor rather than
+// the panel. One rule, no branches on vendor, and nothing hardcoded about
+// `10de:249d`.
+//
+// ## Failing loudly
+//
+// Every path that cannot produce an answer records [`DisplayChoice::problem`]
+// rather than quietly emitting nothing: a silent fallback to gamescope's
+// default IS the defect being fixed here. `Permission denied` on a connector's
+// `status` is a refusal, not "disconnected", and is reported as such.
+
+/// One DRM connector, as `/sys/class/drm/card2-HDMI-A-1` describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Connector {
+    /// The card the connector hangs off: `card2`.
+    pub card: String,
+    /// The connector itself, in the name gamescope and `wlr-randr` use:
+    /// `HDMI-A-1`. This is the sysfs node name minus the `cardN-` prefix.
+    pub name: String,
+    /// `status` read back as `connected`.
+    pub connected: bool,
+    /// `status` could not be read at all — a refusal, which is neither
+    /// connected nor disconnected. Kept separate so it cannot be laundered
+    /// into "no monitor here".
+    pub unreadable: Option<String>,
+    /// A panel built into the machine rather than a cable: `eDP`, `LVDS`, `DSI`.
+    pub internal: bool,
+}
+
+/// Whether a connector name is the machine's own built-in panel.
+///
+/// The kernel's connector type names, from `drm_connector_enum_list` in
+/// `drivers/gpu/drm/drm_connector.c`. Only three of them are soldered to the
+/// chassis; everything else (HDMI-A, DP, DVI-D, VGA, Writeback…) is a port.
+pub fn is_internal_connector(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.starts_with("EDP-") || upper.starts_with("LVDS-") || upper.starts_with("DSI-")
+}
+
+/// Every DRM connector under `<sys>/class/drm`, sorted by card then name.
+///
+/// A connector node is `cardN-<NAME>`; the card nodes themselves (`cardN`, no
+/// dash) are skipped, and so are the render nodes (`renderD128`).
+pub fn connectors(sys: &Path) -> Vec<Connector> {
+    let mut out: Vec<Connector> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(sys.join("class/drm")) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let node = entry.file_name().to_string_lossy().to_string();
+        if !node.starts_with("card") {
+            continue;
+        }
+        let Some((card, name)) = node.split_once('-') else {
+            continue;
+        };
+        if !card["card".len()..].chars().all(|c| c.is_ascii_digit()) || name.is_empty() {
+            continue;
+        }
+        let status_path = entry.path().join("status");
+        let (connected, unreadable) = match std::fs::read_to_string(&status_path) {
+            Ok(s) => (s.trim().eq_ignore_ascii_case("connected"), None),
+            // A connector with no `status` file is not a refusal: sysfs always
+            // writes one for a real connector, so its absence means this is not
+            // the kind of node being looked for.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (false, None),
+            Err(e) => (false, Some(format!("{}: {e}", status_path.display()))),
+        };
+        out.push(Connector {
+            card: card.to_string(),
+            name: name.to_string(),
+            connected,
+            unreadable,
+            internal: is_internal_connector(name),
+        });
+    }
+    out.sort_by(|a, b| a.card.cmp(&b.card).then_with(|| a.name.cmp(&b.name)));
+    out
+}
+
+/// The PCI `vendor:device` pair gamescope's `--prefer-vk-device` matches on,
+/// as lowercase hex with no `0x`: `10de:249d`.
+///
+/// `None` when the DRM node has no PCI device behind it. That is a real case —
+/// a SoC display controller, `vkms`, a virtio node — and it means the flag
+/// cannot be passed rather than that the machine is broken.
+pub fn card_pci_id(sys: &Path, card: &str) -> Option<String> {
+    let dev = sys.join("class/drm").join(card).join("device");
+    let strip = |s: String| {
+        let t = s.trim().to_ascii_lowercase();
+        t.strip_prefix("0x").map(str::to_string).unwrap_or(t)
+    };
+    let vendor = read_trim(&dev.join("vendor")).map(strip)?;
+    let device = read_trim(&dev.join("device")).map(strip)?;
+    if vendor.is_empty() || device.is_empty() {
+        return None;
+    }
+    Some(format!("{vendor}:{device}"))
+}
+
+/// Which screen a full-screen session should open, and on which GPU.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DisplayChoice {
+    /// The connector to ask for: `HDMI-A-1`.
+    pub output: Option<String>,
+    /// The card that owns it: `card2`.
+    pub card: Option<String>,
+    /// That card's `vendor:device`: `10de:249d`.
+    pub pci_id: Option<String>,
+    /// That card's vendor, for the log line: `NVIDIA`.
+    pub vendor: Option<String>,
+    /// How many cards carry a connected connector. `> 1` is the hybrid case
+    /// this whole module exists for.
+    pub cards_with_displays: usize,
+    /// One line saying what was chosen and why, always populated.
+    pub why: String,
+    /// Set when no complete answer could be produced. Never `Some` and silent:
+    /// the caller must print it.
+    pub problem: Option<String>,
+}
+
+impl DisplayChoice {
+    /// The gamescope arguments this choice implies, ready to splice into a
+    /// command line. Empty when nothing could be chosen.
+    ///
+    /// `--prefer-vk-device` comes first because it is the one that was measured
+    /// to move the DRM node as well as the Vulkan device; `--prefer-output`
+    /// alone cannot reach a connector on a card gamescope never opened.
+    pub fn gamescope_args(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(id) = &self.pci_id {
+            out.push("--prefer-vk-device".to_string());
+            out.push(id.clone());
+        }
+        if let Some(name) = &self.output {
+            out.push("--prefer-output".to_string());
+            out.push(name.clone());
+        }
+        out
+    }
+
+    /// Whether this is a complete answer — a screen AND the card to drive it
+    /// with. A screen with no PCI id is deliberately not complete: on a hybrid
+    /// machine that is exactly the case where gamescope would open the wrong
+    /// node.
+    pub fn is_complete(&self) -> bool {
+        self.output.is_some() && self.pci_id.is_some()
+    }
+}
+
+/// Choose the screen and GPU for a full-screen session, from sysfs alone.
+///
+/// Reads only; spawns nothing. See this section's header for the rule and the
+/// argument for it.
+pub fn choose_display(sys: &Path) -> DisplayChoice {
+    let all = connectors(sys);
+    let mut choice = DisplayChoice::default();
+
+    if all.is_empty() {
+        choice.why = format!("{} lists no DRM connectors", sys.join("class/drm").display());
+        choice.problem = Some(
+            "no DRM connectors are visible, so no screen could be chosen; gamescope will \
+             take its own default, which on a hybrid machine is usually the integrated GPU"
+                .to_string(),
+        );
+        return choice;
+    }
+
+    let refused: Vec<&Connector> = all.iter().filter(|c| c.unreadable.is_some()).collect();
+    let connected: Vec<&Connector> = all.iter().filter(|c| c.connected).collect();
+
+    let mut cards: Vec<&str> = connected.iter().map(|c| c.card.as_str()).collect();
+    cards.sort_unstable();
+    cards.dedup();
+    choice.cards_with_displays = cards.len();
+
+    if connected.is_empty() {
+        choice.why = format!(
+            "none of the {} DRM connectors reports `connected`",
+            all.len()
+        );
+        choice.problem = Some(if refused.is_empty() {
+            "no display is connected, so no screen could be chosen; gamescope will take its \
+             own default"
+                .to_string()
+        } else {
+            format!(
+                "no display reports `connected`, but {} connector status file(s) could not \
+                 be read, so this is a refusal and not an answer: {}",
+                refused.len(),
+                refused
+                    .iter()
+                    .filter_map(|c| c.unreadable.clone())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        });
+        return choice;
+    }
+
+    // Rule, in one expression: external before internal, then by name.
+    let pick = connected
+        .iter()
+        .min_by(|a, b| {
+            (a.internal, a.name.as_str())
+                .cmp(&(b.internal, b.name.as_str()))
+        })
+        .copied()
+        .expect("connected is non-empty");
+
+    let pci = card_pci_id(sys, &pick.card);
+    let vendor = read_trim(&sys.join("class/drm").join(&pick.card).join("device/vendor"))
+        .map(|id| GpuVendor::from_pci_id(&id).label().to_string());
+
+    let kind = if pick.internal {
+        "the built-in panel"
+    } else {
+        "an external display"
+    };
+    choice.why = format!(
+        "{} on {} is {}; {} connected output(s) across {} card(s)",
+        pick.name,
+        pick.card,
+        kind,
+        connected.len(),
+        choice.cards_with_displays,
+    );
+    choice.output = Some(pick.name.clone());
+    choice.card = Some(pick.card.clone());
+    choice.vendor = vendor;
+    choice.pci_id = pci;
+
+    if choice.pci_id.is_none() {
+        choice.problem = Some(format!(
+            "{} has no PCI vendor/device id under sysfs, so gamescope cannot be pinned to it \
+             with --prefer-vk-device; it may still open a different card",
+            pick.card
+        ));
+    } else if !refused.is_empty() {
+        choice.problem = Some(format!(
+            "{} connector status file(s) could not be read, so a better screen may exist that \
+             this could not see: {}",
+            refused.len(),
+            refused
+                .iter()
+                .filter_map(|c| c.unreadable.clone())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    choice
+}
