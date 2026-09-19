@@ -105,9 +105,16 @@ fun MachinesScreen(
             state.failure?.let { Notice(it, alarming = true, onDismiss = onDismiss) }
             state.message?.let { Notice(it, alarming = false, onDismiss = onDismiss) }
             state.connection?.let {
+                // The path and its disclosure, not just the round trip.
+                // `docs/remote.md`: "A relay path prints its disclosure — what
+                // the relay can and cannot see — rather than leaving the reader
+                // to assume." A person who has walked out of the house is owed
+                // the fact that a third party is now on the path, at the moment
+                // it becomes true and not in a settings screen.
                 Notice(
                     "Connected to ${it.machine}" +
-                        (it.roundTripMs?.let { ms -> " — round trip ${ms}ms" } ?: ""),
+                        (it.roundTripMs?.let { ms -> " — round trip ${ms}ms" } ?: "") +
+                        "\n${it.path.disclosure().replaceFirstChar { c -> c.uppercase() }}.",
                     alarming = false,
                     onDismiss = onDismiss,
                 )

@@ -33,6 +33,7 @@ import com.apexos.remote.core.PairingOffer
 import com.apexos.remote.core.Settings
 import com.apexos.remote.data.MachineRepository
 import com.apexos.remote.pairing.GatedBox
+import com.apexos.remote.core.Rendezvous
 import com.apexos.remote.pairing.PairingService
 import com.apexos.remote.security.AppLock
 import com.apexos.remote.security.AppLockRefused
@@ -98,7 +99,20 @@ data class UiState(
  * and the round trip came back on a frame that crossed the same path
  * everything else will.
  */
-data class ConnectionReport(val machine: String, val roundTripMs: Long?)
+data class ConnectionReport(
+    val machine: String,
+    val roundTripMs: Long?,
+    /**
+     * Which way the connection went, so the user can be told.
+     *
+     * `docs/remote.md` requires a relay path to print its disclosure "rather
+     * than leaving the reader to assume", and this is the phone's equivalent of
+     * the `path` column `apex remote status` prints. It is here, on a report
+     * that exists to be displayed, and not on the session — see
+     * `PairingService.open`.
+     */
+    val path: Rendezvous.Path,
+)
 
 /** The Agent Center's state for one machine. */
 data class AgentUiState(
@@ -1271,8 +1285,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         try {
             val identity = openIdentity(activity, machine)
             val report = withContext(Dispatchers.IO) {
-                pairing.connect(machine, identity).use { session ->
-                    ConnectionReport(session.machine, session.measureRoundTrip())
+                val connected = pairing.open(machine, identity)
+                connected.session.use { session ->
+                    ConnectionReport(session.machine, session.measureRoundTrip(), connected.path)
                 }
             }
             _state.update { it.copy(busy = null, connection = report, message = null) }
