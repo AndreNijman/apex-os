@@ -38,11 +38,37 @@ Two decisions already read out of the `changes` job:
   image run said the same. Consequence: ~45 min longer, and katana's pull is
   the whole ~6.3 GB rather than tens of MiB.
 
-## Expected tag
+## THE ARTIFACT — run 35469530380, `success` at 2026-09-19T22:29Z, 1 h 20 m 01 s
 
-Per-SHA only — the workflow writes no floating tag off a `task/` branch, so no
-machine but katana can see this image and **the L16 cannot pick it up by
-accident**. Take the tag from the `image` job's log; do not construct it.
+```
+ghcr.io/andrenijman/apex-os:apex-661a9d80d2239d848676d97e1e633d3f7325e853
+  digest sha256:61f7935c259fa90362c09158fd355f32230e0ab21925340c3c2acf4f879bffcc
+```
+
+`:daily-661a9d80…` resolves to the same digest. Read out of the `image` job's
+"Promote to every published tag" step, not constructed.
+
+Every job's STEPS were read, not its conclusion: `core` 12/12 real steps
+success, `base` 13/13, `image` 17/17. `installer-iso` and `qcow2` are
+**skipped** because their dispatch inputs default false — the documented
+"skipped counts as success" trap, checked rather than assumed. Only the
+**daily** flavor was built (the dispatch default), which is the flavor katana
+boots and the same shape as `apex-97c9e8f2`.
+
+Four lines from the `image` job worth keeping:
+
+```
+modules: 14 out-of-tree, all signed by "APEX-OS Secure Boot key (andre)"
+payload split OK: drivers in, gaming userspace out, glvnd intact
+SBOM packages: 9830   file rows: 7049
+signature and SBOM attestation both verify against
+  .../build-image.yml@refs/heads/task/final-image
+not publishing from refs/heads/task/final-image: per-SHA tags written
+```
+
+That last line is the one that matters for the boundary: **no floating tag
+moved**, so the L16 cannot pick this image up through `apex update` by
+accident. Only katana can see it, and only because it was pointed at it.
 
 ## katana baseline, taken 2026-09-20 ~05:10 AWST, BEFORE the switch
 
