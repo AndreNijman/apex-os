@@ -85,6 +85,10 @@ Anything you do must leave those where they are or better.
 
 ## NEXT
 
+**Run the FULL device suite** (expect **35** = 32 + 3) and the rest of the
+gates, then `set-status.py` on P1-060 / P1-052, then report. Steps (a)–(g) are
+all done and pushed. Old NEXT follows.
+
 **Step (d): `--relay` through the suite.** `android/tools/run-device-suite.sh`
 `start_remoted()` (line ~140) AND the embedded `broker.py`'s `restart_remoted`
 (line ~213) both spawn `apex-remoted` and both need
@@ -144,6 +148,15 @@ Everything else on the Android side is already written and was waiting for this:
   because the parity assertion looked for the literal in the Rust source and
   compared it to nothing. Both gates fixed and re-mutated. **Mutate your own
   gates on this unit; two of eight were blind.**
+- **The deployed relay works end to end, measured with an independent client.**
+  A hand-rolled Python guest (`scratch-p1-052-android/guest.py`) dialled
+  `wss://apex-relay.andrenijman.com` at the rendezvous `apex-remoted` was
+  holding: `HTTP/1.1 101`, accept value matches, first frame
+  `{"relay":"paired"}`, and a hello byte it wrote crossed the relay and reached
+  the daemon (`connection from 127.0.0.1 ended: failed to fill whole buffer` —
+  the splice working, then the handshake the probe never finished).
+- **`am instrument -e relay ""` is not an empty argument.** `am` prints its
+  usage and the run produces NO verdict at all. Omit the flag instead.
 - **`SSLSocket` does not verify the hostname by default.** Chain yes, name no,
   unless `sslParameters.endpointIdentificationAlgorithm = "HTTPS"` is set
   before `startHandshake()`. Without it the rendezvous id goes to whoever
@@ -224,6 +237,7 @@ from the Rust one:
 | `125e1d91` | `feat(android)` the RFC 6455 client the relay leg has never had — `:core` codec + `RelayLink` stream adapter |
 | `f8b6fd7d` | `test(android)` two of the relay gates inspected nothing, found by mutation. **36 tests, 0 failures** |
 | `f41667a6` | `feat(android)` dial the relay, and delete the apology at `PairingService:108`. **7 dialler tests, 0 failures** |
+| `d0d2f857` | `test(android)` the relay leg from a real phone through the real deployed relay. **OK (3 tests)**; mutated with `APEX_DEVICE_SUITE_RELAY=` → all 3 fail naming the argument |
 | `b6758c78` | `feat(android)` tell the person which path they got, in the desktop's own words — `ConnectionReport.path`, the banner, `Help.kt`, and a disclosure-parity gate that reads `rendezvous.rs`. **`:core` 496/0 (was 459), `:app` 51/0 (was 44), help-prose TOTAL 0** |
 
 ## IN PROGRESS

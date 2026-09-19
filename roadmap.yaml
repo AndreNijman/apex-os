@@ -4980,29 +4980,35 @@ tasks:
     built there. THE IMPORT IS NOT A HARD IMPORT, and that is measured too: 17 suites load the shipped shell.qml,
     several of them full quickshell bring-ups, and an unresolvable import makes the importing file unloadable -
     shell.qml is the whole desktop. Qt.createComponent() plus a named warning means a missing module gives an
-    English desktop rather than no desktop. PROVED AS SIX REAL PODMAN BUILDS against the local core digest with
-    the apex-shell worktree standing in for the clone: as written rc 0 'proved to load: 29776 bytes'; qmldir loses
-    its plugin line rc 1; bootstrap absent with source present rc 1; source absent with bootstrap present rc 1;
-    both absent (an older ref) rc 0 and skipped by name; launcher setting no QML_IMPORT_PATH rc 1. The load proof
-    resolves the import in a real QML engine and then requires the plugin's own registerTypes line - qml -platform
-    offscreen and NOT quickshell, because the real quickshell loads the module correctly and then does not exit
-    (rc 124 after 60s on the SUCCESS path), which would have been an assertion that could never pass.
-    tests/test-containerfile-order.sh caught the one defect the mini-build could not: the launcher assertion was
-    first written 500 layers above the COPY that creates the launcher. Gates: check-containerfile-assertions.sh
-    195 checked / 0 failed, test-containerfile-order.sh 24/0. apex-shell side: run-i18n-test.sh 24 passed / 0
-    failed / 0 skipped (was 23/0/0) with section 6 now an ok, and its PREDICATE replaced rather than its verdict -
-    the old grep of src/ for QTranslator answered NO about a shell that reaches a translator perfectly well, and
-    would have answered YES for a C++ file somebody moved into src/. Three controls, one per read, all red with
-    distinct messages. mutate-i18n.sh 14 applied / 14 CAUGHT / 0 SURVIVED with new mutants I1, I2, I3. shellcheck
-    clean, check-suites-run-in-ci.sh 69/69 reachable, ci.yml re-parses. WHAT IS STILL NOT TRUE: no .qm is compiled
-    into the image for ANY language, so QTranslator::load() finds nothing and all 186 marked strings come back
-    English. The plugin says so by name through qInfo(), which on Fedora goes to the journal. Compiling the
-    catalogue needs lrelease (qt6-linguist, 1 MiB download / 4 MiB installed / 3 packages) from a DISCARDED
-    builder stage, never a base-tier dnf. And translations/apex-shell_de.ts still carries German for 5 of the 186.
-    No CI run was dispatched on the apex-shell tip before the session deadline. LANDED 2026-09-19 (round 33):
-    task/p2-b-round33 tip df17c34 is on apex-shell roadmap/v2.2 as merge 4eea9fb (9df72cf -> 4eea9fb, --no-ff,
-    1,516 insertions over 10 files, five of them new). Verified ON THE MERGED TIP rather than trusted from the
-    branch: check-no-conflict-markers.sh PASS, ci.yml re-parses as YAML, all five touched suites bash -n clean,
+    English desktop rather than no desktop. RUN END TO END INSIDE THE IMAGE, in the real /usr/bin/quickshell
+    offscreen, with a real ShellRoot carrying shell.qml's new block verbatim: with the module on QML_IMPORT_PATH
+    the shell printed APEXI18N registerTypes, initializeEngine and 'no catalogue for en_US', then Configuration
+    Loaded; with no QML_IMPORT_PATH at all it printed ONE named warning ('the Apex.I18n module did not load, so
+    the shell stays in English - module "Apex.I18n" is not installed') and then Configuration Loaded ANYWAY. The
+    second row is the point: the shell still comes up, where a hard import would have left the machine with no
+    desktop. PROVED AS SIX REAL PODMAN BUILDS against the local core digest with the apex-shell worktree standing
+    in for the clone: as written rc 0 'proved to load: 29776 bytes'; qmldir loses its plugin line rc 1; bootstrap
+    absent with source present rc 1; source absent with bootstrap present rc 1; both absent (an older ref) rc 0
+    and skipped by name; launcher setting no QML_IMPORT_PATH rc 1. The load proof resolves the import in a real
+    QML engine and then requires the plugin's own registerTypes line - qml -platform offscreen and NOT quickshell,
+    because the real quickshell loads the module correctly and then does not exit (rc 124 after 60s on the SUCCESS
+    path), which would have been an assertion that could never pass. tests/test-containerfile-order.sh caught the
+    one defect the mini-build could not: the launcher assertion was first written 500 layers above the COPY that
+    creates the launcher. Gates: check-containerfile-assertions.sh 195 checked / 0 failed,
+    test-containerfile-order.sh 24/0. apex-shell side: run-i18n-test.sh 24 passed / 0 failed / 0 skipped (was
+    23/0/0) with section 6 now an ok, and its PREDICATE replaced rather than its verdict - the old grep of src/
+    for QTranslator answered NO about a shell that reaches a translator perfectly well, and would have answered
+    YES for a C++ file somebody moved into src/. Three controls, one per read, all red with distinct messages.
+    mutate-i18n.sh 14 applied / 14 CAUGHT / 0 SURVIVED with new mutants I1, I2, I3. shellcheck clean,
+    check-suites-run-in-ci.sh 69/69 reachable, ci.yml re-parses. WHAT IS STILL NOT TRUE: no .qm is compiled into
+    the image for ANY language, so QTranslator::load() finds nothing and all 186 marked strings come back English.
+    The plugin says so by name through qInfo(), which on Fedora goes to the journal. Compiling the catalogue needs
+    lrelease (qt6-linguist, 1 MiB download / 4 MiB installed / 3 packages) from a DISCARDED builder stage, never a
+    base-tier dnf. And translations/apex-shell_de.ts still carries German for 5 of the 186. No CI run was
+    dispatched on the apex-shell tip before the session deadline. LANDED 2026-09-19 (round 33): task/p2-b-round33
+    tip df17c34 is on apex-shell roadmap/v2.2 as merge 4eea9fb (9df72cf -> 4eea9fb, --no-ff, 1,516 insertions over
+    10 files, five of them new). Verified ON THE MERGED TIP rather than trusted from the branch:
+    check-no-conflict-markers.sh PASS, ci.yml re-parses as YAML, all five touched suites bash -n clean,
     check-agent-help.sh 25 passed / 0 failed with 8/8 self-mutants, and run-i18n-test.sh 23 passed / 0 failed / 0
     skipped with the 186-string pin holding. Pushed with --force-with-lease. apex-os got NO commits this round and
     that was a decision, not an omission: shipping the plugin is apex-os work with a real image cost nobody has

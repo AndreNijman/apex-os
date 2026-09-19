@@ -320,6 +320,22 @@ the first round on this unit where the apex-os half is the substance.**
   **195 checked / 0 failed**, `test-containerfile-order.sh` **24 passed / 0
   failed**, `shellcheck -S warning` and `bash -n` clean on the launcher.
 
+**THE WHOLE THING RUN END TO END INSIDE THE IMAGE, in the real
+`/usr/bin/quickshell`, with a real `ShellRoot` carrying `shell.qml`'s new block
+verbatim and the real `src/i18n/I18nBootstrap.qml` at its real relative path.**
+Both directions, one container, `QT_QPA_PLATFORM=offscreen`:
+
+| | what the shell printed |
+|---|---|
+| module on `QML_IMPORT_PATH` (as shipped) | `APEXI18N: registerTypes` → `initializeEngine` → `no catalogue for en_US in /usr/share/apex-shell/translations`, then **Configuration Loaded** |
+| no `QML_IMPORT_PATH` at all | one `qml:` WARN — *"APEX i18n: the Apex.I18n module did not load, so the shell stays in English — … module "Apex.I18n" is not installed"* — then **Configuration Loaded** |
+
+The second row is the whole reason the import is not a hard one, measured
+rather than argued: **the shell still comes up.** A hard import would have
+printed "Failed to load configuration" and left the machine with no desktop,
+which is what the five negative builds above were also protecting against from
+the image side.
+
 **WHAT THIS DOES NOT CLAIM, and it is the sentence that matters: no user sees a
 translated string yet.** The image ships no compiled `.qm` for any language, so
 `QTranslator::load()` finds nothing and every one of the 186 marked strings

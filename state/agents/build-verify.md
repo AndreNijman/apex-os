@@ -60,7 +60,10 @@ never pass `check-labwc-keybinds`**, and that is what ate the last agent's build
 `core` and `base` all **succeeded** — so `check-labwc-keybinds` passes on the
 runner. The run failed only in the `image` job at *Generate and attest the
 SBOM*, and the log says `The runner has received a shutdown signal … The
-operation was canceled`. That is **GitHub infrastructure, not APEX**. The
+operation was canceled`. ~~That is **GitHub infrastructure, not APEX**.~~
+**SUPERSEDED — see FOUND. Round 33 reproduced it on 35433705393 and syft was
+OOM-killed (exit 137) after 209 s. It is APEX's image size against a 16 GB
+runner, not a GitHub reclaim. Do not restate the struck-through sentence.** The
 per-SHA image tag was pushed before it died: `ghcr.io/andrenijman/apex-os:
 apex-bd0c41ceb90ef9e7ed67fd938dbf94fcca7f260a` exists, digest
 `sha256:aae6e5b9…`, created 03:15:08Z.
@@ -73,30 +76,16 @@ machine tracks.
 
 ## NEXT
 
-**Now:** watch two things, neither of which needs any more decisions.
+**Nothing is outstanding in this unit.** Both verifications finished; the branch
+is pushed. Two things for the ORCHESTRATOR, in order:
 
-1. **Local build** — transient user unit `apex-build-verify-2` is RUNNING,
-   started ~09:45 AWST from `/var/tmp/apex-work/wt-build-verify`
-   (`roadmap/v2.2` @ 7f647470 + the fix @ 6e4174ee), targets `base apex`, log at
-   `/var/tmp/apex-work/scratch-build-verify/build.log`. It reuses the cached
-   `localhost/apex-os-core:latest` (built 02:54Z from f666f5c1) — legitimate:
-   `git diff --quiet f666f5c1 7f647470 -- Containerfile.core` is EMPTY, so no
-   core input moved. Poll `systemctl --user is-active apex-build-verify-2` and
-   `tail` the log. On failure, `systemctl --user status apex-build-verify-2`
-   has the exit code. It holds a `sleep:idle` block inhibitor, so hypridle's
-   15-minute suspend cannot eat it.
-   **Already proved in that log, in a real build:**
-   `== shell == pinned apex-shell branch 'roadmap/v2.2' — apex-shell has no
-   branch named 'task/build-verify'`. The `check-labwc-keybinds` step that
-   killed the previous agent is at `Containerfile.base` STEP 157/180.
-2. **CI run 35433705393** — still in `core` at ~09:45Z. `gh run view
-   35433705393`; never `gh run watch` (600 s tool cap). When it ends, pull the
-   `image` job's SBOM step log and say whether the failure signature is the same
-   GitHub-runner shutdown as run 35415266422 or something of ours.
-
-If both are green there is nothing left in this unit but to report.
-
-Then, in this order (items 2, 3 and 5 are DONE — kept for the record).
+1. **Land `task/build-verify` @ `6e4174ee`** (one commit on `roadmap/v2.2` @
+   `7f647470`; `build-local.sh`, `tests/test-build-local-shell-ref.sh`,
+   `.github/workflows/pr-validation.yml`).
+2. **Dispatch a new unit for the SBOM OOM below — it is APEX's, not GitHub's,
+   and the roadmap's record of it is wrong.** Do NOT let it be re-diagnosed as
+   "runner infrastructure" a third time. It is the ONLY thing standing between
+   `roadmap/v2.2` and a fully green `build-image`.
 
 ## DONE
 
@@ -164,8 +153,8 @@ Then, in this order (items 2, 3 and 5 are DONE — kept for the record).
 
 ## IN PROGRESS
 
-- CI run 35433705393 only: `image` job still running; `rust`, `changes`, `core`,
-  `base` all green, `installer-iso` skipped. The local build is DONE and green.
+- nothing. Both the local build and CI run 35433705393 are finished and their
+  outcomes are recorded above.
 
 ## FOUND
 
@@ -189,6 +178,58 @@ Then, in this order (items 2, 3 and 5 are DONE — kept for the record).
   `files/` and `android/tools/` only. **`build-local.sh` at the repo root is
   linted by nobody** — same hole the file's own header describes, one directory
   up. Not this unit's to fix; recorded for whoever owns that gate.
+- **THE SBOM FAILURE IS OURS. "GitHub infrastructure, not APEX" IS WRONG, and
+  round 33's own card said it. Corrected here with the smoking gun the earlier
+  run could not produce.** Run 35433705393 died at the same step, and this time
+  the wrapper lived long enough to say why:
+
+      10:18:45  after prune: 86G avail; free 14213 MB of 15989
+      10:22:13  line 64: 25574 Killed   SYFT_PARALLELISM=4 timeout 2700 \
+                  syft "registry:$REF" -o spdx-json > /tmp/sbom.spdx.json
+      10:22:14  ##[error]syft exited 137 after 209s
+
+  **137 = 128+9 = SIGKILL.** Not 124 (the `timeout 2700` arm, which had 2491 s
+  left) and not 143 (SIGTERM). syft was cataloguing a ~13 GB image with ~14.9 GB
+  of RAM available and something shot it at 209 s.
+
+  **Calibration, so the next unit does not inherit an overclaim.** That it was
+  the OOM KILLER specifically is inferred from shape — SIGKILL, the phase, the
+  duration, the size ratio — not read off a kernel message. Nothing printed
+  `Out of memory`, and `free` is only sampled before syft starts. The
+  struck-through "GitHub infrastructure, not APEX" is now firmly wrong either
+  way, but confirm the mechanism before fixing it: `dmesg`/`journalctl -k` after
+  the step, or a `free -m` loop in the background during syft. The candidate
+  directions below hold under either mechanism.
+
+  Checked, not assumed, that this is the SAME defect as 35415266422 rather than
+  two unrelated ones: `git show bd0c41ce:.github/workflows/build-image.yml |
+  grep -c SYFT_PARALLELISM` = 2, so the prior run carried the identical wrapper.
+  It went silent at the same point for 153 s and then the whole RUNNER
+  disappeared — which is what the same memory exhaustion looks like when it
+  takes the VM instead of just the biggest process. Two consecutive runs, same
+  step, same phase, same duration band, one of them an explicit SIGKILL. That is
+  a reproducible resource ceiling, not a coincidence of GitHub reclaims.
+
+  Why it is ours specifically: `SYFT_PARALLELISM=4` is a DELIBERATE raise from
+  syft's default of 1, and the workflow comment says why — "this image has
+  thousands of packages across two app bundles". Those bundles are the Claude
+  and ChatGPT desktop apps that the 2026-09-11 product decision put into `core`
+  (1.3 GB + 548 MB, and `docs/update-cost.md` already records that tension). So
+  the image got much bigger, the cataloguer was told to use four workers on it,
+  and a 16 GB runner cannot hold it. Every input to that is APEX's.
+
+  Candidate directions for whoever gets the unit — NOT decided here, this was
+  out of scope: drop `SYFT_PARALLELISM` back to 1 or 2; catalogue the LOCAL
+  image (`oci-archive:`/`docker-archive:`) instead of `registry:`, which avoids
+  holding pulled layers; add swap on the runner; or move the SBOM to a larger
+  runner. Measure before choosing — the comment right above the invocation says
+  the last unmeasured number in this step "cost three builds to disprove".
+
+  Small separate defect in the same step, free to fix alongside: the error text
+  is `syft exited $rc after ${_el}s (143 = killed; …)` — it hardcodes 143 as the
+  "killed" hint while the code actually seen is 137. 143 is SIGTERM, 137 is
+  SIGKILL, and it is the difference between "something asked it to stop" and
+  "the kernel OOM-killed it". `.github/workflows/build-image.yml:1436`.
 - build-image run 35415266422 died on a GitHub runner shutdown during syft/SBOM,
   after core+base+image had all built. Not an APEX defect — **but read the log
   before repeating that flatly.** Pulled with `gh run view 35415266422
@@ -219,5 +260,10 @@ Then, in this order (items 2, 3 and 5 are DONE — kept for the record).
 - Never push `main`; never open a PR.
 - Use a per-agent scratch subdir; `/var/tmp/apex-work/scratch-*` is shared and an
   agent has committed another agent's message from it before.
+- **The Bash tool caps at 600 s and silently backgrounds anything longer**, which
+  killed the first `gh run` waiter mid-wait. What worked: `Monitor` with
+  `timeout_ms: 3600000` and a bounded `until … completed` poll loop, plus a
+  detached `systemd-run --user` unit (NOT `--pty`/`--wait`) for the build itself
+  so it lived outside this agent's process tree.
 - **Write this card as you go, never at the end.** `NEXT` is load-bearing: it is
   what a fresh agent is handed when you are killed without warning.
