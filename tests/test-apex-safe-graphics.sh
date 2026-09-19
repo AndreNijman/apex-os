@@ -915,6 +915,135 @@ fi
 
 fi  # the client environment was captured
 
+# ── the screens it can and cannot light (evidence §5.5) ──────────────────────
+section "displays on a second GPU"
+
+# THE DEFECT. On katana the recovery session started, painted the laptop panel,
+# and left the user's only external monitor dark — 60 `Swapchain for output
+# 'HDMI-A-1' failed test` errors against zero for `eDP-1`, because the pixman
+# software renderer cannot import the DMA-BUFs wlroots' multi-GPU path needs to
+# feed a secondary card's connector. Nothing said so; the verdict was PARTIAL
+# FAIL and it took a screenshot to find.
+#
+# These cases feed the script a sysfs tree instead of a GPU, so all three
+# shapes are reachable on a machine with one card and no monitor.
+
+DRMROOT="$(mktemp -d "${TMPDIR:-/tmp}/apex-sg-drm-XXXXXX")"
+drm_cleanup() { rm -rf "$DRMROOT"; }
+trap 'cleanup 2>/dev/null; drm_cleanup' EXIT
+
+# <tag> <card> <boot_vga>  /  <tag> <card> <connector> <status>
+drm_card() {
+    mkdir -p "${DRMROOT}/$1/class/drm/$2/device"
+    printf '%s\n' "$3" > "${DRMROOT}/$1/class/drm/$2/device/boot_vga"
+}
+drm_conn() {
+    mkdir -p "${DRMROOT}/$1/class/drm/$2-$3"
+    printf '%s\n' "$4" > "${DRMROOT}/$1/class/drm/$2-$3/status"
+}
+
+# katana as measured: panel on the primary Intel card, monitor on the NVIDIA.
+drm_card katana card1 1; drm_card katana card2 0
+drm_conn katana card1 eDP-1 connected
+drm_conn katana card2 HDMI-A-1 connected
+# The shape §5.5 says is the real emergency: the panel is gone and the only
+# screen left hangs off the discrete card.
+drm_card dead card1 1; drm_card dead card2 0
+drm_conn dead card1 eDP-1 disconnected
+drm_conn dead card2 HDMI-A-1 connected
+# An ordinary desktop: one card, everything on it.
+drm_card simple card0 1
+drm_conn simple card0 DP-1 connected
+
+sg_check() {  # <tag>
+    APEX_SAFE_GRAPHICS_SYS="${DRMROOT}/$1/class/.." \
+    APEX_SAFE_GRAPHICS_CONFIG="$CONFIG" \
+    APEX_SAFE_GRAPHICS_TERMINAL=foot \
+        bash "$SESSION" check 2>&1
+}
+
+out="$(sg_check katana)"
+[[ "$out" == *"primary gpu card1"* ]] \
+    && ok "check names the primary GPU" \
+    || bad "check names the primary GPU" "$out"
+[[ "$out" == *"HDMI-A-1(card2)"* ]] \
+    && ok "check names the output it cannot light, with the card it is on" \
+    || bad "check names the output it cannot light, with the card it is on" "$out"
+[[ "$out" == *"DMA-BUF"* ]] \
+    && ok "…and why, in the words the session's own log used" \
+    || bad "…and why, in the words the session's own log used" "$out"
+
+out="$(sg_check simple)"
+[[ "$out" == *"cannot light(nothing"* ]] \
+    && ok "an ordinary single-GPU machine reports nothing dark" \
+    || bad "an ordinary single-GPU machine reports nothing dark" "$out"
+
+# ── and what the SESSION does about it ───────────────────────────────────────
+# `start_session` execs labwc, so a fake labwc that prints its environment and
+# exits is what makes the decision observable without a compositor. It is first
+# on PATH; a negative control proves it really is.
+SGBIN="$(mktemp -d "${TMPDIR:-/tmp}/apex-sg-bin-XXXXXX")"
+cat > "${SGBIN}/labwc" <<'FAKELABWC'
+#!/usr/bin/env bash
+printf 'FAKE_LABWC WLR_DRM_DEVICES=%s WLR_RENDERER=%s\n' \
+    "${WLR_DRM_DEVICES:-<unset>}" "${WLR_RENDERER:-<unset>}"
+exit 0
+FAKELABWC
+chmod +x "${SGBIN}/labwc"
+
+sg_session() {  # <tag> [extra env...]
+    env -i PATH="${SGBIN}:/usr/bin:/bin" HOME="$DRMROOT" \
+        APEX_SAFE_GRAPHICS_SYS="${DRMROOT}/$1/class/.." \
+        APEX_SAFE_GRAPHICS_CONFIG="$CONFIG" \
+        APEX_SAFE_GRAPHICS_TERMINAL=foot \
+        "${@:2}" \
+        bash "$SESSION" 2>&1
+}
+
+out="$(sg_session simple)"
+[[ "$out" == *"FAKE_LABWC"* ]] \
+    && ok "the fake compositor is really what the session exec'd" \
+    || bad "the fake compositor is really what the session exec'd" "$out"
+
+out="$(sg_session dead)"
+# THE FIX. Every connected screen is on card2, so wlroots is pointed at card2
+# and there is no second device to import between — pixman can drive it.
+[[ "$out" == *"WLR_DRM_DEVICES=/dev/dri/card2"* ]] \
+    && ok "with the panel dead, wlroots is pointed at the card the monitor is on" \
+    || bad "with the panel dead, wlroots is pointed at the card the monitor is on" "$out"
+[[ "$out" == *"WLR_RENDERER=pixman"* ]] \
+    && ok "…and it is still the software renderer, which is the point of the session" \
+    || bad "…and it is still the software renderer" "$out"
+
+out="$(sg_session katana)"
+# The mixed case cannot be solved by choosing a device — one of the two screens
+# is going to be dark whichever card is picked — so it is SAID instead. §5.5's
+# complaint was not that the monitor stayed dark; it was that nothing mentioned it.
+[[ "$out" != *"WLR_DRM_DEVICES=/dev/dri/card"* ]] \
+    && ok "with both screens live the primary is kept" \
+    || bad "with both screens live the primary is kept" "$out"
+[[ "$out" == *"WARNING"* && "$out" == *"HDMI-A-1(card2) will stay dark"* ]] \
+    && ok "…and the session says which screen it is about to leave dark" \
+    || bad "…and the session says which screen it is about to leave dark" "$out"
+[[ "$out" == *"APEX_SAFE_GRAPHICS_DRM_DEVICE"* ]] \
+    && ok "…and names the override that recovers on the other screen instead" \
+    || bad "…and names the override that recovers on the other screen instead" "$out"
+
+out="$(sg_session katana APEX_SAFE_GRAPHICS_DRM_DEVICE=/dev/dri/card2)"
+[[ "$out" == *"WLR_DRM_DEVICES=/dev/dri/card2"* ]] \
+    && ok "the override reaches wlroots" \
+    || bad "the override reaches wlroots" "$out"
+
+out="$(sg_session katana APEX_SAFE_GRAPHICS_RENDERER=auto)"
+[[ "$out" == *"WLR_RENDERER=<unset>"* ]] \
+    && ok "APEX_SAFE_GRAPHICS_RENDERER=auto leaves the renderer to wlroots" \
+    || bad "APEX_SAFE_GRAPHICS_RENDERER=auto leaves the renderer to wlroots" "$out"
+[[ "$out" == *"If the GPU driver is what broke"* ]] \
+    && ok "…and warns that it undoes what this session is for" \
+    || bad "…and warns that it undoes what this session is for" "$out"
+
+rm -rf "$SGBIN"
+
 # ── diagnostics ──────────────────────────────────────────────────────────────
 section "diagnostics"
 

@@ -85,6 +85,47 @@ const SWITCH_SUDOERS: &str = "etc/sudoers.d/040-apex-session-select";
 const RTPRIO_LIMITS: &str = "etc/security/limits.d/30-apex-gaming-rtprio.conf";
 const GREETER_LAST_SESSION: &str = "var/lib/apex-greet/last-session";
 const INPUT_CLASS: &str = "sys/class/input";
+const PROC_SELF_STATUS: &str = "proc/self/status";
+const SYS_ROOT: &str = "sys";
+
+/// `CAP_SYS_NICE` — bit 23 of the capability bitmaps in
+/// `/proc/self/status`, from `include/uapi/linux/capability.h`.
+pub const CAP_SYS_NICE: u32 = 23;
+
+/// The exact words that mark an `Unavailable` reason as "root could answer
+/// this, and this account could not".
+///
+/// A string marker rather than a second field on [`Signal`](crate::workload::Signal)
+/// because `Signal` is shared with `apex workload` and `apex perf`, and this is
+/// a property of ONE probe's paths rather than of the type. It is a constant so
+/// the renderer, the footer and the tests all match on the same bytes — a
+/// hand-typed copy in any of the three is how this kind of marker rots.
+pub const ROOT_READABLE_HINT: &str = "run `sudo apex gaming` to measure it";
+
+/// Reason text for a path this account is not allowed to look at.
+///
+/// ── Why this exists at all ──────────────────────────────────────────────────
+///
+/// Measured on katana, 2026-09-19 (§6 of the qualification): the report said
+///
+/// ```text
+/// sudoers rule    : not measured — could not read the path: Permission denied (os error 13)
+/// ```
+///
+/// which is honest and useless. `/etc/sudoers.d` is `0750 root:root`, so the
+/// kernel returns `EACCES` for a traversal whether or not the file is there —
+/// the probe genuinely cannot distinguish missing from unreadable, and neither
+/// can any amount of cleverness short of being root. What it CAN do is say
+/// which of the two answers it failed to get and name the one command that
+/// gets it, which `sudo apex gaming` did, returning `yes`.
+///
+/// "Permission denied is not absence" is a named lesson in this program, found
+/// in about fourteen places. This is the half of it that is easy to miss: the
+/// measurement was already correct here, and the REPORT was the thing that
+/// left the reader with nothing to do.
+fn eacces_reason(kind: &str) -> String {
+    format!("{kind} is not readable by this account; {ROOT_READABLE_HINT}")
+}
 
 /// Reads (never writes) everything §12's boot-to-game path depends on.
 pub struct Probe {
@@ -138,7 +179,68 @@ impl Probe {
             gamescope: self.program("gamescope"),
             steam: self.program("steam"),
             mangoapp: self.program("mangoapp"),
+            cap_sys_nice: self.cap_sys_nice(),
+            display: crate::gpu::choose_display(&self.at(SYS_ROOT)),
         }
+    }
+
+    /// Whether THIS process holds `CAP_SYS_NICE` in its effective set.
+    ///
+    /// ── Why the capability and not the rlimit ───────────────────────────────
+    ///
+    /// Measured on katana, 2026-09-19 (§6.2): the rtprio drop-in did its job —
+    /// the soft `RLIMIT_RTPRIO` was 20 — the session script correctly saw that
+    /// and passed `--rt`, and gamescope answered
+    ///
+    /// ```text
+    /// No CAP_SYS_NICE, falling back to regular-priority compute and threads.
+    /// ```
+    ///
+    /// on all three attempts. gamescope gates its realtime path on the
+    /// CAPABILITY, not on the rlimit, so `realtime limit: yes` was a row that
+    /// was true about the wrong thing. Both are reported now.
+    ///
+    /// ── Whose capability this is ────────────────────────────────────────────
+    ///
+    /// The set read here belongs to `apex`, not to the future Gaming Mode
+    /// session — but both are started from the same PAM stack on the same
+    /// machine, so an empty effective set here means an empty one there. It is
+    /// a prediction, and the row says so rather than claiming to have measured
+    /// the session.
+    fn cap_sys_nice(&self) -> Signal<bool> {
+        let p = self.at(PROC_SELF_STATUS);
+        let text = match std::fs::read_to_string(&p) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Signal::unavailable(eacces_reason("the capability set"), p.display().to_string())
+            }
+            Err(e) => {
+                return Signal::unavailable(
+                    format!("cannot read the capability set: {e}"),
+                    p.display().to_string(),
+                )
+            }
+        };
+        match cap_bit(&text, "CapEff", CAP_SYS_NICE) {
+            Some(v) => Signal::measured(v, p.display().to_string()),
+            None => Signal::unavailable(
+                "no CapEff line in the process status file",
+                p.display().to_string(),
+            ),
+        }
+    }
+
+    /// The effective uid of this process, read from the same file as the
+    /// capability set so a fixture root can answer it too.
+    pub fn effective_uid(&self) -> Option<u32> {
+        let text = std::fs::read_to_string(self.at(PROC_SELF_STATUS)).ok()?;
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("Uid:") {
+                // real, effective, saved, filesystem
+                return rest.split_whitespace().nth(1)?.parse().ok();
+            }
+        }
+        None
     }
 
     /// Present or absent, with the path looked at. Absence is a *measurement*,
@@ -157,6 +259,9 @@ impl Probe {
             Ok(_) => Signal::measured(true, p.display().to_string()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Signal::measured(false, p.display().to_string())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                Signal::unavailable(eacces_reason("the path"), p.display().to_string())
             }
             Err(e) => Signal::unavailable(
                 format!("could not read the path: {e}"),
@@ -182,6 +287,9 @@ impl Probe {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Signal::measured(false, p.display().to_string())
             }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                Signal::unavailable(eacces_reason("the path"), p.display().to_string())
+            }
             Err(e) => Signal::unavailable(
                 format!("could not read the path: {e}"),
                 p.display().to_string(),
@@ -204,6 +312,14 @@ impl Probe {
                 "the greeter's record is empty; it has not chosen a session yet",
                 p.display().to_string(),
             ),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Signal::unavailable(
+                eacces_reason("the greeter's record"),
+                p.display().to_string(),
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Signal::unavailable(
+                "the greeter has never recorded a session on this machine",
+                p.display().to_string(),
+            ),
             Err(e) => Signal::unavailable(
                 format!("cannot read the greeter's record: {e}"),
                 p.display().to_string(),
@@ -220,6 +336,12 @@ impl Probe {
         let dir = self.at(INPUT_CLASS);
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Signal::unavailable(
+                    eacces_reason("the input device directory"),
+                    dir.display().to_string(),
+                )
+            }
             Err(e) => {
                 return Signal::unavailable(
                     format!("cannot enumerate input devices: {e}"),
@@ -244,6 +366,12 @@ impl Probe {
                 // permission problem masquerade as "not a gamepad", and the
                 // whole answer would then certify an empty list as complete
                 // when it is not.
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    return Signal::unavailable(
+                        eacces_reason(&format!("{}", caps.display())),
+                        dir.display().to_string(),
+                    );
+                }
                 Err(e) => {
                     return Signal::unavailable(
                         format!("{}: {e}", caps.display()),
@@ -297,6 +425,12 @@ pub struct Readiness {
     pub gamescope: Signal<bool>,
     pub steam: Signal<bool>,
     pub mangoapp: Signal<bool>,
+    /// Whether this login holds `CAP_SYS_NICE` — what gamescope's `--rt`
+    /// actually gates on. See [`Probe::cap_sys_nice`].
+    pub cap_sys_nice: Signal<bool>,
+    /// The screen and GPU Gaming Mode will use. See
+    /// [`crate::gpu::choose_display`].
+    pub display: crate::gpu::DisplayChoice,
 }
 
 impl Readiness {
@@ -423,10 +557,33 @@ impl Readiness {
         }
         if self.rtprio_limits.value() == Some(&false) {
             out.push(
-                "the realtime scheduling limit drop-in is absent, so gamescope will run \
-                 without --rt and frame pacing will be worse under load"
+                "the realtime scheduling limit drop-in is absent, so no login on this \
+                 machine can raise a thread to SCHED_RR at all"
                     .to_string(),
             );
+        }
+        // Measured on katana 2026-09-19 (§6.2): the drop-in was present, the
+        // soft limit was 20, `--rt` was passed, and gamescope still ran at
+        // normal priority because it gates on CAP_SYS_NICE rather than on the
+        // rlimit. So this is a SEPARATE warning from the one above and not an
+        // `else` of it: a machine can have the limit and not the capability,
+        // which is every APEX machine today.
+        if self.cap_sys_nice.value() == Some(&false) {
+            out.push(
+                "this login has no CAP_SYS_NICE, which is what gamescope's --rt actually \
+                 needs, so Gaming Mode runs the compositor at ordinary priority and says so \
+                 in its log rather than passing a flag that would be dropped. /usr is \
+                 read-only on APEX, so `setcap` cannot grant it on the gamescope binary; \
+                 granting it at login would also put capabilities in Steam's bwrap, which \
+                 refuses to start with any"
+                    .to_string(),
+            );
+        }
+        if let Some(problem) = &self.display.problem {
+            out.push(format!(
+                "Gaming Mode may open the wrong GPU: {problem}. Override with \
+                 APEX_GAMESCOPE_ARGS in the session environment"
+            ));
         }
         if self.mangoapp.value() == Some(&false) {
             out.push(
@@ -453,12 +610,92 @@ impl Readiness {
         self.blockers().is_empty()
     }
 
+    /// The rows whose answer is "this account may not look", in report order.
+    ///
+    /// Every one of them would be answered by the same single command, so the
+    /// report names them together and prints that command once rather than
+    /// repeating a remedy per row.
+    pub fn rows_needing_root(&self) -> Vec<&'static str> {
+        let needs = |s: &Signal<bool>| {
+            s.reason()
+                .map(|r| r.contains(ROOT_READABLE_HINT))
+                .unwrap_or(false)
+        };
+        let mut out = Vec::new();
+        if needs(&self.session_desktop) {
+            out.push("greeter entry");
+        }
+        if needs(&self.session_launcher) {
+            out.push("session script");
+        }
+        if needs(&self.rtprio_limits) {
+            out.push("realtime limit");
+        }
+        if needs(&self.cap_sys_nice) {
+            out.push("realtime capability");
+        }
+        if needs(&self.switch_helper) {
+            out.push("switch helper");
+        }
+        if needs(&self.switch_sudoers) {
+            out.push("sudoers rule");
+        }
+        if self
+            .preselected_session
+            .reason()
+            .map(|r| r.contains(ROOT_READABLE_HINT))
+            .unwrap_or(false)
+        {
+            out.push("boots to game");
+        }
+        if self
+            .gamepad
+            .reason()
+            .map(|r| r.contains(ROOT_READABLE_HINT))
+            .unwrap_or(false)
+        {
+            out.push("gamepads");
+        }
+        out
+    }
+
     /// Whether the machine is currently set to boot into Gaming Mode.
     pub fn boots_to_game(&self) -> Option<bool> {
         self.preselected_session
             .value()
             .map(|s| s == GAMING_SESSION)
     }
+}
+
+/// One bit of one of `/proc/<pid>/status`'s capability bitmaps.
+///
+/// The kernel prints `CapInh`, `CapPrm`, `CapEff`, `CapBnd` and `CapAmb` as a
+/// single 16-digit lowercase hex number — `cap_bset_fmt` in `fs/proc/array.c`
+/// — most significant nibble first, so this is plain `u64` arithmetic and not
+/// the word-reversed format `/sys/class/input/*/capabilities/key` uses. They
+/// are two different kernel printers and conflating them reads the wrong bit.
+///
+/// `None` when the named line is absent or unparseable, which is "could not
+/// tell" and must not be rendered as "the capability is missing".
+pub fn cap_bit(status: &str, field: &str, bit: u32) -> Option<bool> {
+    if bit >= 64 {
+        return None;
+    }
+    for line in status.lines() {
+        let Some(rest) = line.strip_prefix(field) else {
+            continue;
+        };
+        let Some(rest) = rest.strip_prefix(':') else {
+            continue;
+        };
+        let hex = rest.trim();
+        if hex.is_empty() {
+            return None;
+        }
+        let value = u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok()?;
+        return Some((value >> bit) & 1 == 1);
+    }
+    None
 }
 
 // ── the capability bitmap ────────────────────────────────────────────────────
@@ -664,9 +901,22 @@ mod tests {
             "a stat refused with EACCES is not a measurement of absence"
         );
         assert!(
-            r.switch_sudoers.reason().unwrap_or("").contains("could not read"),
+            r.switch_sudoers.reason().unwrap_or("").contains("not readable by this account"),
             "the reason should say the path could not be read, got {:?}",
             r.switch_sudoers.reason()
+        );
+        // …and it must name the command that DOES answer it. Measured on
+        // katana: `sudo apex gaming` returned `sudoers rule : yes` for exactly
+        // this file, so "could not read" alone left the reader with nothing.
+        assert!(
+            r.switch_sudoers.reason().unwrap_or("").contains(ROOT_READABLE_HINT),
+            "got {:?}",
+            r.switch_sudoers.reason()
+        );
+        assert_eq!(
+            r.rows_needing_root(),
+            vec!["sudoers rule"],
+            "exactly the refused row, named as the report names it"
         );
     }
 
@@ -796,7 +1046,45 @@ mod tests {
         let f = gaming_edition("nort");
         std::fs::remove_file(f.0.join(RTPRIO_LIMITS)).unwrap();
         let r = f.probe().report();
-        assert!(r.warnings().join("\n").contains("--rt"), "{:?}", r.warnings());
+        assert!(
+            r.warnings().join("\n").contains("SCHED_RR"),
+            "{:?}",
+            r.warnings()
+        );
+    }
+
+    /// The two realtime rows are independent, and this is the case katana
+    /// actually produced: the drop-in present, the soft limit 20, `--rt`
+    /// passed, and gamescope still at ordinary priority because it gates on
+    /// CAP_SYS_NICE. A single row could not have said that.
+    #[test]
+    fn the_rtprio_limit_and_cap_sys_nice_are_separate_warnings() {
+        let f = gaming_edition("caps");
+        // The drop-in is present in this fixture; only the capability is not.
+        f.write("proc/self/status", "Uid:\t1000\t1000\t1000\t1000\nCapEff:\t0000000000000000\n");
+        let r = f.probe().report();
+        assert_eq!(r.rtprio_limits.value(), Some(&true));
+        assert_eq!(r.cap_sys_nice.value(), Some(&false));
+        let joined = r.warnings().join("\n");
+        assert!(joined.contains("CAP_SYS_NICE"), "{:?}", r.warnings());
+        assert!(
+            !joined.contains("SCHED_RR at all"),
+            "the drop-in is present, so its warning must not fire: {:?}",
+            r.warnings()
+        );
+        // And a login that DOES hold it raises neither.
+        f.write(
+            "proc/self/status",
+            "Uid:\t0\t0\t0\t0\nCapEff:\t0000003fffffffff\n",
+        );
+        let r = f.probe().report();
+        assert_eq!(r.cap_sys_nice.value(), Some(&true));
+        assert!(
+            !r.warnings().join("\n").contains("CAP_SYS_NICE"),
+            "{:?}",
+            r.warnings()
+        );
+        assert_eq!(f.probe().effective_uid(), Some(0));
     }
 
     #[test]
@@ -988,6 +1276,19 @@ mod tests {
             gamescope: present("gamescope"),
             steam: present("steam"),
             mangoapp: present("mangoapp"),
+            cap_sys_nice: present("cap_sys_nice"),
+            display: crate::gpu::DisplayChoice {
+                output: Some("HDMI-A-1".to_string()),
+                card: Some("card2".to_string()),
+                pci_id: Some("10de:249d".to_string()),
+                vendor: Some("NVIDIA".to_string()),
+                cards_with_displays: 2,
+                vrr: None,
+                vrr_published_anywhere: false,
+                why: "test fixture".to_string(),
+                vrr_why: "test fixture".to_string(),
+                problem: None,
+            },
         }
     }
 

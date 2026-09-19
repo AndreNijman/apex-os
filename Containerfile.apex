@@ -94,10 +94,18 @@ RUN set -eux; \
 # scxctl call from apexd starts it. Enabling it would add a daemon to every
 # boot on every laptop to save an activation that systemd already performs.
 #
-# REALTIME: gamescope's --rt needs a non-zero RLIMIT_RTPRIO (verified: Fedora
-# sets no file capabilities on the binary, and the default hard limit is 0, so
-# --rt silently failed). The limits.d drop-in fixes that through pam_limits,
-# which greetd's PAM stack does run.
+# REALTIME: this drop-in raises RLIMIT_RTPRIO through pam_limits, which greetd's
+# PAM stack does run, and that part works — katana 2026-09-19 measured the soft
+# limit at 20 in a real Gaming Mode session.
+#
+# It is NOT enough for gamescope's `--rt`, and the comment that used to sit here
+# said it was. gamescope gates realtime on CAP_SYS_NICE, not on the rlimit, so
+# with the drop-in installed and the flag passed it still logged "No CAP_SYS_NICE,
+# falling back to regular-priority compute and threads" on every attempt. The
+# session script now checks the capability and passes `--rt` only when it is
+# actually reachable — see its own header for why nothing here grants it
+# (setcap cannot write a read-only composefs /usr, and pam_cap would break
+# Steam's bwrap).
 COPY --chmod=0755 files/system/libexec/apex-gaming-session \
      /usr/libexec/apex-gaming-session
 COPY --chmod=0755 files/system/libexec/apex-session-select \
