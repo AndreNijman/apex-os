@@ -142,9 +142,17 @@ class HelpParityTest {
             // The runtime is a service on the machine and this app cannot start
             // it.
             "start" to listOf("apex agent enable"),
-            // The relay has never been deployed, so off the machine's network
-            // this app reaches nothing.
-            "remote" to listOf("no deployment yet"),
+            // The relay is real now, so the sentence a user is owed changed
+            // from "it does not exist" to what its operator can see. This is
+            // the required-phrase list moving when the code moved — exactly
+            // what :179 below says has to happen, in the other direction.
+            //
+            // The words are not paraphrased here: they are the ones
+            // `Rendezvous.Path.RELAY.disclosure()` carries, which are verbatim
+            // from `apexd/apex-remote-core/src/rendezvous.rs`, so the guide,
+            // the connection banner and the desktop's `apex remote status` all
+            // tell a person the same thing.
+            "remote" to listOf("cannot read", "both addresses", "how much data moves"),
             // A file handed over is capped by the DAEMON, and the sentence has
             // to say which end refuses — a cap the user believes is the app's
             // is a cap they go looking for a setting to change.
