@@ -89,7 +89,19 @@ class ApprovalsOnDeviceTest {
             assertTrue("a request nobody has decided is pending", mine.isPending)
             // Filed by the broker, which is a process in a login session on the
             // computer — so the daemon recorded a human, not this phone.
-            assertEquals("local-terminal", mine.requestOrigin)
+            //
+            // `fromRemote` and NOT `== "local-terminal"`: which of §7's two
+            // local origins the daemon observes is a fact about how the runner
+            // was launched — a login session with a controlling terminal is
+            // `local-terminal`, one without is `apex-shell` — and pinning the
+            // spelling would make this test fail for the launcher's reasons
+            // rather than the app's. The claim is that a human filed it.
+            assertTrue(
+                "the computer's own request must not be recorded as a remote one; the daemon " +
+                    "recorded request_origin=${mine.requestOrigin}",
+                !mine.fromRemote,
+            )
+            assertNotNull("and the origin must have been established at all", mine.requestOrigin)
         }
     }
 
