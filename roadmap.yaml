@@ -3217,30 +3217,45 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    THE ANDROID HALF LANDED ITS CLIENT (2026-09-19, round 33, task/p1-052-android-relay @ 8dd2cc9e, NOT YET
-    LANDED). P1-052 has been 'done' for the Worker and the desktop since 2026-09-12, but the phone could not dial
-    it: there was no relay client on Android at all. There is one now - a hand-rolled RFC 6455 client in :core
-    sharing relay.rs's test vectors, a dialler in :app that sets
-    sslParameters.endpointIdentificationAlgorithm=HTTPS before the handshake (WITHOUT WHICH SSLSocket VALIDATES
-    THE CHAIN AND NOT THE NAME, and the rendezvous id would go to whoever answered the address - a defect every
-    'is TLS on?' test passes), and a PairingService fallback on both legs. The deployment was exercised as
-    deployed, not as a double: Cloudflare returned 101 and {"relay":"paired"} to an independent Python guest, and
-    a real Pixel 7a paired and ran a session through it - device suite OK (35 tests). relay/README.md was
-    corrected: it still said the relay was not deployed, that src/index.js had never been executed, and that the
-    blocker was 'a client that cannot dial wss://'. All three were false. LANDED 2026-09-19 (round 33):
-    task/p1-053e-device @ 9231f72a is on apex-os roadmap/v2.2 as merge 859cbb2b (7f647470 -> 859cbb2b, --no-ff,
-    six commits, 914 insertions over 12 files). Rust changed in this merge, so the workspace was actually rebuilt
-    ON THE MERGED TIP rather than trusted from the branch: cargo test --locked --workspace --no-fail-fast 3407
-    passed / 0 failed / 2 ignored across 57 targets, cargo clippy --workspace --all-targets --locked -D warnings
-    exit 0 with zero warnings, check-no-conflict-markers.sh PASS. Pushed with --force-with-lease. TWO CORRECTIONS
-    FROM A REAL PHONE, 2026-09-19 (task/p1-053e-device @ 9231f72a), and the status is left at done deliberately —
-    see the second. (1) THE DESKTOP BOUND IPv4 ONLY, AND WIDENING IT WOULD HAVE MISLABELLED EVERY RELAYED SESSION.
-    main.rs had bound 0.0.0.0 with a comment naming the regression that stopped it being widened, and the
-    regression was real: a :: listener hands every IPv4 peer to accept(2) as ::ffff:a.b.c.d, and
-    Ipv6Addr::is_loopback is FALSE for ::ffff:127.0.0.1 — it answers only for ::1. A relay splice reaches this
-    daemon over loopback, so State::path_of would have called every relayed session a LAN one and Path::disclosure
-    would have told the owner nobody else was on the path. Measured before anything changed: arrived_by_relay
-    extracted from path_of so the rule can be asserted without a State, then
+    LANDED 2026-09-19 (round 33): task/p1-052-android-relay @ c1ac18e1 is on apex-os roadmap/v2.2 as merge
+    2814f45d (2e04fbcb -> 2814f45d, --no-ff, seven commits, 2,683 insertions over 14 files). No Rust changed, so
+    the workspace was not rebuilt; what DID change was verified ON THE MERGED TIP rather than trusted from the
+    branch: check-no-conflict-markers.sh PASS, run-device-suite.sh bash -n clean, and the JVM suites re-run there
+    — :core 497 tests / 0 failures / 0 errors and :app 52 / 0 / 0, with RelayTest.xml present in the fresh results
+    rather than inferred from a BUILD SUCCESSFUL line. Pushed with --force-with-lease. TWO DEFECTS FOUND IN REVIEW
+    AFTER THAT AND FIXED IN c1ac18e1, both invisible to the tests that already passed: (1) every relayed session
+    LEAKED ITS SOCKET - Session.close releases a connection by closing its output then its input, and on the LAN
+    leg either closes the socket underneath, but RelayInput/RelayOutput inherited the default no-op close(), so a
+    phone held one TCP connection to Cloudflare per session for the life of the process and the desktop kept a
+    splice alive for a peer that had gone; RelayLink.close is now idempotent and both adapters reach it (buffered
+    bytes, then a Close frame so the relay can free the room, then the socket). (2) the NOISE HANDSHAKE ON THE
+    RELAY LEG HAD NO DEADLINE - dial() cleared soTimeout before returning while claiming in its own comment to be
+    doing what the LAN leg does; the LAN leg keeps it THROUGH the handshake and clears it after, so a guest joined
+    to a host whose splice never answers would have blocked in Client.openSession for ever behind a pairing screen
+    with nothing to cancel. Both mutated to check the new gates bite. FINAL TIP c1ac18e1, seven commits. THE
+    ANDROID HALF LANDED ITS CLIENT (2026-09-19, round 33, task/p1-052-android-relay @ c1ac18e1, NOT YET LANDED).
+    P1-052 has been 'done' for the Worker and the desktop since 2026-09-12, but the phone could not dial it: there
+    was no relay client on Android at all. There is one now - a hand-rolled RFC 6455 client in :core sharing
+    relay.rs's test vectors, a dialler in :app that sets sslParameters.endpointIdentificationAlgorithm=HTTPS
+    before the handshake (WITHOUT WHICH SSLSocket VALIDATES THE CHAIN AND NOT THE NAME, and the rendezvous id
+    would go to whoever answered the address - a defect every 'is TLS on?' test passes), and a PairingService
+    fallback on both legs. The deployment was exercised as deployed, not as a double: Cloudflare returned 101 and
+    {"relay":"paired"} to an independent Python guest, and a real Pixel 7a paired and ran a session through it -
+    device suite OK (35 tests). relay/README.md was corrected: it still said the relay was not deployed, that
+    src/index.js had never been executed, and that the blocker was 'a client that cannot dial wss://'. All three
+    were false. LANDED 2026-09-19 (round 33): task/p1-053e-device @ 9231f72a is on apex-os roadmap/v2.2 as merge
+    859cbb2b (7f647470 -> 859cbb2b, --no-ff, six commits, 914 insertions over 12 files). Rust changed in this
+    merge, so the workspace was actually rebuilt ON THE MERGED TIP rather than trusted from the branch: cargo test
+    --locked --workspace --no-fail-fast 3407 passed / 0 failed / 2 ignored across 57 targets, cargo clippy
+    --workspace --all-targets --locked -D warnings exit 0 with zero warnings, check-no-conflict-markers.sh PASS.
+    Pushed with --force-with-lease. TWO CORRECTIONS FROM A REAL PHONE, 2026-09-19 (task/p1-053e-device @
+    9231f72a), and the status is left at done deliberately — see the second. (1) THE DESKTOP BOUND IPv4 ONLY, AND
+    WIDENING IT WOULD HAVE MISLABELLED EVERY RELAYED SESSION. main.rs had bound 0.0.0.0 with a comment naming the
+    regression that stopped it being widened, and the regression was real: a :: listener hands every IPv4 peer to
+    accept(2) as ::ffff:a.b.c.d, and Ipv6Addr::is_loopback is FALSE for ::ffff:127.0.0.1 — it answers only for
+    ::1. A relay splice reaches this daemon over loopback, so State::path_of would have called every relayed
+    session a LAN one and Path::disclosure would have told the owner nobody else was on the path. Measured before
+    anything changed: arrived_by_relay extracted from path_of so the rule can be asserted without a State, then
     a_v4_mapped_relay_splice_is_a_relay_session FAILED on [::ffff:127.0.0.1]:41000 with that port armed.
     to_canonical() on both sides of the seam — once at the boundary where serve.rs reads peer_addr(), so the
     stored peer, apex remote status and the key unregister matches see one spelling, and once inside the rule so a
@@ -4058,8 +4073,24 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    THE RELAY LEG NOW EXISTS ON ANDROID AND IS PROVEN THROUGH THE REAL DEPLOYED RELAY (2026-09-19, round 33,
-    task/p1-052-android-relay @ 8dd2cc9e, six commits, NOT YET LANDED). C1's last missing part was not a test, it
+    LANDED 2026-09-19 (round 33): task/p1-052-android-relay @ c1ac18e1 is on apex-os roadmap/v2.2 as merge
+    2814f45d (2e04fbcb -> 2814f45d, --no-ff, seven commits, 2,683 insertions over 14 files). No Rust changed, so
+    the workspace was not rebuilt; what DID change was verified ON THE MERGED TIP rather than trusted from the
+    branch: check-no-conflict-markers.sh PASS, run-device-suite.sh bash -n clean, and the JVM suites re-run there
+    — :core 497 tests / 0 failures / 0 errors and :app 52 / 0 / 0, with RelayTest.xml present in the fresh results
+    rather than inferred from a BUILD SUCCESSFUL line. Pushed with --force-with-lease. TWO DEFECTS FOUND IN REVIEW
+    AFTER THAT AND FIXED IN c1ac18e1, both invisible to the tests that already passed: (1) every relayed session
+    LEAKED ITS SOCKET - Session.close releases a connection by closing its output then its input, and on the LAN
+    leg either closes the socket underneath, but RelayInput/RelayOutput inherited the default no-op close(), so a
+    phone held one TCP connection to Cloudflare per session for the life of the process and the desktop kept a
+    splice alive for a peer that had gone; RelayLink.close is now idempotent and both adapters reach it (buffered
+    bytes, then a Close frame so the relay can free the room, then the socket). (2) the NOISE HANDSHAKE ON THE
+    RELAY LEG HAD NO DEADLINE - dial() cleared soTimeout before returning while claiming in its own comment to be
+    doing what the LAN leg does; the LAN leg keeps it THROUGH the handshake and clears it after, so a guest joined
+    to a host whose splice never answers would have blocked in Client.openSession for ever behind a pairing screen
+    with nothing to cancel. Both mutated to check the new gates bite. FINAL TIP c1ac18e1, seven commits. THE RELAY
+    LEG NOW EXISTS ON ANDROID AND IS PROVEN THROUGH THE REAL DEPLOYED RELAY (2026-09-19, round 33,
+    task/p1-052-android-relay @ c1ac18e1, six commits, NOT YET LANDED). C1's last missing part was not a test, it
     was a missing feature: there was NO relay client on Android at all - PairingService.kt:108 printed "(and no
     relay client has been written yet)", :core had no WebSocket code and there was no OkHttp in the build, while
     MachinesScreen.kt:288 already offered "relay available". The seam PairingService.kt:21 claimed exists does
@@ -4084,7 +4115,7 @@ tasks:
     with --relay pointed at the REAL deployment, and RelayOnDeviceTest forces the relay leg by copying the
     daemon's offer with lan=emptyList() - real key, real one-time token, rendezvous derived from the pinned key,
     and the desktop's own record of the pairing asserted, which is the half a phone cannot fake. GATES on
-    8dd2cc9e: device suite OK (35 tests) (was 32), TalkBack bound; :core:test 496/0 (was 459); :app 51/0 (was 44);
+    c1ac18e1: device suite OK (35 tests) (was 32), TalkBack bound; :core:test 496/0 (was 459); :app 51/0 (was 44);
     cargo test --locked --workspace 3407 passed 0 failed 2 ignored (unchanged); clippy -D warnings zero;
     check-help-prose 1755 words TOTAL 0 no allowlist; shellcheck 168/0/0; suites-run-in-ci 77/73/4/0;
     containerfile-assertions 194 checked 0 failed 0 inert; doc-verbs 0 undocumented-and-undeclared. MUTATION
@@ -5012,6 +5043,29 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
+    ROUND 34 SECOND HALF - THE CATALOGUE SHIPS TOO, so a German user sees German. apex-os tip is now d7c5ea2e (two
+    commits) and apex-shell tip 45b43c0 (two commits). A new DISCARDED Containerfile.base stage
+    apex-i18n-catalogue installs qt6-linguist, clones apex-shell and compiles every translations/*.ts into a .qm;
+    the final stage copies only the .qm out, so nothing that built them is in the image. That shape is forced by
+    the 113 MB measurement, not by taste. The rejected alternative is written into the stanza's own comment:
+    qt6-linguist in Containerfile.core is 4 MiB and would also give a booted machine lupdate/lrelease (what
+    run-i18n-test.sh sections 2 and 3 need), but touching core triggers a multi-gigabyte update for every machine,
+    which is a person's trade and not a build stage's. The second clone is PROVED to agree with the vendored tree
+    rather than assumed to: each .ts's sha256 is carried out of the catalogue stage and compared against what
+    ships, and a mismatch fails the build naming both hashes. The catalogue is proved to LOAD per language in a
+    real QML engine with the module on the import path, and the instrument was shown to discriminate - truncate
+    the shipped .qm and the same probe reports 'no catalogue for de_DE'. Three more real builds: as written rc 0
+    with 'compiled 1 catalogue(s)' and 'apex-shell_de.qm loads under LANG=de'; a vendored .ts differing from the
+    compiled one rc 1 FATAL; a ref carrying no translations rc 0 'no catalogue to ship' and the build continues.
+    READ OUT OF THE BUILT IMAGE: with LANG=de the SHIPPED src/services/agents/AgentHelpContent.qml returns
+    entryLabel='Wie Agenten und Arbeitsbereiche funktionieren' and cardRead='Anleitung lesen', against LANG=en_US
+    in the SAME image returning the English with the plugin reporting 'no catalogue for en_US'. First time any
+    string in this product has reached a user's language through the image rather than through a test. Still true:
+    the catalogue covers 5 of the 186 marked strings and the other 181 come back in English because nobody has
+    written them - a translator's job, and section 6's note now COUNTS the .ts files and the <translation> entries
+    rather than remembering a number. Adding a language is one file in apex-shell and no apex-os change at all. CI
+    run 35437235207 on 2bc9799 was green on all three jobs with zero red steps (run-i18n-test passed=20 failed=0
+    skipped=1 on the Arch runner, the new section-6 row among them); run 35437841343 was dispatched on 45b43c0.
     ROUND 34 2026-09-19 - THE MODULE SHIPS; NOTHING IS TRANSLATED YET, and both halves of that sentence are
     measured. apex-shell task/p2-b-round34 tip 2bc9799, apex-os task/p2-b-round34 tip e11f2843, both pushed and
     unmerged. Containerfile.base stage 5b2a compiles apex-shell's tests/apex-i18n-plugin.cpp out of the vendored

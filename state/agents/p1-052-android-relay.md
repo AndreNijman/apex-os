@@ -85,18 +85,25 @@ Anything you do must leave those where they are or better.
 
 ## NEXT
 
-**LAND `task/p1-052-android-relay` @ `8dd2cc9e`.** Six commits, all pushed,
+**LAND `task/p1-052-android-relay` @ `c1ac18e1`.** Seven commits, all pushed,
 `git status --short` prints nothing, every gate below measured on that tip, and
-`set-status.py` prepends written and verified (P1-060 23,229 → 27,234;
-P1-052 8,080 → 9,172; prior rounds' text intact, yaml re-parsed).
+`set-status.py` prepends written and verified (P1-060 23,229 → 28,347; P1-052
+8,080 → 10,285; prior rounds' text intact, yaml re-parsed, and the whole yaml
+grepped for the superseded sha `8dd2cc9e` → 0 hits).
 
-**Gates on `8dd2cc9e`, every number out of a log:**
+Branched off `roadmap/v2.2` @ `859cbb2b`; that branch has since moved to
+`2e04fbcb` under another agent (`build-local.sh`). The landing is a merge and
+`git merge-tree --write-tree roadmap/v2.2 HEAD` is **clean, no conflicts** —
+the two touch no file in common. `git diff 859cbb2b..HEAD` is 14 files, all of
+them this unit's.
+
+**Gates on `c1ac18e1`, every number out of a log:**
 
 | gate | result |
 | --- | --- |
 | `run-device-suite.sh` | **OK (35 tests)** (was 32), TalkBack bound |
-| `:core:test` | **496 passed, 0 failed** (was 459) |
-| `:app:testDebugUnitTest` | **51 passed, 0 failed** (was 44) |
+| `:core:test` | **497 passed, 0 failed** (was 459) |
+| `:app:testDebugUnitTest` | **52 passed, 0 failed** (was 44) |
 | `cargo test --locked --workspace` | 3407 passed, 0 failed, 2 ignored (unchanged) |
 | `cargo clippy --workspace --all-targets --locked -D warnings` | zero |
 | `android/tools/check-help-prose.sh` | 1755 words, TOTAL 0, no allowlist |
@@ -104,6 +111,20 @@ P1-052 8,080 → 9,172; prior rounds' text intact, yaml re-parsed).
 | `check-suites-run-in-ci.sh` | 77 suites, 73 run, 4 exempt, 0 unrun-and-undeclared |
 | `check-containerfile-assertions.sh` | 194 checked, 0 failed, 0 inert |
 | `check-no-conflict-markers.sh` / `check-doc-verbs.sh` | PASS / 0 undocumented-and-undeclared |
+
+**Device baseline restored and every value read back** (matches `p1-053e`'s
+table): both APKs uninstalled (`Success` twice, then `pm list packages | grep
+apexos` → 0), `low_power` 0, `airplane_mode_on` 0, `stay_on_while_plugged_in`
+0, `accelerometer_rotation` 1, `font_scale` 1.0, `user_rotation` 0,
+`enabled_accessibility_services` null, `accessibility_enabled` 0, `deviceidle
+get deep` ACTIVE, battery real hardware with 0 override lines. **No orphaned
+daemon from this worktree** — every `apex-remoted`/`apex-agentd` pid was
+checked with `readlink /proc/<pid>/exe`; the only matches were the live
+`/usr/bin/apex-agentd` (1365, 1475), which were left alone.
+
+**P1-051 was NOT touched.** Its remainder is on the dispatch's item list, but
+nothing this round bears on it and its evidence is unchanged — said here rather
+than left to be inferred from silence.
 
 **What this does NOT prove, and a lander should say so:** the phone is still on
 the same Wi-Fi. It takes the relay because the offer's LAN addresses were
@@ -262,6 +283,7 @@ from the Rust one:
 | `f41667a6` | `feat(android)` dial the relay, and delete the apology at `PairingService:108`. **7 dialler tests, 0 failures** |
 | `d0d2f857` | `test(android)` the relay leg from a real phone through the real deployed relay. **OK (3 tests)**; mutated with `APEX_DEVICE_SUITE_RELAY=` → all 3 fail naming the argument |
 | `8dd2cc9e` | `docs(relay)` the README said it was not deployed and that no client could dial `wss` — three false claims |
+| `c1ac18e1` | `fix(android)` every relayed session leaked its socket, and its handshake had no deadline — both found in review, both mutated |
 | `b6758c78` | `feat(android)` tell the person which path they got, in the desktop's own words — `ConnectionReport.path`, the banner, `Help.kt`, and a disclosure-parity gate that reads `rendezvous.rs`. **`:core` 496/0 (was 459), `:app` 51/0 (was 44), help-prose TOTAL 0** |
 
 ## IN PROGRESS

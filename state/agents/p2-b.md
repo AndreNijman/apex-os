@@ -83,7 +83,7 @@ Do not re-run anything on the card's own "DO NOT RE-RUN" list.
 ## NEXT
 
 **ROUND 34 IS COMPLETE AND PUSHED IN BOTH REPOS.** apex-shell
-`task/p2-b-round34` tip **`2bc9799`** (one commit on `roadmap/v2.2`'s
+`task/p2-b-round34` tip **`45b43c0`** (two commits on `roadmap/v2.2`'s
 `4eea9fb`); apex-os `task/p2-b-round34` tip **`d7c5ea2e`** (TWO commits on
 `7f647470`). **The apex-os half is the substance this round** — the module is
 built into the image for the first time. Worktrees `/var/tmp/apex-work/wt-p2-b7`
@@ -262,7 +262,13 @@ Round 32 is finished and pushed in both repos, and both worktrees
 Round 34 (2026-09-19). **The module ships. The shell reaches it. Nothing is
 translated yet, and that last sentence is the honest headline.**
 
-apex-shell `2bc9799`, one commit on `roadmap/v2.2`'s `4eea9fb`, pushed:
+apex-shell `45b43c0`, two commits on `roadmap/v2.2`'s `4eea9fb`, pushed. The
+second (`45b43c0`) is prose only: section 6's note claimed the image ships no
+catalogue, which apex-os `d7c5ea2e` made false. It now COUNTS the `.ts` files
+and the `<translation>` entries instead of remembering them, so it cannot go
+stale the same way again. `run-i18n-test.sh` unchanged at 24/0/0,
+`mutate-i18n.sh` re-ran at 14/14/0 — which is what proves the edit moved no
+anchor. The first (`2bc9799`):
 
 * `src/i18n/I18nBootstrap.qml` is the only file in the repository that names
   `Apex.I18n`, and `shell.qml` loads it through `Qt.createComponent()` and reads
@@ -1756,12 +1762,16 @@ a missing module is an English desktop and not a missing one). Costed rather
 than assumed: **zero packages in any tier, ~37 kB of layer**, because the core
 image already carries `g++`, `moc`, `pkg-config` and both Qt devel packages
 (FOUND 37). Section 6 is an `ok`, and its PREDICATE was replaced because the old
-one answered NO about this exact arrangement (FOUND 38). **One thing remains and
-it is the one that reaches a user: NO `.qm` IS COMPILED INTO THE IMAGE**, for
-any language, so `QTranslator::load()` finds nothing and all 186 strings come
-back English. That needs `lrelease` from a discarded builder stage — costed at 1
-MiB, against 113 MB for the base-tier `dnf` that must not be used. And
-`apex-shell_de.ts` still carries German for five of the 186. translated installer: not
+one answered NO about this exact arrangement (FOUND 38). **AND THE CATALOGUE SHIPS TOO**: a
+DISCARDED `apex-i18n-catalogue` stage compiles every `translations/*.ts` and the
+final stage copies out only the `.qm`, with each `.ts`'s sha256 cross-checked
+against the vendored tree and each `.qm` proved to load per language in a real
+QML engine. Read out of the built image: `LANG=de` returns *"Wie Agenten und
+Arbeitsbereiche funktionieren"* from the SHIPPED guide where `LANG=en_US` in the
+same image returns the English. **What is left is not a mechanism, it is
+words**: the German covers 5 of the 186 marked strings and the other 181 come
+back in English because nobody has written them. A new language is now one
+`.ts` file in apex-shell and no apex-os change at all. translated installer: not
 present, route is gettext. per-user language: not present. recovery flow:
 untouched.
 

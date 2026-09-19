@@ -123,6 +123,9 @@ with an unverified fix is a good outcome; an unrecorded one is not.**
 
 ## IN PROGRESS
 
+- **Probe run `35437829397`** (workflow `sbom-probe`, branch `task/sbom-oom`,
+  commit `0386666a`) — in progress since 18:35 AWST. Read it with
+  `gh run view 35437829397 --log | grep -E 'mode=|oom_kill|Maximum resident|dmesg|OOM|sample'`.
 - Probe workflow `.github/workflows/sbom-probe.yml` on `task/sbom-oom` against
   `sha256:be3bdd0c6384…`, four arms in parallel, syft pinned to the same 1.52.0:
   `repro` (registry:, SYFT_PARALLELISM=4 — the exact failing command),
