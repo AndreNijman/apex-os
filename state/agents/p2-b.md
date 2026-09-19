@@ -26,6 +26,36 @@ question about that runner no longer costs a CI round trip. The recipe is
 run foreground, never backgrounded — a backgrounded podman is SIGTERMed,
 truncates its log and still exits 0.
 
+## ORCHESTRATOR NOTE — round 33 dispatch (2026-09-19)
+
+**Round 32 is LANDED.** apex-shell `task/p2-b-round32` @ `ecc0e39` is on
+`roadmap/v2.2` as merge **`9df72cf`** (`a8cd491` -> `9df72cf`, `--no-ff`, 548
+insertions over `ci.yml`, `tests/run-rtl-test.sh`, `tests/mutate-rtl.sh`);
+`check-no-conflict-markers.sh` PASS, `ci.yml` re-parses as YAML, both suites
+`bash -n` clean on the merged tip. P2-003 and P2-004 evidence updated; both stay
+`partial`. Nothing from round 32 is outstanding.
+
+**Cut `task/p2-b-round33` in BOTH repos** from the new tips — apex-shell
+`9df72cf`, apex-os `7f647470` — and push both even if one repo gets no commits,
+because apex-shell's CI looks for a matching branch name. Round 32's worktrees
+are finished.
+
+**This round is standing-queue item 4, then item 5**: the QTranslator host change
+(FOUND 3), which costs a compiled artefact, and then the ~200 prose strings in
+`AgentHelpContent.qml` that are parked behind it. Note `check-agent-help.sh`
+greps the exact shape `{ k: "kv", t: "$m"`, so it has to move with them.
+
+**Do NOT take standing-queue items 1 and 2 this round** (Orca at the login
+screen, greeter audio). Katana became free today, but (a) it is booted on an
+image **131 commits behind** the integration tip which predates the
+accessibility round, so a greeter measurement there would describe the wrong
+build, and (b) a different agent, `katana-image-qual`, owns the machine this
+round and will reboot it. Ask for it in a later round once that agent has
+rebased it onto the tip image.
+
+Do not re-run anything the "Do NOT re-run" list below names. Every mutation
+harness here costs eight to twenty minutes.
+
 ## NEXT
 
 **Round 32 is COMPLETE and pushed.** apex-shell `task/p2-b-round32` tip
