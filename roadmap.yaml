@@ -685,7 +685,29 @@ tasks:
     game launch. katana is left booted on 97c9e8f2 with three deployments, the September 18 rollback still pinned,
     greetd byte-identical to its backup with zero timers armed, and ~/apex-pre-rebase-20260919 intact. The NVMe
     controllers swapped across this reboot AGAIN -- the APEX Micron 220534D1CB81 moved from nvme0n1 to nvme1n1 --
-    so address disks by serial or label, never by device name.
+    so address disks by serial or label, never by device name. || 2026-09-20, unit pkg-etc-label, the /etc
+    mislabel FIXED on branch task/pkg-etc-label (commit 3ce33791, not landed). install_etc now collects every path
+    it creates or overwrites as it goes and hands the list to restorecon -F -i -f, so the label comes from the
+    LOADED POLICY instead of from cp -a preserving the extraction tree's rpm_var_lib_t. Each branch records only
+    what it actually wrote (the two .apexnew branches leave the original alone, a directory that already existed
+    was not created by us), and the removal pass adds the paths it declined to delete, which is the class
+    /etc/security/limits.d/10-gamemode.conf fell into. -F is load-bearing, not tidiness: a bare restorecon
+    declines to touch any file whose type is in the policy's customizable_types list and still exits 0. label_tree
+    is deliberately untouched, because split_out_of_image has already moved /etc out of the payload root before it
+    runs. New suite tests/test-apex-pkg-etc-label.sh asserts the property over EVERYTHING the pass writes rather
+    than over .pwd.lock: real packages decide which paths exist, the filesystem's own ctime decides which the pass
+    touched, and the engine is run TWICE because the second install is the one that overwrites and is what broke
+    katana. 21 passed / 0 failed where labels can be read and set, 9 / 0 with coverage forced, and 9 is the CI
+    floor because ubuntu-24.04 has no SELinux and podman's own rootfs is mounted context= where setxattr
+    security.selinux returns EOPNOTSUPP. Every control fires on today's packages: the pre-fix replica reproduces
+    the katana finding exactly (/etc/.pwd.lock rpm_var_lib_t where policy wants passwd_file_t), one file
+    mislabelled by hand makes the checker name that file and only that file, and dropping a single path from the
+    list the engine submits turns the coverage gate red. Mutation-tested from outside the suite as well: deleting
+    the relabel call turns 6 assertions red enforced and 2 coverage, deleting the one line that records what the
+    plain-write branch wrote turns coverage red for the 44 paths that branch handles. What only hardware can still
+    confirm, and is therefore still open on this task: that a DynamicUser=yes unit starts after an apex install
+    (there is no PID 1 in a container), and that restorecon resolves against the APEX image's loaded policy rather
+    than Fedora 43's policy rpm. Neither katana nor the L16 was touched.
 - id: P0-002
   title: Introduce protected apex-secretd service
   priority: P0
