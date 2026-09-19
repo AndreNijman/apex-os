@@ -3091,6 +3091,67 @@ jobs:
               exit 1
           fi
 
+      # tests/test-apex-pkg-etc-label.sh — what LABEL the engine puts on the
+      # files it writes into /etc. install_etc copies with `cp -a`, which
+      # preserves the SOURCE label, and the source is an rpm extraction tree
+      # under /var/lib — so every file `apex install` put in /etc arrived as
+      # rpm_var_lib_t. On katana on 2026-09-20 that made /etc/.pwd.lock
+      # rpm_var_lib_t where policy wants passwd_file_t, systemd could not take
+      # the passwd lock, and all six DynamicUser=yes units on the machine —
+      # capsule@.service and rpm-ostreed.service among them — failed at step
+      # USER with 217/USER. No AVC was logged, `systemctl --failed` showed
+      # nothing because those units are on-demand, and it took four rounds of
+      # probing to find. It then recurred on the next rebuild with a DIFFERENT
+      # wrong type, which is why the fix is in the engine.
+      #
+      # The suite asserts the property over EVERYTHING the pass writes, not
+      # over .pwd.lock: the packages decide which paths exist and the
+      # filesystem's own ctime decides which of them the pass touched, so a
+      # file nobody has thought of is covered. Same containment as the two
+      # steps above — podman, repository mounted read-only, nothing installed
+      # on the runner, no sysext built.
+      #
+      # THE FLOOR IS THE COVERAGE-MODE COUNT, AND THAT IS NOT AN ACCIDENT.
+      # Reading and setting a per-file SELinux label needs a host kernel with
+      # SELinux; this runner is ubuntu-24.04 and has none, and podman's own
+      # rootfs is mounted with a fixed `context=` where setxattr security.selinux
+      # returns EOPNOTSUPP regardless. So on the runner the suite measures the
+      # half that does not need labels: every path the pass wrote was handed to
+      # the policy labeller, and matchpathcon — which works from the policy
+      # files with SELinux switched off — wants a non-default type for a real
+      # share of them, so the lookup cannot be a constant. 9 assertions ran
+      # that way, measured on 2026-09-20 by forcing coverage mode on an SELinux
+      # workstation (APEX_ETC_LABEL_FORCE_COVERAGE=1); the same suite runs 21
+      # there without forcing, and the extra 12 are the ones that read labels
+      # back, including the pre-fix control that reproduces the katana finding
+      # exactly. Run it on an APEX machine to get those.
+      #
+      # Both halves are mutation-tested rather than assumed: deleting the
+      # engine's relabel call turns 6 assertions red here and 2 in coverage
+      # mode, and deleting the single line that records what the plain-write
+      # branch wrote turns coverage red for the 44 paths that branch handles.
+      - name: P0 pkg — the label on everything apex install writes into /etc
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          command -v podman >/dev/null || { echo "::error::podman is not on this runner; the etc-label suite would SKIP and exit 0, and a could-not-run is not a pass"; exit 1; }
+          rc=0; out="$(./tests/test-apex-pkg-etc-label.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the etc-label suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex-pkg-etc-label: [0-9]+ passed, [0-9]+ failed$' || true)"
+          [ -n "$summary" ] || { echo "::error::the etc-label suite printed no summary line, which is what it does when podman is absent or no repository was reachable — it then exits 0, so this line is the only thing between that and a green tick"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^apex-pkg-etc-label: //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed /etc labelling assertions failed"; exit 1; }
+          [ "$passed" -ge 9 ] || { echo "::error::only $passed labelling assertions ran; 9 is what coverage mode measured on 2026-09-20, and four of those nine exist purely to stop the other five passing over an empty population"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the etc-label suite printed a SKIP; that means podman, the repository or the SELinux policy rpm was unavailable, and none of the assertions ran"
+              exit 1
+          fi
+
       # tests/test-apex-pkg-update.sh — does a fix baked into an image ever
       # reach a machine that is already running one? On 2026-09-19 it did not.
       # katana was rebased onto the image carrying pkg-share, rebooted, and
