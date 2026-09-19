@@ -81,12 +81,14 @@ object RelayDialler {
             output.write(opening.request(endpoint, rendezvous, role))
             output.flush()
             opening.accept(input)
-            // The deadline comes off HERE and only here, at the same point the
-            // LAN leg drops its own: everything before this line ran against a
-            // relay that had proved nothing, and everything after it may sit
-            // idle for hours while nobody types. The desktop's fifteen-second
-            // keepalive is what stands in for it.
-            socket.soTimeout = 0
+            // The deadline STAYS ON, and the caller clears it — exactly as the
+            // LAN leg does. Getting this wrong is not theoretical: a guest the
+            // relay joined to a host whose splice never answers would sit in
+            // `Client.openSession` for ever, and the symptom is a pairing
+            // screen that spins with nothing to cancel it. The Noise handshake
+            // is the part still running against a peer that has proved
+            // nothing; `Dialled.socket` exists so `PairingService` can drop the
+            // deadline at the same line the LAN leg drops its own.
             Dialled(
                 socket = socket,
                 link = RelayLink(input, output) { runCatching { socket.close() } },

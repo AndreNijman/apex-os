@@ -615,6 +615,42 @@ class RelayTest {
         )
     }
 
+
+    @Test
+    fun `closing either carried stream sends a close and releases the socket`() {
+        // How the layer above releases a connection: `Session.close` closes its
+        // `output` and then its `input`, and on the LAN leg either of those
+        // closes the socket underneath. These two used to be the default
+        // no-op `InputStream.close`, so every relayed session leaked a TCP
+        // connection to the relay and left the desktop holding a splice for a
+        // peer that had gone.
+        for (closeIt in listOf<(RelayLink) -> Unit>({ it.input.close() }, { it.output.close() })) {
+            val sink = ByteArrayOutputStream()
+            var released = 0
+            val link = RelayLink(ByteArrayInputStream(ByteArray(0)), sink) { released++ }
+            link.output.write("unflushed".toByteArray())
+            closeIt(link)
+            assertEquals(1, released, "the socket under the link was not released")
+
+            // The buffered bytes went first, then a close frame — so the relay
+            // can tell a hang-up from a dropped connection and free the room.
+            val frames = splitClientFrames(sink.toByteArray()).map {
+                WsReceiver(ByteArrayInputStream(asFromServer(it))).message()
+            }
+            assertEquals(WsOp.BINARY, frames.first().op)
+            assertEquals("unflushed", String(frames.first().payload))
+            assertEquals(WsOp.CLOSE, frames.last().op)
+
+            // Idempotent: the layer above closes BOTH halves, and a second
+            // close frame on a socket that has gone is an exception thrown
+            // out of a `use` block that had already succeeded.
+            link.input.close()
+            link.output.close()
+            link.close()
+            assertEquals(1, released, "the link released its socket more than once")
+        }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────
 
     /**

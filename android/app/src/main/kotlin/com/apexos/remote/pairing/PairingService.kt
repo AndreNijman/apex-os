@@ -227,6 +227,12 @@ class PairingService {
                     identity = identity,
                     desktopPublic = Device.checkKey(machine.desktopKey),
                 )
+                // Here, and for the same reason as twenty lines above: the
+                // handshake ran under a deadline because the far end had
+                // proved nothing, and a terminal nobody is typing at produces
+                // no bytes for hours. The relay's own ping and the desktop's
+                // keepalive are what stand in for it.
+                dialled.socket.soTimeout = 0
                 Connected(session, Rendezvous.Path.RELAY)
             } catch (e: Exception) {
                 runCatching { dialled.link.close() }
