@@ -11,49 +11,24 @@ scratch: `/var/tmp/apex-work/scratch-katana-image-qual/`
 
 ## NEXT
 
-**Waiting on the GHCR tag; everything that does not need it is already done.**
-Poll: `skopeo inspect --no-tags
-docker://ghcr.io/andrenijman/apex-os:apex-7f647470e222cfa23e0853cac45ef3f7e74c252e`
-— last checked 17:22 AWST, still `manifest unknown` (build dispatched 17:04
-AWST, ~1 h). A background watcher is armed in this session; if you are a fresh
-agent, just poll.
+**18:18 — TAG IS LIVE**, `sha256:be3bdd0c63848811fbbd3a76f17a50f40e90b1eeb8614b93993ec69419f3aafb`,
+created 2026-09-19T10:09:10Z. Rebase running via
+`sudo /var/tmp/apex-work/scratch-katana-image-qual/rebase.sh` (bootc switch +
+clean `systemctl reboot`). After the reboot, in order:
 
-The moment the tag exists, in this order:
+1. `bootc status --json` — record the landed digest into evidence §1.
+2. `journalctl -u apex-sysext-rebuild -b` **before touching anything** (the
+   real-world no-op for §0.2).
+3. `sudo apex install steam` while still merged → expect "already up to date".
+   Then `sudo systemd-sysext unmerge` and repeat, capturing to
+   `.../apex-install-steam.log`. **Check `grep 'multilib: carrying'` first.**
+4. `sudo /var/tmp/apex-work/scratch-katana-image-qual/measure-pkgshare.sh post`.
+5. §6 via `greetd-set.sh`, starting with `apex gaming --gamescope-device-args`
+   over ssh — expected value is already stated in evidence §0.10:
+   `--prefer-vk-device 10de:249d --prefer-output HDMI-A-1`, rc 0.
 
-1. `ssh katana 'sudo bootc switch --transport registry ghcr.io/andrenijman/apex-os:apex-7f647470e222cfa23e0853cac45ef3f7e74c252e'`
-   then `sudo systemctl reboot` (clean reboot, never a hard reset — a crash
-   discards a staged update). Re-read `bootc status --json`; record the digest.
-2. On the new image, prove the no-op first (evidence §0.2): `sudo
-   /usr/libexec/apex-pkg rebuild --if-needed` and `sudo apex install steam`
-   should both decline to rebuild. Then force it:
-   `sudo systemd-sysext unmerge` followed by `sudo apex install steam 2>&1 |
-   tee /var/tmp/apex-work/scratch-katana-image-qual/apex-install-steam.log`
-   (foreground; `systemd-run --wait` if it needs to outlive the ssh).
-   **Check `grep 'multilib: carrying'` in that log BEFORE believing any count**
-   — its absence means the old extension was measured.
-3. Re-run the §0.3 baseline block verbatim against the new `.raw` for the
-   shadow count, and `ls /usr/share/vulkan/icd.d/ | grep -c i686`.
-3a. **Before touching anything on the first new-image boot**, capture
-   `journalctl -u apex-sysext-rebuild -b` — that is the REAL-WORLD no-op for
-   evidence §0.2; the manual `rebuild --if-needed` is only its reproduction.
-4. Then §6, using `sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-set.sh
-   <session-id>` + `sudo systemctl restart greetd`, and **arm the dead-man's
-   switch first** (transient timers do not survive a reboot, so arm it AFTER
-   the rebase reboot):
-   `sudo systemd-run --on-calendar='2026-09-19 20:45:00' --unit=qual-greetd-restore /usr/bin/bash -c 'cp /etc/greetd/config.toml.orig-qual2 /etc/greetd/config.toml && systemctl restart greetd'`
-   — test it once with an `--on-active=30s` copy and watch it fire.
-   **If you are a fresh agent and `/etc/greetd/config.toml` has an
-   `[initial_session]` block, katana is auto-logging in as andre — undo it with
-   `sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-restore.sh`,
-   which restores `/etc/greetd/config.toml.orig-qual2`, `cmp`s it, stops the
-   dead-man's timer and restarts greetd. The backup is deliberately in `/etc`
-   (etc_t) so a systemd timer can exec the restore.**
-
-**Cut order if time runs short** (hard stop 20:58 AWST): rebase + digest,
-pkg-share's three numbers, the greetd login that attributes §6.3 — that row has
-been open two rounds and is cheap — then 6.4's forced run and 6.5. Write and
-commit per block; a partial run with evidence beats a complete one that was
-never written down.
+**If greetd is left armed, undo with
+`sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-restore.sh`.**
 
 ## The plan, written 2026-09-19 17:15 AWST while waiting for the tag
 

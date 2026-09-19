@@ -85,12 +85,14 @@ Anything you do must leave those where they are or better.
 
 ## NEXT
 
-**Write the connector**: `android/app/src/main/kotlin/com/apexos/remote/pairing/
-RelayDialler.kt` — TCP connect, `SSLSocket` when `endpoint.secure` with
-`sslParameters.endpointIdentificationAlgorithm = "HTTPS"` set BEFORE
-`startHandshake()` (without it `SSLSocket` validates the chain and NOT the
-name), write `Opening.request`, `Opening.accept`, return a `RelayLink`. Then a
-`:app` JVM test against a loopback double that does NOT use `Relay.kt`'s codec.
+**Steps (f) and (g): the disclosure.** `RemoteViewModel.ping` must call
+`pairing.open(...)` instead of `connect(...)` and put the returned
+`Rendezvous.Path` into `ConnectionReport` (`RemoteViewModel.kt:101`);
+`MachinesScreen` shows `path.disclosure()` when it is `RELAY`; `Help.kt:212`'s
+note "The relay has no deployment yet" is now FALSE and `HelpParityTest`'s
+inverse list (line ~145) says so too. THEN `--relay` through
+`run-device-suite.sh` `start_remoted` **and** `broker.py` `restart_remoted`,
+then the device test.
 
 ## THE SEAM — measured, and `PairingService.kt:21` is telling the truth
 
@@ -129,6 +131,16 @@ Everything else on the Android side is already written and was waiting for this:
   relay's name on it, or the layer above learns which leg it is on.
 - **No new dependency is needed and OkHttp is the wrong answer here** — see
   "The dependency decision" below.
+- **Four mutations into `Relay.kt`; only two were caught.** `peer-gone` treated
+  as a word to ignore, and `MAX_FRAME` halved, both survived — the first
+  because the test double had nothing left to send after the notice, the second
+  because the parity assertion looked for the literal in the Rust source and
+  compared it to nothing. Both gates fixed and re-mutated. **Mutate your own
+  gates on this unit; two of eight were blind.**
+- **`SSLSocket` does not verify the hostname by default.** Chain yes, name no,
+  unless `sslParameters.endpointIdentificationAlgorithm = "HTTPS"` is set
+  before `startHandshake()`. Without it the rendezvous id goes to whoever
+  answers the address and every "is TLS on?" test still passes.
 
 ## The dependency decision, argued rather than defaulted
 
@@ -202,7 +214,9 @@ from the Rust one:
 
 | commit | what |
 | --- | --- |
-| `125e1d91` | `feat(android)` the RFC 6455 client the relay leg has never had — `:core` codec + `RelayLink` stream adapter, **35 tests, 0 failures** |
+| `125e1d91` | `feat(android)` the RFC 6455 client the relay leg has never had — `:core` codec + `RelayLink` stream adapter |
+| `f8b6fd7d` | `test(android)` two of the relay gates inspected nothing, found by mutation. **36 tests, 0 failures** |
+| `f41667a6` | `feat(android)` dial the relay, and delete the apology at `PairingService:108`. **7 dialler tests, 0 failures** |
 
 ## IN PROGRESS
 
@@ -215,7 +229,7 @@ from the Rust one:
   fallback + delete the apology string (d) `--relay` through
   `run-device-suite.sh` `start_remoted` AND `broker.py` `restart_remoted`
   (e) device test (f) `Help.kt` + `HelpParityTest` (g) the disclosure UI.
-  **Land only after (g).**
+  **(a) (b) (c) DONE and pushed. Land only after (g).**
 
 ## FOUND — inherited from the dispatch
 
