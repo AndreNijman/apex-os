@@ -72,8 +72,19 @@ cleanup() {
   local rc=$?
   restore_talkback
   [ -n "$broker_pid" ] && kill "$broker_pid" 2>/dev/null || true
-  [ -n "$remoted_pid" ] && kill "$remoted_pid" 2>/dev/null || true
-  [ -n "$agentd_pid" ] && kill "$agentd_pid" 2>/dev/null || true
+  # The CURRENT apex-remoted, which is not always the one this script started.
+  # `restart_remoted` — the verb the reconnect test uses — stops the daemon and
+  # starts another, and writes the new pid to `remoted.pid`. Killing the shell
+  # variable instead left the replacement running: measured on 2026-09-19, the
+  # previous round's worktree still held **seven** orphaned `apex-remoted`
+  # processes and one `apex-agentd`, the oldest nearly nine hours old, each
+  # holding a TCP listener. This script's own header says it stops its daemons
+  # by pid; the pid it has to use is the one on disk.
+  local current=""
+  [ -r "$root/remoted.pid" ] && current=$(cat "$root/remoted.pid" 2>/dev/null)
+  for p in "$current" "$remoted_pid" "$agentd_pid"; do
+    [ -n "$p" ] && kill "$p" 2>/dev/null || true
+  done
   wait 2>/dev/null || true
   exit $rc
 }
