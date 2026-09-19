@@ -103,7 +103,7 @@ the other. Fan writes go through the same `SysWriter` as everything else, so
 |---|---|---|---|
 | `Active` | property (r) | `b` | A session is running |
 | `Supported` | property (r) | `b` | The active profile permits game mode |
-| `Status` | property (r) | `a{sv}` | `active`(b), `supported`(b), `tier`(s), `cgroup`(s), `cpuset_policy`(s), `irq_policy`(s); while active also `cpus`(s), `core_source`(s), `prior_tier`(s), `irqs_steered`(u), `irqs_attempted`(u), `irqs_refused`(u), `gpus_locked`(au), `gpus_lock_attempted`(au), `scx_requested`(s), `scx_state`(s), `scx_detail`(s), `pids`(au), `notes`(as), `owner_pid`(u); while idle also `pcores`(s), `ecores`(s), `nvidia_smi`(b), `scx_requested`(s), `scx_state`(s), `scx_detail`(s) |
+| `Status` | property (r) | `a{sv}` | `active`(b), `supported`(b), `tier`(s), `cgroup`(s), `cpuset_policy`(s), `irq_policy`(s); while active also `cpus`(s), `core_source`(s), `prior_tier`(s), `irqs_steered`(u), `irqs_attempted`(u), `irqs_refused`(u), `gpus_locked`(au), `gpus_lock_attempted`(au), `scx_requested`(s), `scx_state`(s), `scx_detail`(s), `scx_btf`(s), `pids`(au), `notes`(as), `owner_pid`(u); while idle also `pcores`(s), `ecores`(s), `nvidia_smi`(b), `scx_requested`(s), `scx_state`(s), `scx_detail`(s), `scx_btf`(s) |
 | `SetActive` | method | `b → ()` | Enter/leave; idempotent both ways; polkit `manage-power` |
 | `StartForPid` | method | `u → ()` | Enter and pin a PID (its children inherit the cgroup); polkit `manage-power` |
 | `AttachPid` | method | `u → ()` | Attach another PID to a running session; `Failed` when inactive; polkit `manage-power` |
@@ -175,11 +175,38 @@ had refused every call since the feature landed.
   Note the kernel's `root/ops` publishes the **struct_ops** name, which drops
   the prefix: `scx_lavd` reads as `lavd`.
 
-The three `scx_*` keys are also present **while game mode is off**, reporting
+`scx_btf` is the **fourth** key, added 2026-09-20, and it answers the question
+`scx_state` structurally cannot: whether a scheduler could EVER attach to this
+kernel. It is a reading of `/sys/kernel/btf/vmlinux` taken by `apexd` itself.
+
+* **`ok`** — the sched-ext kfunc prototypes are the shape a BPF scheduler
+  expects.
+* **`implicit-args`** — one or more `scx_bpf_*` kfuncs still carry the
+  verifier's implicit `struct bpf_prog_aux *` argument in their public
+  prototype, so `libbpf` rejects every scheduler with `func_proto incompatible
+  with vmlinux`. **No sched-ext scheduler can load on such a kernel**, and no
+  APEX setting changes that. This is the reading every APEX image has given so
+  far; `docs/gaming-and-sessions.md` §5d has the measurement.
+* **`no-sched-ext`** — the BTF parsed and carries no `scx_bpf_*` kfunc at all.
+* **`absent`** — `/sys/kernel/btf/vmlinux` is not there.
+* **`unreadable`** — it is there and could not be read or parsed. Deliberately
+  **not** folded into `absent`: a probe that could not look has not looked and
+  found nothing wrong.
+* `not probed` — nothing asked for a scheduler, the same shape as
+  `scx_requested` being empty.
+
+When `scx_btf` blocks loading **and** the kernel did not end up with a
+scheduler attached, its sentence is appended to `scx_detail`. A session that
+reports `loaded` is not argued with, and a kernel with nothing wrong with it
+earns no clause — so the presence of the clause is itself information.
+
+The four `scx_*` keys are also present **while game mode is off**, reporting
 the live reading. That is deliberate: on katana `sched_ext/state` read
 `disabled` before, during and after a session, so quoting it as a release
 discriminator proved nothing, and the surface should make that legible rather
-than leave a reader to infer it.
+than leave a reader to infer it. It matters more for `scx_btf`: a user should
+be able to learn that no Gaming Mode session can carry a scheduler **without
+starting one**.
 
 ## Authorization
 
