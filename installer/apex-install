@@ -177,6 +177,37 @@ note() { printf '%s\n' "$*" || true; log "$*"; }
 WROTE_DISK=0      # 1 once bootc install has begun writing
 INSTALLED_OK=0    # 1 once bootc install returned success
 
+# ── Full-disk encryption state ───────────────────────────────────────────────
+# Declared up here, not where they are first assigned, because die() and
+# unmount_target() BOTH read them and both can run long before the encrypted
+# path does. An unset LUKS_MAPPER under `set -u` inside the cleanup path would
+# turn a recoverable failure into an unexplained crash in the cleanup itself.
+LUKS_PART=""      # the partition carrying the LUKS2 header
+LUKS_MAPPER=""    # the /dev/mapper name, once the volume is open
+LUKS_UUID=""      # the LUKS2 header UUID — what rd.luks.uuid= names
+BOOT_PART=""      # the SEPARATE, UNENCRYPTED /boot partition
+ESP_PART=""       # the ESP this engine created (encrypted whole-disk mode)
+RECOVERY_FILE=""  # 0600 file under /run holding the recovery key. SECRET.
+RECOVERY_KEY=""   # the key itself, once read back. SECRET — never log()ged.
+LUKS_TPM_TOKEN=0  # 1 once a systemd-tpm2 token is OBSERVED in the header
+# Where the enrolment helper lives INSIDE the APEX-OS image being installed.
+# It is not in the live environment: enrolment policy belongs to the system
+# being installed, so the helper ships with it and is run out of it.
+LUKS_ENROLL_PATH="/usr/libexec/apex-luks-enroll"
+# The console (kbd) keymap the installed machine will load — NOT the XKB layout
+# name. See console_keymap_for() for why they are different things and why
+# confusing them is a stranding bug on an encrypted machine.
+CONSOLE_KEYMAP=""
+
+# secret_line(): stdout ONLY, never the log.
+#
+# note() writes its argument to /var/log/apex-install.log, and save_log_to_esp()
+# copies that log onto the live USB stick in plain text on every failure. The
+# disk recovery key must reach the USER and must not be left lying in a log
+# file, so it travels through here and through the deliberate, 0600 copy
+# surface_recovery_key() writes — nowhere else.
+secret_line() { printf '%s\n' "$*" || true; }
+
 # Kernel cmdline, read EARLY: it carries the CI-only apex.unattended flag and
 # the apex.* keys that mode installs from.
 CMD=$(cat /proc/cmdline 2>/dev/null || true)
@@ -227,7 +258,18 @@ TROOT=/run/apex-target
 unmount_target() {
   umount "$TROOT/boot/efi" 2>/dev/null || true
   umount "$TROOT"          2>/dev/null || true
-  [ -n "${MNT:-}" ] && { umount "$MNT/boot/efi" 2>/dev/null || true; umount "$MNT" 2>/dev/null || true; }
+  [ -n "${MNT:-}" ] && { umount "$MNT/boot/efi" 2>/dev/null || true; umount "$MNT/boot" 2>/dev/null || true; umount "$MNT" 2>/dev/null || true; }
+  # A LUKS mapper left open holds the partition busy, so the NEXT run fails at
+  # `cryptsetup luksFormat` with "Device or resource busy" — i.e. the previous
+  # failure is what makes the retry impossible. That is precisely the stranding
+  # this function exists to prevent, and it is why closing belongs here and not
+  # only on the success path.
+  if [ -n "${LUKS_MAPPER:-}" ] && [ -e "/dev/mapper/$LUKS_MAPPER" ]; then
+    umount "$TROOT/boot/efi" 2>/dev/null || true
+    umount "$TROOT/boot"     2>/dev/null || true
+    umount "$TROOT"          2>/dev/null || true
+    cryptsetup close "$LUKS_MAPPER" 2>/dev/null || true
+  fi
   return 0
 }
 
@@ -395,6 +437,88 @@ copy_network_to() {  # $1=deploy dir
   return 0
 }
 
+# ── XKB layout name  →  console (kbd) keymap name ───────────────────────────
+#
+# THESE ARE TWO DIFFERENT NAMESPACES AND THIS FILE USED TO CONFLATE THEM.
+# `set_locale_keymap_in` wrote the operator's XKB layout straight into
+# /etc/vconsole.conf, which systemd-vconsole-setup feeds to `loadkeys`. loadkeys
+# does not speak XKB. Measured against the keymap tree the image actually ships
+# (`i18n_install_all="yes"`, so every kbd map is present):
+#
+#     XKB layout   kbd keymap that exists      what the old code wrote
+#     gb           uk                          gb          -> no such keymap
+#     ch           sg                          ch          -> no such keymap
+#     latam        la-latin1                   latam       -> no such keymap
+#     jp           jp106                       jp          -> no such keymap
+#
+# loadkeys then fails and the console silently keeps the PREVIOUS map, which on
+# a fresh boot is the kernel built-in: `us`. On an unencrypted machine that is
+# an annoyance on tty1. On a machine encrypted by default it is the whole
+# stranding case — the passphrase prompt is a console prompt, so a British user
+# who typed a passphrase containing `"` on their own keyboard has to guess that
+# the box now wants `@`, at a prompt with no way back.
+#
+# The conversion table is systemd's own, /usr/share/systemd/kbd-model-map (the
+# same file `localectl set-x11-keymap` uses in the other direction), and a
+# direct keymap-file hit beats the table — that is the order systemd itself
+# uses, and it keeps `us`, `de`, `fr` and every other layout whose name IS a
+# kbd keymap on the obvious answer instead of whatever the table's first
+# matching row happens to be.
+#
+# Only the FIRST layout of a comma-separated list is converted: the console can
+# load exactly one keymap, and pretending otherwise is how "it looked like it
+# worked" bugs start.
+kbd_has() {  # $1=keymaps dir  $2=candidate name — prints $2 if such a keymap exists
+  local d="$1" n="$2" f
+  [ -d "$d" ] || return 0
+  f=$(find "$d" -type f \( -name "$n.map" -o -name "$n.map.gz" -o -name "$n.map.zst" \) \
+        -print -quit 2>/dev/null || true)
+  [ -n "$f" ] && printf '%s' "$n"
+  return 0
+}
+
+console_keymap_for() {  # $1=xkb layout(s)  $2=xkb variant  $3=deploy dir or ""
+  local layout="${1%%,*}" variant="${2:-}" deploy="${3:-}" kdir mapf hit=""
+  [ -n "$layout" ] || { printf 'us\n'; return 0; }
+  # Prefer the TARGET's data when we have it: the installed machine is the one
+  # that has to load this keymap, and the live ISO's kbd package is not
+  # necessarily the same build.
+  kdir=/usr/lib/kbd/keymaps
+  if [ -n "$deploy" ] && [ -d "$deploy/usr/lib/kbd/keymaps" ]; then
+    kdir="$deploy/usr/lib/kbd/keymaps"
+  fi
+  mapf=/usr/share/systemd/kbd-model-map
+  if [ -n "$deploy" ] && [ -f "$deploy/usr/share/systemd/kbd-model-map" ]; then
+    mapf="$deploy/usr/share/systemd/kbd-model-map"
+  fi
+  # 1. a keymap file named exactly for this layout(+variant).
+  if [ -n "$variant" ]; then
+    hit=$(kbd_has "$kdir" "$layout-$variant")
+  fi
+  if [ -z "$hit" ]; then hit=$(kbd_has "$kdir" "$layout"); fi
+  # 2. systemd's conversion table — exact layout+variant row first, …
+  if [ -z "$hit" ] && [ -f "$mapf" ]; then
+    hit=$(awk -v l="$layout" -v v="$variant" \
+      'BEGIN{ if (v=="") v="-" }
+       /^#/ { next }
+       NF>=2 { xv=(NF>=4 ? $4 : "-"); if ($2==l && xv==v) { print $1; exit } }' \
+      "$mapf" 2>/dev/null || true)
+  fi
+  # 3. … then any row for this layout at all. A `ch` (Swiss) install must land
+  #    on `sg` even though every ch row in the table carries a variant.
+  if [ -z "$hit" ] && [ -f "$mapf" ]; then
+    hit=$(awk -v l="$layout" \
+      '/^#/ { next } NF>=2 { if ($2==l) { print $1; exit } }' \
+      "$mapf" 2>/dev/null || true)
+  fi
+  # 4. `us` is the kernel built-in, so falling back to it changes nothing that
+  #    was not already going to happen — but it is a FALLBACK and the caller
+  #    logs it as one, rather than the silent fallback this comment is about.
+  [ -n "$hit" ] || hit=us
+  printf '%s\n' "$hit"
+  return 0
+}
+
 # ── shared post-install: locale + keyboard layout in the target ──────────────
 # THE CONTRACT THIS IMPLEMENTS
 # /usr/lib/systemd/system-environment-generators/50-apex-keymap (see
@@ -486,8 +610,21 @@ set_locale_keymap_in() {  # $1=deploy dir
   } > "$xkbdir/00-keyboard.conf" 2>>"$LOG" || true
 
   # Console keymap + system locale.
-  printf '# Written by apex-install. Change with: localectl set-keymap <keymap>\nKEYMAP=%s\n' \
-    "$layout" > "$deploy/etc/vconsole.conf" 2>>"$LOG" || true
+  #
+  # `layout` is an XKB name and KEYMAP= is a kbd name; see console_keymap_for().
+  # CONSOLE_KEYMAP is normally already resolved (before the disk was touched, so
+  # the same value could be put on the kernel command line for the initramfs
+  # unlock prompt); recompute here against the TARGET's keymap tree when it is
+  # not, which is the path an operator who skipped the keyboard step takes.
+  local ckmap="${CONSOLE_KEYMAP:-}"
+  if [ -z "$ckmap" ]; then
+    ckmap=$(console_keymap_for "$layout" "$variant" "$deploy")
+  fi
+  if [ "$ckmap" != "$layout" ]; then
+    log "locale/keymap: XKB layout '$layout' -> console keymap '$ckmap'"
+  fi
+  printf '# Written by apex-install. Change with: localectl set-keymap <keymap>\n# NOTE: on an encrypted machine the vconsole.keymap= kernel argument set at\n# install time is what the initramfs unlock prompt uses, and systemd lets it\n# override this file. Change both, or the prompt and the console disagree.\nKEYMAP=%s\n' \
+    "$ckmap" > "$deploy/etc/vconsole.conf" 2>>"$LOG" || true
   printf '# Written by apex-install. Change with: localectl set-locale LANG=...\nLANG=%s\n' \
     "$lang" > "$deploy/etc/locale.conf" 2>>"$LOG" || true
 
@@ -541,7 +678,126 @@ set_locale_keymap_in() {  # $1=deploy dir
       "$deploy/etc/X11" "$deploy/etc/vconsole.conf" "$deploy/etc/locale.conf" \
       "$deploy/etc/localtime" >>"$LOG" 2>&1 || true
   fi
-  log "locale/keymap: LANG=$lang layout=$layout${variant:+ variant=$variant} tz=$tz"
+  log "locale/keymap: LANG=$lang layout=$layout${variant:+ variant=$variant} console=$ckmap tz=$tz"
+  return 0
+}
+
+# ── shared: name the Nth partition of a disk ────────────────────────────────
+# /dev/sda + 1 -> /dev/sda1, but /dev/nvme0n1 + 1 -> /dev/nvme0n1p1 and
+# /dev/mmcblk0 + 1 -> /dev/mmcblk0p1. Probing for the node that actually exists
+# is simpler and more honest than a name-shape rule, and it also proves udev has
+# finished: a name that is not a block device yet is not a name we may use.
+part_dev() {  # $1=disk  $2=partition number — prints the node, or nothing
+  local d="$1" n="$2" c
+  for c in "${d}p${n}" "${d}${n}"; do
+    if [ -b "$c" ]; then printf '%s' "$c"; return 0; fi
+  done
+  return 0
+}
+
+# ── shared: get the disk recovery key to the user ───────────────────────────
+#
+# THIS IS THE FUNCTION THIS WHOLE FEATURE STANDS OR FALLS ON. An encrypted
+# machine whose recovery key was never shown is the stranding case encryption
+# by default exists to prevent: a forgotten passphrase, a keyboard that types
+# something other than what is printed on it, a TPM that changed its mind after
+# a firmware update — every one of them ends at a prompt with no way back, and
+# the recovery key is the way back.
+#
+# systemd's recovery key is deliberately written in a modhex alphabet
+# (bcdefghijklnrtuv and digits) whose characters sit in the SAME PLACE on
+# QWERTY, QWERTZ and AZERTY. So it is also the answer to "the console keymap is
+# wrong": it can be typed on a machine whose layout is not the owner's.
+#
+# Two channels, because each one fails differently:
+#   1. On screen, via a stdout protocol line the graphical front end shows on a
+#      page of its own and makes the user acknowledge. Never through note() or
+#      log() — the log is copied onto the USB stick in the clear on every
+#      failure, and a key in there is a key nobody chose to write down.
+#   2. A 0600 file on the LIVE USB's own ESP — the stick the user is holding,
+#      which they still have when the machine will not boot and which is what
+#      they would boot to recover with anyway. The honest caveat is printed in
+#      the file itself: a stick kept in the same bag as the laptop protects
+#      nothing, so the file says to move it somewhere else or delete it.
+#
+# It is NEVER written to the target's ESP or /boot. Those live on the machine
+# that is encrypted, unencrypted, and an attacker with the laptop has them.
+surface_recovery_key() {  # $1=the recovery key — SECRET
+  local key="$1" esp dst path saved=0 why=""
+  # 1. the screen.
+  secret_line "APEX-INSTALL-RECOVERY-KEY: $key"
+  # 2. the stick. APEX_RECOVERY_DIR is a TEST hook (environment only, never the
+  #    answers file or the kernel command line), the same shape as APEX_IMAGE.
+  if [ -n "${APEX_RECOVERY_DIR:-}" ]; then
+    mkdir -p "$APEX_RECOVERY_DIR" 2>/dev/null || true
+    dst="$APEX_RECOVERY_DIR"
+  else
+    esp=$(blkid -L APEXEFI 2>/dev/null || true)
+    if [ -n "$esp" ]; then
+      dst=$(mktemp -d 2>/dev/null || true)
+      if [ -n "$dst" ] && ! mount "$esp" "$dst" 2>>"$LOG"; then
+        rmdir "$dst" 2>/dev/null || true; dst=""; why="the USB stick could not be mounted"
+      fi
+    else
+      why="this installer is not running from an APEX USB stick"
+    fi
+  fi
+  if [ -n "$dst" ]; then
+    path="$dst/apex-recovery-key-${HOSTNAME:-apex}.txt"
+    if ( umask 077; {
+          printf 'APEX-OS DISK RECOVERY KEY\n'
+          printf '=========================\n\n'
+          printf 'Machine : %s\n' "${HOSTNAME:-apex}"
+          printf 'Disk    : %s\n' "${DISK:-unknown}"
+          printf 'Written : %s\n\n' "$(date -Is 2>/dev/null || date)"
+          printf '    %s\n\n' "$key"
+          printf 'WHAT IT IS FOR\n'
+          printf 'If APEX-OS ever asks for the disk passphrase and will not accept it --\n'
+          printf 'you forgot it, the keyboard is typing something other than what is on\n'
+          printf 'the keys, or the automatic unlock stopped working after a firmware\n'
+          printf 'update -- type THIS instead, at the same prompt. It always works.\n\n'
+          printf 'The letters and digits it uses are in the same place on nearly every\n'
+          printf 'keyboard layout, so it can be typed even when the layout is wrong.\n\n'
+          printf 'KEEP IT SOMEWHERE ELSE\n'
+          printf 'This key opens the disk. On this USB stick, in the same bag as the\n'
+          printf 'laptop, it protects nothing. Copy it to a password manager or write\n'
+          printf 'it on paper kept apart from the machine, then delete this file.\n'
+        } > "$path" ) 2>>"$LOG"; then
+      sync 2>/dev/null || true
+      saved=1
+    else
+      why="writing to the USB stick failed"
+    fi
+    [ -n "${APEX_RECOVERY_DIR:-}" ] || { umount "$dst" 2>/dev/null || true; rmdir "$dst" 2>/dev/null || true; }
+  fi
+  if [ "$saved" = 1 ]; then
+    note "APEX-INSTALL-RECOVERY-SAVED: apex-recovery-key-${HOSTNAME:-apex}.txt"
+  else
+    note "APEX-INSTALL-RECOVERY-UNSAVED: ${why:-unknown reason}"
+  fi
+  return 0
+}
+
+# ── shared post-install: /etc/crypttab in the installed system ──────────────
+# The INITRAMFS unlocks from the kernel command line (rd.luks.uuid=), because a
+# generic, non-hostonly initramfs built in a container cannot contain this
+# machine's crypttab. This file is for the system AFTER switch-root: without it
+# systemd has no record that the root device is encrypted, and `x-initrd.attach`
+# is what tells it the volume was already attached in the initrd rather than
+# queueing a second attempt against a device that is already open.
+write_crypttab_in() {  # $1=deploy dir
+  local deploy="$1" opts="luks,discard,x-initrd.attach"
+  [ -n "${LUKS_UUID:-}" ] || return 0
+  [ -d "$deploy/etc" ] || return 0
+  if [ "${LUKS_TPM_TOKEN:-0}" = 1 ]; then opts="$opts,tpm2-device=auto"; fi
+  printf '# Written by apex-install.\n# <name>  <device>  <key file>  <options>\n%s  UUID=%s  none  %s\n' \
+    "$LUKS_MAPPER" "$LUKS_UUID" "$opts" > "$deploy/etc/crypttab" 2>>"$LOG" || true
+  chmod 0600 "$deploy/etc/crypttab" 2>/dev/null || true
+  if have setfiles && [ -f "$deploy/etc/selinux/targeted/contexts/files/file_contexts" ]; then
+    setfiles -r "$deploy" "$deploy/etc/selinux/targeted/contexts/files/file_contexts" \
+      "$deploy/etc/crypttab" >>"$LOG" 2>&1 || true
+  fi
+  log "crypttab: $LUKS_MAPPER UUID=$LUKS_UUID opts=$opts"
   return 0
 }
 
@@ -605,6 +861,23 @@ if [ "$UNATTENDED" = 1 ]; then
   [ -w /dev/console ] && exec >/dev/console 2>&1
   DISK=$(kv apex.disk); USERNAME=$(kv apex.user); P1=$(kv apex.pass); HOSTNAME=$(kv apex.host)
   : "${USERNAME:=andre}"; : "${HOSTNAME:=apex}"; : "${P1:=apex}"
+  # Encryption in the unattended (CI) path is OPT-IN and says which way it went.
+  # This path exists only on test builds (see the marker-file gate above) and
+  # runs with nobody in front of it, so there is no one to show a recovery key
+  # to; defaulting it to `yes` would encrypt CI disks with a key that goes
+  # straight in the bin. The line is printed rather than assumed so a reader of
+  # a CI log can see the decision instead of inferring it.
+  U_ENCRYPT=$(kv apex.encrypt); : "${U_ENCRYPT:=no}"
+  case "$U_ENCRYPT" in
+    no)  echo "unattended: encryption OFF (pass apex.encrypt=yes to turn it on)" ;;
+    yes) die "unattended: apex.encrypt=yes is not supported.
+
+The unattended path has nobody to show a disk recovery key to, and an encrypted
+disk whose recovery key was never shown to anyone is exactly what this feature
+exists to prevent. Drive the graphical installer, or use --headless with an
+answers file carrying encrypt=yes and lukspass=." ;;
+    *)   die "unattended: bad apex.encrypt='$U_ENCRYPT' (expected yes or no)." ;;
+  esac
   [ -b "$DISK" ] || die "unattended: apex.disk=$DISK is not a block device."
   log "UNATTENDED install: DISK=$DISK USER=$USERNAME HOST=$HOSTNAME"
   echo "APEX-OS unattended install to $DISK …"
@@ -729,6 +1002,9 @@ USERNAME=""; P1=""; HOSTNAME=""; MOKPW=""
 # install a layout nobody picked, and a wrong layout is a password that cannot
 # be typed on first boot.
 KEYMAP=""; KEYVARIANT=""; TIMEZONE=""
+# Encryption is a DECISION, and a decision that goes missing must not be made
+# silently in either direction — see the `encrypt` validation below.
+ENCRYPT=""; LUKSPASS=""
 
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
@@ -749,6 +1025,8 @@ while IFS= read -r line || [ -n "$line" ]; do
     keymap)    KEYMAP="$v" ;;
     keyvariant) KEYVARIANT="$v" ;;
     timezone)  TIMEZONE="$v" ;;
+    encrypt)   ENCRYPT="$v" ;;
+    lukspass)  LUKSPASS="$v" ;;
     *)         die "unknown key in answers file: $k" ;;
   esac
 done < "$ANSWERS"
@@ -765,6 +1043,112 @@ done < "$ANSWERS"
 [ -n "${HOSTNAME:-}" ]     || die "answers: hostname missing"
 [ -n "${P1:-}" ] || die "answers: password missing"
 case "$INSTALL_MODE" in disk|partition) : ;; *) die "answers: bad mode '$INSTALL_MODE'" ;; esac
+
+# ── Encryption: explicit, or refuse ─────────────────────────────────────────
+# APEX-OS encrypts the disk BY DEFAULT. "By default" is a property of the
+# question the front end asks (the box is ticked when the user arrives), NOT a
+# property of this engine — and the engine refuses to guess.
+#
+# Both silent defaults are wrong here, in opposite directions:
+#   * default to `no`  — a front-end bug that drops the key turns a user who
+#     ticked the box into an unencrypted machine, with nothing anywhere saying
+#     so. A silent security downgrade reported as success.
+#   * default to `yes` — a test harness, a scripted install, or the ISO's own
+#     unattended path would start encrypting disks nobody asked to encrypt.
+#
+# So the key is MANDATORY in headless mode. This is the same reasoning the
+# hostname parser above records: a key that can go missing without anybody
+# noticing is the shape of bug that costs a disk. apex-installer-gui always
+# writes it; the unattended (CI) path takes apex.encrypt= from the kernel
+# command line and SAYS which way it went.
+[ -n "${ENCRYPT:-}" ] || die "answers: encrypt missing.
+
+The installer must be told explicitly whether to encrypt this disk — it will
+not guess. Nothing has been erased."
+case "$ENCRYPT" in
+  yes|no) : ;;
+  *) die "answers: bad encrypt '$ENCRYPT' (expected yes or no). Nothing has been erased." ;;
+esac
+
+if [ "$ENCRYPT" = yes ]; then
+  # ── Encryption needs a whole disk, and this is not a shortcut ─────────────
+  # An encrypted root needs an UNENCRYPTED /boot for GRUB to read (see the
+  # layout comment at the encrypted install branch). Partition mode is handed
+  # ONE partition to install into plus somebody else's ESP; there is nowhere to
+  # put /boot without taking a second partition the user never offered. Rather
+  # than invent one, this refuses — with the disk intact and with the two ways
+  # forward named.
+  [ "$INSTALL_MODE" = disk ] \
+    || die "Encryption is only available when APEX-OS gets a whole disk.
+
+Nothing has been erased — your disks are untouched.
+
+An encrypted system still needs a small UNENCRYPTED boot partition for the
+bootloader to read, and installing into a single existing partition leaves
+nowhere to put one.
+
+Either go back and choose 'Erase the whole disk', or go back and turn
+encryption off to install into this partition unencrypted."
+
+  # ── The passphrase ────────────────────────────────────────────────────────
+  # Checked HERE, before anything is erased, for the same reason the username
+  # is: the alternative is discovering it after `cryptsetup luksFormat` has
+  # already replaced the disk's contents.
+  [ -n "${LUKSPASS:-}" ] || die "answers: lukspass missing but encrypt=yes. Nothing has been erased."
+  # ASCII-printable only, and this is a deliberate restriction rather than
+  # laziness. The unlock prompt is a KERNEL CONSOLE prompt: it has one kbd
+  # keymap, no input method, no compose key and no dead keys. A passphrase
+  # containing a character the console keymap cannot produce is a passphrase
+  # the owner cannot type on their own machine, at the one prompt that has no
+  # way back. Every printable ASCII character is reachable on every kbd keymap;
+  # nothing outside that set is.
+  # `grep -v` on a HERE-STRING, deliberately, and not `printf … | grep -q`:
+  # under `pipefail` a matching `grep -q` can return 141 (it exits before the
+  # writer finishes, the writer takes SIGPIPE) and the `if` then reads a real
+  # match as a non-match, so the guard silently never fires. A here-string has
+  # no writer to signal. The anchored whole-line form is used because a
+  # here-string appends a newline, which is itself outside the printable set
+  # and would make the naive `grep -q '[^ -~]'` form match every passphrase.
+  if LC_ALL=C grep -qv '^[ -~]*$' <<<"$LUKSPASS"; then
+    die "The disk passphrase contains a character that cannot be typed at the boot prompt.
+
+Nothing has been erased — your disks are untouched.
+
+The screen that asks for this passphrase runs before the system starts: it has
+no accents, no emoji and no input method — only the plain characters printed on
+your keyboard. Please go back and choose a passphrase made of letters, digits
+and ordinary punctuation. (Your LOGIN password is not restricted this way.)"
+  fi
+  if [ "${#LUKSPASS}" -lt 8 ]; then
+    die "The disk passphrase is too short (${#LUKSPASS} characters; at least 8 are needed).
+
+Nothing has been erased — your disks are untouched."
+  fi
+
+  # ── The tools this path needs, checked before it needs them ───────────────
+  for _t in cryptsetup sgdisk wipefs blkid partprobe mkfs.ext4 mkfs.vfat mkfs.btrfs; do
+    have "$_t" || die "$_t is missing from this installer environment, so the disk cannot be encrypted.
+
+Nothing has been erased — your disks are untouched.
+Go back and turn encryption off to install unencrypted, or use a newer ISO."
+  done
+  # dm-crypt itself. `modprobe` first: on a live ISO the module is present but
+  # not loaded until something asks for it, and "not loaded" read as "not
+  # supported" would refuse an install that was about to work.
+  modprobe dm_crypt 2>>"$LOG" || true
+  if [ ! -d /sys/module/dm_crypt ] && ! grep -qw dm_crypt /proc/modules 2>/dev/null; then
+    die "This kernel cannot set up an encrypted disk (the dm-crypt module did not load).
+
+Nothing has been erased — your disks are untouched.
+Go back and turn encryption off to install APEX-OS unencrypted."
+  fi
+  # btrfs is the only root filesystem this path has been exercised with, and an
+  # untested combination is not something to discover on somebody's only disk.
+  case "$ROOTFS_TYPE" in
+    btrfs) : ;;
+    *) die "Encryption is only supported with the btrfs root filesystem (this install asked for '$ROOTFS_TYPE'). Nothing has been erased." ;;
+  esac
+fi
 
 # ── Validate the account NOW, before anything is erased ──────────────────────
 # These three checks lived only in the deleted text UI, and deleting it took
@@ -807,6 +1191,21 @@ fi
 if [ -n "${TIMEZONE:-}" ]; then
   printf '%s' "$TIMEZONE" | grep -Eq '^[A-Za-z][A-Za-z0-9+_-]*(/[A-Za-z0-9+_-]+)*$' \
     || die "Invalid timezone '$TIMEZONE'. Nothing has been erased."
+fi
+
+# Resolve the CONSOLE keymap here, with the disk still intact, because an
+# encrypted install has to put it on the kernel command line — the initramfs
+# cannot read the installed system's /etc/vconsole.conf, so the unlock prompt's
+# layout is decided at install time or not at all. See console_keymap_for().
+if [ -n "${KEYMAP:-}" ]; then
+  CONSOLE_KEYMAP=$(console_keymap_for "$KEYMAP" "${KEYVARIANT:-}" "")
+  log "keyboard: XKB '$KEYMAP'${KEYVARIANT:+ variant '$KEYVARIANT'} -> console keymap '$CONSOLE_KEYMAP'"
+else
+  # No operator choice: the live environment's own console keymap is ALREADY a
+  # kbd name (it is what systemd-vconsole-setup loaded here), so it needs no
+  # conversion and must not be run through one.
+  CONSOLE_KEYMAP=$(sed -n 's/^KEYMAP=//p' /etc/vconsole.conf 2>/dev/null | tr -d '"' | head -1 || true)
+  log "keyboard: no operator choice; carrying the live console keymap '${CONSOLE_KEYMAP:-us}'"
 fi
 
 printf '%s' "$USERNAME" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' \
@@ -1113,6 +1512,30 @@ The exact error is above and in $LOG."
   PODMAN_STORE=(--root "$STORE_SCRATCH/graph" --runroot "$STORE_SCRATCH/run")
 fi
 
+# ── The encryption helper has to EXIST before the disk is destroyed ─────────
+# It lives in the image, which on a network install only arrived a moment ago,
+# so this is the first point at which the question can be answered — and it is
+# still before anything has been written. An encrypted disk whose recovery key
+# was never created is the stranding case this whole item exists to prevent, so
+# a missing helper is a refusal, never a "carry on without the recovery key".
+if [ "$ENCRYPT" = yes ]; then
+  if [ -n "${APEX_LUKS_ENROLL_LOCAL:-}" ]; then
+    [ -x "$APEX_LUKS_ENROLL_LOCAL" ] \
+      || die "APEX_LUKS_ENROLL_LOCAL=$APEX_LUKS_ENROLL_LOCAL is not executable. Nothing has been erased."
+    log "luks: using the test-only local enrolment helper $APEX_LUKS_ENROLL_LOCAL"
+  elif ! podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm "$IMAGE" \
+         test -x "$LUKS_ENROLL_PATH" >>"$LOG" 2>&1; then
+    die "This APEX-OS image cannot set up an encrypted disk: it does not contain
+the enrolment helper ($LUKS_ENROLL_PATH) that creates the recovery key.
+
+Nothing has been erased — your disks are untouched.
+
+An encrypted disk with no recovery key is a disk you can be permanently locked
+out of, so the installer will not make one. Go back and turn encryption off to
+install APEX-OS unencrypted, or use a newer ISO."
+  fi
+fi
+
 note "Do not power off — $TARGET is being erased and rewritten from here on."
 
 # ── Dry-run stop: the last line before anything is destroyed ─────────────────
@@ -1131,7 +1554,7 @@ note "Do not power off — $TARGET is being erased and rewritten from here on."
 # from the environment, which the GUI never sets.
 if [ "${APEX_DRY_RUN:-0}" = 1 ]; then
   note "APEX-DRY-RUN: validation complete, stopping before the first destructive write."
-  note "  would install: MODE=$INSTALL_MODE TARGET=$TARGET DISK=$DISK ESP=${ESP_DEV:-n/a} FS=$ROOTFS_TYPE USER=$USERNAME HOST=$HOSTNAME"
+  note "  would install: MODE=$INSTALL_MODE TARGET=$TARGET DISK=$DISK ESP=${ESP_DEV:-n/a} FS=$ROOTFS_TYPE USER=$USERNAME HOST=$HOSTNAME ENCRYPT=$ENCRYPT KEYMAP=${CONSOLE_KEYMAP:-unset}"
   restore_console
   echo "APEX-INSTALL-DRYRUN-OK"
   exit 0
@@ -1212,6 +1635,237 @@ if [ "$INSTALL_MODE" = partition ]; then
   fi
   umount "$TROOT/boot/efi" 2>/dev/null || true
   umount "$TROOT" 2>/dev/null || true
+elif [ "$ENCRYPT" = yes ]; then
+  # ── encrypted whole disk: partition, LUKS2, then to-filesystem ────────────
+  #
+  # WHY THIS PATH EXISTS AT ALL, AND WHY IT IS NOT `--block-setup tpm2-luks`.
+  # `bootc install to-disk` offers `--block-setup tpm2-luks`, and using it would
+  # have been three words instead of this branch. Read what it does: it binds
+  # the unlock to "presence of the default tpm2 device" — no passphrase slot, no
+  # recovery slot, and on systemd 258 `--tpm2-device=auto` binds to NO PCRs at
+  # all (measured on real hardware, L-002 round 31). That is an encrypted disk
+  # with exactly one key, held by a chip that a firmware update, a TPM clear or
+  # a motherboard swap takes away — the stranding case verbatim, and it is also
+  # why bootc's own help points at to-filesystem "for anything more complex such
+  # as ... LUKS". So the layout is built here, where the passphrase and the
+  # recovery key are created and PROVEN before the disk is committed to.
+  #
+  # THE LAYOUT, and why /boot is outside the encryption:
+  #
+  #   p1  1 GiB   ef00  EFI System Partition   FAT32     -> /boot/efi
+  #   p2  1 GiB   8300  apex-boot              ext4      -> /boot     (PLAIN)
+  #   p3  rest    8309  apex-luks              LUKS2     -> /         (btrfs)
+  #
+  # APEX boots GRUB through bootupd. Fedora's GRUB can be talked into reading a
+  # LUKS2 volume, but only for some header formats, and the failure mode of
+  # getting that wrong is a machine that does not boot at all rather than one
+  # that asks for a passphrase. A separate plain /boot is what Fedora itself
+  # ships for encrypted installs and what this repository's own runbook
+  # specified (docs/m4-install-runbook.md §5b, docs/m0-results.md §9). The
+  # kernel and initramfs living in the clear is not a secret leak: they are the
+  # same public bytes as the published image, and their integrity is Secure
+  # Boot's job, not the disk encryption's.
+  #
+  # Partition TYPES matter and 8309 is chosen deliberately: the initramfs
+  # carries systemd-gpt-auto-generator, which acts on the DISCOVERABLE root
+  # type GUID. Labelling the LUKS partition "Linux LUKS" rather than "root"
+  # keeps exactly one thing responsible for opening it — the rd.luks.* kernel
+  # arguments written below.
+  WROTE_DISK=1
+  rc=0
+  note "Partitioning $DISK (EFI, a plain boot partition, and an encrypted volume for everything else) …"
+  wipefs -a "$DISK" >>"$LOG" 2>&1 || true
+  sgdisk --zap-all "$DISK" >>"$LOG" 2>&1 || true
+  if ! sgdisk \
+        -n 1:0:+1GiB -t 1:ef00 -c 1:"EFI System Partition" \
+        -n 2:0:+1GiB -t 2:8300 -c 2:"apex-boot" \
+        -n 3:0:0     -t 3:8309 -c 3:"apex-luks" \
+        "$DISK" >>"$LOG" 2>&1; then
+    rc=70; echo "sgdisk could not write the partition table on $DISK" | tee -a "$LOG"
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    partprobe "$DISK" >>"$LOG" 2>&1 || true
+    udevadm settle --timeout=30 >>"$LOG" 2>&1 || true
+    ESP_PART=$(part_dev "$DISK" 1)
+    BOOT_PART=$(part_dev "$DISK" 2)
+    LUKS_PART=$(part_dev "$DISK" 3)
+    if [ -z "$ESP_PART" ] || [ -z "$BOOT_PART" ] || [ -z "$LUKS_PART" ]; then
+      rc=70
+      echo "the new partitions on $DISK did not appear (esp='$ESP_PART' boot='$BOOT_PART' luks='$LUKS_PART')" | tee -a "$LOG"
+    else
+      log "luks layout: esp=$ESP_PART boot=$BOOT_PART luks=$LUKS_PART"
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkfs.vfat -F 32 -n APEXESP "$ESP_PART" >>"$LOG" 2>&1 \
+      || { rc=71; echo "mkfs.vfat failed on the EFI partition $ESP_PART" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkfs.ext4 -F -L apex-boot "$BOOT_PART" >>"$LOG" 2>&1 \
+      || { rc=71; echo "mkfs.ext4 failed on the boot partition $BOOT_PART" | tee -a "$LOG"; }
+  fi
+  # ── the LUKS2 header ───────────────────────────────────────────────────────
+  # The passphrase goes in on STDIN (`--key-file -`), never as an argument:
+  # everything on a command line is world-readable in /proc for as long as the
+  # process lives. argon2id is cryptsetup's own default for LUKS2 and is kept
+  # deliberately — nothing here has to read this header except the initramfs,
+  # which has a full cryptsetup.
+  if [ "${rc:-0}" = 0 ]; then
+    note "Creating the encrypted volume on $LUKS_PART …"
+    LUKS_FMT=(--type luks2 --pbkdf argon2id --label APEXROOT --batch-mode --key-file -)
+    # TEST-ONLY, environment-only: a weaker key-derivation cost so a loopback
+    # test does not spend a gigabyte and several seconds per open. It is LOGGED,
+    # so a run that used it says so in the artefact rather than looking normal.
+    if [ -n "${APEX_LUKS_PBKDF_MEMORY:-}" ]; then
+      LUKS_FMT+=(--pbkdf-memory "$APEX_LUKS_PBKDF_MEMORY" --pbkdf-parallel 1 --pbkdf-force-iterations 4)
+      log "luks: WEAKENED key derivation in use (APEX_LUKS_PBKDF_MEMORY=$APEX_LUKS_PBKDF_MEMORY) — test builds only"
+    fi
+    if ! printf '%s' "$LUKSPASS" | cryptsetup luksFormat "${LUKS_FMT[@]}" "$LUKS_PART" >>"$LOG" 2>&1; then
+      rc=72; echo "cryptsetup luksFormat failed on $LUKS_PART" | tee -a "$LOG"
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    LUKS_UUID=$(cryptsetup luksUUID "$LUKS_PART" 2>>"$LOG" || true)
+    if [ -z "$LUKS_UUID" ]; then
+      rc=72; echo "the new LUKS2 header on $LUKS_PART has no UUID" | tee -a "$LOG"
+    else
+      # The mapper name is fixed here and put on the kernel command line, so the
+      # name the initramfs creates and the name /etc/crypttab expects are the
+      # same string by construction rather than by coincidence.
+      LUKS_MAPPER="luks-$LUKS_UUID"
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    if ! printf '%s' "$LUKSPASS" | cryptsetup open --key-file - "$LUKS_PART" "$LUKS_MAPPER" >>"$LOG" 2>&1; then
+      rc=73; echo "the new encrypted volume would not open with the passphrase just set" | tee -a "$LOG"
+    fi
+  fi
+  # ── enrolment: the recovery key (always) and a TPM slot (only where safe) ──
+  # Policy is NOT decided here. /usr/libexec/apex-luks-enroll, in the image being
+  # installed, owns it; this engine's job is to call it, to check that a
+  # recovery key really came out, and to refuse to continue if one did not.
+  # The existing passphrase is offered both as $PASSWORD (systemd-cryptenroll's
+  # own documented environment variable) and on stdin, because adding a keyslot
+  # requires unlocking the volume key with a key that already exists.
+  if [ "${rc:-0}" = 0 ]; then
+    note "Creating the recovery key …"
+    mkdir -p /run/apex-luks 2>>"$LOG" || true
+    chmod 700 /run/apex-luks 2>/dev/null || true
+    RECOVERY_FILE=/run/apex-luks/recovery.key
+    rm -f "$RECOVERY_FILE" 2>/dev/null || true
+    if [ -n "${APEX_LUKS_ENROLL_LOCAL:-}" ]; then
+      printf '%s' "$LUKSPASS" | PASSWORD="$LUKSPASS" "$APEX_LUKS_ENROLL_LOCAL" \
+        --device "$LUKS_PART" --recovery-out "$RECOVERY_FILE" >>"$LOG" 2>&1 \
+        || { rc=74; echo "the enrolment helper failed" | tee -a "$LOG"; }
+    else
+      printf '%s' "$LUKSPASS" | PASSWORD="$LUKSPASS" \
+        podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host \
+          --security-opt label=disable -i -e PASSWORD \
+          -v /dev:/dev -v /run/apex-luks:/run/apex-luks \
+          "$IMAGE" "$LUKS_ENROLL_PATH" \
+            --device "$LUKS_PART" --recovery-out "$RECOVERY_FILE" >>"$LOG" 2>&1 \
+        || { rc=74; echo "the enrolment helper failed" | tee -a "$LOG"; }
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ] && [ ! -s "$RECOVERY_FILE" ]; then
+    rc=74; echo "the enrolment helper produced no recovery key" | tee -a "$LOG"
+  fi
+  # ── prove both keys open it, BEFORE the ten-minute install ────────────────
+  # This is the acceptance criterion in two commands. A recovery key that was
+  # printed but does not open the volume is worse than none, and finding that
+  # out after the install would mean finding it out on the user's machine.
+  # `grep`-free and `luksDump`-free: --test-passphrase asks the header itself.
+  if [ "${rc:-0}" = 0 ]; then
+    RECOVERY_KEY=$(tr -d '\r\n' < "$RECOVERY_FILE" 2>>"$LOG" || true)
+    note "Checking that the passphrase and the recovery key both open the disk …"
+    if ! printf '%s' "$LUKSPASS" | cryptsetup open --test-passphrase --key-file - "$LUKS_PART" >>"$LOG" 2>&1; then
+      rc=75; echo "the passphrase does not open the encrypted volume" | tee -a "$LOG"
+    fi
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    if ! printf '%s' "$RECOVERY_KEY" | cryptsetup open --test-passphrase --key-file - "$LUKS_PART" >>"$LOG" 2>&1; then
+      rc=75; echo "the recovery key does not open the encrypted volume" | tee -a "$LOG"
+    fi
+  fi
+  # Whether a TPM keyslot was actually added is OBSERVED in the header, not
+  # taken from the helper's word for it: the kernel argument and the crypttab
+  # line below only make sense if a systemd-tpm2 token is really there, and a
+  # tpm2-device= option against a header with no such token is a boot-time
+  # message nobody needs. Substring match on a captured string, NOT
+  # `luksDump | grep -q` — under `pipefail` a matching `grep -q` can return 141
+  # because the writer takes SIGPIPE, which reads here as "no token".
+  if [ "${rc:-0}" = 0 ]; then
+    _dump=$(cryptsetup luksDump "$LUKS_PART" 2>>"$LOG" || true)
+    case "$_dump" in *systemd-tpm2*) LUKS_TPM_TOKEN=1 ;; esac
+    log "luks: header has $(printf '%s' "$_dump" | grep -c '^ *[0-9]*: luks2' || true) keyslot(s); tpm2 token=$LUKS_TPM_TOKEN"
+    _dump=""
+  fi
+  # The key exists and is proven. Get it to the user NOW, not after the install:
+  # a failure in the next ten minutes must not be what loses it.
+  if [ "${rc:-0}" = 0 ]; then
+    surface_recovery_key "$RECOVERY_KEY"
+    shred -u "$RECOVERY_FILE" 2>/dev/null || rm -f "$RECOVERY_FILE" 2>/dev/null || true
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkfs.btrfs -f -L apex-root "/dev/mapper/$LUKS_MAPPER" >>"$LOG" 2>&1 \
+      || { rc=76; echo "mkfs.btrfs failed inside the encrypted volume" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkdir -p "$TROOT"
+    mount "/dev/mapper/$LUKS_MAPPER" "$TROOT" >>"$LOG" 2>&1 \
+      || { rc=77; echo "mounting the encrypted root failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkdir -p "$TROOT/boot"
+    mount "$BOOT_PART" "$TROOT/boot" >>"$LOG" 2>&1 \
+      || { rc=77; echo "mounting the boot partition failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    mkdir -p "$TROOT/boot/efi"
+    mount "$ESP_PART" "$TROOT/boot/efi" >>"$LOG" 2>&1 \
+      || { rc=77; echo "mounting the EFI partition failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ]; then
+    # ── the kernel arguments that make the machine unlockable ──────────────
+    # The initramfs is GENERIC (`hostonly=no`, built in the image), so it cannot
+    # contain this machine's /etc/crypttab. rd.luks.uuid= is what
+    # systemd-cryptsetup-generator reads inside the initrd, and rd.luks.name=
+    # pins the mapper name so /etc/crypttab and the initrd agree.
+    #
+    # vconsole.keymap= is the OTHER half of not stranding people. The unlock
+    # prompt is drawn before any filesystem is mounted, so the only place the
+    # keyboard layout can come from is this command line. Without it every
+    # encrypted machine asks for its passphrase on a US layout, whatever the
+    # owner chose in this installer. It is only added when the layout is not
+    # already the image default, so an ordinary `us` install gains no argument
+    # that could later override `localectl set-keymap`.
+    LUKS_KARGS=(--karg "rd.luks.uuid=$LUKS_UUID" --karg "rd.luks.name=$LUKS_UUID=$LUKS_MAPPER")
+    if [ "$LUKS_TPM_TOKEN" = 1 ]; then
+      LUKS_KARGS+=(--karg "rd.luks.options=$LUKS_UUID=tpm2-device=auto")
+    fi
+    if [ -n "$CONSOLE_KEYMAP" ] && [ "$CONSOLE_KEYMAP" != us ]; then
+      LUKS_KARGS+=(--karg "rd.vconsole.keymap=$CONSOLE_KEYMAP" --karg "vconsole.keymap=$CONSOLE_KEYMAP")
+    fi
+    BOOT_UUID=$(blkid -s UUID -o value "$BOOT_PART" 2>>"$LOG" || true)
+    if [ -n "$BOOT_UUID" ]; then
+      LUKS_KARGS+=(--boot-mount-spec "UUID=$BOOT_UUID")
+    fi
+    log "luks kargs: ${LUKS_KARGS[*]}"
+    podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
+      -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+      -v "$TROOT":"$TROOT":rshared \
+      ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
+      bootc install to-filesystem \
+        --skip-fetch-check --acknowledge-destructive \
+        --karg quiet --karg splash "${LUKS_KARGS[@]}" \
+        ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
+        "$TROOT" 2>&1 | tee -a "$LOG"
+    rc=${PIPESTATUS[0]}
+    { echo "--- boot + ESP after install ---"; find "$TROOT/boot" -maxdepth 3; } >>"$LOG" 2>&1 || true
+  fi
+  umount "$TROOT/boot/efi" 2>/dev/null || true
+  umount "$TROOT/boot"     2>/dev/null || true
+  umount "$TROOT"          2>/dev/null || true
 else
   # --net=host: no netavark needed in the live env; bootc install is offline.
   # Set BEFORE the call: `--wipe` destroys the disk immediately, so a Ctrl+C one
@@ -1231,6 +1885,46 @@ trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the inst
 # you looking in the wrong place.
 case "$rc" in
   0)  : ;;
+  70) die "Could not create the partitions on $DISK (see $LOG).
+
+$DISK has been erased and has no usable partitions on it. Nothing on your OTHER
+disks was touched. Start the installer again to try again — a second attempt on
+the same disk is safe." ;;
+  71) die "Could not create the boot filesystems on $DISK (see $LOG).
+
+$DISK has been erased. Nothing on your other disks was touched. Start the
+installer again to try again." ;;
+  72) die "Could not create the encrypted volume on $DISK (see $LOG).
+
+$DISK has been erased and nothing usable was written to it; in particular NO
+encrypted data exists there, so nothing is locked away. Your other disks were
+not touched. Start the installer again, or go back and turn encryption off." ;;
+  73) die "The encrypted volume was created but would not open with the passphrase that was just set (see $LOG).
+
+$DISK has been erased. There is no data inside that volume — the installer
+stopped before writing any — so nothing has been locked away. Start the
+installer again and choose a different passphrase." ;;
+  74) die "The recovery key for the encrypted disk could not be created (see $LOG).
+
+$DISK has been erased, but NOTHING has been installed on it and nothing is
+locked away.
+
+The installer refuses to finish an encrypted install without a recovery key: a
+disk whose only key is one passphrase is a disk one forgotten password turns
+into a brick. Start the installer again, or go back and turn encryption off." ;;
+  75) die "The disk was encrypted, but the installer could not prove that BOTH the passphrase and the recovery key open it (see $LOG).
+
+$DISK has been erased and nothing has been installed on it, so nothing is
+locked away. This check runs before the install for exactly this reason.
+Start the installer again, or go back and turn encryption off." ;;
+  76) die "Could not create the root filesystem inside the encrypted volume (see $LOG).
+
+$DISK has been erased. Your other disks were not touched. Start the installer
+again to try again." ;;
+  77) die "Could not mount the new filesystems to install into (see $LOG).
+
+$DISK has been erased. Your other disks were not touched. Start the installer
+again to try again." ;;
   90) die "Could not format $TARGET as $ROOTFS_TYPE (mkfs failed — see $LOG). The partition was NOT changed; your other partitions are untouched." ;;
   91) die "Could not mount the freshly formatted $TARGET (see $LOG). $TARGET was reformatted and is now empty; your other partitions are untouched." ;;
   92) die "Could not read/mount the EFI System Partition $ESP_DEV (see $LOG). Nothing was formatted; $TARGET and your other partitions are untouched." ;;
@@ -1255,6 +1949,12 @@ if [ "$INSTALL_MODE" = partition ]; then
   # crucially NO partprobe (the partition table was not modified in this mode;
   # re-reading it needlessly on a disk holding another live OS is pointless risk).
   root_part="$TARGET"
+elif [ -n "$LUKS_MAPPER" ]; then
+  # The installed root is INSIDE the still-open LUKS volume. The scan below
+  # would never find it: mounting the LUKS partition itself yields nothing but
+  # a header, so the loop would run to the end and report "installed root
+  # filesystem not found" about a perfectly good install.
+  root_part="/dev/mapper/$LUKS_MAPPER"
 else
   partprobe "$DISK" 2>>"$LOG" || true
   udevadm settle --timeout=30 2>>"$LOG" || true
@@ -1276,9 +1976,16 @@ deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1 || true)
 create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "post-install"
 copy_network_to "$deploy"
 set_locale_keymap_in "$deploy"
+write_crypttab_in "$deploy"
 # Never let cleanup failures trip the ERR trap AFTER a successful install — that
 # would report failure on a system that is actually installed fine.
 sync || true; umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true
+# Close the encrypted volume now that nothing is using it. Leaving it open
+# holds the partition, and the very next thing that happens here is a reboot
+# into a machine that has to open it again from scratch.
+if [ -n "$LUKS_MAPPER" ] && [ -e "/dev/mapper/$LUKS_MAPPER" ]; then
+  cryptsetup close "$LUKS_MAPPER" >>"$LOG" 2>&1 || log "luks: could not close $LUKS_MAPPER (harmless; it goes away on reboot)"
+fi
 log "post-install: user $USERNAME created, hostname=$HOSTNAME"
 
 # ── 5b. Secure Boot: enrol the APEX key so the installed kernel will boot ────
@@ -1383,6 +2090,19 @@ its key with:
 fi
 
 # ── 6. done ──────────────────────────────────────────────────────────────────
+if [ "$ENCRYPT" = yes ]; then
+  crypt_extra="
+
+This disk is ENCRYPTED. Every time it starts, APEX-OS asks for the disk
+passphrase you chose before it can boot — that is normal and it is not your
+login password.
+
+If it ever will not take that passphrase, type the RECOVERY KEY shown on the
+previous screen at the same prompt instead. It always works, including when the
+keyboard layout is wrong. Keep it somewhere that is not this laptop."
+else
+  crypt_extra=""
+fi
 if [ "$INSTALL_MODE" = partition ]; then
   done_extra="Installed into $TARGET; the other partitions on $DISK were not touched.
 
@@ -1394,7 +2114,7 @@ else
 fi
 note "APEX-OS is installed.
 
-$done_extra
+$done_extra$crypt_extra
 
 Log in as: $USERNAME
 Hostname:  $HOSTNAME
