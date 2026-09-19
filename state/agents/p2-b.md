@@ -18,7 +18,9 @@ pre-prune cards: `scratch-p2-b/p2-b.card.pre-round27-prune.md` and
 ## NEXT
 
 **Round 31 is COMPLETE and pushed in both repos.** Nothing on it is half-done.
-apex-shell tip `1003192` on `task/p2-b-round31`; apex-os tip `43ffce13` on the
+apex-shell tip `f9b189e` on `task/p2-b-round31` (`1003192` is the last commit
+that touches anything CI executes; `f9b189e` is a comment-only `ci.yml`
+correction); apex-os tip `43ffce13` on the
 same branch name (the branch has to exist in both repos because apex-shell's CI
 matches on branch name; apex-os got one commit this round, the RTL link-4
 guard). CI run 35415236747 is read and recorded at the end of the DONE section.
@@ -100,8 +102,9 @@ Nothing. Round 31 is finished and pushed in both repos, and the two worktrees
 Round 31 (2026-09-19). **The recovery screen is audited, both halves, and the
 audit found a product defect that had nothing to do with accessibility.**
 
-apex-shell `task/p2-b-round31`, six commits on `roadmap/v2.2`'s `f068f24`, all
-pushed:
+apex-shell `task/p2-b-round31`, seven commits on `roadmap/v2.2`'s `f068f24`,
+all pushed (the seventh, `f9b189e`, is a comment-only `ci.yml` correction and is
+described with the CI result below):
 
 * `6c277ac` — the RTL half. `tests/run-rtl-test.sh` grows three rows and its
   round-23 "the theme supplies the direction" prose is corrected: the iff
@@ -186,8 +189,22 @@ unchanged at **13 applied, 10 CAUGHT / 0 SURVIVED / 0 MISSCORED, 3 HELD /
 0 FALSE-RED**. FOUND 10's corollary applies: that harness aborts "tree dirty" on
 an uncommitted edit, so run it after the commit.
 
-**FROM THE GITHUB ARCH RUNNER, not this laptop: CI run 35415236747** on the
-final tip `1003192`. `Repo Structure Sanity` **success** (so every REQUIRED path
+**The new mutation harness was kill-tested rather than assumed safe.** Its trap
+code is the proven `20a1613` shape, but its `FILES` now includes
+`src/components/config/CfgSection.qml`, which every Config page instantiates, so
+a restore that works by accident would be wide. Killed with SIGTERM once it was
+past the baseline and into R1, and all five properties asserted: all four files
+restore byte-identical to a sha256 taken before the run; there is **no totals
+line** (it stopped rather than carrying on to score a mutant it never ran);
+there is **no `cp:` error** (it stopped by design rather than by choking); it
+exits **143**; and no snapshot directory is left in `TMPDIR`.
+
+**FROM THE GITHUB ARCH RUNNER, not this laptop: CI run 35415236747** on
+`1003192` — the last commit that touches anything CI executes. The one commit
+after it corrects two stale COMMENTS in `ci.yml` (it named R7 as the FOUND-28
+regression mutant, which is R12 and takes two edits, and still described the
+source-level pair as eleven-plus-three when `5327bc6` made it fourteen-plus-
+three). Comment-only, `ci.yml` re-parsed as YAML, not re-dispatched. `Repo Structure Sanity` **success** (so every REQUIRED path
 exists there, the two new ones included) and `NixOS` **success**. `arch-validate`
 red on **exactly one step — `Right-to-left layout baseline`** — the red this
 unit has carried since round 28, which a control run on `roadmap/v2.2`
@@ -977,15 +994,27 @@ image, NO suite asserts any of it. CJK: MEASURED (`run-i18n-test.sh` §5). RTL:
 shared settings surface mirrors and is mutation-proved (`run-rtl-test.sh`
 30/0/0 here, `mutate-rtl.sh` 13/13 — **CLOSED on this laptop, do not re-run**);
 **0 of 14 window roots mirror** — the honest remaining half. Mechanism guarded
-from apex-os by `test-apex-platform-theme.sh`. **`run-rtl-test.sh` is 17/3/2 on
-the GitHub Arch runner and has been since it landed**, proven not to be any
-branch's doing by a control run on `roadmap/v2.2` (35351740747). `qt6ct` was
-genuinely absent and the step now installs it; `qt6-translations` was ALREADY
-present at 6.11.2 — still 17/3/2 (35352450127, 35353034100), so those two were
-necessary and not sufficient and the cause is NOT identified. Unruled-out
-candidates: the runner is Qt 6.11.2 against this laptop's 6.10.3, and its qt6ct
-has no `/etc/xdg/qt6ct/qt6ct.conf`, which APEX ships. **Do not close it by making
-section 1 SKIP** — that section IS the discriminator. locale: deliberately NOT
+from apex-os by `test-apex-platform-theme.sh`. **`run-rtl-test.sh` is red on the GitHub
+Arch runner and has been since it landed — now 19 passed / 3 failed / 3 skipped
+(was 17/3/2; round 31 added two passing assertions and one COULD-NOT-RUN, and
+the same three rows are still red).** Not any branch's doing — control run on
+`roadmap/v2.2` (35351740747), and red again on `roadmap/v2.2`-derived branches
+in 35352450127, 35353034100, 35382910849 and 35415236747. **THE CAUSE IS NO
+LONGER UNKNOWN: see FOUND 26.** It is `libKF6I18n.so.6`, which Fedora's qt6ct
+build links against and Arch's upstream `qt6ct 0.11-8` does not; that library
+is what loads `qt_ar.qm` and flips the layout direction. CONFIRMED FROM THE
+RUNNER in 35388802498 and again in 35415236747, where the iff PASSED in the
+opposite branch to the one it passes in here and said so in words. **Both
+candidates this row used to list are ELIMINATED BY MEASUREMENT**, not by
+argument: the conf, because the ar_EG run with `XDG_CONFIG_DIRS` and
+`XDG_CONFIG_HOME` both pointed at an empty directory still gives RightToLeft;
+and the Qt version, because it is no longer needed as an explanation and the
+runner has 64 `qt_*.qm` including `qt_ar.qm`. So the runner's three reds are
+TRUTHFUL ABOUT THAT MACHINE. What is open is a DECISION — leave it red, or make
+the runner match what APEX ships (install `ki18n`, preload it for that step
+only, a route already measured to work) — and it is written up as NEXT item 1.
+**Do not close it by making section 1 SKIP** — that section IS the
+discriminator. locale: deliberately NOT
 offered — image ships `glibc-langpack-en` only. translated shell: pipeline
 proven on two machines, blocker is the host (FOUND 3). translated installer: not
 present, route is gettext. per-user language: not present. recovery flow:
@@ -1001,8 +1030,14 @@ untouched.
 5. the ~200 prose strings in `AgentHelpContent.qml`, PARKED until 4 (and
    `check-agent-help.sh` greps the exact shape `{ k: "kv", t: "$m"`, so it must
    move with them);
-6. **`run-rtl-test.sh` section 1 is RED on the GitHub Arch runner and the cause
-   is unknown** — see the P2-004 ledger row; it is older than any current branch;
+6. ~~**`run-rtl-test.sh` section 1 is RED on the GitHub Arch runner and the
+   cause is unknown**~~ **CAUSE IDENTIFIED round 31 (FOUND 26) and confirmed
+   from the runner itself: Arch's upstream qt6ct 0.11-8 links no libKF6I18n,
+   which is the library that loads the Qt catalogue and flips the direction.
+   The step is 19/3/3 there and the three reds are truthful about that machine.
+   What remains is a DECISION, not an investigation — see NEXT item 1. Still
+   older than any current branch, and still must NOT be closed by making
+   section 1 SKIP;**
 7. **RTL layout gap: 0 `LayoutMirroring` / 0 `layoutDirection` among the 14
    window roots**;
 8. ~~the RECOVERY screen, the last unaudited a11y surface named in the P2-003
