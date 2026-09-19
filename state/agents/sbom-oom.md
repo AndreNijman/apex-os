@@ -8,9 +8,11 @@ scratch: `/var/tmp/apex-work/scratch-sbom-oom/` (per-agent)
 
 ## THE ANSWER, in one line
 
-**`GOMEMLIMIT` is the whole fix.** Every probe arm without it died of memory
-exhaustion; both arms with it produced an identical, complete SBOM. Source
-location and parallelism changed nothing. Measured over seven arms, below.
+**Set `GOMEMLIMIT` and the step lives.** Eleven probe arms over two rounds:
+every arm with it passed, every arm without it died — except one that had 35 GB
+of swap to thrash through, which passed 2.2× slower with 417× the page faults.
+Source location, parallelism, and the limit's actual value (4/6/10 GiB) changed
+nothing. **Committed and pushed as `a40cf827`.**
 
 ## What is settled, measured by the round-33 `build-verify` agent
 
@@ -45,7 +47,12 @@ the `build-verify` card. It is not: `bd0c41ce` carried the identical wrapper, so
 the earlier run had the same inputs and lost the whole VM — the same exhaustion
 at a worse severity. **Every input here is APEX's.**
 
-## FOUND — probe run 35437908023, seven arms, read 2026-09-19
+## FOUND — 11 arms over two probe runs, all read 2026-09-19
+
+Round 1 = run **35437908023** (7 arms, the cause). Round 2 = run
+**35447488777** (4 arms, the margin). Both complete; both fully read below.
+
+### Round 1 — the cause
 
 All seven ran the same syft **1.52.0** against the same digest
 `sha256:be3bdd0c6384…` on the same `ubuntu-24.04` runner class (16 GB RAM,
@@ -142,10 +149,38 @@ The stock swap was never close to exhausted under GOMEMLIMIT, so the extra
 32 GB is insurance against a spike that does not happen while the limit is set.
 
 **Decision: do NOT add a swapfile to the SBOM step.** It is disk, a `sudo`
-mkswap/swapon, and extra step surface for no measured margin. If this ever does
-need more headroom, the lever to reach for is a larger runner, not swap. (The
-elapsed difference is not evidence of anything — these are separate VMs with
-different registry-fetch luck.)
+mkswap/swapon, and extra step surface for no measured margin. (The elapsed
+difference is not evidence of anything — separate VMs, different registry-fetch
+luck.)
+
+### `swap32-only` — swap WITHOUT the limit works, and shows what the limit buys
+
+`swap32-only` (no GOMEMLIMIT, 35 GB swap) **passed: rc=0, 9830 packages** — the
+only arm in either round to survive without the limit. But look at the cost
+against round 1's `gomemlimit`:
+
+| | `gomemlimit` (10GiB, 3 GB swap) | `swap32-only` (no limit, 35 GB swap) |
+|---|---|---|
+| elapsed | 904 s | **1958 s** (2.2×) |
+| major page faults | 20,946 | **8,742,468** (417×) |
+| peak `swap_used` | 973 MB | **14,277 MB** |
+| `mem_avail` floor | 188 MB | **29 MB** |
+| peak RSS | 14.65 GiB | 14.89 GiB |
+
+**That is the mechanism, made visible.** Without the limit, GOGC=100 lets the
+heap balloon and the kernel pages **14 GB** to disk — 8.7 million major faults
+is the thrash, and it is exactly what killed every round-1 arm that had only
+3 GB of swap to absorb it. With the limit, the GC keeps the live set bounded and
+~1 GB touches swap.
+
+Two consequences:
+
+- **GOMEMLIMIT is the *efficient* fix, not the only possible one.** Swap alone
+  is a working fallback if the image ever outgrows what the limit can hold.
+- **But it is a bad fallback and must not be adopted casually.** 1958 s is 72%
+  of the step's 2700 s timeout — a slower runner or a larger image turns this
+  arm into an `rc=124`. If it is ever needed, raise the timeout in the same
+  change.
 
 ### AND THE LIMIT'S VALUE IS NOT A LEVER EITHER — do not tune it
 
