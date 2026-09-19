@@ -152,13 +152,67 @@ about swap. Probe 2 fixes it by allocating a *new* file at `/swapfile.probe`.
   moving `:apex`, `:daily`, `:gaming-*`, `:core` or `:base`). The verification
   path this card assumes therefore exists and is safe from `task/sbom-oom`.
 
-## IN PROGRESS
+## IN PROGRESS — run ids, read these first
 
-<!-- RUNIDS -->
+- **Probe round 2: run `35447488777`** (workflow `sbom-probe`, branch
+  `task/sbom-oom`, commit `531b6c96`), started 14:01 UTC. Four arms about the
+  **margin**, not the cause: `gml10-swap32` (the candidate — the working limit
+  plus 32 GB of real swap at `/swapfile.probe`, which is the round-1 `swap32`
+  bug fixed), `swap32-only` (control: is the limit needed once swap exists?),
+  `gml6` and `gml4` (does a lower limit move peak RSS, or is the ~4.7 GiB
+  overshoot non-heap and immovable?). Expect ~15 min per arm, all parallel.
+  Read it with
+  `gh api repos/AndreNijman/apex-os/actions/jobs/<id>/logs` per job id from
+  `gh run view 35447488777 --json jobs`.
+- **Verification build: run `35447611644`** (workflow `build-image`,
+  `workflow_dispatch` on `task/sbom-oom`, commit `a40cf827`), started 14:04 UTC.
+  ~1 hour. This is the one that matters. **A skipped job counts as success in
+  this repo** — do not read a green `image` job as proof. Confirm the step
+  *Generate and attest the SBOM* actually ran and printed
+  `syft catalogued the image in …s` plus a `Maximum resident set size` line:
+
+  ```
+  gh run view 35447611644 --repo AndreNijman/apex-os --json jobs \
+    -q '.jobs[] | "\(.name) \(.conclusion)"'
+  gh run view --job <image job id> --log | grep -E 'catalogued|Maximum resident|SBOM packages|sbom sample|::error'
+  ```
+
+  A dispatch from a non-main ref is publish-guarded: it builds, signs and
+  verifies without moving `:apex`, `:daily`, `:gaming-*`, `:core` or `:base`.
 
 ## NEXT
 
-<!-- NEXT -->
+**The fix is committed and pushed — `a40cf827` on `task/sbom-oom`. Nothing here
+needs re-deriving.** Two runs are in flight; read them in this order.
+
+1. **Verification build `35447611644`.** If the SBOM step ran and passed, this
+   unit is done: say so, and `task/sbom-oom` is ready to land on `roadmap/v2.2`.
+   It carries three commits — two probe commits and the fix. **Delete
+   `.github/workflows/sbom-probe.yml` before or as part of the landing**: it is
+   a temporary measurement, its header says so, and it triggers on pushes to
+   `task/sbom-oom` only, so it is inert elsewhere but should not outlive the
+   question it answered.
+   If the SBOM step failed again, the step now prints exactly what ran out —
+   `oom_kill` delta, dmesg, the journal, peak RSS and the named signal. Read
+   those before changing anything. Do **not** respond by lowering GOMEMLIMIT or
+   restricting cataloguers; see the arms below.
+
+2. **Probe round 2 `35447488777`** tells you what to do if the margin turns out
+   too thin. Expected readings:
+   - `gml10-swap32` passing with GBs of headroom → add the swapfile to the SBOM
+     step as a second commit. This is the likely upgrade.
+   - `swap32-only` passing → swap alone is sufficient and GOMEMLIMIT is belt
+     over braces; simplify if you like, but the limit costs nothing.
+   - `swap32-only` dying → GOMEMLIMIT is load-bearing and swap is only margin.
+   - `gml6`/`gml4` peaking at ~14.7 GiB anyway → **a lower limit is not a
+     lever**; record that so nobody tries it. If they peak lower, a tighter
+     limit is the cheaper margin than swap.
+
+3. If both look good and the build is green, update `dispatch.json` /
+   roadmap status for this unit and unblock unit `final`, which this gates.
+
+**Do not re-run the round-1 arms.** `repro`, `ocidir`, `ocidir-decompressed`
+and `registry-par1` have their answer and it is in the table above.
 
 ## The deadline, and what to do about it
 
