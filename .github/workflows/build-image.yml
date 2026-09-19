@@ -1382,129 +1382,373 @@ jobs:
       # provenance claim. An attestation is signed by the same keyless identity
       # as the image, so one `cosign verify-attestation` answers both "who built
       # it" and "what is in it".
+      # ══════════════════════════════════════════════════════════════════════
+      # The rationale for the step below lives here rather than inside its
+      # `run:` script: GitHub caps a run block at 21,000 characters and this
+      # one hit the cap on 2026-09-20, which shows up as a workflow that will
+      # not parse and a dispatch refused with HTTP 422, not as a failing step.
+      # ══════════════════════════════════════════════════════════════════════
+      #
+      # PINNED, and it has to stay pinned. The GOMEMLIMIT below is not a
+      # guess: it is the one variable that separated success from failure
+      # across seven probe arms, all run against syft 1.52.0. Floating this
+      # to whatever `main` installs today would leave a measured fix
+      # protecting an unmeasured binary — syft's memory profile is the
+      # thing being controlled here, and it moves between releases.
+      # Bumping the version means re-running the probe, not hoping.
+      #
+      # This step died twice on the first build this branch ever completed:
+      # once as "the runner has received a shutdown signal" and once as a
+      # bare exit 143, four and a half minutes after syft printed its
+      # version and with no output of its own. Everything before it —
+      # build, Secure Boot chain, payload split, push, cosign signature —
+      # was green both times.
+      #
+      # By this point the runner holds core, base and the final image in
+      # local podman storage, and syft is about to pull the whole image out
+      # of the registry AGAIN into its own cache. The local copies are dead
+      # weight: the image is pushed and signed, and the promote step below
+      # is skopeo registry-to-registry and never reads local storage. So
+      # they go, and the numbers are printed either side — if this fails a
+      # third time, the log will say whether it was disk or memory instead
+      # of leaving the next person to guess.
+      #
+      # Read the image out of the registry rather than local storage: the
+      # push above is the artefact users get, and a local-storage read could
+      # describe something the registry does not have.
+      #
+      # Under `timeout` so a hang is reported as a hang. A bare 143 from a
+      # killed process reads as "something went wrong somewhere", which is
+      # exactly how this cost two builds.
+      # 45 minutes, raised from 15 on 2026-09-12 after a run that was NOT
+      # short of resources: 86 GB free and 14.8 GB of memory available at
+      # the prune, and syft still ran the full fifteen and was killed.
+      #
+      # ═══ GOMEMLIMIT IS THE FIX, AND EVERY OTHER THEORY HERE WAS WRONG ═══
+      #
+      # Measured 2026-09-19, probe run 35437908023 (.github/workflows/
+      # sbom-probe.yml): seven arms, same syft 1.52.0, same runner class,
+      # all against the digest a failing build had already pushed. One
+      # variable separated every success from every failure.
+      #
+      #   no GOMEMLIMIT, registry:, par 4   died — 15866M used, swap full
+      #   no GOMEMLIMIT, registry:, par 1   died — 15918M used, swap full
+      #   no GOMEMLIMIT, oci-dir:,  par 4   died — 15967M used, swap full
+      #   no GOMEMLIMIT, oci-dir: decompressed   died — rc 143
+      #   GOMEMLIMIT=10GiB, registry:       rc=0, 904s, 9830 packages
+      #   GOMEMLIMIT=10GiB, oci-dir:        rc=0, 735s, 9830 packages
+      #
+      # So, stated because each of these was believed here and each is
+      # false:
+      #
+      #  - It is NOT the registry source. Reading from an OCI layout
+      #    already on local disk died identically. The layers are on disk
+      #    either way — /tmp grows to 14.7 GB and THEN memory climbs another
+      #    4 GB. The cost tracks the file count through the filetree squash
+      #    and MIME pass (anchore/syft#2159), not where the bytes came from.
+      #  - It is NOT compression. The `--dest-decompress` arm died too.
+      #  - It is NOT parallelism, and this is the one that cost real time:
+      #    par 1 died the same way, so the "ran the full fifteen minutes and
+      #    was killed by the timeout" run that justified raising the timeout
+      #    to 45 was ALSO a memory death. The raise fixed nothing. It stays
+      #    only because 904s is now the measured figure and 15 min is too
+      #    close to it; it is not, and never was, the guard against this.
+      #
+      # Why a soft limit works when the box has 16 GB: Go's default GOGC=100
+      # lets the heap reach ~2x live before collecting, so the peak here is
+      # largely garbage. GOMEMLIMIT trades CPU for it and restricts no
+      # cataloguer — the SBOM is byte-for-byte the same 9830 packages, both
+      # Electron trees included.
+      #
+      # HONEST ABOUT THE MARGIN: the limit is SOFT. In the probes peak RSS
+      # was 14.65 GiB with it set to 10GiB on a 16 GB runner, surviving with
+      # 188 MB to spare. VERIFIED IN A REAL BUILD (run 35450175806,
+      # 2026-09-19): syft catalogued the image in 742 s, peak RSS
+      # 15,303,652 KB, 9830 packages, and mem_avail never fell below about
+      # 4.7 GiB — a far wider margin than the probes suggested, because a
+      # probe job carries the probe harness as well.
+      #
+      # A SWAPFILE IS NOT THE ANSWER, and that is measured rather than
+      # assumed: with the limit set, 32 GB of swap bought 16 MB of headroom
+      # and only 1 GB was ever touched. Swap WITHOUT the limit does work and
+      # works badly — 1958 s against 904 s, 8.7M major faults, 14.3 GB
+      # swapped, 72% of the timeout. It is a fallback, not a fix. A smaller
+      # GOMEMLIMIT is not a lever either: 4, 6 and 10 GiB all peak at
+      # 14.65-14.80 GiB, so the overshoot is not heap the limit can reach.
+      #
+      # THE LEVER THAT PARAGRAPH POINTED AT HAS NOW BEEN PULLED, and it took
+      # three attempts to find which lever it actually was — see the blocks
+      # below. It is NOT `SYFT_FILE_METADATA_SELECTION=none`, which drops file
+      # digests and 13%. It is `SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP=false`
+      # for the bulk of the file rows, and then a `jq` trim for the rest. And
+      # none of it touches the RSS, which is measured and stated below.
+      #
+      # Restricting the *cataloguers* is still refused, and that is a
+      # different thing from dropping the file inventory: the two Electron
+      # trees are precisely where a CVE question lands, and an RPM-only SBOM
+      # would answer it with silence while looking authoritative. Every
+      # package stays. Only the per-file rows go.
+      #
+      # SYFT_PARALLELISM because the default is one worker; this image has
+      # thousands of packages across two app bundles. Kept at 4 because the
+      # probe measured it as irrelevant to survival, and it is faster.
+      #
+      # ═══ WHY THE PER-FILE INVENTORY IS NOT IN THIS SBOM ═══════════════
+      #
+      # With the memory death fixed, run 35450175806 got one line further
+      # and died in `cosign attest`:
+      #
+      #   Post "https://rekor.sigstore.dev/api/v1/log/entries":
+      #   giving up after 4 attempt(s)
+      #
+      # That string is go-retryablehttp's generic retries-exhausted message.
+      # It names no status and no cause, and it is the shape of a network
+      # fault, which is how three rounds read it. It is not one. Measured
+      # 2026-09-20, sixteen direct POSTs to that endpoint at ascending
+      # sizes, each re-tested:
+      #
+      #   body <= 25,000,092 B   400, body uploaded and PROCESSED by Rekor
+      #   body >= 25,165,916 B   502, size_upload=0, ~0.43 s, deterministic
+      #
+      # The boundary brackets 25,165,824 B — exactly 24 MiB — and the
+      # refusal comes from the fronting proxy at header time, on
+      # Content-Length, before a single body byte is sent. Two things follow
+      # and both matter:
+      #
+      #  - 502 is in go-retryablehttp's RETRYABLE class (>= 500), unlike the
+      #    413 this was assumed to be. cosign therefore retried a refusal
+      #    that can never succeed, four times, and reported the retries
+      #    rather than the reason.
+      #  - size_upload=0 means no body ever went out. All four attempts fit
+      #    in 3.86 s of that run's log; posting a ~222 MB body four times
+      #    would have taken minutes. The timing in the real log is
+      #    independent confirmation of a header-time refusal.
+      #
+      # The full document was 166 MB, which cosign base64s into a ~222 MB
+      # DSSE body: about 9x the ceiling. No retry setting, no timeout and no
+      # runner size can move that.
+      #
+      # What is actually big is the FILE inventory, not the packages: syft
+      # emits a row per file for an image with roughly 200k of them, plus a
+      # CONTAINS relationship edge from each to its owning package.
+      #
+      # ═══ WHICH KNOB ACTUALLY DROPS THEM — MEASURED, AND NOT THE OBVIOUS
+      # ONE ═══
+      #
+      # Run locally against docker.io/library/alpine:3.20 with this same
+      # syft 1.52.0, because a small image gives the same answer in seconds:
+      #
+      #   default                            packages=15 files=77 rels=125  87,692 B
+      #   FILE_METADATA_SELECTION=none       packages=15 files=77 rels=125  76,227 B
+      #   RELATIONSHIPS_..._OWNERSHIP=false  packages=15 files=2  rels=48   31,767 B
+      #   both of the above                  packages=15 files=1  rels=48   31,130 B
+      #
+      # `SYFT_FILE_METADATA_SELECTION=none` is NOT the lever, which is the
+      # reading a plain description of it invites: it drops each file's
+      # DIGESTS, not the file rows, and saves 13%. The rows and their
+      # ownership edges go with
+      # `SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP=false`, which is 64%.
+      # Both are set: the second is the size, the first also stops syft
+      # sha1/sha256-hashing every file, which is work this step does not
+      # need to do.
+      #
+      # THE PACKAGE SETS ARE IDENTICAL. Checked, not assumed — the sorted
+      # `name@version` list of all 15 alpine packages `diff`s clean between
+      # the default run and the stripped one. This drops files, not packages.
+      #
+      # THE THIRD SWITCH IS DELIBERATELY NOT SET.
+      # `SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP_OVERLAP=false` makes syft
+      # 1.52.0 exit 1 before it catalogues anything:
+      #
+      #   invalid application config: cannot enable
+      #   exclude-binary-overlap-by-ownership without enabling
+      #   package-file-ownership-overlap
+      #
+      # and the knob it demands you flip in exchange is the one that decides
+      # whether a binary syft found and the RPM that owns it are one package
+      # or two — i.e. it changes the PACKAGE set. That is the one thing this
+      # step must not quietly do, so the switch stays on and the overlap
+      # relationships stay in. They are a rounding error next to the file
+      # rows.
+      #
+      # A MISTYPED VALUE CANNOT SILENTLY SHRINK THE SBOM: syft exits 1 on a
+      # selection value it does not recognise (verified with `=nonsense`).
+      # The package-count floor below is the second line of defence, not the
+      # first.
+      #
+      # The cost, stated rather than buried: this SBOM answers "which
+      # packages, at which versions, are in this image" — the CVE question —
+      # and NOT "which files does this image contain, with what digests", nor
+      # "why is this package here". It is a flat list of packages.
+      # Anyone who needs the second can run syft against the published
+      # digest themselves; the image is public and the digest is in the
+      # signature. docs/trust-enforcement.md says so in those words.
+      #
+      # WHAT THE TWO SWITCHES BUY, AND WHAT THEY DO NOT.
+      # Probe run 35456401012 against the same digest: 335 s with them
+      # against 915 s without — a 63% cut, and that is the reason to keep
+      # them. They do NOT buy memory: peak RSS was 15,547,064 KB with the
+      # file inventory off against 15,449,996 KB with it on. An earlier
+      # revision of this comment claimed the file pass drove the RSS. It
+      # was measured and it is false, and it is corrected here rather than
+      # left for the next person to inherit. GOMEMLIMIT therefore STAYS —
+      # it is the measured fix for a measured death, and dropping it on the
+      # theory that these switches replace it is exactly the kind of
+      # unmeasured change this step's history is a monument to.
+      #
+      # THE SWITCHES ARE ALSO NOT ENOUGH ON THEIR OWN. With both set the
+      # document is still 28,259,405 B — 1.5x the ceiling — and Rekor
+      # refused it for real in that probe, with the same 3-second,
+      # four-attempt failure. The trim below is what makes it fit.
+      #
+      # ═══ VERIFIED END TO END — build 35457162588, 2026-09-19 ═══
+      #
+      #   syft catalogued the image in 314s
+      #   Maximum resident set size (kbytes): 14913824
+      #   SBOM packages: 9830   file rows: 7049
+      #   after the trim: packages 9830, cpe refs 55652, DESCRIBES 1
+      #   predicate 14087745B compact -> ~18783660B DSSE body; ceiling
+      #     25165824B, at 74%
+      #   tlog entry created with index: 2893110210
+      #   signature and SBOM attestation both verify against
+      #     …/build-image.yml@refs/heads/task/sbom-attest
+      #
+      # Every step of that `image` job was green, including `Promote to every
+      # published tag` and `Assert every published tag resolves to this digest`,
+      # which had been SKIPPED — i.e. unproved, not passing — in every run since
+      # this step started failing.
+      #
+      # The predicate was byte-identical to the one measured locally off the
+      # probe's artefact (14,087,745 B both times), so the candidate table above
+      # describes this document and not an approximation of it.
+      #
+      # The elapsed time is printed on SUCCESS too. Fifteen minutes was
+      # picked without measurement and cost three builds to disprove; the
+      # real figure is 904 s for the registry source on a 16 GB runner.
+      # ── SAY WHICH RESOURCE RAN OUT ─────────────────────────────────
+      # Run 35433705393 printed `syft exited 137 after 209s` and the error
+      # text guessed "143 = killed". 137 is not 143: 143 is SIGTERM, a
+      # process asked to stop, and 137 is SIGKILL, a process the kernel
+      # removed. That difference is the entire diagnosis, and the step spent
+      # three builds not making it. So: the signal is NAMED, the OOM
+      # counter is read either side, and dmesg and the journal are dumped —
+      # the journal because a systemd-oomd kill leaves nothing in dmesg at
+      # all and is also a SIGKILL.
+      #
+      # An SBOM that describes nothing is worse than none: it answers the
+      # CVE question with silence and looks authoritative doing it. The
+      # image carries thousands of packages, so a hundred is a floor no
+      # healthy build can fall below and any broken one will.
+      #
+      # This floor is load-bearing in a NEW way now that the file inventory
+      # is off. syft does exit 1 on a selection value it does not recognise,
+      # but the count is what proves the shrink came out of the file rows
+      # and not out of the packages — the failure this step must never ship
+      # quietly.
+      #
+      # ── THE SIZE GUARD, AND WHY IT FAILS THE BUILD RATHER THAN COPING ──
+      #
+      # cosign marshals the predicate with Go's json.Marshal — compact — and
+      # base64s it into the DSSE envelope, so the body Rekor sees is about
+      # 4/3 of the COMPACT document. Measure that, not the pretty one syft
+      # wrote, or the guard checks a number nobody sends.
+      #
+      # The ceiling is 25,165,824 B (24 MiB), measured, not assumed, and the
+      # 4/3 is measured too: cosign v2.5.2 was run offline against a
+      # synthetic 4,824,532 B predicate and produced a 6,433,196 B envelope,
+      # factor 1.3334, with every package carried through intact. (The
+      # BUNDLE file base64s the envelope a second time, factor 1.7778. That
+      # is not what goes on the wire, and confusing the two would put this
+      # guard 33% out.)
+      #
+      # TWO THRESHOLDS, because they answer different questions.
+      #
+      # At the CEILING the upload cannot succeed, so the build fails. It
+      # does NOT quietly drop --tlog-upload and carry on: a build that
+      # silently stops transparency-logging its SBOM while the docs still
+      # promise a public log is worse than a red step, because nobody finds
+      # out. If this fires, the options and what each costs are in
+      # ROADMAP/state/agents/sbom-attest.md; the decision is a person's.
+      #
+      # At the BUDGET (80% of the ceiling) the upload still works and the
+      # build stays green — it just says so, while there is still room to do
+      # something about it. Failing here instead would turn "the image grew"
+      # into a red build for something that demonstrably still works.
+      # ── WHAT IS PUBLISHED: THE PACKAGE INVENTORY, AND NOT THE GRAPH ──
+      #
+      # Measured on the real 28,259,405 B document (probe 35456401012's own
+      # artefact), every figure below built from it rather than estimated:
+      #
+      #   packages   9,830        14,076,102 B   49%
+      #     externalRefs             9,108,268 B  (cpe23Type 7,634,382)
+      #     sourceInfo               1,357,597 B
+      #   relationships  43,801   10,872,960 B   38%
+      #     OTHER           17,508  5,883,495 B
+      #     DEPENDENCY_OF   16,463  3,085,431 B
+      #     CONTAINS         9,829  1,860,087 B
+      #     DESCRIBES            1        145 B
+      #   files      7,049         3,298,838 B   12%
+      #
+      # Candidates, each measured, against the 25,165,824 B ceiling:
+      #
+      #   drop files + file-anchored edges        29,523,132  117%  OVER
+      #   + drop OTHER                            25,414,052  100%  OVER by 248 KB
+      #   + drop sourceInfo                       23,603,924   93%  fits
+      #   drop files + all edges but DESCRIBES    18,784,972   74%  fits  ← this
+      #   that, + drop cpe23Type                   8,531,592   33%  fits
+      #
+      # TWO OPTIONS WERE MEASURED AND REFUSED, so nobody re-derives them:
+      #
+      #  - Keeping the dependency graph and paying for it with `sourceInfo`
+      #    lands at 93% of the ceiling. Seven points of headroom on an image
+      #    that gains packages every release is not headroom; its failure
+      #    mode is the next Electron bump turning the build red.
+      #  - Dropping `cpe23Type` would be the cheapest 27% in the document,
+      #    and it is refused: CPEs are the matching key a vulnerability
+      #    scanner uses. Cutting them to save space would shrink the artefact
+      #    by making it worse at the single question it exists to answer.
+      #
+      # So the rule is: this document carries the complete package
+      # inventory — every package, every version, every purl and every CPE —
+      # and does NOT carry the file inventory or the relationship graph. The
+      # dropped parts are structure, and structure is reproducible from the
+      # image: `syft registry:<digest> -o spdx-json` regenerates all of it
+      # from the same bytes. Identity is not reproducible from anything
+      # smaller, so identity is what gets signed and logged.
+      #
+      # ── THE TRIM IS NOW LOAD-BEARING, SO IT IS CHECKED ────────────────
+      # A jq expression that silently ate packages would produce a smaller
+      # document that still looked like an SBOM, attested cleanly, and
+      # answered a CVE question with a confident absence. So the packages
+      # array is compared BEFORE and AFTER, canonically sorted and hashed:
+      # byte-identical or the build stops. Comparing counts would miss a
+      # substitution; comparing the trimmed document with itself would pass
+      # for free.
+      #
+      # ── ATTEST, AND PROVE THE TRANSPARENCY LOG ACTUALLY TOOK IT ────────
+      #
+      # `cosign attest` exits 0 on a path that never reaches Rekor if
+      # --tlog-upload is ever turned off by accident, and this project's
+      # docs claim a publicly verifiable log. So the claim is checked here,
+      # against cosign's own output, rather than assumed from an exit code.
+      #
+      # `if ! cmd` and not `cmd || ...`: set -e does not apply to an
+      # inverted command, and a bare `!` here would swallow a real failure.
       - name: Generate and attest the SBOM
         if: ${{ steps.push.outputs.digest != '' }}
         run: |
           set -euo pipefail
-          # PINNED, and it has to stay pinned. The GOMEMLIMIT below is not a
-          # guess: it is the one variable that separated success from failure
-          # across seven probe arms, all run against syft 1.52.0. Floating this
-          # to whatever `main` installs today would leave a measured fix
-          # protecting an unmeasured binary — syft's memory profile is the
-          # thing being controlled here, and it moves between releases.
-          # Bumping the version means re-running the probe, not hoping.
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
             | sh -s -- -b /usr/local/bin v1.52.0
           syft --version
 
           REF="$IMAGE@${{ steps.push.outputs.digest }}"
 
-          # This step died twice on the first build this branch ever completed:
-          # once as "the runner has received a shutdown signal" and once as a
-          # bare exit 143, four and a half minutes after syft printed its
-          # version and with no output of its own. Everything before it —
-          # build, Secure Boot chain, payload split, push, cosign signature —
-          # was green both times.
-          #
-          # By this point the runner holds core, base and the final image in
-          # local podman storage, and syft is about to pull the whole image out
-          # of the registry AGAIN into its own cache. The local copies are dead
-          # weight: the image is pushed and signed, and the promote step below
-          # is skopeo registry-to-registry and never reads local storage. So
-          # they go, and the numbers are printed either side — if this fails a
-          # third time, the log will say whether it was disk or memory instead
-          # of leaving the next person to guess.
           echo "── before prune ──"; df -h / /mnt 2>/dev/null || true; free -m || true
           sudo podman image prune -af  >/dev/null 2>&1 || true
           sudo podman system prune -af >/dev/null 2>&1 || true
           echo "── after prune ──";  df -h / /mnt 2>/dev/null || true; free -m || true
 
-          # Read the image out of the registry rather than local storage: the
-          # push above is the artefact users get, and a local-storage read could
-          # describe something the registry does not have.
-          #
-          # Under `timeout` so a hang is reported as a hang. A bare 143 from a
-          # killed process reads as "something went wrong somewhere", which is
-          # exactly how this cost two builds.
-          # 45 minutes, raised from 15 on 2026-09-12 after a run that was NOT
-          # short of resources: 86 GB free and 14.8 GB of memory available at
-          # the prune, and syft still ran the full fifteen and was killed.
-          #
-          # ═══ GOMEMLIMIT IS THE FIX, AND EVERY OTHER THEORY HERE WAS WRONG ═══
-          #
-          # Measured 2026-09-19, probe run 35437908023 (.github/workflows/
-          # sbom-probe.yml): seven arms, same syft 1.52.0, same runner class,
-          # all against the digest a failing build had already pushed. One
-          # variable separated every success from every failure.
-          #
-          #   no GOMEMLIMIT, registry:, par 4   died — 15866M used, swap full
-          #   no GOMEMLIMIT, registry:, par 1   died — 15918M used, swap full
-          #   no GOMEMLIMIT, oci-dir:,  par 4   died — 15967M used, swap full
-          #   no GOMEMLIMIT, oci-dir: decompressed   died — rc 143
-          #   GOMEMLIMIT=10GiB, registry:       rc=0, 904s, 9830 packages
-          #   GOMEMLIMIT=10GiB, oci-dir:        rc=0, 735s, 9830 packages
-          #
-          # So, stated because each of these was believed here and each is
-          # false:
-          #
-          #  - It is NOT the registry source. Reading from an OCI layout
-          #    already on local disk died identically. The layers are on disk
-          #    either way — /tmp grows to 14.7 GB and THEN memory climbs another
-          #    4 GB. The cost tracks the file count through the filetree squash
-          #    and MIME pass (anchore/syft#2159), not where the bytes came from.
-          #  - It is NOT compression. The `--dest-decompress` arm died too.
-          #  - It is NOT parallelism, and this is the one that cost real time:
-          #    par 1 died the same way, so the "ran the full fifteen minutes and
-          #    was killed by the timeout" run that justified raising the timeout
-          #    to 45 was ALSO a memory death. The raise fixed nothing. It stays
-          #    only because 904s is now the measured figure and 15 min is too
-          #    close to it; it is not, and never was, the guard against this.
-          #
-          # Why a soft limit works when the box has 16 GB: Go's default GOGC=100
-          # lets the heap reach ~2x live before collecting, so the peak here is
-          # largely garbage. GOMEMLIMIT trades CPU for it and restricts no
-          # cataloguer — the SBOM is byte-for-byte the same 9830 packages, both
-          # Electron trees included.
-          #
-          # HONEST ABOUT THE MARGIN: the limit is SOFT. In the probes peak RSS
-          # was 14.65 GiB with it set to 10GiB on a 16 GB runner, surviving with
-          # 188 MB to spare. VERIFIED IN A REAL BUILD (run 35450175806,
-          # 2026-09-19): syft catalogued the image in 742 s, peak RSS
-          # 15,303,652 KB, 9830 packages, and mem_avail never fell below about
-          # 4.7 GiB — a far wider margin than the probes suggested, because a
-          # probe job carries the probe harness as well.
-          #
-          # A SWAPFILE IS NOT THE ANSWER, and that is measured rather than
-          # assumed: with the limit set, 32 GB of swap bought 16 MB of headroom
-          # and only 1 GB was ever touched. Swap WITHOUT the limit does work and
-          # works badly — 1958 s against 904 s, 8.7M major faults, 14.3 GB
-          # swapped, 72% of the timeout. It is a fallback, not a fix. If this
-          # step starts failing again after the image gains packages, the lever
-          # with real headroom is shrinking the predicate at source; a smaller
-          # number here will not help (4, 6 and 10 GiB all peak at 14.65-14.80
-          # GiB) and restricting the cataloguers is refused below.
-          #
-          # Restricting the cataloguers would be faster and would make the
-          # artefact worse: the two Electron trees are precisely where a CVE
-          # question lands, and an RPM-only SBOM would answer it with silence
-          # while looking authoritative. Time is the cheaper thing to spend.
-          #
-          # SYFT_PARALLELISM because the default is one worker; this image has
-          # thousands of packages across two app bundles. Kept at 4 because the
-          # probe measured it as irrelevant to survival, and it is faster.
-          #
-          # The elapsed time is printed on SUCCESS too. Fifteen minutes was
-          # picked without measurement and cost three builds to disprove; the
-          # real figure is 904 s for the registry source on a 16 GB runner.
-          # ── SAY WHICH RESOURCE RAN OUT ─────────────────────────────────
-          # Run 35433705393 printed `syft exited 137 after 209s` and the error
-          # text guessed "143 = killed". 137 is not 143: 143 is SIGTERM, a
-          # process asked to stop, and 137 is SIGKILL, a process the kernel
-          # removed. That difference is the entire diagnosis, and the step spent
-          # three builds not making it. So: the signal is NAMED, the OOM
-          # counter is read either side, and dmesg and the journal are dumped —
-          # the journal because a systemd-oomd kill leaves nothing in dmesg at
-          # all and is also a SIGKILL.
           _oom0="$(awk '/oom_kill/{print $2}' /proc/vmstat 2>/dev/null || echo 0)"
           ( while true; do
               echo "[sbom sample $(date +%T)] $(free -m | awk '/^Mem:/{printf "mem_used=%sM mem_avail=%sM", $3, $7} /^Swap:/{printf " swap_used=%sM", $3}') root_avail=$(df -BM --output=avail / | tail -1 | tr -d ' ')"
@@ -1517,6 +1761,8 @@ jobs:
           # values the probe measured, and a variable that can drift from what
           # was measured is how this step ends up "fixed" and still dying.
           timeout 2700 "${_timer[@]}" env SYFT_PARALLELISM=4 GOMEMLIMIT=10GiB \
+            SYFT_FILE_METADATA_SELECTION=none \
+            SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP=false \
             syft "registry:$REF" -o spdx-json > /tmp/sbom.spdx.json || {
             rc=$?
             _el=$(( $(date +%s) - _t0 ))
@@ -1544,17 +1790,71 @@ jobs:
           echo "syft catalogued the image in $(( $(date +%s) - _t0 ))s"
           [ -f /tmp/syft.time ] && grep -E 'Maximum resident|Elapsed \(wall' /tmp/syft.time || true
 
-          # An SBOM that describes nothing is worse than none: it answers the
-          # CVE question with silence and looks authoritative doing it. The
-          # image carries thousands of packages, so a hundred is a floor no
-          # healthy build can fall below and any broken one will.
           COUNT="$(jq '.packages | length' /tmp/sbom.spdx.json)"
-          echo "SBOM packages: $COUNT"
+          FILES="$(jq '(.files // []) | length' /tmp/sbom.spdx.json)"
+          echo "SBOM packages: $COUNT   file rows: $FILES"
           test "$COUNT" -gt 100
 
-          cosign attest --yes --predicate /tmp/sbom.spdx.json \
-            --type spdxjson "$REF"
+          jq -c 'del(.files)
+                 | .relationships = [ (.relationships // [])[]
+                                      | select(.relationshipType == "DESCRIBES") ]' \
+            /tmp/sbom.spdx.json > /tmp/sbom.min.json
 
+          PRE="$(jq -S -c '.packages' /tmp/sbom.spdx.json | sha256sum | cut -d' ' -f1)"
+          POST="$(jq -S -c '.packages' /tmp/sbom.min.json | sha256sum | cut -d' ' -f1)"
+          KEPT="$(jq '.packages | length' /tmp/sbom.min.json)"
+          DESC="$(jq '[.relationships[] | select(.relationshipType == "DESCRIBES")] | length' /tmp/sbom.min.json)"
+          CPES="$(jq '[.packages[].externalRefs // [] | .[] | select(.referenceType == "cpe23Type")] | length' /tmp/sbom.min.json)"
+          echo "after the trim: packages ${KEPT}, cpe refs ${CPES}, DESCRIBES ${DESC}"
+          if [ "$PRE" != "$POST" ]; then
+            echo "::error::the trim altered the packages array (${PRE} -> ${POST}). It must remove files and"
+            echo "::error::  relationships and nothing else — the package inventory is the whole artefact."
+            exit 1
+          fi
+          if jq -e 'has("files")' /tmp/sbom.min.json > /dev/null; then
+            echo "::error::the trim left a files array behind; the size figures above no longer apply"
+            exit 1
+          fi
+          if [ "$DESC" != 1 ]; then
+            echo "::error::expected exactly one DESCRIBES relationship after the trim, got ${DESC}"
+            exit 1
+          fi
+
+          PRED=$(stat -c%s /tmp/sbom.min.json)
+          DSSE=$(( (PRED + 2) / 3 * 4 ))
+          REKOR_CEILING=25165824
+          REKOR_BUDGET=20132659
+          echo "predicate ${PRED}B compact -> ~${DSSE}B DSSE body; ceiling ${REKOR_CEILING}B, at $(( DSSE * 100 / REKOR_CEILING ))%"
+          if [ "$DSSE" -ge "$REKOR_CEILING" ]; then
+            echo "::error::the SBOM predicate is ${PRED}B compact, ~${DSSE}B once base64'd into the DSSE envelope."
+            echo "::error::rekor.sigstore.dev refuses any request body at or above ${REKOR_CEILING}B (24 MiB) with an"
+            echo "::error::  immediate HTTP 502 from its fronting proxy, before any body is sent. cosign retries that"
+            echo "::error::  four times and reports 'giving up after 4 attempt(s)', which names neither size nor status."
+            echo "::error::This is NOT a network fault and retrying will not help. The image has outgrown the"
+            echo "::error::  package-level SBOM. See ROADMAP/state/agents/sbom-attest.md for the options and their costs."
+            exit 1
+          elif [ "$DSSE" -ge "$REKOR_BUDGET" ]; then
+            echo "::warning::the SBOM attestation is at $(( DSSE * 100 / REKOR_CEILING ))% of Rekor's 24 MiB request ceiling"
+            echo "::warning::  (~${DSSE}B of ${REKOR_CEILING}B). It still uploads. When it stops, the step fails with the"
+            echo "::warning::  explanation above, and the remaining levers are in ROADMAP/state/agents/sbom-attest.md."
+          fi
+
+          if ! cosign attest --yes --predicate /tmp/sbom.min.json \
+               --type spdxjson "$REF" > /tmp/attest.log 2>&1; then
+            cat /tmp/attest.log
+            echo "::error::cosign attest failed. If the message is 'giving up after N attempt(s)' against"
+            echo "::error::  rekor.sigstore.dev, read the size guard above: a 502 at header time is indistinguishable"
+            echo "::error::  from a network fault in that message, and the predicate was ${PRED}B compact."
+            exit 1
+          fi
+          cat /tmp/attest.log
+          # No pipeline: `printf ... | grep -q` returns 141 on a match under
+          # pipefail, which has mis-seeded suites in this repo before.
+          if ! grep -F 'tlog entry created' /tmp/attest.log > /dev/null; then
+            echo "::error::the SBOM attestation was signed but no transparency-log entry was created."
+            echo "::error::  docs/trust-enforcement.md claims a publicly verifiable log; this build did not produce one."
+            exit 1
+          fi
       - name: Verify the image and its SBOM are both retrievable
         if: ${{ steps.push.outputs.digest != '' }}
         run: |
