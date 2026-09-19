@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!--
+          The host for every Compose assertion in this module.
+
+          `showWhenLocked` and `turnScreenOn` are not conveniences: they are
+          what makes these tests possible at all on a phone with a real screen
+          lock. MEASURED first, then fixed — with the stock host from
+          `ui-test-manifest`, every Compose test on this device failed with "No
+          compose hierarchies found in the app", and logcat gave the reason:
+          `isSleeping=true isVisible=false`, the activity launching and being
+          DESTROYED a frame later because the display was asleep behind a
+          secure keyguard. `adb shell wm dismiss-keyguard` cannot clear a
+          keyguard with a credential on it, and nothing in `adb` can present a
+          fingerprint, so waking the phone is not an option a test runner has.
+
+          An activity that declares these two shows above the keyguard without
+          unlocking anything — it can see nothing the locked phone holds, which
+          is exactly right for a host whose whole content is supplied by the
+          test.
+
+          It lives in `src/debug` and NOT in `src/androidTest`, which is where
+          it was first written: an `androidTest` manifest merges into
+          `com.apexos.remote.test`, and an activity there launches in the test
+          process — "Intent in process com.apexos.remote resolved to different
+          process com.apexos.remote.test". A Compose host has to be in the app
+          under test. `debug` keeps it out of every release artefact, which is
+          the same place `ui-test-manifest` puts its own.
+
+          `configChanges` is copied VERBATIM from `MainActivity`, and that is
+          the point rather than a convenience: the app's one activity handles a
+          rotation itself instead of being recreated, so a host without the
+          same declaration would test the opposite behaviour and call the
+          result "rotation works".
+        -->
+        <activity
+            android:name="com.apexos.remote.device.ComposeHostActivity"
+            android:exported="false"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+            android:theme="@style/Theme.ApexRemote" />
+
+    </application>
+</manifest>

@@ -65,7 +65,14 @@ class LanEndToEndTest {
         service.pair(
             offer = offer,
             deviceName = name,
-            boxFor = { GatedBox(PlainBox(), userVerification = true) },
+            // **false**, and the honesty is the point. `user_verification`
+            // says a second factor gates this device's key; a `PlainBox` gates
+            // nothing, so claiming otherwise would make the desktop record a
+            // protection that does not exist and then let this suite assert
+            // that it had. P1-051's sixth criterion is met by the app refusing
+            // to open without the prompt at all, which is observed elsewhere
+            // and cannot be observed from here.
+            boxFor = { GatedBox(PlainBox(), userVerification = false) },
             nowMs = System.currentTimeMillis(),
         )
     }
@@ -97,11 +104,13 @@ class LanEndToEndTest {
             recorded,
         )
         assertEquals("pairing-test", recorded!!.getString("name"))
-        // P1-051's sixth criterion as the DESKTOP sees it: the phone said a
-        // second factor gates its key, and the desktop wrote that down.
+        // The device's claim, as the DESKTOP recorded it — and this suite's
+        // box gates nothing, so the claim is `false` and the desktop must have
+        // written down `false`. What is asserted is that the flag travels and
+        // is stored per device, not that a second factor exists.
         assertTrue(
-            "the desktop must have recorded the device's second-factor claim",
-            recorded.getBoolean("requires_user_verification"),
+            "the desktop must record the device's own second-factor claim",
+            !recorded.getBoolean("requires_user_verification"),
         )
     }
 
@@ -110,7 +119,7 @@ class LanEndToEndTest {
         val payload = Desktop.offerPayload()
         val offer = Pairing.decodeOffer(payload)
         runBlocking {
-            service.pair(offer, "first-use", { GatedBox(PlainBox(), true) }, System.currentTimeMillis())
+            service.pair(offer, "first-use", { GatedBox(PlainBox(), false) }, System.currentTimeMillis())
         }
         // The same code, scanned twice. A second phone must not get in.
         try {
@@ -118,7 +127,7 @@ class LanEndToEndTest {
                 service.pair(
                     Pairing.decodeOffer(payload),
                     "second-use",
-                    { GatedBox(PlainBox(), true) },
+                    { GatedBox(PlainBox(), false) },
                     System.currentTimeMillis(),
                 )
             }

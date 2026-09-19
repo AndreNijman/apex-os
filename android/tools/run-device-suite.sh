@@ -55,10 +55,22 @@ A=("$adb" -s "$serial")
 
 state=${APEX_DEVICE_SUITE_DIR:-$(mktemp -d /var/tmp/apex-device-suite-XXXXXX)}
 mkdir -p "$state"
-agentd_pid=""; remoted_pid=""; broker_pid=""
+agentd_pid=""; remoted_pid=""; broker_pid=""; talkback_on=""
+
+# TalkBack, when this run turned it on, goes back off no matter how the script
+# ends. `settings delete` and not `settings put … null`, which writes the
+# four-character string "null" and leaves a phone whose screen reader is
+# configured to a service that does not exist.
+restore_talkback() {
+  [ -n "$talkback_on" ] || return 0
+  "${A[@]}" shell settings delete secure enabled_accessibility_services >/dev/null 2>&1 || true
+  "${A[@]}" shell settings put secure accessibility_enabled 0 >/dev/null 2>&1 || true
+  talkback_on=""
+}
 
 cleanup() {
   local rc=$?
+  restore_talkback
   [ -n "$broker_pid" ] && kill "$broker_pid" 2>/dev/null || true
   [ -n "$remoted_pid" ] && kill "$remoted_pid" 2>/dev/null || true
   [ -n "$agentd_pid" ] && kill "$agentd_pid" 2>/dev/null || true
@@ -78,13 +90,23 @@ done
 # A binary older than the sources it was built from would make this suite run a
 # daemon that predates the code under test and report success for it. The Rust
 # end-to-end suite refuses the same thing for the same reason.
-newest_rs=$(find "$repo/apexd/apex-agentd/src" "$repo/apexd/apex-agent-core/src" \
-              "$repo/apexd/apex-remoted/src" "$repo/apexd/apex-remote-core/src" \
-              -name '*.rs' -newer "$bin/apex-remoted" -print -quit 2>/dev/null || true)
-if [ -n "$newest_rs" ]; then
-  echo "FAIL: $newest_rs is newer than $bin/apex-remoted. Rebuild first."
-  exit 1
-fi
+#
+# Each binary is compared only against the crates IT is built from, which is the
+# correction the Rust version needed after its first attempt failed every run:
+# cargo does not relink a binary whose own inputs are unchanged, so after a
+# change to `apex-agentd` the `apex-remoted` binary is LEGITIMATELY older, and
+# saying otherwise makes a true guard cry wolf on a perfectly fresh build.
+stale_against() {
+  local binary=$1; shift
+  local found
+  found=$(find "$@" -name '*.rs' -newer "$binary" -print -quit 2>/dev/null || true)
+  if [ -n "$found" ]; then
+    echo "FAIL: $found is newer than $binary. Run: (cd $repo/apexd && cargo build --workspace)"
+    exit 1
+  fi
+}
+stale_against "$bin/apex-agentd"  "$repo/apexd/apex-agentd/src"  "$repo/apexd/apex-agent-core/src"
+stale_against "$bin/apex-remoted" "$repo/apexd/apex-remoted/src" "$repo/apexd/apex-remote-core/src"
 
 root=$state/daemons
 rm -rf "$root"; mkdir -p "$root"/run "$root"/state "$root"/scratch
@@ -208,8 +230,13 @@ for line in out.splitlines():
         print(a)
 PY
 ); do
-  case $ip in *:*) probe="[$ip]" ;; *) probe=$ip ;; esac
-  if "${A[@]}" shell "echo | toybox nc -w 2 $ip $brokerport >/dev/null 2>&1 && echo up" 2>/dev/null | grep -q up; then
+  # Captured into a variable and matched with `[[ ]]`, NOT piped into
+  # `grep -q`: under `pipefail` a `grep -q` that matches closes the pipe, the
+  # producer takes SIGPIPE, and the pipeline's status is 141 — so a successful
+  # probe would be read as a failure and this script would say the phone cannot
+  # reach the machine when it plainly can.
+  probe=$("${A[@]}" shell "echo | toybox nc -w 2 $ip $brokerport >/dev/null 2>&1 && echo up" 2>/dev/null || true)
+  if [[ "$probe" == *up* ]]; then
     lan="$ip:$port"; break
   fi
 done
@@ -227,11 +254,45 @@ brokeraddr=$(echo "$lan" | sed "s/:[0-9]*\$/:$brokerport/")
 args=(-e lan "$lan" -e broker "$brokeraddr")
 [ -n "$classes" ] && args+=(-e class "$classes")
 
+# ── TalkBack ────────────────────────────────────────────────────────────────
+#
+# Turned ON for the run, because "the semantics tree carries a label" and "a
+# screen reader is actually running while this code composes" are different
+# claims and only the second one is what a user has. GrapheneOS ships AOSP
+# TalkBack (`com.android.talkback`), which is worth saying: it is not a Google
+# app on this phone and it is present anyway.
+#
+# Its absence is NOT a failure — a phone without it is a phone without it — but
+# a silent skip would let "accessibility is tested" rest on nothing, so the
+# state is printed either way and the verdict below says which ran.
+talkback=com.android.talkback/com.google.android.marvin.talkback.TalkBackService
+if "${A[@]}" shell pm list packages 2>/dev/null | grep -q 'com.android.talkback'; then
+  "${A[@]}" shell settings put secure enabled_accessibility_services "$talkback" >/dev/null
+  "${A[@]}" shell settings put secure accessibility_enabled 1 >/dev/null
+  talkback_on=yes
+  bound=""
+  for _ in $(seq 1 40); do
+    t=$("${A[@]}" shell dumpsys accessibility 2>/dev/null | grep -c 'TalkBackService' || true)
+    if [ "${t:-0}" -gt 0 ]; then bound=yes; break; fi
+    sleep 0.25
+  done
+  if [ -n "$bound" ]; then
+    echo "TalkBack: enabled and bound for this run"
+  else
+    echo "FAIL: TalkBack was enabled and never bound, so this run would claim a "
+    echo "      screen reader was watching when none was."
+    exit 1
+  fi
+else
+  echo "TalkBack: not installed on this device; the suite runs without one"
+fi
+
 out=$state/instrument.txt
 set +e
 "${A[@]}" shell am instrument -w -r "${args[@]}" \
   com.apexos.remote.test/androidx.test.runner.AndroidJUnitRunner | tee "$out"
 set -e
+restore_talkback
 
 # `am instrument` exits 0 whatever happens inside it, so the verdict is read out
 # of the stream. `OK (n tests)` and nothing else is a pass; anything with a

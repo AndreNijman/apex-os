@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -164,7 +165,15 @@ fun AgentCenterScreen(
             // same reason it does on the desktop — somebody who does not know
             // what a worktree is will not go looking in settings for a page
             // that explains it.
-            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+            // A `FlowRow` and not a `Row`, and the difference is a defect a
+            // device found: at the largest text size Android offers, four
+            // `TextButton`s do not fit across a Pixel 7a, and a `Row` resolves
+            // that by measuring the last child at a width of ZERO. "Guide"
+            // was on the screen with nothing to occupy — not truncated, not
+            // scrolled off, simply invisible, and unreachable with it. A flow
+            // row wraps instead, so every action stays on the screen at every
+            // font scale. Measured by `LayoutOnDeviceTest` at scale 2.0.
+            FlowRow(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
                 TextButton(onClick = onProjects) { Text("Projects") }
                 TextButton(onClick = onApprovals) {
                     Text(
