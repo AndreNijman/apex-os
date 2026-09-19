@@ -300,7 +300,8 @@
       "conflicts": [
         "p1-048"
       ],
-      "note": "Accessibility is a real audit against a screen reader and keyboard-only navigation, not a sweep for missing labels."
+      "note": "Accessibility is a real audit against a screen reader and keyboard-only navigation, not a sweep for missing labels.",
+      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 32) -- and this says the remaining work is a TRANSLATOR'S and ANDRE'S, not that it is done. Round 34 landed as f8b8184d (apex-os) and 03d77f9 (apex-shell): the Apex.I18n module is built into the image for the first time and the shell reaches it, which closes FOUND 3, the host blocker this unit had been parked behind since the i18n baseline began. What is left, from the card's own ordered list: (1) WRITE THE GERMAN -- the catalogue ships and covers 5 of the 186 marked strings; the other 181 extract, compile and load and come back in English because nobody has written them, and the suite REPORTS that gap rather than hiding it. Adding a language is now one file: drop translations/apex-shell_<lang>.ts into apex-shell and the image compiles, installs and load-proves it with no further apex-os change. That is a translator's job, not an agent's. (2) Orca at the login screen and greeter audio still need HARDWARE and are the oldest open things on this card. (3) An optional tidy-up, REJECTED this round on blast radius: the catalogue stage clones apex-shell a second time and the alternative moves the vendoring stanza into its own stage, but that stanza is the most load-bearing thing in Containerfile.base and the two clones are proved to agree by a sha256 cross-check -- if anybody restructures it, delete the cross-check with it. ONE THING FOR THE NEXT IMAGE BUILD: no full base build has carried the catalogue stage yet. It was proved as a real podman build against the local core image with the worktree standing in for the clone, six builds, one positive and five negatives. Verify it in the first full build that carries it."
     },
     {
       "id": "p2-c",
@@ -471,6 +472,14 @@
         "build-verify"
       ],
       "title": "syft is SIGKILLed cataloguing the image — the last red step in build-image"
+    },
+    {
+      "id": "pkg-update",
+      "items": [
+        "P0-001"
+      ],
+      "after": [],
+      "title": "apex update does not deliver a baked fix to an existing machine"
     }
   ],
   "_completed_units": {
