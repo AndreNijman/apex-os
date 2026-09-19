@@ -35,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.apexos.remote.core.agent.AgentNames
+import com.apexos.remote.core.agent.Agentd
 import com.apexos.remote.core.agent.Hello
 import com.apexos.remote.ui.theme.MachineText
 
@@ -80,13 +81,21 @@ fun StartAgentScreen(
     knownDirectories: List<String>,
     busy: String?,
     failure: String?,
-    onStart: (agent: String?, cwd: String, worktree: String?, prompt: String?, checkpoint: Boolean) -> Unit,
+    onStart: (
+        agent: String?,
+        cwd: String,
+        worktree: String?,
+        prompt: String?,
+        checkpoint: Boolean,
+        args: List<String>,
+    ) -> Unit,
     onBack: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var agent by remember(hello) { mutableStateOf(hello?.defaultAgent?.ifEmpty { null }) }
     var cwd by remember(knownDirectories) { mutableStateOf(knownDirectories.firstOrNull() ?: "") }
     var worktree by remember { mutableStateOf("") }
+    var command by remember { mutableStateOf("") }
     var checkpoint by remember { mutableStateOf(false) }
     var prompt by remember { mutableStateOf("") }
 
@@ -149,6 +158,33 @@ fun StartAgentScreen(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+
+            // Only for the adapter that needs one, and it is not decoration:
+            // `generic` carries no program, `apex-agentd` refuses a session
+            // with none, and this picker offers `generic` because the daemon
+            // lists it in `Hello.agents`. Before this field existed, choosing
+            // it produced a Start button whose only possible outcome was the
+            // daemon's refusal.
+            if (Agentd.commandIsRequired(agent)) {
+                Spacer(Modifier.height(16.dp))
+                Label("Command")
+                OutlinedTextField(
+                    value = command,
+                    onValueChange = { command = it },
+                    singleLine = true,
+                    placeholder = { Text("htop") },
+                    textStyle = MachineText,
+                    isError = command.isBlank(),
+                    supportingText = {
+                        Text(
+                            "The Generic adapter has no program of its own, so it runs the " +
+                                "one you name here. Arguments are split on spaces.",
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
 
@@ -265,9 +301,10 @@ fun StartAgentScreen(
                         worktree.trim().ifEmpty { null },
                         prompt.trim().ifEmpty { null },
                         checkpoint,
+                        commandArguments(command),
                     )
                 },
-                enabled = cwd.trim().startsWith("/") && busy == null,
+                enabled = startIsPossible(agent, cwd, command) && busy == null,
                 shape = RoundedCornerShape(6.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Start") }
@@ -285,6 +322,28 @@ private fun Label(text: String) {
         modifier = Modifier.padding(bottom = 4.dp),
     )
 }
+
+/**
+ * A command line as the wire wants it: `RunRequest.args`, program first.
+ *
+ * Split on whitespace and nothing cleverer. There are no quotes and no shell
+ * here — `args` goes to `execvp` through a PTY, so a quote a user typed would
+ * arrive as a literal quote in an argument, and pretending otherwise would be
+ * a shell this app does not have.
+ */
+fun commandArguments(command: String): List<String> =
+    command.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+
+/**
+ * Whether Start can do anything.
+ *
+ * A function rather than a boolean expression in the button, because it is the
+ * rule this screen exists to get right and a rule in a lambda is a rule no test
+ * can reach.
+ */
+fun startIsPossible(agent: String?, cwd: String, command: String): Boolean =
+    cwd.trim().startsWith("/") &&
+        !(Agentd.commandIsRequired(agent) && commandArguments(command).isEmpty())
 
 /** Every directory the daemon has mentioned, newest first, without repeats. */
 fun knownDirectories(sessions: List<com.apexos.remote.core.agent.AgentSession>): List<String> =
