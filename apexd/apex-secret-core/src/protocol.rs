@@ -160,6 +160,38 @@ pub enum Request {
         body_len: usize,
     },
 
+    /// Authenticate ONE connection a browser capsule opened, and then become
+    /// that connection (P2-012, route B).
+    ///
+    /// The only verb that does not answer and go back to reading request
+    /// lines. On an [`Response::Ok`] the socket stops being a control channel
+    /// and starts being the plaintext of the capsule's request: the daemon has
+    /// by then checked the grant, checked the destination against the
+    /// credential's pin, and opened its own connection to the site. Everything
+    /// after that reply is bytes, in both directions, and the daemon closes
+    /// the connection when the site's answer ends.
+    ///
+    /// It is framed this way for [`Request::Add`]'s second reason and one of
+    /// its own. A browser's request is larger than [`MAX_LINE_BYTES`] may be,
+    /// and — the reason that matters — the daemon must never assemble the
+    /// capsule's traffic into a JSON document: what crosses here is opaque to
+    /// everything but the one head rewrite that adds the header.
+    ///
+    /// **The credential does not come back**, which is the property this whole
+    /// route exists to keep. `apex-agentd` sends the bytes and receives the
+    /// site's answer with the value scrubbed out of it; there is no field here
+    /// or in [`Response`] that could carry one, exactly as the module note
+    /// says.
+    ///
+    /// `destination` is the authority the runtime read off the capsule's
+    /// `CONNECT`, forwarded so the daemon can refuse a mismatch rather than
+    /// trust that the runtime checked. What the daemon actually dials is the
+    /// credential's own pinned host and port, never this string.
+    Present {
+        record: Box<CapabilityRecord>,
+        destination: String,
+    },
+
     /// The audit trail.
     Audit {
         #[serde(default = "default_audit_lines")]

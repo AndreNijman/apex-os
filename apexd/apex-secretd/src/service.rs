@@ -31,7 +31,7 @@ use std::sync::Mutex;
 use apex_secret_core::audit::{self, AuditEvent, AuditLine};
 use apex_secret_core::budget::{self, Budget, Usage};
 use apex_secret_core::capability::{self, CapabilityRecord, EndpointError};
-use apex_secret_core::operation::OperationSpec;
+use apex_secret_core::operation::{self, OperationSpec};
 use apex_secret_core::protocol::{ErrorKind, Response};
 use apex_secret_core::store::{self, ServiceInfo, Store, StoreError};
 use apex_secret_core::SecretValue;
@@ -128,6 +128,64 @@ struct Budgeted<'a> {
     /// Held until the operation reaches the trail; `None` for a project with no
     /// budget, which has no headroom to reserve.
     reserved: Option<Reservation<'a>>,
+}
+
+/// A capsule's connection this daemon has agreed to authenticate.
+///
+/// **It holds the credential**, which is why it is a type in this binary with
+/// no `Serialize` and no field a caller can reach across the socket. It exists
+/// so that the decision and the relay can be two functions — the relay needs
+/// the socket, and the socket belongs to `main`'s connection thread — without
+/// the value passing through anything that could put it on the wire.
+///
+/// The reservation inside it is held for the life of the connection, which is
+/// what makes a budget mean something here: a capsule making many requests
+/// takes many reservations, one per connection, exactly as many operations
+/// would.
+pub struct Presentation<'a> {
+    record: CapabilityRecord,
+    audit_id: String,
+    peer: Peer,
+    info: ServiceInfo,
+    port: u16,
+    endpoint: String,
+    value: SecretValue,
+    spend: (String, Option<String>),
+    _reserved: Option<Reservation<'a>>,
+}
+
+impl Presentation<'_> {
+    /// The credential's stored metadata: the host to dial, the scheme, and
+    /// which header shape to send.
+    pub fn info(&self) -> &ServiceInfo {
+        &self.info
+    }
+
+    /// The port the credential is pinned to, resolved from the scheme when the
+    /// record does not spell one out.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// The value. Inside this process only — see the type's own note.
+    pub fn value(&self) -> &SecretValue {
+        &self.value
+    }
+}
+
+/// The port a credential is pinned to: the one it was stored with, or its
+/// scheme's own.
+///
+/// A capsule's `CONNECT` always carries a port, so the pin has to have one to
+/// compare against. `None` for a scheme with no default, which is refused
+/// rather than defaulted — a credential stored for a scheme this cannot dial
+/// must not become a capsule pinned to port 443 of the same host.
+fn pinned_port(info: &ServiceInfo) -> Option<u16> {
+    info.port.or(match info.scheme.as_str() {
+        "https" => Some(443),
+        "http" => Some(80),
+        _ => None,
+    })
 }
 
 /// One in-flight budgeted operation, released when it goes out of scope.
@@ -1409,6 +1467,261 @@ impl Service {
             exit_code: code,
             output,
         }
+    }
+
+    /// Decide whether one browser-capsule connection may carry this
+    /// credential, and read the value if it may (P2-012, route B).
+    ///
+    /// `use_capability`'s chain, minus the steps a relayed connection has no
+    /// use for. What is kept, in the same order and for the same reasons:
+    ///
+    ///  1. the account, from the kernel — never from the request;
+    ///  2. the operation is `browser.present` and nothing else, so this verb
+    ///     cannot be used to spend a credential on `git.push`;
+    ///  3. the record is well formed and has not expired;
+    ///  4. a credential exists under that name, for that account;
+    ///  5. **the destination the runtime forwarded is the credential's own
+    ///     pin**, host and port — the step that replaces `bind`, and the one
+    ///     that has to be here rather than only in `apex-agentd`: the runtime
+    ///     is a process running as the user;
+    ///  6. the capability is granted for that project;
+    ///  7. §13.14's budget, with a reservation held until the trail line is
+    ///     written;
+    ///  8. only then is the value read.
+    ///
+    /// What is absent, and why. There is no `bind`: a capsule names no
+    /// resource and the endpoint is the pin, so there is nothing for a provider
+    /// to resolve — `browser.present`'s own `bind` refuses for that reason.
+    /// There is no `mint`: a short-lived credential would have to be issued per
+    /// connection, and a browser opens many. There is no §13.8 approval, since
+    /// nothing binds to declare one.
+    ///
+    /// The value is read HERE and travels inside [`Presentation`], which is a
+    /// type in this binary and has no `Serialize`. It never reaches
+    /// `apex-agentd` and cannot: see [`crate::present`] for the arrangement
+    /// that keeps that true.
+    pub fn present_open(
+        &self,
+        peer: Peer,
+        mut record: CapabilityRecord,
+        destination: &str,
+    ) -> Result<Presentation<'_>, Response> {
+        let audit_id = self.next_audit_id();
+        record.audit_id = audit_id.clone();
+        record.approval_policy = UNDECIDED.to_string();
+
+        let spend = RefCell::new((audit::NOT_CHECKED.to_string(), None::<String>));
+        let refuse = |record: &CapabilityRecord, reason: String, kind: ErrorKind| -> Response {
+            let (word, detail) = spend.borrow().clone();
+            self.record(AuditLine {
+                reason: Some(reason.clone()),
+                spend: word,
+                spend_detail: detail,
+                ..AuditLine::from_record(&audit_id, AuditEvent::Refused, peer.uid, peer.pid, record)
+            });
+            Response::error(kind, reason)
+        };
+
+        if !store::valid_service_name(&record.provider) {
+            return Err(refuse(
+                &record,
+                StoreError::BadServiceName(record.provider.clone()).to_string(),
+                ErrorKind::BadRequest,
+            ));
+        }
+        for (field, value) in [
+            ("request_origin", &record.request_origin),
+            ("origin_source", &record.origin_source),
+        ] {
+            if !capability::valid_origin_label(value) {
+                return Err(refuse(
+                    &record,
+                    format!("'{}' is not a {field} label", value.escape_debug()),
+                    ErrorKind::BadRequest,
+                ));
+            }
+        }
+
+        // One operation, checked against the registry so the grant this is
+        // about to consult is written under the same canonical id. A record
+        // naming anything else is refused rather than performed: this verb
+        // relays a connection, and relaying one under the authority of
+        // `git.push` would be a grant meaning something nobody agreed to.
+        let (_, op) = match self.registry.lookup(&record.operation) {
+            Ok(found) => found,
+            Err(e) => return Err(refuse(&record, e.to_string(), ErrorKind::BadRequest)),
+        };
+        if op.id != operation::BROWSER_PRESENT {
+            return Err(refuse(
+                &record,
+                format!(
+                    "'{}' is not an operation a browser capsule's connection can carry; \
+                     only '{}' is",
+                    op.id,
+                    operation::BROWSER_PRESENT
+                ),
+                ErrorKind::BadRequest,
+            ));
+        }
+        record.operation = op.id.to_string();
+
+        let now = store::now_ms();
+        if record.is_expired(now) {
+            return Err(refuse(
+                &record,
+                "that capability request has expired; ask for it again".to_string(),
+                ErrorKind::PermissionDenied,
+            ));
+        }
+
+        let Some(project) = record.project.clone().filter(|p| broker::valid_project(p)) else {
+            return Err(refuse(
+                &record,
+                "this request names no project, so no grant can match it".to_string(),
+                ErrorKind::PermissionDenied,
+            ));
+        };
+        let Some(owner) = broker::owner(peer.uid) else {
+            return Err(refuse(
+                &record,
+                format!("uid {} is not an account on this machine", peer.uid),
+                ErrorKind::PermissionDenied,
+            ));
+        };
+        let Some(info) = self.store.info(peer.uid, &record.provider) else {
+            return Err(refuse(
+                &record,
+                StoreError::NoSuchService(record.provider.clone()).to_string(),
+                ErrorKind::NoSuchService,
+            ));
+        };
+
+        // The pin, in this daemon and not only in the runtime. `apex-agentd`
+        // refuses a session whose allowlist is not exactly this destination,
+        // and that check is worth having where the capsule is built — but it
+        // runs as the user, so it is not the boundary. This is.
+        let port = match pinned_port(&info) {
+            Some(port) => port,
+            None => {
+                return Err(refuse(
+                    &record,
+                    format!(
+                        "'{}' is stored for scheme '{}', which has no port a capsule could \
+                         be pinned to",
+                        info.service, info.scheme
+                    ),
+                    ErrorKind::BadRequest,
+                ))
+            }
+        };
+        let pinned = format!("{}:{port}", info.host.to_ascii_lowercase());
+        if destination.to_ascii_lowercase() != pinned {
+            return Err(refuse(
+                &record,
+                format!(
+                    "that capsule asked for '{}' and '{}' is pinned to '{pinned}'",
+                    destination.escape_debug(),
+                    info.service
+                ),
+                ErrorKind::PermissionDenied,
+            ));
+        }
+        let endpoint = format!("{}://{}", info.scheme, info.host);
+
+        match self.decide(peer, &project, &record.provider, op) {
+            Decision::Allowed(policy) => record.approval_policy = policy.to_string(),
+            Decision::Refused(reason) => {
+                return Err(refuse(&record, reason, ErrorKind::PermissionDenied))
+            }
+        }
+
+        let reserved = match self.check_budget(peer, &project, &owner, &record.provider, op, now) {
+            Ok(budgeted) => {
+                *spend.borrow_mut() = (budgeted.word, budgeted.detail);
+                budgeted.reserved
+            }
+            Err((word, reason)) => {
+                *spend.borrow_mut() = (word, Some(reason.clone()));
+                return Err(refuse(&record, reason, ErrorKind::PermissionDenied));
+            }
+        };
+
+        // Every check has passed. Only now is the value read.
+        let value = match self.store.value(peer.uid, &record.provider) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(refuse(&record, e.to_string(), ErrorKind::NoSuchService));
+            }
+        };
+
+        let spend = spend.borrow().clone();
+        Ok(Presentation {
+            record,
+            audit_id,
+            peer,
+            info,
+            port,
+            endpoint,
+            value,
+            spend,
+            _reserved: reserved,
+        })
+    }
+
+    /// Write the trail line for a connection [`Service::present_open`]
+    /// allowed.
+    ///
+    /// Always called, on both paths, because a `used` line that only appears
+    /// when the site answered would leave the trail silent about exactly the
+    /// runs worth reading — a connection refused by the site, a certificate
+    /// this machine would not accept. The reservation is released when the
+    /// [`Presentation`] is dropped at the end of this function, which is after
+    /// the line is written.
+    pub fn present_finish(&self, p: Presentation<'_>, outcome: Result<crate::present::Carried, String>) {
+        let (word, detail) = p.spend.clone();
+        let line = match outcome {
+            Ok(carried) => AuditLine {
+                endpoint: Some(p.endpoint.clone()),
+                exit_code: Some(0),
+                detail: format!(
+                    "{} — {} bytes returned to the capsule{}",
+                    carried.detail,
+                    carried.returned,
+                    if carried.echoed {
+                        ", WITH THE CREDENTIAL ECHOED BACK AND REDACTED"
+                    } else {
+                        ""
+                    }
+                ),
+                spend: word,
+                spend_detail: detail,
+                ..AuditLine::from_record(
+                    &p.audit_id,
+                    AuditEvent::Used,
+                    p.peer.uid,
+                    p.peer.pid,
+                    &p.record,
+                )
+            },
+            Err(reason) => AuditLine {
+                endpoint: Some(p.endpoint.clone()),
+                // Scrubbed for `use_capability`'s reason: this is the one
+                // refusal path that runs AFTER the value was read, and the
+                // natural way to write an error here is to quote what was
+                // being sent.
+                reason: Some(scrub_all(&reason, &[Some(&p.value)])),
+                spend: word,
+                spend_detail: detail,
+                ..AuditLine::from_record(
+                    &p.audit_id,
+                    AuditEvent::Refused,
+                    p.peer.uid,
+                    p.peer.pid,
+                    &p.record,
+                )
+            },
+        };
+        self.record(line);
     }
 
     /// Put a credential a brokered operation just created into the store.

@@ -154,6 +154,52 @@ impl Client {
         self.read_response()
     }
 
+    /// Hand this connection over to one authenticated browser-capsule
+    /// request.
+    ///
+    /// Consumes the client, because on success the socket is no longer a
+    /// control channel: it carries the capsule's plaintext outbound and the
+    /// site's answer back, and a second request line written onto it would be
+    /// sent to the site as part of the capsule's own request.
+    ///
+    /// The buffered reader is dropped here, and that is only safe because the
+    /// daemon writes its reply and then waits to READ — there is nothing for
+    /// the reader to have buffered past the newline. Checked rather than
+    /// assumed: bytes lost here would be the first bytes of a site's answer,
+    /// and they would be lost silently.
+    pub fn present(
+        mut self,
+        record: crate::capability::CapabilityRecord,
+        destination: &str,
+    ) -> Result<UnixStream> {
+        self.send(&Request::Present {
+            record: Box::new(record),
+            destination: destination.to_string(),
+        })?;
+        let resp = self.read_response()?;
+        if let Some((_, message)) = resp.as_error() {
+            bail!("{message}");
+        }
+        if !matches!(resp, Response::Ok) {
+            bail!(
+                "the secret service replied with a {} to a present",
+                resp.variant()
+            );
+        }
+        let buffered = self.reader.buffer().len();
+        if buffered != 0 {
+            bail!(
+                "the secret service sent {buffered} bytes after its reply, which belong to                  the site's answer and cannot be recovered here"
+            );
+        }
+        // No timeouts from here: a capsule reading a large page is not a
+        // capsule that has stalled, and the daemon closes the connection when
+        // the site's answer ends.
+        self.stream.set_read_timeout(None).ok();
+        self.stream.set_write_timeout(None).ok();
+        Ok(self.stream)
+    }
+
     fn send(&mut self, req: &Request) -> Result<()> {
         let mut line = serde_json::to_string(req)?;
         line.push('\n');
