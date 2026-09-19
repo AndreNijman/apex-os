@@ -126,6 +126,68 @@ The same run logged `tlog entry created with index: 2892864107` for
 `cosign sign` 13 minutes before the attest failed. Rekor was up, the runner's
 network was fine, the OIDC identity worked. Only the size is wrong.
 
+### 7. THE OBVIOUS KNOB IS NOT THE LEVER — measured on alpine, not on the probe
+
+`SYFT_FILE_METADATA_SELECTION=none` reads like the fix and is not. Run against
+`docker.io/library/alpine:3.20` with the same pinned syft 1.52.0, because a
+small image answers this in seconds instead of twelve minutes:
+
+| configuration | packages | files | relationships | compact |
+|---|---|---|---|---|
+| default | 15 | 77 | 125 | 87,692 B |
+| `SYFT_FILE_METADATA_SELECTION=none` | 15 | **77** | 125 | 76,227 B (−13%) |
+| `SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP=false` | 15 | **2** | 48 | 31,767 B (−64%) |
+| both | 15 | 1 | 48 | 31,130 B |
+
+`FILE_METADATA_SELECTION=none` drops each file's **digests**, not the file
+rows. The rows and their ownership edges go with the RELATIONSHIPS switch. The
+first commit of this unit set only the former and would have shipped a 13%
+reduction against a problem that needs 90%.
+
+**The package sets are identical** between the default run and the stripped
+one — the sorted `name@version` list of all fifteen `diff`s clean. This drops
+files, not packages.
+
+**The third switch errors, and must not be forced.**
+`SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP_OVERLAP=false` makes syft 1.52.0
+exit 1 before it catalogues anything:
+
+```
+invalid application config: cannot enable exclude-binary-overlap-by-ownership
+without enabling package-file-ownership-overlap
+```
+
+The knob it demands in exchange decides whether a binary syft found and the RPM
+that owns it are one package or two — i.e. it changes the PACKAGE set. Left
+alone deliberately. **The probe's `norel` arm will therefore fail with rc=1 and
+no output; that is explained, not a defect.**
+
+A value syft does not recognise also exits 1 (checked with `=nonsense`), so a
+typo cannot silently produce a smaller document.
+
+### 8. HOW TO READ THE PROBE'S `jq-strip` NUMBER — it is ~9% LOW
+
+The probe was written before finding 7, so **no arm runs the configuration the
+build actually uses**. `nofiles` is the weak knob, `norel` cannot run, `full` is
+the baseline. Only `jq-strip` approximates package-level — and it is not
+equivalent, in a direction that matters:
+
+| on alpine:3.20 | packages | files | rels | compact |
+|---|---|---|---|---|
+| probe's `jq-strip` of the default doc | 15 | 0 | 34 | 28,552 B |
+| the build's real config (ownership+metadata off) | 15 | 1 | 48 | **31,130 B** |
+
+**`jq-strip` under-reports by about 9%** (1.090x). The difference is 14 `OTHER`
+relationships — the package-file-ownership-**overlap** edges, which finding 7
+says must stay. jq-strip deletes every file-anchored edge; `ownership=false`
+keeps the overlap ones.
+
+So: multiply the probe's `RESULT jq-strip: compact=` by ~1.1 before comparing it
+with the budget, and treat `REKOR jq-strip: ACCEPTED` as *"Rekor accepts a
+package-level document of roughly this size"* — **not** as "the fix is
+verified". Only a real build verifies the real document. The 1.09 comes from a
+15-package image and is indicative, not exact.
+
 ## CHOSEN OPTION — shrink the predicate, keep the transparency log
 
 Ranked, with what each costs:
