@@ -82,6 +82,23 @@ Do not re-run anything on the card's own "DO NOT RE-RUN" list.
 
 ## NEXT
 
+**ROUND 34 IN PROGRESS.** Branch `task/p2-b-round34` is cut and pushed in BOTH
+repos (apex-os from `7f647470`, apex-shell from `4eea9fb`). Worktrees:
+`/var/tmp/apex-work/wt-p2-b7` (apex-os) and `/var/tmp/apex-work/wt-p2-b7-sh`
+(apex-shell). Scratch: `scratch-p2-b/round34/`.
+
+**NEXT ACTION:** decide the catalogue route (see FOUND 37's 113 MB number), then
+write the `Containerfile.base` stanza that compiles the plugin out of the
+vendored shell tree into `/usr/lib64/apex-shell/qml/Apex/I18n/`, and the
+`import Apex.I18n` in `shell.qml`.
+
+**THE COST IS MEASURED AND IT IS NOT A PRODUCT DECISION — see FOUND 37.**
+Building the plugin costs **ZERO packages** anywhere: `g++`, `pkg-config`,
+`moc` (`/usr/lib64/qt6/libexec/moc`) and BOTH `qt6-qtbase-devel` and
+`qt6-qtdeclarative-devel` are already installed in the shipped core image.
+Measured in the real core image, not reasoned. The compile adds a **36.9 kB**
+layer; the `.so` is 29,776 bytes and the qmldir 946.
+
 **ROUND 33 IS COMPLETE AND PUSHED.** apex-shell `task/p2-b-round33` tip
 **`df17c34`**, three commits on `roadmap/v2.2`'s `9df72cf`. apex-os
 `task/p2-b-round33` cut from `7f647470` and pushed with **no commits** — see
@@ -1320,6 +1337,40 @@ produced is still in the FOUND list below (20–24 from round 30, 18–19 from r
     it — em dashes, "every", "nobody", passive voice and three-item lists are
     all rules in this tree, and the guide's own header had to be rewritten to
     pass.
+
+37. **The plugin costs ZERO packages, and the expensive thing is not the
+    plugin — it is any `dnf` at all in the base tier.** Measured 2026-09-19 in
+    the REAL core image (`ghcr.io/andrenijman/apex-os:core-d12d3450…`, the
+    digest `Containerfile.base` builds `FROM`), not in a fedora container and
+    not from the Containerfile source:
+
+    * `g++`, `gcc`, `pkg-config`, `qmake6` are on `$PATH`; `moc` is at
+      `/usr/lib64/qt6/libexec/moc` (found through `qmake6 -query
+      QT_HOST_LIBEXECS`, FOUND 35); `pkg-config --exists Qt6Qml Qt6Core`
+      succeeds — **`qt6-qtbase-devel 6.10.3` and `qt6-qtdeclarative-devel
+      6.10.3` are INSTALLED in the shipped image.** The `dnf5 -y remove
+      'qt6-*-devel'` at `Containerfile.core:927` does not survive the dev
+      toolchain stanza 600 lines later. So the plugin needs **no package
+      added to any tier**, and the "cost it against update-cost.md" question
+      has the cheapest possible answer.
+    * Building the plugin in a layer FROM core: **36.9 kB**. `libapexi18n.so`
+      is **29,776 bytes**, `qmldir` 946.
+    * **A `dnf` transaction in the base tier costs 113 MB, net of zero shipped
+      files.** `dnf5 -y install qt6-linguist` + use `lrelease-qt6` + `dnf5 -y
+      remove` + `dnf5 clean all`, all in ONE layer, leaves a **113 MB** layer
+      (`podman history`). That is the ~200 MB sqlite rpmdb rewrite
+      `docs/update-cost.md` describes, measured rather than quoted, and it is
+      **3,000x the artefact** — per machine, per update, for ever.
+    * `qt6-linguist` itself (the `lrelease-qt6` provider; NOT `qt6-qttools`,
+      which does not carry lrelease) is **1 MiB download / 4 MiB installed /
+      3 packages** — a sixth of the orca line in `docs/update-cost.md`. The
+      package is cheap; the transaction is not. Those are different numbers and
+      collapsing them is how this decision gets made wrong.
+
+    **Consequence for the shape of the change:** the plugin compile goes in the
+    base tier with NO `dnf` (36.9 kB). The `.qm` catalogue needs `lrelease`,
+    which is NOT in the image, so it must come from a DISCARDED builder stage
+    or from core — never from a `dnf` in the final base stage.
 
 ## BLOCKED ON
 

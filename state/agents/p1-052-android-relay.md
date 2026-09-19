@@ -85,6 +85,71 @@ Anything you do must leave those where they are or better.
 
 ## NEXT
 
+**Write `android/core/.../Relay.kt`** — the RFC 6455 client half, ported from
+`apexd/apex-remote-core/src/relay.rs`, with the SAME test vectors — then
+`RelayTest.kt` in `:core`, then the connector in `:app`.
+
+## THE SEAM — measured, and `PairingService.kt:21` is telling the truth
+
+`Client.pair(input: InputStream, output: OutputStream, …)` and
+`Client.openSession(input: InputStream, output: OutputStream, …)` — `:core`
+takes a stream pair and nothing else. `PairingService` is the TCP half and
+supplies `socket.getInputStream()/getOutputStream()`. **So the entire relay leg
+is one more implementation of that pair.** Nothing above the transport learns
+which leg it is on, exactly as `relay.rs`'s module docs require.
+
+Everything else on the Android side is already written and was waiting for this:
+
+| piece | where | state |
+| --- | --- | --- |
+| rendezvous id + path | `Rendezvous.kt` | written, tested (`RendezvousTest`) |
+| `PairedMachine.relay` | `Storage.kt:80` | written, serialised |
+| `PairedMachine.rendezvousId()` | `Storage.kt:84` | written |
+| `PairingOffer.relay` | `Pairing.kt` | written |
+| `[u32 BE][ciphertext]` framing | `Transport.kt` | written — and it is what the WS carries |
+| the affordance | `MachinesScreen.kt:288` | written, unserviceable |
+
+## FOUND (this round, measured)
+
+- **The deployed relay is live and reachable from the L16.**
+  `GET https://apex-relay.andrenijman.com/r/<id>?role=guest` → **HTTP 426**,
+  body `this endpoint speaks WebSocket only`, `server: cloudflare`. So "end to
+  end over the real deployed relay" is takeable, not hypothetical.
+- **A guest never has to wait to be told it is paired.** `relay/src/index.js`
+  sets the guest's `peer` attachment *and* the host's inside the same
+  synchronous block that returns the 101, so a binary frame written straight
+  after the upgrade forwards. A guest that arrives with no host waiting gets
+  **409** (`room.js:93`, "no desktop is waiting at this rendezvous"), which
+  `Opening.check` already turns into a message carrying the status.
+- **`peer-gone` is the relay's word for the far end going away**, and on this
+  side it has to become EOF on the carried stream — not an exception with the
+  relay's name on it, or the layer above learns which leg it is on.
+- **No new dependency is needed and OkHttp is the wrong answer here** — see
+  "The dependency decision" below.
+
+## The dependency decision, argued rather than defaulted
+
+**Hand-rolled, no OkHttp.** The reasons are specific to this module, not copied
+from the Rust one:
+
+1. `:core` is a **pure JVM module** (`kotlin.jvm`, jvmTarget 17), not an Android
+   one. OkHttp in `:core` would be a first HTTP stack in a module whose entire
+   dependency list is bouncycastle + kotlinx-serialization, and `:core`'s tests
+   run on the JVM where its `Dispatcher` threads would outlive them.
+2. **TLS costs nothing without it.** `javax.net.ssl.SSLSocketFactory` is in the
+   JDK and on Android, and it is the platform trust store on both — the same
+   position `relay.rs` takes ("the caller supplies the stream").
+3. **OkHttp's `WebSocket` is callback-and-queue shaped.** It would have to be
+   adapted back into a blocking `InputStream`/`OutputStream` pair to reach the
+   seam, so the adapter gets written either way — and hand-rolling deletes the
+   queue, its unbounded-buffer policy and a 700 kB dependency along with it.
+4. It buys one thing this leg cannot use: **automatic HTTP/2, proxies and
+   redirects**. A redirect on a rendezvous is a path this client must refuse,
+   not follow.
+
+## ORIGINAL PLAN FROM DISPATCH
+
+
 1. Read `relay.rs` end to end, then `Rendezvous.kt` and `PairingService.kt`, and
    write on this card **what the seam is** before writing Kotlin. If the seam
    turns out not to exist where `PairingService.kt:21` claims it does, that is
@@ -136,7 +201,10 @@ Anything you do must leave those where they are or better.
 
 ## IN PROGRESS
 
-- nothing yet.
+- Worktree `/var/tmp/apex-work/wt-p1-052-android` on `task/p1-052-android-relay`
+  off `roadmap/v2.2` @ `859cbb2b`. Read `relay.rs` (1145 lines), `room.js`,
+  `index.js`, `Rendezvous.kt`, `Transport.kt`, `Client.kt`, `Storage.kt`,
+  `PairingService.kt`. Seam confirmed (above). Nothing written yet.
 
 ## FOUND
 
