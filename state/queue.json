@@ -1,6 +1,6 @@
 {
   "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
-  "updated": "2026-09-19T18:10+08:00",
+  "updated": "2026-09-19T18:35+08:00",
   "concurrency_ceiling": 6,
   "units": [
     {
@@ -423,7 +423,8 @@
       "id": "build-verify",
       "items": [],
       "after": [],
-      "title": "Does roadmap/v2.2 still build? The quickshell and multilib changes are unbuilt"
+      "title": "Does roadmap/v2.2 still build? The quickshell and multilib changes are unbuilt",
+      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 33) -- landed as merge 2e04fbcb, 0 unlanded. The question it was dispatched for is ANSWERED: roadmap/v2.2 builds. The local build succeeded end to end (~2h24m for base+apex on a reused core) and the step that killed the previous agent now prints 'apex-labwc-keybinds: 70 defaults, 4 without a labwc equivalent / PASS' with rc.xml untouched; four tags resolve to one image, kernel and 14 out-of-tree modules signed. In CI 35433705393, rust/changes/core/base are all green and inside `image` everything APEX passed -- build, the Secure Boot chain for kernel AND modules, payload split, push, cosign signing -- and the per-SHA tag is live at sha256:be3bdd0c6384. FIXED AND LANDED: build-local.sh now resolves want -> roadmap/v2.2 -> main and prints which rung, three rungs rather than build-image.yml's two because this script runs from whatever worktree you are in and every task/* worktree here has no twin; a SECOND, SILENT defect underneath it -- the 'unreachable remote is FATAL' property was unreachable code, because pipefail hands the assignment ls-remote's 128 and errexit kills the script before the FATAL line, with git's message already eaten by 2>/dev/null (measured: exit 128, nothing printed); and a pr-validation selector that named no repo-root script, so a PR editing only build-local.sh skipped every job INCLUDING the suite guarding it -- the seventh instance of the bug the six comments already in that block describe. tests/test-build-local-shell-ref.sh, 25 assertions, proved in three directions (25/0 with the fix, 8/17 against the old block, and 23/2 with the middle rung deleted -- exactly the two cases that justify it). WHAT REMAINS IS NOT THIS UNIT: the SBOM step OOMs the runner, and that is unit `sbom-oom`, dispatched the same round."
     },
     {
       "id": "katana-image-qual",
@@ -460,6 +461,15 @@
         "p1-053b"
       ],
       "title": "The relay leg the Android app has never had — P1-060 C1s last piece"
+    },
+    {
+      "id": "sbom-oom",
+      "items": [],
+      "after": [],
+      "conflicts": [
+        "build-verify"
+      ],
+      "title": "syft is SIGKILLed cataloguing the image — the last red step in build-image"
     }
   ],
   "_completed_units": {

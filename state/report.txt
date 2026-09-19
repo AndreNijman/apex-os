@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-19 18:01 AWST
+APEX ROADMAP — resume report — 2026-09-19 18:28 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,33 +16,31 @@ APEX ROADMAP — resume report — 2026-09-19 18:01 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  build-verify ALIVE                                         task/build-verify
-             head 6e4174ee fix: build-local.sh pins the MATCHING apex-shell bran
-             dirty 0 file(s), 0 unpushed, card 2m
-             NEXT **Now:** watch two things, neither of which needs any more decisio
+  sbom-oom   ALIVE                                         task/sbom-oom
+             head 
+             dirty 0 file(s), ? unpushed, card 0m
+             NEXT 1. **Confirm the cause on the runner, in one cheap run**, before c
 
   katana-image-qual ALIVE                                         task/katana-image-qual
              head 
-             dirty 0 file(s), ? unpushed, card 0m
-             NEXT **Waiting on the GHCR tag; everything that does not need it is alr
+             dirty 0 file(s), ? unpushed, card 10m
+             NEXT **18:18 — TAG IS LIVE**, `sha256:be3bdd0c63848811fbbd3a76f17a50f40
 
   p1-052-android-relay ALIVE      P1-060 C1 relay leg,P1-051 remainder,P1-052 Android half task/p1-052-android-relay
              head 
-             dirty 0 file(s), ? unpushed, card 0m
-             NEXT 1. Read `relay.rs` end to end, then `Rendezvous.kt` and `PairingSe
+             dirty 0 file(s), ? unpushed, card 2m
+             NEXT **Run the FULL device suite** (expect **35** = 32 + 3) and the res
 
   p2-b       ALIVE      P2-003,P2-004                      task/p2-b-round34
              head 
-             dirty 0 file(s), ? unpushed, card 5m
-             NEXT **ROUND 33 IS COMPLETE AND PUSHED.** apex-shell `task/p2-b-round33
+             dirty 0 file(s), ? unpushed, card 0m
+             NEXT **ROUND 34 IS COMPLETE AND PUSHED IN BOTH REPOS.** apex-shell
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 859cbb2b Merge task/p1-053e-device into roadmap/v2.2
-    task/build-verify
-      6e4174ee fix: build-local.sh pins the MATCHING apex-shell branch, not    [1/10 added lines on tip]
+  int-os:  tip 2e04fbcb Merge task/build-verify into roadmap/v2.2
     task/katana-image-qual
       b00e2ae6 docs(roadmap): katana round-33 baseline — 177 shadows reprodu   [1/10 added lines on tip]
       5f10a0a3 docs(roadmap): the negative control on katana's old image — f   [0/10 added lines on tip]
@@ -51,10 +49,20 @@ APEX ROADMAP — resume report — 2026-09-19 18:01 AWST
       f6470e36 docs(roadmap): section 6.3's bwrap failure was the harness —    [1/10 added lines on tip]
       5036a4f4 docs(roadmap): the old-image control column for every row of    [1/10 added lines on tip]
       ba41fd1c docs(roadmap): the landed selector answers 10de:249d/HDMI-A-1   [0/10 added lines on tip]
+    task/p1-052-android-relay
+      125e1d91 feat(android): the RFC 6455 client the relay leg has never ha   [2/10 added lines on tip]
+      f8b6fd7d test(android): two of the relay gates inspected nothing, meas   [0/10 added lines on tip]
+      f41667a6 feat(android): dial the relay, and delete the apology at Pair   [2/10 added lines on tip]
+      b6758c78 feat(android): tell the person which path they got, in the de   [0/10 added lines on tip]
+      d0d2f857 test(android): the relay leg, from a real phone through the r   [3/10 added lines on tip]
+    task/p2-b-round34
+      e11f2843 feat(shell): build and ship the Apex.I18n module, and put it    [1/10 added lines on tip]
 
   int-shell:  tip 4eea9fb Merge task/p2-b-round33 into roadmap/v2.2 (apex-shell 
     task/p0-022-agents-help
       4a0ed98 feat(agents): the Agent Center said what was running and never   [7/10 added lines on tip]
+    task/p2-b-round34
+      2bc9799 feat(i18n): the shell reaches the Apex.I18n module, and sectio   [0/10 added lines on tip]
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -74,11 +82,11 @@ APEX ROADMAP — resume report — 2026-09-19 18:01 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 46s Sat 2026-09-19
+  snapshot timer: active   last 4s Sat 2026-09-19
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    6731c24  roadmap-state
+    apex-os    4d73a21  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
     apex-os    8957484  wt-build-verify-
@@ -101,7 +109,7 @@ APEX ROADMAP — resume report — 2026-09-19 18:01 AWST
     apex-os    c74f38d  wt-multilib2-
     apex-os    0fd2d78  wt-p0-002-
     apex-os    e63b0e3  wt-p0-003-
-    apex-shell 5f8d029  apex-shell-
+    apex-shell feae55c  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-
@@ -134,9 +142,9 @@ APEX ROADMAP — resume report — 2026-09-19 18:01 AWST
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
     p2-b           P2-003,P2-004                    Accessibility baseline and internationalisation baseline
-    build-verify                                    Does roadmap/v2.2 still build? The quickshell and multilib c
     katana-image-qual                                  Rebase katana onto the tip image, then the gaming and multil
     p1-052-android-relay                                  The relay leg the Android app has never had — P1-060 C1s las
+    sbom-oom                                        syft is SIGKILLed cataloguing the image — the last red step 
 
   READY (dependencies believed satisfied — confirm against the agent table above):
 
@@ -163,6 +171,7 @@ APEX ROADMAP — resume report — 2026-09-19 18:01 AWST
     p1-063 — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-13 (round 24). Round 3 is finished, pushed AND landed — apex-os 619e764a, apex-shell 1da66c7 — and followups-4 wired its 60 lid assertions into CI runner-green. Both remaining criteria are ANDRE'S PHYSICAL ACTIONS and an agent must not fake either. Criterion 1: causation needs the external display physically unplugged. Re-measured 2026-09-13 — Docked=b true, card1-DP-1 connected — and with a display attached logind consults HandleLidSwitchDocked (default ignore) BEFORE any inhibitor, so the lid does nothing with or without APEX's block and the non-suspend cannot be attributed to APEX. The one command that closes it, undocked: `sudo ./tests/test-apex-lid-live.sh`. Criterion 3: 'draws measurably less' needs an undocked machine ON BATTERY that nobody is using — power_now reads CHARGING power on mains — and the runnable recipe is in docs/lid.md under 'What has NOT been measured'. Nothing here is waiting on an agent.
     pkg-share — CLOSED BY HAND:  RE-OPEN CONDITION MET 2026-09-19 (round 33): the image build is in flight as CI 35433705393 on roadmap/v2.2 @ 7f647470e222cfa23e0853cac45ef3f7e74c252e, which carries BOTH 78f04717 (gaming-gpu) and 5de97037 (pkg-share). THE RUN IS OWNED BY UNIT `katana-image-qual`, dispatched this round -- do NOT dispatch this unit separately, it would fight the same machine for the same reboots. Katana was confirmed free at 17:00 AWST (greetd on tty1, nobody logged in, no steam/gamescope/proton). The one fact that made this a new unit rather than a straight re-open: katana's booted image is apex-266dcc57, 131 commits behind the tip, and `git merge-base --is-ancestor` says NO for both merges -- so the rebase is step 1 of the run-book, not a tidy-up, and a run-book started before it measures the wrong build. CLOSED TO DISPATCH 2026-09-19 (round 31) -- code done and landed as merge 5de97037. What is left is ONE CONFIRMATION ON A REAL MACHINE, and it cannot happen until an image is built, because nothing was installed anywhere during this work. The exact commands are on the card: after an image build, `sudo apex install steam` on katana, then `ls /usr/share/vulkan/icd.d/ | grep -c i686` (was 0), the section 3 shadow count (was 177 -- use LC_ALL=C on every sort and comm), and `grep 'multilib: carrying'` in the log, where the image-owned count should dominate the native-pass count. WHAT WAS ACTUALLY WRONG, because the second defect is far larger than the report that found it: `apex resolve` did not merely predict the wrong source for chromium. probe_rpm passed `--` to dnf5 repoquery, which refuses it outright (rc 2, no stdout, stderr discarded), so apex resolve returned NO RPM CANDIDATE FOR ANY PACKAGE IN THE WORLD -- chromium is simply where somebody noticed. The same argument sat in newer_satisfied_by_image, so guard_rpms answered 'not satisfied' for every versioned requirement it was ever asked and its `omitting` branch was structurally unreachable. Verified with the shipped engine on the L16 as a positive control at the same minute. TWO SUITES WERE HIDING IT: test-apex-resolve.sh's fake dnf5 read only its LAST argument, so re-introducing the bad argument failed nothing (now fails 11 assertions); and test-apex-pkg.sh carried two assertions that DEMANDED `--excludepath /usr/share` -- a test that required the defect. Both replaced, with a class-wide guard that no non-comment line passes `--` to dnf5. The excludepath list is gone rather than extended: adding /usr/libexec to it earlier the same day fixed seven packages and nothing about the next directory nobody thought of, so the list was the defect. merge_multilib now carries a path only when neither the running image nor the native pass provides it, and fails CLOSED in the opposite direction to image_owns. Measured: 23 files newly carried, 0 lost. LEFT DELIBERATELY: newer_satisfied_by_image only inspects requirements whose capability IS the package name, so a soname-only requirement is invisible to it. Pre-existing, reachable today, wants its own measurement. RE-OPEN after an image build.
     gaming-gpu — CLOSED BY HAND:  RE-OPEN CONDITION MET 2026-09-19 (round 33): the image build is in flight as CI 35433705393 on roadmap/v2.2 @ 7f647470e222cfa23e0853cac45ef3f7e74c252e, which carries BOTH 78f04717 (gaming-gpu) and 5de97037 (pkg-share). THE RUN IS OWNED BY UNIT `katana-image-qual`, dispatched this round -- do NOT dispatch this unit separately, it would fight the same machine for the same reboots. Katana was confirmed free at 17:00 AWST (greetd on tty1, nobody logged in, no steam/gamescope/proton). The one fact that made this a new unit rather than a straight re-open: katana's booted image is apex-266dcc57, 131 commits behind the tip, and `git merge-base --is-ancestor` says NO for both merges -- so the rebase is step 1 of the run-book, not a tidy-up, and a run-book started before it measures the wrong build. CLOSED TO DISPATCH 2026-09-19 (round 31) -- the CODE is done and landed as merge 78f04717; what is left is ONE HARDWARE RUN and the run-book for it is already written, at docs/gaming-and-sessions.md section 6, six blocks. Fixed and headlessly verified: the GPU/output selection rule (the OUTPUT decides the card, not 'prefer the discrete GPU' -- a dGPU with no connector attached is a session with no screen; external connectors beat the built-in panel, the chosen connector's card supplies the vulkan device id from sysfs, and nothing about 10de:249d is hardcoded); --rt passed only when CAP_SYS_NICE is reachable, with NOTHING granting it on purpose because setcap cannot write a read-only composefs /usr and pam_cap would break Steam's bwrap, which refuses to start with any permitted capability; the flag() helper now separates EACCES from NotFound on every filesystem-read row rather than only the sudoers one; Safe Graphics points wlroots at the card when every connected screen is on one non-primary card; and the niri two-bar defect as a guarded transform of the user's own config.kdl rather than a config APEX ships, because shipping one would only fix the next install. A VRR probe bug was found IN REVIEW and is not in the katana evidence: it globbed card*-*/vrr_capable, and DRM connector names are unique per card, so on a hybrid machine it answered about the wrong screen. STILL BLOCKED, and not on this unit: P1-038 row 6 (Steam Big Picture) needs the /usr/share ICD defect fixed, which unit pkg-share owns -- gate is `ls /usr/share/vulkan/icd.d/ | grep i686` non-empty. And section 6.3's bwrap cause is CLASSIFIED, NOT ATTRIBUTED: the qualification logged in via systemd-run --property=PAMName=login rather than greetd, so the session now logs CapEff/CapPrm/CapAmb unconditionally and the next greetd run answers it from the log alone. RE-OPEN the moment katana is free -- it is currently held by the TPM clear agent -- and start from the run-book. Note: task/p1-043-gpu-parity is ALREADY LANDED (it only looks unlanded because landings were cherry-picks then); do not re-fold it.
+    build-verify — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-19 (round 33) -- landed as merge 2e04fbcb, 0 unlanded. The question it was dispatched for is ANSWERED: roadmap/v2.2 builds. The local build succeeded end to end (~2h24m for base+apex on a reused core) and the step that killed the previous agent now prints 'apex-labwc-keybinds: 70 defaults, 4 without a labwc equivalent / PASS' with rc.xml untouched; four tags resolve to one image, kernel and 14 out-of-tree modules signed. In CI 35433705393, rust/changes/core/base are all green and inside `image` everything APEX passed -- build, the Secure Boot chain for kernel AND modules, payload split, push, cosign signing -- and the per-SHA tag is live at sha256:be3bdd0c6384. FIXED AND LANDED: build-local.sh now resolves want -> roadmap/v2.2 -> main and prints which rung, three rungs rather than build-image.yml's two because this script runs from whatever worktree you are in and every task/* worktree here has no twin; a SECOND, SILENT defect underneath it -- the 'unreachable remote is FATAL' property was unreachable code, because pipefail hands the assignment ls-remote's 128 and errexit kills the script before the FATAL line, with git's message already eaten by 2>/dev/null (measured: exit 128, nothing printed); and a pr-validation selector that named no repo-root script, so a PR editing only build-local.sh skipped every job INCLUDING the suite guarding it -- the seventh instance of the bug the six comments already in that block describe. tests/test-build-local-shell-ref.sh, 25 assertions, proved in three directions (25/0 with the fix, 8/17 against the old block, and 23/2 with the middle rung deleted -- exactly the two cases that justify it). WHAT REMAINS IS NOT THIS UNIT: the SBOM step OOMs the runner, and that is unit `sbom-oom`, dispatched the same round.
     p1-053e — CLOSED BY HAND: CLOSED TO DISPATCH 2026-09-19 (round 33) -- landed as merge 859cbb2b, 0 unlanded. Four takeable items closed plus approvals, which round 1's evidence named and the dispatch did not. P1-060 C1 is met EXCEPT THE RELAY LEG, and that leg is a missing FEATURE rather than a missing test: there is no relay client on Android at all -- PairingService.kt:108 prints its own apology, :core has no WebSocket code, no OkHttp in the build -- while MachinesScreen.kt:288 already shows 'relay available'. That is now unit `p1-052-android-relay`, dispatched the same round on the finding agent's own recommendation. P1-060 C2 is NOT an agent's: it names a tablet and a foldable and neither exists here; it gained the terminal this round and LOST a claim, because TerminalView is a bare Canvas and TalkBack has nothing to announce on it. THE FINDING WITH THE WIDEST BLAST RADIUS IS ABOUT THIS PROGRAM, NOT THIS UNIT: a roadmap-dispatched agent cannot pair, because its cgroup makes origin::observe_pid classify the broker as `scheduled-job` and apex-remoted correctly refuses -- 8 of 24 tests failed on that alone, and round 1 never saw it because it ran interactively. Everything needing a human-at-the-keyboard must go through tests/in-login-session.sh. Also fixed: the suite leaked an apex-remoted per reconnect test and round 1's worktree still held seven orphans.
 
 ────────────────────────────────────────────────────────────────────────────

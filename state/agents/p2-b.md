@@ -318,7 +318,20 @@ the first round on this unit where the apex-os half is the substance.**
 * **`test-containerfile-order.sh` caught the one defect the mini-build could
   not** (FOUND 39). Gates on the branch: `check-containerfile-assertions.sh`
   **195 checked / 0 failed**, `test-containerfile-order.sh` **24 passed / 0
-  failed**, `shellcheck -S warning` and `bash -n` clean on the launcher.
+  failed**, `check-shellcheck-coverage.sh` **168 scripts, 0 newly failing**,
+  `shellcheck -S warning` and `bash -n` clean on the launcher.
+* **The three other apex-os suites that read the launcher were run and their
+  reds are NOT this branch's**, checked against the clean baseline rather than
+  assumed: `test-apex-safe-graphics.sh` 99/0, `test-apex-firstrun.sh` 69/1 and
+  `test-apex-input.sh` 101/8 — and `roadmap/v2.2` at `7f647470` gives 69/1 and
+  101/8 too, identical. Neither red is mine and neither is this unit's to fix.
+* **The zero-package cost rests on something accidental, and that is written
+  down rather than buried**: those two Qt devel packages are in the image only
+  because `Containerfile.core:927`'s `dnf5 -y remove 'qt6-*-devel'` does not
+  survive the dev toolchain stanza 600 lines later. If somebody ever makes that
+  removal stick, stage 5b2a fails LOUDLY — `test -x "$MOC"` or a compile error,
+  not a silent skip — which is the safe direction, but "zero packages" is not
+  the same claim as "no dependency".
 
 **THE WHOLE THING RUN END TO END INSIDE THE IMAGE, in the real
 `/usr/bin/quickshell`, with a real `ShellRoot` carrying `shell.qml`'s new block
@@ -344,6 +357,30 @@ Fedora goes to the journal. What changed is that the route from a `.qm` to a
 rendered string now exists end to end and is asserted at three places — the
 image build, the suite, and the shell's own startup — where before it existed
 only in a test.
+
+**FROM THE GITHUB ARCH RUNNER, not this laptop: CI run 35437235207 on the tip
+`2bc9799`, and ALL THREE JOBS ARE SUCCESS with ZERO red steps.** The third
+consecutive fully green run for this unit. `Repo Structure Sanity` success, so
+the new REQUIRED path `src/i18n/I18nBootstrap.qml` exists there; `NixOS`
+success; `arch-validate` success in 5m6s. The totals lines rather than the
+ticks:
+
+* `run-i18n-test: passed=20 failed=0 skipped=1` — was 19/0/1, and the extra
+  pass is the new row: *"ok shell.qml reaches the Apex.I18n module, whose plugin
+  installs a QTranslator"*, read off the runner's own log. **The predicate is
+  three file reads and it answers the same on a second distribution**, which is
+  what it should do — it is about the repository, not about this machine.
+* `i18n-host: passed=21 failed=0 skipped=3` and `mutate-i18n-host: applied=13
+  caught=11 survived=0 misscored=0 unscorable=0 held=2 false-red=0` — identical
+  to round 33, so nothing this round moved the host measurement.
+* `check-agent-help: passed=22 failed=0` and `run-rtl-test: 32 passed, 0 failed,
+  1 skipped, 4 could-not-run` — both unchanged.
+* `suite coverage (apex-shell): 69 suites, 69 reachable from CI`.
+
+`mutate-i18n.sh` is NOT a CI step (no `mutate-*.sh` is in
+`check-suites-run-in-ci.sh`'s glob — the round-31 note about that gap still
+stands), so its 14/14 is this laptop's number only. Full log at
+`scratch-p2-b/round34/ci-35437235207.log`.
 
 Round 33 (2026-09-19). **P2-004's oldest blocker is gone, and it turned out not
 to be upstream's at all.** Three commits on `roadmap/v2.2`'s `9df72cf`, all
