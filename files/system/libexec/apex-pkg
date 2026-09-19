@@ -633,8 +633,25 @@ extract_rpms() {
     #
     # So: native and noarch first, then the rest with everything that is not a
     # library excluded. `--excludepath` takes the path as it appears in the
-    # header, and 32-bit content lives in /usr/lib and /lib (never /usr/lib64),
-    # so excluding these four leaves exactly the libraries behind.
+    # header, and 32-bit content lives in /usr/lib and /lib (never /usr/lib64).
+    #
+    # /usr/bin, /usr/sbin, /usr/share and /etc are not the whole list, which is
+    # what the first version of this comment claimed. i686 packages also ship
+    # 32-bit HELPER EXECUTABLES under /usr/libexec, and unit/rule/config text
+    # under /usr/lib/{systemd,udev,tmpfiles.d,sysusers.d}. Measured on katana
+    # 2026-09-19 from a plain `apex install steam`: at-spi2-core.i686,
+    # dconf.i686, glib2.i686, glib-networking.i686, glycin-loaders.i686,
+    # gstreamer1.i686 and p11-kit.i686 are all in steam.i686's dependency
+    # closure, and each one shadowed an image helper. The one that bites is
+    # gst-plugin-scanner: GStreamer probes every plugin through that
+    # out-of-process helper, so a 32-bit scanner can load no 64-bit plugin and
+    # the registry fell from 1344 usable features to 2. The greeter was left
+    # running a 32-bit at-spi2 bus by the same route.
+    #
+    # The /usr/lib text files were byte-identical to the image's and broke
+    # nothing, but they are the same class and are excluded on the same ground:
+    # an extension has no business shipping a second copy of a path the image
+    # already owns.
     local -a native=() foreign=() host
     host="$(uname -m)"
     local f arch
@@ -657,6 +674,8 @@ extract_rpms() {
             --nosignature --replacefiles --replacepkgs --excludepath /boot \
             --excludepath /usr/bin --excludepath /usr/sbin \
             --excludepath /usr/share --excludepath /etc \
+            --excludepath /usr/lib/systemd --excludepath /usr/lib/udev \
+            --excludepath /usr/lib/tmpfiles.d --excludepath /usr/lib/sysusers.d \
             "${foreign[@]}" >&2 || die "extraction of the multilib set failed"
     fi
     rm -rf "${root}/usr/share/rpm" "${root}/var/lib/rpm" "${root}/usr/lib/sysimage/rpm"
