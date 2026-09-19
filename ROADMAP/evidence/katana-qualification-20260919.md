@@ -1212,3 +1212,179 @@ which is the behaviour this program keeps asking for.
 read-only loop mount of `apex-user.raw` used for the §3 measurement. It has been
 unmounted. A squashfs is always 100 % used; if `apex storage` is going to look at
 loop-mounted read-only filesystems it should exclude them rather than flag them.
+
+---
+
+## 9. Suspend / resume — PASS
+
+Not allowed on the L16; this is the first real cycle in the program. `rtcwake -m mem`
+was **not** used: it writes `/sys/power/state` directly, skips
+`systemd-suspend.service` and logind's `PrepareForSleep`, and would have proved
+nothing about the path P0-001 cares about. What was run:
+
+```
+$ sudo rtcwake -m no -s 90          # arm the RTC alarm only, do not sleep
+rtcwake: wakeup using /dev/rtc0 at Sat Sep 19 01:38:39 2026 (UTC)
+$ sudo systemctl suspend            # the real path
+```
+
+A labwc session with APEX Shell was running throughout — this is P1-038 row 17.
+A network rescue was armed at T+240 s in case Wi-Fi did not return
+(`enp5s0` is `unavailable`; Wi-Fi is the only route in). **It never fired.**
+
+### 9.1 The cycle itself
+
+```
+Sep 19 09:37:14 nvidia-suspend.service: Finished — NVIDIA system suspend actions (744ms CPU)
+Sep 19 09:37:14 NetworkManager: manager: sleep: sleep requested
+Sep 19 09:37:14 NetworkManager: device (wlo1): activated -> deactivating (reason 'sleeping')
+Sep 19 09:37:15 systemd-sleep[31774]: Successfully froze unit 'user.slice'.
+Sep 19 09:37:15 systemd-sleep[31774]: Performing sleep operation 'suspend'...
+Sep 19 09:37:15 kernel: PM: suspend entry (s2idle)
+Sep 19 09:38:39 kernel: Restarting tasks: Starting → Done
+Sep 19 09:38:39 kernel: PM: suspend exit
+Sep 19 09:38:39 systemd-sleep[31774]: System returned from sleep operation 'suspend'.
+Sep 19 09:38:40 systemd-sleep[31774]: Successfully thawed unit 'user.slice'.
+Sep 19 09:38:40 systemd[1]: Finished systemd-suspend.service - System Suspend.
+Sep 19 09:38:40 nvidia-resume.service: Finished — NVIDIA system resume actions
+Sep 19 09:38:40 NetworkManager: manager: sleep: wake requested
+```
+
+84 seconds asleep in `s2idle` (the default — `cat /sys/power/mem_sleep` reads
+`[s2idle] deep`), woken by the RTC, `systemd-suspend.service` finished cleanly.
+Both NVIDIA sleep units are `enabled` and both ran and succeeded.
+
+### 9.2 State after resume
+
+| check | after resume |
+|---|---|
+| `pgrep -c -x labwc` | 1 |
+| `pgrep -c -u andre quickshell` | 1 |
+| `pgrep -c -x Xwayland` | 1 |
+| `card1-eDP-1` | `connected / enabled / On` |
+| `card2-HDMI-A-1` | `connected / enabled / On` |
+| `wlr-randr` | answers; HDMI-A-1 back at **1920x1080 @ 239.964 Hz**, eDP-1 at 144.028 Hz |
+| `nvidia-smi` processes | still lists `labwc` as a graphics client |
+| render proof | eDP-1 216063 colours mean (157.1,165.8,179.2); HDMI-A-1 215980 colours mean (156.3,165.0,178.3) — both painting |
+| `loginctl show-session 125` | `Type=wayland  State=active  Active=yes` |
+| Wi-Fi | reconnected by itself to `OnzeArcher-5G`, `GENERAL.STATE=100 (connected)` |
+| rescue timer | `journalctl -u qual-net-rescue` → `-- No entries --` (never needed) |
+| failed units | **0 system, 0 user** |
+
+**PASS** — the bar, the dock, the compositor, both outputs, the discrete GPU and
+the network all came back with nothing to do by hand. P1-038 row 17 and P0-001's
+suspend criterion are both satisfied on this machine.
+
+### 9.3 Two honest caveats
+
+**Locking on suspend was NOT established, and the reason is this unit's own
+doing.** `~/.config/hypr/hypridle.conf` carries
+
+```
+general {
+    lock_cmd         = qs -c /usr/share/apex-shell ipc call lockscreen lock
+    before_sleep_cmd = loginctl lock-session
+    after_sleep_cmd  = /usr/share/apex-shell/src/scripts/DpmsControl.sh on
+}
+```
+
+and after the cycle `loginctl show-session 125 -p LockedHint` read `no`, with no
+`lock-session` in the journal. That looks like a security defect and **is not
+one**: this unit had killed hypridle to stop it locking the session mid-test,
+and `ps -o lstart -C hypridle` shows the process was already
+`<defunct>` at 09:37:15. There was nothing alive to run `before_sleep_cmd`.
+**COULD NOT RUN — needs a re-test with hypridle alive.** It is the one row in
+this report whose obvious reading would have been wrong.
+
+**The route back in took ~60 s longer than the machine did.** `katana`'s SSH
+alias reaches this machine over a reverse tunnel (VPS port 18722, falling back
+through the OPi). The OS was up and on Wi-Fi at 09:38:40; the tunnel answered at
+09:38:44 via the OPi and the VPS path was still timing out after that. That is
+Andre's own connectivity plumbing reconnecting, not an OS resume defect — the
+machine's own network was back before it.
+
+---
+
+## 10. The state katana was left in
+
+**Login path: working.** Verified after everything else was torn down, not
+assumed:
+
+```
+$ sudo fgconsole                              → 1
+$ systemctl is-active greetd                  → active
+$ pgrep -a -u greetd -x sway
+1637 sway --unsupported-gpu -c /usr/share/apex-greet/sway-greet.conf
+$ pgrep -a -u greetd -f "qs -p"
+1907 sh -c qs -p /usr/share/apex-greet/shell.qml; swaymsg exit
+$ sudo -u greetd … grim -o eDP-1 /tmp/greeter-edp.png    → 1920x1080 colors=39588 mean=0.2579
+$ sudo -u greetd … grim -o HDMI-A-1 /tmp/greeter-hdmi.png → 1920x1080 colors=39588 mean=0.2579
+```
+
+Both the laptop panel and the NVIDIA monitor are showing the APEX greeter.
+**EYES, stated as such:** the HDMI capture was looked at — clock, date, the
+`andre` field, the keyboard-layout row, the password field, and `APEX Tiling`
+as the preselected session along the bottom.
+
+| | |
+|---|---|
+| deployment | unchanged — `apex-266dcc572c51bdf9ec421d79eaa8784583184cd2`, booted, **no reboot, no rebase, no rollback, nothing pinned** |
+| rollback slot | untouched — `:gaming-nvidia`, `sha256:308127d9…` |
+| active VT | 1, the greeter |
+| greeter preselect | `hyprland` — **restored** after the `apex-session-select` test set it to `apex-gaming` |
+| failed units | 0 system, 0 user |
+| `apex game` | `active: false` — released by the session script's own EXIT trap |
+| test units | none left; `systemctl list-units 'qual-*'` is empty, the rescue timer is gone |
+| loop mounts | none; `/mnt/apexext` unmounted |
+| `~/apex-pre-rebase-20260919/` | **not touched** |
+| `/home` | not touched |
+
+**What this unit changed and left changed:**
+
+1. **`/var/lib/extensions/apex-user.raw` was rebuilt** by the image's own engine.
+   `sha256 39e17a4e3bb55b091b82a1e1bb023467edccfe6e6bacb6d1f904ce2b16cb6695`,
+   219 packages, 337 MB, merged. The **Sep-6 raw is kept**, byte-identical to
+   what was there this morning:
+   `/var/lib/apex/qual-backup-20260919/apex-user.raw.sep06`
+   (`sha256 85e1739b576891215fb302c2716d1f890c64f40a9bd2f93fa12c32103672d2f6`),
+   with `state.json.sep06` and `requested.sep06` beside it. To go back:
+   `sudo cp …/apex-user.raw.sep06 /var/lib/extensions/apex-user.raw && sudo systemd-sysext refresh`.
+2. **Six `.apexnew` files in `/etc`** — `group`, `group-`, `gshadow`, `gshadow-`,
+   `passwd`, `shadow`. The engine wrote them and they are the correct behaviour
+   (§2.2). Left in place rather than tidied away, because they are evidence.
+3. **Three `/etc` image defaults are still missing** from the September 6 damage:
+   `fonts/conf.d/25-unhint-nonlatin.conf`, `krb5.conf.d/crypto-policies`,
+   `pki/tls/fips_local.cnf`. Not caused today; not repaired today.
+4. **Logs and helper scripts kept** under `/var/home/andre/qual/`
+   (~30 MB including screenshots) and `/var/tmp/qual-*.log`. Every command in
+   this report can be re-run from there. Delete freely.
+5. `xdg-desktop-portal-gtk.service` failed once during the session churn and was
+   `reset-failed` — a consequence of starting and stopping five sessions under
+   one long-lived user manager, not an image defect.
+
+**What this unit deliberately did NOT do:**
+
+- **No `apex-pkg` patch on the machine.** The §3 and §6.5 defects are left in
+  place and reproducible; hotfixing `/usr` live is the thing this exercise
+  exists to stop needing, and it would have invalidated every later row.
+- **No `apex qualify consent grant`.** Consent to record results on this disk is
+  Andre's; the database is still `0 passed, 0 failed, 12 not known`.
+- **No avahi unmask** — it was already running (§8.3).
+- **No reboot.** Rollback was not exercised: katana's rollback slot holds a
+  *different* digest from the booted one, so a rollback test here would be
+  meaningful, but it costs a reboot of a machine that is now in a known-good
+  state, and the dispatch's standing instruction is to leave the login path
+  working.
+- **No `--switch`**, because it calls `loginctl terminate-user`, which by its own
+  documentation would have ended this unit's SSH session (§6.7).
+- **No `/etc/greetd/config.toml` edit**, no autologin, no relock, no reflash.
+
+### Re-running any of this
+
+```
+/var/home/andre/qual/start-session.sh <session-id> [vt]   # log in as andre on a VT, from SSH
+/var/home/andre/qual/measure.sh <name>                    # outputs, DRM nodes, nvidia-smi, portals
+/var/home/andre/qual/shot.py <tag>                        # grim both outputs + colour/mean statistics
+/var/home/andre/qual/apptest.sh <tag> <settle> <cmd…>     # launch, diff the screen, classify the client
+/var/home/andre/qual/who-connects.py                      # Wayland vs XWayland by socket peer inode
+```
