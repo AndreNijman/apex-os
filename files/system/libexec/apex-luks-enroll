@@ -1,0 +1,658 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-luks-enroll — enrol the key slots APEX puts on an encrypted volume:
+#  ALWAYS a recovery key, and a TPM2 slot only where a TPM2 slot is actually
+#  worth having. Roadmap L-003, "enable TPM auto-unlock by default where safe".
+#
+#  This is the PRODUCTION path, called by the installer as
+#
+#      /usr/libexec/apex-luks-enroll --device <dev> --recovery-out <path>
+#
+#  It is not files/scripts/boot-v2/apex-luks-enroll, which is a lab tool: that
+#  one creates a throwaway volume against a software TPM and hardcodes a signed
+#  PCR 11 policy, because the lab always builds a UKI (apex-mkuki) for it to
+#  bind to. A shipped machine may or may not have one. Which binding is right is
+#  therefore a question to ASK THE RUNNING SYSTEM, not a constant — see
+#  `policy_select` below, which is the heart of this file.
+#
+#  ═══ THE POLICY, AND THE MEASUREMENT BEHIND EACH CLAUSE ═══
+#
+#  1. A RECOVERY KEY IS ALWAYS ENROLLED, on every path, whatever else happens.
+#     It is enrolled FIRST, so there is no window in which the volume has a TPM
+#     binding and no way back. Everything below can decline; this cannot.
+#
+#  2. NO TPM SLOT WITHOUT SECURE BOOT ENFORCING — for EITHER binding, and the
+#     second half of that is not obvious. See the long note on `policy_select`.
+#
+#  3. NEVER `--tpm2-device=auto` WITHOUT AN EXPLICIT PCR SELECTION.
+#     Measured on systemd 258.10 (katana, Intel PTT): the bare form enrols with
+#     an EMPTY PCR list, `tpm2-pcr-bank` n/a and a policy hash of 32 zero bytes.
+#     That object is sealed to the SRK and nothing else, so anything that can
+#     talk to the TPM unseals it. `systemd-cryptenroll --help` documents no
+#     default, so the reader cannot tell from the tool either — and the command
+#     exits 0. So this script does not trust its own exit status: it reads the
+#     token back and REQUIRES a policy. `--check` is that assertion on its own,
+#     so the gate can be pointed at a volume this script did not enrol.
+#
+#  4. PCR 0 IS NEVER BOUND. It moves on a firmware update, which would strand a
+#     user on a BIOS update. PCR 7 was measured byte-identical across two edk2
+#     revisions in the boot lab, which is the property that makes it usable.
+#
+#  5. NO PIN BY DEFAULT.
+#     On real Intel PTT, `TPM2_PT_MAX_AUTH_FAIL` is 32, `LOCKOUT_INTERVAL`
+#     7200 s and `LOCKOUT_RECOVERY` 86400 s, and a SUCCESSFUL authorisation does
+#     not clear the counter. On a dual-boot machine another OS holds
+#     `lockoutAuth`, so APEX cannot reset it. A PIN by default risks locking a
+#     user out of their own TPM for a day through a route APEX does not
+#     control. `--with-pin` is opt-in, and when it is used the lockout
+#     arithmetic is read off the part and shown.
+#
+#  ═══ WHAT IT DOES NOT DO ═══
+#
+#  It does not create, partition or format anything. The volume must already be
+#  LUKS2 and the caller must already hold a key for it; this adds slots to a
+#  header that exists. It never writes to /boot, /efi or the ESP, and it runs no
+#  bootloader command.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+# Absolute and NOT overridable. This runs as root from the installer, and a
+# caller-supplied variable naming a program a root process executes is a hole —
+# the same reasoning apex-boot-health applies to bootctl. Read PATHS are
+# relocatable by flag below, for the lab; program names are not.
+readonly CRYPTSETUP=/usr/sbin/cryptsetup
+readonly CRYPTENROLL=/usr/bin/systemd-cryptenroll
+# EFI_GLOBAL_VARIABLE, which owns SecureBoot and SetupMode. sd-stub's own
+# variables live under the loader GUID instead.
+readonly SB_GUID=8be4df61-93ca-11d2-aa0d-00e098032b8c
+readonly LOADER_GUID=4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+
+PROG="${0##*/}"
+# Human prose on stderr, machine lines on stdout. The installer parses stdout;
+# a person running this reads stderr, and both must be able to see what
+# happened without the other getting in the way.
+say()  { printf '%s\n' "$*" >&2; }
+note() { printf '  %s\n' "$*" >&2; }
+emit() { printf '%s\n' "$*"; }
+die()  { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
+
+usage() {
+    cat >&2 <<EOF
+usage: $PROG --device DEV --recovery-out PATH [options]
+       $PROG --check --device DEV
+
+  --device DEV           the LUKS2 volume to add key slots to
+  --recovery-out PATH    where to write the recovery key (mode 0600)
+  --unlock-key-file P    an existing key file that opens the volume; without
+                         it, \$PASSWORD is used, or the user is prompted
+  --tpm2-device PATH     TPM2 device (default: auto)
+  --policy NAME          which binding to use: auto (default), or one of the
+                         names in the table in policy_select
+  --probe-root DIR       read Secure Boot state, TPM state and sd-stub state
+                         under DIR instead of / (the lab uses this; nothing is
+                         ever WRITTEN under it)
+  --with-pin             also require a PIN to unlock (opt-in; it prints the
+                         lockout arithmetic it commits you to)
+  --check                do not enrol: read the volume's tokens back and report
+EOF
+    exit 1
+}
+
+DEVICE="" RECOVERY_OUT="" UNLOCK_KEY_FILE="" TPM2_DEVICE="auto"
+PROBE_ROOT="" WANT_POLICY="auto" WITH_PIN=0 CHECK_ONLY=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --device)          DEVICE="${2:-}"; shift 2;;
+        --recovery-out)    RECOVERY_OUT="${2:-}"; shift 2;;
+        --unlock-key-file) UNLOCK_KEY_FILE="${2:-}"; shift 2;;
+        --tpm2-device)     TPM2_DEVICE="${2:-}"; shift 2;;
+        --policy)          WANT_POLICY="${2:-}"; shift 2;;
+        --probe-root)      PROBE_ROOT="${2%/}"; shift 2;;
+        --with-pin)        WITH_PIN=1; shift;;
+        --check)           CHECK_ONLY=1; shift;;
+        -h|--help)         usage;;
+        *) die "unknown argument: $1";;
+    esac
+done
+[[ -n "$DEVICE" ]] || usage
+(( CHECK_ONLY )) || [[ -n "$RECOVERY_OUT" ]] || usage
+
+readonly EFIVARS_DIR="$PROBE_ROOT/sys/firmware/efi/efivars"
+readonly TPM_SYSFS="$PROBE_ROOT/sys/class/tpm/tpm0"
+readonly STUB_RUN="$PROBE_ROOT/run/systemd"
+readonly DEV_DIR="$PROBE_ROOT/dev"
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Reading the header back
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# systemd's LUKS2 token JSON mixes hyphens and underscores in its field names —
+# `tpm2-pcrs`, `tpm2-pcr-bank` and `tpm2-policy-hash` against `tpm2_srk` and
+# `tpm2_pubkey`. Both spellings are real; they were added at different times.
+# The names below were read off a live `cryptsetup luksDump
+# --dump-json-metadata` rather than guessed, because an assertion on a key that
+# never exists fails in both directions and proves nothing either way.
+luks_tokens_json() {
+    "$CRYPTSETUP" luksDump --dump-json-metadata "$1"
+}
+
+# tpm2_report DEV — one line describing the systemd-tpm2 token, or a verdict.
+#
+#   absent
+#   bad <reason>
+#   ok binding=<name> pcrs=<list> bank=<bank> hash=<hex> pin=<yes|no>
+#
+# `binding` is derived from the SHAPE of the token, not from anything this
+# script remembers writing: a token with tpm2_pubkey_pcrs is a signed policy, a
+# token with tpm2-pcrs alone is a value policy.
+tpm2_report() {
+    luks_tokens_json "$1" | python3 -c '
+import json, sys
+
+meta = json.load(sys.stdin)
+tokens = meta.get("tokens", {})
+tpm2 = [t for t in tokens.values() if t.get("type") == "systemd-tpm2"]
+if not tpm2:
+    print("absent"); raise SystemExit(0)
+if len(tpm2) != 1:
+    print(f"bad there are {len(tpm2)} systemd-tpm2 tokens; APEX enrols exactly one")
+    raise SystemExit(0)
+t = tpm2[0]
+
+pcrs = t.get("tpm2-pcrs") or []
+pubkey_pcrs = t.get("tpm2_pubkey_pcrs") or []
+bank = t.get("tpm2-pcr-bank")
+digest = t.get("tpm2-policy-hash", "")
+pin = bool(t.get("tpm2-pin", False))
+
+# THE ASSERTION THIS WHOLE FILE EXISTS FOR. `systemd-cryptenroll
+# --tpm2-device=auto` with no PCR selection exits 0 and writes a token whose PCR
+# list is empty and whose policy hash is 32 zero bytes: sealed to the TPM
+# storage key and nothing else, unsealable by any OS on the same hardware.
+# Exit 0 is not evidence; this is.
+if not pcrs and not pubkey_pcrs:
+    print("bad the token binds NO PCRs at all: it is sealed to the TPM storage "
+          "key and nothing else, so any operating system booted on this "
+          "hardware can unseal it")
+    raise SystemExit(0)
+if not digest or set(digest) <= {"0"}:
+    print(f"bad the policy hash is {digest or 'empty'} — there is no policy to satisfy")
+    raise SystemExit(0)
+if len(digest) != 64 or any(c not in "0123456789abcdefABCDEF" for c in digest):
+    print(f"bad the policy hash is not a 32-byte digest: {digest!r}")
+    raise SystemExit(0)
+if 0 in pcrs or 0 in pubkey_pcrs:
+    print("bad the token binds PCR 0, which moves on a firmware update and "
+          "would strand the user on a BIOS update")
+    raise SystemExit(0)
+
+if pubkey_pcrs:
+    binding = "signed-pcr" + "+".join(str(p) for p in pubkey_pcrs)
+    shown = pubkey_pcrs
+else:
+    binding = "pcr" + "+".join(str(p) for p in pcrs)
+    shown = pcrs
+
+print("ok binding={} pcrs={} bank={} hash={} pin={}".format(
+    binding, "+".join(str(p) for p in shown), bank or "?", digest.lower(),
+    "yes" if pin else "no"))
+'
+}
+
+token_types() {
+    luks_tokens_json "$1" | python3 -c '
+import json, sys
+t = json.load(sys.stdin).get("tokens", {})
+print(" ".join(sorted(v.get("type", "?") for v in t.values())) or "(none)")
+'
+}
+
+keyslot_count() {
+    luks_tokens_json "$1" | python3 -c '
+import json, sys
+print(len(json.load(sys.stdin).get("keyslots", {})))
+'
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  --check: the gate on its own
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Separated from the enrol path deliberately. A gate that only ever runs inside
+# the code it is gating tests that the author's code does what the author wrote;
+# pointed at a volume enrolled some other way, it tests the property. The boot
+# lab uses exactly that to prove this assertion catches a bare
+# `--tpm2-device=auto` enrolment.
+if (( CHECK_ONLY )); then
+    "$CRYPTSETUP" isLuks --type luks2 "$DEVICE" \
+        || die "$DEVICE is not a LUKS2 volume"
+    report="$(tpm2_report "$DEVICE")"
+    types="$(token_types "$DEVICE")"
+    emit "tokens: $types"
+    emit "slots: $(keyslot_count "$DEVICE")"
+    rc=0
+    case "$report" in
+        absent)
+            emit "tpm2: absent"
+            say "$DEVICE has no TPM2 key slot. It unlocks with a passphrase or"
+            say "with the recovery key only."
+            ;;
+        ok\ *)
+            emit "tpm2: ${report#ok }"
+            say "$DEVICE has a TPM2 key slot: ${report#ok }"
+            ;;
+        bad\ *)
+            emit "tpm2: unsafe"
+            say "REFUSED: $DEVICE has a TPM2 key slot that is not safe to rely on."
+            say "${report#bad }"
+            say ""
+            say "Remove it with:  systemd-cryptenroll --wipe-slot=tpm2 $DEVICE"
+            say "then re-run $PROG to add one this machine can actually enforce."
+            rc=2
+            ;;
+        *) die "could not read the TPM2 token back: $report" ;;
+    esac
+    case "$types" in
+        *systemd-recovery*) ;;
+        *) emit "recovery: absent"
+           say ""
+           say "WARNING: there is no recovery key on $DEVICE. If the TPM state"
+           say "changes and the passphrase is lost, the data is unreachable."
+           ;;
+    esac
+    exit "$rc"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Preconditions
+# ═════════════════════════════════════════════════════════════════════════════
+[[ -e "$DEVICE" ]] || die "no such device: $DEVICE"
+case "$(readlink -m "$DEVICE")" in
+    /proc/*|/sys/*) die "refusing to operate on $DEVICE" ;;
+esac
+# Tokens are a LUKS2 feature. On LUKS1 `systemd-cryptenroll` fails with a
+# message about the header format, which reads as a tooling problem rather than
+# as "this volume was made the wrong way".
+"$CRYPTSETUP" isLuks --type luks2 "$DEVICE" \
+    || die "$DEVICE is not a LUKS2 volume; APEX key slots need LUKS2 tokens"
+
+rec_dir="$(dirname "$RECOVERY_OUT")"
+[[ -d "$rec_dir" ]] || die "no such directory for --recovery-out: $rec_dir"
+
+# The key that opens the volume, passed to every enrolment below. Without one,
+# systemd-cryptenroll reads $PASSWORD or prompts — which is right for a person
+# at a terminal and wrong for an installer, so the installer passes the file.
+unlock_args=()
+if [[ -n "$UNLOCK_KEY_FILE" ]]; then
+    [[ -r "$UNLOCK_KEY_FILE" ]] || die "cannot read --unlock-key-file $UNLOCK_KEY_FILE"
+    unlock_args=(--unlock-key-file="$UNLOCK_KEY_FILE")
+fi
+
+say "$PROG: enrolling key slots on $DEVICE"
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  1. The recovery key — always, and first
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Before the TPM, deliberately: a volume that had a TPM binding and no recovery
+# path would make a firmware update a data-loss event, and the window in which
+# that is true is closed by never opening it.
+#
+# An existing recovery slot is WIPED rather than stacked. The caller is being
+# handed a new recovery key and will file that one; a second, older recovery key
+# that nobody can name is a credential in the wild, not a spare.
+if [[ "$(token_types "$DEVICE")" == *systemd-recovery* ]]; then
+    say "  removing the recovery key already on this volume (a second one nobody"
+    say "  holds is a loose credential, not a spare)"
+    # Its own invocation. Measured on systemd 258.10: a wipe combined with an
+    # enrol in one command is a no-op that still exits 0.
+    "$CRYPTENROLL" --wipe-slot=recovery "${unlock_args[@]}" "$DEVICE" >&2 \
+        || die "could not remove the existing recovery key from $DEVICE"
+fi
+
+umask 077
+rec_tmp="$(mktemp "$rec_dir/.apex-recovery.XXXXXX")"
+trap 'rm -f "$rec_tmp"' EXIT
+"$CRYPTENROLL" --recovery-key "${unlock_args[@]}" "$DEVICE" 2>/dev/null \
+    | tr -d '[:space:]' > "$rec_tmp" \
+    || die "could not enrol a recovery key on $DEVICE"
+
+# The shape is asserted, not assumed non-empty. An empty file here would let a
+# recovery test "pass" by unlocking with an empty passphrase the volume does not
+# have. systemd prints the modhex key as 8 dash-separated groups of 8; the
+# DASHES ARE KEPT, because that is the form systemd accepts back and the form a
+# user is shown.
+rec_len="$(wc -c < "$rec_tmp")"
+[[ "$rec_len" == "71" ]] \
+    || die "the recovery key systemd printed is $rec_len characters, expected 71"
+grep -qE '^[a-z]{8}(-[a-z]{8}){7}$' "$rec_tmp" \
+    || die "the recovery key is not 8 modhex groups of 8 characters"
+chmod 600 "$rec_tmp"
+mv -f "$rec_tmp" "$RECOVERY_OUT"
+trap - EXIT
+emit "recovery: enrolled file=$RECOVERY_OUT"
+say "  recovery key written to $RECOVERY_OUT"
+
+# Every path from here on ends in one of these two, and both exit 0: the
+# recovery key is enrolled, so the volume is usable, and an installer must never
+# read "no TPM slot" as a failed install.
+decline() {  # decline SLUG PROSE...
+    local slug="$1"; shift
+    emit "tpm2: declined reason=$slug"
+    emit "tokens: $(token_types "$DEVICE")"
+    emit "slots: $(keyslot_count "$DEVICE")"
+    say ""
+    say "No TPM auto-unlock was set up on this volume."
+    local line
+    for line in "$@"; do note "$line"; done
+    say ""
+    say "The disk still unlocks with your passphrase, and with the recovery key"
+    say "in $RECOVERY_OUT. Keep that key somewhere that is not this computer."
+    exit 0
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  2. Which binding, if any — the decision, made from what can be measured
+# ═════════════════════════════════════════════════════════════════════════════
+#
+#  ── the shared precondition: Secure Boot, for BOTH bindings ──
+#
+#  PCR 7 measures the Secure Boot policy. With Secure Boot off it measures the
+#  DISABLED policy, and it goes on measuring the disabled policy no matter which
+#  kernel boots — so an attacker boots their own system and the TPM unseals for
+#  them, because nothing they did changed the register. That much is obvious.
+#
+#  The signed PCR 11 policy needs Secure Boot just as much, and that is NOT
+#  obvious, so it is written down here rather than discovered later. A signed
+#  policy is a TPM2 PolicyAuthorize over a PolicyPCR digest for PCR 11: the
+#  unsealing side supplies the signature, which ships in the UKI's .pcrsig
+#  section and is therefore PUBLIC, and the TPM then requires PCR 11 to hold the
+#  signed value. PCR 11 starts at zero on every boot and `tpm2_pcrextend 11`
+#  succeeds from plain root — MEASURED on katana, 2026-09-19, where
+#  `tpm2_pcrreset 11` answers "bad locality" but extend does not. So an attacker
+#  who can boot their own kernel can replay the same extends, reach the same
+#  PCR 11 value, present the public signature, and unseal. Nothing in that chain
+#  needs APEX's private PCR key.
+#
+#  What stops them is Secure Boot refusing to load their kernel in the first
+#  place. systemd-cryptenroll says the same thing in its own words when it is
+#  asked to bind a register nobody has extended: "PCR policy effectively
+#  unenforced". The signed policy's advantage over PCR 7 is that it SURVIVES
+#  KERNEL UPDATES — a real and large advantage, since a policy that breaks on
+#  every image update meets the user at the one moment they cannot get a shell.
+#  It is not an advantage in the Secure Boot dimension.
+#
+#  ── the table ──
+#
+#  Ordered best-first. Each entry probes for itself and says why it was not
+#  chosen; `policy_select` takes the first that says yes. Adding a binding is
+#  adding a function and a name to POLICIES — which is the point, because the
+#  bootloader this image ships is changing and the right answer changes with it.
+POLICIES=(signed-pcr11 pcr7)
+
+POLICY_ARGS=()     # the systemd-cryptenroll arguments the chosen binding needs
+POLICY_EXPECT=""   # the `binding=` value the read-back must report
+POLICY_WHY=""      # one sentence, for the user
+POLICY_SKIPPED=()  # why each better binding was passed over
+
+# sd-stub sets StubInfo in the loader namespace when it runs, and drops the
+# public key and signature it carried into /run/systemd for exactly this use.
+# systemd-cryptenroll defaults to those two paths; they are named explicitly
+# anyway, for the same reason --esp-path is always explicit in this tree.
+readonly STUB_PUBKEY="$STUB_RUN/tpm2-pcr-public-key.pem"
+readonly STUB_SIG="$STUB_RUN/tpm2-pcr-signature.json"
+
+probe_signed_pcr11() {
+    if [[ ! -e "$EFIVARS_DIR/StubInfo-$LOADER_GUID" ]]; then
+        POLICY_SKIPPED+=("signed-pcr11: this machine did not boot through sd-stub, so nothing measured a UKI into PCR 11")
+        return 1
+    fi
+    if [[ ! -r "$STUB_PUBKEY" ]]; then
+        POLICY_SKIPPED+=("signed-pcr11: the boot did not publish a PCR signing key at $STUB_PUBKEY")
+        return 1
+    fi
+    # PCR 11 must actually hold something. A register at 64 zeros is one
+    # anybody can extend to anything, and binding to it buys nothing — which is
+    # the state MEASURED on both APEX machines while the image shipped GRUB.
+    local pcr11="$TPM_SYSFS/pcr-sha256/11"
+    if [[ ! -r "$pcr11" ]]; then
+        POLICY_SKIPPED+=("signed-pcr11: the kernel does not export PCR 11 at $pcr11, so APEX cannot tell whether anything measured into it")
+        return 1
+    fi
+    local v; v="$(tr -d '[:space:]' < "$pcr11" | tr 'A-F' 'a-f')"
+    if [[ ! "$v" =~ ^[0-9a-f]{64}$ || "$v" == "$(printf '0%.0s' {1..64})" ]]; then
+        POLICY_SKIPPED+=("signed-pcr11: PCR 11 reads '$v' — nothing has been measured into it, so a policy bound to it would be unenforced")
+        return 1
+    fi
+    POLICY_ARGS=(--tpm2-public-key="$STUB_PUBKEY" --tpm2-public-key-pcrs=11)
+    [[ -r "$STUB_SIG" ]] && POLICY_ARGS+=(--tpm2-signature="$STUB_SIG")
+    POLICY_EXPECT="signed-pcr11"
+    POLICY_WHY="bound to the key that signs APEX's boot images, so a system update does not cost you the auto-unlock"
+    return 0
+}
+
+probe_pcr7() {
+    POLICY_ARGS=(--tpm2-pcrs=7)
+    POLICY_EXPECT="pcr7"
+    POLICY_WHY="bound to PCR 7, the register that records the Secure Boot policy"
+    return 0
+}
+
+policy_select() {
+    local want="$1" p
+    if [[ "$want" != auto ]]; then
+        # An explicit choice still has to pass its own probe. A flag that
+        # bypasses the measurement would turn the whole table into decoration.
+        for p in "${POLICIES[@]}"; do
+            [[ "$p" == "$want" ]] || continue
+            "probe_${p//-/_}" && return 0
+            die "--policy $want is not available here: ${POLICY_SKIPPED[-1]:-no reason recorded}"
+        done
+        die "--policy $want is not one of: ${POLICIES[*]}"
+    fi
+    for p in "${POLICIES[@]}"; do
+        "probe_${p//-/_}" && return 0
+    done
+    return 1
+}
+
+# ── Secure Boot ─────────────────────────────────────────────────────────────
+#
+# Read out of the efivar rather than from `mokutil`, which is not in the image.
+# An efivar file is 4 bytes of attributes followed by the value, so the state is
+# byte 5. SetupMode matters as well: in Setup Mode the platform key is absent
+# and anybody can enrol their own, so "SecureBoot=1" there constrains nothing.
+efivar_byte5() {  # efivar_byte5 NAME -> the value byte, or empty
+    local f="$EFIVARS_DIR/$1-$SB_GUID"
+    [[ -r "$f" ]] || return 1
+    od -An -tu1 -j4 -N1 "$f" 2>/dev/null | tr -d ' \n'
+}
+
+if [[ ! -d "$EFIVARS_DIR" ]]; then
+    decline not-uefi \
+        "This machine did not boot through UEFI, so there is no Secure Boot" \
+        "policy for the TPM to measure. TPM auto-unlock on a BIOS boot would" \
+        "hand the disk to any kernel that asked."
+fi
+
+sb_state="$(efivar_byte5 SecureBoot || true)"
+setup_state="$(efivar_byte5 SetupMode || echo 0)"
+
+if [[ -z "$sb_state" ]]; then
+    decline no-secureboot-variable \
+        "The firmware exposes no SecureBoot variable, so APEX cannot tell" \
+        "whether the boot chain is verified." \
+        "Turn Secure Boot on in the firmware setup, then run:" \
+        "  sudo $0 --device $DEVICE --recovery-out $RECOVERY_OUT"
+fi
+
+if [[ "$setup_state" != "0" ]]; then
+    decline setup-mode \
+        "The firmware is in Secure Boot SETUP MODE: it has no platform key, so" \
+        "anyone can enrol their own signing key and boot anything they like." \
+        "Leave setup mode in the firmware setup (usually by restoring the" \
+        "default Secure Boot keys), then re-run this command."
+fi
+
+if [[ "$sb_state" != "1" ]]; then
+    decline secure-boot-off \
+        "Secure Boot is OFF on this machine." \
+        "" \
+        "A TPM key slot only protects anything if the machine cannot boot" \
+        "something else. With Secure Boot off, an attacker with your laptop" \
+        "boots their own system on this hardware, and the TPM hands them your" \
+        "disk — the register that records the Secure Boot policy says the same" \
+        "thing either way, and the register that records the boot image can be" \
+        "set to any value by whoever is running. So a TPM slot here would look" \
+        "like security and provide none." \
+        "" \
+        "To get TPM auto-unlock: turn Secure Boot on in the firmware setup," \
+        "boot APEX again, and run:" \
+        "  sudo $0 --device $DEVICE --recovery-out $RECOVERY_OUT"
+fi
+
+# ── the TPM itself ──────────────────────────────────────────────────────────
+#
+# The DEVICE NODE is the test, not /sys/class/tpm and not
+# `systemd-cryptenroll --tpm2-device=list`. Both of those enumerate through
+# sysfs, which a container inherits read-only from its host — inside the boot
+# lab `--tpm2-device=list` prints the BUILD BOX's TPM. A node that is not there
+# cannot be talked to, whoever is asking.
+if [[ "$TPM2_DEVICE" == auto ]]; then
+    if [[ ! -c "$DEV_DIR/tpmrm0" && ! -c "$DEV_DIR/tpm0" ]]; then
+        decline no-tpm2-device \
+            "This machine has no TPM2 device (neither $DEV_DIR/tpmrm0 nor" \
+            "$DEV_DIR/tpm0 is present). Some machines ship with the firmware TPM" \
+            "disabled — look for 'PTT', 'fTPM' or 'Security Device' in the" \
+            "firmware setup. If you turn it on, re-run:" \
+            "  sudo $0 --device $DEVICE --recovery-out $RECOVERY_OUT"
+    fi
+fi
+
+# ── the binding ─────────────────────────────────────────────────────────────
+if ! policy_select "$WANT_POLICY"; then
+    decline no-usable-policy \
+        "APEX could not find a way to bind this disk to the TPM that this" \
+        "machine can actually enforce:" \
+        "${POLICY_SKIPPED[@]}"
+fi
+
+for skipped in "${POLICY_SKIPPED[@]}"; do
+    say "  not using $skipped"
+done
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  3. The TPM slot
+# ═════════════════════════════════════════════════════════════════════════════
+pin_args=()
+if (( WITH_PIN )); then
+    pin_args=(--tpm2-with-pin=yes)
+    say ""
+    say "  --with-pin: you will be asked for a PIN at every boot, on top of the"
+    say "  TPM check. Before you commit to it, the lockout arithmetic of this"
+    say "  part — read off the chip, not from documentation:"
+    # tpm2_getcap is best-effort: tpm2-tools is in the image, but a part that
+    # refuses the capability read must not stop an enrolment the user asked for.
+    # What must NOT happen is inventing the numbers, so an unreadable part says
+    # so instead.
+    if command -v tpm2_getcap >/dev/null 2>&1 \
+       && caps="$(tpm2_getcap properties-variable 2>/dev/null)"; then
+        for p in TPM2_PT_MAX_AUTH_FAIL TPM2_PT_LOCKOUT_INTERVAL TPM2_PT_LOCKOUT_RECOVERY; do
+            v="$(printf '%s\n' "$caps" | grep -A2 "^$p:" | grep -m1 'raw:' \
+                 | tr -d ' ' | cut -d: -f2)"
+            note "$p = ${v:-unknown}"
+        done
+        note ""
+        note "A wrong PIN counts against MAX_AUTH_FAIL, and on Intel PTT a"
+        note "SUCCESSFUL unlock does not clear the counter. When it is reached"
+        note "the TPM refuses every unseal for LOCKOUT_INTERVAL seconds, and"
+        note "LOCKOUT_RECOVERY is how long a full lockout lasts. If another"
+        note "operating system on this machine holds the TPM's lockout"
+        note "authorisation, APEX cannot clear it for you — the recovery key in"
+        note "$RECOVERY_OUT is then the only way in."
+    else
+        note "this TPM would not report its lockout properties, so the numbers"
+        note "that decide how long a mistyped PIN locks you out are unknown."
+    fi
+fi
+
+say ""
+say "  Secure Boot is on; binding a TPM key slot ($POLICY_EXPECT)"
+
+# An existing TPM slot is replaced, in two invocations. Measured on systemd
+# 258.10: `--wipe-slot=tpm2 --tpm2-device=auto` in ONE command prints "This PCR
+# set is already enrolled, executing no operation", exits 0, and leaves the
+# sealed blob byte-identical — so a single-command re-enrolment silently does
+# nothing at all.
+if [[ "$(tpm2_report "$DEVICE")" != absent ]]; then
+    say "  replacing the TPM key slot already on this volume"
+    "$CRYPTENROLL" --wipe-slot=tpm2 "${unlock_args[@]}" "$DEVICE" >&2 \
+        || die "could not remove the existing TPM key slot from $DEVICE"
+fi
+
+enroll_err="$(mktemp)"
+trap 'rm -f "$enroll_err"' EXIT
+if ! "$CRYPTENROLL" --tpm2-device="$TPM2_DEVICE" \
+        "${POLICY_ARGS[@]}" "${pin_args[@]}" "${unlock_args[@]}" \
+        "$DEVICE" 2>"$enroll_err"
+then
+    cat "$enroll_err" >&2
+    decline tpm2-enrolment-failed \
+        "systemd-cryptenroll could not bind a key slot to this TPM:" \
+        "$(head -3 "$enroll_err" 2>/dev/null || true)"
+fi
+cat "$enroll_err" >&2
+
+# systemd says this when the register it is sealing to has never been extended.
+# On a Secure-Boot-on machine PCR 7 cannot be all zeros — the firmware extends
+# it before it hands over — so seeing this means the register is not measuring
+# what we think, and a slot bound to a PCR anyone can set to anything is worse
+# than no slot at all. THE POLICY HASH IS NON-ZERO EITHER WAY, so the read-back
+# assertion below would not catch this on its own; both checks are needed.
+if grep -q 'PCR policy effectively unenforced' "$enroll_err"; then
+    "$CRYPTENROLL" --wipe-slot=tpm2 "${unlock_args[@]}" "$DEVICE" >&2 || true
+    decline pcr-uninitialised \
+        "The registers APEX wanted to bind to have never been extended on this" \
+        "machine's TPM: the firmware reports Secure Boot as on but measured" \
+        "nothing. A key slot bound to a register nobody extended can be" \
+        "unsealed by anyone who extends it themselves, so APEX did not add one." \
+        "This is a firmware defect; a firmware update may fix it."
+fi
+rm -f "$enroll_err"
+trap - EXIT
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  4. Read it back. Exit 0 is not evidence.
+# ═════════════════════════════════════════════════════════════════════════════
+report="$(tpm2_report "$DEVICE")"
+case "$report" in
+    ok\ *) ;;
+    absent) die "systemd-cryptenroll exited 0 but wrote no TPM2 token to $DEVICE" ;;
+    bad\ *) die "the TPM2 token systemd-cryptenroll just wrote is not safe: ${report#bad }" ;;
+    *)      die "could not read the TPM2 token back from $DEVICE: $report" ;;
+esac
+
+fields="${report#ok }"
+# The binding is asserted EXACTLY against what was ASKED FOR, not against a
+# pattern that any binding would match. `-ge`-shaped checks are how this
+# repository has previously passed a test called "it binds what it says it
+# binds".
+case "$fields" in
+    "binding=$POLICY_EXPECT "*) ;;
+    *) die "the token reports '$fields', but APEX asked for binding=$POLICY_EXPECT" ;;
+esac
+
+emit "tpm2: enrolled $fields"
+emit "tokens: $(token_types "$DEVICE")"
+emit "slots: $(keyslot_count "$DEVICE")"
+
+say ""
+say "  TPM key slot enrolled: $fields"
+say ""
+say "This disk now unlocks by itself, $POLICY_WHY."
+say "It will ask for the recovery key instead after a change to the Secure Boot"
+say "keys — enrolling a new signing key, a dbx update from the firmware vendor,"
+say "or turning Secure Boot off — and after the TPM is cleared. That is the"
+say "binding working, not a fault."
+say ""
+say "Keep the recovery key in $RECOVERY_OUT somewhere that is not this computer."
