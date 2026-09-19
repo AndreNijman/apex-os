@@ -106,18 +106,18 @@ without a kernel message.** The instrumentation landed in `build-image.yml`
 reads `oom_kill` and dumps dmesg and the journal on failure, so the next CI
 death settles it either way.
 
-### The margin is thin, and the belt was never tested
+### The margin is thin — which is what probe round 2 went after
 
-Both survivors peaked at **14.65–14.72 GiB RSS on a 16 GB box**, with
-`mem_avail` bottoming at **188 MB** and **125 MB** respectively. `GOMEMLIMIT` is
-a *soft* limit: syft blew through the 10 GiB setting by ~4.7 GiB. Two successes
-at ~1% headroom is a fix for today's image and a flake the moment the image
-gains packages.
+Both round-1 survivors peaked at **14.65–14.72 GiB RSS on a 16 GB box**, with
+`mem_avail` bottoming at **188 MB** and **125 MB**. `GOMEMLIMIT` is a *soft*
+limit: syft went through the 10 GiB setting by ~4.7 GiB. Two successes at ~1%
+headroom looked like a fix for today's image and a flake for tomorrow's.
 
-The hedge for exactly this — `swap32` — **never ran**. It died in 0 s on
-`fallocate: fallocate failed: Text file busy`: it tried to `fallocate -l 32G`
-the runner's **already-active** `/swapfile`. That is a probe bug, not a result
-about swap. Probe 2 fixes it by allocating a *new* file at `/swapfile.probe`.
+Round 1's hedge for exactly this — `swap32` — **never ran**. It died in 0 s on
+`fallocate: fallocate failed: Text file busy`: it called `fallocate -l 32G` on
+the runner's **already-active** `/swapfile`. A probe bug, not a result about
+swap. Round 2 fixed it with a new file at `/swapfile.probe` — and then measured
+that swap was not the answer anyway. Read on.
 
 ### Probe round 2 (run 35447488777) — SWAP IS NOT WORTH ADDING
 
@@ -149,10 +149,8 @@ different registry-fetch luck.)
 
 ### AND THE LIMIT'S VALUE IS NOT A LEVER EITHER — do not tune it
 
-`gml4` — GOMEMLIMIT=**4**GiB — **rc=0, 765 s, peak RSS 14.80 GiB**, 9830
-packages, `mem_avail` floor 326 MB. Across every successful arm:
-
-Every arm that has ever succeeded, across both rounds:
+`gml4` (GOMEMLIMIT=**4**GiB) and `gml6` (**6**GiB) both passed with 9830
+packages. Every arm that has ever succeeded, across both rounds:
 
 | GOMEMLIMIT | source | peak RSS | elapsed | `mem_avail` floor |
 |---|---|---|---|---|
@@ -221,16 +219,8 @@ that is definitely available.
 
 ## IN PROGRESS — run ids, read these first
 
-- **Probe round 2: run `35447488777`** (workflow `sbom-probe`, branch
-  `task/sbom-oom`, commit `531b6c96`), started 14:01 UTC. Four arms about the
-  **margin**, not the cause: `gml10-swap32` (the candidate — the working limit
-  plus 32 GB of real swap at `/swapfile.probe`, which is the round-1 `swap32`
-  bug fixed), `swap32-only` (control: is the limit needed once swap exists?),
-  `gml6` and `gml4` (does a lower limit move peak RSS, or is the ~4.7 GiB
-  overshoot non-heap and immovable?). Expect ~15 min per arm, all parallel.
-  Read it with
-  `gh api repos/AndreNijman/apex-os/actions/jobs/<id>/logs` per job id from
-  `gh run view 35447488777 --json jobs`.
+- ~~Probe round 2: run `35447488777`~~ — **COMPLETE, all four arms read.**
+  Results are in FOUND above. Nothing to do with it; do not re-run it.
 - **Verification build: run `35447611644`** (workflow `build-image`,
   `workflow_dispatch` on `task/sbom-oom`, commit **`a40cf827`**), started
   14:04 UTC. **It verifies the GOMEMLIMIT-only fix.** If a later commit lands on
@@ -327,19 +317,19 @@ needs re-deriving.** Two runs are in flight; read them in this order.
        it is not the "restrict the cataloguers" trade the comment block rightly
        refuses. Worth a probe arm of its own.
 
-2. **Probe round 2 `35447488777`** tells you what to do if the margin turns out
-   too thin. Expected readings:
-   - `gml10-swap32` passing with GBs of headroom → add the swapfile to the SBOM
-     step as a second commit. This is the likely upgrade.
-   - `swap32-only` passing → swap alone is sufficient and GOMEMLIMIT is belt
-     over braces; simplify if you like, but the limit costs nothing.
-   - `swap32-only` dying → GOMEMLIMIT is load-bearing and swap is only margin.
-   - `gml6`/`gml4` peaking at ~14.7 GiB anyway → **a lower limit is not a
-     lever**; record that so nobody tries it. If they peak lower, a tighter
-     limit is the cheaper margin than swap.
+2. **There is nothing to commit from probe round 2.** It ran, all four arms are
+   read, and every one of them said "change nothing": swap adds no margin while
+   the limit is set, and the limit's value is not a lever. The results are in
+   FOUND so that nobody spends a round re-deriving them. **Do not add a
+   swapfile and do not tune the number.**
 
-3. If both look good and the build is green, update `dispatch.json` /
-   roadmap status for this unit and unblock unit `final`, which this gates.
+3. **If build 1's `mem_avail` floor is alarming** (say under ~100 MB), probe 3
+   is the smaller-predicate arm described above — cut syft's file/relationship
+   work at source, which plausibly helps the 166 MB predicate and the RSS at
+   once. That is the only untried lever with real headroom behind it.
+
+4. If syft survived in build 1, update `dispatch.json` / roadmap status for this
+   unit and unblock unit `final`, which this gates.
 
 **Do not re-run the round-1 arms.** `repro`, `ocidir`, `ocidir-decompressed`
 and `registry-par1` have their answer and it is in the table above.
