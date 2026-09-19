@@ -800,6 +800,7 @@ pub fn gaming_main(args: GamingArgs) -> i32 {
         // session script logs it verbatim and a session log that says only
         // "starting: gamescope …" is how §6.1 went unnoticed for a release.
         eprintln!("{}", r.display.why);
+        eprintln!("{}", r.display.vrr_why);
         if let Some(problem) = &r.display.problem {
             eprintln!("{problem}");
         }
@@ -865,6 +866,20 @@ pub fn gaming_main(args: GamingArgs) -> i32 {
         _ => kv("output", "none chosen — see the warning below"),
     }
     kv("why", &r.display.why);
+    kv(
+        "adaptive sync",
+        match r.display.vrr {
+            Some(true) => "yes — the chosen output advertises vrr_capable",
+            Some(false) => "no — the chosen output publishes vrr_capable=0",
+            None if r.display.vrr_published_anywhere => {
+                "unknown — this output publishes no vrr_capable, though others here do"
+            }
+            // The §7.2 answer, and the one the old probe could not give: the
+            // difference between a display without VRR and a driver that does
+            // not publish the property.
+            None => "not published — no connector on this machine has vrr_capable",
+        },
+    );
 
     println!();
     println!("── the Desktop <-> Gaming switch ──");
@@ -989,13 +1004,20 @@ fn gaming_json(r: &Readiness, probes_programs: bool) -> String {
     let opt = |v: &Option<String>| v.as_deref().map(js).unwrap_or("null".into());
     let display = format!(
         "{{\"output\":{},\"card\":{},\"pci_id\":{},\"vendor\":{},\
-         \"cards_with_displays\":{},\"gamescope_args\":[{}],\"why\":{},\"problem\":{}}}",
+         \"cards_with_displays\":{},\"gamescope_args\":[{}],\"vrr\":{},\
+         \"vrr_published_anywhere\":{},\"vrr_why\":{},\"why\":{},\"problem\":{}}}",
         opt(&r.display.output),
         opt(&r.display.card),
         opt(&r.display.pci_id),
         opt(&r.display.vendor),
         r.display.cards_with_displays,
         list(&r.display.gamescope_args()),
+        r.display
+            .vrr
+            .map(|v| v.to_string())
+            .unwrap_or("null".into()),
+        r.display.vrr_published_anywhere,
+        js(&r.display.vrr_why),
         js(&r.display.why),
         opt(&r.display.problem),
     );

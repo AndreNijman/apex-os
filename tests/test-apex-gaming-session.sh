@@ -132,6 +132,11 @@ KATANA="$(mkfixture katana)"
 card "$KATANA" card1 0x8086 0x46a6 1
 card "$KATANA" card2 0x10de 0x249d 0
 conn "$KATANA" card1 eDP-1 connected
+# The iGPU's own HDMI port, wired to nothing. DRM connector names are unique
+# per CARD, not per machine, so this one and card2's share a name — and it
+# sorts first. Anything that resolves a connector by name alone answers about
+# a disconnected port on the wrong GPU.
+conn "$KATANA" card1 HDMI-A-1 disconnected
 conn "$KATANA" card2 HDMI-A-1 connected
 
 # The ThinkPad L16: one AMD card, one panel.
@@ -154,7 +159,6 @@ run_session() {  # <fixture-root> [extra env assignments...]
         PATH="${BIN}:/usr/bin:/bin" \
         HOME="${WORK}/home" \
         APEX_ROOT="$1" \
-        VRR_SYS="$1/sys" \
         APEX_GAMING_NO_APEXD=1 \
         "${@:2}" \
         bash "$SESSION" > "${WORK}/out" 2> "${WORK}/log"
@@ -359,23 +363,27 @@ if [[ "$log" == *"does not say"* ]]; then
     ok "…and the log distinguishes 'the driver does not say' from 'no VRR here'"
 else
     bad "…and the log distinguishes 'the driver does not say' from 'no VRR here'" \
-        "log: $(printf '%s' "$log" | grep VRR)"
+        "log: $(printf '%s' "$log" | grep -i vrr)"
 fi
 
-# A machine where the CHOSEN output does advertise it.
+# The namesake trap, end to end: the iGPU's disconnected HDMI-A-1 says 0 and
+# the monitor's says 1. A name-only lookup reads the first and turns VRR off on
+# a machine that has it.
+printf '0\n' > "${KATANA}/sys/class/drm/card1-HDMI-A-1/vrr_capable"
 printf '1\n' > "${KATANA}/sys/class/drm/card2-HDMI-A-1/vrr_capable"
 rc="$(run_session "$KATANA")"
 argv="$(gs_argv)"
 if [[ "$argv" == *"--adaptive-sync"* ]]; then
-    ok "an output that advertises vrr_capable=1 gets adaptive sync"
+    ok "adaptive sync is read from the chosen card, not from a same-named connector"
 else
-    bad "an output that advertises vrr_capable=1 gets adaptive sync" "argv: ${argv}"
+    bad "adaptive sync is read from the chosen card, not from a same-named connector" \
+        "argv: ${argv}"
 fi
+rm -f "${KATANA}/sys/class/drm/card1-HDMI-A-1/vrr_capable" \
+      "${KATANA}/sys/class/drm/card2-HDMI-A-1/vrr_capable"
 
-# …and the case the old global glob got wrong: VRR on the PANEL, on a session
-# that is running on the monitor. Asking for adaptive sync there is asking on
-# behalf of a screen this session is not using.
-rm -f "${KATANA}/sys/class/drm/card2-HDMI-A-1/vrr_capable"
+# …and the case the old global glob got wrong the other way: VRR on the PANEL,
+# on a session that is running on the monitor.
 printf '1\n' > "${KATANA}/sys/class/drm/card1-eDP-1/vrr_capable"
 rc="$(run_session "$KATANA")"
 argv="$(gs_argv)"
@@ -385,12 +393,40 @@ if [[ "$argv" != *"--adaptive-sync"* ]]; then
 else
     bad "VRR on a screen this session is NOT using does not turn it on" "argv: ${argv}"
 fi
-if [[ "$log" == *"a different screen"* ]]; then
+if [[ "$log" == *"not using"* ]]; then
     ok "…and the log says that is what happened"
 else
-    bad "…and the log says that is what happened" "log: $(printf '%s' "$log" | grep VRR)"
+    bad "…and the log says that is what happened" "log: $(printf '%s' "$log" | grep -i vrr)"
 fi
 rm -f "${KATANA}/sys/class/drm/card1-eDP-1/vrr_capable"
+
+section "a partial answer is used, not thrown away"
+
+# A DRM node with no PCI device behind it: --prefer-output is a perfectly good
+# answer and only --prefer-vk-device is unknowable. `apex` exits non-zero
+# because the answer is incomplete; discarding the good half because of that
+# would be a second silent regression on top of the one being fixed.
+NOPCI="$(mkfixture nopci)"
+mkdir -p "${NOPCI}/sys/class/drm/card0-HDMI-A-1"
+printf 'connected\n' > "${NOPCI}/sys/class/drm/card0-HDMI-A-1/status"
+rc="$(run_session "$NOPCI")"
+argv="$(gs_argv)"
+log="$(session_log)"
+if [[ "$argv" == *"--prefer-output HDMI-A-1"* ]]; then
+    ok "the half that could be answered still reaches gamescope"
+else
+    bad "the half that could be answered still reaches gamescope" "argv: ${argv}"
+fi
+if [[ "$argv" != *"--prefer-vk-device"* ]]; then
+    ok "…and no device is invented for the half that could not"
+else
+    bad "…and no device is invented for the half that could not" "argv: ${argv}"
+fi
+if [[ "$log" == *"ERROR"* ]] && [[ "$log" == *"incomplete"* ]]; then
+    ok "…and the gap is said out loud"
+else
+    bad "…and the gap is said out loud" "log: $(printf '%s' "$log" | tail -5)"
+fi
 
 # ── §6.3: the capability reading that explains Steam's bwrap ────────────────
 section "the capability sets are logged whatever they are"

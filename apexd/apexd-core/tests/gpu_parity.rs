@@ -615,6 +615,12 @@ fn katana_displays(tag: &str) -> Fixture {
     f.write("sys/class/drm/card1/device/device", "0x46a6\n")
         .write("sys/class/drm/card2/device/device", "0x249d\n")
         .write("sys/class/drm/card1-eDP-1/status", "connected\n")
+        // The iGPU has an HDMI port too, wired to nothing. This is not padding:
+        // DRM connector names are unique per CARD, not per machine, so
+        // `card1-HDMI-A-1` and `card2-HDMI-A-1` coexist on most hybrid laptops
+        // — and any code that looks a connector up by NAME alone answers about
+        // whichever sorts first, which is this one, which is disconnected.
+        .write("sys/class/drm/card1-HDMI-A-1/status", "disconnected\n")
         .write("sys/class/drm/card2-HDMI-A-1/status", "connected\n")
         .write("sys/class/drm/card2-DP-1/status", "disconnected\n")
         // Render nodes and the card nodes themselves share the prefix and must
@@ -798,7 +804,12 @@ fn connector_enumeration_skips_card_and_render_nodes() {
         .collect();
     assert_eq!(
         names,
-        vec!["card1:eDP-1", "card2:DP-1", "card2:HDMI-A-1"],
+        vec![
+            "card1:HDMI-A-1",
+            "card1:eDP-1",
+            "card2:DP-1",
+            "card2:HDMI-A-1"
+        ],
         "cardN and renderD128 are not connectors"
     );
     // And `discover` still sees exactly the two cards, unaffected.
@@ -813,4 +824,77 @@ fn only_the_three_built_in_connector_types_count_as_internal() {
     for external in ["HDMI-A-1", "DP-1", "DVI-D-1", "VGA-1", "Writeback-1"] {
         assert!(!gpu::is_internal_connector(external), "{external}");
     }
+}
+
+// ─── Adaptive sync, asked about the screen this session will actually use ────
+
+#[test]
+fn vrr_is_read_from_the_chosen_connector_and_not_from_a_name_match() {
+    // THE TRAP. `card1-HDMI-A-1` (iGPU, disconnected) sorts before
+    // `card2-HDMI-A-1` (dGPU, the monitor), so anything that resolves a
+    // connector by name alone reads the wrong one. Here the wrong one says
+    // vrr_capable=0 and the right one says 1, so a name match produces
+    // "no adaptive sync" on a machine that has it.
+    let f = katana_displays("vrr-namesake");
+    f.write("sys/class/drm/card1-HDMI-A-1/vrr_capable", "0\n")
+        .write("sys/class/drm/card2-HDMI-A-1/vrr_capable", "1\n");
+    let c = gpu::choose_display(&f.sys());
+    assert_eq!(c.card.as_deref(), Some("card2"));
+    assert_eq!(c.vrr, Some(true), "read from card2, not from the namesake");
+    assert!(
+        c.gamescope_args().contains(&"--adaptive-sync".to_string()),
+        "{:?}",
+        c.gamescope_args()
+    );
+}
+
+#[test]
+fn vrr_on_a_screen_this_session_is_not_using_does_not_turn_it_on() {
+    // The panel advertises it; the session runs on the monitor. Asking for
+    // adaptive sync here is asking on behalf of a screen nobody is looking at.
+    let f = katana_displays("vrr-other-screen");
+    f.write("sys/class/drm/card1-eDP-1/vrr_capable", "1\n");
+    let c = gpu::choose_display(&f.sys());
+    assert_eq!(c.output.as_deref(), Some("HDMI-A-1"));
+    assert_eq!(c.vrr, None, "the chosen output publishes nothing");
+    assert!(c.vrr_published_anywhere, "the panel does publish it");
+    assert!(
+        !c.gamescope_args().contains(&"--adaptive-sync".to_string()),
+        "{:?}",
+        c.gamescope_args()
+    );
+    assert!(
+        c.vrr_why.contains("not using"),
+        "the log has to say which screen it declined for: {}",
+        c.vrr_why
+    );
+}
+
+#[test]
+fn a_driver_that_publishes_no_vrr_capable_says_so_rather_than_saying_no() {
+    // Katana as measured (§7.2): the NVIDIA connector exposes seven sysfs
+    // attributes and `vrr_capable` is not among them; the Intel connector
+    // exposes fifteen and also lacks it. The old probe globbed, matched
+    // nothing, passed nothing and PRINTED nothing — so on a 240 Hz monitor
+    // "no VRR here" and "this driver does not say" were the same silence.
+    let f = katana_displays("vrr-silent");
+    let c = gpu::choose_display(&f.sys());
+    assert_eq!(c.vrr, None);
+    assert!(!c.vrr_published_anywhere);
+    assert!(
+        c.vrr_why.contains("does not say"),
+        "got {}",
+        c.vrr_why
+    );
+    assert!(!c.gamescope_args().contains(&"--adaptive-sync".to_string()));
+}
+
+#[test]
+fn an_output_that_says_zero_is_a_measurement_not_a_silence() {
+    let f = katana_displays("vrr-zero");
+    f.write("sys/class/drm/card2-HDMI-A-1/vrr_capable", "0\n");
+    let c = gpu::choose_display(&f.sys());
+    assert_eq!(c.vrr, Some(false));
+    assert!(c.vrr_published_anywhere);
+    assert!(c.vrr_why.contains("vrr_capable=0"), "got {}", c.vrr_why);
 }
