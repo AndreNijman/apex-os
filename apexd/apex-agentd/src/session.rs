@@ -359,13 +359,22 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     // instead of leaving an empty record behind.
     let reservation = daemon.registry.lock().expect("registry lock").allocate()?;
     let id = reservation.id();
-    let scratch = paths::scratch_dir(id);
     // Not best-effort: the sandbox binds this path read-write and sets TMPDIR
     // to it. If it cannot be created, or cannot be made private, the session
     // would start with an unexpected scratch directory and fail later in a much
     // harder place to diagnose.
-    paths::ensure_private_dir(&scratch)
-        .with_context(|| format!("preparing the session scratch directory {}", scratch.display()))?;
+    //
+    // `ensure_scratch_dir`, not `ensure_private_dir(&scratch_dir(id))`: the
+    // root lives in world-writable /tmp and is a boundary this account has to
+    // own, and ensuring only the leaf leaves a root another account pre-created
+    // in place while reporting success. See `paths::SCRATCH_ROOT_PREFIX` for
+    // the measurement.
+    let scratch = paths::ensure_scratch_dir(id).with_context(|| {
+        format!(
+            "preparing the session scratch directory {}",
+            paths::scratch_dir(id).display()
+        )
+    })?;
 
     // §6.1: the settings document that subscribes Claude to its own lifecycle,
     // written into the scratch directory the sandbox already binds. Best-effort
