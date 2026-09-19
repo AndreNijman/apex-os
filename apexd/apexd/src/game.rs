@@ -462,6 +462,14 @@ impl Ctx {
             ));
         }
         if let Some(n) = scx.note() {
+            // The plan's own sched-ext note is an INTENT — it says the profile
+            // asks for a scheduler and points at `scx_state` for the answer.
+            // Once there IS an answer, printing both leaves a user reading a
+            // pointer to a line directly beneath it. The measurement replaces
+            // the intent rather than joining it; `apex game profile`, which
+            // renders a plan nobody applied, still shows the intent, because
+            // there it is the only true thing available.
+            notes.retain(|existing: &String| !existing.starts_with("sched-ext:"));
             notes.push(n);
         }
         if !gpus.refused().is_empty() {
@@ -1544,6 +1552,42 @@ mod tests {
             notes_of(&st).iter().any(|n| n.starts_with("sched-ext: loaded")),
             "{:?}",
             notes_of(&st)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_session_shows_the_measurement_and_not_the_intent_beside_it() {
+        // The plan's sched-ext note points at `scx_state` for the answer. Once
+        // there IS an answer, keeping both leaves a user reading a pointer to
+        // the line directly beneath it — and, worse, reading a sentence about
+        // what was ASKED for next to one about what happened, which is exactly
+        // the pair this unit spent its time separating.
+        let st = scx_status(
+            "scx-one-note",
+            Outcome::Landed,
+            ScxState::Enabled {
+                ops: Some("lavd".into()),
+            },
+        )
+        .await;
+        let sched: Vec<String> = notes_of(&st)
+            .into_iter()
+            .filter(|n| n.starts_with("sched-ext:"))
+            .collect();
+        assert_eq!(
+            sched.len(),
+            1,
+            "exactly one sched-ext line in a live session: {sched:?}"
+        );
+        assert!(
+            sched[0].starts_with("sched-ext: loaded"),
+            "and it is the measured one, not the plan's: {}",
+            sched[0]
+        );
+        assert!(
+            !sched[0].contains("ASKS"),
+            "the intent must not survive into a session that has an answer: {}",
+            sched[0]
         );
     }
 
