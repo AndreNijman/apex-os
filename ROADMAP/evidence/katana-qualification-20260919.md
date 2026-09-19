@@ -154,16 +154,52 @@ guard rather than aborting the run. Both halves of the branch work from an image
 
 ### 2.2 The `/etc` removal pass did not eat image-owned files
 
-The Sep-6 defect deleted 26 image-owned `/etc` files. It did not recur:
+The Sep-6 defect deleted 26 image-owned `/etc` files. **It did not recur.**
 
 ```
-$ sudo diff -rq /usr/etc /etc 2>&1 | grep -c "^Only in /usr/etc"
+$ sudo diff -rq /usr/etc /etc | grep "^Only in /usr/etc"
+Only in /usr/etc/fonts/conf.d: 25-unhint-nonlatin.conf
+Only in /usr/etc/krb5.conf.d: crypto-policies
+Only in /usr/etc/pki/tls: fips_local.cnf
+```
+
+Three, not zero — so the honest reading takes one more step. The removal pass
+can only delete paths it recorded in `etc.list`, and **none of these three is in
+it**:
+
+```
+$ sudo cat /var/lib/apex/pkg/etc.list
+group / group- / gshadow / gshadow- / passwd / shadow
+profile.d/steam.csh / profile.d/steam.sh / .pwd.lock
+security/limits.d/10-gamemode.conf
+$ for p in fonts/conf.d/25-unhint-nonlatin.conf krb5.conf.d/crypto-policies pki/tls/fips_local.cnf; do
+    sudo grep -c -x "$p" /var/lib/apex/pkg/etc.list; done
+0
+0
 0
 ```
 
-**PASS.** The six `.apexnew` files above are the *correct* behaviour — the
-engine refused to overwrite `/etc/passwd`, `/etc/group`, `/etc/shadow` and their
-backups because the live copies differ from the package defaults.
+All three are `crypto-policies`/fontconfig symlinks and are residue of the
+**Sep-6** damage-and-restore, which restored 26 files but not these. Today's
+install could not have removed them. `etc.list` shrank to the nine paths above,
+all of which are genuinely extension content (`steam` profile scripts, the
+gamemode limits drop-in) or account files the engine correctly refused to
+overwrite.
+
+**PASS** for the removal pass. The six `.apexnew` files are the *correct*
+behaviour — the engine refused to overwrite `/etc/passwd`, `/etc/group`,
+`/etc/shadow` and their backups because the live copies differ from the package
+defaults:
+
+```
+$ sudo find /etc -name "*.apexnew"
+/etc/group.apexnew  /etc/group-.apexnew  /etc/gshadow.apexnew
+/etc/gshadow-.apexnew  /etc/passwd.apexnew  /etc/shadow.apexnew
+```
+
+**Open, minor:** three `/etc` image defaults are still missing on this machine
+from September 6 and nothing restores them. Worth a `restorecon`-style sweep
+before this machine is used as a clean baseline again.
 
 ---
 
