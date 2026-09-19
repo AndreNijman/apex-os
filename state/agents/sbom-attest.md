@@ -212,15 +212,36 @@ Ranked, with what each costs:
 
 ## RUNS DISPATCHED — pick these up if I am cut short
 
-- **`35455459788`** — `sbom-probe` on `task/sbom-attest`, dispatched
-  2026-09-19T16:35Z by pushing `4f308f82`. ~40-60 min. ONE runner, not a build:
-  it re-catalogues the digest the failing build already pushed
-  (`sha256:86225e1b…`). Read it with
-  `gh api repos/AndreNijman/apex-os/actions/jobs/<id>/logs` (`gh run view --log`
-  refuses while a run is in progress). Grep the log for `RESULT ` and `REKOR `:
-  every number the decision turns on is printed on one of those lines.
-  It also re-confirms the 24 MiB ceiling **from a GitHub runner**, so the
-  bisection above does not rest on one home connection.
+- **`35456273175`** — **`build-image` on `task/sbom-attest`, THE VERIFICATION
+  BUILD**, dispatched 2026-09-19T16:51Z. `core` is skipped (the paths filter
+  deliberately excludes `build-image.yml`), so this is `base` ~16 min then
+  `image` ~24 min, not the ~1 h a full build costs. **What confirms the fix:**
+  step `Generate and attest the SBOM` = success *and not skipped* (a skipped
+  job counts as success in this repo — six documented instances), the line
+  `predicate …B compact -> …B DSSE body; ceiling 25165824B, at N%`, and
+  `tlog entry created with index: N` in that step's log. Then
+  `Verify the image and its SBOM are both retrievable` must also be success.
+
+- **`35456401012`** — `sbom-probe` **round 4**, pushed 2026-09-19T16:55Z.
+  ONE arm: the exact two switches `build-image.yml` sets, against the same
+  already-pushed digest. ~15 min, one runner. Grep its log for `RESULT ` and
+  `REKOR `. It is an independent cross-check of the build, not a substitute:
+  if the build's guard fires, this run's numbers say which lever to reach for
+  next.
+
+- **`35455459788`** — `sbom-probe` round 3, COMPLETE, **partially failed, and the
+  failure was mine**. What it did establish:
+  - **The 24 MiB ceiling is confirmed from a GitHub runner**, so the bisection
+    does not rest on one home connection: `body=25,000,000 -> http=400
+    sent=25000000` and `body=25,166,008 -> http=502 sent=0 t=0.26s`.
+  - The `full` arm: rc=0, **915 s**, peak RSS **15,449,996 KB** — consistent
+    with build 35450175806's 742 s / 15,303,652 KB.
+  - Then the step died on **my own harness bug**:
+    `line 39: name: unbound variable`. `local name="$1" f="…${name}…"` expands
+    every word BEFORE it assigns any of them, so under `set -u` the second
+    initialiser reads `name` while it is still unbound. Every size measurement
+    and every Rekor upload was lost with it. **915 s of syft, thrown away by a
+    one-line bash rule.** Fixed in the next commit.
 
 ## NEXT
 
