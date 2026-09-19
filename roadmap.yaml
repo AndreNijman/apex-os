@@ -4964,110 +4964,145 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED 2026-09-19 (round 33): task/p2-b-round33 tip df17c34 is on apex-shell roadmap/v2.2 as merge 4eea9fb
-    (9df72cf -> 4eea9fb, --no-ff, 1,516 insertions over 10 files, five of them new). Verified ON THE MERGED TIP
-    rather than trusted from the branch: check-no-conflict-markers.sh PASS, ci.yml re-parses as YAML, all five
-    touched suites bash -n clean, check-agent-help.sh 25 passed / 0 failed with 8/8 self-mutants, and
-    run-i18n-test.sh 23 passed / 0 failed / 0 skipped with the 186-string pin holding. Pushed with
-    --force-with-lease. apex-os got NO commits this round and that was a decision, not an omission: shipping the
-    plugin is apex-os work with a real image cost nobody has costed against docs/update-cost.md, and a
-    Containerfile line with nothing consuming it would be the theatre FOUND 34 warns about. ROUND 33 (2026-09-19,
-    apex-shell task/p2-b-round33 tip df17c34, three commits on roadmap/v2.2's 9df72cf, CI 35435459325 ALL THREE
-    JOBS SUCCESS with zero red steps): THE OLDEST BLOCKER ON THIS ROW IS CLOSED, AND IT WAS NEVER UPSTREAM'S.
-    Since round 3 this row has read 'translated shell: pipeline proven, blocker is the host' on the measurement
-    that quickshell builds a bare QQmlEngine and calls no installTranslator, which is true; the conclusion drawn
-    from it, that the fix belongs to somebody else, is one step too far. A bare QQmlEngine still resolves QML
-    modules off its import path, a module may carry a compiled plugin, and a plugin runs C++ inside the shell's
-    process while the import is resolved - before a binding is evaluated. tests/apex-i18n-plugin.cpp is that
-    module in 60 lines, and inside the REAL /usr/bin/quickshell 0.3.1, offscreen, no compositor, under env -i, the
-    SHIPPED src/services/agents/AgentHelpContent.qml singleton reads back German. tests/run-i18n-host-test.sh: 24
-    passed / 0 failed / 0 skipped on the L16 and 21/0/3 on the Arch runner, where the whole bare-engine half runs
-    on a second distribution and a second Qt minor (6.11.2) and the three in-situ rows refuse BY NAME for want of
-    quickshell. Five runs, not two: plain (no plugin, English, and no plugin line in the output), plugin (German),
-    nocat (plugin loaded but the catalogue directory empty - English, and the plugin SAYS so, which is what makes
-    'the German came from a .qm' a claim), late (a translator installed after the tree exists changes nothing) and
-    late-retranslate (the same install plus engine.retranslate() - German). The last pair is why the hook is
-    initializeEngine and it is measured rather than argued. tests/mutate-i18n-host.sh: 13 applied / 11 CAUGHT / 0
-    SURVIVED / 0 MISSCORED / 0 UNSCORABLE / 2 HELD / 0 FALSE-RED, IDENTICAL on both machines. The trap worth
-    knowing: a QQmlEngineExtensionPlugin is NOT enough - the .so is dlopened and the qmldir is read and the import
-    still fails with 'module is not installed' because nothing registers the module; QQmlExtensionPlugin with
-    registerTypes() calling qmlRegisterModule() is what works, and mutant M1 is exactly that. SECOND HALF,
-    standing-queue item 5: the guide's prose is now marked - 5 qsTr() strings become 186 (149 block bodies, 25 kv
-    descriptions, 7 section titles), with 30 command bodies, 9 mono terms and 10 mono descriptions excluded by
-    rule because a translated command line is a command that does not run. Proved content-preserving: strip every
-    qsTr() back off and the file is byte-for-byte the old one. run-i18n-test.sh EXPECT_TR 5 -> 186, agreed by both
-    a grep over code lines and the real lupdate's 186 <source> entries with no duplicates, 23/0/0 here and 19/0/1
-    on the runner. check-agent-help.sh was NOT hand-edited in twenty places: the guide is read once through a
-    qsTr() normaliser that is itself gated in both directions (unwrapped guide -> '0 wrapped going in' red; broken
-    substitution -> '181 wrapped going in, 181 still wrapped coming out' red plus the sandbox-mode check), 25/0
-    with 8/8 self-mutants here and 22/0 on the runner. mutate-i18n.sh gains S1 and S2, the first mutants ever
-    aimed at section 1, 11 applied / 11 caught. WHAT IS NOT CLAIMED: the shell is not translated. The module is
-    built by a test and ships nowhere - shipping it needs an apex-os build stage with Qt devel, an install path
-    and QML_IMPORT_PATH on the launcher, a real image cost against docs/update-cost.md that nobody has costed -
-    and apex-shell_de.ts carries German for five of the 186 while the other 181 load and come back in English.
-    Section 6 of run-i18n-test.sh still prints a NOTE and flips on a live grep of src/ the day shell.qml imports
-    the module. No apex-os commits this round for that reason; the branch exists because apex-shell's CI matches
-    on branch name. LANDED 2026-09-19 (round 33): round 32's apex-shell work is now ON roadmap/v2.2 as merge
-    9df72cf (a8cd491 -> 9df72cf, --no-ff so the merge sha is citable, 548 insertions over
-    .github/workflows/ci.yml, tests/run-rtl-test.sh and tests/mutate-rtl.sh). tests/check-no-conflict-markers.sh
-    PASS on the merged tree; ci.yml re-parsed as YAML and both suites are bash -n clean on the merged tip; pushed
-    with --force-with-lease. The RTL suite's own numbers were NOT re-run on this laptop - the card forbids it and
-    records 37/0/0/0 locally and 32 passed / 0 failed / 1 skipped / 3 could-not-run on the Arch runner (CI
-    35417214107). Round 32 (2026-09-19) settled the RTL runner decision that four rounds had correctly refused to
-    paper over, and did BOTH halves of it because they answer different questions. run-rtl-test.sh had been red on
-    the GitHub Arch runner on exactly three assertions since the day it landed (19 passed / 3 failed / 3 skipped).
-    (1) THE PRECONDITION IS NOW MEASURED BEFORE ANYTHING IS CONCLUDED FROM IT: the plugin block moves above the
-    three rows it explains, ldd (not a distribution name, not a version string) says whether this machine's qt6ct
-    plugin carries a Qt translation loader, and when it measurably does not those three rows report a NAMED
-    could-not-run carrying the reason. CANTRUN is a fourth outcome with its own counter in the totals line,
-    because the suite had been printing absence (not a booted APEX host) and could-not-run (the probe printed no
-    APEXDIR line) as the same word. The gate has two hard limits: it is switched off entirely on a booted APEX
-    host, because on the machine APEX ships to a theme that cannot supply the direction IS the defect; and it
-    cannot engage where the direction flipped anyway, so an excuse whose own reason has stopped being true goes
-    red instead of quiet. The predicate is three-valued and a failed ldd excuses nothing - that arm is proved to
-    fire by asking the predicate about a file that is not an ELF. (2) ci.yml INSTALLS ki18n ON THE ARCH JOB, on
-    its own line and not under a || echo, because a failed install would silently take section 2's right-to-left
-    half with it and still tick green. Measured in an archlinux:latest container that reproduces the runner's own
-    totals exactly (19/3/3, same three FAIL titles, qt6ct 0.11-8, qt6-base 6.11.2): the gate alone gives 20 passed
-    / 0 failed / 1 skipped / 6 could-not-run and measures NOTHING about APEX's mirroring there; the gate plus
-    ki18n gives 32 / 0 / 1 / 3. The eleven-assertion difference is section 2 running its whole right-to-left
-    fixture pass on that machine for the first time - nine assertions about the SHIPPED CfgRow and CfgScroll under
-    a real right-to-left application direction, on a second distribution and a second Qt minor - and it PASSED, so
-    no APEX defect was hiding behind the red. Say which half produced the green: the gate turned three reds into
-    three named could-not-runs, which is a statement about the RUNNER; the library is what proved APEX's own
-    mechanism on a second machine. Proved to fail in both directions on both machines with a stubbed ldd that lies
-    in one direction only: laptop with KF6I18n hidden 33/1/0/0 (gate off, iff red on 'something ELSE loads
-    qt_*.qm'), Arch with KF6I18n injected 28/5/1/0, Arch with ldd exiting 1 28/4/1/1, Arch with /run/ostree-booted
-    present 31/3/0/0. Section 1 is NOT a SKIP and must never become one. AND STANDING-QUEUE ITEM 7 IS NOT THE
-    CHANGE THIS LEDGER DESCRIBED. '0 of 14 window roots carry LayoutMirroring' has read as a forgotten edit since
-    round 23; it is not. Read out of Quickshell's own type registry: PanelWindow -> PanelWindowInterface ->
-    WindowInterface -> Reloadable -> QObject, and FloatingWindow the same, with no Item and no Window anywhere.
-    Qt's LayoutMirroring attached property only works with Items and Windows, and when it does not it DOES NOT
-    FAIL - measured in the engine with a control: attached to a QtObject the object is still created,
-    errorString() is EMPTY and the only trace is one QWARN, while the identical declaration on a Window reads back
-    enabled. So the two lines that work on CfgRow are a silent no-op on all 14 roots. The worse half is what the
-    suite would have done about it: section 3 counted FILES CONTAINING THE STRING, so the obvious edit would have
-    moved the count from 0 to 14, turned the pin green and mirrored nothing - the named remaining half of this row
-    signed off on a grep. Section 3 now asks the engine what it does with a non-Item (Window as the control,
-    needing no quickshell so the Arch runner can run it) and walks the prototype chain link by link out of the
-    registry - link by link and never with a substring test, because 'Window' appears inside PanelWindowInterface
-    and WindowInterface themselves and a *Window* match would answer yes on every chain including this one. Both
-    fail in both directions: R15 makes the walk find an ancestor where there is none and the suite must say THE
-    ROUTE HAS OPENED, which is the day item 7 becomes a task instead of an impossibility. What remains is either a
-    14-file wrap-each-window-in-a-mirroring-Item change nobody has costed - and whoever takes it must read the
-    input-mask warning, because TopBar's Region entries have explicit x: that mirroring does not reach, so
-    mirrored paint over an unmirrored hit region is what that change would ship - or upstream. Final round-32
-    numbers: run-rtl-test.sh 37 passed / 0 failed / 0 skipped / 0 could-not-run on this laptop under env -i (was
-    33/0/0); 32 / 0 / 1 / 4 in the Arch container; mutate-rtl.sh 15 applied / 15 CAUGHT / 0 SURVIVED / 0
-    MISSCORED, re-earned in full on the restructured suite rather than carried over, because round 31's 13/13 was
-    void - three mutants target the suite itself and R4 named a title that no longer exists. R5 and R8 are still
-    CAUGHT, which is the measurement proving the gate masks nothing here. apex-shell task/p2-b-round32 commits
-    9df5d92 and ecc0e39. apex-os has NO commits this round and that is measured rather than lazy: rpm -q
-    --whatrequires kf6-ki18n answers 'no package requires kf6-ki18n', which reads like FOUND 2 one layer deeper
-    and would have justified a Containerfile line - but whatrequires matches on NAME and the dependency is on the
-    SONAME. rpm -q --whatrequires 'libKF6I18n.so.6()(64bit)' answers kf6-kcolorscheme and kf6-kiconthemes, which
-    qt6ct does require, so kf6-ki18n is a hard transitive dependency no slimming pass can drop and naming it would
-    be theatre. The real exposure is still qt6ct's build reverting to upstream's, which
+    ROUND 34 2026-09-19 - THE MODULE SHIPS; NOTHING IS TRANSLATED YET, and both halves of that sentence are
+    measured. apex-shell task/p2-b-round34 tip 2bc9799, apex-os task/p2-b-round34 tip e11f2843, both pushed and
+    unmerged. Containerfile.base stage 5b2a compiles apex-shell's tests/apex-i18n-plugin.cpp out of the vendored
+    shell tree into /usr/lib64/apex-shell/qml/Apex/I18n/{libapexi18n.so,qmldir}; apex-shell-autostart appends that
+    directory to QML_IMPORT_PATH before exec'ing quickshell; shell.qml reaches the module through
+    src/i18n/I18nBootstrap.qml. COST, measured in the real core image and not reasoned about: ZERO packages in any
+    tier and ~37 kB of layer (the .so is 29,776 bytes, the qmldir 946), because g++, pkg-config, qmake6, moc at
+    /usr/lib64/qt6/libexec/moc and BOTH qt6-qtbase-devel and qt6-qtdeclarative-devel are already in the shipped
+    image - Containerfile.core's dnf5 remove of 'qt6-*-devel' does not survive its dev toolchain stanza 600 lines
+    later. The number that decided the shape is the other one: ONE dnf transaction in the base tier costs 113 MB
+    net of zero shipped files (measured with podman history: install qt6-linguist, use lrelease, remove, clean
+    all, in one layer), which is the rewritten sqlite rpmdb docs/update-cost.md describes and 3,000x this
+    artefact, per machine per update. So there is no dnf in the stanza and the .qm catalogue is deliberately not
+    built there. THE IMPORT IS NOT A HARD IMPORT, and that is measured too: 17 suites load the shipped shell.qml,
+    several of them full quickshell bring-ups, and an unresolvable import makes the importing file unloadable -
+    shell.qml is the whole desktop. Qt.createComponent() plus a named warning means a missing module gives an
+    English desktop rather than no desktop. PROVED AS SIX REAL PODMAN BUILDS against the local core digest with
+    the apex-shell worktree standing in for the clone: as written rc 0 'proved to load: 29776 bytes'; qmldir loses
+    its plugin line rc 1; bootstrap absent with source present rc 1; source absent with bootstrap present rc 1;
+    both absent (an older ref) rc 0 and skipped by name; launcher setting no QML_IMPORT_PATH rc 1. The load proof
+    resolves the import in a real QML engine and then requires the plugin's own registerTypes line - qml -platform
+    offscreen and NOT quickshell, because the real quickshell loads the module correctly and then does not exit
+    (rc 124 after 60s on the SUCCESS path), which would have been an assertion that could never pass.
+    tests/test-containerfile-order.sh caught the one defect the mini-build could not: the launcher assertion was
+    first written 500 layers above the COPY that creates the launcher. Gates: check-containerfile-assertions.sh
+    195 checked / 0 failed, test-containerfile-order.sh 24/0. apex-shell side: run-i18n-test.sh 24 passed / 0
+    failed / 0 skipped (was 23/0/0) with section 6 now an ok, and its PREDICATE replaced rather than its verdict -
+    the old grep of src/ for QTranslator answered NO about a shell that reaches a translator perfectly well, and
+    would have answered YES for a C++ file somebody moved into src/. Three controls, one per read, all red with
+    distinct messages. mutate-i18n.sh 14 applied / 14 CAUGHT / 0 SURVIVED with new mutants I1, I2, I3. shellcheck
+    clean, check-suites-run-in-ci.sh 69/69 reachable, ci.yml re-parses. WHAT IS STILL NOT TRUE: no .qm is compiled
+    into the image for ANY language, so QTranslator::load() finds nothing and all 186 marked strings come back
+    English. The plugin says so by name through qInfo(), which on Fedora goes to the journal. Compiling the
+    catalogue needs lrelease (qt6-linguist, 1 MiB download / 4 MiB installed / 3 packages) from a DISCARDED
+    builder stage, never a base-tier dnf. And translations/apex-shell_de.ts still carries German for 5 of the 186.
+    No CI run was dispatched on the apex-shell tip before the session deadline. LANDED 2026-09-19 (round 33):
+    task/p2-b-round33 tip df17c34 is on apex-shell roadmap/v2.2 as merge 4eea9fb (9df72cf -> 4eea9fb, --no-ff,
+    1,516 insertions over 10 files, five of them new). Verified ON THE MERGED TIP rather than trusted from the
+    branch: check-no-conflict-markers.sh PASS, ci.yml re-parses as YAML, all five touched suites bash -n clean,
+    check-agent-help.sh 25 passed / 0 failed with 8/8 self-mutants, and run-i18n-test.sh 23 passed / 0 failed / 0
+    skipped with the 186-string pin holding. Pushed with --force-with-lease. apex-os got NO commits this round and
+    that was a decision, not an omission: shipping the plugin is apex-os work with a real image cost nobody has
+    costed against docs/update-cost.md, and a Containerfile line with nothing consuming it would be the theatre
+    FOUND 34 warns about. ROUND 33 (2026-09-19, apex-shell task/p2-b-round33 tip df17c34, three commits on
+    roadmap/v2.2's 9df72cf, CI 35435459325 ALL THREE JOBS SUCCESS with zero red steps): THE OLDEST BLOCKER ON THIS
+    ROW IS CLOSED, AND IT WAS NEVER UPSTREAM'S. Since round 3 this row has read 'translated shell: pipeline
+    proven, blocker is the host' on the measurement that quickshell builds a bare QQmlEngine and calls no
+    installTranslator, which is true; the conclusion drawn from it, that the fix belongs to somebody else, is one
+    step too far. A bare QQmlEngine still resolves QML modules off its import path, a module may carry a compiled
+    plugin, and a plugin runs C++ inside the shell's process while the import is resolved - before a binding is
+    evaluated. tests/apex-i18n-plugin.cpp is that module in 60 lines, and inside the REAL /usr/bin/quickshell
+    0.3.1, offscreen, no compositor, under env -i, the SHIPPED src/services/agents/AgentHelpContent.qml singleton
+    reads back German. tests/run-i18n-host-test.sh: 24 passed / 0 failed / 0 skipped on the L16 and 21/0/3 on the
+    Arch runner, where the whole bare-engine half runs on a second distribution and a second Qt minor (6.11.2) and
+    the three in-situ rows refuse BY NAME for want of quickshell. Five runs, not two: plain (no plugin, English,
+    and no plugin line in the output), plugin (German), nocat (plugin loaded but the catalogue directory empty -
+    English, and the plugin SAYS so, which is what makes 'the German came from a .qm' a claim), late (a translator
+    installed after the tree exists changes nothing) and late-retranslate (the same install plus
+    engine.retranslate() - German). The last pair is why the hook is initializeEngine and it is measured rather
+    than argued. tests/mutate-i18n-host.sh: 13 applied / 11 CAUGHT / 0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE / 2
+    HELD / 0 FALSE-RED, IDENTICAL on both machines. The trap worth knowing: a QQmlEngineExtensionPlugin is NOT
+    enough - the .so is dlopened and the qmldir is read and the import still fails with 'module is not installed'
+    because nothing registers the module; QQmlExtensionPlugin with registerTypes() calling qmlRegisterModule() is
+    what works, and mutant M1 is exactly that. SECOND HALF, standing-queue item 5: the guide's prose is now marked
+    - 5 qsTr() strings become 186 (149 block bodies, 25 kv descriptions, 7 section titles), with 30 command
+    bodies, 9 mono terms and 10 mono descriptions excluded by rule because a translated command line is a command
+    that does not run. Proved content-preserving: strip every qsTr() back off and the file is byte-for-byte the
+    old one. run-i18n-test.sh EXPECT_TR 5 -> 186, agreed by both a grep over code lines and the real lupdate's 186
+    <source> entries with no duplicates, 23/0/0 here and 19/0/1 on the runner. check-agent-help.sh was NOT
+    hand-edited in twenty places: the guide is read once through a qsTr() normaliser that is itself gated in both
+    directions (unwrapped guide -> '0 wrapped going in' red; broken substitution -> '181 wrapped going in, 181
+    still wrapped coming out' red plus the sandbox-mode check), 25/0 with 8/8 self-mutants here and 22/0 on the
+    runner. mutate-i18n.sh gains S1 and S2, the first mutants ever aimed at section 1, 11 applied / 11 caught.
+    WHAT IS NOT CLAIMED: the shell is not translated. The module is built by a test and ships nowhere - shipping
+    it needs an apex-os build stage with Qt devel, an install path and QML_IMPORT_PATH on the launcher, a real
+    image cost against docs/update-cost.md that nobody has costed - and apex-shell_de.ts carries German for five
+    of the 186 while the other 181 load and come back in English. Section 6 of run-i18n-test.sh still prints a
+    NOTE and flips on a live grep of src/ the day shell.qml imports the module. No apex-os commits this round for
+    that reason; the branch exists because apex-shell's CI matches on branch name. LANDED 2026-09-19 (round 33):
+    round 32's apex-shell work is now ON roadmap/v2.2 as merge 9df72cf (a8cd491 -> 9df72cf, --no-ff so the merge
+    sha is citable, 548 insertions over .github/workflows/ci.yml, tests/run-rtl-test.sh and tests/mutate-rtl.sh).
+    tests/check-no-conflict-markers.sh PASS on the merged tree; ci.yml re-parsed as YAML and both suites are bash
+    -n clean on the merged tip; pushed with --force-with-lease. The RTL suite's own numbers were NOT re-run on
+    this laptop - the card forbids it and records 37/0/0/0 locally and 32 passed / 0 failed / 1 skipped / 3
+    could-not-run on the Arch runner (CI 35417214107). Round 32 (2026-09-19) settled the RTL runner decision that
+    four rounds had correctly refused to paper over, and did BOTH halves of it because they answer different
+    questions. run-rtl-test.sh had been red on the GitHub Arch runner on exactly three assertions since the day it
+    landed (19 passed / 3 failed / 3 skipped). (1) THE PRECONDITION IS NOW MEASURED BEFORE ANYTHING IS CONCLUDED
+    FROM IT: the plugin block moves above the three rows it explains, ldd (not a distribution name, not a version
+    string) says whether this machine's qt6ct plugin carries a Qt translation loader, and when it measurably does
+    not those three rows report a NAMED could-not-run carrying the reason. CANTRUN is a fourth outcome with its
+    own counter in the totals line, because the suite had been printing absence (not a booted APEX host) and
+    could-not-run (the probe printed no APEXDIR line) as the same word. The gate has two hard limits: it is
+    switched off entirely on a booted APEX host, because on the machine APEX ships to a theme that cannot supply
+    the direction IS the defect; and it cannot engage where the direction flipped anyway, so an excuse whose own
+    reason has stopped being true goes red instead of quiet. The predicate is three-valued and a failed ldd
+    excuses nothing - that arm is proved to fire by asking the predicate about a file that is not an ELF. (2)
+    ci.yml INSTALLS ki18n ON THE ARCH JOB, on its own line and not under a || echo, because a failed install would
+    silently take section 2's right-to-left half with it and still tick green. Measured in an archlinux:latest
+    container that reproduces the runner's own totals exactly (19/3/3, same three FAIL titles, qt6ct 0.11-8,
+    qt6-base 6.11.2): the gate alone gives 20 passed / 0 failed / 1 skipped / 6 could-not-run and measures NOTHING
+    about APEX's mirroring there; the gate plus ki18n gives 32 / 0 / 1 / 3. The eleven-assertion difference is
+    section 2 running its whole right-to-left fixture pass on that machine for the first time - nine assertions
+    about the SHIPPED CfgRow and CfgScroll under a real right-to-left application direction, on a second
+    distribution and a second Qt minor - and it PASSED, so no APEX defect was hiding behind the red. Say which
+    half produced the green: the gate turned three reds into three named could-not-runs, which is a statement
+    about the RUNNER; the library is what proved APEX's own mechanism on a second machine. Proved to fail in both
+    directions on both machines with a stubbed ldd that lies in one direction only: laptop with KF6I18n hidden
+    33/1/0/0 (gate off, iff red on 'something ELSE loads qt_*.qm'), Arch with KF6I18n injected 28/5/1/0, Arch with
+    ldd exiting 1 28/4/1/1, Arch with /run/ostree-booted present 31/3/0/0. Section 1 is NOT a SKIP and must never
+    become one. AND STANDING-QUEUE ITEM 7 IS NOT THE CHANGE THIS LEDGER DESCRIBED. '0 of 14 window roots carry
+    LayoutMirroring' has read as a forgotten edit since round 23; it is not. Read out of Quickshell's own type
+    registry: PanelWindow -> PanelWindowInterface -> WindowInterface -> Reloadable -> QObject, and FloatingWindow
+    the same, with no Item and no Window anywhere. Qt's LayoutMirroring attached property only works with Items
+    and Windows, and when it does not it DOES NOT FAIL - measured in the engine with a control: attached to a
+    QtObject the object is still created, errorString() is EMPTY and the only trace is one QWARN, while the
+    identical declaration on a Window reads back enabled. So the two lines that work on CfgRow are a silent no-op
+    on all 14 roots. The worse half is what the suite would have done about it: section 3 counted FILES CONTAINING
+    THE STRING, so the obvious edit would have moved the count from 0 to 14, turned the pin green and mirrored
+    nothing - the named remaining half of this row signed off on a grep. Section 3 now asks the engine what it
+    does with a non-Item (Window as the control, needing no quickshell so the Arch runner can run it) and walks
+    the prototype chain link by link out of the registry - link by link and never with a substring test, because
+    'Window' appears inside PanelWindowInterface and WindowInterface themselves and a *Window* match would answer
+    yes on every chain including this one. Both fail in both directions: R15 makes the walk find an ancestor where
+    there is none and the suite must say THE ROUTE HAS OPENED, which is the day item 7 becomes a task instead of
+    an impossibility. What remains is either a 14-file wrap-each-window-in-a-mirroring-Item change nobody has
+    costed - and whoever takes it must read the input-mask warning, because TopBar's Region entries have explicit
+    x: that mirroring does not reach, so mirrored paint over an unmirrored hit region is what that change would
+    ship - or upstream. Final round-32 numbers: run-rtl-test.sh 37 passed / 0 failed / 0 skipped / 0 could-not-run
+    on this laptop under env -i (was 33/0/0); 32 / 0 / 1 / 4 in the Arch container; mutate-rtl.sh 15 applied / 15
+    CAUGHT / 0 SURVIVED / 0 MISSCORED, re-earned in full on the restructured suite rather than carried over,
+    because round 31's 13/13 was void - three mutants target the suite itself and R4 named a title that no longer
+    exists. R5 and R8 are still CAUGHT, which is the measurement proving the gate masks nothing here. apex-shell
+    task/p2-b-round32 commits 9df5d92 and ecc0e39. apex-os has NO commits this round and that is measured rather
+    than lazy: rpm -q --whatrequires kf6-ki18n answers 'no package requires kf6-ki18n', which reads like FOUND 2
+    one layer deeper and would have justified a Containerfile line - but whatrequires matches on NAME and the
+    dependency is on the SONAME. rpm -q --whatrequires 'libKF6I18n.so.6()(64bit)' answers kf6-kcolorscheme and
+    kf6-kiconthemes, which qt6ct does require, so kf6-ki18n is a hard transitive dependency no slimming pass can
+    drop and naming it would be theatre. The real exposure is still qt6ct's build reverting to upstream's, which
     test-apex-platform-theme.sh link 4 already guards on the booted image. Unchanged by round 29 except for one
     new fact that bears on it. Measured and closed on this laptop: layout before password in greeter and installer
     (test-apex-greet-layout.sh 25, test-installer-keymap.sh 43, test-installer-locale.sh 26); timezone picker from

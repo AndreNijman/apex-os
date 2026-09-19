@@ -82,38 +82,54 @@ Do not re-run anything on the card's own "DO NOT RE-RUN" list.
 
 ## NEXT
 
-**ROUND 34 IN PROGRESS.** Branch `task/p2-b-round34` is cut and pushed in BOTH
-repos (apex-os from `7f647470`, apex-shell from `4eea9fb`). Worktrees:
-`/var/tmp/apex-work/wt-p2-b7` (apex-os) and `/var/tmp/apex-work/wt-p2-b7-sh`
-(apex-shell). Scratch: `scratch-p2-b/round34/`.
+**ROUND 34 IS COMPLETE AND PUSHED IN BOTH REPOS.** apex-shell
+`task/p2-b-round34` tip **`2bc9799`** (one commit on `roadmap/v2.2`'s
+`4eea9fb`); apex-os `task/p2-b-round34` tip **`e11f2843`** (one commit on
+`7f647470`). **The apex-os half is the substance this round** — the module is
+built into the image for the first time. Worktrees `/var/tmp/apex-work/wt-p2-b7`
+(apex-os) and `/var/tmp/apex-work/wt-p2-b7-sh` (apex-shell), scratch
+`scratch-p2-b/round34/`.
 
-**NEXT ACTION:** write the `Containerfile.base` stanza that compiles the plugin
-out of the vendored shell tree into `/usr/lib64/apex-shell/qml/Apex/I18n/`, plus
-`QML_IMPORT_PATH` in `files/system/libexec/apex-shell-autostart`. The apex-shell
-half is DONE and pushed (`2bc9799`).
+Next action for whoever picks this up, in order:
 
-**apex-shell `2bc9799` — the shell reaches the module.**
-`src/i18n/I18nBootstrap.qml` is the only file naming `Apex.I18n`, and
-`shell.qml` loads it through `Qt.createComponent()` and reads the status —
-**deliberately not a hard import**. A QML import that cannot resolve makes the
-importing file unloadable, and `shell.qml` is the whole desktop. Measured: 17
-suites in `tests/` load the shipped `shell.qml`, several of them full quickshell
-bring-ups on the DO-NOT-RE-RUN list, and a hard import would have turned every
-one of them red on this laptop the moment the commit landed. Section 6's
-predicate is REPLACED (see FOUND 38 — the dispatch note's claim that it flips on
-its own is wrong). `run-i18n-test.sh` **24/0/0**, `mutate-i18n.sh` **14 applied /
-14 CAUGHT / 0 SURVIVED** with new mutants I1/I2/I3.
+1. **Compile the catalogue.** This is the ONE piece between the shipped
+   mechanism and a user seeing German, and it is fully costed already (FOUND
+   37): `lrelease` is not in the image, `qt6-linguist` is 1 MiB download / 4 MiB
+   installed / 3 packages, and it must come from a **discarded builder stage** —
+   a `dnf` in the final base stage costs **113 MB per machine per update**,
+   measured. The awkward part is not the cost, it is that the `.ts` lives in
+   apex-shell and the clone happens in the final stage, so a builder stage needs
+   either its own shallow clone with a SHA cross-check or a restructure of the
+   vendoring stanza. Neither is written. **Until it lands, nothing is
+   translated** — the plugin loads, finds no `.qm` and says so through `qInfo()`,
+   which on Fedora means `journalctl --user -b | grep APEXI18N`.
+2. **Write the German** — still a translator's job, still 5 of 186.
+3. **Queue items 1 and 2 still need HARDWARE** (Orca at the login screen,
+   greeter audio). They are the oldest open things on this card.
 
-**The in-build load proof is measured and gated, see FOUND 39**: use
-`/usr/lib64/qt6/bin/qml -platform offscreen`, NOT `quickshell` — quickshell
-HANGS on success in a build container (rc=124 after 60s).
+**Verify in the first image build that carries this**, because no full base
+build has run yet: the stanza was proved as a real podman build against the
+local core image with the apex-shell worktree standing in for the clone, six
+builds (one positive, five negatives), and `test-containerfile-order.sh` caught
+the one thing that method could not (FOUND 39). What remains unproved is only
+the interaction with the other 184 layers.
 
-**THE COST IS MEASURED AND IT IS NOT A PRODUCT DECISION — see FOUND 37.**
-Building the plugin costs **ZERO packages** anywhere: `g++`, `pkg-config`,
-`moc` (`/usr/lib64/qt6/libexec/moc`) and BOTH `qt6-qtbase-devel` and
-`qt6-qtdeclarative-devel` are already installed in the shipped core image.
-Measured in the real core image, not reasoned. The compile adds a **36.9 kB**
-layer; the `.so` is 29,776 bytes and the qmldir 946.
+**DO NOT RE-RUN any of the following on this laptop.** Each is CLOSED here, the
+numbers are in DONE, and every one of them costs minutes to hours:
+`run-rtl-test.sh` (37/0/0/0), `mutate-rtl.sh` (15 applied / 15 CAUGHT),
+`mutate-lockscreen-atspi-shim.sh` (8/6/0/2), the recovery read-back pair
+(`run-recovery-atspi-shim.sh` 33/0/1, `mutate-recovery-atspi-shim.sh`
+15/12/0/3) and the recovery source pair (34/0/0, 17/14/0/3). The i18n pairs are
+CHEAP and may be re-run when something near them changes: `run-i18n-test.sh` is
+seconds, `mutate-i18n.sh` about two minutes, `run-i18n-host-test.sh` about eight
+seconds and `mutate-i18n-host.sh` 58.
+
+**Things measured this round so the next one does not re-derive them:** the core
+image already carries every build tool the plugin needs (FOUND 37); a `dnf` in
+the base tier costs 113 MB whatever it installs (FOUND 37); section 6 of
+`run-i18n-test.sh` did NOT flip on its own and the dispatch note was wrong about
+why (FOUND 38); and the real `quickshell` cannot be used as a build assertion
+because it does not exit (FOUND 39).
 
 **ROUND 33 IS COMPLETE AND PUSHED.** apex-shell `task/p2-b-round33` tip
 **`df17c34`**, three commits on `roadmap/v2.2`'s `9df72cf`. apex-os
@@ -225,7 +241,14 @@ Next action for whoever picks this up, in order:
 
 ## IN PROGRESS
 
-Nothing. Round 33 is finished and pushed in both repos; `wt-p2-b6-sh` is clean
+Nothing. Round 34 is finished and pushed in both repos: `wt-p2-b7-sh` is clean
+at `2bc9799` and `wt-p2-b7` (apex-os) is clean at `e11f2843`, both matching
+their remotes. **CI run 35437235207** was dispatched on the apex-shell tip
+`2bc9799`; if its result is not recorded at the end of the DONE section, it was
+still running at the session deadline —
+`gh run view 35437235207 --repo AndreNijman/apex-shell`.
+
+Round 33 is finished and pushed in both repos; `wt-p2-b6-sh` is clean
 at `df17c34` matching its remote, and `wt-p2-b6` (apex-os) is clean at
 `7f647470` with no commits.
 
@@ -233,6 +256,78 @@ Round 32 is finished and pushed in both repos, and both worktrees
 (`wt-p2-b5`, `wt-p2-b5-sh`) are clean with their HEADs matching their remotes.
 
 ## DONE
+
+Round 34 (2026-09-19). **The module ships. The shell reaches it. Nothing is
+translated yet, and that last sentence is the honest headline.**
+
+apex-shell `2bc9799`, one commit on `roadmap/v2.2`'s `4eea9fb`, pushed:
+
+* `src/i18n/I18nBootstrap.qml` is the only file in the repository that names
+  `Apex.I18n`, and `shell.qml` loads it through `Qt.createComponent()` and reads
+  the status. **Deliberately not a hard import, and the reason is measured**: a
+  QML import that cannot resolve makes the importing file unloadable, and
+  `shell.qml` is the whole desktop — bar, popups, settings window, lock screen.
+  **17 suites in `tests/` load the shipped `shell.qml`**, several of them full
+  quickshell bring-ups on the DO-NOT-RE-RUN list, and a hard import would have
+  turned every one of them red on this laptop the moment the commit landed,
+  indistinguishable from a regression. The module only exists inside an image.
+* **Section 6's PREDICATE is replaced, not its verdict** — FOUND 38. The row is
+  now `ok` and `run-i18n-test.sh` is **24 passed / 0 failed / 0 skipped** (was
+  23/0/0). Proved red in all three directions by running the suite against a
+  broken tree, one control per read: the bootstrap stops importing (23/1),
+  `shell.qml` stops loading the bootstrap (23/1), the plugin stops calling
+  `installTranslator` (23/1), each with its own message naming which half
+  failed.
+* `mutate-i18n.sh` gains **I1, I2 and I3**, one per read, and is **14 applied /
+  14 CAUGHT / 0 SURVIVED**. I2's first draft SURVIVED — it pointed the module
+  half at `tests/apex-i18n-host.cpp`, which calls `installTranslator` twice, so
+  the mutant was not the mutant it claimed to be; the mutant was corrected, not
+  the expectation. I3 leaves `MODULE` alone on purpose: changing it would change
+  the assertion's own title and the harness would report a correctly detected
+  defect as a broken expectation (FOUND 29).
+* Also run and clean: `shellcheck -S warning -x` on both suites,
+  `check-suites-run-in-ci.sh` 69/69 reachable, `check-no-conflict-markers.sh`,
+  `ci.yml` re-parses as YAML, `qmllint-qt6` (the bootstrap's unresolvable import
+  is a WARNING and rc is 0; with the module staged under `-I` it is clean apart
+  from an unused-import Info).
+
+apex-os `e11f2843`, one commit on `roadmap/v2.2`'s `7f647470`, pushed. **This is
+the first round on this unit where the apex-os half is the substance.**
+
+* `Containerfile.base` stage 5b2a compiles `tests/apex-i18n-plugin.cpp` out of
+  the vendored shell tree into
+  `/usr/lib64/apex-shell/qml/Apex/I18n/{libapexi18n.so,qmldir}`. **No `dnf`, no
+  package added to any tier, ~37 kB of layer** — see FOUND 37 for why that is
+  the whole cost and why the 113 MB alternative was rejected.
+* `files/system/libexec/apex-shell-autostart` exports `QML_IMPORT_PATH` and
+  `QML2_IMPORT_PATH` immediately before `exec quickshell`. **Appended, never
+  assigned**, and guarded on the directory existing.
+* **Six real podman builds against the local core image**, with the apex-shell
+  worktree standing in for the clone — one positive and five negatives, each
+  watched going red rather than reasoned about:
+
+  | control | result |
+  |---|---|
+  | as written | rc 0, "Apex.I18n built and proved to load: 29776 bytes" |
+  | qmldir loses its `plugin` line | rc 1, FATAL "a QML engine could not import Apex.I18n" |
+  | bootstrap absent, source present | rc 1, FATAL "nothing in the shell imports the module" |
+  | source absent, bootstrap present | rc 1, FATAL "imports a module nothing can provide" |
+  | both absent (a ref that predates it) | **rc 0**, "predates the Apex.I18n module; skipping it" |
+  | launcher sets no `QML_IMPORT_PATH` | rc 1, FATAL, named |
+
+* **`test-containerfile-order.sh` caught the one defect the mini-build could
+  not** (FOUND 39). Gates on the branch: `check-containerfile-assertions.sh`
+  **195 checked / 0 failed**, `test-containerfile-order.sh` **24 passed / 0
+  failed**, `shellcheck -S warning` and `bash -n` clean on the launcher.
+
+**WHAT THIS DOES NOT CLAIM, and it is the sentence that matters: no user sees a
+translated string yet.** The image ships no compiled `.qm` for any language, so
+`QTranslator::load()` finds nothing and every one of the 186 marked strings
+comes back English. The plugin reports that by name, through `qInfo()`, which on
+Fedora goes to the journal. What changed is that the route from a `.qm` to a
+rendered string now exists end to end and is asserted at three places — the
+image build, the suite, and the shell's own startup — where before it existed
+only in a test.
 
 Round 33 (2026-09-19). **P2-004's oldest blocker is gone, and it turned out not
 to be upstream's at all.** Three commits on `roadmap/v2.2`'s `9df72cf`, all
@@ -1388,6 +1483,70 @@ produced is still in the FOUND list below (20–24 from round 30, 18–19 from r
     which is NOT in the image, so it must come from a DISCARDED builder stage
     or from core — never from a `dnf` in the final base stage.
 
+38. **Section 6 of `run-i18n-test.sh` did NOT flip on its own, and the obvious
+    fix for that would have been worse than the row it replaced.** Round 34's
+    dispatch note said the row is "a live grep of `src/`" that turns green the
+    moment `shell.qml` imports the module. The predicate was
+    `grep -rqn 'installTranslator\|QTranslator' src`, and `import Apex.I18n` in
+    `shell.qml` matches neither the pattern nor the path. Read that way it is
+    wrong in BOTH directions:
+
+    * it answers **NO** about a shell that reaches a translator perfectly well.
+      Nothing under `src/` says `QTranslator` and nothing ever will, because
+      QTranslator is a C++ class and not a QML type — which is section 4's own
+      finding, three sections earlier in the same file.
+    * it answers **YES** for the wrong reason the moment anybody moves the
+      plugin's `.cpp` under `src/`. A C++ file sitting in a directory is not the
+      shell importing anything, and that is one `git mv` away from turning
+      P2-004's named remaining half green over a file move. This was a live
+      risk this round: relocating the plugin out of `tests/` was the obvious
+      tidy-up and it would have done exactly that.
+
+    The row now reads three real files and needs two separate things to hold:
+    the ENTRY POINT reaches the module (`shell.qml` loads the bootstrap AND the
+    bootstrap imports `Apex.I18n` — split, because "shell.qml mentions a path"
+    and "that path imports the module" are different claims), and the MODULE
+    installs a translator. Each arm has its own FAIL message, so which half
+    broke is in the output rather than in a diff. Three controls, one per read,
+    all red. Three mutants, one per read, all CAUGHT.
+
+    **The general shape is the one this program keeps meeting from a new
+    angle:** a proxy predicate written before anybody knew what the answer would
+    look like, kept because it was green, and about to be satisfied by something
+    that is not the thing it is named after.
+
+39. **A Containerfile assertion can be verified by a real build of the stanza
+    alone — and there is exactly one class that method cannot see, which is why
+    `test-containerfile-order.sh` is not optional.** Round 34 verified its new
+    stage with six podman builds `FROM` the local core digest, the apex-shell
+    worktree COPY'd in where the clone would be: one positive and five
+    negatives, each watched going red. That is far better than reasoning and it
+    still missed a defect of exactly the historical kind. The stanza ended with
+    `grep -q 'QML_IMPORT_PATH' /usr/libexec/apex-shell-autostart` at line 804,
+    and the real `Containerfile.base` does not COPY that launcher until line
+    **1301** — an assertion that could never have passed, found in seconds by
+    the repository's own layer-order gate instead of fifty minutes into a build.
+    The mini-build could not see it because the mini-build COPY'd the launcher
+    first: **a stanza extracted from its file no longer knows what exists when
+    it runs.** Run both. The assertion now sits with the other launcher
+    assertions below the COPY, and was re-verified in both directions there.
+
+    Two more things measured in the same pass, both of which would have produced
+    an unpassable assertion if assumed instead:
+
+    * **The real `quickshell` cannot be used as a build assertion.** It loads
+      the module correctly, prints its plugin's lines, and then **does not
+      exit** — `Qt.exit(0)` from a `QtObject` root logs "Signal
+      QQmlEngine::exit() emitted, but no receivers connected". Measured rc=124
+      after a 60s timeout on the SUCCESS path. `/usr/lib64/qt6/bin/qml
+      -platform offscreen` is the instrument: rc 0 in 0s when the module
+      resolves, rc 2 when the qmldir loses its `plugin` line, rc 2 when the
+      module is absent.
+    * **The import resolving is not the same claim as the plugin having run**
+      (FOUND 35's M1/M4 again). The build requires BOTH a zero exit and the
+      `APEXI18N: registerTypes uri=Apex.I18n` line the plugin prints from
+      `registerTypes()`.
+
 ## BLOCKED ON
 
 Nothing this unit can act on. FOUND 14 is closed and the read-back is written
@@ -1501,13 +1660,21 @@ two machines; the HOST route is now built and measured —
 singleton read back in German **inside the real `/usr/bin/quickshell`**
 (FOUND 35). Marked strings went **5 -> 186** (`run-i18n-test.sh` `EXPECT_TR`,
 pinned by both a grep and the real `lupdate`, mutated by S1/S2), with command
-bodies, mono terms and mono descriptions excluded by rule. **Two things remain
-and neither is a measurement**: the module is built by a test and ships
-nowhere (an apex-os image stage, an install path and `QML_IMPORT_PATH` — nobody
-has costed that against `docs/update-cost.md`), and `apex-shell_de.ts` carries
-German for five of the 186 while the other 181 come back in English. Section 6
-of `run-i18n-test.sh` still prints a NOTE rather than an ok, and flips on a live
-grep of `src/` the day `shell.qml` imports the module. translated installer: not
+bodies, mono terms and mono descriptions excluded by rule. **THE MODULE SHIPS as of
+round 34** — `Containerfile.base` stage 5b2a builds it out of the vendored shell
+tree into `/usr/lib64/apex-shell/qml/Apex/I18n/`, `apex-shell-autostart` puts
+that on `QML_IMPORT_PATH`, and `shell.qml` reaches it through
+`src/i18n/I18nBootstrap.qml` (loaded by `Qt.createComponent()`, not imported, so
+a missing module is an English desktop and not a missing one). Costed rather
+than assumed: **zero packages in any tier, ~37 kB of layer**, because the core
+image already carries `g++`, `moc`, `pkg-config` and both Qt devel packages
+(FOUND 37). Section 6 is an `ok`, and its PREDICATE was replaced because the old
+one answered NO about this exact arrangement (FOUND 38). **One thing remains and
+it is the one that reaches a user: NO `.qm` IS COMPILED INTO THE IMAGE**, for
+any language, so `QTranslator::load()` finds nothing and all 186 strings come
+back English. That needs `lrelease` from a discarded builder stage — costed at 1
+MiB, against 113 MB for the base-tier `dnf` that must not be used. And
+`apex-shell_de.ts` still carries German for five of the 186. translated installer: not
 present, route is gettext. per-user language: not present. recovery flow:
 untouched.
 
@@ -1518,11 +1685,10 @@ untouched.
    round 30 (FOUND 20–21). What is left is not investigation: it is filing one
    upstream change and waiting for it. See BLOCKED ON;**
 4. ~~the QTranslator host change (FOUND 3) — costs a compiled artefact~~
-   **DONE round 33 (FOUND 35). It cost a compiled artefact and it is APEX's to
-   ship, not upstream's: a QML extension plugin on `QML_IMPORT_PATH` installs a
-   QTranslator into the real quickshell and the SHIPPED singleton reads back in
-   German. What is left is BUILDING it into the image — see NEXT item 1 — not
-   measuring anything;**
+   **DONE round 33 (FOUND 35) and SHIPPED round 34. The module is built into
+   the image, on quickshell's import path, and reached by `shell.qml`; the
+   build proves it loads in a real QML engine. What is left is the CATALOGUE —
+   no `.qm` is compiled for any language, so nothing is translated yet;**
 5. ~~the ~200 prose strings in `AgentHelpContent.qml`, PARKED until 4~~
    **DONE round 33: 5 marked strings became 186, and `check-agent-help.sh` was
    NOT hand-edited — it reads the guide through one gated normaliser (FOUND

@@ -85,14 +85,21 @@ Anything you do must leave those where they are or better.
 
 ## NEXT
 
-**Steps (f) and (g): the disclosure.** `RemoteViewModel.ping` must call
-`pairing.open(...)` instead of `connect(...)` and put the returned
-`Rendezvous.Path` into `ConnectionReport` (`RemoteViewModel.kt:101`);
-`MachinesScreen` shows `path.disclosure()` when it is `RELAY`; `Help.kt:212`'s
-note "The relay has no deployment yet" is now FALSE and `HelpParityTest`'s
-inverse list (line ~145) says so too. THEN `--relay` through
-`run-device-suite.sh` `start_remoted` **and** `broker.py` `restart_remoted`,
-then the device test.
+**Step (d): `--relay` through the suite.** `android/tools/run-device-suite.sh`
+`start_remoted()` (line ~140) AND the embedded `broker.py`'s `restart_remoted`
+(line ~213) both spawn `apex-remoted` and both need
+`--relay wss://apex-relay.andrenijman.com` — the reconnect test goes through
+the second, so patching only the first leaves half the suite on a daemon that
+holds no rendezvous. Then (e): a device test that forces the relay leg by
+building a `PairingOffer` copy with **`lan = emptyList()`** (NOT TEST-NET-1 —
+empty is a valid payload per `Pairing.kt` and saves 4s of connect timeout per
+bogus address, and `MachineStore.record` then stores an empty `lan` so
+`open()` goes to the relay too, with no second trick).
+
+**Before debugging the phone, read `$root/remoted.log`**: `supervise` refuses a
+`wss://` endpoint with no root store, so confirm the daemon dialled and is
+holding the rendezvous (its `waiting` notice) before believing a 409 from the
+phone means anything.
 
 ## THE SEAM — measured, and `PairingService.kt:21` is telling the truth
 
@@ -217,6 +224,7 @@ from the Rust one:
 | `125e1d91` | `feat(android)` the RFC 6455 client the relay leg has never had — `:core` codec + `RelayLink` stream adapter |
 | `f8b6fd7d` | `test(android)` two of the relay gates inspected nothing, found by mutation. **36 tests, 0 failures** |
 | `f41667a6` | `feat(android)` dial the relay, and delete the apology at `PairingService:108`. **7 dialler tests, 0 failures** |
+| `b6758c78` | `feat(android)` tell the person which path they got, in the desktop's own words — `ConnectionReport.path`, the banner, `Help.kt`, and a disclosure-parity gate that reads `rendezvous.rs`. **`:core` 496/0 (was 459), `:app` 51/0 (was 44), help-prose TOTAL 0** |
 
 ## IN PROGRESS
 
@@ -229,7 +237,9 @@ from the Rust one:
   fallback + delete the apology string (d) `--relay` through
   `run-device-suite.sh` `start_remoted` AND `broker.py` `restart_remoted`
   (e) device test (f) `Help.kt` + `HelpParityTest` (g) the disclosure UI.
-  **(a) (b) (c) DONE and pushed. Land only after (g).**
+  **(a) (b) (c) (f) (g) DONE and pushed — (f) and (g) were taken early because
+  they are the part that makes a client honest, and the card forbids landing a
+  half one. (d) and (e) remain: they are the PROOF, not the feature.**
 
 ## FOUND — inherited from the dispatch
 
