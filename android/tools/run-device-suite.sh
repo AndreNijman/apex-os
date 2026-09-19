@@ -137,9 +137,30 @@ XDG_RUNTIME_DIR=$root/run XDG_STATE_HOME=$root/state \
   "$bin/apex-agentd" >"$root/agentd.log" 2>&1 &
 agentd_pid=$!
 
+# The relay the daemon holds a rendezvous at, so the RELAY LEG is exercised by
+# this suite and not only the LAN one.
+#
+# The real deployment by default, because a relay double on loopback would not
+# answer the question the relay leg exists to answer: whether a phone can reach
+# this computer when it is NOT on this network. Cloudflare terminates the TLS,
+# routes the custom domain and runs the Durable Object; a double proves none of
+# that. `apex-remoted` treats an unusable relay as a warning rather than a
+# refusal to start (`main.rs`: "a bad relay address must not cost the machine
+# its LAN path"), so a run with no internet loses the relay test and keeps the
+# other thirty-odd.
+#
+# Set `APEX_DEVICE_SUITE_RELAY=` to run without one: the other tests all pass
+# and the three relay tests fail naming the argument they were not given, which
+# is the right answer on a machine with no internet — a skip would be a suite
+# reporting success for a leg it never touched.
+relay=${APEX_DEVICE_SUITE_RELAY-wss://apex-relay.andrenijman.com}
+
 start_remoted() {
+  local extra=()
+  [ -n "$relay" ] && extra=(--relay "$relay")
   XDG_RUNTIME_DIR=$root/run XDG_STATE_HOME=$root/state \
-    "$bin/apex-remoted" --port "$port" --allow-foreground >>"$root/remoted.log" 2>&1 &
+    "$bin/apex-remoted" --port "$port" --allow-foreground "${extra[@]}" \
+    >>"$root/remoted.log" 2>&1 &
   remoted_pid=$!
   echo "$remoted_pid" > "$root/remoted.pid"
 }
@@ -179,6 +200,7 @@ import json, os, socket, socketserver, subprocess, sys, time
 
 SOCK, PORT, ROOT, BIN = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 DPORT, AGENTD = sys.argv[5], sys.argv[6]
+RELAY = sys.argv[7] if len(sys.argv) > 7 else ""
 
 def control(line):
     s = socket.socket(socket.AF_UNIX); s.settimeout(60); s.connect(SOCK)
@@ -210,8 +232,14 @@ def restart():
                XDG_RUNTIME_DIR=os.path.join(ROOT, "run"),
                XDG_STATE_HOME=os.path.join(ROOT, "state"))
     log = open(os.path.join(ROOT, "remoted.log"), "ab")
-    p = subprocess.Popen([os.path.join(BIN, "apex-remoted"), "--port", DPORT,
-                          "--allow-foreground"], env=env, stdout=log, stderr=log)
+    # The relay goes to the REPLACEMENT daemon as well. `restart_remoted` is
+    # the verb the reconnect test uses, and a replacement that held no
+    # rendezvous would leave half this suite testing a machine the relay has
+    # never heard of — a failure that looks like the phone's.
+    argv = [os.path.join(BIN, "apex-remoted"), "--port", DPORT, "--allow-foreground"]
+    if RELAY:
+        argv += ["--relay", RELAY]
+    p = subprocess.Popen(argv, env=env, stdout=log, stderr=log)
     with open(pidfile, "w") as f:
         f.write(str(p.pid))
     for _ in range(200):
@@ -255,7 +283,7 @@ class S(socketserver.ThreadingTCPServer):
 S(("0.0.0.0", PORT), H).serve_forever()
 PY
 python3 "$root/broker.py" "$root/run/apex-remoted/control.sock" "$brokerport" "$root" "$bin" "$port" \
-  "$root/run/apex-agentd/control.sock" >"$root/broker.log" 2>&1 &
+  "$root/run/apex-agentd/control.sock" "$relay" >"$root/broker.log" 2>&1 &
 broker_pid=$!
 
 # Which of this machine's addresses the PHONE can actually reach. Measured from
@@ -349,6 +377,12 @@ export ANDROID_HOME=${ANDROID_HOME:-/var/tmp/android-sdk}
 
 brokeraddr=$(echo "$lan" | sed "s/:[0-9]*\$/:$brokerport/")
 args=(-e lan "$lan" -e broker "$brokeraddr")
+# Only when there is one. `am instrument -e relay ""` is not an empty argument:
+# it makes `am` print its usage and exit, so the whole run produces no verdict —
+# measured, and it cost a run to find. Absent instead, which `Desktop.arg` turns
+# into a failure that names the missing argument, so the relay tests fail loudly
+# rather than passing while asserting nothing.
+[ -n "$relay" ] && args+=(-e relay "$relay")
 [ -n "$classes" ] && args+=(-e class "$classes")
 
 # ── TalkBack ────────────────────────────────────────────────────────────────

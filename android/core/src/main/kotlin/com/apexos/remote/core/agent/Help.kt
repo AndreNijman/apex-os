@@ -209,8 +209,14 @@ object Help {
                 kv("On the same network", "A direct connection to the computer. Nothing in the middle."),
                 kv("Away from it", "A relay, which forwards bytes it cannot read. The key stays at the two ends."),
                 note(
-                    "The relay has no deployment yet. Off the computer's network, this app " +
-                        "reaches nothing.",
+                    "This app tries the direct connection first and falls back to the relay " +
+                        "only if that fails, so on your own network the relay learns nothing " +
+                        "about the connection. The app tells you which one it got.",
+                ),
+                kv(
+                    "What the relay sees",
+                    "Encrypted bytes it cannot read, both addresses, when you connect and " +
+                        "how much data moves. Not what any agent said, typed or ran.",
                 ),
                 h("The computer's clipboard"),
                 p(
