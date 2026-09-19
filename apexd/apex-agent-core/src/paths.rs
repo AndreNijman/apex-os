@@ -431,9 +431,15 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
 /// Split out for the reason [`scratch_root_for`] is: a test process has
 /// exactly one uid, and the claim worth asserting — that a directory belonging
 /// to ANOTHER account is refused — is about two. The `stat` is a real one of a
-/// real directory; only the uid it is compared against is chosen. Production
-/// callers use [`ensure_private_dir`] and never reach this.
-pub fn ensure_private_dir_as(dir: &Path, me: u32) -> io::Result<()> {
+/// real directory; only the uid it is compared against is chosen.
+///
+/// **`pub(crate)`, and that is the point.** "Production callers use
+/// [`ensure_private_dir`] and never reach this" would otherwise be a comment
+/// asking to be believed; the visibility makes it a property of the build.
+/// Every other crate in the workspace links this one, so a `pub` here would be
+/// a way for a caller anywhere to choose which account an ownership check
+/// compares against — which is the check.
+pub(crate) fn ensure_private_dir_as(dir: &Path, me: u32) -> io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
     std::fs::DirBuilder::new()
