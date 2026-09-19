@@ -3091,6 +3091,70 @@ jobs:
               exit 1
           fi
 
+      # tests/test-apex-pkg-update.sh — does a fix baked into an image ever
+      # reach a machine that is already running one? On 2026-09-19 it did not.
+      # katana was rebased onto the image carrying pkg-share, rebooted, and
+      # apex-sysext-rebuild.service — the unit whose entire job is to notice
+      # that the OS moved — started and finished in the SAME SECOND, reported
+      # success, and re-merged a byte-identical old extension: 177 image paths
+      # still shadowed, zero i686 Vulkan ICDs on a machine that had just taken
+      # the update (evidence §0.2, §1.2).
+      #
+      # Two guards decide. `cmd_rebuild --if-needed` read os_version_id and
+      # pkg_compat_level; `rebuild_extension`'s own short-circuit read
+      # os_version_id and the resolved rpm set. Neither can see an APEX image
+      # build: VERSION_ID is 43 before and after, and the resolved set comes
+      # from Fedora's repositories. The level is the only signal, and the guard
+      # every install, remove, upgrade and rebuild funnels through ignored it.
+      #
+      # The reason this is a suite and not a one-line diff is the trap in the
+      # remedy. Bumping PKG_COMPAT_LEVEL ALONE looks like a fix: --if-needed
+      # announces a rebuild, re-downloads every rpm, stops at "already up to
+      # date" on the unchanged set, and write_state then stamps the new level —
+      # marker consumed, nothing built, and every later boot matches. So
+      # "the extension rebuilt after a bump" is worthless as an assertion: it
+      # also passes against the broken engine whenever Fedora's repositories
+      # have drifted, which is exactly how katana's rebuild eventually happened
+      # (evidence §2.1: "luck, not design").
+      #
+      # Every case therefore HOLDS THE RESOLVED SET CONSTANT and varies only
+      # the level, and the suite prints the stored set against the computed one
+      # so that is measured rather than claimed. Two of its assertions are
+      # mutants that delete the level clause from the live function body and
+      # require the defect BACK — the container one must reproduce the whole
+      # trap: "compatibility changed", then "already up to date", nothing
+      # extracted, and the new level stamped anyway. Without them a bump with
+      # no fix would read as green.
+      #
+      # Leg A needs nothing; leg B runs the service's exact ExecStart inside
+      # `podman run --rm` because PKG_ROOT is a readonly /var/lib path and the
+      # entrypoint needs root. Same containment as the two steps above: the
+      # repository is mounted read-only, nothing is installed on the runner,
+      # and no sysext is ever merged.
+      - name: P0 packages — does an image fix reach a machine that updates?
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          command -v podman >/dev/null || { echo "::error::podman is not on this runner; leg B would SKIP and a could-not-run is not a pass"; exit 1; }
+          rc=0; out="$(./tests/test-apex-pkg-update.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the pkg-update suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex-pkg-update: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::the pkg-update suite printed no summary line"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^apex-pkg-update: //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          skipped="$(printf '%s' "$counts" | awk '{print $5}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed pkg-update assertions failed"; exit 1; }
+          [ "$skipped" = 0 ] || { echo "::error::$skipped assertions could not run; leg B is the one that runs the service's real entrypoint, so a skip here is a green tick over the defect this suite exists for"; exit 1; }
+          [ "$passed" -ge 16 ] || { echo "::error::only $passed pkg-update assertions ran; 16 ran on 2026-09-19, so some no longer execute — and the two mutants among them are what stop a bare PKG_COMPAT_LEVEL bump reading as a fix"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the pkg-update suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
+              exit 1
+          fi
+
       # tests/test-labwc-session.sh — the APEX Floating session, probed by real
       # clients against a real labwc running the SHIPPED config. It was the last
       # DEBT line in tests/suites-not-in-ci.txt, and its note asked the right
