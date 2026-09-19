@@ -87,10 +87,26 @@ repos (apex-os from `7f647470`, apex-shell from `4eea9fb`). Worktrees:
 `/var/tmp/apex-work/wt-p2-b7` (apex-os) and `/var/tmp/apex-work/wt-p2-b7-sh`
 (apex-shell). Scratch: `scratch-p2-b/round34/`.
 
-**NEXT ACTION:** decide the catalogue route (see FOUND 37's 113 MB number), then
-write the `Containerfile.base` stanza that compiles the plugin out of the
-vendored shell tree into `/usr/lib64/apex-shell/qml/Apex/I18n/`, and the
-`import Apex.I18n` in `shell.qml`.
+**NEXT ACTION:** write the `Containerfile.base` stanza that compiles the plugin
+out of the vendored shell tree into `/usr/lib64/apex-shell/qml/Apex/I18n/`, plus
+`QML_IMPORT_PATH` in `files/system/libexec/apex-shell-autostart`. The apex-shell
+half is DONE and pushed (`2bc9799`).
+
+**apex-shell `2bc9799` — the shell reaches the module.**
+`src/i18n/I18nBootstrap.qml` is the only file naming `Apex.I18n`, and
+`shell.qml` loads it through `Qt.createComponent()` and reads the status —
+**deliberately not a hard import**. A QML import that cannot resolve makes the
+importing file unloadable, and `shell.qml` is the whole desktop. Measured: 17
+suites in `tests/` load the shipped `shell.qml`, several of them full quickshell
+bring-ups on the DO-NOT-RE-RUN list, and a hard import would have turned every
+one of them red on this laptop the moment the commit landed. Section 6's
+predicate is REPLACED (see FOUND 38 — the dispatch note's claim that it flips on
+its own is wrong). `run-i18n-test.sh` **24/0/0**, `mutate-i18n.sh` **14 applied /
+14 CAUGHT / 0 SURVIVED** with new mutants I1/I2/I3.
+
+**The in-build load proof is measured and gated, see FOUND 39**: use
+`/usr/lib64/qt6/bin/qml -platform offscreen`, NOT `quickshell` — quickshell
+HANGS on success in a build container (rc=124 after 60s).
 
 **THE COST IS MEASURED AND IT IS NOT A PRODUCT DECISION — see FOUND 37.**
 Building the plugin costs **ZERO packages** anywhere: `g++`, `pkg-config`,
