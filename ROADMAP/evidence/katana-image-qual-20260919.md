@@ -736,4 +736,483 @@ the native-pass count 2151 to 152.
 
 ## 3. gaming-gpu — docs/gaming-and-sessions.md §6
 
-*(pending)*
+Run on the rebased machine (`apex-7f647470…`, digest `sha256:be3bdd0c…`, version
+`apex (2026-09-19T10:09:10Z)`, up since 18:29:42, **no reboot between §2 and
+this section**). Preconditions re-read immediately before arming, so every
+number below is against a machine that already has pkg-share's output merged:
+
+```
+$ ls /usr/share/vulkan/icd.d/ | grep -c i686          -> 13
+$ sudo sha256sum /var/lib/extensions/apex-user.raw
+eb3b8ba056d8f6f3caca2c3ed3204bda077f5f5f2fa426ccf264e385622c28a6   (§0.1's was 99749240…)
+$ systemd-sysext status        -> /usr  apex-user  Sat 2026-09-19 18:31:25 AWST
+$ wc -l ~/.local/share/Steam/logs/console-linux.txt    -> 37868   (the marker)
+```
+
+### 3.0 The harness, and the two sessions this section reads
+
+Both Gaming Mode runs went through greetd's `initial_session`, the route proven
+in §0.6 and argued for in §0.4 — same PAM service, same `acct_mgmt` →
+`setcred` → `open_session`, same `setresuid`, only the auth conversation
+skipped, and `pam_cap` still absent on this image (§1.1). The Exec is wrapped in
+`systemd-cat -t <tag>` because greetd dup2s the VT onto the session's stdio;
+`systemd-cat` **execs** its target, so the process chain, uid and capability
+sets are untouched. That redirection is the one divergence, stated again here
+because everything below is read out of the journal.
+
+Two runs exist and they are kept apart by tag:
+
+| tag | armed | ended | lines |
+|---|---|---|---|
+| `qual-gaming-new` | 18:34:01 | 20:45:01, by the dead-man restore timer | 144 187 |
+| `qual-gaming-r2` | 22:00:40 | 22:03:49, by a deliberate `SIGTERM` to gamescope | 3 789 |
+
+The first is the **long** run — the session was up 2 h 11 m and Steam was still
+working 2 h 06 m in — and it is what
+answers "does this survive". The second is the **instrumented** run: the machine
+was measured live while it was up, which the first could not be. They agree line
+for line on everything §6 asks.
+
+### 3.1 §6.1 — Gaming Mode opens the card the monitor is on. It does.
+
+The session's own log, `qual-gaming-r2`, in full (the `[apex-gaming-session]`
+lines; identical in `qual-gaming-new`):
+
+```
+[apex-gaming-session] apexd game mode engaged (cpuset/IRQ/clocks/tier/sched-ext)
+[apex-gaming-session] capabilities: CapEff=0000000000000000 CapPrm=0000000000000000 CapAmb=0000000000000000
+[apex-gaming-session] CAP_SYS_NICE: absent; soft RLIMIT_RTPRIO is 20.
+[apex-gaming-session]   NOT passing --rt: gamescope needs the capability, not the rlimit, and would
+[apex-gaming-session]   log 'No CAP_SYS_NICE' and run at ordinary priority anyway. Frame pacing under
+[apex-gaming-session]   load is worse; nothing else is affected. See evidence §6.2.
+[apex-gaming-session] gpu-select: HDMI-A-1 on card2 is an external display; 2 connected output(s) across 2 card(s)
+[apex-gaming-session] gpu-select: no connector on this machine publishes vrr_capable at all, so this is 'the driver does not say' and NOT 'the display has no VRR'. On NVIDIA that is expected; the property has to come from somewhere else
+[apex-gaming-session] GPU/output: --prefer-vk-device 10de:249d --prefer-output HDMI-A-1
+[apex-gaming-session] starting: gamescope -e -f --expose-wayland --prefer-vk-device 10de:249d --prefer-output HDMI-A-1 --mangoapp -- steam -gamepadui
+```
+
+and gamescope's answer:
+
+```
+[gamescope] vulkan: selecting physical device 'NVIDIA GeForce RTX 3070 Laptop GPU': queue family 2 (general queue family 0)
+[gamescope] drm: opening DRM node '/dev/dri/card2'
+[gamescope] drm: Connector HDMI-A-1 -> LEN - R25f-30
+[gamescope] drm: Connectors:
+[gamescope] drm:   HDMI-A-1 (connected)
+[gamescope] drm: selecting connector HDMI-A-1
+[gamescope] drm: selecting mode 1920x1080@240Hz
+```
+
+**All five lines the run-book predicted, verbatim, and the prediction was
+written down before the run** (card `## NEXT`, §0.10, §1.1). `drm: Connectors:`
+lists exactly one entry — gamescope on card2 never even enumerates the panel.
+The whole 3 789-line log contains **0** occurrences of `card1` or `eDP-1`.
+
+Render proof, measured live at 22:03 while the session was up. `grim` and
+`wlr-randr` do not work under gamescope (§0, FOUND), so the proof is who holds
+the node and who is on the GPU:
+
+```
+=== drm clients (who holds a node) ===
+Xwayland        /dev/dri/card2
+gamescope-wl    /dev/dri/card2       <- and NOT card1
+gamescope-wl    /dev/dri/renderD128
+gamescope-wl    /dev/dri/renderD129
+steam           /dev/dri/renderD129
+steamwebhelper  /dev/dri/renderD128
+steamwebhelper  /dev/dri/renderD129
+fossilize_repla /dev/dri/card1       <- shader compiler only, no KMS
+```
+
+```
+$ nvidia-smi
+|    0   N/A  N/A          247577    C+G   gamescope                                82MiB |
+|    0   N/A  N/A          247612      G   Xwayland                                  3MiB |
+|    0   N/A  N/A          247741      G   ...share/Steam/ubuntu12_32/steam          6MiB |
+|    0   N/A  N/A          248108      G   ./steamwebhelper                         20MiB |
+|    0   N/A  N/A          248140      G   ...am/ubuntu12_64/steamwebhelper        265MiB |
+|    0   N/A  N/A          248387    C+G   .../ubuntu12_64/fossilize_replay         35MiB |   (x5)
+```
+
+The **whole** Steam stack — compositor, Xwayland, client and the CEF UI process
+holding 265 MiB — is on the RTX 3070 as a graphics context, and the KMS master
+for the monitor is gamescope on card2. Session 1041: `Seat=seat0 TTY=tty1
+Type=wayland Class=user Active=yes State=active`.
+
+As §0 warned, `card1-eDP-1` is **not** asserted dark: it read
+`enabled=enabled dpms=On` throughout, because nobody holds it once the greeter
+is gone and the panel keeps its last framebuffer. That is why the proof above
+is fd ownership and nvidia-smi rather than a dpms reading.
+
+**§6.1 PASSES.**
+
+### 3.2 §6.2 — realtime, in both directions
+
+```
+in-session, from the session's own log:
+  capabilities: CapEff=0000000000000000 CapPrm=0000000000000000 CapAmb=0000000000000000
+
+live /proc of the two session processes (22:03):
+  gamescope           pid 247622   CapInh 0000000800000000  CapPrm 0  CapEff 0  CapAmb 0  CapBnd 000001ffffffffff
+  apex-gaming-session pid 247449   CapInh 0000000800000000  CapPrm 0  CapEff 0  CapAmb 0  CapBnd 000001ffffffffff
+  steam               pid 252927   CapInh 0                 CapPrm 0  CapEff 0  CapAmb 0
+
+$ getcap "$(command -v gamescope)"     -> (empty), rc 0
+$ apex gaming | grep -E 'realtime (limit|capability)'
+realtime limit     : yes
+realtime capability: no (/proc/self/status)
+```
+
+`CapInh=0000000800000000` is `cap_wake_alarm` alone, inherited from greetd's own
+ambient set and demoted to inheritable on the uid change — exactly what §0.6
+measured on the old image. Nothing on this machine grants CAP_SYS_NICE, and
+nothing pretends to.
+
+**`--rt` is not passed.** The only occurrence of the string `--rt` in the entire
+3 789-line session log is the session script's own prose line
+`NOT passing --rt: …`; the `starting: gamescope …` line quoted in §3.1 does not
+carry it. Limit yes / capability no, as the run-book asked.
+
+*Reading that disagrees with a naive expectation, recorded because the reading
+wins:* gamescope still prints
+
+```
+No CAP_SYS_NICE, falling back to regular-priority compute and threads.
+Performance will be affected.
+```
+
+**even though `--rt` was not passed.** So that message is emitted by gamescope's
+own startup capability probe and is **not** evidence that `--rt` was requested —
+§0.7 saw the same two lines on the old image, where `--rt` *was* passed
+unconditionally. The discriminator is the `starting:` line, not gamescope's
+warning. Worth keeping in the doc: §6.2's sentence "the session log to say
+'CAP_SYS_NICE: absent' and NOT pass `--rt`" is right, but a reader checking it
+by grepping for `CAP_SYS_NICE` will find gamescope's line too and could conclude
+the opposite.
+
+**§6.2 PASSES.**
+
+### 3.3 §6.3 — Steam inside gamescope. It reaches a UI, for the first time.
+
+This is the row the unit exists for, and it is the first run in which it *could*
+pass: §0.7 attributed the `bwrap` half to the round-31 harness, and §2 put 13
+i686 ICDs on `/usr` for the Vulkan half. Both halves were retested together.
+
+Criterion stated before the run, because the doc does not define one: no
+`BInit`/`VK_KHR_surface` failure after the marker, `steamwebhelper` alive, and
+the Steam processes on the NVIDIA card as `G` contexts.
+
+**The Vulkan half — the defect is gone.**
+
+```
+$ grep -cE 'BInit|VK_KHR_surface|Unexpected capabilities' <lines 37869..EOF>
+0
+$ grep -n 'BInit - Unable' console-linux.txt | tail -1
+37590:[2026-09-19 17:31:46] BInit - Unable to initialize Vulkan!     <- the LAST one ever, on the old image
+```
+
+Every previous attempt on this machine ended at that line: 2026-09-06 16:59:26,
+2026-09-17 17:58:58, 2026-09-19 09:25:29, 2026-09-19 17:31:46. After the
+pkg-share extension landed there are **none**, in either run.
+
+**The bwrap half — nothing to attribute any more.**
+
+```
+[2026-09-19 22:00:41] steam.sh[247623]: Steam client's requirements are satisfied
+```
+
+Zero `bwrap: Unexpected capabilities but not setuid` lines in either run, with
+`CapPrm=0` from greetd. §0.7's verdict holds on the new image.
+
+**What actually came up.**
+
+```
+[2026-09-19 22:00:41] Startup - Steam Client launched with: '…/ubuntu12_32/steam' '-srt-logger-opened' '-gamepadui'
+[2026-09-19 22:00:42] Verifying installation... / Verification complete
+[2026-09-19 22:00:43] Running query: 1 - GpuTopology
+                        gpus { id: 2  name: "NVIDIA GeForce RTX 3070 Laptop GPU"
+                               driver_id: k_EGpuDriverId_NvidiaProprietary  580.178.4 }
+[2026-09-19 22:00:44] Steam Runtime Launch Service: steam-runtime-launcher-service is running pid 248073
+[2026-09-19 22:00:44] bus_name=com.steampowered.PressureVessel.LaunchAlongsideSteam
+[2026-09-19 22:00:45] [Gamescope WSI] Executable name: vulkandriverquery
+[2026-09-19 22:00:45] [Gamescope WSI] Forcing on VK_EXT_swapchain_maintenance1.
+```
+
+and live at 22:03, the UI process itself:
+
+```
+248108 ./steamwebhelper … -uimode=4 … -clientui=…/clientui …
+248140 …/ubuntu12_64/steamwebhelper                          265MiB on the RTX 3070 (G)
+```
+
+`-uimode=4` is Big Picture. gamescope's X side logged
+`xwm: Embedded, no cursor set` and then
+`xwm: got the same buffer committed twice, ignoring` — an X client mapping and
+committing buffers, i.e. something is being composited, not an empty root.
+
+**The long run is the durability half.** `qual-gaming-new` held the same stack
+up from 18:34:02 to 20:45:00 — **2 h 11 m** — with Steam's background update loop
+completing normally at 18:36:07 (`HTTP 304 Not Modified`, `Nothing to do`) and
+Fossilize shader-cache replay ticking on the dGPU right through to 20:40:32.
+That last Fossilize line is 2 h 06 m after Steam started and 4 m 28 s before
+the teardown, so the client was still working when the run was cut. It ended
+only because this unit's own dead-man timer restarted greetd.
+
+**§6.3 PASSES. The row can be closed.** For the record, `bwrap` still takes
+SIGSYS core dumps during pressure-vessel's seccomp probing (16 this boot, and
+the same pattern exists in this log back to 2026-07-30) — pre-existing, benign,
+and *not* the `Unexpected capabilities` failure; the requirements check passes.
+
+### 3.4 §6.6 — cleanup, and a defect the run-book's own harness exposed
+
+**Clean exit (`qual-gaming-r2`).** `SIGTERM` to gamescope — the documented
+end-of-session signal, "gamescope exiting is the signal that Gaming Mode is
+over":
+
+```
+[gamescope] launch: Primary child shut down!
+/usr/libexec/apex-gaming-session: line 312: 247577 Segmentation fault (core dumped) gamescope … -- steam …
+[apex-gaming-session] gamescope exited with 139
+[apex-gaming-session] apexd game mode released          <- the EXIT trap ran
+
+$ apex game status        -> active : false
+$ pgrep -c -f '^gamescope' -> 0        $ pgrep -c -x steam -> 0
+$ loginctl                -> greeter back on tty1 by itself, ActiveSession=c5
+```
+
+**Killed exit (`qual-gaming-new`).** When the 20:45 dead-man timer restarted
+greetd instead, the session script logged `gamescope exited with 139` and then
+**nothing**. `apexd game mode released` never appeared, and Gaming Mode was
+still engaged 75 minutes later when this agent picked the machine up:
+
+```
+$ apex game status
+active : true   tier : performance   prior_tier : performance
+cpuset_policy: p-cores   irq_policy: away-from-game   sched-ext: scx_lavd …
+$ sudo journalctl -b -t qual-gaming-new -o cat | grep -c 'apexd game mode released'
+0
+```
+
+**DEFECT (new) — Gaming Mode cannot release itself when its session is torn
+down from outside.** `cleanup()` calls `apex game stop`, which goes through
+polkit action `org.apexos.apexd.manage-power`, whose defaults are
+`allow_active=yes`, `allow_inactive=auth_admin`, `allow_any=auth_admin`
+(`/usr/share/polkit-1/actions/org.apexos.apexd.policy`). The moment logind
+stops treating the session as *active* — which is precisely what a greetd
+restart, a VT switch away, or a logind-driven teardown does — the trap's own
+call is refused. Measured directly, from a session with no seat:
+
+```
+$ apex game stop
+apex: leaving game mode failed: org.freedesktop.DBus.Error.AccessDenied:
+      not authorized for org.apexos.apexd.manage-power
+$ sudo apex game stop
+apex: game mode OFF                       <- root is not subject to the check
+```
+
+The machine is then left with a p-core cpuset, IRQ steering, the `performance`
+tier and `scx_lavd` still installed, with no session that can undo it and no
+prompt anyone will ever see. Two candidate remedies, neither implemented here
+(this unit owns qualification, not the fix): let `apexd` release game mode when
+the session that requested it goes away (it already knows the cgroup), or give
+the release path a `allow_inactive=yes` of its own separate from *entering* game
+mode. Filed as a follow-up below.
+
+Two second-order readings from the same teardown, recorded because they are
+real and neither is caused by this image:
+
+* **gamescope segfaults on exit, every time.** `SIGSEGV` at 20:45:01 and
+  22:03:48 on the new image, and at 09:21:26 on the old one; `SIGABRT` on
+  2026-08-23. The session script reports it faithfully (`exited with 139`) and
+  the trap still runs, so nothing downstream breaks.
+* **`mangoapp` crash-loops for the entire session.** `gamescopereaper --respawn
+  -- mangoapp` respawns it at roughly 2 Hz: **15 376 mangoapp core dumps this
+  boot**, 14 403 respawns in the 2-hour run (57 612 `Glfw Error 65537/65550:
+  X11: Platform not initialized` lines, 364 respawns in the 3-minute run). The
+  MangoHud overlay never appears, the journal takes 144 187 lines for one
+  gaming session, and `coredumpctl` is 15 000 entries deep. **It costs disk, on
+  a machine that has little**: systemd rate-limits storage, so the 15 376
+  crashes left 1 379 dumps totalling **4.0 GB** in `/var/lib/systemd/coredump`
+  after two sessions, on a `/var` that was already 94% full. All but three were
+  removed afterwards (3 mangoapp samples kept alongside the gamescope and bwrap
+  dumps); the store is 26 MB again. `--mangoapp` is added unconditionally by the
+  session script whenever `mangoapp` is on PATH. Filed as a follow-up below.
+
+**§6.6 PASSES for the clean path** and fails for the torn-down path, which is
+the defect above.
+
+### 3.5 §6.4 — Safe Graphics on the dGPU output
+
+**The control flip.** §0.8 measured the old image: four lines, no GPU or output
+rows, and `grep -c WLR_DRM_DEVICES /usr/libexec/apex-safe-graphics` → 0. The new
+image, same command over ssh:
+
+```
+$ /usr/libexec/apex-safe-graphics check                              rc=0
+config      /usr/share/apex/safe-graphics
+compositor  /usr/bin/labwc
+terminal    foot
+renderer    pixman (software)
+primary gpu card1
+can light   eDP-1
+cannot light HDMI-A-1(card2) — on a secondary GPU; the software
+            renderer cannot import DMA-BUFs to reach them
+            force one with APEX_SAFE_GRAPHICS_DRM_DEVICE=/dev/dri/<card>
+
+$ grep -c WLR_DRM_DEVICES /usr/libexec/apex-safe-graphics              -> 6
+$ grep -c APEX_SAFE_GRAPHICS_DRM_DEVICE /usr/libexec/apex-safe-graphics -> 7
+```
+
+Byte-for-byte the three rows the run-book predicts, including naming the escape
+hatch in the same breath as the limitation.
+
+**The forced-device run**, through the same greetd mechanism
+(`env APEX_SAFE_GRAPHICS_DRM_DEVICE=/dev/dri/card2 /usr/libexec/apex-safe-graphics`,
+tag `qual-safegfx`, 22:04:36):
+
+```
+[apex-safe-graphics] primary gpu: card1; connected on it: eDP-1
+[apex-safe-graphics] WLR_DRM_DEVICES=/dev/dri/card2 (forced by APEX_SAFE_GRAPHICS_DRM_DEVICE)
+```
+
+```
+$ grep -c 'did not support importing DMA-BUF' <the log>   -> 0
+$ pgrep -a labwc  -> 262292 labwc -C /usr/share/apex/safe-graphics
+$ pgrep -a foot   -> 262369 foot
+drm holders: labwc /dev/dri/card2      (card1 held by nobody but systemd/logind)
+```
+
+**Render proof — the monitor is the screen that lit.** `grim` works here because
+labwc is wlroots:
+
+```
+$ wlr-randr
+HDMI-A-1 "Lenovo Group Limited R25f-30 URW0PNMC (HDMI-A-1)"
+  Enabled: yes   1920x1080 px, 239.964005 Hz (preferred, current)
+$ wlr-randr --json | names   -> ['HDMI-A-1']            <- the ONLY output
+
+$ python3 ~/qual/shot.py safegfx-card2 HDMI-A-1 eDP-1
+  HDMI-A-1     1920x1080  distinct_colours=699  mean_rgb=(7.8, 7.8, 7.8)
+  eDP-1        grim FAILED rc=1 unknown output 'eDP-1'
+```
+
+The compositor does not merely prefer the monitor — with `WLR_DRM_DEVICES`
+forced to card2 the panel **does not exist in this session at all**, and the
+frame that came back off HDMI-A-1 has 699 distinct colours (foot on labwc's
+black root), not a blank scanout.
+
+**Stated rather than claimed: the automatic branch was NOT reached.** It needs
+every connected screen to be on a non-primary card, i.e. the panel genuinely
+dark — lid shut and docked, or the panel disabled in firmware. `card1-eDP-1`
+read `status=connected enabled=enabled` throughout, so this run could only
+exercise the override. What the override proves is the *mechanism* the automatic
+branch would use; what it does not prove is the detection that chooses it.
+
+**§6.4 PASSES for the forced path; the automatic path remains untested.**
+
+### 3.6 §6.5 — the niri bar
+
+**The precondition was consumed before the login, and by design.** §0.8 recorded
+that at 17:36 on the old image `config.kdl` line 271 was untouched and there was
+no `.pre-apex-bar.bak`. On the new image the transform had **already happened at
+18:29:35**, five minutes after the reboot and four hours before any niri
+session:
+
+```
+Sep 19 18:29:35 apex apex-shell-firstrun[1588]:
+  [apex-shell-firstrun] disabled niri's stock waybar spawn (line 271) -> ~/.config/niri/config.kdl
+```
+
+`apex-shell-firstrun.service` is a **user** unit and runs when `user@1000.service`
+starts, which on this machine is at boot — not at a graphical login. So the doc's
+"after one login to the niri session" understates it: the transform lands on any
+machine whose user manager starts, session or no session. Recorded as a
+divergence: the niri login below **confirms** the end state, it did not trigger
+it.
+
+The niri session was launched through the same harness (tag `qual-niri`,
+22:05:48, `niri --session`, "starting version 26.04") and read live:
+
+```
+$ grep -n waybar ~/.config/niri/config.kdl
+270:// This line starts waybar, a commonly used bar for Wayland compositors.      <- niri's own upstream comment
+271:// spawn-at-startup "waybar"   // disabled by APEX: quickshell is this system's bar
+
+$ pgrep -a -u andre waybar      -> (none)                      was 31621 on the old image
+$ pgrep -a -u andre quickshell  -> 267286 quickshell -c /usr/share/apex-shell   (exactly one)
+$ ls ~/.config/niri/config.kdl.pre-apex-bar.bak   -> present, 28144 B
+$ niri validate --config ~/.config/niri/config.kdl
+INFO niri: config is valid
+```
+
+Exactly one `spawn-at-startup "waybar"` line, commented, ending in the APEX
+marker; the other match is niri's own upstream comment above it.
+
+Free render reading while it was up, which also separates niri from Gaming Mode:
+
+```
+$ python3 ~/qual/shot.py niri-new HDMI-A-1 eDP-1
+  HDMI-A-1     1920x1080  distinct_colours=164551  mean_rgb=(133.7, 142.3, 153.7)
+  eDP-1        1920x1080  distinct_colours=164551  mean_rgb=(133.7, 142.3, 153.7)
+drm holders: niri /dev/dri/card1  AND  niri /dev/dri/card2
+```
+
+niri drives **both** cards and paints both screens; Gaming Mode deliberately
+takes only card2. Two different correct behaviours, and §6.1's reading is not an
+artefact of the machine only being able to light one screen.
+
+**§6.5 PASSES** — two bars became one, and it was one before the login.
+
+### 3.7 Follow-up defects this section found
+
+1. **Gaming Mode stays engaged when its session is torn down from outside.**
+   `apex game stop` is `allow_active=yes` / `auth_admin` otherwise, so the EXIT
+   trap's release is refused the moment logind deactivates the session. Measured
+   twice: the trap succeeded on a clean gamescope exit and never ran to
+   completion on a greetd restart, leaving p-core cpuset + IRQ steering +
+   `performance` + `scx_lavd` installed with nothing able to undo it.
+2. **`mangoapp` crash-loops at ~2 Hz for the whole of every Gaming Mode
+   session** — 15 376 core dumps this boot, 14 403 respawns in one 2-hour
+   session, 144 187 journal lines, and **4.0 GB of stored core dumps** from two
+   sessions on a 94%-full `/var`. The overlay never renders.
+   `--mangoapp` is passed unconditionally whenever `mangoapp` is on PATH.
+3. **gamescope segfaults on every exit** (`139`). Cosmetic today — the trap
+   still runs on the clean path — but it is a core dump per session and it
+   predates this image.
+4. **§6.2's check is ambiguous as written.** gamescope prints
+   `No CAP_SYS_NICE, falling back to regular-priority` whether or not `--rt` was
+   passed, so grepping for `CAP_SYS_NICE` cannot distinguish the two. The
+   `starting: gamescope …` line is the only discriminator.
+5. **§6.5's precondition is stated too narrowly** — the transform runs from
+   `apex-shell-firstrun.service` at user-manager start, not at niri login.
+
+### 3.8 Verdict, and the state the machine was left in
+
+**gaming-gpu PASSES on hardware.** §6.1, §6.2, §6.3, §6.4 (forced path) and
+§6.5 all read what the run-book predicted, on the monitor, on the RTX 3070,
+through a real greetd login. §6.3 — the row this unit existed for — reached a
+Steam Big Picture UI inside gamescope on the dGPU for the first time on this
+machine, and stayed up for two hours. Two paths remain untested and are named
+rather than claimed: Safe Graphics' **automatic** dGPU branch (needs the panel
+genuinely dark) and any actual **game** launch (none was started).
+
+greetd, left explicitly:
+
+```
+$ sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-restore.sh
+restored: byte-identical to backup
+greetd restarted
+$ sudo cmp /etc/greetd/config.toml /etc/greetd/config.toml.orig-qual2   -> identical
+$ sudo grep -c initial_session /etc/greetd/config.toml                  -> 0
+$ systemctl is-active greetd                                            -> active
+$ systemctl list-timers qual-greetd-restore.timer                       -> 0 timers listed
+$ loginctl show-seat seat0 -p ActiveSession                             -> ActiveSession=c5
+$ pgrep -a -u greetd sway
+272321 sway --unsupported-gpu -c /usr/share/apex-greet/sway-greet.conf
+$ apex game status -> active : false ;  gamescope/steam/niri/labwc: none running
+```
+
+The greeter is back on tty1 and Andre can log in normally. One cosmetic
+leftover: logind still lists closed greeter sessions `c1`–`c4` in `State=closing`
+from the repeated greetd restarts; `c5` is the live one and is the active
+session on seat0. They clear on the next boot and nothing holds a device.
