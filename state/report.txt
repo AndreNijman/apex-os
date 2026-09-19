@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-19 17:13 AWST
+APEX ROADMAP — resume report — 2026-09-19 17:55 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -17,34 +17,50 @@ APEX ROADMAP — resume report — 2026-09-19 17:13 AWST
   agents
 ────────────────────────────────────────────────────────────────────────────
   build-verify ALIVE                                         task/build-verify
-             head f666f5c1 Merge task/p2-d-7 into roadmap/v2.2
-             dirty 0 file(s), ? unpushed, card 4m
-             NEXT In this order.
+             head 6e4174ee fix: build-local.sh pins the MATCHING apex-shell bran
+             dirty 0 file(s), 0 unpushed, card 26m
+             NEXT **Now:** watch two things, neither of which needs any more decisio
 
   katana-image-qual ALIVE                                         task/katana-image-qual
              head 
-             dirty 0 file(s), ? unpushed, card 4m
-             NEXT 1. **Poll for the tag** above. While waiting, read
+             dirty 0 file(s), ? unpushed, card 8m
+             NEXT **Waiting on the GHCR tag; everything that does not need it is alr
 
   p1-053e    ALIVE      P1-060 C1,P1-054..P1-058 on-device gaps task/p1-053e-device
              head 
-             dirty 0 file(s), ? unpushed, card 3m
-             NEXT Round 1's own card ordered the remaining work by value. Take them 
+             dirty 0 file(s), ? unpushed, card 0m
+             NEXT **Land `task/p1-053e-device` @ `9231f72a`.** Nothing on this unit 
 
-  p2-b       ALIVE      P2-003,P2-004                      task/p2-b-round33
+  p2-b       ALIVE      P2-003,P2-004                      task/p2-b-round34
              head 
-             dirty 0 file(s), ? unpushed, card 3m
-             NEXT **Round 32 is COMPLETE and pushed.** apex-shell `task/p2-b-round32
+             dirty 0 file(s), ? unpushed, card 0m
+             NEXT **ROUND 33 IS COMPLETE AND PUSHED.** apex-shell `task/p2-b-round33
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
   int-os:  tip 7f647470 Merge task/later-silicon-2 into roadmap/v2.2
-    (nothing — every task branch's content is on the integration tip)
+    task/build-verify
+      6e4174ee fix: build-local.sh pins the MATCHING apex-shell branch, not    [1/10 added lines on tip]
+    task/katana-image-qual
+      b00e2ae6 docs(roadmap): katana round-33 baseline — 177 shadows reprodu   [1/10 added lines on tip]
+      5f10a0a3 docs(roadmap): the negative control on katana's old image — f   [0/10 added lines on tip]
+      e3060b63 docs(roadmap): the PKG_COMPAT_LEVEL remedy would stamp itself   [0/10 added lines on tip]
+      431f0e84 docs(roadmap): the greetd login runs, and section 6.3's permi   [0/10 added lines on tip]
+      f6470e36 docs(roadmap): section 6.3's bwrap failure was the harness —    [1/10 added lines on tip]
+      5036a4f4 docs(roadmap): the old-image control column for every row of    [1/10 added lines on tip]
+    task/p1-053e-device
+      c79761c1 test(android): the device suite says why a dispatched agent c   [0/10 added lines on tip]
+      9668bd16 test(android): the terminal, on a real screen, attached to a    [1/10 added lines on tip]
+      4397b635 test(android): approvals, from a phone that can never approve   [1/10 added lines on tip]
+      23432f28 fix(remote): bind dual-stack, and stop calling a relayed sess   [0/10 added lines on tip]
+      89500813 test(android): the v2 Compose rule, in its own commit because   [0/3 added lines on tip]
+      9231f72a fix(android): the device suite leaked an apex-remoted per rec   [0/10 added lines on tip]
 
-  int-shell:  tip 9df72cf Merge task/p2-b-round32 into roadmap/v2.2 (apex-shell 
-    (nothing — every task branch's content is on the integration tip)
+  int-shell:  tip 4eea9fb Merge task/p2-b-round33 into roadmap/v2.2 (apex-shell 
+    task/p0-022-agents-help
+      4a0ed98 feat(agents): the Agent Center said what was running and never   [7/10 added lines on tip]
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
   landed-then-rewritten. Settle any one of them with
@@ -64,13 +80,14 @@ APEX ROADMAP — resume report — 2026-09-19 17:13 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 30s Sat 2026-09-19
+  snapshot timer: active   last 17:56:13 AWST 11ms
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    9c14e5c  int-os-
-    apex-os    91d9de4  roadmap-state
+    apex-os    e02b00f  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    c02272a  wt-base-os-
+    apex-os    8957484  wt-build-verify-
     apex-os    6c9c17f  wt-clippy-
     apex-os    1951fdc  wt-disposable-
     apex-os    2e3bbcd  wt-editors-
@@ -90,8 +107,7 @@ APEX ROADMAP — resume report — 2026-09-19 17:13 AWST
     apex-os    c74f38d  wt-multilib2-
     apex-os    0fd2d78  wt-p0-002-
     apex-os    e63b0e3  wt-p0-003-
-    apex-os    cb17b4e  wt-p0-004-
-    apex-shell 83354cc  apex-shell-
+    apex-shell 7add8c6  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-
