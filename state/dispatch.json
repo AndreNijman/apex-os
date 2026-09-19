@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-19T12:55+08:00",
+  "updated": "2026-09-19T13:10+08:00",
   "_round": "Round 30. All four of round 29's agents were dead at the resume, every worktree clean with nothing unpushed, so the round was a landing round: four merges, zero unlanded left in either repo. Three agents re-dispatched fresh from cards (never by SendMessage); `later` retired because its remainder is hardware. Three slots deliberately free — one still held for the Android unit, two headroom. No new unit was invented to fill them: the READY list was empty and the COMPLETE section is exhaustive.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 bde4d96c -> 6b531503. Three merges, in order: c6bc990a (task/later-2, tip 0391b4ec, 741 insertions over 5 files), 7658fe1f (task/p2-b-round29, tip cb02019f, tests/lib/atspi.sh), 6b531503 (task/p2-f-4, tip 79027b51, 551 insertions over 2 files). Each merge --no-ff; check-no-conflict-markers.sh PASS after each; pushed once with --force-with-lease. FOURTH MERGE, later the same session: f40ffefe (task/p2-f-5, tip 933bbee1, 1,353 insertions over 7 files — the gdrive provider). Rust changed in this one, so the workspace was actually rebuilt on the merged tip: cargo test --locked --workspace --no-fail-fast 3299 passed / 0 failed / 2 ignored, clippy --workspace --all-targets -D warnings exit 0, tests/test-secret-broker.sh 84/0, and all four count gates unchanged. roadmap/v2.2 is now f40ffefe. FIFTH MERGE: da6fc0fb (task/p2-d-6, tip 044fa254, 1,836 insertions over 16 files — gap 5, the per-run browser CA bind, with route B deliberately not started). Re-run on that tip: cargo test --locked --workspace --no-fail-fast 3314 passed / 0 failed / 2 ignored across 56 targets, clippy exit 0, tests/test-apex-browser.sh 116/0, tests/test-secret-broker.sh 84/0 (re-run because the same tip now also carries gdrive), and all four count gates unchanged. roadmap/v2.2 is now da6fc0fb. THE WIRE VERSION MOVED TO 10 — see _decisions. SIXTH MERGE: bb229745 (task/p2-f-6, tip a4907070, 2,206 insertions over 7 files — the msgraph transport). On that tip: workspace 3338 passed / 0 failed / 2 ignored, clippy exit 0, test-secret-broker.sh 93/0 (was 84), test-apex-browser.sh 116/0 re-run because the same tip carries both, and the four count gates unchanged. roadmap/v2.2 is now bb229745.",
@@ -61,21 +61,6 @@
       "queue_id": "build-verify",
       "card": "ROADMAP/state/agents/build-verify.md",
       "at_dispatch": "Not a roadmap item -- a guard. Two changes landed into the build path and NEITHER has been through a build: 36535383 switched Containerfile.core to the quickshell-git COPR package for the AT-SPI fix, and a869f033 changed apex-pkg's extraction and added a CI step. The quickshell commit added `grep -qE 'revision [0-9a-f]{7,}'` against a --version string nobody has observed from quickshell-git, which is the exact can-only-fail shape that cost this repo five days of image builds and is why check-containerfile-assertions.sh exists; and under pipefail that printf|grep returns 141 on a MATCH, which would invert the negation. Told to build locally, read what --version really prints, and fix the assertion against the observation rather than against what the release build used to print. Also told a skipped job counts as success here (six documented instances) so confirming the new multilib CI step RAN is not the same as the job being green. Bounded away from every machine: katana is the TPM agent's, the L16 is Andre's daily."
-    },
-    {
-      "slug": "later-silicon-2",
-      "items": [
-        "L-001"
-      ],
-      "repo": "apex-os",
-      "worktree": "(agent creates)",
-      "branch": "task/later-silicon-2",
-      "agent_id": "a142d8239a4bc1e85",
-      "dispatched": "2026-09-19T12:00+08:00",
-      "session": "round 31 orchestrator",
-      "queue_id": "later",
-      "card": "ROADMAP/state/agents/later.md",
-      "at_dispatch": "Run 2 only -- the TPM CLEAR and the recovery path on real silicon. ANDRE WAS ASKED DIRECTLY AND SAID YES: katana's TPM is owned by his live Windows install (lockoutAuthSet=1, five persistent handles, a Windows Hello NGC container from 2026-09-12), there is no BitLocker on that disk so no DATA is at risk, and the approved cost is his Windows Hello PIN, which Windows re-provisions. PPI operation 5 reads 'User not required' on this firmware so nobody is needed at the machine. Runs 1 and 4 are already PASS on silicon (merge f602f1cb); runs 3 and 5 are could-not-run with hard reasons; this takes L-001 from 3-of-5 to 4-of-5. Told to VERIFY the clear rather than assume the reboot did it -- a reboot that silently declined the request looks identical to success from outside, and a check that inspects nothing is this program's dominant defect family. Hard boundaries: never write nvme0n1 (Windows + Andre's 1.3TB games library), touch neither of the two ESPs, efibootmgr byte-identical before and after, system disk must not become encrypted, greetd active on VT 1 with 0 failed units. Secure Boot stays OFF; exactly three rows need redoing when Andre enables it."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
