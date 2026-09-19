@@ -165,6 +165,22 @@ triggers one rebuild even if the Fedora version is unchanged. Requested packages
 now provided by the image are removed automatically, so an older extension copy
 cannot shadow the OS package.
 
+That level is the only thing that notices an APEX image build at all: `VERSION_ID`
+is the Fedora release and does not move when APEX rebuilds, and the resolved
+package set comes from Fedora's repositories, which know nothing about what APEX
+baked. To check on a machine that a rebuild really happened rather than being
+skipped, read the level the extension was built at and the unit's own log:
+
+```bash
+jq -r .pkg_compat_level /var/lib/apex/pkg/state.json
+journalctl -u apex-sysext-rebuild -b
+```
+
+A boot that rebuilt logs `extension compatibility changed … — rebuilding`, and
+the unit takes minutes rather than finishing in the same second it started. A
+state file still holding the older level means the rebuild has not run yet — an
+offline boot leaves it for the next one, or for the next `apex update`.
+
 `apex update` also re-resolves user packages, so they receive Fedora security
 fixes instead of staying pinned at whatever was current on install day. If
 nothing changed it stops early and does not re-merge `/usr`.
