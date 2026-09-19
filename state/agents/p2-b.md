@@ -521,145 +521,29 @@ that this page's markup is correct all the way to the bus and that its flows are
 completable through it, so the whole remaining defect is the upstream one in
 FOUND 20 — still unfiled, deliberately, because filing is Andre's call.
 
-Round 30 (2026-09-19). **FOUND 14 is closed**: named cause, standalone
-reproduction, in-situ confirmation, and the lock screen's markup read back off
-the bus for the first time. See FOUND 20–23.
+Round 30 and round 29 (2026-09-18/19) — **PRUNED for length on 2026-09-19.**
+Both are merged and neither has anything outstanding. The full text is in
+`scratch-p2-b/p2-b.card.pre-round33-prune.md`, and every finding either round
+produced is still in the FOUND list below (20–24 from round 30, 18–19 from round
+29), so nothing measured has been lost. The short version:
 
-apex-shell `task/p2-b-round30`, four commits on `roadmap/v2.2`'s `d5c781a`,
-all pushed:
-
-* `273c1fb` — `tests/quickshell-a11y-cause.cpp` (the five-mode reproduction),
-  `tests/check-quickshell-a11y-cause.sh` (**14 passed / 0 failed / 0 skipped**)
-  and `tests/mutate-quickshell-a11y-cause.sh` (**13 applied, 11 CAUGHT /
-  0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE, 2 HELD / 0 FALSE-RED**). The suite
-  is a PIN: mode A must produce a null root, so the day Qt or qtdeclarative
-  fixes this it goes RED and says to delete the pin and write the real
-  read-back. It needs no compositor, no bus and no quickshell, which is why it
-  can run on the Arch runner where nothing else in this unit's shell half can.
-* `b01a276` — `tests/quickshell-a11y-shim.cpp` (the LD_PRELOAD),
-  `tests/run-lockscreen-atspi-shim.sh` (**23 passed / 0 failed / 1 skipped**,
-  six runs) and `tests/mutate-lockscreen-atspi-shim.sh` (**8 applied,
-  6 CAUGHT / 0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE, 2 HELD / 0 FALSE-RED**).
-  Both wired into `ci.yml`, all six new files in the structure-check REQUIRED
-  list, `check-suites-run-in-ci.sh` 66 suites / 66 reachable / 0 exempt,
-  `shellcheck -S warning -x tests/*.sh` clean, `check-no-conflict-markers.sh`
-  PASS, and every REQUIRED path stat-ed (110 checked, 0 missing).
-
-Both mutation harnesses now restore from their **trap**, not only after each
-mutant: before that, a CI step timeout would have left a mutated file in place
-for every later step in the same job, and because these files are in the
-REQUIRED list the structure check would still have passed. The first version of
-that (in `b01a276`) restored correctly **by accident**, and `20a1613` fixes it —
-see FOUND 24. Do not repeat the claim `b01a276`'s message makes.
-
-* `20a1613` — `trap put_back EXIT INT TERM` does not END the script on a
-  signal. The kill test now asserts three things instead of one: the file is
-  restored, there is **no totals line** (it stopped rather than carrying on to
-  score a mutant it never ran) and there is **no `cp` error** (it stopped by
-  design rather than by choking). All three pass; the harness exits 143;
-  unkilled it is unchanged at 13 applied / 11 CAUGHT / 0 SURVIVED / 2 HELD.
-
-`56d7521` is prose only — comments, `echo` lines and skip reasons in
-`run-lockscreen-atspi.sh` — and it was verified as such rather than asserted:
-the suite is 17/0/6 after it, unchanged, and round 29's whole mutation pair
-re-runs at **11 applied / 8 CAUGHT / 0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE /
-3 HELD / 0 FALSE-RED**, also unchanged.
-
-apex-os `task/p2-b-round30`: cut from `6b531503`, pushed, **no commits** —
-nothing this round needed apex-os. The branch exists because apex-shell's CI
-matches on branch name.
-
-P2-003's roadmap evidence carries the `273c1fb` half. The `b01a276` half and
-FOUND 22/23 go in next.
-
-**FROM THE GITHUB ARCH RUNNER, not this laptop.** Two runs: **35382910849** on
-`b01a276` and **35383306764** on the final tip `56d7521`, which reproduces it
-exactly. Taking the first: `Repo Structure Sanity` **success** (so all
-110 REQUIRED paths exist there), `NixOS` **success**, and `arch-validate` red
-on **exactly one step — `run-rtl-test.sh` at 17/3/2**, the pre-existing red this
-unit has carried since round 28 and which a control run on `roadmap/v2.2`
-already proved is nobody's branch's doing. Every new step passed, and the
-important one is the first:
-
-* `check-quickshell-a11y-cause.sh` — **14 passed / 0 failed / 0 skipped ON THE
-  ARCH RUNNER**, `note: Qt 6.11.2, compiler g++`. All five modes RAN there.
-  So FOUND 20 is not a Fedora fact or a Qt 6.10.3 fact: the same
-  `~QCoreApplication` clears the same factory list on a different
-  distribution and a different Qt minor. That is the whole reason this suite
-  was built to need no compositor, no bus and no quickshell.
-* `mutate-quickshell-a11y-cause.sh` — **13 applied, 11 CAUGHT / 0 SURVIVED /
-  0 MISSCORED / 0 UNSCORABLE, 2 HELD / 0 FALSE-RED** on the runner, identical
-  to here. The pin is mutation-proved on two machines.
-* `run-lockscreen-atspi-shim.sh` — `SKIP: no quickshell, so nothing here was
-  measured.` and `passed=0 failed=0 skipped=1`. The named refusal, as designed.
-* `mutate-lockscreen-atspi-shim.sh` — `applied=0 … held=0 false-red=0` and exit
-  0: its baseline guard fired rather than scoring eight mutants against a suite
-  that never ran (FOUND 18 working as intended on the machine that taught it).
-* `run-lockscreen-atspi.sh` — 8/0/1, unchanged by `56d7521`'s prose edit.
-
-Runs **35383306764** (`56d7521`) and **35384106245** (the final tip `20a1613`)
-give the identical lines and the identical single red step, so the round lands
-green apart from a failure older than it.
-
-Round 29 (2026-09-18).
-
-apex-shell `task/p2-b-round29`, five commits on `roadmap/v2.2`'s `379eef8`,
-pushed, NOT yet merged: `d710bfb` the AT-SPI read-back suite and the ported
-harness, `f66db73` the mutation pair and the CI wiring, `c81c421` the
-provenance self-check for the two copied files, `e65d378` the harness guard the
-Arch runner made necessary (FOUND 18) plus the at-spi path list (FOUND 19), and
-`5ae27c3` the per-mutant half of that guard — the WANTS array's comment claimed
-a property only an array nobody forgets to update would have, so `mutate()` now
-asks the same question about its own `want` and scores UNSCORABLE, which fails
-the run. Final harness run: 11 mutants, **8 red CAUGHT / 0 SURVIVED /
-0 MISSCORED / 0 UNSCORABLE, 3 green HELD / 0 FALSE-RED**.
-
-apex-os `task/p2-b-round29`, two commits on `roadmap/v2.2`'s `1668ed9c`, pushed:
-`4aae9249` the `GSETTINGS_BACKEND=memory` fix to `tests/lib/atspi.sh`, and
-`cb02019f` the same at-spi path list. The two copies of that file still diff
-empty apart from the provenance block.
-
-New in apex-shell:
-
-* `tests/run-lockscreen-atspi.sh` — **17 passed / 0 failed / 6 skipped** here.
-  It brings up a private headless labwc, a private session bus and a private
-  a11y bus, loads the shipped `shell.qml`, engages the lock through the shipped
-  IPC handler, and reads the tree back over D-Bus.
-* `tests/mutate-lockscreen-atspi.sh` — 11 mutants, each a full bring-up:
-  **8 red CAUGHT / 0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE, 3 green HELD /
-  0 FALSE-RED.**
-* `tests/lockscreen-atspi-control.qml` — the control fixture.
-* `tests/lib/atspi.sh` and `tests/atspi-walk.py`, ported from apex-os with a
-  PROVENANCE header carrying the `diff` command that proves they are still
-  copies (both empty today).
-* Both suites wired into `.github/workflows/ci.yml` and all five files added to
-  the structure-check REQUIRED list. `check-suites-run-in-ci.sh`: 64 suites,
-  64 reachable, 0 exempt.
-
-apex-os, re-run after the `atspi.sh` change and unchanged from the ledger:
-`test-apex-greet-atspi.sh` 31/0/0, `mutate-greet-atspi.sh` 8 applied / 8 CAUGHT
-/ 0 SURVIVED, `test-apex-greet-session-bus.sh` 37/0/0.
-
-**From the runner, not this laptop.** CI run 35361832221 on
-`task/p2-b-round29`: `structure-check` and the NixOS job green; `arch-validate`
-red on two steps. One is `run-rtl-test.sh` at **17/3/2**, the pre-existing red
-this unit has been carrying since round 28 — unchanged, and not this branch's
-doing. The other was the new mutation step, and it was a REAL defect in the new
-harness, not an environment problem: see FOUND 18. Both are fixed in `e65d378`.
-
-Re-dispatched as **35362877551** and again on the final tip as
-**35363876000** (both green on the two new steps), and this is the
-second-machine result:
-`run-lockscreen-atspi.sh` is **8 passed / 0 failed / 1 skipped on the Arch
-runner**. The whole §1 control passed there — labwc came up headless, the
-private a11y bus came up, `ScreenReaderEnabled` read back true, the frame came
-back MAPPED and the `Accessible.name` came back verbatim. The one SKIP is the
-shell half: the runner has no `quickshell` (AUR), so §2–§5 cannot run there, and
-`mutate-lockscreen-atspi.sh` printed its new guard — naming the three
-assertions the baseline did not make — and exited 0. **So the harness itself is
-proven on two machines and the empty-tree finding is not a laptop artefact.**
-The only red left in that run is `run-rtl-test.sh` at 17/3/2, which is older
-than this branch.
+* **Round 30** closed FOUND 14 — named cause, standalone reproduction
+  (`check-quickshell-a11y-cause.sh` 14/0/0 + `mutate-quickshell-a11y-cause.sh`
+  13 applied / 11 CAUGHT / 2 HELD, identical on the Arch runner), in-situ
+  confirmation, and the lock screen's markup read back off the bus for the
+  first time under the shim (`run-lockscreen-atspi-shim.sh` 23/0/1 +
+  `mutate-lockscreen-atspi-shim.sh` 8 applied / 6 CAUGHT / 2 HELD). FOUND 24 —
+  a signal trap whose handler only RETURNS does not stop the script — came out
+  of it and is the shape every mutation harness here now uses.
+* **Round 29** wrote the first AT-SPI read-back of the lock screen
+  (`run-lockscreen-atspi.sh` 17/0/6 here, 8/0/1 on the Arch runner) and its
+  mutation pair (11 applied / 8 CAUGHT / 3 HELD), ported `lib/atspi.sh` and
+  `atspi-walk.py` into apex-shell with a provenance self-check, and produced
+  FOUND 18 (a mutation harness must check the baseline ASSERTED each mutant's
+  target, not merely that it was green) and FOUND 19 (the two at-spi helpers
+  are never on `$PATH` and their directory differs by distribution). apex-os
+  got `4aae9249` (`GSETTINGS_BACKEND=memory` in `lib/atspi.sh`, FOUND 15) and
+  `cb02019f`.
 
 ## FOUND (still true; do not re-derive)
 

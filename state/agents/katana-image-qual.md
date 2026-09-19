@@ -375,4 +375,19 @@ Blocks, in order, all from §6:
 
 - CI 35433705393 producing
   `ghcr.io/andrenijman/apex-os:apex-7f647470e222cfa23e0853cac45ef3f7e74c252e`.
-  Last poll 17:13 AWST: `manifest unknown`.
+  Last poll **17:46 AWST: `manifest unknown`**. The `core` tier has been
+  `in_progress` since 17:05 (41 min) and `base` + `image` still follow it;
+  `rust` and `changes` are green, `installer-iso` skipped. Health of the run is
+  the `build-verify` agent's question, not this unit's.
+- **There is no shortcut around it.** All five per-SHA tags already on GHCR were
+  checked with `git merge-base --is-ancestor`: `26ea6a02`, `d12d3450`,
+  `61dd814c`, `266dcc57` and `bd0c41ce` (the newest, 2026-09-19 10:15, still
+  35 minutes older than the two merges) carry **neither** `78f04717` nor
+  `5de97037`. This CI run is the only image that can qualify either unit.
+- **Contingency, written down so a fresh agent does not improvise one.** Do
+  NOT live-patch katana's `apex-pkg` to get the pkg-share numbers without an
+  image: the repo `CLAUDE.md` forbids repeating the Sep-6 hotfix, and it would
+  contaminate the machine for the real test. If the tag has not landed by
+  ~20:15 AWST, land what exists — the old-image control column and the §6.3
+  attribution are already complete and pushed — and leave the rebase to the
+  next round with this card pointing at the tag.
