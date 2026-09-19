@@ -3,206 +3,146 @@
 items: P2-008, P2-009, P2-012
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-p2-d
-branch: **task/p2-d-6** (off roadmap/v2.2 @ 6b531503)
+branch: **task/p2-d-7** (off roadmap/v2.2 @ bb229745)
 
-> **PROTOCOL_VERSION IS 10 AS OF ROUND 30.** The per-run browser CA bind
-> (`RunRequest::trust_ca`, gap 5) TAKES 10 — `BROWSER_CA_VERSION = 10`.
-> **ROUTE B'S TLS FIELDS MUST TAKE 11, NOT 10.** `docs/browser-capsule-auth.md`
-> said 10 for route B before this round; round 30 rewrote those three places.
-> Why 10 and not a ride on 9: a daemon that drops this field leaves the capsule
-> distrusting the CA, so Firefox sits on `UNKNOWN_CA` until `--timeout` kills
-> it — five silent minutes and then "the capsule did not finish", which is not
-> the loud refusal `second_factor`'s no-bump argument rests on.
-> `check_daemon_understands` runs BEFORE `Run` and consumes a number; a
-> `SessionInfo` echo could only be read after the browser had already started.
+> **PROTOCOL_VERSION IS 11 AS OF ROUND 31.** Route B took it
+> (`BROWSER_PRESENT_VERSION = 11`, `RunRequest::present`); gap 5's
+> `RunRequest::trust_ca` still holds 10. `BROWSER_CA_VERSION <
+> BROWSER_PRESENT_VERSION` is a **compile-time** assert, so a build that
+> renumbered them does not link — that is also the strongest of this round's
+> ten mutations. The next wire field on this unit takes **12**.
 
-> Rounds 1-5 are landed. `task/p2-d-2`, `-4` and `-5` are merged — do not commit
-> onto any of them. The durable account of what was built is
+> Rounds 1-6 are landed. `task/p2-d-2`, `-4`, `-5` and `-6` are merged — do not
+> commit onto any of them. The durable account of what was built is
 > `docs/browser-capsule.md` + `docs/browser-capsule-auth.md`; round 3's long
 > archive is `/var/tmp/apex-work/scratch-p2-d/p2-d-card-round3-archive.md`.
 
 ## NEXT
 
-**Round 30 is complete and everything is pushed.** Gap 5 is closed and recorded
-against P2-012, P2-008 and P2-009 (evidence re-parsed afterwards; every earlier
-round survived — P2-012 is 31.5 KB now).
+**Round 31 is complete and everything is pushed** (`task/p2-d-7`, six commits,
+`8c3b54bf` → `a932e707`). P2-012's last criterion is closed: a capsule can
+present a credential to a site and is never given it.
 
-The next action for whoever picks this up is NOT engineering. It is getting
-Andre's answer to the question under "The question, for Andre" in
-`docs/browser-capsule-auth.md`: may `apex-agentd` read the plaintext of a
-capsule's connection to the one destination that capsule was pinned to, in
-order to add a credential the capsule is never given? If yes, route B is a
-round of its own and **it takes PROTOCOL_VERSION 11** — 10 is gone. If no,
-P2-012's "capability auth" is permanently unmet rather than pending and the
-item should say so.
+There is **no engineering left on this unit that a round can close**. The three
+things that remain are named under BLOCKED ON and none is a test:
 
-## THIS ROUND'S SCOPE (round 30), narrow on purpose
+- P2-008's USB passthrough means detaching real hardware.
+- P2-009 needs a guest image carrying an agent CLI — a build.
+- Route C (a form login, an OAuth redirect chain) needs `geckodriver` in the
+  image, which is a product decision about what APEX carries, not a round.
 
-**Gap 5 only — the per-run CA bind.** Route B is NOT being built: it is blocked
-on Andre's decision, written out under "The question, for Andre" in
-`docs/browser-capsule-auth.md`. Building the TLS server before the answer
-exists would be a round that may have to be deleted.
+The one small piece of engineering still named anywhere is `SessionInfo`
+carrying neither `trust_ca` nor `present`, so `apex agent status` cannot show
+that a capsule trusts an extra root or that one of its destinations is
+authenticated. Additive optional fields on a stability surface; too small to be
+a unit, and it folds into whichever round next touches `SessionInfo`.
 
-Design taken (advisor-reviewed) before any code:
+**If this unit is dispatched again, it should be to fold that in and for
+nothing else** — or not dispatched at all.
 
-- `RunRequest::trust_ca: Option<String>` — an absolute host path to a
-  PEM file of certificates. It does NOT make the whole session trust a CA:
-  `curl`, `git` and `python` in the same sandbox keep using the system bundle
-  and still refuse the intranet host. It installs a **Firefox
-  enterprise-policy** root, because that is the only CA install route in the
-  image (`nss-tools` is absent, so there is no `certutil`).
-- The daemon writes the policy, not the engine. A generic "bind this file over
-  that path" wire field would let any caller shadow any path inside a session's
-  namespace; `install_browser_ca` mirrors `install_redacted_settings` instead.
-- Refused without a confined sandbox — no namespace, nothing to bind into, so
-  the field would silently mean nothing. Same shape as `--ttl` with no grant.
-- The host's own `/etc/firefox/policies/policies.json` is MERGED, not replaced:
-  it carries four `Status: "default"` preferences and the `//` comment keys,
-  and a capsule that lost them would be a capsule with different defaults from
-  every other browser on the machine.
+## DONE (round 31, branch task/p2-d-7) — six commits, all pushed
 
-## DONE (round 30, branch task/p2-d-6) — six commits, all pushed
+Route B, built because Andre answered the question round 30 refused to answer
+for him: **yes**, the runtime may read the plaintext of a capsule's connection
+to the one destination it was pinned to, in order to add a credential the
+capsule is never given.
 
-- `044fa254` — **a defect in this round's own work, found by review**:
-  `MAX_CA_BYTES`' doc comment claimed it stopped `--trust-ca /dev/zero` and it
-  did not. `install` read the whole file and checked the length after, and
-  `fs::read` on a character device grows a `Vec` until the daemon dies. The
-  engine's `[ -f ]` covered the shipped path; `apex agent run --trust-ca` and
-  any raw client did not. Metadata first now, then `take(cap + 1)`. The
-  oversize assertion had to be strengthened before its mutation went red — it
-  checked the word "limit", which BOTH guards use, so the redundant guard was
-  hiding the removal of the load-bearing one.
-- `2fc59c6b` — **the docs**. `docs/browser-capsule.md`'s NOT BUILT list no
-  longer says a capsule cannot be told to trust a CA; a section replaces it.
-  `docs/browser-capsule-auth.md` reserved protocol 10 for route B while gap 5
-  did not exist — **route B is 11 now**, corrected in all three places with the
-  reason rather than silently. The "What is not decided" bullet is struck and
-  records the two things the build added that it did not foresee (the merge,
-  and the refusal on an absent policy file). One stale sentence fixed: the
-  shape of the shipped `policies.json` IS asserted, by round 29's
-  `Containerfile.base` addition.
-- `8e1ca9cc` — **the capsule itself says what it sees**:
-  `apexd/apex-agentd/tests/browser_ca_bind.rs`, a private daemon and a confined
-  session that copies out what it finds at
-  `/etc/firefox/policies/policies.json` INSIDE its namespace, reads the path
-  that document names, and copies that out too. Four cases, two controls that
-  fail differently. `/etc` is read and its sha256 asserted unchanged. Two
-  mutations red — deleting the `ro_at` push printed the LIVE machine policy in
-  the failure, which is how the file proves it reads through the namespace and
-  not through a fixture. **Also fixed a defect in my own `2fff910f`**:
-  `BrowserCmd::Run` crossed clippy's `large_enum_variant` threshold when the
-  flag was added and that commit was pushed without clippy having been run
-  over it. 56 suites green, clippy clean.
-- `2fff910f` — **`apex browser run --trust-ca FILE`**: the clap surface, the
-  engine, and 11 new suite assertions that the flag reaches the `apex agent
-  run` line and lands among the RUNTIME's flags rather than after the `--`
-  (after it, firefox has no such flag and the capsule fails naming the wrong
-  program). Engine refusals, each asserted to leave no session behind: a
-  relative path, a file that is not there, a file inside `$BROWSER_ROOT`.
-  Five mutations, all red, all restored byte-identically. One assertion was
-  written wrong first — `${#argv%%<pat>*}` is a bad substitution, so it
-  printed an error and asserted NOTHING, neither PASS nor FAIL. The dominant
-  defect family, inside a test written to avoid it.
-  116 passed / 0 failed (was 105); `shellcheck -S warning -x` clean.
-- `b0ef1b2c` — **the daemon half: `apex-agentd/src/browser_ca.rs`.** Copies the
-  PEM where the session can read and not write it, merges a
-  `Certificates.Install` into a copy of the MACHINE's own
-  `/etc/firefox/policies/policies.json`, binds that copy over the real one in
-  the namespace (`spec.ro` twice + one `spec.ro_at`, which is
-  `install_redacted_settings`' shape). Four refusals, not comments: an absent
-  host policy REFUSES (a `--ro-bind-try` over a missing target is a silent
-  no-op); only `CERTIFICATE` blocks may go in (a key beside the cert is the
-  ordinary mistake and the copy lands where the agent can read it); DER is
-  refused with the `openssl` line; a machine that already installs
-  certificates refuses rather than merging two trust lists silently. Six
-  mutations, each restored byte-identically with sha256 checked. The install
-  test's scratch directory is reached through a SYMLINK on purpose — with a
-  plain path the canonical and literal strings are equal and the assertion
-  would be checking nothing.
-- `1fff2c45` — **PROTOCOL_VERSION 10, `RunRequest::trust_ca`, and the CLI's
-  refusal to send it to a daemon that would drop it.** The revision number was
-  the decision and it is argued in the commit and at `PROTOCOL_VERSION`: this
-  is the first guarded field whose dropped key fails CLOSED, and it gets a
-  number anyway because the closed failure is silent for `--timeout` seconds
-  and then blames the timeout. `AgentCmd::Run` is boxed — `RunArgs` crossed
-  clippy's `large_enum_variant` threshold when the flag was added, and that is
-  the flag's cost rather than tidying. Four mutations, each restored
-  byte-identically: the wire key renamed (key assertion red),
-  `BROWSER_CA_VERSION = 9` (compile-time ordering assert red),
-  `PROTOCOL_VERSION` left at 9 (same), the `--trust-ca` row deleted from
-  `settings_a_daemon_could_drop` (table test red, `left: []`).
-  55 suites green, clippy `--all-targets -D warnings` clean.
+- `8c3b54bf` — **`browser.present`, the grant the credential needs.** A
+  provider in `apex-secretd` whose one operation both trait methods refuse: it
+  exists so `apex secret grant NAME browser.present --everywhere` can be typed,
+  because `Service::grant` refuses an operation no provider offers and an
+  interception with no grant behind it would let anything running as the user
+  spend a credential on arbitrary requests to the pinned host. `--everywhere`
+  because a capsule's cwd is a throwaway tree. Two shipped gates fired on it
+  and both were EXTENDED rather than loosened — in particular the one that
+  panics on an operation binding in NEITHER project, which now carries a named
+  list of operations the framework cannot carry at all, checked to refuse
+  identically in both projects and to be non-empty.
+- `b6964f3a` — **`Request::Present`: the daemon that holds the credential is
+  the one that adds it.** The decision is P0-002's and it is the reason the
+  design is split: `apex-agentd` runs as the user, so a value it held an
+  unconfined session of that user could read, and `broker.rs` states the
+  invariant — no verb in `apex_secret_core::protocol` returns a credential.
+  **Andre's yes was about PLAINTEXT and was not a decision to give the runtime
+  a credential**, so the build was arranged so that second question never had
+  to be asked. `apex-secretd` gains rustls as its one TLS client that is not
+  `curl`. One request per connection (`Connection: close` forced, chunked
+  refused, body by declared length), so the parsing surface in a root process
+  is one head. The response direction is scrubbed for the value, same length
+  in place. Eight assertions against the real binary, eight mutations red.
+- `17f4715e` — **PROTOCOL_VERSION 11, `RunRequest::present`, and the guard.**
+  Four refusals at session start (unconfined; not `--network allowlist`;
+  `--trust-ca` alongside; an allowlist that is not EXACTLY the pin), exact
+  host-and-port equality in the proxy, and the pin re-checked in `apex-secretd`
+  because the runtime is not the boundary. ALPN pinned to `http/1.1` — Firefox
+  offers h2 through a tunnel and an h2 stream would be carried as frames
+  nothing adds a header to. The CA private key is deleted the moment the leaf
+  is signed. Ten mutations red, one of them at compile time.
+- `b476e6da` — **the demonstration.** Two loopback TLS origins with an
+  authority each and a client trusting one root set at a time: the pin verifies
+  against the per-run CA and NOT against the origin's own, another allowed
+  destination verifies against the origin's own and NOT against the per-run CA,
+  and a session that named no credential has nothing terminated. Plus the whole
+  chain against a private `apex-secretd` and a site that echoes the header back
+  on purpose.
+- `6c218bb5` — **`apex browser run --capability NAME --present`.** The flag
+  takes no argument: `--capability` already names the credential and has
+  already made its pin the only destination, so a second spelling would be a
+  second thing that can disagree with the first. 130 passed / 0 failed (was
+  116).
+- `a932e707` — **the docs.** The question is an answered section with what the
+  answer did NOT cover; "What it would take" is "What it took" with the two
+  places the estimate was wrong marked; `docs/browser-capsule.md` states the
+  bounded version of "a tunnel is opaque".
 
-## DONE (round 29, branch task/p2-d-5, 4 commits, all merged as bde4d96c)
+## FOUND (round 31)
 
-- `12ee0cbf` — **the Containerfile gate could not see a `python3 -c` assertion
-  at all.** `tests/check-containerfile-assertions.sh` resolved `grep` and
-  nothing else; a python segment missed the regex and hit `continue` — not a
-  failure, not UNRESOLVED, not counted, which that file's own header calls the
-  worst of the three outcomes. It was doing it to seven of its own assertions.
-  Now 193 checked instead of 188, with the two it still cannot follow counted
-  (one path from a `for` variable, one pipe).
-- `73861e55` — **the `policies.json` shape assertion**, which had been round 3's
-  NEXT and round 4's. Positive, not a denylist: `policies` carries `Preferences`
-  and nothing else, every preference at `Status: "default"`. 194 checked, 0
-  failed.
-- `68f3e5c1` — **route B's join, measured**, and the question above written into
-  `docs/browser-capsule-auth.md` under its own heading.
-- `67861c53` — the runner half of `12ee0cbf`'s own argument was **reasoned, not
-  measured**, in a file whose subject is that difference. Measured now: on a box
-  with no `/etc/firefox` the unrewritten handler fails six assertions with
-  `FileNotFoundError` and exits 1, and the shipped one reports 194 checked / 0
-  failed there. Comment only.
+- **`docs/browser-capsule-auth.md` asserted something false and load-bearing:**
+  "the daemon already holds the credential". `apex-agentd` does not and must
+  not. Corrected at the top of route B rather than silently.
+- **A mutation of `apex-secretd` measured GREEN twice.** `cargo test -p
+  apex-agentd` does not rebuild another package's binary, so a fixture that
+  locates `apex-secretd` beside its own executable runs against whatever was
+  last compiled. Both mutations were red the moment it was rebuilt. `cargo test
+  --workspace` — what CI runs — does not have the problem; the note is in the
+  fixture.
+- **A defect in this round's own pump, found by a test and not by reading.**
+  Plaintext was drained only inside the socket-readable branch, and rustls
+  consumes application data during the handshake — a TLS 1.3 client may send
+  its first request in the same flight as its `Finished`. The capsule's first
+  request sat in rustls for ever and the capsule waited out its timeout.
+- **An assertion that inspected nothing, caught by its own mutation.**
+  `trail.contains("http://127.0.0.1")` passed with the `used` audit line
+  carrying no endpoint at all, because the `added` and `granted` lines name the
+  same host. It parses the trail as JSON now.
+- **A flaky test of this round's own**, fixed before it was committed: one
+  `complete_io` then `read_exact` passes on an idle machine and answers
+  `WouldBlock` on a loaded one.
+- **`rustls-native-certs` reads `SSL_CERT_FILE`**, which is what let the
+  full-chain test point `apex-secretd` at a CA it minted — the same variable
+  `curl` and `git` honour, not a hook asked for by the test. It is also what
+  finally measures "re-origination TLS", which the auth doc had listed as
+  unmeasured.
 
-## FOUND (round 29, kept because it is still load-bearing)
+## FOUND (earlier rounds, still load-bearing)
 
 - **`/etc/firefox/policies/policies.json` EXISTS on an APEX machine and is read
   inside every capsule** — the sandbox binds `/` read-only. That is what makes
-  gap 5 possible and it is also why the round-29 image assertion exists.
-- **Firefox tells Mozilla when an enterprise root is installed.** The probe saw
-  it reach for `mitmdetection.services.mozilla.com`. A capsule under
-  `--capability` refuses that host because the pin does not contain it.
+  both gap 5 and route B's CA install possible, and why the round-29 image
+  assertion exists.
+- **Firefox tells Mozilla when an enterprise root is installed.** A capsule
+  under `--capability` refuses that host because the pin does not contain it.
+- **`--ro-bind-try` over a path that does not exist is a silent no-op.**
 - Round 4's recorded inconsistency is still there and still unfixed: the
   engine's pre-check at `apex-browser` ~L505 falls back to the bare host, so
   `--allow e.example:8443` passes it when only `e.example` is allowed and the
   DAEMON refuses it. Fail-closed; the two just do not agree.
-
-## FOUND (round 30)
-
-- **A redundant guard can hide the removal of the one that matters.** The
-  `take(cap + 1)` and the metadata size check both say "limit", so an
-  assertion on that word passed with the metadata check deleted. Assert on
-  what distinguishes them.
-- **`SessionInfo` does not carry `trust_ca`** — NOTED, NOT BUILT. `apex agent
-  status` cannot show that a session trusts an extra root, and for a widening
-  the docs call "widening what it will believe" the record being silent is a
-  gap. Additive optional field on a stability surface; a follow-up, not
-  started.
-- **On the L16 the live daemon speaks protocol 9**, so `apex browser run
-  --trust-ca` will correctly refuse with the restart message until an image
-  carries these binaries. Nothing on the machine was changed this round.
-- **Two defects in my own work, both caught by RUNNING a gate rather than
-  reading.** The suite assertion "the CA lands before the separator" was first
-  written with `${#argv%%<pat>*}` — bash rejects that as a bad substitution, so
-  it printed an error and asserted NOTHING, neither PASS nor FAIL. And
-  `2fff910f` was pushed without `cargo clippy` over it: `BrowserCmd::Run`
-  crossed `large_enum_variant` exactly as `AgentCmd::Run` had. Run the gate
-  before the commit, not after the push.
-- **Nothing populated `SandboxSpec.ro`/`ro_at` from the wire before this
-  round.** That is why gap 5 was a code change rather than a flag, and it is
-  why the generic shape — a wire field naming a file AND a path to bind it over
-  — was rejected: it would let any client shadow any path in any session's
-  namespace.
-- **`--ro-bind-try` over a path that does not exist is a silent no-op.** It is
-  the whole reason `browser_ca::install` refuses when the machine has no
-  `/etc/firefox/policies/policies.json`, and it is worth knowing for anything
-  else that binds over `/etc`.
 
 ## BLOCKED ON
 
 - **P2-008's USB passthrough is not closable by any suite.** It means detaching
   a physical device from the machine running the tests.
 - **P2-009 needs a guest image that carries an agent CLI.** A build, not a test.
-- **P2-012's route B is blocked on a product decision, not on engineering.**
-  See the question in `docs/browser-capsule-auth.md`. Gap 5 is independent of
-  it and is what round 30 is doing.
+- **Route C needs `geckodriver` in the image.** A form login and an OAuth
+  redirect chain are what route B cannot do; that is a product decision about
+  what APEX carries, not a round of work.

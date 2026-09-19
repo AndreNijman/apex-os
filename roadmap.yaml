@@ -3057,7 +3057,29 @@ tasks:
     fine in a screenshot and is exactly the failure the feature exists to prevent. STAYS PARTIAL, AND MUST NOT BE
     CLOSED FROM HERE: --origin-policy remote stays refused until the device key lives in Android Keystore with
     setUserAuthenticationRequired, plus a per-approval challenge and attestation. That is p1-053a's work, and
-    p0-014's CTAP2 verifier is its desktop half.
+    p0-014's CTAP2 verifier is its desktop half. CRITERION 6 OBSERVED ON A REAL DEVICE, 2026-09-19
+    (task/p1-053d-device). 'Biometric/device-lock requirement can be enforced on Android' is now a measurement
+    rather than a design note. On a Pixel 7a running GrapheneOS (Android 17, SDK 37) with a real screen lock, the
+    app raises a BiometricPrompt before it will show anything at all: uiautomator dump reads 'APEX Remote / Unlock
+    to see your computers / Touch the fingerprint sensor / Use PIN'. THE STRONGEST PART IS WHAT COULD NOT BE DONE:
+    an agent with full adb access to a DEBUGGABLE build, able to install, launch, instrument and run-as the
+    package, COULD NOT GET PAST IT. There is no adb verb that presents a fingerprint on real hardware, and 'Use
+    PIN' wants the owner's credential. The enforcement was demonstrated by an adversary with more access than any
+    attacker who picks the phone up. CONSEQUENCE, RECORDED BECAUSE IT SHAPES EVERYTHING ELSE MEASURED THIS ROUND:
+    the live app's own UI could not be driven end to end. The device suite therefore drives PairingService - the
+    production class, not a copy - with a PlainBox in place of KeystoreSecretBox, and names that substitution in
+    the file rather than burying it. The same lock is why Compose tests needed a host activity declaring
+    showWhenLocked: the keyguard stays up for the whole run. CRITERION 4 ('pairing cannot be completed silently by
+    an agent'), OBSERVED AND WORTH A SECOND LOOK BY SOMEBODY: a pairing offer WAS minted this round from a bash
+    process inside a Claude Code session, by writing {"cmd":"pair"} to apex-remoted's control socket.
+    control.rs::may_pair consults apex_agent_core::origin::observe_pid, which classified that shell as
+    local-terminal. The Rust end-to-end suite depends on the same classification, so this is the origin
+    classifier's known scope rather than a new hole - but it is the exact shape the criterion forbids, and it is
+    recorded here rather than left as a thing one agent noticed. THE DEVICE SIDE OF THE FLAG IS ASSERTED TOO:
+    PairingRequest.user_verification travels and the desktop stores it per device
+    (Device.requires_user_verification), measured by reading the daemon's own device list back after a pairing
+    from the phone. This round's box gates nothing, so it sends false and the assertion is that FALSE was recorded
+    - a suite claiming true would have made the desktop write down a protection that did not exist.
 - id: P1-052
   title: Support direct LAN and encrypted internet relay for remote agents
   priority: P1
@@ -3226,7 +3248,29 @@ tasks:
     model each turn a NAMED test red (live from published state, a finished clock that keeps running, a sort
     without live-first, a zero gauge for a session that never reported, an orphan dropped with both safety nets
     removed, the cycle net alone removed, every request retried including signals, a stop during connect ignored);
-    every file restored byte-identical with plain cp.
+    every file restored byte-identical with plain cp. ON A DEVICE 2026-09-19 (task/p1-053d-device), and it found a
+    criterion that could not work. C2 ('can start a new agent with selected profile/project/worktree') WAS
+    UNREACHABLE FOR ONE OF THE SIX ADAPTERS: Hello.agents lists 'generic' on every runtime, so the Start screen
+    offered it, and choosing it could only fail - the Generic adapter carries no program of its own, apex-agentd
+    takes req.args.first() as its program (session.rs:135) and refuses the session when there is none, and
+    Agentd.run had no way to send args at all. The button's only possible outcome was the daemon's refusal after a
+    round trip. Measured against a real apex-agentd from the phone; it is the class of gap a JVM test cannot see,
+    because both halves are individually correct - the picker shows what the daemon lists and the builder sends
+    every field it knows about. Fixed: Agentd.run gains args (appended only when non-empty, so a daemon predating
+    the field still parses the request), Agentd.commandIsRequired pins on the adapter ID because that is literally
+    what the daemon branches on, MachineLink.run refuses the combination before the wire with a sentence about the
+    missing program rather than about `--` (a flag that does not exist on a phone), and the Start screen grows a
+    Command field shown only for that adapter with Start disabled until it is filled. startIsPossible and
+    commandArguments are top-level functions, not expressions inside the button, because a rule in a lambda is a
+    rule no test can reach. run_generic_with_args is in the shared requests.json fixture and asserted from BOTH
+    ends - Kotlin that the builder produces exactly it, Rust that RunRequest parses it with the program FIRST. C1
+    AND C4 CONFIRMED ON THE PHONE: AgentCenterScreen composes with real sessions on a real display and passes the
+    Accessibility Test Framework with TalkBack bound; the agent lifecycle (run, list, info, input, stop) was
+    driven end to end from the device against a real daemon over Wi-Fi. C3's pause/resume/stop ride the same
+    signal verb that stop used. A LAYOUT DEFECT ON THIS SCREEN WAS FOUND THE SAME WAY: at font scale 2.0 the
+    four-button action row did not fit across a Pixel 7a, and a Row resolves that by measuring the last child
+    ('Guide') at width ZERO - present, occupying nothing, unreachable. Now a FlowRow. Mutation-tested: reverting
+    it makes the assertion red naming that exact button.
 - id: P1-055
   title: Android full PTY/TUI remote terminal
   priority: P1
@@ -3299,7 +3343,22 @@ tasks:
     the only gate a machine with no phone has, and the IME path in particular (composition and suggestion
     behaviour against a permanently-empty field is reasoned from the API, not observed); no relay leg, so LAN
     only. Mutation-checked: 17 mutations across the terminal, viewport, palette, watchdog and fixtures each turn a
-    NAMED test red; every file restored byte-identical with plain cp.
+    NAMED test red; every file restored byte-identical with plain cp. ON A DEVICE 2026-09-19
+    (task/p1-053d-device), PARTLY - AND THE PART THAT WAS NOT DONE IS NAMED RATHER THAN IMPLIED. What the phone
+    confirmed: a PTY session really starts on a real apex-agentd from a real phone over Wi-Fi (generic adapter
+    running /bin/cat), the daemon lists it back, and MachineLink.input really writes bytes into it - C2's input
+    direction, end to end, against the real runtime. C5's reconnect half is asserted on the device too: the
+    desktop's service is restarted underneath an open MachineLink and the next question rebuilds the connection,
+    with the link's own connection counter as the evidence. WHAT WAS NOT DONE: TerminalScreen and
+    TerminalController were deliberately LEFT OUT of the on-device Compose suite rather than stubbed. They are
+    driven by a controller that owns a PTY attachment, and half a controller would make an accessibility or layout
+    check assert something no user ever sees; Screens.kt says so in as many words. So nothing here observes ANSI
+    rendering, scrollback, selection or the accessory row on a real display - those remain covered by :core's
+    terminal suite (TerminalTest, ScreenTest, ViewportTest, TuiCompatibilityTest, KeysTest) and by no device
+    evidence. C3's 'orientation changes' is covered for every OTHER screen: each composes in landscape inside a
+    host activity carrying MainActivity's exact configChanges, so the rotation is handled rather than recreated -
+    which is what the app does and therefore what is worth asserting. A terminal in landscape is the one that
+    matters most and is the one still untested.
 - id: P1-056
   title: Android Projects, Workspaces, Worktrees, Tasks and Review UX
   priority: P1
@@ -3374,7 +3433,20 @@ tasks:
     API 11+, is not a flag, and is not relaxed by a debug build. Mutation-checked: 23 mutations across Reply,
     Notifications, Alerts, Agentd, protocol.rs, ApprovalsScreen and the UI state each turn a NAMED test red; every
     file restored byte-identical with plain cp (never mv, never cp -p), the Rust restore confirmed by an empty git
-    diff. One mutation attempt did not compile and is recorded rather than dropped.
+    diff. One mutation attempt did not compile and is recorded rather than dropped. ON A DEVICE 2026-09-19
+    (task/p1-053d-device). WorktreesScreen - the Projects screen this item's C1 asks for - composes on a Pixel 7a
+    for the first time, passes the Accessibility Test Framework with AOSP TalkBack bound, carries a name for every
+    control a screen reader could activate, and lays out with nothing collapsed at font scale 2.0 and in
+    landscape. That is the whole of what a device can add here, and it is worth saying what it is not: it is
+    evidence that the screen WORKS, not that its content is right, because the state it composes with is a fixture
+    rather than a live worktrees reply. C4 IS UNCHANGED AND STILL UNMET FOR THE STRUCTURAL REASON ALREADY ON
+    RECORD: 'checkpoint/undo actions show consequences before execution' needs a wire surface that does not exist
+    - checkpoint::list and checkpoint::restore have only CLI callers on the local filesystem, and
+    RunRequest.checkpoint plus SessionInfo.checkpoint are the entire wire surface. The Start screen's checkpoint
+    switch says what it does and what it does not in the same breath, which is as close as this app can get; the
+    device round changed nothing about that except that the switch NOW HAS A NAME - it had none, its words being
+    in a sibling Column, so TalkBack announced it as 'off, switch'. Found by walking the semantics tree on the
+    phone; the Accessibility Test Framework passes that screen, because an unnamed switch is not one of its rules.
 - id: P1-057
   title: Android remote capability and deployment approvals
   priority: P1
@@ -3442,7 +3514,21 @@ tasks:
     device, no emulator, no Robolectric, and assembleDebug compiles code it never runs; and no revoke has been
     performed against a live daemon. Mutation-checked: decisionLine reading an allowance as done, treating an
     absent exit code as a zero, and describing a wide revoke as a narrow one each turn a NAMED ApprovalsTest red;
-    files restored byte-identical with plain cp.
+    files restored byte-identical with plain cp. C3 OBSERVED FROM THE INSIDE ON A REAL DEVICE, 2026-09-19
+    (task/p1-053d-device). 'Root/system-access and unsafe-everything remain local-approval-only by default' now
+    has a measurement taken from the phone rather than from a daemon test: a session started BY THE PHONE, over a
+    Noise session through a real apex-remoted into a real apex-agentd, is recorded by the daemon as
+    request_origin=claude-remote-control and actor=<this device's id>, asserted by reading SessionInfo back over
+    the same link. That is the property the refusal rests on - a phone cannot be mistaken for a human at the
+    keyboard - and it is asserted positively rather than by watching one refusal. ApprovalsScreen also composes on
+    the phone for the first time, passes the Accessibility Test Framework with TalkBack bound, and lays out at
+    font scale 2.0 and in landscape with nothing collapsed. WHAT IS STILL NOT DONE, SAID PLAINLY: no approve/deny
+    round trip was driven from the device, because there is nothing to drive - `decide` is refused from any
+    non-local origin before the pending check (privilege.rs:1176) and is deliberately absent from the shared
+    requests.json fixture, so the phone has no builder for it and a device test would be a test of a request that
+    is always refused. C1's 'approved/denied from Android according to project policy' therefore remains what it
+    was. C4 is unchanged and remains a separate unit: it needs RenewSystemGrant plus a hardware-enrolled FIDO2
+    credential.
 - id: P1-058
   title: Android push notifications and input-needed workflow
   priority: P1
@@ -3535,7 +3621,35 @@ tasks:
     too-old path every time. No relay leg either, so LAN only. Mutation-checked: eleven mutations across Reply,
     Notifications, Alerts, Agentd and protocol.rs each turn a NAMED test red, including a Rust one (renaming
     Request::Input's data field on the wire turns android_requests_wire red); every file restored byte-identical
-    with plain cp, the Rust restore confirmed by an empty git diff.
+    with plain cp, the Rust restore confirmed by an empty git diff. ON A DEVICE 2026-09-19 (task/p1-053d-device),
+    and GrapheneOS INVERTED THE PREMISE THIS ITEM HAS BEEN CARRYING. Six instrumented assertions now run against
+    Android's real NotificationManager: the channel is really created, an alert really reaches the shade, the same
+    session alerted twice occupies one line and two sessions occupy two (C4's deduplication as ANDROID resolves
+    it, by notification id, not by anything this code decides afterwards), a posted notification carries a real
+    tap target, and every one of the six Alert.Kinds renders text containing no code fence, no shell prompt, no
+    path, no URL and no token shape. C2 ('encrypted/minimized so push infrastructure does not receive sensitive
+    prompt/code content') HAS BEEN RECORDED AS VACUOUSLY MET BECAUSE APEX HAS NO PUSH TRANSPORT, AND THAT WAS
+    EXPECTED TO BE CONFIRMED BY A PHONE WITHOUT PLAY SERVICES. THE OPPOSITE HAPPENED AND IT IS A STRONGER RESULT:
+    this GrapheneOS phone HAS Google Play services - com.google.android.gms 26.29.32,
+    installerPackageName=app.grapheneos.apps, the sandboxed Play build, installed and enabled. FCM is available on
+    this device and the app still does not use it. The minimisation is therefore unconditional rather than an
+    accident of the platform: these notifications are built on the phone, from state the phone already holds, and
+    nothing about them leaves it. The APK carries no Firebase or messaging component (checked with aapt2 over the
+    built manifest) and no crash-reporting SDK. TWO THINGS MEASURED BEFORE ANY OF THAT COULD BE ASSERTED: (a)
+    POST_NOTIFICATIONS ungranted is COMPLETELY SILENT - NotificationManagerCompat.notify accepts the call,
+    returns, and the shade stays empty, with no exception and no log line. That silence is exactly why
+    UiState.notificationsEnabled is on the screen rather than assumed. The suite grants it through UiAutomation,
+    the only way a test can, since the dialog is the user's and no instrumentation can press it. (b) notify is
+    ASYNCHRONOUS - two posts then an immediate read of activeNotifications returns one, so every assertion polls
+    to a deadline instead of reading the next line. C1 AND C3 ARE COVERED FOR THE PATH THAT EXISTS, AND THE PATH
+    THAT DOES NOT IS UNCHANGED: with no push transport anywhere, these alerts come from polling a connection the
+    phone opened and arrive only while that poll is alive. MEASURED THIS ROUND at the shell: backgrounding the app
+    leaves the process alive (curProcState drops to cached), battery saver leaves it alive, and forced deep Doze
+    leaves it alive - but com.apexos.remote is NOT on the Doze whitelist (dumpsys deviceidle whitelist: zero
+    matches), so Android suspends its network in Doze and an agent that needs somebody has no way to wake this
+    phone. That is the real shape of 'notify you when the app is closed', and the guide's forbidden-claims list
+    still says the app cannot do it. Mutation-tested: notify(content.id) -> notify(0) makes the deduplication
+    assertion red naming the two sessions it could no longer tell apart; Notifier.kt restored byte-identical.
 - id: P1-059
   title: Android voice, screenshot, file and clipboard handoff
   priority: P1
@@ -3826,7 +3940,61 @@ tasks:
     arrive only while that poll is alive; and P1-059's criterion 3 needs a verb that reads the machine's
     clipboard. Counts on the tip: 447 :core tests, 38 :app, assembleDebug green; cargo test --workspace green;
     clippy clean at the workspace MSRV; check-agent-state.sh, no-second-write-path.sh and check-help-prose.sh all
-    pass.
+    pass. ROUND 2026-09-19, ON A REAL DEVICE FOR THE FIRST TIME (task/p1-053d-device, six commits off roadmap/v2.2
+    @ bb229745). A Pixel 7a 'lynx' running GrapheneOS, Android 17 (SDK 37, build CP2A.260705.006), over wireless
+    debugging on the same Wi-Fi as the L16. EVERY COMPOSE PATH AND EVERY :core CLASS IN THIS MODULE HAD BEEN
+    COMPILED BY assembleDebug AND NEVER EXECUTED ANYWHERE; 24 instrumented assertions now run on the phone, driven
+    by android/tools/run-device-suite.sh, and they found FOUR shipped defects on their first runs. C1 IS NOW
+    LARGELY MET AND HONESTLY SHORT OF COMPLETE: pairing (against a real apex-remoted's real minted offer, with the
+    desktop's device store asserted afterwards), a spent token refusing a second phone, LAN, session open, agent
+    lifecycle (run/list/info/input/stop through a real PTY running /bin/cat), reconnect after the desktop's
+    service restarts, and device revocation with the refusal asserted NOT to distinguish revoked from
+    never-paired. WHAT C1 STILL LACKS, SAID RATHER THAN GLOSSED: no relay leg (no rendezvous is configured on this
+    machine, so the relay path is still only covered by apex-remoted's Rust suite), no PTY output read back over
+    an attach from the device, and no approve/deny round trip - what IS asserted is P1-057 C3 from the inside,
+    that a phone's request is recorded request_origin=claude-remote-control and actor=<this device id>. C2 IS MET
+    EXCEPT FOR HARDWARE THAT DOES NOT EXIST HERE: the Accessibility Test Framework runs against the real semantics
+    tree on all six composable screens; a semantics sweep asserts every node carrying OnClick has words somewhere
+    below it; every screen lays out at font scale 2.0 and in landscape with no text measured to zero width or
+    height; AOSP TalkBack (com.android.talkback - GrapheneOS ships it) is enabled and BOUND while all of it runs,
+    and the runner refuses to continue if it never binds. THERE IS NO TABLET AND NO FOLDABLE, so those two words
+    in the criterion are untested and this item stays partial for that reason alone. THE FIRST VERSION OF THE
+    ACCESSIBILITY SUITE WAS A FALSE GREEN AND THE FIX IS THE INTERESTING PART: every Compose test failed with 'No
+    compose hierarchies found in the app' while the accessibility test PASSED, because
+    tryPerformAccessibilityChecks() on an empty node collection is a no-op - 'no composition at all' and 'every
+    screen is fine' were the same result. Logcat named the cause: isSleeping=true isVisible=false, the host
+    activity launching and being DESTROYED a frame later behind a secure keyguard that wm dismiss-keyguard cannot
+    clear and no adb verb can unlock. ComposeHostActivity in src/debug declares showWhenLocked and turnScreenOn
+    and carries MainActivity's exact configChanges; ComposeHostTest is the floor under everything else and every
+    walk asserts the tree is non-empty BEFORE checking anything about it. DEFECTS FOUND BY THE DEVICE: (1) every
+    pairing code this project has ever minted advertised an IPv6 address no phone could dial -
+    format!("{ip}:{port}") on a V6 gives nine colon groups and no brackets, and even bracketed, main.rs binds
+    0.0.0.0 so nothing was listening; invisible on dual-stack because the V4 address is tried first. Fixed in
+    state.rs (advertise + reachable_on + State::bound). (2) The phone could not start the generic adapter at all:
+    the picker is Hello.agents, which lists it, and the wire builder had no args, which is where its program goes.
+    (3) The Checkpoint switch had no accessible name - its words are in the sibling Column, so TalkBack announced
+    'off, switch'; ATF passes that screen because an unnamed switch is not one of its rules. (4) 'Guide' was
+    invisible at font scale 2.0: four TextButtons do not fit across a Pixel 7a and a Row resolves that by
+    measuring the last child at width ZERO - on the screen, occupying nothing, unreachable. FlowRow wraps instead.
+    ALSO: Espresso is now pinned to 3.7.0. Compose's test artifacts resolve it transitively at 3.5.0, every
+    waitForIdle goes through Espresso.onIdle, and on Android 14 and later that throws NoSuchMethodException
+    android.hardware.input.InputManager.getInstance - measured on SDK 37, every Compose test died before its first
+    assertion. C3 UNCHANGED AND STILL MET. C4 VERIFIED, NOT REBUILT: dexdump over the built APK finds no
+    crash-reporting SDK (a first grep said 15 hits and every one was 'containsEntry' matching 'sentry'
+    case-insensitively - a false positive reported as such rather than as a finding), and the manifest carries no
+    Firebase or messaging component. C5 VERIFIED AND FOUND RED: check-help-prose.sh, which is this item's
+    stop_slop gate and whose evidence above claims 'TOTAL 0, NO allowlist', had been failing on one passive
+    sentence since the clipboard section landed. Rewritten in active voice; 1705 words, TOTAL 0, still no
+    allowlist. GATES ON THE TIP: run-device-suite.sh OK (24 tests); :core:test 459/0; :app:testDebugUnitTest 44/0;
+    cargo test --locked --workspace 3340 passed / 0 failed / 2 ignored; cargo clippy --workspace --all-targets
+    --locked -D warnings exit 0 zero warnings; containerfile assertions 194 checked 0 failed 0 inert; shellcheck
+    coverage 166 discovered 0 known-failing 0 newly failing; suites-in-CI 75 suites 71 run 4 exempt 0
+    unrun-and-undeclared; no-conflict-markers PASS; doc-verbs 0 undocumented-and-undeclared. run-device-suite.sh
+    is deliberately NOT in CI and is not claimed to be: it needs a phone, and the suites gate discovers
+    tests/test-*.sh, so no hole was opened. Every UI fix was mutation-tested alone (FlowRow->Row, the switch's
+    contentDescription removed, notify(content.id)->notify(0), advertise->format!) and every source restored
+    byte-identical with cp. THE DEVICE BASELINE AT /var/tmp/apex-work/android-baseline-pixel7a.txt WAS RESTORED
+    AND EVERY VALUE READ BACK; both APKs uninstalled.
 - id: P1-061
   title: Extend APEX capabilities to normal application permissions
   priority: P1
