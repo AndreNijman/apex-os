@@ -98,11 +98,32 @@ extension's `pkg_compat_level` is 2 and the engine's constant is still 2.
 
 So none of the three changes across this rebase, and an existing machine keeps
 its old-engine extension — with 0 i686 ICDs and 14 32-bit shadows — after
-`sudo apex update`. The knob that exists for exactly this is
-`PKG_COMPAT_LEVEL`, whose own comment says "increment whenever a newly baked
-image package may overlap existing user extensions"; an engine change that
-alters **which files the extension carries** is the same class. Verified on the
-machine in §2.1 rather than left as a reading.
+`sudo apex update`. Verified on the machine in §2.1 rather than left as a
+reading.
+
+**And the obvious remedy does not work, which is the more useful half of this
+finding.** `PKG_COMPAT_LEVEL` exists for exactly this case — its own comment
+says "increment whenever a newly baked image package may overlap existing user
+extensions" — but bumping it 2→3 would *appear* to fix this and would not,
+because **the two guards check different things**:
+
+| guard | checks `os_version_id` | checks resolved set | checks `pkg_compat_level` |
+|---|---|---|---|
+| `cmd_rebuild --if-needed` (~line 1613) | yes | no | **yes** |
+| `rebuild_extension`'s "already up to date" (~line 1306) | yes | yes | **no** |
+
+After a bump, `rebuild --if-needed` would log "extension compatibility changed
+… — rebuilding", call `rebuild_extension`, re-download every rpm, hit "already
+up to date" because the resolved set is unchanged, and then call `write_state`
+— **which stamps the new level into `state.json`**. The next boot sees a
+matching level and no-ops. One wasted download, no rebuild, and the marker
+consumed: a fix that hides the fact that it did nothing.
+
+The real fix is to add the compat-level comparison to `rebuild_extension`'s own
+short-circuit (or give bare `rebuild` an explicit force path that skips it),
+*then* bump the level, with a test that fails without the first half. Left for a
+follow-up unit; not patched here, because this unit's deliverable is the
+hardware run and the deadline is real.
 
 ### 0.3 The §3.1 shadow baseline, re-measured by this unit on the old image
 
