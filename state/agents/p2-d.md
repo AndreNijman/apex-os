@@ -3,7 +3,7 @@
 items: P2-008, P2-009, P2-012
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-p2-d
-branch: **task/p2-d-7** (off roadmap/v2.2 @ bb229745)
+branch: **task/p2-d-7** (off roadmap/v2.2 @ bb229745, merged up to 36535383; tip 82b1efbc)
 
 > **PROTOCOL_VERSION IS 11 AS OF ROUND 31.** Route B took it
 > (`BROWSER_PRESENT_VERSION = 11`, `RunRequest::present`); gap 5's
@@ -19,8 +19,9 @@ branch: **task/p2-d-7** (off roadmap/v2.2 @ bb229745)
 
 ## NEXT
 
-**Round 31 is complete and everything is pushed** (`task/p2-d-7`, six commits,
-`8c3b54bf` → `a932e707`). P2-012's last criterion is closed: a capsule can
+**Round 31 is complete and everything is pushed** (`task/p2-d-7`, six commits
+`8c3b54bf` → `a932e707`, plus a merge of `roadmap/v2.2` @ `36535383`; tip
+`82b1efbc`). **P2-012 is `done`** — its last criterion is closed: a capsule can
 present a credential to a site and is never given it.
 
 There is **no engineering left on this unit that a round can close**. The three
@@ -40,7 +41,7 @@ a unit, and it folds into whichever round next touches `SessionInfo`.
 **If this unit is dispatched again, it should be to fold that in and for
 nothing else** — or not dispatched at all.
 
-## DONE (round 31, branch task/p2-d-7) — six commits, all pushed
+## DONE (round 31, branch task/p2-d-7) — six commits and a merge, all pushed
 
 Route B, built because Andre answered the question round 30 refused to answer
 for him: **yes**, the runtime may read the plaintext of a capsule's connection

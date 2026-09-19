@@ -5202,7 +5202,7 @@ tasks:
 - id: P2-012
   title: Secure browser automation capsule
   priority: P2
-  status: partial
+  status: done
   area: browser-agent
   depends_on:
   - P1-001
@@ -5570,10 +5570,118 @@ tasks:
     decided' in docs/browser-capsule-auth.md is struck through and done. CHECKED RATHER THAN ASSUMED: the one
     piece of engineering still named anywhere is SessionInfo carrying trust_ca, and `grep -n SessionInfo` finds it
     in NEITHER capsule doc - it lives only on the card and in this field. It is too small to be a unit and folds
-    into whichever round the answer produces. What remains is Andre's answer to the question under 'The question,
-    for Andre' - may apex-agentd read the plaintext of a capsule's connection to the one destination that capsule
-    was pinned to, in order to add a credential the capsule is never given? Yes means route B at protocol 11; no
-    means this criterion is permanently unmet rather than pending and this item should say so.
+    into whichever round the answer produces. LANDED 2026-09-19 (round 31, branch task/p2-d-7, six commits
+    8c3b54bf b6964f3a 17f4715e b476e6da 6c218bb5 a932e707, all pushed): THE LAST CRITERION IS CLOSED. A capsule
+    can present a credential to a site and is never given it. ANDRE ANSWERED THE QUESTION: yes, the runtime may
+    read the plaintext of a capsule's connection to the one destination it was pinned to in order to add a
+    credential the capsule is never given - relayed to this unit in its round-31 dispatch on 2026-09-19; the date
+    he said it is not recorded anywhere this round can see, and inventing one would be worse than the gap. THE
+    ANSWER DID NOT COVER WHAT THE OBVIOUS BUILD WOULD HAVE NEEDED, and this is the single most important line in
+    this entry. The question was about the runtime reading PLAINTEXT. It was not a decision to give the runtime a
+    CREDENTIAL, and those are different questions: apex-agentd runs as the user, so a value it held an unconfined
+    session of that user could read, which is the whole reason the store moved to apex-secretd under P0-002 and
+    why apex-agentd/src/broker.rs states the invariant - no verb in apex_secret_core::protocol returns a
+    credential and nothing in that daemon holds a SecretValue. The build was arranged so the second question never
+    had to be asked: apex-agentd terminates TLS toward the capsule and pumps plaintext, and the credential is
+    added by apex-secretd, which already held it, already decided where it could be spent, and already sees the
+    plaintext of every apex secret use. That sentence in broker.rs is as true after this round as before it.
+    docs/browser-capsule-auth.md ALSO ASSERTED SOMETHING FALSE AND LOAD-BEARING and it is corrected rather than
+    silently fixed: 'What it would take' justified the opaque-tunnel property changing with 'the daemon already
+    holds the credential'. It does not. WHAT WAS BUILT: apex browser run --capability NAME --present, apex agent
+    run --present NAME, RunRequest::present at PROTOCOL_VERSION 11 (BROWSER_PRESENT_VERSION),
+    apex-agentd/src/intercept.rs, apex-secretd/src/present.rs, apex-secretd/src/tls.rs,
+    apex-secretd/src/providers/browser.rs. The daemon mints a CA and one leaf for the destination the named
+    credential is pinned to, installs the authority through gap 5's Firefox enterprise-policy bind, and TERMINATES
+    that one CONNECT instead of tunnelling it; the plaintext crosses to apex-secretd, which adds the Authorization
+    header and opens its own validated rustls connection to the site. ONE WIRE FIELD, NOT TWO - the estimate in
+    the doc said two. Where the credential is spent is that credential's own pin, read out of the secret service;
+    a second field naming the destination would be a second thing that can disagree with the first, and the
+    request would settle the disagreement in favour of whichever one the caller wrote. What the daemon requires
+    instead is that the session's narrowed allowlist BE that destination: exactly one rule, that host, that port.
+    PROTOCOL 11, AND THE ORDERING IS A COMPILE-TIME ASSERT: BROWSER_CA_VERSION (10, gap 5) <
+    BROWSER_PRESENT_VERSION (11), so a build that renumbered them does not link - that is the strongest of this
+    round's mutations and it was measured, not assumed. THE GUARD IS THE DELIVERABLE AND IT IS FOUR REFUSALS PLUS
+    THREE RE-CHECKS, not a comment: at session start an unconfined sandbox is refused (no namespace, so the minted
+    authority could not be installed and the capsule would refuse the very connection asked for and blame its
+    timeout), a network policy that is not allowlist is refused (no egress proxy, so nothing would intercept and
+    the capsule would visit the site as nobody), --trust-ca alongside is refused (the runtime terminates the one
+    destination, so a caller-supplied root is for a connection that no longer exists), and an allowlist that is
+    not EXACTLY the pin is refused - not 'covers the pin', because a wildcard covering it would leave the capsule
+    reaching hosts the credential was never for through tunnels this daemon does not read, beside one destination
+    it does; compared against a list PARSED from the pin rather than a string, because Rule::as_line drops a
+    default port. In the proxy the branch is exact equality on host and port and deliberately does not ask the
+    allowlist. In apex-secretd the grant is checked, the operation must be browser.present and nothing else (a
+    grant written for git.push must not relay a connection), and the pin is checked again - because the runtime
+    runs as the user and is not the boundary. THE GRANT VOCABULARY ENTRY WAS NOT FORESEEN BY THE ESTIMATE:
+    apex-secretd refuses to write a grant for an operation no provider offers, so there is a browser provider
+    whose one operation browser.present has both trait methods refusing. It exists so apex secret grant NAME
+    browser.present --everywhere can be typed; without it an interception with no grant behind it would be a way
+    for anything running as the user to spend a credential on arbitrary requests to the pinned host, which is
+    exactly what apex secret use requires a grant for. --everywhere because a capsule's cwd is a throwaway capsule
+    tree and a project-keyed grant would match one capsule and then name a path that is gone. Two shipped gates in
+    providers/mod.rs fired on the new operation and BOTH WERE EXTENDED RATHER THAN LOOSENED - in particular the
+    one that panics on an operation binding in NEITHER project, correctly, since that is also what a mis-shaped
+    fixture looks like: operations the framework cannot carry at all are now a named list, checked to refuse
+    identically in both projects, to refuse rather than fail, and to be non-empty. ONE REQUEST PER CONNECTION, so
+    the parsing surface in a root process is one head: Connection: close is forced onto the rewritten head,
+    chunked request framing is refused rather than parsed, and a body is carried by its declared length. THE
+    RESPONSE DIRECTION IS SCRUBBED and this was not foreseen either - a site that echoes the header back is the
+    one way a capsule could end up holding the credential without APEX handing it one, so the stream is scanned
+    and any occurrence replaced with x of the same length, because the site declared a Content-Length the browser
+    reads to the end of. It cannot catch a site that transforms the value first; a credential spent at a site is a
+    credential that site has, and that limit is in the doc. ALPN IS http/1.1 AND NOTHING ELSE: Firefox offers h2
+    through a CONNECT tunnel and an h2 stream would be carried as frames nothing adds a header to - a silent 401.
+    The CA's private key is deleted the moment the leaf is signed. HOW THE PROPERTY WAS DEMONSTRATED RATHER THAN
+    ASSERTED, which is the part worth reading: it cannot be seen from inside the daemon, because a daemon that
+    intercepted everything would look exactly like one that intercepted the pin. So it is asserted from the
+    CAPSULE's side, by the only thing a capsule can observe - WHICH CERTIFICATE it was handed. Two loopback TLS
+    origins with an authority each and a client trusting one root set at a time: the pin verifies against the
+    per-run CA and NOT against the origin's own; another allowed destination verifies against the origin's own and
+    NOT against the per-run CA; and a session that named no credential reaches the pin's own certificate. The
+    pairs are what give either half meaning - 'the handshake succeeded' alone says nothing, because it succeeds on
+    both arms against different roots. The second test is the whole chain against a private apex-secretd and a
+    site that echoes the header back on purpose: the site logs Bearer <sentinel>, the capsule's bytes do not
+    contain it, and the echo comes back redacted in place at the same length. That test ALSO measures the one
+    thing the doc listed as unmeasured - the daemon originating a validated TLS connection to the site - because
+    apex-secretd is pointed at the test's own minted authority through SSL_CERT_FILE, the variable
+    rustls-native-certs, curl and git all read rather than a hook asked for by the test. NUMBERS, on the branch
+    tip 82b1efbc - a932e707 plus a merge of roadmap/v2.2 36535383, every number below re-run after that merge and
+    identical: cargo test --locked --workspace --no-fail-fast 3371 passed / 0 failed / 2 ignored across 57 targets
+    (was 3314 / 56); cargo clippy --locked --workspace --all-targets -D warnings exit 0;
+    tests/test-apex-browser.sh 130 passed / 0 failed (was 116); tests/test-secret-broker.sh 93 passed / 0 failed;
+    check-no-conflict-markers.sh PASS; check-suites-run-in-ci.sh 75 / 71 / 4 / 0 (no fifth exemption);
+    check-shellcheck-coverage.sh 165 / 0 / 0 / 0; check-containerfile-assertions.sh 194 checked / 0 failed / 116
+    unresolved / 0 inert; check-doc-verbs.sh 191 / 114 / 0 / 0. 27 mutations across the round, every file restored
+    byte-identically with sha256 compared, every one red. FOUR DEFECTS THE ROUND FOUND IN ITS OWN WORK, all
+    recorded rather than quietly fixed. (1) A MUTATION OF apex-secretd MEASURED GREEN TWICE: cargo test -p
+    apex-agentd does not rebuild another package's binary, so a fixture that locates apex-secretd beside its own
+    executable runs against whatever was last compiled; both mutations were red the moment it was rebuilt, cargo
+    test --workspace does not have the problem, and the note is in the fixture. (2) A DEFECT IN THIS ROUND'S OWN
+    PUMP, found by a test and not by reading it: plaintext was drained only inside the socket-readable branch, and
+    rustls consumes application data during the handshake - a TLS 1.3 client may send its first request in the
+    same flight as its Finished - so the capsule's first request sat in rustls for ever and the capsule waited out
+    its timeout for an answer to a request nothing had forwarded. (3) AN ASSERTION THAT INSPECTED NOTHING, caught
+    by its own mutation: trail.contains('http://127.0.0.1') passed with the used audit line carrying no endpoint
+    at all, because the added and granted lines name the same host; it parses the trail as JSON now and asserts on
+    the one line. (4) A FLAKY TEST of this round's own, fixed before it was committed: one complete_io then
+    read_exact passes on an idle machine and answers WouldBlock on a loaded one. WHAT WAS NOT RUN AND IS NOT
+    CLAIMED: NO FIREFOX HAS GONE THROUGH THE SHIPPED PROXY. Round 29's probe measured a real Firefox accepting a
+    minted leaf at the far end of a CONNECT tunnel and validating the SAN through it, with two controls that fail
+    differently; this round measured what the DAEMON does, with a rustls client in the browser's place. The join
+    is by construction - the same policy bind (exercised through a real namespace by
+    apex-agentd/tests/browser_ca_bind.rs, which ran rather than skipped on this machine, checked with
+    --nocapture), the same kind of leaf, the same tunnel - and not by a browser run. The browserlab was not run
+    this round and no vmlab flow was. THREE LIMITS THAT ARE LIMITS AND NOT HOLES, all in the doc: a site that
+    transforms the credential before echoing it gets past the scrub; SessionInfo carries neither present nor
+    trust_ca, so apex agent status cannot show that a capsule trusts an extra root or that one of its destinations
+    is authenticated - NOTED, NOT BUILT, additive optional fields on a stability surface; and the pinned site sees
+    a TCP connect for a request the head rewrite refuses, which is CONNECT semantics (the tunnel is established
+    and then spoken on) and not a leak. OPERATIONAL: the L16's live daemon speaks an older protocol than 11, so
+    apex browser run --present will correctly refuse with the restart message until an image carries these
+    binaries, and NOTHING ON THE MACHINE WAS CHANGED THIS ROUND. WHAT REMAINS ON THIS CRITERION: nothing a round
+    can close. A form login or an OAuth redirect chain is route C, which needs geckodriver in the image - a
+    product decision about what APEX carries, recorded in docs/browser-capsule.md's not-built list, not a round of
+    work.
 - id: P2-013
   title: Per-project identity binding
   priority: P2

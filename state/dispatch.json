@@ -1,6 +1,6 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-19T03:50+08:00",
+  "updated": "2026-09-19T09:56+08:00",
   "_round": "Round 30. All four of round 29's agents were dead at the resume, every worktree clean with nothing unpushed, so the round was a landing round: four merges, zero unlanded left in either repo. Three agents re-dispatched fresh from cards (never by SendMessage); `later` retired because its remainder is hardware. Three slots deliberately free — one still held for the Android unit, two headroom. No new unit was invented to fill them: the READY list was empty and the COMPLETE section is exhaustive.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 bde4d96c -> 6b531503. Three merges, in order: c6bc990a (task/later-2, tip 0391b4ec, 741 insertions over 5 files), 7658fe1f (task/p2-b-round29, tip cb02019f, tests/lib/atspi.sh), 6b531503 (task/p2-f-4, tip 79027b51, 551 insertions over 2 files). Each merge --no-ff; check-no-conflict-markers.sh PASS after each; pushed once with --force-with-lease. FOURTH MERGE, later the same session: f40ffefe (task/p2-f-5, tip 933bbee1, 1,353 insertions over 7 files — the gdrive provider). Rust changed in this one, so the workspace was actually rebuilt on the merged tip: cargo test --locked --workspace --no-fail-fast 3299 passed / 0 failed / 2 ignored, clippy --workspace --all-targets -D warnings exit 0, tests/test-secret-broker.sh 84/0, and all four count gates unchanged. roadmap/v2.2 is now f40ffefe. FIFTH MERGE: da6fc0fb (task/p2-d-6, tip 044fa254, 1,836 insertions over 16 files — gap 5, the per-run browser CA bind, with route B deliberately not started). Re-run on that tip: cargo test --locked --workspace --no-fail-fast 3314 passed / 0 failed / 2 ignored across 56 targets, clippy exit 0, tests/test-apex-browser.sh 116/0, tests/test-secret-broker.sh 84/0 (re-run because the same tip now also carries gdrive), and all four count gates unchanged. roadmap/v2.2 is now da6fc0fb. THE WIRE VERSION MOVED TO 10 — see _decisions. SIXTH MERGE: bb229745 (task/p2-f-6, tip a4907070, 2,206 insertions over 7 files — the msgraph transport). On that tip: workspace 3338 passed / 0 failed / 2 ignored, clippy exit 0, test-secret-broker.sh 93/0 (was 84), test-apex-browser.sh 116/0 re-run because the same tip carries both, and the four count gates unchanged. roadmap/v2.2 is now bb229745.",
@@ -32,22 +32,71 @@
   },
   "agents": [
     {
-      "slug": "p2-b",
+      "slug": "p2-d",
       "items": [
-        "P2-003",
-        "P2-004"
+        "P2-008",
+        "P2-009",
+        "P2-012"
       ],
-      "repo": "both",
-      "worktree": "/var/tmp/apex-work/wt-p2-b4-sh",
-      "branch": "task/p2-b-round31",
-      "second_worktree": "/var/tmp/apex-work/wt-p2-b4",
-      "second_branch": "task/p2-b-round31",
-      "agent_id": "a8476e4687a14b648",
-      "dispatched": "2026-09-19T03:25+08:00",
-      "session": "round 30 orchestrator",
-      "queue_id": "p2-b",
-      "card": "ROADMAP/state/agents/p2-b.md",
-      "at_dispatch": "Third dispatch of the session for this unit, off the card round 30 left. NEXT in the card's own order: (1) the RECOVERY screen, the last unaudited a11y surface in P2-003, now auditable for real rather than source-only because run-lockscreen-atspi-shim.sh is a working template for reading a quickshell surface back over AT-SPI with an in-run one-node control; (2) P2-004's RTL discriminator, still 17/3/2 with the cause unidentified and section 1 NOT to be turned into a SKIP. Told three things are NOT its: FOUND 22 belongs to p0-014 (P0-015 was reopened for it and an agent is on it this round) so LockedHintService.qml is off-limits; FOUND 20's qtdeclarative one-liner must NOT be filed anywhere, because filing on a public tracker is outward-facing and Andre's call; and FOUND 24 leaves mutate-lockscreen-atspi.sh on the old trap shape on purpose. Warned that check-quickshell-a11y-cause.sh is a PIN that goes red the day upstream fixes this, and that is intentional."
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p2-d",
+      "branch": "task/p2-d-7",
+      "agent_id": "a6808c20064154814",
+      "dispatched": "2026-09-19T08:30+08:00",
+      "session": "round 31 orchestrator",
+      "queue_id": "p2-d",
+      "card": "ROADMAP/state/agents/p2-d.md",
+      "at_dispatch": "RE-OPENED. The unit was closed to dispatch on 2026-09-19 waiting on a DECISION, not on hardware, and Andre answered it: YES, build route B. The question verbatim from docs/browser-capsule-auth.md: may apex-agentd read the plaintext of a capsule's connection to the one destination that capsule was pinned to, in order to add a credential the capsule is never given. Route B takes PROTOCOL_VERSION 11, NOT 10 -- gap 5 already took 10 as BROWSER_CA_VERSION. The SessionInfo.trust_ca follow-up folds into this round: it is an additive optional field on a stability surface and is in NEITHER capsule doc. Six commits pushed as of this write."
+    },
+    {
+      "slug": "p1-053d-device",
+      "items": [
+        "P1-060"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-p1-053d",
+      "branch": "task/p1-053d-device",
+      "agent_id": "ac2f1cb485bc1e1bd",
+      "dispatched": "2026-09-19T07:10+08:00",
+      "session": "round 31 orchestrator",
+      "queue_id": "p1-053c",
+      "card": "ROADMAP/state/agents/p1-053c.md",
+      "at_dispatch": "RE-OPENED because a device appeared. p1-053c was closed to dispatch on 2026-09-14 for exactly one reason -- P1-060 C1/C2 need a physical Android device or a working emulator and this machine had NEITHER (four consecutive emulator SIGSEGVs across rounds 1-3). Andre plugged in a SECOND phone, explicitly not his daily, explicitly disposable: 'you can do anything with this one but beware its grapheneOS not normal android'. GrapheneOS, not stock -- the permission model and the absent Play services are part of the test surface, not obstacles to route around. Reached over wireless debugging at 192.168.1.98. Does NOT bump PROTOCOL_VERSION; it stays with p2-d this round."
+    },
+    {
+      "slug": "katana-qual",
+      "items": [
+        "P1-038",
+        "P2-005",
+        "P2-006",
+        "P2-007"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-katana-qual",
+      "branch": "task/katana-qual",
+      "agent_id": "ab43bc5a0f63b2b26",
+      "dispatched": "2026-09-19T05:40+08:00",
+      "session": "round 31 orchestrator",
+      "queue_id": "p1-038-hardware",
+      "card": "ROADMAP/state/agents/p1-038.md",
+      "at_dispatch": "RE-OPENED because a machine appeared. p1-038-hardware was closed to dispatch on 2026-09-13 and refused as READY four times for one written reason: the 18 remaining labwc matrix rows need real applications on a real session, cannot be done headless, cannot be done on the L16 while Andre uses it, and katana was off-limits. Andre lifted that: 'you can use msi as automated test machine, update, reboot, do whatever you want. i wont use it today', then 'actually test everything on the katana, everything daily, everything gaming, and also the gaming modes should proprely boot and on the monitor and stuff'. Katana was rebased onto the roadmap image (apex-266dcc57 / apex-shell b7953e4f) -- the FIRST time any machine has booted an image carrying the shell work, since the image had been pinned to apex-shell main for 137-158 commits. Negative control on the L16's older image: 3 passed / 8 failed / 1 CNR against katana's 11 / 0 / 1. Later told to install Chromium via 'apex install' deliberately, that path being itself under test, and to diff rpm -qa i686 either side because /usr/libexec is NOT excluded from apex-pkg's 32-bit pass."
+    },
+    {
+      "slug": "later-silicon",
+      "items": [
+        "L-001",
+        "L-002",
+        "L-003"
+      ],
+      "repo": "apex-os",
+      "worktree": "(to be created by the agent)",
+      "branch": "task/later-silicon",
+      "agent_id": "a5b744c1bf66cbbd3",
+      "dispatched": "2026-09-19T09:50+08:00",
+      "session": "round 31 orchestrator",
+      "queue_id": "later",
+      "card": "ROADMAP/state/agents/later.md",
+      "at_dispatch": "RE-OPENED because a machine appeared whose TPM somebody is willing to clear, which is the exact condition the 'later' unit's closure note names. Every TPM result on record is swtpm in a VM; L-001's acceptance word is 'Real'. Katana has a real TPM 2.0 (/sys/class/tpm/tpm0, tpm_version_major=2, tpm2-tools present). Andre: 'for hte tpm secure boot thing, do everything you can for now and we wil ltest secure boot later.' Secure Boot is OFF on katana, which bounds PCR 7 -- the agent must mark every affected row for a redo rather than claim it. HARD BOUNDARY given: katana's system disk is NOT encrypted and must not become so; enrol-and-recover goes on a loopback file or spare partition, never / or /var, never by converting the running system. Follows the five-run procedure already written in docs/boot-v2.md under 'The run somebody with hardware would have to do'; runs 1, 2 and 5 are the minimum that moves L-001 off partial. Must hold katana exclusively -- it enrols keys and reboots -- so it was told to wait for katana-qual to hand over and to do read-only TPM measurement meanwhile."
     },
     {
       "slug": "p2-f",
@@ -60,12 +109,30 @@
       "repo": "apex-os",
       "worktree": "/var/tmp/apex-work/wt-p2-f",
       "branch": "task/p2-f-7",
-      "agent_id": "a55c09c52a505e326",
-      "dispatched": "2026-09-19T03:50+08:00",
-      "session": "round 30 orchestrator",
+      "agent_id": "ab131d24ce0686d2a",
+      "dispatched": "2026-09-19T09:55+08:00",
+      "session": "round 31 orchestrator",
       "queue_id": "p2-f",
       "card": "ROADMAP/state/agents/p2-f.md",
-      "at_dispatch": "THE ORCHESTRATOR OVERRODE THE CARD'S ORDERING, deliberately and with the reason given to the agent. The card's NEXT is P2-016's ensure_private_dir ownership check; the agent was sent at the OTHER thing first - the HTTP_MAX_BYTES defect its predecessor measured and explicitly deferred to 'a round that takes all four'. A file over the cap is reported as a SUCCESSFUL READ OF AN EMPTY FILE: curl exits 63 but its write-out still runs, so stdout is \"\\n200\" and the caller gets code 0 with empty output. That is the worst shape a secret transport can have, because the caller cannot tell 'the file is empty' from 'we refused to read it'. Told that 's3 and oauth look the same' is a HYPOTHESIS and not a measurement, so establishing the real blast radius per transport - including the brand-new msgraph - is the first action; that the fix must make an oversized read a refusal the caller can SEE, not a warning and not a truncation that reads like a short file; and to assert on the mechanism (exit 63 with write-out still printing) rather than the symptom, so the test still means something if the exit code changes. Standing constraints repeated: P2-018 criterion 2 closed, P2-019 is a design item so no fleet daemon, gvfs is a paragraph, and no Microsoft or Google endpoint has ever been contacted from this repository."
+      "at_dispatch": "Fresh agent off the card, NOT a revival -- the predecessor died 327m in with round 32 code-complete and pushed (four commits, 3c6c104f / d8dce04e / 2d7a4d72 / 0b827a8c, the whole aborted-transfer family), worktree clean, nothing unpushed. Its own NEXT ACTION is the start: record P2-017 evidence with set-status.py, reading the existing evidence out of roadmap.yaml FIRST because set-status REPLACES and this program has already destroyed eight evidence fields that way. Warned twice about P2-016: its evidence belongs to unit p2-016-multiuser-2 (merge 5eca2402) and is 8,724 bytes. Told not to chase the known stale-socket flake and not to try to close the gdrive/msgraph socket gap, which is closed by construction by the host pin."
+    },
+    {
+      "slug": "p2-b",
+      "items": [
+        "P2-003",
+        "P2-004"
+      ],
+      "repo": "both",
+      "worktree": "/var/tmp/apex-work/wt-p2-b4-sh",
+      "branch": "task/p2-b-round31",
+      "second_worktree": "/var/tmp/apex-work/wt-p2-b4",
+      "second_branch": "task/p2-b-round31",
+      "agent_id": "a128226a8e4374294",
+      "dispatched": "2026-09-19T09:55+08:00",
+      "session": "round 31 orchestrator",
+      "queue_id": "p2-b",
+      "card": "ROADMAP/state/agents/p2-b.md",
+      "at_dispatch": "Fresh agent off the card, NOT a revival -- the predecessor died 327m in, mid-round-31, leaving one untracked file in the shell worktree (tests/run-recovery-atspi-shim.sh) which is the start of its own step 2. Done and pushed already: the RTL half (FOUND 26), the recovery markup (1 -> 90 nodes on the bus, Erase button reachable), and check-recovery-a11y.sh 31/0/0 + mutate-recovery-a11y.sh 11 CAUGHT / 0 SURVIVED / 3 HELD wired into ci.yml. The card's numbered NEXT is the brief: fix FOUND 27 (printf '\\U000f033e' emits ten ASCII bytes under a C/POSIX locale, so S4's CAUGHT must be re-earned), write the recovery AT-SPI shim pair, dispatch CI. Told again NOT to close run-rtl-test.sh's Arch-runner red by making section 1 SKIP -- that section IS the discriminator -- and that katana is unavailable, being held by two other agents."
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
