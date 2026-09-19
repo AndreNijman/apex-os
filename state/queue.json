@@ -570,6 +570,12 @@
       "items": [],
       "after": [],
       "title": "Pivot every machine to systemd-boot: UKIs, signing, blessing, migration"
+    },
+    {
+      "id": "android-release",
+      "items": [],
+      "after": [],
+      "title": "Publish the Android APK as part of a release, signed and versioned"
     }
   ],
   "_completed_units": {
