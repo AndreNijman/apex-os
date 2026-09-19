@@ -1003,9 +1003,8 @@ mod tests {
             "the gaming scheduler was actually stopped, not merely planned to be"
         );
         let idle = ctx.game_status().await;
-        assert_eq!(
-            bool::try_from(idle.get("active").expect("status always reports active")).unwrap(),
-            false,
+        assert!(
+            !bool::try_from(idle.get("active").expect("status always reports active")).unwrap(),
             "and the status a user reads agrees with the hardware"
         );
         assert!(

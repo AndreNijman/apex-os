@@ -320,8 +320,9 @@ else
 fi
 
 # ── Wayland exposure, and the MangoHud overlay it rules out ─────────────────
-# MEASURED ON KATANA 2026-09-19 and again 2026-09-20 with a controlled A/B, and
-# this is a real either/or rather than a preference:
+# MEASURED ON KATANA 2026-09-19, twice — in the real Gaming Mode session and
+# then in a controlled headless A/B. This is a real either/or, not a
+# preference:
 #
 #   gamescope --backend headless --mangoapp                  -> mangoapp alive,
 #       env: DISPLAY=:0  GAMESCOPE_WAYLAND_DISPLAY=gamescope-0   0 restarts/22 s
