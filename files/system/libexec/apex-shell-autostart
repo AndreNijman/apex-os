@@ -128,6 +128,34 @@ if pgrep -f "quickshell -c ${SHELL_DIR}" >/dev/null 2>&1 \
     exit 0
 fi
 
+# ── The translated shell (P2-004) ───────────────────────────────────────────
+# quickshell constructs a bare QQmlEngine and installs no QTranslator, so every
+# qsTr() in the shell returns its argument unchanged and a German user reads
+# English. The route APEX ships for that is a QML module, Apex.I18n, whose C++
+# plugin installs one while the import is being resolved — measured inside this
+# exact binary by apex-shell's tests/run-i18n-host-test.sh.
+#
+# A bare QQmlEngine still searches QML_IMPORT_PATH, which is the whole reason
+# the route works without patching quickshell. Set here rather than in the
+# compositor `environment` files because it belongs to quickshell and to
+# nothing else on the system: every compositor session reaches the shell
+# through this launcher.
+#
+# APPENDED, never assigned. Clobbering it would silently break a developer
+# running the shell against their own module tree, and a variable that is
+# quietly overwritten is the kind of absence this project keeps paying for.
+#
+# Nothing here fails if the module is missing: the shell loads it through
+# Qt.createComponent() and reports a missing module by name, so an OS older
+# than the shell gives an English desktop rather than no desktop.
+APEX_QML_DIR=/usr/lib64/apex-shell/qml
+if [ -d "${APEX_QML_DIR}" ]; then
+    export QML_IMPORT_PATH="${APEX_QML_DIR}${QML_IMPORT_PATH:+:${QML_IMPORT_PATH}}"
+    export QML2_IMPORT_PATH="${APEX_QML_DIR}${QML2_IMPORT_PATH:+:${QML2_IMPORT_PATH}}"
+else
+    log "no ${APEX_QML_DIR} in this image — the shell will run untranslated"
+fi
+
 log "starting quickshell -c ${SHELL_DIR}"
 # No LD_PRELOAD: the argc shim existed only because Chromium treats Quickshell's
 # argc=0 as fatal, and the shell no longer loads Qt WebEngine. The library is
