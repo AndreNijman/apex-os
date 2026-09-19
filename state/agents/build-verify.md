@@ -24,6 +24,15 @@ branch: **task/build-verify** (off roadmap/v2.2 @ f666f5c1)
 - CI: the new multilib extraction step on the tip (run 35414179241) genuinely ran
   on the runner — `6 passed, 0 failed`, negative control 14 shadows.
 
+- **CONFIRMED IN A REAL BUILD, 2026-09-19 ~11:10 AWST**: the local
+  `./build-local.sh --force-core` reached `Containerfile.core` STEP 19/59 (the
+  desktop stage) and printed
+
+      quickshell: Quickshell 0.3.1 (revision c6a516096dd84d5255b409482eb4bf740b952f88, distributed by Fedora COPR (errornointernet/quickshell))
+
+  byte-identical to the probe, and did NOT print FATAL. The assertion added by
+  `36535383` executes and passes. No change to `Containerfile.core` is needed.
+
 ## NEXT
 
 Finish the local build (`/var/tmp/apex-work/build-verify.log`, unit
