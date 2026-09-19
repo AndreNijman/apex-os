@@ -175,8 +175,14 @@ dependencies {
     // that AccessibilityStaticsTest deliberately could not make — a source scan
     // can see that a label exists, not that Android exposes it.
     androidTestImplementation(libs.androidx.compose.ui.test.junit4.accessibility)
-    // The empty activity `createComposeRule()` needs a manifest entry for.
-    debugImplementation(libs.androidx.compose.ui.test.manifest)
+    // NOT `ui-test-manifest`. It exists to give `createComposeRule()` an empty
+    // `ComponentActivity` to compose into, and nothing here calls that any
+    // more: a stock host is destroyed a frame after launch behind a secure
+    // keyguard, so every Compose test in this module uses
+    // `createAndroidComposeRule<ComposeHostActivity>()` and the activity is
+    // declared in `src/debug` with `showWhenLocked`. Keeping the artefact would
+    // put a second, unusable host activity in the debug manifest beside the one
+    // that works.
 }
 
 tasks.withType<Test>().configureEach {
