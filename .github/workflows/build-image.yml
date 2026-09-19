@@ -1425,19 +1425,50 @@ jobs:
           # The elapsed time is printed on SUCCESS too. Fifteen minutes was
           # picked without measurement and cost three builds to disprove; the
           # next person changing this number should have the real figure.
+          # ── SAY WHICH RESOURCE RAN OUT ─────────────────────────────────
+          # Run 35433705393 printed `syft exited 137 after 209s` and the error
+          # text guessed "143 = killed". 137 is not 143: 143 is SIGTERM, a
+          # process asked to stop, and 137 is SIGKILL, a process the kernel
+          # removed. That difference is the entire diagnosis, and the step spent
+          # three builds not making it. So: the signal is NAMED, the OOM
+          # counter is read either side, and dmesg and the journal are dumped —
+          # the journal because a systemd-oomd kill leaves nothing in dmesg at
+          # all and is also a SIGKILL.
+          _oom0="$(awk '/oom_kill/{print $2}' /proc/vmstat 2>/dev/null || echo 0)"
+          ( while true; do
+              echo "[sbom sample $(date +%T)] $(free -m | awk '/^Mem:/{printf "mem_used=%sM mem_avail=%sM", $3, $7} /^Swap:/{printf " swap_used=%sM", $3}') root_avail=$(df -BM --output=avail / | tail -1 | tr -d ' ')"
+              sleep 15
+            done ) & _sampler=$!
+          _timer=(); [ -x /usr/bin/time ] && _timer=(/usr/bin/time -v -o /tmp/syft.time)
+
           _t0=$(date +%s)
-          SYFT_PARALLELISM=4 timeout 2700 syft "registry:$REF" -o spdx-json \
-            > /tmp/sbom.spdx.json || {
+          timeout 2700 "${_timer[@]}" env SYFT_PARALLELISM=4 GOMEMLIMIT="$SYFT_GOMEMLIMIT" \
+            syft "$SYFT_SOURCE" -o spdx-json > /tmp/sbom.spdx.json || {
             rc=$?
             _el=$(( $(date +%s) - _t0 ))
+            kill $_sampler 2>/dev/null || true
+            _oom1="$(awk '/oom_kill/{print $2}' /proc/vmstat 2>/dev/null || echo 0)"
+            echo "── how it died ──"
+            [ -f /tmp/syft.time ] && grep -E 'Maximum resident|Command terminated|Elapsed \(wall' /tmp/syft.time || true
+            echo "kernel oom_kill counter: $_oom0 -> $_oom1  (delta $(( _oom1 - _oom0 )))"
+            sudo dmesg -T 2>/dev/null | grep -iE 'out of memory|killed process|oom-kill' | tail -10 \
+              || echo "(no OOM lines in dmesg)"
+            sudo journalctl --since '-60 min' --no-pager 2>/dev/null \
+              | grep -iE 'oomd|killed.*memory|memory pressure' | tail -10 \
+              || echo "(no OOM lines in the journal)"
+            free -m; df -h /
             if [ "$rc" = 124 ]; then
               echo "::error::syft did not finish cataloguing the image in 45 minutes (${_el}s)"
+            elif [ "$rc" -gt 128 ] 2>/dev/null; then
+              echo "::error::syft was killed by SIG$(kill -l $(( rc - 128 )) 2>/dev/null || echo "?($(( rc - 128 )))") after ${_el}s — read the oom_kill delta and the memory samples above"
             else
-              echo "::error::syft exited $rc after ${_el}s (143 = killed; check the disk and memory figures above)"
+              echo "::error::syft exited $rc after ${_el}s"
             fi
             exit 1
           }
+          kill $_sampler 2>/dev/null || true
           echo "syft catalogued the image in $(( $(date +%s) - _t0 ))s"
+          [ -f /tmp/syft.time ] && grep -E 'Maximum resident|Elapsed \(wall' /tmp/syft.time || true
 
           # An SBOM that describes nothing is worse than none: it answers the
           # CVE question with silence and looks authoritative doing it. The
