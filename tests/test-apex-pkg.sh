@@ -399,13 +399,28 @@ fi
 #    x86_64 build, so a single --replacefiles pass over both arches let i686
 #    win: /usr/bin/fc-list became an ELF 32-bit i386 binary shadowing the
 #    image's, fc-list returned zero fonts, and Steam drew no text at all.
+#
+#    The fix was a second pass with a hand-written --excludepath list, and the
+#    list was wrong in BOTH directions on katana on 2026-09-19 — it let i686
+#    helpers under /usr/libexec shadow 14 image binaries (§3), and it threw away
+#    every *_icd.i686.json so 32-bit Vulkan had no driver at all (§6.5). Two of
+#    the assertions that used to live here PINNED that list, which is why the
+#    second defect could not be seen from this suite: they demanded
+#    `--excludepath /usr/share`, the very flag that broke Steam.
+#
+#    So the argv no longer decides what is carried — merge_multilib does, file
+#    by file, and what it may see is what this block asserts. Which files
+#    actually cross is measured against real packages in
+#    tests/test-apex-multilib-extract.sh; that needs a container and a
+#    repository, and this suite needs neither.
 XR=$WORK/extract
-mkdir -p "$XR/rpms" "$XR/stub"
+mkdir -p "$XR/rpms" "$XR/stub" "$XR/blind"
 : > "$XR/rpms/native.rpm"; : > "$XR/rpms/lib32.rpm"; : > "$XR/rpms/any.rpm"
 cat > "$XR/stub/rpm" <<STUB
 #!/bin/sh
-# Answer %{ARCH} by file name so extract_rpms can sort the set, and record the
-# argv of every install pass so the assertions can read it back.
+# Answer %{ARCH} by file name so extract_rpms can sort the set, answer -qal
+# with a path so the image-ownership index is non-empty, and record the argv of
+# every install pass so the assertions can read it back.
 case "\$*" in
   *--qf*ARCH*)
      case "\$*" in
@@ -414,35 +429,137 @@ case "\$*" in
        *)            echo noarch ;;
      esac
      exit 0 ;;
+  *-qal*)     echo /usr/bin/true; exit 0 ;;
   *--initdb*) exit 0 ;;
 esac
 echo "\$@" >> "$XR/passes"
 exit 0
 STUB
-chmod +x "$XR/stub/rpm"
+# The same stub with the rpmdb struck dumb: -qal answers nothing at all.
+sed '/-qal/d' "$XR/stub/rpm" > "$XR/blind/rpm"
+chmod +x "$XR/stub/rpm" "$XR/blind/rpm"
 rm -f "$XR/passes"
 PATH="$XR/stub:$PATH" call extract_rpms "$XR/rpms" "$XR/root" >/dev/null 2>&1
 
 native_pass="$(grep -F 'native.rpm' "$XR/passes" 2>/dev/null | head -1)"
 lib32_pass="$(grep -F 'lib32.rpm' "$XR/passes" 2>/dev/null | head -1)"
 
+# Read the flags back out of the recorded argv rather than matching substrings,
+# so "no exclusions but /boot" can be stated as the whole set and not as the
+# absence of the two anyone happened to think of.
+opt_values() {  # opt_values <argv line> <flag> -> sorted, space-separated
+    awk -v want="$2" '{for (i=1;i<NF;i++) if ($i==want) print $(i+1)}' <<<"$1" \
+        | LC_ALL=C sort -u | tr '\n' ' '
+}
+
 if [ -n "$native_pass" ] && [ -n "$lib32_pass" ] && [ "$native_pass" != "$lib32_pass" ]; then
     ok "multilib is extracted in a pass of its own"
 else
     bad "multilib is extracted in a pass of its own" "one pass carried both arches"
 fi
-case "$lib32_pass" in
-    *"--excludepath /usr/bin"*) ok "the multilib pass keeps its hands off /usr/bin" ;;
-    *) bad "the multilib pass keeps its hands off /usr/bin" "a 32-bit binary can shadow the image's" ;;
-esac
-case "$lib32_pass" in
-    *"--excludepath /usr/share"*) ok "and off /usr/share" ;;
-    *) bad "and off /usr/share" "32-bit /usr/share would shadow the image's" ;;
-esac
-case "$native_pass" in
-    *"--excludepath /usr/bin"*) bad "the native pass still installs binaries" "excluded /usr/bin from the native set too" ;;
+
+native_root="$(opt_values "$native_pass" --root)"
+lib32_root="$(opt_values "$lib32_pass" --root)"
+if [ -n "$lib32_root" ] && [ "$lib32_root" != "$native_root" ]; then
+    ok "the 32-bit pass unpacks into a root of its own"
+else
+    bad "the 32-bit pass unpacks into a root of its own" \
+        "both passes used --root ${native_root:-<none>}, so rpm decides what shadows what again"
+fi
+
+lib32_ex="$(opt_values "$lib32_pass" --excludepath)"
+if [ "$lib32_ex" = "/boot " ]; then
+    ok "the 32-bit pass hand-excludes nothing but /boot"
+else
+    bad "the 32-bit pass hand-excludes nothing but /boot" \
+        "it excludes: ${lib32_ex:-<nothing>} — a directory list is what broke Steam twice; the merge decides"
+fi
+
+native_ex="$(opt_values "$native_pass" --excludepath)"
+case " $native_ex " in
+    *" /usr/bin "*) bad "the native pass still installs binaries" "excluded /usr/bin from the native set too" ;;
     *) ok "the native pass still installs binaries" ;;
 esac
+
+# Fail CLOSED, and in the opposite direction to image_owns(). An empty answer
+# from the rpmdb reads as "the image owns nothing", which would carry every
+# 32-bit copy of every image path into the extension — the §3 disaster, for
+# every directory at once. It must stop the run, not proceed.
+blind_out="$(PATH="$XR/blind:$PATH" call extract_rpms "$XR/rpms" "$XR/root-blind" 2>&1)"
+if [[ "$blind_out" == *"refusing to merge the 32-bit set blind"* ]]; then
+    ok "an rpmdb that answers nothing stops the merge"
+else
+    bad "an rpmdb that answers nothing stops the merge" \
+        "it carried on: $(printf '%s' "$blind_out" | tr '\n' ' ' | cut -c1-120)"
+fi
+
+# 6. `--` IS NOT A UNIVERSAL END-OF-OPTIONS SEPARATOR. dnf5 rejects it on every
+#    subcommand, writes the complaint to stderr and prints NOTHING to stdout:
+#
+#      $ dnf5 repoquery --quiet --queryformat '%{name}\n' -- chromium; echo $?
+#      Unknown argument "--" for command "repoquery". …      (stderr)
+#      2                                                      (and no stdout)
+#
+#    Two invocations in this engine carried one and both were silently dead.
+#    probe_rpm's meant `apex resolve` returned no repository candidate for ANY
+#    package, so it told a user to install the Chromium flatpak while `apex
+#    install chromium` installed the Fedora rpm (evidence §11.1). The other was
+#    in newer_satisfied_by_image, below.
+#
+#    Asserted as a CLASS, over the whole engine, because the defect is a
+#    property of dnf5 rather than of the two places anyone has noticed. Comment
+#    lines are stripped first: the comments explaining this quote the broken
+#    invocation verbatim, and a checker that trips over its own explanation is
+#    one somebody deletes.
+dd_hits=$(grep -vE '^[[:space:]]*#' "$ENGINE" | grep -cE '\bdnf5\b[^|]* -- ' || true)
+if [ "${dd_hits:-1}" = 0 ]; then
+    ok "no dnf5 invocation passes '--', which dnf5 refuses"
+else
+    bad "no dnf5 invocation passes '--', which dnf5 refuses" \
+        "$dd_hits invocation(s) still do, and each returns nothing for every input"
+fi
+
+# 7. newer_satisfied_by_image is the function that decides whether a package the
+#    repositories ship NEWER than the image's build is OMITTED (keep the image's
+#    copy, install proceeds) or REFUSED (that needs an OS update). It asked
+#    libdnf5 with a `--`, so it answered "nothing provides this" for every
+#    versioned requirement it was ever asked about, returned 1 every time, and
+#    guard_rpms refused packages it was written to omit.
+#
+#    Driven directly here with both tools stubbed, because the container suite
+#    that runs guard_rpms against a real repository cannot construct a
+#    newer-than-installed set on demand. BOTH directions are asserted, so the
+#    fix cannot be "always return 0", and the stub dnf5 refuses `--` exactly as
+#    the real one does, so the separator coming back fails this case too.
+NS=$WORK/newer
+mkdir -p "$NS/rpms" "$NS/yes" "$NS/no"
+: > "$NS/rpms/other.rpm"
+cat > "$NS/yes/rpm" <<'STUB'
+#!/bin/sh
+case "$*" in
+  *--requires*) echo "libfoo >= 2.0"; exit 0 ;;
+esac
+exit 0
+STUB
+cat > "$NS/yes/dnf5" <<'STUB'
+#!/bin/sh
+for a in "$@"; do
+    if [ "$a" = "--" ]; then
+        echo "Unknown argument \"--\" for command \"$1\"." >&2
+        exit 2
+    fi
+done
+echo libfoo
+exit 0
+STUB
+cp "$NS/yes/rpm" "$NS/no/rpm"
+sed 's/^echo libfoo$/exit 1/' "$NS/yes/dnf5" > "$NS/no/dnf5"
+chmod +x "$NS/yes/rpm" "$NS/yes/dnf5" "$NS/no/rpm" "$NS/no/dnf5"
+
+is "a newer build the image already satisfies is omitted" true \
+   "$(PATH="$NS/yes:$PATH" predicate newer_satisfied_by_image "$NS/rpms" libfoo)"
+is "a newer build nothing satisfies is not" false \
+   "$(PATH="$NS/no:$PATH" predicate newer_satisfied_by_image "$NS/rpms" libfoo)"
 
 echo
 printf 'apex-pkg: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
