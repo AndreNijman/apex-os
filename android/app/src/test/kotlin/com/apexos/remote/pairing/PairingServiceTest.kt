@@ -1,6 +1,7 @@
 package com.apexos.remote.pairing
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 
@@ -14,6 +15,15 @@ import org.junit.jupiter.api.assertThrows
  * of an unbracketed v6 address and call it a port — on a network where v4
  * happens to work, that bug is invisible until somebody's phone is on v6-only
  * mobile data.
+ *
+ * **The first sentence above was false when it was written**, and this file
+ * asserted the parser against a contract the desktop was not keeping.
+ * `state.rs` built each address with `format!("{ip}:{port}")`, which on an
+ * `IpAddr::V6` produces nine colon-separated groups and no brackets at all.
+ * Found on a Pixel 7a by dialling every address out of a real pairing offer
+ * (`LanEndToEndTest`), which is a thing no JVM test in this repository could
+ * do; fixed in `state.rs::advertise`. The test below is the half that belongs
+ * on this side: what the phone does with the shape the desktop used to send.
  *
  * No device, no emulator, no Android class: this runs in `:app:testDebugUnitTest`
  * on the same JVM as `:core`'s suite.
@@ -54,6 +64,31 @@ class PairingServiceTest {
     @Test
     fun `an unclosed bracket is refused rather than guessed at`() {
         assertThrows<IllegalArgumentException> { service.splitHostPort("[2001:db8::1:7717") }
+    }
+
+    @Test
+    fun `the shape the desktop used to send is unreachable, and that is the defect`() {
+        // Verbatim out of a pairing offer this project minted on 2026-09-19,
+        // before `state.rs::advertise` existed: eight groups of address, then
+        // the port, with nothing to separate them.
+        val asItWasSent = "fd00:12b:83b0:c4de:a38b:4ef2:b234:3d31:47717"
+        val (host, port) = service.splitHostPort(asItWasSent)
+        // The parser is right and the sender was wrong. With no brackets there
+        // is no way to tell a port from a final group, so the whole string
+        // becomes a host — one that resolves to nothing — and the listener's
+        // real port is lost.
+        assertEquals(asItWasSent, host)
+        assertEquals(7717, port)
+        assertNotEquals(47717, port, "the listener's port is not recoverable from it")
+
+        // The same machine, the same port, written the way `advertise` writes
+        // it now. This is the assertion that would have failed before the fix
+        // and is the one a device actually depends on.
+        val asItIsSent = "[fd00:12b:83b0:c4de:a38b:4ef2:b234:3d31]:47717"
+        assertEquals(
+            "fd00:12b:83b0:c4de:a38b:4ef2:b234:3d31" to 47717,
+            service.splitHostPort(asItIsSent),
+        )
     }
 
     @Test

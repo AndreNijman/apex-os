@@ -60,6 +60,9 @@ pub struct State {
     pub machine: String,
     /// The port the LAN listener is on.
     pub port: u16,
+    /// The address the LAN listener is bound to, which decides which address
+    /// families a device may be told about.
+    pub bound: std::net::IpAddr,
     /// The relay base URL, when the owner configured one.
     ///
     /// Kept as the owner wrote it, because that is what `apex remote status`
@@ -88,6 +91,10 @@ impl State {
         identity: Identity,
         machine: String,
         port: u16,
+        // The address the LAN listener is actually bound to. Passed in rather
+        // than assumed: it is what decides which addresses may be advertised.
+        // See `State::lan_addresses`.
+        bound: std::net::IpAddr,
         relay: Option<String>,
         store_path: PathBuf,
         ping_interval: std::time::Duration,
@@ -97,6 +104,7 @@ impl State {
             identity,
             machine,
             port,
+            bound,
             relay,
             store_path,
             ping_interval,
@@ -212,12 +220,72 @@ impl State {
     /// Loopback is excluded because it is never reachable from a phone and
     /// putting it in a QR code costs a device one failed connection attempt
     /// before it moves on.
+    ///
+    /// **Through `SocketAddr`, not `format!("{ip}:{port}")`**, and that is the
+    /// whole content of this function. `format!` on an `IpAddr::V6` produces
+    /// `fd00:…:3d31:47717` — an address with nine colon-separated groups,
+    /// which is not an IPv6 address at all and not a `host:port` either. The
+    /// Android client's `splitHostPort` reads more than one colon and no
+    /// brackets as an unbracketed literal, hands the WHOLE string to
+    /// `InetSocketAddress` as a host, and falls back to port 7717; the lookup
+    /// fails and the address is skipped.
+    ///
+    /// So every pairing code this machine has ever produced has advertised an
+    /// IPv6 address no phone could dial. It has never been noticed because the
+    /// IPv4 address is tried first and answers — which is exactly how it would
+    /// stay hidden until somebody paired on a network that had only the one.
+    /// MEASURED on a Pixel 7a against this daemon, not reasoned about: see
+    /// `android/app/src/androidTest/.../LanEndToEndTest.kt`, which dials every
+    /// address in the offer it just scanned and names the ones that refuse.
+    ///
+    /// `SocketAddr`'s own `Display` brackets a V6 and leaves a V4 alone, which
+    /// is the `host:port` grammar both ends already agree on.
+    ///
+    /// ## And only the families the listener actually accepts
+    ///
+    /// The bracketing above was half the defect. The other half is that
+    /// `main.rs` binds `0.0.0.0` — IPv4 only — while this function offered
+    /// every address the machine has, IPv6 included. So a pairing code
+    /// advertised a port on an address where nothing was listening: a phone
+    /// that reached it got `ECONNREFUSED`, and on a dual-stack network it was
+    /// invisible because the IPv4 address is tried first and answers.
+    ///
+    /// Measured from a Pixel 7a, twice: before the bracketing fix the IPv6
+    /// entry did not even parse, and after it the phone connected to the
+    /// address and was refused. Filtering here rather than hardcoding "v4
+    /// only" means the day the listener binds `::` as well, the advertisement
+    /// follows without anybody remembering to change it.
     pub fn lan_addresses(&self) -> Vec<String> {
         crate::net::local_addresses()
             .into_iter()
-            .map(|ip| format!("{ip}:{}", self.port))
+            .filter(|ip| reachable_on(self.bound, *ip))
+            .map(|ip| advertise(ip, self.port))
             .collect()
     }
+}
+
+/// Whether a peer dialling `candidate` could reach a listener bound to `bound`.
+///
+/// A socket bound to `0.0.0.0` accepts IPv4 and nothing else; one bound to
+/// `::` accepts IPv6 and, on Linux with the default `net.ipv6.bindv6only=0`,
+/// IPv4-mapped connections too. A socket bound to one specific address accepts
+/// only that address.
+pub fn reachable_on(bound: std::net::IpAddr, candidate: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match bound {
+        IpAddr::V4(b) if b.is_unspecified() => candidate.is_ipv4(),
+        IpAddr::V6(b) if b.is_unspecified() => true,
+        other => other == candidate,
+    }
+}
+
+/// One address as a device should read it: `host:port`, IPv6 bracketed.
+///
+/// A named function rather than a closure so the rule can be asserted without
+/// a running daemon and without a machine that happens to have an IPv6
+/// address — which is what let the unbracketed version ship.
+pub fn advertise(ip: std::net::IpAddr, port: u16) -> String {
+    SocketAddr::new(ip, port).to_string()
 }
 
 /// Where the control socket lives.
@@ -233,6 +301,58 @@ pub fn control_socket() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nothing_is_advertised_on_a_family_the_listener_does_not_accept() {
+        let v4: std::net::IpAddr = "192.168.1.232".parse().expect("v4");
+        let v6: std::net::IpAddr = "fd00::1".parse().expect("v6");
+        let any4: std::net::IpAddr = "0.0.0.0".parse().expect("any4");
+        let any6: std::net::IpAddr = "::".parse().expect("any6");
+
+        // The defect, stated as a rule: a listener on 0.0.0.0 has nothing on
+        // any IPv6 address, so a pairing code must not name one.
+        assert!(reachable_on(any4, v4));
+        assert!(!reachable_on(any4, v6), "0.0.0.0 does not accept IPv6");
+
+        // A dual-stack listener reaches both, which is what makes this a
+        // filter rather than a hardcoded "IPv4 only".
+        assert!(reachable_on(any6, v4));
+        assert!(reachable_on(any6, v6));
+
+        // And a listener pinned to one address advertises that one only.
+        assert!(reachable_on(v4, v4));
+        assert!(!reachable_on(v4, "192.168.1.9".parse().expect("v4")));
+    }
+
+    #[test]
+    fn an_advertised_ipv6_address_is_bracketed_and_an_ipv4_one_is_not() {
+        // The defect: `format!("{ip}:{port}")` on a V6 produces nine
+        // colon-separated groups, which is neither an address nor a
+        // `host:port`. A phone reads the whole thing as a host, fails to
+        // resolve it, and skips the address — silently, because the V4
+        // address in the same offer answers first.
+        let v6: std::net::IpAddr = "fd00:12b:83b0:c4de:a38b:4ef2:b234:3d31".parse().expect("v6");
+        assert_eq!(
+            advertise(v6, 47717),
+            "[fd00:12b:83b0:c4de:a38b:4ef2:b234:3d31]:47717"
+        );
+        // And the V4 spelling is untouched: bracketing one would break every
+        // client that already parses it.
+        let v4: std::net::IpAddr = "192.168.1.232".parse().expect("v4");
+        assert_eq!(advertise(v4, 47717), "192.168.1.232:47717");
+
+        // The property the phone's parser actually depends on: outside the
+        // brackets there is exactly one colon, so "the last colon separates
+        // the port" is true for both families.
+        for text in [advertise(v6, 7717), advertise(v4, 7717)] {
+            let tail = text.rsplit(']').next().expect("a tail");
+            assert_eq!(
+                tail.matches(':').count(),
+                1,
+                "{text} has no single port separator"
+            );
+        }
+    }
 
     #[test]
     fn a_connection_is_registered_and_then_forgotten() {
