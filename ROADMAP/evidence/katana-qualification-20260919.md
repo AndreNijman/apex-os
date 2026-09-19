@@ -349,3 +349,266 @@ that test, and it is four commands.
 Sep-6 hotfix that this whole exercise exists to stop needing, and it would
 invalidate every later row in this report. The defect is left in place and
 reproducible.
+
+---
+
+## 4. How the sessions were logged in — and why not through greetd
+
+greetd's own path could not be driven: `apex-session-select` deliberately does
+**not** arm autologin ("Switching modes costs one password entry at the greeter"),
+and this unit does not have Andre's password. Editing `/etc/greetd/config.toml`
+to add an `initial_session` would have changed the login path the report is
+meant to qualify.
+
+**What was used instead — a PAM `login` session on VT 2**, which is what greetd
+itself creates, and which logind therefore puts on `seat0` and grants DRM master
+to. `/var/home/andre/qual/start-session.sh`:
+
+```bash
+exec_line="$(sed -n 's/^Exec=//p' /usr/share/wayland-sessions/${id}.desktop | head -1)"
+sudo systemd-run --unit="qual-sess-${id}" --collect \
+  --property=User=andre --property=Group=andre \
+  --property=PAMName=login --property=TTYPath=/dev/tty2 \
+  --property=StandardInput=tty \
+  --setenv=XDG_SEAT=seat0 --setenv=XDG_VTNR=2 \
+  --setenv=XDG_SESSION_DESKTOP="$names" --setenv=XDG_CURRENT_DESKTOP="$names" \
+  /bin/sh -lc "$exec_line"
+sudo chvt 2
+```
+
+`sh -lc "<Exec>"` is exactly how `apex-greet`'s `launch()` runs the session
+(`GreetContext.qml:221`), and the Exec line is read from the shipped `.desktop`
+rather than retyped.
+
+**Fidelity check — logind classifies the result the same way it classifies the
+greeter's own session:**
+
+```
+$ loginctl show-session c1 -p Type -p Class -p Seat   # the greeter
+Seat=seat0   Type=wayland   Class=greeter
+$ loginctl show-session 97 -p Type -p Class -p TTY    # a session started this way
+Type=wayland  Class=user  TTY=tty2
+```
+
+Known divergences, stated: greetd would run this on VT 1 after tearing the
+greeter down, and `sh -lc` under greetd inherits greetd's environment rather
+than systemd-run's. One measurable consequence appeared: under the labwc
+session, applications saw `XDG_SESSION_TYPE=tty` in their environment even
+though logind recorded `Type=wayland`, because `pam_systemd`'s PAM environment
+lands after `--setenv`. Under niri it read `wayland`, because `niri --session`
+re-exports it itself. Treat the `XDG_SESSION_TYPE` **environment variable** rows
+below as a property of this harness, not of the image; the logind `Type` rows
+are the real ones.
+
+The greeter (`sway` + `qs` on tty1) stayed alive throughout; every session ran
+on VT 2 and was torn down with `systemctl stop qual-sess-<id>`.
+
+---
+
+## 5. The five sessions
+
+Per-session readout script: `/var/home/andre/qual/measure.sh` (re-runnable).
+Render proof is `grim` per output plus a distinct-colour/mean-RGB count, so
+"it painted" is a number rather than an impression.
+
+| session | starts | eDP-1 (Intel) | HDMI-A-1 (NVIDIA) | DRM nodes held | nvidia-smi | APEX Shell | XWayland | verdict |
+|---|---|---|---|---|---|---|---|---|
+| APEX Floating (`apex-labwc`) | yes | 1920x1080@144.028 | **1920x1080@239.964** | card1, card2, renderD128, renderD129 | `labwc` listed as `G` | yes | yes | **PASS** |
+| APEX Tiling (`hyprland`) | yes | 1920x1080@144.028 | **1920x1080@239.964** | card1, card2, renderD128, renderD129 | `Hyprland` listed as `G` | yes | yes | **PASS** |
+| APEX Scrolling (`niri`) | yes | 1920x1080@144.028 | **1920x1080@239.964** | card1, card2, renderD129 | `niri` listed as `G` | yes | on demand | **PASS**, with a defect (§5.4) |
+| APEX Safe Graphics | yes | 1920x1080@144.028 | **NOT LIT** | card1, card2 | absent (software renderer) | n/a by design | no | **PARTIAL FAIL** (§5.5) |
+| APEX Gaming Mode | starts, then exits | lit, then released | **NOT LIT** | card1 only | — | n/a by design | yes (gamescope's own) | **FAIL** (§6) |
+
+Render proof, both outputs, each session:
+
+```
+labwc   eDP-1 1920x1080 distinct_colours=216008 mean_rgb=(156.3,165.0,178.3)
+        HDMI-A-1 1920x1080 distinct_colours=216008 mean_rgb=(156.3,165.0,178.3)
+hyprland eDP-1 1920x1080 distinct_colours=216021 mean_rgb=(156.1,164.8,178.1)
+        HDMI-A-1 1920x1080 distinct_colours=216021 mean_rgb=(156.1,164.8,178.2)
+niri    eDP-1 1920x1080 distinct_colours=165218 mean_rgb=(131.8,140.5,151.6)
+        HDMI-A-1 1920x1080 distinct_colours=165218 mean_rgb=(131.8,140.5,151.6)
+safegfx eDP-1 1920x1080 distinct_colours=709    mean_rgb=(7.7,7.7,7.7)
+        HDMI-A-1 grim FAILED rc=1 unknown output 'HDMI-A-1'
+```
+
+The two per-output captures being byte-identical in the desktop sessions is not
+a `grim` bug — it is the same wallpaper and the same per-output bar on both
+screens. Settled by giving HDMI a different mode and re-capturing:
+
+```
+$ wlr-randr --output HDMI-A-1 --mode 1280x720@59.943
+$ grim /tmp/w5.png          → 3200x1080      (one extended desktop, 1920+1280)
+$ grim -o eDP-1 /tmp/e5.png → 1920x1080
+$ grim -o HDMI-A-1 …        → 1280x720
+```
+
+### 5.1 The external monitor is driven by the discrete GPU in all three desktop sessions
+
+`nvidia-smi` lists the compositor itself as a graphics client, which is the
+assertion that matters for P1-043:
+
+```
+| Processes:                                                              |
+|    0   N/A  N/A   1637   G   sway        2MiB |   <- the greeter, on tty1
+|    0   N/A  N/A   9481   G   labwc       2MiB |
+|    0   N/A  N/A  20342   G   Hyprland    3MiB |
+|    0   N/A  N/A  21604   G   niri        3MiB |
+```
+
+and the kernel agrees, with no compositor in the loop:
+
+```
+card1-eDP-1      status=connected  enabled=enabled  dpms=On  mode=1920x1080
+card2-HDMI-A-1   status=connected  enabled=enabled  dpms=On  mode=1920x1080
+```
+
+(`card2-HDMI-A-1` does expose `dpms`; an earlier truncated `ls` in this session
+suggested otherwise and was wrong — checked by reading the attribute directly.)
+
+**PASS** — P1-043's "a hybrid laptop reporting the wrong card" does not happen
+in the desktop sessions. It happens in Gaming Mode; see §6.
+
+### 5.2 APEX Shell responds in every desktop session
+
+```
+$ apex shell launcher|dashboard|notifications|clipboard|power|menu   → rc=0 (labwc)
+$ apex shell launcher|dashboard|power                                → rc=0 (hyprland)
+$ apex shell launcher|dashboard|power                                → rc=0 (niri)
+```
+
+Hyprland's own IPC and the screenshot path both work:
+
+```
+$ HYPRLAND_INSTANCE_SIGNATURE=… hyprctl monitors
+Monitor eDP-1 (ID 0):    1920x1080@144.02800 at 0x0   scale: 1  transform: 0  focused: yes  dpmsStatus: 1  vrr: false
+Monitor HDMI-A-1 (ID 1): 1920x1080@239.96400 at 1920x0 scale: 1 transform: 0  focused: no   dpmsStatus: 1  vrr: false
+$ grimblast save output ~/qual/shots/hypr-grimblast.png
+grim -t png -o eDP-1 /var/home/andre/qual/shots/hypr-grimblast.png   → rc=0, PNG 1920x1080
+```
+
+### 5.3 The session auto-locks, and the lock is compositor-enforced
+
+The labwc session locked itself 5½ minutes into the run. That is
+`~/.config/hypr/hypridle.conf` doing its job, and its timings are worth having
+on record because they are why unattended work on this machine dies:
+
+```
+300s  brightnessctl -s set 10%      (dim)
+330s  loginctl lock-session          (LOCK)
+360s  DpmsControl.sh off             (displays off)
+900s  loginctl suspend               (SUSPEND)
+```
+
+**The lock holds when its client is killed** — tested, because a lock screen
+that a shell command can dismiss is not a lock:
+
+```
+$ grim -o eDP-1 lock-1-locked.png     → 1920x1080 colours=23859 mean=(59.9,63.9,71.1)  (the APEX lock screen)
+$ pkill -x quickshell ; sleep 5
+$ pgrep -c -x quickshell              → 0
+$ grim -o eDP-1 lock-2-after-kill.png → 1920x1080 colours=1     mean=(0.0,0.0,0.0)     (black)
+$ pgrep -c -x labwc                   → 1   (the compositor is still running)
+```
+
+**PASS.** labwc keeps the `ext-session-lock-v1` surface in its abandoned state
+and paints black; the desktop is never revealed. 1 970 435 of 2 073 600 pixels
+changed between the two captures — the lock screen was replaced by black, not by
+the desktop.
+
+**Finding, minor: `grim` hangs forever on a DPMS-off output.** Two `grim`
+processes sat in `poll_schedule_timeout` for 283 s and 150 s while
+`card1-eDP-1` read `enabled=disabled dpms=Off`. `wlr-screencopy` has no timeout
+and neither does `grim`, so the APEX screenshot keybind pressed as the display
+blanks will hang rather than fail. Every `grim` in this report is wrapped in
+`timeout` because of it.
+
+**Finding, minor: `apex shell` exposes no Caffeine target.** `apex shell list`
+has 19 targets; none of them is caffeine or idle-inhibit. Whatever the shell's
+Caffeine toggle is bound to, the CLI cannot reach it, so the "keep this machine
+awake" affordance has no scriptable form. hypridle had to be killed outright to
+finish this run — recorded as a test-harness change; it is session-local and
+died with the session.
+
+### 5.4 DEFECT — the niri session runs two bars
+
+```
+$ pgrep -a -u andre waybar
+21723 waybar
+$ pgrep -a -u andre quickshell
+21730 quickshell -c /usr/share/apex-shell
+```
+
+Both are running. The cause is that **APEX ships no niri configuration at all**:
+
+```
+$ find /usr/share /usr/etc -name config.kdl 2>/dev/null
+        (nothing — readable directories, genuinely absent)
+$ ls -la ~/.config/niri/
+-rw-r--r--. 1 andre andre 28144 Sep  6 09:07 config.kdl
+-rw-r--r--. 1 andre andre 27800 Jul 30 19:16 config.kdl.pre-include.bak
+```
+
+`~/.config/niri/config.kdl` is **niri's own upstream default**, written by niri
+on first run, and line 271 of it is upstream's stock example:
+
+```
+// This line starts waybar, a commonly used bar for Wayland compositors.
+spawn-at-startup "waybar"
+```
+
+`apex-shell-firstrun` only appends two `include` lines
+(`ApexShellInput.kdl`, `ApexShellKeybinds.kdl`) to whatever is already there —
+it never removes the stock waybar spawn. So every niri user who lets niri write
+its own default gets waybar **and** the APEX bar. Contrast Hyprland and labwc,
+both of which APEX seeds from `/usr/share/apex/hypr` and `/usr/share/apex/labwc`.
+
+### 5.5 DEFECT — APEX Safe Graphics cannot light a display on the discrete GPU
+
+This is the recovery session, so the failure mode matters more than most.
+
+```
+$ /usr/libexec/apex-safe-graphics check
+config      /usr/share/apex/safe-graphics
+compositor  /usr/bin/labwc
+terminal    foot
+renderer    pixman (software)
+```
+
+It starts, and the internal panel works — `foot` is up and the desktop paints
+(709 distinct colours, mean 7.7 — a dark recovery desktop). **The external
+monitor is never enabled:**
+
+```
+$ wlr-randr
+HDMI-A-1 "Lenovo Group Limited R25f-30 …"   Enabled: no
+eDP-1    "AU Optronics 0x978F"              Enabled: yes  1920x1080@144.028
+$ cat /sys/class/drm/card2-HDMI-A-1/{enabled,dpms}
+disabled
+Off
+$ grim -o HDMI-A-1 …
+grim: unknown output 'HDMI-A-1'
+```
+
+It cannot be turned on by hand either — `wlr-randr --output HDMI-A-1 --on`
+returns and the output stays `Enabled: no`.
+
+**Cause, from the session's own log:**
+
+```
+[ERROR] [backend/drm/renderer.c:23] Renderer did not support importing DMA-BUFs
+[ERROR] [types/output/swapchain.c:109] Swapchain for output 'HDMI-A-1' failed test   (x60)
+```
+
+Zero such errors for `eDP-1`. The pixman software renderer the session forces
+(`WLR_RENDERER=pixman`, `LIBGL_ALWAYS_SOFTWARE=1`) cannot import DMA-BUFs, and
+wlroots' multi-GPU path needs exactly that to feed a secondary GPU's connector.
+
+**Why it matters:** Safe Graphics exists for "the normal desktop will not
+start". A machine whose panel is dead, a laptop in a dock with the lid shut, or
+any hybrid machine whose only working screen hangs off the discrete GPU gets a
+recovery session that shows nothing at all — and its own comment says the other
+route in is "Ctrl+Alt+F2, log in, run `apex-safe-graphics`", which lands on the
+same blank screen. The session script should either allow hardware rendering on
+the secondary GPU as a fallback, or say out loud which outputs it could not
+light.
