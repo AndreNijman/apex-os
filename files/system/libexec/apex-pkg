@@ -1000,16 +1000,84 @@ image_owns() {
     rpm -qf --quiet -- "$path" 2>/dev/null
 }
 
+# Hand every path install_etc wrote to restorecon, which asks the LOADED POLICY
+# what each one's context should be.
+#
+# Deriving it from the policy is the whole point. `cp -a` preserves the SOURCE
+# label and the source is an rpm extraction tree under /var/lib, so without this
+# every file `apex install` puts in /etc arrives carrying the extraction tree's
+# type. Measured on katana on 2026-09-20 (ROADMAP/evidence/katana-pwd-lock-selinux-20260920.md):
+# 7 of the 11 tracked paths were rpm_var_lib_t, among them /etc/.pwd.lock, which
+# policy wants as passwd_file_t. systemd takes that lock before it will allocate
+# a dynamic UID, so EVERY DynamicUser=yes unit on the machine broke at once —
+# capsule@.service, rpm-ostreed.service, fwupd-refresh.service and three more,
+# each failing at step USER with 217/USER. Nothing logged an AVC: the denial is
+# in PID 1 before any domain transition, and the only line naming the file
+# exists at debug level. It cost four rounds of probing to find.
+#
+# A hardcoded map of filenames here would be the same mistake as the
+# --excludepath list the multilib pass had to abandon, and it would have missed
+# .pwd.lock — a transaction artefact no package owns and nobody would have
+# thought to list.
+relabel_etc() {
+    local list="$1"
+    [ -s "$list" ] || return 0
+    if ! command -v restorecon >/dev/null 2>&1; then
+        warn "restorecon is absent — files installed into /etc keep the label they were copied with"
+        return 0
+    fi
+    # A machine with SELinux off has no labels to get wrong, and restorecon
+    # there relabels nothing while still exiting 0 — so the warning below could
+    # never fire and would mean nothing if it did.
+    if command -v selinuxenabled >/dev/null 2>&1 && ! selinuxenabled; then
+        return 0
+    fi
+    # -F is not tidiness. A bare `restorecon` silently declines to touch any
+    # file whose current type is in the policy's customizable_types list —
+    # "not reset as customized by admin", one line per file, and then exit 0.
+    # That exemption is for labels an ADMIN chose; a file this function has
+    # just written is not one of those, and inheriting the exemption would make
+    # this pass run, report success and change nothing. -i makes a path that
+    # has since been removed a no-op rather than an error.
+    #
+    # Stderr is deliberately NOT swallowed: this defect reported nothing at all
+    # for months, and restorecon's own message is the only thing that would
+    # name a path it could not set.
+    restorecon -F -i -f "$list" >&2 \
+        || warn "relabelling /etc reported problems — see above, then: restorecon -nv -f ${list}"
+    # The saved copies are engine-owned from the top of the tree down, so -R is
+    # unambiguous here in a way it could never be under /etc. They are written
+    # by the same `cp -a` and arrive with the same wrong label.
+    if [ -d "$ETC_SAVE" ]; then
+        restorecon -F -R "$ETC_SAVE" >&2 \
+            || warn "relabelling ${ETC_SAVE} reported problems"
+    fi
+}
+
 install_etc() {
     local etcroot="$1"
     local -a kept=()
+    # Every path this function creates or overwrites, collected AS IT GOES for
+    # the relabel pass at the end. Built here rather than derived afterwards
+    # because only the branch that ran knows which path it actually wrote: the
+    # two `.apexnew` branches leave $target alone, and a directory that already
+    # existed was not created by us.
+    local relist
+    relist="$(mktemp)" || die "cannot create a temporary file"
     if [ -d "$etcroot" ]; then
         local rel target saved
         while IFS= read -r rel; do
             target="/etc/${rel}"
             saved="${ETC_SAVE}/${rel}"
             if [ -d "${etcroot}/${rel}" ]; then
-                mkdir -p "$target"
+                # A directory we create inherits its parent's type by
+                # transition, which is wrong wherever policy has an opinion —
+                # /etc/cron.d is system_cron_spool_t, not etc_t. One that was
+                # already there is not ours to relabel.
+                if [ ! -d "$target" ]; then
+                    mkdir -p "$target"
+                    printf '%s\n' "$target" >> "$relist"
+                fi
                 continue
             fi
             # cp -a, NEVER install: rpm ships /etc symlinks that point back into
@@ -1023,13 +1091,20 @@ install_etc() {
                 mkdir -p "$(dirname "${target}.apexnew")"
                 cp -a -- "${etcroot}/${rel}" "${target}.apexnew"
                 warn "kept your edited ${target}; new version saved as ${target}.apexnew"
+                # The edited file is still one this engine put there, so its
+                # label stays ours to keep right even though its content is not.
+                printf '%s\n%s\n' "${target}.apexnew" "$target" >> "$relist"
             elif [ -e "$target" ] && [ ! -f "$saved" ]; then
                 mkdir -p "$(dirname "${target}.apexnew")"
                 cp -a -- "${etcroot}/${rel}" "${target}.apexnew"
                 warn "${target} already exists and is not ours; new version saved as ${target}.apexnew"
+                # Only the file we wrote. $target predates this engine, and its
+                # label belongs to whoever put it there.
+                printf '%s\n' "${target}.apexnew" >> "$relist"
             else
                 mkdir -p "$(dirname "$target")"
                 cp -a "${etcroot}/${rel}" "$target"
+                printf '%s\n' "$target" >> "$relist"
             fi
             mkdir -p "$(dirname "$saved")"
             cp -a "${etcroot}/${rel}" "$saved"
@@ -1066,11 +1141,21 @@ install_etc() {
             if [ -f "$t" ] && [ -f "$s" ] && [ "$(sha "$t")" = "$(sha "$s")" ] \
                 && ! image_owns "$t"; then
                 rm -f "$t"
+            elif [ -e "$t" ]; then
+                # Still there because the user edited it or the image owns it.
+                # Either way this engine put it there once, so it belongs in the
+                # set whose label the policy decides.
+                # /etc/security/limits.d/10-gamemode.conf on katana was exactly
+                # this — tracked, no longer shipped, still mislabelled, and the
+                # same defect rather than a separate accident.
+                printf '%s\n' "$t" >> "$relist"
             fi
             rm -f "$s"
         done < "$ETC_LIST"
     fi
     printf '%s\n' "${kept[@]:-}" | awk 'NF' > "$ETC_LIST"
+    relabel_etc "$relist"
+    rm -f "$relist"
 }
 
 install_var_dirs() {
