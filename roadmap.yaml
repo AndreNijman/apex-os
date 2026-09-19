@@ -566,7 +566,31 @@ tasks:
     blanket-excluded, which throws away every *_icd.i686.json while keeping the .so files they name: katana has 13
     x86_64 Vulkan ICDs and ZERO i686, so Steam's 32-bit client dies with VK_ERROR_INCOMPATIBLE_DRIVER. NOT fixed;
     unit pkg-share owns it. Also `apex resolve chromium` offers only the flatpak while `apex install chromium`
-    installs the rpm.
+    installs the rpm. || 2026-09-19, unit pkg-share, both remaining apex-pkg defects FIXED on branch
+    task/pkg-share (commit c55f218e, not landed). (b) the /usr/share blanket exclusion is gone and so is the whole
+    --excludepath list: extract_rpms now unpacks the 32-bit set into a scratch root and merge_multilib carries a
+    path only when neither the running image (rpm -qal, the same rpmdb question install_etc's removal pass asks)
+    nor this transaction's native pass already provides it, failing CLOSED so a mute rpmdb stops the merge instead
+    of carrying everything. Measured in fedora:43 over gstreamer1 + at-spi2-core + mesa-vulkan-drivers, 91 rpms /
+    57 i686, new rule vs old on the same set: 23 files newly carried, 0 lost, +44KB; 12 of the 23 are the
+    *_icd.i686.json manifests, the rest are /usr/bin/gio-querymodules-32, six /usr/libexec/getconf/*ILP32* helpers
+    and four licence/gdb files, all arch-tagged or i686-only and unable to shadow anything.
+    tests/test-apex-multilib-extract.sh 6 -> 11 assertions, all derived from the rpms and the rpmdb rather than
+    from a list, with two controls: the pre-fix exclude list read twice (it must still produce a shadow AND must
+    contain none of the manifests) and the merge with the rpmdb clause removed, which must let an image-owned
+    32-bit file through, because in fedora:43 the native-pass clause would otherwise hide the leg katana actually
+    depends on. CI floor 6 -> 11. (c) `apex resolve` lost its entire rpm leg because probe_rpm passed `--` to
+    `dnf5 repoquery`, which refuses it (rc 2, no stdout, dnf5 5.2.18.0) -- so it returned nothing for EVERY
+    package, not just chromium. newer_satisfied_by_image carried the same `--`, so guard_rpms answered 'not
+    satisfied' for every versioned requirement it was ever asked about. Verified on the L16 with the shipped
+    engine as a control: /usr/libexec/apex-pkg still says 'APEX would use: flatpak' for chromium, the fixed engine
+    says rpm and lists chromium-152.0.7977.82-1.fc43. tests/test-apex-resolve.sh's fake dnf5 now refuses `--` like
+    the real one -- it ignored its arguments, which is why 88 assertions passed over this; with the fake fixed,
+    re-introducing `--` fails 11 of them. tests/test-apex-pkg.sh's two assertions that PINNED --excludepath
+    /usr/share and /usr/bin are replaced, since pinning the defect is why this suite could not see it. Suites:
+    extract 11/0, resolve 91/0, pkg 79/0, multilib 3/0, shellcheck clean. NOT confirmed on hardware: nothing was
+    installed on katana or the L16, so the ICDs reaching /usr/share/vulkan/icd.d and Steam initialising Vulkan
+    still need one `sudo apex install steam` from an image carrying this branch.
 - id: P0-002
   title: Introduce protected apex-secretd service
   priority: P0
