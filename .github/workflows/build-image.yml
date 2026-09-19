@@ -227,16 +227,28 @@ jobs:
           # apex-os roadmap/v2.2 and apex-shell main while the two INTEGRATION
           # branches agreed perfectly. It now clones the matching branch and
           # PRINTS which one it used; so does this.
+          # The fallback is ORDERED, and main is last rather than first. The
+          # comment above described this failure and the code still reached
+          # straight for main: on 2026-09-19 build 35447611644 died in
+          # check-labwc-keybinds on task/sbom-oom -- a branch that exists only
+          # in apex-os -- because main's shell publishes 68 keybind defaults
+          # where the integration branch publishes 70. roadmap/v2.2's own
+          # halves agree perfectly (the checker PASSES against the two repo
+          # trees); the build was comparing this repo's integration branch
+          # against the other repo's release branch. Any apex-os branch with no
+          # apex-shell counterpart hit this, which is most of them.
           want="${GITHUB_REF_NAME}"
-          sha="$(git ls-remote https://github.com/AndreNijman/apex-shell \
-                   "refs/heads/${want}" | awk '{print $1}')"
-          if [ -n "$sha" ]; then
-            used="$want"
-          else
+          sha=""; used=""
+          for cand in "$want" roadmap/v2.2 main; do
             sha="$(git ls-remote https://github.com/AndreNijman/apex-shell \
-                     refs/heads/main | awk '{print $1}')"
-            used="main (apex-shell has no branch named ${want})"
-          fi
+                     "refs/heads/${cand}" | awk '{print $1}')"
+            if [ -n "$sha" ]; then
+              if [ "$cand" = "$want" ]; then used="$cand"
+              else used="$cand (apex-shell has no branch named ${want})"
+              fi
+              break
+            fi
+          done
           [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not resolve apex-shell ${used}"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Pinned apex-shell ${used}: $sha"
