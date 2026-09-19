@@ -1,6 +1,6 @@
 {
   "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
-  "updated": "2026-09-19T18:35+08:00",
+  "updated": "2026-09-19T18:45+08:00",
   "concurrency_ceiling": 6,
   "units": [
     {
@@ -460,7 +460,8 @@
         "p1-053c",
         "p1-053b"
       ],
-      "title": "The relay leg the Android app has never had — P1-060 C1s last piece"
+      "title": "The relay leg the Android app has never had — P1-060 C1s last piece",
+      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 33) -- landed as merge 2814f45d, 0 unlanded. THE RELAY LEG WORKS END TO END OVER THE REAL DEPLOYED RELAY, proven twice and independently: a hand-rolled Python guest (so the client under test was not also the witness) dialled wss://apex-relay.andrenijman.com and got HTTP/1.1 101, a matching accept value, {\"relay\":\"paired\"} and its hello byte spliced onto the daemon's listener; then a real Pixel 7a paired and ran a session through Cloudflare, device suite OK (35 tests), up from 32. The seam PairingService.kt:21 claimed turned out to be real, so no refactor was needed, and NO NEW DEPENDENCY was added -- argued rather than defaulted. WHAT IS LEFT IS A PERSON, NOT AN AGENT: the phone is still on the same Wi-Fi and takes the relay because the offer's LAN addresses were WITHHELD, not because they were unreachable. A phone on mobile data needs somebody holding it. P1-060 C2 stays open and unfakeable -- it names a tablet and a foldable and neither exists here. P1-051 was not touched and nothing this round bears on its remainder. FOUR DEFECTS WORTH REMEMBERING, all invisible to passing tests: SSLSocket does not verify the HOSTNAME by default (chain yes, name no), so without endpointIdentificationAlgorithm=\"HTTPS\" the rendezvous id goes to whoever answers the address while every 'is TLS on?' test still passes; every relayed session leaked its socket because Session.close closes the streams and the adapters inherited a no-op close(); the Noise handshake on the relay leg ran with NO deadline despite a comment claiming otherwise; and four mutations into Relay.kt caught only two, one surviving because the parity assertion looked for a literal in the Rust source and compared it to nothing."
     },
     {
       "id": "sbom-oom",

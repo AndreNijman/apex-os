@@ -62,17 +62,12 @@ rather than making the numbers fit.
 
 ## NEXT
 
-**Read the probe run's `repro` arm** (`.github/workflows/sbom-probe.yml`, pushed
-on `task/sbom-oom`, triggers on push to that path): if `sudo dmesg` prints
-`Out of memory: Killed process N (syft)` and `/proc/vmstat oom_kill` moved, the
-cause is confirmed as the kernel OOM killer; then take the `ocidir` arm's result
-(skopeo copy to an OCI layout on disk + `syft oci-dir:`), fold it into
-`build-image.yml`'s SBOM step, commit, and dispatch
-`gh workflow run build-image.yml --ref task/sbom-oom` (NOT roadmap/v2.2 — that
-ref has no fix; workflow_dispatch takes the workflow file from the dispatched ref
-and `PUBLISH` is false off main). If dmesg is SILENT and oom_kill did not move,
-**the OOM reading is refuted** — say so, do not ship oci-dir as a fix for a
-refuted cause, and look at the runner agent killing the step's process group.
+Read the `swap32`, `gomemlimit` and `ocidir*` arms of probe run **35437908023**
+(`gh api repos/AndreNijman/apex-os/actions/jobs/<id>/logs` — `gh run view --log`
+refuses while the run is in progress, the API endpoint does not). Whichever of
+them completes with an SBOM, put that into `build-image.yml`'s SBOM step,
+commit, push `task/sbom-oom`, then
+`gh workflow run build-image.yml --ref task/sbom-oom` and record the run id here.
 
 ## The deadline, and what to do about it
 
@@ -137,6 +132,49 @@ with an unverified fix is a good outcome; an unrecorded one is not.**
   `sudo dmesg` unconditionally.
 
 ## FOUND
+
+### MEASURED, 18:35-18:38 AWST, probe run 35437829397, arm `repro`
+
+**It is memory, and it is not close.** The exact failing command, same runner
+class, same syft 1.52.0, against the same digest. `free -m` every 5 s:
+
+```
+10:35:46 mem_used=1379M  mem_avail=14609M swap_used=0M     tmp=1M
+10:36:26 mem_used=7071M  mem_avail=8918M  swap_used=0M     tmp=9173M
+10:36:52 mem_used=10788M mem_avail=5201M  swap_used=0M     tmp=14715M   <- /tmp stops growing
+10:37:07 mem_used=14580M mem_avail=1408M  swap_used=0M     tmp=14715M
+10:37:37 mem_used=15874M mem_avail=114M   swap_used=2720M  tmp=14715M
+10:38:08 mem_used=15953M mem_avail=35M    swap_used=3070M  tmp=14715M
+10:38:12 ##[error]The runner has received a shutdown signal.
+```
+
+Three things fall out of that, and they change the fix:
+
+1. **"The runner has received a shutdown signal" IS the memory exhaustion.** The
+   round-33 record read that message as GitHub infrastructure. Here it is
+   printed four seconds after the VM ran out of memory AND swap, with the whole
+   climb logged above it. Same failure as the 137, one notch more severe: when
+   the kernel's OOM killer gets there first you get `syft exited 137`; when the
+   VM stops responding first the host cancels the job and prints that line.
+2. **The OOM KILLER specifically is NOT what fired in this arm.** Nothing had
+   been killed when the runner went — `vmstat oom_kill` was still 0 at the start
+   and the job died before it could be re-read. So: *memory exhaustion*
+   confirmed with a measurement; *"the OOM killer"* as the precise mechanism
+   remains the likely reading of the 137 in CI but is still not read from a
+   kernel message. Do not upgrade it without one.
+3. **The layers are ALREADY on disk — `/tmp` grew to 14.7 GB — and syft was
+   holding ~11 GB of RAM at the same time.** The `registry:` source is not
+   keeping the image in memory. So the card's preferred fix, moving the source
+   to a disk-backed OCI layout, addresses something that is not the problem:
+   after `/tmp` stops growing at 10:36:52, memory climbs another 5 GB. This
+   matches anchore/syft#2159 — the memory tracks the FILE COUNT through the
+   filetree squash and MIME detection, not where the bytes were read from. A
+   full Fedora bootc plus two Electron trees is a very large file count.
+
+That is why three arms were added after the first push (`gomemlimit`, `swap32`,
+`ocidir-gomemlimit`): with the mechanism being the live data structure rather
+than the transport, the knobs that can work without restricting a cataloguer are
+a Go soft memory limit and real swap on the 86 GB of free disk.
 
 - (build-verify, round 33) `check-shellcheck-coverage.sh` discovers `tests/`,
   `files/` and `android/tools/` only — **repo-root scripts are linted by
