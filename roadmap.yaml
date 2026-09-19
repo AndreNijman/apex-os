@@ -3096,7 +3096,69 @@ tasks:
     already performance, so scaling_governor reads the same before, during and after; the cgroup, sched_ext/state
     and active are. Full detail at ROADMAP/evidence/gaming-release-20260919.md. katana was read-only this round
     and ends it unchanged: greetd active, game status false, sched_ext disabled, coredump store 26M, /var 53G
-    free.
+    free. || ROUND gaming-scx 2026-09-20 on apex-os task/gaming-scx (777ba028 -> 4bcf76cd, four commits, PUSHED
+    NOT MERGED; merge-tree clean against origin/roadmap/v2.2 777ba028, checked not assumed). THE GAMING MODE
+    DEFECT THE INTEGRATED-IMAGE QUALIFICATION FOUND IS FIXED IN THE REPOSITORY AND IS NOT CONFIRMED ON HARDWARE,
+    because it needs an image build. Gaming Mode had NEVER once loaded a sched-ext scheduler -- three shipped
+    images, every boot -- and apex game status said it had. syswriter.rs ran `scxctl switch` where the machine
+    needed `scxctl start`; APEX loads nothing at boot so the first entry always finds none and scxctl said so in
+    as many words, in journalctl -b, -b -1 and -b -2. Not a regression; it has simply never worked. NEITHER VERB
+    MAY BE HARDCODED, which is why this is not a one-word change: `start` alone would work on exactly the machines
+    APEX ships today and fail on any machine already running a scheduler. The verb is now read off
+    /sys/kernel/sched_ext/state with ONE retry on whichever verb scx_loader's own error names, and both refusal
+    strings were read out of the shipped scxctl 1.1.2 binary rather than invented (the first matches katana's
+    journal verbatim). scxctl get was deliberately NOT run on the L16: org.scx.Loader.service is bus-activating,
+    so it would have started scx_loader on Andre's daily. THE EXPENSIVE HALF WAS THE STATUS. apex game status's
+    only sched-ext output was a sentence copied out of the PLAN, printed directly beneath the line recording the
+    refusal -- the permission-denied-is-not-absence class again, now in its seventeenth location. Outcome gains a
+    third answer, Unknown(String), because Landed/Refused could not hold 'I could not tell' and so held it as one
+    of the other two; landed() is false for it. ScxState reads the kernel
+    (Enabled{ops}/Disabled/InFlux/Unsupported/Unreadable) and is rooted at sys_root -- the old code hardcoded
+    /sys/kernel/sched_ext EVEN ON A WRITER BUILT WITH AN EXPLICIT FIXTURE ROOT, so the only machine that could
+    exercise the path was the one running the tests. After a successful call the writer waits, bounded at 2 s,
+    then reports WHAT IT READ: a command that exits 0 over a machine that did not move comes back Refused. Status
+    gains scx_requested, scx_state and scx_detail; scx_state is loaded / not loaded / unknown / not requested and
+    `loaded` is reachable ONLY from a kernel reading. The keys are reported while game mode is OFF too, so
+    'disabled before, disabled during' reads as the non-answer it is. root/ops publishes the struct_ops name with
+    the scx_ prefix dropped (scx_lavd attaches as lavd), so the comparison strips it -- comparing verbatim would
+    report a working scheduler as a failure, this defect inverted -- and that expectation is flagged as UNVERIFIED
+    because no machine here can load a scheduler to look. THE SIBLING AUDIT FOUND THE SAME SHAPE NEXT DOOR:
+    gpus_locked in apex game status was plan.gpus_locked.clone(), the list the plan MEANT to lock, while
+    run_nvidia_smi had been returning a perfectly good Outcome::Refused that nothing read -- a GPU whose clock
+    lock nvidia-smi rejected was reported as locked. Fixed the IRQ way, with gpus_lock_attempted beside it. Also:
+    game_exit discarded every outcome but a hard Err, so a refused restore was silent under a line asserting the
+    machine was put back. apply_all still discards per-action outcomes by design and no status surface reports a
+    tier as applied, so it is left alone and said so. RUN-BOOK CORRECTED, two rows that proved nothing: 6.6's
+    destroy step was `sudo systemctl restart greetd`, which takes the seat away but leaves the session script
+    alive long enough to run its own EXIT trap, so game mode was released by the ordinary cooperative path -- a
+    good outcome and a DIFFERENT ROW. It is now kill -9 on the owner. And 6.6's `cat /sys/kernel/sched_ext/state #
+    expect: enabled` is deleted: it read disabled during the session as well as after, so the row would have
+    passed on a file that never moved. The governor caveat already in the doc is now one of a PAIR of named
+    non-discriminators on katana. New section 5c records the defect; new section 6.8 carries the three rows that
+    need hardware, including the switch branch (which needs scx_loader holding a real scheduler and is the one
+    branch a fixture cannot honestly stand in for). Section 5a and docs/apexd-dbus.md both claimed katana sat with
+    scx_lavd running for 75 minutes; corrected in place and marked as corrections, because no scheduler was
+    running then or ever -- the cpuset, the IRQs and the tier were real. GATES: cargo test --locked --workspace
+    --no-fail-fast 3450 passed 0 failed, clippy -D warnings clean, test-apex-gaming 131/0, test-apex-modes 67/0,
+    test-apex-gaming-session 46/0, check-doc-verbs 0 stale 0 undeclared (apex game start dropped from
+    doc-verbs-undocumented, which is what its reverse pass is for), check-suites-run-in-ci 0 unrun,
+    check-shellcheck-coverage 0 newly failing, no conflict markers. 30 new assertions; FOURTEEN mutations, each
+    naming the row it turned red, sources restored with plain cp and verified with cmp. MB11 ESCAPED THE FIRST
+    PASS and that near-miss is recorded rather than tidied away: nothing pinned the plan-time note, so reverting
+    it to the sentence that had claimed a scheduler on three images turned nothing red -- a gate that inspects
+    nothing, in this unit's own work. Two assertions added and MB11/MB12 then caught it in both directions. cargo
+    fmt deliberately not run and that is not an omission: the workspace has never been rustfmt'd and
+    build-image.yml:382 records why the --check step is absent. NOTHING IN THE SUITE CAN REACH A REAL SCHEDULER:
+    the fixture constructor is #[cfg(test)], because the existing host-commands guard exists precisely because a
+    live writer in a test once reached the developer's own scheduler and raised a burst of polkit prompts. STAYS
+    PARTIAL: this item's other open half is untouched -- safe GPU controls on AMD/Intel still cannot distinguish
+    'left at default' from 'no knob exists', and Safe Graphics' automatic dGPU branch still needs the panel
+    genuinely dark. And every sched-ext row above is a fixture: nothing was run on katana or the L16 this round,
+    by instruction, and the three hardware rows are a written checklist at docs/gaming-and-sessions.md 6.8, not a
+    claim. Known limitation stated rather than left to be found: game mode STOPS a scheduler it found already
+    running instead of restoring it (scxctl restore would be the fix; no APEX image loads one at boot so the
+    branch has never been reached). Full detail at ROADMAP/evidence/gaming-scx-20260920.md. Agent card
+    ROADMAP/state/agents/gaming-scx.md.
 - id: P1-044
   title: Default incoming firewall
   priority: P1

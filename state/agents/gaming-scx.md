@@ -4,16 +4,27 @@
 Repo `apex-os`, branch `task/gaming-scx`, worktree
 `/var/tmp/apex-work/wt-gaming-scx`, from `roadmap/v2.2` (`777ba028`).
 
-Three commits:
+Four commits, tip `4bcf76cd`:
 
 ```
+4bcf76cd fix(gaming): one sched-ext note in a live session, and a constant …
 30cea72f docs(roadmap): evidence for gaming-scx …
 a197d6ca docs(gaming): correct the two run-book rows that proved nothing …
 015c3de1 fix(gaming): load the sched-ext scheduler, and stop claiming one …
 ```
 
+`git merge-tree --write-tree origin/roadmap/v2.2 task/gaming-scx` → exit 0,
+tree `f84c16bd`, **0 conflicts**, against `origin/roadmap/v2.2` at `777ba028`
+(re-fetched 2026-09-20; the tip had not moved). Run, not assumed.
+
 Evidence: `ROADMAP/evidence/gaming-scx-20260920.md` (tracked, on the branch).
-P1-043 recorded with `set-status.py`, prior evidence carried forward whole.
+P1-043 recorded `partial` with `set-status.py`: prior evidence read out with
+`yaml.safe_load` first and carried forward **whole** — verified afterwards by
+`prior in evidence` → True, 14 551 → 21 172 chars, and a per-item diff showing
+P1-043 as the only row that changed. `partial` because this item's other open
+half is untouched (safe GPU controls on AMD/Intel cannot distinguish "left at
+default" from "no knob exists"; Safe Graphics' automatic dGPU branch needs the
+panel genuinely dark).
 
 ## What was wrong
 
@@ -49,11 +60,21 @@ beneath the journal line recording the refusal.
 
 ## Gates
 
-3447 workspace tests / 0 failed, clippy clean, test-apex-gaming 131/0,
+3450 workspace tests / 0 failed, clippy clean, test-apex-gaming 131/0,
 test-apex-modes 67/0, test-apex-gaming-session 46/0, check-doc-verbs 0 stale
 0 undeclared, check-suites-run-in-ci 0 unrun, check-shellcheck-coverage 0
-newly failing, no conflict markers. 13 mutations, each named the row it
-turned red; sources restored with plain `cp` and verified with `cmp`.
+newly failing, no conflict markers. **14** mutations, each named the row
+it turned red; sources restored with plain `cp` and verified with `cmp`.
+
+MB11 escaped the first pass — nothing pinned the plan-time note, so reverting
+it to the sentence that had claimed a scheduler on three images turned nothing
+red. A gate that inspects nothing, in this unit's own work. Two assertions
+were added; MB11 and MB12 then caught it in both directions. Recorded because
+the near-miss is the finding.
+
+`cargo fmt` was NOT run and that is not an omission: the workspace has never
+been rustfmt'd, `.github/workflows/build-image.yml:382` records that the
+`--check` step is absent for that reason, and rustfmt is not installed here.
 
 **Hardware: NOTHING was touched.** Not katana, not the L16. `scxctl --help`
 on the L16 is the only thing run, and `scxctl get` was deliberately avoided
@@ -66,8 +87,8 @@ Nothing is outstanding in the repository. The remaining work is a machine and
 a merge, in that order of interest:
 
 1. **Land the branch.** `merge-tree` was clean against `roadmap/v2.2`
-   `777ba028` at push time; re-check against the current tip. Landings on this
-   program are merges, not rebases.
+   `777ba028` (see above); re-check if the tip has moved since. Landings on
+   this program are merges, not rebases.
 2. **Run `docs/gaming-and-sessions.md` §6.8 on katana, from an image that
    carries this branch.** Three rows: (A) a scheduler attaches from `disabled`
    — and **record `root/ops` verbatim**, expected `lavd`, an expectation no
@@ -94,6 +115,15 @@ Known limitations, written down rather than left to be rediscovered:
 * **`SCX_SETTLE = 2 s`** is reasoned, not measured on hardware. If §6.8 Row A
   returns `unknown` on `enabling`, raise it and record the number — do not
   re-run until it passes.
+
+**Memory vault was unreachable the whole session** (`claude-memory` MCP,
+CONNECT_TIMEOUT), so no journal entry was appended and no note was written to
+it. Two things from this round belong there when it is back, both of the
+"a checked fact, not an assumption" kind: `scxctl get` is bus-activating via
+`org.scx.Loader.service`, so running it to inspect state STARTS `scx_loader` on
+whatever machine you are on; and a Rust test that writes an executable and then
+runs it can fail with `ETXTBSY` because `fork` in a sibling test thread
+duplicates that still-open write fd — one module-level mutex fixes it.
 
 If you are picking this up cold: `apexd` is the cargo root (cargo from the
 repo root exits 101), and the scx tests live in `apexd-core/src/syswriter.rs`
