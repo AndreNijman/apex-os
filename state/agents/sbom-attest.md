@@ -245,14 +245,43 @@ Ranked, with what each costs:
 
 ## NEXT
 
-1. Read run `35455459788`. `RESULT <arm>: FITS` / `OVER` is the verdict line;
-   `REKOR <arm>: ACCEPTED` with a logIndex is the proof.
-2. If `nofiles` fits: that is the landing. `SYFT_FILE_METADATA_SELECTION=none`
-   in the SBOM step, keep `--type spdxjson`, keep the tlog, add the size guard.
-3. If it does not: `norel` next, then `jq-strip`, then fall back to option C —
-   and option C needs `verify.rs:540` changed **in the same landing**.
-4. Then dispatch `gh workflow run build-image.yml --ref task/sbom-attest` and
-   put the run id in the section above BEFORE reading it.
+**The diagnosis is complete and the fix is committed and pushed. What is
+outstanding is confirmation, and two runs are already in flight for it.**
+
+1. **Read build `35456273175`.** In the `image` job, the step
+   `Generate and attest the SBOM` must be **success and not skipped** (a
+   skipped job counts as success in this repo — confirm the step *ran*), and
+   its log must contain, in this order:
+   - `SBOM packages: 9830   file rows: <small>` — the count must not have moved
+     from 9830. If it did, the shrink came out of the wrong place; stop.
+   - `predicate …B compact -> …B DSSE body; ceiling 25165824B, at N%`
+   - `tlog entry created with index: N`
+   Then `Verify the image and its SBOM are both retrievable` must be success.
+   That step's `cosign verify-attestation` is the end-to-end proof.
+2. **Read probe `35456401012`** for the same numbers a little sooner, and as
+   the independent cross-check. `RESULT ` and `REKOR ` are the lines.
+3. **If the guard fired** (`::error::the SBOM predicate is …`): the document is
+   still over 24 MiB at package level. Do **not** reach for `--tlog-upload=false`
+   as a reflex — read the CHOSEN OPTION section, and the next lever to measure
+   is the `externalRefs` array, where syft emits many `cpe23Type` entries per
+   package. Dropping CPEs while keeping purl is a real reduction (CPE-based
+   scanners match worse) and belongs in `docs/` if taken.
+4. **When the build is green**, three small things close this out:
+   - delete `.github/workflows/sbom-probe.yml` — it says TEMPORARY, and round 4
+     is recoverable from git history at the commit that added it;
+   - replace the estimates in `build-image.yml`'s comment block, in
+     `docs/trust-enforcement.md` and in this card's heading with the measured
+     figures the build printed (file-row count, compact size, tlog index);
+   - `docs/trust-enforcement.md` still says *"no published APEX image has an
+     SBOM attestation yet"* and `verify.rs`'s comments say the same. **Both are
+     still true until this lands on `main`** — the build above is a task
+     branch and the `PUBLISH` guard stops it moving any tag. Leave those
+     sentences to whoever lands the first green `main` build; changing them now
+     would make the docs claim something no published image has.
+   - `files/system/usr/share/apex-os/trust/enforcement.conf` keeps
+     `provenance=warn` for the same reason. Do not tighten it to `enforce`
+     before a published image carries an `.att`, or every machine in the field
+     refuses its next update.
 
 ## BLOCKED ON
 
