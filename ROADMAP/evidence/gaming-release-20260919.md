@@ -157,7 +157,26 @@ script's own pid* rather than a literal that happens to parse.
 | trap fails in silence again | `a refused release is REPORTED, not swallowed` + the polkit-message row |
 | remove the older-apexd fallback | `an apexd that refuses --owner-pid still gets a plain game start` |
 
-### 1.5 What a real run still has to confirm
+### 1.5 Two things checked rather than assumed, and one limitation named
+
+**apexd can actually read `/proc`.** A watch that reads `/proc/<pid>/stat` is
+worth nothing if the daemon's own unit hides it. `apexd/apexd/apexd.service`
+sets `ProtectHome=yes`, `RestrictRealtime=yes`, `MemoryDenyWriteExecute=yes`
+and explicitly `ProtectControlGroups=no`; there is **no `ProtectProc=`, no
+`PrivateUsers=` and no PID-namespace isolation**, so the daemon sees every
+process on the machine. Nothing in this change needed a unit edit.
+
+**apexd restarting mid-session is a pre-existing gap and is not made worse
+here.** `GameSession` lives in memory and dies with the daemon — that is stated
+in `apexd/src/game.rs`'s own header and predates this work. A *graceful* stop
+already releases game mode (`main.rs` calls `game_exit()` on SIGTERM); a crash
+with `Restart=on-failure` comes back with no session, so the cpuset, IRQ
+affinities and sched-ext stay applied with nothing recorded to undo them. The
+owner is simply one more field lost with the rest. Closing that would mean
+persisting the exit plan across restarts, which is a different decision about a
+different failure and is deliberately not taken here.
+
+### 1.6 What a real run still has to confirm
 
 The property cannot be measured off hardware and **needs an image build**: the
 watch lives in `apexd`. The run-book is `docs/gaming-and-sessions.md` §6.6. Its
