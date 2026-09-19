@@ -478,7 +478,13 @@ newer_satisfied_by_image() {
             # An unversioned requirement of the package name is satisfied by the
             # installed build by definition; only ranges can demand newer.
             [ "$req" = "$cap" ] && continue
-            dnf5 repoquery --installed --whatprovides -- "$req" --qf '%{name}\n' 2>/dev/null | grep -q . || return 1
+            # No `--`: dnf5 repoquery refuses it and prints nothing, so this
+            # test answered "not satisfied" for every versioned requirement
+            # ever asked about, and guard_rpms refused packages it was written
+            # to omit. Same defect as probe_rpm's, same file, found with it.
+            # installed_provides() above has always been spelled correctly;
+            # this line is why they now look the same.
+            dnf5 repoquery --installed --whatprovides "$req" --qf '%{name}\n' 2>/dev/null | grep -q . || return 1
         done < <(rpm -qp --nosignature --requires -- "$other" 2>/dev/null)
     done
     return 0
@@ -606,6 +612,111 @@ guard_rpms() {
     fi
 }
 
+# Merge the non-host-architecture tree into the payload, carrying only what
+# nothing else already provides.
+#
+# ONE RULE: a file from the 32-bit pass is carried if, and only if, neither the
+# running image nor this transaction's own native pass already provides that
+# exact path.
+#
+# That single sentence replaces the list of --excludepath directories this
+# function used to carry, and it replaces it because the list was wrong twice
+# over, in OPPOSITE directions, on the same machine on the same day
+# (ROADMAP/evidence/katana-qualification-20260919.md, §3 and §6.5):
+#
+#   TOO NARROW. /usr/bin, /usr/sbin, /usr/share and /etc were excluded and
+#   nothing else, so i686 helper EXECUTABLES under /usr/libexec walked straight
+#   in. A plain `apex install steam` shadowed 14 image binaries, because
+#   at-spi2-core.i686, dconf.i686, glib2.i686, glib-networking.i686,
+#   glycin-loaders.i686, gstreamer1.i686 and p11-kit.i686 are all in
+#   steam.i686's dependency closure. gst-plugin-scanner is the one that bites:
+#   GStreamer probes every plugin through it out of process, so a 32-bit scanner
+#   loads no 64-bit plugin and the registry fell from 1344 usable features to 2.
+#   The greeter was left running a 32-bit accessibility bus by the same route.
+#
+#   TOO BLUNT. --excludepath /usr/share threw away every *_icd.i686.json while
+#   keeping the .so files those manifests name, so /usr/share/vulkan/icd.d held
+#   13 x86_64 ICDs and zero i686 ones. Steam's client is ubuntu12_32/steam, so
+#   it needs 32-bit Vulkan, and it died with VK_ERROR_INCOMPATIBLE_DRIVER. A
+#   manifest called nvidia_icd.i686.json cannot shadow anything — nothing else
+#   on the system has that name — and the rule above keeps it for that reason,
+#   while still dropping the /usr/share/doc, /usr/share/man, icon and locale
+#   copies the exclusion was written for, because the image owns those paths.
+#
+# Adding /usr/libexec to the old list would have fixed seven packages and
+# nothing about the eighth directory nobody had thought of yet. The list was the
+# defect, not its contents.
+#
+# `--excludepath` is prefix-based and all-or-nothing, so "keep only what is
+# unclaimed" cannot be expressed to rpm at all. The foreign set is therefore
+# unpacked into a scratch root of its own and merged from here.
+#
+# The image half of the test is the same question install_etc's removal pass
+# asks before it deletes anything, and for the same reason: the rpmdb is the
+# only thing on this machine that knows which paths belong to the OS.
+#
+# FAILING CLOSED HERE IS THE OPPOSITE OF image_owns(). There, "cannot tell who
+# owns it" must mean KEEP the file — a wrongly deleted /etc/fonts/fonts.conf is
+# unrecoverable. Here it must mean REFUSE THE WHOLE MERGE, because an empty
+# owner list reads as "the image owns nothing" and would carry every 32-bit copy
+# of every image path into the extension: precisely the disaster this pass
+# exists to prevent. So an rpm that cannot answer, or answers with nothing, is a
+# hard stop.
+merge_multilib() {
+    local scratch="$1" root="$2"
+    local idx="${scratch}.image-paths"
+    local all="${scratch}.all" unowned="${scratch}.unowned"
+    local keep="${scratch}.keep" drop="${scratch}.drop"
+
+    rpm -qal > "$idx" 2>/dev/null \
+        || die "cannot ask the rpmdb which files the image owns — refusing to merge the 32-bit set blind"
+    [ -s "$idx" ] \
+        || die "the system rpmdb listed no files at all — refusing to merge the 32-bit set blind"
+    LC_ALL=C sort -u -o "$idx" "$idx"
+
+    ( cd "$scratch" && find . -mindepth 1 \( -type f -o -type l \) -printf '/%P\n' ) \
+        | LC_ALL=C sort > "$all"
+
+    # Not owned by any package installed in the image …
+    LC_ALL=C awk 'NR==FNR { own[$0]; next } !($0 in own)' "$idx" "$all" > "$unowned"
+
+    # … and not already placed by this transaction's native pass. That second
+    # clause is what keeps fontconfig.i686's /usr/bin/fc-list out when the set
+    # carries fontconfig.x86_64 too: the image-owner test cannot see a package
+    # that is not installed yet.
+    : > "$keep"
+    local rel
+    while IFS= read -r rel; do
+        if [ -e "${root}${rel}" ] || [ -L "${root}${rel}" ]; then
+            continue
+        fi
+        printf '%s\n' "$rel" >> "$keep"
+    done < "$unowned"
+
+    local n_all n_unowned n_keep
+    n_all=$(wc -l < "$all"); n_unowned=$(wc -l < "$unowned"); n_keep=$(wc -l < "$keep")
+    msg "multilib: carrying ${n_keep} of ${n_all} file(s) from the 32-bit set ($((n_all - n_unowned)) already owned by the image, $((n_unowned - n_keep)) already placed by this set's native packages)"
+
+    LC_ALL=C comm -23 "$all" "$keep" > "$drop"
+    if [ -s "$drop" ]; then
+        sed "s|^|${scratch}|" "$drop" | tr '\n' '\0' | xargs -0 -r rm -f
+    fi
+    # Directories emptied by that must not be carried either: every
+    # /usr/share/doc/<pkg>, /usr/share/licenses/<pkg> and
+    # /usr/share/locale/*/LC_MESSAGES the image already owns would otherwise
+    # reach the extension as an empty directory.
+    find "$scratch" -mindepth 1 -depth -type d -empty -delete 2>/dev/null || true
+
+    if [ -n "$(ls -A "$scratch" 2>/dev/null)" ]; then
+        # || die rather than || true: the only way this fails is a path that is
+        # a directory in one tree and a file in the other, and silently half
+        # merging a payload is how you ship an extension nobody can explain.
+        cp -a "${scratch}/." "${root}/" \
+            || die "merging the 32-bit set into the payload failed"
+    fi
+    rm -f "$idx" "$all" "$unowned" "$keep" "$drop"
+}
+
 extract_rpms() {
     local destdir="$1" root="$2"
     mkdir -p "$root"
@@ -619,7 +730,8 @@ extract_rpms() {
     # would print a NOKEY warning per package that means nothing.
     rpm --root "$root" --initdb
 
-    # Multilib is extracted in a SECOND pass, taking libraries only.
+    # Multilib is extracted in a SECOND pass, and merged rather than unpacked
+    # straight onto the first.
     #
     # A 32-bit package is not a 32-bit version of an application; it is the
     # libraries a 32-bit application needs. `fontconfig.i686` still carries
@@ -631,27 +743,11 @@ extract_rpms() {
     # hits this because multilib packages are filtered to libraries before they
     # are ever unpacked together.
     #
-    # So: native and noarch first, then the rest with everything that is not a
-    # library excluded. `--excludepath` takes the path as it appears in the
-    # header, and 32-bit content lives in /usr/lib and /lib (never /usr/lib64).
-    #
-    # /usr/bin, /usr/sbin, /usr/share and /etc are not the whole list, which is
-    # what the first version of this comment claimed. i686 packages also ship
-    # 32-bit HELPER EXECUTABLES under /usr/libexec, and unit/rule/config text
-    # under /usr/lib/{systemd,udev,tmpfiles.d,sysusers.d}. Measured on katana
-    # 2026-09-19 from a plain `apex install steam`: at-spi2-core.i686,
-    # dconf.i686, glib2.i686, glib-networking.i686, glycin-loaders.i686,
-    # gstreamer1.i686 and p11-kit.i686 are all in steam.i686's dependency
-    # closure, and each one shadowed an image helper. The one that bites is
-    # gst-plugin-scanner: GStreamer probes every plugin through that
-    # out-of-process helper, so a 32-bit scanner can load no 64-bit plugin and
-    # the registry fell from 1344 usable features to 2. The greeter was left
-    # running a 32-bit at-spi2 bus by the same route.
-    #
-    # The /usr/lib text files were byte-identical to the image's and broke
-    # nothing, but they are the same class and are excluded on the same ground:
-    # an extension has no business shipping a second copy of a path the image
-    # already owns.
+    # So: native and noarch into the payload root, then everything else into a
+    # scratch root of its own, and merge_multilib decides file by file what may
+    # cross. /boot is the one thing still excluded outright in both passes — a
+    # system extension merges /usr and /opt, and a kernel or bootloader file has
+    # no way to reach the running system from here even in principle.
     local -a native=() foreign=() host
     host="$(uname -m)"
     local f arch
@@ -670,14 +766,19 @@ extract_rpms() {
             "${native[@]}" >&2 || die "extraction failed"
     fi
     if [ ${#foreign[@]} -gt 0 ]; then
-        rpm --root "$root" -Uvh --nodeps --noscripts --notriggers --noplugins \
+        # Next to $root, which under build_extension means inside $WORK, so the
+        # existing RETURN trap removes it on every `die` path too.
+        local scratch="${root}.multilib"
+        rm -rf "$scratch"
+        mkdir -p "$scratch"
+        rpm --root "$scratch" --initdb
+        rpm --root "$scratch" -Uvh --nodeps --noscripts --notriggers --noplugins \
             --nosignature --replacefiles --replacepkgs --excludepath /boot \
-            --excludepath /usr/bin --excludepath /usr/sbin \
-            --excludepath /usr/share --excludepath /etc \
-            --excludepath /usr/libexec \
-            --excludepath /usr/lib/systemd --excludepath /usr/lib/udev \
-            --excludepath /usr/lib/tmpfiles.d --excludepath /usr/lib/sysusers.d \
             "${foreign[@]}" >&2 || die "extraction of the multilib set failed"
+        rm -rf "${scratch}/usr/share/rpm" "${scratch}/var/lib/rpm" \
+               "${scratch}/usr/lib/sysimage/rpm"
+        merge_multilib "$scratch" "$root"
+        rm -rf "$scratch"
     fi
     rm -rf "${root}/usr/share/rpm" "${root}/var/lib/rpm" "${root}/usr/lib/sysimage/rpm"
 }
@@ -924,9 +1025,10 @@ install_etc() {
     # paths as its 64-bit sibling, byte for byte — fontconfig.i686 carries
     # /etc/fonts/fonts.conf exactly as the image's fontconfig.x86_64 does. So a
     # run that installed the i686 set recorded those paths as "ours", the next
-    # run stopped shipping them (the multilib pass excludes /etc), and the
-    # user-has-not-touched-it test passed precisely BECAUSE the file was
-    # pristine. It ate 26 image-owned files on the author's machine in one
+    # run stopped shipping them (the multilib pass excluded /etc outright then,
+    # and merge_multilib drops them by image ownership now — either way they
+    # stop arriving), and the user-has-not-touched-it test passed precisely
+    # BECAUSE the file was pristine. It ate 26 image-owned files on the author's machine in one
     # rebuild, among them /etc/fonts/fonts.conf, /etc/ld.so.conf, /etc/krb5.conf,
     # /etc/pki/tls/openssl.cnf and both /etc/pki/nssdb databases.
     #
@@ -1860,11 +1962,31 @@ valid_source() { case "$1" in rpm|flatpak|capsule) return 0 ;; esac; return 1; }
 # repoquery, not search: `dnf5 search htop` matches summaries and would report
 # a candidate for every package that mentions the word. A bare name is an exact
 # name match to repoquery, which is the question being asked.
+#
+# NO `--` BEFORE THE NAME, and that is not a style choice. `dnf5 repoquery`
+# rejects `--` outright:
+#
+#   $ dnf5 repoquery --quiet --queryformat '%{name}\n' -- chromium
+#   Unknown argument "--" for command "repoquery".
+#
+# It writes that to stderr, which this function discards, and prints nothing to
+# stdout — so `probe_rpm` returned NOTHING FOR EVERY PACKAGE IN THE WORLD, and
+# `apex resolve <anything>` silently lost its entire rpm leg. Measured on katana
+# 2026-09-19 (evidence §11.1): `apex resolve chromium` offered only the Flathub
+# build and printed "APEX would use: flatpak", while `apex install chromium`
+# installed chromium-152.0.7977.82-1.fc43.x86_64 from Fedora. A predictor that
+# disagrees with the thing it predicts is worse than no predictor.
+#
+# The suite faked dnf5 and the fake ignored its arguments, so 50+ assertions
+# passed over this. tests/test-apex-resolve.sh's fake now refuses `--` with the
+# real error text, and tests/test-apex-multilib-extract.sh calls probe_rpm
+# against a REAL dnf5 inside the container.
 probe_rpm() {
     command -v dnf5 >/dev/null 2>&1 || return 0
     dnf5 repoquery --quiet --latest-limit 1 \
-         --queryformat '%{name}|%{evr}|%{repoid}|%{summary}\n' -- "$1" 2>/dev/null \
+         --queryformat '%{name}|%{evr}|%{repoid}|%{summary}\n' "$1" 2>/dev/null \
         | awk -F'|' -v n="$1" '$1 == n' \
+        | awk -F'|' '!seen[$1"|"$2]++' \
         | head -3
 }
 

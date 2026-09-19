@@ -2991,11 +2991,18 @@ jobs:
       # to match the repository, and when they do not the guard correctly
       # refuses the whole transaction. So the decisions are the discriminating
       # step there. They were not enough either. On katana on 2026-09-19 every
-      # decision was right and the machine still broke, because extract_rpms'
-      # 32-bit pass excluded /usr/bin, /usr/sbin, /usr/share and /etc and
-      # nothing else — while i686 packages also ship helpers under /usr/libexec.
-      # 14 image binaries were shadowed and GStreamer went from 1344 usable
-      # features to 2.
+      # decision was right and the machine still broke, TWICE, because
+      # extract_rpms' 32-bit pass decided what to carry from a hand-written list
+      # of directories. The list was too narrow: it named /usr/bin, /usr/sbin,
+      # /usr/share and /etc and nothing else, while i686 packages also ship
+      # helpers under /usr/libexec — 14 image binaries were shadowed and
+      # GStreamer went from 1344 usable features to 2 (§3). And it was too
+      # blunt: `--excludepath /usr/share` threw away every *_icd.i686.json while
+      # keeping the .so files those manifests name, so 32-bit Vulkan had no
+      # driver at all and Steam died with VK_ERROR_INCOMPATIBLE_DRIVER (§6.5).
+      # The engine now merges the 32-bit tree file by file instead, carrying a
+      # path only when neither the image nor the native pass already provides
+      # it, and this suite judges the resulting tree from both directions.
       #
       # This one calls extract_rpms DIRECTLY, which is what lets it run where
       # the suite above would be refused: --nodeps --replacefiles into a
@@ -3003,13 +3010,37 @@ jobs:
       # everything happens inside `podman run --rm` with the repository mounted
       # read-only, nothing is installed on the runner, no sysext is built.
       #
-      # The floor below is 6 rather than 3 because two of its six assertions
-      # exist to stop it passing for free: one fails if no 32-bit ELF reached
-      # the tree at all, and one is a negative control that re-extracts the same
-      # set with the pre-fix exclude list and fails if that does NOT produce a
-      # shadow. If Fedora ever stops shipping 32-bit helpers in these packages,
-      # the control goes red and says the instrument has gone blind — which is
-      # the opposite of what a coverage drop usually does here.
+      # The floor below is 11, and SIX of those eleven exist only to stop this
+      # suite passing for free. That ratio is deliberate: the engine no longer
+      # carries a list of excluded directories that a test could read back, so
+      # every assertion here is a measurement of a real tree, and a measurement
+      # of an empty tree passes every rule ever written.
+      #
+      #   * two fail if the download produced no 32-bit ELF and no i686-only
+      #     paths at all, so "nothing is shadowed" cannot come from nothing;
+      #   * one fails if the set ships no arch-tagged Vulkan manifest, which is
+      #     the file class §6.5 was about;
+      #   * control 1 re-extracts the same set with the PRE-FIX exclude list and
+      #     is read twice — it must still produce a shadow (so §3 is visible on
+      #     today's packages) and it must contain none of those manifests (so
+      #     §6.5 is visible too, and "they all arrived" is not a free pass);
+      #   * control 2 re-runs the merge with the rpmdb clause REMOVED and must
+      #     let an image-owned 32-bit file through. Without it this suite would
+      #     be proving the wrong leg of the rule: in fedora:43 the x86_64
+      #     siblings of gstreamer1 and at-spi2-core are downloaded, so the
+      #     "already placed by the native pass" clause hides most of the defect,
+      #     while on a real APEX machine every 64-bit sibling is in the IMAGE
+      #     and the rpmdb clause is the only thing doing the work.
+      #
+      # If Fedora ever stops shipping 32-bit helpers or arch-tagged manifests in
+      # these packages, a control goes red and says the instrument has gone
+      # blind — the opposite of what a coverage drop usually does here.
+      #
+      # The eleventh assertion is not about extraction at all: it calls
+      # probe_rpm against the REAL dnf5 this container has. `apex resolve` lost
+      # its entire rpm leg to `dnf5 repoquery -- <name>`, an invocation dnf5
+      # refuses, and tests/test-apex-resolve.sh could not see it because it
+      # fakes dnf5. This is the only suite in the tree with a real one.
       - name: P1 multilib — where the 32-bit pass actually puts files
         if: ${{ !cancelled() }}
         run: |
@@ -3026,7 +3057,7 @@ jobs:
           failed="$(printf '%s' "$counts" | awk '{print $3}')"
           echo "measured: passed=$passed failed=$failed"
           [ "$failed" = 0 ] || { echo "::error::$failed extraction assertions failed"; exit 1; }
-          [ "$passed" -ge 6 ] || { echo "::error::only $passed extraction assertions ran; 6 ran on 2026-09-19, so some no longer execute — and two of the six are the guards that stop this suite passing for free"; exit 1; }
+          [ "$passed" -ge 11 ] || { echo "::error::only $passed extraction assertions ran; 11 ran on 2026-09-19, so some no longer execute — and six of the eleven are the guards and controls that stop this suite passing for free"; exit 1; }
           if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
               echo "::error::the multilib extract suite printed a SKIP; its abstentions are failures by design, so a SKIP means a new one was added"
               exit 1
