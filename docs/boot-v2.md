@@ -505,7 +505,10 @@ Four things the lab could not have told us, all measured here:
 1. **`systemd-cryptenroll --tpm2-device=auto` binds to NO PCRs on systemd
    258.10.** `tpm2-hash-pcrs` empty, `tpm2-policy-hash` 32 zero bytes. Not
    PCR 7 — nothing. Always pass `--tpm2-pcrs=` or `--tpm2-public-key-pcrs=`
-   explicitly.
+   explicitly. All four enrolment call sites in this tree already do
+   (`apex-luks-enroll:160`, `run-scenarios:1127`, `:1276`, `:1510`), so this is
+   a guardrail to keep rather than a defect to fix — it is L-002's to honour
+   the day encryption goes on by default.
 2. **`systemd-pcrextend` is a silent no-op on a GRUB machine.** *"Kernel stub
    did not measure kernel image into PCR 11, skipping userspace measurement,
    too."* — **exit status 0**, PCR 11 unchanged. So the four phase policies
