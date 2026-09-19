@@ -185,8 +185,24 @@ about swap. Probe 2 fixes it by allocating a *new* file at `/swapfile.probe`.
 **The fix is committed and pushed — `a40cf827` on `task/sbom-oom`. Nothing here
 needs re-deriving.** Two runs are in flight; read them in this order.
 
-1. **Verification build `35447611644`.** If the SBOM step ran and passed, this
-   unit is done: say so, and `task/sbom-oom` is ready to land on `roadmap/v2.2`.
+1. **Verification build `35447611644`.**
+
+   **What proves THIS unit's fix is not a green step.** It is these two lines in
+   the *Generate and attest the SBOM* step:
+
+   ```
+   syft catalogued the image in <N>s
+   	Maximum resident set size (kbytes): <N>
+   ```
+
+   If those appear, syft survived and the diagnosis below is confirmed in a real
+   build — regardless of what the step does afterwards. Read the `[sbom sample]`
+   lines for the `mem_avail` floor; that is the margin in CI, which is tighter
+   than the probe's because the runner is also holding podman storage.
+   A green step is a stronger result and a **different** unit's success; see the
+   `cosign attest` warning below, which is the likely next failure.
+
+   If syft survived, `task/sbom-oom` is ready to land on `roadmap/v2.2`.
    It carries four commits over `2e04fbcb` — `0386666a`, `87aa264e`, `531b6c96`
    (the probe, built up over two rounds) and `a40cf827` (the fix). **Delete
    `.github/workflows/sbom-probe.yml` before or as part of the landing**: it is
@@ -225,10 +241,19 @@ needs re-deriving.** Two runs are in flight; read them in this order.
      memory too. That 166 MB is not 9830 packages' worth of metadata: syft
      emits package-to-file relationships by default, which on an image with
      ~200k files produces 100k+ relationship edges. The same file-level work is
-     what drives the RSS this card is about. `SYFT_FILE_METADATA_SELECTION` /
-     the file cataloguer knobs cut the relationship explosion **without dropping
-     a single package**, so it is not the "restrict the cataloguers" trade the
-     comment block rightly refuses. Worth a probe arm of its own.
+     what drives the RSS this card is about, so the two problems **may** share a
+     cause. They do not yet share a measured fix, and the distinction matters:
+     - The concretely measured remedy in the bluefin PR is **`jq`
+       post-processing** to strip the file/relationship arrays out of the
+       finished SBOM. That shrinks the predicate and does **nothing** for RSS,
+       because syft has already built the structure by then.
+     - Cutting the work at source — the file-metadata / file-cataloguer knobs —
+       would plausibly help both. **UNVERIFIED: the exact env var name
+       (`SYFT_FILE_METADATA_SELECTION`) came out of a web search summary, not
+       out of syft's own config. Read `syft config` / the 1.52.0 docs before
+       relying on it.** Either way it drops file-level detail, not packages, so
+       it is not the "restrict the cataloguers" trade the comment block rightly
+       refuses. Worth a probe arm of its own.
 
 2. **Probe round 2 `35447488777`** tells you what to do if the margin turns out
    too thin. Expected readings:

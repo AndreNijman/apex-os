@@ -2644,7 +2644,44 @@ tasks:
     dark -- labwc honours WLR_DRM_DEVICES where gamescope does not), and 5.4 the niri session ran waybar AND
     quickshell because niri s own upstream default starts waybar and apex-shell-firstrun only ever appended. Rows
     that need the machine are a written checklist with exact commands at docs/gaming-and-sessions.md section 6;
-    nothing was simulated and katana was not touched. Agent card ROADMAP/state/agents/gaming-gpu.md.
+    nothing was simulated and katana was not touched. Agent card ROADMAP/state/agents/gaming-gpu.md. || 2026-09-19
+    ROUND 33, unit katana-image-qual, on hardware: ROWS 6 AND 7 ARE CLOSED and both were retested only after their
+    gate was met. Evidence ROADMAP/evidence/katana-image-qual-20260919.md section 3, branch
+    task/katana-image-qual-2 (commit ef0b95b2, pushed). Katana was rebased onto apex-7f647470 (digest
+    sha256:be3bdd0c) first, so these are readings of a build that carries both merges. Row 7 (gamescope) PASSES:
+    through a real greetd login the session logs GPU/output: --prefer-vk-device 10de:249d --prefer-output HDMI-A-1
+    and gamescope answers with the five predicted lines verbatim -- selecting physical device NVIDIA GeForce RTX
+    3070 Laptop GPU, opening DRM node /dev/dri/card2, Connector HDMI-A-1 -> LEN - R25f-30, selecting connector
+    HDMI-A-1, selecting mode 1920x1080@240Hz. The whole 3789-line session log contains ZERO occurrences of card1
+    or eDP-1. Render proof is fd ownership plus nvidia-smi, because grim and wlr-randr do not work under
+    gamescope: gamescope-wl holds /dev/dri/card2 and not card1, and nvidia-smi lists gamescope C+G, Xwayland G,
+    steam G and steamwebhelper G holding 265 MiB. card1-eDP-1 is NOT asserted dark -- it read enabled/dpms On
+    throughout, because nobody holds it once the greeter is gone. Row 6 (Steam, Big Picture half) PASSES for the
+    first time on this machine now that pkg-share put 13 i686 ICDs on /usr: zero BInit or VK_KHR_surface failures
+    after the marker line, where every earlier attempt died there (2026-09-06 16:59, 2026-09-17 17:58, 2026-09-19
+    09:25 and 17:31). Steam reports requirements are satisfied, reaches
+    bus_name=com.steampowered.PressureVessel.LaunchAlongsideSteam, and steamwebhelper runs with -uimode4, which is
+    Big Picture. A parallel run held the same stack up for 2 h 06 m with Fossilize replay on the dGPU throughout.
+    The bwrap half needed no fix at all: zero Unexpected capabilities lines, CapPrm 0 from greetd, which confirms
+    section 0.7's attribution to the round-31 systemd-run harness. Section 6.4 Safe Graphics and 6.5 the niri bar
+    also pass; 6.5's transform had already run at 18:29:35 from apex-shell-firstrun.service at user-manager start,
+    not at the niri login, so the doc's precondition is stated too narrowly. STILL PARTIAL, and the remaining rows
+    are unchanged in kind: OBS, Discord, VS Code, JetBrains, LibreOffice and Wine are still not installed
+    anywhere; VRR still cannot be tested because no connector on either machine publishes vrr_capable; physical
+    output hotplug still needs a person at the machine; and Safe Graphics' AUTOMATIC dGPU branch could not be
+    reached because it needs the panel genuinely dark (lid shut and docked, or disabled in firmware) -- the
+    forced-device path is what was proven. TWO NEW DEFECTS FOUND BY RUNNING IT, neither of them a matrix row. (1)
+    Gaming Mode cannot release itself when its session is torn down from outside: cleanup() calls apex game stop,
+    whose polkit action org.apexos.apexd.manage-power is allow_active yes and auth_admin otherwise, so the moment
+    logind deactivates the session the trap's own call is refused -- measured both ways, the trap succeeded on a
+    clean gamescope exit and never completed on a greetd restart, leaving the p-core cpuset, IRQ steering, the
+    performance tier and scx_lavd installed with nothing able to undo them. (2) mangoapp crash-loops at about 2 Hz
+    for the whole of every Gaming Mode session: 15376 core dumps in one boot, 14403 respawns in a 2-hour session,
+    144187 journal lines, and the overlay never renders. --mangoapp is added unconditionally whenever mangoapp is
+    on PATH. Also recorded: gamescope segfaults on every exit (139), which predates this image; and section 6.2's
+    check is ambiguous as written, because gamescope prints 'No CAP_SYS_NICE, falling back to regular-priority'
+    whether or not --rt was passed, so only the 'starting: gamescope' line discriminates. greetd was restored
+    byte-identical, the greeter is live on tty1, no timers were left armed.
 - id: P1-039
   title: Compositor-neutral Night Light
   priority: P1
@@ -2877,7 +2914,34 @@ tasks:
     each caught: 4 rows, 3 rows, 1, 2 and 2. cargo test and clippy -D warnings clean. Smoke-run on the real L16
     /sys with no fixture: 1002:1900 matches lspci -nn exactly and `sudoers rule: unknown ... run sudo apex gaming`
     is the section 6 defect answering on a live machine. Katana was NOT touched -- held by the TPM agent all
-    round, which also dual-boots Windows off a second NVMe. Agent card ROADMAP/state/agents/gaming-gpu.md.
+    round, which also dual-boots Windows off a second NVMe. Agent card ROADMAP/state/agents/gaming-gpu.md. ||
+    2026-09-19 ROUND 33, unit katana-image-qual, on the rebased machine (apex-7f647470, sha256:be3bdd0c). THE
+    REMAINDER THIS ITEM NAMED IS CLOSED. 'SmiOutcome::Ready is what a real loaded NVIDIA driver produces' was held
+    open because katana ran steam and proton throughout the round-31 session. Measured with the machine idle, no
+    gamescope and no steam running and apex game status false: apex ai status --json returns 864 bytes on stdout,
+    0 bytes on stderr, valid JSON, rc 0, carrying accel [cuda, vulkan, cpu] and devices [{index 0, NVIDIA GeForce
+    RTX 3070 Laptop GPU, total_mib 8192, used_mib 41, budget_mib 7639}] -- live VRAM off a loaded driver, not a
+    PATH probe. nvidia-smi itself answers 'NVIDIA GeForce RTX 3070 Laptop GPU, 580.178.04', rc 0. The stream split
+    the old FINDINGS-round5 headline was really about is clean on this build. AND THE GAMING MODE DEFECT THIS ITEM
+    DESCRIBED IS FIXED ON HARDWARE. The selector's landed rule was run through a real greetd login and answered
+    --prefer-vk-device 10de:249d --prefer-output HDMI-A-1; gamescope then selected the RTX 3070, opened
+    /dev/dri/card2, enumerated only HDMI-A-1 and drove it at 1920x1080@240Hz, with the whole Steam stack on the
+    dGPU per nvidia-smi. Section 7.2's VRR fix reads correctly too: the session says no connector on this machine
+    publishes vrr_capable at all, which is the distinct fourth outcome rather than the old silence. Section 6.2
+    reads limit yes / capability no, getcap on gamescope is empty, CapEff CapPrm CapAmb are all zero in the
+    session, and --rt is genuinely not passed -- its only occurrence in 3789 log lines is the script's own
+    explanation. Safe Graphics answers about the right card now: its check prints primary gpu card1 / can light
+    eDP-1 / cannot light HDMI-A-1(card2) where the old image printed four lines and no GPU rows, and forced to
+    card2 labwc holds only /dev/dri/card2, wlr-randr lists HDMI-A-1 as the ONLY output, grim on eDP-1 fails with
+    'unknown output', and the monitor frame comes back with 699 distinct colours. Zero DMA-BUF import failures.
+    Full detail at ROADMAP/evidence/katana-image-qual-20260919.md section 3 on branch task/katana-image-qual-2
+    (ef0b95b2, pushed). STAYS PARTIAL for a reason this run measured rather than inherited: apexd applies NO sysfs
+    GPU control on either card here -- apex game status reports gpus_locked 0 and notes 'no sysfs GPU control was
+    applied to card1 (Intel), card2 (NVIDIA) -- either the profile leaves the knob at its default or this driver
+    does not publish one'. The acceptance line says 'Performance Lab AND SAFE CONTROLS work across tested GPU
+    families', and that ambiguity is exactly the untested half: nothing here distinguishes 'left at default' from
+    'no knob exists', on either vendor. Also still open from this round: Safe Graphics' automatic dGPU branch
+    needs the panel genuinely dark and could not be reached.
 - id: P1-044
   title: Default incoming firewall
   priority: P1
