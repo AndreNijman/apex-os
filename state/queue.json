@@ -564,6 +564,12 @@
       "items": [],
       "after": [],
       "title": "A portable Windows app that installs APEX into an empty partition"
+    },
+    {
+      "id": "sdboot-image",
+      "items": [],
+      "after": [],
+      "title": "Pivot every machine to systemd-boot: UKIs, signing, blessing, migration"
     }
   ],
   "_completed_units": {
