@@ -8,6 +8,8 @@ import com.apexos.remote.core.PairedMachine
 import com.apexos.remote.core.PairingAnswer
 import com.apexos.remote.core.PairingOffer
 import com.apexos.remote.core.SecretBox
+import com.apexos.remote.core.RelayEndpoint
+import com.apexos.remote.core.Rendezvous
 import com.apexos.remote.core.Session
 import com.apexos.remote.core.StaticKey
 import java.net.InetSocketAddress
@@ -19,10 +21,21 @@ import kotlinx.coroutines.withContext
  * Pairing and connecting, over a real socket, off the main thread.
  *
  * `:core` is generic over streams because the LAN leg is TCP and the relay leg
- * is a WebSocket carrying the same bytes; this is the TCP half. Everything here
- * runs on [Dispatchers.IO] — a socket touched from the main thread is an
- * immediate `NetworkOnMainThreadException`, and it is a crash that never
- * happens on a laptop running the unit tests.
+ * is a WebSocket carrying the same bytes; this is where both are chosen
+ * between. Everything here runs on [Dispatchers.IO] — a socket touched from the
+ * main thread is an immediate `NetworkOnMainThreadException`, and it is a crash
+ * that never happens on a laptop running the unit tests.
+ *
+ * **LAN first, always**, which is [Rendezvous.PREFERENCE] and not a preference
+ * of this file's. A client that raced both paths and took whichever answered
+ * first would leak a rendezvous connection every time, including on the network
+ * where it was unnecessary — the relay would learn that a session happened at
+ * all, which on the LAN it otherwise never does.
+ *
+ * Below [Client.pair] and [Client.openSession] the two legs are the same thing:
+ * an [java.io.InputStream] and an [java.io.OutputStream]. Which one was used is
+ * returned to the caller as a [Rendezvous.Path] so the user can be told — it is
+ * never read by anything that speaks the protocol.
  */
 class PairingService {
     /**
@@ -103,15 +116,52 @@ class PairingService {
                 )
             }
         }
-        throw NoRouteToMachine(
-            "none of the addresses in the pairing code answered: ${offer.lan.joinToString()}" +
-                if (offer.relay != null) " (and no relay client has been written yet)" else "",
-            lastFailure,
-        )
+        val relay = offer.relay
+            ?: throw NoRouteToMachine(
+                "none of the addresses in the pairing code answered: ${offer.lan.joinToString()}" +
+                    " and it names no relay",
+                lastFailure,
+            )
+        // The relay leg. The rendezvous is derived from the key in the QR code,
+        // so nothing has to be exchanged for the two ends to meet — and the
+        // relay operator sees a hash rather than the desktop's public key.
+        val dialled = try {
+            RelayDialler.dial(RelayEndpoint.parse(relay), Rendezvous.idFor(offer.desktopPublicKey()))
+        } catch (e: Exception) {
+            throw NoRouteToMachine(
+                "neither ${offer.lan.joinToString().ifEmpty { "any local address" }} nor the " +
+                    "relay answered",
+                e,
+            )
+        }
+        dialled.link.use {
+            return@withContext Client.pair(
+                input = it.input,
+                output = it.output,
+                offer = offer,
+                identity = identity,
+                deviceName = deviceName,
+                userVerification = userVerification,
+            )
+        }
     }
 
     /** Open a session with a machine already paired. */
     suspend fun connect(machine: PairedMachine, identity: StaticKey): Session =
+        open(machine, identity).session
+
+    /**
+     * Open a session, and say which way it went.
+     *
+     * The path is here and not on [Session] deliberately. `docs/remote.md`
+     * requires a relay path to disclose what the relay can and cannot see, so
+     * somebody has to be told; but putting it on the session would hand it to
+     * every caller that speaks the protocol, and the moment one of them
+     * branched on it the relay leg would stop being indistinguishable from the
+     * LAN one. It is returned to whoever chose the path, which is the only
+     * layer entitled to know.
+     */
+    suspend fun open(machine: PairedMachine, identity: StaticKey): Connected =
         withContext(Dispatchers.IO) {
             var lastFailure: Exception? = null
             for (address in machine.lan) {
@@ -150,13 +200,38 @@ class PairingService {
                     // still fails on the next write rather than hanging for
                     // ever.
                     socket.soTimeout = 0
-                    session
+                    Connected(session, Rendezvous.Path.LAN)
                 } catch (e: Exception) {
                     runCatching { socket.close() }
                     throw e
                 }
             }
-            throw NoRouteToMachine("${machine.machine} did not answer on any known address", lastFailure)
+
+            val relay = machine.relay
+                ?: throw NoRouteToMachine(
+                    "${machine.machine} did not answer on any known address",
+                    lastFailure,
+                )
+            // Off the machine's network. The rendezvous is derived from the key
+            // pinned when this phone paired, so a relay that wanted to stand in
+            // the middle would still have to complete a Noise handshake against
+            // a key it does not hold.
+            val dialled = RelayDialler.dial(
+                RelayEndpoint.parse(relay),
+                machine.rendezvousId(),
+            )
+            return@withContext try {
+                val session = Client.openSession(
+                    input = dialled.link.input,
+                    output = dialled.link.output,
+                    identity = identity,
+                    desktopPublic = Device.checkKey(machine.desktopKey),
+                )
+                Connected(session, Rendezvous.Path.RELAY)
+            } catch (e: Exception) {
+                runCatching { dialled.link.close() }
+                throw e
+            }
         }
 
     private fun connect(address: String): Socket {
@@ -214,6 +289,14 @@ class PairingService {
         const val DEFAULT_PORT = 7717
     }
 }
+
+/**
+ * A live session and the path it came in on.
+ *
+ * Two values rather than one because the second is not the session's business:
+ * see [PairingService.open].
+ */
+class Connected(val session: Session, val path: Rendezvous.Path)
 
 /** Nothing the pairing code named could be reached. */
 class NoRouteToMachine(message: String, cause: Throwable?) : Exception(message, cause)

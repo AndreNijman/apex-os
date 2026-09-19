@@ -486,7 +486,7 @@ class RelayTest {
         for (m in messages) Transport.writeMessage(overTcp, m)
 
         val toRelay = ByteArrayOutputStream()
-        val link = RelayLink(WsReceiver(ByteArrayInputStream(ByteArray(0))), WsSender(toRelay)) {}
+        val link = RelayLink(ByteArrayInputStream(ByteArray(0)), toRelay) {}
         for (m in messages) Transport.writeMessage(link.output, m)
 
         // Unwrap the frames and the two streams are identical.
@@ -494,8 +494,8 @@ class RelayTest {
 
         // And read back the other way, through frames a relay chose the size of.
         val back = RelayLink(
-            WsReceiver(ByteArrayInputStream(serverFrames(overTcp.toByteArray(), chunk = 7))),
-            WsSender(ByteArrayOutputStream()),
+            ByteArrayInputStream(serverFrames(overTcp.toByteArray(), chunk = 7)),
+            ByteArrayOutputStream(),
         ) {}
         for (m in messages) assertArrayEquals(m, Transport.readMessage(back.input))
     }
@@ -503,7 +503,7 @@ class RelayTest {
     @Test
     fun `one flush is one frame, so a length prefix does not travel alone`() {
         val sink = ByteArrayOutputStream()
-        val link = RelayLink(WsReceiver(ByteArrayInputStream(ByteArray(0))), WsSender(sink)) {}
+        val link = RelayLink(ByteArrayInputStream(ByteArray(0)), sink) {}
         Transport.writeMessage(link.output, ByteArray(10) { 0x42 })
         val frames = frameCount(sink.toByteArray())
         assertEquals(1, frames, "a four-byte length in a frame of its own is a wasted round trip")
@@ -520,10 +520,7 @@ class RelayTest {
         fromRelay.write(serverFrames("payload".toByteArray(), chunk = 64))
 
         val toRelay = ByteArrayOutputStream()
-        val link = RelayLink(
-            WsReceiver(ByteArrayInputStream(fromRelay.toByteArray())),
-            WsSender(toRelay),
-        ) {}
+        val link = RelayLink(ByteArrayInputStream(fromRelay.toByteArray()), toRelay) {}
         assertArrayEquals("payload".toByteArray(), link.input.readBytes())
 
         val answer = WsReceiver(ByteArrayInputStream(asFromServer(toRelay.toByteArray()))).message()
@@ -544,10 +541,7 @@ class RelayTest {
         wire.write(textFrame("{\"relay\":\"rebalancing\"}"))
         wire.write(serverFrames("ghi".toByteArray(), chunk = 64))
 
-        val link = RelayLink(
-            WsReceiver(ByteArrayInputStream(wire.toByteArray())),
-            WsSender(ByteArrayOutputStream()),
-        ) {}
+        val link = RelayLink(ByteArrayInputStream(wire.toByteArray()), ByteArrayOutputStream()) {}
         assertEquals("abcdefghi", String(link.input.readBytes()))
         assertTrue(link.sawPaired, "the relay said paired and the link did not notice")
     }
@@ -562,10 +556,7 @@ class RelayTest {
         val wire = serverFrames("before".toByteArray(), chunk = 64) +
             textFrame(Notice.PEER_GONE.frame()) +
             serverFrames("after the far end was gone".toByteArray(), chunk = 64)
-        val link = RelayLink(
-            WsReceiver(ByteArrayInputStream(wire)),
-            WsSender(ByteArrayOutputStream()),
-        ) {}
+        val link = RelayLink(ByteArrayInputStream(wire), ByteArrayOutputStream()) {}
         assertEquals("before", String(link.input.readBytes()))
         assertEquals(-1, link.input.read(), "the stream did not end when the far end went")
     }
@@ -582,10 +573,7 @@ class RelayTest {
             ByteArray(0), // the socket simply died
         )) {
             val wire = serverFrames("half a message".toByteArray(), chunk = 64) + ending
-            val link = RelayLink(
-                WsReceiver(ByteArrayInputStream(wire)),
-                WsSender(ByteArrayOutputStream()),
-            ) {}
+            val link = RelayLink(ByteArrayInputStream(wire), ByteArrayOutputStream()) {}
             assertEquals("half a message", String(link.input.readBytes()))
             assertEquals(-1, link.input.read(), "a relay that went away was not end of stream")
         }
@@ -609,7 +597,7 @@ class RelayTest {
         val desktopChannel = desktop.intoTransport()
 
         val toRelay = ByteArrayOutputStream()
-        val link = RelayLink(WsReceiver(ByteArrayInputStream(ByteArray(0))), WsSender(toRelay)) {}
+        val link = RelayLink(ByteArrayInputStream(ByteArray(0)), toRelay) {}
         Transport.writeMessage(link.output, deviceChannel.seal(sentinel))
 
         val onTheWire = toRelay.toByteArray()
