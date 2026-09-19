@@ -599,3 +599,218 @@ fn the_state_probe_agrees_with_the_pure_classifier_on_this_machine() {
         assert_eq!(state, gpu::SmiOutcome::Absent);
     }
 }
+
+// ─── Which screen and which GPU a full-screen session opens ─────────────────
+//
+// Katana, 2026-09-19 §6.1: gamescope took its own default, opened `card1`
+// (Intel), saw only `eDP-1`, and the monitor on the RTX 3070's `HDMI-A-1` was
+// never lit. The rule under test is "the output decides the card": these cases
+// are the four shapes APEX has to be right about, and the katana one is the
+// exact sysfs layout that produced the defect.
+
+/// Katana's DRM topology at the moment the defect was measured: the built-in
+/// panel on the Intel iGPU, the only monitor on the RTX 3070.
+fn katana_displays(tag: &str) -> Fixture {
+    let f = katana(tag);
+    f.write("sys/class/drm/card1/device/device", "0x46a6\n")
+        .write("sys/class/drm/card2/device/device", "0x249d\n")
+        .write("sys/class/drm/card1-eDP-1/status", "connected\n")
+        .write("sys/class/drm/card2-HDMI-A-1/status", "connected\n")
+        .write("sys/class/drm/card2-DP-1/status", "disconnected\n")
+        // Render nodes and the card nodes themselves share the prefix and must
+        // not be mistaken for connectors.
+        .write("sys/class/drm/renderD128/dev", "226:128\n");
+    f
+}
+
+#[test]
+fn the_output_decides_the_card_on_a_hybrid_laptop() {
+    let f = katana_displays("choose-katana");
+    let c = gpu::choose_display(&f.sys());
+    assert_eq!(c.output.as_deref(), Some("HDMI-A-1"));
+    assert_eq!(c.card.as_deref(), Some("card2"));
+    assert_eq!(c.pci_id.as_deref(), Some("10de:249d"));
+    assert_eq!(c.vendor.as_deref(), Some("NVIDIA"));
+    assert_eq!(c.cards_with_displays, 2);
+    assert_eq!(c.problem, None, "a complete answer must be silent");
+    assert!(c.is_complete());
+    // The literal flags the session passes, and the exact pair measured to move
+    // gamescope onto card2 and HDMI-A-1 at 240 Hz.
+    assert_eq!(
+        c.gamescope_args(),
+        vec![
+            "--prefer-vk-device".to_string(),
+            "10de:249d".to_string(),
+            "--prefer-output".to_string(),
+            "HDMI-A-1".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn unplugging_the_monitor_falls_back_to_the_panel_and_its_own_card() {
+    // Not a regression to the defect: with no external display the panel IS
+    // the right screen, and the iGPU that drives it IS the right card.
+    let f = katana_displays("choose-unplugged");
+    f.write("sys/class/drm/card2-HDMI-A-1/status", "disconnected\n");
+    let c = gpu::choose_display(&f.sys());
+    assert_eq!(c.output.as_deref(), Some("eDP-1"));
+    assert_eq!(c.card.as_deref(), Some("card1"));
+    assert_eq!(c.pci_id.as_deref(), Some("8086:46a6"));
+    assert_eq!(c.cards_with_displays, 1);
+    assert_eq!(c.problem, None);
+}
+
+#[test]
+fn a_single_gpu_machine_needs_no_special_case() {
+    // The L16: one AMD card, one panel. The rule emits that card's id — which
+    // is what gamescope would have picked anyway — so there is no branch on
+    // "is this machine hybrid", and nothing about 10de:249d is hardcoded.
+    let f = l16("choose-l16");
+    f.write("sys/class/drm/card1/device/device", "0x15bf\n");
+    let c = gpu::choose_display(&f.sys());
+    assert_eq!(c.output.as_deref(), Some("eDP-1"));
+    assert_eq!(c.pci_id.as_deref(), Some("1002:15bf"));
+    assert_eq!(c.vendor.as_deref(), Some("AMD"));
+    assert_eq!(c.cards_with_displays, 1);
+    assert_eq!(c.problem, None);
+}
+
+#[test]
+fn an_external_display_wins_over_the_panel_on_one_card_too() {
+    // A docked laptop with the lid shut still reports eDP-1 connected. The
+    // monitor is the screen the user is looking at, so it is the one chosen,
+    // and --prefer-output is what moves gamescope onto it even when there is
+    // only ever one GPU to open.
+    let f = l16("choose-dock");
+    f.write("sys/class/drm/card1/device/device", "0x15bf\n")
+        .write("sys/class/drm/card1-DP-2/status", "connected\n");
+    let c = gpu::choose_display(&f.sys());
+    assert_eq!(c.output.as_deref(), Some("DP-2"));
+    assert_eq!(c.card.as_deref(), Some("card1"));
+}
+
+#[test]
+fn two_external_monitors_resolve_deterministically() {
+    let f = katana_displays("choose-two-externals");
+    f.write("sys/class/drm/card2-DP-1/status", "connected\n");
+    let c = gpu::choose_display(&f.sys());
+    assert_eq!(
+        c.output.as_deref(),
+        Some("DP-1"),
+        "by name, so two runs on one machine cannot disagree"
+    );
+    assert_eq!(c.card.as_deref(), Some("card2"));
+}
+
+#[test]
+fn an_all_amd_hybrid_picks_the_card_the_monitor_is_on() {
+    // Two AMD cards: an iGPU driving the panel and a dGPU driving the monitor.
+    // "Prefer the discrete GPU" and "prefer a vendor" would both be wrong
+    // rules here in the general case; the output-first rule needs no vendor
+    // knowledge at all.
+    let f = Fixture::new("choose-amd-hybrid");
+    f.write("sys/class/drm/card0/device/vendor", "0x1002\n")
+        .write("sys/class/drm/card0/device/device", "0x15bf\n")
+        .write("sys/class/drm/card0/device/boot_vga", "1\n")
+        .write("sys/class/drm/card0-eDP-1/status", "connected\n")
+        .write("sys/class/drm/card1/device/vendor", "0x1002\n")
+        .write("sys/class/drm/card1/device/device", "0x73df\n")
+        .write("sys/class/drm/card1/device/boot_vga", "0\n")
+        .write("sys/class/drm/card1-HDMI-A-2/status", "connected\n");
+    let c = gpu::choose_display(&f.sys());
+    assert_eq!(c.output.as_deref(), Some("HDMI-A-2"));
+    assert_eq!(c.pci_id.as_deref(), Some("1002:73df"));
+    assert_eq!(c.vendor.as_deref(), Some("AMD"));
+}
+
+#[test]
+fn a_card_with_no_pci_id_says_so_instead_of_pinning_nothing() {
+    // A SoC display controller or `vkms`: a DRM node with no PCI device. The
+    // output can still be asked for; the Vulkan device cannot, and that gap is
+    // reported rather than left for the log to imply.
+    let f = Fixture::new("choose-nopci");
+    f.write("sys/class/drm/card0-HDMI-A-1/status", "connected\n");
+    let c = gpu::choose_display(&f.sys());
+    assert_eq!(c.output.as_deref(), Some("HDMI-A-1"));
+    assert_eq!(c.pci_id, None);
+    assert!(!c.is_complete());
+    assert!(
+        c.problem.as_deref().unwrap_or("").contains("--prefer-vk-device"),
+        "{:?}",
+        c.problem
+    );
+    assert_eq!(
+        c.gamescope_args(),
+        vec!["--prefer-output".to_string(), "HDMI-A-1".to_string()]
+    );
+}
+
+#[test]
+fn nothing_connected_is_a_problem_and_never_a_silent_empty_answer() {
+    let f = katana_displays("choose-dark");
+    f.write("sys/class/drm/card1-eDP-1/status", "disconnected\n")
+        .write("sys/class/drm/card2-HDMI-A-1/status", "disconnected\n");
+    let c = gpu::choose_display(&f.sys());
+    assert_eq!(c.output, None);
+    assert!(c.gamescope_args().is_empty());
+    assert!(c.problem.is_some(), "a silent fallback IS the defect");
+}
+
+#[test]
+fn a_refused_connector_status_is_not_a_disconnected_monitor() {
+    // "Permission denied is not absence", in the place it would do the most
+    // damage: a status file that cannot be read must never be counted as "no
+    // monitor there", because that is how gamescope ends up back on the iGPU.
+    use std::os::unix::fs::PermissionsExt;
+    let f = katana_displays("choose-eacces");
+    let dir = f.sys().join("class/drm/card2-HDMI-A-1");
+    let mut perms = fs::metadata(&dir).unwrap().permissions();
+    perms.set_mode(0o000);
+    fs::set_permissions(&dir, perms).unwrap();
+    let sealed = fs::read_to_string(dir.join("status")).is_err();
+    let c = gpu::choose_display(&f.sys());
+    let mut perms = fs::metadata(&dir).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&dir, perms).unwrap();
+
+    if !sealed {
+        return; // running as root, or with CAP_DAC_OVERRIDE: proves nothing
+    }
+    assert_eq!(
+        c.output.as_deref(),
+        Some("eDP-1"),
+        "the panel is all that could be seen"
+    );
+    assert!(
+        c.problem.as_deref().unwrap_or("").contains("could not be read"),
+        "the refusal has to reach the report, got {:?}",
+        c.problem
+    );
+}
+
+#[test]
+fn connector_enumeration_skips_card_and_render_nodes() {
+    let f = katana_displays("connectors");
+    let names: Vec<String> = gpu::connectors(&f.sys())
+        .into_iter()
+        .map(|c| format!("{}:{}", c.card, c.name))
+        .collect();
+    assert_eq!(
+        names,
+        vec!["card1:eDP-1", "card2:DP-1", "card2:HDMI-A-1"],
+        "cardN and renderD128 are not connectors"
+    );
+    // And `discover` still sees exactly the two cards, unaffected.
+    assert_eq!(gpu::discover(&f.sys()).len(), 2);
+}
+
+#[test]
+fn only_the_three_built_in_connector_types_count_as_internal() {
+    for internal in ["eDP-1", "EDP-2", "LVDS-1", "DSI-1"] {
+        assert!(gpu::is_internal_connector(internal), "{internal}");
+    }
+    for external in ["HDMI-A-1", "DP-1", "DVI-D-1", "VGA-1", "Writeback-1"] {
+        assert!(!gpu::is_internal_connector(external), "{external}");
+    }
+}

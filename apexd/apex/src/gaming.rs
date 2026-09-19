@@ -96,6 +96,16 @@ pub struct GamingArgs {
     /// Emit machine-readable JSON instead of a report.
     #[arg(long)]
     pub json: bool,
+    /// Print the gamescope arguments that put a full-screen session on the
+    /// right GPU and the right screen, one per line, and nothing else.
+    ///
+    /// This is the form `apex-gaming-session` consumes. Exit 0 means a
+    /// complete answer was produced; exit 1 means it was not, and the reason
+    /// is on stderr. Deliberately NOT tied to `--json`'s or the report's exit
+    /// code, which answer "is Gaming Mode ready" — a machine can be perfectly
+    /// ready and still have nothing useful to say about which card to pin.
+    #[arg(long, conflicts_with = "json")]
+    pub gamescope_device_args: bool,
 }
 
 #[derive(Subcommand)]
@@ -785,6 +795,21 @@ pub fn gaming_main(args: GamingArgs) -> i32 {
     let p = probe();
     let r = p.report();
 
+    if args.gamescope_device_args {
+        // stderr carries the reasoning whether or not it worked, because the
+        // session script logs it verbatim and a session log that says only
+        // "starting: gamescope …" is how §6.1 went unnoticed for a release.
+        eprintln!("{}", r.display.why);
+        if let Some(problem) = &r.display.problem {
+            eprintln!("{problem}");
+        }
+        let flags = r.display.gamescope_args();
+        for f in &flags {
+            println!("{f}");
+        }
+        return if r.display.is_complete() { 0 } else { 1 };
+    }
+
     if args.json {
         println!("{}", gaming_json(&r, p.probes_programs()));
         return if r.is_ready() { 0 } else { 1 };
@@ -815,6 +840,31 @@ pub fn gaming_main(args: GamingArgs) -> i32 {
     flag("steam", &r.steam);
     flag("mangoapp", &r.mangoapp);
     flag("realtime limit", &r.rtprio_limits);
+    flag("realtime capability", &r.cap_sys_nice);
+
+    println!();
+    println!("── the screen Gaming Mode will use ──");
+    match (&r.display.output, &r.display.card) {
+        (Some(out), Some(card)) => {
+            kv(
+                "output",
+                &format!(
+                    "{out} on {card}{}",
+                    r.display
+                        .vendor
+                        .as_deref()
+                        .map(|v| format!(" ({v})"))
+                        .unwrap_or_default()
+                ),
+            );
+            match &r.display.pci_id {
+                Some(id) => kv("gamescope device", &format!("--prefer-vk-device {id}")),
+                None => kv("gamescope device", "none — see the warning below"),
+            }
+        }
+        _ => kv("output", "none chosen — see the warning below"),
+    }
+    kv("why", &r.display.why);
 
     println!();
     println!("── the Desktop <-> Gaming switch ──");
@@ -863,6 +913,39 @@ pub fn gaming_main(args: GamingArgs) -> i32 {
         }
     }
 
+    let refused = r.rows_needing_root();
+    if !refused.is_empty() {
+        println!();
+        // The katana report said `not measured — could not read the path:
+        // Permission denied (os error 13)` and stopped there. Re-asked with
+        // `sudo` the same row answered `yes`, so the missing half was never
+        // the measurement — it was the sentence that says which command has
+        // the answer. Printed once for all refused rows rather than once per
+        // row, because it is one command either way.
+        let count = refused.len();
+        print_wrapped(
+            "  ! ",
+            &format!(
+                "{count} row{} above could not be read by this account, so {} neither \
+                 present nor absent: {}.",
+                if count == 1 { "" } else { "s" },
+                if count == 1 { "it is" } else { "they are" },
+                refused.join(", ")
+            ),
+        );
+        match p.effective_uid() {
+            Some(0) => print_wrapped(
+                "    ",
+                "This run is already root, so the refusal is not a privilege problem — \
+                 check for SELinux denials or a mount option.",
+            ),
+            _ => println!(
+                "    Run `sudo apex gaming` to measure {}.",
+                if count == 1 { "it" } else { "them" }
+            ),
+        }
+    }
+
     println!();
     if !p.probes_programs() {
         println!("Program presence was not measured: {ROOT_ENV} is set, and no filesystem");
@@ -884,10 +967,17 @@ fn gaming_json(r: &Readiness, probes_programs: bool) -> String {
             js(name),
             js(s.source())
         ),
+        // `permission_denied` is a separate key rather than a substring a
+        // consumer has to grep the reason for: "missing" and "not allowed to
+        // look" are different answers, and a machine reader needs to tell them
+        // apart as much as a person does.
         None => format!(
-            "{}:{{\"value\":null,\"unavailable\":{},\"source\":{}}}",
+            "{}:{{\"value\":null,\"unavailable\":{},\"permission_denied\":{},\"source\":{}}}",
             js(name),
             js(s.reason().unwrap_or("")),
+            s.reason()
+                .map(|x| x.contains(apexd_core::gaming::ROOT_READABLE_HINT))
+                .unwrap_or(false),
             js(s.source())
         ),
     };
@@ -918,6 +1008,7 @@ fn gaming_json(r: &Readiness, probes_programs: bool) -> String {
             b("gamescope", &r.gamescope),
             b("steam", &r.steam),
             b("mangoapp", &r.mangoapp),
+            b("cap_sys_nice", &r.cap_sys_nice),
         ]
         .join(","),
         pads,
@@ -929,8 +1020,10 @@ fn gaming_json(r: &Readiness, probes_programs: bool) -> String {
 
 // ── rendering ────────────────────────────────────────────────────────────────
 
+/// The column is 19 wide because `realtime capability` is the longest row
+/// label and a row that overflows its own column is the one a reader skips.
 fn kv(key: &str, value: &str) {
-    println!("{key:<16}: {value}");
+    println!("{key:<19}: {value}");
 }
 
 /// A present/absent row that says which path it looked at when the answer is
@@ -940,6 +1033,18 @@ fn flag(name: &str, s: &apexd_core::workload::Signal<bool>) {
     match s.value() {
         Some(true) => kv(name, "yes"),
         Some(false) => kv(name, &format!("no ({})", s.source())),
+        // "not measured" is the right word for a probe that was switched off;
+        // it is the WRONG word for a probe that was refused, because it reads
+        // as "nobody asked" when what happened is "this account may not look".
+        // Katana's report said the former about the latter and the row was
+        // read as an absence. `unknown` plus the command that answers it.
+        None if s
+            .reason()
+            .map(|r| r.contains(apexd_core::gaming::ROOT_READABLE_HINT))
+            .unwrap_or(false) =>
+        {
+            kv(name, &format!("unknown — {} ({})", s.reason().unwrap_or(""), s.source()))
+        }
         None => kv(name, &format!("not measured — {}", s.reason().unwrap_or(""))),
     }
 }

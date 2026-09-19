@@ -30,9 +30,14 @@
 #  usual here: this session cannot be verified on the author's hardware yet.
 #
 #  Env overrides (for debugging, not for normal use):
-#    APEX_GAMESCOPE_ARGS   extra gamescope arguments
+#    APEX_GAMESCOPE_ARGS   extra gamescope arguments, appended LAST so they
+#                          override the device selection below
 #    APEX_STEAM_ARGS       replace the Steam argument list
 #    APEX_GAMING_NO_APEXD  set to 1 to skip `apex game start`
+#    APEX_GAMING_NO_DEVICE_SELECT
+#                          set to 1 to let gamescope pick its own GPU, which is
+#                          the behaviour this script had before 2026-09-19 and
+#                          the one that put Gaming Mode on the wrong screen
 # ─────────────────────────────────────────────────────────────────────────────
 # Deliberately NOT `set -e`: every optimisation below is best-effort, and none of
 # them may prevent the session from starting. The hard requirements are checked
@@ -83,28 +88,102 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
+# ── Capabilities, logged before anything uses them ──────────────────────────
+# Two separate questions turn on this one reading, and both were open after the
+# 2026-09-19 katana run, so it is printed unconditionally rather than derived
+# twice in silence.
+#
+#  1. `--rt` (below) needs CAP_SYS_NICE in the EFFECTIVE set.
+#  2. Steam's own bwrap refuses to start with ANY capability in the PERMITTED
+#     set of a non-setuid process — "Unexpected capabilities but not setuid,
+#     old file caps config?", which is what §6.3 recorded and did not root
+#     cause. If CapPrm below is non-zero, that message is explained and the
+#     session is the thing to fix, not Steam.
+#
+# Those two pull in opposite directions, and that is the finding: granting the
+# session CAP_SYS_NICE so gamescope gets realtime is the same act that stops
+# Steam's runtime from starting inside it. Do not "fix" §6.2 by granting
+# capabilities at login without measuring §6.3 again afterwards.
+# `APEX_ROOT` is the fixture root `apex gaming` already honours, and the same
+# one is honoured here so the capability branches can be exercised on a machine
+# whose real capability set is whatever it is. Unset — which is every real
+# session — this is exactly /proc/self/status.
+CAP_STATUS="/proc/self/status"
+[ -n "${APEX_ROOT:-}" ] && CAP_STATUS="${APEX_ROOT%/}/proc/self/status"
+cap_hex() { awk -v f="$1" '$1 == f":" { print $2; exit }' "${CAP_STATUS}" 2>/dev/null; }
+cap_has() {
+    # bit 23 is CAP_SYS_NICE (include/uapi/linux/capability.h). The kernel
+    # prints these bitmaps most-significant-nibble-first as one 16-digit hex
+    # number, so this is plain arithmetic — NOT the word-reversed format
+    # /sys/class/input/*/capabilities/key uses.
+    local hex="$1" bit="$2"
+    case "${hex}" in ''|*[!0-9a-fA-F]*) return 2 ;; esac
+    (( ( 16#${hex} >> bit ) & 1 ))
+}
+CAP_EFF="$(cap_hex CapEff)"
+CAP_PRM="$(cap_hex CapPrm)"
+CAP_AMB="$(cap_hex CapAmb)"
+log "capabilities: CapEff=${CAP_EFF:-?} CapPrm=${CAP_PRM:-?} CapAmb=${CAP_AMB:-?}"
+# A permitted set of all zeroes is the healthy case. Anything else — and an
+# unreadable one is NOT "anything else", it is a third answer — gets said out
+# loud, because it explains a Steam that dies before it draws anything.
+case "${CAP_PRM}" in
+    '')            log "could not read CapPrm; §6.3's bwrap failure cannot be ruled in or out" ;;
+    *[!0]*)
+        log "WARNING: this session holds capabilities in its permitted set (CapPrm=${CAP_PRM})."
+        log "         Steam's own bwrap refuses to start with any of them: 'Unexpected"
+        log "         capabilities but not setuid, old file caps config?' — evidence §6.3." ;;
+esac
+
 # ── Realtime scheduling ─────────────────────────────────────────────────────
-# `--rt` needs a non-zero RLIMIT_RTPRIO; the image ships
-# /etc/security/limits.d/30-apex-gaming-rtprio.conf and pam_limits applies it.
-# Only pass the flag when the limit is actually there, so the log says something
-# true instead of gamescope quietly failing to acquire RT.
-# The SOFT limit is the one that bounds sched_setscheduler(), so that is what
-# gets checked. `ulimit -Hr` (the hard limit) would pass a limits.d file that
-# raised only the ceiling and left the soft limit at 0 — i.e. it would report
-# success for exactly the silent failure this is here to catch. The shipped
-# drop-in uses `-`, which sets both.
+# MEASURED ON KATANA 2026-09-19 (§6.2), and the reason this block no longer
+# keys off the rlimit alone: the drop-in was installed, the soft RLIMIT_RTPRIO
+# really was 20, this script said "requesting realtime scheduling", passed
+# `--rt`, and gamescope answered
+#
+#     No CAP_SYS_NICE, falling back to regular-priority compute and threads.
+#
+# on all three attempts. gamescope gates its realtime path on the CAPABILITY,
+# not on the rlimit, so the old check was careful about the wrong thing and the
+# log line was a false claim. A flag that is passed and silently dropped is
+# worse than one that is not passed: it makes a status output say `yes`.
+#
+# The rlimit is still read and still logged, because it is the thing that would
+# ALSO have to be there, and a reader chasing frame pacing needs both numbers.
+#
+# WHY NOTHING HERE GRANTS THE CAPABILITY
+#   * `setcap cap_sys_nice+ep /usr/bin/gamescope` cannot work: APEX's /usr is a
+#     read-only composefs, and gamescope arrives through a systemd-sysext
+#     overlay whose lower layers are equally read-only. There is no writable
+#     inode to hang the xattr on. (If a future gamescope RPM ships the file
+#     capability itself, the `getcap` probe below finds it and `--rt` comes
+#     back on with no change here.)
+#   * pam_cap at login would work mechanically and is NOT done, because it puts
+#     capabilities into the permitted set of every process in the session —
+#     including Steam's bwrap, which then refuses to start. See the block above.
 RT_ARGS=()
 rtprio="$(ulimit -Sr 2>/dev/null || echo 0)"
-case "${rtprio}" in
-    unlimited)   RT_ARGS=(--rt) ;;
-    ''|*[!0-9]*) log "cannot read the soft RLIMIT_RTPRIO — not asking for realtime" ;;
-    *) if [ "${rtprio}" -gt 0 ]; then
-           RT_ARGS=(--rt)
-           log "soft RLIMIT_RTPRIO is ${rtprio} — requesting realtime scheduling"
-       else
-           log "soft RLIMIT_RTPRIO is 0 — realtime unavailable (is the user in @wheel?)"
-       fi ;;
-esac
+rt_cap="no"
+if cap_has "${CAP_EFF}" 23; then
+    rt_cap="yes (effective set)"
+elif command -v getcap >/dev/null 2>&1; then
+    gs_caps="$(getcap "$(command -v gamescope)" 2>/dev/null)"
+    # `[[ == * ]]` and not `grep -q`: under `pipefail` a matching `grep -q`
+    # closes the pipe and the writer dies of SIGPIPE, so the pipeline returns
+    # 141 on a MATCH. That trap has already cost this program five suites.
+    if [[ "${gs_caps}" == *cap_sys_nice* ]]; then
+        rt_cap="yes (file capability on gamescope)"
+    fi
+fi
+if [ "${rt_cap}" != "no" ]; then
+    RT_ARGS=(--rt)
+    log "CAP_SYS_NICE: ${rt_cap}; soft RLIMIT_RTPRIO is ${rtprio} — requesting realtime"
+else
+    log "CAP_SYS_NICE: absent; soft RLIMIT_RTPRIO is ${rtprio}."
+    log "  NOT passing --rt: gamescope needs the capability, not the rlimit, and would"
+    log "  log 'No CAP_SYS_NICE' and run at ordinary priority anyway. Frame pacing under"
+    log "  load is worse; nothing else is affected. See evidence §6.2."
+fi
 
 # ── VRR ─────────────────────────────────────────────────────────────────────
 # Only ask for adaptive sync if a connected output actually advertises it.
@@ -138,13 +217,78 @@ if [ -n "${APEX_STEAM_ARGS:-}" ]; then
     STEAM_ARGS=(${APEX_STEAM_ARGS})
 fi
 
+# ── Which GPU, and which screen ─────────────────────────────────────────────
+# THE DEFECT THIS FIXES, measured on katana 2026-09-19 (§6.1). With no device
+# preference, gamescope took its default — the first DRM node — which on a
+# hybrid laptop is the integrated GPU:
+#
+#   vulkan: selecting physical device 'Intel(R) Iris(R) Xe Graphics (ADL GT2)'
+#   drm:    opening DRM node '/dev/dri/card1'
+#   drm:      eDP-1 (connected)          <- the laptop panel, and nothing else
+#   Error drm: drmModeAddFB2WithModifiers failed: Invalid argument
+#
+# The RTX 3070 driving the user's only monitor is card2, and gamescope never
+# looked at it. With `--prefer-vk-device 10de:249d` the same script selected
+# the NVIDIA device, opened card2, found HDMI-A-1 and ran it at 240 Hz.
+#
+# `WLR_DRM_DEVICES` is NOT the lever — also measured: gamescope's DRM backend
+# is its own, not wlroots', and it ignored the variable completely.
+#
+# The card id is NOT hardcoded. `apex gaming --gamescope-device-args` derives
+# it from sysfs with one rule — the output decides the card — which needs no
+# special case for a single-GPU machine or an all-AMD one. The rule and the
+# argument for it live in apexd-core's `gpu::choose_display`; the tests that
+# hold it live in apexd-core/tests/gpu_parity.rs.
+#
+# FAILING LOUDLY, because a silent fallback to the iGPU is the defect: every
+# line the selector prints goes into this log, and a selector that cannot
+# answer says so here before gamescope starts. It is not fatal — refusing to
+# start would regress every single-GPU machine over a probe that hiccupped —
+# but it is never quiet.
+DEVICE_ARGS=()
+if [ "${APEX_GAMING_NO_DEVICE_SELECT:-0}" = "1" ]; then
+    log "device selection disabled by APEX_GAMING_NO_DEVICE_SELECT — gamescope will"
+    log "  take its own default, which on a hybrid laptop is the integrated GPU"
+elif ! command -v apex >/dev/null 2>&1; then
+    log "ERROR: \`apex\` is not on PATH, so the GPU/output selection could not be made."
+    log "  gamescope will take its own default (the first DRM node). On a hybrid"
+    log "  laptop that is the iGPU, and the external monitor will stay dark."
+else
+    _sel_err="$(mktemp)" || _sel_err=/dev/null
+    _sel_out="$(apex gaming --gamescope-device-args 2>"${_sel_err}")"
+    _sel_rc=$?
+    # Read the reasoning back BEFORE acting on the status: the selector always
+    # explains itself, and the explanation is the part that would have made
+    # §6.1 visible in the first session log rather than after a hardware run.
+    if [ -s "${_sel_err}" ]; then
+        while IFS= read -r _line; do
+            [ -n "${_line}" ] && log "gpu-select: ${_line}"
+        done < "${_sel_err}"
+    fi
+    [ "${_sel_err}" = /dev/null ] || rm -f "${_sel_err}"
+    if [ "${_sel_rc}" -eq 0 ] && [ -n "${_sel_out}" ]; then
+        while IFS= read -r _line; do
+            [ -n "${_line}" ] && DEVICE_ARGS+=("${_line}")
+        done <<< "${_sel_out}"
+        log "GPU/output: ${DEVICE_ARGS[*]}"
+    else
+        log "ERROR: no complete GPU/output selection (apex exited ${_sel_rc})."
+        log "  gamescope will take its own default (the first DRM node). On a hybrid"
+        log "  laptop that is the iGPU, and the external monitor will stay dark."
+        log "  Override with APEX_GAMESCOPE_ARGS=\"--prefer-vk-device <vendor>:<device>\"."
+    fi
+fi
+
 # ── gamescope ───────────────────────────────────────────────────────────────
 #   -e/--steam        Steam integration (Big Picture keyboard/controller glue)
 #   -f                fullscreen; the output's native mode is used
 #   --expose-wayland  let native Wayland (xdg-shell) games in, not just X11
 #   --mangoapp        MangoHud via gamescope's own overlay, which upstream says
 #                     to use INSTEAD of wrapping the game in mangohud
-GS_ARGS=(-e -f --expose-wayland "${RT_ARGS[@]}" "${VRR_ARGS[@]}")
+#
+# DEVICE_ARGS comes before APEX_GAMESCOPE_ARGS so a hand-set override still
+# wins: gamescope takes the last occurrence of a repeated option.
+GS_ARGS=(-e -f --expose-wayland "${RT_ARGS[@]}" "${VRR_ARGS[@]}" "${DEVICE_ARGS[@]}")
 command -v mangoapp >/dev/null 2>&1 && GS_ARGS+=(--mangoapp)
 if [ -n "${APEX_GAMESCOPE_ARGS:-}" ]; then
     # shellcheck disable=SC2206
