@@ -612,3 +612,259 @@ route in is "Ctrl+Alt+F2, log in, run `apex-safe-graphics`", which lands on the
 same blank screen. The session script should either allow hardware rendering on
 the secondary GPU as a fallback, or say out loud which outputs it could not
 light.
+
+---
+
+## 6. Gaming Mode — FAIL, for two independent reasons, both fixable
+
+`apex gaming` says it is ready, and after the engine rebuild it is honest about
+the machine rather than about the stale extension:
+
+```
+$ apex gaming
+ready           : yes
+greeter entry   : yes    session script : yes
+gamescope       : yes    steam          : yes    mangoapp : yes
+realtime limit  : yes
+switch helper   : yes
+sudoers rule    : not measured — could not read the path: Permission denied (os error 13)
+gamepads        : none attached
+```
+
+**That last row is a refusal, not an absence** — re-asked with privilege:
+
+```
+$ sudo apex gaming
+sudoers rule    : yes
+```
+
+Worth fixing in the tool: an unprivileged read that cannot see
+`/etc/sudoers.d` reports the same string whether the rule is missing or
+unreadable, and the two are different answers.
+
+### 6.1 DEFECT — Gaming Mode runs on the Intel iGPU and the laptop panel, never the monitor
+
+This is the substance of "the gaming modes should properly boot and on the
+monitor". It does not. From the session's own log, first attempt, unmodified:
+
+```
+[apex-gaming-session] starting: gamescope -e -f --expose-wayland --rt --mangoapp -- steam -gamepadui
+[gamescope] vulkan: Intel device detected, forcing general queue family instead of compute-only queue
+[gamescope] vulkan: selecting physical device 'Intel(R) Iris(R) Xe Graphics (ADL GT2)': queue family 0
+[gamescope] drm:    opening DRM node '/dev/dri/card1'
+[gamescope] drm:    Connectors:
+[gamescope] drm:      eDP-1 (connected)
+[gamescope] drm:    selecting connector eDP-1
+[gamescope] drm:    selecting mode 1920x1080@144Hz
+[gamescope] Error drm: drmModeAddFB2WithModifiers failed: Invalid argument
+```
+
+On a machine with an RTX 3070 and the only external monitor wired to it,
+gamescope picks the **Intel Iris Xe**, opens **card1**, and never sees
+`HDMI-A-1` at all — it is on card2. `apex-gaming-session` passes no device
+preference, so gamescope takes its default, which is the first DRM node.
+
+**The fix is one flag, and it was measured.** Third attempt, identical session
+script, with `APEX_GAMESCOPE_ARGS="--prefer-output HDMI-A-1 --prefer-vk-device 10de:249d"`
+(`10de:249d` from `lspci -nn`: `NVIDIA Corporation GA104M [GeForce RTX 3070 Mobile]`):
+
+```
+[gamescope] vulkan: selecting physical device 'NVIDIA GeForce RTX 3070 Laptop GPU': queue family 2
+[gamescope] drm:    opening DRM node '/dev/dri/card2'
+[gamescope] drm:    Connectors:
+[gamescope] drm:      HDMI-A-1 (connected)
+[gamescope] drm:    selecting connector HDMI-A-1
+[gamescope] drm:    selecting mode 1920x1080@240Hz
+```
+
+Right GPU, right node, right connector, and the monitor's full 240 Hz. Note
+`--prefer-vk-device` is what moves the **DRM node** too — `WLR_DRM_DEVICES=/dev/dri/card2`
+was tried first (second attempt) and gamescope ignored it completely, still
+opening card1, because gamescope's DRM backend is its own and not wlroots'.
+
+So `apex-gaming-session` needs to choose a device rather than accept the
+default. It already probes `/sys/class/drm/card*-*/vrr_capable`; the same kind
+of probe can find which card owns a connected connector and pass
+`--prefer-vk-device` for that card's PCI id.
+
+### 6.2 DEFECT — `--rt` is requested and never granted
+
+```
+[apex-gaming-session] soft RLIMIT_RTPRIO is 20 — requesting realtime scheduling
+[gamescope] No CAP_SYS_NICE, falling back to regular-priority compute and threads.
+             Performance will be affected.
+```
+
+The session script's `ulimit -Sr` check is careful and correct as far as it
+goes, and `30-apex-gaming-rtprio.conf` did its job — the soft limit is 20. But
+gamescope wants **CAP_SYS_NICE**, not just `RLIMIT_RTPRIO`, for its compositing
+and its own threads, and nothing grants it. The log line the script prints
+("requesting realtime scheduling") is therefore true and the outcome is not.
+This happened on every one of the three attempts.
+
+### 6.3 Steam never reaches a UI inside gamescope — two causes observed
+
+`gamescope exited with 0` on attempt one and **139** (SIGSEGV) on attempt three,
+both preceded by `launch: Primary child shut down!` — Steam died first each
+time. Steam's own log (`~/.local/share/Steam/logs/console-linux.txt`) carries
+the reasons; they were not in the session log because Steam redirects its
+output through `srt-logger`:
+
+```
+[09:21:26] steam-runtime-check-requirements: W: Child process exited with code 1:
+             bwrap: Unexpected capabilities but not setuid, old file caps config?
+[09:21:26] steam.sh: Error: Steam now requires user namespaces to be enabled.
+...
+[09:23:37] Unable to open X11 display, exiting
+```
+
+The user-namespace message is **not** a machine misconfiguration — checked
+rather than assumed:
+
+```
+$ sysctl kernel.unprivileged_userns_clone     → 1
+$ cat /proc/sys/user/max_user_namespaces      → 254518
+$ unshare --user --map-root-user echo ok      → ok
+$ getcap /usr/bin/bwrap                       → (no capabilities, correct for a setuid-free bwrap)
+$ flatpak run --command=/bin/true org.blender.Blender   → rc=0
+```
+
+Namespaces work and flatpak's bwrap works. The failing bwrap is the one in
+Steam's own runtime, and it complains about **unexpected capabilities in its
+permitted set** — which points at the environment the session is started in
+rather than at the kernel. Recorded as observed; not root-caused further,
+because §6.1 has to be fixed first and may change this.
+
+### 6.4 Steam itself is fine — PASS in a desktop session, on the monitor
+
+To separate "Steam is broken" from "Gaming Mode is broken", Steam was run in
+the labwc session with `DISPLAY=:0`:
+
+```
+$ pgrep -a -u andre -x Xwayland
+25681 Xwayland :0 -rootless -core -terminate 10 …
+$ DISPLAY=:0 setsid /usr/bin/steam &
+$ ps -u andre -o pid,comm | grep -i steam
+26638 steam
+26860 steam-runtime-l
+26916 steamwebhelper   (+5 more)
+$ tail ~/.local/share/Steam/logs/console-linux.txt
+Desktop state changed: desktop: { pos: 0,0 size: 3840,1080 } primary: { pos: 0,0 size: 1920,1080 }
+Fossilize INFO: Setting autogroup scheduling.
+```
+
+Render proof, and this is the row that answers "does the client render on the
+monitor":
+
+```
+$ python3 ~/qual/shot.py steam-running
+eDP-1    1920x1080 distinct_colours=216174 mean_rgb=(156.3,165.0,178.3)   (unchanged wallpaper)
+HDMI-A-1 1920x1080 distinct_colours=321700 mean_rgb=(121.4,118.9,117.8)   (the Steam client)
+```
+
+**EYES, stated as such:** the HDMI capture was also looked at. It is the full
+Steam client — store page loaded, signed in, the library/community chrome
+correct, text rendering clean with no missing-font boxes (the Sep-6 fontconfig
+symptom does not recur), and the APEX Shell bar along the top. That part is an
+observation, not an assertion; the numbers above are the assertion.
+
+**PASS** for `apex install steam` → a working Steam client on the
+NVIDIA-connected monitor. **The `-gamepadui`/gamescope path is the part that fails.**
+
+### 6.5 DEFECT — `apex install steam` produces a Steam with no 32-bit Vulkan at all
+
+Steam's log, on the successful desktop run:
+
+```
+CVulkanTopology: failed create vulkan instance: -9        (VK_ERROR_INCOMPATIBLE_DRIVER)
+CVulkanTopology: failed to create vulkan instance — Failed to query vulkan gpu topology
+Vulkan missing requested extension 'VK_KHR_surface'.
+Vulkan missing requested extension 'VK_KHR_xlib_surface'.
+BInit - Unable to initialize Vulkan!
+```
+
+Steam's client binary is `ubuntu12_32/steam` — 32-bit — so it needs 32-bit
+Vulkan. The 32-bit loader and the 32-bit drivers are both installed:
+
+```
+$ ls /usr/lib/libvulkan.so.1 /usr/lib/libGLX_nvidia.so.0 /usr/lib/libvulkan_intel.so
+/usr/lib/libvulkan.so.1  /usr/lib/libGLX_nvidia.so.0  /usr/lib/libvulkan_intel.so
+$ sudo grep -o 'xorg-x11-drv-nvidia-libs[^"]*' /var/lib/apex/pkg/state.json | sort -u
+xorg-x11-drv-nvidia-libs-3:580.178.04-1.fc43.i686
+```
+
+**The manifests that connect them are not:**
+
+```
+$ ls /usr/share/vulkan/icd.d/ | grep -c i686
+0
+$ ls /usr/share/vulkan/icd.d/
+asahi_icd.x86_64.json … nvidia_icd.x86_64.json … virtio_icd.x86_64.json   (13, all x86_64)
+```
+
+And the rpms in the set do ship them:
+
+```
+$ dnf5 repoquery -l xorg-x11-drv-nvidia-libs-3:580.178.04-1.fc43.i686 | grep vulkan/icd
+/usr/share/vulkan/icd.d/nvidia_icd.i686.json
+$ dnf5 repoquery -l mesa-vulkan-drivers-25.3.6-3.fc43.i686 | grep vulkan/icd
+/usr/share/vulkan/icd.d/asahi_icd.i686.json … (12 more)
+$ ls /mnt/apexext/usr/share/vulkan/icd.d/          # the built extension
+ls: cannot access '/mnt/apexext/usr/share/vulkan/icd.d/': No such file or directory
+```
+
+**Cause — the same line of `apex-pkg` as §3, failing the other way.** The
+32-bit pass carries `--excludepath /usr/share`, so every `*_icd.i686.json` is
+thrown away while the `.so` files they name are kept. A 32-bit Vulkan
+application on an APEX machine therefore sees **zero** ICDs and falls back to
+nothing.
+
+This is why the 2026-09-17 live recovery had to hand-write
+`/usr/share/vulkan/icd.d/nvidia_icd.i686.json`. The image does not ship it —
+it is `.i686`-suffixed and comes only from the i686 rpm — and `apex install`
+deletes it.
+
+**Fix:** the `/usr/share` exclusion is too blunt. The reason it exists is that
+i686 packages duplicate `/usr/share/doc`, `/usr/share/man`, icons and locale,
+which would shadow the image's. Arch-suffixed files like `*_icd.i686.json`,
+`*.i686.json` implicit layers and `/usr/share/glvnd/egl_vendor.d/*.i686.json`
+cannot shadow anything — nothing else has that name. Either keep paths whose
+basename carries a non-host arch token, or replace the blanket
+`--excludepath /usr/share` with the `rpm -qf` image-owner test §3 wants,
+which handles both defects with one rule.
+
+### 6.6 Gaming Mode cleanup does work
+
+```
+$ apex game status          # after every attempt
+active    : false
+$ pgrep -c -u andre -x gamescope   → 0
+$ systemctl is-active qual-sess-apex-gaming → inactive
+```
+
+The `trap cleanup EXIT HUP INT TERM` released `apex game` every time, including
+after the SIGSEGV exit, and `[apex-gaming-session] apexd game mode released` is
+in the log. The fail-safe design holds: a broken Gaming Mode exits non-zero and
+hands the display back rather than leaving a black screen. **PASS.**
+
+### 6.7 The Desktop ↔ Gaming switch
+
+`apex-session-select` is the whole mechanism, and it is deliberately only half
+of a switch:
+
+```
+apex-session-select <id>            # remember it
+apex-session-select <id> --switch   # remember it, then `loginctl terminate-user`
+```
+
+Its own header says why there is no autologin: "the end state for both machines
+is LUKS2 + TPM2 full-disk encryption, and quietly adding a passwordless
+graphical login to that is a security change nobody asked for. Switching modes
+costs one password entry at the greeter."
+
+**Verified:** the preselect half, and that the helper validates its argument.
+**COULD NOT RUN:** the half that needs a password at the greeter — this unit
+does not have Andre's password, and `--switch` calls `loginctl terminate-user`,
+which the script's own comment warns "ends EVERY session belonging to the
+caller — including an SSH login." Running it would have ended this unit's own
+connection to the machine. Marked COULD-NOT-RUN with the reason, not FAIL.
