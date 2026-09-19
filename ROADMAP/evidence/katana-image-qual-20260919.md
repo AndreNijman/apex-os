@@ -168,6 +168,31 @@ AmbientCapabilities=
 This grep is repeated on the new image in §3 before any capability number is
 believed.
 
+### 0.5 The negative control — five readings that must flip
+
+Taken on the old deployment at 17:20 AWST so "the image changed" is a
+measurement rather than a hope:
+
+```
+$ apex gaming --gamescope-device-args ; echo "rc=$?"
+error: unexpected argument '--gamescope-device-args' found
+rc=2
+$ grep -c 'prefer-vk-device\|prefer-output' /usr/libexec/apex-gaming-session   -> 0
+$ grep -c 'CapEff\|CapPrm\|CapAmb'         /usr/libexec/apex-gaming-session   -> 0
+$ getcap "$(command -v gamescope)" ; echo "rc=$?"                              -> (empty) rc=0
+$ for p in /sys/class/drm/*/vrr_capable; do [ -e "$p" ] && echo "$p"; done      -> (no matches)
+```
+
+The first three must change on the new image; `getcap` and `vrr_capable` must
+**not** — nothing in either unit grants a file capability or invents a sysfs
+attribute, and §6.2 and §7.2 both depend on that staying true.
+
+One thing already correct on the old image and worth recording because round 31
+called it out: the EACCES-vs-absent distinction on the `sudoers rule` row is
+present — it reads `not measured — could not read the path: Permission denied
+(os error 13)`, not a bare `no`.
+
+
 ---
 
 ## 1. The rebase
