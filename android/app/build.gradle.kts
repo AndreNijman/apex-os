@@ -29,6 +29,13 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+
+        // P1-060's first two criteria are claims about what ANDROID does with
+        // this code — a screen reader reading a label, a rotation surviving, a
+        // Noise handshake crossing real Wi-Fi — and no JVM test can make one.
+        // Every Compose path in this app had been compiled and never run until
+        // the suite this runner starts was first executed on a Pixel 7a.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     // ── Release signing (P1-060) ────────────────────────────────────────────
@@ -144,6 +151,27 @@ dependencies {
 
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)
+
+    // ── On-device (instrumented) tests ──────────────────────────────────────
+    //
+    // JUnit **4**, and not because the unit tests' JUnit 5 was a mistake.
+    // `AndroidJUnitRunner` is a JUnit 4 runner; the Jupiter engine does not run
+    // under it, and an `androidTest` source set written for Jupiter compiles
+    // and then discovers zero tests — which reports success. The two source
+    // sets therefore use different frameworks on purpose.
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.uiautomator)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    // `enableAccessibilityChecks()`: the Accessibility Test Framework, run
+    // against the real semantics tree on a real phone. This is the assertion
+    // that AccessibilityStaticsTest deliberately could not make — a source scan
+    // can see that a label exists, not that Android exposes it.
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4.accessibility)
+    // The empty activity `createComposeRule()` needs a manifest entry for.
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
 
 tasks.withType<Test>().configureEach {
