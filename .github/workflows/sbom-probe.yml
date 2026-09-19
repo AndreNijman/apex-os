@@ -15,26 +15,29 @@ name: sbom-probe
 # signed it before the SBOM step ran. Same runner class (ubuntu-24.04, 4 cores,
 # 16 GB), same pinned syft, same command.
 #
-# Four arms, in parallel:
-#   repro                the exact failing command — registry:, parallelism 4
-#   ocidir               skopeo copy to an OCI layout on disk, then oci-dir:
-#   ocidir-decompressed  the same with the layers decompressed on the way in;
-#                        all 113 layers are zstd:chunked, so if oci-dir dies the
-#                        same way this arm separates "where the bytes live" from
-#                        "how they are compressed"
-#   gomemlimit           GOMEMLIMIT=10GiB. syft is Go, and Go's default GOGC=100
-#                        lets the heap reach ~2x live before a collection. If the
-#                        peak is garbage rather than live data, a soft memory
-#                        limit trades CPU for it and restricts no cataloguer.
-#   swap32               a 32 GB swapfile on the 86 GB of free disk, which is the
-#                        most literal reading of "give it the disk instead of the
-#                        memory". Slow if it thrashes; the timeout says so.
-#   ocidir-gomemlimit    both of the above together.
-#   registry-par1        answers the open question in build-image.yml's own
-#                        comment: at parallelism 1 the step ran the full fifteen
-#                        minutes and was killed by the timeout, which is why the
-#                        timeout was raised to 45. Was that slowness or was it
-#                        swap thrash?
+# ═══ ROUND 1 (run 35437908023) ANSWERED THE QUESTION THIS FILE WAS FOR ═══
+#
+# Seven arms, one variable. Every arm WITHOUT GOMEMLIMIT drove the runner to
+# ~15.9 GB used with all 3 GB of swap consumed and lost the VM; both arms WITH
+# GOMEMLIMIT=10GiB produced an identical 9830-package SBOM with both Electron
+# trees in it. `registry:` and `oci-dir:` died alike, so the source is not the
+# cause; parallelism 1 died like parallelism 4, so the "it ran the full fifteen
+# minutes" history in build-image.yml was a memory death too. `oom_kill` was 0
+# throughout and dmesg was clean: these VMs swap-thrashed until the host
+# cancelled them rather than being OOM-killed.
+#
+# ═══ ROUND 2 IS ABOUT THE MARGIN, NOT THE CAUSE ═══
+#
+# Both survivors peaked at 14.65-14.72 GiB RSS on a 16 GB box, with 188 MB and
+# 125 MB left. GOMEMLIMIT is soft and syft overshot it by ~4.7 GiB. Round 1's
+# hedge never ran: `swap32` called fallocate on the runner's active /swapfile
+# and got `Text file busy` in 0 s.
+#
+#   gml10-swap32  the candidate — the measured-working limit plus 32 GB of real
+#                 swap on the 86 GB of free disk.
+#   swap32-only   the control — is the limit needed once swap exists?
+#   gml6, gml4    does a lower limit move peak RSS, or is the overshoot
+#                 non-heap and immovable?
 #
 # Triggered by pushing THIS FILE to task/sbom-oom. `paths` keeps later commits
 # to build-image.yml from re-running it.
@@ -58,13 +61,10 @@ jobs:
       fail-fast: false
       matrix:
         mode:
-          - repro
-          - ocidir
-          - ocidir-decompressed
-          - gomemlimit
-          - swap32
-          - ocidir-gomemlimit
-          - registry-par1
+          - gml10-swap32
+          - swap32-only
+          - gml6
+          - gml4
     steps:
       - uses: actions/checkout@v4
 
@@ -117,31 +117,50 @@ jobs:
           PAR=4
           GML=""
           SRC="registry:$REF"
+          # ROUND 2. Round 1 settled the cause: every arm without GOMEMLIMIT
+          # died, both arms with it produced the same 9830-package SBOM, and
+          # neither the source (registry: vs oci-dir:) nor the parallelism
+          # (4 vs 1) changed that. Those arms are gone; they have their answer.
+          #
+          # What round 1 did NOT settle is the MARGIN. Both survivors peaked at
+          # 14.65-14.72 GiB RSS on a 16 GB box and bottomed out at 188 MB and
+          # 125 MB available. GOMEMLIMIT is a SOFT limit — syft went through the
+          # 10 GiB setting by ~4.7 GiB — so "it passed twice at 1% headroom" is
+          # a fix for today's image, not for the next package added to it.
+          #
+          # Round 1's hedge for exactly this never ran: the `swap32` arm called
+          # `fallocate -l 32G /swapfile` on the runner's ALREADY-ACTIVE swapfile
+          # and got `Text file busy` in 0 s. A new file at a new path fixes it.
+          #
+          #   gml10-swap32  the candidate: the measured-working limit plus real
+          #                 swap on the 86 GB of free disk, so the transient
+          #                 spike at the filetree squash has somewhere to go.
+          #   swap32-only   the control. If this passes, the limit is belt over
+          #                 braces and swap alone is the simpler fix. If it
+          #                 dies, GOMEMLIMIT is load-bearing and swap is only
+          #                 the margin.
+          #   gml6 / gml4   does a LOWER limit actually lower peak RSS, or is
+          #                 the ~4.7 GiB of overshoot non-heap and immovable?
+          #                 If gml4 peaks at 14.7 GiB too, tightening the number
+          #                 is not a lever and nobody should try it again.
+          add_swap() {
+            # NOT /swapfile — that one is mounted. A second swap file, on root,
+            # where round 1 measured 86 GB free.
+            sudo fallocate -l 32G /swapfile.probe
+            sudo chmod 600 /swapfile.probe
+            sudo mkswap /swapfile.probe >/dev/null
+            sudo swapon /swapfile.probe
+            echo "── swap after add ──"; swapon --show; free -m; df -h /
+          }
           case "$MODE" in
-            repro)               : ;;
-            registry-par1)       PAR=1 ;;
-            gomemlimit)          GML=10GiB ;;
-            swap32)
-              sudo fallocate -l 32G /swapfile
-              sudo chmod 600 /swapfile
-              sudo mkswap /swapfile >/dev/null
-              sudo swapon /swapfile
-              swapon --show; free -m
-              ;;
-            ocidir|ocidir-decompressed|ocidir-gomemlimit)
-              DEC=""
-              [ "$MODE" = ocidir-decompressed ] && DEC="--dest-decompress"
-              [ "$MODE" = ocidir-gomemlimit ] && GML=10GiB
-              _c0=$(date +%s)
-              skopeo copy --retry-times 3 $DEC "docker://$REF" "oci:/tmp/oci:apex"
-              echo "skopeo copy ($MODE) took $(( $(date +%s) - _c0 ))s"
-              du -sh /tmp/oci; df -h /
-              SRC="oci-dir:/tmp/oci"
-              ;;
+            gml10-swap32)  GML=10GiB; add_swap ;;
+            swap32-only)   add_swap ;;
+            gml6)          GML=6GiB ;;
+            gml4)          GML=4GiB ;;
           esac
 
           ENVS=(SYFT_PARALLELISM="$PAR")
-          [ -n "$GML" ] && ENVS+=(GOMEMLIMIT="$GML")
+          if [ -n "$GML" ]; then ENVS+=(GOMEMLIMIT="$GML"); fi
           echo "── syft: mode=$MODE parallelism=$PAR gomemlimit=${GML:-unset} source=$SRC ──"
           _t0=$(date +%s)
           timeout 2700 /usr/bin/time -v -o /tmp/time.txt \
