@@ -94,6 +94,8 @@ htop|3.3.0-4.fc43|fedora|Interactive process viewer
 neovim|0.10.2-1.fc43|fedora|Vim-fork focused on extensibility
 discord|0.0.75-1.fc43|rpmfusion-nonfree|All-in-one voice and text chat for gamers
 android-tools|35.0.2-2.fc43|fedora|Android platform tools
+ripgrep|14.1.1-5.fc43|updates|Line-oriented search tool
+ripgrep|14.1.1-5.fc43|updates-archive|Line-oriented search tool
 EOF
 
 # `appid<TAB>name<TAB>remotes`, as flatpak search --columns emits.
@@ -106,6 +108,28 @@ printf 'org.example.Monitor\tSystem Monitor\tflathub\n'      >> "$WORK/flatpak-a
 
 cat > "$BIN/dnf5" <<EOF
 #!/usr/bin/env bash
+# THE REAL dnf5 REFUSES \`--\`, SO THIS ONE DOES TOO. Measured against dnf5
+# 5.2.18.0 on 2026-09-19:
+#
+#   \$ dnf5 repoquery --quiet --queryformat '%{name}\\n' -- chromium; echo \$?
+#   Unknown argument "--" for command "repoquery". …          (stderr)
+#   2                                                          (and no stdout)
+#
+# apex-pkg's probe_rpm passed \`--\` to repoquery, and this suite's 50+
+# assertions all passed over it, because the fake read only its LAST argument
+# and never looked at the rest. The consequence on real hardware was total:
+# probe_rpm returned nothing for every package in the world, \`apex resolve\`
+# lost its entire rpm leg, and it told a user to install the Chromium flatpak
+# while \`apex install chromium\` installed the Fedora rpm (evidence §11.1).
+#
+# A fake that accepts arguments the real tool rejects is a gate that inspects
+# nothing. This loop is what makes the assertions below able to see the defect.
+for a in "\$@"; do
+    if [ "\$a" = "--" ]; then
+        echo "Unknown argument \"--\" for command \"\${1:-}\". Add \"--help\" for more information about the arguments." >&2
+        exit 2
+    fi
+done
 # repoquery answers exact names (what the resolver asks); search matches
 # summaries too (what \`apex search\` asks). Anything else is a test bug and
 # must be loud rather than quietly returning nothing.
@@ -184,6 +208,20 @@ for tool in dnf5 flatpak; do
     fi
     ok "$tool resolves to the fake"
 done
+
+# …and the fake must be as strict as the real tool about arguments, or every
+# assertion below is measuring a tool that does not exist. This is the single
+# line that would have caught evidence §11.1 with no network: probe_rpm passed
+# `--` to `dnf5 repoquery`, which refuses it, and the whole rpm leg of
+# `apex resolve` went silently missing on every machine.
+fake_dd_out=$(env -i PATH="$SAFE_PATH" dnf5 repoquery --quiet -- htop 2>/dev/null)
+fake_dd_rc=$?
+if [ -z "$fake_dd_out" ] && [ "$fake_dd_rc" != 0 ]; then
+    ok "the fake dnf5 refuses '--' the way dnf5 5.2.18.0 does"
+else
+    bad "the fake dnf5 refuses '--' the way dnf5 5.2.18.0 does" \
+        "it answered rc=${fake_dd_rc} with $(printf '%q' "$fake_dd_out"), so a re-introduced '--' would be invisible here"
+fi
 
 echo "── the ranking is the policy, so it is asserted directly ──────────────"
 # Every combination. The order is the claim: a repository package first
@@ -372,6 +410,18 @@ echo "── the install paths state provenance where the user can see it ──
 install_body=$(awk '/^cmd_install\(\) \{/,/^\}/' "$ENGINE")
 has "the RPM route states provenance"     'provenance rpm'     "$install_body"
 has "the Flatpak route states provenance" 'provenance flatpak' "$install_body"
+
+echo "── one package in two repositories is one candidate ───────────────────"
+# `--latest-limit 1` is per repository, so a name carried by both `updates` and
+# `updates-archive` comes back twice at the same EVR. Measured on the L16 on
+# 2026-09-19: the fixed resolver printed chromium-152.0.7977.82-1.fc43 as two
+# separate "candidates". `apex resolve` answers "which SOURCE would APEX use",
+# and the same rpm from a second mirror of the same repository set is not a
+# second source — it is the same answer printed twice.
+out=$(run_pkg resolve ripgrep)
+is "a package in two repos is listed once" 1 \
+   "$(printf '%s\n' "$out" | grep -c '^  rpm ')"
+has "…and it is still the rpm that wins" "APEX would use: rpm" "$out"
 
 echo "── search reports more than one source ────────────────────────────────"
 out=$(run_pkg search neovim)
