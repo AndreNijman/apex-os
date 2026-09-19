@@ -84,7 +84,7 @@ Do not re-run anything on the card's own "DO NOT RE-RUN" list.
 
 **ROUND 34 IS COMPLETE AND PUSHED IN BOTH REPOS.** apex-shell
 `task/p2-b-round34` tip **`2bc9799`** (one commit on `roadmap/v2.2`'s
-`4eea9fb`); apex-os `task/p2-b-round34` tip **`e11f2843`** (one commit on
+`4eea9fb`); apex-os `task/p2-b-round34` tip **`d7c5ea2e`** (TWO commits on
 `7f647470`). **The apex-os half is the substance this round** — the module is
 built into the image for the first time. Worktrees `/var/tmp/apex-work/wt-p2-b7`
 (apex-os) and `/var/tmp/apex-work/wt-p2-b7-sh` (apex-shell), scratch
@@ -92,20 +92,22 @@ built into the image for the first time. Worktrees `/var/tmp/apex-work/wt-p2-b7`
 
 Next action for whoever picks this up, in order:
 
-1. **Compile the catalogue.** This is the ONE piece between the shipped
-   mechanism and a user seeing German, and it is fully costed already (FOUND
-   37): `lrelease` is not in the image, `qt6-linguist` is 1 MiB download / 4 MiB
-   installed / 3 packages, and it must come from a **discarded builder stage** —
-   a `dnf` in the final base stage costs **113 MB per machine per update**,
-   measured. The awkward part is not the cost, it is that the `.ts` lives in
-   apex-shell and the clone happens in the final stage, so a builder stage needs
-   either its own shallow clone with a SHA cross-check or a restructure of the
-   vendoring stanza. Neither is written. **Until it lands, nothing is
-   translated** — the plugin loads, finds no `.qm` and says so through `qInfo()`,
-   which on Fedora means `journalctl --user -b | grep APEXI18N`.
-2. **Write the German** — still a translator's job, still 5 of 186.
-3. **Queue items 1 and 2 still need HARDWARE** (Orca at the login screen,
-   greeter audio). They are the oldest open things on this card.
+1. **Write the German.** The catalogue SHIPS as of `d7c5ea2e` and it covers
+   **5 of the 186** marked strings; the other 181 extract, compile and load and
+   come back in English because nobody has written them. That is a translator's
+   job, not an agent's, and the suite reports the gap rather than hiding it.
+   Adding a language is now one file: drop `translations/apex-shell_<lang>.ts`
+   into apex-shell and the image compiles, installs and load-proves it without
+   another line of apex-os.
+2. **Queue items 1 and 2 still need HARDWARE** (Orca at the login screen,
+   greeter audio). They are the oldest open things on this card and the only
+   P2-003 work left that is not upstream's.
+3. **Optional tidy-up nobody has needed yet**: the catalogue stage clones
+   apex-shell a SECOND time, and the alternative is moving the vendoring stanza
+   into its own stage so one clone serves both. That was rejected this round on
+   blast radius — the vendoring stanza is the most load-bearing thing in
+   `Containerfile.base` and the two clones are proved to agree by a sha256
+   cross-check. If anybody restructures it, delete the cross-check with it.
 
 **Verify in the first image build that carries this**, because no full base
 build has run yet: the stanza was proved as a real podman build against the
@@ -349,14 +351,46 @@ printed "Failed to load configuration" and left the machine with no desktop,
 which is what the five negative builds above were also protecting against from
 the image side.
 
-**WHAT THIS DOES NOT CLAIM, and it is the sentence that matters: no user sees a
-translated string yet.** The image ships no compiled `.qm` for any language, so
-`QTranslator::load()` finds nothing and every one of the 186 marked strings
-comes back English. The plugin reports that by name, through `qInfo()`, which on
-Fedora goes to the journal. What changed is that the route from a `.qm` to a
-rendered string now exists end to end and is asserted at three places — the
-image build, the suite, and the shell's own startup — where before it existed
-only in a test.
+**apex-os `d7c5ea2e` — the catalogue, and the first time a string in this
+product has reached a user's language through the IMAGE rather than a test.**
+A new `apex-i18n-catalogue` stage, DISCARDED, installs `qt6-linguist`, clones
+apex-shell and compiles every `translations/*.ts` into a `.qm`; the final stage
+copies only the `.qm` out. **The 113 MB number is why it is shaped that way**
+(FOUND 37): a `dnf` in the final base stage costs that per machine per update,
+net of zero shipped files, to run one command once at build time. The other
+route — `qt6-linguist` in `Containerfile.core`, 4 MiB, which would also give a
+booted machine `lupdate`/`lrelease` — is written into the stanza's comment and
+deliberately NOT taken, because touching core triggers a multi-gigabyte update
+for every machine and that is a person's trade to make, not a build stage's.
+
+* **The second clone is PROVED to agree with the vendored one**, not assumed to:
+  each `.ts`'s sha256 is carried out of the catalogue stage and compared against
+  the tree that ships. A ref that moves between the two clones fails the build,
+  naming both hashes.
+* **The catalogue is proved to LOAD, per language, in a real QML engine** — and
+  the instrument was shown to discriminate: truncate the shipped `.qm` and the
+  same probe reports `no catalogue for de_DE`, so the assertion goes red. A
+  `.qm` that `lrelease` wrote and QTranslator declines is otherwise
+  indistinguishable from no `.qm` at all.
+* Three more real builds: as written (**"compiled 1 catalogue(s)"**,
+  **"apex-shell_de.qm loads under LANG=de"**); the vendored `.ts` differing from
+  the one compiled (rc 1, FATAL naming both hashes); a ref carrying no
+  `translations/*.ts` (rc 0, "no catalogue to ship", build continues).
+* **Read out of the built image, which is the point of all of it:**
+
+  | LANG | `AgentHelpContent.entryLabel` | `cardRead` |
+  |---|---|---|
+  | `de` | **Wie Agenten und Arbeitsbereiche funktionieren** | **Anleitung lesen** |
+  | `en_US` (control, same image) | How Agents & Workspaces work | Read the guide |
+
+  with the plugin reporting `installed …/apex-shell_de.qm` on the first and
+  `no catalogue for en_US` on the second.
+
+**WHAT THIS STILL DOES NOT CLAIM: the shell is not translated, it is
+translatABLE and 5 strings deep.** The catalogue covers 5 of the 186 marked
+strings; the other 181 extract, compile and load and come back in English
+because nobody has written them. Adding a language is now one file in
+apex-shell and no apex-os change at all.
 
 **FROM THE GITHUB ARCH RUNNER, not this laptop: CI run 35437235207 on the tip
 `2bc9799`, and ALL THREE JOBS ARE SUCCESS with ZERO red steps.** The third

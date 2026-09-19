@@ -11,24 +11,37 @@ scratch: `/var/tmp/apex-work/scratch-katana-image-qual/`
 
 ## NEXT
 
-**18:18 — TAG IS LIVE**, `sha256:be3bdd0c63848811fbbd3a76f17a50f40e90b1eeb8614b93993ec69419f3aafb`,
-created 2026-09-19T10:09:10Z. Rebase running via
-`sudo /var/tmp/apex-work/scratch-katana-image-qual/rebase.sh` (bootc switch +
-clean `systemctl reboot`). After the reboot, in order:
+**18:43 — REBASE AND pkg-share ARE DONE AND PUSHED. Now on §6.**
+Katana is booted on `apex-7f647470…`, digest
+`sha256:be3bdd0c63848811fbbd3a76f17a50f40e90b1eeb8614b93993ec69419f3aafb`,
+version `apex (2026-09-19T10:09:10Z)`; rollback is the old `apex-266dcc57`.
 
-1. `bootc status --json` — record the landed digest into evidence §1.
-2. `journalctl -u apex-sysext-rebuild -b` **before touching anything** (the
-   real-world no-op for §0.2).
-3. `sudo apex install steam` while still merged → expect "already up to date".
-   Then `sudo systemd-sysext unmerge` and repeat, capturing to
-   `.../apex-install-steam.log`. **Check `grep 'multilib: carrying'` first.**
-4. `sudo /var/tmp/apex-work/scratch-katana-image-qual/measure-pkgshare.sh post`.
-5. §6 via `greetd-set.sh`, starting with `apex gaming --gamescope-device-args`
-   over ssh — expected value is already stated in evidence §0.10:
-   `--prefer-vk-device 10de:249d --prefer-output HDMI-A-1`, rc 0.
+Next action: **arm Gaming Mode through greetd and read its log.**
 
-**If greetd is left armed, undo with
-`sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-restore.sh`.**
+```
+ssh katana
+sudo systemd-run --on-calendar='2026-09-19 20:45:00' --unit=qual-greetd-restore \
+    /usr/bin/bash -c 'cp /etc/greetd/config.toml.orig-qual2 /etc/greetd/config.toml && systemctl restart greetd'
+sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-set.sh apex-gaming "" qual-gaming-new
+sudo systemctl restart greetd     # greetd-set.sh already cleared /run/greetd.run
+# then, from ssh:
+sudo journalctl -b -t qual-gaming-new -o cat
+/var/tmp/apex-work/scratch-katana-image-qual/measure-session.sh gaming
+```
+
+Expected, stated before the run: `GPU/output: --prefer-vk-device 10de:249d
+--prefer-output HDMI-A-1`; gamescope selecting `NVIDIA GeForce RTX 3070 Laptop
+GPU`, `/dev/dri/card2`, `HDMI-A-1`, `1920x1080@240Hz`; a
+`capabilities: CapEff=0 CapPrm=0 CapAmb=0` line; `CAP_SYS_NICE: absent` and no
+`--rt` in the `starting: gamescope …` line.
+
+Then 6.3 (Steam inside gamescope — the ICDs are there now), 6.6 (cleanup),
+6.4 (safe graphics, forced device via the same mechanism), 6.5 (niri).
+
+**ALWAYS FINISH WITH
+`sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-restore.sh`** — it
+restores `/etc/greetd/config.toml.orig-qual2`, `cmp`s it, stops the dead-man's
+timer and restarts greetd.
 
 ## The plan, written 2026-09-19 17:15 AWST while waiting for the tag
 
@@ -170,6 +183,28 @@ Blocks, in order, all from §6:
 - 17:12 — pre-rebase baseline captured (see plan step P).
 - 17:15 — read §6 of `docs/gaming-and-sessions.md` end to end and §§3, 4, 6 of
   the round-31 evidence; plan above written.
+- **18:42 — pkg-share PASSES ON HARDWARE.** `multilib: carrying 2079 of 4382
+  file(s) from the 32-bit set (2151 already owned by the image, 152 already
+  placed by this set's native packages)` — the discriminator line is present,
+  so the new engine built it, and the image-owned count dominates 14:1.
+  **Shadow count 177 → 0** (the `comm -12` set is empty, not merely smaller),
+  **32-bit ELF shadows 14 → 0**, **i686 ICDs 0 → 13 of 26** (including
+  `nvidia_icd.i686.json`, the file the Sep-17 recovery hand-wrote), **GStreamer
+  2 features → 1344** with the image's own 64-bit `gst-plugin-scanner`, fc-list
+  still 538. Evidence §2, commit `1375efa8`, pushed.
+  Caveat recorded rather than buried: it rebuilt because Fedora's repos had
+  drifted since 01:43, not because the update path asked — on a machine with
+  static repos it would have said `already up to date`. §0.2 stands.
+- **18:32 — REBASED.** `bootc switch` pulled 6.2 GB, deployed in 11 s, clean
+  `systemctl reboot`, up at 18:29:42. Booted digest
+  `sha256:be3bdd0c63848811fbbd3a76f17a50f40e90b1eeb8614b93993ec69419f3aafb`.
+  `bootc switch` did NOT refuse despite the `Unlocked: hotfix` rollback.
+  **§0.2 confirmed on the machine**: `apex-sysext-rebuild.service` started and
+  finished in the same second, `Result=success`, and the extension was still
+  byte-identical (`sha256:99749240…`) with **0 i686 ICDs** — the update
+  delivered the fix to nobody. Evidence §1, commit `86e68aab`.
+  All five controls flipped as predicted, and `apex gaming`'s screen block on
+  the real machine is byte-identical to §0.10's prediction.
 - 18:02 — **the landed selector, run on katana's REAL sysfs, answers exactly
   `--prefer-vk-device 10de:249d --prefer-output HDMI-A-1`, rc 0**, with
   `output: HDMI-A-1 on card2 (NVIDIA)` and

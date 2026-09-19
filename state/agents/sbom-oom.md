@@ -62,29 +62,17 @@ rather than making the numbers fit.
 
 ## NEXT
 
-1. **Confirm the cause on the runner, in one cheap run**, before changing the
-   fix: sample `free -m` beside syft and dump `sudo dmesg | tail` in the failure
-   arm. A step that dies saying *which* resource ran out is worth more than one
-   that is merely fixed.
-2. **Then fix it.** Candidate directions, in the order they look right — argue
-   your choice on this card rather than taking the first:
-   - `SYFT_PARALLELISM=2` or back to `1`, keeping the 45-minute timeout that was
-     already sized for the slow path.
-   - **Give syft a disk-backed source instead of `registry:`.** The runner has
-     ~86 GB free after the prune and ~15 GB of memory: `skopeo copy` to a local
-     OCI layout and catalogue that, so the layers live on disk rather than in
-     syft's cache. This is the direction that actually matches the constraint.
-   - Do **NOT** restrict the cataloguers. The step's comment already argues this
-     and it is right: the two Electron trees are precisely where a CVE question
-     lands, and an RPM-only SBOM would answer with silence while looking
-     authoritative.
-3. **Fix the error text while you are there.** `build-image.yml:1436` prints
-   `(143 = killed)` and the code actually observed is **137**. 143 is SIGTERM,
-   137 is SIGKILL — "asked to stop" versus "the kernel killed it", which is the
-   whole diagnosis. Print the signal name.
-4. **Verify with one dispatched build**, `gh workflow run build-image.yml --ref
-   roadmap/v2.2`. It is ~1 hour and a non-main dispatch moves no tag anything
-   tracks (`PUBLISH` guard at `build-image.yml:170`). Watch it to completion.
+**Read the probe run's `repro` arm** (`.github/workflows/sbom-probe.yml`, pushed
+on `task/sbom-oom`, triggers on push to that path): if `sudo dmesg` prints
+`Out of memory: Killed process N (syft)` and `/proc/vmstat oom_kill` moved, the
+cause is confirmed as the kernel OOM killer; then take the `ocidir` arm's result
+(skopeo copy to an OCI layout on disk + `syft oci-dir:`), fold it into
+`build-image.yml`'s SBOM step, commit, and dispatch
+`gh workflow run build-image.yml --ref task/sbom-oom` (NOT roadmap/v2.2 — that
+ref has no fix; workflow_dispatch takes the workflow file from the dispatched ref
+and `PUBLISH` is false off main). If dmesg is SILENT and oom_kill did not move,
+**the OOM reading is refuted** — say so, do not ship oci-dir as a fix for a
+refuted cause, and look at the runner agent killing the step's process group.
 
 ## The deadline, and what to do about it
 
@@ -116,11 +104,34 @@ with an unverified fix is a good outcome; an unrecorded one is not.**
 
 ## DONE
 
-- nothing yet.
+- Worktree `/var/tmp/apex-work/wt-sbom-oom` on `task/sbom-oom` off `2e04fbcb`.
+- Read the failing log of 35433705393 directly. Measured, not inferred:
+  after the prune the runner had **86 GB disk free** and **14915 MB memory
+  available** (16 GB total, 3 GB swap, all free); syft 1.52.0 was **Killed**
+  209 s in; `##[error]syft exited 137`. Disk cannot be it — 86 GB consumed in
+  209 s is 411 MB/s sustained, and the image is only 7.3 GB on the wire.
+- Measured the image itself: **113 layers, 7.26 GB compressed**, largest layer
+  832 MB, and **every layer is `application/vnd.oci.image.layer.v1.tar+zstd`**
+  (zstd:chunked, from the push step). That matters: if a disk-backed OCI layout
+  ALSO dies, compression handling, not source location, becomes the suspect —
+  so the probe carries a `--dest-decompress` arm too.
+- Checked the other workflows' triggers: nothing in this repo fires on a push to
+  `task/*` (build-image is `branches: [main]`, pr-validation is
+  `[roadmap/v2.2]`), so a probe workflow with `on: push` scoped to its own path
+  on this branch is the cheap experiment — same `ubuntu-24.04` runner class,
+  same 16 GB, against the image digest that already exists in GHCR.
 
 ## IN PROGRESS
 
-- nothing yet.
+- Probe workflow `.github/workflows/sbom-probe.yml` on `task/sbom-oom` against
+  `sha256:be3bdd0c6384…`, four arms in parallel, syft pinned to the same 1.52.0:
+  `repro` (registry:, SYFT_PARALLELISM=4 — the exact failing command),
+  `ocidir` (skopeo copy → OCI layout on disk → `syft oci-dir:`),
+  `ocidir-decompressed` (same but `--dest-decompress`, the zstd hedge),
+  `registry-par1` (the "was the 15-minute timeout also memory" answer).
+  Every arm samples `free -m` + `df` every 5 s, reads `/proc/vmstat oom_kill`
+  before and after, runs syft under `/usr/bin/time -v` for peak RSS, and dumps
+  `sudo dmesg` unconditionally.
 
 ## FOUND
 
