@@ -116,13 +116,116 @@ CORE_IMG=localhost/apex-os-core:latest
 #
 # A failure to reach the remote is fatal rather than a fallback to `main`: a
 # build that quietly vendors a stale shell is the thing this exists to prevent.
-SHELL_REF="${APEX_SHELL_REF:-}"
-if [ -z "$SHELL_REF" ]; then
-    SHELL_REF="$(git ls-remote https://github.com/AndreNijman/apex-shell refs/heads/main 2>/dev/null | awk '{print $1}')"
-    [ -n "$SHELL_REF" ] || {
-        echo "FATAL: cannot resolve apex-shell main. Set APEX_SHELL_REF=<sha> to build offline." >&2
+#
+# ── and it resolves the MATCHING branch, not `main` ──────────────────────────
+#
+# This asked for `refs/heads/main` unconditionally, and that is the THIRD
+# appearance of one defect; the other two callers had already fixed it and left
+# their reasoning in place:
+#
+#   * build-image.yml `Pin apex-shell` — pinning main "vendored an apex-shell
+#     months behind the apex-os being built", and `base` then died in
+#     check-labwc-keybinds on W-A-s (screen reader) and W-A-v (voice), two
+#     keybinds roadmap/v2.2's rc.xml has and old apex-shell defaults do not
+#     generate.
+#   * pr-validation.yml — its input-parity check compared apex-os roadmap/v2.2
+#     against apex-shell main and reported drift while the two INTEGRATION
+#     branches agreed perfectly.
+#
+# Measured here, 2026-09-19, four ways: apex-os roadmap/v2.2 + apex-shell
+# roadmap/v2.2 passes check-labwc-keybinds (70 defaults, 4 skipped); apex-os
+# roadmap/v2.2 + apex-shell main fails on exactly those two keybinds. So a local
+# build of roadmap/v2.2 could never pass, and the answer is NOT to regenerate
+# rc.xml against the older shell — that reverts the accessibility work.
+#
+# THE MIDDLE RUNG. The chain is want -> roadmap/v2.2 -> main, which is
+# pr-validation.yml's three-rung chain rather than build-image.yml's two. That
+# is deliberate and the difference matters HERE more than in either workflow:
+# build-image.yml only ever runs on a branch that apex-shell also has, while
+# this script is run by a human from whatever worktree they are standing in,
+# and every `task/*` worktree in this program has no apex-shell twin. A
+# two-rung chain would send all of them to `main` and reproduce the exact
+# failure above. pr-validation.yml's comment records the same finding.
+#
+# The `roadmap/v2.2` rung is a PROGRAM-LIFETIME rung, not a permanent one. Once
+# v2.2 lands in main and apex-shell deletes the branch, this degrades cleanly to
+# want -> main. If apex-shell keeps the branch after the program ends, a feature
+# branch cut from a post-program `main` would vendor a stale shell from it —
+# delete the rung then. pr-validation.yml carries the identical hazard; this is
+# not a new one.
+#
+# UNREACHABLE IS FATAL, AND IT NOW SAYS SO. The old code could not reach its own
+# FATAL. `SHELL_REF="$(git ls-remote … 2>/dev/null | awk …)"` under `set -euo
+# pipefail` gives the assignment ls-remote's status (128 for an unreachable
+# remote) through pipefail, and errexit kills the script at the assignment —
+# before the `[ -n … ] ||` line that carries the message, with git's own error
+# thrown away by `2>/dev/null`. Measured: exit 128, not one word printed. So the
+# stated property held only by accident of `main` always existing. It is now a
+# RETURN CODE decision — 0 found, 2 the remote answered and has no such branch,
+# anything else unreachable — and git's stderr is left alone so the user can
+# read it.
+#
+# APEX_SHELL_REMOTE exists so tests/test-build-local-shell-ref.sh can point this
+# at local fixture repositories and drive every rung offline. Nothing else
+# should set it.
+SHELL_REMOTE="${APEX_SHELL_REMOTE:-https://github.com/AndreNijman/apex-shell}"
+
+# Resolve ONE branch on the apex-shell remote.
+#   0 -> found; the sha is in SHELL_REF_OUT
+#   2 -> the remote answered and has no such branch (try the next rung)
+#   unreachable -> FATAL, here, rather than a silent fallback
+SHELL_REF_OUT=""
+resolve_shell_branch() {  # $1 = branch name
+    local out rc=0 sha
+    SHELL_REF_OUT=""
+    out="$(git ls-remote --exit-code "$SHELL_REMOTE" "refs/heads/$1")" || rc=$?
+    case "$rc" in
+        0) ;;
+        2) return 2 ;;
+        *) echo "FATAL: cannot reach apex-shell at $SHELL_REMOTE — git ls-remote exited $rc." >&2
+           echo "       Its error is above. A build that quietly vendors a stale shell is" >&2
+           echo "       what this refuses to do. Set APEX_SHELL_REF=<sha> to build offline." >&2
+           exit 1 ;;
+    esac
+    out="${out%%$'\n'*}"   # first line
+    sha="${out%%$'\t'*}"   # first field
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || {
+        echo "FATAL: apex-shell '$1' resolved to '$sha', which is not a 40-hex sha" >&2
         exit 1
     }
+    SHELL_REF_OUT="$sha"
+}
+
+SHELL_REF="${APEX_SHELL_REF:-}"
+if [ -n "$SHELL_REF" ]; then
+    echo "== shell == pinned by APEX_SHELL_REF; the remote was not consulted"
+else
+    # A detached HEAD prints the literal string `HEAD`, which is not a branch
+    # name and must not be asked for as one.
+    want="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')"
+    [ "$want" = HEAD ] && want=""
+
+    used=""
+    tried=()
+    for cand in "$want" roadmap/v2.2 main; do
+        [ -n "$cand" ] || continue
+        case " ${tried[*]-} " in *" $cand "*) continue ;; esac
+        tried+=("$cand")
+        if resolve_shell_branch "$cand"; then
+            used="$cand"; SHELL_REF="$SHELL_REF_OUT"; break
+        fi
+    done
+
+    [ -n "$used" ] || {
+        echo "FATAL: apex-shell has none of the branches ${tried[*]-} — not even main." >&2
+        echo "       Set APEX_SHELL_REF=<sha> to build offline." >&2
+        exit 1
+    }
+    if [ "$used" = "$want" ]; then
+        echo "== shell == pinned apex-shell branch '$used', which matches this apex-os branch"
+    else
+        echo "== shell == pinned apex-shell branch '$used' — apex-shell has no branch named '${want:-<detached HEAD>}'"
+    fi
 fi
 echo "== shell == vendoring apex-shell $SHELL_REF"
 
