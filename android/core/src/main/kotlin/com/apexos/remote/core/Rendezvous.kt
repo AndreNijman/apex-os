@@ -28,6 +28,44 @@ object Rendezvous {
         return Base64Url.encode(Crypto.sha256(DOMAIN, desktopPublic).copyOf(16))
     }
 
+    /**
+     * Which way a connection reached the machine, and what to tell the person
+     * holding the phone about it.
+     *
+     * Ported from `Path` in `apexd/apex-remote-core/src/rendezvous.rs`, and the
+     * disclosure strings are **verbatim** from `Path::disclosure` there. That
+     * function's own doc says why: it is written once "so the CLI and the shell
+     * page and the Android app cannot each invent their own reassuring version
+     * of it", and an app that paraphrased would be the thing it warns about.
+     * `RendezvousTest` reads the Rust source and compares.
+     */
+    enum class Path(val text: String) {
+        /** A direct TCP connection on the local network. */
+        LAN("lan"),
+
+        /** Through a relay. Slower, and observable by its operator. */
+        RELAY("relay"),
+        ;
+
+        /** What the user is told about privacy on this path. */
+        fun disclosure(): String = when (this) {
+            LAN -> "direct on this network; nothing leaves it and no third party is involved"
+            RELAY -> "through a relay, which carries encrypted bytes it cannot read but does " +
+                "see both addresses, when you connect and how much data moves"
+        }
+    }
+
+    /**
+     * The order a client tries paths in.
+     *
+     * LAN first, always. It is faster, it involves nobody else, and when it
+     * works the relay never learns the session happened at all. A client that
+     * raced both and took whichever answered first would leak a rendezvous
+     * connection every time, including on the network where it was
+     * unnecessary.
+     */
+    val PREFERENCE = listOf(Path.LAN, Path.RELAY)
+
     /** Which end of a rendezvous a connection is. A device is always the guest. */
     enum class Role(val text: String) {
         HOST("host"),
