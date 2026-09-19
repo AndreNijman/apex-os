@@ -3940,44 +3940,44 @@ tasks:
     arrive only while that poll is alive; and P1-059's criterion 3 needs a verb that reads the machine's
     clipboard. Counts on the tip: 447 :core tests, 38 :app, assembleDebug green; cargo test --workspace green;
     clippy clean at the workspace MSRV; check-agent-state.sh, no-second-write-path.sh and check-help-prose.sh all
-    pass. ROUND 2026-09-19, ON A REAL DEVICE FOR THE FIRST TIME (task/p1-053d-device, six commits off roadmap/v2.2
-    @ bb229745). A Pixel 7a 'lynx' running GrapheneOS, Android 17 (SDK 37, build CP2A.260705.006), over wireless
-    debugging on the same Wi-Fi as the L16. EVERY COMPOSE PATH AND EVERY :core CLASS IN THIS MODULE HAD BEEN
-    COMPILED BY assembleDebug AND NEVER EXECUTED ANYWHERE; 24 instrumented assertions now run on the phone, driven
-    by android/tools/run-device-suite.sh, and they found FOUR shipped defects on their first runs. C1 IS NOW
-    LARGELY MET AND HONESTLY SHORT OF COMPLETE: pairing (against a real apex-remoted's real minted offer, with the
-    desktop's device store asserted afterwards), a spent token refusing a second phone, LAN, session open, agent
-    lifecycle (run/list/info/input/stop through a real PTY running /bin/cat), reconnect after the desktop's
-    service restarts, and device revocation with the refusal asserted NOT to distinguish revoked from
-    never-paired. WHAT C1 STILL LACKS, SAID RATHER THAN GLOSSED: no relay leg (no rendezvous is configured on this
-    machine, so the relay path is still only covered by apex-remoted's Rust suite), no PTY output read back over
-    an attach from the device, and no approve/deny round trip - what IS asserted is P1-057 C3 from the inside,
-    that a phone's request is recorded request_origin=claude-remote-control and actor=<this device id>. C2 IS MET
-    EXCEPT FOR HARDWARE THAT DOES NOT EXIST HERE: the Accessibility Test Framework runs against the real semantics
-    tree on all six composable screens; a semantics sweep asserts every node carrying OnClick has words somewhere
-    below it; every screen lays out at font scale 2.0 and in landscape with no text measured to zero width or
-    height; AOSP TalkBack (com.android.talkback - GrapheneOS ships it) is enabled and BOUND while all of it runs,
-    and the runner refuses to continue if it never binds. THERE IS NO TABLET AND NO FOLDABLE, so those two words
-    in the criterion are untested and this item stays partial for that reason alone. THE FIRST VERSION OF THE
-    ACCESSIBILITY SUITE WAS A FALSE GREEN AND THE FIX IS THE INTERESTING PART: every Compose test failed with 'No
-    compose hierarchies found in the app' while the accessibility test PASSED, because
-    tryPerformAccessibilityChecks() on an empty node collection is a no-op - 'no composition at all' and 'every
-    screen is fine' were the same result. Logcat named the cause: isSleeping=true isVisible=false, the host
-    activity launching and being DESTROYED a frame later behind a secure keyguard that wm dismiss-keyguard cannot
-    clear and no adb verb can unlock. ComposeHostActivity in src/debug declares showWhenLocked and turnScreenOn
-    and carries MainActivity's exact configChanges; ComposeHostTest is the floor under everything else and every
-    walk asserts the tree is non-empty BEFORE checking anything about it. DEFECTS FOUND BY THE DEVICE: (1) every
-    pairing code this project has ever minted advertised an IPv6 address no phone could dial -
-    format!("{ip}:{port}") on a V6 gives nine colon groups and no brackets, and even bracketed, main.rs binds
-    0.0.0.0 so nothing was listening; invisible on dual-stack because the V4 address is tried first. Fixed in
-    state.rs (advertise + reachable_on + State::bound). (2) The phone could not start the generic adapter at all:
-    the picker is Hello.agents, which lists it, and the wire builder had no args, which is where its program goes.
-    (3) The Checkpoint switch had no accessible name - its words are in the sibling Column, so TalkBack announced
-    'off, switch'; ATF passes that screen because an unnamed switch is not one of its rules. (4) 'Guide' was
-    invisible at font scale 2.0: four TextButtons do not fit across a Pixel 7a and a Row resolves that by
-    measuring the last child at width ZERO - on the screen, occupying nothing, unreachable. FlowRow wraps instead.
-    ALSO: Espresso is now pinned to 3.7.0. Compose's test artifacts resolve it transitively at 3.5.0, every
-    waitForIdle goes through Espresso.onIdle, and on Android 14 and later that throws NoSuchMethodException
+    pass. ROUND 2026-09-19, ON A REAL DEVICE FOR THE FIRST TIME (task/p1-053d-device, eight commits off
+    roadmap/v2.2 @ bb229745, tip fd316f60). A Pixel 7a 'lynx' running GrapheneOS, Android 17 (SDK 37, build
+    CP2A.260705.006), over wireless debugging on the same Wi-Fi as the L16. EVERY COMPOSE PATH AND EVERY :core
+    CLASS IN THIS MODULE HAD BEEN COMPILED BY assembleDebug AND NEVER EXECUTED ANYWHERE; 24 instrumented
+    assertions now run on the phone, driven by android/tools/run-device-suite.sh, and they found FOUR shipped
+    defects on their first runs. C1 IS NOW LARGELY MET AND HONESTLY SHORT OF COMPLETE: pairing (against a real
+    apex-remoted's real minted offer, with the desktop's device store asserted afterwards), a spent token refusing
+    a second phone, LAN, session open, agent lifecycle (run/list/info/input/stop through a real PTY running
+    /bin/cat), reconnect after the desktop's service restarts, and device revocation with the refusal asserted NOT
+    to distinguish revoked from never-paired. WHAT C1 STILL LACKS, SAID RATHER THAN GLOSSED: no relay leg (no
+    rendezvous is configured on this machine, so the relay path is still only covered by apex-remoted's Rust
+    suite), no PTY output read back over an attach from the device, and no approve/deny round trip - what IS
+    asserted is P1-057 C3 from the inside, that a phone's request is recorded request_origin=claude-remote-control
+    and actor=<this device id>. C2 IS MET EXCEPT FOR HARDWARE THAT DOES NOT EXIST HERE: the Accessibility Test
+    Framework runs against the real semantics tree on all six composable screens; a semantics sweep asserts every
+    node carrying OnClick has words somewhere below it; every screen lays out at font scale 2.0 and in landscape
+    with no text measured to zero width or height; AOSP TalkBack (com.android.talkback - GrapheneOS ships it) is
+    enabled and BOUND while all of it runs, and the runner refuses to continue if it never binds. THERE IS NO
+    TABLET AND NO FOLDABLE, so those two words in the criterion are untested and this item stays partial for that
+    reason alone. THE FIRST VERSION OF THE ACCESSIBILITY SUITE WAS A FALSE GREEN AND THE FIX IS THE INTERESTING
+    PART: every Compose test failed with 'No compose hierarchies found in the app' while the accessibility test
+    PASSED, because tryPerformAccessibilityChecks() on an empty node collection is a no-op - 'no composition at
+    all' and 'every screen is fine' were the same result. Logcat named the cause: isSleeping=true isVisible=false,
+    the host activity launching and being DESTROYED a frame later behind a secure keyguard that wm
+    dismiss-keyguard cannot clear and no adb verb can unlock. ComposeHostActivity in src/debug declares
+    showWhenLocked and turnScreenOn and carries MainActivity's exact configChanges; ComposeHostTest is the floor
+    under everything else and every walk asserts the tree is non-empty BEFORE checking anything about it. DEFECTS
+    FOUND BY THE DEVICE: (1) every pairing code this project has ever minted advertised an IPv6 address no phone
+    could dial - format!("{ip}:{port}") on a V6 gives nine colon groups and no brackets, and even bracketed,
+    main.rs binds 0.0.0.0 so nothing was listening; invisible on dual-stack because the V4 address is tried first.
+    Fixed in state.rs (advertise + reachable_on + State::bound). (2) The phone could not start the generic adapter
+    at all: the picker is Hello.agents, which lists it, and the wire builder had no args, which is where its
+    program goes. (3) The Checkpoint switch had no accessible name - its words are in the sibling Column, so
+    TalkBack announced 'off, switch'; ATF passes that screen because an unnamed switch is not one of its rules.
+    (4) 'Guide' was invisible at font scale 2.0: four TextButtons do not fit across a Pixel 7a and a Row resolves
+    that by measuring the last child at width ZERO - on the screen, occupying nothing, unreachable. FlowRow wraps
+    instead. ALSO: Espresso is now pinned to 3.7.0. Compose's test artifacts resolve it transitively at 3.5.0,
+    every waitForIdle goes through Espresso.onIdle, and on Android 14 and later that throws NoSuchMethodException
     android.hardware.input.InputManager.getInstance - measured on SDK 37, every Compose test died before its first
     assertion. C3 UNCHANGED AND STILL MET. C4 VERIFIED, NOT REBUILT: dexdump over the built APK finds no
     crash-reporting SDK (a first grep said 15 hits and every one was 'containsEntry' matching 'sentry'
@@ -3985,16 +3985,17 @@ tasks:
     Firebase or messaging component. C5 VERIFIED AND FOUND RED: check-help-prose.sh, which is this item's
     stop_slop gate and whose evidence above claims 'TOTAL 0, NO allowlist', had been failing on one passive
     sentence since the clipboard section landed. Rewritten in active voice; 1705 words, TOTAL 0, still no
-    allowlist. GATES ON THE TIP: run-device-suite.sh OK (24 tests); :core:test 459/0; :app:testDebugUnitTest 44/0;
-    cargo test --locked --workspace 3340 passed / 0 failed / 2 ignored; cargo clippy --workspace --all-targets
-    --locked -D warnings exit 0 zero warnings; containerfile assertions 194 checked 0 failed 0 inert; shellcheck
-    coverage 166 discovered 0 known-failing 0 newly failing; suites-in-CI 75 suites 71 run 4 exempt 0
-    unrun-and-undeclared; no-conflict-markers PASS; doc-verbs 0 undocumented-and-undeclared. run-device-suite.sh
-    is deliberately NOT in CI and is not claimed to be: it needs a phone, and the suites gate discovers
-    tests/test-*.sh, so no hole was opened. Every UI fix was mutation-tested alone (FlowRow->Row, the switch's
-    contentDescription removed, notify(content.id)->notify(0), advertise->format!) and every source restored
-    byte-identical with cp. THE DEVICE BASELINE AT /var/tmp/apex-work/android-baseline-pixel7a.txt WAS RESTORED
-    AND EVERY VALUE READ BACK; both APKs uninstalled.
+    allowlist. GATES ON THE TIP (fd316f60, and the device suite was RE-RUN on that commit rather than quoted from
+    an earlier one): run-device-suite.sh OK (24 tests); :core:test 459/0; :app:testDebugUnitTest 44/0; cargo test
+    --locked --workspace 3340 passed / 0 failed / 2 ignored; cargo clippy --workspace --all-targets --locked -D
+    warnings exit 0 zero warnings; containerfile assertions 194 checked 0 failed 0 inert; shellcheck coverage 166
+    discovered 0 known-failing 0 newly failing; suites-in-CI 75 suites 71 run 4 exempt 0 unrun-and-undeclared;
+    no-conflict-markers PASS; doc-verbs 0 undocumented-and-undeclared. run-device-suite.sh is deliberately NOT in
+    CI and is not claimed to be: it needs a phone, and the suites gate discovers tests/test-*.sh, so no hole was
+    opened. Every UI fix was mutation-tested alone (FlowRow->Row, the switch's contentDescription removed,
+    notify(content.id)->notify(0), advertise->format!) and every source restored byte-identical with cp. THE
+    DEVICE BASELINE AT /var/tmp/apex-work/android-baseline-pixel7a.txt WAS RESTORED AND EVERY VALUE READ BACK;
+    both APKs uninstalled.
 - id: P1-061
   title: Extend APEX capabilities to normal application permissions
   priority: P1

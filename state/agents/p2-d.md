@@ -32,14 +32,28 @@ things that remain are named under BLOCKED ON and none is a test:
 - Route C (a form login, an OAuth redirect chain) needs `geckodriver` in the
   image, which is a product decision about what APEX carries, not a round.
 
-The one small piece of engineering still named anywhere is `SessionInfo`
-carrying neither `trust_ca` nor `present`, so `apex agent status` cannot show
-that a capsule trusts an extra root or that one of its destinations is
-authenticated. Additive optional fields on a stability surface; too small to be
-a unit, and it folds into whichever round next touches `SessionInfo`.
+Two small pieces of engineering are still named anywhere, and both are too
+small to be a unit:
 
-**If this unit is dispatched again, it should be to fold that in and for
-nothing else** — or not dispatched at all.
+- **`SessionInfo` carries neither `trust_ca` nor `present`**, so `apex agent
+  status` cannot show that a capsule trusts an extra root or that one of its
+  destinations is authenticated. Additive optional fields on a stability
+  surface; it folds into whichever round next touches `SessionInfo`.
+- **`present_pin`'s secret-service half is code-reviewed, not tested.**
+  `present_allowlist_is_only` was split out of it precisely so it could be
+  exercised without a secret service, and it is; the half that remains — the
+  `List` call, `find(|s| s.service == service)`, the port defaulted from the
+  scheme — is reached by no test in the tree, because nothing starts the daemon
+  against a private `apex-secretd` and then asks it to `Run` with `present`.
+  The mutation that proves the gap is `.find(|s| s.service == service)` →
+  `.next()`: it would pin a capsule to the FIRST stored credential's host
+  whatever was named, and every suite in the repo stays green. The fix is a
+  `browser_ca_bind.rs`-shaped integration test (agentd + private secretd +
+  `Run { present }`), which is the same fixture the `SessionInfo` item above
+  wants in order to assert the new field end to end.
+
+**If this unit is dispatched again, it should be to fold those two in together
+and for nothing else** — or not dispatched at all.
 
 ## DONE (round 31, branch task/p2-d-7) — six commits and a merge, all pushed
 
