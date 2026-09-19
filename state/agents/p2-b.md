@@ -68,29 +68,36 @@ installs a QTranslator into the real quickshell process, and the SHIPPED
 `AgentHelpContent` singleton reads back **German inside quickshell itself**,
 offscreen, with no compositor. Scratch: `scratch-p2-b/round33/spike/`.
 
-**Round 33, two commits landed on the branch and pushed** (apex-shell
-`task/p2-b-round33`, on `roadmap/v2.2`'s `9df72cf`):
+**ROUND 33 IS COMPLETE AND PUSHED.** apex-shell `task/p2-b-round33` tip
+**`df17c34`**, three commits on `roadmap/v2.2`'s `9df72cf`. apex-os
+`task/p2-b-round33` cut from `7f647470` and pushed with **no commits** — see
+"no apex-os change" below, it is a decision and not an omission. CI run
+**35435459325** dispatched on the tip; its result is at the end of the DONE
+section.
 
-* `b850df2` — the route. `tests/apex-i18n-plugin.cpp`,
-  `tests/apex-i18n-host.cpp`, `tests/apex-i18n-qmldir`,
-  `tests/run-i18n-host-test.sh` (**24 passed / 0 failed / 0 skipped** here under
-  `env -i HOME PATH USER TMPDIR`), `tests/mutate-i18n-host.sh` (**13 applied /
-  11 CAUGHT / 0 SURVIVED / 0 MISSCORED / 0 UNSCORABLE / 2 HELD / 0 FALSE-RED**,
-  58 seconds), two `ci.yml` steps and five REQUIRED entries.
-* `07700b6` — `run-i18n-test.sh` sections 4 and 6, prose and note text only.
-  Still **23 passed / 0 failed / 0 skipped**, and `mutate-i18n.sh` re-runs at
-  **9 applied / 9 CAUGHT / 0 SURVIVED**, unchanged, which is what proves the
-  edit did not move a host-probe anchor.
+Standing-queue items **4 and 5 are both CLOSED**. What is left of them is one
+thing and it is NOT a measurement problem — it is a build:
 
-Next action: **standing-queue item 5** — wrap the ~200 prose strings in
-`src/services/agents/AgentHelpContent.qml` in `qsTr()`. Wrap by BLOCK KIND
-(`h`, `p`, `kv`, `note`, `todo` bodies and each section `title:`), never
-`cmd` bodies (commands printed verbatim) and never `id:`/`icon:`. Do NOT
-hand-edit the ~20 greps in `check-agent-help.sh`: give it ONE normaliser that
-turns `t: qsTr("…")` back into `t: "…"` at load and inside every `recheck_*`
-path, so its existing self-mutants keep proving both directions. Then re-pin
-`EXPECT_TR` in `run-i18n-test.sh` from **lupdate's** extracted count, not from a
-grep, and check `mutate-i18n.sh` for mutants that hardcode 5.
+1. **SHIP the module.** `tests/apex-i18n-plugin.cpp` proves the route and ships
+   nowhere. Shipping it is three pieces and the first is the expensive one:
+   (a) build the plugin in an apex-os image stage (it needs `qt6-qtdeclarative-devel`,
+   `pkgconf`, `moc` and a compiler at BUILD time only — nobody has costed that
+   against `docs/update-cost.md`), (b) install it as
+   `/usr/lib64/apex-shell/qml/Apex/I18n/{libapexi18n.so,qmldir}` with
+   `QML_IMPORT_PATH` set by whatever launches quickshell, (c) `import Apex.I18n`
+   in `shell.qml`. When (c) lands, `run-i18n-test.sh` section 6 flips from a
+   note to an `ok` ON ITS OWN — that row is a live grep of `src/`, not a
+   sentence anyone has to remember.
+2. **Write the German.** `translations/apex-shell_de.ts` covers five of the 186
+   marked strings. The other 181 extract, compile and load and come back in
+   English. That is a translator's job, not an agent's, and the suite reports
+   the gap rather than hiding it.
+
+Everything else on the standing queue is unchanged: items **1 and 2 still need
+HARDWARE** (Orca at the login screen, greeter audio) and are the oldest open
+things on this card. Katana was off limits again this round — a different agent
+owned it and it boots an image 131 commits behind the tip. Ask for it once that
+agent has rebased it.
 
 **Round 32 is COMPLETE and pushed.** apex-shell `task/p2-b-round32` tip
 `ecc0e39` (two commits on `roadmap/v2.2`'s `a8cd491`); apex-os
@@ -155,15 +162,130 @@ Next action for whoever picks this up, in order:
 
 ## IN PROGRESS
 
-Round 33, standing-queue item 5 (the ~200 prose strings in
-`AgentHelpContent.qml`). Item 4 is DONE and pushed — see NEXT for the two
-commits and their numbers. Worktree `wt-p2-b6-sh` is clean at `07700b6`;
-apex-os `task/p2-b-round33` has no commits so far.
+Nothing. Round 33 is finished and pushed in both repos; `wt-p2-b6-sh` is clean
+at `df17c34` matching its remote, and `wt-p2-b6` (apex-os) is clean at
+`7f647470` with no commits.
 
 Round 32 is finished and pushed in both repos, and both worktrees
 (`wt-p2-b5`, `wt-p2-b5-sh`) are clean with their HEADs matching their remotes.
 
 ## DONE
+
+Round 33 (2026-09-19). **P2-004's oldest blocker is gone, and it turned out not
+to be upstream's at all.** Three commits on `roadmap/v2.2`'s `9df72cf`, all
+pushed:
+
+* `b850df2` — the route, and the artefact that takes it. `tests/apex-i18n-plugin.cpp`
+  (60 lines of C++), `tests/apex-i18n-qmldir`, `tests/apex-i18n-host.cpp` (a
+  bare `QQmlEngine` built out of quickshell's own two lines, so the Arch runner
+  can measure this at all), `tests/run-i18n-host-test.sh` and
+  `tests/mutate-i18n-host.sh`, plus two `ci.yml` steps and five REQUIRED
+  entries. **FOUND 35** is the measurement.
+
+  `run-i18n-host-test.sh` — **24 passed / 0 failed / 0 skipped** here under
+  `env -i HOME PATH USER TMPDIR`. **Five runs, not two**, because "German
+  appeared" has three innocent explanations and each got its own control:
+
+  | mode | what it is | result |
+  |---|---|---|
+  | plain | no plugin at all | English, and **no plugin line in the output** |
+  | plugin | plugin + catalogue | **German** |
+  | nocat | plugin, catalogue dir EMPTY | English, and the plugin SAYS so |
+  | late | translator installed AFTER the tree exists | English |
+  | late-retranslate | the same plus `engine.retranslate()` | **German** |
+
+  The last pair is why the plugin works from `initializeEngine()`, measured
+  rather than argued: it is the fact a later "just install a translator in
+  `main()`" would break on, silently. `nocat` is why "the German came from a
+  catalogue" is a claim and not a hope. Section 4 then runs the REAL
+  `/usr/bin/quickshell` on the same fixtures and refuses BY NAME, three rows at
+  a time, on a machine without one.
+
+  `mutate-i18n-host.sh` — **13 applied / 11 CAUGHT / 0 SURVIVED / 0 MISSCORED /
+  0 UNSCORABLE / 2 HELD / 0 FALSE-RED**, 58 seconds. M1 and M4 are the pair
+  that matter (drop `qmlRegisterModule`; comment out the qmldir's `plugin`
+  line) because both leave every symptom saying the plugin is fine. M10 and M11
+  break the two builds, because a suite that read "did not compile" as a skip
+  would turn every measurement in it into a silent absence.
+
+  **One ambient dependency worth knowing about**: Fedora builds Qt with journald
+  support, so the default handler sends `qInfo()` to the JOURNAL whenever stderr
+  is not a terminal — which is every CI run. `QT_FORCE_STDERR_LOGGING=1` is set
+  on every launch; without it the "no plugin line appeared" row would pass for a
+  plugin that ran perfectly. The positive row in the `plugin` run is the control
+  for the negative row in the `plain` run: identical launcher, so an absence
+  there is an absence.
+
+* `07700b6` — `run-i18n-test.sh` sections 4 and 6, prose and note text only.
+  Every row in section 4 is still TRUE and still passes; what they invited was
+  the wrong reading. They now say they are the STATEMENT of the problem and
+  name where the answer lives, and section 6 stops ending on two hypothetical
+  routes. **The row still prints a note rather than an ok, deliberately: it
+  flips when `src/` imports the module, not when the module exists**, and the
+  flip is a live grep of `src/`. Still 23/0/0, and `mutate-i18n.sh` re-ran at
+  9 applied / 9 CAUGHT / 0 SURVIVED, unchanged — which is what proves the edit
+  moved no host-probe anchor.
+
+* `df17c34` — standing-queue item 5. **5 marked strings become 186.** 149 block
+  bodies, 25 `kv` descriptions and all 7 section titles in
+  `AgentHelpContent.qml`. What stays unwrapped is a rule and not a lapse: 30
+  `k: "cmd"` bodies (a translated command line is a command that does not run),
+  9 `mt: true` mono TERMS (`ctrl-]`, `Escape`, `SUPER+D` — keystrokes, not
+  words), 10 `md: true` mono DESCRIPTIONS (a path or a command line), and
+  `id:`/`icon:`.
+
+  **Proved content-preserving rather than eyeballed**: strip every `qsTr()` back
+  off the new file and it is byte-for-byte the old one apart from the five
+  wrappers that were already there. And the guide still instantiates the same —
+  7 sections, 188 blocks, 30 of them `cmd`, first heading verbatim — read off
+  the LIVE singleton in a QML engine, not off the source.
+
+  `EXPECT_TR` 5 → **186**, and the two counts that pin it agree exactly: the
+  suite's own grep over code lines says 186 and the real `lupdate` extracts 186
+  `<source>` entries, with **no duplicates** to make those two differ (checked
+  — if there had been any, one constant could not have satisfied both rows).
+
+  **`check-agent-help.sh` was NOT hand-edited in twenty places.** Twenty greps
+  there name the shape `{ k: "kv", t: "strict"` and its self-test carries
+  another dozen anchors; rewriting thirty-odd patterns would have been thirty
+  chances to get one wrong with nothing to tell you which. The guide is read
+  ONCE through a normaliser that turns `qsTr("…")` back into `"…"`, and
+  everything reads that — **including the copy the self-test mutates**, which is
+  why every existing mutant anchor and recheck function is untouched. **25
+  passed / 0 failed, 8 self-mutants applied / 8 caught** (was 24/0 and 8/8).
+
+  The normaliser is itself gated IN BOTH DIRECTIONS, measured not asserted:
+  with the guide unwrapped the row reads "0 wrapped going in" and goes red;
+  with the substitution removed it reads "181 wrapped going in, 181 still
+  wrapped coming out" and takes the sandbox-mode check red with it. The count is
+  taken on the KEYS (`t:`/`d:`/`title:` + `qsTr("`) and not on the word `qsTr`,
+  because the guide's own header names `qsTr()` in prose and a count that
+  included prose would answer "still wrapped" about a normaliser that had
+  worked.
+
+  `mutate-i18n.sh` gains **S1 and S2, the first mutants this repository has ever
+  had on section 1** — that pin was five strings nothing mutated and is now the
+  headline number of P2-004's translatable-strings row. **11 applied / 11
+  CAUGHT / 0 SURVIVED.**
+
+  Also re-run against this tree and unchanged: `check-push-to-talk.sh` 42/0,
+  `check-agent-center-invariants.sh` 14/0, `check-color-tokens.sh` 22/0 with
+  9/9 self-mutants, `run-i18n-host-test.sh` 24/0/0, `qmllint-qt6` clean.
+
+**MARKED IS NOT TRANSLATED, and the 186 must not be read as progress it is
+not.** `translations/apex-shell_de.ts` carries German for five of them; the
+other 181 extract, compile and load and come back in English because nobody has
+written them. And the module that makes any of it reach a user is built by a
+test and ships nowhere. Both facts are written into the guide's own header and
+into the suite's output rather than left to a card nobody reads.
+
+**No apex-os change, and that is a decision.** Shipping the plugin is apex-os
+work — a build stage with Qt devel in it, an install path, and `QML_IMPORT_PATH`
+on whatever launches quickshell — and it is a real image cost against
+`docs/update-cost.md` that nobody has costed. Doing it half way this round (say,
+adding the package to a Containerfile with nothing consuming it) would be the
+theatre FOUND 34 warns about. The branch exists and is pushed because
+apex-shell's CI matches on branch name.
 
 Round 32 (2026-09-19). **The RTL runner red is decided, both halves, and the
 decision found that standing-queue item 7 is not the change the ledger says.**
@@ -1220,6 +1342,37 @@ than this branch.
     the Qt6 devel headers are all present and sections 2 and 3 of
     `run-i18n-test.sh` really run here.
 
+36. **When a landed gate greps for a shape you are about to change, add ONE
+    normaliser instead of editing thirty patterns — and gate the normaliser in
+    both directions, because a silent one turns every grep below it into a
+    false negative.** Wrapping `AgentHelpContent.qml`'s prose in `qsTr()`
+    (round 33) broke `check-agent-help.sh` in the obvious way: twenty greps name
+    `{ k: "kv", t: "strict"` and eight self-test mutants carry anchors in the
+    same shape. Hand-editing all of them is thirty chances to get one wrong with
+    nothing to report which. Reading the file ONCE through an unwrapper and
+    pointing everything — **including the copy the self-test mutates** — at that
+    copy is one change, and it leaves every existing mutant proving exactly what
+    it proved before (8 applied / 8 caught, unchanged).
+
+    Two details that are easy to get wrong and were measured rather than
+    assumed. **Count the KEYS, not the token**: `grep -c 'qsTr('` over the file
+    includes the header comment that NAMES `qsTr()` in prose, so the "nothing
+    left wrapped" half would go red about a normaliser that had worked
+    perfectly; `\b(t|d|title): qsTr\("` cannot match prose. And **run the gate
+    with the normaliser disabled before believing it**: it reads "181 wrapped
+    going in, 181 still wrapped coming out" and takes the sandbox-mode check red
+    with it, which is the proof that the rest of the file really is reading
+    through it. The other direction — an unwrapped guide — reads "0 wrapped
+    going in", which is what stops the mechanism becoming dead code that keeps
+    passing after the wrapping is reverted.
+
+    One exception, deliberate: the stop-slop check stays pointed at the REAL
+    file, because its output names the path a human has to go and edit. It also
+    reads COMMENTS, so a header comment written for a commit message will fail
+    it — em dashes, "every", "nobody", passive voice and three-item lists are
+    all rules in this tree, and the guide's own header had to be rewritten to
+    pass.
+
 ## BLOCKED ON
 
 Nothing this unit can act on. FOUND 14 is closed and the read-back is written
@@ -1324,8 +1477,22 @@ a SKIP and must never become one — that section IS the discriminator. The gate
 is off entirely on a booted APEX host and cannot engage where the direction
 flipped anyway, and it is proved to fail in both directions on both machines
 with a stubbed `ldd`.
-offered — image ships `glibc-langpack-en` only. translated shell: pipeline
-proven on two machines, blocker is the host (FOUND 3). translated installer: not
+offered — image ships `glibc-langpack-en` only. **translated shell: the host
+blocker is CLOSED round 33 and it was never upstream's.** Pipeline proven on
+two machines; the HOST route is now built and measured —
+`run-i18n-host-test.sh` **24 passed / 0 failed / 0 skipped** +
+`mutate-i18n-host.sh` **13 applied / 11 CAUGHT / 0 SURVIVED / 0 MISSCORED /
+0 UNSCORABLE / 2 HELD / 0 FALSE-RED** — with the SHIPPED `AgentHelpContent`
+singleton read back in German **inside the real `/usr/bin/quickshell`**
+(FOUND 35). Marked strings went **5 -> 186** (`run-i18n-test.sh` `EXPECT_TR`,
+pinned by both a grep and the real `lupdate`, mutated by S1/S2), with command
+bodies, mono terms and mono descriptions excluded by rule. **Two things remain
+and neither is a measurement**: the module is built by a test and ships
+nowhere (an apex-os image stage, an install path and `QML_IMPORT_PATH` — nobody
+has costed that against `docs/update-cost.md`), and `apex-shell_de.ts` carries
+German for five of the 186 while the other 181 come back in English. Section 6
+of `run-i18n-test.sh` still prints a NOTE rather than an ok, and flips on a live
+grep of `src/` the day `shell.qml` imports the module. translated installer: not
 present, route is gettext. per-user language: not present. recovery flow:
 untouched.
 
@@ -1335,10 +1502,16 @@ untouched.
 3. ~~the quickshell accessibility defect (FOUND 14)~~ **DIAGNOSED AND CLOSED
    round 30 (FOUND 20–21). What is left is not investigation: it is filing one
    upstream change and waiting for it. See BLOCKED ON;**
-4. the QTranslator host change (FOUND 3) — costs a compiled artefact;
-5. the ~200 prose strings in `AgentHelpContent.qml`, PARKED until 4 (and
-   `check-agent-help.sh` greps the exact shape `{ k: "kv", t: "$m"`, so it must
-   move with them);
+4. ~~the QTranslator host change (FOUND 3) — costs a compiled artefact~~
+   **DONE round 33 (FOUND 35). It cost a compiled artefact and it is APEX's to
+   ship, not upstream's: a QML extension plugin on `QML_IMPORT_PATH` installs a
+   QTranslator into the real quickshell and the SHIPPED singleton reads back in
+   German. What is left is BUILDING it into the image — see NEXT item 1 — not
+   measuring anything;**
+5. ~~the ~200 prose strings in `AgentHelpContent.qml`, PARKED until 4~~
+   **DONE round 33: 5 marked strings became 186, and `check-agent-help.sh` was
+   NOT hand-edited — it reads the guide through one gated normaliser (FOUND
+   36). What is left is a translator writing the German for the other 181;**
 6. ~~**`run-rtl-test.sh` section 1 is RED on the GitHub Arch runner**~~
    **DECIDED AND CLOSED round 32, both halves. The step is 32 passed / 0 failed
    / 1 skipped / 3 could-not-run there. Section 1 is still NOT a SKIP;**
