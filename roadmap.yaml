@@ -4467,6 +4467,12 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
+    LANDED 2026-09-19 (round 33): the apex-shell half of round 32 is on roadmap/v2.2 as merge 9df72cf, and it
+    carried NOTHING for this row - every line of it is P2-004's RTL decision. Queue items 1 and 2, Orca at the
+    login screen and greeter audio, are still unmeasured and still need hardware. Katana became free on 2026-09-19
+    at ~17:00 AWST, but it is booted on an image 131 commits behind the integration tip that predates the
+    accessibility round, so a greeter measurement taken there today would describe the wrong build; the image at
+    the tip is building as CI 35433705393 and the hardware slot this round went to the gaming/multilib run-book.
     Round 32 (2026-09-19) added nothing to P2-003 and says so rather than padding: both reachable items on this
     unit's queue this round were P2-004 (the RTL CI decision, and the window-root mirroring question). Queue items
     1 and 2 - Orca at the login screen and greeter audio - still need HARDWARE, and on 2026-09-19 katana was held
@@ -4796,9 +4802,15 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Round 32 (2026-09-19) settled the RTL runner decision that four rounds had correctly refused to paper over,
-    and did BOTH halves of it because they answer different questions. run-rtl-test.sh had been red on the GitHub
-    Arch runner on exactly three assertions since the day it landed (19 passed / 3 failed / 3 skipped). (1) THE
+    LANDED 2026-09-19 (round 33): round 32's apex-shell work is now ON roadmap/v2.2 as merge 9df72cf (a8cd491 ->
+    9df72cf, --no-ff so the merge sha is citable, 548 insertions over .github/workflows/ci.yml,
+    tests/run-rtl-test.sh and tests/mutate-rtl.sh). tests/check-no-conflict-markers.sh PASS on the merged tree;
+    ci.yml re-parsed as YAML and both suites are bash -n clean on the merged tip; pushed with --force-with-lease.
+    The RTL suite's own numbers were NOT re-run on this laptop - the card forbids it and records 37/0/0/0 locally
+    and 32 passed / 0 failed / 1 skipped / 3 could-not-run on the Arch runner (CI 35417214107). Round 32
+    (2026-09-19) settled the RTL runner decision that four rounds had correctly refused to paper over, and did
+    BOTH halves of it because they answer different questions. run-rtl-test.sh had been red on the GitHub Arch
+    runner on exactly three assertions since the day it landed (19 passed / 3 failed / 3 skipped). (1) THE
     PRECONDITION IS NOW MEASURED BEFORE ANYTHING IS CONCLUDED FROM IT: the plugin block moves above the three rows
     it explains, ldd (not a distribution name, not a version string) says whether this machine's qt6ct plugin
     carries a Qt translation loader, and when it measurably does not those three rows report a NAMED could-not-run
