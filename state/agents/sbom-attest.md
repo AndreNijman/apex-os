@@ -115,9 +115,28 @@ Ranked, with what each costs:
   needs hosting, its own key management, and every APEX machine taught to trust
   a second log — a larger surface than the problem.
 
+## RUNS DISPATCHED — pick these up if I am cut short
+
+- **`35455459788`** — `sbom-probe` on `task/sbom-attest`, dispatched
+  2026-09-19T16:35Z by pushing `4f308f82`. ~40-60 min. ONE runner, not a build:
+  it re-catalogues the digest the failing build already pushed
+  (`sha256:86225e1b…`). Read it with
+  `gh api repos/AndreNijman/apex-os/actions/jobs/<id>/logs` (`gh run view --log`
+  refuses while a run is in progress). Grep the log for `RESULT ` and `REKOR `:
+  every number the decision turns on is printed on one of those lines.
+  It also re-confirms the 24 MiB ceiling **from a GitHub runner**, so the
+  bisection above does not rest on one home connection.
+
 ## NEXT
 
-(in progress — see the section that replaces this when the probe lands)
+1. Read run `35455459788`. `RESULT <arm>: FITS` / `OVER` is the verdict line;
+   `REKOR <arm>: ACCEPTED` with a logIndex is the proof.
+2. If `nofiles` fits: that is the landing. `SYFT_FILE_METADATA_SELECTION=none`
+   in the SBOM step, keep `--type spdxjson`, keep the tlog, add the size guard.
+3. If it does not: `norel` next, then `jq-strip`, then fall back to option C —
+   and option C needs `verify.rs:540` changed **in the same landing**.
+4. Then dispatch `gh workflow run build-image.yml --ref task/sbom-attest` and
+   put the run id in the section above BEFORE reading it.
 
 ## BLOCKED ON
 
