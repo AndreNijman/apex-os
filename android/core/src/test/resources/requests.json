@@ -76,6 +76,7 @@
     "worktree": "wt-review",
     "checkpoint": true
   },
+  "run_generic_with_args": { "cmd": "run", "cwd": "/home/andre", "cols": 80, "rows": 24, "agent": "generic", "args": ["/bin/cat", "-v"] },
   "worktrees_all": { "cmd": "worktrees" },
   "worktrees_one": { "cmd": "worktrees", "project": "apex" },
   "requests": { "cmd": "requests" },

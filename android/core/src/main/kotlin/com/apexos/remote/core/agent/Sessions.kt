@@ -374,6 +374,25 @@ object Agentd {
         }
 
     /**
+     * The one adapter that has no program of its own.
+     *
+     * `apex-agentd` decides this on the adapter's **id**, not on a capability
+     * it reports: `session.rs:135` reads
+     * `req.args.first().filter(|_| adapter.id == "generic")` and refuses when
+     * that is empty. So the id is what this pins on, because that is the rule
+     * the daemon actually applies — and the daemon publishes no flag that
+     * would let a client ask instead.
+     *
+     * `Hello.agents` lists `generic` on every runtime, so a phone that offered
+     * it without asking for a command offered a button that could only fail.
+     * It did, until a device measured it.
+     */
+    fun commandIsRequired(agent: String?): Boolean = agent == GENERIC_ADAPTER
+
+    /** The adapter id that carries no program. */
+    const val GENERIC_ADAPTER = "generic"
+
+    /**
      * Start a session.
      *
      * `cwd`, `cols` and `rows` are the only required fields of `RunRequest`;
@@ -389,11 +408,32 @@ object Agentd {
         prompt: String? = null,
         worktree: String? = null,
         checkpoint: Boolean = false,
+        args: List<String> = emptyList(),
     ): String = buildString {
         append("""{"cmd":"run","cwd":"""").append(escape(cwd)).append('"')
         append(""","cols":""").append(cols)
         append(""","rows":""").append(rows)
         if (!agent.isNullOrEmpty()) append(""","agent":"""").append(escape(agent)).append('"')
+        // `RunRequest.args` — "extra arguments appended after the adapter's
+        // own". Sent only when there are some, like every other optional key
+        // here, so a request from this phone stays the shape a daemon that
+        // predates the field can parse.
+        //
+        // It is here because without it a phone cannot start the `generic`
+        // adapter AT ALL: the daemon answers "the generic adapter needs a
+        // program to run; pass one after `--`", and `args` is where that
+        // program goes. The phone offered `generic` in its picker anyway,
+        // because the picker is `Hello.agents` and the daemon lists it.
+        // MEASURED against a real `apex-agentd` from a Pixel 7a, which is how
+        // a gap between a picker and a wire builder gets noticed.
+        if (args.isNotEmpty()) {
+            append(""","args":[""")
+            args.forEachIndexed { i, a ->
+                if (i > 0) append(',')
+                append('"').append(escape(a)).append('"')
+            }
+            append(']')
+        }
         if (!prompt.isNullOrEmpty()) append(""","prompt":"""").append(escape(prompt)).append('"')
         if (!worktree.isNullOrEmpty()) append(""","worktree":"""").append(escape(worktree)).append('"')
         // Sent only when true. `RunRequest.checkpoint` is `#[serde(default)]`

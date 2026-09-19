@@ -316,13 +316,14 @@ fun ApexRemoteApp(
                     knownDirectories = knownDirectories(state.agents.sessions),
                     busy = state.agents.busy,
                     failure = state.agents.failure,
-                    onStart = { agent, cwd, worktree, prompt, checkpoint ->
+                    onStart = { agent, cwd, worktree, prompt, checkpoint, args ->
                         viewModel.startAgent(
                             cwd = cwd,
                             agent = agent,
                             worktree = worktree,
                             prompt = prompt,
                             checkpoint = checkpoint,
+                            args = args,
                         )
                     },
                     onBack = { navigation.popBackStack() },
