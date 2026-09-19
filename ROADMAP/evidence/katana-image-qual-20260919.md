@@ -627,9 +627,112 @@ merged over `/usr`, and nothing in the update path rebuilds it. §0.2 predicted
 this from reading the two guards; this is the measurement.
 
 
-## 2. pkg-share
+## 2. pkg-share — CONFIRMED, and by a wider margin than the closure claimed
 
-*(pending)*
+`sudo apex install steam`, run under `systemd-run --unit=qual-install-steam
+--property=TimeoutStartSec=infinity` so it could not be cut short by an ssh
+that went away.
+
+### 2.1 Which engine ran — established before any count was believed
+
+```
+$ grep 'multilib: carrying' apex-install-steam-merged.log
+apex-pkg: multilib: carrying 2079 of 4382 file(s) from the 32-bit set
+          (2151 already owned by the image, 152 already placed by this set's native packages)
+```
+
+That line exists only in the new `merge_multilib`, so the extension measured
+below was built by the fixed engine. **The image-owned count dominates the
+native-pass count by 14:1** — 2151 paths dropped because the running image
+already provides them, 152 because this transaction's own 64-bit pass had
+already placed them. That ratio is the shape the rule predicts: most of what an
+i686 dependency closure carries is a second copy of something the OS already
+has.
+
+**Why it rebuilt at all, stated honestly:** not because the update path asked it
+to (§1.2 shows it did not), but because Fedora's repositories had moved since
+01:43 — the log shows new EVRs such as `NetworkManager-libnm-1:1.54.3-3.fc43` —
+so the resolved set differed and `rebuild_extension`'s "already up to date"
+comparison failed. **On a machine whose repositories had not drifted, this
+command would have printed `already up to date` and changed nothing.** The
+rebuild was luck, not design, and §0.2 remains a defect.
+
+### 2.2 The three numbers
+
+Same script, same machine, same `LC_ALL=C`, against the new `.raw`:
+
+| | old engine (§0.3) | new engine |
+|---|---|---|
+| extension files + symlinks | 3 716 | 3 564 |
+| image paths (`rpm -qal`) | 266 030 | 266 093 |
+| **paths the extension shadows** | **177** | **0** |
+| **32-bit ELF over a 64-bit image binary** | **14** | **0** |
+| **`ls /usr/share/vulkan/icd.d/ \| grep -c i686`** | **0** (13 files) | **13** (26 files) |
+| `gst-inspect-1.0 \| tail -1` | 240 plugins, **2 features** | 240 plugins, **1344 features** |
+| `fc-list \| wc -l` | 538 | 538 |
+| extension size | 540 012 544 B | 535 928 832 B |
+
+`comm -12` between the extension's file list and the image's `rpm -qal` returns
+**nothing at all**. Not "fewer" — the set is empty, and so is the 32-bit subset
+of it.
+
+### 2.3 The thirteen manifests, by name
+
+```
+$ ls /usr/share/vulkan/icd.d/ | grep i686
+asahi_icd.i686.json      broadcom_icd.i686.json   dzn_icd.i686.json
+freedreno_icd.i686.json  intel_hasvk_icd.i686.json intel_icd.i686.json
+lvp_icd.i686.json        nouveau_icd.i686.json    nvidia_icd.i686.json
+panfrost_icd.i686.json   powervr_mesa_icd.i686.json radeon_icd.i686.json
+virtio_icd.i686.json
+```
+
+`nvidia_icd.i686.json` is the file the 2026-09-17 live recovery had to
+hand-write, because the image does not ship it and the old engine threw it away
+with the blanket `--excludepath /usr/share`. It now arrives from the rpm that
+owns it. **This is the gate on P1-038 row 6 (Steam Big Picture), and it is
+open.**
+
+### 2.4 The GStreamer regression is gone, with the binary as the witness
+
+```
+$ file -b /usr/libexec/gstreamer-1.0/gst-plugin-scanner
+ELF 64-bit LSB pie executable, x86-64 … BuildID[sha1]=af21c6a3ef0db9e767c7c4d8dc22ec8a6e281db6
+$ rm -rf ~/.cache/gstreamer-1.0; gst-inspect-1.0 | tail -1
+Total count: 240 plugins, 1344 features
+```
+
+240 plugins and 1344 features with the image's own scanner in place — the same
+number round 31 could only reach by pointing `GST_PLUGIN_SCANNER` at the
+pristine deployment by hand. Every other binary the old extension shadowed is
+64-bit again, checked one at a time:
+
+```
+/usr/bin/fc-list                     ELF 64-bit LSB pie executable, x86-64
+/usr/libexec/at-spi-bus-launcher     ELF 64-bit LSB pie executable, x86-64
+/usr/libexec/dconf-service           ELF 64-bit LSB pie executable, x86-64
+/usr/libexec/p11-kit/p11-kit-remote  ELF 64-bit LSB pie executable, x86-64
+/usr/libexec/gio-launch-desktop      ELF 64-bit LSB pie executable, x86-64
+```
+
+The greeter's accessibility bus (§3.4 of round 31) therefore stops being a
+32-bit binary on the next greeter start, without anyone touching it.
+
+### 2.5 What moved in the extension, and what that does and does not prove
+
+56 paths are carried that were not before and 208 are gone. **That comparison
+is contaminated by the repository drift of §2.1** — different EVRs mean
+different `.build-id` paths and different library sonames — so it is recorded,
+not leaned on. What is clean is the intersection with the image, because both
+sides of it were measured on their own machine at their own moment: 177 → 0.
+The gone-208 are dominated by `/usr/i686-w64-mingw32/sys-root/mingw/share/locale/*`
+`.mo` files, i.e. cross-compiler locale data the image already owns, which is
+precisely what the new rule is for.
+
+**Verdict: pkg-share PASSES on hardware.** The three confirmations the closure
+asked for are 13 (was 0), 0 (was 177), and an image-owned count that dominates
+the native-pass count 2151 to 152.
+
 
 ## 3. gaming-gpu — docs/gaming-and-sessions.md §6
 
