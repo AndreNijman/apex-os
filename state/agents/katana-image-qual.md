@@ -195,6 +195,17 @@ Blocks, in order, all from §6:
 - 17:12 — pre-rebase baseline captured (see plan step P).
 - 17:15 — read §6 of `docs/gaming-and-sessions.md` end to end and §§3, 4, 6 of
   the round-31 evidence; plan above written.
+- 18:02 — **the landed selector, run on katana's REAL sysfs, answers exactly
+  `--prefer-vk-device 10de:249d --prefer-output HDMI-A-1`, rc 0**, with
+  `output: HDMI-A-1 on card2 (NVIDIA)` and
+  `why: HDMI-A-1 on card2 is an external display; 2 connected output(s) across
+  2 card(s)`. Built `apex` from this branch (`cargo build --bin apex` in
+  `apexd/`, 38 s) and pointed it at a copy of katana's `/sys/class/drm` — the
+  CLI honours **`APEX_ROOT`** (a root containing `sys/`), not `APEX_SYS_ROOT`,
+  which silently reads the real `/sys` and cost one confused run. Free parity
+  check: the same binary on the L16's own `/sys` says `eDP-1 on card1 (AMD)`,
+  `1002:1900` — so nothing about `10de:249d` is hardcoded. Evidence §0.10,
+  commit `ba41fd1c`. **§6.1 now has a stated expected value before the run.**
 - 17:36 — **the old-image control column is complete and pushed (`5036a4f4`)**:
   §6.4 (`apex-safe-graphics check` prints 4 lines, no GPU/output rows; 0
   occurrences of `WLR_DRM_DEVICES`) and §6.5 (niri through greetd runs **waybar

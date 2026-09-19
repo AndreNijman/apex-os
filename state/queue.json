@@ -1,6 +1,6 @@
 {
   "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
-  "updated": "2026-09-19T17:20+08:00",
+  "updated": "2026-09-19T18:10+08:00",
   "concurrency_ceiling": 6,
   "units": [
     {
@@ -447,7 +447,19 @@
         "p1-053c",
         "p1-053b"
       ],
-      "title": "APEX Remote Android round 2 on the real device: terminal, PTY read-back, dual-stack bind"
+      "title": "APEX Remote Android round 2 on the real device: terminal, PTY read-back, dual-stack bind",
+      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 33) -- landed as merge 859cbb2b, 0 unlanded. Four takeable items closed plus approvals, which round 1's evidence named and the dispatch did not. P1-060 C1 is met EXCEPT THE RELAY LEG, and that leg is a missing FEATURE rather than a missing test: there is no relay client on Android at all -- PairingService.kt:108 prints its own apology, :core has no WebSocket code, no OkHttp in the build -- while MachinesScreen.kt:288 already shows 'relay available'. That is now unit `p1-052-android-relay`, dispatched the same round on the finding agent's own recommendation. P1-060 C2 is NOT an agent's: it names a tablet and a foldable and neither exists here; it gained the terminal this round and LOST a claim, because TerminalView is a bare Canvas and TalkBack has nothing to announce on it. THE FINDING WITH THE WIDEST BLAST RADIUS IS ABOUT THIS PROGRAM, NOT THIS UNIT: a roadmap-dispatched agent cannot pair, because its cgroup makes origin::observe_pid classify the broker as `scheduled-job` and apex-remoted correctly refuses -- 8 of 24 tests failed on that alone, and round 1 never saw it because it ran interactively. Everything needing a human-at-the-keyboard must go through tests/in-login-session.sh. Also fixed: the suite leaked an apex-remoted per reconnect test and round 1's worktree still held seven orphans."
+    },
+    {
+      "id": "p1-052-android-relay",
+      "items": [],
+      "after": [],
+      "conflicts": [
+        "p1-053e",
+        "p1-053c",
+        "p1-053b"
+      ],
+      "title": "The relay leg the Android app has never had — P1-060 C1s last piece"
     }
   ],
   "_completed_units": {
