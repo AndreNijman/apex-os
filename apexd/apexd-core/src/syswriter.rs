@@ -279,11 +279,17 @@ pub struct RealWriter {
 
 /// How long the daemon waits for a started sched-ext scheduler to attach.
 ///
-/// Two seconds: BPF load plus attach is hundreds of milliseconds on the
-/// katana-class hardware this was measured against, and game entry is a rare,
+/// Two seconds, and the number is REASONED rather than measured: BPF load plus
+/// attach is expected to be in the hundreds of milliseconds, and nothing here
+/// has ever loaded a scheduler on hardware to time it. Game entry is a rare,
 /// user-initiated operation on a multi-thread tokio runtime, so a bounded
-/// stall here is cheaper than the alternative — which is reporting a scheduler
-/// as loaded because nobody waited to look.
+/// stall is cheaper than the alternative — which is reporting a scheduler as
+/// loaded because nobody waited to look.
+///
+/// `docs/gaming-and-sessions.md` §6.8 says what to record if this turns out to
+/// be too short (a status of `unknown` over a `state` of `enabling`), and says
+/// to record the number rather than re-run until it passes. Writing "measured"
+/// here would be this unit's own defect, one file over.
 const SCX_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl RealWriter {

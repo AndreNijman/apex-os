@@ -161,6 +161,12 @@ And a profile with `scx = ""`: `scx_state : not requested`, `scx_requested`
 empty, and **no sched-ext note at all** — silence, not a note about a step that
 is not in the plan.
 
+A live session carries **one** sched-ext note, the measured one. The plan's own
+note is an intent pointing at `scx_state` for the answer; once there is an
+answer, the measurement replaces it rather than sitting under it. `apex game
+profile`, which renders a plan nobody applied, still shows the intent, because
+there it is the only true thing available.
+
 ## 5. `root/ops` is the struct_ops name, and comparing it verbatim would be this defect inverted
 
 The kernel publishes `lavd`, not `scx_lavd`; `rusty`, not `scx_rusty`. A
@@ -212,7 +218,7 @@ status` reads the tier back out of sysfs. Left alone.
 ## 7. Gates
 
 ```
-cargo test --locked --workspace --no-fail-fast   3447 passed, 0 failed
+cargo test --locked --workspace --no-fail-fast   3450 passed, 0 failed
 cargo clippy --locked --workspace --all-targets -D warnings   clean
 tests/test-apex-gaming.sh            131 passed, 0 failed
 tests/test-apex-modes.sh              67 passed, 0 failed
@@ -223,10 +229,16 @@ tests/check-shellcheck-coverage.sh    170 scripts, 0 newly failing
 tests/check-no-conflict-markers.sh    PASS
 ```
 
-New assertions: 17 in `apexd-core/src/syswriter.rs` (`mod scx_tests`), 10 in
+New assertions: 17 in `apexd-core/src/syswriter.rs` (`mod scx_tests`), 11 in
 `apexd/src/game.rs`, 2 in `apexd-core/tests/gamemode.rs`. No new suite, so
 nothing to add to `tests/suites-not-in-ci.txt`; all three files already run in
 CI through `cargo test`.
+
+**`cargo fmt` was deliberately not run**, and that is not an omission: the
+workspace has never been rustfmt'd, `.github/workflows/build-image.yml:382`
+says the `--check` step is absent for that reason and names the day to add it
+back, and rustfmt is not installed here. Running it would have reformatted 24
+unrelated files.
 
 **Nothing in the suite can reach a real scheduler.** The fixture constructor
 `RealWriter::for_scx_test` is `#[cfg(test)]`, because the existing
@@ -260,6 +272,7 @@ Every source restored with plain `cp` and verified byte-identical with `cmp`.
 | MB11 | the plan note asserts success again | `the_plan_note_asks_for_a_scheduler_and_does_not_claim_one` |
 | MB12 | the plan note stops naming the scheduler | same row — it fails in both directions |
 | MB13 | `scx = ""` still plans a switch | `a_profile_that_asks_for_no_scheduler_plans_no_note_about_one` + 3 pre-existing |
+| MB14 | keep the plan's intent note beside the measurement | `a_live_session_shows_the_measurement_and_not_the_intent_beside_it` |
 
 **MB11 escaped on the first pass.** Nothing pinned the plan-time note, so
 reverting it to the sentence that had claimed a scheduler on three images
@@ -316,4 +329,7 @@ document now, which is what that file's reverse pass is for.
   beats a bare `scx_lavd` is a tuning question for a machine with a game on it.
 * **`SCX_SETTLE = 2 s`** is reasoned, not measured on hardware. §6.8 says to
   record the number if Row A comes back `unknown` on `enabling` rather than
-  re-running until it passes.
+  re-running until it passes. The constant's own doc comment says so too — it
+  briefly claimed "measured against katana-class hardware", which nothing here
+  had done, and writing that in the file that fixes an unverified claim would
+  have been the defect one directory over.
