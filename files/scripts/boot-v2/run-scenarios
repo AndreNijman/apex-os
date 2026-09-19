@@ -2130,6 +2130,38 @@ scenario_enroll_sb_on() {
     # ── the recovery key still works after all of that ─────────────────────
     enroll_assert_recovery "$img" "$rec" "enroll-sb-on"
 
+    # ── a register nobody extended is refused, and the slot is not left ───
+    #
+    # This is the branch the policy hash CANNOT catch. Enrolling against a PCR 7
+    # that is still 64 zeros produces a perfectly good-looking non-zero policy
+    # hash — measured in this lab — while binding to a register any root process
+    # can set to any value it likes. systemd says so on stderr and nowhere else,
+    # so the script reads its stderr, and this arm is what proves it does.
+    #
+    # A SECOND software TPM, on its own port, because the one above has had PCR 7
+    # extended three times by now and cannot be put back: tpm2_pcrreset answers
+    # "bad locality" for PCR 7 exactly as it does on silicon.
+    local zimg="$WORK/enroll-sbon-zero.img" zrec="$WORK/enroll-sbon-zero.recovery-key"
+    local hot_tpm="$ENROLL_TPM" hot_dir="$ENROLL_TPM_DIR"
+    enroll_swtpm sbon-zero 2343
+    enroll_volume "$zimg"
+    rc="$(enroll_run "$WORK/enroll-zero" --device "$zimg" --recovery-out "$zrec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$root")"
+    assert_eq 0 "$rc" "enroll-sb-on, PCR 7 never extended: exit status"
+    assert_eq "declined reason=pcr-uninitialised" \
+        "$(enroll_field "$WORK/enroll-zero.out" tpm2)" \
+        "enroll-sb-on, PCR 7 never extended: refused the unenforceable binding"
+    # And it did not leave the slot it had just created lying around. A refusal
+    # that reports a refusal while the keyslot stays enrolled is the worst of
+    # both: the user is told there is no TPM unlock and the disk has one.
+    assert_eq "systemd-recovery" \
+        "$(enroll_field "$WORK/enroll-zero.out" tokens)" \
+        "enroll-sb-on, PCR 7 never extended: the TPM slot was removed again"
+    enroll_assert_recovery "$zimg" "$zrec" "enroll-sb-on, PCR 7 never extended"
+    enroll_swtpm_stop
+    ENROLL_TPM="$hot_tpm"; ENROLL_TPM_DIR="$hot_dir"
+
     # ── --with-pin is opt-in, and it shows its arithmetic ──────────────────
     # A separate volume: the one above must keep pin=no so that assertion means
     # what it says.
