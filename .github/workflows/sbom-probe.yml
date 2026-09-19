@@ -22,6 +22,14 @@ name: sbom-probe
 #                        all 113 layers are zstd:chunked, so if oci-dir dies the
 #                        same way this arm separates "where the bytes live" from
 #                        "how they are compressed"
+#   gomemlimit           GOMEMLIMIT=10GiB. syft is Go, and Go's default GOGC=100
+#                        lets the heap reach ~2x live before a collection. If the
+#                        peak is garbage rather than live data, a soft memory
+#                        limit trades CPU for it and restricts no cataloguer.
+#   swap32               a 32 GB swapfile on the 86 GB of free disk, which is the
+#                        most literal reading of "give it the disk instead of the
+#                        memory". Slow if it thrashes; the timeout says so.
+#   ocidir-gomemlimit    both of the above together.
 #   registry-par1        answers the open question in build-image.yml's own
 #                        comment: at parallelism 1 the step ran the full fifteen
 #                        minutes and was killed by the timeout, which is why the
@@ -49,7 +57,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [repro, ocidir, ocidir-decompressed, registry-par1]
+        mode:
+          - repro
+          - ocidir
+          - ocidir-decompressed
+          - gomemlimit
+          - swap32
+          - ocidir-gomemlimit
+          - registry-par1
     steps:
       - uses: actions/checkout@v4
 
@@ -100,12 +115,23 @@ jobs:
           trap 'kill $SPID 2>/dev/null || true' EXIT
 
           PAR=4
+          GML=""
+          SRC="registry:$REF"
           case "$MODE" in
-            repro)               SRC="registry:$REF" ;;
-            registry-par1)       SRC="registry:$REF"; PAR=1 ;;
-            ocidir|ocidir-decompressed)
+            repro)               : ;;
+            registry-par1)       PAR=1 ;;
+            gomemlimit)          GML=10GiB ;;
+            swap32)
+              sudo fallocate -l 32G /swapfile
+              sudo chmod 600 /swapfile
+              sudo mkswap /swapfile >/dev/null
+              sudo swapon /swapfile
+              swapon --show; free -m
+              ;;
+            ocidir|ocidir-decompressed|ocidir-gomemlimit)
               DEC=""
               [ "$MODE" = ocidir-decompressed ] && DEC="--dest-decompress"
+              [ "$MODE" = ocidir-gomemlimit ] && GML=10GiB
               _c0=$(date +%s)
               skopeo copy --retry-times 3 $DEC "docker://$REF" "oci:/tmp/oci:apex"
               echo "skopeo copy ($MODE) took $(( $(date +%s) - _c0 ))s"
@@ -114,10 +140,12 @@ jobs:
               ;;
           esac
 
-          echo "── syft: mode=$MODE parallelism=$PAR source=$SRC ──"
+          ENVS=(SYFT_PARALLELISM="$PAR")
+          [ -n "$GML" ] && ENVS+=(GOMEMLIMIT="$GML")
+          echo "── syft: mode=$MODE parallelism=$PAR gomemlimit=${GML:-unset} source=$SRC ──"
           _t0=$(date +%s)
           timeout 2700 /usr/bin/time -v -o /tmp/time.txt \
-            env SYFT_PARALLELISM="$PAR" syft "$SRC" -o spdx-json \
+            env "${ENVS[@]}" syft "$SRC" -o spdx-json \
             > /tmp/sbom.spdx.json
           rc=$?
           _el=$(( $(date +%s) - _t0 ))
