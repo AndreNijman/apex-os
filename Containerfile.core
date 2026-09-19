@@ -737,8 +737,28 @@ RUN set -eux; \
         || { echo "FATAL: irqbalance.service is not masked"; exit 1; }
 
 # ── Stage 2: desktop + greeter stack ───────────────────────────────────────
-# hyprland (sdegler COPR) + quickshell (errornointernet COPR 0.3.0 —
-# the exact version apex-greet targets) + greetd. The greeter's compositor host
+# hyprland (sdegler COPR) + quickshell-git (errornointernet COPR) + greetd.
+#
+# quickshell-git, NOT quickshell, and the reason is accessibility. Released
+# 0.3.1 publishes NOTHING to AT-SPI: the application node answers ChildCount 0
+# and no window appears, so every `Accessible.role`/`.name` in apex-shell is
+# source-correct and unreachable at runtime, including the ones on the lock
+# screen's password field. Measured with a per-pid AT-SPI probe across six
+# window configurations.
+#
+# The cause was never window creation. quickshell deleted a QCoreApplication
+# before building the QGuiApplication, which tore down QtQuick's accessibility
+# hooks; upstream fixed it in 916a0dd "launch: avoid creating multiple
+# QApplications" on 2026-08-28, EIGHT DAYS after v0.3.1 was tagged, so no
+# release carries it (their issues #1006 and #1144 cover it). The same COPR
+# builds master as quickshell-git, and c6a5160 publishes a real tree: frame ->
+# label for PanelWindow and PopupWindow, and `text 'PASSWORD FIELD'` for the
+# lock surface.
+#
+# The cost, stated rather than buried: this is a rolling snapshot, so an image
+# built next week gets a different commit. That is worse for reproducibility
+# than a tagged release and better than shipping a desktop no screen reader can
+# read. Move back to `quickshell` the moment a release contains 916a0dd. The greeter's compositor host
 # is moving OFF cage: M0 spike A found cage 0.2.0 does not serve wlr-layer-shell
 # to quickshell 0.3.0, so the greeter never paints under it. sway 1.11 and labwc
 # 0.9.6 (both stock F43, both layer-shell v4) are installed as the real host;
@@ -810,7 +830,7 @@ RUN set -eux; \
     dnf5 -y copr enable sdegler/hyprland; \
     dnf5 -y copr enable errornointernet/quickshell; \
     dnf5 -y install \
-        hyprland quickshell greetd sway labwc cage xwayland-satellite foot \
+        hyprland quickshell-git greetd sway labwc cage xwayland-satellite foot \
         jetbrains-mono-fonts fontconfig flatpak distrobox git-core niri \
         hyprlock hypridle hyprsunset hyprshot grimblast mate-polkit \
         pipewire pipewire-pulseaudio wireplumber rtkit \
@@ -824,7 +844,22 @@ RUN set -eux; \
         glibc-langpack-en zram-generator-defaults; \
     dnf5 -y copr disable sdegler/hyprland; \
     dnf5 -y copr disable errornointernet/quickshell; \
-    dnf5 clean all
+    dnf5 clean all; \
+    : 'The accessibility fix is the whole reason quickshell-git is here, so the'; \
+    : 'build refuses a quickshell that predates it. Released 0.3.1 reports an'; \
+    : 'EMPTY revision -- "Quickshell 0.3.1 (revision , distributed by ...)" --'; \
+    : 'because it is built from a tarball with no git tree. The snapshot reports'; \
+    : 'the commit it was built from. An empty revision therefore means the COPR'; \
+    : 'served the release package and every Accessible.* in apex-shell would be'; \
+    : 'unreachable at runtime, with nothing else failing to say so.'; \
+    qs_ver="$(quickshell --version 2>&1 | head -n1)"; \
+    printf 'quickshell: %s\n' "$qs_ver"; \
+    if ! printf '%s' "$qs_ver" | grep -qE 'revision [0-9a-f]{7,}'; then \
+        echo "FATAL: quickshell reports no git revision -- this is the release"; \
+        echo "       build, which publishes nothing to AT-SPI (upstream 916a0dd"; \
+        echo "       landed after v0.3.1). Got: $qs_ver"; \
+        exit 1; \
+    fi
 
 # ── hyprland-qtutils, built HERE against the desktop stack ──────────────────
 # Hyprland warns at every startup without it, and CAsyncDialogBox cannot create
