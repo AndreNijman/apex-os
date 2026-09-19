@@ -260,14 +260,43 @@ Different eighteen-vs-twenty-two, overlapping in ten. Ten of the 22 kfuncs
 `scx_bpf_dsq_insert___v2` — so **`scx_lavd` would fail to load on Fedora 43's
 stock kernel as well.**
 
-Two conclusions follow:
+### 3.1 And a third kernel: the L16's own
+
+Found by smoke-testing the new CLI line (§5.1) on this build machine, which is
+the L16. **`/sys/kernel/btf/vmlinux` was read; nothing was written, and the
+D-Bus addresses were deliberately pointed at a nonexistent socket so no daemon
+was contacted.**
+
+`7.2.3-cachyos2.fc43.x86_64` — a *different* kernel version from katana's, same
+`CONFIG_PAHOLE_VERSION=130` and GCC 15.3.1 — is affected too, at **20 of 68**.
+
+| kernel | version | affected |
+|---|---|---|
+| L16 (`kernel-cachyos`) | `7.2.3-cachyos2.fc43` | **20 of 68** |
+| katana (`kernel-cachyos`) | `7.2.6-cachyos1.fc43` | **22 of 68** |
+| Fedora stock (`kernel-core`) | `7.2.6-100.fc43` | **18 of 68** |
+
+Three kernels, three *different* subsets, every one of them broken. Which
+kfuncs fall through moves with the tree and the config; **that any fall through
+is invariant across all three.** Common to all three are
+`scx_bpf_destroy_dsq`, `scx_bpf_dispatch_cancel` and
+`scx_bpf_get_idle_cpumask` — and a scheduler that does not call
+`scx_bpf_get_idle_cpumask` is hard to imagine.
+
+So this is not one bad COPR build, and it is not one kernel version.
+
+Three conclusions follow:
 
 1. **This is not CachyOS packaging.** It is the Fedora 43 toolchain
    (`dwarves-1.30`, GCC 15.3.1) against a 7.2 kernel, and which kfuncs fall
-   through varies with the tree and config — which is why the two sets differ.
+   through varies with the tree and config — which is why all three sets
+   differ.
 2. **Switching APEX to Fedora's stock kernel would not fix Gaming Mode's
    scheduler tier**, and would cost BORE, 1000 Hz and the rest of the reason
    that kernel was chosen. It is not the cheap escape it appears to be.
+3. **Pinning backwards would not help either** — the L16's older kernel is
+   affected as well, which is the closest thing available to a test of that
+   idea without a rebuild.
 
 ---
 
@@ -334,6 +363,17 @@ the probe says loading is blocked **and** the kernel did not end up with a
 scheduler. A `loaded` session is not argued with; a kernel with nothing wrong
 earns no sentence. The key is reported **while game mode is off**, so a user
 can learn that no session can carry a scheduler without starting one.
+
+`apex game status`'s **daemon-not-running** branch reports it too. That branch
+prints a local view assembled by the CLI rather than the daemon's `Status`
+map, and it said nothing about sched-ext at all — so the one surface a user
+reaches when `apexd` is down was the one that could not tell them their kernel
+refuses every scheduler. It now prints `scx`, `scx_btf` and, when loading is
+blocked, the sentence. It follows the `nvidia-smi:` line beside it, which
+reports a *state* for the same reason. **Like that line, it is not covered by
+a test** — the branch has never had one — but it was smoke-run for real:
+pointing both D-Bus addresses at a nonexistent socket forces it, and it is
+where §3.1's third reading came from.
 
 What katana's status would now say, from the real BTF through the shipped
 reader:
@@ -452,3 +492,8 @@ mutation.
   deployments with the September 18 one pinned, greetd untouched, no
   `efibootmgr` write, nothing written to any disk but three files under `/tmp`
   which were removed.
+* **The L16 was read, once, and not touched.** §3.1's reading is
+  `/sys/kernel/btf/vmlinux` plus `uname -r` and `/proc/config.gz`, taken by a
+  binary built in a scratch worktree with both D-Bus addresses pointed at a
+  nonexistent socket so that no running daemon was contacted and no polkit
+  action could be reached. Nothing was installed, written or configured.
