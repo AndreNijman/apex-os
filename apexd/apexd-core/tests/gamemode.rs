@@ -647,6 +647,59 @@ fn scx_is_first_on_enter_and_last_on_exit() {
 }
 
 #[test]
+fn the_plan_note_asks_for_a_scheduler_and_does_not_claim_one() {
+    // A PLAN cannot know what the machine did with it, and this note is what
+    // `apex game status` carried as its only sched-ext surface. It read
+    //
+    //     sched-ext: scx_lavd for the session, kernel scheduler restored on exit
+    //
+    // and on katana it was printed directly beneath the journal line recording
+    // `scxctl` refusing the call — for three consecutive boots, on two
+    // different images. Nobody could have caught it, because the sentence was
+    // copied out of the plan and never checked against anything.
+    //
+    // Both directions matter. A note that stops naming the scheduler is no
+    // use either, so the name is required as well.
+    let (_f, plan) = scx_plan("scx_lavd");
+    let note = plan
+        .notes
+        .iter()
+        .find(|n| n.contains("sched-ext"))
+        .unwrap_or_else(|| panic!("the plan must still explain its scx step: {:?}", plan.notes));
+
+    assert!(
+        note.contains("scx_lavd"),
+        "the note must name the scheduler it plans: {note}"
+    );
+    assert!(
+        note.to_lowercase().contains("asks"),
+        "a plan ASKS; it is in no position to report. Got: {note}"
+    );
+    assert!(
+        note.contains("scx_state"),
+        "and it must point at the surface that DOES report, or the reader has \
+         nowhere to go for the answer: {note}"
+    );
+    assert!(
+        !note.contains("for the session, kernel scheduler restored on exit"),
+        "this is the exact sentence that asserted a scheduler that had never \
+         loaded — it must not come back: {note}"
+    );
+}
+
+#[test]
+fn a_profile_that_asks_for_no_scheduler_plans_no_note_about_one() {
+    // The other direction: `scx = ""` must produce silence, not a note
+    // explaining a step that is not in the plan.
+    let (_f, plan) = scx_plan("");
+    assert!(
+        !plan.notes.iter().any(|n| n.contains("sched-ext")),
+        "nothing was planned, so nothing is to be said: {:?}",
+        plan.notes
+    );
+}
+
+#[test]
 fn the_default_scx_is_the_only_thing_planned_when_cpuset_is_off() {
     // The complement of cpuset_off_plans_nothing_at_all: with the shipped
     // default, `cpuset = "off"` plans the scheduler switch and NOTHING else. If
