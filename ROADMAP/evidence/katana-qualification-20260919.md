@@ -1036,3 +1036,179 @@ Under greetd this cannot happen: `loginctl terminate-user` takes the user
 manager with it and the next session starts its own portal. **Do not read §7.1
 as a statement about Hyprland or niri** — it is labwc's number, measured in
 labwc's session. The Hyprland and niri portal rows are untested.
+
+---
+
+## 8. The booted device readings — P2-005 / P2-006 / P2-007
+
+`ROADMAP/evidence/P2-005-007-device-maturity.md` ends with a seven-step
+checklist and the right answer per line. Run on katana, booted, with
+`apex devices all`. Full output: `~/qual/40-devices.log`.
+
+### 8.1 Step 2 — the six lines only a booted machine can answer
+
+| line | expected | katana | verdict |
+|---|---|---|---|
+| `links` | a count then one row per interface, **not** "could not reach NetworkManager" | `4` + `wlo1 wifi connected`, `lo loopback connected (externally)`, `p2p-dev-wlo1 wifi-p2p disconnected`, `enp5s0 ethernet unavailable` | **PASS** |
+| `connectivity` | `full, and checked` | `full, and checked` | **PASS** — `21-apex-connectivity.conf` landed |
+| `hotplug (udev)` | `systemd-udevd is running` | `systemd-udevd is running` | **PASS** |
+| `paired devices` | a count or `none` | `none` (adapter `hci0`, radio not blocked) | **PASS** |
+| `this machine serves` | `nothing (no smbd, no nfs-server)` | `nothing (no smbd, no nfs-server)` | **PASS** |
+| `auto-mount` | `udisks2 running` | `udisks2 running` | **PASS** |
+
+Six of six. None of them says "could not be asked" on this booted machine.
+
+### 8.2 Step 3 — the safety claim
+
+```
+hotspot / tethering        nothing known is in the way
+    NetworkManager opens DHCP and DNS on a shared link as it comes up;
+    `sudo apex firewall hotspot list` says which links are open right now
+$ systemctl is-active apex-firewall
+active
+$ sudo apex firewall status
+apex-firewall: policy: incoming dropped by default, outgoing allowed
+always allowed, and not removable here:
+  established replies, loopback, ICMP, DHCP, mDNS/LLMNR, ssh
+  not sharing this machine's connection on any link
+exceptions you have added:
+  (none)
+```
+
+**PASS.** The forbidden string `not known — the firewall could not be asked`
+does not appear, and `apex-firewall.service` is **active** — the positive
+control the L16 could not provide on the old image.
+
+### 8.3 Step 4 — avahi did not need unmasking on this machine
+
+```
+Printing
+  mDNS (avahi)               running
+  cups.socket                enabled
+  queues                     none configured
+  sharing a printer          off
+```
+
+**Already `running`.** The mask the checklist describes is an `/etc` fact and is
+not present on katana, so `systemctl unmask` was **not run** and nothing was
+changed. Recorded as a difference between the two machines, not as a step
+skipped.
+
+`queues: none configured` — no printer was found on the LAN. That is an absence
+of printers, not a failure to look: the scanner half of the same discovery
+**did** find one.
+
+### 8.4 Step 4, second half — scanning found a real driverless device
+
+```
+Scanning
+  scanners                   2 found
+      device `v4l:/dev/video0' is a Noname HD Webcam: HD Webcam virtual device
+      device `airscan:e0:Canon TR4600 series' is a eSCL Canon TR4600 series ip=192.168.1.121
+```
+
+**PASS, and this is the strongest single row in P2-005**: a real eSCL device
+discovered over the network by IP, through avahi, with no driver installed. That
+is the acceptance the item was written for.
+
+### 8.5 Step 6 — 802.1X: katana does not have the L16's exposure
+
+```
+enterprise Wi-Fi (802.1X)  no saved profile uses it
+```
+
+The L16 has two saved enterprise profiles that validate no certificate. Katana
+has none, so there is nothing to fix here. **N/A**, and the L16 finding stands
+unchanged.
+
+### 8.6 Step 5 — the hotspot, end to end
+
+**COULD NOT RUN.** It needs a phone to join the hotspot and somebody holding it;
+nobody is at the machine. `nmcli device wifi hotspot` would also have taken
+`wlo1` down, and `wlo1` is the only route to this machine —
+`enp5s0` reads `ethernet unavailable`. The firewall half of the claim is
+recorded in §8.2; the join-and-resolve half is not.
+
+### 8.7 Step 7 — printer sharing over the LAN
+
+**NOT RUN.** `sharing a printer: off` and `this machine serves: nothing`; there
+is no printer attached to share, so `apex devices share` has nothing to say
+about a firewall blocking it.
+
+### 8.8 Everything else the booted machine reported
+
+```
+$ systemctl --failed --no-legend | wc -l           → 0     (system)
+$ systemctl --user --failed --no-legend | wc -l    → 0     (user)
+$ uname -r                                         → 7.2.5-cachyos1.fc43.x86_64
+$ rpm -q kernel                                    → package kernel is not installed
+$ rpm -q kernel-cachyos                            → kernel-cachyos-7.2.5-cachyos1.fc43.x86_64
+```
+
+Zero failed units on both buses. The `vconsole-setup` boot race recorded for the
+L16 did not appear here.
+
+```
+$ apex boot status
+Bootloader     : grub / GRUB 2.12
+Secure Boot    : disabled
+Signed UKI     : no — kernel and initramfs were loaded separately
+Measured boot  : TPM present, event log present, signed PCR policy not in effect
+Boot counting  : not in effect — this machine boots via grub, which has no boot counter
+Last health    : no verdict recorded (the health unit has not run)
+
+$ sudo mokutil --sb-state      → SecureBoot disabled
+```
+
+**katana's Secure Boot is disabled** — the L16's is enabled. P0-001's "katana's
+Secure Boot" row is now answered, and the answer is *off*.
+
+```
+$ apex trust
+  image       : ghcr.io/andrenijman/apex-os:apex-266dcc572c51bdf9ec421d79eaa8784583184cd2
+  pulled      : no signature was checked — the deployment's origin records an unverified pull
+  next update : /etc/containers/policy.json accepts any image, signed or not
+  registry    : not contacted — `apex trust --verify` asks it
+```
+
+Expected, and correctly reported: the machine was rebased from an
+`ostree-unverified-registry:` origin, and the tool says so rather than claiming
+verification it did not do.
+
+```
+$ apex qualify status
+Micro-Star International Co., Ltd. GF   88d762dc320cc44c   12th Gen Intel(R) Core(TM) i7-12700H
+kernel 7.2.5-cachyos1.fc43.x86_64   firmware E17L3IMS.110
+consent: unset — nobody has been asked; nothing is being recorded
+  [?] sleep / audio / Wi-Fi / Bluetooth / external monitor / VRR / GPU driver /
+      desktop portals / upgrade / rollback / fresh install / Secure Boot
+0 passed, 0 failed, 12 not known
+```
+
+**Deliberately left at 0/0/12.** `apex qualify consent grant` records results on
+this disk, and consent is Andre's to give, not this unit's. Eight of those
+twelve checks are answered in this file and could be folded in with
+`apex qualify record` the moment he grants it — `external monitor`, `GPU driver`,
+`desktop portals`, `VRR`, `Secure Boot`, `sleep`, `Wi-Fi`, `Bluetooth`.
+
+```
+$ apex storage status
+[available]   /dev/nvme0n1   SPCC M.2 PCIe SSD, 2000.4 GB, solid state, 39 °C
+[available]   /dev/nvme1n1   Micron_2450_MTFDKBA1T0TFK, 1024.2 GB, solid state, 42 °C
+[unavailable] health rows    Smartctl … Permission denied … — run it with sudo
+[verified]    nvme0n1 trim   fstrim.timer enabled, last run Thu 2026-09-17 17:54:09 AWST
+[verified]    nvme1n1 trim   the filesystem discards as it frees blocks
+[available]   ext4 on /var/home/andre/Games   9% used, 1213.8 GiB free
+[available]   btrfs on /sysroot               93% used, 60.2 GiB free
+1 needing attention, 4 that could not be measured
+```
+
+The four "could not be measured" rows are SMART reads refused for lack of root
+and the tool says which command fixes it — a refusal reported as a refusal,
+which is the behaviour this program keeps asking for.
+
+**One row was caused by this unit and is not a real finding:**
+`[attention] squashfs on /var/mnt/apexext 100% used, 0.0 GiB free` was the
+read-only loop mount of `apex-user.raw` used for the §3 measurement. It has been
+unmounted. A squashfs is always 100 % used; if `apex storage` is going to look at
+loop-mounted read-only filesystems it should exclude them rather than flag them.
