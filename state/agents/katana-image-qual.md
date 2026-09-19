@@ -7,7 +7,7 @@ worktree: `/var/tmp/apex-work/wt-katana-qual3`, branch `task/katana-image-qual-2
   (created 2026-09-19 21:57 AWST off `roadmap/v2.2` @ f8b8184d; the round-33
   agent's own `task/katana-image-qual` @ 1375efa8 is ALREADY LANDED as merge
   `c13ac17a` and its worktree `wt-katana-qual2` can be removed)
-evidence file: `ROADMAP/evidence/katana-image-qual-20260919.md` — now 1213
+evidence file: `ROADMAP/evidence/katana-image-qual-20260919.md` — now 1218
   lines, §0 through §3, complete. The round-31 run is
   `ROADMAP/evidence/katana-qualification-20260919.md` and is a different file;
   read it, do not overwrite it.
@@ -16,14 +16,14 @@ scratch: `/var/tmp/apex-work/scratch-katana-image-qual/` (on katana)
 ## NEXT
 
 **THE RUN-BOOK IS FINISHED. There is no next action on katana for this unit.**
-§0–§3 of the evidence are written, committed as `ef0b95b2` + `60074e42` on
+§0–§3 of the evidence are written, committed as `ef0b95b2`, `60074e42` and `e2afa3cd` on
 `task/katana-image-qual-2`, and pushed. P1-038 and P1-043 both carry the
 hardware readings in `roadmap.yaml`. Both stay `partial`, and §3.8 plus the two
 evidence fields say exactly which rows are left and why none of them is an
 agent's.
 
 **What a stranger should do with this card:** land
-`task/katana-image-qual-2` (two commits, evidence only, no code) and close the
+`task/katana-image-qual-2` (three commits, evidence only, no code) and close the
 unit. Do **not** dispatch another agent at katana for §6 — every block has been
 run on the real machine through a real greetd login and the readings are in the
 file.
@@ -88,8 +88,10 @@ fixed here; this unit qualifies, it does not patch.
 2. **`mangoapp` crash-loops at ~2 Hz for the whole of every Gaming Mode
    session.** 15 376 core dumps in one boot; 14 403 respawns and 57 612
    `Glfw Error 65537/65550: X11: Platform not initialized` lines in a 2-hour
-   session (144 187 journal lines for one session). The overlay never renders.
-   `--mangoapp` is added unconditionally whenever `mangoapp` is on PATH.
+   session (144 187 journal lines for one session), and **4.0 GB of stored core
+   dumps** from two sessions on a `/var` that was already 94% full. The overlay
+   never renders. `--mangoapp` is added unconditionally whenever `mangoapp` is
+   on PATH. The dumps were cleared afterwards, 3 samples kept.
 3. **gamescope segfaults on every exit** (`139`, core dumped). Cosmetic today —
    the trap still runs on the clean path — but it predates this image
    (`SIGSEGV` 2026-09-19 09:21 on the OLD image, `SIGABRT` 2026-08-23).

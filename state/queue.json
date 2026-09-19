@@ -439,7 +439,8 @@
         "p2-c",
         "p2-b"
       ],
-      "title": "Rebase katana onto the tip image, then the gaming and multilib run-books"
+      "title": "Rebase katana onto the tip image, then the gaming and multilib run-books",
+      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 32) -- the run-book is FINISHED. Sections 0 through 6 are complete on hardware and landed as merges c13ac17a and de77ae5d; the evidence is 1,218 lines. Gaming Mode lands on the monitor on the discrete card (the selector's answer, then gamescope's five predicted lines verbatim, and zero occurrences of card1 or eDP-1 in a 3,789-line session log), and Steam reaches Big Picture inside gamescope for the first time on that machine -- zero BInit/VK_KHR_surface failures where every prior attempt died exactly there. pkg-share is confirmed: 177 shadowed paths to 0, 14 ELF shadows to 0, 0 to 13 i686 Vulkan ICDs, GStreamer 2 to 1344 features. greetd was restored and VERIFIED (cmp identical, 0 timers armed, apex game status false). The card's own NEXT says not to dispatch another agent at katana for section 6. What came OUT of the run is now unit gaming-release (the session cannot release itself; mangoapp crash-loops) and unit pkg-update (an image update delivers the fix to nobody). Untested and NAMED rather than claimed: Safe Graphics' automatic dGPU branch needs the panel genuinely dark, and no actual game was launched."
     },
     {
       "id": "p1-053e",
@@ -480,6 +481,14 @@
       ],
       "after": [],
       "title": "apex update does not deliver a baked fix to an existing machine"
+    },
+    {
+      "id": "gaming-release",
+      "items": [
+        "P1-043"
+      ],
+      "after": [],
+      "title": "Gaming Mode cannot release itself, and mangoapp fills /var with core dumps"
     }
   ],
   "_completed_units": {

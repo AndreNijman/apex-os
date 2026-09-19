@@ -147,6 +147,45 @@ need more headroom, the lever to reach for is a larger runner, not swap. (The
 elapsed difference is not evidence of anything — these are separate VMs with
 different registry-fetch luck.)
 
+### AND THE LIMIT'S VALUE IS NOT A LEVER EITHER — do not tune it
+
+`gml4` — GOMEMLIMIT=**4**GiB — **rc=0, 765 s, peak RSS 14.80 GiB**, 9830
+packages, `mem_avail` floor 326 MB. Across every successful arm:
+
+Every arm that has ever succeeded, across both rounds:
+
+| GOMEMLIMIT | source | peak RSS | elapsed | `mem_avail` floor |
+|---|---|---|---|---|
+| 4 GiB | `registry:` | **14.80 GiB** | 765 s | 326 MB |
+| 6 GiB | `registry:` | **14.80 GiB** | 831 s | 117 MB |
+| 10 GiB | `registry:` | 14.65 GiB | 904 s | 188 MB |
+| 10 GiB + 32 GB swap | `registry:` | 14.69 GiB | 698 s | 204 MB |
+| 10 GiB | `oci-dir:` | 14.72 GiB | 735 s | 125 MB |
+
+**Cutting the limit from 10 GiB to 4 GiB did not lower peak RSS — it raised it
+slightly.** Every successful arm lands at 14.65–14.80 GiB, ~92% of the box,
+whatever the number says. So the "overshoot" is not heap the limit can reclaim,
+and **the value is nearly irrelevant: what matters is that GOMEMLIMIT is set at
+all.** Setting it appears to keep the Go GC continuously active instead of
+letting GOGC=100 double the heap into the wall.
+
+Practical consequence, and the reason this is written down: **if this step fails
+again, lowering the number will not help.** Five arms say so.
+
+**And read the margin honestly: it is inside the noise.** The `mem_avail` floors
+of five passing arms are 117, 125, 188, 204 and 326 MB — a ~200 MB spread on a
+~200 MB margin, i.e. a confidence interval that includes zero. Nothing measured
+beats this configuration, so it is the right thing to land; but **the
+`mem_avail` floor printed by build `35447611644` is the number that decides
+whether this holds or whether probe 3 is needed.** Read it.
+
+A note on the obvious escape hatch: **a larger runner may not be available
+here.** `AndreNijman/apex-os` is a public repo owned by a **User**, not an
+organisation; GitHub's larger runners are a paid, per-account feature and
+nothing in this repo uses one (every job is `ubuntu-24.04`). Do not plan around
+it without checking it exists. The smaller-predicate route below is the lever
+that is definitely available.
+
 ### Two defects found in the fix that was waiting here
 
 - The predecessor's uncommitted `build-image.yml` draft referenced
