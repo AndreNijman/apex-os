@@ -8,7 +8,7 @@ machine: katana (MSI Katana GF76 12UG, Intel PTT fTPM)
 ## NEXT
 
 Nothing is running, nothing is half-finished, katana is clean and released.
-Branch tip `16fe7ad3` is pushed, cut from `roadmap/v2.2` `f602f1cb`.
+Branch tip `b5435034` is pushed, cut from `roadmap/v2.2` `f602f1cb`.
 
 **Andre said yes. The TPM was cleared. Run 2 is PASS.** L-001 went from 3 of 5
 runs to **4 of 5** and is still `partial`.
@@ -44,13 +44,16 @@ ever at risk.
 
 **A rule for anyone who touches katana again, which cost this unit a rewrite of
 the predecessor's safety argument:** `/dev/nvme0n1` is **not a stable name**
-there. The two NVMe controllers are probed asynchronously (`nvme1` =
-`0000:02:00.0`, `nvme0` = `0000:03:00.0`) and the indices swapped across the
-reboot, so the disk this programme is told never to write became the APEX disk.
-Identify by serial — `Micron_2450_MTFDKBA1T0TFK` `220534D1CB81` is **APEX**,
-`SPCC M.2 PCIe SSD` `240023925111005` is **WINDOWS** — or by PARTUUID, or by
-label (`apex-root`, `EFI-SYSTEM`, `games`). And **APEX's default boot entry
-lives on the Windows disk's ESP**: `Boot0000* APEX-OS Primary` is
+there. Three boots were logged. The first two — including the clear — enumerated
+the two NVMe controllers one way; the third, an **ordinary** reboot five minutes
+later with nothing special about it, enumerated them the other way, and the disk
+this programme is told never to write became the APEX disk. So the names are not
+merely changeable, they are changeable by nothing at all. Identify by serial —
+`Micron_2450_MTFDKBA1T0TFK` `220534D1CB81` is **APEX**, `SPCC M.2 PCIe SSD`
+`240023925111005` is **WINDOWS** — or by PCI function (`0000:03:00.0` = APEX,
+`0000:02:00.0` = Windows), or by PARTUUID, or by label (`apex-root`,
+`EFI-SYSTEM`, `games`). And **APEX's default boot entry lives on the Windows
+disk's ESP**: `Boot0000* APEX-OS Primary` is
 `HD(1,GPT,2ba9a2ea-…)/\EFI\APEX\SHIMX64.EFI`, the same 200 MB partition
 `Boot0002* Windows Boot Manager` boots from, and `BootCurrent` was `0000` on all
 three boots.
@@ -60,15 +63,21 @@ rather than removed — `state/queue.json`'s note for the `later` unit carries
 them.
 
 ## DONE
-- Round 32. Branched `task/later-silicon-2` from `roadmap/v2.2` `f602f1cb`. One
-  commit, `16fe7ad3`, pushed: the ROUND 32 record (§14–§21 of
+- Round 32. Branched `task/later-silicon-2` from `roadmap/v2.2` `f602f1cb`. Two
+  commits, `16fe7ad3` and `b5435034`, both pushed. `16fe7ad3` carries the
+  ROUND 32 record (§14–§21 of
   `ROADMAP/evidence/L-001-katana-tpm-20260919.md`), forward pointers on the
   three places round 31 left stale (§7's heading, §0.1's "the TPM was not
   cleared" row, §12's TPM-clear row), and four `docs/boot-v2.md` changes: the
   katana table's Run 2 row now reads **PASS**, the Run 2 procedure names the PPI
   path and says to *verify* the clear rather than infer it, the Recovery table
   gains an evicted-SRK row, and the one-command no-op paragraph gains its
-  silicon confirmation.
+  silicon confirmation. `b5435034` is a correction found in review: §19 blamed
+  the NVMe rename on the clear reboot, and the clear boot's own write counters
+  said otherwise — the swap landed on the **control** reboot, which is a
+  stronger statement of the same finding. It also fixes two wordings: §15.3 said
+  `HR_NV_INDEX` counts by attribute when it counts by range, and `boot-v2.md`
+  guessed which three events a clear adds to PCR 1.
 - Eight scripted runs on katana, each uploaded and run foreground over SSH, logs
   in the session scratchpad: `r1-prepare`, `r1b-time`, `r2-verify-clear`,
   `r3-refuse-recover`, `r4-reenrol`, `r5-srk`, `r6*-evt`, `r7-control`,
@@ -76,8 +85,9 @@ them.
   **control reboot with no PPI request** (`c93168d6` → `9dad77b0`), taken so
   that "the clear moved PCR 1" could be separated from "PCR 1 moves every boot".
 - L-001 recorded `partial` with ROUND 32 evidence **appended**: rounds 25–31
-  verified afterwards to be an exact 28 215-character prefix of the 38 793
-  stored. Counts unchanged at 92 done / 34 partial / 0 todo / 2 blocked.
+  verified afterwards to be an exact 28 215-character prefix of the 39 578
+  stored, re-verified after the correction commit. Counts unchanged at 92 done /
+  34 partial / 0 todo / 2 blocked.
 - `state/queue.json`: the `later` unit's `note` and `closed` rewritten for the
   answered question, and `_hardware_blocked` gains an L-001-run-5 entry so
   nobody re-derives why the last run is not dispatchable.
@@ -126,9 +136,10 @@ them.
 - **A TPM clear moves PCR 1 permanently on this board.** `68CBF16D…` →
   `AA21AE08…`, and the firmware's own log grew 42 328 → 42 805 bytes, 80 → 83
   events, 8 → 11 on PCR 1 — **identical again on the control boot**, so it is a
-  new steady state. Never bind a keyslot to PCR 1. Meanwhile **PCR 0, 4 and 7
-  are byte-identical across three boots**, which §13.1 called a cheap extra it
-  had skipped.
+  new steady state. Which three events were added is unrecoverable: round 31
+  kept the per-register count, not the event list. Never bind a keyslot to
+  PCR 1. Meanwhile **PCR 0, 4 and 7 are byte-identical across three boots**,
+  which §13.1 called a cheap extra it had skipped.
 - **`/dev/nvme0n1` is not a stable name on katana** — see NEXT. This corrects
   §0.1's *method*; its conclusion still holds, because every volume in both
   rounds lived in a loopback file on `apex-root` whatever the kernel called it,

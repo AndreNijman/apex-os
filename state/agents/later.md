@@ -8,7 +8,7 @@ branch: task/later-2
 
 **SUPERSEDED TWICE. Read `later-silicon-2.md` first, then `later-silicon.md`.**
 Round 32 (2026-09-19, unit `later-silicon-2`, branch `task/later-silicon-2`,
-commit `16fe7ad3`, pushed) answered the one question round 31 ended on.
+commits `16fe7ad3` and `b5435034`, pushed) answered the one question round 31 ended on.
 
 **Andre said yes, katana's TPM was cleared, and Run 2 is PASS.** L-001 is now
 **4 of 5 runs** and still `partial`. In one boot on an Intel PTT fTPM, a volume
@@ -23,9 +23,10 @@ and Run 3 has no firmware capsule to apply. Both are in `state/queue.json`
 under `_hardware_blocked`.
 
 **If you are going to touch katana: `/dev/nvme0n1` is not a stable name there.**
-The two NVMe controllers are probed asynchronously and the indices swapped
-across round 32's reboot, so the disk this programme is told never to write
-became the APEX disk. Use the serial, the PARTUUID or the label.
+The two NVMe controllers are probed asynchronously. Round 32 logged three boots;
+the third — an ordinary reboot, not the clear — enumerated them the other way
+round, and the disk this programme is told never to write became the APEX disk.
+Use the serial, the PCI function, the PARTUUID or the label.
 
 The round-31 card follows, and the round-29 card after that. Both are still
 accurate about what was true when they were written.
