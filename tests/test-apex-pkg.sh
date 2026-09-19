@@ -493,6 +493,74 @@ else
         "it carried on: $(printf '%s' "$blind_out" | tr '\n' ' ' | cut -c1-120)"
 fi
 
+# 6. `--` IS NOT A UNIVERSAL END-OF-OPTIONS SEPARATOR. dnf5 rejects it on every
+#    subcommand, writes the complaint to stderr and prints NOTHING to stdout:
+#
+#      $ dnf5 repoquery --quiet --queryformat '%{name}\n' -- chromium; echo $?
+#      Unknown argument "--" for command "repoquery". …      (stderr)
+#      2                                                      (and no stdout)
+#
+#    Two invocations in this engine carried one and both were silently dead.
+#    probe_rpm's meant `apex resolve` returned no repository candidate for ANY
+#    package, so it told a user to install the Chromium flatpak while `apex
+#    install chromium` installed the Fedora rpm (evidence §11.1). The other was
+#    in newer_satisfied_by_image, below.
+#
+#    Asserted as a CLASS, over the whole engine, because the defect is a
+#    property of dnf5 rather than of the two places anyone has noticed. Comment
+#    lines are stripped first: the comments explaining this quote the broken
+#    invocation verbatim, and a checker that trips over its own explanation is
+#    one somebody deletes.
+dd_hits=$(grep -vE '^[[:space:]]*#' "$ENGINE" | grep -cE '\bdnf5\b[^|]* -- ' || true)
+if [ "${dd_hits:-1}" = 0 ]; then
+    ok "no dnf5 invocation passes '--', which dnf5 refuses"
+else
+    bad "no dnf5 invocation passes '--', which dnf5 refuses" \
+        "$dd_hits invocation(s) still do, and each returns nothing for every input"
+fi
+
+# 7. newer_satisfied_by_image is the function that decides whether a package the
+#    repositories ship NEWER than the image's build is OMITTED (keep the image's
+#    copy, install proceeds) or REFUSED (that needs an OS update). It asked
+#    libdnf5 with a `--`, so it answered "nothing provides this" for every
+#    versioned requirement it was ever asked about, returned 1 every time, and
+#    guard_rpms refused packages it was written to omit.
+#
+#    Driven directly here with both tools stubbed, because the container suite
+#    that runs guard_rpms against a real repository cannot construct a
+#    newer-than-installed set on demand. BOTH directions are asserted, so the
+#    fix cannot be "always return 0", and the stub dnf5 refuses `--` exactly as
+#    the real one does, so the separator coming back fails this case too.
+NS=$WORK/newer
+mkdir -p "$NS/rpms" "$NS/yes" "$NS/no"
+: > "$NS/rpms/other.rpm"
+cat > "$NS/yes/rpm" <<'STUB'
+#!/bin/sh
+case "$*" in
+  *--requires*) echo "libfoo >= 2.0"; exit 0 ;;
+esac
+exit 0
+STUB
+cat > "$NS/yes/dnf5" <<'STUB'
+#!/bin/sh
+for a in "$@"; do
+    if [ "$a" = "--" ]; then
+        echo "Unknown argument \"--\" for command \"$1\"." >&2
+        exit 2
+    fi
+done
+echo libfoo
+exit 0
+STUB
+cp "$NS/yes/rpm" "$NS/no/rpm"
+sed 's/^echo libfoo$/exit 1/' "$NS/yes/dnf5" > "$NS/no/dnf5"
+chmod +x "$NS/yes/rpm" "$NS/yes/dnf5" "$NS/no/rpm" "$NS/no/dnf5"
+
+is "a newer build the image already satisfies is omitted" true \
+   "$(PATH="$NS/yes:$PATH" predicate newer_satisfied_by_image "$NS/rpms" libfoo)"
+is "a newer build nothing satisfies is not" false \
+   "$(PATH="$NS/no:$PATH" predicate newer_satisfied_by_image "$NS/rpms" libfoo)"
+
 echo
 printf 'apex-pkg: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" = 0 ]
