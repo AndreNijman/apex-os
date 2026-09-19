@@ -24,16 +24,16 @@ branch: **task/p2-d-7** (off roadmap/v2.2 @ bb229745, merged up to 36535383; tip
 `82b1efbc`). **P2-012 is `done`** — its last criterion is closed: a capsule can
 present a credential to a site and is never given it.
 
-There is **no engineering left on this unit that a round can close**. The three
-things that remain are named under BLOCKED ON and none is a test:
+**No CRITERION on this unit is closable by another round.** The three things
+that would close one are named under BLOCKED ON and none of them is a test:
 
 - P2-008's USB passthrough means detaching real hardware.
 - P2-009 needs a guest image carrying an agent CLI — a build.
 - Route C (a form login, an OAuth redirect chain) needs `geckodriver` in the
   image, which is a product decision about what APEX carries, not a round.
 
-Two small pieces of engineering are still named anywhere, and both are too
-small to be a unit:
+What IS left is two small pieces of engineering, neither of which closes a
+criterion and both of which are too small to be a unit on their own:
 
 - **`SessionInfo` carries neither `trust_ca` nor `present`**, so `apex agent
   status` cannot show that a capsule trusts an extra root or that one of its

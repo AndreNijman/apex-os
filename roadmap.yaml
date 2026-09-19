@@ -5672,17 +5672,24 @@ tasks:
     is by construction - the same policy bind (exercised through a real namespace by
     apex-agentd/tests/browser_ca_bind.rs, which ran rather than skipped on this machine, checked with
     --nocapture), the same kind of leaf, the same tunnel - and not by a browser run. The browserlab was not run
-    this round and no vmlab flow was. THREE LIMITS THAT ARE LIMITS AND NOT HOLES, all in the doc: a site that
-    transforms the credential before echoing it gets past the scrub; SessionInfo carries neither present nor
-    trust_ca, so apex agent status cannot show that a capsule trusts an extra root or that one of its destinations
-    is authenticated - NOTED, NOT BUILT, additive optional fields on a stability surface; and the pinned site sees
-    a TCP connect for a request the head rewrite refuses, which is CONNECT semantics (the tunnel is established
-    and then spoken on) and not a leak. OPERATIONAL: the L16's live daemon speaks an older protocol than 11, so
-    apex browser run --present will correctly refuse with the restart message until an image carries these
-    binaries, and NOTHING ON THE MACHINE WAS CHANGED THIS ROUND. WHAT REMAINS ON THIS CRITERION: nothing a round
-    can close. A form login or an OAuth redirect chain is route C, which needs geckodriver in the image - a
-    product decision about what APEX carries, recorded in docs/browser-capsule.md's not-built list, not a round of
-    work.
+    this round and no vmlab flow was. ONE GUARD OF THIS ROUND'S OWN IS CODE-REVIEWED AND NOT TESTED: present_pin's
+    secret-service half - the List call, find(|s| s.service == service), and the port defaulted from the stored
+    scheme - is reached by no test, because nothing in the tree starts apex-agentd against a private apex-secretd
+    and then asks it to Run with present; present_allowlist_is_only was split out of it precisely so the allowlist
+    comparison could be exercised without a secret service, and that half IS tested and mutated. The mutation that
+    proves the gap is find(|s| s.service == service) -> next(), which would pin a capsule to the first stored
+    credential's host whatever was named and leaves every suite in the repo green; it is recorded on the unit card
+    as the next round's work, alongside SessionInfo, because both want the same fixture. THREE LIMITS THAT ARE
+    LIMITS AND NOT HOLES, all in the doc: a site that transforms the credential before echoing it gets past the
+    scrub; SessionInfo carries neither present nor trust_ca, so apex agent status cannot show that a capsule
+    trusts an extra root or that one of its destinations is authenticated - NOTED, NOT BUILT, additive optional
+    fields on a stability surface; and the pinned site sees a TCP connect for a request the head rewrite refuses,
+    which is CONNECT semantics (the tunnel is established and then spoken on) and not a leak. OPERATIONAL: the
+    L16's live daemon speaks an older protocol than 11, so apex browser run --present will correctly refuse with
+    the restart message until an image carries these binaries, and NOTHING ON THE MACHINE WAS CHANGED THIS ROUND.
+    WHAT REMAINS ON THIS CRITERION: nothing a round can close. A form login or an OAuth redirect chain is route C,
+    which needs geckodriver in the image - a product decision about what APEX carries, recorded in
+    docs/browser-capsule.md's not-built list, not a round of work.
 - id: P2-013
   title: Per-project identity binding
   priority: P2
