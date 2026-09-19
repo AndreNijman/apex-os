@@ -84,4 +84,44 @@ object Desktop {
 
     /** Take a device's access away, as `apex remote revoke` does. */
     fun revoke(id: String): JSONObject = ask("""{"cmd":"revoke","device":"$id"}""")
+
+    // ── the human at the computer, which this phone is not ──────────────────
+    //
+    // §7 reserves filing and deciding a privilege request for a local origin,
+    // and `apex-agentd` enforces that on the wire. So the state an approvals
+    // screen exists to show cannot be produced from here at all, and these two
+    // ask the RUNNER to produce it — from a process in a login session on the
+    // computer, which is a human as far as the daemon is concerned.
+    //
+    // They are two named verbs with fixed shapes and not a general forwarder.
+    // A "send anything to apex-agentd" verb would be a way for a test to borrow
+    // a local origin for any request at all, and the value of this whole suite
+    // is that the phone's own origin is real.
+
+    /**
+     * File a privilege request at the computer. Returns the daemon's record.
+     *
+     * `Response::Request` is an internally tagged newtype variant, so the
+     * record's own fields sit beside `"reply":"request"` rather than under a
+     * key of their own — the same flattening `Approvals.kt` documents for
+     * `verb`. The reply object IS the request.
+     */
+    fun filePrivilegeRequest(verb: String, args: List<String>, reason: String): JSONObject {
+        val list = args.joinToString(",") { """"$it"""" }
+        return requestReply(
+            """{"cmd":"file_privilege_request","verb":"$verb","args":[$list],"reason":"$reason"}""",
+        )
+    }
+
+    /** Decide one, at the computer, the way `apex request allow|deny` does. */
+    fun decideLocally(id: Int, decision: String): JSONObject =
+        requestReply("""{"cmd":"decide_locally","id":$id,"decision":"$decision"}""")
+
+    private fun requestReply(line: String): JSONObject {
+        val reply = ask(line)
+        check(reply.optString("reply") == "request") {
+            "apex-agentd did not answer $line with a privilege request: $reply"
+        }
+        return reply
+    }
 }

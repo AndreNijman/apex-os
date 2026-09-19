@@ -198,16 +198,9 @@ impl State {
     }
 
     /// How a connection from this address reached the machine.
-    ///
-    /// Relay only when BOTH halves say so: the address is loopback *and* its
-    /// port is one a splice has armed. The kernel reuses ephemeral ports, and
-    /// a check on the port alone would eventually label a LAN session — or a
-    /// local one somebody made by hand — as relayed, which is a lie in the
-    /// direction that matters, because `Path::disclosure` tells the owner a
-    /// third party was involved.
     pub fn path_of(&self, peer: Option<SocketAddr>) -> RemotePath {
         match peer {
-            Some(addr) if addr.ip().is_loopback() && self.relay_sources.holds(addr.port()) => {
+            Some(addr) if arrived_by_relay(addr, |p| self.relay_sources.holds(p)) => {
                 RemotePath::Relay
             }
             _ => RemotePath::Lan,
@@ -264,6 +257,45 @@ impl State {
     }
 }
 
+/// Whether a connection from `peer` arrived through a relay splice.
+///
+/// Relay only when BOTH halves say so: the address is loopback *and* its port
+/// is one a splice has armed. The kernel reuses ephemeral ports, and a check on
+/// the port alone would eventually label a LAN session — or a local one
+/// somebody made by hand — as relayed, which is a lie in the direction that
+/// matters, because `Path::disclosure` tells the owner a third party was
+/// involved.
+///
+/// ## `to_canonical`, which is the whole reason this is a function of its own
+///
+/// On a dual-stack listener every IPv4 peer arrives as `::ffff:a.b.c.d`, and
+/// `Ipv6Addr::is_loopback` is **false** for `::ffff:127.0.0.1` — it answers
+/// only for `::1`. So the moment the listener moved from `0.0.0.0` to `::`,
+/// every relayed session on this machine would have been recorded as a LAN
+/// one, and the owner would have been told nobody else was on the path when
+/// somebody was. That is the regression `main.rs` named and declined to take
+/// blind; this is the measurement it asked for, and
+/// `a_v4_mapped_relay_splice_is_a_relay_session` is where it fails without
+/// this line.
+///
+/// `armed` is passed as a closure rather than the `Sources` itself so the rule
+/// can be asserted without a `State`, which needs an identity and a device
+/// store on disk to exist.
+pub fn arrived_by_relay(peer: SocketAddr, armed: impl Fn(u16) -> bool) -> bool {
+    peer.ip().to_canonical().is_loopback() && armed(peer.port())
+}
+
+/// A peer address with any IPv4-mapped form flattened back to plain IPv4.
+///
+/// Applied ONCE, where `serve.rs` reads `peer_addr()`, so that everything
+/// downstream — the relay/LAN decision, the address in `apex remote status`,
+/// and the key `unregister` matches a closing connection on — sees the same
+/// value. Canonicalising in each of those instead would leave the next one
+/// added to be forgotten, and the failure of forgetting is silent.
+pub fn canonical(peer: Option<SocketAddr>) -> Option<SocketAddr> {
+    peer.map(|a| SocketAddr::new(a.ip().to_canonical(), a.port()))
+}
+
 /// Whether a peer dialling `candidate` could reach a listener bound to `bound`.
 ///
 /// A socket bound to `0.0.0.0` accepts IPv4 and nothing else; one bound to
@@ -301,6 +333,61 @@ pub fn control_socket() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_v4_mapped_relay_splice_is_a_relay_session() {
+        // The regression that kept this daemon on `0.0.0.0`, written down as
+        // the test `main.rs` said it needed.
+        //
+        // A relay splice connects to the listener over loopback, and on a
+        // dual-stack listener that arrives as `::ffff:127.0.0.1`. Without
+        // `to_canonical` this is not loopback — `Ipv6Addr::is_loopback`
+        // answers only for `::1` — so the session is recorded as LAN and the
+        // owner is told nobody else was on the path.
+        let spliced: SocketAddr = "[::ffff:127.0.0.1]:41000".parse().expect("mapped loopback");
+        assert!(
+            arrived_by_relay(spliced, |p| p == 41000),
+            "a splice arriving IPv4-mapped is still a splice"
+        );
+        // The v4 form of the same thing, which is what a listener on 0.0.0.0
+        // sees and what has always worked.
+        let plain: SocketAddr = "127.0.0.1:41000".parse().expect("loopback");
+        assert!(arrived_by_relay(plain, |p| p == 41000));
+        // And the real IPv6 loopback, which a v6 splice would use.
+        let six: SocketAddr = "[::1]:41000".parse().expect("v6 loopback");
+        assert!(arrived_by_relay(six, |p| p == 41000));
+
+        // Both halves still have to say so. These are the lies in the other
+        // direction and they matter more: a LAN session labelled `relay`
+        // tells the owner a third party carried their terminal when none did.
+        assert!(
+            !arrived_by_relay(spliced, |_| false),
+            "a loopback connection on a port no splice armed is not a relay"
+        );
+        let lan: SocketAddr = "[::ffff:192.168.1.98]:41000".parse().expect("mapped lan");
+        assert!(
+            !arrived_by_relay(lan, |p| p == 41000),
+            "a phone on the LAN is not a relay however its address is written"
+        );
+    }
+
+    #[test]
+    fn the_peer_address_is_flattened_once_at_the_boundary() {
+        // What `serve.rs` stores, and therefore what `apex remote status`
+        // prints and what `unregister` matches on. A device list showing
+        // `::ffff:192.168.1.98` for a phone that is plainly on 192.168.1.98
+        // is the same address written in a way its owner cannot recognise.
+        let mapped: SocketAddr = "[::ffff:192.168.1.98]:55000".parse().expect("mapped");
+        assert_eq!(
+            canonical(Some(mapped)),
+            Some("192.168.1.98:55000".parse().expect("v4")),
+        );
+        // A genuine IPv6 peer is left exactly as it is: it is not a v4 address
+        // written differently, and rewriting it would lose it.
+        let six: SocketAddr = "[fd00::1]:55000".parse().expect("v6");
+        assert_eq!(canonical(Some(six)), Some(six));
+        assert_eq!(canonical(None), None);
+    }
 
     #[test]
     fn nothing_is_advertised_on_a_family_the_listener_does_not_accept() {

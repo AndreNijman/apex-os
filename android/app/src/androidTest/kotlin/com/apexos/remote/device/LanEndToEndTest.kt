@@ -1,16 +1,11 @@
 package com.apexos.remote.device
 
-import com.apexos.remote.core.MachineStore
 import com.apexos.remote.core.PairedMachine
-import com.apexos.remote.core.PairingOffer
-import com.apexos.remote.core.SecretBox
 import com.apexos.remote.core.SessionRefused
 import com.apexos.remote.core.Pairing
-import com.apexos.remote.core.StaticKey
 import com.apexos.remote.core.agent.MachineLink
 import com.apexos.remote.pairing.GatedBox
 import com.apexos.remote.pairing.NoRouteToMachine
-import com.apexos.remote.pairing.PairingService
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import kotlinx.coroutines.runBlocking
@@ -33,62 +28,24 @@ import org.junit.runner.RunWith
  * handshakes, the device store on disk, and `PairingService` — the production
  * class, not a copy of it.
  *
- * Not real: the keystore. `KeystoreSecretBox` gates the device key behind a
- * `BiometricPrompt`, and no amount of `adb` can present a fingerprint, so the
- * box handed to `PairingService` here is [PlainBox]. That substitution is the
- * ONE thing this file fakes and it is named rather than buried, because
- * P1-051's sixth criterion is about exactly that gate — which is observed
- * separately, by the app refusing to open at all without it.
+ * Not real: the keystore, and only the keystore. [Paired] owns that
+ * substitution and names it: `KeystoreSecretBox` gates the device key behind a
+ * `BiometricPrompt`, no amount of `adb` can present a fingerprint, so the box
+ * handed to `PairingService` here protects nothing. P1-051's sixth criterion
+ * is about exactly that gate — which is observed separately, by the app
+ * refusing to open at all without it.
  */
 @RunWith(AndroidJUnit4::class)
 @LargeTest
 class LanEndToEndTest {
 
-    /**
-     * A box that seals nothing.
-     *
-     * Not `null`, and not a branch in `PairingService`: the production path has
-     * to run, and the production path seals. What changes is only where the
-     * protection comes from — here, nowhere.
-     */
-    private class PlainBox : SecretBox {
-        override val describe: String = "an unprotected test box"
-        override fun seal(plaintext: ByteArray): ByteArray = plaintext.copyOf()
-        override fun open(ciphertext: ByteArray): ByteArray = ciphertext.copyOf()
-    }
+    private val service = Paired.service
 
-    private val service = PairingService()
+    private fun pair(name: String = "pixel-under-test"): PairedMachine = Paired.machine(name)
 
-    /** Pair this phone with the desktop, using an offer the daemon just minted. */
-    private fun pair(name: String = "pixel-under-test"): PairedMachine = runBlocking {
-        val offer = Pairing.decodeOffer(Desktop.offerPayload())
-        service.pair(
-            offer = offer,
-            deviceName = name,
-            // **false**, and the honesty is the point. `user_verification`
-            // says a second factor gates this device's key; a `PlainBox` gates
-            // nothing, so claiming otherwise would make the desktop record a
-            // protection that does not exist and then let this suite assert
-            // that it had. P1-051's sixth criterion is met by the app refusing
-            // to open without the prompt at all, which is observed elsewhere
-            // and cannot be observed from here.
-            boxFor = { GatedBox(PlainBox(), userVerification = false) },
-            nowMs = System.currentTimeMillis(),
-        )
-    }
+    private fun identityOf(machine: PairedMachine) = Paired.identityOf(machine)
 
-    /**
-     * The device key back out of the record, through the SAME call the app
-     * makes — `MachineStore.identityFor`, with the same box that sealed it.
-     * Nothing here reaches around the store.
-     */
-    private fun identityOf(machine: PairedMachine): StaticKey =
-        MachineStore().identityFor(machine, PlainBox())
-
-    private fun linkTo(machine: PairedMachine): MachineLink {
-        val identity = identityOf(machine)
-        return MachineLink({ runBlocking { service.connect(machine, identity) } })
-    }
+    private fun linkTo(machine: PairedMachine): MachineLink = Paired.linkTo(machine)
 
     // ── pairing ─────────────────────────────────────────────────────────────
 
@@ -119,7 +76,7 @@ class LanEndToEndTest {
         val payload = Desktop.offerPayload()
         val offer = Pairing.decodeOffer(payload)
         runBlocking {
-            service.pair(offer, "first-use", { GatedBox(PlainBox(), false) }, System.currentTimeMillis())
+            service.pair(offer, "first-use", { GatedBox(Paired.PlainBox(), false) }, System.currentTimeMillis())
         }
         // The same code, scanned twice. A second phone must not get in.
         try {
@@ -127,7 +84,7 @@ class LanEndToEndTest {
                 service.pair(
                     Pairing.decodeOffer(payload),
                     "second-use",
-                    { GatedBox(PlainBox(), false) },
+                    { GatedBox(Paired.PlainBox(), false) },
                     System.currentTimeMillis(),
                 )
             }
