@@ -130,6 +130,35 @@ class AgentdRequestWireTest {
     }
 
     @Test
+    fun `the generic adapter gets the program it needs, and nobody else gets an empty list`() {
+        // `RunRequest.args` — "extra arguments appended after the adapter's
+        // own". Without it a phone could not start `generic` AT ALL, and
+        // `generic` is in every runtime's `Hello.agents`. Measured against a
+        // real daemon from a Pixel 7a: "the generic adapter needs a program to
+        // run; pass one after `--`".
+        expect(
+            "run_generic_with_args",
+            Agentd.run(
+                cwd = "/home/andre",
+                cols = 80,
+                rows = 24,
+                agent = "generic",
+                args = listOf("/bin/cat", "-v"),
+            ),
+        )
+        // Absent when empty, like every other optional key: `args` has a serde
+        // default, and a daemon that predates the field rejects the key.
+        assertFalse(
+            Agentd.run("/x", 80, 24, agent = "claude").contains("args"),
+            "a request with no extra arguments must not mention any",
+        )
+        // And the rule the screen and the link both consult.
+        assertTrue(Agentd.commandIsRequired("generic"), "generic carries no program")
+        assertFalse(Agentd.commandIsRequired("claude"), "claude does")
+        assertFalse(Agentd.commandIsRequired(null), "the machine's default is not generic by name")
+    }
+
+    @Test
     fun `worktrees is a verb — the note that said it was not read the wrong enum`() {
         expect("worktrees_all", Agentd.worktrees())
         expect("worktrees_one", Agentd.worktrees("apex"))
@@ -183,7 +212,8 @@ class AgentdRequestWireTest {
                 "hello", "list", "info", "attach", "resize", "signal", "input",
                 "clipboard",
                 "receive", "receive_hostile_name",
-                "run_minimal", "run_full", "worktrees_all", "worktrees_one",
+                "run_minimal", "run_full", "run_generic_with_args",
+                "worktrees_all", "worktrees_one",
                 "requests", "grants", "system_grants",
                 "revoke_one", "revoke_all", "revoke_system_grant",
             ),

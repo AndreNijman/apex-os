@@ -29,6 +29,13 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+
+        // P1-060's first two criteria are claims about what ANDROID does with
+        // this code — a screen reader reading a label, a rotation surviving, a
+        // Noise handshake crossing real Wi-Fi — and no JVM test can make one.
+        // Every Compose path in this app had been compiled and never run until
+        // the suite this runner starts was first executed on a Pixel 7a.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     // ── Release signing (P1-060) ────────────────────────────────────────────
@@ -144,6 +151,38 @@ dependencies {
 
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)
+
+    // ── On-device (instrumented) tests ──────────────────────────────────────
+    //
+    // JUnit **4**, and not because the unit tests' JUnit 5 was a mistake.
+    // `AndroidJUnitRunner` is a JUnit 4 runner; the Jupiter engine does not run
+    // under it, and an `androidTest` source set written for Jupiter compiles
+    // and then discovers zero tests — which reports success. The two source
+    // sets therefore use different frameworks on purpose.
+    androidTestImplementation(libs.androidx.test.runner)
+    // Not imported anywhere. It is here to raise the floor, exactly as
+    // `fragment` is above: Compose's test rule reaches `Espresso.onIdle()` on
+    // every `waitForIdle`, the transitive resolution is 3.5.0, and 3.5.0 is
+    // broken on every Android from 14 up. See the note in libs.versions.toml.
+    androidTestImplementation(libs.androidx.test.espresso.core)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.uiautomator)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    // `enableAccessibilityChecks()`: the Accessibility Test Framework, run
+    // against the real semantics tree on a real phone. This is the assertion
+    // that AccessibilityStaticsTest deliberately could not make — a source scan
+    // can see that a label exists, not that Android exposes it.
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4.accessibility)
+    // NOT `ui-test-manifest`. It exists to give `createComposeRule()` an empty
+    // `ComponentActivity` to compose into, and nothing here calls that any
+    // more: a stock host is destroyed a frame after launch behind a secure
+    // keyguard, so every Compose test in this module uses
+    // `createAndroidComposeRule<ComposeHostActivity>()` and the activity is
+    // declared in `src/debug` with `showWhenLocked`. Keeping the artefact would
+    // put a second, unusable host activity in the debug manifest beside the one
+    // that works.
 }
 
 tasks.withType<Test>().configureEach {
