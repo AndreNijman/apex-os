@@ -73,7 +73,13 @@ machine tracks.
 
 ## NEXT
 
-In this order.
+**Now:** reset `wt-build-verify` onto `roadmap/v2.2` @ 7f647470 (clean, nothing
+committed), then rewrite the `build-local.sh` shell-ref block (lines 105-127) to
+the 3-rung chain want -> roadmap/v2.2 -> main. CI run 35433705393 was at the
+`core` job as of ~09:11Z (rust/changes green, installer-iso skipped) — poll with
+`gh run view 35433705393`, never `gh run watch` (600s tool cap).
+
+Then, in this order.
 
 1. **Watch 35433705393 to completion** (`gh run watch 35433705393`, or poll
    `gh run view`). It is ~1 hour. Report per job, and if the SBOM step dies the
