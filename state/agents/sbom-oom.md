@@ -352,18 +352,29 @@ needs re-deriving.** Two runs are in flight; read them in this order.
        it is not the "restrict the cataloguers" trade the comment block rightly
        refuses. Worth a probe arm of its own.
 
-2. **There is nothing to commit from probe round 2.** It ran, all four arms are
+2. **When you land this, refresh the SBOM step's own comment block from this
+   card.** `a40cf827`'s comment predates probe round 2 and its remedy paragraph
+   is now wrong: it says *"the answer is more headroom (a swapfile on the 86 GB
+   of free disk, or a larger runner)"*. Probe 2 measured that a swapfile buys
+   **16 MB** while the limit is set, and this repo is a **User** account with
+   every job on `ubuntu-24.04`, so a larger runner is unverified. Fix it at
+   landing, not now — a new commit would change the SHA build `35447611644` is
+   verifying. Its commit title also says GOMEMLIMIT is the *whole* fix; after
+   `swap32-only` the accurate word is the *efficient* fix. The card is the
+   record; the comment catches up when it lands.
+
+3. **There is nothing to commit from probe round 2.** It ran, all four arms are
    read, and every one of them said "change nothing": swap adds no margin while
    the limit is set, and the limit's value is not a lever. The results are in
    FOUND so that nobody spends a round re-deriving them. **Do not add a
    swapfile and do not tune the number.**
 
-3. **If build 1's `mem_avail` floor is alarming** (say under ~100 MB), probe 3
+4. **If build 1's `mem_avail` floor is alarming** (say under ~100 MB), probe 3
    is the smaller-predicate arm described above — cut syft's file/relationship
    work at source, which plausibly helps the 166 MB predicate and the RSS at
    once. That is the only untried lever with real headroom behind it.
 
-4. If syft survived in build 1, update `dispatch.json` / roadmap status for this
+5. If syft survived in build 1, update `dispatch.json` / roadmap status for this
    unit and unblock unit `final`, which this gates.
 
 **Do not re-run the round-1 arms.** `repro`, `ocidir`, `ocidir-decompressed`
