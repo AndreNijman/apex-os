@@ -175,7 +175,14 @@ jobs:
           # that exists to notice exactly that — lives in this job and would not
           # have run. The check whose job it is to catch a deletion was disarmed
           # by the deletion.
-          grep -Eq '^(files/|tests/|Containerfile|\.github/workflows/)' <<<"$files" && engine=true
+          # `build-local.sh` is in the ENGINE selector for the same reason as
+          # every line above, and it is the seventh instance. It sits at the
+          # repository ROOT, which no selector named, so a PR editing only it
+          # set every selector false, skipped every job, and passed — including
+          # tests/test-build-local-shell-ref.sh, the suite that exists to hold
+          # its apex-shell pinning rule. The file an assertion is ABOUT has to
+          # select the job that runs it.
+          grep -Eq '^(files/|tests/|Containerfile|build-local\.sh|\.github/workflows/)' <<<"$files" && engine=true
           # The Android client. Its own job, because none of the three above can
           # build it — and because without this rule an Android-only change
           # matches nothing, every selector stays false, every job is skipped,
@@ -3154,6 +3161,23 @@ jobs:
               echo "::error::the labwc session suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
               exit 1
           fi
+
+      # A local build vendors apex-shell too, and it was vendoring the WRONG
+      # ONE. build-local.sh asked the remote for `refs/heads/main`
+      # unconditionally while this workflow and build-image.yml had both already
+      # been changed to pin the MATCHING branch — the third appearance of one
+      # defect. The bill is an hour per attempt: apex-os roadmap/v2.2 built
+      # against apex-shell main dies at Containerfile.base STEP 157/180 in
+      # check-labwc-keybinds, on W-A-s (screen reader) and W-A-v (voice).
+      #
+      # The suite runs the real build-local.sh against LOCAL fixture remotes, so
+      # it needs no network and builds nothing: it drives all three rungs of the
+      # chain, the detached-HEAD case, an unreachable remote, and an explicit
+      # APEX_SHELL_REF. Proved in both directions before landing — 25 passed
+      # against the fix, 8 passed / 17 failed against the block it replaced.
+      - name: build-local.sh pins the matching apex-shell branch
+        if: ${{ !cancelled() }}
+        run: ./tests/test-build-local-shell-ref.sh
 
       - name: Every suite is actually run by CI
         # `if: !cancelled()` for the reason the comment block below gives
