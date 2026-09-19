@@ -986,9 +986,22 @@ fn gaming_json(r: &Readiness, probes_programs: bool) -> String {
         Some(v) => format!("[{}]", list(v)),
         None => "null".to_string(),
     };
+    let opt = |v: &Option<String>| v.as_deref().map(js).unwrap_or("null".into());
+    let display = format!(
+        "{{\"output\":{},\"card\":{},\"pci_id\":{},\"vendor\":{},\
+         \"cards_with_displays\":{},\"gamescope_args\":[{}],\"why\":{},\"problem\":{}}}",
+        opt(&r.display.output),
+        opt(&r.display.card),
+        opt(&r.display.pci_id),
+        opt(&r.display.vendor),
+        r.display.cards_with_displays,
+        list(&r.display.gamescope_args()),
+        js(&r.display.why),
+        opt(&r.display.problem),
+    );
     format!(
         "{{\"ready\":{},\"probes_programs\":{},\"boots_to_game\":{},\
-         \"preselected_session\":{},\"checks\":{{{}}},\"gamepads\":{},\
+         \"preselected_session\":{},\"checks\":{{{}}},\"display\":{display},\"gamepads\":{},\
          \"blockers\":[{}],\"warnings\":[{}],\"install_hint\":{}}}",
         r.is_ready(),
         probes_programs,
