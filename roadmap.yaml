@@ -3217,19 +3217,30 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED 2026-09-19 (round 33): task/p1-053e-device @ 9231f72a is on apex-os roadmap/v2.2 as merge 859cbb2b
-    (7f647470 -> 859cbb2b, --no-ff, six commits, 914 insertions over 12 files). Rust changed in this merge, so the
-    workspace was actually rebuilt ON THE MERGED TIP rather than trusted from the branch: cargo test --locked
-    --workspace --no-fail-fast 3407 passed / 0 failed / 2 ignored across 57 targets, cargo clippy --workspace
-    --all-targets --locked -D warnings exit 0 with zero warnings, check-no-conflict-markers.sh PASS. Pushed with
-    --force-with-lease. TWO CORRECTIONS FROM A REAL PHONE, 2026-09-19 (task/p1-053e-device @ 9231f72a), and the
-    status is left at done deliberately — see the second. (1) THE DESKTOP BOUND IPv4 ONLY, AND WIDENING IT WOULD
-    HAVE MISLABELLED EVERY RELAYED SESSION. main.rs had bound 0.0.0.0 with a comment naming the regression that
-    stopped it being widened, and the regression was real: a :: listener hands every IPv4 peer to accept(2) as
-    ::ffff:a.b.c.d, and Ipv6Addr::is_loopback is FALSE for ::ffff:127.0.0.1 — it answers only for ::1. A relay
-    splice reaches this daemon over loopback, so State::path_of would have called every relayed session a LAN one
-    and Path::disclosure would have told the owner nobody else was on the path. Measured before anything changed:
-    arrived_by_relay extracted from path_of so the rule can be asserted without a State, then
+    THE ANDROID HALF LANDED ITS CLIENT (2026-09-19, round 33, task/p1-052-android-relay @ 8dd2cc9e, NOT YET
+    LANDED). P1-052 has been 'done' for the Worker and the desktop since 2026-09-12, but the phone could not dial
+    it: there was no relay client on Android at all. There is one now - a hand-rolled RFC 6455 client in :core
+    sharing relay.rs's test vectors, a dialler in :app that sets
+    sslParameters.endpointIdentificationAlgorithm=HTTPS before the handshake (WITHOUT WHICH SSLSocket VALIDATES
+    THE CHAIN AND NOT THE NAME, and the rendezvous id would go to whoever answered the address - a defect every
+    'is TLS on?' test passes), and a PairingService fallback on both legs. The deployment was exercised as
+    deployed, not as a double: Cloudflare returned 101 and {"relay":"paired"} to an independent Python guest, and
+    a real Pixel 7a paired and ran a session through it - device suite OK (35 tests). relay/README.md was
+    corrected: it still said the relay was not deployed, that src/index.js had never been executed, and that the
+    blocker was 'a client that cannot dial wss://'. All three were false. LANDED 2026-09-19 (round 33):
+    task/p1-053e-device @ 9231f72a is on apex-os roadmap/v2.2 as merge 859cbb2b (7f647470 -> 859cbb2b, --no-ff,
+    six commits, 914 insertions over 12 files). Rust changed in this merge, so the workspace was actually rebuilt
+    ON THE MERGED TIP rather than trusted from the branch: cargo test --locked --workspace --no-fail-fast 3407
+    passed / 0 failed / 2 ignored across 57 targets, cargo clippy --workspace --all-targets --locked -D warnings
+    exit 0 with zero warnings, check-no-conflict-markers.sh PASS. Pushed with --force-with-lease. TWO CORRECTIONS
+    FROM A REAL PHONE, 2026-09-19 (task/p1-053e-device @ 9231f72a), and the status is left at done deliberately —
+    see the second. (1) THE DESKTOP BOUND IPv4 ONLY, AND WIDENING IT WOULD HAVE MISLABELLED EVERY RELAYED SESSION.
+    main.rs had bound 0.0.0.0 with a comment naming the regression that stopped it being widened, and the
+    regression was real: a :: listener hands every IPv4 peer to accept(2) as ::ffff:a.b.c.d, and
+    Ipv6Addr::is_loopback is FALSE for ::ffff:127.0.0.1 — it answers only for ::1. A relay splice reaches this
+    daemon over loopback, so State::path_of would have called every relayed session a LAN one and Path::disclosure
+    would have told the owner nobody else was on the path. Measured before anything changed: arrived_by_relay
+    extracted from path_of so the rule can be asserted without a State, then
     a_v4_mapped_relay_splice_is_a_relay_session FAILED on [::ffff:127.0.0.1]:41000 with that port armed.
     to_canonical() on both sides of the seam — once at the boundary where serve.rs reads peer_addr(), so the
     stored peer, apex remote status and the key unregister matches see one spelling, and once inside the rule so a
@@ -4047,61 +4058,98 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    LANDED 2026-09-19 (round 33): task/p1-053e-device @ 9231f72a is on apex-os roadmap/v2.2 as merge 859cbb2b
-    (7f647470 -> 859cbb2b, --no-ff, six commits, 914 insertions over 12 files). Rust changed in this merge, so the
-    workspace was actually rebuilt ON THE MERGED TIP rather than trusted from the branch: cargo test --locked
-    --workspace --no-fail-fast 3407 passed / 0 failed / 2 ignored across 57 targets, cargo clippy --workspace
-    --all-targets --locked -D warnings exit 0 with zero warnings, check-no-conflict-markers.sh PASS. Pushed with
-    --force-with-lease. ROUND 2 ON THE PIXEL 7a, 2026-09-19 (task/p1-053e-device, six commits off roadmap/v2.2 @
-    7f647470, tip 9231f72a). C1 IS NOW MET EXCEPT FOR THE RELAY, AND THE RELAY IS NOT A MISSING TEST — IT IS A
-    MISSING FEATURE. There is no relay client on Android at all: PairingService says so in its own error text
-    ("and no relay client has been written yet"), :core has no WebSocket code, core/build.gradle.kts carries
-    bouncycastle and kotlinx-serialization and nothing else, and Help.kt tells the user the relay has no
-    deployment. Covering the relay leg on a device means writing P1-052's Android half — an RFC 6455 client, a
-    PairingService fallback, a relay double the phone can dial, apex-remoted --relay carried through the suite's
-    broker including restart_remoted, a device test that makes the LAN unreachable so the relay is the leg under
-    test, and HelpParityTest's inverse list moved. That is its own unit and is recommended as its own card; a half
-    relay client would be worse than none. EVERYTHING ELSE C1 NAMES NOW RUNS ON THE PHONE. PTY INPUT/OUTPUT, the
-    first of the two gaps round 1 named: TerminalOnDeviceTest composes the real TerminalScreen with a real
-    TerminalController attached to a real /bin/cat through apex-remoted and apex-agentd, types a per-run sentinel
-    through TerminalController.sendText — the path a keystroke takes from the hidden BasicTextField, io thread
-    included — and asserts it comes back in the Snapshot the repaint loop hands TerminalView. Mutated to print
-    what the screen held: the sentinel appears twice, the PTY's echo and cat's own output. APPROVALS, the third
-    gap, which the dispatch did not name and round 1's evidence did: ApprovalsOnDeviceTest. The round trip is the
-    wrong shape for this criterion and that is the finding rather than a shortcut — privilege.rs refuses decide
-    from any non-local origin and the check sits BEFORE the request is looked up, so a phone cannot approve,
-    cannot deny, and cannot learn from a refusal whether the request exists. Approvals.kt has recorded that since
-    it was written and nothing had ever sent the frame. This builds the decide line by hand, sends it against a
-    REAL pending request, and asserts permission_denied naming claude-remote-control and §7; then the same frame
-    for id 999999, which a local caller is told does not exist and a phone is told the identical thing, so the
-    refusal is not an oracle for request ids. What a phone MAY do is asserted too: a request filed at the computer
-    reaches the phone with verb, packages, reason and a local request_origin intact, a human at the computer
-    denies it and the phone sees denied, grants and system_grants both answer, and revoking something absent is
-    no_such_request and NOT permission_denied. C2 GAINS THE TERMINAL AND LOSES A CLAIM NOBODY HAD MADE. Landscape
-    at font scale 2.0 on this phone is a 63x7 terminal, and the PTY on the computer agrees at 63x7 — handle_attach
-    and Request::Resize write the attaching terminal's size into SessionInfo, so that number is the phone's own
-    measurement reaching the machine. Not 80x24: the largest accessibility text size costs 17 of the 80 columns
-    Settings.terminalTextSp says these TUIs lay out for. AND: TerminalView is a bare Canvas, so no glyph on the
-    terminal screen reaches the semantics tree and TalkBack has nothing to announce there. That is a real C2 gap
-    and it is written down rather than papered over. C2 still also lacks a tablet and a foldable, which do not
-    exist here. THREE THINGS MEASURED THAT CHANGE HOW THIS SUITE IS RUN. (1) A ROADMAP-DISPATCHED AGENT CANNOT
-    PAIR, AND THAT IS THE §7 GUARD WORKING. This agent's cgroup is
-    user@1000.service/app.slice/apex-roadmap-resume.service, so origin::observe_pid classifies the broker as
-    scheduled-job and apex-remoted refuses every offer. First run on the tip: 24 tests, 8 failures, all eight that
-    sentence, after two minutes of gradle. Round 1 ran inside an interactive session and got local-terminal, which
-    is why it never saw this. The runner now asks once, before building anything, and when the answer names
-    scheduled-job it names tests/in-login-session.sh and the two variables that wrapper does not forward. Every
-    number below was produced through that wrapper, in a real PAM login session. (2) TerminalScreen CANNOT BE
-    HOSTED BY createAndroidComposeRule. Its withFrameNanos repaint loop keeps the Recomposer permanently busy, so
-    ComposeTestRule.setContent never returns from its own waitForIdle — IdlingResourceTimeoutException,
-    hadRecomposerChanges = true, measured, all three tests. The file hosts the composition through
-    ComponentActivity.setContent, the way MainActivity does, and polls. (3) MachineLink.request returns an error
-    reply as a STRING and does not throw; the throw lives in the Agentd.readX parsers above it. A test that only
-    caught AgentError around the hand-built decide frame reported "a phone approved a root operation" — it had
-    not, the daemon had refused in writing and nothing read the writing. THE DEPRECATED RULE IS GONE:
-    androidx.compose.ui.test.junit4.v2.createAndroidComposeRule in the three files that use it
-    (TerminalOnDeviceTest does not and cannot), in its own commit because it swaps UnconfinedTestDispatcher for
-    StandardTestDispatcher; a --rerun-tasks compile no longer emits the deprecation. ONE MORE DEFECT THE ROUND
+    THE RELAY LEG NOW EXISTS ON ANDROID AND IS PROVEN THROUGH THE REAL DEPLOYED RELAY (2026-09-19, round 33,
+    task/p1-052-android-relay @ 8dd2cc9e, six commits, NOT YET LANDED). C1's last missing part was not a test, it
+    was a missing feature: there was NO relay client on Android at all - PairingService.kt:108 printed "(and no
+    relay client has been written yet)", :core had no WebSocket code and there was no OkHttp in the build, while
+    MachinesScreen.kt:288 already offered "relay available". The seam PairingService.kt:21 claimed exists does
+    exist, measured: Client.pair and Client.openSession take an InputStream/OutputStream pair and nothing else, so
+    the relay leg is one more implementation of that pair. Built: android/core/.../Relay.kt, an RFC 6455 client
+    ported from apexd/apex-remote-core/src/relay.rs and checked against the SAME vectors that file is checked
+    against (RFC 6455 s1.3 accept value verbatim, the three length forms at their boundaries, fragmentation, a
+    control frame inside a fragmented message, every frame a server may not send, a 64-bit length with the top bit
+    set); RelayLink, which consumes the relay's notices, pings and close inside itself so nothing above the
+    transport can branch on which leg it is on, and turns peer-gone into end-of-stream; and
+    android/app/.../RelayDialler.kt for the socket and TLS. NO NEW DEPENDENCY - hand-rolled, argued on the card
+    rather than defaulted: :core is a pure JVM module, javax.net.ssl is the trust store on both platforms, and
+    OkHttp's callback-and-queue WebSocket would have to be adapted back into a blocking stream pair to reach that
+    seam anyway. DISCLOSURE, which docs/remote.md requires of a relay path: ConnectionReport carries
+    Rendezvous.Path, the banner prints Path.disclosure() at the moment a third party joins the path, Help.kt's
+    "the relay has no deployment yet" note is gone, and RendezvousTest reads the disclosure strings OUT of
+    rendezvous.rs and compares - mutating the LAN line to "totally private and safe" fails it. MEASURED END TO
+    END, twice and independently: (1) a hand-rolled Python guest dialled wss://apex-relay.andrenijman.com at the
+    rendezvous apex-remoted was holding and got HTTP/1.1 101, a matching accept value, {"relay":"paired"}, and its
+    hello byte reached the daemon, which spliced it onto its own listener - so the client under test was not also
+    the witness; (2) the phone. run-device-suite.sh now starts apex-remoted (and the broker's restart_remoted)
+    with --relay pointed at the REAL deployment, and RelayOnDeviceTest forces the relay leg by copying the
+    daemon's offer with lan=emptyList() - real key, real one-time token, rendezvous derived from the pinned key,
+    and the desktop's own record of the pairing asserted, which is the half a phone cannot fake. GATES on
+    8dd2cc9e: device suite OK (35 tests) (was 32), TalkBack bound; :core:test 496/0 (was 459); :app 51/0 (was 44);
+    cargo test --locked --workspace 3407 passed 0 failed 2 ignored (unchanged); clippy -D warnings zero;
+    check-help-prose 1755 words TOTAL 0 no allowlist; shellcheck 168/0/0; suites-run-in-ci 77/73/4/0;
+    containerfile-assertions 194 checked 0 failed 0 inert; doc-verbs 0 undocumented-and-undeclared. MUTATION
+    FINDINGS, because passing gates were not enough: four mutations into Relay.kt caught only two - peer-gone
+    treated as a word to ignore survived (the double had nothing left to send after the notice) and MAX_FRAME
+    halved survived (the parity assertion looked for the literal in the Rust source and compared it to nothing);
+    both gates fixed and re-mutated. The device test was mutated too, with APEX_DEVICE_SUITE_RELAY= : all three
+    fail naming the missing argument, so the pass is not a suite asserting nothing. WHAT THIS DOES NOT CONCLUDE:
+    the phone is still on the same Wi-Fi, and takes the relay because the LAN addresses were withheld rather than
+    because they were unreachable. A phone on mobile data needs a person to hold it. C2 remains open and
+    unfakeable - it names a tablet and a foldable, neither of which exists here. LANDED 2026-09-19 (round 33):
+    task/p1-053e-device @ 9231f72a is on apex-os roadmap/v2.2 as merge 859cbb2b (7f647470 -> 859cbb2b, --no-ff,
+    six commits, 914 insertions over 12 files). Rust changed in this merge, so the workspace was actually rebuilt
+    ON THE MERGED TIP rather than trusted from the branch: cargo test --locked --workspace --no-fail-fast 3407
+    passed / 0 failed / 2 ignored across 57 targets, cargo clippy --workspace --all-targets --locked -D warnings
+    exit 0 with zero warnings, check-no-conflict-markers.sh PASS. Pushed with --force-with-lease. ROUND 2 ON THE
+    PIXEL 7a, 2026-09-19 (task/p1-053e-device, six commits off roadmap/v2.2 @ 7f647470, tip 9231f72a). C1 IS NOW
+    MET EXCEPT FOR THE RELAY, AND THE RELAY IS NOT A MISSING TEST — IT IS A MISSING FEATURE. There is no relay
+    client on Android at all: PairingService says so in its own error text ("and no relay client has been written
+    yet"), :core has no WebSocket code, core/build.gradle.kts carries bouncycastle and kotlinx-serialization and
+    nothing else, and Help.kt tells the user the relay has no deployment. Covering the relay leg on a device means
+    writing P1-052's Android half — an RFC 6455 client, a PairingService fallback, a relay double the phone can
+    dial, apex-remoted --relay carried through the suite's broker including restart_remoted, a device test that
+    makes the LAN unreachable so the relay is the leg under test, and HelpParityTest's inverse list moved. That is
+    its own unit and is recommended as its own card; a half relay client would be worse than none. EVERYTHING ELSE
+    C1 NAMES NOW RUNS ON THE PHONE. PTY INPUT/OUTPUT, the first of the two gaps round 1 named:
+    TerminalOnDeviceTest composes the real TerminalScreen with a real TerminalController attached to a real
+    /bin/cat through apex-remoted and apex-agentd, types a per-run sentinel through TerminalController.sendText —
+    the path a keystroke takes from the hidden BasicTextField, io thread included — and asserts it comes back in
+    the Snapshot the repaint loop hands TerminalView. Mutated to print what the screen held: the sentinel appears
+    twice, the PTY's echo and cat's own output. APPROVALS, the third gap, which the dispatch did not name and
+    round 1's evidence did: ApprovalsOnDeviceTest. The round trip is the wrong shape for this criterion and that
+    is the finding rather than a shortcut — privilege.rs refuses decide from any non-local origin and the check
+    sits BEFORE the request is looked up, so a phone cannot approve, cannot deny, and cannot learn from a refusal
+    whether the request exists. Approvals.kt has recorded that since it was written and nothing had ever sent the
+    frame. This builds the decide line by hand, sends it against a REAL pending request, and asserts
+    permission_denied naming claude-remote-control and §7; then the same frame for id 999999, which a local caller
+    is told does not exist and a phone is told the identical thing, so the refusal is not an oracle for request
+    ids. What a phone MAY do is asserted too: a request filed at the computer reaches the phone with verb,
+    packages, reason and a local request_origin intact, a human at the computer denies it and the phone sees
+    denied, grants and system_grants both answer, and revoking something absent is no_such_request and NOT
+    permission_denied. C2 GAINS THE TERMINAL AND LOSES A CLAIM NOBODY HAD MADE. Landscape at font scale 2.0 on
+    this phone is a 63x7 terminal, and the PTY on the computer agrees at 63x7 — handle_attach and Request::Resize
+    write the attaching terminal's size into SessionInfo, so that number is the phone's own measurement reaching
+    the machine. Not 80x24: the largest accessibility text size costs 17 of the 80 columns Settings.terminalTextSp
+    says these TUIs lay out for. AND: TerminalView is a bare Canvas, so no glyph on the terminal screen reaches
+    the semantics tree and TalkBack has nothing to announce there. That is a real C2 gap and it is written down
+    rather than papered over. C2 still also lacks a tablet and a foldable, which do not exist here. THREE THINGS
+    MEASURED THAT CHANGE HOW THIS SUITE IS RUN. (1) A ROADMAP-DISPATCHED AGENT CANNOT PAIR, AND THAT IS THE §7
+    GUARD WORKING. This agent's cgroup is user@1000.service/app.slice/apex-roadmap-resume.service, so
+    origin::observe_pid classifies the broker as scheduled-job and apex-remoted refuses every offer. First run on
+    the tip: 24 tests, 8 failures, all eight that sentence, after two minutes of gradle. Round 1 ran inside an
+    interactive session and got local-terminal, which is why it never saw this. The runner now asks once, before
+    building anything, and when the answer names scheduled-job it names tests/in-login-session.sh and the two
+    variables that wrapper does not forward. Every number below was produced through that wrapper, in a real PAM
+    login session. (2) TerminalScreen CANNOT BE HOSTED BY createAndroidComposeRule. Its withFrameNanos repaint
+    loop keeps the Recomposer permanently busy, so ComposeTestRule.setContent never returns from its own
+    waitForIdle — IdlingResourceTimeoutException, hadRecomposerChanges = true, measured, all three tests. The file
+    hosts the composition through ComponentActivity.setContent, the way MainActivity does, and polls. (3)
+    MachineLink.request returns an error reply as a STRING and does not throw; the throw lives in the Agentd.readX
+    parsers above it. A test that only caught AgentError around the hand-built decide frame reported "a phone
+    approved a root operation" — it had not, the daemon had refused in writing and nothing read the writing. THE
+    DEPRECATED RULE IS GONE: androidx.compose.ui.test.junit4.v2.createAndroidComposeRule in the three files that
+    use it (TerminalOnDeviceTest does not and cannot), in its own commit because it swaps UnconfinedTestDispatcher
+    for StandardTestDispatcher; a --rerun-tasks compile no longer emits the deprecation. ONE MORE DEFECT THE ROUND
     FOUND IN ITS OWN HARNESS: the suite leaked an apex-remoted per run. Its header says it stops its daemons by
     pid and it stopped the wrong one — restart_remoted, the verb the reconnect test uses, starts a replacement and
     writes the new pid to remoted.pid, while the EXIT trap killed the shell variable naming the process that verb

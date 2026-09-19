@@ -85,9 +85,32 @@ Anything you do must leave those where they are or better.
 
 ## NEXT
 
-**Run the FULL device suite** (expect **35** = 32 + 3) and the rest of the
-gates, then `set-status.py` on P1-060 / P1-052, then report. Steps (a)–(g) are
-all done and pushed. Old NEXT follows.
+**LAND `task/p1-052-android-relay` @ `8dd2cc9e`.** Six commits, all pushed,
+`git status --short` prints nothing, every gate below measured on that tip, and
+`set-status.py` prepends written and verified (P1-060 23,229 → 27,234;
+P1-052 8,080 → 9,172; prior rounds' text intact, yaml re-parsed).
+
+**Gates on `8dd2cc9e`, every number out of a log:**
+
+| gate | result |
+| --- | --- |
+| `run-device-suite.sh` | **OK (35 tests)** (was 32), TalkBack bound |
+| `:core:test` | **496 passed, 0 failed** (was 459) |
+| `:app:testDebugUnitTest` | **51 passed, 0 failed** (was 44) |
+| `cargo test --locked --workspace` | 3407 passed, 0 failed, 2 ignored (unchanged) |
+| `cargo clippy --workspace --all-targets --locked -D warnings` | zero |
+| `android/tools/check-help-prose.sh` | 1755 words, TOTAL 0, no allowlist |
+| `check-shellcheck-coverage.sh` | 168 discovered, 0 known-failing, 0 newly failing |
+| `check-suites-run-in-ci.sh` | 77 suites, 73 run, 4 exempt, 0 unrun-and-undeclared |
+| `check-containerfile-assertions.sh` | 194 checked, 0 failed, 0 inert |
+| `check-no-conflict-markers.sh` / `check-doc-verbs.sh` | PASS / 0 undocumented-and-undeclared |
+
+**What this does NOT prove, and a lander should say so:** the phone is still on
+the same Wi-Fi. It takes the relay because the offer's LAN addresses were
+withheld, not because they were unreachable. A phone on mobile data needs a
+person to hold it, and that is the only part of the relay leg still unmeasured.
+
+Old NEXT follows.
 
 **Step (d): `--relay` through the suite.** `android/tools/run-device-suite.sh`
 `start_remoted()` (line ~140) AND the embedded `broker.py`'s `restart_remoted`
@@ -238,6 +261,7 @@ from the Rust one:
 | `f8b6fd7d` | `test(android)` two of the relay gates inspected nothing, found by mutation. **36 tests, 0 failures** |
 | `f41667a6` | `feat(android)` dial the relay, and delete the apology at `PairingService:108`. **7 dialler tests, 0 failures** |
 | `d0d2f857` | `test(android)` the relay leg from a real phone through the real deployed relay. **OK (3 tests)**; mutated with `APEX_DEVICE_SUITE_RELAY=` → all 3 fail naming the argument |
+| `8dd2cc9e` | `docs(relay)` the README said it was not deployed and that no client could dial `wss` — three false claims |
 | `b6758c78` | `feat(android)` tell the person which path they got, in the desktop's own words — `ConnectionReport.path`, the banner, `Help.kt`, and a disclosure-parity gate that reads `rendezvous.rs`. **`:core` 496/0 (was 459), `:app` 51/0 (was 44), help-prose TOTAL 0** |
 
 ## IN PROGRESS
@@ -246,6 +270,7 @@ from the Rust one:
   off `roadmap/v2.2` @ `859cbb2b`. Read `relay.rs` (1145 lines), `room.js`,
   `index.js`, `Rendezvous.kt`, `Transport.kt`, `Client.kt`, `Storage.kt`,
   `PairingService.kt`. Seam confirmed (above).
+- **Complete.** Six commits, pushed, tree clean.
 - Commit 1 of ~6 done and pushed. Sequence, so a cutoff at any point leaves a
   complete artefact: (a) codec **DONE** (b) connector (c) `PairingService`
   fallback + delete the apology string (d) `--relay` through
