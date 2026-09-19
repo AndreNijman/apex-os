@@ -96,9 +96,38 @@ make_fake mangoapp
 make_fake getcap
 # `apex` is a wrapper around the REAL binary so the selection rule under test
 # is the one that ships, while `apex game start` still cannot reach a bus.
+#
+# `apex game …` is INTERCEPTED and never reaches the real binary. That is not
+# tidiness: the real `apex game start` talks to apexd on the live system bus,
+# so a suite that let it through would enter game mode on the machine running
+# the tests — p-core cpuset, IRQ steering, `performance`, scx_lavd — which is
+# exactly the state these tests exist to keep off a machine.
+#
+# The fake records its own PPID alongside the argv, which is what lets the
+# owner assertions check that `--owner-pid` names the SESSION SCRIPT and not
+# some constant that happens to be a number.
 cat > "${BIN}/apex" <<APEXFAKE
 #!/usr/bin/env bash
 printf 'apex\n' >> "${CALLS}"
+if [ "\${1:-}" = "game" ]; then
+    printf 'ppid=%s argv=%s\n' "\$PPID" "\$*" >> "${WORK}/apex-game-calls"
+    case "\${2:-}" in
+        start)
+            # An apexd that predates the owner watch refuses --owner-pid.
+            if [ "\${APEX_FAKE_NO_OWNER:-0}" = "1" ] && [[ "\$*" == *--owner-pid* ]]; then
+                printf 'apex: entering game mode failed: unknown method StartOwnedBy\n' >&2
+                exit 1
+            fi
+            exit 0 ;;
+        stop)
+            if [ "\${APEX_FAKE_STOP_FAILS:-0}" = "1" ]; then
+                printf 'apex: leaving game mode failed: org.freedesktop.DBus.Error.AccessDenied: not authorized for org.apexos.apexd.manage-power\n' >&2
+                exit 1
+            fi
+            exit 0 ;;
+    esac
+    exit 0
+fi
 exec "${APEX_BIN}" "\$@"
 APEXFAKE
 chmod +x "${BIN}/apex"
@@ -164,6 +193,24 @@ run_session() {  # <fixture-root> [extra env assignments...]
         bash "$SESSION" > "${WORK}/out" 2> "${WORK}/log"
     printf '%s' "$?"
 }
+
+# The same, with apexd NOT stubbed out — so `apex game start` / `apex game
+# stop` really are called, against the intercepting fake above. Later `env`
+# assignments win, so the caller's own overrides still apply.
+run_session_with_apexd() {  # <fixture-root> [extra env assignments...]
+    : > "$CALLS"
+    rm -f "${WORK}/argv-gamescope" "${WORK}/apex-game-calls"
+    env -i \
+        PATH="${BIN}:/usr/bin:/bin" \
+        HOME="${WORK}/home" \
+        APEX_ROOT="$1" \
+        APEX_GAMING_NO_APEXD=0 \
+        "${@:2}" \
+        bash "$SESSION" > "${WORK}/out" 2> "${WORK}/log"
+    printf '%s' "$?"
+}
+
+game_calls() { cat "${WORK}/apex-game-calls" 2>/dev/null; }
 
 gs_argv() { cat "${WORK}/argv-gamescope" 2>/dev/null; }
 session_log() { cat "${WORK}/log" 2>/dev/null; }
@@ -473,6 +520,147 @@ else
     bad "…and names the command that installs it" "log: $(session_log)"
 fi
 make_fake gamescope
+
+# ── the MangoHud overlay, and the flag it cannot coexist with ──────────────
+#
+# MEASURED ON KATANA (evidence §3.4 and the 2026-09-20 A/B in the session
+# script's own header): `--expose-wayland` puts WAYLAND_DISPLAY into mangoapp's
+# environment, GLFW takes its Wayland backend, mangoapp dereferences the NULL
+# X11 display it gets back, and gamescopereaper respawns the segfault ~2 Hz for
+# the whole session — 15 376 core dumps and 4.0 GB in one boot, with no overlay
+# ever drawn. Both directions are asserted, because a gate that only ever
+# answers one way is the defect family this repo keeps finding.
+section "MangoHud is not passed into a crash loop"
+
+rc="$(run_session "$KATANA")"
+argv="$(gs_argv)"
+if [[ "$argv" == *"--expose-wayland"* ]]; then
+    ok "--expose-wayland is still passed by default (native Wayland games)"
+else
+    bad "--expose-wayland is still passed by default (native Wayland games)" "argv: ${argv}"
+fi
+if [[ "$argv" != *"--mangoapp"* ]]; then
+    ok "…and --mangoapp is NOT, even though mangoapp is on PATH"
+else
+    bad "…and --mangoapp is NOT, even though mangoapp is on PATH" "argv: ${argv}"
+fi
+log="$(session_log)"
+if [[ "$log" == *"NOT passing --mangoapp"* ]] && [[ "$log" == *"WAYLAND_DISPLAY"* ]]; then
+    ok "…and the log says which flag rules it out, and why"
+else
+    bad "…and the log says which flag rules it out, and why" "log: $(printf '%s' "$log" | tail -6)"
+fi
+
+# The other direction. Without this row the gate above passes just as well for
+# a script that has simply deleted --mangoapp.
+rc="$(run_session "$KATANA" APEX_GAMING_EXPOSE_WAYLAND=0)"
+argv="$(gs_argv)"
+if [[ "$argv" == *"--mangoapp"* ]] && [[ "$argv" != *"--expose-wayland"* ]]; then
+    ok "with APEX_GAMING_EXPOSE_WAYLAND=0 the overlay comes back and exposure goes"
+else
+    bad "with APEX_GAMING_EXPOSE_WAYLAND=0 the overlay comes back and exposure goes" \
+        "argv: ${argv}"
+fi
+
+# And a machine with no mangohud installed must get neither the flag nor the
+# explanation — the message is about a choice, not about an absent package.
+mv "${BIN}/mangoapp" "${WORK}/mangoapp.hidden"
+rc="$(run_session "$KATANA" APEX_GAMING_EXPOSE_WAYLAND=0)"
+argv="$(gs_argv)"
+log="$(session_log)"
+if [[ "$argv" != *"--mangoapp"* ]] && [[ "$log" != *"NOT passing --mangoapp"* ]]; then
+    ok "no mangoapp on PATH: no flag and no explanation of a choice nobody made"
+else
+    bad "no mangoapp on PATH: no flag and no explanation of a choice nobody made" \
+        "argv: ${argv}"
+fi
+mv "${WORK}/mangoapp.hidden" "${BIN}/mangoapp"
+
+# ── releasing game mode when the session is destroyed (evidence §3.4) ──────
+#
+# The defect: `cleanup()` runs `apex game stop`, which is polkit action
+# `org.apexos.apexd.manage-power` — `allow_active=yes`, `auth_admin` otherwise.
+# The instant logind deactivates the session the call is REFUSED, and on katana
+# the machine sat for 75 minutes on a p-core cpuset with steered IRQs, the
+# `performance` tier and scx_lavd, with nothing able to undo it and NOTHING IN
+# ITS OWN LOG. These rows hold the two halves of the fix: the session hands
+# apexd an owner to watch, and the trap can no longer fail in silence.
+section "a session that is torn down can still be released"
+
+rc="$(run_session_with_apexd "$KATANA")"
+calls="$(game_calls)"
+start_line="$(printf '%s\n' "$calls" | grep -m1 'argv=game start' || true)"
+if [[ "$start_line" == *"--owner-pid"* ]]; then
+    ok "the session hands apexd an owner pid at start"
+else
+    bad "the session hands apexd an owner pid at start" "game calls: ${calls}"
+fi
+# The pid must be THE SESSION SCRIPT's, not a constant that happens to parse.
+# The fake records its own PPID, which is the script that invoked it.
+owner_pid="$(printf '%s' "$start_line" | sed -n 's/.*--owner-pid \([0-9]*\).*/\1/p')"
+caller_pid="$(printf '%s' "$start_line" | sed -n 's/^ppid=\([0-9]*\).*/\1/p')"
+if [ -n "$owner_pid" ] && [ "$owner_pid" = "$caller_pid" ]; then
+    ok "…and it is the session script's own pid (${owner_pid}), not a literal"
+else
+    bad "…and it is the session script's own pid, not a literal" \
+        "owner=${owner_pid} caller=${caller_pid}; line: ${start_line}"
+fi
+if [[ "$(session_log)" == *"release is owned by apexd"* ]]; then
+    ok "…and the log says the release no longer depends on this session's privileges"
+else
+    bad "…and the log says the release no longer depends on this session's privileges" \
+        "log: $(session_log | tail -5)"
+fi
+# The trap still runs on the clean path.
+if printf '%s\n' "$calls" | grep -q 'argv=game stop'; then
+    ok "the EXIT trap still calls game stop on the clean path"
+else
+    bad "the EXIT trap still calls game stop on the clean path" "game calls: ${calls}"
+fi
+if [[ "$(session_log)" == *"apexd game mode released"* ]]; then
+    ok "…and says so when it worked"
+else
+    bad "…and says so when it worked" "log: $(session_log | tail -5)"
+fi
+
+# A REFUSED stop is the measured failure mode, and it must be loud. The old
+# script's `apex game stop >/dev/null 2>&1 && log …` printed nothing at all.
+rc="$(run_session_with_apexd "$KATANA" APEX_FAKE_STOP_FAILS=1)"
+log="$(session_log)"
+if [[ "$log" == *"could not release game mode"* ]]; then
+    ok "a refused release is REPORTED, not swallowed"
+else
+    bad "a refused release is REPORTED, not swallowed" "log: $(printf '%s' "$log" | tail -6)"
+fi
+if [[ "$log" == *"not authorized for org.apexos.apexd.manage-power"* ]]; then
+    ok "…with polkit's own message, so the cause is in the log a user can read"
+else
+    bad "…with polkit's own message, so the cause is in the log a user can read" \
+        "log: $(printf '%s' "$log" | tail -6)"
+fi
+if [[ "$log" == *"apexd is"*"watching pid"* ]]; then
+    ok "…and names what will release it instead"
+else
+    bad "…and names what will release it instead" "log: $(printf '%s' "$log" | tail -6)"
+fi
+
+# An apexd too old to take an owner must still start game mode — and must say
+# what has been lost rather than reading like a normal start.
+rc="$(run_session_with_apexd "$KATANA" APEX_FAKE_NO_OWNER=1)"
+calls="$(game_calls)"
+log="$(session_log)"
+if printf '%s\n' "$calls" | grep -q 'argv=game start$'; then
+    ok "an apexd that refuses --owner-pid still gets a plain game start"
+else
+    bad "an apexd that refuses --owner-pid still gets a plain game start" \
+        "game calls: ${calls}"
+fi
+if [[ "$log" == *"does not accept a session owner"* ]]; then
+    ok "…and the fallback says the release now depends on a trap polkit can refuse"
+else
+    bad "…and the fallback says the release now depends on a trap polkit can refuse" \
+        "log: $(printf '%s' "$log" | tail -6)"
+fi
 
 printf '\napex-gaming-session: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]

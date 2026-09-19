@@ -51,6 +51,14 @@ pub struct Ctx {
     /// which is how `apex game status` shipped reporting a plan as a
     /// measurement.
     pub proc_irq_root: PathBuf,
+    /// The procfs root the session-owner watch reads `<pid>/stat` from.
+    ///
+    /// Rooted for exactly the reason `proc_irq_root` is, and the stake is
+    /// higher: this is the reading that makes the daemon UNDO game mode. A
+    /// hardcoded `/proc` would mean the only way to test "a torn-down session
+    /// releases the machine" is to tear down a real session on real hardware,
+    /// which is how that defect reached katana in the first place.
+    pub proc_root: PathBuf,
     /// M6: fan discovery, mode state and the restore path.
     pub fan: Arc<FanController>,
     /// M6: read-side access to `nvidia-smi`.
@@ -71,6 +79,7 @@ impl Ctx {
         initial: State,
         sys_root: impl Into<PathBuf>,
         proc_irq_root: impl Into<PathBuf>,
+        proc_root: impl Into<PathBuf>,
         nvidia: Arc<dyn NvidiaSmi>,
     ) -> Arc<Ctx> {
         let sys_root = sys_root.into();
@@ -89,6 +98,7 @@ impl Ctx {
             batteries,
             sys_root,
             proc_irq_root: proc_irq_root.into(),
+            proc_root: proc_root.into(),
             fan,
             nvidia,
             game: Mutex::new(None),

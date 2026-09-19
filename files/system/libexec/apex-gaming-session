@@ -38,6 +38,10 @@
 #                          set to 1 to let gamescope pick its own GPU, which is
 #                          the behaviour this script had before 2026-09-19 and
 #                          the one that put Gaming Mode on the wrong screen
+#    APEX_GAMING_EXPOSE_WAYLAND
+#                          set to 0 to drop --expose-wayland (X11-only games).
+#                          It also decides --mangoapp, because the two cannot
+#                          both be on — see the MangoHud block below.
 #    APEX_ROOT             the fixture root `apex gaming` already honours; the
 #                          capability read below uses it too. Never set in a
 #                          real session.
@@ -75,18 +79,55 @@ fi
 #
 # Best-effort: on a machine whose profile disables game mode, or with apexd
 # down, gaming still works — it is just not tuned.
+#
+# `--owner-pid $$` is the fix for the defect the 2026-09-19 katana run found
+# (evidence §3.4), and it is the load-bearing half of leaving Gaming Mode.
+# The EXIT trap below CANNOT be relied on: it runs `apex game stop`, which is
+# polkit action `org.apexos.apexd.manage-power` with `allow_active=yes` and
+# `auth_admin` for everything else, so the instant logind stops calling this
+# session active — a greetd restart, a VT switch, any logind-driven teardown —
+# the trap's own call is refused and the machine keeps a p-core cpuset, steered
+# IRQs, the `performance` tier and scx_lavd with nothing able to undo them.
+#
+# Naming an owner hands that job to apexd, which is root and asks polkit nothing
+# about itself: when THIS script dies, for any reason, in any state of the
+# session, apexd releases game mode. The owner is watched, not pinned — nothing
+# about the cpuset changes.
 if [ "${APEX_GAMING_NO_APEXD:-0}" != "1" ] && command -v apex >/dev/null 2>&1; then
-    if apex game start >/dev/null 2>&1; then
+    if apex game start --owner-pid "$$" >/dev/null 2>&1; then
         log "apexd game mode engaged (cpuset/IRQ/clocks/tier/sched-ext)"
+        log "  release is owned by apexd, watching pid $$ — a destroyed session still undoes it"
+    elif apex game start >/dev/null 2>&1; then
+        # An apexd that predates the owner watch. Say what is lost rather than
+        # letting it read as a normal start.
+        log "apexd game mode engaged (cpuset/IRQ/clocks/tier/sched-ext)"
+        log "  WARNING: this apexd does not accept a session owner, so releasing game mode"
+        log "  depends entirely on the EXIT trap below — and polkit refuses that trap once"
+        log "  logind deactivates this session. See evidence §3.4."
     else
         log "apexd game mode unavailable — continuing untuned"
     fi
 fi
 
 # Leaving Gaming Mode must always undo it, however the session ends.
+#
+# This is now the SECOND of two paths and no longer the only one. It is kept
+# because it is instant on the clean path, where apexd's watch would take up to
+# a tick longer; both call the same idempotent release, so the two racing is
+# harmless. What it must never do again is fail in silence: the version this
+# replaces was `apex game stop >/dev/null 2>&1 && log …`, which on the refused
+# path printed absolutely nothing, and that silence is why a machine sat in a
+# gaming power profile for 75 minutes with no clue in its own log.
 cleanup() {
     if [ "${APEX_GAMING_NO_APEXD:-0}" != "1" ] && command -v apex >/dev/null 2>&1; then
-        apex game stop >/dev/null 2>&1 && log "apexd game mode released"
+        local out
+        if out="$(apex game stop 2>&1)"; then
+            log "apexd game mode released"
+        else
+            log "this session could not release game mode: ${out}"
+            log "  expected when logind has already deactivated the session; apexd is"
+            log "  watching pid $$ and releases it itself within a couple of seconds."
+        fi
     fi
 }
 trap cleanup EXIT HUP INT TERM
@@ -278,12 +319,67 @@ else
     fi
 fi
 
+# ── Wayland exposure, and the MangoHud overlay it rules out ─────────────────
+# MEASURED ON KATANA 2026-09-19 and again 2026-09-20 with a controlled A/B, and
+# this is a real either/or rather than a preference:
+#
+#   gamescope --backend headless --mangoapp                  -> mangoapp alive,
+#       env: DISPLAY=:0  GAMESCOPE_WAYLAND_DISPLAY=gamescope-0   0 restarts/22 s
+#   gamescope --backend headless --expose-wayland --mangoapp -> 171 restarts/22 s
+#       env: the same PLUS WAYLAND_DISPLAY=gamescope-0
+#
+# `--expose-wayland` is what puts `WAYLAND_DISPLAY` in the environment of
+# gamescope's children, mangoapp included. GLFW auto-selects its Wayland backend
+# whenever that variable is set (libdecor loads, and says so), and mangoapp then
+# calls `glfwGetX11Display()` — which on the Wayland backend logs
+# `Glfw Error 65550: X11: Platform not initialized` and returns NULL — and hands
+# that NULL straight to `XInternAtom`. The backtrace off katana's kept core dump
+# is two frames long: `XInternAtom` called from `main`.
+#
+# gamescopereaper respawns it immediately and forever. On katana that was
+# 15 376 core dumps in one boot, 14 403 respawns and 57 612 GLFW lines in one
+# 2-hour session (144 187 journal lines for a single session), and 4.0 GB of
+# stored dumps. The overlay never drew a pixel, so this costs nothing to give
+# up: `--mangoapp` was buying a crash loop and no overlay.
+#
+# THE CHOICE, stated: `--expose-wayland` stays on. Native Wayland (xdg-shell)
+# games are worth more than an overlay that has never rendered on this system,
+# and §6.1/§6.3 were qualified on hardware WITH it. `--mangoapp` is therefore
+# not passed — and it is gated on the variable rather than deleted, so that if
+# `--expose-wayland` is ever turned off the overlay comes back by itself
+# instead of needing someone to remember it.
+#
+# Neither half is APEX's to fix upstream: mangoapp should request the X11
+# platform (or refuse to dereference a NULL Display), and gamescopereaper's
+# `--respawn` has no backoff. Both are reported by this comment and by the
+# evidence, not worked around.
+EXPOSE_WAYLAND="${APEX_GAMING_EXPOSE_WAYLAND:-1}"
+WAYLAND_ARGS=()
+MANGO_ARGS=()
+if [ "${EXPOSE_WAYLAND}" = "1" ]; then
+    WAYLAND_ARGS=(--expose-wayland)
+fi
+if ! command -v mangoapp >/dev/null 2>&1; then
+    :   # not installed — `apex install mangohud` would add it
+elif [ "${EXPOSE_WAYLAND}" = "1" ]; then
+    log "NOT passing --mangoapp: it and --expose-wayland cannot both be on."
+    log "  --expose-wayland puts WAYLAND_DISPLAY in mangoapp's environment, GLFW then"
+    log "  picks its Wayland backend, and mangoapp dereferences the NULL X11 display"
+    log "  it gets back — a segfault every ~0.5 s for the whole session, respawned by"
+    log "  gamescopereaper, and no overlay. Measured on katana; see evidence §3.4."
+    log "  Set APEX_GAMING_EXPOSE_WAYLAND=0 to have the overlay instead of native"
+    log "  Wayland game support."
+else
+    MANGO_ARGS=(--mangoapp)
+    log "--mangoapp enabled: --expose-wayland is off, so GLFW will take the X11 backend"
+fi
+
 # ── gamescope ───────────────────────────────────────────────────────────────
 #   -e/--steam        Steam integration (Big Picture keyboard/controller glue)
 #   -f                fullscreen; the output's native mode is used
 #   --expose-wayland  let native Wayland (xdg-shell) games in, not just X11
-#   --mangoapp        MangoHud via gamescope's own overlay, which upstream says
-#                     to use INSTEAD of wrapping the game in mangohud
+#   --mangoapp        MangoHud via gamescope's own overlay — see the block above
+#                     for why it is off while --expose-wayland is on
 #
 # `--adaptive-sync` is not decided here. It arrives inside DEVICE_ARGS, from the
 # same selector, because it is a question about ONE connector and the selector
@@ -297,8 +393,7 @@ fi
 #
 # DEVICE_ARGS comes before APEX_GAMESCOPE_ARGS so a hand-set override still
 # wins: gamescope takes the last occurrence of a repeated option.
-GS_ARGS=(-e -f --expose-wayland "${RT_ARGS[@]}" "${DEVICE_ARGS[@]}")
-command -v mangoapp >/dev/null 2>&1 && GS_ARGS+=(--mangoapp)
+GS_ARGS=(-e -f "${WAYLAND_ARGS[@]}" "${RT_ARGS[@]}" "${DEVICE_ARGS[@]}" "${MANGO_ARGS[@]}")
 if [ -n "${APEX_GAMESCOPE_ARGS:-}" ]; then
     # shellcheck disable=SC2206
     GS_ARGS+=(${APEX_GAMESCOPE_ARGS})

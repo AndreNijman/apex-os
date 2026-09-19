@@ -676,3 +676,141 @@ fn the_default_scx_is_the_only_thing_planned_when_cpuset_is_off() {
     );
     assert_eq!(plan.exit, vec![Action::ScxStop]);
 }
+
+// ── the session owner: who the daemon watches so a torn-down session releases ─
+//
+// These stand behind the fix for the katana 2026-09-19 defect (evidence §3.4):
+// Gaming Mode could not release itself when logind deactivated its session,
+// because the EXIT trap's `apex game stop` is a polkit `allow_active=yes`
+// action and a deactivated session is no longer active. apexd now watches the
+// process that asked for game mode and releases it when that process dies.
+// Everything below is the reading that decision is made from.
+
+use apexd_core::game::{owner_for_pid, owner_state, parse_proc_stat, OwnerState, SessionOwner};
+
+/// A `/proc/<pid>/stat` line in the kernel's real shape. Fields 1 and 2 are
+/// `pid` and `(comm)`; everything after the closing paren is field 3 onward.
+fn stat_line(pid: u32, comm: &str, state: char, starttime: u64) -> String {
+    let mut fields: Vec<String> = Vec::new();
+    // fields 4..=21 — their values do not matter here, only their COUNT does.
+    for n in 4..=21 {
+        fields.push(n.to_string());
+    }
+    format!(
+        "{pid} ({comm}) {state} {} {starttime} 0 0 0",
+        fields.join(" ")
+    )
+}
+
+fn proc_fixture(tag: &str) -> Fixture {
+    Fixture::new(tag)
+}
+
+#[test]
+fn starttime_is_read_after_the_last_paren_so_a_comm_with_spaces_cannot_shift_it() {
+    // The same process, named three ways. A whitespace-split from the start of
+    // the line reads a different field for each of these; the parse must not.
+    for comm in ["bash", "apex gaming session", "my prog (old)", "a) b (c"] {
+        let line = stat_line(4242, comm, 'S', 99_887_766);
+        let st = parse_proc_stat(&line)
+            .unwrap_or_else(|| panic!("comm {comm:?} made the stat line unparseable"));
+        assert_eq!(
+            st.starttime, 99_887_766,
+            "comm {comm:?} shifted the start time; field 2 was not skipped by the last ')'"
+        );
+        assert_eq!(st.state, 'S', "comm {comm:?} shifted the state field");
+    }
+}
+
+#[test]
+fn a_truncated_stat_line_is_unparseable_rather_than_wrong() {
+    // 22 fields are needed. A line with 21 must yield None — NOT a zero, which
+    // would compare unequal to every recorded start time and release game mode
+    // on every tick.
+    let short = format!("7 (x) S {}", (4..=21).map(|n| n.to_string()).collect::<Vec<_>>().join(" "));
+    assert_eq!(parse_proc_stat(&short), None);
+    assert_eq!(parse_proc_stat(""), None);
+    assert_eq!(parse_proc_stat("7 x S 1 2 3"), None, "no ')' at all");
+}
+
+#[test]
+fn an_owner_that_is_still_running_is_alive() {
+    let f = proc_fixture("owner-alive");
+    f.write("proc/900/stat", &stat_line(900, "apex-gaming-ses", 'S', 12345));
+    let owner = owner_for_pid(&f.path().join("proc"), 900).expect("the fixture pid is readable");
+    assert_eq!(owner, SessionOwner { pid: 900, starttime: 12345 });
+    assert_eq!(owner_state(&f.path().join("proc"), &owner), OwnerState::Alive);
+}
+
+#[test]
+fn an_owner_whose_proc_entry_vanished_is_gone() {
+    let f = proc_fixture("owner-gone");
+    f.write("proc/901/stat", &stat_line(901, "apex-gaming-ses", 'S', 12345));
+    let proc = f.path().join("proc");
+    let owner = owner_for_pid(&proc, 901).unwrap();
+    assert_eq!(owner_state(&proc, &owner), OwnerState::Alive);
+
+    fs::remove_dir_all(proc.join("901")).unwrap();
+    match owner_state(&proc, &owner) {
+        OwnerState::Gone(why) => assert!(why.contains("/proc/901"), "why was {why:?}"),
+        other => panic!("a vanished owner read as {other:?}"),
+    }
+}
+
+#[test]
+fn a_reused_pid_is_gone_and_not_alive() {
+    // The whole reason the start time is recorded. Same number, different
+    // process: a bare-PID watch would call this Alive and pin the machine in a
+    // gaming power profile for as long as the impostor lives.
+    let f = proc_fixture("owner-reused");
+    let proc = f.path().join("proc");
+    f.write("proc/902/stat", &stat_line(902, "apex-gaming-ses", 'S', 12345));
+    let owner = owner_for_pid(&proc, 902).unwrap();
+
+    f.write("proc/902/stat", &stat_line(902, "something-else", 'S', 999_999));
+    match owner_state(&proc, &owner) {
+        OwnerState::Gone(why) => assert!(why.contains("reused"), "why was {why:?}"),
+        other => panic!("a reused pid read as {other:?}"),
+    }
+}
+
+#[test]
+fn a_zombie_owner_is_gone() {
+    // It has exited and holds nothing; only an unreaped parent keeps the
+    // directory. Waiting for the reap would mean a greetd that died mid-
+    // teardown leaves the machine in the gaming profile indefinitely.
+    let f = proc_fixture("owner-zombie");
+    let proc = f.path().join("proc");
+    f.write("proc/903/stat", &stat_line(903, "apex-gaming-ses", 'Z', 12345));
+    let owner = SessionOwner { pid: 903, starttime: 12345 };
+    match owner_state(&proc, &owner) {
+        OwnerState::Gone(why) => assert!(why.contains("zombie"), "why was {why:?}"),
+        other => panic!("a zombie owner read as {other:?}"),
+    }
+}
+
+#[test]
+fn an_unreadable_proc_is_a_third_answer_and_never_a_release() {
+    // Fail closed. An unreadable /proc has measured nothing, and turning that
+    // into a release would make an I/O error change the machine's power state.
+    let f = proc_fixture("owner-unreadable");
+    let owner = SessionOwner { pid: 904, starttime: 12345 };
+
+    match owner_state(&f.path().join("no-such-proc"), &owner) {
+        OwnerState::Unknown(why) => assert!(why.contains("no-such-proc"), "why was {why:?}"),
+        other => panic!("an absent /proc read as {other:?}"),
+    }
+
+    // Present but garbage: also Unknown, not Gone.
+    f.write("proc/904/stat", "this is not a stat line");
+    match owner_state(&f.path().join("proc"), &owner) {
+        OwnerState::Unknown(why) => assert!(why.contains("904"), "why was {why:?}"),
+        other => panic!("an unparseable stat read as {other:?}"),
+    }
+}
+
+#[test]
+fn owner_for_pid_refuses_a_pid_that_does_not_exist() {
+    let f = proc_fixture("owner-absent");
+    assert_eq!(owner_for_pid(&f.path().join("proc"), 905), None);
+}

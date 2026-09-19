@@ -1209,6 +1209,15 @@ enum GameCmd {
         /// PID to move into the game cpuset.
         #[arg(long)]
         pid: Option<u32>,
+        /// PID whose death ends the session. apexd watches it and releases
+        /// game mode itself when it goes, which is the ONLY path that works
+        /// once logind has deactivated the session: `apex game stop` is a
+        /// polkit `allow_active=yes` action and an inactive session's call is
+        /// refused (katana 2026-09-19, evidence §3.4). The owner is watched,
+        /// not pinned — combine with `--pid` if it should also be in the
+        /// cpuset. `apex-gaming-session` passes its own `$$` here.
+        #[arg(long)]
+        owner_pid: Option<u32>,
     },
     /// Leave game mode, restoring everything it changed.
     Stop,
@@ -2303,11 +2312,23 @@ async fn cmd_game(cmd: GameCmd) -> i32 {
             }
             0
         }
-        GameCmd::Start { pid } => match &proxy {
+        GameCmd::Start { pid, owner_pid } => match &proxy {
             Some(p) => {
-                let res = match pid {
-                    Some(pid) => p.start_for_pid(pid).await,
-                    None => p.set_active(true).await,
+                // The owner is the atomic part: entering game mode and naming
+                // the process that ends it must not be two calls with a window
+                // between them in which the machine is tuned and unwatched.
+                // A `--pid` given alongside is attached afterwards, because
+                // that is a cpuset question and not a lifetime one.
+                let res = match (owner_pid, pid) {
+                    (Some(owner), _) => match p.start_owned_by(owner).await {
+                        Ok(()) => match pid {
+                            Some(pid) => p.attach_pid(pid).await,
+                            None => Ok(()),
+                        },
+                        Err(e) => Err(e),
+                    },
+                    (None, Some(pid)) => p.start_for_pid(pid).await,
+                    (None, None) => p.set_active(true).await,
                 };
                 match res {
                     Ok(()) => {
