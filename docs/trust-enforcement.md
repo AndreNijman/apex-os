@@ -100,7 +100,9 @@ last claim cannot quietly stop being true.
 **What is not in it: the per-file inventory.** syft's default output also lists
 every file in the image with its digests, plus a relationship edge from each
 file to the package that owns it. APEX turns that off
-(`SYFT_FILE_METADATA_SELECTION=none`). So this document answers *"which
+(`SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP=false`, with
+`SYFT_FILE_METADATA_SELECTION=none` so the digests are never computed either).
+So this document answers *"which
 packages, at which versions, is this image built from"* — the question a CVE
 advisory makes you ask — and does **not** answer *"which files does this image
 contain, and what is each one's SHA-256"*.
