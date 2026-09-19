@@ -23,19 +23,26 @@
 #  a mechanism rather than a coincidence.
 #
 #  Nothing in APEX installs a QTranslator. `/usr/bin/quickshell` calls neither
-#  QTranslator nor installTranslator. The thing that installs one is the
-#  **qt6ct platform theme plugin**, which loads `qt_<lang>.qm` on the way to
-#  applying a palette. So right-to-left mirroring on a shipped APEX desktop
-#  works entirely as a side effect of a dark-mode theming choice, and the
-#  comment in files/system/qt6ct/qt6ct.conf says so in as many words: "dark
-#  palette".
+#  QTranslator nor installTranslator. What installs one arrives with the
+#  **qt6ct platform theme plugin** — but, corrected 2026-09-19 (round 31), not
+#  BY it: the plugin's own binary contains no QTranslator code, and the
+#  catalogue is loaded by `libKF6I18n`, which Fedora's build of qt6ct links
+#  against and upstream's plain 0.11 release does not. See link 4 in the live
+#  section for the four measurements. So right-to-left mirroring on a shipped
+#  APEX desktop works as a side effect of a dark-mode theming choice AND of a
+#  Fedora packaging choice, and the comment in files/system/qt6ct/qt6ct.conf
+#  says the first of those in as many words: "dark palette".
 #
-#  ── The chain has THREE links in the image and all three were unguarded ─────
+#  ── The chain has FOUR links in the image and all four were unguarded ──────
 #    1. `QT_QPA_PLATFORMTHEME=<theme>` written into /etc/environment.
 #    2. the same variable in files/desktop/labwc/environment, for the labwc
 #       session, which does not inherit the Hyprland `env =` lines.
 #    3. the package that OWNS the plugin, and the package that owns the
 #       `qt_<lang>.qm` catalogues it loads.
+#    4. the library that actually LOADS one of those catalogues, which is
+#       neither of those two packages and reaches the process one DT_NEEDED
+#       hop past the plugin: libqt6ct.so -> libKF6IconThemes.so.6 ->
+#       libKF6I18n.so.6. Added round 31.
 #
 #  Link 3 is the one nobody wrote down. Measured on a booted APEX host:
 #  `qt6-qttranslations` owns /usr/share/qt6/translations/qt_ar.qm, no package
@@ -184,7 +191,7 @@ want "  ...and it is redirected into /etc/environment, where pam_env reads it" \
 
 # The value, asserted as a value. This is the assertion that did not exist
 # anywhere in either repository before round 26.
-want "  ...and the theme it names is qt6ct, the plugin that installs a QTranslator" \
+want "  ...and the theme it names is qt6ct, the plugin a Qt translation loader arrives with (link 4)" \
     test "$env_value" = "qt6ct"
 
 section "link 2 — the labwc session sets the same theme"
@@ -291,6 +298,91 @@ else
         bad "the platform theme plugin $PLUGIN is installed"
         note "The variable names a theme with no plugin behind it. Qt falls back"
         note "silently, no QTranslator is installed, and nothing mirrors."
+    fi
+
+    # ── link 4, found 2026-09-19 (p2-b round 31): the plugin does not load the
+    # catalogue. libKF6I18n does, and it is in the process only because
+    # FEDORA'S BUILD of qt6ct links it.
+    #
+    # Everything above this point in the file — and apex-shell's
+    # run-rtl-test.sh since round 23 — said the qt6ct plugin installs a
+    # QTranslator on its way to applying a palette. That is not what happens.
+    # `nm -DC` and `strings` on this machine's libqt6ct.so find no QTranslator
+    # code in it at all; `ldd` finds eight KF6 libraries. Measured four ways
+    # with `strace -e openat` naming every qt_*.qm the process opened, Qt
+    # 6.10.3, LANG=LC_ALL=ar_EG.UTF-8, one process each:
+    #
+    #     QT_QPA_PLATFORMTHEME=qt6ct      RTL   opened qt_ar.qm, qt_en.qm
+    #     a bogus theme name              LTR   opened none
+    #     no platform theme               LTR   opened none
+    #     no theme + LD_PRELOAD KF6I18n   RTL   opened qt_ar.qm, qt_en.qm
+    #
+    # The last row is the one that settles it: with no platform theme at all,
+    # one extra library in the process installs the Qt catalogue and flips the
+    # direction.
+    #
+    # Why that belongs in a guard in THIS repository rather than as a note. It
+    # is the same silent-loss shape as link 3 and it is one step further from
+    # anything APEX declares: right-to-left layout on APEX depends on a Fedora
+    # PACKAGING choice. Fedora currently ships a post-release git snapshot of
+    # qt6ct built with the KDE integration; upstream's plain 0.11 release — the
+    # build Arch ships, and the reason apex-shell's RTL suite has been red on
+    # the GitHub runner since it landed — links none of it. A rebase onto a
+    # Fedora that goes back to the plain build, or a slimming pass that drops
+    # KF6, un-mirrors every APEX surface with nothing red anywhere.
+    if [ -e "$PLUGIN" ]; then
+        # Captured into a variable and matched with a case, never `ldd |
+        # grep -q`: under pipefail a grep -q that MATCHES closes the pipe, ldd
+        # takes SIGPIPE and the pipeline's status is 141, so the check answers
+        # "no" precisely when the answer is yes.
+        ldd_plugin=$(ldd "$PLUGIN" 2>/dev/null)
+        case "$ldd_plugin" in
+            *libKF6I18n*)
+                i18n_path=$(printf '%s\n' "$ldd_plugin" | awk '/libKF6I18n/ {print $3; exit}')
+                i18n_owner=$(rpm -qf --qf '%{NAME}' "$i18n_path" 2>/dev/null)
+                ok "the plugin drags in the Qt translation loader that actually flips the direction (${i18n_path:-?} <- ${i18n_owner:-none})"
+                note "TRANSITIVELY, and the hop was read rather than assumed:"
+                note "libqt6ct.so's own DT_NEEDED names libKF6IconThemes.so.6 and"
+                note "not libKF6I18n; libKF6IconThemes.so.6's DT_NEEDED names"
+                note "libKF6I18n.so.6. So ldd's closure is the right question here"
+                note "and a DT_NEEDED grep on the plugin alone would answer no."
+                note "None of it is declared by anything in this repository: it is"
+                note "Fedora's build of ${env_value} pulling in the KDE integration."
+                note "Upstream's plain 0.11 release does not, and on that build"
+                note "nothing in the process loads qt_ar.qm."
+                ;;
+            "")
+                skp "the plugin drags in a Qt translation loader"
+                note "ldd read nothing from $PLUGIN — COULD-NOT-RUN, not a pass."
+                ;;
+            *)
+                bad "the plugin drags in a Qt translation loader"
+                note "$PLUGIN links no libKF6I18n. Qt decides the layout direction"
+                note "by TRANSLATING QT_LAYOUT_DIRECTION, so with no catalogue"
+                note "loader in the process every APEX surface is LeftToRight for"
+                note "Arabic and Hebrew — the ur_PK control, for every language."
+                note "Either the qt6ct build changed or KF6 was slimmed out."
+                ;;
+        esac
+
+        # A predicate that cannot answer NO turns the row above into a
+        # constant. Qt's own core library is the control: nothing in qtbase
+        # links KF6, so an affirmative here would mean the question is
+        # answering yes to everything it is asked.
+        ctl_lib=$(printf '%s\n' "$ldd_plugin" | awk '/libQt6Core\.so/ {print $3; exit}')
+        if [ -z "$ctl_lib" ] || [ ! -e "$ctl_lib" ]; then
+            skp "  ...and that question can answer NO"
+            note "could not resolve libQt6Core.so.6 out of $PLUGIN to ask it about."
+        else
+            ldd_ctl=$(ldd "$ctl_lib" 2>/dev/null)
+            case "$ldd_ctl" in
+                *libKF6I18n*)
+                    bad "  ...and that question can answer NO"
+                    note "$ctl_lib came back as linking libKF6I18n. The check says yes"
+                    note "to everything and the row above it proves nothing." ;;
+                *)  ok "  ...and that question can answer NO — $ctl_lib, which links no KF6, comes back negative" ;;
+            esac
+        fi
     fi
 
     QM=/usr/share/qt6/translations/qt_ar.qm
