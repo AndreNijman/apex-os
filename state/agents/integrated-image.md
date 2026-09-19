@@ -1,40 +1,108 @@
 # integrated-image — build the integrated image and qualify it on katana
 
-Repo: apex-os. Branch `task/integrated-image` @ 97c9e8f2 (= roadmap/v2.2 tip,
-pushed 2026-09-19T18:32Z). Worktree `/var/tmp/apex-work/wt-integrated-image`.
+Repo: apex-os. Branch `task/integrated-image`, cut 2026-09-19T18:32Z off
+`roadmap/v2.2` @ `97c9e8f2`. Worktree `/var/tmp/apex-work/wt-integrated-image`.
+Tip `d6bea820` = 97c9e8f2 + ONE evidence-only commit (no image content).
 
-## IMAGE BUILD — RECORD THIS FIRST
+## IMAGE BUILD — THE RUN ID, RECORDED FIRST
 - **Run 35461554871**, workflow_dispatch on `task/integrated-image` @ 97c9e8f2,
   queued 2026-09-19T18:33:05Z.
   https://github.com/AndreNijman/apex-os/actions/runs/35461554871
-- A non-main dispatch pushes only per-SHA tags, so the artifact to expect is
-  `ghcr.io/andrenijman/apex-os:apex-97c9e8f25ee55593a97502505f51c6115ebbee7c`.
-  It moves no floating tag; the fleet is untouched.
-- FALLBACK IF IT FAILS: run **35457162588** (success, 1h17m, task/sbom-attest
-  @ fd456c5a) already built this exact source tree for everything that lands in
-  the image — `git diff fd456c5a 97c9e8f2` touches only
-  `.github/workflows/build-image.yml` and deletes `sbom-probe.yml`. Its tag is
-  `apex-fd456c5acf1531beeb1e90cf050a1d9c3a47ef93`. Check the shell sha it
-  resolved before treating it as equivalent.
+- `changes` job READ, not assumed:
+  `Pinned apex-shell roadmap/v2.2 (apex-shell has no branch named
+  task/integrated-image): 03d77f96f521df7501d710d5c15ae8d0074a39ce`
+  — the current apex-shell tip, which carries the Apex.I18n work. The
+  12e9d454 ordered fallback did its job; this is NOT a main-shell build.
+- `core rebuild: true (core sources changed)` → full ~1 h 20 m build, and
+  katana's pull will be the whole image rather than tens of MB.
+- `PUBLISH: false` → per-SHA tags only, no floating name moves, fleet untouched.
+  Expected artifact:
+  `ghcr.io/andrenijman/apex-os:apex-97c9e8f25ee55593a97502505f51c6115ebbee7c`
+- FALLBACK IF IT FAILS: run **35457162588** (success, 1 h 17 m, task/sbom-attest
+  @ `fd456c5a`). `git diff fd456c5a 97c9e8f2` touches ONLY
+  `.github/workflows/build-image.yml` and deletes `sbom-probe.yml`, so its
+  image content is this tree's. Confirm the shell sha it resolved before
+  treating it as equivalent. Tag
+  `apex-fd456c5acf1531beeb1e90cf050a1d9c3a47ef93`.
 
 ## Boundaries (from the brief, not negotiable)
-- **Do not touch the L16.** Booting the L16 is Andre's half of `final`.
-- **Do not merge to main, do not open a PR.** Order when Andre does it:
-  apex-shell roadmap/v2.2 -> main FIRST (Containerfile.base carries
-  ARG APEX_SHELL_REF=main), then apex-os roadmap/v2.2 -> main.
-- katana: never write to the Windows disk (serial 240023925111005) — it holds
-  APEX's own Boot0000 ESP and Andre's 1.3 TB games library. APEX disk is
-  Micron serial 220534D1CB81. `/dev/nvme0n1` is not stable across reboots.
-- Keep the rollback deployment and `~/apex-pre-rebase-20260919/` intact.
+- **Do not touch the L16.** Booting it is Andre's half of unit `final`.
+- **Do not merge to main, do not open a PR.** When Andre does it:
+  apex-shell `roadmap/v2.2` -> `main` FIRST (Containerfile.base carries
+  `ARG APEX_SHELL_REF=main`), THEN apex-os `roadmap/v2.2` -> `main`.
+- katana: APEX disk = Micron serial `220534D1CB81` (nvme0n1 today, 953.9 G,
+  carries `/var` on p3). Windows = SPCC serial `240023925111005` (nvme1n1
+  today, 1.8 T) and it holds APEX's own `Boot0000` ESP plus Andre's games.
+  **Never write to it.** `/dev/nvmeXnY` is not stable; address by serial.
+- greetd is boot-critical: arm `qual-greetd-restore` FIRST, use
+  `greetd-set.sh` / `greetd-restore.sh` (never a bare restart — the
+  `/run/greetd.run` runfile trap), and finish with `cmp` against
+  `/etc/greetd/config.toml.orig-qual2`.
 
-## Katana starting state (measured 2026-09-19T18:3xZ, before anything)
-- booted `ghcr.io/andrenijman/apex-os:apex-7f647470e222cfa23e0853cac45ef3f7e74c252e`
-  digest sha256:be3bdd0c…3aafb, deployed 2026-09-19T10:09Z
-- rollback `apex-266dcc572c51bdf9ec421d79eaa8784583184cd2`
-  digest sha256:ba263890…503d
+## Katana starting state (measured 2026-09-20 ~02:3x AWST, before any change)
+- booted `apex-7f647470e222cfa23e0853cac45ef3f7e74c252e`,
+  digest `sha256:be3bdd0c…3aafb`, deployed 2026-09-19T10:09Z
+- rollback `apex-266dcc572c51bdf9ec421d79eaa8784583184cd2`,
+  digest `sha256:ba263890…503d` — **now PINNED** (`ostree admin pin 1`) so the
+  switch + reboot cannot prune it. Unpin with `ostree admin pin -u 1`.
+- `/var` 954 G, 53 G free (95 % used), on the APEX Micron. `/` composefs.
+- extension `/var/lib/extensions/apex-user.raw` 535 928 832 bytes,
+  sha256 **`eb3b8ba056d8f6f3caca2c3ed3204bda077f5f5f2fa426ccf264e385622c28a6`**.
+  **The brief's `99749240…` is STALE** — the katana-image-qual run rebuilt it
+  at 18:31 AWST. `eb3b8ba0…` is the number that has to move.
+- `sudo jq -r .pkg_compat_level /var/lib/apex/pkg/state.json` → **2**
+  (booted engine `/usr/libexec/apex-pkg` line 99: `PKG_COMPAT_LEVEL=2`;
+  the tip's line 119 reads 3 — this is the pair that makes the row testable)
+- `apex-sysext-rebuild.service`: active (exited), **started and finished in the
+  same second** (18:29:40 → 18:29:40) — the defect's exact signature.
+- `ls /usr/share/vulkan/icd.d/ | grep -c i686` → 13 already (pkg-share landed
+  on the booted image; it must still read 13 AFTER the rebuild).
+- `systemd-analyze cat-config systemd/coredump.conf` → no `MaxUse`/`KeepFree`;
+  no drop-in dir at all. `/var/lib/systemd/coredump` 26 M.
+
+## A HOST-BREAKING DEFECT FOUND AND FIXED ON THE WAY IN
+`rpm-ostreed.service` would not start: 217/USER, "Failed to update dynamic user
+credentials: Permission denied", persistent. It was **not rpm-ostreed** — a
+bare `DynamicUser=yes` probe failed the same way, so the whole facility was
+down. SELinux Enforcing, **no AVC logged**. PID 1 debug logging named it:
+`Cannot open /etc/.pwd.lock: Permission denied`; the file carried
+`rpm_var_lib_t` where policy wants `passwd_file_t`.
+
+`apex install` put it there. `relabel_tree()` runs `setfiles` on the extraction
+tree's `/usr` and `/opt` only; `install_etc` copies into the live `/etc` with
+`cp -a`, which preserves the source label. **7 of the 11 paths in
+`/var/lib/apex/pkg/etc.list` were mislabelled.** `restorecon` on the seven
+fixed it and it is verified (DynamicUser probe succeeds, `rpm-ostree status`
+returns, `rpm-ostreed` active). Full account, including the engine fix that was
+deliberately NOT made here and the one read-only command to check the L16:
+`ROADMAP/evidence/katana-pwd-lock-selinux-20260920.md` (commit `d6bea820`).
+
+## The four things to verify, and the discriminators (from the `closed` notes)
+1. **pkg-update** — journal line `level 2 -> … level 3 — rebuilding`; duration
+   in MINUTES; `state.json` → 3; extension sha off `eb3b8ba0…`; i686 ICDs 13;
+   `comm -12` of the extension file list against `rpm -qal` EMPTY. The journal
+   line and the duration are load-bearing; the sha alone is not.
+   Katana rebuilds **once redundantly** — that is the mechanism, not a defect.
+2. **gaming-release** — `docs/gaming-and-sessions.md` §6.6 and §6.7.
+   `active : false`, `apex-game` cgroup gone, `sched_ext/state` → `disabled`,
+   apexd's `the session owner is gone`. `apex game status` must show
+   `owner_pid` ≠ 0 or the row cannot pass. **The CPU governor is NOT a
+   discriminator here** (katana's AC default tier is already `performance`).
+   Plus: mangoapp no longer crash-loops, and whether the MangoHud overlay
+   actually RENDERS with `APEX_GAMING_EXPOSE_WAYLAND=0` (it never has).
+3. **p2-b** — `/usr/lib64/apex-shell/qml/Apex/I18n/libapexi18n.so` present in
+   the booted `/usr`, and the shell loads it
+   (`APEXI18N: registerTypes uri=Apex.I18n` in the greeter's journal).
+4. **coredump drop-in** — `systemd-analyze cat-config systemd/coredump.conf`
+   → `MaxUse=256M` and `KeepFree=2G`.
 
 ## NEXT
-Wait on run 35461554871, then `bootc switch` katana to the per-SHA tag and
-work the four verifications (pkg-update, gaming-release, p2-b i18n, coredump
-drop-in). Discriminators are in the `closed` notes of those units in
-ROADMAP/state/queue.json — do not invent new ones.
+Monitor `bdxfncpqo` is watching run 35461554871 and emits each job result.
+When it is green: `sudo bootc switch --transport registry
+ghcr.io/andrenijman/apex-os:apex-97c9e8f2…` on katana, `systemctl reboot`,
+then wait with a BOUNDED ssh retry loop (the in-boot rebuild makes first boot
+slow) and work the four rows above in that order. `apex update` is not the
+route — katana tracks a per-SHA tag that never moves and a non-main dispatch
+moves no floating tag; the unit's re-open condition is "an image built from a
+tip carrying b512cf12, taken by a machine that already has an extension", and
+`bootc switch` satisfies it.
