@@ -405,6 +405,78 @@ The `trap cleanup EXIT HUP INT TERM` released game mode on the greetd path too,
 and the greeter came back on tty1 by itself.
 
 
+### 0.8 The remaining two blocks, on the old image, through the same greetd harness
+
+**§6.4 — Safe Graphics has no idea which GPU it is on.** The whole output of
+`check` on the old deployment:
+
+```
+$ /usr/libexec/apex-safe-graphics check ; echo rc=$?
+config      /usr/share/apex/safe-graphics
+compositor  /usr/bin/labwc
+terminal    foot
+renderer    pixman (software)
+rc=0
+$ grep -c WLR_DRM_DEVICES /usr/libexec/apex-safe-graphics                 -> 0
+$ grep -c 'primary gpu\|can light\|cannot light' /usr/libexec/apex-safe-graphics -> 0
+```
+
+Four lines, none of them about a GPU or an output. The `primary gpu` / `can
+light` / `cannot light` rows the run-book expects do not exist yet, and neither
+does the `WLR_DRM_DEVICES` branch.
+
+**§6.5 — the two-bar defect, reproduced through greetd.** `greetd-set.sh niri`,
+runfile cleared, greetd restarted:
+
+```
+$ pgrep -a -u andre waybar       -> 31621 waybar
+$ pgrep -a -u andre quickshell   -> 31630 quickshell -c /usr/share/apex-shell
+$ pgrep -a -u andre -x niri      -> 31531 niri --session
+$ grep -n waybar ~/.config/niri/config.kdl
+270:// This line starts waybar, a commonly used bar for Wayland compositors.
+271:spawn-at-startup "waybar"
+$ ls ~/.config/niri/config.kdl.pre-apex-bar.bak
+ls: cannot access '…': No such file or directory
+```
+
+Two bars, and the precondition for the fix is intact — the old image's
+`apex-shell-firstrun` contains no `pre-apex-bar` or `NIRI_STOCK_WAYBAR` string
+at all (`grep -c` → 0), so it left the user's config alone, as it must.
+
+Both outputs are live in this session, which is the baseline §6.1 has to beat:
+
+```
+eDP-1     AU Optronics 0x978F              1920x1080 @ 144.028 Hz   Adaptive Sync: disabled
+HDMI-A-1  Lenovo Group Limited R25f-30     1920x1080 @ 239.964 Hz   (serial URW0PNMC)
+```
+
+greetd restored byte-identical and restarted after each of these runs.
+
+### 0.9 Summary of the old-image controls
+
+Everything below was measured by this unit, on this machine, through the same
+greetd harness the new-image run will use. It is the left-hand column of every
+row in §2 and §3.
+
+| row | old image, 2026-09-19 17:2x–17:3x |
+|---|---|
+| `apex gaming --gamescope-device-args` | `error: unexpected argument`, rc 2 |
+| gamescope's Vulkan device | `Intel(R) Iris(R) Xe Graphics (ADL GT2)` |
+| gamescope's DRM node | `/dev/dri/card1` — card2 untouched by anything |
+| gamescope's connector | `eDP-1` @ 1920x1080@144; `HDMI-A-1` not in its list |
+| `--rt` | passed unconditionally; `No CAP_SYS_NICE, falling back` |
+| session capability log | absent (the script does not log one) |
+| greetd session `CapPrm` | `0000000000000000` |
+| bwrap in the greetd run | **no error; pressure-vessel starts** |
+| Steam Vulkan | `BInit - Unable to initialize Vulkan!` |
+| i686 ICDs | 0 of 13 |
+| extension paths shadowing the image | 177, of which 14 are 32-bit ELF |
+| `gst-inspect-1.0` | 240 plugins, **2 features** |
+| `apex-safe-graphics check` | 4 lines, no GPU or output rows |
+| niri session | waybar **and** quickshell — two bars |
+| `apex game` cleanup | released every time, 0 gamescope left |
+
+
 ---
 
 ## 1. The rebase
