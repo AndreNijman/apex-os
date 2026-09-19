@@ -89,6 +89,13 @@ a signed attestation. It is worth being precise about what that document covers,
 because "SBOM" is used for two quite different artefacts and APEX publishes the
 smaller one.
 
+**Tense, because the rest of this page is careful about it:** this section
+describes what the build produces *when the SBOM step runs*. No image published
+on `main` carries one yet — which is why `provenance` defaults to `warn` further
+down, and why `apex trust` says "none published" today. The two statements are
+not in conflict: one is about the pipeline, the other about what has actually
+shipped.
+
 **What is in it.** Every package syft finds in the image — around 9,800 of them
 — with name, version and purl. That includes the RPM set, the npm trees inside
 the Claude and ChatGPT desktop apps, and the Go and Rust modules inside the
