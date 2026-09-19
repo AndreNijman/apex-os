@@ -1466,12 +1466,23 @@ jobs:
           # cataloguer — the SBOM is byte-for-byte the same 9830 packages, both
           # Electron trees included.
           #
-          # HONEST ABOUT THE MARGIN: the limit is SOFT. Peak RSS was still
-          # 14.65 GiB with it set to 10GiB, on a 16 GB runner — it survived with
-          # 188 MB to spare. If this step starts failing again after the image
-          # gains packages, the answer is more headroom (a swapfile on the 86 GB
-          # of free disk, or a larger runner), NOT a smaller number here and NOT
-          # restricting the cataloguers.
+          # HONEST ABOUT THE MARGIN: the limit is SOFT. In the probes peak RSS
+          # was 14.65 GiB with it set to 10GiB on a 16 GB runner, surviving with
+          # 188 MB to spare. VERIFIED IN A REAL BUILD (run 35450175806,
+          # 2026-09-19): syft catalogued the image in 742 s, peak RSS
+          # 15,303,652 KB, 9830 packages, and mem_avail never fell below about
+          # 4.7 GiB — a far wider margin than the probes suggested, because a
+          # probe job carries the probe harness as well.
+          #
+          # A SWAPFILE IS NOT THE ANSWER, and that is measured rather than
+          # assumed: with the limit set, 32 GB of swap bought 16 MB of headroom
+          # and only 1 GB was ever touched. Swap WITHOUT the limit does work and
+          # works badly — 1958 s against 904 s, 8.7M major faults, 14.3 GB
+          # swapped, 72% of the timeout. It is a fallback, not a fix. If this
+          # step starts failing again after the image gains packages, the lever
+          # with real headroom is shrinking the predicate at source; a smaller
+          # number here will not help (4, 6 and 10 GiB all peak at 14.65-14.80
+          # GiB) and restricting the cataloguers is refused below.
           #
           # Restricting the cataloguers would be faster and would make the
           # artefact worse: the two Electron trees are precisely where a CVE
