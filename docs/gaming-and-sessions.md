@@ -245,8 +245,15 @@ machine — the stock binds are the only binds there are.
 `apex game stop`. On katana 2026-09-19 that worked on a clean gamescope exit
 and did nothing at all when greetd was restarted underneath it: `apex game
 status` still read `active: true` seventy-five minutes later, with a p-core
-cpuset, steered IRQs, the `performance` tier and `scx_lavd` still installed —
-and **not one line in the session's own log** to say so.
+cpuset, steered IRQs and the `performance` tier still in force — and **not one
+line in the session's own log** to say so.
+
+> **This account originally listed `scx_lavd` as a fourth thing left running.
+> That was false, and it is left here corrected rather than quietly deleted**
+> (2026-09-20). No sched-ext scheduler was running — not then, and not on any
+> boot since the feature landed. `apex game status` said one was because the
+> only sched-ext thing it reported was a sentence copied out of the plan, while
+> `scxctl` had refused every call. See §5c.
 
 The cause is not a bug in the trap. `apex game stop` goes through polkit action
 `org.apexos.apexd.manage-power`, whose defaults are
@@ -370,6 +377,101 @@ Neither half is APEX's to fix: mangoapp should ask GLFW for the X11 platform
 has no backoff. Both are recorded rather than worked around. What APEX *does*
 own is that a 2 Hz crasher could take `/var` with it, and that is bounded
 separately in `files/system/coredump/50-apex-coredump-limits.conf`.
+
+## 5c. Gaming Mode had never loaded a sched-ext scheduler, and status said it had
+
+### What it did
+
+Three shipped images, every boot, in the journal directly above the line the
+status surface quoted:
+
+```
+apexd: scxctl switch -s scx_lavd failed (exit status: 1):
+       error: no scx scheduler running, use 'start' instead of 'switch'
+apexd: game: sched-ext: scx_lavd for the session, kernel scheduler restored on exit
+```
+
+The second line was `apex game status`'s only sched-ext output. It asserted as
+a fact the thing the line above it had just reported as failed, because it was
+not a report at all — it was a sentence lifted out of the *plan*, printed
+whether or not the plan had done anything.
+
+Found on katana 2026-09-20 while qualifying §6.6, and present in
+`journalctl -b -1` and `-b -2` as well, so it is not a regression. It has
+simply never worked. `scxctl` and `scx_lavd` were installed
+(`scx-scheds-1.1.3-3.fc43`), `scx_loader.service` was active,
+`/sys/kernel/sched_ext/nr_rejected` was 0 and `enable_seq` was 0 — the kernel
+never rejected a scheduler, because one was never offered.
+
+### The cause: two verbs that are not interchangeable
+
+`scxctl` has both, and each refuses in the other's state, in as many words:
+
+| state | `start` | `switch` |
+|---|---|---|
+| nothing attached | attaches it | `error: no scx scheduler running, use 'start' instead of 'switch'` |
+| one attached | `error: scx scheduler already running, use 'switch' instead of 'start'` | replaces it |
+
+APEX loads no scheduler at boot, so the first entry into Gaming Mode always
+finds none — and the engine hardcoded `switch`.
+
+### The rule, and why it is not "use `start` instead"
+
+Swapping one hardcoded verb for the other would work on exactly the machines
+APEX ships today and fail on any machine that already runs a scheduler. So the
+verb is **read off the kernel**: `/sys/kernel/sched_ext/state` decides, and a
+single retry on whichever verb `scx_loader`'s own error names covers both the
+race and the case where the state could not be read. One retry, not a loop.
+
+And the half that actually cost three images: **`scxctl` exiting 0 is a fact
+about `scxctl`.** Whether a BPF scheduler is attached is a fact about the
+kernel. After a successful call the daemon waits, bounded at 2 s, for
+`sched_ext/state` to reach `enabled`, then reports **what it read**:
+
+* `scx_state : loaded` — the kernel says a scheduler is attached.
+  `scx_detail` quotes `root/ops`.
+* `scx_state : not loaded` — nothing attached, or this kernel has no
+  `CONFIG_SCHED_CLASS_EXT`. Both are definite answers. **A `scxctl` that
+  exited 0 over a kernel that still reads `disabled` lands here**, which is
+  the general form of the defect.
+* `scx_state : unknown` — `state` unreadable, or mid-transition. Never rounded
+  to either of the others: a failed read is not an absent feature.
+
+`scx_detail` names both halves, so a disagreement between the command and the
+kernel is visible instead of resolved in silence. The keys are reported while
+game mode is **off** as well, so "disabled before, disabled during" reads as
+the non-answer it is rather than as a passing row.
+
+> **`root/ops` is the struct_ops name and drops the prefix.** `scx_lavd`
+> attaches as `lavd`, `scx_rusty` as `rusty`. Comparing it verbatim against
+> the requested name would report a working scheduler as a failure — this
+> defect inverted — so the comparison strips the prefix, and a genuine
+> mismatch is *reported* rather than treated as "not loaded".
+
+### The same shape, found next door
+
+The defect is "a command whose result is assumed rather than read", so the
+sibling writers were checked for it. One more had it: **`gpus_locked` in
+`apex game status` was the list of GPUs the plan MEANT to lock**, while
+`run_nvidia_smi` had been returning a perfectly good refusal that nothing
+read. It now reports the GPUs whose locks `nvidia-smi` accepted, with
+`gpus_lock_attempted` beside it. And the **exit** path discarded every outcome
+but a hard error, so a refused restore was silent underneath a line asserting
+the machine had been put back.
+
+### Where it lives
+
+* `apexd/apexd-core/src/syswriter.rs` — `scx_load`, `scx_stop`,
+  `read_scx_state`, and `Outcome::Unknown`, which is the third answer the
+  writer previously had nowhere to put.
+* `apexd/apexd/src/game.rs` — `ScxReport`, `GpuLockReport`, and the `scx_*`
+  keys in `Status`.
+* Verified headlessly: 17 tests drive a fixture sysfs and a fake `scxctl` that
+  can be honest, refuse either way, or exit 0 and change nothing; 10 more pin
+  what `apex game status` says in each state. Nothing in the suite can reach a
+  real scheduler — the fixture constructor is `#[cfg(test)]`, because the
+  existing host-command guard exists precisely because a live writer in a test
+  once reached the developer's own.
 
 ## 6. What still needs katana, and the exact commands
 
@@ -526,20 +628,31 @@ apex game status
 pgrep -f '^/usr/libexec/apex-gaming-session'   # must equal that owner_pid
 ```
 
-Record the three things that must come back, **while game mode is on**:
+Record what must come back, **while game mode is on**:
 
 ```sh
 cat /sys/fs/cgroup/apex-game/cpuset.cpus    # the p-core list
-cat /sys/kernel/sched_ext/state             # expect: enabled
-apex game status | grep -E '^(tier|prior_tier)'
+apex game status | grep -E '^(tier|prior_tier|scx_)'
+#    expect: scx_state : loaded, and scx_detail naming root/ops.
+#    See §5c before reading anything into sched_ext/state by itself.
 ```
 
-Now destroy the session the way nothing can cooperate with — no signal to the
-script, no `apex game stop`, no trap:
+Now destroy the session the way nothing can cooperate with. **It must be
+`SIGKILL`, and to the session script's own PID.**
 
 ```sh
-sudo systemctl restart greetd
+sudo kill -9 "$(pgrep -f '^/usr/libexec/apex-gaming-session')"
 ```
+
+> **`sudo systemctl restart greetd` does NOT test this row, and this run-book
+> told you to use it until 2026-09-20.** The qualification found out why: the
+> restart takes the *seat* away, but the session script itself survives long
+> enough to run its own `EXIT` trap, so game mode is released by the ordinary
+> cooperative path — `[apex-gaming-session] apexd game mode released`, three
+> times, idempotent. That is a good outcome and it is a different row. Only
+> killing the owner outright leaves nothing that can cooperate: no trap, no
+> signal handler, no `apex game stop`. Measured: 1.9 s to release, which is the
+> 2 s watch.
 
 Within a few seconds, with **nothing having asked**:
 
@@ -548,18 +661,29 @@ apex game status | head -3
 #    expect: active : false
 test -d /sys/fs/cgroup/apex-game && echo STILL THERE || echo removed
 #    expect: removed
-cat /sys/kernel/sched_ext/state             # expect: disabled
+apex game status | grep '^scx_'
+#    expect: scx_state : not loaded  (see §5c)
 sudo journalctl -u apexd -b -o cat | grep -m1 'session owner is gone'
 #    expect: apexd: game: the session owner is gone (/proc/<pid> is gone)
 #            — releasing game mode.
 ```
 
-**The governor is NOT a discriminator on katana and must not be quoted as
-one.** Its profile's AC default tier is already `performance`, so `prior_tier`
-and `tier` are both `performance` and `scaling_governor` reads `performance`
-before, during and after. The readings that actually move on this machine are
-the cgroup, sched-ext and `active`. On a machine whose default tier is
-`balanced`, `scaling_governor` is a fourth witness.
+**Two of the obvious readings are NOT discriminators on katana.** Quoting
+either as evidence produces a row that passes without proving anything.
+
+* **The CPU governor.** Katana's profile's AC default tier is already
+  `performance`, so `prior_tier` and `tier` are both `performance` and
+  `scaling_governor` reads `performance` before, during and after. On a machine
+  whose default tier is `balanced`, `scaling_governor` is a real witness.
+* **`/sys/kernel/sched_ext/state` on its own.** It read `disabled` during the
+  session as well as after, because Gaming Mode had never loaded a scheduler at
+  all — §5c. On an image carrying that fix it does move, and `apex game status`'s
+  `scx_state` is the reading to record, because it distinguishes `not loaded`
+  from `unknown` where the bare file cannot.
+
+The readings that moved on this machine are **the cgroup, `active`, and the
+apexd journal line**. Record `scx_state` as a fourth once the §5c fix is in an
+image; until then, record it and say which image it came from.
 
 Two more worth taking while you are there:
 
@@ -599,3 +723,72 @@ the suite, arm one session with `APEX_GAMING_EXPOSE_WAYLAND=0` in the Exec
 environment: `--mangoapp` should be back in the `starting:` line,
 `--expose-wayland` gone, and the overlay should actually render — that is the
 one thing no machine has ever seen it do here.
+
+### 6.8 sched-ext actually loads (§5c)
+
+Everything in §5c is proven against fixtures. **Three rows need the machine**,
+and none can be inferred from a green suite. Run them from an **image that
+carries the fix** — on an older image `scx_state` is absent from
+`apex game status` entirely, which is itself how you tell.
+
+```sh
+# ── Row A: a scheduler actually attaches. ───────────────────────────────────
+# With NO session running first, so the starting state is the one that used to
+# break:
+cat /sys/kernel/sched_ext/state          # expect: disabled
+apex game status | grep '^scx_'
+#    expect: scx_requested : scx_lavd / scx_state : not loaded
+
+sudo apex game start
+apex game status | grep '^scx_'
+#    expect: scx_state : loaded
+#            scx_detail : ... sched_ext/state is enabled, root/ops reads '<name>'
+# RECORD THE root/ops STRING VERBATIM. It is expected to be `lavd`, and that
+# expectation has never been checked on hardware — no machine here can load a
+# scheduler to look at it. If it reads something else, scx_ops_matches() wants
+# to know.
+sudo journalctl -u apexd -b -o cat | grep -m1 'scxctl'
+#    expect: NO 'no scx scheduler running' line. Its presence means the verb
+#    selection did not see `disabled`, which is a real failure of this fix.
+
+# ── Row B: it goes away again. ──────────────────────────────────────────────
+sudo apex game stop
+cat /sys/kernel/sched_ext/state          # expect: disabled
+apex game status | grep '^scx_state'     # expect: not loaded
+sudo journalctl -u apexd -b -o cat | grep -m1 'sched-ext after exit'
+#    expect: a line, and it must say disabled. Before this fix the exit path
+#    discarded every outcome but a hard error, so a refused stop was silent.
+
+# ── Row C: `switch` is reached when something IS already running. ────────────
+# The one branch a fixture cannot honestly stand in for, because it needs
+# scx_loader holding a real scheduler. Load one by hand FIRST:
+sudo scxctl start -s scx_rusty
+cat /sys/kernel/sched_ext/state          # expect: enabled
+sudo apex game start
+sudo journalctl -u apexd -b -o cat | grep -m1 'scxctl'
+#    expect: no refusal. The engine must have chosen `switch`, not `start`.
+apex game status | grep '^scx_'
+#    expect: scx_state : loaded, root/ops now naming lavd rather than rusty.
+sudo apex game stop
+#    EXPECT A NAMED LINE, not a silent restore:
+#    "sched-ext was already running before this session (rusty) and exit
+#     STOPPED it rather than putting it back"
+#    That is a KNOWN LIMITATION, not a failure of the run: game mode stops the
+#    scheduler it found rather than restoring it. `scxctl restore` exists and
+#    would be the fix; it is not done here because no APEX image loads a
+#    scheduler at boot, so nothing has ever reached it.
+sudo scxctl stop
+#    expect: it REFUSES — `apex game stop` already stopped it, and nothing is
+#    running. That refusal is the row passing, not a loose end.
+```
+
+**On the timing.** `scx_load` waits up to 2 s (`SCX_SETTLE`) for the scheduler
+to attach before reporting. If Row A comes back `unknown` with a `state` of
+`enabling`, the budget is too short for that hardware and the constant needs
+raising — record the number rather than re-running until it passes.
+
+**Not asked for here, and deliberately:** `scx_loader` has *modes* (`Gaming`,
+`LowLatency`, `PowerSave`, `Server`) that `scxctl start -m` selects and that
+APEX does not use. Whether `-m gaming` beats a bare `-s scx_lavd` is a tuning
+question for a machine with a game on it, not a correctness one, and it does
+not belong in the row that proves the scheduler loads at all.
