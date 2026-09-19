@@ -1030,9 +1030,13 @@ real and neither is caused by this image:
   boot**, 14 403 respawns in the 2-hour run (57 612 `Glfw Error 65537/65550:
   X11: Platform not initialized` lines, 364 respawns in the 3-minute run). The
   MangoHud overlay never appears, the journal takes 144 187 lines for one
-  gaming session, and `coredumpctl` is 15 000 entries deep. `--mangoapp` is
-  added unconditionally by the session script whenever `mangoapp` is on PATH.
-  Filed as a follow-up below.
+  gaming session, and `coredumpctl` is 15 000 entries deep. **It costs disk, on
+  a machine that has little**: systemd rate-limits storage, so the 15 376
+  crashes left 1 379 dumps totalling **4.0 GB** in `/var/lib/systemd/coredump`
+  after two sessions, on a `/var` that was already 94% full. All but three were
+  removed afterwards (3 mangoapp samples kept alongside the gamescope and bwrap
+  dumps); the store is 26 MB again. `--mangoapp` is added unconditionally by the
+  session script whenever `mangoapp` is on PATH. Filed as a follow-up below.
 
 **§6.6 PASSES for the clean path** and fails for the torn-down path, which is
 the defect above.
@@ -1169,7 +1173,8 @@ artefact of the machine only being able to light one screen.
    `performance` + `scx_lavd` installed with nothing able to undo it.
 2. **`mangoapp` crash-loops at ~2 Hz for the whole of every Gaming Mode
    session** — 15 376 core dumps this boot, 14 403 respawns in one 2-hour
-   session, 144 187 journal lines. The overlay never renders.
+   session, 144 187 journal lines, and **4.0 GB of stored core dumps** from two
+   sessions on a 94%-full `/var`. The overlay never renders.
    `--mangoapp` is passed unconditionally whenever `mangoapp` is on PATH.
 3. **gamescope segfaults on every exit** (`139`). Cosmetic today — the trap
    still runs on the clean path — but it is a core dump per session and it
