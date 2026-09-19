@@ -640,7 +640,52 @@ tasks:
     by the fixed engine (section 2.1 shows the "multilib: carrying" line) but stamped level 2, since that engine's
     constant was still 2 -- that rebuild is the mechanism working, not the defect; and the L16 carries a clippy
     extension, so it rebuilds on the first boot after this lands, under a live desktop, bounded by the unit's
-    Nice=10 and IOSchedulingClass=idle.
+    Nice=10 and IOSchedulingClass=idle. || 2026-09-20, unit integrated-image, THE INTEGRATED IMAGE EXISTS AND FOUR
+    THINGS ARE NOW CONFIRMED ON HARDWARE (evidence ROADMAP/evidence/integrated-image-20260920.md and
+    katana-pwd-lock-selinux-20260920.md). Build run 35461554871, workflow_dispatch on task/integrated-image at
+    97c9e8f2, green end to end in 1h12m; every job's steps read rather than assumed, since a skipped job counts as
+    success here. Tag ghcr.io/andrenijman/apex-os:apex-97c9e8f25ee55593a97502505f51c6115ebbee7c at digest
+    sha256:55fc9e4ee9b2c1b27045cba5a594a40e97fb0d73c70170cfbe0003f5cd4d73b0. It pinned apex-shell roadmap/v2.2
+    03d77f96 through the ordered fallback, so the two halves are the same age, and it moved no floating tag, so no
+    machine but katana saw it. katana was switched with bootc switch and rebooted cleanly onto it. (1) pkg-update
+    PASSES: apex-sysext-rebuild took 53.8 seconds where the same unit took 33 milliseconds on the previous boot,
+    the journal names its reason -- extension compatibility changed OS 43 level 2 to OS 43 level 3, rebuilding --
+    state.json reads pkg_compat_level 3, the extension sha moved from eb3b8ba0 to 75290ae7, the i686 Vulkan ICD
+    count is still 13, comm -12 of the extension file list against rpm -qal is empty over 3564 and 266093 paths,
+    and nothing failed afterwards. Honest reading: 54 seconds is not the minutes the notes predicted, because
+    katana's rpms were cached, and the extension is byte-different with an identical file set because the resolved
+    set of 223 did not move -- the LEVEL did, which is the fix. (2) coredump drop-in PASSES: MaxUse=256M and
+    KeepFree=2G on the booted machine, and neither line exists without the drop-in because Fedora comments every
+    value out. (3) p2-b PASSES, both halves: the first full base build ever to carry the catalogue stage compiled
+    apex-shell_de.qm from apex-shell 03d77f96 and proved Apex.I18n loads, and on the booted machine the
+    Containerfile's own offscreen probe reports APEXI18N installed
+    /usr/share/apex-shell/translations/apex-shell_de.qm under de_DE and reports honestly that there is no
+    catalogue for C. The greeter's journal is not a channel for this -- greetd dup2s the VT onto the session
+    stdio. (4) gaming-release PASSES: apex game status printed owner_pid 7799 matching the session script, and
+    after SIGKILLing the owner apexd logged 'the session owner is gone (/proc/9688 is gone) - releasing game mode'
+    1.9 seconds later, with active false, the apex-game cgroup removed and no gamescope left. NOTE the run-book's
+    own recipe, a greetd restart, did NOT exercise this: the session survived long enough to run its trap and
+    released cleanly, so SIGKILL is what 'nothing can cooperate' has to mean. 6.7 also passes -- gamescope starts
+    with --expose-wayland and WITHOUT --mangoapp, zero new mangoapp core dumps against 15376 in one boot before,
+    zero Glfw Error lines against 57612, and 171 session journal lines against 144187. TWO DEFECTS FOUND, neither
+    fixed here. (a) apex install writes /etc with cp -a and never relabels: relabel_tree covers only the
+    extraction tree's /usr and /opt. All 7 paths in etc.list were mislabelled, and /etc/.pwd.lock as rpm_var_lib_t
+    breaks DynamicUser=yes for PID 1 system-wide -- six units including capsule@.service and rpm-ostreed, with NO
+    AVC logged because the denial is on a path PID 1 takes before any transition. It RECURRED on the level 3
+    rebuild with a different wrong type, var_lib_t, which happens to be permitted, so this is a defect that fires
+    on every rebuild and breaks the machine only sometimes. restorecon fixes it and was applied twice, verified
+    both times. The L16 has run apex install and nobody has checked it: stat -c %C /etc/.pwd.lock, want
+    passwd_file_t. (b) apexd runs `scxctl switch -s scx_lavd` where the machine needs `scxctl start` -- scxctl
+    itself says so -- so Gaming Mode has NEVER loaded a sched-ext scheduler, on this image or the previous two,
+    while apex game status's notes field claims it did. syswriter.rs line 739. It also means sched_ext/state is
+    not a release discriminator on katana, the way the governor already is not. STILL UNANSWERED and named rather
+    than glossed: whether systemd-sysext refresh re-merging /usr disturbs a LIVE desktop (katana ran only the
+    greeter, and the L16 will be the first machine to answer it, under Andre's working session); whether the
+    MangoHud overlay renders with APEX_GAMING_EXPOSE_WAYLAND=0; Safe Graphics' automatic dGPU branch; and any real
+    game launch. katana is left booted on 97c9e8f2 with three deployments, the September 18 rollback still pinned,
+    greetd byte-identical to its backup with zero timers armed, and ~/apex-pre-rebase-20260919 intact. The NVMe
+    controllers swapped across this reboot AGAIN -- the APEX Micron 220534D1CB81 moved from nvme0n1 to nvme1n1 --
+    so address disks by serial or label, never by device name.
 - id: P0-002
   title: Introduce protected apex-secretd service
   priority: P0

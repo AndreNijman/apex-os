@@ -1,174 +1,142 @@
-# integrated-image — build the integrated image and qualify it on katana
+# integrated-image — DONE. The image is built and qualified on katana.
 
-Repo: apex-os. Branch `task/integrated-image`, cut 2026-09-19T18:32Z off
-`roadmap/v2.2` @ `97c9e8f2`. Worktree `/var/tmp/apex-work/wt-integrated-image`.
-Tip `d6bea820` = 97c9e8f2 + ONE evidence-only commit (no image content).
+Repo apex-os, branch **`task/integrated-image`** (tip `20e21d86`), cut off
+`roadmap/v2.2` @ `97c9e8f2`. Its three commits are evidence files ONLY; the
+image content is exactly `roadmap/v2.2`'s tree. Worktree
+`/var/tmp/apex-work/wt-integrated-image`.
 
-## THE IMAGE EXISTS AND IS GREEN END TO END
-**Run 35461554871 completed `success` at 2026-09-19T19:45Z, 1 h 12 m.**
-`changes` success, `rust` success, `core` success (13 steps, none skipped),
-`base` success, `image` success (17 steps, none skipped), `installer-iso` and
-`qcow2` skipped because their dispatch inputs default false.
+## The artifact
+
+**Run 35461554871** — `workflow_dispatch` on `task/integrated-image` @
+`97c9e8f2`, queued 2026-09-19T18:33:05Z, **`success` at 19:45Z, 1 h 12 m**.
+https://github.com/AndreNijman/apex-os/actions/runs/35461554871
 
 ```
 ghcr.io/andrenijman/apex-os:apex-97c9e8f25ee55593a97502505f51c6115ebbee7c
   digest sha256:55fc9e4ee9b2c1b27045cba5a594a40e97fb0d73c70170cfbe0003f5cd4d73b0
 ```
-and the log says `not publishing from refs/heads/task/integrated-image:
-per-SHA tags written` — no floating tag moved, the fleet is untouched.
 
-**Two of the four rows are already answered BY THE BUILD** (hardware still
-owes the other half of each):
-- p2-b: `catalogue: compiled 1 catalogue(s) from apex-shell 03d77f96…`,
-  `Apex.I18n built and proved to load: 29776 bytes`, `Apex.I18n stage
-  complete`, `catalogue: apex-shell_de.qm loads under LANG=de`. The in-build
-  offscreen probe's `APEXI18N: registerTypes uri=Apex.I18n` grep passed. This
-  is the FIRST full base build ever to carry the catalogue stage.
-- coredump: STEP 137 copies the drop-in, STEP 138 asserts the merged config
-  and prints `coredump storage bounded: MaxUse=256M KeepFree=2G (default was
-  a 4 GiB cap)`.
+- Every job's STEPS were read, not just its conclusion: `core` 13/13 success,
+  `image` 17/17 success. `installer-iso` and `qcow2` are `skipped` because
+  their dispatch inputs default false — that is the "skipped counts as
+  success" trap, checked rather than assumed.
+- `Pinned apex-shell roadmap/v2.2 (apex-shell has no branch named
+  task/integrated-image): 03d77f96…` — the ordered fallback (`12e9d454`)
+  worked. Both halves are the same age. This is NOT a main-shell build.
+- `not publishing from refs/heads/task/integrated-image: per-SHA tags written`
+  — no floating tag moved, no machine but katana saw this image.
+- `core rebuild: true (core sources changed)`, so katana's pull was the whole
+  image, 6.3 GB.
 
-## IMAGE BUILD — THE RUN ID, RECORDED FIRST
-- **Run 35461554871**, workflow_dispatch on `task/integrated-image` @ 97c9e8f2,
-  queued 2026-09-19T18:33:05Z.
-  https://github.com/AndreNijman/apex-os/actions/runs/35461554871
-- `changes` job READ, not assumed:
-  `Pinned apex-shell roadmap/v2.2 (apex-shell has no branch named
-  task/integrated-image): 03d77f96f521df7501d710d5c15ae8d0074a39ce`
-  — the current apex-shell tip, which carries the Apex.I18n work. The
-  12e9d454 ordered fallback did its job; this is NOT a main-shell build.
-- `core rebuild: true (core sources changed)` → full ~1 h 20 m build, and
-  katana's pull will be the whole image rather than tens of MB.
-- `PUBLISH: false` → per-SHA tags only, no floating name moves, fleet untouched.
-  Expected artifact:
-  `ghcr.io/andrenijman/apex-os:apex-97c9e8f25ee55593a97502505f51c6115ebbee7c`
-- FALLBACK IF IT FAILS: run **35457162588** (success, 1 h 17 m, task/sbom-attest
-  @ `fd456c5a`). `git diff fd456c5a 97c9e8f2` touches ONLY
-  `.github/workflows/build-image.yml` and deletes `sbom-probe.yml`, so its
-  image content is this tree's. Confirm the shell sha it resolved before
-  treating it as equivalent. Tag
-  `apex-fd456c5acf1531beeb1e90cf050a1d9c3a47ef93`.
+## All four rows: CONFIRMED ON HARDWARE
 
-## Boundaries (from the brief, not negotiable)
-- **Do not touch the L16.** Booting it is Andre's half of unit `final`.
-- **Do not merge to main, do not open a PR.** When Andre does it:
-  apex-shell `roadmap/v2.2` -> `main` FIRST (Containerfile.base carries
-  `ARG APEX_SHELL_REF=main`), THEN apex-os `roadmap/v2.2` -> `main`.
-- katana: APEX disk = Micron serial `220534D1CB81` (nvme0n1 today, 953.9 G,
-  carries `/var` on p3). Windows = SPCC serial `240023925111005` (nvme1n1
-  today, 1.8 T) and it holds APEX's own `Boot0000` ESP plus Andre's games.
-  **Never write to it.** `/dev/nvmeXnY` is not stable; address by serial.
-- greetd is boot-critical: arm `qual-greetd-restore` FIRST, use
-  `greetd-set.sh` / `greetd-restore.sh` (never a bare restart — the
-  `/run/greetd.run` runfile trap), and finish with `cmp` against
-  `/etc/greetd/config.toml.orig-qual2`.
+Numbers are in `ROADMAP/evidence/integrated-image-20260920.md`; each unit's
+own `closed` note in `queue.json` carries its own.
 
-## Katana starting state (measured 2026-09-20 ~02:3x AWST, before any change)
-- booted `apex-7f647470e222cfa23e0853cac45ef3f7e74c252e`,
-  digest `sha256:be3bdd0c…3aafb`, deployed 2026-09-19T10:09Z
-- rollback `apex-266dcc572c51bdf9ec421d79eaa8784583184cd2`,
-  digest `sha256:ba263890…503d` — **now PINNED** (`ostree admin pin 1`) so the
-  switch + reboot cannot prune it. Unpin with `ostree admin pin -u 1`.
-- `/var` 954 G, 53 G free (95 % used), on the APEX Micron. `/` composefs.
-- extension `/var/lib/extensions/apex-user.raw` 535 928 832 bytes,
-  sha256 **`eb3b8ba056d8f6f3caca2c3ed3204bda077f5f5f2fa426ccf264e385622c28a6`**.
-  **The brief's `99749240…` is STALE** — the katana-image-qual run rebuilt it
-  at 18:31 AWST. `eb3b8ba0…` is the number that has to move.
-- `sudo jq -r .pkg_compat_level /var/lib/apex/pkg/state.json` → **2**
-  (booted engine `/usr/libexec/apex-pkg` line 99: `PKG_COMPAT_LEVEL=2`;
-  the tip's line 119 reads 3 — this is the pair that makes the row testable)
-- `apex-sysext-rebuild.service`: active (exited), **started and finished in the
-  same second** (18:29:40 → 18:29:40) — the defect's exact signature.
-- `ls /usr/share/vulkan/icd.d/ | grep -c i686` → 13 already (pkg-share landed
-  on the booted image; it must still read 13 AFTER the rebuild).
-- `systemd-analyze cat-config systemd/coredump.conf` → no `MaxUse`/`KeepFree`;
-  no drop-in dir at all. `/var/lib/systemd/coredump` 26 M.
+| row | discriminator, as it actually read |
+|---|---|
+| **pkg-update** | rebuild **53.8 s** vs **33 ms** the boot before; journal says `level 2 -> … level 3 — rebuilding`; `pkg_compat_level` 3; ext sha `eb3b8ba0` → `75290ae7`; 13 i686 ICDs; `comm -12` vs `rpm -qal` **empty** |
+| **gaming-release** | `owner_pid : 7799`; after SIGKILL, apexd's `the session owner is gone (/proc/9688 is gone)` **1.9 s** later; `active : false`; cgroup removed; `--mangoapp` absent; **0** new mangoapp dumps (was 15 376), **0** Glfw lines (was 57 612), **171** journal lines (was 144 187) |
+| **p2-b** | build compiled `apex-shell_de.qm`; on the machine the offscreen probe says `APEXI18N: installed …/apex-shell_de.qm` under `de_DE`, and honestly `no catalogue for C` under `C` |
+| **coredump** | `MaxUse=256M` / `KeepFree=2G` live; neither line exists without the drop-in |
 
-## A HOST-BREAKING DEFECT FOUND AND FIXED ON THE WAY IN
-`rpm-ostreed.service` would not start: 217/USER, "Failed to update dynamic user
-credentials: Permission denied", persistent. It was **not rpm-ostreed** — a
-bare `DynamicUser=yes` probe failed the same way, so the whole facility was
-down. SELinux Enforcing, **no AVC logged**. PID 1 debug logging named it:
-`Cannot open /etc/.pwd.lock: Permission denied`; the file carried
-`rpm_var_lib_t` where policy wants `passwd_file_t`.
+### Three things that are true and easy to misread
+- **54 s is not "minutes".** katana's rpms were cached. 54 s vs 33 ms is still
+  an unambiguous discriminator; the earlier wording was optimistic.
+- **The extension is byte-different with an IDENTICAL file set** (0 newly
+  carried, 0 lost). The resolved set of 223 did not move — the *level* did,
+  which is the entire fix.
+- **The run-book's §6.6 recipe does not test §6.6.** `systemctl restart
+  greetd` left the session alive long enough to run its trap, which released
+  game mode cleanly by the ordinary path. Only SIGKILLing the owner is
+  "nothing can cooperate". **Amend the run-book.**
 
-`apex install` put it there. `relabel_tree()` runs `setfiles` on the extraction
-tree's `/usr` and `/opt` only; `install_etc` copies into the live `/etc` with
-`cp -a`, which preserves the source label. **7 of the 11 paths in
-`/var/lib/apex/pkg/etc.list` were mislabelled.** `restorecon` on the seven
-fixed it and it is verified (DynamicUser probe succeeds, `rpm-ostree status`
-returns, `rpm-ostreed` active). Full account, including the engine fix that was
-deliberately NOT made here and the one read-only command to check the L16:
-`ROADMAP/evidence/katana-pwd-lock-selinux-20260920.md` (commit `d6bea820`).
+## TWO DEFECTS FOUND. Neither fixed, and that was deliberate.
+The image under qualification was already built and on the machine; an engine
+change now would invalidate the run it is embedded in.
 
-## The four things to verify, and the discriminators (from the `closed` notes)
-1. **pkg-update** — journal line `level 2 -> … level 3 — rebuilding`; duration
-   in MINUTES; `state.json` → 3; extension sha off `eb3b8ba0…`; i686 ICDs 13;
-   `comm -12` of the extension file list against `rpm -qal` EMPTY. The journal
-   line and the duration are load-bearing; the sha alone is not.
-   Katana rebuilds **once redundantly** — that is the mechanism, not a defect.
-2. **gaming-release** — `docs/gaming-and-sessions.md` §6.6 and §6.7.
-   `active : false`, `apex-game` cgroup gone, `sched_ext/state` → `disabled`,
-   apexd's `the session owner is gone`. `apex game status` must show
-   `owner_pid` ≠ 0 or the row cannot pass. **The CPU governor is NOT a
-   discriminator here** (katana's AC default tier is already `performance`).
-   Plus: mangoapp no longer crash-loops, and whether the MangoHud overlay
-   actually RENDERS with `APEX_GAMING_EXPOSE_WAYLAND=0` (it never has).
-3. **p2-b** — `/usr/lib64/apex-shell/qml/Apex/I18n/libapexi18n.so` present in
-   the booted `/usr`, and the shell loads it
-   (`APEXI18N: registerTypes uri=Apex.I18n` in the greeter's journal).
-4. **coredump drop-in** — `systemd-analyze cat-config systemd/coredump.conf`
-   → `MaxUse=256M` and `KeepFree=2G`.
+1. **`apex install` mislabels every file it writes into `/etc`.**
+   `relabel_tree` runs `setfiles` on the extraction tree's `/usr` and `/opt`
+   only; `install_etc` copies into the live `/etc` with `cp -a`, which keeps
+   the source label. All 7 paths in `etc.list` were wrong.
+   `/etc/.pwd.lock` as `rpm_var_lib_t` breaks `DynamicUser=yes` for **six**
+   units — `capsule@.service`, `rpm-ostreed`, `fwupd-refresh`,
+   `rpm-ostree-countme`, `chrony-wait`, `wsdd` — **with no AVC logged**,
+   because the denial is on a path PID 1 takes before any transition.
+   **It recurred on the level-3 rebuild** with a *different* wrong type
+   (`var_lib_t`, which happens to be permitted), so it fires every rebuild and
+   breaks the machine only sometimes. `restorecon` fixes it; applied and
+   verified twice. Shape of the fix: `relabel_tree` must cover `${root}/etc`,
+   and `install_etc` must `restorecon` what it writes.
+   `ROADMAP/evidence/katana-pwd-lock-selinux-20260920.md`.
+2. **Gaming Mode has never loaded a sched-ext scheduler.**
+   `apexd/apexd-core/src/syswriter.rs:739` runs `scxctl switch -s scx_lavd`;
+   with nothing running, scxctl answers *"no scx scheduler running, use
+   'start' instead of 'switch'"*. apexd logs that failure and the **next**
+   line — which is also `apex game status`'s `notes` field — claims
+   `sched-ext: scx_lavd for the session` as fact. Present on boots `-1` and
+   `-2` too, so **not a regression**. Consequence for anyone re-running the
+   run-book: **`sched_ext/state` is not a discriminator on katana**, exactly
+   like the governor.
 
-## PREP ALREADY DONE ON KATANA (so a stranger does not redo it)
-- `/var/tmp/apex-work/scratch-integrated-image/` holds the PRE snapshot
-  (`ext-pre.txt` 3 564 paths, `image-pre.txt` 266 093, `shadow-pre.txt` 0,
-  `state-pre.json`, `ext-sha-pre.txt`) and **`post-boot.sh`**, which runs all
-  four rows plus the `.pwd.lock` recurrence audit. Run it AFTER the sysext
-  rebuild reaches a terminal state, not before — `state.json` reads 2 and the
-  ICD count can read 0 while it is still `activating`.
-- The greetd helpers from the last run are intact and were re-read:
-  `/var/tmp/apex-work/scratch-katana-image-qual/greetd-set.sh`,
-  `greetd-restore.sh`, `measure-session.sh`, `measure-pkgshare.sh`.
-  Session id for Gaming Mode is **`apex-gaming`**.
-  Do NOT copy the old card's `--on-calendar='2026-09-19 20:45:00'`; it is in
-  the past and fires immediately. Use `--on-active=30min`, unit name
-  `qual-greetd-restore` (that is the name `greetd-restore.sh` stops).
-- Two readings that will mislead a stranger, both checked in the source:
-  * `owner_pid` is inserted into `apex game status` ONLY while a session is
-    active (`apexd/apexd/src/game.rs` ~457). Its absence on an idle machine is
-    by design. The idle discriminator is
-    `strings -a /usr/bin/apexd | grep -c 'the session owner is gone'`.
-  * The greeter's stderr never reaches the journal (greetd dup2s the VT onto
-    the session stdio), so grepping the journal for `APEXI18N` proves nothing.
-    Use the Containerfile's own offscreen probe —
-    `/usr/lib64/qt6/bin/qml -platform offscreen` with
-    `QML_IMPORT_PATH=/usr/lib64/apex-shell/qml` — which `post-boot.sh` does.
+## katana, as it is left
+- Booted `apex-97c9e8f2…`, digest `sha256:55fc9e4e…`.
+- **Three** deployments. `bootc status`'s `rollback` slot now holds
+  `apex-7f647470` (the rotated one); the **September 18 `apex-266dcc57`
+  survives underneath it as a third deployment with `Pinned: yes`** — it was
+  pinned *before* the switch so the rotation could not prune it. A stranger
+  reading only `bootc status` will think it is gone. `ostree admin pin -u 2`
+  to unpin.
+- greetd **byte-identical** to `config.toml.orig-qual2` (`cmp`), `0`
+  `initial_session`, `0` timers armed, `greetd` active, greeter live on tty1
+  (sway + swaybg + apex-greet).
+- `~/apex-pre-rebase-20260919/` intact, 4 files, 2.1 M. Nothing left mounted.
+  `/var` 54 G free.
+- `/etc` labels `restorecon`ed — **for now**. The next extension rebuild
+  re-breaks them.
+- **THE NVMe CONTROLLERS SWAPPED AGAIN across this reboot.** The APEX Micron
+  `220534D1CB81` moved `nvme0n1` → `nvme1n1`; Windows SPCC `240023925111005`
+  moved `nvme1n1` → `nvme0n1`. `/var` is on the APEX disk, verified by LABEL
+  (`apex-root`) and serial. Never trust a device name here.
+- Scratch, kept as the record:
+  `/var/tmp/apex-work/scratch-integrated-image/` — `post-boot.sh`, `game.sh`,
+  the pre/post extension file lists, `session-intgame.log`.
 
-## SWITCH DONE, REBOOT PENDING
-`bootc switch` is COMPLETE and the new deployment is **staged**; `ostree admin
-status` shows three deployments and the rollback still `Pinned: yes`.
+## Two traps this run paid for
+- **`bootc switch` over ssh is SIGHUPed when the channel closes**, and a 600 s
+  tool cap closes it. The 6.3 GB pull survived in the image store but nothing
+  was staged and `bootc status` said `staged: none` — which reads exactly like
+  a failed pull. Re-run it detached:
+  `sudo systemd-run --unit=intimg-switch --collect
+  --property=TimeoutStartSec=infinity --service-type=oneshot /usr/bin/bootc
+  switch --transport registry <IMG>`. The second run found `No changes` and
+  staged in 10 s.
+- **`owner_pid` is only in `apex game status` while a session is ACTIVE**
+  (`apexd/apexd/src/game.rs` ~457). Its absence on an idle machine is by
+  design. The idle discriminator is
+  `strings -a /usr/bin/apexd | grep -c 'the session owner is gone'`.
 
-**A trap that cost 15 minutes here, write it down:** `bootc switch` run
-straight over ssh is SIGHUPed when the ssh channel closes, and the Bash tool's
-600 s cap closes it. The pull (6.3 GB, 67 of 113 layers) survived in the image
-store but nothing was staged, and `bootc status` said `staged: none` — which
-reads exactly like a failed pull. Re-run it as a detached transient unit:
-`sudo systemd-run --unit=intimg-switch --collect
---property=TimeoutStartSec=infinity --service-type=oneshot /usr/bin/bootc
-switch --transport registry <IMG>`, then poll `journalctl -u intimg-switch`.
-The second run found `No changes` and staged in 10 s.
-
-Next step is a CLEAN `systemctl reboot` — a crash before a clean shutdown
-discards a staged update and it reads as "updated but nothing changed".
-
-## NEXT
-After the reboot: wait with a BOUNDED ssh retry loop (the in-boot rebuild
-makes first boot slow), wait for `apex-sysext-rebuild.service` to reach a
-TERMINAL state (`active` or `failed`) before running `post-boot.sh` — while it
-is `activating`, `state.json` still reads 2 and the ICD count can read 0 — and
-work the four rows above in that order. `apex update` is not the
-route — katana tracks a per-SHA tag that never moves and a non-main dispatch
-moves no floating tag; the unit's re-open condition is "an image built from a
-tip carrying b512cf12, taken by a machine that already has an extension", and
-`bootc switch` satisfies it.
+## NEXT — this unit has nothing left. What is left is ANDRE'S, in this order
+1. **On the L16, before anything else, one read-only command:**
+   `stat -c %C /etc/.pwd.lock` — want `passwd_file_t`. The L16 has run
+   `apex install`. If it reads `rpm_var_lib_t`, its `rpm-ostreed` and APEX
+   Capsules are already dead and nothing has said so; `sudo restorecon
+   /etc/.pwd.lock` fixes it. **This agent did not run it: the L16 is off
+   limits.**
+2. **Andre's call, not an agent's:** whether the two defects above land on
+   `roadmap/v2.2` first. Neither blocks the qualification, which stands. But
+   the L16 rebuilds its clippy extension on the first boot after this image,
+   and defect 1 fires on every rebuild.
+3. If (2) is yes, **one more image build** — same dispatch, new tip.
+4. **Boot the L16 onto the per-SHA tag** and qualify it. It will be the first
+   machine to answer the one question katana could not: whether
+   `systemd-sysext refresh` re-merging `/usr` disturbs a **live desktop**.
+   Katana ran only the greeter. It will happen under Andre's working session;
+   `Nice=10` and `IOSchedulingClass=idle` bound the cost, the `/usr` re-merge
+   does not care about either.
+5. **Then, and only then, the two merges, in THIS order:**
+   **apex-shell `roadmap/v2.2` → `main` FIRST**, because
+   `Containerfile.base` carries `ARG APEX_SHELL_REF=main` (lines 93 and 769) —
+   land apex-os first and the next main build vendors an apex-shell months
+   behind and dies in `check-labwc-keybinds`. **THEN apex-os `roadmap/v2.2` →
+   `main`.** This agent opened no PR and merged nothing, by instruction.
