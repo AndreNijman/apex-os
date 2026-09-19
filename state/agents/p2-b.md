@@ -2,14 +2,14 @@
 
 items: P2-003, P2-004
 repo: both
-worktree: /var/tmp/apex-work/wt-p2-b5
-branch: task/p2-b-round32
-second_worktree: /var/tmp/apex-work/wt-p2-b5-sh
-second_branch: task/p2-b-round32
-scratch: /var/tmp/apex-work/scratch-p2-b/round32/
+worktree: /var/tmp/apex-work/wt-p2-b6
+branch: task/p2-b-round33
+second_worktree: /var/tmp/apex-work/wt-p2-b6-sh
+second_branch: task/p2-b-round33
+scratch: /var/tmp/apex-work/scratch-p2-b/round33/
 
-The branch name moved to `task/p2-b-round32` this round (both repos, both cut
-from `roadmap/v2.2`: apex-os `b0e34371`, apex-shell `a8cd491`). It must exist
+The branch name moved to `task/p2-b-round33` this round (both repos, both cut
+from `roadmap/v2.2`: apex-os `7f647470`, apex-shell `9df72cf`, both pushed). It must exist
 and be pushed in BOTH repos even when a repo gets no commits, because
 apex-shell's CI looks for a matching branch name. Round 31's worktrees
 (`wt-p2-b4`, `wt-p2-b4-sh`) are finished and their work is merged. Full
@@ -57,6 +57,27 @@ Do not re-run anything the "Do NOT re-run" list below names. Every mutation
 harness here costs eight to twenty minutes.
 
 ## NEXT
+
+**ROUND 33 IN FLIGHT.** Branches cut and pushed in both repos (apex-shell
+`task/p2-b-round33` from `9df72cf`, apex-os from `7f647470`); worktrees
+`wt-p2-b6-sh` and `wt-p2-b6`.
+
+Next action: **spike whether quickshell's bare `QQmlEngine` honours a QML
+extension-plugin import path**, in `/var/tmp/apex-work/scratch-p2-b/round33/`.
+That is the go/no-go for standing-queue item 4 — the one route to a QTranslator
+that APEX can ship without an upstream change: a compiled
+`QQmlEngineExtensionPlugin` whose `initializeEngine()` calls
+`installTranslator`, reached by `import Apex.I18n` in `shell.qml` with
+`QML_IMPORT_PATH` set by whatever launches quickshell. If quickshell refuses
+the import path or the module, **that negative IS the round's deliverable**
+(the FOUND 32 shape) and it gets written down rather than routed around.
+
+**FOUND 8 IS STALE.** `qt6-qttools` IS installed on this laptop now:
+`lupdate-qt6`, `lrelease-qt6`, `moc` (`/usr/lib64/qt6/libexec/moc`), `rcc`,
+`qmake6`, `cmake`, `g++` and the Qt6 devel headers are all present, so sections
+2 and 3 of `run-i18n-test.sh` really run here. Locate `moc` through
+`qmake6 -query QT_HOST_LIBEXECS`, never by hardcoding — Fedora
+`/usr/lib64/qt6/libexec`, Arch `/usr/lib/qt6`.
 
 **Round 32 is COMPLETE and pushed.** apex-shell `task/p2-b-round32` tip
 `ecc0e39` (two commits on `roadmap/v2.2`'s `a8cd491`); apex-os
@@ -121,7 +142,11 @@ Next action for whoever picks this up, in order:
 
 ## IN PROGRESS
 
-Nothing. Round 32 is finished and pushed in both repos, and both worktrees
+Round 33, standing-queue item 4 (the QTranslator host change, FOUND 3).
+Branches cut and pushed, no commits yet. Spike running in
+`scratch-p2-b/round33/`.
+
+Round 32 is finished and pushed in both repos, and both worktrees
 (`wt-p2-b5`, `wt-p2-b5-sh`) are clean with their HEADs matching their remotes.
 
 ## DONE

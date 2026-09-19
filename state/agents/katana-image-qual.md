@@ -90,7 +90,9 @@ Blocks, in order, all from §6:
   gaming-gpu's own closure says bwrap "refuses to start with any permitted
   capability", so CapPrm=0 from greetd + bwrap still failing moves the hunt to
   Steam's runtime; CapPrm non-zero attributes it to the image.
-- **6.4** `/usr/libexec/apex-safe-graphics check`, then
+- **6.4** `/usr/libexec/apex-safe-graphics check` runs fine over ssh; the
+  forced-device run needs a seat, so it goes through the same
+  `initial_session` mechanism with the env var set in the command.
   `APEX_SAFE_GRAPHICS_DRM_DEVICE=/dev/dri/card2 /usr/libexec/apex-safe-graphics`.
   The automatic branch needs the panel genuinely dark — record whether it could
   be reached rather than claiming it.
@@ -112,6 +114,39 @@ Blocks, in order, all from §6:
 - `ROADMAP/set-status.py` REPLACES evidence; read the existing text and prepend.
 - Never push `main`; never open a PR; push only `task/katana-image-qual`.
 
+## Orchestrator additions, round 33, folded 17:19 AWST
+
+1. **The old extension is the false-negative trap, and one of the
+   orchestrator's facts about it is stale.** The message said the `.raw` is the
+   2026-09-06 one, 219 packages / ~337 MB. It is not: measured 17:16 AWST it is
+   **540 012 544 B, built `2026-09-19T01:43:06Z`, 223 resolved packages**, i.e.
+   the round-31 run rebuilt it TODAY — but with the image's engine, which
+   predates pkg-share. The substance is unchanged and the warning stands: it
+   survives a rebase and re-merges at boot, so a premature
+   `ls /usr/share/vulkan/icd.d/ | grep -c i686` reads **0** and looks like
+   pkg-share failed.
+   **THE DISCRIMINATOR IS `multilib: carrying` IN THE INSTALL LOG** — only the
+   new engine emits it (`merge_multilib`, `apex-pkg` ~line 698). Its ABSENCE
+   means the September/round-31 extension was measured, not that the fix
+   failed. Establish which engine ran before believing any count.
+   *What I will do with the old `.raw`*: not delete it. `sudo systemd-sysext
+   unmerge` makes `merged` false so `apex install steam` falls through to a
+   real rebuild, and `activate_payload` replaces the file itself; the old
+   size/sha (`99749240e8762e2b4eaf0c3840a07beba249961e1cad86f798805c22c58282ed`,
+   540 012 544 B) are recorded above and in the evidence before anything moves.
+   The hand-copied-file manifest is `/var/lib/apex/steam-recovery-20260917/installed-files.jsonl`
+   (1 687 289 B, 2026-09-17) and is left untouched.
+2. **Disk checked rather than assumed** — `df -h /var` at 17:18:
+   `954G size, 890G used, 60G available, 94%`. `/var`, `/sysroot` and `/boot`
+   are the same filesystem. 60 G is ample for a multi-GB pull, so **no
+   `rpm-ostree cleanup -r`** — that would drop the `gaming-nvidia` rollback
+   deployment for no benefit, and `bootc switch` retires the oldest deployment
+   on its own.
+3. **HARD DEADLINE ~20:58 AWST** (orchestrator runs under `timeout 4h` from
+   16:58). Priority if short: (a) rebase + digest, (b) pkg-share's three
+   numbers, (c) the greetd login that attributes §6.3's bwrap cause, (d) 6.4-6.6.
+   Evidence is written **per block**, committed and pushed as measured.
+
 ## DONE
 
 - 17:12 — worktree `/var/tmp/apex-work/wt-katana-qual2` on
@@ -121,6 +156,10 @@ Blocks, in order, all from §6:
 - 17:12 — pre-rebase baseline captured (see plan step P).
 - 17:15 — read §6 of `docs/gaming-and-sessions.md` end to end and §§3, 4, 6 of
   the round-31 evidence; plan above written.
+- 17:18 — `df -h /var` on katana: 60 G available, no cleanup needed.
+- 17:17 — PAM capability audit on katana (no `pam_cap`), `apex-pkg` rebuild
+  short-circuit read out of the engine, extension/state baseline captured. See
+  FOUND.
 
 ## IN PROGRESS
 
@@ -138,6 +177,47 @@ Blocks, in order, all from §6:
 - The extension on katana right now was built at 09:43 today by the **old**
   engine. `apex install steam` must rebuild it after the rebase or the
   pkg-share numbers measure the old rule.
+- **No `pam_cap` anywhere, and no `/etc/security/capability.conf`** — measured
+  on katana 17:17 AWST: `grep -i pam_cap /etc/pam.d/{greetd,system-auth,postlogin,login}`
+  is empty and the file does not exist. **This is the fidelity argument for the
+  `initial_session` route**: greetd's initial session skips `pam_authenticate`
+  but still runs `acct_mgmt` -> `setcred` -> `open_session`, and nothing in the
+  `auth` stack on this machine can grant a capability, so skipping it cannot
+  change `CapPrm`. Re-run the same grep on the NEW image before believing it.
+- The greeter's own process (`sway` as user `greetd`) already reads
+  `CapPrm: 0000000000000000` / `CapAmb: 0` with `CapBnd: 000001ffffffffff`. So
+  greetd hands down an empty permitted set before any of this.
+- **`apex install steam` will NOT rebuild the extension after the rebase, and
+  neither will the boot service.** `rebuild_extension` short-circuits with
+  "already up to date" when the resolved rpm set, `os_version_id` and
+  `pkg_compat_level` all match and the sysext is merged
+  (`files/system/libexec/apex-pkg` ~line 1300), and
+  `apex-sysext-rebuild.service` runs `rebuild --if-needed`, which returns 0 on
+  exactly the same three-way match (~line 1613). Measured on katana:
+  `VERSION_ID=43`, `state.json` `os_version_id: "43"`, `pkg_compat_level: 2`,
+  built `2026-09-19T01:43:06Z`, 8 requested / 223 resolved, extension
+  540 012 544 B, sha `99749240…`. **VERSION_ID does not move across an APEX
+  image build**, so none of the three changes.
+  - *Consequence to test and record*: pkg-share's fix does not reach an
+    existing machine through `sudo apex update` at all. The knob that exists
+    for this is `PKG_COMPAT_LEVEL` (2 today); an engine change that alters
+    WHICH FILES the extension carries is exactly the case it is documented for.
+    Likely a follow-up defect for this unit to file.
+  - *Method*: prove the no-op first (`sudo /usr/libexec/apex-pkg rebuild
+    --if-needed` and `sudo apex install steam` on the new image, both expected
+    to do nothing), then force it with `sudo systemd-sysext unmerge` followed
+    by `sudo apex install steam`, which makes `merged` false and falls through
+    to `extract_rpms`. Keep the requested set as it is (chromium, gamemode,
+    gamescope, libgcc.i686, libSM.i686, mangohud, steam, steam-devices) so the
+    177 shadow count is like-for-like with round 31.
+- `grim` and `wlr-randr` do not work under gamescope (its DRM/Wayland backend
+  is its own, not wlroots). Render proof for 6.1 is therefore the five
+  gamescope log lines + `nvidia-smi` listing gamescope as `G` + DRM sysfs
+  (`/sys/class/drm/card2-HDMI-A-1/{enabled,dpms}` vs `card1-eDP-1/dpms`).
+  `grim` is still the right tool for 6.4 (labwc) and 6.5 (niri).
+- Only two connectors are `connected`: `card1-eDP-1` (Intel) and
+  `card2-HDMI-A-1` (NVIDIA).
+
 
 ## BLOCKED ON
 
