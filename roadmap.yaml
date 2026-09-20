@@ -3220,8 +3220,8 @@ tasks:
     running instead of restoring it (scxctl restore would be the fix; no APEX image loads one at boot so the
     branch has never been reached). Full detail at ROADMAP/evidence/gaming-scx-20260920.md. Agent card
     ROADMAP/state/agents/gaming-scx.md. || ROUND kernel-btf-scx 2026-09-20 on apex-os task/kernel-btf-scx
-    (303221d5 -> 0fdfce6f, THREE commits, PUSHED NOT MERGED; merge-tree --write-tree against origin/roadmap/v2.2
-    at 303221d5 exit 0, tree 65fa44e6, 0 conflicts, re-fetched and run not assumed). SENT TO CONFIRM THE SCHED-EXT
+    (303221d5 -> 46a85367, FOUR commits, PUSHED NOT MERGED; merge-tree --write-tree against origin/roadmap/v2.2 at
+    303221d5 exit 0, tree cfa0e594, 0 conflicts, re-fetched and run not assumed). SENT TO CONFIRM THE SCHED-EXT
     CAUSE FROM THE ARTEFACTS RATHER THAN INHERIT IT, AND BOTH INHERITED CAUSES ARE WRONG. The defect is real: no
     scx_* scheduler can load on an APEX image at all. CORRECTION 1: APEX DOES NOT BUILD THIS KERNEL.
     Containerfile.core lines 216-224 dnf5-installs the prebuilt kernel-cachyos RPM from COPR
@@ -3308,8 +3308,13 @@ tasks:
     configured, and that read is where the third kernel row came from. katana was read-only and is unchanged:
     booted apex-661a9d80 (sha256:61f7935c), three deployments with the September 18 one pinned, greetd active and
     untouched, no efibootmgr write, systemctl --failed empty, sched_ext/state disabled; three throwaway /tmp
-    parser files removed. Full detail at ROADMAP/evidence/kernel-btf-scx-20260920.md. Agent card
-    ROADMAP/state/agents/kernel-btf-scx.md.
+    parser files removed. LIMITS ON THE CLAIMS, written down rather than left to read better than they are:
+    'exactly the 22 libbpf named' validates the READER against katana and does not make 22 the number - libbpf's
+    list is the kfuncs scx_lavd declares, and the L16's 20 and Fedora's 18 include names scx_lavd never mentions;
+    the _impl skip ASSUMES '_impl' means pre-strip twin, which holds across all three kernels read but would
+    silently skip a public kfunc genuinely named scx_bpf_*_impl; and game_exit's log was left alone on purpose, so
+    an affected kernel's exit line carries no BTF clause. Full detail at
+    ROADMAP/evidence/kernel-btf-scx-20260920.md. Agent card ROADMAP/state/agents/kernel-btf-scx.md.
 - id: P1-044
   title: Default incoming firewall
   priority: P1

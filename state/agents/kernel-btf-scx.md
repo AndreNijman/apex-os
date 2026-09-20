@@ -4,9 +4,11 @@
 Repo `apex-os`, branch `task/kernel-btf-scx`, worktree
 `/var/tmp/apex-work/wt-kernel-btf-scx`, from `roadmap/v2.2` (`303221d5`).
 
-Three commits, tip `0fdfce6f`:
+Four commits, tip `46a85367`:
 
 ```
+46a85367 docs(roadmap): name the _impl assumption, and what 'exactly the 22'
+         does not mean
 0fdfce6f feat(gaming): the local view says it too, and a third kernel confirms
          the defect is general
 b5bea21f docs(gaming): sched-ext cannot load on any APEX kernel, and section
@@ -22,7 +24,7 @@ aafc6898 feat(gaming): say WHICH kind of 'not loaded' sched-ext is, by reading
 Evidence: `ROADMAP/evidence/kernel-btf-scx-20260920.md` (tracked, on the
 branch). P1-043 recorded `partial` with `set-status.py`: prior evidence read
 out with `yaml.safe_load` first and carried forward **whole** — verified
-afterwards by `prior in evidence` → True, 21 172 → 30 790 chars, a per-item
+afterwards by `prior in evidence` → True, 21 172 → 31 360 chars, a per-item
 diff showing P1-043 as the only row that changed, 128 tasks before and after,
 `global_agent_rules` intact, and 0 hyphen-space corruptions in the new text.
 
@@ -156,6 +158,15 @@ Nothing is half-done. In priority order for whoever picks this up:
    take two minutes. Cross-check the kfunc names in `scx_detail` against
    `journalctl -u scx_loader`; they matched exactly here (22 of 68) and a
    disagreement is a defect in `kernelbtf.rs`, not in the kernel.
+
+   **Run the daemon-STOPPED path first** (`systemctl stop apexd`, then
+   `apex game status`). That is the branch with no test and the one most
+   likely to surprise: `describe()` is a long sentence and the local view
+   prints it under a 12-character key column.
+
+   And note what "exactly the 22" does and does not mean: `libbpf`'s list is
+   the kfuncs `scx_lavd` declares. The L16 gives 20 and Fedora 18, with names
+   `scx_lavd` never mentions. 22 is katana's number, not the number.
 
 5. **Split this item.** P1-043 is titled *"GPU parity across NVIDIA/AMD/Intel"*
    and now carries four sched-ext rounds and ~29 kB of evidence. The sched-ext
