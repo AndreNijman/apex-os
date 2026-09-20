@@ -156,6 +156,72 @@ fi
 log()  { printf '%s %s\n' "$(date +%T)" "$*" >>"$LOG" 2>/dev/null || true; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# ── The firmware is not part of the target disk ─────────────────────────────
+#
+# On real hardware `bootc install` MUST write UEFI NVRAM: bootupd runs
+# `efibootmgr --create` and the entry it makes is how the machine starts. That
+# is the whole point of an installer, and nothing here interferes with it.
+#
+# A LOOPBACK target is a different thing wearing the same interface. The "disk"
+# is a file, and the machine that would boot it is not the machine running the
+# installer. On 2026-09-20 a loopback `bootc install` on a developer laptop ran
+# with the host's /sys/firmware/efi/efivars mounted read-write; bootupd deleted
+# that laptop's real `APEX-OS` boot entry and recreated it against the loop
+# device's ESP — PARTUUID ee26313c-…, which exists on no physical disk — and
+# the laptop would not boot the next morning. It was repaired from a live USB.
+# See BOOT-BREAKAGE-2026-09-20.md and AGENTS.md "Touching a machine's boot
+# path".
+#
+# So when, and ONLY when, the target is loop-backed, the install container gets
+# an empty tmpfs over efivars. efivarfs is the only channel to NVRAM, so with
+# it masked `efibootmgr` finds no variables, bootupd writes the ESP and leaves
+# the firmware alone, and the disk image is complete for the machine that will
+# eventually boot it. Measured, not assumed: the sdboot lab ran seven masked
+# loopback installs that night and produced bootable ESPs without moving one
+# NVRAM byte; the eighth was unmasked and is the incident above.
+#
+# The test is the SYSFS BACKING FILE, never the device name. `/dev/loop1` can
+# be renamed or symlinked; `/sys/class/block/<name>/loop/backing_file` exists
+# if and only if the kernel itself considers the device a loop device, and that
+# is the condition that matters.
+#
+# APEX_SYSFS_BLOCK is a TEST SEAM and it only ever ADDS loop-ness. The real
+# /sys/class/block is consulted first and unconditionally; the override can
+# make a device look loop-backed that is not, and can never make a loop device
+# look real. That direction is deliberate: the failure mode of a wrong "yes" is
+# a disk image with no firmware entry, which the next boot of the machine that
+# owns the image fixes; the failure mode of a wrong "no" is the incident above.
+NVRAM_ARGS=()
+disk_is_loopback() {  # $1=block device path — 0 if the kernel calls it a loop
+  local d base
+  d=$(readlink -f "${1:-}" 2>/dev/null || true)
+  [ -n "$d" ] || return 1
+  case "$d" in /dev/*) : ;; *) return 1 ;; esac
+  base=${d#/dev/}
+  base=${base//\//!}
+  [ -e "/sys/class/block/$base/loop/backing_file" ] && return 0
+  [ -n "${APEX_SYSFS_BLOCK:-}" ] \
+    && [ -e "$APEX_SYSFS_BLOCK/$base/loop/backing_file" ] && return 0
+  return 1
+}
+# Sets NVRAM_ARGS for the install about to run. Call it immediately before the
+# podman invocation, with the TARGET DISK — not a partition of it.
+set_nvram_args_for() {  # $1=target block device
+  local base backing
+  NVRAM_ARGS=()
+  if disk_is_loopback "$1"; then
+    NVRAM_ARGS=(--tmpfs /sys/firmware/efi/efivars)
+    base=$(basename "$(readlink -f "$1")")
+    backing=$(cat "/sys/class/block/$base/loop/backing_file" 2>/dev/null \
+             || cat "${APEX_SYSFS_BLOCK:-/nonexistent}/$base/loop/backing_file" 2>/dev/null \
+             || echo unknown)
+    log "nvram: $1 is loop-backed ($backing) — masking /sys/firmware/efi/efivars in the install container"
+    note "Loopback target: this machine's UEFI boot entries are masked off and will not be touched."
+  else
+    log "nvram: $1 is a real block device — the install container sees the firmware, as a real install must"
+  fi
+}
+
 # note(): the engine's ONE user-facing output primitive — stdout plus the log.
 # stdout is read line by line by the graphical front end (which shows the last
 # line as its status text), or lands on the serial console in CI, so everything
@@ -943,8 +1009,10 @@ answers file carrying encrypt=yes and lukspass=." ;;
   trap - ERR
   set +e
   # --net=host: no netavark needed in the live env; bootc install is offline.
+  set_nvram_args_for "$DISK"
   podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
     -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+    ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
     ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
     bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
       --karg quiet --karg splash ${EXTRA_KARGS[@]+"${EXTRA_KARGS[@]}"} \
@@ -1689,8 +1757,10 @@ if [ "$INSTALL_MODE" = partition ]; then
       { echo "--- backed up neighbour EFI files to EFI/fedora/apex-backup ---"
         ls -l "$TROOT/boot/efi/EFI/fedora/apex-backup" 2>/dev/null; } >>"$LOG" 2>&1 || true
     fi
+    set_nvram_args_for "$DISK"
     podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
       -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+      ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
       -v "$TROOT":"$TROOT":rshared \
       ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
       bootc install to-filesystem \
@@ -1921,8 +1991,10 @@ elif [ "$ENCRYPT" = yes ]; then
       LUKS_KARGS+=(--boot-mount-spec "UUID=$BOOT_UUID")
     fi
     log "luks kargs: ${LUKS_KARGS[*]}"
+    set_nvram_args_for "$DISK"
     podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
       -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+      ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
       -v "$TROOT":"$TROOT":rshared \
       ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
       bootc install to-filesystem \
@@ -1973,8 +2045,10 @@ else
   # Set BEFORE the call: `--wipe` destroys the disk immediately, so a Ctrl+C one
   # second later must NOT be reported as "nothing was written".
   WROTE_DISK=1
+  set_nvram_args_for "$DISK"
   podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
     -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
+    ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
     ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
     bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
       --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
