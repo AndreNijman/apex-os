@@ -8443,7 +8443,12 @@ tasks:
     vconsole.keymap=X and the first contains the second, so a sed without /g removed the wrong one. (c) L-001's
     silicon cases are unchanged - the TPM clear and the TPM-removed case are still unqualified, and NEW BLOCKER
     (4) from round 31, systemd-cryptenroll --tpm2-device=auto binding to no PCRs, is apex-luks-enroll's and is
-    untouched here.
+    untouched here. TWO RESIDUALS ON THIS ROUND'S OWN WORK, recorded rather than left to be found: keymap_can_type
+    asks whether a character appears anywhere in the table, so it catches ABSENT characters and not hard-to-reach
+    ones - il answers yes because Latin capitals sit on Shift and lowercase on the CapsLock plane, which is hard
+    rather than impossible but is the same class of problem; and --generic-image is proven only on the
+    to-filesystem path, because runs 7 and 8 are encrypted installs and no bootc install to-disk loopback run has
+    happened since the flag was added to those two call sites.
 - id: L-003
   title: Enable TPM auto-unlock by default where safe
   priority: Later

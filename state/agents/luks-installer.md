@@ -112,6 +112,21 @@ snapshot. The machine was never rebooted broken.
 7. **`tests/lab/bootc-install-lab` needs `--generic-image`** — see the top of
    this card. Not this unit's file.
 
+## Two known residuals, written down rather than discovered later
+
+* **`keymap_can_type` catches ABSENT characters, not hard-to-reach ones.** It
+  asks whether the character appears anywhere in the table. `il` therefore
+  answers `yes`: Latin capitals are on Shift and lowercase on the CapsLock
+  plane, so a Hebrew owner typing `apexzed1` normally gets Hebrew and has to
+  find the Latin plane. That is hard, not impossible, and the recovery key
+  exists — but it is the same class of problem the check was built for and the
+  check does not cover it.
+* **`--generic-image` is proven on the `to-filesystem` path only.** Runs 7 and
+  8 are encrypted installs. The two `bootc install to-disk --wipe` sites get
+  the flag through the same `set_nvram_args_for` call and need no BIOS boot
+  partition of their own (bootc builds a layout that has one), but **no
+  `to-disk` loopback install has been run since the flag was added.**
+
 ## Traps this unit paid for
 
 * `/tmp` is a 15 GB **tmpfs**. Use `/var/lab-scratch`.
