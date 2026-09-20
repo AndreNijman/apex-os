@@ -398,6 +398,25 @@ jobs:
             *)  exit "$rc" ;;
           esac
 
+          # Same clone, same shape, a different contract: apexd's power tiers
+          # against the shell's picker. tier.rs states in prose that the IDs
+          # "must match the strings the D-Bus API and the apex-shell
+          # PowerProfileService use verbatim" — and nothing enforced it, so the
+          # picker went on offering `ultra` and `ultra-max` for a release after
+          # apexd stopped parsing them. Two buttons that could only fail, found
+          # by Andre looking at the page rather than by any test on either side,
+          # because each side was internally consistent.
+          set +e
+          python3 files/scripts/check-tier-parity \
+            --service /tmp/apex-shell-parity/src/services/system/PowerProfileService.qml
+          rc=$?
+          set -e
+          case "$rc" in
+            0)  echo "tier parity holds" ;;
+            77) echo "::notice::apex-shell unavailable; tier parity not checked" ;;
+            *)  exit "$rc" ;;
+          esac
+
       - name: §24 every session APEX ships has a decided portal backend set
         if: ${{ !cancelled() }}
         run: |
@@ -664,6 +683,25 @@ jobs:
       - name: §22 boot v2 — the opt-in is structural, and nothing shipped touches a boot path
         if: ${{ !cancelled() }}
         run: ./tests/test-boot-v2.sh
+
+      # The efivars guard. In `static` for the same reason as the step above:
+      # the scan it ends with walks EVERY tracked file, so a PR adding an
+      # unmasked `bootc install --via-loopback` anywhere — a workflow, an
+      # installer script, a lab helper — must not be able to skip it by
+      # touching neither apexd/ nor files/.
+      #
+      # 2026-09-20: one loopback install out of eight ran without
+      # `--tmpfs /sys/firmware/efi/efivars`, bootupd rewrote the HOST's boot
+      # entry to point inside the disk image it was building, and the laptop
+      # would not boot the next morning. The discipline was already there and
+      # was followed seven times out of eight. BOOT-BREAKAGE-2026-09-20.md.
+      #
+      # Nothing dangerous runs here: `podman` and `efibootmgr` are stubs on
+      # PATH and the firmware root is a fixture tree. The assertion is about
+      # launch ARGUMENTS, which need no launch.
+      - name: the efivars mask is not something a caller can forget
+        if: ${{ !cancelled() }}
+        run: ./tests/test-bootc-install-guard.sh
 
       # §27's trust readout, structural half. In `static` because the check
       # that matters most here compares two files in DIFFERENT selectors: the
