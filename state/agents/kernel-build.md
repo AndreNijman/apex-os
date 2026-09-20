@@ -11,6 +11,8 @@ Not merged. Not landed. No PR.
 Commits (push after each):
 
 ```
+f3ea6ae8 test(kernel): check core's contract against the built RPMs, not
+         against hope
 66053ded fix(core): the kernel image must be built from THIS commit's pin
 7167e46d build(local): build the kernel tier before core, and read its verdict
          back
@@ -159,12 +161,28 @@ to and including `rpmbuild` started cleanly, and these are confirmed in that log
    piping rpmbuild to `tail` would have swallowed its exit status). The most
    likely break is `%autopatch` applying the BORE patch against the pinned tag.
 
-2. **Install the RPMs into a scratch `fedora-bootc:43` and check core's
-   contract without a core build.** `ls -d /usr/lib/modules/*cachyos*` must
-   match, `/usr/lib/modules/<kver>/{vmlinuz,config}` must exist, and
-   `rpm -q kernel-cachyos{,-core,-modules,-devel-matched}` must all resolve.
-   Ten minutes, and it is what stands between this and a 50-minute core build
-   failing at its `rpm -q` gate.
+2. **Run `tests/check-kernel-contract.sh`** — written this round for exactly
+   this, so it does not have to be reconstructed. It installs the produced
+   RPMs into a scratch `fedora-bootc:43` and checks every contract
+   `Containerfile.core` depends on: the four packages it hard-gates on, the
+   `ls -d /usr/lib/modules/*cachyos*` kver glob matching exactly one directory,
+   `vmlinuz`/`config`/`System.map`/`build` present, `sign-file` executable and
+   `CONFIG_MODULE_SIG_HASH` readable (the module-signing stage dies without
+   either), `depmod`, the sched-ext and BTF options, and that `vmlinuz` really
+   is a PE with `CONFIG_EFI_STUB=y` — which `sbsign` needs and `sdboot-image`'s
+   UKI needs.
+
+   ```sh
+   cid=$(podman create localhost/apex-kernel:local /x)
+   podman cp "$cid:/rpms" /var/lab-scratch/kernel-rpms && podman rm "$cid"
+   RPMS=/var/lab-scratch/kernel-rpms ./tests/check-kernel-contract.sh
+   ```
+
+   (`FROM scratch` has no shell, so `podman create` + `podman cp` — `podman run`
+   cannot read that image.) Ten minutes, and it is what stands between this and
+   a 50-minute core build failing at its `rpm -q` gate. It is deliberately not
+   a CI gate and deliberately not named `test-*.sh`: it needs a 45-minute
+   kernel build first.
 
 3. **The CI job — NOT WRITTEN, and it needs a decision from Andre first.**
    `.github/workflows/build-image.yml` needs a `kernel` job that runs before
