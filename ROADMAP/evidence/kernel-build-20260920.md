@@ -354,9 +354,27 @@ more kfuncs became eligible should produce exactly 18 more twins:
 | Fedora's stock 7.2.6 (pahole 1.30) | 18 | 29 |
 | **this build (pahole 1.32)** | **0** | **47** |
 
-**29 + 18 = 47.** Exactly. The 18 kfuncs pahole 1.30 left untagged are the 18
-`resolve_btfids` was skipping, and under 1.32 it processes all of them. That is
-a prediction of the §4.3 model, not a number it was fitted to.
+**29 + 18 = 47**, and the arithmetic is not the proof — the names are. Rather
+than leave a suggestive sum, the two twin sets were diffed:
+
+* our 47 twins are a **strict superset** of the shipped kernel's 29 (nothing in
+  the old set is missing from the new one);
+* the 18 twins we gained are, **name for name, exactly the 18 kfuncs pahole
+  1.30 had left untagged** — both directions of the comparison are empty: no
+  new twin is unexplained by that list, and no name on that list failed to get
+  one.
+
+So the 18 kfuncs 1.30 left untagged really are the 18 `resolve_btfids` was
+skipping, and under 1.32 it processes every one. That was a prediction of the
+§4.3 model, not a number fitted to it.
+
+**One thing the sum must not be read as saying.** A twin appears per kfunc
+whose implicit argument is *actually stripped*, and being tagged does not mean
+having one to strip: **47 of the 68 tagged names have a twin and 21 do not**.
+Those 21 carry no `struct bpf_prog_aux *`, so `resolve_btfids` sees them, has
+nothing to remove, and creates nothing. "Tagged" and "stripped" are different
+sets; it is a coincidence worth naming that all 18 of the newly-tagged happened
+to fall in the stripped one.
 
 The DECL_TAG count agrees with the A/B independently: **308** here, **308** for
 pahole 1.32 in §1's table, against 288 for both 1.30 and the shipped kernel.
@@ -414,6 +432,27 @@ to execute **zero** checks and exit 0: `podman run` without `-i` gives the
 container an empty stdin, so `bash -s` read EOF and the whole heredoc of
 contracts was discarded. The verdict above is from the repaired version, which
 fails on a negative control.
+
+#### Signing: `sbsign` actually run, not inferred from two bytes
+
+The contract test checks that `vmlinuz` starts with `MZ`. That is necessary and
+not sufficient — `sbsign` needs a well-formed PE, and this is a kernel built
+with a toolchain APEX has never shipped before. So the real thing was run
+against the `vmlinuz` extracted from `kernel-cachyos-core`, exactly as
+`Containerfile.core` Stage 1b does it:
+
+```text
+objdump -f  ->  file format pei-x86-64      (a real PE, not just an MZ prefix)
+sbverify    ->  No signature table present   (unsigned to begin with, as expected)
+sbsign --key … --cert … --output …  ->  "Signing Unsigned original image", rc=0
+sbverify --list <signed>            ->  signature 1, issuer /CN=apex-test, rc=0
+16,904,704 bytes in -> 16,906,248 out
+```
+
+Stage 1b will sign this kernel. `/usr/share/apex-os/secureboot/kernel-signed`
+therefore stays honest with no change, and `Containerfile.release`'s assertion
+of it needed none — checked separately as an empty diff of every signing line
+on this branch against `roadmap/v2.2`.
 
 #### Cost, now measured end to end rather than estimated
 
