@@ -192,8 +192,9 @@ pid 240024  adj=500  cc1
 18 cc1 processes on 20 cores; load average 20.6
 ```
 
-Andre's own processes sit at the default `oom_score_adj=0`, so every one of
-these dies before anything of his does. That is the whole of the "protect his
+Andre's own processes sit at the kernel default `oom_score_adj=0` — that is the
+default rather than something read off his session, which was not sampled — so
+every one of these dies before anything of his does. That is the whole of the "protect his
 session" mechanism — there is no cap anywhere on how fast the build may go.
 
 `Containerfile.kernel`'s compile parallelism became a build ARG in the same
@@ -237,9 +238,37 @@ passes `$(nproc)` = 20 here.
    bumps are deliberate.
 3. **Unprivileged and blind to Andre's data.** `ghrunner` is in no sudoers rule
    and no group. `/var/home/andre` is 0700 and additionally listed in the unit's
-   `InaccessiblePaths=`, along with `/root`, `/var/roothome` and
-   `/var/lab/scratch`. The runner tree is root-owned with `bin/` and
-   `externals/` read-only; only the top level and `_work` are writable.
+   `InaccessiblePaths=`, along with `/root`, `/var/roothome`, `/var/lab/scratch`
+   and `/var/lib/apex` — the last because *this unit* put a 239 MB archive of
+   his Steam Proton prefix there, and a prefix can carry cached credentials.
+   The runner tree is root-owned, with `bin/` and `externals/` read-only and the
+   top level **1775 — sticky**.
+
+   **The sticky bit is not cosmetic, and it was missing until it was tested
+   for.** Write permission on a *directory* lets you rename or unlink entries in
+   it whatever their ownership. With the top level at 0775, `touch bin/pwned`
+   was refused — which is what the first probe checked — while this was not:
+
+   ```
+   LEAK: ghrunner CAN rename a root-owned entry
+   LEAK: ghrunner CAN replace bin/
+   ```
+
+   `mv bin bin.x && cp -r bin.x bin` owns every subsequent job, straight through
+   the ephemeral boundary whose entire purpose is that a job leaves nothing
+   behind. It is not privilege escalation — nothing in that tree runs as root —
+   but it is persistence, which is the thing ephemeral is for. Re-measured after
+   `chmod 1775`: rename denied, `bin/` replacement denied, `run.sh` deletion
+   denied, and `ghrunner` can still create the `.runner`/`.credentials` that
+   `config.sh` must write. A root-owned `.root-decoy` sits at the top level so
+   the probe has something to *try* to rename every run; if that ever succeeds,
+   the sticky bit has been lost.
+
+   **`svc.sh` must stay `ghrunner`-writable**, which cost one failed restart to
+   learn: `config.sh` rewrites it on every registration, so root-owning it kills
+   the ephemeral loop with `Access to the path '.../svc.sh' is denied`. Nothing
+   executes it — the unit calls `run.sh` directly — so a poisoned `svc.sh` runs
+   nothing.
 4. **No route onto his LAN.** `table inet apex_runner` — a *separate* nft table
    so `apex-firewall.service` can rebuild its own without taking this with it —
    rejects uid 960 to `10/8`, `172.16/12`, `192.168/16` and `fc00::/7`, with a
@@ -255,20 +284,25 @@ capabilities on `newuidmap`/`newgidmap`. What stands in for it is that
 ### It was tested, not assumed
 
 `.github/workflows/katana-probe.yml` attempts every forbidden thing from inside
-a real job and fails the run if any succeeds. Run **35517909892**, all green:
+a real job and fails the run if any succeeds. It grew as holes were found —
+16 assertions, then 17 with `pkexec`, now **21**. Run **35520468567**, green,
+all 21 refused:
 
 ```
-denied: sudo -n true                    denied: list his games library
-denied: su root                         denied: list his dev scratch
-denied: list his home                   denied: read the token that registers the runner
-denied: read his ssh dir                denied: write into the runner's bin/
-denied: read his known_hosts            denied: edit the runner's systemd unit
-denied: read his gh credentials         denied: reach the router
-denied: list his APEX worktrees         denied: reach this host over the LAN
-                                        denied: reach 10/8
-                                        denied: ssh anywhere on the LAN
+privilege        sudo -n true · su root · pkexec
+his data         list his home · read his ssh dir · read his known_hosts
+                 read his gh credentials · list his APEX worktrees
+                 list his games library · list his dev scratch
+what WE created  read the token that registers the runner
+                 read the backup of his Steam prefix
+the runner       write into the runner's bin/ · edit the runner's systemd unit
+                 rename a root-owned file at the runner's top level
+                 replace the runner's bin/ wholesale · delete the runner's run.sh
+his LAN          reach the router · reach this host over the LAN
+                 reach 10/8 · ssh anywhere on the LAN
+
 ok: resolve DNS · reach the internet · write the workspace · run a container
-cpus=20  mem=62GiB   /dev/nvme1n1p6  492G  2.8G  484G  1% /var/lab
+cpus=20  mem=62GiB
 ```
 
 Three further checks, because a probe that cannot fail proves nothing:
