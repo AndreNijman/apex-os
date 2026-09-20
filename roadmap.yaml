@@ -8430,11 +8430,20 @@ tasks:
     lab loopback install still depends on nvram-guard catching the write after the fact; that is efivars-guard's
     file, reported and not edited. WHY THIS STAYS BLOCKED, three things. (a) NO DISK THIS INSTALLER PRODUCED HAS
     EVER BEEN BOOTED - the keymap proof uses a bare volume and a direct kernel boot with no firmware, no
-    bootloader and no ostree pivot, so bootloader -> initramfs -> unlock -> pivot -> login is unexercised. (b) No
-    encrypted install has completed end to end since the useradd /proc fix: run 5 died at the NVRAM guard and run
-    6, with --generic-image, was still running when this was written. (c) L-001's silicon cases are unchanged -
-    the TPM clear and the TPM-removed case are still unqualified, and NEW BLOCKER (4) from round 31,
-    systemd-cryptenroll --tpm2-device=auto binding to no PCRs, is apex-luks-enroll's and is untouched here.
+    bootloader and no ostree pivot, so bootloader -> initramfs -> unlock -> pivot -> login is unexercised. (b) is
+    now CLOSED: run 8 of installer/test-installer-luks-live.sh is 41 passed / 0 failed with engine exit 0 after
+    334s and nvram-guard verdict verified - both keys open the volume, a wrong passphrase is refused, btrfs and an
+    ostree deployment are inside, the account is created in the encrypted root, the recovery key is on screen and
+    in a 0600 file and in neither log, the BLS entry carries rd.luks.uuid, rd.luks.name,
+    vconsole.keymap=bg_bds-utf8 and root=, and loader/credentials/vconsole.keymap.cred is on the ESP. Getting
+    there took three more findings: --generic-image also installs the i386-pc GRUB component, so the encrypted
+    layout needed a 1 MiB ef02 BIOS boot partition or the install died with the volume already encrypted; the
+    suite's final-protocol-line check read nvram-guard's stderr and called a clean install a failure; and the
+    vconsole.keymap kernel-argument mutant PASSED, because the engine writes both rd.vconsole.keymap=X and
+    vconsole.keymap=X and the first contains the second, so a sed without /g removed the wrong one. (c) L-001's
+    silicon cases are unchanged - the TPM clear and the TPM-removed case are still unqualified, and NEW BLOCKER
+    (4) from round 31, systemd-cryptenroll --tpm2-device=auto binding to no PCRs, is apex-luks-enroll's and is
+    untouched here.
 - id: L-003
   title: Enable TPM auto-unlock by default where safe
   priority: Later

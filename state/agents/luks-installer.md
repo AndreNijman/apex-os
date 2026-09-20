@@ -44,7 +44,7 @@ snapshot. The machine was never rebooted broken.
 | `files/dracut/apex-unlock-hint/apex-vconsole-credential{,.service}` | **NEW.** Applies a `vconsole.keymap` system credential to the initramfs's own `/etc/vconsole.conf` before `systemd-vconsole-setup`, and stands down if the kernel command line already decided. This is the UKI-era keymap channel |
 | `installer/test-installer-keymap-boot.sh` + `keymap-boot-drive.py` | **NEW, not CI.** Five real guests, shipped initramfs, real LUKS2 volume, passphrase typed on an emulated keyboard through QMP. 12 passed / 0 failed |
 | `installer/test-installer-luks.sh` | 57 passed / 0 failed on the L16, and `keymap-checks.sh` re-run inside `quay.io/fedora/fedora:43` — the route CI takes — is 32 / 0 with the identical 547/15/11 sweep. NVRAM section (5 assertions + 2 mutants) and, through `keymap-checks.sh`, 14 typeability assertions + 2 mutants |
-| `installer/test-installer-luks-live.sh` | now runs the engine inside `tests/lab/nvram-guard` and asserts its verdict; asserts the ESP credential and that bootupd never ran `efibootmgr` |
+| `installer/test-installer-luks-live.sh` | **41 passed / 0 failed**, engine exit 0. Runs the engine inside `tests/lab/nvram-guard` and asserts its verdict; asserts the ESP credential and that bootupd never ran `efibootmgr` |
 | `Containerfile.apex` | asserts both shim halves are in the shipped initramfs, naming `sysinit.target.wants` |
 | `docs/disk-encryption.md` | the UKI seam is measured now, not predicted |
 
@@ -74,18 +74,14 @@ snapshot. The machine was never rebooted broken.
 
 ## NEXT
 
-1. **Finish the live install.** `installer/test-installer-luks-live.sh` run 6
-   was started at 2026-09-20 ~23:05 with the `--generic-image` fix in place;
-   read `/var/lab-scratch/luks-installer-msgs/r2/live-run6.log` first and look
-   for exactly three things: nvram-guard's verdict must be `verified`;
-   `grep 'Executing: "efibootmgr"'` over that log and the engine log must find
-   nothing; and `sudo efibootmgr -v` must still name PARTUUID `1c417de2-…`,
-   `0x12c000`. If those three hold, the `--generic-image` prevention is proven
-   whatever else the run reports. Run 5
-   died at the NVRAM guard, so **no encrypted install has completed end to end
-   since the `/proc` fix for `useradd`**. Needs `sudo -n`, root podman,
-   `localhost/apex-os:daily`, ~25 GB on `/var/lab-scratch` — never `/tmp`.
-   **Check `sudo efibootmgr -v` names PARTUUID `1c417de2-…` before and after.**
+1. **The live install is GREEN — do not re-derive it.**
+   `installer/test-installer-luks-live.sh` run 8, 2026-09-20 23:0x:
+   `engine exit=0 after 334s`, **41 passed / 0 failed**, nvram-guard verdict
+   `verified`, `Boot0000` still PARTUUID `1c417de2-…`. Log:
+   `/var/lab-scratch/luks-installer-msgs/r2/live-run8.log`. It takes ~6 minutes
+   and needs `sudo -n`, root podman, `localhost/apex-os:daily`, ~25 GB on
+   `/var/lab-scratch` — never `/tmp`.
+
 2. **Boot a disk this installer produced.** Nothing has. The keymap boot test
    uses a bare volume and a direct kernel boot: no firmware, no bootloader, no
    ostree pivot. The recipe is one OVMF boot in the `apex-bootlab` container
