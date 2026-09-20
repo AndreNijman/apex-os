@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-20 20:38 AWST
+APEX ROADMAP — resume report — 2026-09-21 01:38 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,69 +16,39 @@ APEX ROADMAP — resume report — 2026-09-20 20:38 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  kernel-btf-scx no worktree P1-043                             task/kernel-btf-scx
+  kernel-build dead 191m  P1-043                             task/kernel-build
              head 
-             dirty 0 file(s), ? unpushed, card 762m
-             NEXT Nothing is half-done. In priority order for whoever picks this up:
+             dirty 0 file(s), ? unpushed, card 191m
+             NEXT 1. **Build `core` against this kernel — the one thing left that is
 
-  luks-installer no worktree L-002                              task/luks-installer
+  android-release dead 242m                                     task/android-release
              head 
-             dirty 0 file(s), ? unpushed, card 740m
-             NEXT 1. **Re-run `installer/test-installer-luks-live.sh`** (needs `sudo
+             dirty 0 file(s), ? unpushed, card 242m
+             NEXT Nothing is half-done. In rough order of value:
 
-  luks-enroll no worktree L-003                              task/luks-enroll
+  luks-installer dead 147m  L-002                              task/luks-installer
              head 
-             dirty 0 file(s), ? unpushed, card 709m
-             NEXT Read this before picking the item up cold.
+             dirty 0 file(s), ? unpushed, card 128m
+             NEXT 1. **The live install is GREEN — do not re-derive it.**
 
-  windows-installer no worktree                                    task/windows-installer
+  sdboot-image dead 183m                                     task/sdboot-image
              head 
-             dirty 0 file(s), ? unpushed, card -
+             dirty 0 file(s), ? unpushed, card 184m
+             NEXT Everything below is pushed; nothing is half-applied. Start here.
+
+  windows-installer unknown                                       task/windows-installer
+             head f28b2a51 build(windows): cross-compile the installer, and prov
+             dirty 0 file(s), 0 unpushed, card -
              NEXT (no card)
-
-  sdboot-image no worktree                                    task/sdboot-image
-             head 
-             dirty 0 file(s), ? unpushed, card -
-             NEXT (no card)
-
-  android-release no worktree                                    task/android-release
-             head 
-             dirty 0 file(s), ? unpushed, card 765m
-             NEXT 1. **Protocol version window in `android/core`.** Retry the handsh
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 4c2478fc Merge task/luks-enroll into roadmap/v2.2
-    task/android-release
-      a7d935ea feat(android): derive versionCode from the environment, not a   [0/10 added lines on tip]
-    task/kernel-build
-      175459d3 feat(kernel): dwarves 1.32 fixes the kfunc BTF defect, measur   [0/10 added lines on tip]
-      b4b4b1bb feat(kernel): build the kernel in its own tier, and refuse on   [1/10 added lines on tip]
-      aa9e582b feat(core): install APEX's own kernel, and refuse one whose B   [0/10 added lines on tip]
-      5508938c docs(update-cost): the kernel is a fourth tier, and why it is   [0/10 added lines on tip]
-      fb866a29 test(kernel): check the pin is actually pinned, without a 45-   [1/10 added lines on tip]
-      7167e46d build(local): build the kernel tier before core, and read its   [0/10 added lines on tip]
-      66053ded fix(core): the kernel image must be built from THIS commit's    [0/10 added lines on tip]
-      f3ea6ae8 test(kernel): check core's contract against the built RPMs, n   [1/10 added lines on tip]
-      e1602af0 docs(kernel): the A/B takes 36 seconds, not the ~90 first wri   [0/6 added lines on tip]
-    task/luks-installer
-      09051da3 feat(installer): create LUKS2 volumes, with a recovery key an   [2/10 added lines on tip]
-      92bdf557 feat(image): pin the disk-unlock chain, and let the unlock pr   [0/10 added lines on tip]
-      d5fce945 feat(installer): ask about encryption, and put the recovery k   [2/10 added lines on tip]
-      9d732903 fix(installer): probe the deployment, not the filesystem, bef   [0/10 added lines on tip]
-      b1e3f9ef docs(roadmap): record what the installer can encrypt now, and   [0/10 added lines on tip]
-      15b5fe46 fix(installer): do not return early from the engine's output    [0/9 added lines on tip]
-      23716b91 fix(installer): mount /proc in the deployment so useradd can    [0/10 added lines on tip]
-      4215146e test(installer): measure the keymap conversion in CI instead    [0/10 added lines on tip]
-    task/sdboot-image
-      08af2d31 docs(boot): measure what systemd-boot actually needs from boo   [0/10 added lines on tip]
-      9777a30f docs(boot): boot counting survives finalize-staged if the ren   [1/10 added lines on tip]
-    task/windows-installer
-      81a25c24 feat(installer): start portable Windows installer with read-o   [1/10 added lines on tip]
+  int-os:  tip 283b0690 Merge task/windows-installer-2 into roadmap/v2.2
+    (nothing — every task branch's content is on the integration tip)
 
-  int-shell:  tip 03d77f9 Merge task/p2-b-round34 into roadmap/v2.2 (apex-shell 
+  int-shell:  tip 9567586 Merge task/focus-switcher into roadmap/v2.2 (apex-shel
     (nothing — every task branch's content is on the integration tip)
 
   The per-commit lines above are a HEURISTIC: a low count can also mean
@@ -113,20 +83,24 @@ APEX ROADMAP — resume report — 2026-09-20 20:38 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 20:38:02 AWST 26s
+  snapshot timer: active   last 37s Mon 2026-09-21
   wip refs:
     apex-os    dd3496b  apex-os-
-    apex-os    cd6c758  apex-os-windows-installer-
-    apex-os    9c14e5c  int-os-
-    apex-os    baad8dc  roadmap-state
+    apex-os    ea0c64e  apex-os-windows-installer-
+    apex-os    15fdf3d  int-os-
+    apex-os    17e14b2  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
-    apex-os    5656bbe  wt-android-release-
+    apex-os    dd974a7  wt-android-release-
+    apex-os    9d0f766  wt-android-signing-
     apex-os    c02272a  wt-base-os-
     apex-os    8957484  wt-build-verify-
     apex-os    6c9c17f  wt-clippy-
     apex-os    1951fdc  wt-disposable-
     apex-os    2e3bbcd  wt-editors-
     apex-os    31a3d16  wt-editors2-
+    apex-os    526ff13  wt-efivars-guard-
+    apex-os    317f1fd  wt-efivars-guard-2-
+    apex-os    6d02ade  wt-focus-switcher-
     apex-os    7ebac77  wt-followups-
     apex-os    0a2f642  wt-followups-3-
     apex-os    a6e9909  wt-followups-4-
@@ -136,15 +110,13 @@ APEX ROADMAP — resume report — 2026-09-20 20:38 AWST
     apex-os    d2b4c3e  wt-gaming-gpu-
     apex-os    e354d6f  wt-gaming-release-
     apex-os    de7dff9  wt-gaming-scx-
-    apex-os    0683355  wt-greeter-os-
-    apex-os    39d525a  wt-kernel-btf-scx-
-    apex-os    15d803c  wt-kernel-build-
-    apex-os    5ad9db1  wt-later-
-    apex-shell bb45693  apex-shell-
+    apex-shell 2f5949f  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-
+    apex-shell 856b52a  wt-drop-ultra-
     apex-shell c8f1e50  wt-editors2-shell-
+    apex-shell 878b8a4  wt-focus-shell-
     apex-shell 6e7aca4  wt-followups-3-shell-
     apex-shell 75049cf  wt-greeter-shell-
     apex-shell ed92eaa  wt-lockhint-
@@ -163,24 +135,22 @@ APEX ROADMAP — resume report — 2026-09-20 20:38 AWST
     apex-shell 3db5952  wt-p1-038-
     apex-shell f10daa7  wt-p1-039-
     apex-shell 589d611  wt-p1-040-
-    apex-shell 71c31b7  wt-p1-040b-
-    apex-shell 6e781d3  wt-p1-040c-
 
 ────────────────────────────────────────────────────────────────────────────
   next
 ────────────────────────────────────────────────────────────────────────────
-  6 agent(s) dispatched, ceiling 6
+  5 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
-    kernel-btf-scx P1-043                           No sched-ext scheduler can load: the baked kernel's BTF pred
     luks-installer L-002                            The installer cannot create a LUKS2 volume at all
-    luks-enroll    L-003                            TPM auto-unlock by default, where safe is a measured precond
     windows-installer                                  A portable Windows app that installs APEX into an empty part
     sdboot-image                                    Pivot every machine to systemd-boot: UKIs, signing, blessing
     android-release                                  Publish the Android APK as part of a release, signed and ver
 
   READY (dependencies believed satisfied — confirm against the agent table above):
     final-image    P0-001                           Build the image carrying the last two fixes, before the L16 
+    kernel-btf-scx P1-043                           No sched-ext scheduler can load: the baked kernel's BTF pred
+    luks-enroll    L-003                            TPM auto-unlock by default, where safe is a measured precond
 
   HELD:
     final          after *
