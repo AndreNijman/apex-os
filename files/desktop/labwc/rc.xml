@@ -185,45 +185,40 @@
     <!-- SUPER+SHIFT+SPACE is "toggle floating" on Hyprland. labwc stacks, so
          every window already floats and there is nothing to toggle; the key is
          kept on the nearest useful behaviour rather than left dead. -->
-    <!-- ── Alt-Tab: the APEX Shell window switcher ──────────────────────────
-         Every window on every desktop, most-recently-used first, drawn by the
-         shell so the Hyprland and Floating sessions show the SAME switcher.
+    <!-- ── Alt-Tab: labwc's own switcher, across every desktop ──────────────
+         `workspace="all"` is the whole of Andre's "it goes for all windows
+         including windows in other workspaces" for this session: labwc's
+         switcher is already hold-ALT-tap-Tab-release-ALT, already draws
+         thumbnails (see <windowSwitcher> above), and already cycles in focus
+         order. The attribute is the only thing it was missing.
 
-         labwc's own NextWindow/PreviousWindow are not bound any more. They are
-         good — `workspace="all"` would have given the cross-desktop half of
-         what Andre asked for in one attribute — but they are labwc's, and a
-         user who moves between the two sessions would get a different switcher
-         in each. The <windowSwitcher> block above still configures them for
-         anyone who binds them again by hand.
+         ── Why this is NOT the APEX Shell switcher the Hyprland session gets ──
+         The shell's switcher needs the compositor to tell it when ALT is
+         RELEASED, because a switcher surface that took keyboard focus to see
+         the release itself would be taking focus off the window it is about to
+         activate — the defect this file's WarpCursor lines exist to fix, one
+         layer up. Hyprland has a release bind for that. labwc has
+         onRelease="yes", and it deliberately does not do this:
 
-         Hold Alt, tap Tab, release Alt. The RELEASE is a keybind here rather
-         than something the shell watches for: a switcher surface that took
-         keyboard focus in order to see the Alt release would be taking focus
-         off the window it is about to activate, which is the defect this whole
-         change exists to remove. So the shell's overlay never asks for the
-         keyboard, and labwc reports the release instead.
+             "This is useful to bind actions to only modifier keys, where the
+              action should fire when the modifier is used WITHOUT another key"
+                                                        — labwc-config(5)
 
-         onRelease fires on EVERY Alt release, not only while the switcher is
-         open, which is why the command is /usr/libexec/apex-switcher and not
-         `apex shell …`: with nothing open the helper does one `[ -e ]` on a
-         file under XDG_RUNTIME_DIR and exits.
+         Measured on labwc 0.9.6, 2026-09-20: with `Alt_L onRelease="yes"`
+         bound, holding ALT, tapping Tab (which fires A-Tab) and releasing ALT
+         fires the release binding ZERO times. Pressing and releasing ALT with
+         no Tab in between fires it. It is documented behaviour, not a bug, and
+         it makes a shell-drawn hold-and-release switcher impossible here.
 
-         Both Alt keys, because a switch started with the right-hand one has to
-         be finishable with it. -->
+         So the Floating session keeps the switcher labwc already has, which
+         does the same job properly, and APEX's own is bound on the session
+         that can support it. docs/window-switcher.md says which is which
+         rather than implying the three sessions match. -->
     <keybind key="A-Tab">
-      <action name="Execute" command="/usr/libexec/apex-switcher next"/>
+      <action name="NextWindow" workspace="all"/>
     </keybind>
     <keybind key="A-S-Tab">
-      <action name="Execute" command="/usr/libexec/apex-switcher prev"/>
-    </keybind>
-    <keybind key="A-Escape">
-      <action name="Execute" command="/usr/libexec/apex-switcher cancel"/>
-    </keybind>
-    <keybind key="Alt_L" onRelease="yes">
-      <action name="Execute" command="/usr/libexec/apex-switcher commit"/>
-    </keybind>
-    <keybind key="Alt_R" onRelease="yes">
-      <action name="Execute" command="/usr/libexec/apex-switcher commit"/>
+      <action name="PreviousWindow" workspace="all"/>
     </keybind>
 
     <!-- Hyprland binds SUPER+arrows to movefocus. labwc has NO directional
