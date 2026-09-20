@@ -14,6 +14,9 @@ Repo `apex-os`, branch **`task/katana-runner`**, worktree
 `ec7b3ccf`. All commits pushed.
 
 ```
+ae633df8 docs(evidence): APEX's kernel built on katana in 34m23s, and every gate passed
+c5710aa5 docs(evidence): what was checked about rootless podman, and one warning that is a choice
+047b938a docs(evidence): the backup directory is the undo, not a leftover
 b4f8b8b1 docs(evidence): record the measured OOM and cap numbers, not the intent
 81f6a24f docs(evidence): say which of the three fork-PR layers is load-bearing
 c06a48a0 ci(katana): three hardening fixes found by reading the files again
@@ -36,7 +39,10 @@ boot stanza.
 **`c06a48a0` was committed after the kernel run started and is not in the code
 that run executed** — pushing it would have cancelled the build via
 `cancel-in-progress`. It changes the contract step's `RPMS=` derivation and the
-workflow's push-branch filter, so the next run is the first to exercise them.
+workflow's push-branch filter, so the next kernel run is the first to exercise
+them. Its probe half *was* exercised: pushing it re-ran `katana-probe.yml` as
+run **35520119201**, green, with all **17** containment assertions denied —
+`pkexec` among them now.
 
 **The machine changes are NOT in this branch and cannot be.** They are recorded
 in full, with a removal recipe, at
@@ -98,9 +104,15 @@ Proof, not assertion: sha256 of all 1041 regular files before and after →
   except `192.168.1.1:53`. Andre's own uid is unaffected (verified: he gets
   HTTP 200 from the router at the same time the runner is rejected).
 
-Containment run **35517909892** is green with all 16 forbidden actions denied
-and all 4 positive controls passing, and the `deny` harness was separately shown
-to go red when handed a leak.
+Containment runs **35517909892** (16 assertions) and **35520119201** (17, after
+`pkexec` was added) are both green, every forbidden action denied and all 4
+positive controls passing. The `deny` harness was separately shown to go red
+when handed a leak, so it is capable of failing.
+
+Final state, after both a probe job and a 37-minute kernel build: runner
+`online busy=false`, three processes (run.sh, run-helper.sh, Runner.Listener)
+and **no stray job process**, `/var/lab` back to 3.1 GB of 492 GB, `games`
+unchanged at 59 GB of 848 GB, and the nft counter at 13 rejected packets.
 
 ## NEXT — for a stranger
 
@@ -114,9 +126,10 @@ to go red when handed a leak.
    only 5 rpms, but it is now written without the pipeline. One
    `gh workflow run kernel-build.yml --ref task/katana-runner` confirms the
    rewritten step. Not urgent; the kernel itself is proven.
-2. **Land it.** `git merge-tree origin/roadmap/v2.2 HEAD` → **exit 0, no
-   conflicts**, and the branch is **0 behind / 4 ahead** of
-   `origin/roadmap/v2.2` (checked at `f42ed421`). Land via
+2. **Land it.** `origin/roadmap/v2.2` moved 27 commits while this unit ran, so
+   it was **merged in** rather than left as a stale "0 behind" claim: the merge
+   was clean, it touched none of this unit's five files, and the branch is now
+   **0 behind / 12 ahead**. Land via
    `/var/tmp/apex-work/int-os`, not a main checkout. Landings are merges, not
    rebases. The only file here that belongs to another unit's history is
    `Containerfile.kernel`, and the change to it is additive: a
