@@ -135,6 +135,16 @@ jobs:
           # attacker-controlled for anyone who can dispatch.
           kvm_arg=()
           [[ "${{ steps.accel.outputs.kvm }}" == "true" ]] && kvm_arg=(--device /dev/kvm)
+          # nvram-guard wraps the HOST-SIDE launch, which is the only layer
+          # that can see host EFI variables at all. run-scenarios itself runs
+          # INSIDE this container, where /sys/firmware/efi/efivars does not
+          # exist, so a check in there would inspect nothing. AGENTS.md
+          # boot-path rule 6; efivars-guard left this handover explicitly.
+          # On a runner with no UEFI firmware the guard reports
+          # `could-not-run`, runs the command, and never claims it measured
+          # anything — so this is safe in CI and load-bearing on a developer's
+          # own machine, which is where the 2026-09-20 breakage happened.
+          ./tests/lab/nvram-guard --label boot-v2-scenarios -- \
           podman run --rm "${kvm_arg[@]}" \
             -v "$PWD:/work:z" \
             -e "SCENARIOS=$SCENARIOS" \
@@ -235,7 +245,10 @@ jobs:
           case "$ITERATIONS" in
             ''|*[!0-9]*) echo "::error::chaos_iterations must be a number"; exit 1 ;;
           esac
+          # Same reason as the scenario launch above: the chaos loop boots
+          # guests from the host side. AGENTS.md boot-path rule 6.
           CHAOS_BOOTLAB_IMAGE=localhost/apex-bootlab \
+            ./tests/lab/nvram-guard --label boot-v2-chaos -- \
             ./tests/chaos/chaos-loop \
               --out "$RUNNER_TEMP/chaos-series" \
               --iterations "$ITERATIONS" \

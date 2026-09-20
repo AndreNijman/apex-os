@@ -57,9 +57,10 @@ done
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "the opt-in is structural, not a claim in a comment"
-# This is the property the whole section is most likely to lose silently. GRUB
-# is the default for every published image (AGENTS.md boot-path rule 5), so
-# every unit shipped here must be incapable of doing anything on a GRUB boot.
+# This is the property the whole section is most likely to lose silently. One
+# image serves machines installed on either backend (AGENTS.md boot-path rule
+# 5), so every unit shipped here must be incapable of doing anything on a GRUB
+# boot.
 # The switch is systemd-boot's own LoaderBootCountPath EFI variable, which is
 # also what systemd-bless-boot-generator conditions on.
 for u in "$UNIT_HEALTH" "$UNIT_NOTICE"; do
@@ -90,6 +91,170 @@ grep -q 'systemctl enable apex-boot-health.service' "$BASECF" \
 grep -q 'boot-complete.target.requires/apex-boot-health.service' "$BASECF" \
     && ok "Containerfile.base checks the RequiredBy symlink systemctl created" \
     || bad "Containerfile.base does not verify the enablement it performed"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+sec "the boot counter APEX writes, because bootc writes none"
+# bootc produces entry filenames with no +N-M suffix and a loader.conf whose
+# timeout is commented out, so on a machine installed exactly as bootc leaves
+# it LoaderBootCountPath never appears and everything above is inert. The
+# counter has to be written into the STAGED entry: bootc-finalize-staged
+# replaces the whole entries/ directory at shutdown, discarding anything
+# written into a live filename. Measured, eleven guest boots, evidence in
+# ROADMAP/evidence/sdboot-image-20260920-lab.md.
+COUNT="$REPO/files/system/libexec/apex-boot-count"
+UNIT_COUNT="$REPO/files/system/units/apex-boot-count.service"
+BLESS_DROPIN="$REPO/files/system/units/10-apex-bless-boot-esp.conf"
+SEPOL="$REPO/files/system/selinux/apex_sdboot.te"
+for f in "$COUNT" "$UNIT_COUNT" "$BLESS_DROPIN" "$SEPOL"; do
+    [[ -f "$f" ]] || { echo "FATAL: missing $f" >&2; exit 1; }
+done
+[[ -x "$COUNT" ]] || bad "$COUNT is not executable in the repo"
+
+BOOTED=aaaa1111
+FRESH=bbbb2222
+
+# Build an ESP fixture. `live` is what bootc has installed; `staged` is what it
+# is about to install. Nothing under live/ may ever change.
+mk_esp() {           # mk_esp <dir> <srel-contents> <staged entry name...>
+    local d="$1" srel="$2"; shift 2
+    mkdir -p "$d/loader/entries" "$d/loader/entries.staged"
+    [[ "$srel" == none ]] || printf '%s\n' "$srel" > "$d/loader/entries.srel"
+    printf 'title live\noptions rw composefs=%s\n' "$BOOTED" \
+        > "$d/loader/entries/bootc_apex-43-1.conf"
+    local e
+    for e in "$@"; do
+        local digest="${e##*:}" name="${e%%:*}"
+        printf 'title staged\noptions rw quiet composefs=%s\n' "$digest" \
+            > "$d/loader/entries.staged/$name"
+    done
+}
+staged_ls() { ( cd "$1/loader/entries.staged" && ls -1 | sort | tr '\n' ' ' ); }
+live_ls()   { ( cd "$1/loader/entries" && ls -1 | sort | tr '\n' ' ' ); }
+run_count() {        # run_count <esp> <cmdline>
+    local esp="$1" cl="$2"
+    printf '%s\n' "$cl" > "$TMP/cmdline"
+    APEX_BOOT_ESP="$esp" APEX_BOOT_CMDLINE="$TMP/cmdline" "$COUNT" stage 2>>"$TMP/count.log"
+}
+
+# ── the ordinary case: two staged entries, one of them new ──
+E="$TMP/esp-normal"
+mk_esp "$E" type1 "bootc_apex-43-0.conf:$BOOTED" "bootc_apex-43-1.conf:$FRESH"
+live_before="$(live_ls "$E")"
+run_count "$E" "rw quiet composefs=$BOOTED" && rc=0 || rc=$?
+eq 0 "$rc" "apex-boot-count exits 0 on the ordinary case"
+eq 'bootc_apex-43-0.conf bootc_apex-43-1+3-0.conf ' "$(staged_ls "$E")" \
+   "the entry whose composefs digest is NOT the booted one gets the counter"
+eq "$live_before" "$(live_ls "$E")" "the LIVE entries directory is untouched"
+
+# ── idempotence: a second run must not reset a counter sd-boot has decremented ──
+E2="$TMP/esp-counted"
+mk_esp "$E2" type1 "bootc_apex-43-0.conf:$BOOTED" "bootc_apex-43-1+1-2.conf:$FRESH"
+run_count "$E2" "rw composefs=$BOOTED" || true
+eq 'bootc_apex-43-0.conf bootc_apex-43-1+1-2.conf ' "$(staged_ls "$E2")" \
+   "an already-counted staged set is left exactly as it was"
+
+# ── nothing new staged (the bootc-rollback-to-current and no-op cases) ──
+E3="$TMP/esp-nothing-new"
+mk_esp "$E3" type1 "bootc_apex-43-0.conf:$BOOTED"
+run_count "$E3" "rw composefs=$BOOTED" || true
+eq 'bootc_apex-43-0.conf ' "$(staged_ls "$E3")" \
+   "a staged set that is all the booted deployment is left alone"
+
+# ── ambiguity is refused, never guessed ──
+E4="$TMP/esp-ambiguous"
+mk_esp "$E4" type1 "bootc_apex-43-0.conf:cccc3333" "bootc_apex-43-1.conf:$FRESH"
+run_count "$E4" "rw composefs=$BOOTED" || true
+eq 'bootc_apex-43-0.conf bootc_apex-43-1.conf ' "$(staged_ls "$E4")" \
+   "two entries differing from the booted one are refused, not guessed between"
+
+# ── a GRUB machine: no entries.srel, so nothing happens even if a dir exists ──
+E5="$TMP/esp-grub"
+mk_esp "$E5" none "bootc_apex-43-1.conf:$FRESH"
+run_count "$E5" "rw composefs=$BOOTED" || true
+eq 'bootc_apex-43-1.conf ' "$(staged_ls "$E5")" \
+   "without entries.srel nothing is renamed (the GRUB case)"
+
+# ── a loader directory that is not Type #1 ──
+E6="$TMP/esp-type2"
+mk_esp "$E6" type2 "bootc_apex-43-1.conf:$FRESH"
+run_count "$E6" "rw composefs=$BOOTED" || true
+eq 'bootc_apex-43-1.conf ' "$(staged_ls "$E6")" \
+   "entries.srel saying anything but type1 is refused"
+
+# ── no composefs= on the command line: it cannot tell which entry is new ──
+E7="$TMP/esp-nocfs"
+mk_esp "$E7" type1 "bootc_apex-43-0.conf:$BOOTED" "bootc_apex-43-1.conf:$FRESH"
+run_count "$E7" "rw quiet" || true
+eq 'bootc_apex-43-0.conf bootc_apex-43-1.conf ' "$(staged_ls "$E7")" \
+   "with no composefs= on the cmdline it refuses rather than guessing"
+
+# ── and the fixture itself must be capable of showing a rename ──
+# Without this control every eq above could be passing because the helper is
+# broken in a way that renames nothing, ever. The ordinary case already proves
+# one rename happened; this proves the two are the same helper and the same
+# fixture shape.
+E8="$TMP/esp-control"
+mk_esp "$E8" type1 "bootc_apex-43-0.conf:$BOOTED" "bootc_apex-43-7.conf:$FRESH"
+run_count "$E8" "rw composefs=$BOOTED" || true
+if [[ "$(staged_ls "$E8")" == *'bootc_apex-43-7+3-0.conf'* ]]; then
+    ok "positive control: the same helper does rename when the case is unambiguous"
+else
+    bad "positive control failed — the refusals above may be vacuous: $(staged_ls "$E8")"
+fi
+
+# ── the unit's condition and ordering ──
+# It cannot use LoaderBootCountPath: that variable exists only once counting is
+# already in effect, and this unit is what starts it. Worse, it works in
+# ExecStop, and a unit whose START condition failed is never stopped.
+grep -qx 'ConditionPathExists=/boot/loader/entries.srel' "$UNIT_COUNT" \
+    && ok "apex-boot-count is conditioned on entries.srel (absent on a GRUB machine)" \
+    || bad "apex-boot-count has no entries.srel condition — it would run on a GRUB machine"
+grep -qx 'After=bootc-finalize-staged.service' "$UNIT_COUNT" \
+    && ok "apex-boot-count starts After bootc-finalize-staged, so it STOPS before it" \
+    || bad "apex-boot-count must be After=bootc-finalize-staged.service, or its ExecStop runs after the swap"
+grep -q '^ExecStop=/usr/libexec/apex-boot-count stage' "$UNIT_COUNT" \
+    && ok "apex-boot-count does its work in ExecStop" \
+    || bad "apex-boot-count must work in ExecStop — the staged dir exists only at shutdown"
+grep -qx 'WantedBy=multi-user.target' "$UNIT_COUNT" \
+    && ok "apex-boot-count is WantedBy (a missing counter must not fail a boot)" \
+    || bad "apex-boot-count must be WantedBy=multi-user.target, not RequiredBy"
+grep -q 'systemctl enable apex-boot-count.service' "$BASECF" \
+    && ok "Containerfile.base enables apex-boot-count.service" \
+    || bad "Containerfile.base does not enable apex-boot-count.service"
+
+# ═════════════════════════════════════════════════════════════════════════════
+sec "the blessing can write a FAT ESP, or none of the above matters"
+# On the composefs path the ESP IS /boot, so the entries systemd-bless-boot
+# renames are dosfs_t. PID 1 running /usr/lib/systemd/systemd-bless-boot
+# (init_exec_t) stays in init_t, which Fedora 43 allows no rename on dosfs_t —
+# measured on the APEX image, with the AVC, in
+# ROADMAP/evidence/sdboot-image-20260921-decision.md. Unrepaired, the counter
+# above turns into a machine that rolls itself back on every fourth boot.
+grep -qx 'SELinuxContext=-system_u:system_r:bootupd_t:s0' "$BLESS_DROPIN" \
+    && ok "the blessing runs in bootupd_t, the domain allowed to write a FAT ESP" \
+    || bad "the bless-boot drop-in does not set SELinuxContext to bootupd_t"
+# The leading dash is the difference between "unconfined blessing" and "failed
+# unit, counter never stripped, rollback on the fourth boot".
+grep -q 'SELinuxContext=-' "$BLESS_DROPIN" \
+    && ok "SELinuxContext failure is non-fatal (the leading dash)" \
+    || bad "SELinuxContext has no leading dash — a policy problem would roll the machine back"
+grep -q 'allow bootupd_t init_exec_t:file' "$SEPOL" \
+    && ok "the policy module grants the entrypoint the transition needs" \
+    || bad "apex_sdboot.te does not grant bootupd_t an entrypoint on init_exec_t"
+grep -q 'entrypoint' "$SEPOL" \
+    && ok "…and specifically the entrypoint permission" \
+    || bad "apex_sdboot.te never mentions entrypoint"
+# The module NAME must equal the .pp basename or checkmodule refuses outright.
+grep -qx 'module apex_sdboot 1.0.0;' "$SEPOL" \
+    && ok "the module name matches the filename checkmodule will write" \
+    || bad "apex_sdboot.te's module name must be apex_sdboot to match the .pp basename"
+grep -q 'semodule -N -i apex_sdboot.pp' "$REPO/Containerfile.core" \
+    && ok "Containerfile.core installs the policy module" \
+    || bad "Containerfile.core does not install apex_sdboot.pp"
+grep -q 'semodule -l | grep -qx apex_sdboot' "$BASECF" \
+    && ok "Containerfile.base asserts across the tier boundary that it is there" \
+    || bad "Containerfile.base does not check the core tier still ships the policy module"
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "nothing shipped into the image touches a real boot path"
