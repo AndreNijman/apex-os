@@ -1189,6 +1189,12 @@ RUN set -eux; \
     test -f /usr/lib64/cryptsetup/libcryptsetup-token-systemd-tpm2.so; \
     : '--with-pin reads this parts lockout counters off the chip rather'; \
     : 'than quoting numbers from documentation, and needs tpm2-tools to.'; \
+    : 'MEASURED 2026-09-20: tpm2-tools reaches this image only as a'; \
+    : 'dependency of clevis (rpm -q --whatrequires tpm2-tools -> clevis) and'; \
+    : 'is pinned by no line in Containerfile.core. If this assertion is what'; \
+    : 'failed your build, clevis stopped pulling it in: add tpm2-tools to'; \
+    : 'core explicitly rather than deleting this line, or --with-pin goes'; \
+    : 'back to telling users their lockout numbers are unknown.'; \
     test -x /usr/bin/tpm2_getcap; \
     \
     : '── it must never bind a PCR this program has ruled out ──'; \
