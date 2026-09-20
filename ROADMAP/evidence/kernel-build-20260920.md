@@ -153,3 +153,148 @@ https://kojipkgs.fedoraproject.org/packages/dwarves/<ver>/<rel>/x86_64/
 * **`dwarves-1.32-1.fc43` is in Fedora 43 updates-testing, not stable.** Pinning it by
   koji NVR URL is what makes it usable now; that pin is a build input, not a runtime
   dependency, and nothing ships dwarves to a user.
+
+---
+
+## 4. The build tier, and what the first end-to-end run found
+
+§1–§3 were measured by re-running pahole over an existing kernel's DWARF. That
+answers the root-cause question and nothing else. The tier in
+`Containerfile.kernel` is what turns it into a kernel APEX ships, and its first
+two runs each found a defect that no amount of re-reading the A/B would have.
+
+### 4.1 `rpmbuild` deletes the tree the gate has to read
+
+The 2026-09-20 08:21 AWST run **compiled the kernel successfully** and then died
+one second later:
+
+```text
+Wrote: /build/rpm/RPMS/x86_64/kernel-cachyos-modules-7.2.6-cachyos1.apex1.fc43.x86_64.rpm
+Executing(rmbuild): /bin/sh -e /var/tmp/rpm-tmp.PKBW0H
++ rm -rf /build/rpm/BUILD/kernel-cachyos-7.2.6-build
+…
++ VMLINUX=
+FATAL: no vmlinux under /build/rpm/BUILD — the build tree is not where this expects
+```
+
+rpm ≥ 4.20 runs an `Executing(rmbuild)` phase after a **successful** build that
+deletes `%{buildsubdir}`. The whole source tree goes, `vmlinux` with it, so the
+gate had nothing to read. 49m14s of wall clock (08:21:51 → 09:11:05), and the
+podman layer is discarded on a failed `RUN`, so the artefacts went with it.
+
+Measured rather than assumed, on `fedora:43` / rpm 6.0.2 with a throwaway spec
+that plants a file called `vmlinux` in its build dir:
+
+| rpmbuild invocation | `find BUILD -name vmlinux` |
+|---|---|
+| default | **0 found** |
+| `--noclean` | **1 found** |
+
+The spec defines no `%clean`, so the flag has no other effect. `--noclean` is
+now passed and carries a comment saying why, because it reads like tidy-up
+someone can safely remove.
+
+**The prior round's prediction was wrong, and that is worth recording.** Its
+card said "the most likely break is `%autopatch` applying the BORE patch
+against the pinned tag". `%autopatch` was fine; every source verified by
+sha256, the BORE patch applied, the kernel linked. The failure was in the
+harness, one line after the compile finished.
+
+Two further changes to the same step, both aimed at the same 50-minute feedback
+loop: the vmlinux search now asserts **exactly one** match rather than taking
+`head -1` (a gate must read *the* artefact the build produced), and its failure
+message names `--noclean` as the first thing to check. The `rpmbuild` wall time
+is printed, because the rpmbuild log dies with the layer.
+
+### 4.2 The builder base moved *during this unit*
+
+`kernel.pin` content-addresses every input — kernel tree, config, BORE patch,
+both dwarves RPMs — except one: `BUILDER_BASE` named `fedora:43`, a floating
+tag. It moved the same day:
+
+* build at 08:21 AWST pulled base blob `ce241f1b…`
+* build at 20:5x AWST pulled `a71bf9b8…`
+* `skopeo inspect docker://registry.fedoraproject.org/fedora:43` →
+  `sha256:84325c67…`, **`Created: 2026-09-20T05:47:58Z`**
+
+The immediate cost was the layer cache missing at step 1, re-downloading the
+toolchain and the 266 MB kernel tarball. Both `FROM` lines and `BUILDER_BASE`
+now name the digest.
+
+**What that does not pin, stated so nobody reads more into it:** the digest
+freezes the base *layer*, not the `dnf5 -y install gcc …` transaction on top of
+it, which still resolves against Fedora's live repositories. GCC can still move
+between two builds of an unchanged pin. That is tolerable for one reason and it
+is not "it's probably fine": what the compiler can change is the kernel
+**binary**, and what it cannot change is whether the kfunc BTF is correct —
+that is pahole's, pinned by NVR **and** sha256 and asserted twice against the
+built kernel. `cc=` in `/manifest/kernel-build.txt` records the compiler each
+build actually used, so the residual drift is visible after the fact.
+
+### 4.3 The `*_impl` twins are created by `resolve_btfids` — measured, not assumed
+
+`ROADMAP/evidence/kernel-btf-scx-20260920.md` recorded a limitation on its own
+reader: *"the `_impl` skip ASSUMES `_impl` means pre-strip twin, which holds
+across all three kernels read but would silently skip a public kfunc genuinely
+named `scx_bpf_*_impl`."*
+
+That assumption is now a measurement. Counting `scx_bpf_*` FUNCs in the three
+blobs the A/B already produced:
+
+| blob | stage | `scx_bpf_*` FUNCs | of which `*_impl` |
+|---|---|---|---|
+| pahole 1.30 output | **pre**-`resolve_btfids` | 68 | **0** |
+| pahole 1.32 output | **pre**-`resolve_btfids` | 68 | **0** |
+| the kernel's shipped `.BTF` | **post**-`resolve_btfids` | 97 | **29** |
+
+pahole emits no `*_impl` name at all, under either version. All 29 appear only
+after `resolve_btfids` has run, and 97 = the same 68 plus those 29. They are
+created by the strip step, one per kfunc whose implicit `struct bpf_prog_aux *`
+was actually removed — not a naming convention, a by-product.
+
+Two consequences:
+
+* The exclusion is **correct for the right reason**. A public kfunc genuinely
+  named `scx_bpf_something_impl` would appear in pahole's output, where no
+  `*_impl` name exists; the named risk is bounded by a reading rather than by
+  hope.
+* **Any reader run against a vmlinux's `.BTF` section must exclude them**,
+  because a vmlinux is always read after `resolve_btfids`. A reader that did not
+  would report a perfectly good kernel as having ~29 untagged kfuncs.
+
+### 4.4 Two readers, because this gate had never passed
+
+`apex-kernel-btf-gate` had never once returned 0 on a real kernel. Every BTF
+available to test it against carried the defect, so every test of it was a
+negative one. If it failed on a kernel we built, "this kernel is genuinely
+broken" and "the reader is wrong about this BTF" would look identical, and
+telling them apart costs another 45 minutes.
+
+`kernel/btf-xcheck.sh` is a second, independent reading: `sh` + `bpftool`, no
+code shared with the Rust reader, asking the other half of the question — the
+gate asks whether the published prototype still carries the implicit
+`struct bpf_prog_aux *` (the symptom), this asks whether pahole emitted a
+`bpf_kfunc` DECL_TAG at all (the root cause). It runs **first** and prints
+whatever it finds, before the reader that can abort the build. If the gate
+passes and this one does not, the build fails on the disagreement.
+
+Validated against every BTF on hand, and it fails both ways:
+
+| input | examined | twins excluded | untagged | exit |
+|---|---|---|---|---|
+| the kernel's shipped `.BTF` | 68 | 29 | **18** | 1 |
+| pahole 1.30 on that DWARF | 68 | 0 | **18** | 1 |
+| pahole 1.32 on that DWARF | 68 | 0 | **0** | **0** |
+| the ELF `vmlinux` directly | 68 | 29 | **18** | 1 |
+| a valid BTF with no `scx_bpf_*` at all | 0 | 0 | 0 | **1, refused** |
+
+The first three reproduce §1's table to the digit from an independent
+implementation. The last row is the one that matters most: zero untagged out of
+zero examined is **not** a passing kernel, and a gate that would call it one is
+this repository's dominant defect family. It was produced by compiling a
+two-line C file with `-g` and running `pahole --btf_encode_detached` over it —
+a real BTF blob that simply contains no sched-ext.
+
+### 4.5 The end-to-end run
+
+<!-- PENDING: filled in when the rebuilt tier finishes. -->
