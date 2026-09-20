@@ -306,9 +306,17 @@ scan_list() {   # file paths on stdin -> "path:line" per violation
             /\\[[:space:]]*$/ { sub(/\\[[:space:]]*$/, " ", acc); next }
             {
                 s = acc; sub(/^[[:space:]]*/, "", s)
-                if (substr(s, 1, 1) != "#" && index(acc, "via-loopback") > 0 \
-                    && index(acc, "/sys/firmware/efi/efivars") == 0 \
-                    && index(acc, "bootc-install-lab") == 0)
+                # A COMMENT MUST NOT SATISFY THIS CHECK. `podman run …
+                # --via-loopback …  # TODO: --tmpfs /sys/firmware/efi/efivars`
+                # is the shape that would otherwise walk straight through, and
+                # it is the same species as the forbid-check this repository
+                # once shipped that matched the comment explaining what it
+                # forbade. Trailing comments are cut before BOTH tests, so a
+                # `#` inside a quoted string can only produce a FALSE POSITIVE,
+                # which fails loudly and is the right direction to be wrong in.
+                code = acc; sub(/[[:space:]]#.*$/, "", code)
+                if (substr(s, 1, 1) != "#" && index(code, "via-loopback") > 0 \
+                    && index(code, "/sys/firmware/efi/efivars") == 0)
                     printf "%s:%d\n", path, NR
                 acc = ""
             }
@@ -340,23 +348,51 @@ sudo podman run --rm --privileged --pid=host \
         --filesystem ext4 /work/lab.img
 FIXTURE
 
+cat > "$FIX/commented.sh" <<'FIXTURE'
+#!/bin/sh
+sudo podman run --rm --privileged --pid=host \
+    -v /dev:/dev \
+    -v /var/lab-scratch:/work \
+    localhost/apex-os:daily \
+    bootc install to-disk --via-loopback --wipe \
+        --filesystem ext4 /work/lab.img   # TODO --tmpfs /sys/firmware/efi/efivars
+FIXTURE
+
 vhits="$(printf '%s\n' "$FIX/violating.sh" | scan_list)"
 [[ -n "$vhits" ]] && ok "the scan catches an unmasked loopback caller ($vhits)" \
                   || bad "the scan MISSED the 2026-09-20 command shape — it inspects nothing"
 chits="$(printf '%s\n' "$FIX/compliant.sh" | scan_list)"
 [[ -z "$chits" ]] && ok "the scan passes a masked caller" \
                   || bad "the scan flags a correctly masked caller: $chits"
+khits="$(printf '%s\n' "$FIX/commented.sh" | scan_list)"
+[[ -n "$khits" ]] && ok "a mask that exists only in a trailing comment does not satisfy the scan" \
+                  || bad "the scan accepted a COMMENTED mask — a comment is not a guard"
 
 # Now the repository itself. Two files are exempt and both are named here:
 # the wrapper builds the argv across several array appends rather than one
 # continued command, and this suite embeds the violating fixture above.
 cd "$REPO" || exit 1
-hits="$(git ls-files 2>/dev/null \
+# An EMPTY file list would make the verdict below print "ok" while inspecting
+# nothing — and `git ls-files` really can come back empty here, because CI
+# checkout falls back to a tarball with no .git. So the list is captured, its
+# size is asserted against a floor, and a sentinel that is KNOWN to contain a
+# `bootc install` line has to be inside it before the clean verdict is
+# believed. Same guard as test-boot-v2.sh's "the scan is vacuous".
+mapfile -t tracked < <(git ls-files \
         | grep -vE '^(docs/|ROADMAP/)' \
         | grep -vE '\.md$' \
         | grep -vxF 'tests/lab/bootc-install-lab' \
-        | grep -vxF 'tests/test-bootc-install-guard.sh' \
-        | scan_list)"
+        | grep -vxF 'tests/test-bootc-install-guard.sh')
+printf '%s\n' ${tracked[@]+"${tracked[@]}"} > "$WORK/tracked.txt"
+(( ${#tracked[@]} > 300 )) \
+    && ok "the scan covers ${#tracked[@]} tracked files" \
+    || bad "the scan is vacuous: git ls-files gave ${#tracked[@]} files (a tarball checkout has no .git)"
+# Not piped into `grep -q`: a match makes grep exit early, printf takes SIGPIPE,
+# and under `pipefail` the pipeline returns 141 on SUCCESS.
+grep -qxF 'installer/apex-install' "$WORK/tracked.txt" \
+    && ok "the sentinel installer/apex-install is inside the scanned set" \
+    || bad "installer/apex-install is not in the scanned set — the file list is wrong"
+hits="$(scan_list < "$WORK/tracked.txt")"
 [[ -z "$hits" ]] \
     && ok "no tracked file runs an unmasked --via-loopback install" \
     || bad "these run a loopback install without masking efivars:"$'\n'"$hits"
