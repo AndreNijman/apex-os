@@ -255,7 +255,39 @@ RUN set -eux; \
     lsinitrd "/usr/lib/modules/${KVER}/initramfs.img" \
         | grep -E '/nvidia[^/]*\.ko' \
         || { echo "FATAL: nvidia is not in the shipped initramfs — a dGPU-attached panel would stay black"; exit 1; }; \
-    echo "initramfs: plymouth theme + nvidia drivers present"
+    # ── the disk-unlock chain, checked in the artifact that boots ──────────
+    # This is the LAST dracut run of the build (see the tier's header), so it
+    # is the only place these can be checked: an assertion before it inspects
+    # an initramfs that is about to be replaced.
+    #
+    # Every one of these is a machine that asks for a passphrase it cannot use:
+    #   systemd-cryptsetup  — nothing opens the volume at all;
+    #   the crypt module    — no rd.luks.* handling, so nothing tries;
+    #   the tpm2 token .so  — a TPM-enrolled keyslot is unusable and the boot
+    #                         falls back to the passphrase prompt silently;
+    #   the keymaps         — every prompt is a `us` prompt, whatever the owner
+    #                         chose, which is the stranding case for anyone
+    #                         whose passphrase uses a key that moved.
+    # The keymap check names a NON-us map on purpose: `us` is the kernel
+    # built-in and would be there even if the whole keymap tree were missing.
+    INITRD="/usr/lib/modules/${KVER}/initramfs.img"; \
+    lsinitrd "$INITRD" | grep -qE 'usr/bin/systemd-cryptsetup' \
+        || { echo "FATAL: systemd-cryptsetup is not in the shipped initramfs — an encrypted root could never be opened"; exit 1; }; \
+    lsinitrd "$INITRD" -m | tr ' ' '\n' | grep -qx 'crypt' \
+        || { echo "FATAL: dracut's crypt module is not in the shipped initramfs — rd.luks.* would be ignored"; exit 1; }; \
+    lsinitrd "$INITRD" | grep -qE 'libcryptsetup-token-systemd-tpm2\.so' \
+        || { echo "FATAL: the systemd-tpm2 token plugin is not in the shipped initramfs — a TPM keyslot would be unusable"; exit 1; }; \
+    lsinitrd "$INITRD" | grep -qE 'kbd/keymaps/.*/de\.map' \
+        || { echo "FATAL: the console keymaps are not in the shipped initramfs — every unlock prompt would be a US one"; exit 1; }; \
+    # The hint module. A dracut module whose check() is never called, or whose
+    # install() silently failed, leaves NO trace and no error — the build would
+    # look identical. So both halves are named: the program, and the symlink
+    # that is the only reason systemd ever runs it.
+    lsinitrd "$INITRD" | grep -qE 'usr/bin/apex-unlock-hint' \
+        || { echo "FATAL: apex-unlock-hint is not in the shipped initramfs — the unlock prompt could not say which keyboard it is using"; exit 1; }; \
+    lsinitrd "$INITRD" | grep -qE 'initrd\.target\.wants/apex-unlock-hint\.service' \
+        || { echo "FATAL: apex-unlock-hint.service is in the initramfs but nothing pulls it in — it would never run"; exit 1; }; \
+    echo "initramfs: plymouth theme + nvidia drivers + the disk-unlock chain present"
 
 # Kernel args for the graphical splash. `quiet splash` per the theme's own
 # README (files/branding/plymouth/README.md). NOTE: `quiet` raises the console

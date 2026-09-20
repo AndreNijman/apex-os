@@ -1,0 +1,41 @@
+#!/bin/sh
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-unlock-hint — runs in the INITRAMFS, just before the disk passphrase is
+#  asked for, and puts one line on the splash saying what the prompt is using.
+#
+#  WHY THIS IS NOT DECORATION. The passphrase prompt is drawn before any
+#  filesystem is mounted. It has one console keymap, no input method and no way
+#  back. If the layout is not what the owner expects, the characters they type
+#  are not the characters they see on their keys, the passphrase is refused,
+#  and nothing on the screen says why — they conclude they have forgotten it.
+#  Naming the layout, and naming the recovery key as the way out, is the
+#  difference between a puzzle and a prompt.
+#
+#  It says nothing at all on a machine with no encrypted volume: no rd.luks on
+#  the command line, no message. Silence is the correct output for most boots.
+# ─────────────────────────────────────────────────────────────────────────────
+set -u
+
+CMDLINE=/proc/cmdline
+[ -r "$CMDLINE" ] || exit 0
+
+# Nothing to unlock, nothing to say.
+grep -q 'rd\.luks\.' "$CMDLINE" || exit 0
+
+command -v plymouth >/dev/null 2>&1 || exit 0
+# A plymouth that is not running must not become a boot failure: this is a
+# message, and a machine that cannot show it still has to boot.
+plymouth --ping >/dev/null 2>&1 || exit 0
+
+# The installer puts vconsole.keymap= here for any layout that is not the image
+# default. Its absence therefore means `us`, which is the kernel's built-in and
+# what systemd-vconsole-setup will have loaded.
+KEYMAP=$(sed -n 's/.*[ 	]vconsole\.keymap=\([^ 	]*\).*/\1/p' "$CMDLINE" | tail -1)
+[ -n "$KEYMAP" ] || KEYMAP=$(sed -n 's/^vconsole\.keymap=\([^ 	]*\).*/\1/p' "$CMDLINE" | tail -1)
+[ -n "$KEYMAP" ] || KEYMAP=us
+
+plymouth message \
+    --text="Keyboard: $KEYMAP  ·  if this passphrase is refused, type your APEX recovery key here instead" \
+    >/dev/null 2>&1 || exit 0
+
+exit 0
