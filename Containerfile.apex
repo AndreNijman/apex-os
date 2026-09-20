@@ -287,6 +287,18 @@ RUN set -eux; \
         || { echo "FATAL: apex-unlock-hint is not in the shipped initramfs — the unlock prompt could not say which keyboard it is using"; exit 1; }; \
     lsinitrd "$INITRD" | grep -qE 'initrd\.target\.wants/apex-unlock-hint\.service' \
         || { echo "FATAL: apex-unlock-hint.service is in the initramfs but nothing pulls it in — it would never run"; exit 1; }; \
+    #
+    # The per-machine keymap channel that survives a signed UKI. Same module,
+    # same two halves, and the SAME trap in a sharper form: this unit must be
+    # pulled in by sysinit.target.wants and not initrd.target.wants, because
+    # systemd-vconsole-setup is ordered Before=sysinit.target and a unit that
+    # ran at initrd.target would set a keymap that had already been loaded.
+    # A wrong .wants directory here is a silent no-op that only shows up as a
+    # locked-out owner, so the directory is named in the assertion.
+    lsinitrd "$INITRD" | grep -qE 'usr/bin/apex-vconsole-credential' \
+        || { echo "FATAL: apex-vconsole-credential is not in the shipped initramfs — a UKI machine could not be told its keyboard layout"; exit 1; }; \
+    lsinitrd "$INITRD" | grep -qE 'sysinit\.target\.wants/apex-vconsole-credential\.service' \
+        || { echo "FATAL: apex-vconsole-credential.service is not pulled in by sysinit.target.wants — it would run after the keymap was already loaded, or never"; exit 1; }; \
     echo "initramfs: plymouth theme + nvidia drivers + the disk-unlock chain present"
 
 # Kernel args for the graphical splash. `quiet splash` per the theme's own

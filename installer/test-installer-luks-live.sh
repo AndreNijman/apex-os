@@ -268,6 +268,37 @@ else
     bad "/boot mounts with no key" "mount failed"
 fi
 
+# ── the ESP credential: the keymap channel that survives a signed UKI ───────
+# The kernel argument asserted further down is what this machine boots with
+# today, under GRUB. It cannot survive the systemd-boot + UKI pivot, because
+# there the command line lives inside the signed PE image. systemd-boot reads
+# \loader\credentials\*.cred off the ESP and hands them to the initrd as
+# system credentials, so the installer writes the keymap there as well, on
+# every encrypted install, and a machine installed today carries its layout
+# into a UKI world with nothing to migrate. GRUB ignores the file entirely.
+#
+# What it CANNOT show is that the credential is then honoured — a .cred is
+# inert without files/dracut/apex-unlock-hint's apex-vconsole-credential, which
+# is measured by booting a guest in installer/test-installer-keymap-boot.sh.
+# This assertion is only that the installer wrote the file with the right name
+# and the right content.
+if sudo -n mount -o ro "$ESP_PART" "$BOOTMNT" 2>/dev/null; then
+    CREDF="$BOOTMNT/loader/credentials/vconsole.keymap.cred"
+    if sudo -n test -f "$CREDF"; then
+        credval=$(sudo -n cat "$CREDF" 2>/dev/null | tr -d '\r\n')
+        if [ "$credval" = "$KEYMAP_CONSOLE" ]; then
+            ok "the ESP carries the vconsole.keymap credential" "$credval"
+        else
+            bad "the ESP carries the vconsole.keymap credential" "content '$credval', expected '$KEYMAP_CONSOLE'"
+        fi
+    else
+        bad "the ESP carries the vconsole.keymap credential" "no loader/credentials/vconsole.keymap.cred"
+    fi
+    sudo -n umount "$BOOTMNT"
+else
+    bad "the ESP mounts so the credential can be read" "mount of $ESP_PART failed"
+fi
+
 echo
 echo "── the LUKS2 volume, and both ways into it ────────────────────────────"
 if sudo -n cryptsetup isLuks --type luks2 "$LUKS_PART" 2>/dev/null; then ok "p3 carries a LUKS2 header"
