@@ -1437,6 +1437,21 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/check-containerfile-assertions.sh
 
+      # APEX builds its own kernel, and kernel/kernel.pin is what decides which
+      # one. It exists because the COPR build it replaces takes
+      # `BuildRequires: dwarves` unversioned and fetches two of its three
+      # sources from `master` URLs -- which is how a kernel that could not load
+      # any sched-ext scheduler shipped three times. A pin file rots into
+      # decoration quietly (a URL edited back to a branch, a sha left behind
+      # when a version moves), and none of that fails a build: it just stops
+      # being reproducible. This checks it without a 45-minute kernel compile,
+      # and fails in both directions -- an undefined key the build reads, and a
+      # pin key nothing reads.
+      - name: The kernel pin is actually pinned
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        run: ./tests/check-kernel-pin.sh
+
       - name: Run trusted-device assertions
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
