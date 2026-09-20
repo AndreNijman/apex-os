@@ -336,9 +336,60 @@ hosted runner is a second environment and it keeps finding defects a developer
 machine cannot (`ROADMAP/evidence/` has a whole family of them). Moving them
 here would trade that away for minutes.
 
-`kernel-build.yml` triggers on `workflow_dispatch` and on pushes touching
-`kernel/**`, `Containerfile.kernel` or the workflow itself, with a `concurrency`
-group so two pushes cannot queue two 100 GB builds.
+`kernel-build.yml` triggers on `workflow_dispatch` and on pushes to `main` or
+`roadmap/**` touching `kernel/**`, `Containerfile.kernel` or the workflow
+itself, with a `concurrency` group so two pushes cannot queue two 100 GB builds.
+
+### A real kernel build ran on it, and passed
+
+This is the point of the whole unit, so it is a measurement and not a claim.
+**Run 35518017589**, branch `task/katana-runner`, every step green including
+`assert-kernel-ran` on `ubuntu-24.04`:
+
+```
+free on /var/lab: 484 GiB       cpus=20  mem=62GiB
+pahole in buildroot: v1.32 (pin says 1.32-1.fc43)
+rpmbuild took 34m23s at -j20
+
+--- reading 1 of 2: bpftool, the root cause (did pahole emit the tag?)
+btf-xcheck: PASS — every scx_bpf_* name carries the tag
+--- reading 2 of 2: apexd kernelbtf.rs, the symptom — THIS ONE IS THE GATE
+  verdict : ok
+PASS: this kernel can load a sched-ext scheduler.
+both readers agree: this kernel's scx_bpf_* kfuncs are intact
+
+kver=7.2.6-cachyos1.apex1.fc43.x86_64
+dwarves=1.32-1.fc43   pahole_version=132   btf_scx=usable   rpms=5
+```
+
+Then `tests/check-kernel-contract.sh` against the RPMs the build actually
+produced — 18 contracts, and the `CONTRACT-TEST-BODY-RAN` sentinel present, so
+this is not the failure mode where the body is silently discarded:
+
+```
+ok: rpm -q kernel-cachyos / -core / -modules / -devel-matched
+ok: vmlinuz, config, System.map, build/ symlink, sign-file, CONFIG_MODULE_SIG_HASH
+ok: depmod -a 7.2.6-cachyos1.apex1.fc43.x86_64
+ok: vmlinuz starts with MZ — a PE image, signable and UKI-stub-able
+ok: CONFIG_EFI_STUB / SCHED_CLASS_EXT / DEBUG_INFO_BTF / DEBUG_INFO_BTF_MODULES / SCHED_BORE = y
+ok: CONFIG_MODULE_ALLOW_BTF_MISMATCH is not set
+contract test fail=0        contract-test exit=0
+```
+
+**34m23s at `-j20`**, against the ~45 minutes the tier was measured at with
+`-j12`. Katana stayed usable throughout: load sat at 20-23 on 20 cores, memory
+peaked around 4 GB resident with the rest in page cache, and nothing of Andre's
+was ever a candidate for the OOM killer.
+
+**One number in `docs/update-cost.md` is worth revisiting rather than
+repeating.** That file says the tree is ~100 GB, measured as a development
+machine's `/var` going 552 GB free to 453 GB. Sampling `/var/lab` every few
+minutes through this run, the **highest figure seen was 39 GB**, and after the
+build's own `rm -rf` of the tree inside its layer it settled at 6.7 GB. A
+sampled peak can miss a transient spike, so this is not a refutation — but the
+500 GiB partition is not merely adequate, it is roughly an order of magnitude
+larger than what this run actually needed, and the workflow's 150 GB pre-flight
+guard is comfortably conservative.
 
 ---
 
