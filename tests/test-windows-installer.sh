@@ -61,20 +61,49 @@ nogo()   { printf 'COULD-NOT-RUN  %s\n' "$1"; cannot=$((cannot+1)); }
 
 # ── 0. the source may not contain a write API ────────────────────────────────
 #  "This build cannot write to a disk" is a claim worth making mechanically
-#  rather than in a comment. Every Win32 call that could modify a disk, a file
-#  on the ESP or a firmware variable is named here; if one appears in the
-#  source, this build is no longer the read-only build it says it is and the
-#  claim in its own --help has to change with it.
+#  rather than in a comment.
+#
+#  Part one is a denylist of names. Part two exists because a denylist of names
+#  is not enough: `DeviceIoControl` takes an arbitrary u32, the control codes
+#  are hand-written hex, and `IOCTL_DISK_SET_DRIVE_LAYOUT_EX` is 0x0007C054 —
+#  a number, which no name-based grep will ever see. So part two is an
+#  ALLOWLIST: every IOCTL/FSCTL constant declared in the source must be one of
+#  the five read-side codes below, and none may be passed as a bare literal.
+#  It fails both ways — a new code, or a code that stops being declared.
 writers=0
-for api in GENERIC_WRITE WriteFile SetFirmwareEnvironmentVariable \
-           FSCTL_DISMOUNT_VOLUME IOCTL_DISK_SET_DRIVE_LAYOUT \
-           DeleteFile MoveFile CreateDirectory; do
+for api in GENERIC_WRITE GENERIC_ALL FILE_WRITE_DATA WriteFile \
+           SetFirmwareEnvironmentVariable SetEndOfFile \
+           DeleteFile MoveFile CreateDirectory RemoveDirectory SetFileAttributes; do
     if grep -rqn --include='*.rs' "\\b$api" windows-installer/src/; then
         bad "the source contains $api — this build claims to write nothing"
         writers=$((writers+1))
     fi
 done
-[ "$writers" = 0 ] && ok "no disk, file or firmware WRITE API appears in the source"
+[ "$writers" = 0 ] && ok "no disk, file or firmware WRITE API appears in the source by name"
+
+#  CTL_CODE(DeviceType, Function, Method, Access):
+#    0x00070000  IOCTL_DISK_GET_DRIVE_GEOMETRY
+#    0x00070050  IOCTL_DISK_GET_DRIVE_LAYOUT_EX
+#    0x0007405c  IOCTL_DISK_GET_LENGTH_INFO
+#    0x002d1400  IOCTL_STORAGE_QUERY_PROPERTY
+#    0x00560000  IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS
+declared="$(grep -rhoE 'const (IOCTL|FSCTL)_[A-Z_0-9]+: u32 = 0x[0-9A-Fa-f_]+' \
+              windows-installer/src/ | sed 's/.*= //' | tr -d '_' |
+            tr '[:upper:]' '[:lower:]' | sort -u)"
+allowed="$(printf '0x00070000\n0x00070050\n0x0007405c\n0x002d1400\n0x00560000\n' | sort)"
+unexpected="$(comm -23 <(printf '%s\n' "$declared") <(printf '%s\n' "$allowed"))"
+if [ -n "$unexpected" ]; then
+    bad "an IOCTL/FSCTL code outside the read-only allowlist is declared: $(echo $unexpected)"
+elif [ -z "$declared" ]; then
+    bad "no IOCTL constants found at all — the allowlist check is inspecting nothing"
+else
+    ok "every declared IOCTL code ($(printf '%s\n' "$declared" | wc -l)) is on the read-only allowlist"
+fi
+if grep -rqnE '\.ioctl\(\s*0x' windows-installer/src/; then
+    bad "an IOCTL code is passed as a bare numeric literal, bypassing the allowlist"
+else
+    ok "no IOCTL code is passed as a bare numeric literal"
+fi
 
 # ── 1. it cross-builds ───────────────────────────────────────────────────────
 build_log="$OUT/build.log"

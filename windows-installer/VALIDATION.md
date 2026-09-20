@@ -115,10 +115,27 @@ two Windows guest boots:
   - everything the program prints is ASCII.
 - `windows-installer/build-windows.sh`: produces
   `PE32+ executable for MS Windows 5.02 (console), x86-64`.
-- `tests/test-windows-installer.sh` gained a source scan for write APIs
-  (`GENERIC_WRITE`, `WriteFile`, `SetFirmwareEnvironmentVariable`,
-  `FSCTL_DISMOUNT_VOLUME`, `IOCTL_DISK_SET_DRIVE_LAYOUT`, `DeleteFile`,
-  `MoveFile`, `CreateDirectory`) — none appear.
+- `tests/test-windows-installer.sh` proves "this build writes nothing" in two
+  ways, because one is not enough. A **denylist of names** (`GENERIC_WRITE`,
+  `WriteFile`, `SetFirmwareEnvironmentVariable`, `SetEndOfFile`, `DeleteFile`,
+  `MoveFile`, `CreateDirectory`, …) catches the obvious. But `DeviceIoControl`
+  takes an arbitrary `u32` and the control codes are hand-written hex —
+  `IOCTL_DISK_SET_DRIVE_LAYOUT_EX` is `0x0007C054`, a number no name-based grep
+  will ever see. So there is also an **allowlist**: every `IOCTL_`/`FSCTL_`
+  constant declared in the source must be one of the five read-side codes, and
+  none may be passed as a bare numeric literal. Both halves were checked to
+  fail: declaring `0x0007_C054` produces *"an IOCTL/FSCTL code outside the
+  read-only allowlist is declared"*, and replacing a named constant with its
+  literal produces *"an IOCTL code is passed as a bare numeric literal"*.
+
+### A difference from the Linux installer worth knowing
+
+The 16 decimal GB minimum is borrowed from `installer/apex-install`, but not
+applied to the same thing. That installer checks **`$DISK`** in both of its
+modes (`installer/apex-install:849-855`), so in partition mode it never sizes
+the target partition at all: a 40 GB disk with a 2 GB free partition passes its
+check. This program applies the number to the **partition**, and is therefore
+**stricter than the Linux installer**, not equal to it.
 
 ## Executed, in the Windows guest
 
