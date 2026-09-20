@@ -1973,6 +1973,88 @@ RUN set -eux; \
     dnf5 clean all; \
     test -x /usr/sbin/efibootmgr -o -x /usr/bin/efibootmgr
 
+# ── systemd-boot and ukify: the pivot's dnf half ───────────────────────────
+#
+# Andre decided on 2026-09-20 that APEX moves to systemd-boot on every machine
+# (docs/boot-v2.md, "The pivot to systemd-boot"). The loader binary and the UKI
+# tooling are dnf transactions, so they belong here and not in the files tier.
+#
+# WHY THE LOADER MUST BE IN THE SHIPPED IMAGE, not just in CI:
+# `bootc install --bootloader systemd` copies systemd-boot OUT OF THE IMAGE
+# BEING INSTALLED. Measured in the lab: with systemd-boot-unsigned absent,
+# bootc printed "Installing bootloader via systemd-boot", exited 0, and left an
+# ESP holding an empty /EFI/BOOT, an empty /EFI/systemd, a kernel, an initrd
+# and a loader entry -- and no loader binary anywhere. The disk was unbootable
+# and the install reported success. bootc will not assert this; we do, below.
+#
+# ukify is here so that `bootc container ukify` can run inside a build derived
+# from this tier without a second dnf transaction. AGENTS.md boot-path rule 3
+# ("ukify, qemu, mkosi and virt-install are build-time tooling, not host
+# software") is about not dnf-installing them onto a RUNNING machine, which is
+# the machine drift the contract prohibits; putting a tool in the image is the
+# opposite of drift. If the UKI ends up being built only in CI, the pattern to
+# follow is the sbsigntools one further up this file -- install, use, remove in
+# a single RUN -- and this line moves there.
+#
+# checkpolicy and policycoreutils are made EXPLICIT for the same reason
+# efibootmgr is: Containerfile.base compiles the apex_sdboot policy module with
+# checkmodule/semodule_package/semodule, they are only present transitively
+# today, and a future core change that drops them would turn the boot blessing
+# back into a silent rollback loop.
+RUN set -eux; \
+    dnf5 -y install systemd-boot-unsigned systemd-ukify \
+                    checkpolicy policycoreutils python3-setools; \
+    dnf5 clean all; \
+    : '-- the loader binary bootc will copy onto an ESP --'; \
+    test -f /usr/lib/systemd/boot/efi/systemd-bootx64.efi; \
+    : '-- the stub every UKI is built around --'; \
+    test -f /usr/lib/systemd/boot/efi/linuxx64.efi.stub; \
+    : '-- and the tools --'; \
+    test -x /usr/bin/ukify; \
+    test -x /usr/bin/bootctl; \
+    test -x /usr/bin/checkmodule; \
+    test -x /usr/bin/semodule_package; \
+    test -x /usr/bin/semodule; \
+    python3 -c 'import setools'
+
+# ── the boot blessing has to be able to write a FAT ESP ───────────────────
+#
+# Measured on the APEX image in the VM lab, composefs + systemd-boot, SELinux
+# enforcing (ROADMAP/evidence/sdboot-image-20260920-decision.md):
+#
+#   systemd-bless-boot: Failed to rename '/loader/entries/…+2-1.conf'
+#                       to '/loader/entries/….conf': Permission denied
+#   avc: denied { rename } comm="systemd-bless-b"
+#        scontext=system_u:system_r:init_t:s0
+#        tcontext=system_u:object_r:dosfs_t:s0 tclass=file permissive=0
+#
+# In the same boot `mv` on the same file worked and the same binary re-run from
+# a shell worked, so it is the SELinux domain and nothing else. Unrepaired,
+# nothing ever strips the +N-M counter and every deployment rolls itself back
+# on its fourth boot. The module and the reasoning are in the .te file; the
+# drop-in that requests the transition ships from Containerfile.base.
+#
+# Compiled HERE and not in the files tier on purpose: this is compilation, and
+# `semodule -i` rewrites the binary policy under /etc. Measured in
+# ghcr.io/andrenijman/apex-os:daily: /etc/selinux grows by 466 bytes, but
+# policy.35 (3.8 MB) is rewritten whole, and an OCI layer carries a changed
+# file whole — so doing it in the thin tier would put ~4 MB into every update.
+# docs/update-cost.md, "What the systemd-boot pivot added".
+COPY files/system/selinux/apex_sdboot.te /usr/share/apex-os/selinux/apex_sdboot.te
+COPY files/system/selinux/verify-apex-sdboot.py \
+     /usr/share/apex-os/selinux/verify-apex-sdboot.py
+RUN set -eux; \
+    cd /usr/share/apex-os/selinux; \
+    : 'checkmodule refuses a module whose name differs from the .pp basename.'; \
+    checkmodule -M -m -o apex_sdboot.mod apex_sdboot.te; \
+    semodule_package -o apex_sdboot.pp -m apex_sdboot.mod; \
+    semodule -N -i apex_sdboot.pp; \
+    rm -f apex_sdboot.mod; \
+    semodule -l | grep -qx apex_sdboot; \
+    : '-- and the rule reached the BINARY policy, which is what the kernel'; \
+    : '-- enforces. `semodule -l` only proves a module is installed.'; \
+    python3 /usr/share/apex-os/selinux/verify-apex-sdboot.py
+
 # ── npm global prefix: per-user, not root-owned /usr/local (apex-logs 16) ────
 # Fedora's nodejs ships /etc/npmrc with `prefix=/usr/local`. On a bootc system
 # /usr/local is a symlink to ../var/usrlocal, created root-owned 0755 by the

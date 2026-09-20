@@ -36,7 +36,7 @@ Documentation and comments must state measured facts and current behavior. Rejec
 - Package installs, network downloads, third-party builds, and out-of-tree kernel modules belong in `Containerfile.core`; repository-owned files and first-party `apexd` compilation belong in `Containerfile.base`. Never hide a package transaction in a volatile tier — every `dnf` transaction rewrites the ~200 MB sqlite rpmdb into its own layer, and above `core` that layer ships to every machine on every update.
 - Every external action, image, package source, kernel/driver pair, and shell checkout must be pinned or resolved once and carried forward immutably. A long build must not silently pick up a newer APEX Shell commit halfway through.
 - `apex` is the canonical published tag, and `daily`, `gaming-mesa` and `gaming-nvidia` must keep resolving to the SAME digest forever. They are no longer editions; they are live references owned by other people's laptops. A tag that stops being updated does not error — `bootc upgrade` reports "no update available" indefinitely and that machine silently stops receiving security updates. CI asserts by reading each tag's digest back out of the registry, not by trusting that the promotion command exited zero. Platform tags remain stable inputs for shell-only releases. Promotion must be serialized, must not let an older job overwrite a newer image, and must occur only after verification and signing.
-- Secure Boot is a product invariant. The shipped kernel AND every out-of-tree module must be signed by the expected chain, and each must have a verification step that reads the signature out of the built artifact — `sbverify` for the kernel image, `modinfo -F signer` for modules. Marker files alone are not proof, and a check that iterates over a set that can be empty is not proof either: assert a non-zero count. Never commit private keys. CI gets signing material only through secrets or ephemeral identity, and the secret must be mounted in whichever tier does the signing.
+- Secure Boot is a product invariant. The shipped kernel AND every out-of-tree module must be signed by the expected chain, and each must have a verification step that reads the signature out of the built artifact — `sbverify` for the kernel image, `modinfo -F signer` for modules. Marker files alone are not proof, and a check that iterates over a set that can be empty is not proof either: assert a non-zero count. **The built artifact is whatever the firmware loads.** The day a UKI becomes the boot object, signing and `sbverify`-ing the inner `vmlinuz` proves nothing — the kernel is signed, the assertion is green, and the thing that boots is unsigned. The signature and its verification move to the UKI in the same change that produces one. Never commit private keys. CI gets signing material only through secrets or ephemeral identity, and the secret must be mounted in whichever tier does the signing.
 - Keep least-privilege workflow permissions. Treat `pull_request_target`, interpolation into shell, artifact extraction, cache restore, and code from forks as hostile-input boundaries. Never execute untrusted PR code with write tokens or secrets.
 - Preserve OCI source-revision labels and cosign keyless signing identity. Fail closed when digest capture, signature verification, kernel verification, layer-prefix verification, or promotion preconditions are unavailable.
 - Keep shell-only releases small. They must inherit platform blobs unchanged and reject excessive new compressed data; recompressing inherited layers creates a full-fleet download.
@@ -123,18 +123,56 @@ phase.
    host software.** They arrive in a capsule or a system extension, never
    `rpm-ostree install`, and never as an ad-hoc `dnf` on a host — that is the
    machine drift this contract prohibits, and a build box is exactly where it
-   is most tempting.
+   is most tempting. This is about a RUNNING machine, not about the image: a
+   tool baked into the image by `Containerfile.core` is the opposite of drift,
+   and `systemd-ukify` is there because `bootc container ukify` has to run
+   inside a build derived from that tier.
 4. **Secure Boot keys are never generated on, or written to, a real machine's
    firmware by a script in this repo.** Enrollment is a documented, explicitly
    user-initiated path. CI and VMs get ephemeral keys; a private key never
    reaches the repository.
-5. **GRUB stays the default for every published image in this generation.**
-   §22's own recommendation is to keep it while the OSTree/bootc install path
-   depends on it, and to keep it for legacy BIOS regardless. The systemd-boot +
-   UKI path is built, tested and shipped as an **opt-in**, and a change that
-   makes it the default for the published image is a contract violation, not a
-   milestone. (There is one image; `daily`, `gaming-mesa` and `gaming-nvidia`
-   are tags on its digest, so there is no per-edition exception to find here.)
+5. **APEX is moving to systemd-boot on every machine — Andre's decision,
+   2026-09-20 — and the reasons GRUB was kept did not evaporate with it.** They
+   are now the conditions the pivot has to satisfy, and the design that
+   satisfies them is `docs/boot-v2.md`, "The pivot to systemd-boot". In short:
+
+   * It is a **storage-backend change**, not a bootloader flag. `bootc install
+     --bootloader systemd` on the ostree backend is refused outright
+     (`bootupd is required for ostree-based installs`), because bootupd ships
+     only a grub2+shim payload and ostree's entries and kernels live on btrfs,
+     which sd-boot cannot read. Only `--composefs-backend` works, and there is
+     no in-place ostree → composefs converter, so **an existing machine cannot
+     be converted; it is a reinstall.**
+   * **Nothing in the image may install a bootloader**, and that is unchanged:
+     no `bootctl install`, `bootctl update`, `bootupctl`, `grub2-install` or
+     `efibootmgr -c`, and `tests/test-boot-v2.sh` scans every shipped unit and
+     helper for those commands on executable lines. There is no rollback for
+     an ESP a script overwrote. Enrolment stays the documented, user-initiated
+     procedure.
+   * **Per-machine configuration is systemd credentials on the ESP.** Under a
+     signed UKI the initramfs is inside the PE and the cmdline cannot differ
+     per machine — `systemd-stub(7)`: with Secure Boot on and a `.cmdline`
+     section present, a loader-supplied command line is ignored. Addons are
+     validated against db/Shim MOK, and APEX's key is a CI secret, so a machine
+     cannot make one. LUKS is found by GPT partition type GUID, not named by
+     `rd.luks.uuid=`.
+   * **The blessing must work or nothing else matters.** `systemd-bless-boot`
+     could not rename a loader entry on a FAT ESP under enforcing SELinux —
+     measured, with the AVC, in
+     `ROADMAP/evidence/sdboot-image-20260920-decision.md`. Unrepaired, every
+     deployment rolls itself back on its fourth boot. Any change that touches
+     `systemd-bless-boot.service`, the `apex_sdboot` policy module or
+     `apex-boot-count` is touching that.
+   * **systemd-boot is UEFI-only.** `bootc install` creates a 1 MiB BIOS boot
+     partition on every install and nothing is ever written into it — the
+     L16's `bootupd-state.json` records only the `EFI` component — so the
+     pivot drops a configuration that was created but never functional. The
+     live ISO does boot legacy BIOS and is not affected.
+
+   Until the five gates at the end of that document's pivot section are met, no
+   real machine is migrated. (There is one image; `daily`, `gaming-mesa` and
+   `gaming-nvidia` are tags on its digest, so there is no per-edition exception
+   to find here.)
 6. **A container that runs `bootc install` must not be able to see this
    machine's EFI variables.** Launch every
    `bootc install to-disk --via-loopback` through

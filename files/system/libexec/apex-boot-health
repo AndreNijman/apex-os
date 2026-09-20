@@ -37,11 +37,13 @@
 #  runs, the suffix is not stripped, and the next boot burns another try. That
 #  is the whole rollback mechanism, and every moving part of it is upstream's.
 #
-#  ── inert on a GRUB machine, which is every published image ──
+#  ── inert on a GRUB machine, which is every published image today ──
 #
-#  GRUB stays the default for the published image in this generation (AGENTS.md
-#  boot-path rule 5, and §22's own recommendation). APEX ships one image, so
-#  that is every APEX machine, not a per-edition statement.
+#  APEX is moving to systemd-boot on every machine (Andre, 2026-09-20;
+#  AGENTS.md boot-path rule 5, docs/boot-v2.md). Every image published SO FAR
+#  boots GRUB, and a machine only gets systemd-boot by being installed onto the
+#  composefs backend — there is no in-place conversion. Both kinds of machine
+#  therefore exist, on one image.
 #  This script therefore has to be a no-op there, and the condition it uses is
 #  the same one systemd-bless-boot-generator uses: the `LoaderBootCountPath`
 #  EFI variable, which only exists when systemd-boot booted this machine WITH
@@ -78,10 +80,25 @@ counting_in_effect() { [[ -e "$EFIVARS_DIR/LoaderBootCountPath-$LOADER_GUID" ]];
 # EFI variable payloads are a 4-byte attribute prefix followed by UTF-16LE.
 # `tr -d '\0'` after dropping the prefix is correct for the ASCII values sd-boot
 # and sd-stub write, and avoids depending on iconv in an early-boot unit.
+#
+# ── why dd and not `tail -c +5` ──
+#
+# efivarfs files are NOT SEEKABLE, and `tail -c +N` seeks. On a real machine it
+# prints nothing and says so on stderr:
+#
+#   tail: /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-…:
+#         cannot seek to relative offset 4: Illegal seek
+#
+# which this function then returned as an empty string, so every APEX boot on
+# systemd-boot reported `entry unknown` — visible in the lab serial logs
+# (ROADMAP/evidence/sdboot-image-20260920-decision.md) and reproduced on the
+# L16 against LoaderInfo, which really does exist there and really does say
+# "GRUB 2.12". `dd bs=1` reads a byte at a time and never seeks, so it is
+# correct on efivarfs, on a regular fixture file and on a pipe alike.
 efivar_str() {
     local f="$EFIVARS_DIR/$1-$LOADER_GUID"
     [[ -r "$f" ]] || return 1
-    tail -c +5 "$f" | tr -d '\0'
+    dd if="$f" bs=1 skip=4 status=none 2>/dev/null | tr -d '\0'
 }
 
 bootctl_entries() {

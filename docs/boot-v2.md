@@ -1,50 +1,495 @@
 # Boot v2 — signed UKIs, boot counting, measured boot
 
 Roadmap §22. This is the reference for the systemd-boot + Unified Kernel Image
-path: what exists, what it was measured to do, how a developer opts a machine
-into it, and how to get back.
+path: what exists, what it was measured to do, how a machine gets onto it, and
+how to get back.
 
-## GRUB is the default, and that is not a temporary state
+**Andre decided on 2026-09-20 that APEX moves to systemd-boot on every
+machine.** The next section is that decision and the design it forces. The rest
+of the document — the ESP layout, the measurements, the enrolment procedure,
+recovery — is unchanged and is what the decision is built on.
 
-**The published APEX image boots through GRUB, and will for this generation of
-APEX.** There is one image; `apex`, `daily`, `gaming-mesa` and `gaming-nvidia`
-are four tags on the same manifest digest, so this is one artifact, not four.
-The systemd-boot + UKI path described here is **opt-in**, per machine, by
-hand.
+## The pivot to systemd-boot — the decision, and what it costs
 
-§23's implementation table reads "Boot v2: composefs + systemd-boot + UKIs +
-measured boot", which alone sounds like a bootloader swap. §22 says the
-opposite. Its own title is *"do not switch to Limine as the main path"*, its
-recommendation is to **keep GRUB for the current APEX generation** while the
-OSTree/bootc install path depends on it, and to keep it for legacy BIOS
-regardless. Its anti-goal is explicit: *do not switch bootloaders for
-aesthetics; change the boot architecture only when it improves reliability,
-verification and rollback.*
+**Decision, Andre, 2026-09-20: APEX moves to systemd-boot on every machine.**
+Taken with the risks in front of him — it changes how every machine boots, on
+an ESP shared with Windows on at least one of them, and there is no rollback
+for an ESP something overwrote. This section is the design that has to satisfy
+the constraints the old default was protecting, not an argument about the
+decision.
 
-So a change that makes systemd-boot the default for a published flavor
-violates the section it claims to implement, and the Secure Boot product
-invariant in `AGENTS.md` at the same time. `AGENTS.md`'s boot-path rules carry
-this as rule 5.
+Everything below that says *measured* is a command that ran in the VM lab, and
+the transcript is in `ROADMAP/evidence/sdboot-image-20260920-lab.md` or
+`ROADMAP/evidence/sdboot-image-20260920-decision.md`.
 
-Two consequences visible in the shipped image:
+### The pivot is a storage-backend change, not a bootloader flag
 
-* Nothing in the image runs `bootctl install`, `bootctl update`, `bootupctl`,
-  `grub2-install` or `efibootmgr -c`. `tests/test-boot-v2.sh` scans every
-  shipped unit and helper for those commands on **executable** lines and fails
-  the build if one appears. Enrollment is the human procedure below.
-* The two units that implement boot counting carry
-  `ConditionPathExists=/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f`.
-  That variable is set only when systemd-boot booted the machine **with a boot
-  counter in effect**, so on a GRUB machine neither unit starts, and a failed
-  condition is a skip rather than a failure.
+This is the load-bearing finding, and it is the real reason GRUB stayed:
 
-  The condition is written against `LoaderBootCountPath` specifically, and that
-  choice is load-bearing. Measured on both real machines: the laptop has no
-  `Loader*` variables at all, but **the katana carries `LoaderInfo`,
-  `LoaderDevicePartUUID` and `LoaderSystemToken` while still booting GRUB 2.12**.
-  A condition written against `LoaderInfo` — the obvious "is systemd-boot
-  involved" test — would have fired these units on a machine that never boots
-  through systemd-boot. Any further conditioned unit must use the same variable.
+```
+bootc install to-disk --via-loopback … --bootloader systemd   # ostree backend
+error: Installing to disk: bootupd is required for ostree-based installs
+```
+
+`bootupd` **is** in the image; it only ships a grub2+shim payload, so on the
+ostree backend `--bootloader systemd` has nothing to install and bootc refuses
+rather than producing an unbootable disk. Two structural reasons sit behind
+that refusal, both visible on the L16: ostree's BLS entries and kernels live on
+**btrfs** under `/boot`, which systemd-boot cannot read at all — it reads only
+what UEFI's simple-file-system protocol reads, which is FAT; and the ostree
+cmdline carries a per-deployment `ostree=` and a per-machine `root=UUID=`,
+neither of which can be inside a UKI signed in CI.
+
+`bootc install … --bootloader systemd --composefs-backend` installs, boots and
+upgrades. So every APEX machine that boots systemd-boot is a machine whose root
+storage is composefs-backed, and **there is no in-place ostree → composefs
+converter**: `bootc --help` on 1.16.10 and 1.16.13 lists no migration verb.
+
+### What boots through systemd-boot today, measured
+
+| | state |
+| --- | --- |
+| `bootc install --bootloader systemd --composefs-backend` | installs, and the guest reaches a login prompt under OVMF |
+| `bootc upgrade` on that machine | writes a correct new entry; dedupes the ESP directory when kernel+initramfs are unchanged, writes a second one when the initramfs moves |
+| rollback by boot counter | **proven** — at `+0-3` sd-boot selected the previous deployment by itself, with `systemd-bless-boot` masked throughout |
+| `systemd-bless-boot` on the APEX image | **was failing on an enforcing SELinux denial; repaired and proven in a boot** — see below |
+| Secure Boot on this path | not yet measured; every lab boot was non-SB OVMF |
+| a sealed UKI on this path | not yet built; `bootc container ukify` exists and has not been run |
+| the ESP an existing APEX machine has | **too small** — 600 MiB on the L16 against ~1.1 GiB needed |
+
+### `systemd-bless-boot` cannot rename an entry on a FAT ESP. Measured.
+
+Without blessing there is no pivot: the counter would run every deployment down
+to `+0-N` and roll it back, which is the failure the old default was avoiding.
+On the APEX image, installed composefs + systemd-boot, with the entry renamed
+to carry a counter, the blessing fails:
+
+```
+systemd-bless-boot[1609]: Failed to rename
+    '/loader/entries/bootc_fedora-43-1+2-1.conf'
+ to '/loader/entries/bootc_fedora-43-1.conf': Permission denied
+audit: avc: denied { rename } for comm="systemd-bless-b"
+    name="bootc_fedora-43-1+2-1.conf" dev="vda2"
+    scontext=system_u:system_r:init_t:s0
+    tcontext=system_u:object_r:dosfs_t:s0 tclass=file permissive=0
+```
+
+It is not a mount-option or a FAT problem: in the same boot, `mv` on the same
+file in the same directory succeeded, and re-running the same binary from a
+shell succeeded (`Marked boot as 'good'`, rc=0). The difference is the SELinux
+domain, and the cause is structural rather than an APEX mistake:
+
+* `/usr/lib/systemd/systemd-bless-boot` is labelled `init_exec_t`, so when PID 1
+  runs it the process stays in `init_t`. Fedora 43's policy has
+  `systemd_bless_boot_generator_t` for the *generator* and **no domain at all
+  for the worker**.
+* Queried out of the live policy with `setools`, `init_t` has no `rename`,
+  `create`, `unlink` or `open` on `dosfs_t:file`, and no `add_name`/`write` on
+  `dosfs_t:dir`. It has none of them on `boot_t` either, so relabelling the ESP
+  with a `context=` mount option would not have helped.
+* On a GRUB machine this never comes up, because the ESP is written by
+  `bootupd`, whose domain `bootupd_t` **does** have full management of
+  `dosfs_t` — that is the domain Fedora built for exactly this job.
+
+APEX's fix is to send the blessing into that domain rather than widen `init_t`:
+a drop-in sets `SELinuxContext=-system_u:system_r:bootupd_t:s0` on
+`systemd-bless-boot.service`, and a one-rule policy module grants the only
+permission the transition is missing — `bootupd_t` may use `init_exec_t` as an
+entrypoint. `init_t → bootupd_t:process transition` and `bootupd_t`'s journal
+and fd access are already allowed through the `daemon` attribute, checked
+rather than assumed.
+
+**It is proven in a boot, not only in the policy.** Same image lineage, same
+backend, same enforcing SELinux as the run that failed, installed through
+`tests/lab/bootc-install-lab` and booted twice under OVMF:
+
+```
+systemd-bless-boot[1210]: Marked boot as 'good'. (Boot attempt counter is at 1.)
+systemd[1]: Finished systemd-bless-boot.service
+LAB-enforce:       Enforcing
+LAB-bless-result:  active / success
+LAB-entries-after: bootc_fedora-43-1.conf      <- the +3-0 suffix is gone
+LAB-avc:           <empty>
+```
+
+One caveat that changes what that proves: **`bootupd_t` is a permissive domain
+in Fedora 43** — one of 41. Denials inside it are logged and allowed. The zero
+AVCs are still meaningful, because a permissive domain logs what it would have
+denied and nothing was logged; but the drop-in alone would probably work today
+even without the module. The module is what makes this correct rather than
+tolerated, and what keeps it working on the day that domain becomes enforcing.
+
+**And the symmetric change to `apex-boot-count` is wrong** — it was tried in the
+same guest and reverted. `/usr/libexec` is `bin_t`, and the policy has
+`type_transition init_t bin_t:process unconfined_service_t` while `init_exec_t`
+has no transition at all. So the helper was already unconfined and could rename
+a `dosfs_t` file unaided; forcing `bootupd_t` confined it into a domain whose
+`proc_t:file` access is `map` only, and the guest logged
+`avc: denied { read } comm="cat" path="/proc/cmdline" scontext=bootupd_t` while
+still appearing to pass, because the domain is permissive. `/proc/cmdline` is
+where the counter reads the booted composefs digest, so on an enforcing
+`bootupd_t` it would silently stop writing counters. `Containerfile.base` and
+the test suite now assert that unit carries **no** `SELinuxContext=`.
+
+The `-` prefix covers one family of failure and it is worth naming which.
+`systemd.exec(5)`: with the dash, *"failing to set the SELinux security context
+will be ignored, but it's still possible that the subsequent execve() may fail
+when the security policy doesn't allow the transition."* So a machine with
+SELinux disabled or permissive, or a policy with no `bootupd_t`, blesses
+unconfined and is fine. A machine that is **enforcing with the module missing**
+is not: `setexeccon` succeeds, the kernel denies the `execve`, the unit fails,
+and the deployment rolls itself back on the fourth boot. What guards that is
+`Containerfile.base` asserting across the tier boundary that `semodule -l`
+still lists `apex_sdboot` — the policy module and the drop-in are a pair, and
+removing either one alone is the dangerous edit.
+
+### Per-machine configuration under a signed UKI
+
+This is the decision other units build against. Under a sealed UKI the
+initramfs is inside the signed PE, so **anything that must differ per machine
+can no longer be regenerated locally** — `Containerfile.release` already
+asserts the initramfs is baked at build time, and a signature makes that
+irreversible rather than merely preferred. L-002's keymap is the concrete case:
+a user who cannot type their passphrase on a `us` layout is stranded at the
+LUKS prompt, and "regenerate the initramfs at install time" is precisely what a
+signed UKI forbids.
+
+**APEX's mechanism is systemd credentials placed on the ESP.** The kernel
+command line stays image-static inside the UKI; nothing per-machine goes into
+it.
+
+Why, read out of the shipped systemd (258.10) rather than from memory:
+
+* **A per-machine cmdline is impossible, not merely awkward.**
+  `systemd-stub(7)`: *"If UEFI SecureBoot is enabled and the `.cmdline` section
+  is present in the executed image, any attempts to override the kernel command
+  line by passing one as invocation parameters to the EFI binary are ignored."*
+  So on a Secure Boot machine the `options` line of a loader entry is dead, and
+  a machine-specific cmdline would need a machine-specific signature.
+* **The cmdline does not need to be per-machine on this path.** Measured from
+  the lab guest's own `/proc/cmdline` on a composefs install:
+  `rw <kargs> composefs=<verity>` — no `root=`, no per-machine UUID. The
+  composefs digest is a property of the image being booted, so it belongs
+  inside the signed PE.
+* **UKI addons are ruled out for per-machine use.** `systemd-stub(7)`: addons
+  *"will be validated using keys in UEFI DB, Shim's DB or Shim's MOK, and only
+  loaded if the check passes"*. APEX's signing key is a CI secret that must
+  never reach a user's machine (`AGENTS.md`, and boot-path rule 4), so a
+  machine cannot produce an addon its own firmware will accept. Addons remain
+  useful for *image-wide* configuration signed in CI — which buys nothing over
+  putting it in the UKI.
+* **Credentials are not signature-gated, and have consumers already.** The stub
+  collects `/loader/credentials/*.cred` and `<uki>.efi.extra.d/*.cred` into
+  `/.extra/global_credentials/` and `/.extra/credentials/` in the initrd, and
+  measures them into **PCR 12**. `systemd.system-credentials(7)` in this very
+  systemd lists `vconsole.keymap`, `vconsole.font`, `cryptsetup.passphrase`,
+  `system.hostname`, `fstab.extra`, `systemd.unit-dropin.*`, `udev.rules.*` and
+  more as well-known credentials — so the keymap fix is a file the installer
+  writes, not a dracut change.
+
+The rules that come with choosing credentials, and they are not optional:
+
+1. **A plaintext `.cred` on the ESP is unauthenticated.** Anyone who can write
+   the ESP can change it. It is measured into PCR 12, so a TPM policy bound to
+   PCR 12 notices — but nothing refuses to boot on its own.
+2. So: **non-secret machine settings** (keymap, console font, hostname) may be
+   plaintext. **Anything that unlocks the disk** must be
+   `systemd-creds encrypt --with-key=tpm2`, which only this machine's TPM can
+   decrypt, and which therefore cannot be lifted off the ESP onto another box.
+3. **LUKS is discovered, not named.** With the `options` line dead under Secure
+   Boot, `rd.luks.uuid=` and `root=UUID=` are both unavailable. The replacement
+   is GPT Discoverable Partitions: `systemd-gpt-auto-generator(8)` in this
+   systemd states that in the initrd an encrypted `/` is set up as
+   `/dev/mapper/root` with a generated `sysroot.mount`, from the partition
+   **type GUID** alone, and measures the volume key into PCR 15 when the kernel
+   was booted through `systemd-stub`. gpt-auto stands down if `root=` is on the
+   cmdline, which on this path it is not.
+
+**The contract `luks-installer` builds against**, therefore:
+
+* the root partition must carry the x86-64 root type GUID
+  `4f68bce3-e8cd-4db1-96e7-fbcaf984b709`, so gpt-auto finds it with no kargs;
+* the installer must not add `root=`, `rd.luks.uuid=` or
+  `rd.vconsole.keymap=` to the command line — they will be ignored on a Secure
+  Boot machine and are a trap on a non-Secure-Boot one, because they work there
+  and stop working when Secure Boot is turned on;
+* the keymap is written as `vconsole.keymap` in
+  `<ESP>/loader/credentials/vconsole.keymap.cred`, plaintext, at install time;
+* the TPM2 unlock path stays `apex-luks-enroll`'s; a passphrase handed to the
+  initrd as a credential must be TPM2-encrypted.
+
+### How reversible this is for an existing machine — it is not, and here is why
+
+"Additive before destructive" is achievable as a **one-shot test** and is not
+achievable as a migration.
+
+*What is possible today* is the enrolment procedure further down this document:
+build a UKI from the machine's current deployment, `bootctl install` onto the
+existing ESP, add a new `BootXXXX`, and use `BootNext` so the first reboot is a
+single test with GRUB untouched and still first in `BootOrder`. That is a real
+additive test and it is the right way to see systemd-boot boot this hardware.
+
+*What it is not* is a migration, for three measured reasons:
+
+* **`bootc upgrade` will not maintain it.** On the ostree backend, updates keep
+  writing BLS entries under `/boot` on btrfs, which sd-boot cannot read. The
+  hand-built UKI is a snapshot of one deployment and goes stale at the next
+  update.
+* **The ESP does not fit two deployments.** The L16's kernel + initramfs is
+  16.9 MB + 375.6 MB = **374 MiB per deployment**; bootc keeps booted and
+  rollback, plus a third transiently while an update stages — about **1.1 GiB**.
+  The L16's ESP is **600 MiB**, and an ESP cannot be grown in place without
+  moving the partition after it. bootc's own composefs default is 1 GiB, which
+  is itself under the transient peak, so APEX must ask for more than bootc's
+  default. The two unused 2 GiB XBOOTLDR partitions on the L16 cannot absorb
+  this: `strings` on the `bootc` binary contains **zero** occurrences of
+  `xbootldr` or the XBOOTLDR type GUID.
+* **ostree → composefs has no converter.** So switching an existing machine is
+  a reinstall with repartitioning, and its reverse is another reinstall.
+
+The honest statement for a user: **migrating an existing APEX machine to
+systemd-boot means backing up and reinstalling.** New installs get it from the
+installer, where the partition table is being created anyway and the ESP can be
+sized correctly the first time.
+
+### Legacy BIOS — what "all machines" costs
+
+systemd-boot is a UEFI application. There is no BIOS systemd-boot, so a machine
+that boots legacy BIOS cannot be on this path at all. What APEX actually
+supports today, checked rather than assumed:
+
+* `installer/apex-install` has two modes. **Disk mode** runs `bootc install
+  to-disk --wipe`, and bootc lays out the table itself — including a **1 MiB
+  BIOS boot partition on every install, UEFI or not, on both backends**.
+  **Partition mode** runs `bootc install to-filesystem` into a root the
+  installer made and an ESP that already exists, so no table is created and no
+  BIOS boot partition is either.
+* `bootupd` ships a BIOS payload (`/usr/lib/bootupd/updates/BIOS.json`).
+* **The L16 has no BIOS boot partition at all** — `lsblk -o PARTTYPENAME` shows
+  an EFI System partition, two `Linux extended boot` partitions and two
+  filesystems, and nothing else. It was installed in partition mode. Its
+  `/boot/bootupd-state.json` records only the `EFI` component, so even where
+  the partition does get created, nothing is written into it.
+* The **live ISO genuinely boots legacy BIOS**: `installer/build-live-iso.sh`
+  builds an El Torito core image and an isohybrid MBR with a VESA `vga=791`
+  handoff specifically for BIOS.
+
+So the cost is smaller than it looks and must still be stated plainly: **APEX's
+installer media boots legacy BIOS; no APEX installation is known to have ever
+booted legacy BIOS from disk**, because on whole-disk installs the bootloader
+was never written there and on partition-mode installs the partition does not
+exist. The pivot therefore drops a configuration that was created but never
+functional, and on this laptop was not even created. If BIOS-from-disk is ever
+wanted, it is GRUB on the ostree backend — the two paths cannot be the same
+image's default, and that is a product decision, not a build flag.
+
+### Two phases, and which one ships first
+
+Everything measured so far is **phase 1**, and the two phases are not the same
+machine. Saying which is which is the difference between `luks-installer`
+writing a karg that works and writing one that is ignored.
+
+**Phase 1 — unsealed Type #1 entries.** What `bootc install --bootloader
+systemd --composefs-backend` produces today: a loose `vmlinuz` and `initrd`
+under `/EFI/Linux/bootc_composefs-<verity>/`, a `.conf` in
+`/loader/entries/`, and the kernel command line on that file's `options` line.
+This is what installs, boots, upgrades and rolls back in the lab. `bootc status`
+calls it `bootType: Bls`. The initramfs is not signed and not measured
+differently from what GRUB does today, so **a karg still works here** — and
+that is exactly the trap, because it stops working in phase 2.
+
+`apex-boot-count` is a phase-1 program: it parses `options` lines and renames
+`.conf` files.
+
+**Phase 2 — sealed UKI.** Kernel, initramfs and command line inside one signed
+PE in `/EFI/Linux/`, with no `.conf` and no `options` line. Upstream's term for
+it is *sealed*: the composefs digest is inside the signature. `bootc container
+ukify` and `bootc container split-kernel-and-rootfs` exist in the shipped bootc
+1.16.10 and neither has been run. This is where the credential mechanism stops
+being a preference and becomes the only way to configure a machine.
+
+**APEX ships phase 1 first and targets phase 2.** Phase 1 is a measured
+install/boot/upgrade/rollback path that needs no firmware enrolment; phase 2
+needs a signing decision that has not been made (below). Two consequences worth
+writing down rather than discovering:
+
+* Anything built on "a karg will carry this" is building on phase 1 only. Do
+  not do it for per-machine values — use a credential, which works identically
+  in both phases.
+* **Boot counting has to be redone for phase 2.** A UKI is counted by renaming
+  the `.efi` itself (`apex-<id>+3-0.efi`), not a `.conf`, and how `bootc`
+  names and stages UKIs is unmeasured. `apex-boot-count` will need a second
+  branch, and its test suite a second fixture shape.
+
+### Secure Boot: a decision, not a measurement
+
+Gate 1 below is usually written as "measure Secure Boot on this path". It is
+actually a design decision that nobody has taken, and it is visible in the ESP
+`bootc` produces:
+
+```
+/EFI/BOOT/BOOTX64.EFI              <- systemd-boot itself, as the fallback
+/EFI/systemd/systemd-bootx64.efi   <- systemd-boot
+```
+
+There is **no shim and no `/EFI/fedora`**. On a machine whose `db` holds the
+stock Microsoft CA — which is every machine out of the box — neither of those
+binaries validates, because `systemd-boot-unsigned` is exactly what its name
+says. The two ways out are different products:
+
+1. **APEX-signed sd-boot, enrolled by the user.** Sign
+   `systemd-bootx64.efi` and the UKI with the APEX MOK in CI, and every user
+   enrols the APEX certificate in their firmware once. That is boot-path rule
+   4's documented, user-initiated procedure, and it is a real cost: a
+   per-machine manual step with a firmware UI in it.
+2. **shim → sd-boot.** Keep Fedora's Microsoft-signed shim as the first stage
+   and have it load an APEX-MOK-signed systemd-boot. Fedora's shim is built
+   with `grubx64.efi` as its second stage, so this means either a shim built
+   with a different second stage, or shipping sd-boot under that name — and
+   `bootc --bootloader systemd` lays down neither shim nor that filename, so
+   the ESP would have to be authored by APEX rather than by bootc.
+
+Option 2 is the only one that keeps "install and it boots" true for a user who
+never opens firmware setup. Option 1 is the only one that needs no new
+bootloader plumbing. **This is the decision to take before phase 2**, and it is
+a product decision, not a build flag.
+
+### What this needs from the kernel build
+
+`kernel-build` owns the kernel now, which makes UKIs materially easier — the
+kernel, the initramfs and the signing are all APEX's. Three things this path
+needs it to expose, stated now so they are designed in rather than retrofitted:
+
+1. **`vmlinuz` and `initramfs.img` stay at `/usr/lib/modules/<kver>/`.**
+   `bootc container ukify --kernel-dir` expects exactly that shape
+   (`/parent/$kernel_version`), and `Containerfile.release` already asserts the
+   initramfs is there. Do not move them to `/boot`.
+2. **The MOK signing step must be reusable for an arbitrary PE binary, not just
+   `vmlinuz`.** Phase 2 signs a UKI, and the Secure Boot decision above may
+   also need `systemd-bootx64.efi` signed. A signer that only knows how to sign
+   a kernel image has to be rewritten at exactly the wrong moment. It should
+   also be able to attach a `.sbat` section, which is what makes a signed
+   artifact revocable by SBAT policy instead of by DBX.
+3. **The signature AND its gate move to the UKI the moment a UKI exists.**
+   This is the one that produces an unbootable machine with every assertion
+   still green, so it is written as a rule rather than a preference:
+
+   > Once a UKI is the object the firmware loads, signing the inner `vmlinuz`
+   > signs something the firmware never validates. The kernel is signed, the
+   > check that looks at the kernel passes, and the thing that actually boots
+   > is unsigned. Nothing goes red until a real machine refuses to boot.
+
+   The kernel unit (merge `74b777ac`) verified the pieces this needs, measured
+   rather than assumed: `vmlinuz` is a real `pei-x86-64` PE with
+   `CONFIG_EFI_STUB=y` asserted, `sbsign` runs on it with rc=0 and `sbverify`
+   confirms, and `/usr/share/apex-os/kernel/{build.txt,kernel.pin}` carry
+   consumable provenance. So the signing path works end to end; what must not
+   happen is the signature staying on the kernel once the UKI becomes the boot
+   object. `AGENTS.md`'s Secure Boot invariant — read the signature out of the
+   built artifact — then means `sbverify` against the **UKI**.
+
+   Two facts from that unit that this design should not get wrong:
+
+   * **The kernel image is `FROM scratch`, RPMs only, 186.9 MiB, and no user
+     ever downloads it.** The fleet update cost is unchanged by it. Nothing in
+     `docs/update-cost.md`'s accounting for this pivot moves because of the
+     kernel.
+   * **There is no shell in that image.** `build-local.sh` read a verdict
+     through `/bin/sh` on it, always got an empty string, and would have
+     aborted a successful 74-minute build. Anything here that inspects the
+     kernel image must read files out of it, not shell into it.
+
+### Before this is pointed at katana or the L16
+
+In order, and none of them are optional:
+
+1. **The Secure Boot chain decided, then measured.** bootc's ESP has no shim
+   and no `/EFI/fedora`, and `systemd-boot-unsigned` is unsigned, so on a stock
+   `db` nothing on that ESP validates. Pick between an APEX-signed sd-boot the
+   user enrols and a shim → sd-boot chain APEX authors itself (see above), then
+   measure it in the VM lab under OVMF. Nothing above was measured with Secure
+   Boot on at all.
+2. A sealed UKI built by `bootc container ukify` from the APEX image, booting
+   in that guest — including the credential mechanism above actually changing
+   the keymap at a LUKS prompt. **The same change must move the MOK signature
+   and the `sbverify` gate from the kernel to the UKI**, in one step: a build
+   that emits a UKI while still signing and verifying only the inner kernel is
+   green and unbootable.
+3. ~~The blessing fix proven on the APEX image.~~ **Done, 2026-09-20** — entry
+   counted, booted, suffix stripped, zero AVCs, `LAB-bless-result: active /
+   success`. What remains from this gate is the cheap half: the *reverted*
+   `apex-boot-count` renaming a staged entry in a guest. Both things it rests
+   on are measured; the shipped combination has not been through a boot.
+4. A Windows-entry assertion: an `efibootmgr -v` capture before and after an
+   install into a lab disk that carries a `Windows Boot Manager` entry,
+   compared with `cmp`, failing if anything moved. Katana's APEX `Boot0000`
+   lives on the **Windows** ESP, so this is the one that protects two operating
+   systems rather than one.
+5. An ESP sizing decision, since 1 GiB is under the peak APEX needs.
+
+Until all five are done, **no real machine is migrated**, and the L16 is not a
+candidate at all — it was unbootable on the morning of 2026-09-20 because a
+loopback install saw the host's EFI variables (`BOOT-BREAKAGE-2026-09-20.md`).
+
+### What the image does today
+
+The old default is still what ships, and that is a sequencing statement, not a
+contradiction: nothing in the image runs `bootctl install`, `bootctl update`,
+`bootupctl`, `grub2-install` or `efibootmgr -c`, and `tests/test-boot-v2.sh`
+scans every shipped unit and helper for those commands on **executable** lines
+and fails the build if one appears. What the pivot has added to the image so
+far is the machinery that has to exist *before* a default can move:
+`systemd-boot-unsigned` and `systemd-ukify` in `Containerfile.core`, the
+blessing fix, and the boot-counting unit below. Enrolment is still the human
+procedure further down.
+
+The two units that implement boot counting carry
+`ConditionPathExists=/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f`.
+That variable is set only when systemd-boot booted the machine **with a boot
+counter in effect**, so on a GRUB machine neither unit starts, and a failed
+condition is a skip rather than a failure.
+
+The condition is written against `LoaderBootCountPath` specifically, and that
+choice is load-bearing. An earlier note here said the laptop had no `Loader*`
+variables at all and only the katana did; re-checked 2026-09-20, **that is
+wrong, and wrong in the direction that matters**. The L16 carries `LoaderInfo`,
+`LoaderDevicePartUUID` and `LoaderSystemToken` too, and its `LoaderInfo` reads:
+
+```
+$ dd if=/sys/firmware/efi/efivars/LoaderInfo-4a67b082-… bs=1 skip=4 status=none | tr -d '\0'
+GRUB 2.12
+```
+
+GRUB 2.12 sets `LoaderInfo` itself. A condition written against it — the
+obvious "is systemd-boot involved" test — would fire these units on **every**
+APEX machine, all of which boot GRUB. `LoaderBootCountPath` is set only by
+systemd-boot and only when a counter is in effect. Any further conditioned unit
+must use the same variable, or `entries.srel` where it cannot (see
+`apex-boot-count` below).
+
+### Boot counting has to be written by APEX, because bootc writes none
+
+Four installs and two upgrades produced entry filenames of the form
+`bootc_<osid>-<ver>-<N>.conf` with **no `+N-M` counter**, and a `loader.conf`
+whose `timeout` and `console-mode` are both commented out. On a machine
+installed exactly as bootc leaves it, `LoaderBootCountPath` never appears,
+`apex-boot-health.service` and `apex-boot-notice.service` are both skipped by
+their condition, `systemd-bless-boot` never runs, and there is no automatic
+rollback. The health gate is inert until something writes the counter.
+
+Renaming the live entry does not survive an upgrade: `bootc upgrade` writes a
+fresh, uncounted set into `/boot/loader/entries.staged/` and
+`bootc-finalize-staged.service` replaces the whole `entries/` directory at
+shutdown, discarding anything APEX put in a filename. Renaming inside
+`entries.staged/` **does** survive — measured across five boots, ending with
+sd-boot selecting the previous deployment by itself at `+0-3`.
+
+So APEX ships `apex-boot-count.service`: it renames the newest staged entry to
+carry `+3-0`, and it runs at shutdown ordered so that its work happens **before**
+`bootc-finalize-staged.service` swaps the directory in. It is a rename in a
+directory bootc is about to install, not a write to a live boot path, and it is
+conditioned on `/boot/loader/entries.staged` existing so it is inert on a GRUB
+machine and on a machine with nothing staged.
 
 ## What exists
 
@@ -59,6 +504,8 @@ Two consequences visible in the shipped image:
 | LUKS2 + TPM, lab | `files/scripts/boot-v2/apex-luks-enroll` | signed PCR 11 policy plus a recovery key, against a software TPM. A different program from the row above; see "TPM-bound unlock" |
 | VM harness | `files/scripts/boot-v2/run-scenarios` | fifteen scenarios, all booting real guests under Secure Boot enforcing |
 | health gate | `files/system/libexec/apex-boot-health` | the `boot-complete.target` gate, and the rollback notice |
+| boot counter | `files/system/libexec/apex-boot-count` | renames the STAGED entry to `+3-0` so bootc's uncounted set gets a counter; picks the entry by composefs digest, refuses on ambiguity |
+| blessing repair | `files/system/selinux/apex_sdboot.te` + `files/system/units/10-apex-bless-boot-esp.conf` | lets `systemd-bless-boot` rename an entry on a FAT ESP, which `init_t` cannot |
 | reporting | `apex boot status` | read-only; what verified this boot and what the counter believes |
 | CI | `.github/workflows/boot-v2.yml` | builds the lab, boots the scenarios, publishes nothing |
 
@@ -647,6 +1094,15 @@ sudo files/scripts/boot-v2/apex-stage-root --output ~/bootlab-work/apex-root
 # Take it from the running system, not from this document:
 cat /proc/cmdline
 
+# Every host-side launch of the boot lab goes through nvram-guard. It reads
+# `efibootmgr -v` and the efivarfs Boot* digests before and after and fails the
+# run if this machine's boot entries moved. It cannot prevent a write; it turns
+# "found at the next power-on" into "found when the command returns", which is
+# the difference between a five-minute fix and an unbootable laptop
+# (BOOT-BREAKAGE-2026-09-20.md). AGENTS.md boot-path rule 6. The check belongs
+# HERE and not inside run-scenarios, because inside the container there are no
+# host EFI variables to read.
+./tests/lab/nvram-guard -- \
 podman run --rm -v ~/bootlab-work:/work:z apex-bootlab -c '
   /work/apex-os/files/scripts/boot-v2/apex-mkuki \
       --output /work/apex-<deployment>.efi \
@@ -669,9 +1125,20 @@ sudo mokutil --import /path/to/your-cert.der
 #   Verify before going further:
 mokutil --list-enrolled | grep -i "<your CN>"
 
-# ── 3. install systemd-boot and place the UKI ──
+# ── 3. check the ESP has room, BEFORE writing anything to it ──
+#   A UKI is the kernel plus the initramfs: 374 MiB on the L16 today. Know the
+#   number for this machine and the free space you have, and stop here if it
+#   does not fit. This is a ONE-deployment test, not a migration — two APEX
+#   deployments plus a staged third need about 1.1 GiB of ESP.
+du -b "/usr/lib/modules/$(uname -r)"/{vmlinuz,initramfs.img}
+df -h /boot/efi
+
+# ── 4. install systemd-boot and place the UKI ──
 #   `bootctl install` writes the ESP and adds an NVRAM entry. Nothing in this
 #   repository runs it for you.
+#   Capture the boot entries first: this is what you compare against, and it is
+#   what proves the Windows entry on a dual-boot machine was not touched.
+sudo efibootmgr -v | tee ~/efibootmgr.before
 sudo bootctl install
 sudo mkdir -p /boot/efi/EFI/Linux
 #   +3-0 is the boot counter: three tries, none used.
@@ -679,7 +1146,36 @@ sudo cp ~/bootlab-work/apex-<deployment>.efi \
         /boot/efi/EFI/Linux/apex-<deployment>+3-0.efi
 sudo bootctl list                   # the entry must appear, with 3 tries left
 
-# ── 4. reboot, and check ──
+#   Per-machine settings go beside the UKI as credentials, because a signed
+#   UKI's command line cannot carry them. A keymap, for instance — the setting
+#   that decides whether you can type your own LUKS passphrase:
+#   The directory does not exist on a GRUB machine's ESP; create it first.
+sudo mkdir -p /boot/efi/loader/credentials
+printf 'de' | sudo tee /boot/efi/loader/credentials/vconsole.keymap.cred
+#   Plaintext is right for a keymap and WRONG for anything that unlocks the
+#   disk: a .cred on the ESP is unauthenticated and anyone who can write the
+#   ESP can change it. It is measured into PCR 12, so a TPM policy notices, but
+#   nothing refuses to boot on its own. Secrets go through
+#   `systemd-creds encrypt --with-key=tpm2`.
+
+# ── 5. compare the boot entries. Additive means ADDITIVE. ──
+sudo efibootmgr -v | tee ~/efibootmgr.after
+#   The existing entries must be byte-identical; only a new one may appear.
+diff <(grep -v '^BootOrder:' ~/efibootmgr.before) \
+     <(grep -v '^BootOrder:' ~/efibootmgr.after)
+#   On a machine that also boots Windows, this is the line that matters:
+cmp <(grep -i 'Windows Boot Manager' ~/efibootmgr.before) \
+    <(grep -i 'Windows Boot Manager' ~/efibootmgr.after) \
+  && echo "Windows entry unchanged"
+#   If the Windows entry moved, STOP and restore it from ~/efibootmgr.before
+#   before rebooting.
+
+# ── 6. make the first reboot a TEST, not a commitment ──
+#   BootNext applies to exactly one boot and the firmware clears it. GRUB stays
+#   first in BootOrder, so if systemd-boot does not come up, the boot after
+#   that is the machine you had this morning.
+sudo efibootmgr | grep -i 'Linux Boot Manager'     # note its BootXXXX number
+sudo efibootmgr --bootnext XXXX
 sudo systemctl reboot
 #   after it comes up:
 apex boot status
@@ -690,8 +1186,15 @@ apex boot status
 
 If it does **not** come up: the boot counter is doing its job. Three failed
 attempts and systemd-boot selects the previous entry by itself. GRUB is still
-installed and still in the firmware's boot order; pick it from the firmware boot
-menu.
+installed and still first in the firmware's boot order, and `BootNext` is
+already spent, so the next power-on is the machine you had before.
+
+**This is a test and not a migration, and the difference is not pedantry.** The
+UKI you just placed is a snapshot of one deployment. `bootc upgrade` on this
+machine keeps writing ostree BLS entries under `/boot`, which systemd-boot
+cannot read, so the UKI goes stale at the next update and nothing refreshes it.
+Getting a machine onto systemd-boot *permanently* means installing it onto the
+composefs backend, which means reinstalling — see the pivot section at the top.
 
 ### TPM-bound unlock
 
@@ -842,17 +1345,22 @@ named failure.
   means `efibootmgr` and that is not something a script in this repository does
   near a real machine. On hardware, `bootctl install` creates the entry and the
   operator runs it.
-* **`bootctl` is the only systemd-boot tooling in the image, and it only
-  reads.** `systemd-boot-unsigned` and `systemd-ukify` are not installed:
-  adding them would be a package transaction, which belongs in
-  `Containerfile.core`, and a `core` rebuild makes the next fleet update
-  multi-gigabyte. Nothing in the shipped boot-counting path needs them —
-  `systemd-bless-boot`, `boot-complete.target` and the bless-boot generator
-  are all in the `systemd` package the image already has, and
-  `Containerfile.base` asserts each one is present rather than assuming it.
-* **No composefs work.** §23's row names composefs, and APEX already boots on a
-  composefs root — the katana does, today, through GRUB. Nothing here changes
-  that, and nothing here needed to.
+* **The image now carries `systemd-boot-unsigned` and `systemd-ukify`, and
+  still installs nothing.** They went into `Containerfile.core` with the pivot,
+  because `bootc install --bootloader systemd` copies the loader *out of the
+  image being installed* — an image without it produces an ESP with no loader
+  binary and an install that exits 0. That is a `core` rebuild and therefore a
+  real fleet-update cost, recorded in `docs/update-cost.md`'s terms. `bootctl`
+  in the shipped path is still read-only: `apex boot status` calls
+  `bootctl list` and nothing else.
+* **"composefs" means two different things and they are not the same
+  machine.** §23's row names composefs, and APEX already boots on a
+  composefs-backed **ostree** root — the katana does, today, through GRUB. That
+  is not bootc's `--composefs-backend`, which is a different storage backend
+  with its own deployment layout, its own `bootc status` shape (`bootType:
+  Bls`, `softRebootCapable: true`) and the ESP mounted at `/boot`. The pivot is
+  a move to the latter. Reading the katana's existing composefs root as "the
+  katana is already on the new backend" would be a serious mistake.
 * **The `apex boot status` entry list needs root**, because the ESP is mode
   0700. Without it the command reports `entries: unavailable` **with the
   reason**, never an empty list: an empty list is indistinguishable from "no
@@ -860,10 +1368,30 @@ named failure.
 
 ## Running the harness yourself
 
+Every launch below is wrapped in `tests/lab/nvram-guard`, and that is not
+decoration. The check has to live on the HOST side: `run-scenarios` runs inside
+the container, where `/sys/firmware/efi/efivars` does not exist, so a check in
+there would inspect nothing. AGENTS.md boot-path rule 6. A `bootc install
+--via-loopback` goes through `tests/lab/bootc-install-lab` instead, which
+builds the podman argv itself and cannot be talked out of the efivars mask.
+
+Two practical notes, both learned the hard way:
+
+* **The guard needs no `sudo`** — efivars are world-readable and `efibootmgr
+  -v` works as an ordinary user (checked on the L16 as uid 1000). It does need
+  `efibootmgr` to exist: with `/sys/firmware/efi` present and the binary
+  missing it reports `could-not-snapshot` and **refuses to run the command at
+  all**, which is correct and is why `boot-v2.yml` installs it on the runner.
+* **`sudo` in front of `podman` changes which image store is used.** The
+  commands below build `apex-bootlab` rootless and run it rootless. If you
+  build as root, run as root — an image in the other store looks like an image
+  that does not exist.
+
 ```bash
 # on the katana, or any box with /dev/kvm and podman
 podman build -t apex-bootlab -f bootlab/Containerfile .
 mkdir -p ~/bootlab-work/out
+./tests/lab/nvram-guard --label bootlab -- \
 podman run --rm --device /dev/kvm -v ~/bootlab-work:/work:z \
     -v "$PWD:/work/repo:z" apex-bootlab -c \
     '/work/repo/files/scripts/boot-v2/run-scenarios --work /work/out'
@@ -871,6 +1399,7 @@ podman run --rm --device /dev/kvm -v ~/bootlab-work:/work:z \
 # the two scenarios that need a real APEX image are requested by name, and
 # hard-fail rather than skipping if the staged root is missing:
 sudo files/scripts/boot-v2/apex-stage-root --output ~/bootlab-work/out/apex-root
+./tests/lab/nvram-guard --label bootlab-apex -- \
 podman run --rm --device /dev/kvm -v ~/bootlab-work:/work:z \
     -v "$PWD:/work/repo:z" apex-bootlab -c \
     '/work/repo/files/scripts/boot-v2/run-scenarios --work /work/out apex-image luks-tpm'
@@ -887,6 +1416,7 @@ image's, because moving PCR 0 needs two firmwares differing only in code:
 
 ```bash
 # the older Fedora build, extracted from its rpm — any different revision works
+./tests/lab/nvram-guard --label bootlab-fw-alt -- \
 podman run --rm --device /dev/kvm -v ~/bootlab-work:/work:z \
     -v "$PWD:/work/repo:z" -e APEX_BOOTLAB_FW_ALT=/work/OVMF_CODE_4M.secboot.qcow2 \
     apex-bootlab -c \

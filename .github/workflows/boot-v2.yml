@@ -115,6 +115,24 @@ jobs:
             echo "::warning::/dev/kvm is absent; guests fall back to TCG and will be slow"
           fi
 
+      - name: nvram-guard needs efibootmgr, or it refuses to launch anything
+        run: |
+          set -euo pipefail
+          # The guard has three verdicts and the middle one MATTERS HERE: with
+          # /sys/firmware/efi present but no `efibootmgr`, the snapshot is not
+          # real, and it refuses to run the command at all (exit 4) rather than
+          # claim a pass it cannot make. Azure runners can be UEFI, so a
+          # missing binary would turn every scenario launch below red for a
+          # reason that has nothing to do with the scenarios.
+          #
+          # efivars are world-readable, so no sudo is needed to read them —
+          # checked on a real UEFI machine as uid 1000.
+          command -v efibootmgr >/dev/null 2>&1 \
+            || sudo apt-get install -y --no-install-recommends efibootmgr
+          # And say plainly which world this runner is in, so a `could-not-run`
+          # further down is a recorded fact rather than a surprise.
+          ./tests/lab/nvram-guard --snapshot "$RUNNER_TEMP/nvram-precheck" || true
+
       - name: Build the boot lab
         run: |
           set -euo pipefail
@@ -135,6 +153,16 @@ jobs:
           # attacker-controlled for anyone who can dispatch.
           kvm_arg=()
           [[ "${{ steps.accel.outputs.kvm }}" == "true" ]] && kvm_arg=(--device /dev/kvm)
+          # nvram-guard wraps the HOST-SIDE launch, which is the only layer
+          # that can see host EFI variables at all. run-scenarios itself runs
+          # INSIDE this container, where /sys/firmware/efi/efivars does not
+          # exist, so a check in there would inspect nothing. AGENTS.md
+          # boot-path rule 6; efivars-guard left this handover explicitly.
+          # On a runner with no UEFI firmware the guard reports
+          # `could-not-run`, runs the command, and never claims it measured
+          # anything — so this is safe in CI and load-bearing on a developer's
+          # own machine, which is where the 2026-09-20 breakage happened.
+          ./tests/lab/nvram-guard --label boot-v2-scenarios -- \
           podman run --rm "${kvm_arg[@]}" \
             -v "$PWD:/work:z" \
             -e "SCENARIOS=$SCENARIOS" \
@@ -235,7 +263,10 @@ jobs:
           case "$ITERATIONS" in
             ''|*[!0-9]*) echo "::error::chaos_iterations must be a number"; exit 1 ;;
           esac
+          # Same reason as the scenario launch above: the chaos loop boots
+          # guests from the host side. AGENTS.md boot-path rule 6.
           CHAOS_BOOTLAB_IMAGE=localhost/apex-bootlab \
+            ./tests/lab/nvram-guard --label boot-v2-chaos -- \
             ./tests/chaos/chaos-loop \
               --out "$RUNNER_TEMP/chaos-series" \
               --iterations "$ITERATIONS" \
