@@ -3073,12 +3073,15 @@ RUN set -eux; \
     if ! grep -A1 'bind("ALT", "Alt_L"' /usr/share/apex/hypr/apex/keybindings.lua \
          | grep -q 'release = true' \
         ; then echo "FATAL: the Alt_L switcher bind is not a release bind"; exit 1; fi; \
-    : 'labwc: the same three, plus the release, naming the same helper.'; \
-    grep -q 'apex-switcher next'   /usr/share/apex/labwc/rc.xml; \
-    grep -q 'apex-switcher prev'   /usr/share/apex/labwc/rc.xml; \
-    grep -q 'apex-switcher commit' /usr/share/apex/labwc/rc.xml; \
-    if ! grep -q 'onRelease="yes"' /usr/share/apex/labwc/rc.xml \
-        ; then echo "FATAL: labwc has no onRelease keybind to commit the switcher"; exit 1; fi; \
+    : 'ALT+Return is the commit that does not depend on release semantics.'; \
+    grep -q 'bind("ALT", "Return"' /usr/share/apex/hypr/apex/keybindings.lua; \
+    : 'labwc keeps its OWN switcher, because labwc-config(5) says onRelease is'; \
+    : 'for a modifier used WITHOUT another key -- measured: it never fires'; \
+    : 'after A-Tab. What it was missing is the cross-desktop attribute.'; \
+    grep -q '<action name="NextWindow" workspace="all"/>'     /usr/share/apex/labwc/rc.xml; \
+    grep -q '<action name="PreviousWindow" workspace="all"/>' /usr/share/apex/labwc/rc.xml; \
+    if grep -q 'apex-switcher' /usr/share/apex/labwc/rc.xml \
+        ; then echo "FATAL: labwc binds the shell switcher, which it cannot commit"; exit 1; fi; \
     : 'The closed-state path must not reach the shell. A stub apex that fails'; \
     : 'the build if it is called is the only honest way to assert that.'; \
     mkdir -p /tmp/switcher-probe/bin /tmp/switcher-probe/run; \

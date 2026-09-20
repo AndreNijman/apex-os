@@ -144,6 +144,19 @@ end
 -- Both Alt keys, because a keyboard has two and a user who started the switch
 -- with the right-hand one has to be able to finish it.
 --
+-- ── ALT+Return commits too, and that is not decoration ───────────────────────
+-- The release bind cannot be verified without a person: a synthetic keyboard
+-- (wtype's virtual-keyboard-v1) is accepted by 0.56.2 and then reports
+-- `active keymap: error`, and no bind fires from it at all — measured
+-- 2026-09-20 — so nothing headless can press a real ALT and let go of it.
+--
+-- If `release = true` ever stops firing after a chord, the way labwc's
+-- onRelease deliberately does not fire after one, the switcher would open and
+-- have no keyboard way to close. ALT+Return is the floor under that: it is an
+-- ordinary press bind, it cannot be affected by whatever the release semantics
+-- are, and with `transparent = true` plus apex-switcher's flag test it costs a
+-- closed switcher one `[ -e ]` and still reaches the application underneath.
+--
 -- ── Why this is not in the shell's keybind model ─────────────────────────────
 -- That model has no concept of a key RELEASE, so a rebind made in APEX Settings
 -- would move the "next" bind and leave the commit on Alt — a switcher you can
@@ -168,6 +181,8 @@ bind("ALT", "Alt_L", hl.dsp.exec_cmd(switcher .. " commit"),
      { release = true, transparent = true, description = "Commit the window switcher" })
 bind("ALT", "Alt_R", hl.dsp.exec_cmd(switcher .. " commit"),
      { release = true, transparent = true, description = "Commit the window switcher" })
+bind("ALT", "Return", hl.dsp.exec_cmd(switcher .. " commit"),
+     { transparent = true, description = "Commit the window switcher" })
 
 -- ── Workspaces ───────────────────────────────────────────────────────────────
 -- 1-9 then 0, where 0 is workspace 10.

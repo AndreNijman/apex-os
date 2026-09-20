@@ -2351,6 +2351,38 @@ jobs:
               [ "$passed" -ge 22 ] || { echo "::error::only $passed apex hypr-lua assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
           fi
 
+      # What SUPER+arrow actually DOES, which no config grep can answer. The
+      # seeded session focus-follows-mouse, so a keyboard focus change that
+      # leaves the pointer behind is undone by the next twitch of the mouse —
+      # the defect Andre reported. The suite measures the pointer's position
+      # after a directional focus, and runs the whole thing a second time with
+      # `no_warps = true` where those assertions MUST fail. A gate that agrees
+      # with whatever the configuration says is the dominant defect family in
+      # this tree; the control is what stops this being one.
+      #
+      # Same nesting as the step above, same reason it usually skips here.
+      - name: Run the Hyprland focus + switcher assertions
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          rc=0; out="$(./tests/test-apex-hypr-focus.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::test-apex-hypr-focus.sh exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex hypr-focus: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::test-apex-hypr-focus.sh printed no summary line; nothing below can be believed"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-hypr-focus.sh's summary"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $3}')"
+          failed="$(printf '%s' "$summary" | awk '{print $5}')"
+          skipped="$(printf '%s' "$summary" | awk '{print $7}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed apex hypr-focus assertions failed"; exit 1; }
+          if [ "$passed" -eq 0 ]; then
+              [ "$skipped" -gt 0 ] || { echo "::error::test-apex-hypr-focus.sh asserted nothing and did not say why"; exit 1; }
+              echo "::warning::test-apex-hypr-focus.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc + Hyprland + quickshell and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 17 assertions only ever run on a machine with the compositors installed."
+          else
+              [ "$passed" -ge 17 ] || { echo "::error::only $passed apex hypr-focus assertions ran; 17 ran on 2026-09-20, so some no longer execute"; exit 1; }
+          fi
+
       # The input half of the same argument. test-apex-input.sh proves each
       # compositor's validator ACCEPTS what is generated; only a running
       # instance proves the value arrives, that `hyprctl reload` re-reads a

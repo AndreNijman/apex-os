@@ -6,8 +6,8 @@ pointer goes with it.**
 | | Hyprland (APEX Desktop) | labwc (APEX Floating) | niri (APEX Scrolling) |
 |---|---|---|---|
 | `SUPER`+arrow | moves focus, cursor warps into the window | moves the window to that edge, cursor warps with it | moves focus along the scroll |
-| `ALT`+`Tab` | APEX Shell switcher | APEX Shell switcher | niri's own recent-windows switcher |
-| `ALT`+`SHIFT`+`Tab` | the same, backwards | the same, backwards | niri's, backwards |
+| `ALT`+`Tab` | APEX Shell switcher | labwc's thumbnail switcher, all desktops | niri's recent-windows switcher |
+| `ALT`+`SHIFT`+`Tab` | the same, backwards | the same, backwards | the same, backwards |
 
 ## Why the pointer has to move
 
@@ -62,13 +62,43 @@ the release:
 
 * Hyprland — a bind with `release = true` (`bindr`) on `Alt_L` and `Alt_R`,
   and `transparent = true` so applications still see the release themselves.
-* labwc — `<keybind key="Alt_L" onRelease="yes">`, likewise for `Alt_R`.
 
-Both fire on *every* `ALT` release for as long as the machine is on, not only
-while the switcher is open. That is why the keybinds name
+It fires on *every* `ALT` release for as long as the machine is on, not only
+while the switcher is open. That is why the keybind names
 `/usr/libexec/apex-switcher` rather than `apex shell switcher` directly: with
 nothing open, the helper does one `[ -e ]` on a flag file under
 `XDG_RUNTIME_DIR` and exits, and the shell is never contacted.
+
+`ALT`+`Return` commits as well, and it is not decoration. The release binding
+is the one part of this that no headless test can press — a synthetic keyboard
+(`wtype`, virtual-keyboard-v1) is accepted by Hyprland 0.56.2 and then reported
+with `active keymap: error`, and no binding fires from it. `ALT`+`Return` is an
+ordinary press binding, so if the release semantics ever change the switcher
+still has a keyboard way to commit rather than becoming a thing you can open
+and not close.
+
+### Why the other two sessions keep their own
+
+Both were measured rather than assumed, on 2026-09-20.
+
+**labwc** has `onRelease="yes"`, and labwc-config(5) says what it is for: "the
+action should fire when the modifier is used **without** another key". Holding
+`ALT`, tapping `Tab` — which fires the `A-Tab` binding — and releasing `ALT`
+fires an `Alt_L onRelease` binding zero times; pressing and releasing `ALT` with
+no `Tab` fires it. That is the documented design, and it makes a shell-drawn
+hold-and-release switcher impossible there. labwc's own switcher does the same
+job properly, so the Floating session keeps it — with
+`<action name="NextWindow" workspace="all"/>`, which is the whole of "all
+windows including other workspaces" for that session.
+
+**niri** 26.04 ships `recent-windows`: hold-and-release, MRU ordering, live
+previews, on by default with `Alt`+`Tab` and `Mod`+`Tab` bound. It has no
+key-release binding for the shell's switcher to borrow either.
+
+So `ALT`+`Tab` looks different in each session, and that is a decision rather
+than an oversight: two of the three compositors already do this well, and
+replacing a working native switcher with a worse shell-drawn one for the sake
+of a matching look would be the wrong trade.
 
 ### Rebinding
 
@@ -78,9 +108,3 @@ move `next` and leave the commit on `ALT` — a switcher you can open and cannot
 close. Until the model grows a release, the combination is fixed in
 `apex/keybindings.lua` and `rc.xml`.
 
-### niri
-
-niri 26.04 ships its own recent-windows switcher — hold-and-release, MRU
-ordering, live previews — and has no key-release binding for the shell's to
-borrow. Configuring niri's rather than half-porting APEX's is the honest
-answer there, and it is the one session where `ALT`+`Tab` looks different.
