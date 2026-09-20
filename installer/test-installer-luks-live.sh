@@ -222,8 +222,13 @@ echo
 echo "── the install itself ─────────────────────────────────────────────────"
 if [ "$rc" = 0 ]; then ok "engine exit status" "0"
 else bad "engine exit status" "$rc — see $OUT"; fi
-if [[ "$(tail -1 "$OUT")" == "APEX-INSTALL-OK" ]]; then ok "final protocol line is APEX-INSTALL-OK"
-else bad "final protocol line is APEX-INSTALL-OK" "got: $(tail -1 "$OUT")"; fi
+# The ENGINE's last word, not the file's. tests/lab/nvram-guard now wraps the
+# engine and writes its verdict to stderr, which lands in the same capture, so
+# a plain `tail -1` reads the guard's line and reports a clean install as a
+# protocol failure. The guard's lines are prefixed and are dropped here.
+lastproto=$(grep -v 'nvram-guard\[' "$OUT" | grep -v '^[[:space:]]*$' | tail -1)
+if [[ "$lastproto" == "APEX-INSTALL-OK" ]]; then ok "final protocol line is APEX-INSTALL-OK"
+else bad "final protocol line is APEX-INSTALL-OK" "got: $lastproto"; fi
 if grep -q 'Unexpected error on line' "$OUT"; then bad "the ERR trap did not fire" "it did"
 else ok "the ERR trap did not fire"; fi
 
@@ -452,7 +457,13 @@ if [ -n "$ENTRY" ]; then
     # the assertion. Each must make it fail.
     for m in "rd.luks.uuid=$LUKS_UUID" "rd.luks.name=$LUKS_UUID=luks-$LUKS_UUID" \
              "vconsole.keymap=$KEYMAP_CONSOLE" "root=UUID=$ROOT_UUID"; do
-        sed "s|$m|XX-removed-XX|" "$ENTRY" > "$WORK/entry.mut"
+        # GLOBAL, and it took a live run to find out why. The engine writes
+        # BOTH `rd.vconsole.keymap=X` and `vconsole.keymap=X`, and the first
+        # of those CONTAINS the second as a substring. Without /g, sed removed
+        # only the occurrence inside `rd.vconsole.keymap=` and the assertion
+        # still found the plain one — so the mutant passed, which is this
+        # suite's word for "the case proves nothing".
+        sed "s|$m|XX-removed-XX|g" "$ENTRY" > "$WORK/entry.mut"
         if assert_kargs "$WORK/entry.mut"; then
             bad "mutant: kernel argument '${m%%=*}' is actually checked" "it passed without it"
         else
