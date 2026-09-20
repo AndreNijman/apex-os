@@ -118,9 +118,12 @@ included because the shipped kernel reports `CONFIG_PAHOLE_HAS_LANG_EXCLUDE=y`.
 kernel/research/run-ab.sh      # runs inside registry.fedoraproject.org/fedora:43
 ```
 
-~90 seconds plus the 1.3 GB debuginfo download. pahole itself is **7.1 s (1.30)** and
-**5.3 s (1.32)** over the 537 MB vmlinux, peak RSS 1.05 GB and 0.99 GB — so the BTF
-step is *not* a meaningful part of a kernel build's cost.
+**36 seconds** of container time (08:14:11 → 08:14:47, from the unit's own
+journal), plus the one-off 1.3 GB debuginfo download. pahole itself is
+**7.1 s (1.30)** and **5.3 s (1.32)** over the 537 MB vmlinux, peak RSS 1.05 GB
+and 0.99 GB — so the BTF step is *not* a meaningful part of a kernel build's
+cost, and the whole experiment is cheap enough that there was never a good
+reason to leave 1.32 unverified.
 
 Both dwarves builds are pinned to permanent koji NVR URLs, not to "whatever
 updates-testing has today":
