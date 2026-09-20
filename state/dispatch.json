@@ -1,84 +1,14 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-20T23:15+08:00",
-  "_round": "Round 35. RESUMED after Andre shut the laptop down and after the boot breakage he repaired. LANDED THIS ROUND: task/efivars-guard (f5cdf6e7) -- the wrapper that makes a loopback install unable to reach host NVRAM, which is the fix for the defect that made the L16 unbootable; task/tier-parity (b5f696cb) and apex-shell task/drop-ultra-tiers (b04c035) -- the two dead Ultra power profiles removed, plus a parity gate that fails CI in BOTH directions when the shell's picker and apexd's Tier disagree. THE BOOT BREAKAGE, for anyone resuming: a privileged `bootc install to-disk --via-loopback` with no tmpfs over /sys/firmware/efi/efivars let bootupd delete the host's real APEX-OS entry and recreate it pointing at /dev/loop1, inside the image being built. Andre repaired it from a live USB; his write-up is BOOT-BREAKAGE-2026-09-20.md in the repo root and is authoritative. The disk bounds in the agent briefs held perfectly -- nothing on disk was damaged -- but the FIRMWARE was never bounded. Every future brief touching bootc/bootupd/efibootmgr/an ESP must require tests/lab/bootc-install-lab, which builds the podman args itself and always inserts the mask.",
+  "updated": "2026-09-21T01:45+08:00",
+  "_round": "Round 35 is COMPLETE. Zero agents running. Every unit dispatched this round finished and LANDED; roadmap/v2.2 tip 283b0690. LANDED THIS ROUND: kernel-build (APEX builds its own kernel; BTF gate returns ok for the first time on any kernel; dwarves 1.32 confirmed by name, not arithmetic), katana-runner (self-hosted runner + a 500 GiB apexdev partition cut from games, Windows partitions provably untouched, a real kernel build green in 34m23s at -j20), sdboot-migrate (IN-PLACE crash-safe migration -- the previous round's `reinstall required` was WRONG and Andre rejected it before it was measured), luks-installer (first encrypted install end to end; keymap proven by typing on an emulated keyboard through key POSITIONS), efivars-guard-2 (the morning's guard was HALF INERT and this corrects it), android-signing (key decision implemented; found pr-validation leaking the keystore into the workspace), windows-installer-2 (a real Windows VM, which immediately found three defects Linux testing could not), focus-switcher (pointer follows keyboard focus, proven with a control that reproduces Andre's bug on demand; alt-tab switcher across all workspaces), and the Ultra power-profile removal with a parity gate. A NOTE ON THIS FILE: it went stale between 23:05 and 01:45 because the orchestrator was landing rather than dispatching, and a peer session read its mtime as `nothing is happening` and nearly acted on the repo. The branch tip is the activity signal, not this file's mtime.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 7f647470 -> 859cbb2b. ONE merge: task/p1-053e-device tip 9231f72a, six commits, 914 insertions over 12 files. Rust changed, so the workspace was REBUILT ON THE MERGED TIP rather than trusted from the branch: cargo test --locked --workspace --no-fail-fast 3407 passed / 0 failed / 2 ignored across 57 targets, cargo clippy --workspace --all-targets --locked -D warnings exit 0 with zero warnings, check-no-conflict-markers.sh PASS. Pushed with --force-with-lease. THE MERGE MESSAGE WAS AMENDED BEFORE PUSHING: it was written with git commit -m \"...\" containing backticked prose, zsh command-substituted `scheduled-job` and ate the phrase, and the tell was `(eval):1: command not found` buried under the diffstat. Third instance of that bug in this repo; rewritten from a file with a quoted heredoc. EARLIER IN THE ROUND: 0 unlanded at the resume -- every round-31 branch (task/katana-qual 1886a221, task/p1-053d-device fd316f60, task/p2-d-7 82b1efbc, task/p2-f-6 a4907070) is contained by ancestry, and task/build-verify did not exist on the remote. SECOND MERGE: 2e04fbcb (task/build-verify, tip 6e4174ee, three files -- build-local.sh, tests/test-build-local-shell-ref.sh, .github/workflows/pr-validation.yml). Verified on the merged tip: pr-validation.yml re-parses as YAML, both scripts bash -n clean, tests/test-build-local-shell-ref.sh 25 passed / 0 failed, check-suites-run-in-ci.sh 78 suites / 74 run / 4 exempt / 0 unrun-and-undeclared, check-shellcheck-coverage.sh 169 discovered / 0 known-failing / 0 newly failing. The Android work from the previous merge was confirmed present afterwards, because the branch was cut from 7f647470 and its diff against the newer tip reads as deletions. roadmap/v2.2 is now 2e04fbcb. THIRD MERGE: 2814f45d (task/p1-052-android-relay, tip c1ac18e1, seven commits, 2,683 insertions over 14 files -- the Android relay leg). No Rust changed, so the workspace was deliberately NOT rebuilt and the note says so rather than implying a run that did not happen; what did change was verified on the merged tip: check-no-conflict-markers.sh PASS, run-device-suite.sh bash -n clean, and the JVM suites RE-RUN there -- :core 497/0/0 and :app 52/0/0, with RelayTest.xml confirmed present in results timestamped during that run rather than inferred from a BUILD SUCCESSFUL line, because gradle reported 1s and a stale result would have looked identical. roadmap/v2.2 is now 2814f45d.",
     "apex-shell": "roadmap/v2.2 a8cd491 -> 9df72cf. ONE merge: task/p2-b-round32 tip ecc0e39, 548 insertions over 3 files (.github/workflows/ci.yml, tests/run-rtl-test.sh, tests/mutate-rtl.sh). --no-ff DELIBERATELY: the branch is two commits straight on a8cd491 and would have fast-forwarded, leaving no merge sha to cite. tests/check-no-conflict-markers.sh PASS on the merged tree; ci.yml re-parsed as YAML and both suites are bash -n clean on the merged tip; pushed once with --force-with-lease. The RTL suite's own numbers were NOT re-run locally -- the card forbids it and records 37/0/0/0 here and 32 passed / 0 failed / 1 skipped / 3 could-not-run on the Arch runner (CI 35417214107). SECOND MERGE, later the same session: 4eea9fb (task/p2-b-round33, tip df17c34, three commits, 1,516 insertions over 10 files, five of them new -- the QTranslator host plugin and the guide's prose, 5 marked strings to 186). Verified ON THE MERGED TIP rather than trusted from the branch: check-no-conflict-markers.sh PASS, ci.yml re-parses as YAML, all five touched suites bash -n clean, check-agent-help.sh 25 passed / 0 failed with 8/8 self-mutants, run-i18n-test.sh 23 passed / 0 failed / 0 skipped with the 186-string pin holding. roadmap/v2.2 is now 4eea9fb. apex-os got NO commits from this round by decision, not omission: shipping the plugin is apex-os work with an uncosted image cost, and a Containerfile line with nothing consuming it would be the theatre FOUND 34 warns about -- so it became round 34's dispatch instead."
   },
   "_status_recorded_this_round": "P2-004 partial and P2-003 partial, both with the landing prepended to the EXISTING evidence rather than replacing it -- set-status.py has no append flag and a straight write would have erased 33,626 and 15,073 characters of prior rounds. Verified after writing: P2-003 33626 -> 34270 chars, P2-004 15073 -> 15694, file re-parses, 128 tasks, counts unchanged at 92 done / 34 partial / 0 todo / 2 blocked. P2-003 explicitly records that the landing carried NOTHING for that row, rather than letting a merge sha imply progress it did not make. SECOND WRITE: P2-004 partial again for the round-33 landing, prepended and verified 19,523 -> 20,334 characters. P2-003 deliberately NOT rewritten -- the round-33 agent had already recorded that the round carried nothing for that row, and a second 'landed nothing' note would be padding. THIRD WRITE: P1-060, P1-055, P1-057 partial and P1-052 done for the Android landing, each prepended and each verified at exactly +558 characters (22,671->23,229 / 9,527->10,085 / 8,454->9,012 / 7,522->8,080). Counts unchanged at 92/34/0/2 of 128 after every write this round. FOURTH WRITE: P1-060 partial and P1-052 done for the relay landing, prepended and verified at +623 each (28,347->28,970 and 10,285->10,908). Counts still 92/34/0/2 of 128.",
   "_deliberately_held": "THREE SLOTS of six at 18:45, and the reason is still contention rather than caution. Every remaining unit whose re-open condition is met needs KATANA's graphical session, and katana-image-qual owns it until the section 6 run finishes: p1-038-hardware (the 18 labwc matrix rows), p2-f (a free VT nobody is sitting at), p2-b items 1-2 (Orca at the login screen, greeter audio), and p2-c -- whose gate, 'an image build lands and a NEW reader could have arrived with it', IS NOW MET for the first time, because katana is booted on apex-7f647470. All four are re-offerable the moment that agent reports. p2-d was not dispatched either: its own card says no criterion on it is closable by another round and what remains is two pieces too small to be a unit. No unit was invented to fill a slot.",
-  "agents": [
-    {
-      "slug": "kernel-build",
-      "items": [
-        "P1-043"
-      ],
-      "repo": "apex-os",
-      "branch": "task/kernel-build",
-      "worktree": "(agent creates)",
-      "agent_id": "ad06797b720f2fb8a",
-      "dispatched": "2026-09-20T17:30+08:00",
-      "session": "round 35 orchestrator",
-      "queue_id": "kernel-build",
-      "card": "ROADMAP/state/agents/kernel-build.md",
-      "at_dispatch": "Resumed after the shutdown; +16 commits, latest on the kernel's recurring price and the CI question. Andre approved building our own kernel with the cost stated (45 min on core, ~5 GB fleet pull, permanent maintenance INCLUDING SECURITY UPDATES, which is the real ongoing obligation). Priority order given: VERIFY dwarves 1.32 actually fixes the kfunc tags BEFORE committing to a full build -- 22 of 68 scx_bpf_ kfuncs lack their DECL_TAG, Fedora's own stock kernel has 18 of 68 so it is not CachyOS, and 1.32 is in updates-testing and UNVERIFIED. Told NOT to enable CONFIG_MODULE_ALLOW_BTF_MISMATCH: it exists to tolerate a mismatch and a kernel we build should not have one."
-    },
-    {
-      "slug": "android-release",
-      "items": [],
-      "repo": "apex-os",
-      "branch": "task/android-release",
-      "worktree": "(agent creates)",
-      "agent_id": "a7247188a837d814e",
-      "dispatched": "2026-09-20T17:30+08:00",
-      "session": "round 35 orchestrator",
-      "queue_id": "android-release",
-      "card": "ROADMAP/state/agents/android-release.md",
-      "at_dispatch": "Resumed after the shutdown; +4 commits, latest about pairing at the desktop's revision. Andre settled the open questions: GitHub Releases AND build the page, written for someone who has never sideloaded; auto-update the APK (which does NOT contradict his 2026-09-11 no-self-update rule for the DESKTOP apps, because the phone is not running APEX and apex update cannot reach it -- that distinction goes in docs/); and `not some suckky system where half the time peoples things wont work`, which is the app/OS protocol drift. Told to READ what apex-remoted does on a version mismatch rather than assume -- if it is a hard equality check then every OS update breaks every phone, and that is a finding about the wire. The SIGNING KEY remains an open decision for Andre: Android refuses an update signed by a different key, so losing it permanently blocks every existing install from upgrading."
-    },
-    {
-      "slug": "luks-installer",
-      "items": [
-        "L-002"
-      ],
-      "repo": "apex-os",
-      "branch": "task/luks-installer",
-      "worktree": "(agent creates)",
-      "agent_id": "a13d95fc0079c98ee",
-      "dispatched": "2026-09-20T18:00+08:00",
-      "session": "round 35 orchestrator",
-      "queue_id": "luks-installer",
-      "card": "ROADMAP/state/agents/luks-installer.md",
-      "at_dispatch": "HELD deliberately until the efivars guard landed, because THIS unit's predecessor caused the boot breakage -- its live apex-install ran a privileged container with no efivars mask. Now resumed with tests/lab/bootc-install-lab required for every loopback install. +9 commits, latest measuring the keymap conversion in CI. Owes three things: the installer must be able to CREATE a LUKS2 volume (before this unit apex-install mentioned crypto_LUKS once, in a refusal list, and luksFormat appeared nowhere); the keymap, where the property to test is that a passphrase with a non-us character unlocks at the BOOT PROMPT, not that a config file contains a string; and surfacing the recovery key. Constrained by the UKI pivot: the initramfs will live inside a signed PE, so a fix depending on local initramfs regeneration is dead on arrival -- sdboot-image owns the per-machine mechanism."
-    },
-    {
-      "slug": "sdboot-image",
-      "items": [],
-      "repo": "apex-os",
-      "branch": "task/sdboot-image",
-      "worktree": "(agent creates)",
-      "agent_id": "a5a830eff891409be",
-      "dispatched": "2026-09-20T18:00+08:00",
-      "session": "round 35 orchestrator",
-      "queue_id": "sdboot-image",
-      "card": "ROADMAP/state/agents/sdboot-image.md",
-      "at_dispatch": "HELD until the efivars guard landed, since this unit's whole subject is the boot path. Andre's decision: fully pivot every machine to systemd-boot. Given the specific handover efivars-guard left: run-scenarios was deliberately NOT edited because it runs INSIDE the bootlab container where there are no host efivars to read, so the right layer is whoever launches it -- wrap the host-side `podman run ... apex-bootlab` in nvram-guard and switch loopback installs to the wrapper. Owns the decision another unit is waiting on: with UKIs the initramfs is inside the signed PE, so per-machine config cannot be regenerated locally -- cmdline, credentials, addons or something read from the ESP. Legacy BIOS is a real conflict with `all machines` and must be reported, not silently resolved either way."
-    },
-    {
-      "slug": "windows-installer",
-      "items": [],
-      "repo": "apex-os",
-      "branch": "task/windows-installer",
-      "worktree": "/var/home/andre/Projects/apex/apex-os-windows-installer",
-      "agent_id": "task-mu934snb-nu3ms2",
-      "dispatched": "2026-09-20T08:35+08:00",
-      "session": "round 34 orchestrator",
-      "queue_id": "windows-installer",
-      "card": "ROADMAP/state/agents/windows-installer.md",
-      "at_dispatch": "CODEX round 2, gpt-6-astra at MEDIUM effort per Andre, still running through the companion task-worker. Round 1 delivered read-only emptiness validation in Rust with an image lab proving NTFS/ext/btrfs/LUKS/nested-GPT/interior-data/mkfs.ext4/stale-GPT/corruption/overlap/symlinks all FAIL and an all-zero target passes, every test comparing complete before/after image bytes. Round 2 was given the unblock its VALIDATION.md called impossible: mingw64-gcc and rust-std-static-x86_64-pc-windows-gnu-1.98.0 are both packaged and the std matches the system rustc EXACTLY, so a real .exe can be cross-compiled. WATCH FOR: round 1 finished and did NOT push because its git fetch hit DNS; the orchestrator pushed it by hand 90 minutes later."
-    }
-  ],
+  "agents": [],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
   "_findings": {
     "nft -c cannot run in a build container": "netlink: Error: cache initialization failed: Operation not permitted. nft -c applies nothing, but libnftables opens a netlink socket and lists the LIVE ruleset before it will look at a file, and that needs CAP_NET_ADMIN over a real netns. The build had none, so the parser never ran and the step exited 1 at STEP 99/148. Fixed by giving it a netns of its own: unshare --user --map-root-user --net nft -c -f. Proved four ways with a fake unshare on PATH - parses / rejects a mutant at line 60 col 56-60 / unshare absent / unshare REFUSED - because the first draft classified unshare's own refusal as 'nft rejected the ruleset' and would have failed the build a second time on a false diagnosis.",
