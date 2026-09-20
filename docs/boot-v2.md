@@ -251,12 +251,110 @@ functional, and on this laptop was not even created. If BIOS-from-disk is ever
 wanted, it is GRUB on the ostree backend — the two paths cannot be the same
 image's default, and that is a product decision, not a build flag.
 
+### Two phases, and which one ships first
+
+Everything measured so far is **phase 1**, and the two phases are not the same
+machine. Saying which is which is the difference between `luks-installer`
+writing a karg that works and writing one that is ignored.
+
+**Phase 1 — unsealed Type #1 entries.** What `bootc install --bootloader
+systemd --composefs-backend` produces today: a loose `vmlinuz` and `initrd`
+under `/EFI/Linux/bootc_composefs-<verity>/`, a `.conf` in
+`/loader/entries/`, and the kernel command line on that file's `options` line.
+This is what installs, boots, upgrades and rolls back in the lab. `bootc status`
+calls it `bootType: Bls`. The initramfs is not signed and not measured
+differently from what GRUB does today, so **a karg still works here** — and
+that is exactly the trap, because it stops working in phase 2.
+
+`apex-boot-count` is a phase-1 program: it parses `options` lines and renames
+`.conf` files.
+
+**Phase 2 — sealed UKI.** Kernel, initramfs and command line inside one signed
+PE in `/EFI/Linux/`, with no `.conf` and no `options` line. Upstream's term for
+it is *sealed*: the composefs digest is inside the signature. `bootc container
+ukify` and `bootc container split-kernel-and-rootfs` exist in the shipped bootc
+1.16.10 and neither has been run. This is where the credential mechanism stops
+being a preference and becomes the only way to configure a machine.
+
+**APEX ships phase 1 first and targets phase 2.** Phase 1 is a measured
+install/boot/upgrade/rollback path that needs no firmware enrolment; phase 2
+needs a signing decision that has not been made (below). Two consequences worth
+writing down rather than discovering:
+
+* Anything built on "a karg will carry this" is building on phase 1 only. Do
+  not do it for per-machine values — use a credential, which works identically
+  in both phases.
+* **Boot counting has to be redone for phase 2.** A UKI is counted by renaming
+  the `.efi` itself (`apex-<id>+3-0.efi`), not a `.conf`, and how `bootc`
+  names and stages UKIs is unmeasured. `apex-boot-count` will need a second
+  branch, and its test suite a second fixture shape.
+
+### Secure Boot: a decision, not a measurement
+
+Gate 1 below is usually written as "measure Secure Boot on this path". It is
+actually a design decision that nobody has taken, and it is visible in the ESP
+`bootc` produces:
+
+```
+/EFI/BOOT/BOOTX64.EFI              <- systemd-boot itself, as the fallback
+/EFI/systemd/systemd-bootx64.efi   <- systemd-boot
+```
+
+There is **no shim and no `/EFI/fedora`**. On a machine whose `db` holds the
+stock Microsoft CA — which is every machine out of the box — neither of those
+binaries validates, because `systemd-boot-unsigned` is exactly what its name
+says. The two ways out are different products:
+
+1. **APEX-signed sd-boot, enrolled by the user.** Sign
+   `systemd-bootx64.efi` and the UKI with the APEX MOK in CI, and every user
+   enrols the APEX certificate in their firmware once. That is boot-path rule
+   4's documented, user-initiated procedure, and it is a real cost: a
+   per-machine manual step with a firmware UI in it.
+2. **shim → sd-boot.** Keep Fedora's Microsoft-signed shim as the first stage
+   and have it load an APEX-MOK-signed systemd-boot. Fedora's shim is built
+   with `grubx64.efi` as its second stage, so this means either a shim built
+   with a different second stage, or shipping sd-boot under that name — and
+   `bootc --bootloader systemd` lays down neither shim nor that filename, so
+   the ESP would have to be authored by APEX rather than by bootc.
+
+Option 2 is the only one that keeps "install and it boots" true for a user who
+never opens firmware setup. Option 1 is the only one that needs no new
+bootloader plumbing. **This is the decision to take before phase 2**, and it is
+a product decision, not a build flag.
+
+### What this needs from the kernel build
+
+`kernel-build` owns the kernel now, which makes UKIs materially easier — the
+kernel, the initramfs and the signing are all APEX's. Three things this path
+needs it to expose, stated now so they are designed in rather than retrofitted:
+
+1. **`vmlinuz` and `initramfs.img` stay at `/usr/lib/modules/<kver>/`.**
+   `bootc container ukify --kernel-dir` expects exactly that shape
+   (`/parent/$kernel_version`), and `Containerfile.release` already asserts the
+   initramfs is there. Do not move them to `/boot`.
+2. **The MOK signing step must be reusable for an arbitrary PE binary, not just
+   `vmlinuz`.** Phase 2 signs a UKI, and the Secure Boot decision above may
+   also need `systemd-bootx64.efi` signed. A signer that only knows how to sign
+   a kernel image has to be rewritten at exactly the wrong moment. It should
+   also be able to attach a `.sbat` section, which is what makes a signed
+   artifact revocable by SBAT policy instead of by DBX.
+3. **The verification gate moves with the signature.** `AGENTS.md` requires the
+   signature to be read back out of the built artifact — `sbverify` on the
+   kernel image today. Inside a UKI the kernel's own signature is not what the
+   firmware checks; the UKI's is. So the `sbverify` gate has to run against the
+   UKI, and a build that produces a UKI but verifies only the inner kernel is
+   asserting the wrong thing.
+
 ### Before this is pointed at katana or the L16
 
 In order, and none of them are optional:
 
-1. Secure Boot on the composefs path, in the VM lab, under OVMF with the APEX
-   certificate in `db`. Nothing above was measured with Secure Boot on.
+1. **The Secure Boot chain decided, then measured.** bootc's ESP has no shim
+   and no `/EFI/fedora`, and `systemd-boot-unsigned` is unsigned, so on a stock
+   `db` nothing on that ESP validates. Pick between an APEX-signed sd-boot the
+   user enrols and a shim → sd-boot chain APEX authors itself (see above), then
+   measure it in the VM lab under OVMF. Nothing above was measured with Secure
+   Boot on at all.
 2. A sealed UKI built by `bootc container ukify` from the APEX image, booting
    in that guest — including the credential mechanism above actually changing
    the keymap at a LUKS prompt.
