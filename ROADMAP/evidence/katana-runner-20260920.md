@@ -251,10 +251,12 @@ Three further checks, because a probe that cannot fail proves nothing:
   control-group plus no logind session for `ghrunner` means there is nowhere
   for a process to hide.
 
-The GitHub API reports `ephemeral=null` for this runner, which is a reporting
-gap rather than a configuration one — the behavioural proof is that the
-listener **exits after one job** and is re-registered, which a non-ephemeral
-runner does not do.
+The GitHub API reports `ephemeral=null` for this runner. That is a reporting
+gap, not a configuration one, and it is worth knowing about before somebody
+reads it as "the `--ephemeral` flag did not take". Two things say otherwise:
+`/var/lab/runner/actions-runner/.runner` contains `"ephemeral": true` and
+`"disableUpdate": true`, and the listener **exits after one job** and is
+re-registered, which a non-ephemeral runner does not do.
 
 ### Which jobs target it
 
