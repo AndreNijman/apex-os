@@ -11,15 +11,36 @@ Not merged. Not landed. No PR.
 Commits (push after each):
 
 ```
-175459d3 feat(kernel): dwarves 1.32 fixes the kfunc BTF defect, measured on a
-         real kernel
-b4b4b1bb feat(kernel): build the kernel in its own tier, and refuse one with
-         the defect
+66053ded fix(core): the kernel image must be built from THIS commit's pin
+7167e46d build(local): build the kernel tier before core, and read its verdict
+         back
+fb866a29 test(kernel): check the pin is actually pinned, without a 45-minute
+         build
+5508938c docs(update-cost): the kernel is a fourth tier, and why it is not in
+         core
 aa9e582b feat(core): install APEX's own kernel, and refuse one whose BTF was
          never checked
+b4b4b1bb feat(kernel): build the kernel in its own tier, and refuse one with
+         the defect
+175459d3 feat(kernel): dwarves 1.32 fixes the kfunc BTF defect, measured on a
+         real kernel
 ```
 
+Working tree clean, `HEAD == origin/task/kernel-build` (checked, not assumed).
+
+`git merge-tree --write-tree origin/roadmap/v2.2 task/kernel-build` → **exit 0,
+no conflicts**, tree `38b8497a`. Run against `origin/roadmap/v2.2` as it stands
+now, which has moved **13 commits ahead** of the `223a255a` this branched from —
+so that is a live check, not a stale one.
+
 Evidence: `ROADMAP/evidence/kernel-build-20260920.md` (tracked, on the branch).
+
+**No roadmap item was recorded.** `kernel-build` appears in neither
+`dispatch.json` nor `queue.json`, so there is no id to record against, and
+`set-status.py` REPLACES evidence — writing to a guessed item would have
+destroyed another one's. The orchestrator should assign an id; the prior
+round's card already asked for P1-043 to be split, and this is the half that
+wants its own.
 
 ---
 
@@ -151,12 +172,16 @@ to and including `rpmbuild` started cleanly, and these are confirmed in that log
    `kernel/**` already triggers a core rebuild, which is right — core must
    reinstall — but nothing builds the kernel image yet.
 
-   **The decision:** GitHub's hosted runners are 4 vCPU. This build used 12
-   cores; on a hosted runner the honest estimate is **three to four times
-   longer**, which puts the kernel tier alone in the 2–3 hour range and may
-   exceed the 6-hour job limit when combined. The alternatives are a
-   self-hosted runner on katana (20 cores, podman already there) or paying for
-   larger runners. That is Andre's call, not an agent's.
+   **The decision, and it is sharper than "slower":** the build tree is
+   **~100 GB** — measured, `/var` went 552 GB free to 453 GB during it. A
+   hosted GitHub runner has **14 GB** of disk. So this is not "3–4× longer on
+   4 vCPU", it is **cannot run on a hosted runner at all**, before the CPU
+   argument even starts. The realistic options are a **self-hosted runner on
+   katana** (20 cores, podman already there — but note katana's `/var` is
+   tight, so check it has 120 GB free first) or restructuring the spec to
+   build far fewer modules (`_build_minimal 1` + a modprobed.db, which changes
+   what the kernel supports and is a product decision of its own). That is
+   Andre's call, not an agent's.
 
    Traps when writing it: a workflow `run:` block is capped at **21,000
    characters** and overflowing surfaces as a jobless failed run.
@@ -166,6 +191,14 @@ to and including `rpmbuild` started cleanly, and these are confirmed in that log
    is stable the pin can become "stable, ≥ 1.32" — and the *gate* is what makes
    that relaxation safe rather than a hope.
 
+   **The risk to watch while it is still updates-testing:** an update in
+   testing can be *unpushed*. Koji URLs stay valid for a built package, so the
+   pin itself does not break — but if Fedora withdraws 1.32 for a reason, APEX
+   would keep building against a withdrawn toolchain and nothing in the pin
+   would notice. **The gate is the protection here, not the pin**: a
+   regression in a withdrawn 1.32 would show up as the build refusing its own
+   kernel, which is the correct failure.
+
 5. **Report it upstream.** Still nobody's done it, and this round makes the
    report much stronger than the last one could: it is no longer "some kfuncs
    lose their tag", it is "pahole 1.30 drops the `bpf_kfunc` DECL_TAG for 18 of
@@ -173,12 +206,20 @@ to and including `rpmbuild` started cleanly, and these are confirmed in that log
    the reproduction script". Both the COPR maintainer and the dwarves list want
    this. `kernel/research/run-ab.sh` *is* the reproducer.
 
-6. **`digest-pin `BUILDER_BASE`.** It is `registry.fedoraproject.org/fedora:43`,
+6. **Digest-pin `BUILDER_BASE`.** It is `registry.fedoraproject.org/fedora:43`,
    a floating tag, so GCC can move under the pin. The build now *records* the
    compiler in `/manifest/kernel-build.txt`, which makes drift visible, but
    recording is not pinning.
 
-7. **A drift watcher.** A scheduled workflow that diffs `kernel/kernel.pin`
+7. **The kernel-image identity contract is landed, but note what it means for
+   the build that was running when this was written.** `Containerfile.core`
+   now `cmp`s the kernel image's `/manifest/kernel.pin` against the pin in the
+   build context, and requires `kver=` in the manifest. The in-flight build
+   predates the `kver=` field, so **that particular image cannot feed core** —
+   it was built to measure the compile and the gate, not to be consumed.
+   Rebuild the kernel tier before building core.
+
+8. **A drift watcher.** A scheduled workflow that diffs `kernel/kernel.pin`
    against the CachyOS tags API and Fedora's dwarves stable version, and fails
    or opens an issue. See "Security obligation" below — this is the mechanism
    that keeps the obligation from being a thing someone has to remember.
@@ -238,10 +279,10 @@ UKI assembly time rather than as a mutable karg. Worth `luks-installer` and
 
 ## Cost, stated plainly
 
-* **Build time:** the pahole step itself is *not* the cost — 5.3 s and ~1 GB RSS
-  over a 537 MB vmlinux, measured. The cost is the kernel compile: ~45 min at
-  `-j12` on this 16-core box, and **an estimated 3–4× that on a 4 vCPU hosted
-  runner**, which is item 3's decision.
+* **Build time and disk:** the pahole step is *not* the cost — 5.3 s and ~1 GB
+  RSS over a 537 MB vmlinux, measured. The cost is the kernel compile: ~45 min
+  at `-j12` on this 16-core box, and a **~100 GB build tree** (measured). That
+  disk figure is what decides item 3: a hosted GitHub runner has 14 GB.
 * **Image size:** the kernel image is RPMs only (`FROM scratch`), so it adds
   nothing to what a user downloads. `core` installs the same kernel it installed
   before, from a different source — **the fleet's ~5 GB update cost is
