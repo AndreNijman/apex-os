@@ -108,17 +108,30 @@ case "$kind" in
     *)             bad "not a 64-bit Windows PE: $kind" ;;
 esac
 
-# ── 3. the decision rules pass their unit tests ──────────────────────────────
+# ── 3. the decision rules and the image laboratory ───────────────────────────
+#  Both in one container, because the image lab drives the COMPILED binary
+#  against GPT fixtures and so needs the same toolchain. Nothing in CI ran the
+#  image lab before this; it was a file you had to know to type.
 unit_log="$OUT/unit.log"
 if podman run --rm -v "$PWD/windows-installer":/src:ro,z "$IMAGE" bash -euo pipefail -c '
-        dnf install -y -q --setopt=install_weak_deps=False rust cargo >/dev/null
+        dnf install -y -q --setopt=install_weak_deps=False rust cargo python3 >/dev/null
         cp -r /src /build && cd /build
         cargo test --offline --locked 2>&1
+        cargo build --offline --locked 2>&1
+        echo "APEX_IMAGE_LAB_BEGIN"
+        python3 tests/image_lab.py 2>&1
     ' >"$unit_log" 2>&1; then
     n="$(grep -c '^test .* ok$' "$unit_log")"
     ok "the partition-eligibility and confirmation rules pass ($n unit tests)"
+    lab_n="$(sed -n '/APEX_IMAGE_LAB_BEGIN/,$p' "$unit_log" | grep -oE 'Ran [0-9]+ tests' | grep -oE '[0-9]+')"
+    if sed -n '/APEX_IMAGE_LAB_BEGIN/,$p' "$unit_log" | grep -q '^OK$'; then
+        ok "the GPT image laboratory passes (${lab_n:-?} cases, against the compiled binary)"
+    else
+        bad "the GPT image laboratory failed"
+        sed -n '/APEX_IMAGE_LAB_BEGIN/,$p' "$unit_log" | tail -20 | sed 's/^/        /'
+    fi
 else
-    bad "the rule unit tests failed"
+    bad "the rule unit tests or the image laboratory failed"
     tail -20 "$unit_log" | sed 's/^/        /'
 fi
 # The negative that matters most. The confirmation screen must never identify a
