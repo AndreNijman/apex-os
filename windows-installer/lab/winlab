@@ -189,7 +189,7 @@ qemu_run() {
         -drive "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd" \
         -drive "if=pflash,format=raw,unit=1,file=$VARS" \
         -device ich9-ahci,id=ahci \
-        -drive "id=sys,file=$SYSDISK,format=raw,if=none,cache=unsafe" \
+        -drive "id=sys,file=$SYSDISK,format=${SYSFMT:-raw},if=none,cache=unsafe" \
         -device "ide-hd,drive=sys,bus=ahci.0,bootindex=$dkidx,model=APEX-LAB-SYSTEM,serial=SYS0000000001" \
         "${cd[@]}" "$@" \
         -display none -vga std -monitor "unix:$MON,server,nowait" \
@@ -284,8 +284,148 @@ cmd_status() {
         || say "  container $IMAGE ABSENT"
 }
 
+# ── winlab build ─────────────────────────────────────────────────────────────
+#  Cross-build the installer and drop it where the guest can be handed it.
+cmd_build() {
+    local builder="$HERE/../build-windows.sh"
+    [ -x "$builder" ] || die "no $builder"
+    "$builder" "$DIR" || die "cross-build failed"
+}
+
+# ── winlab fixtures ──────────────────────────────────────────────────────────
+#  The target disks. These are what the installer is pointed at; the Windows
+#  system disk is never a candidate.
+#
+#  Fixture A is AHCI and carries three partitions chosen to be the three
+#  answers the tool must give:
+#
+#     1  Linux filesystem type, every byte zero      — eligible
+#     2  basic data, formatted NTFS, Windows mounts  — refuse, and name the
+#                                                      drive letter
+#     3  basic data, every byte zero                 — the partition a user
+#                                                      actually produces by
+#                                                      shrinking C: in Disk
+#                                                      Management
+#
+#  Fixture B is an NVMe device with one eligible partition, and it exists for
+#  one reason: to be enumerated in both orders. On Andre's own hardware NVMe
+#  names have reordered across three ordinary reboots, so any identity the tool
+#  prints that changes when the order changes is an identity that will one day
+#  name the wrong disk.
+cmd_fixtures() {
+    inlab '
+        set -e
+        mk() {   # $1 image  $2 size  $3 sfdisk script
+            rm -f "$1"; qemu-img create -f raw "$1" "$2" >/dev/null
+            printf "%s" "$3" | sfdisk "$1" >/dev/null
+        }
+        mk /w/fixture-a.raw 1600M "label: gpt
+size=512MiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"APEX-TARGET-A\"
+size=256MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=\"Windows data\"
+size=256MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=\"Blank basic\"
+"
+        mk /w/fixture-b.raw 1024M "label: gpt
+size=768MiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"APEX-TARGET-B\"
+"
+        # Partition 2 gets a real NTFS filesystem. Offsets come from sfdisk
+        # rather than arithmetic, so a layout change cannot silently format the
+        # wrong extent.
+        start=$(sfdisk -d /w/fixture-a.raw | awk -F"start=|," "/raw2/ {print \$2+0}")
+        size=$(sfdisk -d /w/fixture-a.raw  | awk -F"size=|," "/raw2/ {print \$3+0}")
+        # mkntfs cannot write into an offset inside a file, so the filesystem
+        # is built standalone and copied into place. dd with seek and count
+        # keeps the write inside the partition by construction.
+        rm -f /w/.ntfs.img
+        truncate -s $((size*512)) /w/.ntfs.img
+        mkntfs --force --quiet --fast --label WINDATA /w/.ntfs.img >/dev/null 2>&1
+        dd if=/w/.ntfs.img of=/w/fixture-a.raw bs=512 seek="$start" count="$size" \
+            conv=notrunc status=none
+        rm -f /w/.ntfs.img
+        echo "--- fixture A ---"; sfdisk -d /w/fixture-a.raw | grep raw
+        echo "--- fixture B ---"; sfdisk -d /w/fixture-b.raw | grep raw
+        echo "--- partition 2 now holds ---"; file -s /w/fixture-a.raw | head -1
+    ' || die "fixture build failed"
+    say "fixtures: $DIR/fixture-a.raw $DIR/fixture-b.raw"
+}
+
+# ── winlab run ───────────────────────────────────────────────────────────────
+#  Boot the golden image with a job on the transport disk. The golden itself is
+#  never written to: the guest runs on a qcow2 overlay and a copy of the
+#  firmware variables, so a run that corrupts Windows costs one `rm`.
+cmd_run() {
+    local rundir="${1:-}" swap=no
+    [ -n "$rundir" ] || die "usage: winlab run DIR [--swap]"
+    [ "${2:-}" = --swap ] && swap=yes
+    rundir="$(cd "$rundir" && pwd)"
+    [ -f "$rundir/run.ps1" ] || die "$rundir/run.ps1 is missing"
+    need "$GOLDEN" golden
+    need "$DIR/fixture-a.raw" fixtures
+    have_kvm || die "/dev/kvm is not usable"
+
+    podman run --rm --device /dev/kvm \
+        -v "$DIR":/w:Z -v "$HERE":/lab:ro,Z -v "$rundir":/job:ro,Z \
+        -e SWAP="$swap" \
+        "$IMAGE" bash -uo pipefail -c "$(qemu_args)"'
+        set -e
+        export VARS=/w/run-VARS.fd SYSDISK=/w/run.qcow2 SYSFMT=qcow2 \
+               MON=/w/run-mon.sock SHOTTAG=run
+
+        rm -f "$SYSDISK" "$VARS" /w/run-transport.raw
+        qemu-img create -f qcow2 -b /w/golden.raw -F raw "$SYSDISK" >/dev/null
+        cp /w/golden-VARS.fd "$VARS"
+
+        # The firmware baseline, taken from the varstore the guest is about to
+        # boot — not from a note about what it should contain.
+        virt-fw-vars -i /w/golden-VARS.fd --print 2>/dev/null |
+            grep -E "^(Boot[0-9]{4}|BootOrder)" | sort > /w/fw-before.txt
+
+        # Fresh transport every run: a stale result.txt from a previous run is
+        # indistinguishable from a run that produced one.
+        qemu-img create -f raw /w/run-transport.raw 256M >/dev/null
+        printf "label: gpt\nsize=250MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=APEXLAB\n" |
+            sfdisk /w/run-transport.raw >/dev/null
+        mformat -i /w/run-transport.raw@@1048576 -F -v APEXLAB ::
+        mcopy -i /w/run-transport.raw@@1048576 /job/* ::/ 
+        [ -f /w/apex-windows-installer.exe ] &&
+            mcopy -i /w/run-transport.raw@@1048576 /w/apex-windows-installer.exe ::/
+        echo "--- transport contents ---"
+        mdir -i /w/run-transport.raw@@1048576 ::
+
+        fixa=(-drive "id=fa,file=/w/fixture-a.raw,format=raw,if=none"
+              -device "ide-hd,drive=fa,bus=ahci.2,model=APEX-FIXTURE-A,serial=FIXA00000001")
+        fixb=(-drive "id=fb,file=/w/fixture-b.raw,format=raw,if=none"
+              -device "nvme,drive=fb,serial=FIXB00000002")
+        order=("${fixa[@]}" "${fixb[@]}")
+        [ "$SWAP" = yes ] && order=("${fixb[@]}" "${fixa[@]}")
+
+        rc=0
+        QEMU_TIMEOUT=900 qemu_run disk \
+            -drive "id=tr,file=/w/run-transport.raw,format=raw,if=none" \
+            -device "ide-hd,drive=tr,bus=ahci.1,model=APEX-LAB-TRANSPORT,serial=TRN0000000001" \
+            "${order[@]}" || rc=$?
+        echo "qemu exited rc=$rc"
+
+        virt-fw-vars -i "$VARS" --print 2>/dev/null |
+            grep -E "^(Boot[0-9]{4}|BootOrder)" | sort > /w/fw-after.txt
+
+        echo "═══ GUEST RESULT ═══"
+        mtype -i /w/run-transport.raw@@1048576 ::/result.txt 2>/dev/null ||
+            echo "(no result.txt — the guest produced nothing)"
+        echo "═══ STATUS ═══"
+        mtype -i /w/run-transport.raw@@1048576 ::/status.txt 2>/dev/null ||
+            echo "(no status.txt)"
+        echo "═══ FIRMWARE VARIABLES: before vs after ═══"
+        if diff -u /w/fw-before.txt /w/fw-after.txt; then
+            echo "IDENTICAL — no boot entry and no boot order changed"
+        fi
+    ' || die "run failed"
+}
+
 case "${1:-}" in
     image)    cmd_image ;;
+    build)    cmd_build ;;
+    fixtures) cmd_fixtures ;;
+    run)      shift; cmd_run "$@" ;;
     fetch)    cmd_fetch ;;
     media)    cmd_media ;;
     golden)   cmd_golden ;;
