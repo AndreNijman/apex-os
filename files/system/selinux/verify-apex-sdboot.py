@@ -19,8 +19,9 @@ import setools
 
 WANT = "entrypoint"
 SRC = "bootupd_t"
-# init_exec_t is systemd-bless-boot; bin_t is /usr/libexec/apex-boot-count.
-TARGETS = ("init_exec_t", "bin_t")
+# init_exec_t is /usr/lib/systemd/systemd-bless-boot, the only program that
+# needs to be moved into bootupd_t. See apex_sdboot.te for why nothing else does.
+TARGETS = ("init_exec_t",)
 
 candidates = sorted(glob.glob("/etc/selinux/targeted/policy/policy.*"))
 if not candidates:
