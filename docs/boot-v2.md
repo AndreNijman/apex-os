@@ -216,23 +216,30 @@ systemd-boot is a UEFI application. There is no BIOS systemd-boot, so a machine
 that boots legacy BIOS cannot be on this path at all. What APEX actually
 supports today, checked rather than assumed:
 
-* `bootc install to-disk` creates a **1 MiB BIOS boot partition on every
-  install**, UEFI or not, on both backends — so `installer/apex-install` does
-  too, since it calls `bootc install`.
+* `installer/apex-install` has two modes. **Disk mode** runs `bootc install
+  to-disk --wipe`, and bootc lays out the table itself — including a **1 MiB
+  BIOS boot partition on every install, UEFI or not, on both backends**.
+  **Partition mode** runs `bootc install to-filesystem` into a root the
+  installer made and an ESP that already exists, so no table is created and no
+  BIOS boot partition is either.
 * `bootupd` ships a BIOS payload (`/usr/lib/bootupd/updates/BIOS.json`).
-* **But the L16's `/boot/bootupd-state.json` records only the `EFI` component.**
-  The BIOS boot partition exists and nothing was ever written into it.
+* **The L16 has no BIOS boot partition at all** — `lsblk -o PARTTYPENAME` shows
+  an EFI System partition, two `Linux extended boot` partitions and two
+  filesystems, and nothing else. It was installed in partition mode. Its
+  `/boot/bootupd-state.json` records only the `EFI` component, so even where
+  the partition does get created, nothing is written into it.
 * The **live ISO genuinely boots legacy BIOS**: `installer/build-live-iso.sh`
   builds an El Torito core image and an isohybrid MBR with a VESA `vga=791`
   handoff specifically for BIOS.
 
 So the cost is smaller than it looks and must still be stated plainly: **APEX's
 installer media boots legacy BIOS; no APEX installation is known to have ever
-booted legacy BIOS from disk**, because the bootloader was never written there.
-The pivot therefore drops a configuration that was created but never
-functional. If BIOS-from-disk is ever wanted, it is GRUB on the ostree backend
-— the two paths cannot be the same image's default, and that is a product
-decision, not a build flag.
+booted legacy BIOS from disk**, because on whole-disk installs the bootloader
+was never written there and on partition-mode installs the partition does not
+exist. The pivot therefore drops a configuration that was created but never
+functional, and on this laptop was not even created. If BIOS-from-disk is ever
+wanted, it is GRUB on the ostree backend — the two paths cannot be the same
+image's default, and that is a product decision, not a build flag.
 
 ### Before this is pointed at katana or the L16
 
