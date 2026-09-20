@@ -146,6 +146,128 @@ if [ -s "$FNS" ]; then
 fi
 
 echo
+echo
+echo "── can the owner TYPE their passphrase on the layout they chose? ──────"
+# The passphrase validation in the engine restricts the passphrase to printable
+# ASCII, and its comment used to claim that every printable ASCII character is
+# reachable on every kbd keymap. MEASURED across the whole shipped tree, that
+# is false for 15 of 562 keymaps, and each one is a machine whose owner cannot
+# type their own passphrase at the one prompt with no way back:
+#
+#   hr-unicode, rs-latinunicode, ba-unicode, me-latinunicode, epo-legacy
+#       no q, w, x or y ANYWHERE in the table
+#   vn, kz-latin, cm-azerty            no `1`
+#   it-geo, ge-ergonomic               Georgian; several Latin letters absent
+#   fa                                 Persian; almost no Latin at all
+#
+# These assertions run the engine's own functions against the real tree.
+TFNS="$WORK/typeable-fns.sh"
+sed -n '/^_keymap_cat()/,/^}/p;/^_keymap_text()/,/^}/p;/^keymap_ascii_set()/,/^}/p;/^keymap_can_type()/,/^}/p' "$ENGINE" > "$TFNS"
+if ! grep -q 'keymap_can_type' "$TFNS"; then
+    bad "extract the typeability check from the engine" "nothing extracted"
+else
+(
+    # shellcheck disable=SC1090
+    . "$TFNS"
+    _p=0; _f=0
+    T="$KEYMAP_TREE"
+    tcase() {  # keymap passphrase expected-prefix human
+        local got
+        got=$(keymap_can_type "$2" "$T" "$1")
+        case "$got" in
+          "$3"*) printf 'PASS  %-46s %s -> %s\n' "$4" "$1" "$got"; _p=$((_p+1)) ;;
+          *)     printf 'FAIL  %-46s %s -> %s, want %s*\n' "$4" "$1" "$got" "$3"; _f=$((_f+1)) ;;
+        esac
+    }
+    tcase us          'apexzed1' yes  "us can type a Latin passphrase"
+    tcase de          'apexzed1' yes  "de can type a Latin passphrase"
+    tcase bg_bds-utf8 'apexzed1' yes  "bg_bds-utf8 can: Latin is its base plane"
+    tcase ru          'apexzed1' yes  "ru can: Cyrillic is on AltGr, Latin is not"
+    tcase jp106       'apexzed1' yes  "jp106 can, and only through its include"
+    tcase hr-unicode  'apexzed1' no:  "hr-unicode cannot — no x anywhere"
+    tcase vn          'apexzed1' no:  "vn cannot — no digit 1 anywhere"
+    tcase fa          'apexzed1' no:  "fa cannot — almost no Latin at all"
+    tcase hr-unicode  'alpha123' yes  "hr-unicode CAN type a passphrase avoiding q w x y"
+    tcase nosuchkeymapatall 'apexzed1' unknown "a keymap that does not exist is unknown, not no"
+
+    # THE FALLBACK'S OWN PRECONDITION. When a layout cannot type the
+    # passphrase the engine moves the unlock prompt to `us`. That is only safe
+    # if `us` can type everything the engine allows — which is every printable
+    # ASCII character, the set the passphrase validation enforces.
+    allascii=$(awk 'BEGIN { for (i = 32; i <= 126; i++) printf "%c", i }')
+    got=$(keymap_can_type "$allascii" "$T" us)
+    if [ "$got" = yes ]; then
+        printf 'PASS  %-46s all 95 printable ASCII characters\n' "us can type anything the engine accepts"; _p=$((_p+1))
+    else
+        printf 'FAIL  %-46s us -> %s\n' "us can type anything the engine accepts" "$got"; _f=$((_f+1))
+    fi
+
+    # MUTATION 1: the X keysym name table. The legacy maps write their digits
+    # as `one`, `two`; without the table they look like keyboards with no
+    # number row, and bg_bds-utf8 flips to `no`. A table that cannot be made to
+    # matter is not being tested.
+    MUT="$WORK/mutant-keysym-names"
+    sed '/^          nd = split("one two three/,/^          for (i = 1; i <= nd; i++)/d' "$TFNS" > "$MUT"
+    if cmp -s "$TFNS" "$MUT"; then
+        printf 'FAIL  %-46s the mutation matched nothing\n' "mutant: the keysym name table"; _f=$((_f+1))
+    elif ! bash -n "$MUT" 2>/dev/null; then
+        printf 'FAIL  %-46s the mutant does not parse\n' "mutant: the keysym name table"; _f=$((_f+1))
+    else
+        got=$(bash -c '. "$1"; keymap_can_type apexzed1 "$2" bg_bds-utf8' _ "$MUT" "$T" 2>/dev/null)
+        case "$got" in
+          no:*) printf 'PASS  %-46s names removed -> bg_bds-utf8 loses its digits (%s)\n' "mutant: the keysym name table" "$got"; _p=$((_p+1)) ;;
+          *)    printf 'FAIL  %-46s got %s\n' "mutant: the keysym name table" "$got"; _f=$((_f+1)) ;;
+        esac
+    fi
+
+    # MUTATION 2: the unanchored keycode pattern. Half the xkb maps write one
+    # plane per line with the modifiers in front — `shift keycode 2 = ...`.
+    # Anchoring the pattern made `fi` look like a keyboard with no `1`, no `7`
+    # and no `e`, which is how this was found.
+    MUT2="$WORK/mutant-anchor"
+    sed 's|/keycode\[\[:space:\]\]+\[0-9\]+\[\[:space:\]\]\*=/ {|/^keycode[[:space:]]+[0-9]+[[:space:]]*=/ {|' "$TFNS" > "$MUT2"
+    if cmp -s "$TFNS" "$MUT2"; then
+        printf 'FAIL  %-46s the mutation matched nothing\n' "mutant: the unanchored keycode pattern"; _f=$((_f+1))
+    else
+        got=$(bash -c '. "$1"; keymap_can_type apexzed1 "$2" fi' _ "$MUT2" "$T" 2>/dev/null)
+        case "$got" in
+          no:*) printf 'PASS  %-46s anchored -> fi loses keys it has (%s)\n' "mutant: the unanchored keycode pattern" "$got"; _p=$((_p+1)) ;;
+          *)    printf 'FAIL  %-46s got %s\n' "mutant: the unanchored keycode pattern" "$got"; _f=$((_f+1)) ;;
+        esac
+    fi
+
+    # THE WHOLE TREE, so a future kbd update that moves a layout into or out of
+    # the untypeable set is visible instead of silent. The bound is loose on
+    # purpose: what must not happen is 0 (the check has stopped working) or
+    # most of the tree (it has started condemning working keyboards).
+    yes=0; no=0; unk=0
+    for f in $(find "$T/xkb" "$T/legacy/i386" "$T/i386" -type f -name '*.map.gz' 2>/dev/null | sort); do
+        # The FILE, not the name: keymap_ascii_set takes an absolute path as
+        # the map itself, which skips one find over the whole tree per keymap.
+        case "$(keymap_can_type apexzed1 "$T" "$f")" in
+            yes)  yes=$((yes+1)) ;;
+            no:*) no=$((no+1)) ;;
+            *)    unk=$((unk+1)) ;;
+        esac
+    done
+    if [ "$yes" -gt 400 ] && [ "$no" -ge 1 ] && [ "$no" -le 40 ]; then
+        printf 'PASS  %-46s %s typeable, %s not, %s unreadable\n' "the tree splits the way it was measured" "$yes" "$no" "$unk"; _p=$((_p+1))
+    else
+        printf 'FAIL  %-46s %s typeable, %s not, %s unreadable\n' "the tree splits the way it was measured" "$yes" "$no" "$unk"; _f=$((_f+1))
+    fi
+    printf 'TYPEABLE-SUB: %s %s\n' "$_p" "$_f"
+) > "$WORK/typeable.out" 2>&1
+    cat "$WORK/typeable.out"
+    tline=$(grep -m1 '^TYPEABLE-SUB: ' "$WORK/typeable.out" 2>/dev/null || true)
+    if [ -z "$tline" ]; then
+        bad "the typeability checks reported a result" "no TYPEABLE-SUB line"
+    else
+        read -r _ttag tp tf <<<"$tline"
+        : "$_ttag"
+        pass=$((pass + tp)); fail=$((fail + tf))
+    fi
+fi
+
 echo "── the keymap moves the KEYS, not just a string in a file ─────────────"
 # The property the owner actually experiences is not "vconsole.conf contains a
 # name". It is: the key their finger lands on produces the character they

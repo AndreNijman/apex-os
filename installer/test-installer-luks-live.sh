@@ -73,11 +73,15 @@ command -v losetup   >/dev/null || die "losetup is not installed."
 #
 # There are now two independent layers and this suite uses both:
 #
-#   1. PREVENTION, in the engine. `apex-install` masks
-#      /sys/firmware/efi/efivars with a tmpfs whenever the install target is
-#      loop-backed, so the container has no NVRAM to write. Measured by
-#      test-installer-luks.sh, which also fails if a new privileged call site
-#      appears without the mask.
+#   1. PREVENTION, in the engine. `apex-install` passes bootc
+#      `--generic-image` whenever the install target is loop-backed, which
+#      skips the firmware step while still installing every bootloader type,
+#      and additionally masks /sys/firmware/efi/efivars in the container.
+#      The FLAG is the guard; the mask is defence in depth. The first version
+#      of this shipped the mask alone and a run on 2026-09-20 at 22:12 proved
+#      it insufficient: bootc takes --pid=host and re-enters the host mount
+#      namespace for the bootloader step. Measured by test-installer-luks.sh,
+#      which also fails if a new privileged call site appears unguarded.
 #   2. DETECTION, here. Every byte of the host's `Boot*` variables is hashed
 #      before and after the engine runs, by the same guard the bootc lab uses.
 #      If layer 1 is ever wrong, this says so when the command returns instead
@@ -467,6 +471,24 @@ fi
 # rendering of it. Two sources; a change either one sees is a failure. And a
 # verdict that is neither "verified" nor an explained could-not-run is a
 # failure too: a guard whose output cannot be found proves nothing.
+# And the engine's own decision, plus the absence of the tool that does the
+# damage. MEASURED 2026-09-20: the tmpfs mask ALONE did not stop this — bootc
+# runs with --pid=host and re-enters the host mount namespace for the
+# bootloader step, so `efibootmgr --create --disk /dev/loop1` still reached
+# this machine's NVRAM and the guard below is what caught it. The prevention
+# is `bootc install --generic-image`, which skips the firmware step, and these
+# two assertions are what say it is actually in effect.
+if grep -q -- '--generic-image' "$LOGCOPY" 2>/dev/null \
+   || grep -q 'loop-backed' "$LOGCOPY" 2>/dev/null; then
+    ok "the engine took the loopback path for the firmware" "$(grep -m1 '^..:..:.. nvram:' "$LOGCOPY" 2>/dev/null | sed 's/^[0-9:]* //')"
+else
+    bad "the engine took the loopback path for the firmware" "no nvram decision in the engine log"
+fi
+if grep -q 'Executing: "efibootmgr"' "$OUT" "$LOGCOPY" 2>/dev/null; then
+    bad "bootupd never ran efibootmgr" "it did — see the log; the firmware step was NOT skipped"
+else
+    ok "bootupd never ran efibootmgr" "the firmware step was skipped"
+fi
 nvverdict=$(sed -n 's/^.*nvram-guard\[[^]]*\]: verdict: \([a-z-]*\).*/\1/p' "$OUT" 2>/dev/null | tail -1)
 case "$nvverdict" in
     verified)       ok "nvram-guard measured the run" "verdict: verified" ;;
