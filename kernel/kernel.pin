@@ -21,7 +21,10 @@
 # CachyOS's kernel tree. BORE + sched_ext + the CachyOS patch set.
 KERNEL_VERSION=7.2.6
 KERNEL_TAG=cachyos-7.2.6-1
-KERNEL_TAG_OBJECT=ad989a1d77e9ffdf2c1a92f67b75707bae0dda74
+# git tag object for KERNEL_TAG, for provenance when someone goes looking:
+#   ad989a1d77e9ffdf2c1a92f67b75707bae0dda74
+# Not a KEY= line: KERNEL_SRC_SHA256 is what actually pins the content, and
+# tests/check-kernel-pin.sh rejects a pin key nothing reads.
 KERNEL_SRC_URL=https://github.com/CachyOS/linux/archive/refs/tags/cachyos-7.2.6-1.tar.gz
 KERNEL_SRC_SHA256=df0e592cb404cc650664241820d53385b76b4fb284f2ab33ffa9bf9f7d43243d
 
