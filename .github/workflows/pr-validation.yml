@@ -3528,8 +3528,12 @@ jobs:
           # 6 -> 10 with P1-054's start screen, 10 -> 33 with P1-056/057/058's
           # screens and P1-059/060's manifest assertions. Same reasoning as the
           # core floor above: a floor that has been overtaken stops being one.
-          test "$total" -ge 33 \
-            || { echo "::error::only $total app tests ran; expected at least 33"; exit 1; }
+          #
+          # 33 -> 53, measured on 2026-09-20 from this module's own results
+          # XML after android-release added the install-status receiver
+          # assertion and `roadmap/v2.2` brought the rest.
+          test "$total" -ge 53 \
+            || { echo "::error::only $total app tests ran; expected at least 53"; exit 1; }
 
       # The guide's prose, under the same stop-slop checker the desktop's help
       # passes. It reports NOT CHECKED and exits 0 when the skill is absent,

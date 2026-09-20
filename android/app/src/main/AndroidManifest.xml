@@ -25,6 +25,34 @@
          is not already connected to. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Keeping this app from drifting away from the machines it talks to.
+
+         This phone is not running APEX-OS. The APK is in no image and `apex
+         update` cannot reach it, so unlike the ChatGPT and Claude DESKTOP apps
+         — which must not self-update, because `sudo apex update` already moves
+         them — there is no other path here. Without this permission the app
+         only ever moves forward when its owner remembers to go and look, and a
+         client that falls behind the OS is the exact failure the protocol
+         window on the other side of this app exists to survive.
+
+         What it buys is narrow and worth stating, because the name sounds
+         broader than it is. It does NOT let this app install anything quietly,
+         and it does not let it install anything else: it earns the right to
+         ASK, and Android still draws its own "do you want to update this app?"
+         screen, which the user can refuse. GrapheneOS draws it too. The user
+         can also revoke it afterwards from Settings and the app keeps working
+         — the update row simply offers to send them there again.
+
+         The APK never becomes a file this app owns. It is streamed from the
+         release straight into a `PackageInstaller` session while its SHA-256
+         is computed, and the session is committed only if the digest matches
+         the one the release published — so there is no download directory, no
+         FileProvider, no content:// URI, and nothing for
+         `InsecureStorageTest`'s byte-by-byte walk of app storage to account
+         for. `ManifestTest` asserts that the permission list is exactly these
+         five and no more. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- Push-to-talk, and what is NOT here is the point of it.
 
          RECORD_AUDIO is absent, deliberately. Speech reaches this app through
@@ -116,5 +144,22 @@
                 <data android:scheme="apex-remote" />
             </intent-filter>
         </activity>
+
+        <!-- Where `PackageInstaller` answers, and where the user's install
+             prompt is actually raised: `commit()` shows nothing by itself, it
+             broadcasts STATUS_PENDING_USER_ACTION carrying the intent that
+             draws the prompt.
+
+             Declared here rather than registered at runtime because the status
+             can arrive after this process has gone, and `exported="false"`
+             because the only sender that should ever reach it is the system
+             replying to a session this app created. -->
+        <receiver
+            android:name=".update.UpdateInstallReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.apexos.remote.UPDATE_STATUS" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
