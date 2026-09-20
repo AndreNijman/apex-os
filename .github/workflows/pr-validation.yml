@@ -695,21 +695,24 @@ jobs:
         run: ./tests/test-boot-v2.sh
 
       # The efivars guard. In `static` for the same reason as the step above:
-      # the scan it ends with walks EVERY tracked file, so a PR adding an
-      # unmasked `bootc install --via-loopback` anywhere — a workflow, an
-      # installer script, a lab helper — must not be able to skip it by
-      # touching neither apexd/ nor files/.
+      # the scan it ends with walks EVERY tracked file, so a PR adding a
+      # `bootc install --via-loopback` with no `--generic-image` anywhere — a
+      # workflow, an installer script, a lab helper — must not be able to skip
+      # it by touching neither apexd/ nor files/.
       #
-      # 2026-09-20: one loopback install out of eight ran without
-      # `--tmpfs /sys/firmware/efi/efivars`, bootupd rewrote the HOST's boot
-      # entry to point inside the disk image it was building, and the laptop
-      # would not boot the next morning. The discipline was already there and
-      # was followed seven times out of eight. BOOT-BREAKAGE-2026-09-20.md.
+      # 2026-09-20, twice. A loopback install reached bootc's firmware step,
+      # bootupd rewrote the HOST's boot entry to point inside the disk image it
+      # was building, and the laptop would not boot the next morning. The fix
+      # shipped that evening was an efivars tmpfs; the SECOND occurrence, four
+      # hours later, happened with that tmpfs applied and logged, because bootc
+      # nsenters into the host's mount namespace for that step. The flag that
+      # prevents it is `--generic-image`, and this suite proves the wrapper
+      # refuses to launch without it. BOOT-BREAKAGE-2026-09-20.md.
       #
       # Nothing dangerous runs here: `podman` and `efibootmgr` are stubs on
       # PATH and the firmware root is a fixture tree. The assertion is about
       # launch ARGUMENTS, which need no launch.
-      - name: the efivars mask is not something a caller can forget
+      - name: a loopback bootc install cannot reach this machine's firmware
         if: ${{ !cancelled() }}
         run: ./tests/test-bootc-install-guard.sh
 

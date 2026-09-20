@@ -2,11 +2,23 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  test-bootc-install-guard.sh — the efivars guard, proven in BOTH directions.
 #
-#  What it guards, in one paragraph: on 2026-09-20 a `bootc install to-disk
-#  --via-loopback` ran in a `--privileged --pid=host` container with no
-#  `--tmpfs /sys/firmware/efi/efivars`. bootupd deleted the host's Boot0000 and
-#  recreated it against the ESP inside the image file being built. The laptop
-#  would not boot. BOOT-BREAKAGE-2026-09-20.md.
+#  What it guards, in one paragraph: on 2026-09-20 `installer/apex-install`
+#  ran inside a `--privileged --pid=host` container and reached bootc's
+#  bootloader step without `--generic-image`. bootupd deleted the host's
+#  Boot0000 and recreated it against the ESP inside the image file being built.
+#  The laptop would not boot. BOOT-BREAKAGE-2026-09-20.md.
+#
+#  ═══ WHICH LAYER IS WHICH ═══
+#
+#  PREVENTION is `--generic-image` ("Changes to the system firmware will be
+#  skipped"), asserted in the argv as `generic-image-present` and mutated below.
+#  DETECTION is nvram-guard, exercised below in both directions.
+#  The efivars tmpfs is DEFENCE IN DEPTH and INERT against bootc, which
+#  nsenters into the host's mount namespace for that step; it is still asserted
+#  and still mutated, because keeping it working is cheap, but the suite must
+#  not be read as saying it protects anything. The first version of this file
+#  passed 52/0 while its central claim was false, because every assertion was
+#  about arguments and none was about which argument does the work.
 #
 #  ═══ THE DEFECT THIS SUITE REFUSES TO BE ═══
 #
@@ -27,6 +39,17 @@
 #    * that the repo scan works is proven against PLANTED fixtures, one
 #      violating and one compliant, because the repository has zero loopback
 #      callers today and a scan finding nothing proves nothing.
+#
+#  ═══ WHAT THE REPO SCAN CANNOT COVER, SAID OUT LOUD ═══
+#
+#  The scan matches the literal `--via-loopback`. NEITHER of the two real
+#  incidents contained that string: both were `apex-install` handing bootc a
+#  loop DEVICE it had attached itself, on a `to-filesystem` install. So the
+#  scan covers the shape a human types at a prompt, and covers apex-install's
+#  path NOT AT ALL — that one is covered by `installer/test-installer-luks.sh`'s
+#  NVRAM section and by the live suite asserting nvram-guard's verdict. Saying
+#  so here is the point: a scan believed to cover more than it does is how the
+#  second incident happened.
 #
 #  ═══ NOTHING DANGEROUS RUNS ═══
 #
@@ -128,6 +151,27 @@ mask_in_recording() {
     return 1
 }
 
+# Is --generic-image in the recorded podman argv, and is it where BOOTC will
+# see it? Position is the whole point: podman would swallow the same string
+# appearing before the image name, and bootc would never get it. So this reads
+# the FILE the stub wrote and only counts hits after the `bootc install` pair.
+generic_image_in_recording() {
+    local f="$1" seen_bootc=0 prev="" line
+    [[ -f "$f" ]] || return 1
+    while IFS= read -r line; do
+        if [[ "$seen_bootc" == 0 ]]; then
+            [[ "$prev" == "bootc" && "$line" == "install" ]] && seen_bootc=1
+            prev="$line"; continue
+        fi
+        [[ "$line" == "--generic-image" ]] && return 0
+    done < "$f"
+    return 1
+}
+
+# The same string BEFORE `bootc install` must NOT count. Used to prove the
+# helper above discriminates, rather than matching anywhere in the file.
+generic_image_anywhere() { grep -qxF -- '--generic-image' "$1" 2>/dev/null; }
+
 IMG="$WORK/target.img"
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -144,9 +188,41 @@ fi
 grep -q -- '--via-loopback' "$REC/podman.argv" \
     && ok "the run really is a loopback install" \
     || bad "no --via-loopback in the recorded argv — this suite is testing the wrong command"
+# THE PREVENTION. Everything above this line is about a mask that bootc walks
+# straight past; this is the assertion that corresponds to the layer that works.
+if generic_image_in_recording "$REC/podman.argv"; then
+    ok "bootc itself was handed --generic-image — the firmware step is skipped"
+else
+    bad "no --generic-image after 'bootc install' in the recorded argv: $(tr '\n' ' ' < "$REC/podman.argv" 2>/dev/null)"
+fi
 grep -q 'verdict: verified' <<<"$out" \
     && ok "nvram-guard reported verified around the run" \
     || bad "nvram-guard did not report verified: $out"
+
+# ═════════════════════════════════════════════════════════════════════════════
+sec "a caller cannot satisfy generic-image-present from the podman side"
+# ═════════════════════════════════════════════════════════════════════════════
+# `--podman-arg --generic-image` puts the literal string in the argv, but before
+# the image name — podman eats it and bootc never sees it. A check that merely
+# grepped the argv would call that compliant. This case exists so that the
+# discrimination is proven rather than asserted in a comment. podman's stub
+# accepts anything, so the wrapper still runs; what must hold is that the
+# helper distinguishes the two positions.
+reset_recordings
+pout="$("$WRAPPER" --size 1M --podman-arg --generic-image localhost/fake:lab "$IMG" 2>&1)"; prc=$?
+eq 0 "$prc" "a --podman-arg --generic-image run still launches"
+generic_image_anywhere "$REC/podman.argv" \
+    && ok "the string appears in the argv twice over" \
+    || bad "the fixture did not land: $pout"
+gcount="$(grep -cxF -- '--generic-image' "$REC/podman.argv")"
+eq 2 "$gcount" "both copies are present (one podman-side, one bootc-side)"
+# Now remove the wrapper's own copy from the recording and re-check: what is
+# left is ONLY the podman-side string, and the helper must reject it.
+grep -nxF -- '--generic-image' "$REC/podman.argv" | tail -1 | cut -d: -f1 \
+    | xargs -I{} sed -i '{}d' "$REC/podman.argv"
+generic_image_in_recording "$REC/podman.argv" \
+    && bad "a podman-side --generic-image satisfied the bootc-side check" \
+    || ok "a podman-side --generic-image does NOT satisfy the bootc-side check"
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "direction 2 — delete the mask and the named assertion goes red"
@@ -176,6 +252,71 @@ grep -q 'efivars-mask-present' <<<"$mout" \
 [[ -e "$WORK/mutant.img" ]] \
     && bad "the mutant created the target image before refusing" \
     || ok "nothing was created on disk by the refused run"
+
+# ═════════════════════════════════════════════════════════════════════════════
+sec "direction 2b — delete --generic-image and the launch is REFUSED"
+# ═════════════════════════════════════════════════════════════════════════════
+# THE DISCRIMINATING CASE. A loopback install without --generic-image is the
+# thing that made this laptop unbootable twice, and the wrapper must refuse it
+# BEFORE launching, not detect it afterwards. Proven the same way as the mask:
+# delete the one tagged line from a COPY and watch `generic-image-present` go
+# red while podman is never invoked. The damage is never reproduced — no bootc
+# runs, no container starts, no EFI variable is read or written. The claim is
+# about the argv the wrapper builds and about its refusal, and both are
+# observable without firmware.
+MUT2="$WORK/mutant2"; mkdir -p "$MUT2"
+cp "$WRAPPER" "$MUT2/bootc-install-lab"; cp "$GUARD" "$MUT2/nvram-guard"
+chmod +x "$MUT2/bootc-install-lab" "$MUT2/nvram-guard"
+gbefore=$(grep -c '# generic-image$' "$WRAPPER")
+sed -i '/# generic-image$/d' "$MUT2/bootc-install-lab"
+gafter=$(grep -c '# generic-image$' "$MUT2/bootc-install-lab")
+eq 1 "$gbefore" "the shipped wrapper has exactly one --generic-image line"
+eq 0 "$gafter" "the mutant has none — the mutation really removed it"
+# and it removed the RIGHT thing: the mutant must still carry the mask, or this
+# case would be re-proving direction 2 under a different name.
+grep -q -- '--tmpfs /sys/firmware/efi/efivars' "$MUT2/bootc-install-lab" \
+    && ok "the mutant still carries the efivars mask — the two layers are independent" \
+    || bad "the mutation removed the mask too; this case is not discriminating"
+
+reset_recordings
+g2out="$("$MUT2/bootc-install-lab" --size 1M localhost/fake:lab "$WORK/mutant2.img" 2>&1)"; g2rc=$?
+eq 7 "$g2rc" "the mutant refuses to launch"
+grep -q 'generic-image-present' <<<"$g2out" \
+    && ok "the refusal names the assertion: generic-image-present" \
+    || bad "the mutant failed without naming generic-image-present: $g2out"
+grep -q 'efivars-mask-present' <<<"$g2out" \
+    && bad "it blamed the mask, which is not what is missing" \
+    || ok "it does not blame the mask — the message names the layer that failed"
+[[ -f "$REC/podman.argv" ]] \
+    && bad "the mutant still invoked podman — the check runs too late to matter" \
+    || ok "podman was never invoked: the refusal happens before launch"
+[[ -e "$WORK/mutant2.img" ]] \
+    && bad "the mutant created the target image before refusing" \
+    || ok "nothing was created on disk by the refused run"
+grep -q 'nsenter\|host mount namespace' <<<"$g2out" \
+    && ok "the refusal says why the mask would not have covered this" \
+    || bad "the refusal does not explain the namespace hop: $g2out"
+
+# A wrapper whose argv lost `bootc install` entirely must also fail, rather
+# than scanning an empty range and reporting ok. That is this repository's
+# signature defect and the assertion is written to fail loudly on it.
+MUT3="$WORK/mutant3"; mkdir -p "$MUT3"
+cp "$WRAPPER" "$MUT3/bootc-install-lab"; cp "$GUARD" "$MUT3/nvram-guard"
+chmod +x "$MUT3/bootc-install-lab" "$MUT3/nvram-guard"
+# Anchored to the array append, not to the bare phrase: the phrase also appears
+# in the header prose, and a sed that rewrote a comment would "break" nothing
+# while this case still reported a pass.
+nb=$(grep -cF 'PODMAN_ARGS+=("$IMAGE" bootc install to-disk' "$MUT3/bootc-install-lab")
+sed -i 's/PODMAN_ARGS+=("$IMAGE" bootc install to-disk/PODMAN_ARGS+=("$IMAGE" NOTBOOTC notinstall to-disk/' "$MUT3/bootc-install-lab"
+na=$(grep -cF 'PODMAN_ARGS+=("$IMAGE" bootc install to-disk' "$MUT3/bootc-install-lab")
+eq 1 "$nb" "there is exactly one bootc-install ARRAY APPEND to break"
+eq 0 "$na" "the mutant has none — the mutation really removed it"
+reset_recordings
+n3out="$("$MUT3/bootc-install-lab" --size 1M localhost/fake:lab "$WORK/mutant3.img" 2>&1)"; n3rc=$?
+eq 7 "$n3rc" "an argv with no 'bootc install' fails the assertion"
+grep -q 'inspected nothing' <<<"$n3out" \
+    && ok "and it says it would have inspected nothing" \
+    || bad "a vacuous scan passed quietly: $n3out"
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "a caller cannot unmask it either"
@@ -289,6 +430,15 @@ sec "no scripted caller in this repository bypasses the wrapper"
 # repo proves nothing on its own. Both fixtures below exist so that the scan is
 # shown to work in both directions before its verdict on the repo is believed.
 #
+# WHAT IT LOOKS FOR CHANGED, AND THE OLD ANSWER WAS BACKWARDS. It used to flag
+# a `--via-loopback` command with no `/sys/firmware/efi/efivars` in it. That is
+# the inert property: the mask does not stop bootc, which nsenters into the
+# host mount namespace for the bootloader step. So the old scan would have
+# passed a command that writes this machine'"'"'s NVRAM (loopback, masked, no
+# --generic-image) and flagged one that cannot (loopback, unmasked, with
+# --generic-image). It now flags a loopback install with no `--generic-image`,
+# which is the property that decides whether the firmware step runs.
+#
 # Continuations are joined first: in a real caller the `--via-loopback` and the
 # `--tmpfs` are on different physical lines of one command.
 scan_list() {   # file paths on stdin -> "path:line" per violation
@@ -316,7 +466,7 @@ scan_list() {   # file paths on stdin -> "path:line" per violation
                 # which fails loudly and is the right direction to be wrong in.
                 code = acc; sub(/[[:space:]]#.*$/, "", code)
                 if (substr(s, 1, 1) != "#" && index(code, "via-loopback") > 0 \
-                    && index(code, "/sys/firmware/efi/efivars") == 0)
+                    && index(code, "--generic-image") == 0)
                     printf "%s:%d\n", path, NR
                 acc = ""
             }
@@ -327,13 +477,19 @@ scan_list() {   # file paths on stdin -> "path:line" per violation
 FIX="$WORK/fixtures"; mkdir -p "$FIX"
 cat > "$FIX/violating.sh" <<'FIXTURE'
 #!/bin/sh
-# This is what the 2026-09-20 run looked like.
+# A loopback install that would run bootc's firmware step against this machine.
+# NOT a transcript of either real incident: both of those were apex-install
+# handing bootc a loop DEVICE, with no `--via-loopback` anywhere in them. This
+# is the shape a person types at a prompt, which is the shape the scan covers.
+# Note it DOES carry the efivars tmpfs, and is dangerous anyway — that is the
+# case the previous version of this scan called compliant.
 sudo podman run --rm --privileged --pid=host \
     -v /var/lib/containers:/var/lib/containers \
     -v /dev:/dev \
+    --tmpfs /sys/firmware/efi/efivars \
     -v /var/lab-scratch:/work \
     localhost/apex-os:daily \
-    bootc install to-disk --via-loopback --generic-image --wipe \
+    bootc install to-disk --via-loopback --wipe \
         --filesystem ext4 /work/lab.img
 FIXTURE
 cat > "$FIX/compliant.sh" <<'FIXTURE'
@@ -355,18 +511,33 @@ sudo podman run --rm --privileged --pid=host \
     -v /var/lab-scratch:/work \
     localhost/apex-os:daily \
     bootc install to-disk --via-loopback --wipe \
-        --filesystem ext4 /work/lab.img   # TODO --tmpfs /sys/firmware/efi/efivars
+        --filesystem ext4 /work/lab.img   # TODO add --generic-image
 FIXTURE
 
 vhits="$(printf '%s\n' "$FIX/violating.sh" | scan_list)"
-[[ -n "$vhits" ]] && ok "the scan catches an unmasked loopback caller ($vhits)" \
-                  || bad "the scan MISSED the 2026-09-20 command shape — it inspects nothing"
+[[ -n "$vhits" ]] && ok "the scan catches a loopback caller with no --generic-image ($vhits)" \
+                  || bad "the scan MISSED a firmware-writing command shape — it inspects nothing"
 chits="$(printf '%s\n' "$FIX/compliant.sh" | scan_list)"
-[[ -z "$chits" ]] && ok "the scan passes a masked caller" \
-                  || bad "the scan flags a correctly masked caller: $chits"
+[[ -z "$chits" ]] && ok "the scan passes a caller that skips the firmware step" \
+                  || bad "the scan flags a correct caller: $chits"
 khits="$(printf '%s\n' "$FIX/commented.sh" | scan_list)"
-[[ -n "$khits" ]] && ok "a mask that exists only in a trailing comment does not satisfy the scan" \
-                  || bad "the scan accepted a COMMENTED mask — a comment is not a guard"
+[[ -n "$khits" ]] && ok "a flag that exists only in a trailing comment does not satisfy the scan" \
+                  || bad "the scan accepted a COMMENTED --generic-image — a comment is not a guard"
+# The old predicate, run against the same three fixtures, to show the change is
+# not cosmetic: it called the dangerous fixture compliant. If this ever stops
+# holding, the two predicates have converged and one of them is wrong.
+old_predicate_hits() {
+    awk '{ acc = acc $0 }
+         /\\[[:space:]]*$/ { sub(/\\[[:space:]]*$/, " ", acc); next }
+         { s = acc; sub(/^[[:space:]]*/, "", s)
+           code = acc; sub(/[[:space:]]#.*$/, "", code)
+           if (substr(s, 1, 1) != "#" && index(code, "via-loopback") > 0 \
+               && index(code, "/sys/firmware/efi/efivars") == 0) print NR
+           acc = "" }' "$1"
+}
+[[ -z "$(old_predicate_hits "$FIX/violating.sh")" ]] \
+    && ok "the OLD predicate passed this dangerous command — the inversion was load-bearing" \
+    || bad "the old predicate also caught it; this scan change proves nothing"
 
 # Now the repository itself. Two files are exempt and both are named here:
 # the wrapper builds the argv across several array appends rather than one
@@ -394,8 +565,8 @@ grep -qxF 'installer/apex-install' "$WORK/tracked.txt" \
     || bad "installer/apex-install is not in the scanned set — the file list is wrong"
 hits="$(scan_list < "$WORK/tracked.txt")"
 [[ -z "$hits" ]] \
-    && ok "no tracked file runs an unmasked --via-loopback install" \
-    || bad "these run a loopback install without masking efivars:"$'\n'"$hits"
+    && ok "no tracked file runs a --via-loopback install without --generic-image" \
+    || bad "these run a loopback install that would write this machine's NVRAM:"$'\n'"$hits"
 
 printf '\n== test-bootc-install-guard: %d passed, %d failed ==\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))
