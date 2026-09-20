@@ -1,4 +1,14 @@
-//! Read-only image laboratory. No raw-device or installation capability.
+//! GPT enumeration and all-bytes content inspection, plus — on Windows — the
+//! storage, ownership and locking layer the installer is built on.
+//!
+//! The GPT reader here is deliberately the *only* GPT reader: on Windows it is
+//! pointed at `\\.\PhysicalDriveN` and its answer is compared against what
+//! Windows itself reports through `IOCTL_DISK_GET_DRIVE_LAYOUT_EX`. Two
+//! independent sources that have to agree is worth more than either alone.
+pub mod plan;
+#[cfg(windows)]
+pub mod windows;
+
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path};
@@ -61,13 +71,13 @@ pub fn open_image(path: &Path) -> io::Result<File> {
     if !f.metadata()?.is_file() { return Err(refuse("opened handle is not a regular file")); }
     Ok(f)
 }
-fn at(f: &mut File, offset: u64, size: usize) -> io::Result<Vec<u8>> {
+fn at<R: Read + Seek>(f: &mut R, offset: u64, size: usize) -> io::Result<Vec<u8>> {
     f.seek(SeekFrom::Start(offset))?;
     let mut b = vec![0;size];
     f.read_exact(&mut b)?;
     Ok(b)
 }
-fn header(f: &mut File, lba: u64, alternate: u64) -> io::Result<Vec<u8>> {
+fn header<R: Read + Seek>(f: &mut R, lba: u64, alternate: u64) -> io::Result<Vec<u8>> {
     let h = at(f, lba * 512, 512)?;
     if &h[..8] != b"EFI PART" || u32le(&h[8..]) != 0x10000 || u32le(&h[12..]) != 92
         || u32le(&h[20..]) != 0 || u64le(&h[24..]) != lba || u64le(&h[32..]) != alternate {
@@ -82,20 +92,49 @@ fn header(f: &mut File, lba: u64, alternate: u64) -> io::Result<Vec<u8>> {
 /// entries, mirrored tables. Unsupported layouts are refused, not guessed.
 pub fn enumerate(f: &mut File) -> io::Result<Layout> {
     let len = f.metadata()?.len();
+    enumerate_in(f, len)
+}
+/// The same enumeration against anything seekable, with the length supplied
+/// rather than asked of the object.
+///
+/// This split is not tidiness. `File::metadata().len()` answers **0** for a
+/// handle on `\\.\PhysicalDriveN`, so a reader that asks the handle how big
+/// it is decides every physical disk is too small to hold a GPT and refuses
+/// the machine it was pointed at. On Windows the length comes from
+/// `IOCTL_DISK_GET_LENGTH_INFO` instead.
+pub fn enumerate_in<R: Read + Seek>(f: &mut R, len: u64) -> io::Result<Layout> {
     if len < 68 * 512 || len % 512 != 0 { return Err(refuse("invalid image length")); }
     let last = len / 512 - 1;
     let mbr = at(f, 0, 512)?;
+    // SizeInLBA. UEFI 2.10 table 5.3 says "the size of the disk minus one …
+    // Set to 0xFFFFFFFF if the size of the disk is too large to be
+    // represented in this field", and WINDOWS WRITES 0xFFFFFFFF ALWAYS —
+    // measured on a Windows Server 2022 install to a 40 GB disk, where the
+    // correct value 0x04FFFFFF fits easily. Requiring the exact value refuses
+    // every Windows-formatted disk there is, which is the entire population
+    // this program exists to read.
+    let size_in_lba = u64::from(u32le(&mbr[458..]));
     if mbr[510..] != [0x55,0xaa] || mbr[446] != 0 || mbr[450] != 0xee
-        || u32le(&mbr[454..]) != 1 || u64::from(u32le(&mbr[458..])) != last.min(u64::from(u32::MAX))
+        || u32le(&mbr[454..]) != 1
+        || (size_in_lba != last.min(u64::from(u32::MAX)) && size_in_lba != u64::from(u32::MAX))
         || mbr[462..510].iter().any(|v| *v != 0) {
         return Err(refuse("missing protective MBR or hybrid MBR"));
     }
     let h = header(f,1,last)?;
     let backup = header(f,last,1)?;
+    // The usable range is a RANGE, not a pair of constants. The first round
+    // required first-usable == 34 and last-usable == last-33 exactly, which
+    // is what a disk looks like when the entry table is immediately followed
+    // by data. Every disk `sfdisk` produces has first-usable 2048, because it
+    // aligns the first partition to 1 MiB, and that alignment is normal and
+    // correct. UEFI 2.10 §5.3.2 constrains these to a range and nothing more:
+    // the usable range must lie outside both copies of the header and table.
+    let first_usable = u64le(&h[40..]);
+    let last_usable = u64le(&h[48..]);
     if h[40..72] != backup[40..72] || h[80..92] != backup[80..92]
         || u64le(&h[72..]) != 2 || u64le(&backup[72..]) != last-32
         || u32le(&h[80..]) != 128 || u32le(&h[84..]) != 128
-        || u64le(&h[40..]) != 34 || u64le(&h[48..]) != last-33
+        || first_usable < 34 || last_usable > last-33 || first_usable > last_usable
         || h[56..72].iter().all(|v| *v == 0) {
         return Err(refuse("unsupported GPT geometry or disagreeing backup"));
     }
@@ -111,7 +150,11 @@ pub fn enumerate(f: &mut File) -> io::Result<Layout> {
         }
         let start = u64le(&e[32..]);
         let end = u64le(&e[40..]);
-        if start < 34 || end > last-33 || start > end || e[16..32].iter().all(|v| *v == 0) {
+        // Against the header's own usable range, not against constants: a
+        // partition outside the range its own table declares is the defect
+        // worth catching.
+        if start < first_usable || end > last_usable || start > end
+            || e[16..32].iter().all(|v| *v == 0) {
             return Err(refuse("invalid partition bounds or identity"));
         }
         let p = Partition { id: guid(&e[16..32]), kind: guid(&e[..16]),

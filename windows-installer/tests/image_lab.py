@@ -19,11 +19,13 @@ START = 2048
 END = SIZE // 512 - 34
 
 
-def fixture(kind=LINUX, attributes=0, overlap=False, stale=False):
+def fixture(kind=LINUX, attributes=0, overlap=False, stale=False,
+            first_usable=34, last_usable=None, mbr_size=None):
     b = bytearray(SIZE)
     b[510:512] = b'\x55\xaa'
     b[450] = 0xee
-    struct.pack_into('<II', b, 454, 1, SIZE // 512 - 1)
+    struct.pack_into('<II', b, 454, 1,
+                     SIZE // 512 - 1 if mbr_size is None else mbr_size)
     entries = bytearray(16384)
     entries[:16] = kind.bytes_le
     entries[16:32] = PART.bytes_le
@@ -36,11 +38,13 @@ def fixture(kind=LINUX, attributes=0, overlap=False, stale=False):
     if stale:
         entries[160] = 1  # unused type GUID, residual bounds
     last = SIZE // 512 - 1
+    if last_usable is None:
+        last_usable = last - 33
     for current, alternate, table in [(1, last, 2), (last, 1, last-32)]:
         h = bytearray(512)
         h[:8] = b'EFI PART'
         struct.pack_into('<IIIIQQQQ', h, 8, 0x10000, 92, 0, 0,
-                         current, alternate, 34, last-33)
+                         current, alternate, first_usable, last_usable)
         h[56:72] = DISK.bytes_le
         struct.pack_into('<QIII', h, 72, table, 128, 128, zlib.crc32(entries))
         struct.pack_into('<I', h, 16, zlib.crc32(h[:92]))
@@ -63,6 +67,43 @@ class ImageTests(unittest.TestCase):
 
     def test_empty(self):
         self.check_image(fixture(), f'{(END-START+1)*512}/{(END-START+1)*512} bytes read', success=True)
+
+    def test_windows_writes_ffffffff_as_the_protective_mbr_size(self):
+        # UEFI 2.10 table 5.3: SizeInLBA is the disk size minus one, "Set to
+        # 0xFFFFFFFF if the size of the disk is too large to be represented in
+        # this field". Windows writes 0xFFFFFFFF ALWAYS -- measured on a
+        # Windows Server 2022 install to a 40 GB disk, where the correct
+        # 0x04FFFFFF fits with room to spare. Demanding the exact value refuses
+        # every Windows-formatted disk in the world.
+        total = (END - START + 1) * 512
+        self.check_image(fixture(mbr_size=0xFFFFFFFF),
+                         f'{total}/{total} bytes read', success=True)
+
+    def test_a_one_mib_aligned_usable_range_is_accepted(self):
+        # What sfdisk produces: the first partition aligned to 1 MiB, so
+        # first-usable is 2048 rather than 34. Requiring exactly 34 refused
+        # every disk this project's own lab builds.
+        total = (END - START + 1) * 512
+        self.check_image(fixture(first_usable=2048),
+                         f'{total}/{total} bytes read', success=True)
+
+    def test_a_partition_outside_the_declared_usable_range_is_refused(self):
+        # The other half of the same relaxation. Widening the accepted range
+        # must not stop the bounds check from using it: a partition starting
+        # before the table says the usable area begins, or ending after it
+        # ends, is refused.
+        self.check_image(fixture(first_usable=START + 8),
+                         'invalid partition bounds or identity')
+        self.check_image(fixture(last_usable=END - 1),
+                         'invalid partition bounds or identity')
+
+    def test_a_usable_range_that_overruns_the_disk_is_refused(self):
+        # last-usable must still lie inside the space the backup header and
+        # table occupy, whatever the header claims.
+        self.check_image(fixture(last_usable=SIZE // 512 - 2),
+                         'unsupported GPT geometry or disagreeing backup')
+        self.check_image(fixture(first_usable=33),
+                         'unsupported GPT geometry or disagreeing backup')
 
     def test_signatures_and_arbitrary_data(self):
         for offset, signature in [(3, b'NTFS    '), (1024+56, b'\x53\xef'),

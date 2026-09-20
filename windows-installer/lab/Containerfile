@@ -1,0 +1,73 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  APEX Windows installer lab
+#
+#  A disk-writing tool that has never written a disk is not finished, and there
+#  is no Windows machine in this program that may be written to. So the tool's
+#  test environment is a real Windows guest under qemu/KVM, and this is the
+#  image that runs it.
+#
+#  WHY A CONTAINER AND NOT THE HOST
+#
+#  The development host is APEX: bootc, read-only, `dnf install` refused. The
+#  qemu/OVMF/mtools stack cannot live next to the source. This mirrors
+#  `bootlab/Containerfile`, which exists for the same reason and which this
+#  deliberately does NOT extend — bootlab belongs to the boot-v2 units, and
+#  everything for this unit stays under `windows-installer/`.
+#
+#  /dev/kvm is passed as a device, not a privilege. The container stays
+#  unprivileged and every guest is an ordinary qemu process with no host disk,
+#  no host ESP and no host firmware variables in reach.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM registry.fedoraproject.org/fedora:43
+
+RUN dnf -y install --setopt=install_weak_deps=False \
+        `# ── the guest ──────────────────────────────────────────────────` \
+        qemu-kvm qemu-system-x86-core qemu-img \
+        `# edk2-ovmf is the UEFI firmware. The Windows guest is UEFI-only:` \
+        `# a CSM/BIOS guest would produce an MBR Windows install and none of` \
+        `# the GPT, ESP or firmware-variable assertions would mean anything.` \
+        edk2-ovmf \
+        `# ── authoring the install media ────────────────────────────────` \
+        `# xorriso remasters the Microsoft ISO so that it (a) carries` \
+        `# autounattend.xml and (b) boots from the *noprompt* El Torito EFI` \
+        `# image. Without (b) the guest sits on "Press any key to boot from` \
+        `# CD" forever, because there is no keyboard attached to a headless` \
+        `# run and the prompt is what the stock efisys.bin does.` \
+        xorriso \
+        `# wimlib inspects install.wim. Picking the wrong /IMAGE/INDEX in` \
+        `# autounattend.xml makes Setup stop on an edition-picker dialog` \
+        `# that a headless run cannot see, so the index is read, not guessed.` \
+        wimlib-utils \
+        `# ── moving files in and out of the guest without any driver ────` \
+        `# mtools reads and writes FAT from outside. The results transport is` \
+        `# a FAT disk the guest writes to and the host reads afterwards; that` \
+        `# needs no virtio driver, no network and no shared folder, none of` \
+        `# which stock Windows Setup media provides.` \
+        mtools dosfstools \
+        `# ── reading the guest's disks from the host ────────────────────` \
+        `# The "Windows is still bootable and its entry is untouched" claims` \
+        `# are made by host tools reading artefacts, never by the guest` \
+        `# reporting on itself. p7zip parses GPT and NTFS, which is how` \
+        `# Windows/Panther/setuperr.log comes out of a guest that died` \
+        `# headless. gdisk/util-linux read the partition tables.` \
+        p7zip p7zip-plugins gdisk util-linux parted e2fsprogs \
+        `# mkntfs builds the not-empty fixture partition. A Linux-made NTFS` \
+        `# is good enough for the claim being made: Windows mounts it, gives` \
+        `# it a letter, and the installer must then refuse it by name.` \
+        ntfsprogs \
+        `# virt-fw-vars prints an OVMF varstore's boot entries from outside` \
+        `# the guest. The before/after diff of Boot#### and BootOrder is the` \
+        `# assertion that the Windows entry was not touched — an assertion,` \
+        `# not an intention.` \
+        python3-virt-firmware \
+        `# ── the installer itself is cross-built here too ───────────────` \
+        rust cargo mingw64-gcc mingw64-winpthreads-static \
+        rust-std-static-x86_64-pc-windows-gnu \
+        `# ── odds and ends the scripts use ──────────────────────────────` \
+        python3 jq file findutils procps-ng socat coreutils diffutils \
+    && dnf clean all
+
+# qemu on Fedora lives here and is not on PATH under all invocations.
+ENV PATH="/usr/libexec:${PATH}"
+
+WORKDIR /work
