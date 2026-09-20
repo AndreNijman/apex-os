@@ -72,6 +72,7 @@ FROM registry.fedoraproject.org/fedora:43 AS kbuild
 
 COPY kernel/kernel.pin /build/kernel.pin
 COPY kernel/kernel-cachyos.spec /build/kernel-cachyos.spec
+COPY kernel/btf-xcheck.sh /usr/local/bin/apex-btf-xcheck
 COPY --from=gate-builder /out/apex-kernel-btf-gate /usr/local/bin/apex-kernel-btf-gate
 
 # Build dependencies. Transcribed from the spec's own BuildRequires, plus the
@@ -129,10 +130,11 @@ RUN set -eux; \
     ls -l
 
 # ── Build, gate, collect ────────────────────────────────────────────────────
-# One RUN on purpose. The kernel build tree is ~30 GB and must not become a
-# layer; the gate must run against the vmlinux this build produced rather than
-# against something recovered later; and the tree is deleted before the layer
-# closes.
+# One RUN on purpose. The kernel build tree is ~100 GB — measured 2026-09-20,
+# this machine's /var went 552 GB free to 453 GB during the compile — and must
+# not become a layer; the gate must run against the vmlinux this build produced
+# rather than against something recovered later; and the tree is deleted before
+# the layer closes.
 #
 # `-j12`, not `-j$(nproc)`: 16 parallel GCCs plus pahole's ~1 GB peak over a
 # 500 MB vmlinux is how a 29 GB box starts swapping.
@@ -145,26 +147,50 @@ RUN set -eux; \
     FEDVER="$(. /etc/os-release; echo "${VERSION_ID}")"; \
     test -n "${FEDVER}" || { echo "FATAL: no VERSION_ID in the builder's os-release"; exit 1; }; \
     echo "builder is Fedora ${FEDVER}; release will be cachyos1.apex${APEX_KERNEL_BUILD}.fc${FEDVER}"; \
+    # `--noclean` IS LOAD-BEARING, DO NOT DROP IT. rpm >= 4.20 runs an
+    # `Executing(rmbuild)` phase after a successful build that deletes
+    # %{buildsubdir} — the whole kernel source tree, vmlinux included. Without
+    # this flag rpmbuild succeeds, the tree evaporates, and the gate below has
+    # nothing to read: a 49-minute build that dies one second after the kernel
+    # is finished. That is exactly how the 2026-09-20 run failed. Measured on
+    # fedora:43 / rpm 6.0.2: default leaves 0 vmlinux under BUILD, --noclean
+    # leaves it. The spec defines no %clean, so the flag has no other effect.
+    #
     # NOT `rpmbuild … | tail`: `set -e` sees only the LAST command in a
     # pipeline, so a failed rpmbuild piped to tail exits 0 and the build
     # marches on to assert against a kernel that was never linked. Redirect,
     # test explicitly, print the tail either way.
+    T0="$(date -u +%s)"; \
+    echo "rpmbuild starting at $(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
     if ! rpmbuild -bb kernel-cachyos.spec \
             --define "_topdir /build/rpm" \
             --define "dist .apex${APEX_KERNEL_BUILD}.fc${FEDVER}" \
             --define "_smp_build_ncpus 12" \
+            --noclean \
             > /build/rpmbuild.log 2>&1; then \
         echo "FATAL: rpmbuild failed — last 120 lines:"; \
         tail -120 /build/rpmbuild.log; \
         exit 1; \
     fi; \
+    T1="$(date -u +%s)"; \
     tail -15 /build/rpmbuild.log; \
+    # The compile time is a number this tier is judged on and the rpmbuild log
+    # dies with this layer, so print it where the build log keeps it.
+    echo "rpmbuild took $(( (T1 - T0) / 60 ))m$(( (T1 - T0) % 60 ))s at -j12"; \
     \
     echo "=== locating the vmlinux this build linked ==="; \
-    VMLINUX="$(find /build/rpm/BUILD -maxdepth 4 -type f -name vmlinux | head -1)"; \
-    test -n "${VMLINUX}" \
-        || { echo "FATAL: no vmlinux under /build/rpm/BUILD — the build tree is not where this expects"; \
+    find /build/rpm/BUILD -maxdepth 4 -type f -name vmlinux > /build/vmlinux-found || true; \
+    NVM="$(wc -l < /build/vmlinux-found)"; \
+    # Exactly one, not `head -1`. The gate must read THE vmlinux this build
+    # linked; if that ever stops being unambiguous, picking the first silently
+    # is how a gate ends up inspecting the wrong artefact.
+    test "${NVM}" = "1" \
+        || { echo "FATAL: expected exactly 1 vmlinux under /build/rpm/BUILD, found ${NVM}"; \
+             cat /build/vmlinux-found; \
+             echo "       If this is 0: rpm >= 4.20 deletes the build tree in its rmbuild"; \
+             echo "       phase unless --noclean is passed to rpmbuild. Check that flag first."; \
              find /build/rpm/BUILD -maxdepth 3 -type d | head -20; exit 1; }; \
+    VMLINUX="$(cat /build/vmlinux-found)"; \
     echo "vmlinux: ${VMLINUX} ($(stat -c %s "${VMLINUX}") bytes)"; \
     \
     echo "=== the config this kernel was actually built with ==="; \
@@ -193,7 +219,32 @@ RUN set -eux; \
     objcopy --dump-section .BTF=/build/vmlinux.btf "${VMLINUX}" /dev/null; \
     test -s /build/vmlinux.btf \
         || { echo "FATAL: .BTF section is empty or absent in ${VMLINUX}"; exit 1; }; \
+    \
+    # TWO readers, deliberately, and both must say clean.
+    #
+    # This gate had never passed on a real kernel before this build existed —
+    # every BTF available to test it against carried the defect, so every test
+    # was a negative one. If the authoritative reader fails here, "the kernel
+    # is genuinely broken" and "the reader is wrong about this particular BTF"
+    # are indistinguishable from one reading, and telling them apart costs
+    # another 45 minutes. So the bpftool reading runs FIRST and prints, whatever
+    # it finds, before the reader that can abort the build.
+    #
+    # They ask different questions on purpose (root cause vs symptom) and share
+    # no code: sh + bpftool here, apexd's kernelbtf.rs there. `if …; then` and
+    # not `!`, because `set -e` does not apply to an inverted command.
+    echo "--- reading 1 of 2: bpftool, the root cause (did pahole emit the tag?)"; \
+    if apex-btf-xcheck /build/vmlinux.btf; then XCHECK=pass; else XCHECK=fail; fi; \
+    echo "--- reading 2 of 2: apexd kernelbtf.rs, the symptom — THIS ONE IS THE GATE"; \
     apex-kernel-btf-gate /build/vmlinux.btf; \
+    test "${XCHECK}" = "pass" \
+        || { echo "FATAL: the two readers disagree about this kernel's BTF."; \
+             echo "       apex-kernel-btf-gate says the published prototypes are clean, and"; \
+             echo "       the bpftool reading above says a bpf_kfunc DECL_TAG is missing."; \
+             echo "       One of them is wrong and this kernel does not ship until it is"; \
+             echo "       known which. Start from the untagged names printed above."; \
+             exit 1; }; \
+    echo "both readers agree: this kernel's scx_bpf_* kfuncs are intact"; \
     \
     echo "=== collecting ==="; \
     mkdir -p /rpms /manifest; \
