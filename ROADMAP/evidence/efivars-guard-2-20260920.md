@@ -4,9 +4,16 @@ Unit `efivars-guard-2`. It exists because the first pass shipped a layer that
 prevents nothing and described it as the protection, and the machine proved it
 inert four hours later.
 
-Nothing in this unit wrote an EFI variable, ran `bootc install`, or started a
-container that touched a disk. `efibootmgr` was not invoked at all. Two
-read-only containers were started, both `ls`/`strings` only.
+**What this unit ran, precisely, because a vague version of this sentence is
+the kind of claim it exists to stop.** Four containers, all `--rm`, none
+privileged except one: two `ls`/`strings` probes, one of them `--privileged
+--pid=host` (§1 — the measurement only means anything with those flags on, and
+it reads two paths and exits), and two runs of `bootc install to-disk --help`
+in `localhost/apex-os:daily`, unprivileged and without `--pid=host`, to read
+§2's text out of the binary rather than from memory. **No install was
+performed**, no disk or image file was written, and `efibootmgr` was never
+invoked — every `efibootmgr` line quoted below is read out of a log file that
+already existed.
 
 ## 0. The honest layer table
 
@@ -93,7 +100,32 @@ write-up is UTC; locally it was **09:02:17 AWST**, and the file's mtime is
 until `68855e92` (2026-09-20 21:25) — and that commit added only the tmpfs. The
 flag itself arrived in `f0ec87de` (22:21), whose subject is *"the efivars mask
 was not the guard; skip the firmware step instead"* — written after the second
-occurrence at 21:53.
+occurrence, which began at 21:53:26 and had written NVRAM by 22:12:15.
+
+The second occurrence has a surviving log too:
+`/var/lab-scratch/apex-luks-live.ZAGaYm/engine-stdout.txt`. Launched **21:53:26**
+(`efi-before.txt` mtime); the write had landed by **22:12:15**. Its own words,
+in order:
+
+```
+nvram-guard[luks-live-install]: before: 29 Boot* variables, 26 entries
+Installing APEX-OS to /dev/loop1 (entire disk) …
+Loopback target: this machine's UEFI boot entries are masked off and will not be touched.
+Bootloader: grub
+Installing bootloader via bootupd
+Executing: "efibootmgr" "-b" "0000" "-B"
+…
+Executing: "efibootmgr" "--create" "--disk" "/dev/loop1" "--part" "1" …
+…
+!!! nvram-guard[luks-live-install]: verdict: nvram-changed — this command MOVED THE HOST'S BOOT ENTRIES.
+```
+
+**The engine printed the mask's promise and then broke it in the next four
+lines.** "this machine's UEFI boot entries are masked off and will not be
+touched" is `set_nvram_args_for`'s own `note()` from `68855e92`, the commit that
+added the tmpfs and called it the fix. That is the whole finding in six lines of
+one log, and `nvram-guard` — the layer the first pass called secondary — is what
+turned it into a restore instead of a second live USB.
 
 So nothing in either incident contradicts `--generic-image`'s sufficiency; the
 flag was simply absent both times.

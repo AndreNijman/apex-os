@@ -7,8 +7,8 @@
 > step, so a tmpfs inside the container is irrelevant to it; and an unmasked
 > privileged container shows *zero* entries under `/sys/firmware/efi/efivars`
 > anyway, so the host's efivarfs was never in the container's view to be
-> masked. At 21:53 the same evening a loopback install ran **with the mask
-> applied and logged** and moved `Boot0000` off the real ESP — four hours after
+> masked. At 21:53:26 the same evening a loopback install ran **with the mask
+> applied and its promise printed** and moved `Boot0000` off the real ESP — four hours after
 > this unit landed as "the fix". `nvram-guard`, the layer this document calls
 > secondary, is what caught it.
 >
