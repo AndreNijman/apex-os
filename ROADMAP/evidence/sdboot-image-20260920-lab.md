@@ -160,22 +160,70 @@ previous deployment survives as `rollback` in `bootc status`.
 `softRebootCapable: true` on the staged deployment — the composefs backend
 supports `bootc upgrade --soft-reboot`.
 
-## 4. Boot counting is NOT produced by bootc, and today it would gate nothing
+## 4. Boot counting: bootc writes none, `bootc upgrade` destroys one, and APEX can put it back
 
-Every entry filename bootc wrote was `bootc_fedora-43-N.conf` with **no `+N-M`
-counter**, across four installs and two upgrades. `loader.conf` had `timeout`
-and `console-mode` commented out and no `@saved`/`default`.
+Four installs and two upgrades produced entry filenames of the form
+`bootc_<osid>-<ver>-<N>.conf` with **no `+N-M` counter**, and a `loader.conf`
+with `timeout` and `console-mode` both commented out.
 
-APEX's shipped `apex-boot-health.service` and `apex-boot-notice.service` are
-conditioned on `/sys/firmware/efi/efivars/LoaderBootCountPath-…`, which
-systemd-boot sets **only when an entry carries a counter**. So on a machine
-installed exactly as above, both units are skipped, `systemd-bless-boot` never
-runs, and there is no automatic rollback. The health gate that
-`Containerfile.base` asserts so carefully is inert until something writes the
-counter into the entry filename.
+So on a machine installed exactly as bootc leaves it,
+`/sys/firmware/efi/efivars/LoaderBootCountPath-*` never appears,
+`apex-boot-health.service` and `apex-boot-notice.service` are both skipped by
+their `ConditionPathExists`, `systemd-bless-boot` never runs, and there is no
+automatic rollback. The health gate `Containerfile.base` asserts so carefully is
+**inert on this path** until something writes the counter into the filename.
 
-That "something" has to be APEX: it is a rename of the `.conf` in the ESP at
-deployment-staging time. Nothing upstream does it on this path.
+### The counter works, and `bootc upgrade` wipes it (`count.img`, 4 boots)
+
+Renaming the booted entry by hand:
+
+| boot | action | entries in the ESP | `LoaderBootCountPath` |
+| --- | --- | --- | --- |
+| 1 | `mv bootc_fedora-43-1.conf bootc_fedora-43-1+3-0.conf`; mask `systemd-bless-boot` | `…+3-0.conf` | absent |
+| 2 | sd-boot decremented before the kernel started | `…+2-1.conf` | **present**, naming `\loader\entries\bootc_fedora-43-1+2-1.conf` |
+| 2 | then `bootc upgrade` | `entries/`: `…-1+2-1.conf` · `entries.staged/`: `…-0.conf` `…-1.conf` | — |
+| 3 | after the reboot | `…-0.conf` `…-1.conf` — **counter gone** | absent |
+| 4 | nothing restores it | same | absent |
+
+`bootc upgrade` does not edit the live entry; it writes a **fresh, uncounted
+set** into `/boot/loader/entries.staged/`, and `bootc-finalize-staged.service`
+replaces the whole `entries/` directory at shutdown. Anything APEX wrote into a
+filename before the upgrade is discarded with the old directory.
+
+### Renaming inside `entries.staged/` survives the swap (`count2.img`, 5 boots)
+
+Same machine, but the rename happens on the *staged* entry, immediately after
+`bootc upgrade` returns and before the reboot:
+
+```
+LAB-STAGED-BEFORE: bootc_fedora-43-0.conf bootc_fedora-43-1.conf
+mv  …/entries.staged/bootc_fedora-43-1.conf  …/entries.staged/bootc_fedora-43-1+3-0.conf
+LAB-STAGED-AFTER:  bootc_fedora-43-0.conf bootc_fedora-43-1+3-0.conf
+```
+
+| boot | booted | entry in the ESP | `LoaderBootCountPath` |
+| --- | --- | --- | --- |
+| 2 | **d2** (the upgrade) | `bootc_fedora-43-1+2-1.conf` | present |
+| 3 | d2 | `bootc_fedora-43-1+1-2.conf` | present |
+| 4 | d2 | `bootc_fedora-43-1+0-3.conf` | present |
+| 5 | **d1** (the previous deployment) | `bootc_fedora-43-0.conf` selected; `…-1+0-3.conf` still there, skipped | absent |
+
+Both halves hold. The counter survives `bootc-finalize-staged`, systemd-boot
+decrements it before each kernel start, and at `+0-3` **it rolled back to the
+previous deployment by itself** — with `systemd-bless-boot` masked throughout,
+so nothing blessed the new entry and the rollback is the counter's doing.
+
+So the mechanism APEX needs is one unit that renames the newest file in
+`/boot/loader/entries.staged/` to carry `+3-0`, ordered before
+`bootc-finalize-staged.service`. It is a rename in a directory bootc is about to
+swap in, not a write to a live boot path.
+
+**Not observed here: the blessing.** `systemd-bless-boot` was unmasked at boot 3
+and the `+0-3` suffix was still present at boots 4 and 5. `boot-complete.target`
+is not reached on a stock `fedora-bootc` guest, and this lab image has none of
+APEX's `apex-boot-health.service` / `boot-complete.target.requires` wiring. The
+strip has to be measured on the APEX image, and until it is, the honest
+statement is that **rollback is proven and blessing is not**.
 
 ## 5. ESP capacity is the hard constraint for existing machines
 
@@ -230,4 +278,10 @@ anything in the repo or on this machine.
 * The APEX image itself. Every install above used `fedora-bootc:43` or a
   three-line derivative. APEX's 15 GB image has not been through this.
 * Any migration of an existing machine.
-* Boot counting with a counter actually present in an entry filename.
+* The blessing half of boot counting, on an image whose `boot-complete.target`
+  is actually reached.
+* XBOOTLDR. Ruled out by probe rather than by test: `strings` on `bootc` has
+  **zero** occurrences of `xbootldr` or the XBOOTLDR type GUID `bc13c2ff…`, and
+  `bootc --help` on 1.16.13 lists no migration verb. The L16's two unused 2 GiB
+  XBOOTLDR partitions cannot absorb the ESP requirement, and there is no
+  in-place ostree→composefs converter.
