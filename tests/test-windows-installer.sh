@@ -110,7 +110,7 @@ esac
 
 # ── 3. the decision rules pass their unit tests ──────────────────────────────
 unit_log="$OUT/unit.log"
-if podman run --rm -v "$PWD/windows-installer":/src:ro,Z "$IMAGE" bash -euo pipefail -c '
+if podman run --rm -v "$PWD/windows-installer":/src:ro,z "$IMAGE" bash -euo pipefail -c '
         dnf install -y -q --setopt=install_weak_deps=False rust cargo >/dev/null
         cp -r /src /build && cd /build
         cargo test --offline --locked 2>&1
@@ -133,7 +133,7 @@ fi
 # Wine's own failures (missing loader, bad image) also exit non-zero, so the
 # exit code is not the assertion — the program's message is.
 run_out="$OUT/run.txt"
-podman run --rm -v "$OUT":/exe:ro,Z "$IMAGE" bash -c '
+podman run --rm -v "$OUT":/exe:ro,z "$IMAGE" bash -c '
     dnf install -y -q --setopt=install_weak_deps=False wine >/dev/null 2>&1 \
         || { echo "APEX_WINE_UNAVAILABLE"; exit 0; }
     export WINEDEBUG=-all WINEPREFIX=/tmp/wineprefix
@@ -198,12 +198,23 @@ elif [ ! -s "$WINLAB_DIR/golden.raw" ]; then
 elif [ "${APEX_WINLAB_GUEST:-}" != 1 ]; then
     nogo "the Windows guest was not exercised: it takes several minutes, so set APEX_WINLAB_GUEST=1 to ask for it"
 else
+    # Both enumeration orders. The second is not a repetition: --swap moves
+    # fixture A to a different AHCI port, so Windows gives it a different disk
+    # number, and the claim under test is that nothing the tool prints moves
+    # with it.
     guest_log="$OUT/guest.log"
+    swap_log="$OUT/guest-swap.log"
     if "$WINLAB" run windows-installer/lab/jobs/survey >"$guest_log" 2>&1; then
         ok "the Windows guest ran the survey job"
     else
         bad "the Windows guest run failed"
         tail -20 "$guest_log" | sed 's/^/        /'
+    fi
+    if "$WINLAB" run windows-installer/lab/jobs/survey --swap >"$swap_log" 2>&1; then
+        ok "the Windows guest ran it again with the disks on swapped ports"
+    else
+        bad "the swapped-order guest run failed"
+        tail -20 "$swap_log" | sed 's/^/        /'
     fi
 
     assert_guest() {   # $1 description   $2 grep -E pattern
@@ -211,22 +222,67 @@ else
             bad "guest: $1 (no line matching $2)"; fi
     }
     assert_guest "the survey reached its own conclusion" 'survey-complete'
-    assert_guest "the on-disk GPT and Windows' table agreed on every disk" 'partition table AGREE'
+    assert_guest "the on-disk GPT and Windows' table agreed on every disk" \
+                 'partition table AGREE'
     if grep -q 'DISAGREE' "$guest_log"; then
         bad "guest: at least one disk's two partition-table readings disagreed"
     else
         ok "guest: no disk had disagreeing partition-table readings"
     fi
-    assert_guest "the EFI system partition was refused as a protected type" 'REFUSED \(protected partition type\)'
-    assert_guest "a partition Windows has mounted was refused, and the mount named" \
-                 'REFUSED \(in use by Windows\).*mounted at'
-    assert_guest "an empty Windows basic-data partition was still refused" \
-                 'REFUSED \(Windows-owned partition type\)'
+    # The ESP and C: are refused as IN USE; the Microsoft reserved partition is
+    # the one that reaches the protected-type rule, because Windows builds no
+    # volume over it. Asserting the right reason against the right partition
+    # matters: a description that names the wrong one passes by accident and
+    # then documents something false.
+    assert_guest "the Microsoft reserved partition was refused as a protected type" \
+                 'REFUSED \(protected partition type\): this is a Microsoft reserved'
+    assert_guest "the running Windows system partition was refused, and C: named" \
+                 'REFUSED \(in use by Windows\).*mounted at C:'
+    assert_guest "the NTFS fixture partition was refused, and its letter named" \
+                 'REFUSED \(in use by Windows\).*NTFS, label "WINDATA"'
+    # The zeroed basic-data fixture is refused for a STRONGER reason than its
+    # type: Windows gives a RAW basic-data partition a drive letter, so it is
+    # already in use by the time the tool looks. That is the design's own claim
+    # about basic-data partitions, demonstrated rather than argued. The type
+    # rule itself is covered by the unit test
+    # every_windows_owned_type_is_refused_even_when_empty_and_large.
+    assert_guest "an all-zero basic-data partition was refused, Windows having lettered it" \
+                 'REFUSED \(in use by Windows\).*unrecognised filesystem'
     assert_guest "an eligible partition was read to the last byte and found zero" \
                  'ALL-ZERO CONTENT'
-    assert_guest "the confirmation named the disk by its serial number" 'FIXA00000001|FIXB00000002'
+    assert_guest "the exclusivity check was re-asked immediately before reading" \
+                 'exclusivity no volume object covers this partition, re-checked'
+    assert_guest "the confirmation named the disk by its serial number" 'FIXA00000001'
     assert_guest "the firmware variables were unchanged by the run" \
-                 'IDENTICAL — no boot entry and no boot order changed'
+                 'IDENTICAL'
+
+    # ── the enumeration-order claim, made properly ───────────────────────────
+    WINLAB_DIR="${APEX_WINLAB_DIR:-/var/lab-scratch/winlab}"
+    a="$WINLAB_DIR/guest-normal.txt"
+    b="$WINLAB_DIR/guest-swapped.txt"
+    if [ -s "$a" ] && [ -s "$b" ]; then
+        # Windows' own disk number for the fixture must actually have moved,
+        # or the comparison below is vacuous.
+        na="$(grep -E '^ *[0-9]+ +APEX-FIXTURE-A' "$a" | awk '{print $1}')"
+        nb="$(grep -E '^ *[0-9]+ +APEX-FIXTURE-A' "$b" | awk '{print $1}')"
+        if [ -n "$na" ] && [ -n "$nb" ] && [ "$na" != "$nb" ]; then
+            ok "guest: Windows numbered APEX-FIXTURE-A as disk $na and then as disk $nb"
+        else
+            bad "guest: the swapped run did not change Windows' disk number (${na:-?} vs ${nb:-?}); the comparison below would prove nothing"
+        fi
+        # And the words the user commits against must be byte-identical.
+        sed -n '/ERASE AND INSTALL/,/Disk numbers change/p' "$a" | tr -d '\r' >"$OUT/conf-a.txt"
+        sed -n '/ERASE AND INSTALL/,/Disk numbers change/p' "$b" | tr -d '\r' >"$OUT/conf-b.txt"
+        if [ -s "$OUT/conf-a.txt" ] && diff -q "$OUT/conf-a.txt" "$OUT/conf-b.txt" >/dev/null; then
+            ok "guest: the confirmation text is identical across both enumeration orders"
+        else
+            bad "guest: the confirmation text changed when the disk number changed"
+            diff -u "$OUT/conf-a.txt" "$OUT/conf-b.txt" | head -20 | sed 's/^/        /'
+        fi
+    else
+        bad "guest: one of the two run transcripts is missing ($a, $b)"
+    fi
+
     if grep -q 'ERASE AND INSTALL' "$guest_log" &&
        sed -n '/ERASE AND INSTALL/,/Disk numbers change/p' "$guest_log" |
            grep -q 'PhysicalDrive'; then

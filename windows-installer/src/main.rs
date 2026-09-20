@@ -327,28 +327,45 @@ mod win {
             Verdict::ContentCheckAllowed => {}
         }
 
-        // Exclusivity, before the content is trusted. A partition with no
-        // volume object has nothing to lock — Windows created no volume for
-        // it, which is itself the evidence that Windows is not using it — and
-        // that is reported plainly rather than dressed up as a lock.
-        let volume = vols.0.iter().find(|v| v.overlaps(disk.number, part.offset, part.length));
-        match volume {
-            Some(v) => {
-                let device = v.name.trim_end_matches('\\');
-                match w::Device::open(device).and_then(|d| d.lock_volume()) {
-                    Ok(()) => println!("lock      FSCTL_LOCK_VOLUME succeeded on {device}"),
-                    Err(e) => {
-                        return Err(format!(
-                            "Windows would not give exclusive use of {device}: {e}"
-                        )
-                        .into());
-                    }
-                }
-            }
-            None => println!(
-                "lock      no volume object covers this partition, so Windows has not mounted it and there is nothing to lock"
-            ),
+        // Exclusivity, re-asked rather than remembered.
+        //
+        // There is deliberately no FSCTL_LOCK_VOLUME here, and the reason is
+        // a finding rather than an omission: Windows creates NO VOLUME OBJECT
+        // for a Linux-filesystem-type partition. Measured in the lab — the
+        // eligible fixture partitions have no volume, no drive letter and
+        // nothing to open. And a partition that DOES have a volume has
+        // already been refused by `assess` above, because an overlapping
+        // volume is a Claim. So a lock call on this path could only ever run
+        // on a partition that was already refused: it would be safety code
+        // that never executes, which reads as coverage and is worse than
+        // none.
+        //
+        // What this does instead is re-enumerate the volumes NOW, immediately
+        // before the content is read, rather than trusting the survey's
+        // answer. Between the survey and here a service can rescan, a user
+        // can act in Disk Management, or removable media can appear.
+        let (fresh, problems) = w::volumes();
+        let now: Vec<_> = fresh
+            .iter()
+            .filter(|v| v.overlaps(disk.number, part.offset, part.length))
+            .collect();
+        if !now.is_empty() {
+            return Err(format!(
+                "Windows has taken this partition since the survey: {}",
+                now.iter().map(|v| v.describe_use()).collect::<Vec<_>>().join("; ")
+            )
+            .into());
         }
+        if !problems.is_empty() {
+            return Err(format!(
+                "the volume list could not be read completely, so 'Windows is not using this' cannot be established: {}",
+                problems.join("; ")
+            )
+            .into());
+        }
+        println!(
+            "exclusivity no volume object covers this partition, re-checked against a fresh volume enumeration. Windows has not mounted it and has nothing here to lock."
+        );
 
         println!("scanning  every one of the {} bytes", part.length);
         let mut dev = w::Device::open(&disk.path)?;
