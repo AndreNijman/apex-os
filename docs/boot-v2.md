@@ -97,9 +97,19 @@ a drop-in sets `SELinuxContext=-system_u:system_r:bootupd_t:s0` on
 permission the transition is missing — `bootupd_t` may use `init_exec_t` as an
 entrypoint. `init_t → bootupd_t:process transition` and `bootupd_t`'s journal
 and fd access are already allowed through the `daemon` attribute, checked
-rather than assumed. The `-` prefix is load-bearing: a machine where the
-context cannot be set must still run the blessing, unconfined, rather than fail
-the unit and roll itself back.
+rather than assumed.
+
+The `-` prefix covers one family of failure and it is worth naming which.
+`systemd.exec(5)`: with the dash, *"failing to set the SELinux security context
+will be ignored, but it's still possible that the subsequent execve() may fail
+when the security policy doesn't allow the transition."* So a machine with
+SELinux disabled or permissive, or a policy with no `bootupd_t`, blesses
+unconfined and is fine. A machine that is **enforcing with the module missing**
+is not: `setexeccon` succeeds, the kernel denies the `execve`, the unit fails,
+and the deployment rolls itself back on the fourth boot. What guards that is
+`Containerfile.base` asserting across the tier boundary that `semodule -l`
+still lists `apex_sdboot` — the policy module and the drop-in are a pair, and
+removing either one alone is the dangerous edit.
 
 ### Per-machine configuration under a signed UKI
 
@@ -282,12 +292,22 @@ counter in effect**, so on a GRUB machine neither unit starts, and a failed
 condition is a skip rather than a failure.
 
 The condition is written against `LoaderBootCountPath` specifically, and that
-choice is load-bearing. Measured on both real machines: the laptop has no
-`Loader*` variables at all, but **the katana carries `LoaderInfo`,
-`LoaderDevicePartUUID` and `LoaderSystemToken` while still booting GRUB 2.12**.
-A condition written against `LoaderInfo` — the obvious "is systemd-boot
-involved" test — would have fired these units on a machine that never boots
-through systemd-boot. Any further conditioned unit must use the same variable.
+choice is load-bearing. An earlier note here said the laptop had no `Loader*`
+variables at all and only the katana did; re-checked 2026-09-21, **that is
+wrong, and wrong in the direction that matters**. The L16 carries `LoaderInfo`,
+`LoaderDevicePartUUID` and `LoaderSystemToken` too, and its `LoaderInfo` reads:
+
+```
+$ dd if=/sys/firmware/efi/efivars/LoaderInfo-4a67b082-… bs=1 skip=4 status=none | tr -d '\0'
+GRUB 2.12
+```
+
+GRUB 2.12 sets `LoaderInfo` itself. A condition written against it — the
+obvious "is systemd-boot involved" test — would fire these units on **every**
+APEX machine, all of which boot GRUB. `LoaderBootCountPath` is set only by
+systemd-boot and only when a counter is in effect. Any further conditioned unit
+must use the same variable, or `entries.srel` where it cannot (see
+`apex-boot-count` below).
 
 ### Boot counting has to be written by APEX, because bootc writes none
 
@@ -969,6 +989,8 @@ sudo bootctl list                   # the entry must appear, with 3 tries left
 #   Per-machine settings go beside the UKI as credentials, because a signed
 #   UKI's command line cannot carry them. A keymap, for instance — the setting
 #   that decides whether you can type your own LUKS passphrase:
+#   The directory does not exist on a GRUB machine's ESP; create it first.
+sudo mkdir -p /boot/efi/loader/credentials
 printf 'de' | sudo tee /boot/efi/loader/credentials/vconsole.keymap.cred
 #   Plaintext is right for a keymap and WRONG for anything that unlocks the
 #   disk: a .cred on the ESP is unauthenticated and anyone who can write the

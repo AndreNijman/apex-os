@@ -94,6 +94,95 @@ grep -q 'boot-complete.target.requires/apex-boot-health.service' "$BASECF" \
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+sec "EFI variable payloads are read off a file that cannot be seeked"
+# efivarfs files are not seekable. `tail -c +5` seeks, so on a real machine it
+# printed nothing and said "cannot seek to relative offset 4: Illegal seek" —
+# and apex-boot-health reported `entry unknown` on every systemd-boot boot.
+# Seen in the lab serial logs and reproduced on the L16, whose LoaderInfo is
+# present and reads "GRUB 2.12". The regression is invisible against a regular
+# fixture file, so the control here is a FIFO: unseekable, like efivarfs.
+EFIT="$TMP/efivars-seek"
+mkdir -p "$EFIT"
+# The function under test is the shipped one, lifted out of the shipped file,
+# so this cannot drift into testing a copy.
+sed -n '/^efivar_str() {/,/^}/p' "$HEALTH" > "$TMP/efivar_str.sh"
+[[ -s "$TMP/efivar_str.sh" ]] \
+    || bad "could not lift efivar_str out of apex-boot-health — the two checks below are vacuous"
+
+# The 4-byte attribute prefix must really be four bytes: a bash variable
+# cannot hold the three NULs, so printf writes them directly.
+printf '\x07\x00\x00\x00apex-good.efi' > "$EFIT/LoaderEntrySelected-$LOADER_GUID"
+got="$(
+    set +u
+    # shellcheck disable=SC1090
+    . "$TMP/efivar_str.sh"
+    EFIVARS_DIR="$EFIT" LOADER_GUID="$LOADER_GUID" efivar_str LoaderEntrySelected
+)"
+eq 'apex-good.efi' "$got" "an EFI string is read out of a regular fixture file"
+
+# ── and the same read against something that cannot be seeked ──
+FIFO="$TMP/LoaderEntrySelected-$LOADER_GUID"
+mkfifo "$FIFO"
+( printf '\x07\x00\x00\x00apex-new.efi' > "$FIFO" 2>/dev/null ) &
+wpid=$!
+gotfifo="$(
+    set +u
+    # shellcheck disable=SC1090
+    . "$TMP/efivar_str.sh"
+    EFIVARS_DIR="$TMP" LOADER_GUID="$LOADER_GUID" efivar_str LoaderEntrySelected
+)"
+wait "$wpid" 2>/dev/null || true
+eq 'apex-new.efi' "$gotfifo" "the byte-wise read works on an UNSEEKABLE file (the efivarfs case)"
+
+# The inverse control has to be a REAL efivarfs file, and it is worth saying
+# why rather than quietly using a weaker one. A FIFO does not reproduce the
+# defect: GNU tail sees S_ISFIFO and reads instead of seeking, so
+# `tail -c +5 "$FIFO"` succeeds. An efivarfs entry is a regular file that
+# reports a size, so tail tries lseek and gets ESPIPE. Only the real thing
+# discriminates.
+REALVAR=/sys/firmware/efi/efivars/LoaderInfo-$LOADER_GUID
+if [[ -r "$REALVAR" ]]; then
+    oldway="$(timeout 10 tail -c +5 "$REALVAR" 2>/dev/null | tr -d '\0' || true)"
+    newway="$(
+        set +u
+        # shellcheck disable=SC1090
+        . "$TMP/efivar_str.sh"
+        EFIVARS_DIR=/sys/firmware/efi/efivars LOADER_GUID="$LOADER_GUID" \
+            efivar_str LoaderInfo 2>/dev/null || true
+    )"
+    [[ -n "$newway" ]] \
+        && ok "on this machine's real efivarfs the shipped reader returns '$newway'" \
+        || bad "the shipped reader returned nothing from $REALVAR"
+    [[ "$oldway" != "$newway" ]] \
+        && ok "inverse control: 'tail -c +5' does NOT return that on real efivarfs" \
+        || bad "inverse control: 'tail -c +5' agreed here, so this check cannot catch the defect"
+else
+    printf '  NOTE this machine has no %s — the definitive\n' "$(basename "$REALVAR")"
+    printf '       inverse control needs a UEFI host and was NOT run. The FIFO case\n'
+    printf '       above proves the byte-wise read works on unseekable input; it does\n'
+    printf '       NOT prove the old one failed. See the L16 transcript in\n'
+    printf '       ROADMAP/evidence/sdboot-image-20260921-decision.md.\n'
+fi
+
+# Executable lines only: the helper's own comment quotes the broken command to
+# explain why it is broken, and a tripwire a comment can trip is a tripwire
+# nobody can keep green — the same rule as the boot-path scan below.
+grep -nE '^[^#]*tail -c \+' "$HEALTH" >/dev/null 2>&1 \
+    && bad "apex-boot-health still reads efivars with a seeking command" \
+    || ok "apex-boot-health does not seek an efivarfs file"
+
+# ── and a real UTF-16LE payload, which is what sd-boot actually writes ──
+printf '\x07\x00\x00\x00' > "$EFIT/LoaderInfo-$LOADER_GUID"
+printf 'systemd-boot 258.10' | iconv -f UTF-8 -t UTF-16LE >> "$EFIT/LoaderInfo-$LOADER_GUID"
+gotu16="$(
+    set +u
+    # shellcheck disable=SC1090
+    . "$TMP/efivar_str.sh"
+    EFIVARS_DIR="$EFIT" LOADER_GUID="$LOADER_GUID" efivar_str LoaderInfo
+)"
+eq 'systemd-boot 258.10' "$gotu16" "a UTF-16LE payload reads back as the string sd-boot wrote"
+
+# ═════════════════════════════════════════════════════════════════════════════
 sec "the boot counter APEX writes, because bootc writes none"
 # bootc produces entry filenames with no +N-M suffix and a loader.conf whose
 # timeout is commented out, so on a machine installed exactly as bootc leaves
@@ -234,11 +323,13 @@ sec "the blessing can write a FAT ESP, or none of the above matters"
 grep -qx 'SELinuxContext=-system_u:system_r:bootupd_t:s0' "$BLESS_DROPIN" \
     && ok "the blessing runs in bootupd_t, the domain allowed to write a FAT ESP" \
     || bad "the bless-boot drop-in does not set SELinuxContext to bootupd_t"
-# The leading dash is the difference between "unconfined blessing" and "failed
-# unit, counter never stripped, rollback on the fourth boot".
+# The leading dash makes FAILING TO SET the context non-fatal — systemd.exec(5)
+# is explicit that the execve can still be denied afterwards, so this covers
+# SELinux disabled or a policy without bootupd_t and NOT the module going
+# missing on an enforcing machine. That case is the cross-tier assertion below.
 grep -q 'SELinuxContext=-' "$BLESS_DROPIN" \
-    && ok "SELinuxContext failure is non-fatal (the leading dash)" \
-    || bad "SELinuxContext has no leading dash — a policy problem would roll the machine back"
+    && ok "setting the context is non-fatal if it cannot be set (the leading dash)" \
+    || bad "SELinuxContext has no leading dash — a permissive or SELinux-less machine would fail the unit"
 grep -q 'allow bootupd_t init_exec_t:file' "$SEPOL" \
     && ok "the policy module grants the entrypoint the transition needs" \
     || bad "apex_sdboot.te does not grant bootupd_t an entrypoint on init_exec_t"
