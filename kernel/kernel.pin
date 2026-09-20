@@ -78,4 +78,30 @@ APEX_KERNEL_BUILD=1
 # ── Builder base ────────────────────────────────────────────────────────────
 # Fedora 43, matching the buildroot the COPR uses, so GCC stays 15.3.x and the
 # only variable this tier changes against the upstream build is pahole.
-BUILDER_BASE=registry.fedoraproject.org/fedora:43
+#
+# BY DIGEST, NOT BY TAG, and this is not theoretical. `fedora:43` was a floating
+# tag here until 2026-09-20 and it moved under us THAT DAY: a build started at
+# 08:21 AWST pulled blob ce241f1b, and one started at 20:5x the same day pulled
+# a71bf9b8 from an image the registry had rebuilt at 05:47:58Z. Everything else
+# in this file is content-addressed; the base the compiler runs on was the one
+# input still named by a label someone else can repoint.
+#
+# sha256:84325c67… was `fedora:43` on 2026-09-20, built 2026-09-20T05:47:58Z,
+# Labels.version=43, read with `skopeo inspect docker://…/fedora:43`. Bump it
+# deliberately, the way KERNEL_TAG is bumped.
+#
+# WHAT THIS DOES NOT PIN, said plainly so nobody reads more into it. The digest
+# freezes the base LAYER. It does not freeze the `dnf5 -y install gcc …`
+# transaction that Containerfile.kernel runs on top of it, which resolves
+# against Fedora's live repositories — so GCC, binutils and glibc can still move
+# between two builds of an unchanged pin. Freezing those needs a pinned
+# repository snapshot, which this tier does not have.
+#
+# The reason that is tolerable, rather than the same defect one layer up: what
+# the compiler version can change is the kernel BINARY, and a differing binary
+# is caught by nothing here but breaks nothing either. What it cannot change is
+# whether the kfunc BTF is correct — that is pahole's, pinned by NVR and sha256
+# and asserted twice against the built kernel. `cc=` in
+# /manifest/kernel-build.txt records the compiler each build actually used, so
+# the drift is visible after the fact even though it is not prevented.
+BUILDER_BASE=registry.fedoraproject.org/fedora@sha256:84325c671db8a23b0679e04fb863d4081d98c4fc4ae9c9d5bcd883b4cea4e003
