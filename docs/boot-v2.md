@@ -1508,7 +1508,11 @@ decoration. The check has to live on the HOST side: `run-scenarios` runs inside
 the container, where `/sys/firmware/efi/efivars` does not exist, so a check in
 there would inspect nothing. AGENTS.md boot-path rule 6. A `bootc install
 --via-loopback` goes through `tests/lab/bootc-install-lab` instead, which
-builds the podman argv itself and cannot be talked out of the efivars mask.
+builds the podman argv itself and refuses to launch without `--generic-image`
+(bootc: "Changes to the system firmware will be skipped"). That flag, not the
+efivars tmpfs, is what prevents the 2026-09-20 breakage: bootc takes
+`--pid=host` and re-enters the host's mount namespace for the bootloader step,
+so a tmpfs inside the container never covered it. AGENTS.md boot-path rule 6.
 
 Two practical notes, both learned the hard way:
 

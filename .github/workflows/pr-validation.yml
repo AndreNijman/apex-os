@@ -708,21 +708,24 @@ jobs:
         run: ./tests/test-boot-migrate.sh
 
       # The efivars guard. In `static` for the same reason as the step above:
-      # the scan it ends with walks EVERY tracked file, so a PR adding an
-      # unmasked `bootc install --via-loopback` anywhere — a workflow, an
-      # installer script, a lab helper — must not be able to skip it by
-      # touching neither apexd/ nor files/.
+      # the scan it ends with walks EVERY tracked file, so a PR adding a
+      # `bootc install --via-loopback` with no `--generic-image` anywhere — a
+      # workflow, an installer script, a lab helper — must not be able to skip
+      # it by touching neither apexd/ nor files/.
       #
-      # 2026-09-20: one loopback install out of eight ran without
-      # `--tmpfs /sys/firmware/efi/efivars`, bootupd rewrote the HOST's boot
-      # entry to point inside the disk image it was building, and the laptop
-      # would not boot the next morning. The discipline was already there and
-      # was followed seven times out of eight. BOOT-BREAKAGE-2026-09-20.md.
+      # 2026-09-20, twice. A loopback install reached bootc's firmware step,
+      # bootupd rewrote the HOST's boot entry to point inside the disk image it
+      # was building, and the laptop would not boot the next morning. The fix
+      # shipped that evening was an efivars tmpfs; the SECOND occurrence, four
+      # hours later, happened with that tmpfs applied and logged, because bootc
+      # nsenters into the host's mount namespace for that step. The flag that
+      # prevents it is `--generic-image`, and this suite proves the wrapper
+      # refuses to launch without it. BOOT-BREAKAGE-2026-09-20.md.
       #
       # Nothing dangerous runs here: `podman` and `efibootmgr` are stubs on
       # PATH and the firmware root is a fixture tree. The assertion is about
       # launch ARGUMENTS, which need no launch.
-      - name: the efivars mask is not something a caller can forget
+      - name: a loopback bootc install cannot reach this machine's firmware
         if: ${{ !cancelled() }}
         run: ./tests/test-bootc-install-guard.sh
 
@@ -2391,6 +2394,38 @@ jobs:
               echo "::warning::test-apex-hypr-lua.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
           else
               [ "$passed" -ge 22 ] || { echo "::error::only $passed apex hypr-lua assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
+          fi
+
+      # What SUPER+arrow actually DOES, which no config grep can answer. The
+      # seeded session focus-follows-mouse, so a keyboard focus change that
+      # leaves the pointer behind is undone by the next twitch of the mouse —
+      # the defect Andre reported. The suite measures the pointer's position
+      # after a directional focus, and runs the whole thing a second time with
+      # `no_warps = true` where those assertions MUST fail. A gate that agrees
+      # with whatever the configuration says is the dominant defect family in
+      # this tree; the control is what stops this being one.
+      #
+      # Same nesting as the step above, same reason it usually skips here.
+      - name: Run the Hyprland focus + switcher assertions
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          rc=0; out="$(./tests/test-apex-hypr-focus.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::test-apex-hypr-focus.sh exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex hypr-focus: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::test-apex-hypr-focus.sh printed no summary line; nothing below can be believed"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like test-apex-hypr-focus.sh's summary"; exit 1; }
+          passed="$(printf '%s' "$summary" | awk '{print $3}')"
+          failed="$(printf '%s' "$summary" | awk '{print $5}')"
+          skipped="$(printf '%s' "$summary" | awk '{print $7}')"
+          echo "measured: passed=$passed failed=$failed skipped=$skipped"
+          [ "$failed" = 0 ] || { echo "::error::$failed apex hypr-focus assertions failed"; exit 1; }
+          if [ "$passed" -eq 0 ]; then
+              [ "$skipped" -gt 0 ] || { echo "::error::test-apex-hypr-focus.sh asserted nothing and did not say why"; exit 1; }
+              echo "::warning::test-apex-hypr-focus.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc + Hyprland + quickshell and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 17 assertions only ever run on a machine with the compositors installed."
+          else
+              [ "$passed" -ge 19 ] || { echo "::error::only $passed apex hypr-focus assertions ran; 19 ran on 2026-09-20, so some no longer execute"; exit 1; }
           fi
 
       # The input half of the same argument. test-apex-input.sh proves each
