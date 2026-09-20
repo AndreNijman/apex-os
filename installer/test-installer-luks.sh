@@ -251,6 +251,177 @@ else
 fi
 
 echo
+echo
+echo "── a loopback target must not be able to reach this machine's NVRAM ───"
+# WHY THIS IS IN THE ENCRYPTION SUITE. The encrypted path is the one that runs
+# `bootc install to-filesystem` inside a `--privileged --pid=host` container,
+# and the live half of this suite points that at a LOOPBACK FILE on a
+# developer's own machine. On 2026-09-20 exactly that shape of run — a
+# privileged loopback install with the host's efivarfs visible — deleted a
+# laptop's real `APEX-OS` boot entry and recreated it against the loop device's
+# ESP. The laptop would not boot. BOOT-BREAKAGE-2026-09-20.md.
+#
+# The engine now masks efivars when, and only when, the target is loop-backed.
+# These assertions run the REAL FUNCTIONS OUT OF THE SHIPPED ENGINE against a
+# fabricated sysfs tree, so they measure behaviour and not the presence of a
+# string in a file.
+NVFNS="$WORK/nvram-fns.sh"
+FAKESYS="$WORK/sysblock"
+mkdir -p "$FAKESYS/loop9/loop"
+printf '/var/lab-scratch/pretend.img\n' > "$FAKESYS/loop9/loop/backing_file"
+
+# nvram_probe ENGINE DEVICE [APEX_SYSFS_BLOCK] — prints the NVRAM_ARGS the
+# named engine would use for that device, or `EXTRACT-FAILED`.
+nvram_probe() {
+    local eng="$1" dev="$2" seam="${3:-}"
+    sed -n '/^disk_is_loopback()/,/^}/p;/^set_nvram_args_for()/,/^}/p' "$eng" > "$NVFNS"
+    grep -q 'set_nvram_args_for' "$NVFNS" || { echo "EXTRACT-FAILED"; return; }
+    APEX_SYSFS_BLOCK="$seam" bash -c '
+        log()  { :; }
+        note() { :; }
+        . "$1"
+        set_nvram_args_for "$2"
+        printf "%s\n" "${NVRAM_ARGS[*]-}"
+    ' _ "$NVFNS" "$dev" 2>/dev/null
+}
+
+got=$(nvram_probe "$ENGINE" /dev/loop9 "$FAKESYS")
+case "$got" in
+    *"--tmpfs /sys/firmware/efi/efivars"*)
+        ok "a loop-backed target masks efivars in the container" "$got" ;;
+    EXTRACT-FAILED)
+        bad "a loop-backed target masks efivars in the container" "could not extract the functions from the engine" ;;
+    *)  bad "a loop-backed target masks efivars in the container" "got '${got:-<empty>}'" ;;
+esac
+
+# The inverse, and it is the one that must not regress: a REAL disk still gets
+# the firmware, because a real install has to create a boot entry or the
+# machine it just installed will not start.
+got=$(nvram_probe "$ENGINE" /dev/nvme0n1 "$FAKESYS")
+if [ -z "$got" ]; then
+    ok "a real block device still reaches the firmware" "no podman arguments added"
+else
+    bad "a real block device still reaches the firmware" "engine would have added '$got'"
+fi
+
+# The seam only ever ADDS loop-ness: with the override unset, the fabricated
+# tree is invisible and /dev/loop9 (which does not exist here) is not loop.
+# A seam that could HIDE a loop device would be able to re-create the incident.
+got=$(nvram_probe "$ENGINE" /dev/loop9 "")
+if [ -z "$got" ]; then
+    ok "the test seam cannot hide a real loop device" "unset override -> real sysfs only"
+else
+    bad "the test seam cannot hide a real loop device" "got '$got' with the override unset"
+fi
+
+# STRUCTURAL: a fifth install call site added later without the mask would pass
+# every behavioural assertion above and still brick a laptop. So the engine is
+# read as a whole: every privileged container is found, its full (backslash-
+# continued) command line is reassembled, and each one is classified.
+#
+# An install container — one whose command is `bootc install` — must be
+# immediately preceded by set_nvram_args_for AND must pass NVRAM_ARGS.
+#
+# There is exactly one privileged container that is NOT an install: the call to
+# the enrolment helper. It is named here rather than exempted by position,
+# because it deliberately keeps the host's efivarfs — /usr/libexec/apex-luks-
+# enroll decides whether to add a TPM keyslot by reading the SecureBoot EFI
+# variable, and masking that would silently turn every TPM enrolment off. It
+# runs no bootloader tool. Any OTHER privileged container appearing in this
+# engine is an unreviewed NVRAM risk and fails this assertion by name.
+nvscan=$(awk '
+  { l[NR] = $0 }
+  END {
+    for (i = 1; i <= NR; i++) {
+      if (l[i] !~ /run --rm --privileged/) continue
+      site++
+      cmd = l[i]; j = i
+      while (l[j] ~ /\\$/ && j < NR) { j++; cmd = cmd " " l[j] }
+      if (cmd ~ /bootc install/) {
+        inst++
+        if (l[i-1] ~ /set_nvram_args_for/ && cmd ~ /NVRAM_ARGS/) good++
+        else printf "UNGUARDED-INSTALL:%d ", i
+      } else if (cmd ~ /LUKS_ENROLL_PATH/) {
+        enrol++
+      } else {
+        printf "UNREVIEWED-PRIVILEGED:%d ", i
+      }
+    }
+    printf "sites=%d install=%d guarded=%d enrol=%d\n", site, inst, good, enrol
+  }' "$ENGINE")
+nvsites=$(printf '%s' "$nvscan"  | sed -n 's/.*sites=\([0-9]*\).*/\1/p')
+nvinst=$(printf '%s' "$nvscan"   | sed -n 's/.*install=\([0-9]*\).*/\1/p')
+nvgood=$(printf '%s' "$nvscan"   | sed -n 's/.*guarded=\([0-9]*\).*/\1/p')
+nvenrol=$(printf '%s' "$nvscan"  | sed -n 's/.*enrol=\([0-9]*\).*/\1/p')
+case "$nvscan" in
+    *UNGUARDED-INSTALL*|*UNREVIEWED-PRIVILEGED*)
+        bad "every privileged install call site is guarded" "$nvscan" ;;
+    *)
+        if [ "${nvinst:-0}" -ge 4 ] && [ "${nvinst:-0}" = "${nvgood:-0}" ] \
+           && [ "${nvenrol:-0}" = 1 ] \
+           && [ "$(( ${nvinst:-0} + ${nvenrol:-0} ))" = "${nvsites:-0}" ]; then
+            ok "every privileged install call site is guarded" "$nvscan"
+        else
+            bad "every privileged install call site is guarded" "$nvscan"
+        fi ;;
+esac
+
+# MUTATION for the structural scan itself: take the guard off ONE install call
+# site and the scan must name that site. Without this the scan could be a
+# tautology that passes whatever the engine looks like.
+MUT_SITE="$WORK/mutant-site"
+cp "$ENGINE" "$MUT_SITE"
+python3 - "$MUT_SITE" <<'PY' 2>/dev/null || sed -i '0,/^  set_nvram_args_for "\$DISK"$/{/^  set_nvram_args_for "\$DISK"$/d}' "$MUT_SITE"
+import sys
+p = sys.argv[1]
+lines = open(p, encoding="utf-8").read().split("\n")
+for i, l in enumerate(lines):
+    if l.strip() == 'set_nvram_args_for "$DISK"':
+        del lines[i]
+        break
+else:
+    sys.exit(1)
+open(p, "w", encoding="utf-8").write("\n".join(lines))
+PY
+if cmp -s "$ENGINE" "$MUT_SITE"; then
+    bad "mutant: one call site loses its guard" "the mutation changed nothing"
+elif ! bash -n "$MUT_SITE" 2>/dev/null; then
+    bad "mutant: one call site loses its guard" "the mutant does not parse"
+else
+    mutscan=$(awk '
+      { l[NR] = $0 }
+      END {
+        for (i = 1; i <= NR; i++) {
+          if (l[i] !~ /run --rm --privileged/) continue
+          cmd = l[i]; j = i
+          while (l[j] ~ /\\$/ && j < NR) { j++; cmd = cmd " " l[j] }
+          if (cmd ~ /bootc install/ && !(l[i-1] ~ /set_nvram_args_for/ && cmd ~ /NVRAM_ARGS/))
+            printf "UNGUARDED-INSTALL:%d ", i
+        }
+      }' "$MUT_SITE")
+    case "$mutscan" in
+        *UNGUARDED-INSTALL*) ok "mutant: one call site loses its guard" "scan named it: $mutscan" ;;
+        *) bad "mutant: one call site loses its guard" "the scan saw nothing wrong" ;;
+    esac
+fi
+
+# MUTATION. Remove the one line that builds the mask and the loop case must
+# stop masking. One line, deleted by an exact match, so the mutant still parses.
+MUT_NV="$WORK/mutant-nvram"
+cp "$ENGINE" "$MUT_NV"
+sed -i '/^    NVRAM_ARGS=(--tmpfs \/sys\/firmware\/efi\/efivars)$/d' "$MUT_NV"
+if cmp -s "$ENGINE" "$MUT_NV"; then
+    bad "mutant: efivars mask" "the mutation changed nothing — the sed program matched no line"
+elif ! bash -n "$MUT_NV" 2>/dev/null; then
+    bad "mutant: efivars mask" "the mutant does not parse; the mutation ate more than its line"
+else
+    got=$(nvram_probe "$MUT_NV" /dev/loop9 "$FAKESYS")
+    case "$got" in
+        *"--tmpfs"*) bad "mutant: efivars mask" "the mask survived its own deletion — the case proves nothing" ;;
+        *)           ok "mutant: efivars mask" "mask removed -> loopback target no longer masked" ;;
+    esac
+fi
+
 # ── the keymap half, run where the data it reads actually exists ───────────
 # These assertions need Fedora's keymap tree (/usr/lib/kbd/keymaps), systemd's
 # kbd-model-map and xkeyboard-config's rules/base.lst. A GitHub ubuntu-24.04

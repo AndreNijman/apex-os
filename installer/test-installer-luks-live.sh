@@ -63,6 +63,33 @@ die() { printf 'FATAL: %s\n' "$1" >&2; exit 2; }
 sudo -n true 2>/dev/null || die "needs passwordless root (sudo -n)."
 command -v podman    >/dev/null || die "podman is not installed."
 command -v losetup   >/dev/null || die "losetup is not installed."
+
+# ── the engine runs inside tests/lab/nvram-guard, and this is not optional ──
+#
+# This suite points a `--privileged --pid=host` container at a loopback file on
+# a developer's own machine. That is the exact shape of the run that deleted a
+# laptop's `APEX-OS` boot entry on 2026-09-20 and left it unbootable until it
+# was repaired from a live USB (BOOT-BREAKAGE-2026-09-20.md).
+#
+# There are now two independent layers and this suite uses both:
+#
+#   1. PREVENTION, in the engine. `apex-install` masks
+#      /sys/firmware/efi/efivars with a tmpfs whenever the install target is
+#      loop-backed, so the container has no NVRAM to write. Measured by
+#      test-installer-luks.sh, which also fails if a new privileged call site
+#      appears without the mask.
+#   2. DETECTION, here. Every byte of the host's `Boot*` variables is hashed
+#      before and after the engine runs, by the same guard the bootc lab uses.
+#      If layer 1 is ever wrong, this says so when the command returns instead
+#      of at the next power-on.
+#
+# A missing guard is a hard stop. Running this suite without layer 2 because
+# the file moved is how the incident happened in the first place: a discipline
+# followed most of the time.
+NVGUARD="../tests/lab/nvram-guard"
+[ -x "$NVGUARD" ] || die "$NVGUARD is missing or not executable.
+This suite will not run a privileged loopback install without it — see
+BOOT-BREAKAGE-2026-09-20.md and AGENTS.md \"Touching a machine's boot path\"."
 command -v cryptsetup>/dev/null || die "cryptsetup is not installed."
 sudo -n podman image exists "$IMAGE" 2>/dev/null \
     || die "$IMAGE is not in ROOT podman storage. Build it, or set APEX_LIVE_IMAGE."
@@ -175,7 +202,8 @@ start=$(date +%s)
 # readable afterwards without root, and the engine writes nothing to it that
 # needs privilege.
 # shellcheck disable=SC2024
-sudo -n env \
+sudo -n "$NVGUARD" --label "luks-live-install" --out "$WORK/nvram" -- \
+  env \
     APEX_IMAGE="$IMAGE" \
     APEX_LUKS_ENROLL_LOCAL="$HELPER" \
     APEX_RECOVERY_DIR="$RECOVERY_DIR" \
@@ -404,6 +432,17 @@ else
     bad "this machine's UEFI boot entries are unchanged" "SEE $EFI_BEFORE vs $EFI_AFTER — DO NOT REBOOT UNTIL CHECKED"
     diff "$EFI_BEFORE" "$EFI_AFTER" | head -20
 fi
+# The guard's own verdict, which reads efivarfs itself rather than efibootmgr's
+# rendering of it. Two sources; a change either one sees is a failure. And a
+# verdict that is neither "verified" nor an explained could-not-run is a
+# failure too: a guard whose output cannot be found proves nothing.
+nvverdict=$(sed -n 's/^.*nvram-guard\[[^]]*\]: verdict: \([a-z-]*\).*/\1/p' "$OUT" 2>/dev/null | tail -1)
+case "$nvverdict" in
+    verified)       ok "nvram-guard measured the run" "verdict: verified" ;;
+    could-not-run)  ok "nvram-guard measured the run" "verdict: could-not-run (no UEFI on this host)" ;;
+    "")             bad "nvram-guard measured the run" "no verdict in $OUT — the guard did not report" ;;
+    *)              bad "nvram-guard measured the run" "verdict: $nvverdict — DO NOT REBOOT UNTIL CHECKED" ;;
+esac
 
 echo
 echo "──────────────────────────────────────────────────────────────────────"
