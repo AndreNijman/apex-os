@@ -4,7 +4,7 @@ ask: Andre delegated it — *"you decide signing key or whatever, thats your job
   The orchestrator decided; this unit implemented the decision.
 repo: apex-os
 worktree: `/var/tmp/apex-work/wt-android-signing`, branch `task/android-signing`
-  (**pushed, not merged**; tip `49a2e9ed`)
+  (**pushed, not merged**; tip `d433cbd6`, four commits)
 owns: `android/tools/{generate-signing-key,require-signing-secrets,verify-signing-identity}.sh`,
   `android/signing-certificate.sha256`, `docs/android-signing.md`,
   `tests/test-android-signing.sh`, the signing parts of
@@ -14,7 +14,7 @@ owns: `android/tools/{generate-signing-key,require-signing-secrets,verify-signin
 
 ## STATUS — COMPLETE. Waiting on one act only Andre can perform.
 
-Three commits:
+Four commits:
 
 * `7a7136f9` merge `origin/task/android-release` — **this branch carries that
   unit's work too.** `roadmap/v2.2` does not have the Android release pipeline,
@@ -24,6 +24,7 @@ Three commits:
   well; landing android-release first is also fine and this still merges.
 * `a7aaeed5` the decision, the scripts, the gates, the docs, the suite
 * `49a2e9ed` `ROADMAP/evidence/android-signing-20260920.md`
+* `d433cbd6` the android job installs PyYAML rather than assuming the runner has it
 
 ## THE DECISION, as implemented
 
@@ -114,12 +115,18 @@ was shredded; `find` over the scratch and the worktree returns no `*.jks`,
    file's newline. `require-signing-secrets.sh` catches it and says so, but
    only if the value really has one; a password that is merely wrong looks the
    same from inside Gradle.
-4. **Rotation is documented and NOT implemented.** AGP has no
+4. **First CI run: if `tests/test-android-signing.sh` exits 2, that is a
+   missing tool on the runner, not a gate failing.** The suite refuses to skip
+   its own prerequisites, so it FATALs without PyYAML, apksigner, aapt2 or a
+   `platforms/*/android.jar`. The android job installs `python3-yaml` and
+   `platforms;android-36` in earlier steps, and build-tools comes with the
+   image — but read the exit code before reading the assertions.
+5. **Rotation is documented and NOT implemented.** AGP has no
    `SigningCertificateLineage` support, so a rotated release is an `apksigner`
    step outside the Gradle build and `lineage.bin` becomes a permanent fifth
    secret. Measured facts are in the doc; the pipeline change is not written,
    and writing it before it is needed would be writing it untested.
-5. `docs/android-app.md`'s open-decision section is gone, replaced by a pointer.
+6. `docs/android-app.md`'s open-decision section is gone, replaced by a pointer.
    Anything that still says the decision is open is stale.
 
 ## TRAPS PAID FOR HERE

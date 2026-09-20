@@ -3314,7 +3314,90 @@ tasks:
     the _impl skip ASSUMES '_impl' means pre-strip twin, which holds across all three kernels read but would
     silently skip a public kfunc genuinely named scx_bpf_*_impl; and game_exit's log was left alone on purpose, so
     an affected kernel's exit line carries no BTF clause. Full detail at
-    ROADMAP/evidence/kernel-btf-scx-20260920.md. Agent card ROADMAP/state/agents/kernel-btf-scx.md.
+    ROADMAP/evidence/kernel-btf-scx-20260920.md. Agent card ROADMAP/state/agents/kernel-btf-scx.md. || 2026-09-20
+    ROUND 34, unit kernel-build, branch task/kernel-build (pushed, not landed, no PR): APEX BUILT ITS OWN KERNEL
+    AND IT PASSES. podman build EXIT=0: rpmbuild 73m42s at -j12, 76m55s wall, vmlinux 498,397,712 bytes, kver
+    7.2.6-cachyos1.apex1.fc43.x86_64, 5 rpms totalling 180.4 MiB in a 186.9 MiB FROM-scratch image no user ever
+    downloads. CONFIG_PAHOLE_VERSION=132 (as pinned) is the line proving the pin did something - CachyOS ships 131
+    in its config and the symbol has no prompt, so olddefconfig recomputes it from the buildroot's pahole. BOTH
+    READERS CALL IT CLEAN: btf-xcheck 68 examined, 308 DECL_TAGs, 0 untagged; apex-kernel-btf-gate 'verdict: ok',
+    WHICH IS ITS FIRST EXIT 0 ON ANY KERNEL IN EXISTENCE - every BTF before this one carried the defect, so the
+    gate had only ever been validated negatively (four inputs, all exit 1) and now has a positive control. Both
+    were re-run from OUTSIDE the container over the vmlinux.btf extracted from the finished image, in case the
+    in-build pass was peculiar to the builder: host binary exit 0, bpftool in a clean fedora:43 exit 0. THE
+    ARITHMETIC CONFIRMS THE MECHANISM: resolve_btfids creates one *_impl twin per kfunc whose implicit argument it
+    actually strips, which predicts that a kernel where 18 more kfuncs became eligible carries exactly 18 more
+    twins. Fedora's stock 7.2.6 has 18 untagged and 29 twins; this build has 0 untagged and 47. 29 + 18 = 47
+    exactly, a prediction of the model rather than a number fitted to it, and 308 DECL_TAGs matches the A/B's 1.32
+    reading against 288 for 1.30. tests/check-kernel-contract.sh passes fail=0 against the real RPMs - the four
+    hard-gated packages, the *cachyos* kver glob matching exactly one directory, sign-file and
+    CONFIG_MODULE_SIG_HASH (module signing dies without either), depmod, and vmlinuz starting with MZ so sbsign
+    and a UKI stub both work. STILL NOT PROVEN, said plainly: no scx scheduler has been LOADED on this kernel;
+    that needs it booted on hardware, which this unit deliberately did not do, and the remaining gap is scx_lavd
+    attaching on an image built from these RPMs. HOW IT GOT HERE: THE FIRST BUILD'S FAILURE WAS THE HARNESS, NOT
+    THE KERNEL. The 08:21 run compiled a full CachyOS 7.2.6 successfully in 49m14s and died one second later: rpm
+    >= 4.20 runs an Executing(rmbuild) phase after a SUCCESSFUL build that deletes %{buildsubdir}, so vmlinux was
+    gone before the BTF gate could read it. Measured on fedora:43/rpm 6.0.2 with a throwaway spec - default leaves
+    0 vmlinux under BUILD, --noclean leaves 1; the spec defines no %clean so the flag has no other effect. The
+    prior card's prediction, that %autopatch would fail on the BORE patch, was WRONG: every source verified by
+    sha256, the patch applied, the kernel linked. THE LAST REPRODUCIBILITY HOLE IS CLOSED AND IT WAS NOT
+    THEORETICAL: BUILDER_BASE named the floating tag fedora:43 and the tag MOVED DURING THIS UNIT'S OWN WORK - the
+    08:21 build pulled base blob ce241f1b, the evening rerun pulled a71bf9b8 from an image the registry rebuilt at
+    05:47:58Z that morning, which also cost a full cache miss. Both FROM lines and BUILDER_BASE now name
+    sha256:84325c67. What that does NOT pin is written into kernel.pin rather than left to be assumed: the digest
+    freezes the base LAYER, not the dnf5 install gcc transaction on top of it, so GCC can still move - tolerable
+    because the compiler can change the kernel BINARY but cannot change whether the kfunc BTF is correct, which is
+    pahole's and is pinned by NVR AND sha256. AN ASSUMPTION THE PRIOR ROUND FLAGGED IS NOW A MEASUREMENT:
+    kernel-btf-scx's own LIMITS ON THE CLAIMS said the _impl skip ASSUMED those names were pre-strip twins.
+    Counted across the three A/B blobs, pahole emits 68 scx_bpf_* FUNCs and ZERO *_impl under either version,
+    while the shipped post-resolve_btfids .BTF has 97 - the same 68 plus 29 *_impl. They are created by
+    resolve_btfids, one per kfunc whose implicit argument it actually stripped, so the exclusion is right for the
+    right reason and any reader run over a vmlinux's .BTF must make it. TWO READERS NOW, because
+    apex-kernel-btf-gate had never returned 0 on any BTF in existence (re-checked: four inputs, all exit 1) so
+    every test of it was a negative one. kernel/btf-xcheck.sh is sh+bpftool, shares no code, asks the root-cause
+    question (did pahole emit the DECL_TAG) where the gate asks the symptom question (is the implicit arg still
+    there), runs first and prints, and a gate-passes/xcheck-fails disagreement fails the build. It reproduces the
+    evidence table to the digit from an independent implementation (shipped 68/18, 1.30 68/18, 1.32 68/0) and
+    REFUSES a valid BTF containing no scx_bpf_* at all, because zero untagged out of zero examined is not a
+    passing kernel. THE SECURITY OBLIGATION NOW HAS A MECHANISM AND IT IS VERIFIED IN CI, not merely written:
+    tests/check-kernel-drift.sh plus .github/workflows/kernel-drift.yml RAN FOR REAL in GitHub Actions (run
+    35512436299, 15s, success). Three outcomes, not two - 0 no drift, 1 drift, 2 a lookup could not be performed,
+    which is not a pass; five mutants all caught. BOTH its lookups were wrong when first written and both were
+    caught by checking them against a second source: GitHub's /tags API returns tags in its own order and page one
+    of CachyOS/linux is 100 v5.18-rc* tags with no cachyos-* among them, so the obvious reading is "no newer
+    kernel" (now git ls-remote, all 148 in 1.1s, no token); and worse, mdapi answers version 1.32 for dwarves and
+    three fields later repo: updates-testing, so the first version of the script reported a LIVE FALSE POSITIVE,
+    "1.32 has reached stable, relax the pin", where bodhi says status=testing and date_stable=None. It now asks
+    bodhi. Current state that answers two standing questions: cachyos-7.2.6-1 IS the newest stable tag in the 7.2
+    series (of 101), and dwarves-1.32-1.fc43 is STILL in updates-testing, so the koji NVR pin CANNOT be relaxed
+    yet. CHECK-KERNEL-CONTRACT.SH WAS ITSELF THE DEFECT IT EXISTS TO PREVENT. Written last round, never runnable
+    until there were RPMs, and run for the first time today it turned out to check nothing and report success:
+    podman run had no -i, so the container got an empty stdin, bash -s read EOF, the entire heredoc of contracts
+    was discarded and it exited 0 (measured: without -i no output and rc=0, with -i the body runs and rc=7); and
+    the script ended on an echo with no exit, so it exited with ECHO's status even when contracts failed. Both
+    fixed, a sentinel line now makes a non-running body fatal, and the fix is negative-controlled - pointed at 2KB
+    of /dev/urandom named like a kernel RPM it reports 18 FAILs and exits 1 where before it exited 0 silently. A
+    third fix in the same file removed a head|grep -q under pipefail that can return 141 on a match, stated
+    honestly as a known class rather than an observed failure (300 iterations did not reproduce it). CHECKED
+    RATHER THAN INHERITED: signing is untouched - the diff of Containerfile.core on this branch against
+    roadmap/v2.2 grepped for sbsign|kernel-signed|secureboot|sign-file|MODULE_SIG is EMPTY, so
+    /usr/share/apex-os/secureboot/kernel-signed stays honest and Containerfile.release's assertion needs no
+    change; and all four config assertions will pass, read out of the pinned config - SCHED_CLASS_EXT=y,
+    DEBUG_INFO_BTF=y, EFI_STUB=y, and MODULE_ALLOW_BTF_MISMATCH NOT SET with no scripts/config line enabling it,
+    SO THE DISPATCH'S "do not enable MODULE_ALLOW_BTF_MISMATCH" NEEDS NO EXCEPTION - no module required it.
+    CONFIG_PAHOLE_VERSION=131 ships in CachyOS's config and that is fine: the symbol has no prompt so olddefconfig
+    recomputes it from the buildroot's pahole, which is exactly what the =132 assertion proves. COSTS, MEASURED:
+    ~45-49 min at -j12, a ~100 GB build tree (/var went 552 to 453 GB free), and the fleet's ~5 GB update cost
+    UNCHANGED because the kernel image is RPMs only (FROM scratch) and core installs the same kernel from a
+    different source. THE ONE THING THAT NEEDS ANDRE AND NOT AN AGENT: nothing builds the kernel image in CI, and
+    the decision is sharper than "slower" - the tree is ~100 GB and a hosted GitHub runner has 14 GB, so it cannot
+    run on one at all. Two options with their real costs are a table in docs/update-cost.md: a self-hosted runner
+    on katana (needs >=120 GB free on a tight /var, and a self-hosted runner executing PR code is its own security
+    decision), or _build_minimal 1 plus a modprobed.db, which CHANGES WHAT HARDWARE APEX BOOTS ON and is a product
+    decision. Until one is chosen a release depends on somebody's laptop. Nothing was run on katana or the L16's
+    system state: no image installed, no deployment touched, no boot path/ESP/NVRAM/bootloader touched, and no
+    bootc install of any kind. Full detail at ROADMAP/evidence/kernel-build-20260920.md section 4. Agent card
+    ROADMAP/state/agents/kernel-build.md.
 - id: P1-044
   title: Default incoming firewall
   priority: P1

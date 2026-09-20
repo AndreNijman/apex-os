@@ -1,9 +1,14 @@
 # unit: kernel-build — APEX builds its own kernel
 
-**Status: the decisive measurement was done last round. This round found why the
-first end-to-end build died, fixed it, closed the last reproducibility hole, and
-built the mechanism that carries the security obligation. The rebuilt kernel
-tier was IN FLIGHT when this line was written — see §"Where the build got to".**
+**Status: DONE for this round, and the headline is that APEX HAS NOW BUILT ITS
+OWN KERNEL AND IT PASSES.** `podman build` exited 0, both BTF readers call the
+result clean, and `tests/check-kernel-contract.sh` passes `fail=0` against the
+real RPMs. `apex-kernel-btf-gate` returned **`verdict: ok`** — its first exit 0
+on any kernel in existence. P1-043 recorded (`partial`), prior evidence carried
+forward whole. Nothing landed, no PR.
+
+**The one thing that needs Andre and not an agent is NEXT item 2: the CI
+decision.** The build tree is ~100 GB and a hosted GitHub runner has 14 GB.
 
 Repo `apex-os`, branch `task/kernel-build`, worktree
 `/var/tmp/apex-work/wt-kernel-build`.
@@ -14,11 +19,18 @@ Not landed. No PR.
 Commits this round (all pushed):
 
 ```
+8508e9b1 docs(evidence): APEX built the kernel, and the gate returned 0 for
+         the first time
+07f58337 fix(tests): lint kernel/ too, and stop the drift check failing that
+         lint
+eeb29fd0 fix(local): the kernel verdict was read with a shell the kernel image
+         has not got
+ed74b8c1 fix(kernel): the contract test checked nothing and said it passed
+c5a56710 docs(update-cost): the kernel's recurring price, and the CI question
+         it cannot answer
 204035e5 feat(kernel): notice when the pin stops being current, because
          nothing else will
-<docs>   docs(update-cost): the kernel's recurring price, and the CI question
-         it cannot answer
-<ev>     docs(evidence): what the first two end-to-end runs of the kernel tier
+9a684a66 docs(evidence): what the first two end-to-end runs of the kernel tier
          found
 a5ce7437 build(kernel): pin the builder base by digest, because the tag moved
          mid-unit
@@ -28,8 +40,22 @@ cb262685 test(kernel): derive the pin checker's locals instead of listing them
 6150e25c Merge origin/roadmap/v2.2 into task/kernel-build
 ```
 
-Evidence: `ROADMAP/evidence/kernel-build-20260920.md` (tracked, on the branch),
-§4 added this round.
+Two more defects were found by RUNNING things that had never been run, and both
+are the "gate that inspects nothing" family:
+
+* **`tests/check-kernel-contract.sh` executed zero checks and exited 0.**
+  `podman run` with no `-i` gives the container an empty stdin, so `bash -s`
+  read EOF and the whole heredoc of contracts was discarded; and the script
+  ended on an `echo`, so it exited with ECHO's status even when contracts
+  failed. Both fixed, a sentinel makes a non-running body fatal, and the fix is
+  negative-controlled.
+* **`build-local.sh` read the kernel verdict with `podman run --entrypoint
+  /bin/sh` on a `FROM scratch` image.** No shell, so it always came back empty
+  and would have aborted a *successful* 74-minute build with
+  `btf_scx='', expected 'usable'`. Now `podman create` + `podman cp`.
+
+Evidence: `ROADMAP/evidence/kernel-build-20260920.md` (tracked, on the branch).
+§4 added this round; **§4.5 is the end-to-end run with every number in it**.
 
 ---
 
@@ -169,56 +195,71 @@ so **the koji NVR pin cannot be relaxed yet.**
 
 ---
 
-## Where the build got to
+## The build: it passed. Full numbers in evidence §4.5
 
-`podman build -f Containerfile.kernel -t apex-kernel:local .` as transient unit
-**`kb-build2`**, log `/var/lab-scratch/kernel-build/logs/build2.log`, started
-2026-09-20 ~20:56 AWST with `rpmbuild` entering at 12:59:03Z.
+`localhost/apex-kernel:local` **exists in the ROOTLESS podman store** and is the
+image everything below was verified against. `EXIT=0`.
 
-**IN FLIGHT when this card was written. Read the tail of that log before
-assuming anything about the outcome.** Confirmed in it already: the pinned
-dwarves RPMs verified by sha256, `pahole in buildroot: v1.32`, all three pinned
-sources verified, the gate binary compiled into the builder stage, and
-`rpmbuild` running with `--noclean`.
+```text
+rpmbuild 73m42s at -j12 · 76m55s wall · vmlinux 498,397,712 bytes
+CONFIG_PAHOLE_VERSION=132 (as pinned) · SCHED_CLASS_EXT=y · DEBUG_INFO_BTF=y
+EFI_STUB=y · MODULE_ALLOW_BTF_MISMATCH not set
+btf-xcheck: 68 examined (47 *_impl twins excluded), 308 DECL_TAGs, 0 untagged
+apex-kernel-btf-gate: verdict ok        <-- ITS FIRST EXIT 0, EVER
+kver 7.2.6-cachyos1.apex1.fc43.x86_64 · 5 rpms, 180.4 MiB · image 186.9 MiB
+cc = gcc (GCC) 15.3.1 20260722 (Red Hat 15.3.1-1)
+```
 
-Tagged `apex-kernel:local` deliberately — that is `Containerfile.core`'s default
-`APEX_KERNEL_IMAGE`, so a passing image feeds a core build with no `--build-arg`.
+Verified again from OUTSIDE the container over the `vmlinux.btf` extracted from
+the finished image (host gate exit 0; `btf-xcheck.sh` in a clean `fedora:43`
+exit 0), and `tests/check-kernel-contract.sh` passes `fail=0` against the real
+RPMs. Extracted artefacts kept at **`/var/lab-scratch/kernel-build/out2/`**
+(`rpms/`, `manifest/`), build log `…/logs/build2.log`.
 
-**Provenance if it passes:** neither `kernel/kernel.pin` nor
-`Containerfile.kernel` has changed since `a5ce7437`, so that is the commit the
-image was built from. `Containerfile.core` `cmp`s the build context's
-`kernel.pin` against `/manifest/kernel.pin`, so **any edit to either file means
-the image must be rebuilt before it can feed core.**
+**`29 + 18 = 47`** — Fedora's kernel has 18 untagged kfuncs and 29 `*_impl`
+twins; ours has 0 untagged and 47 twins. That is the §4.3 model predicting a
+number rather than being fitted to one.
+
+**Provenance:** built from commit `a5ce7437`; neither `kernel/kernel.pin` nor
+`Containerfile.kernel` has moved since. `Containerfile.core` `cmp`s the build
+context's `kernel.pin` against `/manifest/kernel.pin`, so **any edit to either
+file means the kernel tier must be rebuilt before it can feed core.**
+
+**Two practical gotchas for whoever builds core next.**
+1. The image is tagged `apex-kernel:local`, which is `Containerfile.core`'s
+   default `APEX_KERNEL_IMAGE`, so a core build needs no `--build-arg`.
+2. But `build-local.sh` uses **`sudo podman`** (root storage) and this image is
+   in the **rootless** store. `sudo podman image exists` will not find it and
+   `build_kernel` will recompile. Either re-run the build under `sudo podman`,
+   or `podman image scp` / save-and-load it across, before assuming 74 minutes
+   have been saved.
 
 ---
 
 ## NEXT — in priority order, for a stranger
 
-1. **Finish reading the build out, then run the contract test.** If the log ends
-   in `EXIT=0`, the gate returned 0 on a real kernel for the first time ever.
-   Then, in this order:
-   ```sh
-   cid=$(podman create localhost/apex-kernel:local /x)
-   podman cp "$cid:/rpms" /var/lab-scratch/kernel-rpms
-   podman cp "$cid:/manifest" /var/lab-scratch/kernel-manifest && podman rm "$cid"
-   RPMS=/var/lab-scratch/kernel-rpms ./tests/check-kernel-contract.sh
-   ```
-   (`FROM scratch` has no shell — `podman create` + `podman cp`, never
-   `podman run`.) Ten minutes, and it is what stands between this and a
-   50-minute core build failing at its `rpm -q` gate. Then run BOTH readers over
-   the extracted `/manifest/vmlinux.btf` from OUTSIDE the container
-   (`apexd/target/release/apex-kernel-btf-gate` is already built on the host,
-   and `kernel/btf-xcheck.sh` needs a fedora container for bpftool), and append
-   the timings, `podman image inspect --format '{{.Size}}'` and the RPM sizes to
-   evidence §4.5.
+1. **Build `core` against this kernel — the one thing left that is pure
+   execution.** Everything the kernel tier owes core is now verified, so the
+   next real step is a core build that consumes it, which is also the first
+   chance to see the cross-tier contracts (`btf_scx=usable`, the `kver` check,
+   the `kernel.pin` `cmp`) fire for real. Mind the rootless-vs-sudo store note
+   above, and expect ~45–50 minutes for core on top.
 
-   If it **FAILS**: do not `podman build` again — the layer is discarded and you
-   lose the compile. Re-run the final RUN's body in a *named* container off the
-   cached sources layer (`podman run --name kb-persist <layer-id> bash -c '…'`)
-   so the tree survives for inspection. xcheck's printed names tell you which
-   story it is: names listed = the kernel genuinely has the defect (and that is
-   the loud result Andre needs immediately, not something to engineer past);
-   xcheck clean but the gate red = the readers disagree and one is wrong.
+   Do NOT re-run the kernel build to get there. If a rebuild ever is needed and
+   it **fails**, do not `podman build` again either — a failed `RUN` layer is
+   discarded and the compile is lost. Re-run the final RUN's body in a *named*
+   container off the cached sources layer
+   (`podman run --name kb-persist <layer-id> bash -c '…'`) so the tree survives
+   for inspection. `btf-xcheck`'s printed names tell you which story it is:
+   names listed = the kernel genuinely has the defect, and that is a loud
+   result Andre needs immediately rather than something to engineer past;
+   xcheck clean but the gate red = the two readers disagree and one is wrong.
+
+   **The genuinely remaining unknown is hardware.** The gate says the kfunc
+   prototypes are the shape libbpf expects. No scx scheduler has been *loaded*
+   on this kernel, because that needs it booted. `scx_lavd` attaching on a
+   machine running an image built from these RPMs is the last link in the chain
+   this whole line of work exists to close.
 
 2. **THE CI DECISION, AND IT IS ANDRE'S, NOT AN AGENT'S.** Nothing builds the
    kernel image in CI. `build-image.yml` needs a `kernel` job before `core`
@@ -301,13 +342,19 @@ time rather than as a mutable karg.
 
 ## Cost, stated plainly
 
-* **Build time:** ~45–49 min at `-j12` on this 16-core box. The pahole step is
-  **not** the cost — 5.3 s and ~1 GB RSS over a 537 MB vmlinux, measured.
+* **Build time:** the two real runs were **49m14s** and **73m42s** at `-j12` on
+  this 16-core box. The spread is not the kernel — an unrelated CPU-heavy
+  application was running through the second one, and `-j12` on 16 cores does
+  not get 12 cores when something else wants four. **Plan on ~45–50 min for a
+  quiet machine.** The pahole step is **not** the cost: 5.3 s and ~1 GB RSS over
+  a 537 MB vmlinux, measured.
 * **Disk:** a **~100 GB** build tree, measured (`/var` 552 → 453 GB free). That
   figure, not the CPU, is what decides the CI question.
-* **Image size:** the kernel image is RPMs only (`FROM scratch`), so it adds
-  nothing to a user's download. `core` installs the same kernel from a different
-  source — **the fleet's ~5 GB update cost is unchanged.**
+* **Image size:** **186.9 MiB**, of which 180.4 MiB is the five RPMs — it is
+  `FROM scratch`, so it is the artefacts and nothing else, and **no user ever
+  downloads it**; only the `core` build pulls it. `core` installs the same
+  kernel from a different source, so **the fleet's ~5 GB update cost is
+  unchanged.** `vmlinux` itself (475 MiB) is deliberately not shipped.
 * **Security updates — the obligation, and it is permanent.** When CachyOS tags
   a new `cachyos-7.2.*`, somebody must bump `KERNEL_TAG` and its sha256. Nothing
   happens on its own, and **an unbumped pin is a kernel that silently stops
