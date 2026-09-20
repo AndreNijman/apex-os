@@ -137,12 +137,35 @@ end
 -- compositor reports the release instead, and the shell's overlay never asks
 -- for the keyboard at all.
 --
--- `release = true` is Hyprland's `bindr`. `transparent = true` is its `t` flag:
--- the release still reaches the focused application, so holding Alt for an
--- application's own Alt-something shortcut is unaffected.
+-- `release = true` is Hyprland's `bindr`.
+--
+-- ── `non_consuming`, not `transparent` ───────────────────────────────────────
+-- The flag that lets the key ALSO reach the focused application is `n`,
+-- `non_consuming = true`. `t` (`transparent = true`) means something else
+-- entirely — this bind cannot be shadowed by another bind — and a bind carrying
+-- only `t` still eats the key.
+--
+-- That distinction is not cosmetic here. ALT+Return and ALT+Escape are ordinary
+-- press binds that exist for the switcher and are pressed with the switcher
+-- CLOSED almost every time: Thunar opens Properties on ALT+Return, and browsers
+-- use it in the address bar. A consuming bind would take both away from every
+-- application on the machine, permanently, to serve a switcher that is not open.
+-- A consumed ALT *release* is worse — that is how an application ends up
+-- believing Alt is still held.
+--
+-- Checked as data rather than by eye: `hyprctl binds -j` reports
+-- `non_consuming` per bind, tests/test-apex-hypr-focus.sh asserts it is true on
+-- every one of these, and the three other spellings that look plausible
+-- (`nonConsuming`, `consume = false`, `ignore_mods`) are all ACCEPTED by
+-- hl.bind and all leave `non_consuming: false`. A wrong name here is silent.
 --
 -- Both Alt keys, because a keyboard has two and a user who started the switch
 -- with the right-hand one has to be able to finish it.
+--
+-- And both with and without SHIFT: after ALT+SHIFT+Tab the fingers do not come
+-- off the two modifiers at the same instant, so the Alt release very often
+-- arrives with SHIFT still down. modmask 8 would not match it, and the switcher
+-- would sit open until something else closed it.
 --
 -- ── ALT+Return commits too, and that is not decoration ───────────────────────
 -- The release bind cannot be verified without a person: a synthetic keyboard
@@ -171,18 +194,27 @@ end
 -- under XDG_RUNTIME_DIR and an exit. One short-lived shell per Alt release,
 -- never the shell's IPC.
 local switcher = "/usr/libexec/apex-switcher"
-bind("ALT",           "Tab",    hl.dsp.exec_cmd(switcher .. " next"),
+local commit   = { non_consuming = true, transparent = true,
+                   description = "Commit the window switcher" }
+local release  = { release = true, non_consuming = true, transparent = true,
+                   description = "Commit the window switcher" }
+
+-- Tab IS consumed: ALT+Tab is the window manager's, and an application that
+-- also wanted it would be fighting the switcher on every press.
+bind("ALT",       "Tab", hl.dsp.exec_cmd(switcher .. " next"),
      { description = "Window switcher" })
-bind("ALT SHIFT",     "Tab",    hl.dsp.exec_cmd(switcher .. " prev"),
+bind("ALT SHIFT", "Tab", hl.dsp.exec_cmd(switcher .. " prev"),
      { description = "Window switcher (reverse)" })
-bind("ALT",           "Escape", hl.dsp.exec_cmd(switcher .. " cancel"),
-     { description = "Cancel the window switcher" })
-bind("ALT", "Alt_L", hl.dsp.exec_cmd(switcher .. " commit"),
-     { release = true, transparent = true, description = "Commit the window switcher" })
-bind("ALT", "Alt_R", hl.dsp.exec_cmd(switcher .. " commit"),
-     { release = true, transparent = true, description = "Commit the window switcher" })
-bind("ALT", "Return", hl.dsp.exec_cmd(switcher .. " commit"),
-     { transparent = true, description = "Commit the window switcher" })
+
+bind("ALT",       "Escape", hl.dsp.exec_cmd(switcher .. " cancel"),
+     { non_consuming = true, transparent = true,
+       description = "Cancel the window switcher" })
+bind("ALT",       "Return", hl.dsp.exec_cmd(switcher .. " commit"), commit)
+
+bind("ALT",       "Alt_L", hl.dsp.exec_cmd(switcher .. " commit"), release)
+bind("ALT",       "Alt_R", hl.dsp.exec_cmd(switcher .. " commit"), release)
+bind("ALT SHIFT", "Alt_L", hl.dsp.exec_cmd(switcher .. " commit"), release)
+bind("ALT SHIFT", "Alt_R", hl.dsp.exec_cmd(switcher .. " commit"), release)
 
 -- ── Workspaces ───────────────────────────────────────────────────────────────
 -- 1-9 then 0, where 0 is workspace 10.

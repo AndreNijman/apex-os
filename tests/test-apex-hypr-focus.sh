@@ -443,24 +443,43 @@ except Exception: binds = []
 for b in binds:
     d = str(b.get("description", ""))
     if "switcher" in d.lower():
-        print("%s|%s|%s|%s" % (b.get("modmask"), b.get("key"), b.get("release"), d))')"
+        print("%s|%s|%s|%s|%s" % (b.get("modmask"), b.get("key"), b.get("release"),
+                                  b.get("non_consuming"), d))')"
 echo "$switcher_binds" | sed 's/^/    /'
 
-want_one() {   # want_one DESC MODMASK KEY RELEASE
+want_one() {   # want_one DESC MODMASK KEY RELEASE NON_CONSUMING
     if printf '%s\n' "$switcher_binds" \
-        | grep -qiE "^$2\|$3\|$4\|"; then
+        | grep -qiE "^$2\|$3\|$4\|$5\|"; then
         ok "$1"
     else
         bad "$1"
     fi
 }
 # modmask 8 is ALT, 9 is ALT+SHIFT.
-want_one "ALT+Tab opens the switcher"                8 Tab    false
-want_one "ALT+SHIFT+Tab steps backwards"             9 Tab    false
-want_one "ALT+Escape cancels"                        8 Escape false
-want_one "releasing Alt_L commits (a RELEASE bind)"  8 Alt_L  true
-want_one "releasing Alt_R commits (a RELEASE bind)"  8 Alt_R  true
-want_one "ALT+Return commits without a release bind" 8 Return false
+#
+# The `non_consuming` column is the one worth explaining. ALT+Return and
+# ALT+Escape are pressed with the switcher CLOSED almost every time — Thunar
+# opens Properties on ALT+Return — so a consuming bind would take them away
+# from every application on the machine to serve a switcher that is not open.
+# A consumed ALT RELEASE is worse: that is how an application ends up believing
+# Alt is still held.
+#
+# It is asserted rather than trusted because the wrong spelling is SILENT.
+# `nonConsuming`, `consume = false` and `ignore_mods` are all accepted by
+# hl.bind without an error and all leave `non_consuming: false`; so does
+# `transparent = true`, which means a different thing entirely (this bind
+# cannot be shadowed by another bind).
+want_one "ALT+Tab opens the switcher, and consumes Tab"        8 Tab    false false
+want_one "ALT+SHIFT+Tab steps backwards"                       9 Tab    false false
+want_one "ALT+Escape cancels, without eating ALT+Escape"       8 Escape false true
+want_one "ALT+Return commits, without eating ALT+Return"       8 Return false true
+want_one "releasing Alt_L commits (release, non-consuming)"    8 Alt_L  true  true
+want_one "releasing Alt_R commits (release, non-consuming)"    8 Alt_R  true  true
+# After ALT+SHIFT+Tab the fingers do not leave both modifiers at the same
+# instant, so the ALT release usually arrives with SHIFT still down — modmask 9,
+# which the binds above do not match.
+want_one "releasing Alt_L with SHIFT still down also commits"  9 Alt_L  true  true
+want_one "releasing Alt_R with SHIFT still down also commits"  9 Alt_R  true  true
 
 cleanup
 

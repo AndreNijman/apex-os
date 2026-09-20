@@ -47,7 +47,7 @@ report, reproduced on demand.
 | | suite | what it proves |
 |---|---|---|
 | apex-os | `tests/test-apex-hypr-focus.sh` | `SUPER`+arrow warps the pointer and holds focus; the control fails; every arrow combo is bound exactly once; the switcher's binds exist and the `Alt_L`/`Alt_R` ones are releases |
-| apex-shell | `tests/run-window-switcher-test.sh` | real `ALT` and `TAB` keys reach the switcher — stepping, wrapping, backwards, `ESCAPE`, commit, and a window that has left the screen |
+| apex-shell | `tests/run-window-switcher-test.sh` | real `ALT` and `TAB` keys reach the switcher — stepping, wrapping, backwards, `ESCAPE`, commit, a tap with no pause at all, a stale flag repairing itself, and a window that has left the screen |
 | apex-shell | `tests/run-switcher-activate-test.sh` | committing focuses the selected window, puts the pointer inside it, holds focus through a nudge, and switches workspace for a window on another one |
 | apex-shell | `tests/run-niri-keybinds-test.sh` | the niri fragment carries `recent-windows` and `niri validate` accepts it |
 
@@ -90,6 +90,43 @@ while the switcher is open. That is why the keybind names
 nothing open, the helper does one `[ -e ]` on a flag file under
 `XDG_RUNTIME_DIR` and exits, and the shell is never contacted.
 
+There are four release bindings, not two: `Alt_L` and `Alt_R`, each with and
+without `SHIFT`. After `ALT`+`SHIFT`+`Tab` the fingers do not come off the two
+modifiers at the same instant, so the `ALT` release usually arrives with
+`SHIFT` still held — a different modmask, which the plain bindings would not
+match, and the switcher would sit open.
+
+Every binding except `ALT`+`Tab` itself is **non-consuming**
+(`non_consuming = true`, Hyprland's `n`). `ALT`+`Return` and `ALT`+`Escape` are
+pressed with the switcher closed almost every time — Thunar opens Properties on
+`ALT`+`Return` — so a consuming binding would take them away from every
+application on the machine in order to serve a switcher that is not open, and a
+consumed `ALT` *release* is how an application ends up believing `ALT` is still
+held. Note that `transparent` (`t`) is **not** that flag: it means "this binding
+cannot be shadowed by another binding", and a binding carrying only `t` still
+eats the key. Three other plausible spellings — `nonConsuming`,
+`consume = false`, `ignore_mods` — are accepted by `hl.bind` without complaint
+and leave `non_consuming: false`, so the value is asserted against a running
+instance rather than trusted.
+
+### The single tap
+
+A quick `ALT`+`Tab` lets go of `ALT` about 60 ms after `Tab` goes down, and
+both the press and the release are separate short-lived processes: a spawn, an
+`apex`, and a `qs ipc call`, each. Two consequences, both handled:
+
+* The flag file is written by **the helper, on `next`**, not by the shell at
+  the end of that chain — otherwise the release arrives before the flag exists,
+  the commit is dropped, and the switcher is left open on the wrong entry.
+* The two processes can still overtake each other, so a commit that arrives
+  with nothing open is *remembered* for 600 ms, and the `next` that opens the
+  switcher within that window commits immediately. A stray `ALT` release cannot
+  arm that: the helper only forwards a commit when the flag exists, and only
+  `next`/`prev` create it.
+
+A flag left behind — `next` with a single window open writes one and opens
+nothing — costs one wasted IPC call, and that call is what removes it.
+
 `ALT`+`Return` commits as well, and it is not decoration. The release binding
 is the one part of this that no headless test can press — a synthetic keyboard
 (`wtype`, virtual-keyboard-v1) is accepted by Hyprland 0.56.2 and then reported
@@ -111,6 +148,17 @@ hold-and-release switcher impossible there. labwc's own switcher does the same
 job properly, so the Floating session keeps it — with
 `<action name="NextWindow" workspace="all"/>`, which is the whole of "all
 windows including other workspaces" for that session.
+
+**One thing labwc's switcher does not do: warp the pointer.** With
+`<followMouse>yes</followMouse>`, `ALT`+`Tab` gives focus to the window you
+picked and the next movement of the mouse hands it to whatever is under the
+cursor — the same complaint this document opens with, in that session's
+`ALT`+`Tab`. `<action name="WarpCursor" to="window"/>` exists and would fix it
+IF it ran after the cycle rather than at key-press time, and nothing here can
+tell which: labwc has no IPC, so the pointer's position cannot be read back
+headlessly, and adding an unverified warp risks warping to the OLD window
+before the cycle even starts. It is left undone and written down rather than
+guessed at.
 
 **niri** 26.04 ships `recent-windows`: hold-and-release, MRU ordering, live
 previews. It has no key-release binding for the shell's switcher to borrow
