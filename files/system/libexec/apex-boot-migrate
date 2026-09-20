@@ -514,6 +514,19 @@ print(((b.get("image") or {}).get("imageDigest")) or "")')"
 
     echo staged > "$STATE/phase"
     sync
+
+    # The image was copied out of bootc's storage into podman's to run the
+    # install as a container of it. That copy is a THIRD full copy of the image
+    # on this disk — APEX's is 15 GB — and it has done its job. Removing it is
+    # the difference between a migration that costs a deployment and one that
+    # costs a deployment plus the whole image again. katana's /var is tight.
+    if [ "${runimage:-}" = localhost/bootc ]; then
+        podman rmi localhost/bootc >/dev/null 2>&1 &&
+            log "removed the working copy of the image ($(basename "$runimage"))"
+    fi
+    # The root was remounted read-write for the install. Put it back.
+    mount -o remount,ro "$SYSROOT" 2>/dev/null
+
     release_esp
     log "staged: the new boot path is written and nothing the firmware reads has changed"
     return 0
@@ -664,7 +677,25 @@ cmd_confirm() {
     [ "$(cat "$STATE/phase" 2>/dev/null)" = committed ] || { log "nothing to confirm"; return 0; }
     case "$(booted_loader)" in
         *systemd-boot*) ;;
-        *) log "this boot is not systemd-boot; not confirming"; return 0 ;;
+        *)
+            # Committed, and this boot is NOT the new path. BootNext is a
+            # one-shot: the firmware consumed it, so the trial has already
+            # happened and it did not end here. Either the loader was refused
+            # or that boot did not get far enough to confirm itself.
+            #
+            # This is recorded rather than shrugged at, because the machine is
+            # otherwise indistinguishable from one that has not rebooted yet —
+            # and `apex update` would then commit again, and the user would
+            # reboot into the same failure every time. A failed migration is
+            # not retried without being asked.
+            echo failed > "$STATE/phase"
+            date -Is > "$STATE/failed-at" 2>/dev/null
+            sync
+            log "the migration's trial boot did not come up: this boot is not"
+            log "systemd-boot and BootNext has been consumed. Recorded as failed."
+            log "This machine is working, on GRUB, with everything it had."
+            log "Nothing will retry on its own. To try again: apex-boot-migrate retry"
+            return 0 ;;
     esac
     local num; num="$(cat "$STATE/bootnum" 2>/dev/null)"
     [ -n "$num" ] || { log "no recorded boot entry number"; return 0; }
@@ -695,6 +726,19 @@ cmd_abort() {
     return 0
 }
 
+cmd_retry() {
+    [ "$(cat "$STATE/phase" 2>/dev/null)" = failed ] || refuse "nothing-failed" \
+        "There is no failed migration to retry."
+    # Back to `staged`, not to nothing: everything the stage wrote is still on
+    # this machine and still correct, so the retry is one EFI variable write.
+    echo staged > "$STATE/phase"
+    rm -f "$STATE/failed-at"
+    sync
+    log "armed again. The next 'apex-boot-migrate auto' — or 'apex update' —"
+    log "will commit, and the boot after it tries systemd-boot once more."
+    return 0
+}
+
 cmd_status() {
     printf 'phase:        %s\n' "$(cat "$STATE/phase" 2>/dev/null || echo 'not started')"
     printf 'store:        %s\n' "$(booted_store)"
@@ -704,6 +748,14 @@ cmd_status() {
 }
 
 cmd_auto() {
+    if [ "$(cat "$STATE/phase" 2>/dev/null)" = failed ]; then
+        refuse "last-attempt-failed" \
+            "The last migration was committed and its trial boot did not come up" \
+            "($(cat "$STATE/failed-at" 2>/dev/null || echo 'time not recorded'))." \
+            "This machine is on GRUB and working. Committing again would just" \
+            "spend another reboot on the same failure, so it is not done" \
+            "automatically: run 'apex-boot-migrate retry' to arm it once more."
+    fi
     # A machine that already has a complete stage — because the last run's
     # power was cut after staging and before the commit — does not stage
     # again. Everything the stage wrote is still there and still correct.
@@ -727,6 +779,7 @@ case "${1:-status}" in
     commit)   cmd_commit ;;
     confirm)  cmd_confirm ;;
     abort)    cmd_abort ;;
+    retry)    cmd_retry ;;
     auto)     cmd_auto ;;
-    *) printf 'usage: apex-boot-migrate {status|precheck|stage|commit|confirm|abort|auto}\n' >&2; exit 2 ;;
+    *) printf 'usage: apex-boot-migrate {status|precheck|stage|commit|confirm|retry|abort|auto}\n' >&2; exit 2 ;;
 esac

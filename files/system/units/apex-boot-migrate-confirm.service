@@ -1,0 +1,56 @@
+[Unit]
+Description=Confirm or fail the systemd-boot migration
+Documentation=file:///usr/share/doc/apex/boot-v2.md
+
+# ── what this unit decides ──
+#
+# apex-boot-migrate's commit is a BootNext write: one boot of the new path,
+# then the firmware forgets. This unit is what turns that single trial into
+# the default — or records that it failed. It runs on EVERY boot while a
+# migration is in flight, on both boot paths, and does one of two things:
+#
+#   booted systemd-boot, phase=committed  ->  write BootOrder, phase=confirmed
+#   booted GRUB,         phase=committed  ->  phase=failed, and say so
+#
+# The second case is the one that needs a unit rather than a comment. A
+# machine whose new path did not come up is back on GRUB with BootNext already
+# consumed, and nothing else would notice: the next `apex update` would stage
+# and commit again, and the user would reboot into the same broken loader
+# every time. Recording the failure is what stops that loop.
+#
+# ── the ordering, and what it is honestly worth ──
+#
+# boot-complete.target is the right gate: APEX puts apex-boot-health in its
+# .requires, so reaching it means the health check passed. But it is reached
+# only when something pulls it in, and on the first boot of a migrated machine
+# the loader entry carries no boot counter, so systemd-bless-boot — the unit
+# that normally pulls it — is skipped by its own ConditionPathExists.
+#
+# So: Wants= to pull the target in where it can run, After= to be ordered
+# behind it, and WantedBy=multi-user.target so this unit still runs on a
+# machine where that target is never reached. Wants= is not Requires=: a
+# failed or absent boot-complete.target does not stop this unit. That is a
+# deliberate weakening and it is written down rather than hidden — the
+# strong version is in docs/boot-v2.md as the next step, once the migrated
+# entry carries a counter.
+Wants=boot-complete.target
+After=boot-complete.target multi-user.target
+
+# Nothing to do on a machine that never started a migration. The state
+# directory is created by `apex-boot-migrate stage` and by nothing else.
+ConditionPathExists=/var/lib/apex/boot-migrate/phase
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/apex-boot-migrate confirm
+# An EFI variable write, from init_t, on an enforcing machine: measured
+# working in the lab guest. efivarfs is not the FAT ESP that defeated
+# systemd-bless-boot, and needs no SELinuxContext= drop-in.
+TimeoutStartSec=60s
+
+[Install]
+# WantedBy, not RequiredBy. A machine that cannot start this must still boot:
+# the cost of it not running is that BootOrder is not rewritten, which means
+# the next boot is the old path — the safe direction.
+WantedBy=multi-user.target
