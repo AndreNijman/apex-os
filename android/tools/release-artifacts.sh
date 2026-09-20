@@ -19,7 +19,9 @@
 #
 #  The `.json` is a contract, not a convenience: the in-app updater fetches it
 #  to decide whether a newer build exists, and verifies the APK it then
-#  downloads against the `sha256` in it.
+#  downloads against the `sha256` in it. It also carries the protocol window
+#  this build speaks, read out of `Client.kt` rather than repeated here, so the
+#  Releases page can state the compatibility promise instead of implying one.
 #
 #  THE AAB IS BUILT AND NOT PUBLISHED. `verifyReleaseSigning` checks the bundle
 #  as well as the APK — a bundle is a jar and needs jarsigner rather than
@@ -128,6 +130,38 @@ client=core/src/main/kotlin/com/apexos/remote/core/Client.kt
 protocol=$(sed -n 's/^const val REMOTE_PROTOCOL_VERSION: Int = \([0-9]*\).*/\1/p' "$client" | head -1)
 [ -n "$protocol" ] || fatal "no REMOTE_PROTOCOL_VERSION line in $client; it was renamed or removed"
 
+# ── And the whole window, not just the preferred revision ────────────────────
+#
+# The Releases page tells people what happens when their machine and their app
+# are at different ages, and that sentence is only true if it is written from
+# the window this build actually ships. So the list is read here, refused if it
+# is not a plain list of integers, and carried into the metadata — where
+# `release-notes.sh` reads it back rather than guessing.
+#
+# A strict match on purpose. `listOf(REMOTE_PROTOCOL_VERSION)` or a list built
+# at runtime would parse to nothing here, and a window that parsed to nothing
+# must STOP the release rather than publish a page that quietly says "v" and a
+# blank. That is why `Client.kt` writes the entry as a literal and a test holds
+# it to the constant.
+window_line=$(sed -n 's/^val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(\([^)]*\)).*/\1/p' \
+    "$client" | head -1)
+[ -n "$window_line" ] \
+    || fatal "no SUPPORTED_REMOTE_PROTOCOL_VERSIONS = listOf(...) line in $client; it was renamed, or it is no longer a literal list the release metadata can read"
+case "$window_line" in
+    *[!0-9,\ ]*) fatal "SUPPORTED_REMOTE_PROTOCOL_VERSIONS is '$window_line', which is not a plain list of integers. The release metadata cannot state a window it cannot read, and a page that claims compatibility it cannot name is worse than one that claims none." ;;
+esac
+window=$(printf '%s' "$window_line" | tr -d ' ')
+case "$window" in
+    ""|*,,*|,*|*,) fatal "SUPPORTED_REMOTE_PROTOCOL_VERSIONS is '$window_line', which is malformed" ;;
+esac
+# The preferred revision must be IN the window. The Kotlin test asserts this
+# too; it is asserted again here because the two files can be edited apart and
+# this is the last point before the number reaches a user's phone.
+case ",$window," in
+    *",$protocol,"*) : ;;
+    *) fatal "REMOTE_PROTOCOL_VERSION is $protocol but SUPPORTED_REMOTE_PROTOCOL_VERSIONS is ($window_line); a build cannot prefer a revision it does not list" ;;
+esac
+
 commit=$(git -C "$repo" rev-parse HEAD 2>/dev/null) || fatal "cannot read the release commit"
 
 # Written by python rather than by hand, so a version name containing a
@@ -135,7 +169,7 @@ commit=$(git -C "$repo" rev-parse HEAD 2>/dev/null) || fatal "cannot read the re
 # updater cannot parse.
 APEX_JSON_CODE="$code" APEX_JSON_NAME="$name" APEX_JSON_TAG="$tag" \
 APEX_JSON_APK="$(basename "$apk")" APEX_JSON_SHA="$digest" APEX_JSON_SIZE="$size" \
-APEX_JSON_PROTOCOL="$protocol" APEX_JSON_COMMIT="$commit" \
+APEX_JSON_PROTOCOL="$protocol" APEX_JSON_COMMIT="$commit" APEX_JSON_WINDOW="$window" \
 python3 -c '
 import json, os
 print(json.dumps({
@@ -147,6 +181,7 @@ print(json.dumps({
     "sha256": os.environ["APEX_JSON_SHA"],
     "sizeBytes": int(os.environ["APEX_JSON_SIZE"]),
     "remoteProtocolPreferred": int(os.environ["APEX_JSON_PROTOCOL"]),
+    "remoteProtocolSupported": [int(v) for v in os.environ["APEX_JSON_WINDOW"].split(",")],
 }, indent=2))
 ' > "$out/apex-remote-$name.json" || fatal "could not write the metadata"
 
@@ -154,3 +189,4 @@ echo "apk=$apk"
 echo "sha256=$digest"
 echo "json=$out/apex-remote-$name.json"
 echo "protocol=$protocol"
+echo "window=$window"

@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.assertThrows
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -34,7 +35,14 @@ import java.io.PipedOutputStream
  *
  * Everything below drives a real Noise handshake against a real responder in a
  * thread. Nothing greps a constant.
+ *
+ * `@Timeout(30)` is the belt to the responders' braces. Every test here has a
+ * real thread on the other end of a real pipe, and the characteristic failure
+ * of that arrangement is not a red test but a build that never finishes — a
+ * hang says nothing about what broke, and this suite has already cost one
+ * fourteen-minute one.
  */
+@Timeout(30)
 class VersionWindowTest {
     private val desktop = InMemoryStaticKey(ByteArray(Crypto.DHLEN) { 7 })
     private val device = InMemoryStaticKey(ByteArray(Crypto.DHLEN) { 9 })
@@ -58,11 +66,23 @@ class VersionWindowTest {
         val toDevice = PipedOutputStream()
         val deviceReads = PipedInputStream(toDevice, 1 shl 16)
         val thread = Thread {
-            check(desktopReads.read() == Transport.HELLO_SESSION.toInt())
-            val handshake = Noise.sessionResponder(desktop, version)
-            handshake.read(Transport.readMessage(desktopReads))
-            Transport.writeMessage(toDevice, handshake.write(machineName.toByteArray(Charsets.UTF_8)))
-            toDevice.flush()
+            // `finally { close() }` is the difference between a failing test
+            // and a hung build. A responder that dies — a prologue that does
+            // not match, a message that will not decrypt — leaves the client
+            // blocked in `PipedInputStream.read`, which waits in one-second
+            // rounds and only notices a dead writer if that writer had already
+            // written something. It never had. Closing the sink turns that
+            // wait into an end-of-stream, which is a refusal, which is a red
+            // test naming the problem.
+            try {
+                check(desktopReads.read() == Transport.HELLO_SESSION.toInt())
+                val handshake = Noise.sessionResponder(desktop, version)
+                handshake.read(Transport.readMessage(desktopReads))
+                Transport.writeMessage(toDevice, handshake.write(machineName.toByteArray(Charsets.UTF_8)))
+                toDevice.flush()
+            } finally {
+                runCatching { toDevice.close() }
+            }
         }
         // A DAEMON thread, and not as a detail. A responder blocked on a read
         // that will never be satisfied — which is exactly what happens when
@@ -260,16 +280,26 @@ class VersionWindowTest {
         val toDevice = PipedOutputStream()
         val deviceReads = PipedInputStream(toDevice, 1 shl 16)
         val responder = Thread {
-            check(desktopReads.read() == Transport.HELLO_PAIR.toInt())
-            val handshake = Noise.pairingResponder(desktop, 1)
-            handshake.read(Transport.readMessage(desktopReads))
-            Transport.writeMessage(
-                toDevice,
-                handshake.write(
-                    """{"ok":true,"device":"pixel-8","machine":"l16"}""".toByteArray(Charsets.UTF_8),
-                ),
-            )
-            toDevice.flush()
+            // Closed on the way out for the same reason as `acceptingDesktop`
+            // above, and this is the test that proved it necessary: with
+            // `Client.pair` handshaking at its own preferred revision instead
+            // of the offer's, this responder threw, nothing was ever written,
+            // and the suite sat in `PipedInputStream.read` for fourteen
+            // minutes before it was killed by hand.
+            try {
+                check(desktopReads.read() == Transport.HELLO_PAIR.toInt())
+                val handshake = Noise.pairingResponder(desktop, 1)
+                handshake.read(Transport.readMessage(desktopReads))
+                Transport.writeMessage(
+                    toDevice,
+                    handshake.write(
+                        """{"ok":true,"device":"pixel-8","machine":"l16"}""".toByteArray(Charsets.UTF_8),
+                    ),
+                )
+                toDevice.flush()
+            } finally {
+                runCatching { toDevice.close() }
+            }
         }
         responder.isDaemon = true
         responder.start()
