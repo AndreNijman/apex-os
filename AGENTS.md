@@ -135,3 +135,24 @@ phase.
    makes it the default for the published image is a contract violation, not a
    milestone. (There is one image; `daily`, `gaming-mesa` and `gaming-nvidia`
    are tags on its digest, so there is no per-edition exception to find here.)
+6. **A container that runs `bootc install` must not be able to see this
+   machine's EFI variables.** Launch every
+   `bootc install to-disk --via-loopback` through
+   `tests/lab/bootc-install-lab`, which builds the podman argv itself, always
+   masks `/sys/firmware/efi/efivars` with a tmpfs, refuses a caller-supplied
+   mount at that path or any parent of it, refuses a block-device or tmpfs
+   target, and runs the whole thing under `tests/lab/nvram-guard` — a
+   before/after `efibootmgr -v` plus efivarfs `Boot*` digest diff that fails
+   the run if the host's boot entries moved. Wrap anything else that touches a
+   loopback install or boots a lab guest in `nvram-guard -- <command>` too; it
+   is read-only and costs nothing.
+
+   Why a wrapper and not a rule: this *was* a rule. On 2026-09-20 the sdboot
+   lab ran eight loopback installs and seven of them passed
+   `--tmpfs /sys/firmware/efi/efivars`. The eighth did not, bootupd deleted
+   `Boot0000 APEX-OS` and recreated it against the ESP inside the disk image
+   file it was building, and Andre's laptop would not boot the next morning —
+   repaired from a live USB. A discipline followed seven times out of eight is
+   a statistic, not a guard. `tests/test-bootc-install-guard.sh` holds both
+   halves open: it proves the mask reaches podman, and it proves the launch is
+   refused when the mask is gone. See BOOT-BREAKAGE-2026-09-20.md.
