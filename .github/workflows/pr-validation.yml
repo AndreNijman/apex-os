@@ -2994,6 +2994,8 @@ jobs:
           # expansion in a command that runs as root.
           shellcheck -S warning files/system/libexec/apex-pkg \
             tests/in-login-session.sh \
+            files/system/libexec/apex-boot-migrate \
+            tests/test-boot-migrate.sh \
             files/system/libexec/apex-env \
             files/system/libexec/apex-plugin \
             files/system/libexec/apex-disposable \
