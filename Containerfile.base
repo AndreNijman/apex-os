@@ -1224,7 +1224,13 @@ RUN set -eux; \
     : 'systemd transitions to unconfined_service_t; forcing bootupd_t there'; \
     : 'confines a process that was already unconfined into a domain that'; \
     : 'cannot read /proc/cmdline. Measured in a guest, then reverted.'; \
-    ! grep -q '^SELinuxContext=' /usr/lib/systemd/system/apex-boot-count.service; \
+    : 'Written as an if, not as `! grep`: errexit does not apply to an'; \
+    : 'inverted command, so `! grep ...` in the middle of a chain fails'; \
+    : 'nothing. tests/check-containerfile-assertions.sh caught this one.'; \
+    if grep -q '^SELinuxContext=' /usr/lib/systemd/system/apex-boot-count.service; then \
+        echo "FATAL: apex-boot-count.service sets SELinuxContext; bootupd_t cannot read /proc/cmdline" >&2; \
+        exit 1; \
+    fi; \
     : 'Nothing in the shipped payload may touch a real boot path. Matched on'; \
     : 'the executable lines only: a comment naming the command it refuses to'; \
     : 'run must not fail this, and the units and helper both contain such'; \
