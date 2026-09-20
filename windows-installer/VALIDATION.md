@@ -62,6 +62,44 @@ real life. The images are sparse.
 
 ---
 
+## The suite, run end to end
+
+`APEX_WINLAB_GUEST=1 ./tests/test-windows-installer.sh`, one uninterrupted run,
+two Windows guest boots:
+
+```
+    PASS  no disk, file or firmware WRITE API appears in the source
+    PASS  the Windows cross-build completed
+    PASS  a binary was produced
+    PASS  it is a PE32+ x86-64 Windows binary
+    PASS  the partition-eligibility and confirmation rules pass (14 unit tests)
+    PASS  the GPT image laboratory passes (12 cases, against the compiled binary)
+    PASS  the 'never identify a disk by index' rule is among the tests that ran
+    PASS  running it with no arguments exits 1
+    PASS  the usage line the program itself prints reached the user
+    PASS  it still declares that installation and firmware changes are disabled
+    PASS  the Windows survey path runs to a stated conclusion under wine
+    PASS  the Windows guest ran the survey job
+    PASS  the Windows guest ran it again with the disks on swapped ports
+    PASS  guest: the survey reached its own conclusion
+    PASS  guest: the on-disk GPT and Windows' table agreed on every disk
+    PASS  guest: no disk had disagreeing partition-table readings
+    PASS  guest: the Microsoft reserved partition was refused as a protected type
+    PASS  guest: the running Windows system partition was refused, and C: named
+    PASS  guest: the NTFS fixture partition was refused, and its letter named
+    PASS  guest: an all-zero basic-data partition was refused, Windows having lettered it
+    PASS  guest: an eligible partition was read to the last byte and found zero
+    PASS  guest: the exclusivity check was re-asked immediately before reading
+    PASS  guest: the confirmation named the disk by its serial number
+    PASS  guest: the firmware variables were unchanged by the run
+    PASS  guest: Windows numbered APEX-FIXTURE-A as disk 2 and then as disk 1
+    PASS  guest: the confirmation text is identical across both enumeration orders
+    PASS  guest: the confirmation text contains no device index
+    apex-windows-installer: 27 passed, 0 failed, 0 could-not-run
+```
+
+---
+
 ## Executed, on Linux
 
 - `cargo build --offline --locked` and `cargo test --offline --locked`:
