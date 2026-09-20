@@ -16,11 +16,16 @@ pub const EFI_SYSTEM: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
 pub const MICROSOFT_RESERVED: &str = "e3c9e316-0b5c-4db8-817d-f92df00215ae";
 pub const WINDOWS_RECOVERY: &str = "de94bba4-06d1-4d40-a16a-bfd50179d6ac";
 
-/// `installer/apex-install` refuses a target below 16 decimal GB. The same
-/// number is applied here, to the partition rather than the disk, because the
-/// partition is the thing that has to hold the operating system — a 40 GB disk
-/// with a 2 GB free partition passes the Linux installer's disk check and
-/// still cannot hold APEX.
+/// 16 decimal GB, borrowed from `installer/apex-install` and applied to a
+/// different thing.
+///
+/// That installer checks `$DISK` — in BOTH of its modes, whole-disk and
+/// partition (`installer/apex-install:849-855`), so in partition mode it never
+/// sizes the target partition at all. A 40 GB disk with a 2 GB free partition
+/// passes its check and still cannot hold APEX. This program applies the same
+/// number to the partition, which is the thing that has to hold the operating
+/// system, and is therefore **stricter than the Linux installer**, not equal
+/// to it. Worth knowing before anyone "aligns" the two.
 pub const MINIMUM_ROOT_BYTES: u64 = 16 * 1000 * 1000 * 1000;
 
 pub fn type_name(guid: &str) -> &'static str {

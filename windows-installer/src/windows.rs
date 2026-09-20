@@ -380,7 +380,7 @@ pub struct WinPartition {
 ///       GPT arm: PartitionType GUID(16), PartitionId GUID(16),
 ///                DWORD64 Attributes(8), WCHAR Name[36] (72)
 pub fn layout(dev: &Device) -> io::Result<(String, Vec<WinPartition>)> {
-    let b = dev.ioctl(IOCTL_DISK_GET_DRIVE_LAYOUT_EX, &[], 48 + 144 * 128)?;
+    let b = dev.ioctl(0x0007_0050, &[], 48 + 144 * 128)?;
     if b.len() < 48 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "short drive layout"));
     }
