@@ -20,6 +20,7 @@
 #  Usage:
 #     ./build-local.sh                 core + base + apex, signed
 #     ./build-local.sh base            just the base (reuses the existing core)
+#     ./build-local.sh kernel          just the kernel tier (the ~45 min compile)
 #     ./build-local.sh apex            just the image tier
 #     ./build-local.sh --allow-unsigned base       no key needed
 #     ./build-local.sh --force-core                rebuild core even if present
@@ -100,6 +101,11 @@ fi
 REV="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 
 CORE_IMG=localhost/apex-os-core:latest
+# The kernel is its own tier now (docs/update-cost.md, "The fourth tier").
+# Containerfile.core consumes it by name and has NO COPR fallback, so a local
+# core build needs this image to exist first. The default in Containerfile.core
+# is this exact name.
+KERNEL_IMG=localhost/apex-kernel:local
 
 # ── The shell ref, resolved rather than named ────────────────────────────────
 # Containerfile.base defaults APEX_SHELL_REF to `main`, and `git clone --branch
@@ -277,15 +283,41 @@ assert_signed() {  # $1 = image, $2 = label
     echo "$2: kernel signed, modules signed, apex-mok.der present"
 }
 
+# The kernel compile. Reused unless --force-core, on the same reasoning as the
+# core reuse below: it is the slowest thing here and it only needs to move when
+# kernel/kernel.pin does. Unlike core, there is no fallback if it is missing --
+# Containerfile.core stops rather than quietly installing a kernel that never
+# went through apex-kernel-btf-gate.
+build_kernel() {
+    if [ "$FORCE_CORE" = 0 ] && sudo podman image exists "$KERNEL_IMG"; then
+        echo "== kernel == reusing existing $KERNEL_IMG (pass --force-core to rebuild)"
+        return 0
+    fi
+    echo "== kernel == compiling the kernel (~45 min at -j12; longer on fewer cores)"
+    sudo podman build --isolation=chroot \
+        -f Containerfile.kernel -t "$KERNEL_IMG" .
+
+    # Assert rather than trust. The build's own gate is what decides this, but
+    # reading the verdict back out of the produced image is what proves the gate
+    # ran at all -- a `podman build` that exits 0 is not evidence by itself.
+    got="$(sudo podman run --rm --entrypoint /bin/sh "$KERNEL_IMG" \
+             -c 'sed -n "s/^btf_scx=//p" /manifest/kernel-build.txt' 2>/dev/null || true)"
+    [ "$got" = usable ] \
+        || { echo "FATAL: kernel image reports btf_scx='$got', expected 'usable'"; exit 1; }
+    echo "kernel: BTF verdict usable"
+}
+
 build_core() {
     if [ "$FORCE_CORE" = 0 ] && sudo podman image exists "$CORE_IMG"; then
         echo "== core == reusing existing $CORE_IMG (pass --force-core to rebuild)"
         return 0
     fi
+    build_kernel
     echo "== core == (this is the slow one, ~45 min)"
     sudo podman build --isolation=chroot \
         "${SECRET_ARGS[@]}" \
         --build-arg APEX_REVISION="$REV" \
+        --build-arg APEX_KERNEL_IMAGE="$KERNEL_IMG" \
         -f Containerfile.core -t "$CORE_IMG" .
 
     # Assert rather than trust. The Containerfile degrades to `unsigned` on any
@@ -353,6 +385,7 @@ build_image() {  # $1 = apex (or a legacy tag name, which maps to it)
 
 for t in "${TARGETS[@]}"; do
     case "$t" in
+        kernel) build_kernel ;;
         core) build_core ;;
         base) build_base ;;
         *)    build_image "$t" ;;
