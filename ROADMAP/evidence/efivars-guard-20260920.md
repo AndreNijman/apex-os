@@ -1,5 +1,29 @@
 # The efivars guard — what was built, and how it was proven, 2026-09-20
 
+> **SUPERSEDED THE SAME NIGHT, AND WRONG ABOUT ITS CENTRAL CLAIM.** Everything
+> below describes the `--tmpfs /sys/firmware/efi/efivars` mask as the layer
+> that prevents the 2026-09-20 breakage. **It prevents nothing.** `bootc` takes
+> `--pid=host` and re-enters the HOST's mount namespace for the bootloader
+> step, so a tmpfs inside the container is irrelevant to it; and an unmasked
+> privileged container shows *zero* entries under `/sys/firmware/efi/efivars`
+> anyway, so the host's efivarfs was never in the container's view to be
+> masked. At 21:53 the same evening a loopback install ran **with the mask
+> applied and logged** and moved `Boot0000` off the real ESP — four hours after
+> this unit landed as "the fix". `nvram-guard`, the layer this document calls
+> secondary, is what caught it.
+>
+> The prevention is `bootc install --generic-image`. See
+> `ROADMAP/evidence/efivars-guard-2-20260920.md` — unit `efivars-guard-2` —
+> for what replaced this, and for the two things this document got factually
+> wrong: neither incident was a `--via-loopback` command, and section 0's
+> "there was no caller to fix" missed the caller that caused both of them
+> (`installer/apex-install`, on a `to-filesystem` install against a loop
+> device it had attached itself).
+>
+> The account below is kept because the mutation harness, the binary-file and
+> empty-`git ls-files` traps in section 4, and the nvram-guard design are all
+> still correct and still in force.
+
 Unit `efivars-guard`. Follow-up 1 of `BOOT-BREAKAGE-2026-09-20.md`:
 
 > *"The installer test path must mask efivars. Any `bootc install to-disk
