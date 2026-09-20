@@ -136,8 +136,13 @@ RUN set -eux; \
 # rather than against something recovered later; and the tree is deleted before
 # the layer closes.
 #
-# `-j12`, not `-j$(nproc)`: 16 parallel GCCs plus pahole's ~1 GB peak over a
-# 500 MB vmlinux is how a 29 GB box starts swapping.
+# NOT `-j$(nproc)`, EVER: 16 parallel GCCs plus pahole's ~1 GB peak over a
+# 500 MB vmlinux is how a 29 GB box starts swapping. The number is a build ARG
+# so the machine doing the building decides it, and the DEFAULT STAYS 12 — the
+# value this tier was measured at on a 29 GB box. Raise it only where the RAM
+# is actually there: CI passes 20 on katana (20 cores, 62 GiB), which is where
+# kernel builds run now (.github/workflows/kernel-build.yml).
+ARG KERNEL_BUILD_JOBS=12
 RUN set -eux; \
     set -a; . /build/kernel.pin; set +a; \
     cd /build/rpm/SPECS; \
@@ -165,7 +170,7 @@ RUN set -eux; \
     if ! rpmbuild -bb kernel-cachyos.spec \
             --define "_topdir /build/rpm" \
             --define "dist .apex${APEX_KERNEL_BUILD}.fc${FEDVER}" \
-            --define "_smp_build_ncpus 12" \
+            --define "_smp_build_ncpus ${KERNEL_BUILD_JOBS}" \
             --noclean \
             > /build/rpmbuild.log 2>&1; then \
         echo "FATAL: rpmbuild failed — last 120 lines:"; \
@@ -176,7 +181,7 @@ RUN set -eux; \
     tail -15 /build/rpmbuild.log; \
     # The compile time is a number this tier is judged on and the rpmbuild log
     # dies with this layer, so print it where the build log keeps it.
-    echo "rpmbuild took $(( (T1 - T0) / 60 ))m$(( (T1 - T0) % 60 ))s at -j12"; \
+    echo "rpmbuild took $(( (T1 - T0) / 60 ))m$(( (T1 - T0) % 60 ))s at -j${KERNEL_BUILD_JOBS}"; \
     \
     echo "=== locating the vmlinux this build linked ==="; \
     find /build/rpm/BUILD -maxdepth 4 -type f -name vmlinux > /build/vmlinux-found || true; \

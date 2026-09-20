@@ -1,0 +1,150 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  kernel-build.yml — compile APEX's own kernel on katana.
+#
+#  WHY THIS IS THE ONE JOB THAT LEAVES THE HOSTED RUNNERS
+#
+#  `Containerfile.kernel` needs a ~100 GB build tree (measured 2026-09-20) and
+#  ~45 minutes of 12-way compile. A GitHub-hosted `ubuntu-24.04` runner has
+#  14 GB of disk. That is not a tuning problem, it is an impossibility, and it
+#  is the reason katana exists as a self-hosted runner at all. Everything else
+#  in this repository STAYS on `ubuntu-24.04` on purpose — the hosted runner is
+#  a second environment that keeps finding defects a developer machine cannot
+#  (see `ROADMAP/evidence/`), and that is worth more than the minutes it costs.
+#
+#  Katana: 20 cores, 62 GiB RAM, 500 GB on /var/lab. The runner is ephemeral and
+#  unprivileged; see `ROADMAP/evidence/katana-runner-20260920.md`.
+# ─────────────────────────────────────────────────────────────────────────────
+name: kernel build (katana)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_contract_check:
+        description: 'Also run tests/check-kernel-contract.sh against the produced RPMs'
+        type: boolean
+        default: true
+  push:
+    paths:
+      - 'kernel/**'
+      - 'Containerfile.kernel'
+      - '.github/workflows/kernel-build.yml'
+
+permissions:
+  contents: read
+
+# Two pushes must not queue two 100 GB builds.
+concurrency:
+  group: kernel-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kernel:
+    # Fork pull requests never reach Andre's hardware. See the long note in
+    # katana-probe.yml: this `if:` is the belt, and the repository's
+    # "require approval for all external contributors" setting is the control.
+    # NEVER give this job a `pull_request_target` trigger.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, katana]
+    timeout-minutes: 300
+    env:
+      KERNEL_IMG: localhost/apex-kernel:ci
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: the build needs room — say so before spending 45 minutes
+        run: |
+          set -euo pipefail
+          avail_gb=$(df -BG --output=avail /var/lab | tail -1 | tr -dc '0-9')
+          echo "free on /var/lab: ${avail_gb} GiB"
+          echo "cpus=$(nproc) mem=$(free -g | awk '/^Mem:/{print $2}')GiB"
+          if [ "$avail_gb" -lt 150 ]; then
+            echo "FATAL: the kernel build tree is ~100 GB and only ${avail_gb} GiB is free."
+            echo "       Prune the runner's container storage:"
+            echo "         sudo -u ghrunner XDG_RUNTIME_DIR=/run/apex-runner HOME=/var/lab/runner podman system prune -af"
+            exit 1
+          fi
+
+      - name: compile
+        run: |
+          set -euo pipefail
+          # Same invocation as build-local.sh's build_kernel(), minus the sudo:
+          # this runner is unprivileged and podman here is rootless.
+          #
+          # KERNEL_BUILD_JOBS: the Containerfile's default is 12, measured on a
+          # 29 GiB machine. Katana has 20 cores and 62 GiB and Andre asked for
+          # the whole box, so this hands it all of them. There is deliberately
+          # no CPUQuota or MemoryMax on the runner unit; what protects his
+          # session is OOMScoreAdjust=300, which makes the build die first.
+          podman build --isolation=chroot \
+            --build-arg "KERNEL_BUILD_JOBS=$(nproc)" \
+            -f Containerfile.kernel -t "$KERNEL_IMG" .
+
+      - name: read the verdict back out of the image it produced
+        run: |
+          set -euo pipefail
+          # `podman build` exiting 0 is NOT evidence the BTF gate ran. Read the
+          # manifest the build wrote. The image is FROM scratch and has no
+          # shell, so this must be `podman create` + `podman cp`, never
+          # `podman run` — a `podman run --entrypoint /bin/sh` on it cannot
+          # start and comes back EMPTY, which fails as though the gate failed.
+          cid="$(podman create "$KERNEL_IMG" /x)"
+          tmp="$(mktemp -d)"
+          podman cp "$cid:/manifest/kernel-build.txt" "$tmp/kernel-build.txt"
+          podman rm "$cid" >/dev/null
+          echo "--- /manifest/kernel-build.txt ---"
+          cat "$tmp/kernel-build.txt"
+          got="$(sed -n 's/^btf_scx=//p' "$tmp/kernel-build.txt")"
+          if [ "$got" != "usable" ]; then
+            echo "FATAL: kernel image reports btf_scx='$got', expected 'usable'"
+            exit 1
+          fi
+          echo "kernel: BTF verdict usable"
+          {
+            echo "### kernel built on katana"
+            echo '```'
+            cat "$tmp/kernel-build.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          rm -rf "$tmp"
+
+      - name: contract check against the real RPMs
+        if: github.event_name != 'workflow_dispatch' || inputs.run_contract_check
+        run: |
+          set -euo pipefail
+          rpmdir="$RUNNER_TEMP/kernel-rpms"
+          rm -rf "$rpmdir"; mkdir -p "$rpmdir"
+          cid="$(podman create "$KERNEL_IMG" /x)"
+          podman cp "$cid:/rpms" "$rpmdir"
+          podman rm "$cid" >/dev/null
+          n=$(find "$rpmdir" -name '*.rpm' | wc -l)
+          echo "extracted $n rpms"
+          if [ "$n" -eq 0 ]; then echo "FATAL: no rpms came out of the image"; exit 1; fi
+          RPMS="$(dirname "$(find "$rpmdir" -name '*.rpm' | head -1)")" \
+            ./tests/check-kernel-contract.sh
+
+      - name: give the disk back
+        if: always()
+        run: |
+          set -uo pipefail
+          # The ephemeral registration wipes _work, but NOT the container
+          # graphroot — that is deliberate, so the builder base layers survive
+          # between runs. Drop the dangling build layers this run created.
+          podman image prune -f || true
+          df -h /var/lab | tail -1
+
+  # A skipped job counts as success. Make "the kernel job never ran" red.
+  assert-kernel-ran:
+    needs: kernel
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          set -euo pipefail
+          result='${{ needs.kernel.result }}'
+          echo "kernel job result: $result"
+          if [ "$result" != "success" ]; then
+            echo "the kernel build did not run to success"
+            exit 1
+          fi
