@@ -42,8 +42,13 @@
 #                          argv that WOULD run, launch nothing
 #      --size SIZE         create TARGET.img at this size if absent (default 20G)
 #      --filesystem FS     bootc --filesystem (default ext4)
-#      --bootloader NAME   bootc --bootloader (omitted by default: GRUB stays
-#                          the default for published images, AGENTS.md rule 5)
+#      --bootloader NAME   bootc --bootloader (omitted by default, which gets
+#                          the ostree backend + GRUB — the shape an existing
+#                          APEX machine has, and what a migration test needs
+#                          to start from. Published images are moving to
+#                          systemd-boot, AGENTS.md rule 5; `--bootloader
+#                          systemd` needs `-- --composefs-backend` after it,
+#                          because bootc refuses the flag on ostree.)
 #      --podman-arg ARG    extra podman argument, repeatable, still refused if
 #                          it touches /sys
 #      --out DIR           keep the nvram-guard snapshot pair here
@@ -83,7 +88,7 @@ while [ $# -gt 0 ]; do
         --out)         OUT="${2:?--out needs a directory}"; shift 2 ;;
         --podman-arg)  EXTRA_PODMAN+=("${2:?--podman-arg needs a value}"); shift 2 ;;
         --)            shift; EXTRA_BOOTC=("$@"); break ;;
-        -h|--help)     sed -n '2,55p' "$0"; exit 0 ;;
+        -h|--help)     sed -n '2,60p' "$0"; exit 0 ;;
         -*)            die "unknown option $1" ;;
         *)             POSITIONAL+=("$1"); shift ;;
     esac

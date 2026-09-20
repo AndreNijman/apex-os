@@ -522,8 +522,10 @@ fn print_human(r: &Value) {
             // leaving a reader to wonder which half is broken.
             println!(
                 "Boot counting  : not in effect — this machine boots via {}, which has no \n\
-                 \x20                boot counter. GRUB is the default for every published APEX\n\
-                 \x20                image; systemd-boot with counting is opt-in.",
+                 \x20                boot counter. APEX is moving to systemd-boot: `sudo apex\n\
+                 \x20                update` migrates this machine in place when it can be done\n\
+                 \x20                safely, and `apex-boot-migrate precheck` says why not when\n\
+                 \x20                it cannot. Until then this is the normal state, not a fault.",
                 s(&["bootloader"])
             );
         }

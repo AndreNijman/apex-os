@@ -694,6 +694,19 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-boot-v2.sh
 
+      # The in-place migration to systemd-boot. In `static` rather than `rust`
+      # because what it guards is mostly a shell engine, a unit and a
+      # Containerfile block, and the `rust` job's path filter would skip a PR
+      # that changed only those — a skipped job passes.
+      #
+      # It cannot prove crash-safety; a guest with its power cut did that, and
+      # the transcripts are in ROADMAP/evidence/sdboot-migrate-20260921-lab.md.
+      # What it holds is the order of the writes, every refusal, and the state
+      # machine that stops a failed migration being re-armed on every update.
+      - name: §22 migration — one commit point, every refusal, no re-arming a failure
+        if: ${{ !cancelled() }}
+        run: ./tests/test-boot-migrate.sh
+
       # The efivars guard. In `static` for the same reason as the step above:
       # the scan it ends with walks EVERY tracked file, so a PR adding an
       # unmasked `bootc install --via-loopback` anywhere — a workflow, an
