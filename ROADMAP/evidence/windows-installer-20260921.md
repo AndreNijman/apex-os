@@ -94,7 +94,7 @@ have exercised every rule except the one that fires in real life.
 
 ## 3. What the guest proved
 
-`APEX_WINLAB_GUEST=1 tests/test-windows-installer.sh` — **27 passed, 0 failed,
+`APEX_WINLAB_GUEST=1 tests/test-windows-installer.sh` — **29 passed, 0 failed,
 0 could-not-run**, in one uninterrupted run with two Windows guest boots:
 
 * both readings of every partition table **AGREE** on all four disks — Windows'
