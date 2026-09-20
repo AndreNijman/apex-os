@@ -3673,6 +3673,16 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-android-release.sh
 
+      # The signing suite reads release-android.yml as YAML rather than
+      # grepping it — a grep is satisfied by a comment mentioning the thing it
+      # forbids, which this repository has shipped. It FATALs without PyYAML
+      # rather than skipping those assertions, so the module is made certain to
+      # be there: it is the only suite in the tree that needs it, and "the
+      # runner image probably has it" is not something to discover in a red
+      # required check.
+      - name: PyYAML, for the workflow assertions
+        run: python3 -c 'import yaml' || sudo apt-get install -y -qq python3-yaml
+
       # The other half of the same refusal: no key, or the WRONG key. This
       # suite builds a throwaway keystore and a 700-byte APK signed with it,
       # and checks the published-fingerprint gate both ways — it must accept
