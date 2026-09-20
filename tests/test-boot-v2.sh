@@ -311,6 +311,14 @@ grep -qx 'WantedBy=multi-user.target' "$UNIT_COUNT" \
 grep -q 'systemctl enable apex-boot-count.service' "$BASECF" \
     && ok "Containerfile.base enables apex-boot-count.service" \
     || bad "Containerfile.base does not enable apex-boot-count.service"
+# It renames a .conf on the same FAT ESP the blessing does, from a bin_t helper
+# in /usr/libexec — so PID 1 leaves it in init_t and the identical AVC applies.
+grep -qx 'SELinuxContext=-system_u:system_r:bootupd_t:s0' "$UNIT_COUNT" \
+    && ok "apex-boot-count runs in bootupd_t too — it writes the same FAT ESP" \
+    || bad "apex-boot-count has no SELinuxContext — init_t cannot rename a dosfs_t file"
+grep -q 'allow bootupd_t bin_t:file' "$SEPOL" \
+    && ok "the policy module grants the bin_t entrypoint apex-boot-count needs" \
+    || bad "apex_sdboot.te does not grant bootupd_t an entrypoint on bin_t"
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "the blessing can write a FAT ESP, or none of the above matters"

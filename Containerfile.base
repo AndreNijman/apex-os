@@ -1220,6 +1220,10 @@ RUN set -eux; \
     : 'directory in: systemd stops units in reverse start order.'; \
     grep -q '^After=bootc-finalize-staged.service$' \
         /usr/lib/systemd/system/apex-boot-count.service; \
+    : 'It renames a file on the same FAT ESP as the blessing does, from a'; \
+    : 'bin_t helper, so it needs the same domain or the same AVC stops it.'; \
+    grep -q '^SELinuxContext=-system_u:system_r:bootupd_t:s0$' \
+        /usr/lib/systemd/system/apex-boot-count.service; \
     : 'Nothing in the shipped payload may touch a real boot path. Matched on'; \
     : 'the executable lines only: a comment naming the command it refuses to'; \
     : 'run must not fail this, and the units and helper both contain such'; \

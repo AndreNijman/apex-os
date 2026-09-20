@@ -64,12 +64,33 @@
 # of its own in selinux-policy. When it gets one, delete this module and the
 # drop-in together.
 
+# ── the SECOND program that needs this, found the same way ────────────────
+#
+# apex-boot-count renames a .conf inside /boot/loader/entries.staged — the same
+# FAT ESP, the same dosfs_t, from a systemd ExecStop. /usr/libexec is bin_t and
+# there is no transition from init_t on bin_t, so it would have hit the
+# identical AVC. It gets the same drop-in, and bootupd_t needs an entrypoint on
+# bin_t as well as on init_exec_t.
+#
+# bin_t is broader than a dedicated exec type would be, and that is a choice
+# rather than an oversight. The narrow version needs a file_contexts entry
+# labelling /usr/libexec/apex-boot-count with a type of its own, which only
+# takes effect if the deployment relabels — and if it silently does not, the
+# counter is never written and nothing says so. A permission that works is
+# worth more here than a label that might. What bounds bin_t is the other half
+# of the transition: only init_t may enter bootupd_t at all, and PID 1 already
+# runs everything in init_t, so the marginal grant is "a systemd unit that
+# explicitly asks for bootupd_t can write a FAT filesystem". The two units in
+# this repository that ask are the only ones that ask.
+
 module apex_sdboot 1.0.0;
 
 require {
     type bootupd_t;
     type init_exec_t;
+    type bin_t;
     class file { entrypoint execute getattr map open read };
 }
 
 allow bootupd_t init_exec_t:file { entrypoint execute getattr map open read };
+allow bootupd_t bin_t:file { entrypoint execute getattr map open read };
