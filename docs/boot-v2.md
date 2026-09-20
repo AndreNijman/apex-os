@@ -55,7 +55,8 @@ Two consequences visible in the shipped image:
 | ESP authoring | `files/scripts/boot-v2/apex-mkesp` | systemd-boot at `/EFI/APEX/`, UKIs at `/EFI/Linux/apex-<id>+N-M.efi` |
 | ephemeral keys | `files/scripts/boot-v2/apex-sb-keys` | Secure Boot, PCR-policy and deliberately-untrusted keypairs |
 | SB firmware vars | `files/scripts/boot-v2/apex-sb-vars` | an OVMF varstore with the APEX certificate as the only `db` entry |
-| LUKS2 + TPM | `files/scripts/boot-v2/apex-luks-enroll` | signed PCR 11 policy plus a recovery key, against a software TPM |
+| LUKS2 + TPM, shipped | `files/system/libexec/apex-luks-enroll` | the enrolment path a machine uses: a recovery key always, and a TPM slot bound to whichever policy this machine can enforce |
+| LUKS2 + TPM, lab | `files/scripts/boot-v2/apex-luks-enroll` | signed PCR 11 policy plus a recovery key, against a software TPM. A different program from the row above; see "TPM-bound unlock" |
 | VM harness | `files/scripts/boot-v2/run-scenarios` | fifteen scenarios, all booting real guests under Secure Boot enforcing |
 | health gate | `files/system/libexec/apex-boot-health` | the `boot-complete.target` gate, and the rollback notice |
 | reporting | `apex boot status` | read-only; what verified this boot and what the counter believes |
@@ -553,10 +554,17 @@ Four things the lab could not have told us, all measured here:
 1. **`systemd-cryptenroll --tpm2-device=auto` binds to NO PCRs on systemd
    258.10.** `tpm2-hash-pcrs` empty, `tpm2-policy-hash` 32 zero bytes. Not
    PCR 7 — nothing. Always pass `--tpm2-pcrs=` or `--tpm2-public-key-pcrs=`
-   explicitly. All four enrolment call sites in this tree already do
-   (`apex-luks-enroll:160`, `run-scenarios:1127`, `:1276`, `:1510`), so this is
-   a guardrail to keep rather than a defect to fix — it is L-002's to honour
-   the day encryption goes on by default.
+   explicitly. Every enrolment call site in this tree does, and the line numbers
+   that used to be quoted here are gone on purpose: a citation into a file that
+   keeps changing goes stale silently, so the property is asserted instead.
+   `Containerfile.base` refuses to build an image in which
+   `/usr/libexec/apex-luks-enroll` names a TPM2 device on an executable line
+   with no PCR selection beside it, `tests/test-boot-v2.sh` asserts the same
+   thing on every pull request with both controls, and the shipped script reads
+   the token back after enrolling and refuses one with no policy. Reproduced in
+   the boot lab against swtpm on 2026-09-20, so the finding is no longer
+   silicon-only: `tpm2-pcrs: []`, **no `tpm2-pcr-bank` field at all**,
+   `tpm2-policy-hash` 64 zeros, `New TPM2 token enrolled as key slot 1`, exit 0.
 2. **`systemd-pcrextend` is a silent no-op on a GRUB machine.** *"Kernel stub
    did not measure kernel image into PCR 11, skipping userspace measurement,
    too."* — **exit status 0**, PCR 11 unchanged. So the four phase policies
@@ -685,27 +693,74 @@ attempts and systemd-boot selects the previous entry by itself. GRUB is still
 installed and still in the firmware's boot order; pick it from the firmware boot
 menu.
 
-### TPM-bound unlock (opt-in, developer feature)
+### TPM-bound unlock
 
-Only after the above works, and only on a machine whose data you can afford to
-lose. `apex-luks-enroll` is a **boot-lab** script: it targets an image file and
-a software TPM, and refuses `--tpm2-device=auto` and any `/dev` path outright.
-The equivalent on a real machine is `systemd-cryptenroll` run by you:
+There are **two scripts called `apex-luks-enroll`** and they are different
+programs. Getting them confused is the one mistake this section exists to stop.
+
+| | `files/scripts/boot-v2/apex-luks-enroll` | `/usr/libexec/apex-luks-enroll` |
+| --- | --- | --- |
+| who runs it | the boot lab | the installer, or you |
+| what it targets | an image file it creates itself | a LUKS2 volume that already exists |
+| what TPM | **only** a software TPM at a named swtpm state directory; `auto` and any `/dev` path are refused outright | the real one |
+| the binding | always a signed PCR 11 policy | whichever binding this machine can enforce — it asks |
+| in the image | no | yes, shipped by `Containerfile.base` |
+
+On a real machine:
 
 ```bash
-# Recovery FIRST. A volume with a TPM binding and no recovery path turns a
-# firmware update into a data-loss event.
-sudo systemd-cryptenroll --recovery-key /dev/<your-luks-partition>
-#   Write the modhex key down. It is 8 groups of 8 characters. It is shown once.
-
-sudo systemd-cryptenroll --tpm2-device=auto \
-     --tpm2-public-key=/path/to/pcr-public-key.pem \
-     --tpm2-public-key-pcrs=11 \
-     /dev/<your-luks-partition>
+sudo /usr/libexec/apex-luks-enroll \
+     --device /dev/<your-luks-partition> \
+     --recovery-out /root/apex-recovery-key.txt
 ```
 
-and the UKI must then be built with `--pcr-key` so it carries the matching
-`.pcrsig`. A UKI without one will be refused by the policy, which is the
+It always enrols a recovery key, and it enrols it FIRST — a volume with a TPM
+binding and no recovery path turns a firmware update into a data-loss event, and
+the window in which that is true is closed by never opening it. Move that file
+off the encrypted disk before you reboot, not after.
+
+It adds a TPM key slot only where this machine can actually enforce one, and
+when it declines it says why in words you can act on. What it decides, and how:
+
+| what it finds | what you get | the machine-readable line |
+| --- | --- | --- |
+| Secure Boot on, TPM present, no sd-stub | a TPM slot bound to **PCR 7** | `tpm2: enrolled binding=pcr7 pcrs=7 bank=sha256 hash=… pin=no` |
+| Secure Boot on, booted through sd-stub, PCR 11 really extended | a TPM slot bound to the **signed PCR 11** policy, which survives kernel updates | `tpm2: enrolled binding=signed-pcr11 …` |
+| Secure Boot **off** | recovery key only | `tpm2: declined reason=secure-boot-off` |
+| Secure Boot reports on, but the firmware is in Setup Mode | recovery key only | `tpm2: declined reason=setup-mode` |
+| no TPM device | recovery key only | `tpm2: declined reason=no-tpm2-device` |
+| Secure Boot on but PCR 7 never extended | recovery key only, and the slot it made is removed again | `tpm2: declined reason=pcr-uninitialised` |
+
+**It exits 0 in every one of those rows.** A declined TPM slot is not a failed
+enrolment: the volume has a recovery key and works. Only a failure to enrol the
+recovery key is non-zero.
+
+**Why no TPM slot without Secure Boot, for either binding.** PCR 7 records the
+Secure Boot policy, and with Secure Boot off it records the *disabled* policy
+whichever kernel boots — so an attacker boots their own system and the TPM
+unseals for them. The signed PCR 11 policy is no better off, which is the part
+that surprises people: the signature it needs ships in the UKI's `.pcrsig`
+section and is public, PCR 11 starts at zero on every boot, `tpm2_pcrextend 11`
+works from plain root, and every digest that reaches the signed value is a hash
+of public material. An attacker who can boot any kernel replays the extends and
+unseals without APEX's private key. What stops them is Secure Boot refusing to
+load their kernel. If Secure Boot cannot be enabled on a machine, `--with-pin`
+is the other route — read what it prints about the lockout counter first.
+
+**Never `--tpm2-device=auto` with no PCR selection.** Measured on systemd
+258.10: the bare form exits 0, prints "New TPM2 token enrolled", and writes a
+token with `tpm2-pcrs: []`, no `tpm2-pcr-bank` field and a policy hash of 32
+zero bytes — sealed to the TPM storage key and nothing else, so any OS on that
+hardware unseals it. To check a volume somebody else enrolled:
+
+```bash
+sudo /usr/libexec/apex-luks-enroll --check --device /dev/<partition>
+```
+
+which exits 2 and says what is wrong if the TPM slot carries no policy.
+
+On the UKI path the UKI must be built with `--pcr-key` so it carries the
+matching `.pcrsig`. A UKI without one is refused by the policy, which is the
 designed behaviour and not a fault.
 
 ## Recovery
