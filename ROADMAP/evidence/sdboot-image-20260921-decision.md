@@ -184,6 +184,24 @@ systemd.extra-unit.*, systemd.unit-dropin.*, udev.rules.*, network.*
 by `systemd-vconsole-setup.service` — which is L-002's keymap problem solved by
 a file the installer writes, with no initramfs regeneration anywhere.
 
+**And bootc already creates the partition type that discovery needs.** From
+this round's own install of the APEX image
+(`localhost/apex-sdboot:bless2`, `--composefs-backend --bootloader systemd`):
+
+```
+Device         Start      End  Sectors Size Type
+/dev/loop2p1    2048     4095     2048   1M BIOS boot
+/dev/loop2p2    4096  2101247  2097152   1G EFI System
+/dev/loop2p3 2101248 90175487 88074240  42G Linux root (x86-64)
+```
+
+`Linux root (x86-64)` is the Discoverable Partitions type GUID
+`4f68bce3-e8cd-4db1-96e7-fbcaf984b709`. So the contract handed to
+`luks-installer` is not asking for something new — it is asking the installer
+to keep doing what `bootc install to-disk` already does, on a path where the
+installer lays out the table itself. (The 1 MiB BIOS boot partition is visible
+here too, on the composefs backend, with nothing written into it.)
+
 **LUKS is discovered, not named** — `systemd-gpt-auto-generator(8)`:
 
 > When systemd is running in the initrd the `/` partition may be encrypted with
