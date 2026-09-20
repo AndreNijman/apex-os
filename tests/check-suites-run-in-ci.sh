@@ -38,10 +38,17 @@ exempt=()
 [ -f "$EXEMPT" ] && mapfile -t exempt < <(grep -vE '^\s*(#|$)' "$EXEMPT" | awk '{print $1}')
 is_exempt() { local n; for n in ${exempt[@]+"${exempt[@]}"}; do [ "$n" = "$1" ] && return 0; done; return 1; }
 
+# ── the discovery root was itself a hand-written list ───────────────────────
+# This file was written to replace a hand-written list of suites, and it kept
+# one: `tests/`. The installer's suites live in `installer/` and are named one
+# by one in pr-validation.yml's `installer` job, so another one could be landed,
+# look like coverage, and be run by nobody — the exact defect this file exists
+# to prevent, one directory over. Discovery has to cover every place a suite
+# lives, or it is a list again.
 missing=(); resurrected=(); run=0
-for s in tests/test-*.sh; do
+for s in tests/test-*.sh installer/test-*.sh; do
     [ -f "$s" ] || continue
-    base="${s#tests/}"
+    base="${s##*/}"
     # A COMMENT naming a suite is not an invocation of it. This file's own
     # step in pr-validation.yml describes the defect by naming
     # tests/test-apex-lid.sh, and a bare `grep -F` read that prose as proof the
@@ -57,7 +64,7 @@ for s in tests/test-*.sh; do
     fi
 done
 
-total=$(ls tests/test-*.sh 2>/dev/null | wc -l | tr -d ' ')
+total=$(ls tests/test-*.sh installer/test-*.sh 2>/dev/null | wc -l | tr -d ' ')
 printf '\nsuite coverage: %s suites, %d run by CI, %d exempt, %d unrun and undeclared\n' \
     "$total" "$run" "${#exempt[@]}" "${#missing[@]}"
 
