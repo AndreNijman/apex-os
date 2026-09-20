@@ -47,7 +47,11 @@ if (Test-Path $espLetter) {
 
 # ── The installer's own survey ───────────────────────────────────────────────
 '=== apex-windows-installer survey ==='
-$survey = & $exe survey 2>&1
+# Through cmd, not `& $exe ... 2>&1`. PowerShell 5.1 turns a native program's
+# stderr into ErrorRecord objects and prints each one with a source-code
+# excerpt and a FullyQualifiedErrorId, which buries the program's actual
+# message in six lines of PowerShell furniture. cmd just merges the streams.
+$survey = & cmd /c "`"$exe`" survey 2>&1"
 $survey | Out-String -Width 200
 "survey-exit: $LASTEXITCODE"
 
@@ -62,7 +66,7 @@ $guids = $survey | Out-String |
 "partitions-seen: $($guids.Count)"
 foreach ($g in $guids) {
     "=== inspect $g ==="
-    $out = & $exe inspect $g 2>&1
+    $out = & cmd /c "`"$exe`" inspect $g 2>&1"
     $out | Out-String -Width 200
     "inspect-exit($g): $LASTEXITCODE"
 }

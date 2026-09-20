@@ -78,11 +78,18 @@ need() { [ -e "$1" ] || die "missing $1 — run 'winlab $2' first"; }
 have_kvm() { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }
 
 # Run a script inside the lab container. $DIR is /w, this directory is /lab.
+#
+# `:z` and not `:Z`. `:Z` labels the directory with the calling container's
+# own private MCS category pair, so the moment a second container is started
+# against the same work directory the first one loses write access to it —
+# which shows up as qemu failing to unlock its own qcow2 and a shell failing
+# to create a file it had just listed. Two of these containers run at once
+# routinely: a long guest run and a media rebuild.
 inlab() {
     local kvm=()
     have_kvm && kvm=(--device /dev/kvm)
     podman run --rm "${kvm[@]}" \
-        -v "$DIR":/w:Z -v "$HERE":/lab:ro,Z \
+        -v "$DIR":/w:z -v "$HERE":/lab:ro,z \
         "$IMAGE" bash -uo pipefail -c "$1"
 }
 
@@ -377,7 +384,7 @@ cmd_run() {
     have_kvm || die "/dev/kvm is not usable"
 
     podman run --rm --device /dev/kvm \
-        -v "$DIR":/w:Z -v "$HERE":/lab:ro,Z -v "$rundir":/job:ro,Z \
+        -v "$DIR":/w:z -v "$HERE":/lab:ro,z -v "$rundir":/job:ro,z \
         -e SWAP="$swap" \
         "$IMAGE" bash -uo pipefail -c "$(qemu_args)"'
         set -e

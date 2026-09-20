@@ -44,12 +44,14 @@ fi
 
 mkdir -p "$OUT"
 
-# `cp -r /src /build` rather than building in the bind mount: the mount is
+# `:z` rather than `:Z`: OUT is often the shared lab work directory, and a
+# private MCS category pair would take it away from a guest run already using
+# it. `cp -r /src /build` rather than building in the bind mount: the mount is
 # read-only on purpose, so a stray `target/` cannot land in the work tree and
 # the host's own build artefacts cannot influence the result.
 podman run --rm \
-    -v "$HERE":/src:ro,Z \
-    -v "$OUT":/out:Z \
+    -v "$HERE":/src:ro,z \
+    -v "$OUT":/out:z \
     "$IMAGE" bash -euo pipefail -c '
         dnf install -y -q --setopt=install_weak_deps=False \
             rust cargo mingw64-gcc mingw64-winpthreads-static \

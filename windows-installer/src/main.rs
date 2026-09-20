@@ -9,7 +9,7 @@ use apex_windows_installer::{Scan, enumerate, lab_policy, open_image, scan};
 use std::{env, io, path::Path, process::ExitCode};
 
 const USAGE: &str = "\
-apex-windows-installer — APEX installer for Windows (survey stage)
+apex-windows-installer -- APEX installer for Windows (survey stage)
 
   apex-windows-installer survey        every disk, its identity, its partitions
   apex-windows-installer inspect GUID  one partition by its GPT GUID, including
@@ -40,7 +40,7 @@ fn lab(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let original_len = image.metadata()?.len();
     let layout = enumerate(&mut image)?;
     println!(
-        "READ-ONLY IMAGE LAB — no installation available\nDisk GPT GUID: {}\nModel/serial: unavailable (image fixture, not hardware)",
+        "READ-ONLY IMAGE LAB -- no installation available\nDisk GPT GUID: {}\nModel/serial: unavailable (image fixture, not hardware)",
         layout.disk_id
     );
     for p in &layout.partitions {
@@ -215,7 +215,7 @@ mod win {
 
     pub fn print_survey() -> Result<(), Box<dyn std::error::Error>> {
         let (disks, vols, problems) = surveyed();
-        println!("APEX WINDOWS INSTALLER — READ-ONLY SURVEY. Nothing is written.");
+        println!("APEX WINDOWS INSTALLER -- READ-ONLY SURVEY. Nothing is written.");
         println!("disks-found: {}", disks.len());
         for d in &disks {
             println!("\nDISK {}", d.identity.gpt_disk_guid);
@@ -227,7 +227,7 @@ mod win {
                     "  agreement  the on-disk GPT and Windows' partition table AGREE ({} partitions)",
                     d.partitions.len()
                 ),
-                Err(e) => println!("  agreement  DISAGREE — {e}"),
+                Err(e) => println!("  agreement  DISAGREE -- {e}"),
             }
             for p in &d.partitions {
                 let claims = vols.claims(d.number, p.offset, p.length);
@@ -263,7 +263,7 @@ mod win {
             }
         }
         if !problems.is_empty() {
-            println!("\nCOULD NOT BE READ — these are reported, not ignored:");
+            println!("\nCOULD NOT BE READ -- these are reported, not ignored:");
             for p in &problems {
                 println!("  {p}");
             }
@@ -310,12 +310,12 @@ mod win {
         }
         let (disk, part) = hits[0];
 
-        println!("INSPECTING {guid} — READ-ONLY. Nothing is written.");
+        println!("INSPECTING {guid} -- READ-ONLY. Nothing is written.");
         println!("disk  {}", describe(&disk.identity));
         println!("disk-guid {}", disk.identity.gpt_disk_guid);
         match &disk.agreement {
             Ok(()) => println!("agreement the on-disk GPT and Windows' partition table AGREE"),
-            Err(e) => return Err(format!("REFUSED: {e}").into()),
+            Err(e) => return Err(e.clone().into()),
         }
 
         let claims = vols.claims(disk.number, part.offset, part.length);
@@ -339,7 +339,7 @@ mod win {
                     Ok(()) => println!("lock      FSCTL_LOCK_VOLUME succeeded on {device}"),
                     Err(e) => {
                         return Err(format!(
-                            "REFUSED: Windows would not give exclusive use of {device}: {e}"
+                            "Windows would not give exclusive use of {device}: {e}"
                         )
                         .into());
                     }
@@ -360,7 +360,7 @@ mod win {
         let (guid2, parts2) = w::layout(&dev2)?;
         if guid2 != disk.identity.gpt_disk_guid || facts(&parts2) != disk.partitions {
             return Err(
-                "REFUSED: the partition table changed while its contents were being read".into()
+                "the partition table changed while its contents were being read".into()
             );
         }
 

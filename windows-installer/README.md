@@ -1,10 +1,23 @@
-# Portable Windows installer: design and read-only image laboratory
+# Portable Windows installer
 
-Status: **not an installer**. This is a reviewable first slice: a dependency-free
-Rust content validator, strict GPT image enumerator, and interactive console
-selection by partition GUID. It has no device-opening API, disk-write API,
-firmware API, deployment command, elevation, or Install button. Do not use it to
-certify a physical partition as safe. No real disks were used for development.
+Status: **surveys real Windows disks; installs nothing.** It opens
+`\\.\PhysicalDriveN` read-only, reads the partition table twice — once through
+Windows and once off the disk itself — asks Windows what it is using, reads
+every byte of a candidate partition, and prints the confirmation a user would
+have to accept. There is no write path: no handle is opened for writing, and
+`tests/test-windows-installer.sh` greps the source for every write API to keep
+that true rather than asserted.
+
+Read `ARCHITECTURE.md` first. It answers the question that decides the whole
+design — a Windows program cannot run `bootc install`, so what does "install
+APEX from Windows" mean — and gives the measured facts that decided it.
+
+**There is a Windows virtual machine, and it is part of the deliverable.**
+`lab/winlab` builds one from Microsoft's evaluation media: Windows Server 2022
+installs itself headlessly in about two and a half minutes onto a GPT disk with
+a 100 MB ESP, and the installer is then pointed at fixture disks carrying the
+partition layouts that matter. Everything below that says "measured" was
+measured there. Nothing in this program has ever touched a physical disk.
 
 ## Toolchain decision
 
@@ -197,10 +210,14 @@ blocker requiring fault-injection tests, not something an “undo” button solv
 
 ## Review gates before hardware support
 
+- [x] A Windows guest exists, and the binary runs on it. `lab/winlab golden`
+      builds it; `lab/winlab run lab/jobs/survey` points the installer at it.
+- [x] Windows enumeration and ownership, cross-checked against an independent
+      reading of the same GPT bytes, with the two required to agree.
 - [ ] Windows x86_64 static-CRT build and clean-VM execution; Authenticode and
       supply-chain review; no installer, MSI, drivers or runtime installation.
-- [ ] Audited Windows enumeration, ownership, hardware identity and exclusivity;
-      stable-ID tests with controller order swaps and duplicate/missing serials.
+      (The build is currently the GNU target, not MSVC, and is unsigned.)
+- [ ] Stable-ID tests with controller order swaps and duplicate/missing serials.
 - [ ] VHDX/VM tests for Windows/system/recovery/ESP refusal, BitLocker, hibernation,
       Storage Spaces, RAW volumes, 4Kn, short reads, hot unplug and lock failure.
 - [ ] Fuzz/corpus review of GPT parsing, huge/overflowing ranges and concurrent
