@@ -6,7 +6,7 @@
 - **Evidence**:
   - `ROADMAP/evidence/sdboot-image-20260920-lab.md` — install / boot / upgrade /
     rollback transcripts (predecessor).
-  - `ROADMAP/evidence/sdboot-image-20260921-decision.md` — the SELinux blessing
+  - `ROADMAP/evidence/sdboot-image-20260920-decision.md` — the SELinux blessing
     defect, the per-machine decision, the BIOS correction (this round).
 - **The design lives in the repo**, not in this card: `docs/boot-v2.md`,
   section "The pivot to systemd-boot". `AGENTS.md` boot-path rule 5 is the
@@ -69,7 +69,7 @@ snapshot pairs). Delete the .img when done; it is the biggest thing here.
 * **`systemd-bless-boot` could not rename a loader entry on a FAT ESP.** AVC:
   `init_t` → `dosfs_t:file rename` denied, enforcing, on the APEX image.
   Fedora has no domain for the worker. Unrepaired, every deployment rolls back
-  on its fourth boot. **Repaired, and PROVEN IN A BOOT on 2026-09-21**:
+  on its fourth boot. **Repaired, and PROVEN IN A BOOT on 2026-09-20**:
   `Marked boot as 'good'`, suffix stripped, zero AVCs.
 * **`bootc` writes no boot counter**, so the health gate the image asserts is
   inert on a machine installed exactly as bootc leaves it. `apex-boot-count`
@@ -118,6 +118,15 @@ Everything below is pushed; nothing is half-applied. Start here.
    `LAB-avc2` is empty. A rename with denials under it is the failure that
    looked like a pass last time — `bootupd_t` is permissive, so it logs rather
    than refuses.
+
+   Two fixes to make in `lab-run-apex.sh` before re-running:
+   - `LAB-runtime-policy:` came back **empty** last time; its `python3 -c …
+     2>&1 | tail -2` swallowed the error. Print the exception. Until it works,
+     "the module is loaded" rests on the absence of an entrypoint AVC rather
+     than on a read of the kernel's policy.
+   - Add `semodule -DB` before the probe so `dontaudit`ed denials surface. The
+     module is proven **necessary**; proving it **sufficient** for an enforcing
+     `bootupd_t` needs dontaudit off.
 
    Two things that cost time last round: the images live in the **root** podman
    store (`sudo podman images`), not the user one; and a `podman build` that
