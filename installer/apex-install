@@ -1908,11 +1908,24 @@ elif [ "$ENCRYPT" = yes ]; then
   umount -R "$TROOT/boot/efi" 2>/dev/null || true
   umount -R "$TROOT/boot"     2>/dev/null || true
   umount -R "$TROOT"          2>/dev/null || true
-  if findmnt -rno TARGET --target "$TROOT" 2>/dev/null | grep -qx "$TROOT"; then
-    umount -Rl "$TROOT" 2>>"$LOG" || true
+  # A PREFIX match, not an exact one. bootc mounts things INSIDE the tree —
+  # /sysroot, the stateroot var, the boot binds — and with rshared those appear
+  # on the host too. Checking only that `$TROOT` itself is gone would declare
+  # success while `$TROOT/ostree/deploy/.../var` was still mounted, which is
+  # the mount that the account step then writes through.
+  _resid=$(findmnt -rno TARGET 2>/dev/null | grep -c "^$TROOT" || true)
+  if [ "${_resid:-0}" != 0 ]; then
+    log "luks: $_resid mount(s) still under $TROOT after the install — releasing lazily"
+    findmnt -rno TARGET 2>/dev/null | grep "^$TROOT" | sort -r | while read -r _m; do
+      umount -Rl "$_m" 2>>"$LOG" || true
+    done
   fi
-  if [ "${rc:-0}" = 0 ] && findmnt -rno TARGET --target "$TROOT" 2>/dev/null | grep -qx "$TROOT"; then
-    rc=78; echo "could not release $TROOT after the install" | tee -a "$LOG"
+  if [ "${rc:-0}" = 0 ]; then
+    _resid=$(findmnt -rno TARGET 2>/dev/null | grep -c "^$TROOT" || true)
+    if [ "${_resid:-0}" != 0 ]; then
+      { echo "--- mounts still under $TROOT ---"; findmnt -R "$TROOT"; } >>"$LOG" 2>&1 || true
+      rc=78; echo "could not release $TROOT after the install ($_resid mount(s) left)" | tee -a "$LOG"
+    fi
   fi
 else
   # --net=host: no netavark needed in the live env; bootc install is offline.
@@ -2029,6 +2042,7 @@ mount -o rw "$root_part" "$MNT" 2>>"$LOG" || die "Could not mount the new root (
 # which sends the reader looking at shadow-utils and SELinux instead of at a
 # mount flag. Ask the question directly, and name the answer.
 if ! touch "$MNT/.apex-write-probe" 2>>"$LOG"; then
+  { echo "--- mounts at the time of the failed write probe ---"; findmnt -R "$MNT"; } >>"$LOG" 2>&1 || true
   umount "$MNT" 2>/dev/null || true
   die "The freshly installed root ($root_part) mounted READ-ONLY, so your account could not be created.
 
@@ -2042,6 +2056,31 @@ rm -f "$MNT/.apex-write-probe" 2>/dev/null || true
 # emptiness check on the next line is what should report the problem.
 deploy=$(ls -d "$MNT"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1 || true)
 [ -n "$deploy" ] || { umount "$MNT" 2>/dev/null || true; die "Installed ostree deployment not found under $root_part."; }
+# ── probe the directory useradd actually writes to ──────────────────────────
+# A write probe at the root of the filesystem is the wrong question. useradd
+# renames /etc/passwd+ over /etc/passwd INSIDE THE DEPLOYMENT, and a deployment
+# can be unwritable while the filesystem holding it is not — a stale mount left
+# over the tree, an ostree checkout that was never made writable, an immutable
+# attribute. Measured on a loopback install: the root probe passed and useradd
+# still failed with "failure while writing changes to /etc/passwd", which sends
+# the reader to shadow-utils and SELinux instead of to the deployment.
+#
+# So ask the exact question, and if the answer is no, say what was tried and
+# dump the mount tree into the log rather than leaving the next person to guess.
+if ! touch "$deploy/etc/.apex-write-probe" 2>>"$LOG"; then
+  { echo "--- the deployment refused a write ---"
+    echo "deploy=$deploy"
+    ls -ld "$deploy" "$deploy/etc" 2>&1
+    lsattr -d "$deploy" "$deploy/etc" 2>&1
+    findmnt -R "$MNT" 2>&1
+  } >>"$LOG" 2>&1 || true
+  umount "$MNT" 2>/dev/null || true
+  die "The installed system ($deploy) will not accept changes, so your account could not be created (see $LOG).
+
+APEX-OS is on $DISK but has no account on it — do not reboot expecting to log
+in. Start the installer again; a second run on the same disk is safe."
+fi
+rm -f "$deploy/etc/.apex-write-probe" 2>/dev/null || true
 create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "post-install"
 copy_network_to "$deploy"
 set_locale_keymap_in "$deploy"
