@@ -1,9 +1,18 @@
 # sdboot-migrate — move a live machine to systemd-boot, in place, safely
 
 - **Repo / branch**: apex-os, `task/sdboot-migrate`, branched from
-  `roadmap/v2.2` @ `602a8376`. Three commits, all pushed:
-  `6b40edb5` the engine, `70181f18` the `apex update` wiring and the confirm
-  unit, `ae239be5` docs, tests and evidence. **Not landed.**
+  `roadmap/v2.2` @ `602a8376`. Seven commits, all pushed: `6b40edb5` the engine,
+  `70181f18` the `apex update` wiring and the confirm unit, `ae239be5` docs,
+  tests and evidence, `bc250af1` shellcheck, `743bfdb6` five state-machine and
+  precheck fixes, `f03d5f43` one assertion tightened, `e40087ed` a merge of
+  `origin/roadmap/v2.2` (the branch was 27 commits behind; the one conflict was
+  `tests/lab/bootc-install-lab`, where `efivars-guard` had already corrected
+  the same stale rule-5 comment — resolved in their favour, it is their file).
+  Every suite green on the merged tip: `test-boot-migrate` 61,
+  `test-boot-v2` 150 / 177 with the binary, `test-bootc-install-guard` 71,
+  `check-containerfile-assertions` clean, shellcheck clean, cargo builds.
+  **Not landed**, and `roadmap.yaml` is untouched — this unit was dispatched without a task id, so
+  nothing was recorded against one.
 - **Worktree**: `/var/tmp/apex-work/wt-sdboot-migrate`.
 - **Evidence**: `ROADMAP/evidence/sdboot-migrate-20260921-lab.md` — ~30 guest
   boots, the crash matrix with the power actually cut, and the two defects the
@@ -30,7 +39,7 @@ removable-media fallback bootc had just replaced with an unsigned loader.
 | `files/system/units/apex-boot-migrate-confirm.service` | writes `BootOrder` after a boot that worked, or records the migration as failed |
 | `apexd/apex/src/ops.rs` | `apex update` runs the migration **instead of** `bootc upgrade`; exit 10 (refused) is "carry on" |
 | `Containerfile.base` | ships both, enables the unit, asserts podman/mkfs.vfat/rsync/efibootmgr/unshare and the Wants=-not-Requires= ordering |
-| `tests/test-boot-migrate.sh` | 50 assertions, 13 mutations, all caught; wired into `pr-validation.yml`'s `static` job |
+| `tests/test-boot-migrate.sh` | 61 assertions, 22 mutations, all caught; wired into `pr-validation.yml`'s `static` job |
 | `docs/boot-v2.md`, `docs/update-cost.md`, `AGENTS.md` | the design, the disk cost, and the corrected rule 5 |
 | `apexd/apex/src/boot.rs` + `main.rs` + `tests/test-boot-v2.sh` | the "GRUB is the default" string, its help and its test, changed together |
 | `tests/lab/bootc-install-lab` | its usage text cited rule 5 for the opposite of what rule 5 says |
@@ -125,7 +134,18 @@ control disk that drives the experiment without an image rebuild).
    `BootOrder` is confirmed — today a migrated machine has exactly one Type #1
    entry, so a counted-out deployment has nothing to fall back to within
    sd-boot.
-7. **Tighten the confirm gate.** It is `Wants=boot-complete.target`, not
+7. **A free-space precheck on the ROOT filesystem.** The ESP is checked; the
+   root is not. A migration writes a second full copy of the image into
+   `/composefs` — ~15 GB on APEX — and katana's `/var` is the machine where
+   that runs out. `docs/update-cost.md` records the cost; nothing refuses on
+   it yet.
+8. **What should `apex update` do on a *fallback* GRUB boot of a confirmed
+   machine?** Today it exits 3 and stays silent, so the user's update does
+   nothing at all — which is wrong in the other direction: `bootc upgrade`
+   there would update the ostree deployment and diverge the two paths. Not a
+   brick, but a state nobody designed. Decide it before anyone is living on
+   the fallback.
+9. **Tighten the confirm gate.** It is `Wants=boot-complete.target`, not
    `Requires=`, because the migrated entry carries no boot counter so
    `systemd-bless-boot` is condition-skipped. Measured: the target **is**
    reached anyway on the lab guest. If the stage renames the new entry to carry
