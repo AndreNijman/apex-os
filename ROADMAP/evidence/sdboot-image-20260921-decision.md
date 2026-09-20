@@ -209,17 +209,44 @@ will want to see before trusting the contract.
 
 ## 4. Legacy BIOS, on this machine, today
 
+The predecessor's evidence says the BIOS boot partition exists on the L16 and
+was never written to. Re-checked this round, and **half of that is wrong in the
+direction that matters**: the partition does not exist on this machine at all.
+
 ```
 $ python3 -c 'import json;d=json.load(open("/boot/bootupd-state.json"));print(list(d["installed"]))'
 ['EFI']
+
+$ ls /usr/lib/bootupd/updates/
+EFI  BIOS.json  EFI.json
+
+$ lsblk -o NAME,PARTTYPENAME,SIZE /dev/nvme0n1
+nvme0n1                           1.9T
+├─nvme0n1p1 EFI System            600M
+├─nvme0n1p2 Linux extended boot     2G
+├─nvme0n1p3 Linux filesystem    396.3G
+├─nvme0n1p4 Linux extended boot     2G
+└─nvme0n1p5 Linux filesystem      1.5T
 ```
 
-The 1 MiB BIOS boot partition `bootc install` creates on every install has
-never been written to on the L16. `bootupd` ships `BIOS.json` alongside
-`EFI.json`, and `installer/build-live-iso.sh` really does build an El Torito
-core image and an isohybrid MBR — so the **installer media** boots legacy BIOS
-and an **installed APEX system on this machine does not have a BIOS
-bootloader**.
+No `BIOS boot` partition. The reason is in `installer/apex-install`: it has two
+modes, and only one of them lets bootc create a partition table.
+
+* **disk mode** runs `bootc install to-disk --wipe`, and bootc lays out the
+  table itself — that is where the 1 MiB BIOS boot partition the predecessor
+  measured on loopback images comes from, on both backends.
+* **partition mode** runs `bootc install to-filesystem` into a root the
+  installer made and an ESP that already exists. No table is created, so no
+  BIOS boot partition is either. The L16's layout is partition mode.
+
+Neither mode passes `--bootloader` or `--composefs-backend`, so both install
+ostree + GRUB today.
+
+`installer/build-live-iso.sh` does build an El Torito core image and an
+isohybrid MBR with a VESA `vga=791` handoff, so the **installer media** boots
+legacy BIOS. What no evidence supports is an **installed** APEX system booting
+it: on whole-disk installs the partition is created and left empty, and on
+partition-mode installs like this laptop it is not created at all.
 
 ## 5. What this round did NOT do, stated so nobody reads it as done
 
