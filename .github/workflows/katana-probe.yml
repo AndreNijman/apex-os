@@ -73,6 +73,10 @@ jobs:
           echo "--- privilege ---"
           deny "sudo -n true"                    sudo -n true
           deny "su root"                         su -c true root
+          # `su` proves little on its own — there is no tty and no password to
+          # give it. pkexec is the escalation path that actually exists on this
+          # machine, and ghrunner is in no group polkit's admin rule accepts.
+          deny "pkexec"                          pkexec /bin/true
 
           echo "--- Andre's data ---"
           deny "list his home"                   ls /var/home/andre

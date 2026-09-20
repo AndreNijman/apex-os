@@ -290,11 +290,24 @@ group so two pushes cannot queue two 100 GB builds.
   `/var/lab/runner/.local/share/containers/storage` persists so the ~2 GB
   builder base is not re-pulled every run. That is a deliberate trade and it is
   only acceptable *because* fork code never reaches this runner.
-* **No reboot test.** See above.
-* `apex-firewall.service` owns `table inet apex`; this unit added a separate
-  `table inet apex_runner` and its own oneshot so the two cannot clobber each
-  other. If `apex-firewall` is ever changed to flush *all* tables, this rule
-  goes with it — check `nft list table inet apex_runner` after such a change.
+* **`/run/apex-runner` carries over between jobs too.** `RuntimeDirectoryPreserve=yes`
+  keeps podman's runtime directory across restarts rather than making it
+  re-initialise every job. Same carry-over class as the graphroot, same
+  justification, and it is worth knowing rather than discovering.
+* **`ghrunner` took uid/gid 960 from `useradd --system`**, which is inside the
+  range a future image's `sysusers.d` could allocate to something else. It is
+  not pinned. If the image ever ships a system user that collides, the
+  ownership on `/var/lab/runner` is what will look wrong.
+* **`apex-firewall.service` was checked, not assumed.** Its `ExecStart` is
+  `nft -f /usr/share/apex/nftables/apex.nft` plus `apex-firewall reload`, and
+  its `ExecStop` is `nft delete table inet apex`. Every operation in that file
+  and in `/usr/libexec/apex-firewall` is **scoped to `table inet apex`** — a
+  `delete table inet apex`, and `nft flush set $TABLE …` for its port sets.
+  **There is no `flush ruleset` anywhere in it**, so a restart of APEX's
+  firewall cannot take `table inet apex_runner` with it. If that ever changes,
+  the symptom is silent — the check is
+  `nft list table inet apex_runner`, and its `counter` should be non-zero after
+  the probe workflow runs.
 
 ## 4. Everything created on katana, for a clean removal
 
