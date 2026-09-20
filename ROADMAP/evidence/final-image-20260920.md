@@ -353,12 +353,31 @@ Error: the running kernel's BTF has malformed scx kfunc prototype(s): …
 ```
 
 **No sched-ext scheduler can load on this image at all**, for a kernel-build
-reason that has nothing to do with apexd: APEX's kernel BTF was generated with
-`pahole < 1.26`, so every `scx_*` scheduler fails with
+reason that has nothing to do with apexd: every `scx_*` scheduler fails with
 `func_proto incompatible with vmlinux`. The kernel is
-**`7.2.6-cachyos1.fc43.x86_64`** — `rpm -q kernel` says *not installed*, so it
-is the CachyOS kernel this repo bakes from `kernel/**` rather than a Fedora one,
-and that is where the BTF is generated and where a follow-up item has to land.
+**`7.2.6-cachyos1.fc43.x86_64`** and `rpm -q kernel` says *not installed*,
+because Fedora's `kernel` was swapped out for the CachyOS one.
+
+> **CORRECTED 2026-09-20 by unit `kernel-btf-scx`, which was sent to act on
+> this paragraph. Two claims in it are wrong, and both were inherited rather
+> than measured.**
+>
+> 1. **APEX does not bake this kernel.** `Containerfile.core` lines 216–224
+>    `dnf5 install`s the prebuilt `kernel-cachyos` RPM from COPR
+>    `bieszczaders/kernel-cachyos`. `kernel/**` in this repository is six
+>    files — the M0 spike that *chose* that kernel — and builds nothing that
+>    ships. A follow-up item cannot land there.
+> 2. **"Built with pahole < 1.26" is `scx_utils`' own guess and it is wrong
+>    for this kernel.** The COPR build used `dwarves-1.30-2.fc43`, and the
+>    running kernel says so itself: `CONFIG_PAHOLE_VERSION=130`. The mechanism
+>    that flag enables demonstrably ran — the BTF carries 282 `bpf_kfunc`
+>    `DECL_TAG`s and 44 `_impl` variants. The real defect is narrower: **22 of
+>    68 `scx_bpf_*` kfuncs carry no `bpf_kfunc` tag**, so their implicit
+>    `struct bpf_prog_aux *` was never stripped.
+>
+> The reading in this section is otherwise exactly right, and the rest of §3
+> stands. Full working, including why Fedora's own stock kernel is affected
+> too, at `ROADMAP/evidence/kernel-btf-scx-20260920.md`.
 `scx-scheds-1.1.3-3.fc43` is the userspace side and it is not at fault. `nr_rejected` stays `0` — the kernel
 never sees an attach to reject; the BPF program will not load. A separate item,
 and it is what `SCX_SETTLE` would have been blamed for: the 2 s budget is **not**

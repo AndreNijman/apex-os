@@ -59,6 +59,13 @@ pub mod gaming;
 pub mod gpu;
 pub mod host;
 pub mod irq;
+// P1-043's kernel-BTF probe. It reads `/sys/kernel/btf/vmlinux` — rooted, like
+// `syswriter::read_scx_state`, so every answer is reachable from a temp
+// directory — and says whether a sched-ext scheduler can bind to this kernel
+// AT ALL. On every APEX image to date it cannot, for a kernel-build reason
+// APEX does not own, and Gaming Mode's `not loaded` needed a way to say which
+// kind of "not loaded" it is.
+pub mod kernelbtf;
 // P1-063's lid policy. Pure, like its neighbours: the decision is a total
 // function over injected readings, because the act it authorises is a laptop
 // going to sleep in someone's bag and the only machine that could exercise it

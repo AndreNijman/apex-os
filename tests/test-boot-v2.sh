@@ -668,6 +668,122 @@ grep -q 'plaintext-marker=written' "$TMP/notpm.sh" \
     && ok "the with-TPM arm writes the marker the recovery arm reads back" \
     || bad "the with-TPM arm no longer writes the marker, so recovery-marker=found proves nothing about the data"
 
+sec "L-003: the shipped enrolment path cannot bind what this program has ruled out"
+# These run on EVERY pull request, with no lab, no swtpm and no qemu. The boot
+# lab proves the BEHAVIOUR of files/system/libexec/apex-luks-enroll; this proves
+# the properties that must hold in the source whether the lab ran or not — and
+# the lab is path-filtered, so a PR that edits only this script would otherwise
+# be gated by nothing at all.
+ENROLL="$REPO/files/system/libexec/apex-luks-enroll"
+[[ -f "$ENROLL" ]] \
+    && ok "the shipped enrolment script exists" \
+    || bad "no script at $ENROLL — every check below is vacuous"
+[[ -x "$ENROLL" ]] \
+    && ok "the shipped enrolment script is executable in the repo" \
+    || bad "$ENROLL is not executable in the repo"
+grep -q 'COPY --chmod=0755 files/system/libexec/apex-luks-enroll' "$BASECF" \
+    && ok "Containerfile.base copies it into the image" \
+    || bad "Containerfile.base does not ship apex-luks-enroll, so nothing on a machine can call it"
+
+# ── the defect this whole item exists to prevent ───────────────────────────
+# `systemd-cryptenroll --tpm2-device=auto` with no PCR selection exits 0 and
+# seals to the TPM storage key and nothing else. MEASURED on systemd 258.10:
+# tpm2-pcrs [], no tpm2-pcr-bank field, policy hash 32 zero bytes. The match is
+# on EXECUTABLE lines only, because the script explains that defect at length
+# and a tripwire a comment can trip is a tripwire nobody can keep green.
+BARE_DEVICE='^[^#]*--tpm2-device='
+BARE_OK='POLICY_ARGS|tpm2-pcrs|--tpm2-device=PATH|unlock-tpm2-device'
+if grep -nE "$BARE_DEVICE" "$ENROLL" | grep -vE "$BARE_OK" >/dev/null 2>&1; then
+    bad "an enrolment names a TPM2 device with no PCR selection beside it: $(grep -nE "$BARE_DEVICE" "$ENROLL" | grep -vE "$BARE_OK" | head -1)"
+else
+    ok "no executable line names a TPM2 device without a PCR selection"
+fi
+# Both controls on that tripwire, because a pattern that matches nothing at all
+# reports exactly the same "clean".
+printf '#!/bin/sh\n# a comment naming --tpm2-device=auto with no PCRs, on purpose\necho hi\n' \
+    > "$TMP/enroll-comment-only"
+if grep -nE "$BARE_DEVICE" "$TMP/enroll-comment-only" | grep -vE "$BARE_OK" >/dev/null 2>&1; then
+    bad "inverse control: a comment naming --tpm2-device= trips the tripwire (false red)"
+else
+    ok "inverse control: a comment naming --tpm2-device= does not trip it"
+fi
+printf '#!/bin/sh\nsystemd-cryptenroll --tpm2-device=auto /dev/sda2\n' > "$TMP/enroll-bare"
+if grep -nE "$BARE_DEVICE" "$TMP/enroll-bare" | grep -vE "$BARE_OK" >/dev/null 2>&1; then
+    ok "positive control: a real bare enrolment DOES trip the tripwire"
+else
+    bad "positive control: a bare --tpm2-device=auto line did not trip the tripwire — it can never fire"
+fi
+
+# ── the registers this program has ruled out, and why ──────────────────────
+#   PCR 0  moves on a firmware update and would strand a user on a BIOS update.
+#   PCR 11 is 64 zeros on a machine with no sd-stub, and `tpm2_pcrextend 11`
+#          succeeds from plain root while `tpm2_pcrreset 11` answers "bad
+#          locality" — so binding to it there is a local denial of service.
+# PCR 11 is allowed ONLY through the signed-policy probe, which requires a
+# non-zero PCR 11 and an sd-stub boot before it will choose it. That is the
+# seam the bootloader pivot needs, so the check names the guard rather than the
+# register.
+if grep -nE '^[^#]*--tpm2-(public-key-)?pcrs=[^ ]*\b0\b' "$ENROLL" >/dev/null 2>&1; then
+    bad "the enrolment script binds PCR 0: $(grep -nE '^[^#]*--tpm2-(public-key-)?pcrs=[^ ]*\b0\b' "$ENROLL" | head -1)"
+else
+    ok "no executable line binds PCR 0"
+fi
+if grep -nE '^[^#]*--tpm2-public-key-pcrs=' "$ENROLL" >/dev/null 2>&1; then
+    # It may only appear inside the probe that first checks PCR 11 is non-zero.
+    sed -n '/^probe_signed_pcr11()/,/^}$/p' "$ENROLL" > "$TMP/enroll-p11.sh"
+    if grep -q -- '--tpm2-public-key-pcrs=' "$TMP/enroll-p11.sh" \
+       && grep -q 'pcr-sha256/11' "$TMP/enroll-p11.sh" \
+       && grep -q 'StubInfo' "$TMP/enroll-p11.sh"; then
+        ok "a PCR 11 binding exists only behind the sd-stub and non-zero-PCR-11 probes"
+    else
+        bad "a PCR 11 binding is reachable without proving sd-stub booted and PCR 11 was extended"
+    fi
+else
+    ok "no PCR 11 binding is present at all"
+fi
+
+# ── no PIN by default ───────────────────────────────────────────────────────
+# On real Intel PTT, MAX_AUTH_FAIL is 32, lockout 7200 s, recovery 86400 s, and
+# a successful authorisation does NOT clear the counter. A default PIN risks
+# locking a user out of their own TPM for a day, and on a dual-boot machine
+# another OS holds lockoutAuth so APEX cannot clear it.
+grep -qE '^WITH_PIN=0|WITH_PIN=0 ' "$ENROLL" \
+    && ok "the PIN is off unless asked for" \
+    || bad "the enrolment script does not default WITH_PIN to 0"
+
+# ── the recovery key is enrolled BEFORE the TPM, not after ─────────────────
+# Order, not presence. A script that enrolled the TPM first and the recovery key
+# second would pass every "is there a recovery key" check while leaving a window
+# in which the volume has a TPM binding and no way back — which is exactly the
+# state that makes a firmware update a data-loss event.
+rline="$(awk '/CRYPTENROLL" --recovery-key/{print NR; exit}' "$ENROLL")"
+tline="$(awk '/enroll_args=\(--tpm2-device=/{print NR; exit}' "$ENROLL")"
+if [[ -n "$rline" && -n "$tline" ]] && (( rline < tline )); then
+    ok "the recovery key is enrolled at line $rline, before the TPM slot at line $tline"
+else
+    bad "the recovery key is enrolled at line '${rline:-none}' and the TPM slot at line '${tline:-none}': a TPM-only window exists"
+fi
+
+# ── the four scenarios are in the DEFAULT set, not behind a name ───────────
+# The defined-vs-listed check above passes for a scenario in either array, so it
+# cannot see a scenario moved from ALL into STAGED. STAGED scenarios are skipped
+# by a default run, which is how a gate stops running while still being listed.
+allblock="$(sed -n '/^ALL=(/,/)$/p' "$RUNSC")"
+for s in enroll-sb-on enroll-sb-off enroll-no-tpm enroll-bare-policy; do
+    grep -qw -- "$s" <<<"$allblock" \
+        && ok "$s runs in a default boot-lab run" \
+        || bad "$s is not in ALL, so a default run skips it and still reports success"
+done
+
+# ── the lab is actually triggered by a change to the shipped script ────────
+# boot-v2.yml is path-filtered and a skipped job counts as success, so a path
+# filter that does not name this file means the four scenarios never run on the
+# PR that breaks them.
+WF="$REPO/.github/workflows/boot-v2.yml"
+grep -q 'files/system/libexec/apex-luks-enroll' "$WF" \
+    && ok "boot-v2.yml runs the lab when the enrolment script changes" \
+    || bad "boot-v2.yml has no path filter for apex-luks-enroll: the lab would be skipped, and a skipped job passes"
+
 # ═════════════════════════════════════════════════════════════════════════════
 if (( WITH_BINARY )); then
 sec "apex boot status reports the state, and does not invent the parts it cannot see"

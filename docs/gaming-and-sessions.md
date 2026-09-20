@@ -442,6 +442,11 @@ kernel is visible instead of resolved in silence. The keys are reported while
 game mode is **off** as well, so "disabled before, disabled during" reads as
 the non-answer it is rather than as a passing row.
 
+> **`not loaded` is the answer on every APEX image to date, and it is not this
+> fix failing.** The shipped kernel's BTF cannot accept a sched-ext scheduler
+> at all. A fourth key, `scx_btf`, says which kind of `not loaded` it is —
+> **read §5d before reading anything into `scx_state` on a real machine.**
+
 > **`root/ops` is the struct_ops name and drops the prefix.** `scx_lavd`
 > attaches as `lavd`, `scx_rusty` as `rusty`. Comparing it verbatim against
 > the requested name would report a working scheduler as a failure — this
@@ -472,6 +477,98 @@ the machine had been put back.
   real scheduler — the fixture constructor is `#[cfg(test)]`, because the
   existing host-command guard exists precisely because a live writer in a test
   once reached the developer's own.
+
+## 5d. And no sched-ext scheduler can load on an APEX kernel at all
+
+§5c fixed the verb and made `apex game status` stop claiming a scheduler the
+kernel says is not there. On hardware, the honest answer it now gives is
+`not loaded` — **permanently, on every APEX image to date**, and for a reason
+that is neither the verb nor the settle budget.
+
+Measured on katana 2026-09-20, `7.2.6-cachyos1.fc43.x86_64`, from
+`journalctl -u scx_loader`:
+
+```text
+libbpf: extern (func ksym) 'scx_bpf_create_dsq': func_proto [1864]
+        incompatible with vmlinux [60823]
+libbpf: failed to load BPF skeleton 'bpf_bpf': -EINVAL
+Error: the running kernel's BTF has malformed scx kfunc prototype(s):
+  scx_bpf_cidperf_cap, … scx_bpf_create_dsq, … scx_bpf_kick_cpu, …
+  (22 names)
+```
+
+Type `60823` in that kernel's own BTF reads
+
+```text
+s32 scx_bpf_create_dsq(u64 dsq_id, s32 node, const struct bpf_prog_aux *aux)
+```
+
+The third parameter is the **verifier's implicit argument**. A kfunc marked
+`KF_IMPLICIT_ARGS` is supposed to have it stripped from the public prototype by
+`resolve_btfids`, which finds the kfunc through a `BTF_KIND_DECL_TAG` valued
+`bpf_kfunc` that `pahole` emits. On this kernel **22 of 68 `scx_bpf_*` kfuncs
+carry no such tag**, so the strip never happened for them, and every scheduler
+that references one of the 22 — which is all of them — is rejected.
+
+`nr_rejected` stays `0` throughout: the kernel never sees an attach to reject,
+because the BPF program will not load. `SCX_SETTLE` is not the cause either —
+`sched_ext/state` never read `enabling`.
+
+**APEX cannot fix this.** It does not build a kernel: `Containerfile.core`
+stage 1 installs the prebuilt `kernel-cachyos` RPM from COPR
+`bieszczaders/kernel-cachyos`. (`kernel/**` in this repository is the M0 spike
+that *chose* that kernel; it builds nothing that ships.) The full working,
+including why the "built with pahole < 1.26" explanation `scx_utils` prints is
+wrong for this kernel and what would have to happen upstream, is at
+`ROADMAP/evidence/kernel-btf-scx-20260920.md`.
+
+### What the status surface does about it
+
+A fourth key, **`scx_btf`**, reporting a reading of `/sys/kernel/btf/vmlinux`
+taken by `apexd` itself:
+
+* `ok` — the sched-ext kfunc prototypes are the shape a BPF scheduler expects.
+* `implicit-args` — one or more still carry `struct bpf_prog_aux *`. **No
+  scheduler can load on this kernel**, and `scx_detail` says so in words,
+  naming a kfunc and the proportion.
+* `no-sched-ext` — the BTF parsed and carries no `scx_bpf_*` kfunc at all.
+* `absent` — `/sys/kernel/btf/vmlinux` is not there.
+* `unreadable` — it is there and could not be read or parsed. **Not folded
+  into `absent`**, and it blames nothing: a probe that cannot see has not seen
+  a broken kernel.
+
+The clause is appended to `scx_detail` only when the probe says loading is
+blocked **and** the kernel did not end up with a scheduler attached — a
+`loaded` session is not argued with, and a kernel with nothing wrong earns no
+sentence. The keys are reported while game mode is **off** too, so the answer
+is available before anyone starts a session that cannot work.
+
+> **This makes `not loaded` actionable rather than merely honest.** `not
+> loaded` on a kernel that could take a scheduler is a bug report about APEX.
+> `not loaded` with `scx_btf : implicit-args` is a kernel to wait for, and no
+> amount of retrying, reconfiguring or reinstalling will move it.
+
+`apex game status`'s **daemon-not-running** branch prints `scx` and `scx_btf`
+as well. It is a local view assembled by the CLI, not the daemon's `Status`
+map, and it used to say nothing about sched-ext at all.
+
+`apexd/apexd-core/src/kernelbtf.rs` is the reader: a bounded BTF parser with no
+dependency, rooted at `sys_root` like `read_scx_state`, so every answer is
+reachable from a temp directory. Verified against the real thing as well as
+against fixtures, on **three** kernels:
+
+| kernel | version | `scx_bpf_*` kfuncs affected |
+|---|---|---|
+| L16 (`kernel-cachyos`) | `7.2.3-cachyos2.fc43` | 20 of 68 |
+| katana (`kernel-cachyos`) | `7.2.6-cachyos1.fc43` | **22 of 68** |
+| Fedora stock (`kernel-core`) | `7.2.6-100.fc43` | 18 of 68 |
+
+katana's 22 are **exactly the 22 `libbpf` named**, which is what validates the
+reader. The other two rows are what makes the problem general: three kernels,
+three different subsets, all broken, all three including
+`scx_bpf_get_idle_cpumask`. Neither "boot Fedora's kernel" nor "pin an older
+CachyOS kernel" is the workaround it looks like.
+
 
 ## 6. What still needs katana, and the exact commands
 
@@ -724,15 +821,42 @@ environment: `--mangoapp` should be back in the `starting:` line,
 `--expose-wayland` gone, and the overlay should actually render — that is the
 one thing no machine has ever seen it do here.
 
-### 6.8 sched-ext actually loads (§5c)
+### 6.8 sched-ext actually loads (§5c, §5d)
+
+> **CORRECTED 2026-09-20, after the rows below were run on katana.** Rows A and
+> C as originally written **cannot pass on any APEX image built to date**, and
+> that is not a failure of §5c's fix. The shipped kernel's BTF gives 22
+> sched-ext kfuncs a prototype `libbpf` refuses, so no `scx_*` scheduler loads
+> — see §5d. The old text expected `scx_state : loaded` and would have been
+> read as a regression by whoever ran it next. What each row can prove today is
+> now stated alongside what it was written to prove.
 
 Everything in §5c is proven against fixtures. **Three rows need the machine**,
 and none can be inferred from a green suite. Run them from an **image that
 carries the fix** — on an older image `scx_state` is absent from
 `apex game status` entirely, which is itself how you tell.
 
+**Start with Row 0.** It decides whether Rows A and C can prove anything at
+all, and it takes one command.
+
 ```sh
-# ── Row A: a scheduler actually attaches. ───────────────────────────────────
+# ── Row 0: can this kernel take a scheduler? (§5d) ──────────────────────────
+apex game status | grep '^scx_btf'
+#    `ok`            → Rows A and C are runnable as written.
+#    `implicit-args` → they are NOT. Skip to Row A-alt. This is the reading
+#                      every APEX image has given so far.
+#    `absent` / `unreadable` / `no-sched-ext` → the probe could not answer;
+#                      record which one and read §5d before going further.
+#
+# The kernel's own account of the same fact, worth capturing once per image:
+sudo journalctl -u scx_loader -b -o cat | grep -m1 'func_proto'
+#    On an affected kernel: "extern (func ksym) 'scx_bpf_create_dsq':
+#    func_proto [N] incompatible with vmlinux [M]".
+#    NOTE: scx_loader is bus-activating. Running this after `apex game start`
+#    reads a journal that exists; running it on an idle machine may find no
+#    unit at all, which is not the same as no error.
+
+# ── Row A: a scheduler actually attaches.  (needs Row 0 = ok) ───────────────
 # With NO session running first, so the starting state is the one that used to
 # break:
 cat /sys/kernel/sched_ext/state          # expect: disabled
@@ -751,7 +875,29 @@ sudo journalctl -u apexd -b -o cat | grep -m1 'scxctl'
 #    expect: NO 'no scx scheduler running' line. Its presence means the verb
 #    selection did not see `disabled`, which is a real failure of this fix.
 
+# ── Row A-alt: the row that IS runnable on an affected kernel. ──────────────
+# It proves the two things §5c and §5d are actually responsible for: that the
+# verb was chosen from the kernel, and that the status names the real reason.
+sudo apex game start
+sudo journalctl -u apexd -b -o cat | grep -c 'no scx scheduler running'
+#    expect: 0. The verb was read off sched_ext/state, saw `disabled`, and
+#    chose `start`. The old hardcoded `switch` produced that refusal on every
+#    boot of three images.
+apex game status | grep '^scx_'
+#    expect: scx_state : not loaded
+#            scx_btf   : implicit-args
+#            scx_detail: ... — kernel BTF: N of M sched-ext kfuncs still carry
+#                        the verifier's implicit 'struct bpf_prog_aux *'
+#                        argument (e.g. scx_bpf_...) ... NO sched-ext
+#                        scheduler can load on this kernel
+# Cross-check the probe against the kernel's own complaint: the kfunc names in
+# scx_detail must be drawn from the same set scx_loader printed above. They
+# matched exactly on katana (22 of 68) and a disagreement is a defect in
+# kernelbtf.rs, not in the kernel.
+sudo apex game stop
+
 # ── Row B: it goes away again. ──────────────────────────────────────────────
+# Runnable either way: nothing attached is the state `stop` is for.
 sudo apex game stop
 cat /sys/kernel/sched_ext/state          # expect: disabled
 apex game status | grep '^scx_state'     # expect: not loaded
@@ -761,9 +907,14 @@ sudo journalctl -u apexd -b -o cat | grep -m1 'sched-ext after exit'
 
 # ── Row C: `switch` is reached when something IS already running. ────────────
 # The one branch a fixture cannot honestly stand in for, because it needs
-# scx_loader holding a real scheduler. Load one by hand FIRST:
+# scx_loader holding a real scheduler — which an affected kernel cannot give
+# it. NEEDS ROW 0 = ok.
 sudo scxctl start -s scx_rusty
 cat /sys/kernel/sched_ext/state          # expect: enabled
+#    On an affected kernel this reads `disabled` and `scxctl get` will
+#    nevertheless claim a scheduler is running. That disagreement is
+#    scx_loader's bookkeeping, not the kernel's, and it is the exact lie §5c
+#    exists to stop APEX repeating. Do not proceed; the row cannot run.
 sudo apex game start
 sudo journalctl -u apexd -b -o cat | grep -m1 'scxctl'
 #    expect: no refusal. The engine must have chosen `switch`, not `start`.
@@ -781,6 +932,15 @@ sudo scxctl stop
 #    expect: it REFUSES — `apex game stop` already stopped it, and nothing is
 #    running. That refusal is the row passing, not a loose end.
 ```
+
+**Row C's retry branch was reached anyway on 2026-09-20**, through a condition
+better than the scripted one: after a failed attempt on an affected kernel,
+`scx_loader`'s own bookkeeping believed a scheduler was running while the
+kernel said none was, so APEX chose `start`, was refused with
+`already running, use 'switch'`, and took the single retry. Both verbs were
+exercised, and the status still refused to claim a scheduler. Row C's *other*
+half — the named "stopped it rather than restoring it" line on exit — remains
+unreached, because nothing has ever been running to restore.
 
 **On the timing.** `scx_load` waits up to 2 s (`SCX_SETTLE`) for the scheduler
 to attach before reporting. If Row A comes back `unknown` with a `state` of
