@@ -255,7 +255,51 @@ RUN set -eux; \
     lsinitrd "/usr/lib/modules/${KVER}/initramfs.img" \
         | grep -E '/nvidia[^/]*\.ko' \
         || { echo "FATAL: nvidia is not in the shipped initramfs — a dGPU-attached panel would stay black"; exit 1; }; \
-    echo "initramfs: plymouth theme + nvidia drivers present"
+    # ── the disk-unlock chain, checked in the artifact that boots ──────────
+    # This is the LAST dracut run of the build (see the tier's header), so it
+    # is the only place these can be checked: an assertion before it inspects
+    # an initramfs that is about to be replaced.
+    #
+    # Every one of these is a machine that asks for a passphrase it cannot use:
+    #   systemd-cryptsetup  — nothing opens the volume at all;
+    #   the crypt module    — no rd.luks.* handling, so nothing tries;
+    #   the tpm2 token .so  — a TPM-enrolled keyslot is unusable and the boot
+    #                         falls back to the passphrase prompt silently;
+    #   the keymaps         — every prompt is a `us` prompt, whatever the owner
+    #                         chose, which is the stranding case for anyone
+    #                         whose passphrase uses a key that moved.
+    # The keymap check names a NON-us map on purpose: `us` is the kernel
+    # built-in and would be there even if the whole keymap tree were missing.
+    INITRD="/usr/lib/modules/${KVER}/initramfs.img"; \
+    lsinitrd "$INITRD" | grep -qE 'usr/bin/systemd-cryptsetup' \
+        || { echo "FATAL: systemd-cryptsetup is not in the shipped initramfs — an encrypted root could never be opened"; exit 1; }; \
+    lsinitrd "$INITRD" -m | tr ' ' '\n' | grep -qx 'crypt' \
+        || { echo "FATAL: dracut's crypt module is not in the shipped initramfs — rd.luks.* would be ignored"; exit 1; }; \
+    lsinitrd "$INITRD" | grep -qE 'libcryptsetup-token-systemd-tpm2\.so' \
+        || { echo "FATAL: the systemd-tpm2 token plugin is not in the shipped initramfs — a TPM keyslot would be unusable"; exit 1; }; \
+    lsinitrd "$INITRD" | grep -qE 'kbd/keymaps/.*/de\.map' \
+        || { echo "FATAL: the console keymaps are not in the shipped initramfs — every unlock prompt would be a US one"; exit 1; }; \
+    # The hint module. A dracut module whose check() is never called, or whose
+    # install() silently failed, leaves NO trace and no error — the build would
+    # look identical. So both halves are named: the program, and the symlink
+    # that is the only reason systemd ever runs it.
+    lsinitrd "$INITRD" | grep -qE 'usr/bin/apex-unlock-hint' \
+        || { echo "FATAL: apex-unlock-hint is not in the shipped initramfs — the unlock prompt could not say which keyboard it is using"; exit 1; }; \
+    lsinitrd "$INITRD" | grep -qE 'initrd\.target\.wants/apex-unlock-hint\.service' \
+        || { echo "FATAL: apex-unlock-hint.service is in the initramfs but nothing pulls it in — it would never run"; exit 1; }; \
+    #
+    # The per-machine keymap channel that survives a signed UKI. Same module,
+    # same two halves, and the SAME trap in a sharper form: this unit must be
+    # pulled in by sysinit.target.wants and not initrd.target.wants, because
+    # systemd-vconsole-setup is ordered Before=sysinit.target and a unit that
+    # ran at initrd.target would set a keymap that had already been loaded.
+    # A wrong .wants directory here is a silent no-op that only shows up as a
+    # locked-out owner, so the directory is named in the assertion.
+    lsinitrd "$INITRD" | grep -qE 'usr/bin/apex-vconsole-credential' \
+        || { echo "FATAL: apex-vconsole-credential is not in the shipped initramfs — a UKI machine could not be told its keyboard layout"; exit 1; }; \
+    lsinitrd "$INITRD" | grep -qE 'sysinit\.target\.wants/apex-vconsole-credential\.service' \
+        || { echo "FATAL: apex-vconsole-credential.service is not pulled in by sysinit.target.wants — it would run after the keymap was already loaded, or never"; exit 1; }; \
+    echo "initramfs: plymouth theme + nvidia drivers + the disk-unlock chain present"
 
 # Kernel args for the graphical splash. `quiet splash` per the theme's own
 # README (files/branding/plymouth/README.md). NOTE: `quiet` raises the console

@@ -8,8 +8,10 @@
 # NOPASSWD because this is invoked from a compositor-spawned script, which has no
 # way to present a password prompt. The user still authenticates at the greeter
 # immediately afterwards: APEX-OS deliberately does NOT configure autologin the
-# way SteamOS and Bazzite do, because both target machines end up on LUKS2+TPM2
-# and a passwordless graphical login is not a change to make silently.
+# way SteamOS and Bazzite do. The installer offers full-disk LUKS2 with the box
+# already ticked, so a machine installed today is normally encrypted; TPM
+# auto-unlock is not on by default (L-003). A passwordless graphical login on
+# top of either is not a change to make silently.
 #
 # Deliberately narrow. The helper takes no caller-supplied paths and validates
 # the session id against the .desktop files actually installed in

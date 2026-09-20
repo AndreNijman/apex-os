@@ -422,6 +422,67 @@ RUN set -eux; \
     echo "firmware: iwlwifi $(find /usr/lib/firmware -name 'iwlwifi*' | wc -l) files, SOF + UCM2 present"; \
     dnf5 clean all
 
+# ── Stage 1a2: the disk-unlock chain is an EXPLICIT dependency ─────────────
+#
+# cryptsetup was in this image, and nothing asked for it. `rpm -q --whatrequires
+# cryptsetup` answered with exactly one package — clevis-luks — which is itself
+# only here because it comes down with the bootc base. So the binary that opens
+# an encrypted root was present at the end of a two-link chain of other
+# people's decisions, and any of the three could drop it in a rebase without a
+# single line of this repository changing.
+#
+# That is not an acceptable shape for a dependency of the BOOT PATH. If
+# cryptsetup disappears, the failure is not a missing feature at install time:
+# it is a machine that has already been encrypted and can no longer be opened,
+# discovered on the first boot after an update. Name it here, where a dependency
+# that has to exist is a line somebody has to delete on purpose.
+#
+# kbd is named for the same reason and is the other half of the same failure.
+# The unlock prompt is a kernel console prompt, so the console keymap decides
+# which characters the owner's keyboard actually produces; without
+# /usr/lib/kbd/keymaps there is one layout, `us`, and a passphrase typed on any
+# other layout cannot be entered. It arrives today through systemd-udev, which
+# is no more a decision of this repository's than clevis-luks was.
+#
+# Both are asserted after installing, because `dnf5 -y install` on a package
+# that is already present is a no-op that exits 0 and proves nothing about
+# whether the files are there.
+RUN set -eux; \
+    dnf5 -y install cryptsetup kbd; \
+    command -v cryptsetup >/dev/null \
+        || { echo "FATAL: cryptsetup is not on PATH — an encrypted root could not be opened"; exit 1; }; \
+    rpm -q cryptsetup >/dev/null \
+        || { echo "FATAL: cryptsetup is not owned by the rpmdb"; exit 1; }; \
+    { test -x /usr/bin/systemd-cryptsetup || test -x /usr/lib/systemd/systemd-cryptsetup; } \
+        || { echo "FATAL: systemd-cryptsetup is missing — the initramfs could not unlock the root"; exit 1; }; \
+    test -f /usr/lib64/cryptsetup/libcryptsetup-token-systemd-tpm2.so \
+        || { echo "FATAL: the systemd-tpm2 LUKS2 token plugin is missing — a TPM-enrolled keyslot could not be used"; exit 1; }; \
+    test -f /usr/share/systemd/kbd-model-map \
+        || { echo "FATAL: kbd-model-map is missing — the installer could not convert an XKB layout to a console keymap"; exit 1; }; \
+    test -n "$(find /usr/lib/kbd/keymaps -name 'us.map*' -print -quit)" \
+        || { echo "FATAL: no console keymaps — every unlock prompt would be a blind one"; exit 1; }; \
+    echo "unlock chain: $(rpm -q cryptsetup), $(rpm -q kbd), $(find /usr/lib/kbd/keymaps -name '*.map*' | wc -l) keymaps"; \
+    dnf5 clean all
+
+# ── The unlock prompt has to be able to explain itself ─────────────────────
+# Plymouth's message() was an empty function in both APEX themes, so everything
+# the boot tried to tell the user was accepted and dropped. That is fixed in
+# the themes; this is the caller. It has to live in the INITRAMFS, because the
+# passphrase prompt happens before any filesystem is mounted, so a dracut
+# module is the only shape it can take.
+#
+# Landed HERE rather than in the apex tier because the LAST dracut run of the
+# build is the apex tier's plymouth one (see Containerfile.apex): a module
+# copied in after that would never be in a shipped initramfs at all.
+COPY files/dracut/apex-unlock-hint /usr/lib/dracut/modules.d/99apex-unlock-hint
+RUN set -eux; \
+    chmod 0755 /usr/lib/dracut/modules.d/99apex-unlock-hint/module-setup.sh \
+               /usr/lib/dracut/modules.d/99apex-unlock-hint/apex-unlock-hint; \
+    chmod 0644 /usr/lib/dracut/modules.d/99apex-unlock-hint/apex-unlock-hint.service; \
+    sh -n /usr/lib/dracut/modules.d/99apex-unlock-hint/apex-unlock-hint; \
+    bash -n /usr/lib/dracut/modules.d/99apex-unlock-hint/module-setup.sh; \
+    echo "dracut: 99apex-unlock-hint installed"
+
 # ── Stage 1b: Secure Boot — sign the kernel with the APEX MOK ──────────────
 # The CachyOS kernel comes from a COPR and is UNSIGNED (verified: PE certificate
 # table size 0). Under Secure Boot, Fedora's signed grub refuses to boot it, so
