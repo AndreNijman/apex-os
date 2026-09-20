@@ -1,8 +1,13 @@
 # unit: katana-runner — katana is a self-hosted runner, on its own 500 GB partition
 
-**Status: DONE.** The partition surgery is finished and verified, the runner is
-installed, containment is tested rather than assumed, and a kernel build was
-started on it. Nothing landed. No PR.
+**Status: DONE, and the headline is that APEX'S KERNEL NOW BUILDS IN CI.** The
+partition surgery is finished and verified, the runner is installed, the
+containment is tested rather than assumed, and **a real kernel build ran on
+katana and passed end to end** — run **35518017589**, `rpmbuild took 34m23s at
+-j20`, `btf_scx=usable`, both BTF readers agreeing, and
+`tests/check-kernel-contract.sh` at **`fail=0`** against the RPMs that build
+produced. That closes the question `docs/update-cost.md` said this tier could
+not answer for itself. Nothing landed. No PR.
 
 Repo `apex-os`, branch **`task/katana-runner`**, worktree
 `/var/tmp/apex-work/wt-katana-runner`. Branched from `origin/roadmap/v2.2` at
@@ -99,16 +104,16 @@ to go red when handed a leak.
 
 ## NEXT — for a stranger
 
-1. **Check whether the kernel build finished.** Run **35518017589** on branch
-   `task/katana-runner` was `in_progress` at the `compile` step when this unit
-   ended — the first real kernel build on katana, `-j20` via the new
-   `KERNEL_BUILD_JOBS` ARG. `gh run view 35518017589`. If it went red, the
-   likely causes in order: rootless podman + `--isolation=chroot` disagreeing
-   with something `rpmbuild` wants; disk (the guard step demands 150 GB free
-   and there were 478 GB); or `-j20` on 62 GiB, in which case drop
-   `KERNEL_BUILD_JOBS` back toward 12 in `.github/workflows/kernel-build.yml`
-   — **do not** change the Containerfile default, which is deliberately 12.
-   Re-run with `gh workflow run kernel-build.yml --ref task/katana-runner`.
+1. **Re-run the kernel build once, because the run that passed did not contain
+   commit `c06a48a0`.** That commit was deliberately held back while the build
+   was in flight (pushing it would have cancelled the run via
+   `cancel-in-progress`), and it changes two things the green run never
+   exercised: the contract step's `RPMS=` derivation, and the workflow's
+   push-branch filter. The old derivation used `find … | head -1` under
+   `pipefail`, which is the 141-on-success trap — it happened to survive with
+   only 5 rpms, but it is now written without the pipeline. One
+   `gh workflow run kernel-build.yml --ref task/katana-runner` confirms the
+   rewritten step. Not urgent; the kernel itself is proven.
 2. **Land it.** `git merge-tree origin/roadmap/v2.2 HEAD` → **exit 0, no
    conflicts**, and the branch is **0 behind / 4 ahead** of
    `origin/roadmap/v2.2` (checked at `f42ed421`). Land via
