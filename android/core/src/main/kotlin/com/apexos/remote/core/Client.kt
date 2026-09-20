@@ -53,7 +53,16 @@ object Client {
                 ),
             )
         }
-        val version = versions.first()
+        // The DESKTOP's revision, not `versions.first()`. This line is the
+        // acceptance: a window that admitted the offer and then handshook at
+        // this build's preferred revision would put a different number in the
+        // Noise prologue, the handshake would fail, and `pair` would report
+        // that the machine does not hold the key from the QR code — a message
+        // about keys for a problem about versions. Measured: with
+        // `versions.first()` the pairing test in `VersionWindowTest` does not
+        // fail, it HANGS, because the responder dies and the initiator waits
+        // for a reply that is never written.
+        val version = offer.v
         // Refused here rather than by the desktop. Sending a name the desktop
         // will reject would burn the owner's pairing offer — `pairing::complete`
         // redeems the token before it validates the device — and cost them a
@@ -197,8 +206,14 @@ object Client {
                 if (refused == null) refused = e
                 abandon(connection)
             } catch (e: Throwable) {
+                // NOT another revision's turn. A key that is not the pinned
+                // one, a stream that died mid-write, a parse that failed —
+                // none of those get better at an older revision, and retrying
+                // them would spend one dial per revision and then report a
+                // protocol problem for something that was not one. Closed
+                // first, because the throw leaves nobody else holding it.
                 abandon(connection)
-                continue
+                throw e
             }
         }
         throw SessionRefused(exhaustedVersionWindow(versions), refused)
@@ -413,8 +428,18 @@ const val REMOTE_PROTOCOL_VERSION: Int = 1
  * oldest entry is what drops support for desktops that have not updated, and
  * it should be done deliberately and written in the release notes, because to
  * the owner of such a desktop it is indistinguishable from the app breaking.
+ *
+ * Written as plain integers rather than as `listOf(REMOTE_PROTOCOL_VERSION)`
+ * because `android/tools/release-artifacts.sh` READS THIS LINE to put the
+ * window into the release metadata, and from there onto the Releases page. A
+ * page that claims "an app one revision behind still connects" without being
+ * able to state the window is a compatibility promise nobody can check — the
+ * defect class this unit exists to close. The literal cannot drift from the
+ * constant: `VersionWindowTest` asserts that this list's maximum IS
+ * [REMOTE_PROTOCOL_VERSION] and that the list is newest-first and has no
+ * duplicates.
  */
-val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(REMOTE_PROTOCOL_VERSION)
+val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(1)
 
 /** "v1", or "v1 to v3" — the window as a person would say it. */
 internal fun describeVersionWindow(versions: List<Int>): String {
