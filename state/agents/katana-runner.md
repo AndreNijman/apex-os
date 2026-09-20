@@ -104,12 +104,24 @@ Proof, not assertion: sha256 of all 1041 regular files before and after →
   except `192.168.1.1:53`. Andre's own uid is unaffected (verified: he gets
   HTTP 200 from the router at the same time the runner is rejected).
 
-Containment runs **35517909892** (16 assertions) and **35520119201** (17, after
-`pkexec` was added) are both green, every forbidden action denied and all 4
-positive controls passing. The `deny` harness was separately shown to go red
-when handed a leak, so it is capable of failing.
+Containment grew as holes were found: 16 assertions, then 17 with `pkexec`, now
+**21**. Latest run **35520468567**, green, all 21 refused, 4 positive controls
+passing. The `deny` harness was separately shown to go red when handed a leak,
+so it is capable of failing.
 
-Final state, after both a probe job and a 37-minute kernel build: runner
+**One of those holes was real and this unit had claimed the opposite.** The top
+level of the runner tree was `0775 root:ghrunner`, and directory write lets you
+rename or unlink entries whatever their ownership — so `touch bin/pwned` was
+refused (what the probe checked) while `mv bin bin.x && cp -r bin.x bin` was
+not. Measured: *"LEAK: ghrunner CAN replace bin/"*. That is persistence across
+the ephemeral boundary. Fixed with `chmod 1775` plus a root-owned `.root-decoy`
+the probe now tries to rename every run. **`svc.sh` must stay ghrunner-writable**
+— `config.sh` rewrites it on every registration, and root-owning it killed the
+ephemeral loop until that was undone. Second hole, same shape: this unit's own
+backup directory (holding his Steam Proton prefix) was 0755; now 0700 and in
+`InaccessiblePaths=`.
+
+Final state, after three probe jobs and a 37-minute kernel build: runner
 `online busy=false`, three processes (run.sh, run-helper.sh, Runner.Listener)
 and **no stray job process**, `/var/lab` back to 3.1 GB of 492 GB, `games`
 unchanged at 59 GB of 848 GB, and the nft counter at 13 rejected packets.
