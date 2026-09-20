@@ -130,8 +130,12 @@ than installing its own cmdline hook). So an encrypted install now gets
 vconsole.keymap=<console keymap>   rd.vconsole.keymap=<console keymap>
 ```
 
-added, and **only when the keymap is not `us`** — an ordinary US install gains
-no argument that could later override `localectl set-keymap`.
+added, and **only when the resolved console keymap is not exactly `us`**. The
+guard is on the console keymap, not on the XKB layout: `us` + `dvorak` resolves
+to `us-dvorak` and does get the argument, because that owner's fingers really
+do produce different characters. Only a machine that lands on plain `us` — the
+kernel's built-in — gains no argument that could later override
+`localectl set-keymap`.
 
 On an encrypted machine the kernel argument is therefore the source of truth
 for the console keymap, and `/etc/vconsole.conf` says so in a comment. That is

@@ -255,7 +255,17 @@ if [ -n "$RECOVERY_FILE" ]; then
     mode=$(stat -c %a "$RECOVERY_FILE" 2>/dev/null)
     if [ "$mode" = 600 ]; then ok "the recovery-key file is 0600"
     else bad "the recovery-key file is 0600" "mode $mode"; fi
-    RECOVERY_KEY=$(grep -oE '[a-z]{8}(-[a-z]{8})+' "$RECOVERY_FILE" | head -1)
+    # The mode is a number; this is the behaviour. An unprivileged reader must
+    # not be able to open it at all.
+    if head -c1 "$RECOVERY_FILE" >/dev/null 2>&1; then
+        bad "an unprivileged user cannot read the recovery key" "this one could"
+    else
+        ok "an unprivileged user cannot read the recovery key"
+    fi
+    # `sudo` to read it, because the engine writes it 0600 root -- which is the
+    # point. A suite that could read this file without privilege would be
+    # asserting the opposite of what it means to.
+    RECOVERY_KEY=$(sudo -n grep -oE '[a-z]{8}(-[a-z]{8})+' "$RECOVERY_FILE" | head -1)
 else
     bad "a recovery-key file was written where the user can find it" "nothing in $RECOVERY_DIR"
 fi
