@@ -1,0 +1,13 @@
+# Keep build products out of the build context.
+#
+# Every Containerfile here does `COPY apexd/ /build/apexd/` and then builds it.
+# A developer's local `cargo build` leaves ~440 MB of host-built artefacts in
+# apexd/target, and without this they are shipped into the context and land on
+# top of the container's own target directory — host rustc and glibc output
+# seeding a container build. CI never noticed because a fresh checkout has no
+# target/; a local build is where it bites, and "works in CI, wrong locally" is
+# the harder direction to debug.
+apexd/target/
+**/target/
+
+.git/

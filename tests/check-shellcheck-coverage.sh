@@ -30,9 +30,17 @@ FLAGS=(-S warning -x)
 
 command -v shellcheck >/dev/null || { echo "FATAL: shellcheck is not installed"; exit 1; }
 
-# Every shell script under tests/, files/ and android/tools/. A shebang naming
-# zsh or fish is NOT a shell shellcheck can read, and counting one as a failure
-# would park it on the known-failing list for ever.
+# Every shell script under tests/, files/, android/tools/ and kernel/. A shebang
+# naming zsh or fish is NOT a shell shellcheck can read, and counting one as a
+# failure would park it on the known-failing list for ever.
+#
+# `kernel` was added 2026-09-20 for the third time this file has had to learn
+# its own lesson. APEX started building its own kernel, and kernel/ acquired
+# btf-xcheck.sh — which is COPYed into the kernel build image and is one of the
+# two readers that decide whether a kernel may ship — plus three spike scripts.
+# Not one of them was linted by anything, because the roots were still the
+# directories somebody had thought of. All four were already clean at this
+# severity, so the gap cost nothing again, which is the point made below.
 #
 # `android/tools` was added after the same reasoning as this file's own: the
 # discovery roots were the two directories somebody thought of, and the Android
@@ -52,7 +60,7 @@ command -v shellcheck >/dev/null || { echo "FATAL: shellcheck is not installed";
 # point: the gap is only ever free until it is not. Discovery is now the shebang
 # alone. It reads the first two bytes of ~335 files and takes about a second.
 mapfile -t scripts < <(
-    find tests files android/tools -type f 2>/dev/null \
+    find tests files android/tools kernel -type f 2>/dev/null \
     | while IFS= read -r f; do
         case "$f" in */__pycache__/*|*/.git/*) continue ;; esac
         if [ "${f##*.}" = sh ]; then printf '%s\n' "$f"; continue; fi
