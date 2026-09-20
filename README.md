@@ -309,14 +309,28 @@ Download the `apex-remote-*.apk` from the same
 check it against the `.sha256` beside it. Each release explains, for somebody who
 has never sideloaded an app, exactly what Android will ask and how to answer it.
 
+Every APEX Remote APK is signed by one certificate, and this is its SHA-256
+fingerprint:
+
+<!-- fingerprint:begin -->
+UNSET
+<!-- fingerprint:end -->
+
+`apksigner verify --print-certs apex-remote-<version>.apk` prints the
+certificate that actually signed your download; it must be that value. (`UNSET`
+means no release has been signed yet.) Android enforces the same thing from then
+on: an update signed by any other key will not install over it.
+
 Once installed the app keeps itself current — it checks the Releases page and
 offers, and Android still shows its own install prompt before anything is
 replaced. On the machine, `apex remote status` says whether the service is
 running and which protocol version it speaks. Pairing is `apex remote pair`.
 
-[docs/android-app.md](docs/android-app.md) covers how the APK is signed, how the
-version is derived, and what happens when the app and the machine are different
-ages. [docs/remote.md](docs/remote.md) covers the app itself.
+[docs/android-app.md](docs/android-app.md) covers how the release is built, how
+the version is derived, and what happens when the app and the machine are
+different ages. [docs/android-signing.md](docs/android-signing.md) covers the
+signing key: who holds it, why GitHub is not its backup, and how it can be
+rotated. [docs/remote.md](docs/remote.md) covers the app itself.
 
 ## Repository layout
 

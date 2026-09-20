@@ -197,7 +197,7 @@ jobs:
           # android job is the only one that runs that suite. The gate whose
           # job is to hold the release flow would not have run on a change to
           # the release flow.
-          grep -Eq '^(android/|tests/test-android-release\.sh|\.github/workflows/release-android\.yml)' <<<"$files" && android=true
+          grep -Eq '^(android/|tests/test-android-(release|signing)\.sh|\.github/workflows/release-android\.yml)' <<<"$files" && android=true
 
           # The fail-towards-running rule, applied.
           if [ -z "${base:-}" ] || [ -z "${head:-}" ]; then
@@ -3606,61 +3606,55 @@ jobs:
       # activity result the app takes, including the notification permission.
       # `assembleDebug` had never said a word about it. That is the reason this
       # runs on every android change and not only on a tag.
+      # THIS JOB DOES NOT SIGN, and that is a decision rather than an accident
+      # of which secrets a pull request can see.
+      #
+      # It used to decode `APEX_KEYSTORE_BASE64` into the WORKSPACE whenever the
+      # secret was visible. Nothing consumed it and nothing published it, but
+      # the arrangement meant that the day the production key is set as a
+      # repository secret, it would begin appearing on a runner for every push
+      # and every same-repo pull request — dozens of runs a week, in the
+      # checkout directory, where one `upload-artifact` of `android/` would
+      # publish it. `release-android.yml` is `workflow_dispatch`-only, main-only
+      # and deliberate, materialises the key under `$RUNNER_TEMP` at 0600 and
+      # shreds it in an `if: always()` step.
+      #
+      # Losing or leaking THIS key does not mean "future releases are unsigned"
+      # the way the Secure Boot key does. It means every APEX Remote install in
+      # the world can never be upgraded, because Android accepts an update only
+      # from the key that signed what is installed, and the owner's only escape
+      # is to uninstall — which destroys their paired device key. Same
+      # mechanism as Secure Boot, far worse blast radius, so the key appears in
+      # exactly one workflow. docs/android-signing.md.
       - name: Build the release APK and AAB
-        env:
-          # Absent on a pull request, present on the branch this ships from.
-          # With them absent the artefacts are UNSIGNED, and the next step says
-          # so instead of reporting a release.
-          APEX_KEYSTORE: ${{ github.workspace }}/android/ci-release.jks
-          APEX_KEYSTORE_PASSWORD: ${{ secrets.APEX_KEYSTORE_PASSWORD }}
-          APEX_KEY_ALIAS: ${{ secrets.APEX_KEY_ALIAS }}
-          APEX_KEY_PASSWORD: ${{ secrets.APEX_KEY_PASSWORD }}
-          # Through the environment, never spliced into the script body. A
-          # `${{ }}` inside a `run:` is substituted as TEXT before the shell
-          # sees it, so a secret holding a quote would end the string and the
-          # rest would be a command. The same rule the engine follows for every
-          # other value it does not control.
-          APEX_KEYSTORE_BASE64: ${{ secrets.APEX_KEYSTORE_BASE64 }}
-        run: |
-          set -euo pipefail
-          # The keystore arrives base64 in a secret and is written where the
-          # build expects it. No key material is in this repository and none
-          # ever should be: a signing key in a repository is a signing key for
-          # everybody who can clone it, and a forged build of THIS app asks for
-          # a phone's paired device key.
-          if [ -n "${APEX_KEYSTORE_BASE64:-}" ]; then
-            printf '%s' "$APEX_KEYSTORE_BASE64" | base64 -d > ci-release.jks
-          fi
-          ./gradlew --no-daemon --stacktrace :app:assembleRelease :app:bundleRelease
+        run: ./gradlew --no-daemon --stacktrace :app:assembleRelease :app:bundleRelease
 
-      - name: Signed, or plainly not signed
+      - name: Plainly not signed, and no key on this runner
         run: |
           set -euo pipefail
           apk="$(ls app/build/outputs/apk/release/*.apk)"
           aab="$(ls app/build/outputs/bundle/release/*.aab)"
           ls -l "$apk" "$aab"
-          if [ -f ci-release.jks ]; then
-            # A signing key was supplied, so an unsigned artefact is a failure
-            # and `verifyReleaseSigning` is what says so. It reads the APK's
-            # own signature blocks with apksigner and the bundle's with
-            # jarsigner — different schemes, and checking only one would leave
-            # the artefact a store actually takes unchecked.
-            ./gradlew --no-daemon --stacktrace :app:verifyReleaseSigning
-          else
-            # No key on this run. The artefacts exist and cannot be installed,
-            # and this step says exactly that rather than printing a tick that
-            # a reader would take for a shippable build.
-            echo "::notice::release artefacts built UNSIGNED (no signing secrets on this run);"\
-                 "they are not installable and are not a release"
-            case "$apk" in
-              *unsigned*) : ;;
-              *) echo "::error::$apk is not named unsigned but no keystore was supplied"; exit 1 ;;
-            esac
+          # The artefacts exist and cannot be installed, and this step says
+          # exactly that rather than printing a tick a reader would take for a
+          # shippable build.
+          echo "::notice::release artefacts built UNSIGNED (this job never signs);"\
+               "they are not installable and are not a release"
+          case "$apk" in
+            *unsigned*) : ;;
+            *) echo "::error::$apk is not named unsigned, so something signed it on a runner that must not hold the signing key"; exit 1 ;;
+          esac
+          # Asserted, not assumed: a keystore anywhere in the checkout is the
+          # failure this job was restructured to make impossible, and an
+          # assertion that only inspects the APK's name would not see it.
+          # No `| head`: under `pipefail` a closed pipe makes the writer exit
+          # 141 and the step fails for a reason that has nothing to do with
+          # what it checks. This repository has been mis-seeded by exactly that.
+          found="$(find "$GITHUB_WORKSPACE" -name '*.jks' -o -name '*.keystore' -o -name '*.p12')"
+          if [ -n "$found" ]; then
+            echo "::error::a keystore is present in the workspace:"; printf '%s\n' "$found"
+            exit 1
           fi
-
-      - name: Shred the keystore
-        if: always()
-        run: rm -f ci-release.jks
 
       # ── The release flow itself ──────────────────────────────────────────
       #
@@ -3678,6 +3672,15 @@ jobs:
       - name: The release flow refuses what it must
         working-directory: ${{ github.workspace }}
         run: ./tests/test-android-release.sh
+
+      # The other half of the same refusal: no key, or the WRONG key. This
+      # suite builds a throwaway keystore and a 700-byte APK signed with it,
+      # and checks the published-fingerprint gate both ways — it must accept
+      # the key it published and refuse one it did not. It shreds its own key
+      # material. Nothing here touches a repository secret.
+      - name: The signing gates refuse what they must
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-android-signing.sh
 
   result:
     name: PR validation

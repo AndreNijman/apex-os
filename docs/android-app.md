@@ -230,26 +230,22 @@ by any test:
   machine with no signing secrets can go; `dry_run` exists so the rest can be
   proved without publishing.
 
-## The decision still open, for Andre
+## The signing key
 
-**No Android signing key exists.** Checked, not assumed: `gh secret list -R
+**No Android signing key exists yet.** Checked, not assumed: `gh secret list -R
 AndreNijman/apex-os` returns exactly `APEX_SB_CRT_B64` and `APEX_SB_KEY_B64`.
-None of the four `APEX_KEYSTORE*`/`APEX_KEY*` secrets is set, so the release
-step in `pr-validation.yml` has never signed anything and has only ever taken
-its unsigned branch, and `release-android.yml` refuses to run at all.
+None of the four `APEX_KEYSTORE*`/`APEX_KEY*` secrets is set, so
+`release-android.yml` refuses on its first real step.
 
-No agent should generate this key. It decides whether every future install can
-be upgraded, and generating one in a session is how it ends up existing in
-exactly one place nobody remembers. What is needed is a decision about:
+The decision about where that key is generated, where its only authoritative
+copy lives, and how it is rotated is settled and written up in
+**[android-signing.md](android-signing.md)**. The short version: Andre generates
+it offline with `android/tools/generate-signing-key.sh`, the authoritative copy
+is his and offline, GitHub holds a working copy that *cannot be read back*, and
+a release with no key — or with a key this repository has not published —
+refuses rather than shipping something one person could install and then never
+update.
 
-1. **Where it is generated** — and on what machine.
-2. **Where the only copy of the backup lives.** This is the whole question. Lose
-   it and every installed app is permanently stuck; keep it somewhere a CI job
-   can read and it is not a backup, it is a second copy of the live key.
-3. **Whether the alias and passwords follow the `apex-secretd` pattern** or are
-   held the way the Secure Boot key is today.
-
-Until that decision is made, the release workflow fails on its first real step
-with a message saying so and pointing here, which is the correct behaviour: a
-release that cannot be signed is not a release, and an unsigned APK cannot be
-installed on any phone.
+`pr-validation.yml` does not sign at all. It builds the release target on every
+Android change because `lintVitalRelease` only runs there, and asserts the APK
+is named `unsigned`; the signing key appears in exactly one workflow.
