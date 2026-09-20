@@ -362,25 +362,45 @@ decline() {  # decline SLUG PROSE...
 #  kernel boots — so an attacker boots their own system and the TPM unseals for
 #  them, because nothing they did changed the register. That much is obvious.
 #
-#  The signed PCR 11 policy needs Secure Boot just as much, and that is NOT
-#  obvious, so it is written down here rather than discovered later. A signed
-#  policy is a TPM2 PolicyAuthorize over a PolicyPCR digest for PCR 11: the
-#  unsealing side supplies the signature, which ships in the UKI's .pcrsig
-#  section and is therefore PUBLIC, and the TPM then requires PCR 11 to hold the
-#  signed value. PCR 11 starts at zero on every boot and `tpm2_pcrextend 11`
+#  THE SIGNED PCR 11 POLICY NEEDS SECURE BOOT JUST AS MUCH, and that is not
+#  obvious — it is the opposite of what the shape of the mechanism suggests, so
+#  it is written down here rather than rediscovered. A signed policy is a TPM2
+#  PolicyAuthorize over a PolicyPCR digest for PCR 11. The UNSEALING side
+#  supplies the signature; it ships in the UKI's .pcrsig section, on the ESP,
+#  and is therefore public. The TPM then requires PCR 11 to hold the signed
+#  value V. PCR 11 starts at zero on every boot, and `tpm2_pcrextend 11`
 #  succeeds from plain root — MEASURED on katana, 2026-09-19, where
-#  `tpm2_pcrreset 11` answers "bad locality" but extend does not. So an attacker
-#  who can boot their own kernel can replay the same extends, reach the same
-#  PCR 11 value, present the public signature, and unseal. Nothing in that chain
-#  needs APEX's private PCR key.
+#  `tpm2_pcrreset 11` answers "bad locality" but extend does not.
+#
+#  Every digest that gets V is public too: they are hashes of the UKI's own
+#  sections and of systemd's phase strings. So an attacker who can boot ANY
+#  kernel of their choosing extends PCR 11 to V from their own userspace,
+#  presents the public signature, and unseals. Nothing in that chain needs
+#  APEX's private PCR key, and building our own kernel does not change it —
+#  the attacker does not need our kernel, only our PCR value, and that is
+#  computable from files they can read.
 #
 #  What stops them is Secure Boot refusing to load their kernel in the first
 #  place. systemd-cryptenroll says the same thing in its own words when it is
 #  asked to bind a register nobody has extended: "PCR policy effectively
-#  unenforced". The signed policy's advantage over PCR 7 is that it SURVIVES
-#  KERNEL UPDATES — a real and large advantage, since a policy that breaks on
-#  every image update meets the user at the one moment they cannot get a shell.
-#  It is not an advantage in the Secure Boot dimension.
+#  unenforced". L-001 §3.1 records it as "binding to a register nobody extended
+#  buys nothing, because anyone can extend it to anything", and the lab script's
+#  own header says "what stops an attacker substituting their own UKI is Secure
+#  Boot enforcing".
+#
+#  The signed policy's advantage over PCR 7 is real and large, and it is a
+#  DIFFERENT advantage: it SURVIVES KERNEL UPDATES, where a value-bound policy
+#  meets the user at the one moment they cannot get a shell. That is why it is
+#  first in the table. It is not an advantage in the Secure Boot dimension.
+#
+#  IF THAT JUDGEMENT IS EVER OVERRULED, the change is one `sb_enforcing ||`
+#  clause in `probe_signed_pcr11` and nothing else. It is written as a per-probe
+#  precondition, not as a property of the mechanism, precisely so that the
+#  argument can be had in one place — and so that a binding which genuinely does
+#  not need Secure Boot can say so for itself. The route to auto-unlock on a
+#  machine that will not enable Secure Boot is `--with-pin`, which puts a secret
+#  the attacker does not have in front of the unseal; it is opt-in because of
+#  the lockout arithmetic in clause 5, not because of this.
 #
 #  ── the table ──
 #
@@ -402,7 +422,19 @@ POLICY_SKIPPED=()  # why each better binding was passed over
 readonly STUB_PUBKEY="$STUB_RUN/tpm2-pcr-public-key.pem"
 readonly STUB_SIG="$STUB_RUN/tpm2-pcr-signature.json"
 
+# SB_ENFORCING is set from the efivars below, before any probe runs. Each probe
+# tests it FOR ITSELF rather than relying on a gate somewhere above: the gate
+# that produces the user-facing `secure-boot-off` message is driven BY these
+# probes failing, so there is exactly one place that decides, and a binding that
+# genuinely did not need Secure Boot could drop its clause without touching
+# anything else.
+SB_ENFORCING=0
+
 probe_signed_pcr11() {
+    if (( ! SB_ENFORCING )); then
+        POLICY_SKIPPED+=("signed-pcr11: Secure Boot is off, so an attacker can boot their own kernel and extend PCR 11 to the signed value themselves — the signature they would need is public, in the UKI")
+        return 1
+    fi
     if [[ ! -e "$EFIVARS_DIR/StubInfo-$LOADER_GUID" ]]; then
         POLICY_SKIPPED+=("signed-pcr11: this machine did not boot through sd-stub, so nothing measured a UKI into PCR 11")
         return 1
@@ -432,6 +464,10 @@ probe_signed_pcr11() {
 }
 
 probe_pcr7() {
+    if (( ! SB_ENFORCING )); then
+        POLICY_SKIPPED+=("pcr7: Secure Boot is off, so PCR 7 records the DISABLED policy and goes on recording it whichever kernel boots")
+        return 1
+    fi
     POLICY_ARGS=(--tpm2-pcrs=7)
     POLICY_EXPECT="pcr7"
     POLICY_WHY="bound to PCR 7, the register that records the Secure Boot policy"
@@ -494,24 +530,12 @@ if [[ "$setup_state" != "0" ]]; then
         "default Secure Boot keys), then re-run this command."
 fi
 
-if [[ "$sb_state" != "1" ]]; then
-    decline secure-boot-off \
-        "Secure Boot is OFF on this machine." \
-        "" \
-        "A TPM key slot only protects anything if the machine cannot boot" \
-        "something else. With Secure Boot off, an attacker with your laptop" \
-        "boots their own system on this hardware, and the TPM hands them your" \
-        "disk — the register that records the Secure Boot policy says the same" \
-        "thing either way, and the register that records the boot image can be" \
-        "set to any value by whoever is running. So a TPM slot here would look" \
-        "like security and provide none." \
-        "" \
-        "To get TPM auto-unlock: turn Secure Boot on in the firmware setup," \
-        "boot APEX again, and run:" \
-        "  sudo $0 --device $DEVICE --recovery-out $RECOVERY_OUT"
-fi
+[[ "$sb_state" == "1" ]] && SB_ENFORCING=1
 
 # ── the TPM itself ──────────────────────────────────────────────────────────
+#
+# Before the binding is chosen, because a machine with no TPM has nothing to
+# bind to whatever the table says.
 #
 # The DEVICE NODE is the test, not /sys/class/tpm and not
 # `systemd-cryptenroll --tpm2-device=list`. Both of those enumerate through
@@ -530,16 +554,50 @@ if [[ "$TPM2_DEVICE" == auto ]]; then
 fi
 
 # ── the binding ─────────────────────────────────────────────────────────────
-if ! policy_select "$WANT_POLICY"; then
+#
+# EXACTLY ONE CALL. An earlier draft asked the table twice — once to decide
+# whether Secure Boot was the blocker and once to pick a binding — and every
+# skip reason was recorded and printed twice. Whatever the table says here is
+# what the rest of this program acts on.
+policy_ok=0
+policy_select "$WANT_POLICY" && policy_ok=1
+
+for skipped in "${POLICY_SKIPPED[@]}"; do
+    say "  not using $skipped"
+done
+
+if (( ! policy_ok )); then
+    # THE SECURE BOOT REFUSAL IS NOT A SEPARATE DECISION FROM THE TABLE. It is
+    # what the table saying no reduces to when Secure Boot is the reason every
+    # binding said no — the probes decide, this only chooses the words. A
+    # binding added later that genuinely does not need Secure Boot is selected
+    # above and never reaches here, without this branch being touched.
+    if (( ! SB_ENFORCING )); then
+        decline secure-boot-off \
+            "Secure Boot is OFF on this machine." \
+            "" \
+            "A TPM key slot only protects anything if the machine cannot boot" \
+            "something else. With Secure Boot off, an attacker with your laptop" \
+            "boots their own system on this hardware, and the TPM hands them" \
+            "your disk. Binding to the Secure Boot policy does not help — that" \
+            "register says the same thing either way. Binding to the boot image" \
+            "does not help either: that register starts at zero every boot and" \
+            "whoever is running can set it to any value, including the right" \
+            "one. So a TPM slot here would look like security and provide none." \
+            "" \
+            "To get TPM auto-unlock: turn Secure Boot on in the firmware setup," \
+            "boot APEX again, and run:" \
+            "  sudo $0 --device $DEVICE --recovery-out $RECOVERY_OUT" \
+            "" \
+            "If Secure Boot cannot be turned on here, --with-pin is the other" \
+            "route: it puts a secret in front of the unseal that an attacker" \
+            "does not have. Read what it prints about the lockout counter first."
+    fi
     decline no-usable-policy \
         "APEX could not find a way to bind this disk to the TPM that this" \
         "machine can actually enforce:" \
         "${POLICY_SKIPPED[@]}"
 fi
-
-for skipped in "${POLICY_SKIPPED[@]}"; do
-    say "  not using $skipped"
-done
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  3. The TPM slot
@@ -563,8 +621,20 @@ if (( WITH_PIN )); then
     # lockout properties" for a TPM that reports them perfectly well.
     getcap_env=()
     [[ "$TPM2_DEVICE" == auto ]] || getcap_env=(TPM2TOOLS_TCTI="$TPM2_DEVICE")
-    if command -v tpm2_getcap >/dev/null 2>&1 \
-       && caps="$(env "${getcap_env[@]}" tpm2_getcap properties-variable 2>/dev/null)"; then
+    caps=""
+    # THE TWO WAYS THIS CAN FAIL ARE DIFFERENT SENTENCES. "the tool is not
+    # installed" and "the part would not answer" send the reader after
+    # completely different things, and an earlier version said the second for
+    # both. tpm2-tools reaches this image only as a dependency of clevis and is
+    # pinned by no line in Containerfile.core, so the first is the likelier one.
+    if ! command -v tpm2_getcap >/dev/null 2>&1; then
+        note "tpm2_getcap is not installed, so the numbers that decide how long"
+        note "a mistyped PIN locks you out cannot be read off this part."
+    elif ! caps="$(env "${getcap_env[@]}" tpm2_getcap properties-variable 2>/dev/null)"; then
+        note "this TPM would not report its lockout properties, so the numbers"
+        note "that decide how long a mistyped PIN locks you out are unknown."
+    fi
+    if [[ -n "$caps" ]]; then
         # Both output shapes. tpm2-tools 5.7 prints `TPM2_PT_X: 0x20` on one
         # line; older builds print the name then an indented `raw:` line. A
         # parser that knew only one of them reported `unknown` for real numbers.
@@ -583,9 +653,6 @@ if (( WITH_PIN )); then
         note "operating system on this machine holds the TPM's lockout"
         note "authorisation, APEX cannot clear it for you — the recovery key in"
         note "$RECOVERY_OUT is then the only way in."
-    else
-        note "this TPM would not report its lockout properties, so the numbers"
-        note "that decide how long a mistyped PIN locks you out are unknown."
     fi
 fi
 
