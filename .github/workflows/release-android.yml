@@ -1,0 +1,251 @@
+# ──────────────────────────────────────────────────────────────────────────────
+#  Publish the APEX Remote Android client to a GitHub Release.
+#
+#  WHY A GITHUB RELEASE AND NOT AN OCI ARTEFACT
+#
+#  Everything else this repository ships is a container image, and a channel tag
+#  is what a machine's bootc origin points at. None of that reaches a phone. A
+#  phone needs a file a person can tap in a browser, and this repository already
+#  has exactly one mechanism for that: `README.md` sends users to the Releases
+#  page for the netinstall ISO and its `.sha256`. The APK is the same shape of
+#  thing as the ISO — the artefact you fetch BEFORE you have an APEX machine to
+#  fetch it from — so it goes to the same place. The new part is that this one
+#  is produced by a workflow rather than uploaded by hand.
+#
+#  THE PERMISSION ESCALATION, SAID OUT LOUD
+#
+#  `contents: write`. Every other workflow here is `contents: read`, and this is
+#  the only one that needs to create a tag and a release. It is
+#  `workflow_dispatch`-only, it refuses to run off main, and it touches no
+#  registry and no channel tag, so it cannot move what a booted machine tracks.
+#
+#  WHAT IT WILL NOT DO
+#
+#   * Run off main. A versionCode derived from a branch can be lower than one
+#     already released, and Android cannot install a lower code over a higher.
+#   * Build unsigned. `release-artifacts.sh` fails on a missing keystore rather
+#     than producing the "not a release" artefacts pr-validation tolerates.
+#   * Reuse or lower a versionCode. `release-version.sh` refuses against every
+#     `android-v*` tag that exists, locally and on the remote.
+#
+#  PROVING IT WITHOUT PUBLISHING: `dry_run` defaults to **true**. Everything
+#  runs — the version gate, the signed build, the signature verification, the
+#  checksum and metadata — and the release is not created. Turning it off is a
+#  deliberate act.
+# ──────────────────────────────────────────────────────────────────────────────
+name: release-android
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and verify everything, but do not create the release"
+        type: boolean
+        default: true
+
+# Its own group. This workflow never touches the registry, so it has no reason
+# to queue behind an image publish — and an image publish has no reason to wait
+# for an APK build.
+concurrency:
+  group: apex-android-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # create the tag and the release. See the header.
+  id-token: write   # cosign keyless, for the detached signature over the APK.
+
+jobs:
+  release:
+    name: Publish the Android client
+    runs-on: ubuntu-24.04
+    env:
+      # The `secrets` context is not available in a step-level `if:`, only in
+      # job-level env — so "is signing configured?" is surfaced as a plain
+      # boolean here. Without this the step condition would silently evaluate
+      # to false and never run, which is exactly the quietly-skipped check this
+      # repository has shipped before. Copied from build-image.yml.
+      APEX_SIGNING_CONFIGURED: ${{ secrets.APEX_KEYSTORE_BASE64 != '' }}
+    steps:
+      # Off main, full stop. Checked before anything is built, because the
+      # whole versionCode scheme rests on it.
+      - name: This must be main
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::release-android runs on main only; this dispatch was for ${{ github.ref }}."
+            echo "::error::A versionCode is the commit count, and a branch can have a LOWER count than main."
+            exit 1
+          fi
+
+      # fetch-depth 0, and it is load-bearing rather than tidy: the versionCode
+      # IS `git rev-list --count`, and a shallow clone counts the handful of
+      # commits it was given. A shallow release would hand out a code below
+      # every one already published.
+      - name: Checkout, with all of the history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: The signing key must be configured
+        run: |
+          set -euo pipefail
+          if [ "${APEX_SIGNING_CONFIGURED}" != "true" ]; then
+            echo "::error::APEX_KEYSTORE_BASE64 is not set on this repository, so this run could only produce an UNSIGNED APK."
+            echo "::error::An unsigned APK cannot be installed on any phone. See docs/android-app.md for who holds the key."
+            exit 1
+          fi
+
+      - name: JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # The platform AGP compiles against, installed rather than assumed, and
+      # the jar checked rather than the directory — see the same step in
+      # pr-validation.yml for the broken-install this catches.
+      - name: Android platform 36
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:?no Android SDK on this runner}}"
+          "$sdk/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" >/dev/null
+          jar="$sdk/platforms/android-36/android.jar"
+          test -f "$jar" || { echo "::error::$jar is missing; the platform unpacked badly"; exit 1; }
+
+      # No `if:`. A gate that can be skipped is not a gate, and this repository
+      # records six occasions where a skipped job was read as a pass.
+      - name: Decide the version, or refuse
+        id: version
+        run: |
+          set -euo pipefail
+          git fetch --tags --force origin
+          android/tools/release-version.sh --main-ref origin/main | tee "$RUNNER_TEMP/version.txt"
+          # `tee` means the numbers are in the log AND in the outputs. Read
+          # back rather than re-derived, so the two cannot disagree.
+          cat "$RUNNER_TEMP/version.txt" >> "$GITHUB_OUTPUT"
+
+      # The Secure Boot ritual from build-image.yml, not pr-validation's: a
+      # 0700 directory under RUNNER_TEMP, 0600 on the file, and never the
+      # workspace — a keystore in the workspace is a keystore an upload-artifact
+      # step could publish.
+      - name: Materialise the keystore
+        env:
+          # Through the environment, never spliced into the script body. A
+          # `${{ }}` inside a `run:` is substituted as TEXT before the shell
+          # sees it, so a secret holding a quote would end the string and the
+          # rest would be a command.
+          APEX_KEYSTORE_BASE64: ${{ secrets.APEX_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          secdir="$RUNNER_TEMP/apex-android-signing"
+          mkdir -p "$secdir"
+          chmod 700 "$secdir"
+          printf '%s' "$APEX_KEYSTORE_BASE64" | base64 -d > "$secdir/release.jks"
+          chmod 600 "$secdir/release.jks"
+          # Non-empty, and really a keystore. A secret pasted in mangled fails
+          # here in a second rather than inside Gradle after a full compile.
+          test -s "$secdir/release.jks" || { echo "::error::the decoded keystore is empty"; exit 1; }
+
+      - name: Build and sign the APK
+        env:
+          APEX_KEYSTORE: ${{ runner.temp }}/apex-android-signing/release.jks
+          APEX_KEYSTORE_PASSWORD: ${{ secrets.APEX_KEYSTORE_PASSWORD }}
+          APEX_KEY_ALIAS: ${{ secrets.APEX_KEY_ALIAS }}
+          APEX_KEY_PASSWORD: ${{ secrets.APEX_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          android/tools/release-artifacts.sh \
+            --out "$RUNNER_TEMP/release" \
+            --code "${{ steps.version.outputs.code }}" \
+            --name "${{ steps.version.outputs.name }}" \
+            --tag  "${{ steps.version.outputs.tag }}"
+
+      # Immediately after the build and before anything that could fail, so the
+      # key does not sit on the runner through the upload.
+      - name: Shred the keystore
+        if: always()
+        run: |
+          set -euo pipefail
+          secdir="$RUNNER_TEMP/apex-android-signing"
+          [ -d "$secdir" ] || exit 0
+          shred -u "$secdir"/release.jks 2>/dev/null || rm -f "$secdir"/release.jks
+          rmdir "$secdir" 2>/dev/null || true
+
+      - uses: sigstore/cosign-installer@v3
+
+      # A detached signature over the APK, under this workflow's keyless
+      # identity. Said honestly: this is NOT what protects a phone. A phone is
+      # protected by the `.sha256` it can check and by Android refusing an
+      # update signed by a different key than the installed app. This exists so
+      # that the APK is provenanced like everything else this repository
+      # publishes, and so a desktop can verify it without trusting the browser
+      # that downloaded it.
+      - name: Sign the APK with cosign
+        run: |
+          set -euo pipefail
+          apk="$(ls "$RUNNER_TEMP"/release/*.apk)"
+          cosign sign-blob --yes \
+            --output-signature "$apk.sig" \
+            --output-certificate "$apk.pem" \
+            "$apk"
+          test -s "$apk.sig" || { echo "::error::cosign produced no signature"; exit 1; }
+          test -s "$apk.pem" || { echo "::error::cosign produced no certificate"; exit 1; }
+
+      - name: Write the release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          android/tools/release-notes.sh \
+            --code "${{ steps.version.outputs.code }}" \
+            --name "${{ steps.version.outputs.name }}" \
+            --dir "$RUNNER_TEMP/release" \
+            > "$RUNNER_TEMP/notes.md"
+          test -s "$RUNNER_TEMP/notes.md" || { echo "::error::the release notes are empty"; exit 1; }
+
+      - name: Create the release
+        if: ${{ inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          gh release create "$tag" \
+            --title "APEX Remote for Android ${{ steps.version.outputs.name }}" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --target "${{ github.sha }}" \
+            "$RUNNER_TEMP"/release/*
+
+      # Read back, because `gh release create` exiting zero is not evidence the
+      # assets are there — the same reason build-image.yml re-reads every tag it
+      # moved instead of trusting skopeo's exit code.
+      - name: Read the release back
+        if: ${{ inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          names="$(gh release view "$tag" --json assets --jq '.assets[].name')"
+          echo "$names"
+          fail=0
+          for want in .apk .apk.sha256 .json .sig .pem; do
+            case "$names" in
+              *"$want"*) echo "  ok   $want" ;;
+              *) echo "::error::no $want asset on $tag"; fail=1 ;;
+            esac
+          done
+          [ "$fail" = 0 ] || exit 1
+
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### APEX Remote for Android"
+            echo "- versionCode: \`${{ steps.version.outputs.code }}\`"
+            echo "- versionName: \`${{ steps.version.outputs.name }}\`"
+            echo "- tag: \`${{ steps.version.outputs.tag }}\`"
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "- **DRY RUN** — everything was built and verified; no release was created."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

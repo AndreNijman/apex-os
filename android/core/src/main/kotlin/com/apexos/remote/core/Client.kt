@@ -31,16 +31,29 @@ object Client {
         identity: StaticKey,
         deviceName: String,
         userVerification: Boolean,
-        version: Int = REMOTE_PROTOCOL_VERSION,
+        versions: List<Int> = SUPPORTED_REMOTE_PROTOCOL_VERSIONS,
         ephemerals: EphemeralSource = EphemeralSource.Secure,
     ): PairingAnswer {
-        if (offer.v != version) {
+        require(versions.isNotEmpty()) { "a client must speak at least one protocol revision" }
+        // A WINDOW, not an equality test. The offer states the desktop's
+        // revision in the clear, so pairing is the one moment the two ends
+        // genuinely can agree, and refusing a desktop this build can talk to
+        // purely because it is not the newest would be an invented failure.
+        //
+        // The handshake then runs at the DESKTOP's revision rather than this
+        // build's preferred one, which is what makes the acceptance real: a
+        // window that accepted the offer and then handshook at the wrong
+        // version would fail a few lines later with a message about keys.
+        if (offer.v !in versions) {
             throw PairingException(
                 PairingError.Malformed(
-                    "that machine speaks APEX Remote v${offer.v} and this app speaks v$version",
+                    "that machine speaks APEX Remote v${offer.v} and this app speaks " +
+                        "${describeVersionWindow(versions)}. Update whichever is older: " +
+                        "`sudo apex update` on the machine, or this app from its release page.",
                 ),
             )
         }
+        val version = versions.first()
         // Refused here rather than by the desktop. Sending a name the desktop
         // will reject would burn the owner's pairing offer — `pairing::complete`
         // redeems the token before it validates the device — and cost them a
@@ -125,7 +138,75 @@ object Client {
         }
         return Session(machine, handshake.intoTransport(), input, output)
     }
+
+    /**
+     * Open a session, trying every protocol revision this build speaks.
+     *
+     * [openSession] is one attempt at one revision; this is the thing an app
+     * should actually call. A desktop refuses a revision it does not speak by
+     * closing the socket without replying, so each attempt needs its own
+     * connection — hence [connect], which is called once per revision tried.
+     *
+     * Generic over the connection so that the caller keeps hold of whatever it
+     * needs afterwards. The LAN leg needs its `Socket` back to clear the
+     * handshake deadline, the relay leg needs its dialled link to close, and a
+     * test needs neither; none of that belongs in here.
+     *
+     * Only a [SessionRefused] moves on to the next revision. Anything else —
+     * a connection that could not be made, a desktop whose static key is not
+     * the pinned one — is a different failure and is raised as one, because
+     * retrying it at another revision would turn one honest error into a
+     * handful of misleading ones.
+     */
+    fun <C> openSessionAcrossVersions(
+        identity: StaticKey,
+        desktopPublic: ByteArray,
+        versions: List<Int> = SUPPORTED_REMOTE_PROTOCOL_VERSIONS,
+        ephemerals: EphemeralSource = EphemeralSource.Secure,
+        connect: () -> C,
+        streams: (C) -> Pair<InputStream, OutputStream>,
+        abandon: (C) -> Unit,
+    ): Attached<C> {
+        require(versions.isNotEmpty()) { "a client must speak at least one protocol revision" }
+        var refused: SessionRefused? = null
+        for (version in versions) {
+            val connection = connect()
+            val (input, output) = try {
+                streams(connection)
+            } catch (e: Throwable) {
+                // A connection whose streams could not be taken is still a
+                // connection, and dropping it here without closing it would
+                // leak one file descriptor per revision tried.
+                abandon(connection)
+                throw e
+            }
+            try {
+                val session = openSession(
+                    input = input,
+                    output = output,
+                    identity = identity,
+                    desktopPublic = desktopPublic,
+                    version = version,
+                    ephemerals = ephemerals,
+                )
+                return Attached(session, connection, version)
+            } catch (e: SessionRefused) {
+                // Keep the FIRST refusal as the cause. The window is tried
+                // newest first, so the first is the attempt at the revision
+                // this build would rather be speaking.
+                if (refused == null) refused = e
+                abandon(connection)
+            } catch (e: Throwable) {
+                abandon(connection)
+                continue
+            }
+        }
+        throw SessionRefused(exhaustedVersionWindow(versions), refused)
+    }
 }
+
+/** A live session, the connection it is riding on, and the revision it agreed. */
+class Attached<C>(val session: Session, val connection: C, val version: Int)
 
 /** The desktop hung up during the session handshake. */
 class SessionRefused(message: String, cause: Throwable? = null) : Exception(message, cause)
@@ -306,3 +387,58 @@ class Session internal constructor(
  * which versions what travels *inside* a control frame.
  */
 const val REMOTE_PROTOCOL_VERSION: Int = 1
+
+/**
+ * Every protocol revision this build can speak, **newest first**.
+ *
+ * The phone and the desktop are updated by different people at different
+ * times — the OS through `apex update`, the app through its own release — so
+ * they are routinely at different ages, and a client that speaks exactly one
+ * revision stops working on the day the OS moves. This list is what makes that
+ * drift survivable instead of fatal.
+ *
+ * It can be a plain list, with no negotiation and no round trip, because of
+ * how the version is carried. It is hashed into the Noise prologue and never
+ * transmitted (`noise.rs`: "Noise binds the prologue into the handshake hash,
+ * so two ends that disagree about either simply fail to complete"), so a
+ * client cannot ASK which revision a desktop speaks — but it can try one, and
+ * a wrong guess costs a single connection and leaks nothing. [Client] tries
+ * each in turn.
+ *
+ * Newest first so that an up-to-date pair connects on the first attempt and
+ * only a genuinely old machine pays for a second.
+ *
+ * **Adding an entry is a promise**: this build must be able to hold a whole
+ * session at that revision, not merely complete its handshake. Removing the
+ * oldest entry is what drops support for desktops that have not updated, and
+ * it should be done deliberately and written in the release notes, because to
+ * the owner of such a desktop it is indistinguishable from the app breaking.
+ */
+val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(REMOTE_PROTOCOL_VERSION)
+
+/** "v1", or "v1 to v3" — the window as a person would say it. */
+internal fun describeVersionWindow(versions: List<Int>): String {
+    val lo = versions.min()
+    val hi = versions.max()
+    return if (lo == hi) "v$lo" else "v$lo to v$hi"
+}
+
+/**
+ * What the app says when every revision it speaks was refused.
+ *
+ * It names BOTH causes, because the phone genuinely cannot tell them apart and
+ * pretending otherwise is what made this failure so bad before: the desktop
+ * drops the socket without a reply, so a protocol mismatch and a revoked
+ * device are byte-for-byte identical from here. The old message asserted the
+ * revocation and never mentioned the version, which meant that bumping the
+ * protocol told every installed phone it had been thrown out.
+ *
+ * It also says how to find out, rather than leaving the user to guess: `apex
+ * remote status` prints the desktop's protocol version, and this sentence
+ * prints the app's.
+ */
+internal fun exhaustedVersionWindow(versions: List<Int>): String =
+    "this machine did not accept this device. Either the device was unpaired or revoked " +
+        "on it, or the machine and this app no longer speak the same APEX Remote protocol " +
+        "— this app speaks ${describeVersionWindow(versions)}. Run `apex remote status` on " +
+        "the machine to see the version it speaks, and update whichever side is older."

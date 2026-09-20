@@ -165,25 +165,42 @@ class PairingService {
         withContext(Dispatchers.IO) {
             var lastFailure: Exception? = null
             for (address in machine.lan) {
-                val socket = try {
-                    connect(address)
-                } catch (e: Exception) {
-                    lastFailure = e
-                    continue
-                }
+                // `reached` separates "this address did not answer" from "this
+                // address answered and the conversation failed". The first is
+                // a reason to try the next address; the second is a real
+                // answer and must be raised, or a machine that refused this
+                // device would be reported as unreachable.
+                //
+                // It is needed because the connection is now made INSIDE
+                // `openSessionAcrossVersions` — a desktop refuses a protocol
+                // revision by closing the socket, so each revision tried needs
+                // its own connection and the dial can no longer sit out here.
+                var reached = false
                 // NOT `use`: the session owns the socket for as long as it
                 // lives, and closing it here would end the session the moment
                 // this function returned. But a handshake that *fails* owns
                 // nothing, and leaving that socket open would leak one file
                 // descriptor per refused connection — on a revoked phone that
                 // keeps trying, which is exactly the phone this path is for.
-                return@withContext try {
-                    val session = Client.openSession(
-                        input = socket.getInputStream(),
-                        output = socket.getOutputStream(),
+                // `abandon` below is what closes those.
+                val attached = try {
+                    Client.openSessionAcrossVersions(
                         identity = identity,
                         desktopPublic = Device.checkKey(machine.desktopKey),
+                        connect = { connect(address).also { reached = true } },
+                        streams = { it.getInputStream() to it.getOutputStream() },
+                        abandon = { runCatching { it.close() } },
                     )
+                } catch (e: Exception) {
+                    if (!reached) {
+                        lastFailure = e
+                        continue
+                    }
+                    throw e
+                }
+                val socket = attached.connection
+                return@withContext try {
+                    val session = attached.session
                     // The deadline comes OFF here, and only here: everything
                     // before this line ran against a peer that had not proved
                     // anything, and everything after it may sit idle for
@@ -216,17 +233,24 @@ class PairingService {
             // pinned when this phone paired, so a relay that wanted to stand in
             // the middle would still have to complete a Noise handshake against
             // a key it does not hold.
-            val dialled = RelayDialler.dial(
-                RelayEndpoint.parse(relay),
-                machine.rendezvousId(),
+            //
+            // Dialled once per protocol revision tried, for the same reason as
+            // the LAN leg: a desktop refuses a revision by hanging up, so a
+            // second attempt needs a second connection. A relay dial is more
+            // expensive than a TCP connect, which is the other half of why
+            // `SUPPORTED_REMOTE_PROTOCOL_VERSIONS` is ordered newest first —
+            // an up-to-date pair pays for exactly one.
+            val endpoint = RelayEndpoint.parse(relay)
+            val attached = Client.openSessionAcrossVersions(
+                identity = identity,
+                desktopPublic = Device.checkKey(machine.desktopKey),
+                connect = { RelayDialler.dial(endpoint, machine.rendezvousId()) },
+                streams = { it.link.input to it.link.output },
+                abandon = { runCatching { it.link.close() } },
             )
+            val dialled = attached.connection
             return@withContext try {
-                val session = Client.openSession(
-                    input = dialled.link.input,
-                    output = dialled.link.output,
-                    identity = identity,
-                    desktopPublic = Device.checkKey(machine.desktopKey),
-                )
+                val session = attached.session
                 // Here, and for the same reason as twenty lines above: the
                 // handshake ran under a deadline because the far end had
                 // proved nothing, and a terminal nobody is typing at produces
