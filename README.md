@@ -313,7 +313,7 @@ Every APEX Remote APK is signed by one certificate, and this is its SHA-256
 fingerprint:
 
 <!-- fingerprint:begin -->
-UNSET
+9b2418f3cd37ba2ae83cdaeec5068280e02dc64135fdb1bb9fcb247326a66c67
 <!-- fingerprint:end -->
 
 `apksigner verify --print-certs apex-remote-<version>.apk` prints the

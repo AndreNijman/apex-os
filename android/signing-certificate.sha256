@@ -29,4 +29,4 @@
 # covers minSdkVersion 33+ and the old key 24..32. Both fingerprints go here,
 # in the same commit as the rotation. docs/android-signing.md has the whole
 # procedure.
-UNSET
+9b2418f3cd37ba2ae83cdaeec5068280e02dc64135fdb1bb9fcb247326a66c67

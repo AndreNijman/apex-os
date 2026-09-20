@@ -128,7 +128,7 @@ checkout.
 ## The certificate
 
 <!-- fingerprint:begin -->
-UNSET
+9b2418f3cd37ba2ae83cdaeec5068280e02dc64135fdb1bb9fcb247326a66c67
 <!-- fingerprint:end -->
 
 This is the SHA-256 of the signing certificate, and it is the value a stranger
