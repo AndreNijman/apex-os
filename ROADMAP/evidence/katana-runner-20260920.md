@@ -185,15 +185,33 @@ passes `$(nproc)` = 20 here.
 
 ### Security: the job is assumed hostile
 
-1. **Fork pull requests never reach the machine.** The repository setting
-   `actions/permissions/fork-pr-contributor-approval` was changed from
-   `first_time_contributors` to **`all_external_contributors`** on 2026-09-20.
-   Nothing from outside runs until Andre approves it. **This is the control.**
-   The `if: … head.repo.full_name == github.repository` guard in both workflows
-   is the belt — on a `pull_request` event GitHub runs the workflow file from
-   the *fork's head*, so a fork can delete that line. PRs still work: a fork PR
-   gets full CI on `ubuntu-24.04` and simply never targets `katana`.
-   **Never give a self-hosted job a `pull_request_target` trigger.**
+1. **Fork pull requests never reach the machine.** Three layers, and it matters
+   which one is load-bearing:
+   * **Neither self-hosted workflow has a `pull_request` trigger at all.**
+     `katana-probe.yml` fires on `workflow_dispatch` and on a push touching
+     itself; `kernel-build.yml` on `workflow_dispatch` and on pushes to `main`
+     or `roadmap/**`. So an ordinary fork PR does not start either of them, and
+     a contributor's PR experience is completely unchanged — they get
+     `pr-validation.yml` on `ubuntu-24.04` exactly as before, with no red check
+     from a skipped self-hosted job.
+   * The `if: … head.repo.full_name == github.repository` guard on each
+     self-hosted job, which catches the case where somebody later adds a
+     `pull_request` trigger and forgets.
+   * **The control**: the repository setting
+     `actions/permissions/fork-pr-contributor-approval`, changed from
+     `first_time_contributors` to **`all_external_contributors`** on
+     2026-09-20. This is the one that actually holds, because on a
+     `pull_request` event GitHub runs the workflow file **from the fork's
+     head** — a fork can add a `pull_request` trigger, point `runs-on` at
+     `katana` and delete the `if:` line, all in its own copy of the file. What
+     stops that is that nothing from an external contributor runs at all until
+     Andre approves it.
+
+   **Never give a self-hosted job a `pull_request_target` trigger**: it runs
+   the fork's code with the base repository's secrets and permissions, which is
+   the exact combination that turns a pull request into remote code execution.
+   `grep -rn pull_request_target .github/workflows/` returns only the comments
+   forbidding it.
 2. **Ephemeral.** `config.sh --ephemeral --replace --disableupdate`, re-run
    before every job by `ExecStartPre=+/usr/local/sbin/apex-runner-register`,
    which runs **as root** so the credential that mints registration tokens is
