@@ -2040,9 +2040,27 @@ elif [ "$ENCRYPT" = yes ]; then
   note "Partitioning $DISK (EFI, a plain boot partition, and an encrypted volume for everything else) …"
   wipefs -a "$DISK" >>"$LOG" 2>&1 || true
   sgdisk --zap-all "$DISK" >>"$LOG" 2>&1 || true
+  #
+  # PARTITION 4 IS A 1 MiB BIOS BOOT PARTITION AND IT IS NOT DECORATION.
+  # bootupd installs the BIOS GRUB component as well as the EFI one whenever
+  # bootc is told this is a generic image — which is exactly what a loopback
+  # install is told, because that is the flag that stops it rewriting the
+  # building machine's NVRAM. Without somewhere to embed core.img,
+  # `grub2-install --target i386-pc` refuses ("will not proceed with
+  # blocklists") and the whole install fails after the volume is already
+  # encrypted. MEASURED 2026-09-20 22:26, live run 6.
+  #
+  # It is created between 2 and 3 so the NUMBERING stays 1=ESP, 2=boot,
+  # 3=LUKS — sgdisk allocates in the order the options are given, not in
+  # number order — because those three numbers are written into the installer's
+  # own discovery, its tests, and the recovery instructions in
+  # docs/disk-encryption.md. It costs 1 MiB, it is unused on a UEFI machine,
+  # and it makes the encrypted layout match what `bootc install to-disk`
+  # builds for itself.
   if ! sgdisk \
         -n 1:0:+1GiB -t 1:ef00 -c 1:"EFI System Partition" \
         -n 2:0:+1GiB -t 2:8300 -c 2:"apex-boot" \
+        -n 4:0:+1MiB -t 4:ef02 -c 4:"BIOS boot partition" \
         -n 3:0:0     -t 3:8309 -c 3:"apex-luks" \
         "$DISK" >>"$LOG" 2>&1; then
     rc=70; echo "sgdisk could not write the partition table on $DISK" | tee -a "$LOG"

@@ -20,7 +20,23 @@ to-disk` do it:
 |------|------|------|-----------|------------|
 | p1 | 1 GiB | `ef00` EFI System | FAT32 | `/boot/efi` |
 | p2 | 1 GiB | `8300` Linux filesystem | ext4, **not encrypted** | `/boot` |
+| p4 | 1 MiB | `ef02` BIOS boot | none | nothing |
 | p3 | rest | `8309` Linux LUKS | LUKS2 → btrfs | `/` |
+
+p4 is out of numerical order on purpose: sgdisk allocates in the order the
+options are given, so the 1 MiB partition sits physically between `/boot` and
+the encrypted volume while the numbers 1, 2 and 3 keep meaning what they have
+always meant to the installer's own discovery, its tests, and the recovery
+instructions below.
+
+**Why a BIOS boot partition on a UEFI machine.** It is empty and unused on one.
+It exists because a LOOPBACK install passes bootc `--generic-image` — the flag
+that stops the building machine's UEFI boot entries being rewritten — and that
+flag also makes bootupd install the i386-pc GRUB component. With nowhere to
+embed `core.img`, `grub2-install` refuses ("will not proceed with blocklists")
+and the install fails *after* the volume is already encrypted. Measured on
+2026-09-20. One megabyte buys a layout that behaves the same in the lab and on
+real hardware, which is worth more than the megabyte.
 
 Then `bootc install to-filesystem` installs into the opened volume, with the
 `/boot` partition already mounted so bootc picks up its UUID.
