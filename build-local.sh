@@ -300,8 +300,23 @@ build_kernel() {
     # Assert rather than trust. The build's own gate is what decides this, but
     # reading the verdict back out of the produced image is what proves the gate
     # ran at all -- a `podman build` that exits 0 is not evidence by itself.
-    got="$(sudo podman run --rm --entrypoint /bin/sh "$KERNEL_IMG" \
-             -c 'sed -n "s/^btf_scx=//p" /manifest/kernel-build.txt' 2>/dev/null || true)"
+    #
+    # `podman create` + `podman cp`, NOT `podman run`. The kernel image is
+    # `FROM scratch`: it has no /bin/sh, so `podman run --entrypoint /bin/sh`
+    # cannot start, the `2>/dev/null || true` swallows it, and the read comes
+    # back EMPTY -- which fails the test below and aborts with
+    # "btf_scx='', expected 'usable'" AFTER a 45-minute compile that in fact
+    # passed its gate. Measured against a scratch image carrying this exact
+    # manifest: the run form yields '', the create+cp form yields 'usable'.
+    kcid="$(sudo podman create "$KERNEL_IMG" /x)" \
+        || { echo "FATAL: cannot create a container from $KERNEL_IMG"; exit 1; }
+    ktmp="$(mktemp -d)"
+    sudo podman cp "$kcid:/manifest/kernel-build.txt" "$ktmp/kernel-build.txt" \
+        || { echo "FATAL: $KERNEL_IMG has no /manifest/kernel-build.txt -- it was not built by Containerfile.kernel"; \
+             sudo podman rm "$kcid" >/dev/null 2>&1 || true; exit 1; }
+    sudo podman rm "$kcid" >/dev/null
+    got="$(sed -n 's/^btf_scx=//p' "$ktmp/kernel-build.txt")"
+    rm -rf "$ktmp"
     [ "$got" = usable ] \
         || { echo "FATAL: kernel image reports btf_scx='$got', expected 'usable'"; exit 1; }
     echo "kernel: BTF verdict usable"
