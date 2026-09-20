@@ -32,7 +32,7 @@ ESP is 100 MB.
 
 Code: `src/windows.rs` (hand-declared kernel32 FFI, structures parsed by byte
 offset), `src/plan.rs` (platform-neutral eligibility rules + the confirmation
-text, 10 unit tests that run on Linux), `src/main.rs` gains `survey` and
+text, 14 unit tests that run on Linux), `src/main.rs` gains `survey` and
 `inspect`. Cross-builds to a PE32+ binary.
 
 ## Traps already paid for — do not rediscover these
@@ -58,20 +58,43 @@ text, 10 unit tests that run on Linux), `src/main.rs` gains `survey` and
 
 ## NEXT
 
-1. Read `/var/lab-scratch/winlab/run2.log` — the first guest run of `survey` +
-   `inspect` against the fixtures. Fix whatever it says and re-run with
-   `windows-installer/lab/winlab run windows-installer/lab/jobs/survey`.
-2. Run it again with `--swap` and assert the same partition GUID produces the
-   same identity text when the NVMe/AHCI enumeration order changes.
-3. `APEX_WINLAB_GUEST=1 tests/test-windows-installer.sh` is the full suite.
-   Without KVM it reports `could-not-run` for the guest stage, never a pass.
-4. Then priority 4 — payload deployment — with a synthetic payload: write a
-   few MB of known SHA256 through the locked volume handle and `cmp` it back
-   from the host against `fixture-a.raw`. Nothing real, nothing signed.
-5. Product decision to surface, not to solve: `plan::assess` refuses Windows
-   basic-data even when zeroed, which is exactly the partition a user makes by
-   shrinking C:. The refusal carries a `diskpart set id=` remedy. Andre should
-   decide whether the tool ever retypes a partition itself.
+1. **Fixture disks are attached raw, with no overlay.** The system disk gets a
+   qcow2 overlay per run; the fixtures do not. The first job that writes
+   anything — priority 4, or a `diskpart` test — permanently mutates
+   `fixture-a.raw` and every later run silently measures a different disk.
+   Give them overlays in `cmd_run` before writing anything.
+
+2. **The `diskpart set id=` remedy has never been exercised, and may be a dead
+   end.** `plan::assess` refuses Windows basic-data and tells the user to
+   retype the partition themselves. But every Windows-made partition on the
+   golden carries GPT attribute bit 63 (`0x8000000000000000`), and `assess`
+   also refuses any partition with attributes set. If `set id=` leaves the
+   attribute in place, the remedy leads straight into a second refusal. A job
+   that runs the remedy on a fixture overlay and re-surveys settles it in one
+   guest boot.
+
+3. **Priority 4 — payload deployment — with a synthetic payload only.** Write
+   a few MB of known SHA256 through `\\.\PhysicalDriveN` at the verified
+   offset, then `cmp` it back from the host against `fixture-a.raw`. Read
+   `ARCHITECTURE.md`'s "Exclusivity" section first: there is no volume to lock,
+   so the write path's safety is offset validation plus a volume re-enumeration
+   immediately before each write, plus Windows' own refusal to write through a
+   `PhysicalDrive` handle into a region a mounted volume owns.
+
+4. **Priorities 5 and 6 — the ESP transaction and undo — have not started.**
+   The design is in `ARCHITECTURE.md`. The firmware before/after diff the lab
+   already performs is the assertion they have to satisfy.
+
+5. **Two product decisions to put to Andre, not to solve here.**
+   - The composefs path needs ~1.1 GiB of ESP; a stock Windows ESP has
+     **68.3 MiB free, measured**. Either Windows-side installs stay on
+     ostree/GRUB, or the installer has to create a second ESP — which is a GPT
+     modification, and avoiding one is the point of the whole design.
+   - Should the tool ever retype a basic-data partition itself? Today it
+     refuses and hands the user a `diskpart` command.
+
+6. The GUI does not exist. The confirmation text does, and is unit-tested; the
+   screen that shows it does not.
 
 If this agent is dead, do not message it. Read this file, then continue in the
 worktree above.
