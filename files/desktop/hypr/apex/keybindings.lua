@@ -124,6 +124,98 @@ for key, direction in pairs(directions) do
          { description = "Move window " .. direction })
 end
 
+-- ── Alt-Tab window switcher ──────────────────────────────────────────────────
+-- The APEX Shell switcher: every window on every workspace, most-recently-used
+-- first. It is bound HERE rather than in the shell's keybind model, and that is
+-- a deliberate limitation rather than an oversight — see below.
+--
+-- ── Hold Alt, tap Tab, release Alt ───────────────────────────────────────────
+-- The release is what makes it an alt-tab rather than a menu, and the shell
+-- cannot see it: a switcher that took keyboard focus in order to watch for the
+-- Alt release would itself be taking focus away from the window it is about to
+-- give focus to, which is the bug this whole unit exists to fix. So the
+-- compositor reports the release instead, and the shell's overlay never asks
+-- for the keyboard at all.
+--
+-- `release = true` is Hyprland's `bindr`.
+--
+-- ── `non_consuming`, not `transparent` ───────────────────────────────────────
+-- The flag that lets the key ALSO reach the focused application is `n`,
+-- `non_consuming = true`. `t` (`transparent = true`) means something else
+-- entirely — this bind cannot be shadowed by another bind — and a bind carrying
+-- only `t` still eats the key.
+--
+-- That distinction is not cosmetic here. ALT+Return and ALT+Escape are ordinary
+-- press binds that exist for the switcher and are pressed with the switcher
+-- CLOSED almost every time: Thunar opens Properties on ALT+Return, and browsers
+-- use it in the address bar. A consuming bind would take both away from every
+-- application on the machine, permanently, to serve a switcher that is not open.
+-- A consumed ALT *release* is worse — that is how an application ends up
+-- believing Alt is still held.
+--
+-- Checked as data rather than by eye: `hyprctl binds -j` reports
+-- `non_consuming` per bind, tests/test-apex-hypr-focus.sh asserts it is true on
+-- every one of these, and the three other spellings that look plausible
+-- (`nonConsuming`, `consume = false`, `ignore_mods`) are all ACCEPTED by
+-- hl.bind and all leave `non_consuming: false`. A wrong name here is silent.
+--
+-- Both Alt keys, because a keyboard has two and a user who started the switch
+-- with the right-hand one has to be able to finish it.
+--
+-- And both with and without SHIFT: after ALT+SHIFT+Tab the fingers do not come
+-- off the two modifiers at the same instant, so the Alt release very often
+-- arrives with SHIFT still down. modmask 8 would not match it, and the switcher
+-- would sit open until something else closed it.
+--
+-- ── ALT+Return commits too, and that is not decoration ───────────────────────
+-- The release bind cannot be verified without a person: a synthetic keyboard
+-- (wtype's virtual-keyboard-v1) is accepted by 0.56.2 and then reports
+-- `active keymap: error`, and no bind fires from it at all — measured
+-- 2026-09-20 — so nothing headless can press a real ALT and let go of it.
+--
+-- If `release = true` ever stops firing after a chord, the way labwc's
+-- onRelease deliberately does not fire after one, the switcher would open and
+-- have no keyboard way to close. ALT+Return is the floor under that: it is an
+-- ordinary press bind, it cannot be affected by whatever the release semantics
+-- are, and with `transparent = true` plus apex-switcher's flag test it costs a
+-- closed switcher one `[ -e ]` and still reaches the application underneath.
+--
+-- ── Why this is not in the shell's keybind model ─────────────────────────────
+-- That model has no concept of a key RELEASE, so a rebind made in APEX Settings
+-- would move the "next" bind and leave the commit on Alt — a switcher you can
+-- open and cannot close. Until the model can express a release, the combination
+-- stays fixed and stays here. The Keybinds page says so rather than offering a
+-- control that would half-work.
+--
+-- ── The cost of the release bind, stated ─────────────────────────────────────
+-- It fires on EVERY Alt release, all day, not only while the switcher is open.
+-- That is why the target is /usr/libexec/apex-switcher and not `apex shell …`
+-- directly: the helper's whole closed-state path is one `[ -e ]` test on a file
+-- under XDG_RUNTIME_DIR and an exit. One short-lived shell per Alt release,
+-- never the shell's IPC.
+local switcher = "/usr/libexec/apex-switcher"
+local commit   = { non_consuming = true, transparent = true,
+                   description = "Commit the window switcher" }
+local release  = { release = true, non_consuming = true, transparent = true,
+                   description = "Commit the window switcher" }
+
+-- Tab IS consumed: ALT+Tab is the window manager's, and an application that
+-- also wanted it would be fighting the switcher on every press.
+bind("ALT",       "Tab", hl.dsp.exec_cmd(switcher .. " next"),
+     { description = "Window switcher" })
+bind("ALT SHIFT", "Tab", hl.dsp.exec_cmd(switcher .. " prev"),
+     { description = "Window switcher (reverse)" })
+
+bind("ALT",       "Escape", hl.dsp.exec_cmd(switcher .. " cancel"),
+     { non_consuming = true, transparent = true,
+       description = "Cancel the window switcher" })
+bind("ALT",       "Return", hl.dsp.exec_cmd(switcher .. " commit"), commit)
+
+bind("ALT",       "Alt_L", hl.dsp.exec_cmd(switcher .. " commit"), release)
+bind("ALT",       "Alt_R", hl.dsp.exec_cmd(switcher .. " commit"), release)
+bind("ALT SHIFT", "Alt_L", hl.dsp.exec_cmd(switcher .. " commit"), release)
+bind("ALT SHIFT", "Alt_R", hl.dsp.exec_cmd(switcher .. " commit"), release)
+
 -- ── Workspaces ───────────────────────────────────────────────────────────────
 -- 1-9 then 0, where 0 is workspace 10.
 for i = 1, 10 do
