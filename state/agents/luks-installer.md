@@ -6,6 +6,36 @@ Branch `task/luks-installer` in **apex-os**, worktree
 
 ## READ THIS FIRST — the guard in tests/lab does not prevent what it says
 
+> **RESOLVED 2026-09-20 by unit `efivars-guard-2`, branch
+> `task/efivars-guard-2` (3 commits, pushed, not landed). Do not re-do this.**
+> Two corrections to what is written below, both checked rather than assumed:
+>
+> 1. **`bootc-install-lab` already passed `--generic-image`** — it is in the
+>    original commit `ba9737f8` and on `roadmap/v2.2` @ `602a8376` at the
+>    `PODMAN_ARGS+=("$IMAGE" bootc install ...)` line. What was missing was any
+>    **assertion**, so nothing stopped an edit removing it. There is one now:
+>    `generic-image-present`, exit 7, scanning the assembled argv after the
+>    `bootc install` token, mutation-tested in
+>    `tests/test-bootc-install-guard.sh` (71 passed, 0 failed).
+> 2. **This card's diagnosis of WHY the mask is inert is correct and was
+>    re-verified independently** (bootc's `nsenter` / `/proc/1/ns/mnt` strings;
+>    an unmasked privileged container showing zero efivars entries). That part
+>    stands, and is now written into AGENTS.md rule 6 and both lab scripts.
+>
+> Item 7 of NEXT below ("`tests/lab/bootc-install-lab` needs `--generic-image`")
+> is therefore closed. Evidence:
+> `ROADMAP/evidence/efivars-guard-2-20260920.md`; card:
+> `ROADMAP/state/agents/efivars-guard-2.md`.
+>
+> One thing this unit's own log proved that is worth having here: THIS card's
+> run at 21:53:26 is preserved at
+> `/var/lab-scratch/apex-luks-live.ZAGaYm/engine-stdout.txt`, and it prints
+> `Loopback target: this machine's UEFI boot entries are masked off and will
+> not be touched.` four lines before bootupd runs `efibootmgr -b 0000 -B`.
+> That `note()` text came from `68855e92` and is a promise the tmpfs could not
+> keep; `f0ec87de` replaced it. The account below is kept as the record.
+
+
 `tests/lab/bootc-install-lab` inserts `--tmpfs /sys/firmware/efi/efivars` and
 calls that the primary guard. **It is not one.** Measured here on 2026-09-20 at
 22:12: a loopback `bootc install to-filesystem` ran with that mask applied and

@@ -4,8 +4,8 @@ items: none (dispatched directly off BOOT-BREAKAGE-2026-09-20.md and the
        second occurrence recorded on `luks-installer`'s card)
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-efivars-guard-2
-branch: task/efivars-guard-2 — 3 commits, `602a8376..1edbd9e9`, all PUSHED, NOT landed
-base: roadmap/v2.2 @ 602a8376
+branch: task/efivars-guard-2 — all PUSHED, NOT landed
+base: roadmap/v2.2 @ 602a8376 — 4 commits, `602a8376..013231ae`
 evidence: ROADMAP/evidence/efivars-guard-2-20260920.md
 suite: tests/test-bootc-install-guard.sh — **71 passed, 0 failed**
 files owned: tests/lab/bootc-install-lab, tests/lab/nvram-guard,
@@ -53,6 +53,20 @@ Proven without writing to firmware: delete the line from a **copy** of the
 wrapper, assert exit 7, the assertion name, that the stub podman recorded
 nothing, and that no target image was created. No `bootc install` runs, no
 container starts, no EFI variable is read or written anywhere in the suite.
+
+## Both incidents now rest on their own logs, not on the write-up
+
+| | log | launched | NVRAM moved |
+| --- | --- | --- | --- |
+| first | `/var/lab-scratch/apex-luks-live.oRDxu4/engine-stdout.txt` | — | 09:02:17 AWST (`01:02:17` in the write-up is UTC) |
+| second | `/var/lab-scratch/apex-luks-live.ZAGaYm/engine-stdout.txt` | 21:53:26 | by 22:12:15 |
+
+The second one is the whole finding in six lines, in the machine's own words:
+it prints `Loopback target: this machine's UEFI boot entries are masked off and
+will not be touched.` — `set_nvram_args_for`'s `note()` from `68855e92`, the
+commit that added the tmpfs and called it the fix — and then runs
+`efibootmgr -b 0000 -B` four lines later, ending in `nvram-guard`'s
+`nvram-changed` verdict. Quote that log, not the brief.
 
 ## Three things a stranger most needs to know
 
@@ -105,6 +119,30 @@ container starts, no EFI variable is read or written anywhere in the suite.
    before editing his write-up; the correction is in
    `ROADMAP/evidence/efivars-guard-2-20260920.md` §3 meanwhile.
 6. **Tell `sdboot-migrate`** about the one-clause `docs/boot-v2.md` edit above.
+7. **THE ORCHESTRATOR'S OWN MEMORY STILL TEACHES THE INERT GUARD.**
+   `~/.claude/projects/-var-home-andre-Projects-apex/memory/loopback-install-rewrote-host-nvram.md`
+   states, as *"the rule for every future dispatch"*: **"Require `--tmpfs
+   /sys/firmware/efi/efivars` on any privileged container doing an install."**
+   The next dispatch that boots memory re-applies a guard that prevents
+   nothing. That file is the orchestrator's, not this unit's, and it is the
+   single highest-value thing left: the rule should be `--generic-image` for
+   loop-backed targets, with the tmpfs demoted to defence in depth and
+   `nvram-guard` named as the detection layer.
+
+## Shared-file conflict check — done, not assumed
+
+Ran against every live branch, at the time of the last commit:
+
+* `AGENTS.md` and `docs/boot-v2.md` — **no other live branch touches either.**
+  Checked `sdboot-migrate`, `sdboot-image`, `katana-runner`, `focus-switcher`,
+  `android-release`, `kernel-build`.
+* `.github/workflows/pr-validation.yml` — `sdboot-image` (+51/-147) and
+  `katana-runner` (-14) both touch the file, but **neither touches the efivars
+  guard step**: the diff filtered for `efivars|bootc-install-guard` is empty
+  for both. A textual conflict is possible if hunks land adjacently; a semantic
+  one is not.
+* `tests/check-suites-run-in-ci.sh` passes — 91 suites, 85 run by CI, 6 exempt,
+  0 unrun and undeclared. The step **rename** does not trip it.
 
 ## Traps paid for here
 
