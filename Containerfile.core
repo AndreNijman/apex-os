@@ -250,6 +250,10 @@ RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf
 # sched-ext USERSPACE and is unaffected by any of this.
 COPY --from=kernel-rpms /rpms     /tmp/apex-kernel-rpms
 COPY --from=kernel-rpms /manifest /tmp/apex-kernel-manifest
+# The pin as THIS commit has it, so the two can be compared. `kernel/**` is
+# already in the core path filter, so this COPY costs nothing and buys the
+# check that makes that filter mean what it appears to mean.
+COPY kernel/kernel.pin /tmp/apex-kernel-pin-expected
 RUN set -eux; \
     dnf5 -y install dnf5-plugins; \
     dnf5 -y remove --no-autoremove \
@@ -272,22 +276,45 @@ RUN set -eux; \
     test "${BTF}" = usable \
         || { echo "FATAL: kernel manifest says btf_scx='${BTF}', expected 'usable'"; exit 1; }; \
     echo "kernel BTF verdict from the build that made these RPMs: ${BTF}"; \
-    dnf5 -y install /tmp/apex-kernel-rpms/kernel-cachyos-*.rpm \
+    # IDENTITY, not just health. Without this, a stale local kernel image built
+    # from a pin three revisions ago passes every other check here: its BTF was
+    # genuinely usable, its kver genuinely matches its own manifest. `kernel/**`
+    # triggers a core rebuild precisely so core picks up a new kernel — this is
+    # what makes that true rather than assumed.
+    cmp /tmp/apex-kernel-pin-expected "${MAN%/*}/kernel.pin" \
+        || { echo "FATAL: the kernel image was built from a DIFFERENT kernel/kernel.pin than this commit has."; \
+             echo "       Rebuild the kernel tier (./build-local.sh kernel --force-core),"; \
+             echo "       or point APEX_KERNEL_IMAGE at one built from this pin."; \
+             diff /tmp/apex-kernel-pin-expected "${MAN%/*}/kernel.pin" || true; \
+             exit 1; }; \
+    echo "kernel image was built from this commit's kernel/kernel.pin"; \
+    # --nogpgcheck is a DECISION, stated rather than left as a warning in the
+    # log. These RPMs are local files APEX built itself; there is no repo
+    # signature to check and no key to check it against. What stands in for the
+    # signature is the identity check above plus the digest-pinned
+    # `FROM ${APEX_KERNEL_IMAGE}` that produced them.
+    dnf5 -y --nogpgcheck install /tmp/apex-kernel-rpms/kernel-cachyos-*.rpm \
       || echo "WARN: kernel install exited non-zero (expected: cosmetic %posttrans dracut) — verifying RPMs landed"; \
-    rpm -q kernel-cachyos kernel-cachyos-core kernel-cachyos-modules kernel-cachyos-devel-matched; \
-    # Prove the kernel that actually landed in the rpmdb is the one the manifest
-    # describes. Without this, a stale RPM left in the context would install
-    # happily under a manifest vouching for a different build.
+    # That `|| echo` tolerates a cosmetic %posttrans failure, but it also
+    # swallows a real one — a missing dependency, a conflict with the Fedora
+    # kernel just removed — and `rpm -q` alone would still pass, because
+    # posttrans is the final phase and the packages did land. So every one of
+    # the four must be the EXACT version the manifest vouches for, not merely
+    # present.
     WANT_KVER="$(sed -n 's/^kver=//p' "${MAN}")"; \
     test -n "${WANT_KVER}" || { echo "FATAL: kernel manifest carries no kver"; exit 1; }; \
-    GOT_KVER="$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' kernel-cachyos-core)"; \
-    test "${GOT_KVER}" = "${WANT_KVER}" \
-        || { echo "FATAL: installed kernel is ${GOT_KVER}, manifest vouches for ${WANT_KVER}"; exit 1; }; \
-    echo "kernel ${GOT_KVER} installed, from APEX's own build"; \
+    for p in kernel-cachyos kernel-cachyos-core kernel-cachyos-modules \
+             kernel-cachyos-devel-matched; do \
+        got="$(rpm -q --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' "${p}")"; \
+        test "${got}" = "${WANT_KVER}" \
+            || { echo "FATAL: ${p} is ${got}, manifest vouches for ${WANT_KVER}"; exit 1; }; \
+        echo "installed: ${p}-${got}"; \
+    done; \
+    echo "kernel ${WANT_KVER} installed, from APEX's own build"; \
     mkdir -p /usr/share/apex-os/kernel; \
     cp "${MAN}" /usr/share/apex-os/kernel/build.txt; \
     cp /tmp/apex-kernel-manifest/kernel.pin /usr/share/apex-os/kernel/kernel.pin; \
-    rm -rf /tmp/apex-kernel-rpms /tmp/apex-kernel-manifest; \
+    rm -rf /tmp/apex-kernel-rpms /tmp/apex-kernel-manifest /tmp/apex-kernel-pin-expected; \
     dnf5 clean all
 
 # Ensure the kernel image + initramfs live under /usr/lib/modules/<kver>/ —
@@ -2083,6 +2110,11 @@ RUN set -eux; \
 #     banner brands itself), but the stock "Kernel \r on \m" line prints
 #     7.1.3-cachyos1.fc43.x86_64. Drop that line — the kernel release string
 #     itself cannot be changed without building the kernel from source.
+#     (That last clause stopped being true when APEX took over the kernel
+#     build: the release is now `cachyos1.apex<N>.fc<ver>`, set from
+#     kernel/kernel.pin. The line is still dropped — branding a VT banner is
+#     not a reason to touch a kernel release string — but the stated
+#     impossibility is no longer the reason.)
 #   - LOGO=apex-os-logo names an icon that is COPY'd in the base tier, so the
 #     hicolor cache rebuild lives there too — running it here would cache an
 #     icon theme that does not yet contain the spark. Same for `dconf update`,
