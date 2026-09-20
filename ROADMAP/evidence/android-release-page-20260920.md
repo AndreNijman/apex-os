@@ -1,24 +1,40 @@
 # Evidence — the APEX Remote Releases page, generated 2026-09-20
 
-This is the page body `android/tools/release-notes.sh` produces, run against a
-real artefact directory rather than written by hand. It is here so the prose can
-be reviewed before a release is ever cut.
+The page body `android/tools/release-notes.sh` produces, run against a **real,
+signed release build** rather than written by hand, so the prose can be reviewed
+before a release is ever cut.
 
-Produced with:
+## How it was produced, and what that proves
 
 ```
-android/tools/release-notes.sh --code 1330 --name 0.1.0+1330.gac7db108 --dir <release dir>
+export APEX_KEYSTORE=<throwaway keystore, /var/lab-scratch, never committed>
+android/tools/release-artifacts.sh --out <dir> --code 1330 \\
+    --name 0.1.0+1330.gac7db108 --tag android-v1330
+android/tools/release-notes.sh --code 1330 --name 0.1.0+1330.gac7db108 --dir <dir>
 ```
 
-The `--dir` held the debug APK under the release's name (43,502,784 bytes — a
-release APK will differ), its real `.sha256`, and the metadata file shaped
-exactly as `release-artifacts.sh` writes it, window included. So the checksum,
-the size, the version and the protocol sentence below are all read from a real
-file, which is the property that makes this reviewable at all.
+`release-artifacts.sh` exited 0 having run `:app:assembleRelease`,
+`:app:bundleRelease` and `:app:verifyReleaseSigning`. Read back from the
+artefacts themselves rather than from the build log:
+
+| checked | value |
+|---|---|
+| `aapt2 dump badging` versionCode | `1330` — so `APEX_VERSION_CODE` really reaches the APK |
+| versionName | `0.1.0+1330.gac7db108` |
+| APK signature | v2/v3, `CN=THROWAWAY DO NOT SHIP` |
+| AAB signature | `jar verified` under jarsigner |
+| APK size | 34,972,715 bytes |
+| sha256 | `29c45c6d8c1f01dcf22f5ed9c6c4c21effae2c944d39d7fe1b6ea9f5792563c6` |
+| metadata window | `remoteProtocolSupported: [1]`, read out of `Client.kt` |
+| `REQUEST_INSTALL_PACKAGES` | present in the built APK's merged manifest |
+
+The keystore was a throwaway generated in `/var/lab-scratch`, used once and
+deleted. It is **not** the release key: no Android signing key exists yet, and
+that decision is Andre's — see `docs/android-app.md`.
 
 **No release was created and no tag was moved.** `release-android.yml` is
-`workflow_dispatch`-only and `dry_run` defaults to true; this artefact was made
-by running the notes script directly.
+`workflow_dispatch`-only and its `dry_run` input defaults to true; this artefact
+was made by running the two scripts directly, and nothing touched GitHub.
 
 ---
 
@@ -66,7 +82,7 @@ sha256sum -c apex-remote-VERSION.apk.sha256
 The checksum for this build is:
 
 ```
-6e6a406e11a79013710c782442305221dc206f48fe8247d91b632bd7865fbcfc
+29c45c6d8c1f01dcf22f5ed9c6c4c21effae2c944d39d7fe1b6ea9f5792563c6
 ```
 
 There is also a `.sig` and a `.pem` beside the APK. Those are a Sigstore
@@ -121,5 +137,5 @@ the top and your paired machines are kept.
 | Version | `0.1.0+1330.gac7db108` |
 | versionCode | `1330` |
 | Remote protocol | `v1` (this build speaks `1`) |
-| Size | ~41 MB |
+| Size | ~33 MB |
 | Minimum Android | 9.0 (API 28) |
