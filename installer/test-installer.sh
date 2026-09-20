@@ -149,7 +149,13 @@ check() {
 # A disk that cannot exist, so the whole-disk cases stop at the block-device
 # check instead of proceeding. The account guards run BEFORE that check — which
 # is the ordering under test.
-BASE=$'mode=disk\ndisk=/dev/zzz-does-not-exist\npassword=pw\nhostname=apex'
+# `encrypt=no` is here because the engine now REFUSES an answers file that
+# does not say, one way or the other, whether to encrypt the disk. It is not
+# a default this suite is choosing: a missing key is its own refusal, and
+# installer/test-installer-luks.sh is the suite that asserts that. Without
+# it every case below would stop at the encryption question instead of the
+# guard it is actually testing.
+BASE=$'mode=disk\ndisk=/dev/zzz-does-not-exist\npassword=pw\nhostname=apex\nencrypt=no'
 
 echo "── argument handling ──────────────────────────────────────────────────"
 out=$(sudo -n APEX_IMAGE="$ENGINE_IMAGE" "$ENGINE" </dev/null 2>&1); rc=$?
@@ -165,7 +171,7 @@ echo "── account validation (must run before the disk is touched) ───�
 check "username: uppercase"   "Invalid username 'Bob'"        "$BASE"$'\nusername=Bob'
 check "username: leading digit" "Invalid username '1bob'"     "$BASE"$'\nusername=1bob'
 check "username: reserved"    "reserved system account"       "$BASE"$'\nusername=root'
-check "hostname: underscore"  "Invalid hostname 'my_host'"    $'mode=disk\ndisk=/dev/zzz-does-not-exist\npassword=pw\nusername=bob\nhostname=my_host'
+check "hostname: underscore"  "Invalid hostname 'my_host'"    $'mode=disk\ndisk=/dev/zzz-does-not-exist\npassword=pw\nusername=bob\nhostname=my_host\nencrypt=no'
 
 echo "── answers-file handling ──────────────────────────────────────────────"
 check "unknown key"           "unknown key in answers file"   "$BASE"$'\nusername=bob\nbogus=1'
@@ -198,8 +204,8 @@ echo "── partition mode: the two most destructive mistakes ─────�
 # These need devices that exist for the guard to be reached. Read-only: both
 # cases are refused by the guard under test, long before any write.
 if [ -b /dev/sda ] && [ -b /dev/sdb ] && [ -b /dev/sda2 ] && [ -b /dev/sdb1 ]; then
-    check "target == ESP"     "same device"                   $'mode=partition\ndisk=/dev/sda\ntarget=/dev/sda2\nesp=/dev/sda2\nusername=bob\npassword=pw\nhostname=apex'
-    check "target on another disk" "is not a partition of"    $'mode=partition\ndisk=/dev/sda\ntarget=/dev/sdb1\nesp=/dev/sda2\nusername=bob\npassword=pw\nhostname=apex'
+    check "target == ESP"     "same device"                   $'mode=partition\ndisk=/dev/sda\ntarget=/dev/sda2\nesp=/dev/sda2\nusername=bob\npassword=pw\nhostname=apex\nencrypt=no'
+    check "target on another disk" "is not a partition of"    $'mode=partition\ndisk=/dev/sda\ntarget=/dev/sdb1\nesp=/dev/sda2\nusername=bob\npassword=pw\nhostname=apex\nencrypt=no'
 else
     echo "SKIP  partition-mode cases (need /dev/sda2 and /dev/sdb1 present)"
 fi

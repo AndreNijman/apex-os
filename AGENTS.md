@@ -173,24 +173,51 @@ phase.
    real machine is migrated. (There is one image; `daily`, `gaming-mesa` and
    `gaming-nvidia` are tags on its digest, so there is no per-edition exception
    to find here.)
-6. **A container that runs `bootc install` must not be able to see this
-   machine's EFI variables.** Launch every
-   `bootc install to-disk --via-loopback` through
-   `tests/lab/bootc-install-lab`, which builds the podman argv itself, always
-   masks `/sys/firmware/efi/efivars` with a tmpfs, refuses a caller-supplied
-   mount at that path or any parent of it, refuses a block-device or tmpfs
-   target, and runs the whole thing under `tests/lab/nvram-guard` — a
-   before/after `efibootmgr -v` plus efivarfs `Boot*` digest diff that fails
-   the run if the host's boot entries moved. Wrap anything else that touches a
-   loopback install or boots a lab guest in `nvram-guard -- <command>` too; it
-   is read-only and costs nothing.
+6. **A container that runs `bootc install` against anything loop-backed must
+   pass `--generic-image`.** That is the whole rule, and it is the only thing
+   here that prevents the 2026-09-20 breakage. bootc's own help: *"Changes to
+   the system firmware will be skipped."* A loopback image is never this
+   machine's firmware's business.
 
-   Why a wrapper and not a rule: this *was* a rule. On 2026-09-20 the sdboot
-   lab ran eight loopback installs and seven of them passed
-   `--tmpfs /sys/firmware/efi/efivars`. The eighth did not, bootupd deleted
-   `Boot0000 APEX-OS` and recreated it against the ESP inside the disk image
-   file it was building, and Andre's laptop would not boot the next morning —
-   repaired from a live USB. A discipline followed seven times out of eight is
-   a statistic, not a guard. `tests/test-bootc-install-guard.sh` holds both
-   halves open: it proves the mask reaches podman, and it proves the launch is
-   refused when the mask is gone. See BOOT-BREAKAGE-2026-09-20.md.
+   Launch every `bootc install to-disk --via-loopback` through
+   `tests/lab/bootc-install-lab`. It builds the podman argv itself, puts
+   `--generic-image` in it, and **refuses to launch without it** (assertion
+   `generic-image-present`, exit 7). It also refuses a block-device or tmpfs
+   target, and runs the whole thing under `tests/lab/nvram-guard`. For a path
+   that is not a literal `--via-loopback` — `installer/apex-install` handing
+   bootc a loop device it attached itself — the engine's own
+   `set_nvram_args_for` adds the flag; the same requirement, different file.
+
+   **Which layer is which, because the first version of this rule got it
+   wrong.** `--generic-image` is PREVENTION. `nvram-guard` is DETECTION — a
+   before/after `efibootmgr -v` plus efivarfs `Boot*` digest diff that fails
+   the run if the host's boot entries moved; it cannot stop a write, and it is
+   the only layer that has ever actually caught this, twice. Wrap anything that
+   touches a loopback install or boots a lab guest in `nvram-guard -- <command>`;
+   it is read-only and costs nothing.
+
+   **The efivars tmpfs is DEFENCE IN DEPTH and does not prevent this.** Keep
+   it — it bounds a process that stays inside the container — but do not
+   describe it as the guard. `bootc` takes `--pid=host` and re-enters the
+   HOST's mount namespace for the bootloader step (`strings /usr/bin/bootc`:
+   `nsenter`, `/proc/1/ns/mnt`, `/proc/1/root`), and an unmasked privileged
+   container shows *zero* entries under `/sys/firmware/efi/efivars` anyway, so
+   there was never a host efivarfs in the container's view to mask.
+
+   What it cost to learn that: on 2026-09-20 at 09:02 an install with no
+   `--generic-image` had bootupd delete `Boot0000 APEX-OS` and recreate it
+   against the ESP inside the image file being built; Andre's laptop would not
+   boot and was repaired from a live USB. The tmpfs was added the same evening
+   and called the fix. At 21:53 a second install ran **with the mask applied
+   and its promise printed** — *"this machine's UEFI boot entries are masked
+   off and will not be touched"* — and moved `Boot0000` again four log lines
+   later. `nvram-guard` caught that one when
+   the command returned and the exact bytes were restored from its own
+   before-snapshot. Neither run contained the string `--via-loopback`; both
+   were `apex-install` on a `to-filesystem` install against a loop device.
+
+   `tests/test-bootc-install-guard.sh` holds both halves open for both layers:
+   it proves each flag reaches podman in the position that matters, and it
+   proves the launch is refused when either is removed from a copy of the
+   wrapper. It does not reproduce the damage to do so — the claims are about
+   the argv and the refusal. See BOOT-BREAKAGE-2026-09-20.md.
