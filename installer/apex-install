@@ -198,6 +198,13 @@ LUKS_ENROLL_PATH="/usr/libexec/apex-luks-enroll"
 # name. See console_keymap_for() for why they are different things and why
 # confusing them is a stranding bug on an encrypted machine.
 CONSOLE_KEYMAP=""
+# The deployment directory create_user_in() currently has /proc and the
+# stateroot var mounted under. Read by unmount_target() so a failure anywhere
+# in that function still releases them: a mount left under the deployment keeps
+# the filesystem busy, which makes `umount` and `cryptsetup close` fail and the
+# NEXT install run refuse the disk as "in use" — the retry-is-impossible shape
+# this file already guards against elsewhere.
+DEPLOY_MNT=""
 
 # secret_line(): stdout ONLY, never the log.
 #
@@ -258,6 +265,7 @@ TROOT=/run/apex-target
 unmount_target() {
   umount "$TROOT/boot/efi" 2>/dev/null || true
   umount "$TROOT"          2>/dev/null || true
+  [ -n "${DEPLOY_MNT:-}" ] && { umount "$DEPLOY_MNT/proc" 2>/dev/null || true; umount "$DEPLOY_MNT/var" 2>/dev/null || true; }
   [ -n "${MNT:-}" ] && { umount "$MNT/boot/efi" 2>/dev/null || true; umount "$MNT/boot" 2>/dev/null || true; umount "$MNT" 2>/dev/null || true; }
   # A LUKS mapper left open holds the partition busy, so the NEXT run fails at
   # `cryptsetup luksFormat` with "Device or resource busy" — i.e. the previous
@@ -817,11 +825,41 @@ write_crypttab_in() {  # $1=deploy dir
   return 0
 }
 
+# Undo create_user_in()'s two mounts. Every exit path of that function goes
+# through here, including the failures: see DEPLOY_MNT above for why a mount
+# left behind is worse than the error that caused it.
+release_deploy_mounts() {  # $1=deploy dir
+  umount "$1/proc" 2>/dev/null || true
+  umount "$1/var"  2>/dev/null || true
+  DEPLOY_MNT=""
+  return 0
+}
+
 create_user_in() {  # $1=deploy dir  $2=user  $3=pass  $4=hostname  $5=err-prefix
   local deploy=$1 user=$2 pass=$3 host=$4 pfx=$5 statevar setype spec f
   statevar=$(dirname "$(dirname "$deploy")")/var
+  DEPLOY_MNT="$deploy"
   mount --bind "$statevar" "$deploy/var" 2>>"$LOG" \
     || die "$pfx: bind-mounting the stateroot var failed."
+  # ── /proc inside the deployment is not optional ────────────────────────────
+  # MEASURED, on two complete installs: without this mount `useradd --root`
+  # fails with
+  #     useradd: failure while writing changes to /etc/passwd
+  # and the cause has nothing to do with /etc/passwd, with permissions, or with
+  # the filesystem being read-only — all three were checked and all three were
+  # fine. useradd asks is_selinux_enabled() BEFORE it chroots, which on Fedora
+  # answers yes, and then inside the chroot calls setfscreatecon() to label the
+  # new /etc/passwd+. setfscreatecon() writes /proc/thread-self/attr/fscreate;
+  # with no /proc in the chroot that open returns ENOENT, shadow-utils converts
+  # it to EACCES, and the generic message above is all the user ever sees. An
+  # strace of the failing run shows the backup /etc/passwd- written in full and
+  # /etc/passwd+ never opened at all.
+  #
+  # chpasswd --root writes /etc/shadow the same way, so the mount has to cover
+  # the whole function rather than just the useradd line. /sys is NOT needed:
+  # the chrooted setfiles below was verified to relabel correctly without it.
+  mount -t proc proc "$deploy/proc" 2>>"$LOG" \
+    || { release_deploy_mounts "$deploy"; die "$pfx: mounting /proc inside the new system failed, and useradd cannot create an account without it."; }
   # zsh is the APEX default shell (with starship, seeded at first login). Fall
   # back to bash if the image somehow lacks zsh — a user with a nonexistent
   # login shell cannot log in at all, which is a far worse failure than bash.
@@ -840,9 +878,9 @@ create_user_in() {  # $1=deploy dir  $2=user  $3=pass  $4=hostname  $5=err-prefi
   fi
   log "creating $user with login shell $ushell"
   useradd --root "$deploy" -m -G wheel -s "$ushell" "$user" 2>>"$LOG" \
-    || { umount "$deploy/var" 2>/dev/null; die "$pfx: useradd failed for $user (see $LOG)."; }
+    || { release_deploy_mounts "$deploy"; die "$pfx: useradd failed for $user (see $LOG)."; }
   echo "$user:$pass" | chpasswd --root "$deploy" 2>>"$LOG" \
-    || { umount "$deploy/var" 2>/dev/null; die "$pfx: setting the password failed (see $LOG)."; }
+    || { release_deploy_mounts "$deploy"; die "$pfx: setting the password failed (see $LOG)."; }
   echo "$host" > "$deploy/etc/hostname" 2>>"$LOG" || true
   setype=$(sed -n 's/^SELINUXTYPE=//p' "$deploy/etc/selinux/config" 2>/dev/null | head -1)
   spec="/etc/selinux/${setype:-targeted}/contexts/files/file_contexts"
@@ -850,7 +888,7 @@ create_user_in() {  # $1=deploy dir  $2=user  $3=pass  $4=hostname  $5=err-prefi
   # claim success: unlabeled /etc/passwd means greetd/polkitd get AVC-denied and
   # the user cannot log in — an unusable system reported as a clean install.
   if [ ! -x "$deploy/usr/sbin/setfiles" ] || [ ! -f "$deploy$spec" ]; then
-    umount "$deploy/var" 2>/dev/null || true
+    release_deploy_mounts "$deploy"
     die "$pfx: cannot SELinux-relabel the new account files (setfiles or the policy file_contexts is missing in the installed system). Without the relabel, login would be denied. The OS is installed on $DISK but the account is not usable."
   fi
   if true; then
@@ -859,9 +897,9 @@ create_user_in() {  # $1=deploy dir  $2=user  $3=pass  $4=hostname  $5=err-prefi
       [ -e "$deploy/etc/$f" ] && paths+=("/etc/$f")
     done
     chroot "$deploy" /usr/sbin/setfiles -F "$spec" "${paths[@]}" 2>&1 | tee -a "$LOG" \
-      || { umount "$deploy/var" 2>/dev/null; die "$pfx: SELinux relabel of the account files failed (see $LOG)."; }
+      || { release_deploy_mounts "$deploy"; die "$pfx: SELinux relabel of the account files failed (see $LOG)."; }
   fi
-  umount "$deploy/var" 2>>"$LOG" || true
+  release_deploy_mounts "$deploy"
 }
 
 # ── unattended mode (automation / QEMU boot-test) ────────────────────────────
@@ -1865,9 +1903,12 @@ elif [ "$ENCRYPT" = yes ]; then
     # prompt is drawn before any filesystem is mounted, so the only place the
     # keyboard layout can come from is this command line. Without it every
     # encrypted machine asks for its passphrase on a US layout, whatever the
-    # owner chose in this installer. It is only added when the layout is not
-    # already the image default, so an ordinary `us` install gains no argument
-    # that could later override `localectl set-keymap`.
+    # owner chose in this installer. The guard below is on the RESOLVED
+    # CONSOLE KEYMAP, not on the XKB layout: a US machine on Dvorak resolves to
+    # `us-dvorak`, which is not `us`, and does get the argument — correctly, as
+    # its owner types a different passphrase than a plain-US one would. Only a
+    # machine that lands on exactly `us`, the kernel built-in, is left with no
+    # argument that could later override `localectl set-keymap`.
     LUKS_KARGS=(--karg "rd.luks.uuid=$LUKS_UUID" --karg "rd.luks.name=$LUKS_UUID=$LUKS_MAPPER")
     if [ "$LUKS_TPM_TOKEN" = 1 ]; then
       LUKS_KARGS+=(--karg "rd.luks.options=$LUKS_UUID=tpm2-device=auto")
