@@ -41,7 +41,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 ALL=(prereq signed-uki reproducible negative-unsigned negative-foreign
-     negative-tampered entry-layout boot-counting)
+     negative-tampered entry-layout boot-counting
+     # L-003, the SHIPPED enrolment path. These need swtpm and cryptsetup and
+     # nothing else — no staged root, no UKI, no guest — so they belong in the
+     # default run rather than behind a name somebody has to remember.
+     enroll-sb-on enroll-sb-off enroll-no-tpm enroll-bare-policy)
 # Scenarios needing something the container cannot produce for itself. Kept OUT
 # of ALL so a default run cannot silently skip them and still report success:
 # they are requested by name and hard-fail when their input is missing.
@@ -1822,6 +1826,657 @@ scenario_luks_s3() {
     # name and printed what /sys/power/mem_sleep then held.
     assert_serial_has "$ser" "APEX-BOOTLAB: s3-mode=deep"
     cp "$ser" "$WORK/serial-luks-s3-resumed.log"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  L-003 — the SHIPPED enrolment path, /usr/libexec/apex-luks-enroll
+# ═════════════════════════════════════════════════════════════════════════════
+#
+#  Everything above this line boots a guest. These four do not, and that is not
+#  a shortcut: what they have to prove is what a LUKS2 HEADER ends up holding on
+#  a machine in three states, and a header is the same object whether it was
+#  written from a guest or from here. Booting a VM to read one back would add
+#  eight minutes and a second thing that can break, and would prove nothing the
+#  header does not already say.
+#
+#  What they do NOT prove, said here rather than left implied: that the slot
+#  unlocks at BOOT. `luks-tpm` boots a real guest for that, against the signed
+#  PCR 11 policy the lab builds a UKI for. On the PCR 7 binding the production
+#  script chooses today, the in-boot half is unproven in this harness — see
+#  ROADMAP/state/agents/luks-enroll.md.
+#
+#  The unseal itself IS proven here, without device-mapper and without a guest:
+#  `systemd-cryptenroll --unlock-tpm2-device=…` only succeeds if the TPM2 slot
+#  actually unsealed, so using it to add a throwaway slot on a COPY of the
+#  volume is a real unseal with a readable exit status. Moving PCR 7 and doing
+#  it again is the matching refusal.
+
+ENROLL="$(cd "$HERE/../../system/libexec" && pwd)/apex-luks-enroll"
+# EFI_GLOBAL_VARIABLE. The production script reads SecureBoot and SetupMode
+# from here; the fixtures below write the real 5-byte shape (4 attribute bytes
+# then the value) rather than a byte, so a script that forgot the offset fails.
+ENROLL_SB_GUID=8be4df61-93ca-11d2-aa0d-00e098032b8c
+ENROLL_PASS=apex-bootlab-passphrase
+
+enroll_require() {
+    [[ -x "$ENROLL" ]] || die "no executable enrolment script at $ENROLL"
+    command -v swtpm >/dev/null || die "swtpm is missing from the boot lab"
+    command -v tpm2_pcrextend >/dev/null || die "tpm2-tools is missing from the boot lab"
+}
+
+# enroll_swtpm TAG PORT — a fresh software TPM, and the TCTI string for it.
+#
+# Its own state directory per scenario: a TPM whose state another scenario has
+# already written to makes "PCR 7 holds what we put there" depend on execution
+# order, which is the property fresh_vars exists to protect for EFI variables.
+ENROLL_TPM=""       # the systemd/tpm2-tools device string
+ENROLL_TPM_DIR=""
+enroll_swtpm() {
+    local tag="$1" port="$2"
+    ENROLL_TPM_DIR="$WORK/enroll-tpm-$tag"
+    rm -rf "$ENROLL_TPM_DIR"; mkdir -p "$ENROLL_TPM_DIR"
+    swtpm socket --tpm2 --tpmstate "dir=$ENROLL_TPM_DIR" \
+        --server "type=tcp,port=$port,bindaddr=127.0.0.1" \
+        --ctrl "type=tcp,port=$((port + 1)),bindaddr=127.0.0.1" \
+        --flags not-need-init,startup-clear \
+        --log "file=$ENROLL_TPM_DIR/swtpm.log,level=1" \
+        --pid "file=$ENROLL_TPM_DIR/swtpm.pid" --daemon \
+        || die "swtpm failed to start for '$tag' (see $ENROLL_TPM_DIR/swtpm.log)"
+    ENROLL_TPM="swtpm:host=127.0.0.1,port=$port"
+}
+
+enroll_swtpm_stop() {
+    [[ -f "${ENROLL_TPM_DIR:-}/swtpm.pid" ]] || return 0
+    kill "$(cat "$ENROLL_TPM_DIR/swtpm.pid")" 2>/dev/null || true
+    rm -f "$ENROLL_TPM_DIR/swtpm.pid"
+}
+
+# enroll_pcr7 HEX — extend PCR 7 in the current software TPM.
+#
+# WITHOUT THIS THE SB-ON SCENARIO WOULD TEST A STATE NO SECURE-BOOT MACHINE IS
+# EVER IN. A bare swtpm has PCR 7 at 64 zeros; systemd enrols against it anyway
+# and prints "PCR policy effectively unenforced", and the policy hash is
+# non-zero either way — so a hash-only assertion would pass on a volume bound to
+# a register anybody can set. Real firmware extends PCR 7 before handing over,
+# and the production script treats that warning as a refusal, so the fixture has
+# to put the register in the state the refusal is written for.
+enroll_pcr7() {
+    TPM2TOOLS_TCTI="$ENROLL_TPM" tpm2_pcrextend "7:sha256=$1" >/dev/null \
+        || die "could not extend PCR 7 in the software TPM"
+}
+
+# enroll_volume PATH — a LUKS2 volume with a known passphrase, and a key file
+# holding it so nothing below has to drive a prompt.
+#
+# pbkdf2 at the minimum iteration count: this is a throwaway header in a test
+# and argon2id's default memory cost turns each of these scenarios into minutes.
+# It is NOT what an APEX machine uses, and nothing here configures one.
+ENROLL_KEYFILE=""
+enroll_volume() {
+    local img="$1"
+    ENROLL_KEYFILE="$WORK/enroll-key.txt"
+    printf '%s' "$ENROLL_PASS" > "$ENROLL_KEYFILE"
+    chmod 600 "$ENROLL_KEYFILE"
+    rm -f "$img"
+    truncate -s 48M "$img"
+    cryptsetup luksFormat --type luks2 --batch-mode \
+        --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
+        --label APEXENROLLLAB "$img" "$ENROLL_KEYFILE" >&2 \
+        || die "could not create a LUKS2 volume at $img"
+}
+
+# enroll_root TAG SECUREBOOT SETUPMODE WITH_TPM_NODE — the fixture the
+# production script probes with --probe-root.
+#
+# An efivar is 4 bytes of attributes then the value, so these are 5 bytes with
+# the state in byte 5. The whole 5-byte shape is written, not just the value
+# byte, so that a script which read byte 1 instead of byte 5 would report
+# SecureBoot as 7 on every fixture and fail rather than accidentally agree.
+enroll_root() {
+    local tag="$1" sb="$2" setup="$3" tpmnode="$4"
+    local root="$WORK/enroll-root-$tag"
+    rm -rf "$root"
+    mkdir -p "$root/sys/firmware/efi/efivars" "$root/dev" "$root/run/systemd"
+    # Written with python3 rather than printf: a 5-byte file with a NUL in it
+    # is exactly the shape `printf` is worst at, and an efivar fixture that
+    # silently came out 4 bytes would make the production script's offset
+    # arithmetic untested rather than wrong.
+    python3 -c 'import sys; open(sys.argv[1], "wb").write(bytes([7, 0, 0, 0, int(sys.argv[2])]))' \
+        "$root/sys/firmware/efi/efivars/SecureBoot-$ENROLL_SB_GUID" "$sb"
+    python3 -c 'import sys; open(sys.argv[1], "wb").write(bytes([7, 0, 0, 0, int(sys.argv[2])]))' \
+        "$root/sys/firmware/efi/efivars/SetupMode-$ENROLL_SB_GUID" "$setup"
+    # The TPM device node. The production script tests the NODE and not
+    # /sys/class/tpm, because sysfs inside this container is the BUILD BOX's —
+    # `systemd-cryptenroll --tpm2-device=list` in here prints katana's real TPM.
+    # A regular file is enough to prove the branch is not taken; the node test
+    # is `-c`, so the scenario that wants "TPM present" names its device
+    # explicitly instead of relying on this.
+    # The production script's test is `-c`, so the fixture has to satisfy `-c`
+    # or the present-node arm of that check never runs. podman drops CAP_MKNOD,
+    # so mknod fails here — a SYMLINK TO /dev/null is a character device by
+    # every test `-c` makes, cannot be mistaken for a TPM by anything that
+    # opens it, and needs no capability. mknod is still tried first, so a lab
+    # with the capability gets the real thing.
+    if [[ "$tpmnode" == yes ]]; then
+        mknod "$root/dev/tpmrm0" c 10 224 2>/dev/null \
+            || ln -sf /dev/null "$root/dev/tpmrm0"
+    fi
+    printf '%s\n' "$root"
+}
+
+# enroll_run OUT_PREFIX ARGS... — run the shipped script, capturing both
+# streams separately, and print the exit status.
+#
+# The two streams are kept apart on purpose: the contract with the installer is
+# that STDOUT carries machine lines and STDERR carries the prose for a person.
+# A scenario that grepped a merged log could not tell the two apart and would
+# pass a script that printed its machine lines into the prose.
+# Every scenario in this family is bounded. Nothing here may wait for a person.
+#
+# MEASURED, TWICE, AND THE FIRST FIX WAS NOT ENOUGH. `systemd-cryptenroll
+# --tpm2-with-pin=yes` asks for the new PIN, and the harness sat on that prompt
+# for seven minutes with fifteen green lines already printed above it. Closing
+# stdin looked like the fix; it is not. With stdin on /dev/null and no terminal
+# at all, the same command blocked for THIRTY-SIX MINUTES inside the container,
+# because systemd falls back to its ask-password SOCKET protocol and waits for
+# an agent that will never come. `$NEWPIN` is what makes the non-interactive
+# path work, and a scenario that forgets it must FAIL rather than hang.
+#
+# So the bound is external and applies to every invocation. 120 s is roughly
+# forty times the slowest thing any of these scenarios legitimately does.
+ENROLL_TIMEOUT=120
+
+enroll_run() {
+    local prefix="$1"; shift
+    local rc=0
+    timeout "$ENROLL_TIMEOUT" "$ENROLL" "$@" \
+        >"$prefix.out" 2>"$prefix.err" </dev/null || rc=$?
+    # `timeout` reports 124 for a kill. Recorded in the captured stderr so the
+    # scenario's own assertions have something to read, rather than silently
+    # looking like a script that printed nothing.
+    (( rc == 124 )) && printf 'TIMED OUT after %ss\n' "$ENROLL_TIMEOUT" >>"$prefix.err"
+    printf '%s\n' "$rc"
+}
+
+# enroll_check DEV OUT — `--check`, bounded the same way. Prints the exit code.
+enroll_check() {
+    local dev="$1" out="$2" rc=0
+    timeout "$ENROLL_TIMEOUT" "$ENROLL" --check --device "$dev" \
+        >"$out" 2>&1 </dev/null || rc=$?
+    printf '%s\n' "$rc"
+}
+
+# enroll_field FILE KEY — the value of one `key: value` machine line, or empty.
+#
+# `|| true` because an absent field is an ANSWER here, not an error: several
+# assertions below are "this line is not present", and `$( )` under `set -e`
+# turns a grep miss into an abort of the whole harness.
+enroll_field() {
+    grep -m1 "^$2: " "$1" 2>/dev/null | cut -d' ' -f2- || true
+}
+
+# The recovery key opens the volume, and a mutated one does not.
+#
+# BOTH HALVES, ALWAYS. `--test-passphrase` needs no device-mapper, so this runs
+# unprivileged — and a check that only ever tries the right key cannot tell a
+# working recovery slot from a header that accepts anything.
+enroll_assert_recovery() {
+    local img="$1" key="$2" what="$3"
+    if [[ ! -s "$key" ]]; then bad "$what: no recovery key file at $key"; return; fi
+    local n; n="$(wc -c < "$key")"
+    assert_eq 71 "$n" "$what: recovery key length"
+    if grep -qE '^[a-z]{8}(-[a-z]{8}){7}$' "$key"; then
+        ok "$what: the recovery key is 8 modhex groups of 8"
+    else
+        bad "$what: the recovery key is not 8 modhex groups of 8"
+    fi
+    if cryptsetup open --test-passphrase --key-file "$key" "$img" >/dev/null 2>&1; then
+        ok "$what: the recovery key opens the volume"
+    else
+        bad "$what: the recovery key does NOT open the volume"
+    fi
+    # The control. One character changed; anything else is a header that would
+    # have accepted the empty string just as happily.
+    # One character changed, and changed to ANOTHER MODHEX CHARACTER. 'z' is
+    # not in systemd's modhex alphabet (cbdefghijklnrtuv), so a key mutated to
+    # 'z' would be refused for being malformed — which would leave "a wrong key
+    # is refused" untested while looking green.
+    local bad_key="$key.mutant"
+    sed 's/^c/b/; t; s/^./c/' "$key" > "$bad_key"
+    if files_same "$key" "$bad_key"; then
+        bad "$what: the mutated recovery key is identical to the real one — the control proves nothing"
+    elif cryptsetup open --test-passphrase --key-file "$bad_key" "$img" >/dev/null 2>&1; then
+        bad "$what: a MUTATED recovery key also opened the volume"
+    else
+        ok "$what: a mutated recovery key is refused (control)"
+    fi
+}
+
+# enroll_assert_unseal IMG WANT WHAT — does the TPM2 slot actually unseal?
+#
+# On a COPY, because the proof is destructive: `--unlock-tpm2-device` has to be
+# given something to DO, and the cheapest harmless thing is to add a recovery
+# slot. The copy is thrown away afterwards, so the volume every other assertion
+# reads stays exactly as the production script left it.
+enroll_assert_unseal() {
+    local img="$1" want="$2" what="$3"
+    local copy="$img.unseal-probe"
+    cp "$img" "$copy"
+    local rc=0
+    PASSWORD="" timeout "$ENROLL_TIMEOUT" systemd-cryptenroll \
+        --unlock-tpm2-device="$ENROLL_TPM" \
+        --recovery-key "$copy" >/dev/null 2>"$copy.err" </dev/null || rc=$?
+    if [[ "$want" == unseals ]]; then
+        if (( rc == 0 )); then ok "$what: the TPM2 slot unsealed the volume"
+        else bad "$what: the TPM2 slot did NOT unseal (rc=$rc): $(head -2 "$copy.err" | tr '\n' ' ')"; fi
+    else
+        if (( rc != 0 )); then ok "$what: the TPM2 slot REFUSED to unseal, as it must"
+        else bad "$what: the TPM2 slot unsealed when it should have refused"; fi
+    fi
+    rm -f "$copy"
+}
+
+# ── Secure Boot ON: a TPM slot, bound to PCR 7, with a policy ───────────────
+scenario_enroll_sb_on() {
+    log "enroll-sb-on: L-003, Secure Boot on — a TPM slot bound to PCR 7"
+    enroll_require
+    enroll_swtpm sbon 2341
+    trap enroll_swtpm_stop RETURN
+    # A value no firmware would produce, so nothing below can be reading a
+    # register some other part of the harness happened to extend.
+    enroll_pcr7 00000000000000000000000000000000000000000000000000000000000000a1
+
+    local root img rec rc
+    root="$(enroll_root sbon 1 0 yes)"
+    img="$WORK/enroll-sbon.img"
+    rec="$WORK/enroll-sbon.recovery-key"
+    enroll_volume "$img"
+
+    # NEWPIN IS SET ON THE DEFAULT ENROLMENT ON PURPOSE, and it is not a
+    # convenience. The default path asks for no PIN, so this variable is inert
+    # — which makes the `pin=no` assertion below a stronger claim than it looks:
+    # the enrolment had a PIN available for the taking and did not take it.
+    #
+    # It also makes the "PIN on by default" mutant die on the assertion written
+    # for it. MEASURED: without it that mutant was caught by the timeout bound
+    # instead, because an un-PINned `--tpm2-with-pin=yes` blocks on systemd's
+    # ask-password socket — a real kill, but one that never reaches `pin=no`, so
+    # the assertion this scenario exists to make went untested.
+    rc="$(NEWPIN=1234 enroll_run "$WORK/enroll-sbon" --device "$img" --recovery-out "$rec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$root")"
+    assert_eq 0 "$rc" "enroll-sb-on: exit status"
+
+    # ── the machine lines the installer reads ──────────────────────────────
+    local tpm2 tokens
+    tpm2="$(enroll_field "$WORK/enroll-sbon.out" tpm2)"
+    tokens="$(enroll_field "$WORK/enroll-sbon.out" tokens)"
+    info "tpm2: $tpm2"
+    assert_eq "systemd-recovery systemd-tpm2" "$tokens" "enroll-sb-on: tokens"
+    assert_eq "enrolled file=$rec" \
+        "$(enroll_field "$WORK/enroll-sbon.out" recovery)" "enroll-sb-on: recovery line"
+
+    # The binding is asserted EXACTLY, field by field, not with a pattern that
+    # any binding would satisfy. The hash is pulled out and checked separately
+    # because "a policy hash is present" and "a policy hash is not 32 zero
+    # bytes" are different claims, and the bare enrolment satisfies the first.
+    local want_prefix="enrolled binding=pcr7 pcrs=7 bank=sha256 hash="
+    case "$tpm2" in
+        "$want_prefix"*) ok "enroll-sb-on: bound to PCR 7 in the sha256 bank" ;;
+        *) bad "enroll-sb-on: tpm2 line is '$tpm2', expected to start '$want_prefix'" ;;
+    esac
+    case "$tpm2" in
+        *" pin=no") ok "enroll-sb-on: no PIN, with NEWPIN set and available to take" ;;
+        *) bad "enroll-sb-on: the default enrolment set a PIN: '$tpm2'" ;;
+    esac
+    local hash
+    hash="$(sed -n 's/.* hash=\([0-9a-f]*\).*/\1/p' <<<"$tpm2")"
+    if luks_pcr_is_real "$hash"; then
+        ok "enroll-sb-on: the policy hash is a real 32-byte digest ($hash)"
+    else
+        bad "enroll-sb-on: the policy hash is '$hash' — empty, short, or 32 zero bytes"
+    fi
+
+    # ── the seam: it SAID why it passed over the better binding ────────────
+    # The signed PCR 11 policy is the one this machine would rather have. There
+    # is no sd-stub in the fixture, so it must be skipped AND the skip must be
+    # legible — a silent fallback is how a machine that could have had the
+    # better binding quietly gets the worse one for ever.
+    if grep -q 'not using signed-pcr11' "$WORK/enroll-sbon.err"; then
+        ok "enroll-sb-on: it named the better binding it could not use"
+        info "$(grep -m1 'not using signed-pcr11' "$WORK/enroll-sbon.err")"
+    else
+        bad "enroll-sb-on: it fell back to PCR 7 without saying why signed-pcr11 was unavailable"
+    fi
+
+    # ── the gate, run separately against the volume it just wrote ──────────
+    local crc
+    crc="$(enroll_check "$img" "$WORK/enroll-sbon.check.out")"
+    assert_eq 0 "$crc" "enroll-sb-on: --check accepts the volume it enrolled"
+
+    # ── does it actually unseal, and does it stop when PCR 7 moves? ────────
+    enroll_assert_unseal "$img" unseals "enroll-sb-on"
+    enroll_pcr7 00000000000000000000000000000000000000000000000000000000000000a2
+    enroll_assert_unseal "$img" refuses "enroll-sb-on, PCR 7 moved"
+
+    # ── the recovery key still works after all of that ─────────────────────
+    enroll_assert_recovery "$img" "$rec" "enroll-sb-on"
+
+    # ── a register nobody extended is refused, and the slot is not left ───
+    #
+    # This is the branch the policy hash CANNOT catch. Enrolling against a PCR 7
+    # that is still 64 zeros produces a perfectly good-looking non-zero policy
+    # hash — measured in this lab — while binding to a register any root process
+    # can set to any value it likes. systemd says so on stderr and nowhere else,
+    # so the script reads its stderr, and this arm is what proves it does.
+    #
+    # A SECOND software TPM, on its own port, because the one above has had PCR 7
+    # extended three times by now and cannot be put back: tpm2_pcrreset answers
+    # "bad locality" for PCR 7 exactly as it does on silicon.
+    local zimg="$WORK/enroll-sbon-zero.img" zrec="$WORK/enroll-sbon-zero.recovery-key"
+    local hot_tpm="$ENROLL_TPM" hot_dir="$ENROLL_TPM_DIR"
+    enroll_swtpm sbon-zero 2343
+    enroll_volume "$zimg"
+    rc="$(enroll_run "$WORK/enroll-zero" --device "$zimg" --recovery-out "$zrec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$root")"
+    assert_eq 0 "$rc" "enroll-sb-on, PCR 7 never extended: exit status"
+    assert_eq "declined reason=pcr-uninitialised" \
+        "$(enroll_field "$WORK/enroll-zero.out" tpm2)" \
+        "enroll-sb-on, PCR 7 never extended: refused the unenforceable binding"
+    # And it did not leave the slot it had just created lying around. A refusal
+    # that reports a refusal while the keyslot stays enrolled is the worst of
+    # both: the user is told there is no TPM unlock and the disk has one.
+    assert_eq "systemd-recovery" \
+        "$(enroll_field "$WORK/enroll-zero.out" tokens)" \
+        "enroll-sb-on, PCR 7 never extended: the TPM slot was removed again"
+    enroll_assert_recovery "$zimg" "$zrec" "enroll-sb-on, PCR 7 never extended"
+    enroll_swtpm_stop
+    ENROLL_TPM="$hot_tpm"; ENROLL_TPM_DIR="$hot_dir"
+
+    # ── --with-pin is opt-in, and it shows its arithmetic ──────────────────
+    # A separate volume: the one above must keep pin=no so that assertion means
+    # what it says.
+    local pimg="$WORK/enroll-sbon-pin.img" prec="$WORK/enroll-sbon-pin.recovery-key"
+    enroll_volume "$pimg"
+    enroll_pcr7 00000000000000000000000000000000000000000000000000000000000000b1
+    rc="$(NEWPIN=1234 enroll_run "$WORK/enroll-pin" \
+            --device "$pimg" --recovery-out "$prec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$root" --with-pin)"
+    if (( rc == 0 )); then
+        case "$(enroll_field "$WORK/enroll-pin.out" tpm2)" in
+            *" pin=yes") ok "enroll-sb-on: --with-pin really sets a PIN" ;;
+            *) bad "enroll-sb-on: --with-pin did not produce pin=yes" ;;
+        esac
+        # The numbers, read off the part, and not the word "unknown" beside
+        # them: the script has an honest fallback for a TPM that will not
+        # answer, and a check that accepted the fallback would pass a script
+        # that had stopped asking.
+        if grep -qE 'TPM2_PT_MAX_AUTH_FAIL = 0x[0-9A-Fa-f]+' "$WORK/enroll-pin.err" \
+           && grep -qE 'TPM2_PT_LOCKOUT_INTERVAL = 0x[0-9A-Fa-f]+' "$WORK/enroll-pin.err" \
+           && grep -qE 'TPM2_PT_LOCKOUT_RECOVERY = 0x[0-9A-Fa-f]+' "$WORK/enroll-pin.err"; then
+            ok "enroll-sb-on: --with-pin read this part's lockout arithmetic off the chip"
+            info "$(grep -m1 'TPM2_PT_MAX_AUTH_FAIL' "$WORK/enroll-pin.err")"
+        elif grep -q 'would not report its lockout properties' "$WORK/enroll-pin.err"; then
+            cannot "enroll-sb-on: the software TPM would not report its lockout properties, so --with-pin could only say so"
+        else
+            bad "enroll-sb-on: --with-pin said nothing about the lockout counter at all"
+        fi
+        enroll_assert_recovery "$pimg" "$prec" "enroll-sb-on --with-pin"
+    else
+        # A software TPM that will not take a PIN is a lab limitation, not an
+        # APEX defect, and recording it as a failure would report the wrong
+        # thing. It is NOT recorded as a pass either.
+        cannot "enroll-sb-on: --with-pin exited $rc against swtpm: $(head -2 "$WORK/enroll-pin.err" | tr '\n' ' ')"
+    fi
+}
+
+# ── Secure Boot OFF: no TPM slot, and a reason a user can act on ───────────
+scenario_enroll_sb_off() {
+    log "enroll-sb-off: L-003, Secure Boot off — recovery key only, and it says why"
+    enroll_require
+    enroll_swtpm sboff 2351
+    trap enroll_swtpm_stop RETURN
+    enroll_pcr7 00000000000000000000000000000000000000000000000000000000000000c1
+
+    local root img rec rc
+    root="$(enroll_root sboff 0 0 yes)"
+    img="$WORK/enroll-sboff.img"
+    rec="$WORK/enroll-sboff.recovery-key"
+    enroll_volume "$img"
+
+    rc="$(enroll_run "$WORK/enroll-sboff" --device "$img" --recovery-out "$rec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$root")"
+    # EXIT 0 IS PART OF THE CONTRACT. The volume is usable and the recovery key
+    # is enrolled; an installer that read "no TPM slot" as a failed install
+    # would abort a perfectly good installation on a machine whose owner simply
+    # has not turned Secure Boot on.
+    assert_eq 0 "$rc" "enroll-sb-off: exit status (a declined TPM slot is not a failure)"
+
+    assert_eq "declined reason=secure-boot-off" \
+        "$(enroll_field "$WORK/enroll-sboff.out" tpm2)" "enroll-sb-off: tpm2 line"
+    # EXACTLY the recovery token. "contains systemd-recovery" would also pass on
+    # a volume that had quietly been given a TPM slot as well.
+    assert_eq "systemd-recovery" \
+        "$(enroll_field "$WORK/enroll-sboff.out" tokens)" "enroll-sb-off: tokens"
+    assert_eq "enrolled file=$rec" \
+        "$(enroll_field "$WORK/enroll-sboff.out" recovery)" "enroll-sb-off: recovery line"
+
+    # The reason has to be in words the user can act on, which means naming the
+    # thing to change and where. A slug alone is a machine talking to itself.
+    local err="$WORK/enroll-sboff.err"
+    if grep -qi 'Secure Boot is OFF' "$err"; then
+        ok "enroll-sb-off: it says Secure Boot is off, in those words"
+    else
+        bad "enroll-sb-off: the prose never says Secure Boot is off"
+    fi
+    if grep -qi 'turn Secure Boot on in the firmware setup' "$err"; then
+        ok "enroll-sb-off: it says what to change and where"
+    else
+        bad "enroll-sb-off: it does not tell the user what to do about it"
+    fi
+    if grep -qF -- "$rec" "$err"; then
+        ok "enroll-sb-off: it names the recovery key file the user must keep"
+    else
+        bad "enroll-sb-off: the prose never names the recovery key file"
+    fi
+
+    # --check agrees, from outside, that there is no TPM slot here.
+    local crc
+    crc="$(enroll_check "$img" "$WORK/enroll-sboff.check.out")"
+    assert_eq 0 "$crc" "enroll-sb-off: --check exit status"
+    assert_eq "absent" "$(enroll_field "$WORK/enroll-sboff.check.out" tpm2)" \
+        "enroll-sb-off: --check reports no TPM slot"
+
+    enroll_assert_recovery "$img" "$rec" "enroll-sb-off"
+
+    # ── setup mode is refused too, and for its own reason ──────────────────
+    # SecureBoot=1 in SETUP MODE means nothing: there is no platform key, so
+    # anyone can enrol their own and sign whatever they like. A check that only
+    # read SecureBoot would call this machine safe.
+    local sroot simg srec
+    sroot="$(enroll_root setupmode 1 1 yes)"
+    simg="$WORK/enroll-setupmode.img"
+    srec="$WORK/enroll-setupmode.recovery-key"
+    enroll_volume "$simg"
+    rc="$(enroll_run "$WORK/enroll-setupmode" --device "$simg" --recovery-out "$srec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$sroot")"
+    assert_eq 0 "$rc" "enroll-setup-mode: exit status"
+    assert_eq "declined reason=setup-mode" \
+        "$(enroll_field "$WORK/enroll-setupmode.out" tpm2)" \
+        "enroll-setup-mode: SecureBoot=1 in setup mode is still refused"
+    enroll_assert_recovery "$simg" "$srec" "enroll-setup-mode"
+}
+
+# ── No TPM at all: recovery key, and the firmware setting to look for ──────
+scenario_enroll_no_tpm() {
+    log "enroll-no-tpm: L-003, no TPM device — recovery key only"
+    enroll_require
+
+    local root img rec rc
+    # Secure Boot ON, so the only thing that can decline is the missing TPM.
+    # With it off, this scenario would pass while testing the previous one.
+    root="$(enroll_root notpm 1 0 no)"
+    img="$WORK/enroll-notpm.img"
+    rec="$WORK/enroll-notpm.recovery-key"
+    enroll_volume "$img"
+
+    # --tpm2-device is left at its default `auto`, which is the branch that
+    # looks for a device node. Naming a device would assert one exists.
+    rc="$(enroll_run "$WORK/enroll-notpm" --device "$img" --recovery-out "$rec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --probe-root "$root")"
+    assert_eq 0 "$rc" "enroll-no-tpm: exit status"
+    assert_eq "declined reason=no-tpm2-device" \
+        "$(enroll_field "$WORK/enroll-notpm.out" tpm2)" "enroll-no-tpm: tpm2 line"
+    assert_eq "systemd-recovery" \
+        "$(enroll_field "$WORK/enroll-notpm.out" tokens)" "enroll-no-tpm: tokens"
+
+    local err="$WORK/enroll-notpm.err"
+    if grep -qi 'PTT' "$err" && grep -qi 'fTPM' "$err"; then
+        ok "enroll-no-tpm: it names the firmware settings to look for"
+    else
+        bad "enroll-no-tpm: it does not say where a user would turn a TPM on"
+    fi
+
+    enroll_assert_recovery "$img" "$rec" "enroll-no-tpm"
+
+    # The control on the fixture itself. If enroll_root were writing the TPM
+    # node in both cases, the scenario above would be declining for the reason
+    # it declines everywhere, and would still be green.
+    local yesroot
+    yesroot="$(enroll_root notpm-control 1 0 yes)"
+    if [[ -e "$yesroot/dev/tpmrm0" && ! -e "$root/dev/tpmrm0" ]]; then
+        ok "enroll-no-tpm: the fixture really does differ in the TPM node (control)"
+    else
+        bad "enroll-no-tpm: the with-TPM and without-TPM fixtures are the same — the scenario proves nothing"
+    fi
+
+    # THE OTHER ARM. Everything above shows an absent node declines. Without
+    # this, a script that declined `no-tpm2-device` unconditionally would be
+    # green — the same shape as a gate that inspects nothing. The node has to be
+    # a real CHARACTER DEVICE for the branch to be exercised, and podman drops
+    # CAP_MKNOD by default, so a lab that cannot make one records COULD-NOT-RUN
+    # rather than passing or failing.
+    if [[ -c "$yesroot/dev/tpmrm0" ]]; then
+        local cimg="$WORK/enroll-notpm-control.img" crec="$WORK/enroll-notpm-control.recovery-key"
+        enroll_volume "$cimg"
+        rc="$(enroll_run "$WORK/enroll-notpm-control" --device "$cimg" \
+                --recovery-out "$crec" --unlock-key-file "$ENROLL_KEYFILE" \
+                --probe-root "$yesroot")"
+        # It will still fail to enrol — `auto` finds no TPM to talk to in this
+        # container — but it must fail for a DIFFERENT reason, which is the
+        # whole point: the node check is what separates the two fixtures.
+        case "$(enroll_field "$WORK/enroll-notpm-control.out" tpm2)" in
+            *no-tpm2-device*)
+                bad "enroll-no-tpm: a present TPM node still declined as no-tpm2-device — the node check is not what decided" ;;
+            *)  ok "enroll-no-tpm: a present TPM node does NOT decline as no-tpm2-device (control)" ;;
+        esac
+        enroll_assert_recovery "$cimg" "$crec" "enroll-no-tpm control"
+    else
+        cannot "enroll-no-tpm: could not create a character device at $yesroot/dev/tpmrm0 (podman drops CAP_MKNOD), so the present-node arm of the check is untested"
+    fi
+}
+
+# ── THE NEGATIVE CONTROL: a volume enrolled the bare way must be caught ────
+#
+#  This is the scenario that decides whether any of the others mean anything.
+#  Everything else checks that the production script's output matches what the
+#  production script was written to produce. This one enrols a volume WITHOUT
+#  the production script, the way `systemd-cryptenroll --tpm2-device=auto` does
+#  it by default, and requires the gate to reject it.
+#
+#  MEASURED, systemd 258.10, in this lab: that enrolment prints "New TPM2 token
+#  enrolled as key slot 1", exits 0, and writes `tpm2-pcrs: []`,
+#  `tpm2-policy-hash: <64 zeros>` and no `tpm2-pcr-bank` field at all. The
+#  object is sealed to the TPM's storage key and nothing else.
+scenario_enroll_bare_policy() {
+    log "enroll-bare-policy: L-003, the gate catches an enrolment bound to no PCRs"
+    enroll_require
+    enroll_swtpm bare 2361
+    trap enroll_swtpm_stop RETURN
+    enroll_pcr7 00000000000000000000000000000000000000000000000000000000000000d1
+
+    local img="$WORK/enroll-bare.img"
+    enroll_volume "$img"
+    # Deliberately NOT through the production script.
+    PASSWORD="$ENROLL_PASS" systemd-cryptenroll --tpm2-device="$ENROLL_TPM" \
+        --unlock-key-file="$ENROLL_KEYFILE" "$img" >&2 </dev/null \
+        || die "could not create the bare-enrolment control volume"
+
+    # The control is known-bad rather than assumed bad. If systemd ever changes
+    # its default to bind something, this says so instead of quietly turning the
+    # scenario into a test of nothing.
+    local shape
+    shape="$(cryptsetup luksDump --dump-json-metadata "$img" | python3 -c '
+import json, sys
+t = [v for v in json.load(sys.stdin).get("tokens", {}).values()
+     if v.get("type") == "systemd-tpm2"]
+if len(t) != 1:
+    print("no-single-tpm2-token"); raise SystemExit(0)
+print("pcrs=%s hash=%s" % (t[0].get("tpm2-pcrs"), t[0].get("tpm2-policy-hash")))
+')"
+    info "bare token: $shape"
+    if [[ "$shape" == "pcrs=[] hash=$(printf '0%.0s' {1..64})" ]]; then
+        ok "enroll-bare-policy: the control volume really is bound to no PCRs"
+    else
+        bad "enroll-bare-policy: the control is '$shape', not the empty policy this scenario exists to catch"
+    fi
+
+    # ── the gate ───────────────────────────────────────────────────────────
+    local rc
+    rc="$(enroll_check "$img" "$WORK/enroll-bare.out")"
+    cp "$WORK/enroll-bare.out" "$WORK/enroll-bare.err"
+    assert_eq 2 "$rc" "enroll-bare-policy: --check REFUSES the empty policy"
+    assert_eq "unsafe" "$(enroll_field "$WORK/enroll-bare.out" tpm2)" \
+        "enroll-bare-policy: --check machine line"
+    if grep -q 'binds NO PCRs at all' "$WORK/enroll-bare.err"; then
+        ok "enroll-bare-policy: it says what is wrong with the token"
+    else
+        bad "enroll-bare-policy: the refusal does not explain itself"
+    fi
+    if grep -q 'wipe-slot=tpm2' "$WORK/enroll-bare.err"; then
+        ok "enroll-bare-policy: it says how to undo it"
+    else
+        bad "enroll-bare-policy: the refusal offers no way forward"
+    fi
+
+    # ── the OTHER arm of the same gate ─────────────────────────────────────
+    # A gate that refuses everything is not a gate. The SB-on scenario asserts
+    # --check accepts a good volume, but it does so with the same swtpm and the
+    # same fixture; doing it again here, on a volume this scenario enrolled,
+    # means the refusal above cannot be an artefact of the gate always failing.
+    local goodimg="$WORK/enroll-bare-good.img" goodrec="$WORK/enroll-bare-good.recovery-key"
+    local root; root="$(enroll_root bare 1 0 yes)"
+    enroll_volume "$goodimg"
+    rc="$(enroll_run "$WORK/enroll-bare-good" --device "$goodimg" --recovery-out "$goodrec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$root")"
+    assert_eq 0 "$rc" "enroll-bare-policy: the good volume enrols"
+    rc="$(enroll_check "$goodimg" "$WORK/enroll-bare-good.check.out")"
+    assert_eq 0 "$rc" "enroll-bare-policy: --check ACCEPTS a volume bound to PCR 7 (both arms)"
+
+    # ── and the production script REPAIRS a volume that already has the bad
+    #    token, rather than stacking a second one beside it ─────────────────
+    local fiximg="$WORK/enroll-bare-fix.img" fixrec="$WORK/enroll-bare-fix.recovery-key"
+    cp "$img" "$fiximg"
+    rc="$(enroll_run "$WORK/enroll-bare-fix" --device "$fiximg" --recovery-out "$fixrec" \
+            --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
+            --probe-root "$root")"
+    assert_eq 0 "$rc" "enroll-bare-policy: re-enrolling over the bad token"
+    assert_eq "systemd-recovery systemd-tpm2" \
+        "$(enroll_field "$WORK/enroll-bare-fix.out" tokens)" \
+        "enroll-bare-policy: exactly one TPM token afterwards, not two"
+    case "$(enroll_field "$WORK/enroll-bare-fix.out" tpm2)" in
+        "enrolled binding=pcr7 pcrs=7 bank=sha256 hash="*)
+            ok "enroll-bare-policy: the repaired volume is bound to PCR 7" ;;
+        *)  bad "enroll-bare-policy: the repaired volume is still not bound to PCR 7" ;;
+    esac
+    rc="$(enroll_check "$fiximg" "$WORK/enroll-bare-fix.check.out")"
+    assert_eq 0 "$rc" "enroll-bare-policy: --check now accepts the repaired volume"
+    enroll_assert_recovery "$fiximg" "$fixrec" "enroll-bare-policy, repaired"
 }
 
 # ── run ─────────────────────────────────────────────────────────────────────
