@@ -247,7 +247,7 @@ if (( CHECK_ONLY )); then
             say "${report#bad }"
             say ""
             say "Remove it with:  systemd-cryptenroll --wipe-slot=tpm2 $DEVICE"
-            say "then re-run $PROG to add one this machine can actually enforce."
+            say "then re-run $PROG to add one this machine can enforce."
             rc=2
             ;;
         *) die "could not read the TPM2 token back: $report" ;;
