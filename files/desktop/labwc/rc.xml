@@ -185,17 +185,58 @@
     <!-- SUPER+SHIFT+SPACE is "toggle floating" on Hyprland. labwc stacks, so
          every window already floats and there is nothing to toggle; the key is
          kept on the nearest useful behaviour rather than left dead. -->
+    <!-- ── Alt-Tab: the APEX Shell window switcher ──────────────────────────
+         Every window on every desktop, most-recently-used first, drawn by the
+         shell so the Hyprland and Floating sessions show the SAME switcher.
+
+         labwc's own NextWindow/PreviousWindow are not bound any more. They are
+         good — `workspace="all"` would have given the cross-desktop half of
+         what Andre asked for in one attribute — but they are labwc's, and a
+         user who moves between the two sessions would get a different switcher
+         in each. The <windowSwitcher> block above still configures them for
+         anyone who binds them again by hand.
+
+         Hold Alt, tap Tab, release Alt. The RELEASE is a keybind here rather
+         than something the shell watches for: a switcher surface that took
+         keyboard focus in order to see the Alt release would be taking focus
+         off the window it is about to activate, which is the defect this whole
+         change exists to remove. So the shell's overlay never asks for the
+         keyboard, and labwc reports the release instead.
+
+         onRelease fires on EVERY Alt release, not only while the switcher is
+         open, which is why the command is /usr/libexec/apex-switcher and not
+         `apex shell …`: with nothing open the helper does one `[ -e ]` on a
+         file under XDG_RUNTIME_DIR and exits.
+
+         Both Alt keys, because a switch started with the right-hand one has to
+         be finishable with it. -->
     <keybind key="A-Tab">
-      <action name="NextWindow"/>
+      <action name="Execute" command="/usr/libexec/apex-switcher next"/>
     </keybind>
     <keybind key="A-S-Tab">
-      <action name="PreviousWindow"/>
+      <action name="Execute" command="/usr/libexec/apex-switcher prev"/>
+    </keybind>
+    <keybind key="A-Escape">
+      <action name="Execute" command="/usr/libexec/apex-switcher cancel"/>
+    </keybind>
+    <keybind key="Alt_L" onRelease="yes">
+      <action name="Execute" command="/usr/libexec/apex-switcher commit"/>
+    </keybind>
+    <keybind key="Alt_R" onRelease="yes">
+      <action name="Execute" command="/usr/libexec/apex-switcher commit"/>
     </keybind>
 
     <!-- Hyprland binds SUPER+arrows to movefocus. labwc has NO directional
          focus action — `Focus` takes no arguments, because a stacking
          compositor has no spatial grid to traverse. Alt-Tab above is the
-         equivalent, so the arrows move the window instead. -->
+         equivalent, so the arrows move the window instead.
+
+         What the arrows DO get is a WarpCursor, generated into the block below
+         alongside every MoveToEdge and SnapToEdge. Moving a window out from
+         under a stationary pointer is the labwc spelling of exactly the bug
+         Andre reported on Hyprland: <followMouse>yes</followMouse> then hands
+         focus to whatever the move uncovered. Carrying the pointer with the
+         window keeps the window you just moved focused. -->
 
     <!-- SUPER+SHIFT+arrows is "move window" on Hyprland; snapping to an edge is
          the stacking analogue. -->
@@ -301,18 +342,22 @@
     </keybind>
     <keybind key="W-Down">
       <action name="MoveToEdge" direction="down"/>
+      <action name="WarpCursor" to="window"/>
     </keybind>
     <keybind key="W-Left">
       <action name="MoveToEdge" direction="left"/>
+      <action name="WarpCursor" to="window"/>
     </keybind>
     <keybind key="W-Right">
       <action name="MoveToEdge" direction="right"/>
+      <action name="WarpCursor" to="window"/>
     </keybind>
     <keybind key="W-b">
       <action name="Execute" command="apex shell focus"/>
     </keybind>
     <keybind key="W-Up">
       <action name="MoveToEdge" direction="up"/>
+      <action name="WarpCursor" to="window"/>
     </keybind>
     <keybind key="W-A-h">
       <action name="Execute" command="apex shell network hotspot"/>
@@ -328,15 +373,19 @@
     </keybind>
     <keybind key="W-S-Down">
       <action name="SnapToEdge" direction="down"/>
+      <action name="WarpCursor" to="window"/>
     </keybind>
     <keybind key="W-S-Left">
       <action name="SnapToEdge" direction="left"/>
+      <action name="WarpCursor" to="window"/>
     </keybind>
     <keybind key="W-S-Right">
       <action name="SnapToEdge" direction="right"/>
+      <action name="WarpCursor" to="window"/>
     </keybind>
     <keybind key="W-S-Up">
       <action name="SnapToEdge" direction="up"/>
+      <action name="WarpCursor" to="window"/>
     </keybind>
     <keybind key="W-S-1">
       <action name="SendToDesktop" to="1"/>
