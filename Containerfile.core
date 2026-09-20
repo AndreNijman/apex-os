@@ -2,7 +2,8 @@
 # APEX-OS — CORE image (heavy, slow-moving foundation)
 #
 #   fedora-bootc:43
-#     → CachyOS perf kernel swap + MOK signing                [own RUNs]
+#     → APEX's own kernel, from Containerfile.kernel + MOK    [own RUNs]
+#       (the COMPILE is its own tier; this installs and signs the RPMs)
 #     → out-of-tree modules (nvidia, xone, xpadneo) + MOK     [own RUNs]
 #       module signing, NVIDIA userspace, nouveau/KMS config
 #     → hardware-enablement firmware                          [own RUN]

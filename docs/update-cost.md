@@ -49,7 +49,8 @@ The image is now built in three tiers instead of two:
 
 | Tier | File | Contents | Rebuilds when |
 |------|------|----------|---------------|
-| **core** | `Containerfile.core` | kernel + MOK signing, firmware, desktop/greeter stack, scx, Bazaar, codecs, baked apps, printing, input methods, fonts, dev toolchain, zsh/starship, awww/matugen/yazi, OS branding & locale | `Containerfile.core` or `kernel/**` changes · `force_core` · the weekly cron finds a **new** `fedora-bootc` digest |
+| **kernel** | `Containerfile.kernel` | the kernel itself, compiled from pinned source with a pinned `dwarves` | `kernel/**` changes — i.e. `kernel/kernel.pin` moves |
+| **core** | `Containerfile.core` | kernel *install* + MOK signing, firmware, desktop/greeter stack, scx, Bazaar, codecs, baked apps, printing, input methods, fonts, dev toolchain, zsh/starship, awww/matugen/yazi, OS branding & locale | `Containerfile.core` or `kernel/**` changes · `force_core` · the weekly cron finds a **new** `fedora-bootc` digest |
 | **base** | `Containerfile.base` | apexd + apex CLI, sysprofiles, D-Bus/polkit/units, every `files/**` COPY, the vendored APEX Shell | `Containerfile.base`, `apexd/**`, `config/**`, `files/**` change, or core rebuilt |
 | **image** | `Containerfile.apex` | edition stamp, gaming-session files, Plymouth theme, final initramfs | every run |
 
@@ -70,6 +71,52 @@ digests, so `bootc` recognises blobs it already has and downloads none of them.
 That is the whole mechanism. It needs no build cache and no registry cache, and
 it cannot silently stop working: if the core digest moves, the layers move; if
 it does not, they do not.
+
+### The fourth tier: the kernel
+
+APEX builds its own kernel (`ROADMAP/evidence/kernel-build-20260920.md` says
+why — every kernel it shipped before was unable to load a sched-ext scheduler).
+That compile is ~45 minutes, and the obvious place for it is `core`, because
+the rule below says anything that compiles a third-party program goes there.
+
+It is not in `core`, for a reason this document is the right place to record:
+**`core` is built with no layer cache.** There is no `--cache-from` any more and
+scheduled and forced runs pass `--no-cache` outright. So a kernel compile inside
+`core` is paid in full on every `core` rebuild — and the "Rebuilds when" column
+above says `core` rebuilds for a `Containerfile.core` edit, a `force_core`, or a
+new `fedora-bootc` digest. None of those are kernel changes.
+
+The cost that matters is not the 45 minutes, though. It is that each of those
+rebuilds would produce a **different kernel binary**: new `vmlinuz`, new
+modules, new BTF, akmods rebuilt against it and re-signed — all as a side effect
+of an edit that had nothing to do with the kernel, with nothing tying the kernel
+to its own inputs. `kernel/kernel.pin` exists so that the kernel moves when the
+kernel's inputs move and at no other time.
+
+So the kernel uses the same mechanism `base` uses to consume `core`: a
+separately published image, pinned by digest. `Containerfile.core` keeps the
+`dnf` transaction that *installs* the RPMs — which is what the rule below is
+actually about — and gets them from the kernel image:
+
+```dockerfile
+ARG APEX_KERNEL_IMAGE=localhost/apex-kernel:local
+FROM ${APEX_KERNEL_IMAGE} AS kernel-rpms
+…
+COPY --from=kernel-rpms /rpms     /tmp/apex-kernel-rpms
+COPY --from=kernel-rpms /manifest /tmp/apex-kernel-manifest
+```
+
+**The fleet download cost is unchanged.** `core` moving is a full multi-gigabyte
+download either way; the kernel image itself is never pulled by a user, only by
+the `core` build. What changes is that `core` stops moving for kernel reasons
+and the kernel stops moving for `core` reasons.
+
+Two things cross this new tier boundary and must survive any future edit, in the
+same way `/usr/lib/apex-kver` crosses core→gaming: the manifest's `btf_scx`
+verdict, which `core` refuses to install without, and its `kver`, which `core`
+checks against the kernel that actually landed in the rpmdb. Both are copied to
+`/usr/share/apex-os/kernel/` so a running machine can answer what it is booting
+and what built its BTF.
 
 ### The rule for new content
 
