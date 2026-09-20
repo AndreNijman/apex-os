@@ -43,8 +43,13 @@ unknowable() { echo "UNKNOWN: $*"; unknown=$((unknown + 1)); }
 current() { echo "current: $*"; }
 
 [ -s "${PIN}" ] || { echo "UNKNOWN: no ${PIN}"; exit 2; }
-# shellcheck disable=SC1090
-set -a; . "${PIN}"; set +a
+set -a
+# The directive has to sit directly above the `.` and nothing else: written as
+# `set -a; . "${PIN}"; set +a` on one line it attaches to `set -a`, leaves
+# SC1090 live, and fails tests/check-shellcheck-coverage.sh.
+# shellcheck source=/dev/null
+. "${PIN}"
+set +a
 
 echo "kernel/kernel.pin: KERNEL_TAG=${KERNEL_TAG} DWARVES_NVR=${DWARVES_NVR}"
 echo
