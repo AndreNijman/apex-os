@@ -38,6 +38,7 @@ use apexd_core::game::{
     CGROUP_ROOT,
 };
 use apexd_core::irq;
+use apexd_core::kernelbtf::{scx_btf_support, ScxBtf};
 use apexd_core::syswriter::{Outcome, ScxState};
 use apexd_core::tier::{Action, Tier};
 use apexd_core::topology::CoreTopology;
@@ -98,6 +99,20 @@ pub struct ScxReport {
     /// What the kernel reported afterwards, read by the daemon rather than
     /// inferred from `applied`.
     pub observed: Option<ScxState>,
+    /// Whether this kernel's BTF can accept a sched-ext scheduler AT ALL,
+    /// read straight out of `/sys/kernel/btf/vmlinux`.
+    ///
+    /// The round before this one made `not loaded` honest. This makes it
+    /// *useful*: on every APEX image to date the answer is `not loaded`
+    /// permanently, because 22 sched-ext kfuncs in the shipped kernel's BTF
+    /// still carry the verifier's implicit `struct bpf_prog_aux *` argument
+    /// and `libbpf` rejects every `scx_*` scheduler as
+    /// `func_proto incompatible with vmlinux`. "Nothing attached this time"
+    /// and "nothing can ever attach on this kernel" are different facts and a
+    /// user acts on them differently.
+    ///
+    /// `None` only when the probe was not run.
+    pub btf: Option<ScxBtf>,
 }
 
 impl ScxReport {
@@ -150,7 +165,22 @@ impl ScxReport {
             }
             _ => String::new(),
         };
-        format!("asked for {want}; {said}; {seen}{mismatch}")
+        // The kernel-build clause, and ONLY when the kernel did not end up
+        // with a scheduler attached. When one IS attached the BTF is evidently
+        // fine and the clause would be noise on the one line a user reads.
+        //
+        // It goes last because it is the thing that changes what a person does
+        // next: `not loaded` on a kernel that CAN load one is a bug report
+        // about APEX; `not loaded` on a kernel whose BTF rejects every
+        // scheduler is a kernel to wait for, and no amount of retrying,
+        // reconfiguring or reinstalling will move it.
+        let kernel = match &self.btf {
+            Some(b) if b.blocks_loading() && self.verdict() != "loaded" => {
+                format!(" — {}", b.describe())
+            }
+            _ => String::new(),
+        };
+        format!("asked for {want}; {said}; {seen}{mismatch}{kernel}")
     }
 
     /// The single note the session carries, or `None` when nothing was asked.
@@ -447,6 +477,19 @@ impl Ctx {
         // changes nothing — the exact shape of the defect on katana.
         if scx.requested.is_some() {
             scx.observed = Some(self.writer.scx_state());
+            // And the question `scx_state` cannot answer: whether a scheduler
+            // could EVER have attached to this kernel. Read from the same
+            // `sys_root` as everything else, so a fixture answers it too.
+            //
+            // Deliberately read even when the load succeeded: a `loaded`
+            // session with a BTF the probe calls broken would mean the probe
+            // is wrong, and the only way that is ever noticed is if the
+            // reading is taken when it is not needed.
+            let btf = scx_btf_support(&self.sys_root);
+            if btf.blocks_loading() {
+                eprintln!("apexd: game: {}", btf.describe());
+            }
+            scx.btf = Some(btf);
         }
 
         let mut notes = plan.notes.clone();
@@ -729,6 +772,23 @@ impl Ctx {
                 );
                 insert(&mut m, "scx_state", Value::from(s.scx.verdict().to_string()));
                 insert(&mut m, "scx_detail", Value::from(s.scx.detail()));
+                // The fourth sched-ext key, and the one that says whether
+                // `scx_state` is ever going to read anything else on this
+                // machine. `ok`, `implicit-args`, `no-sched-ext`, `absent` or
+                // `unreadable`; `not probed` when nothing asked for a
+                // scheduler, which is the same shape as `scx_requested`.
+                insert(
+                    &mut m,
+                    "scx_btf",
+                    Value::from(
+                        s.scx
+                            .btf
+                            .as_ref()
+                            .map(|b| b.verdict())
+                            .unwrap_or("not probed")
+                            .to_string(),
+                    ),
+                );
                 insert(&mut m, "pids", Value::from(s.pids.clone()));
                 insert(&mut m, "notes", Value::from(s.notes.clone()));
                 // `owner_pid` is 0 when nothing is watching this session. It is
@@ -760,13 +820,26 @@ impl Ctx {
                 // katana qualification quoted sched_ext/state as a release
                 // discriminator when it had read `disabled` throughout.
                 let live = apexd_core::syswriter::read_scx_state(&self.sys_root);
+                // And whether this kernel could accept one if it were asked.
+                // This is the reading a person takes BEFORE ever starting
+                // Gaming Mode, and on every APEX image to date it is the one
+                // that decides the answer — so the idle surface carries it
+                // too, rather than making somebody start a session to find out
+                // that no session can work.
+                let btf = scx_btf_support(&self.sys_root);
                 insert(
                     &mut m,
                     "scx_requested",
                     Value::from(cfg.scx.trim().to_string()),
                 );
                 insert(&mut m, "scx_state", Value::from(live.verdict().to_string()));
-                insert(&mut m, "scx_detail", Value::from(live.describe()));
+                let detail = if btf.blocks_loading() {
+                    format!("{} — {}", live.describe(), btf.describe())
+                } else {
+                    live.describe()
+                };
+                insert(&mut m, "scx_detail", Value::from(detail));
+                insert(&mut m, "scx_btf", Value::from(btf.verdict().to_string()));
             }
         }
         m
@@ -1694,6 +1767,257 @@ mod tests {
             !notes_of(&st).iter().any(|n| n.contains("sched-ext")),
             "a profile that asks for nothing must not mention it: {:?}",
             notes_of(&st)
+        );
+    }
+
+    // ── P1-043: whether this KERNEL can take a scheduler at all ─────────────
+    //
+    // `scx_state : not loaded` was the round-before's fix and it is honest.
+    // It is also, on every APEX image to date, permanent — 22 sched-ext kfuncs
+    // in the shipped kernel's BTF carry the verifier's implicit
+    // `struct bpf_prog_aux *` argument and libbpf rejects every scheduler with
+    // `func_proto incompatible with vmlinux`. These rows are about the
+    // difference between "nothing attached this time" and "nothing can ever
+    // attach here", which is the difference between a bug report and a wait.
+
+    /// A hand-rolled BTF blob carrying one `scx_bpf_*` kfunc, with or without
+    /// the verifier's implicit trailing `struct bpf_prog_aux *`.
+    ///
+    /// Written out by hand rather than reusing `apexd-core`'s test builder
+    /// (which is `#[cfg(test)]` and so invisible from here) and rather than
+    /// checking in a 6.6 MB real `vmlinux` BTF. It is the file the probe
+    /// reads, so these rows exercise the parser and the plumbing together.
+    fn btf_blob(kfunc: &str, with_aux: bool) -> Vec<u8> {
+        let mut strings: Vec<u8> = vec![0];
+        let intern = |s: &str, strings: &mut Vec<u8>| -> u32 {
+            let off = strings.len() as u32;
+            strings.extend_from_slice(s.as_bytes());
+            strings.push(0);
+            off
+        };
+        let n_u64 = intern("u64", &mut strings);
+        let n_aux = intern("bpf_prog_aux", &mut strings);
+        let n_arg = intern("dsq_id", &mut strings);
+        let n_impl = intern("aux", &mut strings);
+        let n_fn = intern(kfunc, &mut strings);
+
+        let mut types: Vec<u8> = Vec::new();
+        let mut rec = |name_off: u32, kind: u32, vlen: u32, sot: u32, tail: &[u8]| {
+            let info = (kind << 24) | (vlen & 0xffff);
+            types.extend_from_slice(&name_off.to_le_bytes());
+            types.extend_from_slice(&info.to_le_bytes());
+            types.extend_from_slice(&sot.to_le_bytes());
+            types.extend_from_slice(tail);
+        };
+        rec(n_u64, 1, 0, 8, &0u32.to_le_bytes()); // 1: INT u64
+        rec(n_aux, 4, 0, 0, &[]); // 2: STRUCT bpf_prog_aux
+        rec(0, 2, 0, 2, &[]); // 3: PTR -> 2
+        let mut params: Vec<u8> = Vec::new();
+        params.extend_from_slice(&n_arg.to_le_bytes());
+        params.extend_from_slice(&1u32.to_le_bytes());
+        let mut vlen = 1;
+        if with_aux {
+            params.extend_from_slice(&n_impl.to_le_bytes());
+            params.extend_from_slice(&3u32.to_le_bytes());
+            vlen = 2;
+        }
+        rec(0, 13, vlen, 1, &params); // 4: FUNC_PROTO
+        rec(n_fn, 12, 1, 4, &[]); // 5: FUNC
+
+        let hdr_len: u32 = 24;
+        let type_len = types.len() as u32;
+        let str_len = strings.len() as u32;
+        let mut out = Vec::new();
+        out.extend_from_slice(&0xeb9fu16.to_le_bytes());
+        out.push(1);
+        out.push(0);
+        out.extend_from_slice(&hdr_len.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // type_off
+        out.extend_from_slice(&type_len.to_le_bytes());
+        out.extend_from_slice(&type_len.to_le_bytes()); // str_off
+        out.extend_from_slice(&str_len.to_le_bytes());
+        out.extend_from_slice(&types);
+        out.extend_from_slice(&strings);
+        out
+    }
+
+    /// [`scx_status`], with a `/sys/kernel/btf/vmlinux` under the same root.
+    async fn scx_status_with_btf(
+        tag: &str,
+        outcome: Outcome,
+        state: ScxState,
+        btf: Option<Vec<u8>>,
+    ) -> HashMap<String, OwnedValue> {
+        let root = scratch(tag);
+        if let Some(bytes) = btf {
+            let d = root.join("kernel/btf");
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("vmlinux"), bytes).unwrap();
+        }
+        let irq_root = hybrid_machine(&root);
+        let ctx = build_ctx(
+            &root,
+            PROFILE_SCX,
+            &irq_root,
+            Arc::new(ScxWriter { outcome, state }),
+        );
+        ctx.game_enter(&[]).await.unwrap();
+        ctx.game_status().await
+    }
+
+    #[tokio::test]
+    async fn a_kernel_whose_btf_refuses_every_scheduler_says_which_kind_of_not_loaded() {
+        let st = scx_status_with_btf(
+            "scx-btf-broken",
+            Outcome::Refused(
+                "scxctl start -s scx_lavd reported success, but sched_ext/state is still \
+                 disabled after 2s — no scheduler attached"
+                    .into(),
+            ),
+            ScxState::Disabled,
+            Some(btf_blob("scx_bpf_create_dsq", true)),
+        )
+        .await;
+        assert_eq!(str_of(&st, "scx_state"), "not loaded");
+        assert_eq!(str_of(&st, "scx_btf"), "implicit-args");
+        let detail = str_of(&st, "scx_detail");
+        assert!(
+            detail.contains("scx_bpf_create_dsq"),
+            "the kfunc has to be named — it is the string a reader matches \
+             against scx_loader's own journal line: {detail}"
+        );
+        assert!(
+            detail.contains("bpf_prog_aux"),
+            "and the argument that should not be there: {detail}"
+        );
+        assert!(
+            detail.contains("NO sched-ext scheduler can load"),
+            "a user has to be able to tell this apart from a transient failure: {detail}"
+        );
+        // Both halves survive: the kernel clause is added, never substituted.
+        assert!(
+            detail.contains("sched_ext/state is disabled"),
+            "the sysfs reading must still be there: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_kernel_whose_btf_is_fine_gets_no_kernel_clause() {
+        // The other direction, and the one that makes the row above mean
+        // something: the SAME refusal over a good BTF must not acquire a
+        // sentence blaming the kernel.
+        let st = scx_status_with_btf(
+            "scx-btf-ok",
+            Outcome::Refused("scxctl start -s scx_lavd: no such scheduler".into()),
+            ScxState::Disabled,
+            Some(btf_blob("scx_bpf_create_dsq", false)),
+        )
+        .await;
+        assert_eq!(str_of(&st, "scx_state"), "not loaded");
+        assert_eq!(str_of(&st, "scx_btf"), "ok");
+        let detail = str_of(&st, "scx_detail");
+        assert!(
+            !detail.contains("bpf_prog_aux"),
+            "nothing is wrong with this kernel's BTF: {detail}"
+        );
+        assert!(
+            !detail.contains("NO sched-ext scheduler can load"),
+            "and saying so here would be the defect this probe exists to avoid: {detail}"
+        );
+        // The clause must be ABSENT, not merely harmless. Asserting only on
+        // the alarming words let a mutation that appends the BTF sentence
+        // unconditionally pass the whole suite, because the `Usable` sentence
+        // contains none of them — a gate that runs and inspects nothing, in
+        // this unit's own work.
+        assert!(
+            !detail.contains("kernel BTF"),
+            "a kernel with nothing wrong with it earns no clause at all: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_btf_that_could_not_be_read_blames_nothing() {
+        // A probe that cannot see is not a probe that saw a broken kernel.
+        // `absent` is reported, and no reason is attached to `scx_detail`.
+        let st = scx_status_with_btf(
+            "scx-btf-absent",
+            Outcome::Refused("scxctl start -s scx_lavd: refused".into()),
+            ScxState::Disabled,
+            None,
+        )
+        .await;
+        assert_eq!(str_of(&st, "scx_btf"), "absent");
+        let detail = str_of(&st, "scx_detail");
+        assert!(!detail.contains("bpf_prog_aux"), "{detail}");
+        assert!(
+            !detail.contains("kernel BTF"),
+            "a probe that could not look has nothing to add to the sentence: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_loaded_scheduler_is_not_argued_with() {
+        // If the kernel says a scheduler IS attached, the BTF is evidently
+        // adequate whatever the probe thinks, and the clause would be noise on
+        // the one line a user reads. `scx_btf` still reports the reading, so
+        // the disagreement is visible rather than swallowed.
+        let st = scx_status_with_btf(
+            "scx-btf-loaded",
+            Outcome::Landed,
+            ScxState::Enabled {
+                ops: Some("lavd".into()),
+            },
+            Some(btf_blob("scx_bpf_create_dsq", true)),
+        )
+        .await;
+        assert_eq!(str_of(&st, "scx_state"), "loaded");
+        assert_eq!(str_of(&st, "scx_btf"), "implicit-args");
+        assert!(
+            !str_of(&st, "scx_detail").contains("NO sched-ext scheduler can load"),
+            "{}",
+            str_of(&st, "scx_detail")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_idle_surface_answers_before_anybody_starts_a_session() {
+        // The reading a person takes first, and the one §6.8 of the run-book
+        // opens with. Making somebody start Gaming Mode to discover that no
+        // Gaming Mode session can work is the wrong order.
+        let root = scratch("scx-btf-idle");
+        let d = root.join("kernel/btf");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("vmlinux"), btf_blob("scx_bpf_create_dsq", true)).unwrap();
+        let irq_root = hybrid_machine(&root);
+        let ctx = build_ctx(&root, PROFILE_SCX, &irq_root, Arc::new(MockWriter::new()));
+        // No `game_enter`: this is the idle branch of `game_status`.
+        let st = ctx.game_status().await;
+        assert_eq!(str_of(&st, "scx_requested"), "scx_lavd");
+        assert_eq!(str_of(&st, "scx_btf"), "implicit-args");
+        let detail = str_of(&st, "scx_detail");
+        assert!(
+            detail.contains("scx_bpf_create_dsq") && detail.contains("NO sched-ext scheduler"),
+            "the idle surface has to carry the reason too: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_idle_surface_does_not_invent_a_reason_on_a_good_kernel() {
+        // Same row with the argument stripped. Without this pair the one above
+        // would pass against a status line that said this on every machine.
+        let root = scratch("scx-btf-idle-ok");
+        let d = root.join("kernel/btf");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("vmlinux"), btf_blob("scx_bpf_create_dsq", false)).unwrap();
+        let irq_root = hybrid_machine(&root);
+        let ctx = build_ctx(&root, PROFILE_SCX, &irq_root, Arc::new(MockWriter::new()));
+        let st = ctx.game_status().await;
+        assert_eq!(str_of(&st, "scx_btf"), "ok");
+        let detail = str_of(&st, "scx_detail");
+        assert!(!detail.contains("NO sched-ext scheduler"), "{detail}");
+        assert!(
+            !detail.contains("kernel BTF"),
+            "the idle surface earns no clause on a kernel with nothing wrong: {detail}"
         );
     }
 
