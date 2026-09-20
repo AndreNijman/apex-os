@@ -1283,17 +1283,22 @@ named failure.
   means `efibootmgr` and that is not something a script in this repository does
   near a real machine. On hardware, `bootctl install` creates the entry and the
   operator runs it.
-* **`bootctl` is the only systemd-boot tooling in the image, and it only
-  reads.** `systemd-boot-unsigned` and `systemd-ukify` are not installed:
-  adding them would be a package transaction, which belongs in
-  `Containerfile.core`, and a `core` rebuild makes the next fleet update
-  multi-gigabyte. Nothing in the shipped boot-counting path needs them —
-  `systemd-bless-boot`, `boot-complete.target` and the bless-boot generator
-  are all in the `systemd` package the image already has, and
-  `Containerfile.base` asserts each one is present rather than assuming it.
-* **No composefs work.** §23's row names composefs, and APEX already boots on a
-  composefs root — the katana does, today, through GRUB. Nothing here changes
-  that, and nothing here needed to.
+* **The image now carries `systemd-boot-unsigned` and `systemd-ukify`, and
+  still installs nothing.** They went into `Containerfile.core` with the pivot,
+  because `bootc install --bootloader systemd` copies the loader *out of the
+  image being installed* — an image without it produces an ESP with no loader
+  binary and an install that exits 0. That is a `core` rebuild and therefore a
+  real fleet-update cost, recorded in `docs/update-cost.md`'s terms. `bootctl`
+  in the shipped path is still read-only: `apex boot status` calls
+  `bootctl list` and nothing else.
+* **"composefs" means two different things and they are not the same
+  machine.** §23's row names composefs, and APEX already boots on a
+  composefs-backed **ostree** root — the katana does, today, through GRUB. That
+  is not bootc's `--composefs-backend`, which is a different storage backend
+  with its own deployment layout, its own `bootc status` shape (`bootType:
+  Bls`, `softRebootCapable: true`) and the ESP mounted at `/boot`. The pivot is
+  a move to the latter. Reading the katana's existing composefs root as "the
+  katana is already on the new backend" would be a serious mistake.
 * **The `apex boot status` entry list needs root**, because the ESP is mode
   0700. Without it the command reports `entries: unavailable` **with the
   reason**, never an empty list: an empty list is indistinguishable from "no
