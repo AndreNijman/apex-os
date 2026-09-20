@@ -706,6 +706,61 @@ fn trust_gate(allow_unverified: bool) -> Option<i32> {
     }
 }
 
+/// The in-place move from ostree + GRUB to composefs + systemd-boot.
+///
+/// Returns true only when this machine actually migrated, in which case the
+/// caller must NOT also run `bootc upgrade` in the same invocation.
+///
+/// Exit codes are the engine's: 0 migrated, 10 refused (and it said why, at
+/// length, on stderr), anything else failed (likewise). Neither of the last
+/// two is fatal to `apex update`: the machine is on GRUB and GRUB works.
+fn migrate_boot_path() -> bool {
+    const ENGINE: &str = "/usr/libexec/apex-boot-migrate";
+    if !Path::new(ENGINE).exists() {
+        return false;
+    }
+    match run(ENGINE, &["auto"]) {
+        Ok(0) => true,
+        Ok(10) => {
+            eprintln!(
+                "apex: this machine stays on GRUB for now — see the reason above, and\n\
+                 apex: `apex-boot-migrate precheck` to re-check it at any time."
+            );
+            false
+        }
+        Ok(code) => {
+            eprintln!(
+                "apex: the boot-path migration did not complete (exit {code}). Nothing was\n\
+                 apex: committed: this machine still boots the way it did."
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("apex: could not run the boot-path migration: {e}");
+            false
+        }
+    }
+}
+
+/// The tail of `update`: the passes that are independent of the OS image.
+/// Factored out so the migration can return early without skipping them.
+fn finish_update(started: Instant, mut worst: i32, opts: &UpdateOptions) -> i32 {
+    if !opts.skip_packages && !opts.firmware_only {
+        worst = worst.max(packages_pass());
+    }
+    if !opts.skip_flatpak && !opts.firmware_only {
+        worst = worst.max(flatpak_pass());
+    }
+    if !opts.skip_firmware {
+        worst = worst.max(firmware_pass());
+    }
+    println!(
+        "apex: update finished in {:.1}s",
+        started.elapsed().as_secs_f64()
+    );
+    worst
+}
+
 pub fn update(opts: UpdateOptions) -> i32 {
     let started = Instant::now();
     let mut worst = 0;
@@ -773,6 +828,31 @@ pub fn update(opts: UpdateOptions) -> i32 {
         } else {
             Some(FsyncGuard::disable())
         };
+        // §22's boot-path migration, and it runs INSTEAD of the image update
+        // when it does anything at all. Andre, 2026-09-20: "active machines
+        // should automatically migrate with sudo apex install, not this
+        // dumbass reinstall shit." This is where that happens — the normal
+        // update path, no flag, nothing for the user to choose.
+        //
+        // Instead of, not as well as: the migration deploys the digest this
+        // machine is ALREADY running, so it changes the boot path and nothing
+        // else. Staging an ostree update in the same invocation would leave
+        // one shutdown with two finalize paths to run, which is exactly the
+        // kind of thing that turns a reboot into a recovery.
+        //
+        // A refusal is not a failure. A machine that must not migrate — Secure
+        // Boot with an unsigned loader, an ESP too small to hold two
+        // deployments — keeps booting GRUB and takes its update normally. The
+        // engine prints why, in full, and that is deliberate: it is the reason
+        // the machine is not getting a feature it was promised.
+        if migrate_boot_path() {
+            println!(
+                "apex: the boot path was migrated. Reboot when you like; this update did not\n\
+                 apex: change the OS image, and the next one will come through the new path."
+            );
+            return finish_update(started, worst, &opts);
+        }
+
         // Deliberately NOT preceded by `bootc upgrade --check`: bootc already
         // no-ops when the booted image is current, and checking first would add
         // a second registry round-trip to the exact path we are trying to make
@@ -793,23 +873,7 @@ pub fn update(opts: UpdateOptions) -> i32 {
         }
     }
 
-    if !opts.skip_packages && !opts.firmware_only {
-        worst = worst.max(packages_pass());
-    }
-
-    if !opts.skip_flatpak && !opts.firmware_only {
-        worst = worst.max(flatpak_pass());
-    }
-
-    if !opts.skip_firmware {
-        worst = worst.max(firmware_pass());
-    }
-
-    println!(
-        "apex: update finished in {:.1}s",
-        started.elapsed().as_secs_f64()
-    );
-    worst
+    finish_update(started, worst, &opts)
 }
 
 /// Update Flatpak applications as part of `apex update`.
