@@ -63,6 +63,53 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 android=$(dirname "$here")
 repo=$(dirname "$android")
 
+# ── The protocol revision this build prefers, and the whole window ───────────
+#
+# Read FIRST, before the keystore and long before Gradle. These two values go
+# into the metadata the updater reads and onto the page a person reads, and a
+# source file they cannot be read from must stop the release in a second
+# rather than after a ten-minute build.
+#
+# Read out of the source rather than repeated here, and a refusal if the line
+# has moved — a metadata file that quietly claims the wrong protocol revision
+# would send a user to update the wrong side.
+client="$android/core/src/main/kotlin/com/apexos/remote/core/Client.kt"
+[ -f "$client" ] || fatal "$client is missing, so the protocol revision cannot be read"
+protocol=$(sed -n 's/^const val REMOTE_PROTOCOL_VERSION: Int = \([0-9]*\).*/\1/p' "$client" | head -1)
+[ -n "$protocol" ] || fatal "no REMOTE_PROTOCOL_VERSION line in $client; it was renamed or removed"
+
+# ── And the whole window, not just the preferred revision ────────────────────
+#
+# The Releases page tells people what happens when their machine and their app
+# are at different ages, and that sentence is only true if it is written from
+# the window this build actually ships. So the list is read here, refused if it
+# is not a plain list of integers, and carried into the metadata — where
+# `release-notes.sh` reads it back rather than guessing.
+#
+# A strict match on purpose. `listOf(REMOTE_PROTOCOL_VERSION)` or a list built
+# at runtime would parse to nothing here, and a window that parsed to nothing
+# must STOP the release rather than publish a page that quietly says "v" and a
+# blank. That is why `Client.kt` writes the entry as a literal and a test holds
+# it to the constant.
+window_line=$(sed -n 's/^val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(\([^)]*\)).*/\1/p' \
+    "$client" | head -1)
+[ -n "$window_line" ] \
+    || fatal "no SUPPORTED_REMOTE_PROTOCOL_VERSIONS = listOf(...) line in $client; it was renamed, or it is no longer a literal list the release metadata can read"
+case "$window_line" in
+    *[!0-9,\ ]*) fatal "SUPPORTED_REMOTE_PROTOCOL_VERSIONS is '$window_line', which is not a plain list of integers. The release metadata cannot state a window it cannot read, and a page that claims compatibility it cannot name is worse than one that claims none." ;;
+esac
+window=$(printf '%s' "$window_line" | tr -d ' ')
+case "$window" in
+    ""|*,,*|,*|*,) fatal "SUPPORTED_REMOTE_PROTOCOL_VERSIONS is '$window_line', which is malformed" ;;
+esac
+# The preferred revision must be IN the window. The Kotlin test asserts this
+# too; it is asserted again here because the two files can be edited apart and
+# this is the last point before the number reaches a user's phone.
+case ",$window," in
+    *",$protocol,"*) : ;;
+    *) fatal "REMOTE_PROTOCOL_VERSION is $protocol but SUPPORTED_REMOTE_PROTOCOL_VERSIONS is ($window_line); a build cannot prefer a revision it does not list" ;;
+esac
+
 # ── The signing key, or nothing ──────────────────────────────────────────────
 #
 # Checked HERE, before a build that takes minutes, and named one at a time so
@@ -119,48 +166,6 @@ digest="${sum%% *}"
 printf '%s  %s\n' "$digest" "$(basename "$apk")" > "$apk.sha256"
 
 size=$(stat -c%s "$apk") || fatal "cannot stat the APK"
-
-# ── The protocol revision this build prefers ─────────────────────────────────
-#
-# Read out of the source rather than repeated here, and a refusal if the line
-# has moved — a metadata file that quietly claims the wrong protocol revision
-# would send a user to update the wrong side.
-client=core/src/main/kotlin/com/apexos/remote/core/Client.kt
-[ -f "$client" ] || fatal "$client is missing, so the protocol revision cannot be read"
-protocol=$(sed -n 's/^const val REMOTE_PROTOCOL_VERSION: Int = \([0-9]*\).*/\1/p' "$client" | head -1)
-[ -n "$protocol" ] || fatal "no REMOTE_PROTOCOL_VERSION line in $client; it was renamed or removed"
-
-# ── And the whole window, not just the preferred revision ────────────────────
-#
-# The Releases page tells people what happens when their machine and their app
-# are at different ages, and that sentence is only true if it is written from
-# the window this build actually ships. So the list is read here, refused if it
-# is not a plain list of integers, and carried into the metadata — where
-# `release-notes.sh` reads it back rather than guessing.
-#
-# A strict match on purpose. `listOf(REMOTE_PROTOCOL_VERSION)` or a list built
-# at runtime would parse to nothing here, and a window that parsed to nothing
-# must STOP the release rather than publish a page that quietly says "v" and a
-# blank. That is why `Client.kt` writes the entry as a literal and a test holds
-# it to the constant.
-window_line=$(sed -n 's/^val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(\([^)]*\)).*/\1/p' \
-    "$client" | head -1)
-[ -n "$window_line" ] \
-    || fatal "no SUPPORTED_REMOTE_PROTOCOL_VERSIONS = listOf(...) line in $client; it was renamed, or it is no longer a literal list the release metadata can read"
-case "$window_line" in
-    *[!0-9,\ ]*) fatal "SUPPORTED_REMOTE_PROTOCOL_VERSIONS is '$window_line', which is not a plain list of integers. The release metadata cannot state a window it cannot read, and a page that claims compatibility it cannot name is worse than one that claims none." ;;
-esac
-window=$(printf '%s' "$window_line" | tr -d ' ')
-case "$window" in
-    ""|*,,*|,*|*,) fatal "SUPPORTED_REMOTE_PROTOCOL_VERSIONS is '$window_line', which is malformed" ;;
-esac
-# The preferred revision must be IN the window. The Kotlin test asserts this
-# too; it is asserted again here because the two files can be edited apart and
-# this is the last point before the number reaches a user's phone.
-case ",$window," in
-    *",$protocol,"*) : ;;
-    *) fatal "REMOTE_PROTOCOL_VERSION is $protocol but SUPPORTED_REMOTE_PROTOCOL_VERSIONS is ($window_line); a build cannot prefer a revision it does not list" ;;
-esac
 
 commit=$(git -C "$repo" rev-parse HEAD 2>/dev/null) || fatal "cannot read the release commit"
 

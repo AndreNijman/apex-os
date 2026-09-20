@@ -44,6 +44,37 @@ meta="$dir/apex-remote-$name.json"
 protocol=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["remoteProtocolPreferred"])' "$meta") \
     || fatal "could not read the protocol revision out of $meta"
 
+# -- The window, and a page that only claims what the build can do -----------
+#
+# The compatibility sentence below is the one people will quote back when
+# something does not connect, so it is generated from the window this build
+# actually ships rather than written once and left to rot. A build that speaks
+# a single revision gets a sentence that says so; a build that speaks several
+# gets the range. Saying "an app one revision behind still connects" on a build
+# whose window is one entry long would be a promise nobody could keep -- this
+# repository's dominant defect class, in prose instead of in code.
+window=$(python3 -c '
+import json, sys
+w = json.load(open(sys.argv[1])).get("remoteProtocolSupported") or []
+print(",".join(str(int(v)) for v in w))
+' "$meta") || fatal "could not read the protocol window out of $meta"
+[ -n "$window" ] \
+    || fatal "$meta carries no remoteProtocolSupported, so this page cannot state what it is compatible with. Rebuild with a release-artifacts.sh that emits it rather than publishing a page that implies a promise."
+window_lo=$(printf '%s' "$window" | tr ',' '\n' | sort -n | head -1)
+window_hi=$(printf '%s' "$window" | tr ',' '\n' | sort -n | tail -1)
+if [ "$window_lo" = "$window_hi" ]; then
+    compat="This build speaks exactly one revision of that protocol, **v$window_hi**, and no
+other. Today that is the only revision there is, so every APEX machine speaks
+it. When a second one appears, a later build of this app will speak both and
+try each in turn -- which is why, when it cannot connect, it tells you the
+version may be the problem instead of claiming your phone has been unpaired."
+else
+    compat="They do not have to match exactly. This build speaks **v$window_lo to v$window_hi**
+and tries each in turn, so an app that has run ahead of your machine still
+connects to it. When none of them work it says so in those words and names the
+side to update, rather than claiming your phone has been unpaired."
+fi
+
 size_mb=$(python3 -c 'import os,sys; print(f"{os.path.getsize(sys.argv[1])/1048576:.0f}")' "$dir/$apk") \
     || fatal "could not size the APK"
 
@@ -128,13 +159,11 @@ and is unlocked by your fingerprint or PIN. It never leaves the phone.
 
 ## Versions, and what happens when they drift
 
-This build speaks **APEX Remote protocol v$protocol**. Your machine prints the
-version it speaks in \`apex remote status\`.
+The app and your machine are updated by different people at different times, so
+they will not always be the same age. Your machine prints the protocol version
+it speaks in \`apex remote status\`.
 
-They do not have to match exactly. The app tries every revision it knows how to
-speak, so an app that is ahead of your machine — or behind it by one — still
-connects. When it genuinely cannot, it says so in those words and tells you
-which side to update, rather than claiming the phone has been unpaired.
+$compat
 
 ## Updating
 
@@ -150,7 +179,7 @@ the top and your paired machines are kept.
 |---|---|
 | Version | \`$name\` |
 | versionCode | \`$code\` |
-| Remote protocol | \`v$protocol\` |
+| Remote protocol | \`v$protocol\` (this build speaks \`$window\`) |
 | Size | ~${size_mb} MB |
 | Minimum Android | 9.0 (API 28) |
 EOF
