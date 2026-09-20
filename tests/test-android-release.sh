@@ -74,8 +74,10 @@ build_fixture() {
     cp "$ARTIFACTS_SH" "$dir/repo/android/tools/release-artifacts.sh"
     cp "$NOTES_SH" "$dir/repo/android/tools/release-notes.sh"
     printf 'val APEX_MARKETING_VERSION = "0.1.0"\n' > "$dir/repo/android/app/build.gradle.kts"
-    printf 'const val REMOTE_PROTOCOL_VERSION: Int = 1\n' \
-        > "$dir/repo/android/core/src/main/kotlin/com/apexos/remote/core/Client.kt"
+    {
+        printf 'const val REMOTE_PROTOCOL_VERSION: Int = 1\n'
+        printf 'val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(1)\n'
+    } > "$dir/repo/android/core/src/main/kotlin/com/apexos/remote/core/Client.kt"
     (
         cd "$dir/repo" || exit 1
         git init --quiet -b main .
@@ -250,7 +252,8 @@ printf 'not really an apk, but a real file with a real digest\n' > "$notes_dir/a
 digest=$(sha256sum "$notes_dir/apex-remote-$name.apk")
 digest="${digest%% *}"
 printf '%s  apex-remote-%s.apk\n' "$digest" "$name" > "$notes_dir/apex-remote-$name.apk.sha256"
-printf '{"remoteProtocolPreferred": 4}\n' > "$notes_dir/apex-remote-$name.json"
+printf '{"remoteProtocolPreferred": 4, "remoteProtocolSupported": [4, 3]}\n' \
+    > "$notes_dir/apex-remote-$name.json"
 
 out=$("$NOTES_SH" --code 7 --name "$name" --dir "$notes_dir" 2>&1)
 rc=$?
@@ -259,12 +262,20 @@ if [ "$rc" -eq 0 ] && said "$out" "$digest"; then
 else
     bad "the notes did not carry the real digest (rc=$rc)"
 fi
-# Read from the metadata, not hardcoded: the fixture says 4, so a page that
-# printed v1 would be reciting a constant.
-if said "$out" "protocol v4"; then
-    ok "the page states the protocol revision this build speaks, read from the build"
+# Read from the metadata, not hardcoded: the fixture's window is [4, 3], so a
+# page saying "v3 to v4" can only have derived it, and a page saying v1 would
+# be reciting a constant. Both halves are checked — the range in the prose and
+# the preferred revision in the table, which is the number somebody compares
+# against `apex remote status`.
+if said "$out" "v3 to v4"; then
+    ok "the page states the protocol window this build speaks, read from the build"
 else
-    bad "the page does not state the protocol revision, or hardcodes it"
+    bad "the page does not state the protocol window, or hardcodes it"
+fi
+if said "$out" "\`v4\`"; then
+    ok "the page names the revision this build prefers, for comparing with the machine"
+else
+    bad "the page does not name the preferred revision"
 fi
 if said "$out" "Allow from this source"; then
     ok "the page tells a first-time sideloader what Android will ask them"
@@ -326,6 +337,172 @@ if said "$wf" 'shred'; then
     ok "the keystore is shredded from the runner"
 else
     bad "the keystore is left on the runner"
+fi
+
+section "the protocol window reaches the metadata, or the release stops"
+
+# The compatibility promise on the Releases page is generated from the window
+# this build actually ships. A build whose window cannot be read must refuse,
+# because the alternative is a page that implies compatibility nobody can check
+# — which is this repository's dominant defect class wearing prose.
+
+FIXW="$WORK/fixw"
+build_fixture "$FIXW" 3
+CLIENT="$FIXW/repo/android/core/src/main/kotlin/com/apexos/remote/core/Client.kt"
+ART="$FIXW/repo/android/tools/release-artifacts.sh"
+
+# 1. A window that is no longer a literal list. `listOf(REMOTE_PROTOCOL_VERSION)`
+#    is the obvious, tidy-looking edit, and it is the one that makes the window
+#    unreadable — so it must stop the release rather than publish a blank.
+{
+    printf 'const val REMOTE_PROTOCOL_VERSION: Int = 1\n'
+    printf 'val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(REMOTE_PROTOCOL_VERSION)\n'
+} > "$CLIENT"
+out=$(APEX_KEYSTORE=/dev/null APEX_KEYSTORE_PASSWORD=x APEX_KEY_ALIAS=y APEX_KEY_PASSWORD=z \
+      "$ART" --out "$WORK/outw" --code 5 --name 0.1.0+5.gdeadbeef 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ] && said "$out" "not a plain list of integers"; then
+    ok "a window that is not a literal list refuses the release"
+else
+    bad "an unreadable protocol window did not stop the release (rc=$rc): $out"
+fi
+
+# 2. The window renamed out of the file entirely.
+printf 'const val REMOTE_PROTOCOL_VERSION: Int = 1\n' > "$CLIENT"
+out=$(APEX_KEYSTORE=/dev/null APEX_KEYSTORE_PASSWORD=x APEX_KEY_ALIAS=y APEX_KEY_PASSWORD=z \
+      "$ART" --out "$WORK/outw" --code 5 --name 0.1.0+5.gdeadbeef 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ] && said "$out" "SUPPORTED_REMOTE_PROTOCOL_VERSIONS"; then
+    ok "a missing window is named, not silently treated as empty"
+else
+    bad "a missing window was not reported (rc=$rc): $out"
+fi
+
+# 3. A build that prefers a revision it does not list. The Kotlin suite asserts
+#    this too; it is asserted again at the last point before the number reaches
+#    a phone, because the two files can be edited apart.
+{
+    printf 'const val REMOTE_PROTOCOL_VERSION: Int = 3\n'
+    printf 'val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(2, 1)\n'
+} > "$CLIENT"
+out=$(APEX_KEYSTORE=/dev/null APEX_KEYSTORE_PASSWORD=x APEX_KEY_ALIAS=y APEX_KEY_PASSWORD=z \
+      "$ART" --out "$WORK/outw" --code 5 --name 0.1.0+5.gdeadbeef 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ] && said "$out" "cannot prefer a revision it does not list"; then
+    ok "a build preferring a revision outside its own window is refused"
+else
+    bad "a preferred revision outside the window was accepted (rc=$rc): $out"
+fi
+
+# 4. And the check is not vacuous: a good file gets PAST it and fails later, on
+#    the keystore. A refusal that fires for every input would pass all three
+#    assertions above and prove nothing.
+{
+    printf 'const val REMOTE_PROTOCOL_VERSION: Int = 1\n'
+    printf 'val SUPPORTED_REMOTE_PROTOCOL_VERSIONS: List<Int> = listOf(1)\n'
+} > "$CLIENT"
+out=$(env -u APEX_KEYSTORE -u APEX_KEYSTORE_PASSWORD -u APEX_KEY_ALIAS -u APEX_KEY_PASSWORD \
+      "$ART" --out "$WORK/outw" --code 5 --name 0.1.0+5.gdeadbeef 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ] && said "$out" "APEX_KEYSTORE is not set"; then
+    ok "a readable window is not refused; the run proceeds to the next gate"
+else
+    bad "a valid protocol window was refused, so the check fires for everything (rc=$rc): $out"
+fi
+
+section "the page states the compatibility promise this build can keep"
+
+# The page is read by somebody whose machine will not connect. A single-revision
+# build that told them "an app one revision behind still connects" would be
+# describing a build that does not exist.
+onew="$WORK/notes-one"
+mkdir -p "$onew"
+namew="0.1.0+9.gaaaaaaaa"
+printf 'apk\n' > "$onew/apex-remote-$namew.apk"
+dw=$(sha256sum "$onew/apex-remote-$namew.apk"); dw="${dw%% *}"
+printf '%s  apex-remote-%s.apk\n' "$dw" "$namew" > "$onew/apex-remote-$namew.apk.sha256"
+printf '{"remoteProtocolPreferred": 1, "remoteProtocolSupported": [1]}\n' \
+    > "$onew/apex-remote-$namew.json"
+out=$("$NOTES_SH" --code 9 --name "$namew" --dir "$onew" 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] && said "$out" "exactly one revision"; then
+    ok "a single-revision build says so instead of promising a range"
+else
+    bad "a one-entry window claimed compatibility it does not have (rc=$rc)"
+fi
+if said "$out" "behind it by one"; then
+    bad "the page still carries the old promise that this build cannot keep"
+else
+    ok "the page does not claim a tolerance this build does not have"
+fi
+
+# And the other arm. Both branches of a conditional sentence have to be
+# exercised, or half of it is prose nobody has read.
+printf '{"remoteProtocolPreferred": 3, "remoteProtocolSupported": [3, 2, 1]}\n' \
+    > "$onew/apex-remote-$namew.json"
+out=$("$NOTES_SH" --code 9 --name "$namew" --dir "$onew" 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] && said "$out" "v1 to v3"; then
+    ok "a multi-revision build states the range it really speaks"
+else
+    bad "a three-entry window did not produce a range (rc=$rc): $out"
+fi
+
+# A metadata file with no window at all. Older than the field, or written by
+# something that is not release-artifacts.sh; either way the page must not
+# guess.
+printf '{"remoteProtocolPreferred": 1}\n' > "$onew/apex-remote-$namew.json"
+out=$("$NOTES_SH" --code 9 --name "$namew" --dir "$onew" 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ] && said "$out" "remoteProtocolSupported"; then
+    ok "a page that cannot state the window is refused rather than implied"
+else
+    bad "a missing window produced a page anyway (rc=$rc): $out"
+fi
+
+section "the workflow and the app agree about where updates come from"
+
+# The in-app updater reads the Releases page of one repository, and the release
+# workflow writes to it. A metadata file the updater cannot parse would leave
+# every installed phone quietly stuck, so the contract is asserted on both
+# sides rather than kept in step by memory.
+UPDATER="$ROOT/android/core/src/main/kotlin/com/apexos/remote/core/update/Updates.kt"
+[ -f "$UPDATER" ] || { echo "FATAL: $UPDATER is missing; the updater this section is about does not exist" >&2; exit 2; }
+updater_src=$(cat "$UPDATER")
+artifacts_src=$(cat "$ARTIFACTS_SH")
+
+for field in versionCode apk sha256 sizeBytes remoteProtocolSupported; do
+    if said "$updater_src" "$field" && said "$artifacts_src" "$field"; then
+        ok "both sides of the update metadata name $field"
+    else
+        bad "$field is written by one side and not read by the other"
+    fi
+done
+
+# NOT /releases/latest. Measured 2026-09-20: this repository's Releases page
+# carries OS netinstall ISOs, and that endpoint answers one of them — an
+# updater built on it finds no APK and reports "up to date" forever.
+# Comments STRIPPED before looking. `Updates.kt` explains at length why it does
+# not use `/releases/latest`, and a bare substring search would read that
+# explanation as the offence — the same shape as the forbid-check this
+# repository once shipped that matched the comment describing what it forbade.
+updater_code=$(grep -vE '^[[:space:]]*(\*|//|/\*)' "$UPDATER")
+if said "$updater_code" "releases/latest"; then
+    bad "the updater uses /releases/latest, which on this repository answers an OS ISO release"
+else
+    ok "the updater does not use /releases/latest, which here would never find an APK"
+fi
+# …and the strip is not so eager that it left nothing to search. A check that
+# reads an empty string always passes.
+if said "$updater_code" "newestAndroidRelease"; then
+    ok "there is real code left after the comments are stripped"
+else
+    bad "stripping comments left nothing, so the check above inspected an empty string"
+fi
+if said "$updater_src" 'android-v'; then
+    ok "the updater picks its release out by the android-v tag"
+else
+    bad "the updater has no way to tell an Android release from an OS one"
 fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
