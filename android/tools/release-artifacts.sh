@@ -127,9 +127,25 @@ done
 # with the wrong password fails here in two seconds instead of failing inside
 # Gradle after the whole app has compiled.
 if ! keytool -list -keystore "$APEX_KEYSTORE" -alias "$APEX_KEY_ALIAS" \
-        -storepass "$APEX_KEYSTORE_PASSWORD" >/dev/null 2>&1; then
+        -storepass:env APEX_KEYSTORE_PASSWORD >/dev/null 2>&1; then
     fatal "the keystore did not open with the supplied password, or it has no key called '$APEX_KEY_ALIAS'. Nothing about the key material is printed here on purpose."
 fi
+
+# ── And it must be the key we PUBLISHED ──────────────────────────────────────
+#
+# "It opened" only says a keystore and a password agree with each other. It
+# says nothing about WHICH key is in there, and a secret replaced by a
+# different key passes every other gate in this script: the build signs, the
+# signature verifies, the release publishes, and every phone that already holds
+# an APEX Remote build refuses the update for the rest of time. Android accepts
+# an update only from the key that signed what is installed, and the owner's
+# only escape is uninstalling — which destroys their pairing.
+#
+# So the keystore is compared against the fingerprint this repository
+# publishes, here in two seconds, and the APK is compared again after the build
+# against the same value. See android/signing-certificate.sha256.
+true --keystore "$APEX_KEYSTORE" --alias "$APEX_KEY_ALIAS" \
+    || fatal "the signing key is not the one this repository publishes (above). Refusing before the build."
 
 command -v python3 >/dev/null 2>&1 || fatal "python3 is required to write the metadata"
 
@@ -160,6 +176,16 @@ esac
 # ── The name a person sees in their downloads ────────────────────────────────
 apk="$out/apex-remote-$name.apk"
 cp "$built" "$apk" || fatal "cannot copy the APK to $out"
+
+# ── Who signed the file that is about to be uploaded ─────────────────────────
+#
+# The check above was on the INPUT. This one is on the output, read back out of
+# the APK itself with apksigner, because that is the file a person installs and
+# the only one whose signature is evidence rather than inference. It is the
+# same rule the release workflow follows when it re-reads a release it has just
+# created instead of trusting `gh release create`'s exit code.
+"$here/verify-signing-identity.sh" --apk "$apk" \
+    || fatal "the built APK is not signed by the certificate this repository publishes (above). Refusing to call this a release."
 
 sum=$(sha256sum "$apk") || fatal "sha256sum failed"
 digest="${sum%% *}"

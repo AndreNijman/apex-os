@@ -1,0 +1,32 @@
+# The certificate that signs every published APEX Remote APK.
+#
+# This file is the PUBLISHED value. A person who has downloaded an APK can run
+#
+#     apksigner verify --print-certs apex-remote-<version>.apk
+#
+# and compare the "certificate SHA-256 digest" it prints against the line(s)
+# below. Nothing secret is here: a certificate fingerprint is a public fact
+# about a public key, and publishing it is the only way a stranger can tell
+# an APK built by this repository from one built by somebody else.
+#
+# FORMAT: one fingerprint per line, SHA-256 of the DER certificate, as 64
+# lowercase hex characters. `keytool -list -v` prints the same bytes uppercase
+# and colon-separated; either spelling is accepted and normalised.
+#
+# HOW IT IS USED: `android/tools/verify-signing-identity.sh` refuses a release
+# whose signers are not EXACTLY this set — before the build, against the
+# keystore, and after it, against the APK that would be published. So a
+# keystore secret replaced by a different key stops the release instead of
+# shipping an APK that no installed copy of the app can be updated from.
+#
+# WHILE IT SAYS `UNSET` NO RELEASE CAN BE CUT, and that is deliberate: no
+# signing key exists yet. `android/tools/generate-signing-key.sh` writes the
+# real value here when Andre generates the key. See docs/android-signing.md.
+#
+# ROTATION: `apksigner rotate` signs with the new key and keeps the old one in
+# a SigningCertificateLineage, so a rotated APK legitimately carries TWO
+# certificates — measured 2026-09-20 with build-tools 36.0.0: the new key
+# covers minSdkVersion 33+ and the old key 24..32. Both fingerprints go here,
+# in the same commit as the rotation. docs/android-signing.md has the whole
+# procedure.
+UNSET
