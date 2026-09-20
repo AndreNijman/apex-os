@@ -186,8 +186,23 @@ fun ApexRemoteApp(
                 LaunchedEffect(installing) {
                     val offer = (updater.state as? UpdateUi.Available)?.offer
                     if (installing && offer != null) {
-                        installing = false
-                        updater.install(offer)
+                        // The flag is cleared in a `finally`, AFTER the install
+                        // returns, and that ordering is the whole of this
+                        // comment. Clearing it first changes this effect's own
+                        // key, which schedules a recomposition, which CANCELS
+                        // the coroutine it was cleared in — so the blocking
+                        // download would run to completion on its IO
+                        // dispatcher while `withContext` returned a
+                        // CancellationException here, and neither the "waiting
+                        // for Android's prompt" state nor a checksum failure
+                        // would ever reach the banner. The user would be left
+                        // watching "Downloading…" forever, which is the
+                        // spinning pairing screen in a new place.
+                        try {
+                            updater.install(offer)
+                        } finally {
+                            installing = false
+                        }
                     }
                 }
             }
