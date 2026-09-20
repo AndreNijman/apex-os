@@ -1354,6 +1354,17 @@ enum ShellCmd {
     /// naming the session the words are going to, and stops on its own after
     /// ninety seconds.
     Voice,
+    /// Drive the Alt-Tab window switcher: next | prev | commit | cancel.
+    ///
+    /// Bound by the compositor, not typed: ALT+Tab runs `next`, releasing ALT
+    /// runs `commit`. `/usr/libexec/apex-switcher` is the wrapper the keybinds
+    /// actually name — it skips the IPC entirely when no switcher is open,
+    /// because the release binding fires on every ALT release.
+    Switcher {
+        /// next | prev | commit | cancel
+        #[arg(value_name = "ACTION")]
+        action: String,
+    },
     /// List every target this wrapper knows, with the IPC call behind it.
     List,
     /// Call an arbitrary target/function, for anything not covered above.
@@ -2448,6 +2459,10 @@ fn shell_targets() -> Vec<(&'static str, &'static str, &'static str)> {
         ("focus", "focus-toggle", "toggle"),
         ("record", "screenrec-on", "toggle"),
         ("voice", "voice-ptt", "toggle"),
+        ("switcher next", "window-switcher", "next"),
+        ("switcher prev", "window-switcher", "prev"),
+        ("switcher commit", "window-switcher", "commit"),
+        ("switcher cancel", "window-switcher", "cancel"),
     ]
 }
 
@@ -2658,6 +2673,23 @@ fn cmd_shell(cmd: ShellCmd) -> i32 {
         ShellCmd::Focus => shell_ipc("focus-toggle", "toggle", &[]),
         ShellCmd::Record => shell_ipc("screenrec-on", "toggle", &[]),
         ShellCmd::Voice => shell_ipc("voice-ptt", "toggle", &[]),
+
+        // Four functions on one target rather than four targets, because they
+        // are four operations on one piece of state and the shell has to see
+        // them arrive in order.
+        ShellCmd::Switcher { action } => {
+            let func = match action.as_str() {
+                "next" | "prev" | "commit" | "cancel" => action.as_str(),
+                other => {
+                    eprintln!(
+                        "apex: unknown switcher action '{other}' \
+                         (try: next, prev, commit, cancel)"
+                    );
+                    return 1;
+                }
+            };
+            shell_ipc("window-switcher", func, &[])
+        }
 
         ShellCmd::Audio { which } => {
             let target = match which.as_str() {
@@ -3278,11 +3310,44 @@ mod tests {
         }
         // `apex shell list` is documentation, so it must actually cover the
         // verbs that exist rather than drifting from them.
-        for expect in ["launcher", "settings", "lock", "power", "focus", "record"] {
+        for expect in [
+            "launcher",
+            "settings",
+            "lock",
+            "power",
+            "focus",
+            "record",
+            "switcher next",
+            "switcher commit",
+        ] {
             assert!(
                 rows.iter().any(|(v, ..)| *v == expect),
                 "{expect} missing from the target table"
             );
+        }
+    }
+
+    #[test]
+    fn switcher_actions_parse_and_are_bounded() {
+        match shell_cmd(&["apex", "shell", "switcher", "next"]) {
+            ShellCmd::Switcher { action } => assert_eq!(action, "next"),
+            _ => panic!("not switcher"),
+        }
+        match shell_cmd(&["apex", "shell", "switcher", "commit"]) {
+            ShellCmd::Switcher { action } => assert_eq!(action, "commit"),
+            _ => panic!("not switcher"),
+        }
+        // The action is a free string at the clap layer, so the rejection of a
+        // wrong one lives in the dispatch arm. What is asserted here is that
+        // every action the compositor configs actually bind is in the table —
+        // a verb the keybinds use and the CLI rejects is a dead shortcut.
+        let rows = shell_targets();
+        for action in ["next", "prev", "commit", "cancel"] {
+            let verb = format!("switcher {action}");
+            let row = rows.iter().find(|(v, ..)| *v == verb);
+            let (_, target, func) = row.unwrap_or_else(|| panic!("{verb} missing"));
+            assert_eq!(*target, "window-switcher");
+            assert_eq!(*func, action);
         }
     }
 
