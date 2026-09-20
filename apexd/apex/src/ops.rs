@@ -721,6 +721,11 @@ fn migrate_boot_path() -> bool {
     }
     match run(ENGINE, &["auto"]) {
         Ok(0) => true,
+        // 3 is "there is nothing to do here" — this machine has already
+        // migrated, or is booted on the new path. Silent on purpose: a
+        // migrated machine printing four lines about staying on GRUB on every
+        // single update would be worse than saying nothing.
+        Ok(3) => false,
         Ok(10) => {
             eprintln!(
                 "apex: this machine stays on GRUB for now — see the reason above, and\n\

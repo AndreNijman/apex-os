@@ -85,6 +85,7 @@
 #      APEX_MIGRATE_STATE    alternative state directory
 #      APEX_MIGRATE_ESP      an already-mounted ESP, instead of finding one
 #      APEX_MIGRATE_DRYRUN   print the install argv instead of running it
+#      APEX_MIGRATE_STORE    the booted storage backend, instead of asking bootc
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -124,7 +125,22 @@ root_disk() {
     local src; src="$(root_source)"
     [ -n "$src" ] || return 1
     src="${src%%[*}"          # btrfs prints /dev/nvme0n1p5[/subvol]
-    lsblk -no PKNAME "$src" 2>/dev/null | head -1
+    # Walk up until the parent is a disk. One PKNAME is enough for a plain
+    # partition and WRONG for everything else: on a LUKS root the source is
+    # /dev/mapper/luks-… whose parent is the *partition*, so a single lookup
+    # returns nvme0n1p3, and find_esp then walks a partition's children and
+    # finds nothing. luks-installer is making encryption the default, so that
+    # would be every new machine refusing `no-esp`.
+    local cur="$src" parent type i=0
+    while [ "$i" -lt 8 ]; do
+        type="$(lsblk -ndo TYPE "$cur" 2>/dev/null | head -1)"
+        [ "$type" = disk ] && { basename "$cur"; return 0; }
+        parent="$(lsblk -no PKNAME "$cur" 2>/dev/null | head -1)"
+        [ -n "$parent" ] || return 1
+        cur="/dev/$parent"
+        i=$(( i + 1 ))
+    done
+    return 1
 }
 
 find_esp() {   # prints the ESP block device
@@ -163,6 +179,10 @@ release_esp() {
 }
 
 booted_store() {
+    # The test hook is here and not around the call sites: the phase logic in
+    # cmd_auto is only reachable on a machine whose store is ostreeContainer,
+    # so a fixture that cannot say so cannot exercise it at all.
+    [ -n "${APEX_MIGRATE_STORE:-}" ] && { printf '%s\n' "$APEX_MIGRATE_STORE"; return 0; }
     bootc status --json 2>/dev/null |
         python3 -c 'import sys,json
 d=json.load(sys.stdin); b=(d.get("status") or {}).get("booted") or {}
@@ -255,7 +275,22 @@ cmd_precheck() {
     # firmware will refuse is a brick with every assertion green, so this is a
     # refusal until APEX signs the loader and the key is enrolled — the
     # decision docs/boot-v2.md records as open.
-    if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'; then
+    # Read the firmware variable, not mokutil. `command -v mokutil` being
+    # false is not "Secure Boot is off" — it is "this image has no mokutil",
+    # and the lab guest was exactly that, so the branch below had never fired
+    # on the machine it was written for. The efivarfs read needs `dd bs=1
+    # skip=4`; `tail -c +5` cannot read efivarfs at all (apex-boot-health hit
+    # the same thing). Byte 5 is the value; the first four are attributes.
+    local sb_var=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+    local sb=""
+    if [ -e "$sb_var" ]; then
+        sb="$(dd if="$sb_var" bs=1 skip=4 count=1 status=none 2>/dev/null | od -An -tu1 | tr -d ' \n')"
+        [ -n "$sb" ] || refuse "secure-boot-unknown" \
+            "$sb_var exists and could not be read, so whether this machine" \
+            "enforces Secure Boot is unknown. Committing a machine to an" \
+            "unsigned loader on a guess is how one becomes unbootable."
+    fi
+    if [ "$sb" = 1 ]; then
         if [ ! -f /usr/share/apex-os/boot/sdboot-signed ]; then
             refuse "secure-boot-unsigned-loader" \
                 "Secure Boot is enabled and this image's systemd-boot is unsigned." \
@@ -277,7 +312,12 @@ cmd_precheck() {
     per="$(deployment_kernel_bytes)"
     [ "$per" -gt 0 ] || refuse "no-kernel" \
         "Could not measure this deployment's kernel and initramfs under /usr/lib/modules."
-    need=$(( per * 2 / 1024 + ESP_SLACK_MIB * 1024 ))     # KiB
+    # Three, not two. The steady state is booted + rollback, and an update
+    # stages a third alongside them — the predecessor measured three
+    # directories on the ESP during an upgrade. An ESP sized for two passes
+    # this check and then cannot take its first update, which is a worse place
+    # to find out.
+    need=$(( per * 3 / 1024 + ESP_SLACK_MIB * 1024 ))     # KiB
     avail="$(df -Pk "$esp_mounted_at" | awk 'NR==2{print $4}')"
     # Anything already written by a previous stage counts as available: a
     # re-run must not refuse because its own last attempt is still there.
@@ -288,8 +328,9 @@ cmd_precheck() {
         refuse "esp-too-small" \
             "The EFI System Partition has $(( avail / 1024 )) MiB free and this" \
             "machine needs $(( need / 1024 )) MiB — one deployment's kernel and" \
-            "initramfs is $(( per / 1024 / 1024 )) MiB and systemd-boot keeps two," \
-            "plus room to stage a third during an update." \
+            "initramfs is $(( per / 1024 / 1024 )) MiB, systemd-boot keeps the" \
+            "booted one and the rollback, and an update stages a third" \
+            "alongside them." \
             "An ESP cannot be grown in place without moving the partition after" \
             "it, so this machine stays on GRUB until its ESP is made bigger." \
             "docs/boot-v2.md, 'The ESP is the binding constraint'."
@@ -313,12 +354,30 @@ cmd_stage() {
     with_esp || fail "no-esp" "The ESP disappeared between precheck and stage."
 
     # ── 1. save the one file bootc overwrites ────────────────────────────────
+    # The save happens ONCE, and never over an existing one. A re-run after a
+    # power cut that landed between bootc replacing this file and the restore
+    # would otherwise save systemd-boot as "the original" and then faithfully
+    # restore it — leaving the removable-media fallback permanently an
+    # unsigned loader, with every check in this script green.
     local fallback="$esp_mounted_at/EFI/BOOT/BOOTX64.EFI"
-    if [ -f "$fallback" ]; then
+    local sdboot=/usr/lib/systemd/boot/efi/systemd-bootx64.efi
+    if [ -f "$fallback" ] && [ ! -f "$STATE/BOOTX64.EFI.orig" ]; then
+        if [ -f "$sdboot" ] &&
+           [ "$(sha256sum "$fallback" | awk '{print $1}')" = \
+             "$(sha256sum "$sdboot"   | awk '{print $1}')" ]; then
+            release_esp
+            fail "fallback-already-systemd-boot" \
+                "/EFI/BOOT/BOOTX64.EFI is already systemd-boot and there is no" \
+                "saved copy of what it was. A previous run was interrupted" \
+                "between replacing it and putting it back. Restore it by hand" \
+                "from the shim in /EFI/fedora before migrating this machine."
+        fi
         cp -f "$fallback" "$STATE/BOOTX64.EFI.orig" || fail "save-fallback" \
             "Could not save $fallback, which the install overwrites."
         sha256sum "$STATE/BOOTX64.EFI.orig" | awk '{print $1}' > "$STATE/BOOTX64.EFI.sha"
         log "saved the removable-media fallback ($(stat -c %s "$fallback") bytes)"
+    elif [ -f "$STATE/BOOTX64.EFI.orig" ]; then
+        log "keeping the removable-media fallback an earlier run saved"
     fi
 
     # ── 2. record what the old path looks like, so step 5 can prove it survived
@@ -663,6 +722,9 @@ cmd_commit() {
         "Could not set BootNext. Nothing is committed; this machine still boots GRUB."
 
     echo committed > "$STATE/phase"
+    # Which boot committed, so a second `apex update` in the SAME boot does not
+    # fall through and run the whole install again over a complete deployment.
+    cat /proc/sys/kernel/random/boot_id > "$STATE/committed-boot" 2>/dev/null
     sync
     log "committed: the next boot is systemd-boot (Boot$num). If it does not come up,"
     log "the boot after it is GRUB again — BootNext is a one-shot and the firmware"
@@ -747,8 +809,44 @@ cmd_status() {
     printf 'BootOrder:    %s\n' "$(efibootmgr 2>/dev/null | sed -n 's/^BootOrder: //p')"
 }
 
+# Exit 3 means "there is nothing to do here", as distinct from exit 10's
+# "this machine must not be migrated". `apex update` prints an explanation for
+# the second and nothing at all for the first: a machine that has already
+# migrated must not be told on every single update that it is staying on GRUB.
+NOTHING_TO_DO=3
+
 cmd_auto() {
-    if [ "$(cat "$STATE/phase" 2>/dev/null)" = failed ]; then
+    local phase; phase="$(cat "$STATE/phase" 2>/dev/null || true)"
+
+    # Already there. Checked on the phase as well as on the backend, because a
+    # user who picks GRUB out of the firmware menu on a confirmed machine is
+    # booted on ostreeContainer and would otherwise pass precheck and stage the
+    # whole thing again.
+    if [ "$phase" = confirmed ]; then return "$NOTHING_TO_DO"; fi
+    case "$(booted_loader)" in *systemd-boot*) return "$NOTHING_TO_DO" ;; esac
+    if [ "$(booted_store)" != ostreeContainer ]; then return "$NOTHING_TO_DO"; fi
+
+    if [ "$phase" = committed ]; then
+        local now committed_in
+        now="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+        committed_in="$(cat "$STATE/committed-boot" 2>/dev/null || true)"
+        if [ -n "$now" ] && [ "$now" = "$committed_in" ]; then
+            # Committed during THIS boot. Nothing more can be done until the
+            # machine reboots, and running the install again over a complete
+            # composefs deployment is not "nothing".
+            log "already committed in this boot: reboot to finish the migration"
+            return 0
+        fi
+        # Committed in an earlier boot and we are still on GRUB, so the trial
+        # has been and gone. The confirm unit records this too; doing it here
+        # as well means a machine whose unit never ran still cannot loop.
+        echo failed > "$STATE/phase"
+        date -Is > "$STATE/failed-at" 2>/dev/null
+        sync
+        phase=failed
+    fi
+
+    if [ "$phase" = failed ]; then
         refuse "last-attempt-failed" \
             "The last migration was committed and its trial boot did not come up" \
             "($(cat "$STATE/failed-at" 2>/dev/null || echo 'time not recorded'))." \
@@ -759,7 +857,7 @@ cmd_auto() {
     # A machine that already has a complete stage — because the last run's
     # power was cut after staging and before the commit — does not stage
     # again. Everything the stage wrote is still there and still correct.
-    if [ "$(cat "$STATE/phase" 2>/dev/null)" = staged ]; then
+    if [ "$phase" = staged ]; then
         log "a complete stage from an earlier run is already on this machine"
         cmd_commit || return $?
         log "this machine will boot systemd-boot next time. Reboot when you like."
