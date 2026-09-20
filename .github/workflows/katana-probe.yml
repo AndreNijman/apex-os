@@ -1,0 +1,176 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  katana-probe.yml — prove what a job on the self-hosted runner CANNOT reach.
+#
+#  A self-hosted runner on a PUBLIC repository runs whatever a workflow tells
+#  it to, on Andre's own machine. The containment below is the reason that is
+#  acceptable, and a permission believed in but never tested is this program's
+#  most-repeated defect — so this workflow ATTEMPTS each forbidden thing and
+#  fails if any of them succeeds.
+#
+#  Read `ROADMAP/evidence/katana-runner-20260920.md` for how the runner is set
+#  up and how to undo it.
+# ─────────────────────────────────────────────────────────────────────────────
+name: katana containment probe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/katana-probe.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: katana-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    # FORK PULL REQUESTS MUST NEVER REACH THIS MACHINE.
+    #
+    # This `if:` is the belt, not the control. On a `pull_request` event GitHub
+    # runs the workflow file FROM THE PULL REQUEST HEAD, so a fork can simply
+    # delete this line. The actual control is the repository setting
+    # "Require approval for all external contributors"
+    # (actions/permissions/fork-pr-contributor-approval =
+    # all_external_contributors), set 2026-09-20 — no workflow from outside runs
+    # at all until Andre approves it. Never add `pull_request_target` to a job
+    # that runs here: it hands the base repo's secrets to the fork's code.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, katana]
+    timeout-minutes: 20
+    steps:
+      - name: identity
+        run: |
+          set -euo pipefail
+          echo "user=$(id -un) uid=$(id -u) groups=$(id -Gn)"
+          test "$(id -un)" = "ghrunner" || { echo "FAIL: not running as ghrunner"; exit 1; }
+          echo "workspace=$PWD"
+          case "$PWD" in
+            /var/lab/runner/_work/*) echo "ok: workspace is on the dev partition" ;;
+            *) echo "FAIL: workspace is $PWD, expected it under /var/lab/runner/_work"; exit 1 ;;
+          esac
+
+      - name: containment — each of these MUST be refused
+        run: |
+          set -uo pipefail
+          fails=0
+          # `set -e` does NOT apply to a command inverted with `!`, so every
+          # assertion below is written as an explicit if/then.
+          deny() {
+            desc="$1"; shift
+            if "$@" >/dev/null 2>&1; then
+              echo "  LEAK  : $desc  -- SUCCEEDED and must not have"
+              fails=$((fails + 1))
+            else
+              echo "  denied: $desc"
+            fi
+          }
+
+          echo "--- privilege ---"
+          deny "sudo -n true"                    sudo -n true
+          deny "su root"                         su -c true root
+          # `su` proves little on its own — there is no tty and no password to
+          # give it. pkexec is the escalation path that actually exists on this
+          # machine, and ghrunner is in no group polkit's admin rule accepts.
+          deny "pkexec"                          pkexec /bin/true
+
+          echo "--- Andre's data ---"
+          deny "list his home"                   ls /var/home/andre
+          deny "read his ssh dir"                ls /var/home/andre/.ssh
+          deny "read his known_hosts"            cat /var/home/andre/.ssh/known_hosts
+          deny "read his gh credentials"         cat /var/home/andre/.config/gh/hosts.yml
+          deny "list his APEX worktrees"         ls /var/home/andre/Projects/apex
+          deny "list his games library"          ls /var/home/andre/Games
+          deny "list his dev scratch"            ls /var/lab/scratch
+
+          echo "--- the runner's own credential ---"
+          deny "read the token that registers the runner" cat /etc/apex-runner/gh-token
+
+          echo "--- the runner's own backups of Andre's data ---"
+          # This unit archived his Steam Proton prefix while repartitioning.
+          # It is his data, this unit put it there, and a prefix can carry
+          # cached credentials — so the probe checks what it created, not only
+          # what was already on the machine.
+          deny "read the backup of his Steam prefix" ls /var/lib/apex/katana-runner-20260920
+
+          echo "--- tamper with the runner itself ---"
+          deny "write into the runner's bin/"    touch /var/lab/runner/actions-runner/bin/pwned
+          deny "edit the runner's systemd unit"  touch /etc/systemd/system/apex-github-runner.service
+          # THE ATTACK THE ABOVE TWO DO NOT COVER, and which succeeded until
+          # 2026-09-20: write permission on a DIRECTORY lets you rename or
+          # unlink entries in it whatever their ownership. `touch bin/pwned` is
+          # refused while `mv bin bin.x && cp -r bin.x bin` is not — and that
+          # owns every later job, straight through the ephemeral boundary.
+          # The top level is 1775 (sticky) so ghrunner can still create the
+          # .runner/.credentials it needs but cannot touch root's entries.
+          deny "rename a root-owned file at the runner's top level" \
+               mv /var/lab/runner/actions-runner/.root-decoy /var/lab/runner/actions-runner/.root-decoy.x
+          deny "replace the runner's bin/ wholesale" \
+               mv /var/lab/runner/actions-runner/bin /var/lab/runner/actions-runner/bin.x
+          deny "delete the runner's run.sh" rm -f /var/lab/runner/actions-runner/run.sh
+
+          echo "--- Andre's LAN ---"
+          deny "reach the router"                curl -sS --max-time 5 -o /dev/null http://192.168.1.1/
+          deny "reach this host over the LAN"    curl -sS --max-time 5 -o /dev/null http://192.168.1.245/
+          deny "reach 10/8"                      curl -sS --max-time 5 -o /dev/null http://10.0.0.1/
+          deny "ssh anywhere on the LAN"         timeout 5 bash -c 'exec 3<>/dev/tcp/192.168.1.1/22'
+
+          echo
+          if [ "$fails" -ne 0 ]; then
+            echo "CONTAINMENT FAILED: $fails of the assertions above got through."
+            exit 1
+          fi
+          echo "containment holds: every forbidden action was refused."
+
+      - name: positive controls — these MUST work, or the probe proved nothing
+        run: |
+          set -euo pipefail
+          allow() {
+            desc="$1"; shift
+            if "$@" >/dev/null 2>&1; then
+              echo "  ok    : $desc"
+            else
+              echo "  BROKEN: $desc -- a job cannot do its work"
+              exit 1
+            fi
+          }
+          allow "resolve DNS"          getent hosts github.com
+          allow "reach the internet"   curl -fsS --max-time 20 -o /dev/null https://api.github.com/
+          allow "write the workspace"  touch ./probe-write-test
+          allow "run a container"      podman run --rm quay.io/fedora/fedora-bootc:43 /bin/true
+          rm -f ./probe-write-test
+          echo "--- the box this gets ---"
+          echo "cpus=$(nproc)  mem=$(free -g | awk '/^Mem:/{print $2}')GiB"
+          df -h /var/lab | tail -1
+
+      - name: leave a stray process behind, so the cleanup can be proven
+        run: |
+          set -euo pipefail
+          # An ephemeral runner's whole point is that nothing survives a job.
+          # This double-forks out of the step's own process tree; only the
+          # unit's cgroup teardown can reap it. Checked from outside the job.
+          setsid nohup sleep 9999 </dev/null >/dev/null 2>&1 &
+          sleep 1
+          pgrep -u ghrunner -f 'sleep 9999' >/dev/null && echo "stray process planted"
+
+  # A SKIPPED JOB COUNTS AS SUCCESS in these workflows. This job turns a skipped
+  # or cancelled probe into a red run, so "the probe never ran" cannot read as
+  # "the probe passed".
+  assert-probe-ran:
+    needs: probe
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: the probe must have actually run and passed
+        run: |
+          set -euo pipefail
+          result='${{ needs.probe.result }}'
+          echo "probe result: $result"
+          if [ "$result" != "success" ]; then
+            echo "the containment probe did not run to success — treat the runner as unverified"
+            exit 1
+          fi
