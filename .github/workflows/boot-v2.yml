@@ -115,6 +115,24 @@ jobs:
             echo "::warning::/dev/kvm is absent; guests fall back to TCG and will be slow"
           fi
 
+      - name: nvram-guard needs efibootmgr, or it refuses to launch anything
+        run: |
+          set -euo pipefail
+          # The guard has three verdicts and the middle one MATTERS HERE: with
+          # /sys/firmware/efi present but no `efibootmgr`, the snapshot is not
+          # real, and it refuses to run the command at all (exit 4) rather than
+          # claim a pass it cannot make. Azure runners can be UEFI, so a
+          # missing binary would turn every scenario launch below red for a
+          # reason that has nothing to do with the scenarios.
+          #
+          # efivars are world-readable, so no sudo is needed to read them —
+          # checked on a real UEFI machine as uid 1000.
+          command -v efibootmgr >/dev/null 2>&1 \
+            || sudo apt-get install -y --no-install-recommends efibootmgr
+          # And say plainly which world this runner is in, so a `could-not-run`
+          # further down is a recorded fact rather than a surprise.
+          ./tests/lab/nvram-guard --snapshot "$RUNNER_TEMP/nvram-precheck" || true
+
       - name: Build the boot lab
         run: |
           set -euo pipefail

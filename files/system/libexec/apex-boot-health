@@ -91,7 +91,7 @@ counting_in_effect() { [[ -e "$EFIVARS_DIR/LoaderBootCountPath-$LOADER_GUID" ]];
 #
 # which this function then returned as an empty string, so every APEX boot on
 # systemd-boot reported `entry unknown` — visible in the lab serial logs
-# (ROADMAP/evidence/sdboot-image-20260921-decision.md) and reproduced on the
+# (ROADMAP/evidence/sdboot-image-20260920-decision.md) and reproduced on the
 # L16 against LoaderInfo, which really does exist there and really does say
 # "GRUB 2.12". `dd bs=1` reads a byte at a time and never seeks, so it is
 # correct on efivarfs, on a regular fixture file and on a pipe alike.

@@ -5,7 +5,7 @@
 # On the composefs + systemd-boot path the ESP is mounted at /boot, so the
 # Type #1 loader entries systemd-bless-boot has to rename are FAT files
 # labelled dosfs_t. Measured on the APEX image in the VM lab, SELinux
-# enforcing (ROADMAP/evidence/sdboot-image-20260921-decision.md):
+# enforcing (ROADMAP/evidence/sdboot-image-20260920-decision.md):
 #
 #   systemd-bless-boot[1609]: Failed to rename
 #       '/loader/entries/bootc_fedora-43-1+2-1.conf'

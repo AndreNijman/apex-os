@@ -161,7 +161,7 @@ else
     printf '       inverse control needs a UEFI host and was NOT run. The FIFO case\n'
     printf '       above proves the byte-wise read works on unseekable input; it does\n'
     printf '       NOT prove the old one failed. See the L16 transcript in\n'
-    printf '       ROADMAP/evidence/sdboot-image-20260921-decision.md.\n'
+    printf '       ROADMAP/evidence/sdboot-image-20260920-decision.md.\n'
 fi
 
 # Executable lines only: the helper's own comment quotes the broken command to
@@ -328,7 +328,7 @@ sec "the blessing can write a FAT ESP, or none of the above matters"
 # renames are dosfs_t. PID 1 running /usr/lib/systemd/systemd-bless-boot
 # (init_exec_t) stays in init_t, which Fedora 43 allows no rename on dosfs_t —
 # measured on the APEX image, with the AVC, in
-# ROADMAP/evidence/sdboot-image-20260921-decision.md. Unrepaired, the counter
+# ROADMAP/evidence/sdboot-image-20260920-decision.md. Unrepaired, the counter
 # above turns into a machine that rolls itself back on every fourth boot.
 grep -qx 'SELinuxContext=-system_u:system_r:bootupd_t:s0' "$BLESS_DROPIN" \
     && ok "the blessing runs in bootupd_t, the domain allowed to write a FAT ESP" \

@@ -1929,7 +1929,7 @@ RUN set -eux; \
 # ── the boot blessing has to be able to write a FAT ESP ───────────────────
 #
 # Measured on the APEX image in the VM lab, composefs + systemd-boot, SELinux
-# enforcing (ROADMAP/evidence/sdboot-image-20260921-decision.md):
+# enforcing (ROADMAP/evidence/sdboot-image-20260920-decision.md):
 #
 #   systemd-bless-boot: Failed to rename '/loader/entries/…+2-1.conf'
 #                       to '/loader/entries/….conf': Permission denied
