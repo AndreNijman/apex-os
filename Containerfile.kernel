@@ -139,13 +139,19 @@ RUN set -eux; \
 RUN set -eux; \
     set -a; . /build/kernel.pin; set +a; \
     cd /build/rpm/SPECS; \
+    # The dist tag decides the RPM release string, so it must follow the
+    # builder we are actually in rather than a hardcoded 43 that silently
+    # disagrees with BUILDER_BASE the day that pin moves.
+    FEDVER="$(. /etc/os-release; echo "${VERSION_ID}")"; \
+    test -n "${FEDVER}" || { echo "FATAL: no VERSION_ID in the builder's os-release"; exit 1; }; \
+    echo "builder is Fedora ${FEDVER}; release will be cachyos1.apex${APEX_KERNEL_BUILD}.fc${FEDVER}"; \
     # NOT `rpmbuild … | tail`: `set -e` sees only the LAST command in a
     # pipeline, so a failed rpmbuild piped to tail exits 0 and the build
     # marches on to assert against a kernel that was never linked. Redirect,
     # test explicitly, print the tail either way.
     if ! rpmbuild -bb kernel-cachyos.spec \
             --define "_topdir /build/rpm" \
-            --define "dist .apex${APEX_KERNEL_BUILD}.fc43" \
+            --define "dist .apex${APEX_KERNEL_BUILD}.fc${FEDVER}" \
             --define "_smp_build_ncpus 12" \
             > /build/rpmbuild.log 2>&1; then \
         echo "FATAL: rpmbuild failed — last 120 lines:"; \
@@ -194,16 +200,40 @@ RUN set -eux; \
     find /build/rpm/RPMS -type f -name '*.rpm' -exec cp -t /rpms {} +; \
     ls -l /rpms; \
     N="$(find /rpms -name '*.rpm' | wc -l)"; \
-    test "${N}" -ge 4 \
-        || { echo "FATAL: only ${N} rpms produced; expected the kernel, core, modules and devel set"; exit 1; }; \
-    KVER="$(sed -n 's/^CONFIG_LOCALVERSION=\"\(.*\)\"$/\1/p' "${CONF}" || true)"; \
+    # BY NAME, not by count. `-ge 4` would pass on four debuginfo subpackages
+    # and the missing one would surface 50 minutes later as core's `rpm -q`
+    # hard-gate failing — which is the expensive way to learn it. These are
+    # exactly the four Containerfile.core installs and then asserts.
+    rpm -qp --qf '%{NAME}\n' /rpms/*.rpm | sort -u > /build/rpm-names; \
+    cat /build/rpm-names; \
+    for want in kernel-cachyos kernel-cachyos-core kernel-cachyos-modules \
+                kernel-cachyos-devel-matched; do \
+        grep -qx "${want}" /build/rpm-names \
+            || { echo "FATAL: this build produced no ${want} — Containerfile.core installs and rpm -q's it"; exit 1; }; \
+        echo "produced: ${want}"; \
+    done; \
+    KVER="$(rpm -qp --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' /rpms/kernel-cachyos-core-*.rpm | head -1)"; \
+    test -n "${KVER}" || { echo "FATAL: cannot read the kernel version off its own rpm"; exit 1; }; \
+    # Containerfile.core finds the kernel with `ls -d /usr/lib/modules/*cachyos*`.
+    # If a release-string change ever stopped matching that glob, core would
+    # fail on an unset KVER with nothing saying why. Assert it here, where the
+    # string is made.
+    case "${KVER}" in \
+        *cachyos*) echo "kver: ${KVER} (matches core's *cachyos* glob)" ;; \
+        *) echo "FATAL: kver '${KVER}' does not contain 'cachyos'; Containerfile.core's kver glob would find nothing"; exit 1 ;; \
+    esac; \
+    CCVER="$(sed -n 's/^CONFIG_CC_VERSION_TEXT="\(.*\)"$/\1/p' "${CONF}")"; \
     cp "${CONF}" /manifest/config; \
     cp /build/vmlinux.btf /manifest/vmlinux.btf; \
     cp /build/kernel.pin /manifest/kernel.pin; \
     { echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
       echo "kernel_tag=${KERNEL_TAG}"; \
+      echo "kernel_version=${KERNEL_VERSION}"; \
+      echo "kver=${KVER}"; \
       echo "dwarves=${DWARVES_NVR}"; \
       echo "pahole_version=${GOTPAHOLE}"; \
+      echo "builder=fedora:${FEDVER}"; \
+      echo "cc=${CCVER}"; \
       echo "btf_scx=usable"; \
       echo "rpms=${N}"; } > /manifest/kernel-build.txt; \
     cat /manifest/kernel-build.txt; \
@@ -215,7 +245,11 @@ RUN set -eux; \
 FROM scratch
 COPY --from=kbuild /rpms /rpms
 COPY --from=kbuild /manifest /manifest
+# One label, deliberately. A `org.apexos.kernel.tag="cachyos-7.2.6-1"` here
+# would be a second copy of kernel.pin that nothing makes agree with the first,
+# and the day the pin moves it becomes a confident lie in `skopeo inspect`.
+# /manifest/kernel-build.txt is written by the build that produced these RPMs,
+# carries the kver, the toolchain and the BTF verdict, and cannot disagree with
+# them. /manifest/kernel.pin is the inputs it came from.
 LABEL org.apexos.tier="kernel" \
-      org.apexos.kernel.tag="cachyos-7.2.6-1" \
-      org.apexos.kernel.dwarves="1.32-1.fc43" \
-      org.apexos.kernel.btf-scx="usable"
+      org.apexos.kernel.manifest="/manifest/kernel-build.txt"
