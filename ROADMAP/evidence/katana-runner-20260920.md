@@ -360,3 +360,10 @@ umount /var/lab                # then remove the /etc/fstab line
 Deregister the runner in the repository's Settings → Actions → Runners, and put
 `fork-pr-contributor-approval` back to `first_time_contributors` if that is
 wanted. The partition itself is undone with the `sgdisk --load-backup` above.
+
+**Do not delete `/var/lib/apex/katana-runner-20260920/`** — it is the undo, not
+a leftover. It carries its own `README.md`, which the runner unit's
+`Documentation=` points at, so `systemctl cat apex-github-runner` leads a
+stranger to it. It is ~240 MB, almost all of it the Steam prefix archive; the
+archive is the only part that is safe to drop once Andre confirms his save data
+is fine.
