@@ -35,7 +35,28 @@ gained focus:
 `tests/test-apex-hypr-focus.sh` asserts the *consequence* on a real nested
 Hyprland — the pointer ends up inside the newly focused window, and the window
 is still focused after the pointer is nudged — rather than asserting that a
-config file contains a line.
+config file contains a line. It then tears the session down and runs the whole
+thing again with `no_warps = true`, where those assertions **must** fail, so
+the suite cannot pass by agreeing with whatever the configuration happens to
+say. In that control the pointer is left at 480,540 while the focused window
+starts at x=962, and a one-pixel nudge hands focus straight back: Andre's
+report, reproduced on demand.
+
+## What is tested where
+
+| | suite | what it proves |
+|---|---|---|
+| apex-os | `tests/test-apex-hypr-focus.sh` | `SUPER`+arrow warps the pointer and holds focus; the control fails; every arrow combo is bound exactly once; the switcher's binds exist and the `Alt_L`/`Alt_R` ones are releases |
+| apex-shell | `tests/run-window-switcher-test.sh` | real `ALT` and `TAB` keys reach the switcher — stepping, wrapping, backwards, `ESCAPE`, commit, and a window that has left the screen |
+| apex-shell | `tests/run-switcher-activate-test.sh` | committing focuses the selected window, puts the pointer inside it, holds focus through a nudge, and switches workspace for a window on another one |
+| apex-shell | `tests/run-niri-keybinds-test.sh` | the niri fragment carries `recent-windows` and `niri validate` accepts it |
+
+One thing no headless suite can press: a real `ALT` held down and let go.
+`wtype`'s virtual keyboard is accepted by Hyprland 0.56.2 and then reported
+with `active keymap: error`, and no binding fires from it; niri behaves the
+same way; only wlroots compositors take it. So the release binding is asserted
+as *registered* (`release: true` in `hyprctl binds`) and confirmed for real by
+a person holding `ALT`.
 
 ## The Alt-Tab switcher
 
@@ -92,8 +113,12 @@ job properly, so the Floating session keeps it — with
 windows including other workspaces" for that session.
 
 **niri** 26.04 ships `recent-windows`: hold-and-release, MRU ordering, live
-previews, on by default with `Alt`+`Tab` and `Mod`+`Tab` bound. It has no
-key-release binding for the shell's switcher to borrow either.
+previews. It has no key-release binding for the shell's switcher to borrow
+either, so the Scrolling session keeps niri's — and APEX Shell writes the two
+binds into `ApexShellKeybinds.kdl` rather than inheriting them, for the same
+reason `cursor { no_warps = false }` is written into the Hyprland seed when it
+too is upstream's default: this is APEX's `ALT`+`Tab`, not something a later
+release can change its mind about.
 
 So `ALT`+`Tab` looks different in each session, and that is a decision rather
 than an oversight: two of the three compositors already do this well, and
