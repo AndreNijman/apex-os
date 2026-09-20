@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  winlab — the Windows virtual machine this installer is tested against.
+#
+#  ═══ WHY THERE IS A WHOLE VM IN A TEST DIRECTORY ═══
+#
+#  The first round of `windows-installer/` shipped a careful GPT parser and an
+#  emptiness validator and recorded, honestly, that none of it had ever seen a
+#  Windows machine. It could not have: katana dual-boots Windows and katana is
+#  Andre's, the L16 is the machine this is typed on, and a disk-writing tool
+#  whose first real disk is somebody's laptop is how you get an unbootable
+#  laptop. There is no Windows machine in this program that may be written to,
+#  so the Windows machine has to be built.
+#
+#  Everything below is a file under $APEX_WINLAB_DIR. No host disk, no host
+#  ESP, no host firmware variable is in reach of any guest. /dev/kvm is passed
+#  as a device to an unprivileged container, which is a device pass-through and
+#  not a privilege.
+#
+#  ═══ THE FOUR THINGS THAT MAKE A HEADLESS WINDOWS INSTALL WORK ═══
+#
+#  1. The El Torito UEFI boot image is swapped for efisys_noprompt.bin. The
+#     stock one prints "Press any key to boot from CD or DVD" and waits for a
+#     keyboard that a headless run does not have.
+#  2. autounattend.xml goes in the ISO root, and names /IMAGE/INDEX 1 — read
+#     out of install.wim with wiminfo rather than guessed, because a wrong
+#     index stops Setup on a picker dialog nobody can see.
+#  3. Setup reboots two or three times. qemu runs with -no-reboot so each boot
+#     is a separate process the harness controls: the CD boots first once, the
+#     disk boots first afterwards. Otherwise the CD wins every reboot and Setup
+#     starts over, forever.
+#  4. Nothing is asked of the guest over a network or a shared folder, because
+#     Windows Setup media carries no virtio driver. The transport is a FAT disk
+#     labelled APEXLAB that the host writes with mtools and the guest reads as
+#     an ordinary drive letter. Everything comes back the same way.
+#
+#  ═══ THE MACHINE ═══
+#
+#  q35 + AHCI, deliberately. Stock Windows Server 2022 media has no virtio
+#  storage driver, so a virtio-blk system disk is a guest that never finds a
+#  disk to install to. AHCI also takes model= and serial=, which is exactly the
+#  hardware identity the installer has to name its target by.
+#
+#  ═══ USAGE ═══
+#
+#      winlab image              build the container
+#      winlab media              remaster the Microsoft ISO
+#      winlab golden             run Setup; produce golden.raw + golden-VARS.fd
+#      winlab fixtures           build the target-disk fixtures
+#      winlab run DIR [--swap]   boot the golden with DIR/run.ps1, print results
+#      winlab status             what exists and what does not
+#
+#  $APEX_WINLAB_DIR defaults to /var/lab-scratch/winlab. It is not /tmp on
+#  purpose: /tmp here is a tmpfs on a 29 GB machine and a 5 GB ISO plus a 40 GB
+#  disk image would be RAM.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIR="${APEX_WINLAB_DIR:-/var/lab-scratch/winlab}"
+IMAGE="${APEX_WINLAB_IMAGE:-localhost/apex-winlab:latest}"
+
+ISO="$DIR/ws2022-eval.iso"
+MEDIA="$DIR/apex-winsetup.iso"
+GOLDEN="$DIR/golden.raw"
+GOLDVARS="$DIR/golden-VARS.fd"
+
+# The Microsoft evaluation media. 180-day evaluation, no product key, no
+# Microsoft account, no TPM requirement — the reasons this edition and not
+# Windows 11. The link is Microsoft's own permanent fwlink.
+ISO_URL='https://go.microsoft.com/fwlink/p/?LinkID=2195280'
+ISO_BYTES=5044094976
+
+say()  { printf '%s\n' "$*"; }
+die()  { printf 'winlab: %s\n' "$*" >&2; exit 1; }
+need() { [ -e "$1" ] || die "missing $1 — run 'winlab $2' first"; }
+
+have_kvm() { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }
+
+# Run a script inside the lab container. $DIR is /w, this directory is /lab.
+inlab() {
+    local kvm=()
+    have_kvm && kvm=(--device /dev/kvm)
+    podman run --rm "${kvm[@]}" \
+        -v "$DIR":/w:Z -v "$HERE":/lab:ro,Z \
+        "$IMAGE" bash -uo pipefail -c "$1"
+}
+
+# ── winlab image ─────────────────────────────────────────────────────────────
+cmd_image() {
+    command -v podman >/dev/null 2>&1 || die "podman is absent"
+    podman build -t "$IMAGE" -f "$HERE/Containerfile" "$HERE"
+}
+
+# ── winlab fetch ─────────────────────────────────────────────────────────────
+cmd_fetch() {
+    mkdir -p "$DIR"
+    if [ -s "$ISO" ] && [ "$(stat -c %s "$ISO")" = "$ISO_BYTES" ]; then
+        say "have $ISO ($ISO_BYTES bytes)"
+        return 0
+    fi
+    say "fetching Windows Server 2022 Evaluation (~5.0 GB) …"
+    curl -sS -L -C - -o "$ISO" "$ISO_URL" || die "download failed"
+    local got; got="$(stat -c %s "$ISO")"
+    [ "$got" = "$ISO_BYTES" ] || die "size $got, expected $ISO_BYTES"
+    say "fetched $ISO"
+}
+
+# ── winlab media ─────────────────────────────────────────────────────────────
+#  Extract, add, re-author. The obvious one-pass `xorriso -indev … -outdev …`
+#  does NOT work on this media and the reason is worth writing down: the
+#  Microsoft ISO's ISO-9660 tree contains exactly one file, README.TXT. Every
+#  real file — sources/install.wim, efi/, boot/ — lives in the UDF volume, and
+#  libisofs reads no UDF, so xorriso loads an image with nothing in it and
+#  reports "Cannot find path '/efi/microsoft/boot/efisys_noprompt.bin'" as
+#  though the file were absent. It is not absent; it is in a filesystem the
+#  loader cannot see. 7z reads UDF, so extraction goes through it and xorriso
+#  authors the replacement from a directory.
+#
+#  install.wim is 4.34 GB and xorriso's mkisofs emulation writes no UDF, so the
+#  replacement media cannot carry it as one file: ISO-9660 caps a file at 4 GiB
+#  and Windows' CDFS driver does not read multi-extent files. So the image is
+#  SPLIT with wimlib into sources/install.swm + install2.swm, which is the
+#  arrangement Microsoft documents for FAT32 install media and which Setup
+#  picks up with no answer-file help. Joliet carries the long names.
+#
+#  The BIOS boot record is dropped — only the EFI El Torito entry is authored.
+#  The guest is UEFI-only on purpose: a CSM boot produces an MBR Windows
+#  install, and then every GPT, ESP and firmware-variable assertion this lab
+#  exists to make would be measuring the wrong machine.
+cmd_media() {
+    need "$ISO" fetch
+    inlab '
+        set -e
+        test -f /lab/autounattend.xml
+        rm -rf /w/isoroot && mkdir -p /w/isoroot
+        echo "extracting the Microsoft media (UDF) …"
+        7z x -y -bso0 -bsp0 -o/w/isoroot /w/ws2022-eval.iso
+        test -s /w/isoroot/efi/microsoft/boot/efisys_noprompt.bin
+        test -s /w/isoroot/sources/install.wim
+        chmod -R u+w /w/isoroot
+        cp /lab/autounattend.xml     /w/isoroot/autounattend.xml
+        cp /lab/apexlab-agent.ps1    /w/isoroot/apexlab-agent.ps1
+        echo "splitting install.wim (4.34 GB does not fit an ISO-9660 file) …"
+        wimsplit /w/isoroot/sources/install.wim /w/isoroot/sources/install.swm 3800 >/dev/null
+        rm -f /w/isoroot/sources/install.wim
+        ls -l /w/isoroot/sources/install*.swm
+        echo "authoring …"
+        rm -f /w/apex-winsetup.iso
+        xorriso -as mkisofs \
+            -iso-level 3 -J -joliet-long -V APEX_WINSETUP \
+            -e efi/microsoft/boot/efisys_noprompt.bin -no-emul-boot \
+            -o /w/apex-winsetup.iso /w/isoroot 2>&1 | tail -8
+        rm -rf /w/isoroot
+        ls -l /w/apex-winsetup.iso
+        echo "--- the produced media, as the firmware will see it ---"
+        xorriso -indev /w/apex-winsetup.iso -report_el_torito plain 2>&1 |
+            grep -E "El Torito (boot img|images|catalog)"
+        echo "--- autounattend.xml is in the root, and it is ours ---"
+        7z l /w/apex-winsetup.iso 2>/dev/null | grep -iE "autounattend|apexlab-agent" | head
+    ' || die "remaster failed"
+    say "media: $MEDIA"
+}
+
+# ── the qemu command line, in one place ──────────────────────────────────────
+#  Emitted as shell text for the container. $1 selects who boots first.
+qemu_args() {
+    cat <<'QEMU'
+# $VARS $SYSDISK $MON $SHOTTAG must be set. $1 = who boots first: cd|disk.
+# Everything after $1 is appended to the command line verbatim.
+#
+# A headless Windows Setup that stops shows you nothing at all, so a watcher
+# takes a monitor screendump every 30 s into /w/shot-$SHOTTAG.ppm, overwriting.
+# When a phase ends the file holds the last frame before it did — which is the
+# difference between "Setup failed" and knowing which dialog it failed on.
+qemu_run() {
+    local first="$1"; shift
+    local cdidx=2 dkidx=1
+    [ "$first" = cd ] && { cdidx=1; dkidx=2; }
+    local cd=()
+    if [ "$first" = cd ] && [ -f /w/apex-winsetup.iso ]; then
+        cd=(-drive "id=cd,file=/w/apex-winsetup.iso,format=raw,if=none,media=cdrom,readonly=on"
+            -device "ide-cd,drive=cd,bus=ahci.4,bootindex=$cdidx")
+    fi
+    rm -f "$MON"
+    timeout "${QEMU_TIMEOUT:-2700}" qemu-system-x86_64 \
+        -name apex-winlab \
+        -machine q35,accel=kvm -cpu host -smp 4 -m 4096 \
+        -drive "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd" \
+        -drive "if=pflash,format=raw,unit=1,file=$VARS" \
+        -device ich9-ahci,id=ahci \
+        -drive "id=sys,file=$SYSDISK,format=raw,if=none,cache=unsafe" \
+        -device "ide-hd,drive=sys,bus=ahci.0,bootindex=$dkidx,model=APEX-LAB-SYSTEM,serial=SYS0000000001" \
+        "${cd[@]}" "$@" \
+        -display none -vga std -monitor "unix:$MON,server,nowait" \
+        -no-reboot -rtc base=utc -boot menu=off &
+    local qpid=$!
+    (
+        while kill -0 "$qpid" 2>/dev/null; do
+            sleep 30
+            [ -S "$MON" ] || continue
+            printf 'screendump /w/shot-%s.ppm\n' "$SHOTTAG" |
+                timeout 10 socat - "unix-connect:$MON" >/dev/null 2>&1
+        done
+    ) &
+    local wpid=$!
+    local rc=0
+    wait "$qpid" || rc=$?
+    kill "$wpid" 2>/dev/null
+    wait "$wpid" 2>/dev/null
+    return "$rc"
+}
+QEMU
+}
+
+# ── winlab golden ────────────────────────────────────────────────────────────
+cmd_golden() {
+    need "$MEDIA" media
+    have_kvm || die "/dev/kvm is not usable; the Windows install needs it"
+    rm -f "$GOLDEN" "$GOLDVARS" "$DIR/transport.raw"
+    inlab "$(qemu_args)"'
+        set -e
+        export VARS=/w/golden-VARS.fd SYSDISK=/w/golden.raw MON=/w/mon.sock
+        cp /usr/share/edk2/ovmf/OVMF_VARS.fd "$VARS"
+        qemu-img create -f raw "$SYSDISK" 40G >/dev/null
+
+        # The transport disk exists from phase 2 onward only. During phase 1
+        # the system disk is the ONLY disk attached, so autounattend.xml`s
+        # "DiskID 0, WillWipeDisk true" cannot possibly address anything else.
+        mkfs_transport() {
+            qemu-img create -f raw /w/transport.raw 64M >/dev/null
+            printf "label: gpt\nsize=60MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=APEXLAB\n" |
+                sfdisk /w/transport.raw >/dev/null 2>&1
+            mformat -i /w/transport.raw@@1048576 -F -v APEXLAB ::
+        }
+
+        phase=1
+        while [ $phase -le 8 ]; do
+            echo "── golden phase $phase ── $(date -u +%H:%M:%S)"
+            export SHOTTAG="golden-p$phase"
+            rc=0
+            if [ $phase = 1 ]; then
+                qemu_run cd || rc=$?
+            else
+                [ -f /w/transport.raw ] || mkfs_transport
+                qemu_run disk \
+                    -drive "id=tr,file=/w/transport.raw,format=raw,if=none" \
+                    -device "ide-hd,drive=tr,bus=ahci.1,model=APEX-LAB-TRANSPORT,serial=TRN0000000001" \
+                    || rc=$?
+            fi
+            echo "   qemu exited rc=$rc at $(date -u +%H:%M:%S)"
+            if [ -f /w/transport.raw ] &&
+               mdir -i /w/transport.raw@@1048576 ::/golden.txt >/dev/null 2>&1; then
+                echo "GOLDEN-READY marker found after phase $phase"
+                break
+            fi
+            phase=$((phase+1))
+        done
+
+        mdir -i /w/transport.raw@@1048576 ::/golden.txt >/dev/null 2>&1 || {
+            echo "FATAL: Setup never produced the completion marker" >&2
+            echo "--- partitions the guest left on the system disk ---" >&2
+            sfdisk -d /w/golden.raw 2>&1 | head -20 >&2
+            exit 1
+        }
+
+        echo "--- firmware boot entries after Setup (the before-baseline) ---"
+        virt-fw-vars -i "$VARS" --print 2>&1 | grep -iE "Boot[0-9]{4}|BootOrder" | head -20
+        echo "--- partition table Windows created ---"
+        sfdisk -d /w/golden.raw
+    ' || die "golden build failed"
+    say "golden: $GOLDEN + $GOLDVARS"
+}
+
+# ── winlab status ────────────────────────────────────────────────────────────
+cmd_status() {
+    local f
+    for f in "$ISO" "$MEDIA" "$GOLDEN" "$GOLDVARS"; do
+        if [ -e "$f" ]; then printf '  present  %-14s %s\n' "$(du -h --apparent-size "$f" | cut -f1)" "$f"
+        else                 printf '  ABSENT   %-14s %s\n' '' "$f"; fi
+    done
+    have_kvm && say "  /dev/kvm usable" || say "  /dev/kvm NOT usable — no guest can run"
+    podman image exists "$IMAGE" 2>/dev/null && say "  container $IMAGE present" \
+        || say "  container $IMAGE ABSENT"
+}
+
+case "${1:-}" in
+    image)    cmd_image ;;
+    fetch)    cmd_fetch ;;
+    media)    cmd_media ;;
+    golden)   cmd_golden ;;
+    status)   cmd_status ;;
+    *) sed -n '/^#  ═══ USAGE ═══/,/^# ────/p' "$0" | sed 's/^#\s\?//'; exit 2 ;;
+esac
