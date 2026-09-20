@@ -3,6 +3,27 @@
 #  apex-luks-enroll — build a LUKS2 volume for the boot lab and bind it to a
 #  SOFTWARE TPM, using a signed PCR 11 policy plus a recovery key.
 #
+#  ── THIS IS THE LAB TOOL. THE SHIPPED ONE IS ELSEWHERE ──
+#
+#  The path a real machine uses is files/system/libexec/apex-luks-enroll, which
+#  the image installs as /usr/libexec/apex-luks-enroll and the installer calls.
+#  The two are deliberately separate programs and neither is a copy of the
+#  other:
+#
+#    * This one CREATES a throwaway volume, picks its own passphrase, refuses
+#      any TPM that is not a software TPM at a named swtpm state directory, and
+#      hardcodes the signed PCR 11 policy — which it can, because the lab always
+#      builds a UKI (apex-mkuki) for sd-stub to measure into PCR 11.
+#    * The shipped one adds slots to a volume that already exists, talks to the
+#      real TPM, and CHOOSES its binding from what it can measure about the
+#      running system: whether sd-stub booted it, whether PCR 11 was actually
+#      extended, whether Secure Boot is enforcing. On a machine with no sd-stub
+#      PCR 11 is 64 zeros and a policy bound to it is unenforceable, so it binds
+#      PCR 7 there instead and says why.
+#
+#  Changing the policy here changes what the `luks-tpm*` guest scenarios prove
+#  about the UKI path. It does NOT change what any machine does.
+#
 #  §22 migration step 5, "measured boot and TPM-bound disk unlock as an opt-in
 #  developer feature". Step 6 — encryption by default — is explicitly gated on
 #  recovery and hardware edge cases being proven, and they are not, so nothing
