@@ -15,7 +15,7 @@ guest boots:
 
 ```
 APEX_WINLAB_GUEST=1 ./tests/test-windows-installer.sh
-apex-windows-installer: 27 passed, 0 failed, 0 could-not-run
+apex-windows-installer: 29 passed, 0 failed, 0 could-not-run
 ```
 
 Eight commits on `task/windows-installer-2`, all pushed, tip `c12e69d6`. Not
@@ -124,6 +124,13 @@ offset), `src/plan.rs` (platform-neutral eligibility rules + confirmation text,
 
 6. The GUI does not exist. The confirmation text does, and is unit-tested; the
    screen that shows it does not.
+
+## For the orchestrator
+
+`ROADMAP/state/queue.json` still carries the round-1 unit `windows-installer`
+(line ~563). It was not touched: the queue is the orchestrator's. This round
+ran as **`windows-installer-2`** and its card is this file, so a resume that
+looks only for the round-1 slug will not find this work.
 
 If this agent is dead, do not message it. Read this file, then continue in the
 worktree above.
