@@ -714,13 +714,13 @@ sudo /usr/libexec/apex-luks-enroll \
      --recovery-out /root/apex-recovery-key.txt
 ```
 
-It always enrols a recovery key, and it enrols it FIRST — a volume with a TPM
-binding and no recovery path turns a firmware update into a data-loss event, and
-the window in which that is true is closed by never opening it. Move that file
-off the encrypted disk before you reboot, not after.
+It enrols a recovery key first, before anything else, on every path. A volume
+that has a TPM binding and no recovery path turns a firmware update into a
+data-loss event, so the script never opens that window. Move the key file off
+the encrypted disk before you reboot, not after.
 
-It adds a TPM key slot only where this machine can actually enforce one, and
-when it declines it says why in words you can act on. What it decides, and how:
+It adds a TPM key slot only where this machine can enforce one, and when it
+declines it tells you why in words you can act on:
 
 | what it finds | what you get | the machine-readable line |
 | --- | --- | --- |
@@ -731,16 +731,15 @@ when it declines it says why in words you can act on. What it decides, and how:
 | no TPM device | recovery key only | `tpm2: declined reason=no-tpm2-device` |
 | Secure Boot on but PCR 7 never extended | recovery key only, and the slot it made is removed again | `tpm2: declined reason=pcr-uninitialised` |
 
-**It exits 0 in every one of those rows.** A declined TPM slot is not a failed
-enrolment: the volume has a recovery key and works. Only a failure to enrol the
-recovery key is non-zero.
+**It exits 0 in every one of those rows.** A declined TPM slot still leaves you
+a volume with a recovery key on it, so an installer must not stop there. Only a
+failure to enrol the recovery key exits non-zero.
 
 **Why no TPM slot without Secure Boot, for either binding.** PCR 7 records the
 Secure Boot policy, and with Secure Boot off it records the *disabled* policy
 whichever kernel boots — so an attacker boots their own system and the TPM
-unseals for them. The signed PCR 11 policy is no better off, which is the part
-that surprises people: the signature it needs ships in the UKI's `.pcrsig`
-section and is public, PCR 11 starts at zero on every boot, `tpm2_pcrextend 11`
+unseals for them. The signed PCR 11 policy is no better off, and that is the half people miss:
+the signature it needs ships in the UKI's `.pcrsig` section and is public, PCR 11 starts at zero on every boot, `tpm2_pcrextend 11`
 works from plain root, and every digest that reaches the signed value is a hash
 of public material. An attacker who can boot any kernel replays the extends and
 unseals without APEX's private key. What stops them is Secure Boot refusing to
