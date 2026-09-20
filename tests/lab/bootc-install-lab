@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  bootc-install-lab — the ONLY supported way to run
+#  `bootc install to-disk --via-loopback` on a developer machine.
+#
+#  ═══ WHY A WRAPPER AND NOT A RULE ═══
+#
+#  There was already a rule. On the night of 2026-09-19/20 the sdboot lab ran
+#  eight loopback installs. SEVEN passed `--tmpfs /sys/firmware/efi/efivars`.
+#  The eighth did not, bootupd saw the host's real EFI variables read-write,
+#  deleted `Boot0000 APEX-OS` and recreated it pointing at PARTUUID
+#  ee26313c-… — the ESP inside the disk image file it was building, which
+#  exists on no physical disk. Andre's daily laptop would not boot the next
+#  morning and was repaired from a live USB. BOOT-BREAKAGE-2026-09-20.md.
+#
+#  A discipline followed 7 times out of 8 is not a guard; it is a statistic.
+#  So the mask is not something a caller passes. It is something this script
+#  adds, and refuses to launch without:
+#
+#      * the podman argv is built HERE, not by the caller;
+#      * the assembled argv is scanned for the mask before anything executes
+#        (the assertion is named `efivars-mask-present`);
+#      * caller-supplied podman arguments that would re-expose the host's
+#        efivarfs — including `-v /sys:/sys`, which defeats a tmpfs one level
+#        down — are refused BY NAME;
+#      * the whole run goes through tests/lab/nvram-guard, which reads
+#        `efibootmgr -v` and the efivarfs `Boot*` digests before and after and
+#        fails if they moved. Two independent layers: this one stops the
+#        mistake, that one catches a bypass.
+#
+#  ═══ WHAT THIS DOES NOT COVER ═══
+#
+#  Real installs onto real hardware (`installer/apex-install`, the live ISO)
+#  MUST write the host's NVRAM — that is the entire point of installing an
+#  operating system. This wrapper is loopback-only and refuses a block device
+#  target, so the two paths cannot be confused for one another.
+#
+#  Usage:
+#      tests/lab/bootc-install-lab [options] IMAGE TARGET.img [-- BOOTC_ARG...]
+#
+#      --dry-run           run every refusal and the mask assertion, print the
+#                          argv that WOULD run, launch nothing
+#      --size SIZE         create TARGET.img at this size if absent (default 20G)
+#      --filesystem FS     bootc --filesystem (default ext4)
+#      --bootloader NAME   bootc --bootloader (omitted by default: GRUB stays
+#                          the default for published images, AGENTS.md rule 5)
+#      --podman-arg ARG    extra podman argument, repeatable, still refused if
+#                          it touches /sys
+#      --out DIR           keep the nvram-guard snapshot pair here
+#
+#  Run it under sudo; `podman` is taken from PATH so the suite can intercept.
+#
+#  Exit codes: 0 ok · 2 usage · 5 refused by name · 6 efivars-mask-present ·
+#              plus nvram-guard's 3 (nvram-changed) and 4 (could-not-snapshot).
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NVRAM_GUARD="$HERE/nvram-guard"
+
+DRY_RUN=0
+SIZE=20G
+FILESYSTEM=ext4
+BOOTLOADER=""
+OUT=""
+EXTRA_PODMAN=()
+EXTRA_BOOTC=()
+POSITIONAL=()
+
+die()     { printf '\n!!! bootc-install-lab: %s\n' "$*" >&2; exit 2; }
+refuse()  { printf '\n!!! bootc-install-lab REFUSED [%s]\n' "$1" >&2; shift
+            printf '    %s\n' "$@" >&2
+            printf '\n    See BOOT-BREAKAGE-2026-09-20.md and AGENTS.md "Touching a machine'"'"'s boot path".\n' >&2
+            exit 5; }
+info()    { printf '    %s\n' "$*" >&2; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run)     DRY_RUN=1; shift ;;
+        --size)        SIZE="${2:?--size needs a value}"; shift 2 ;;
+        --filesystem)  FILESYSTEM="${2:?--filesystem needs a value}"; shift 2 ;;
+        --bootloader)  BOOTLOADER="${2:?--bootloader needs a value}"; shift 2 ;;
+        --out)         OUT="${2:?--out needs a directory}"; shift 2 ;;
+        --podman-arg)  EXTRA_PODMAN+=("${2:?--podman-arg needs a value}"); shift 2 ;;
+        --)            shift; EXTRA_BOOTC=("$@"); break ;;
+        -h|--help)     sed -n '2,55p' "$0"; exit 0 ;;
+        -*)            die "unknown option $1" ;;
+        *)             POSITIONAL+=("$1"); shift ;;
+    esac
+done
+
+[ "${#POSITIONAL[@]}" -eq 2 ] || die "need exactly IMAGE and TARGET.img; got ${#POSITIONAL[@]} positional argument(s)"
+IMAGE="${POSITIONAL[0]}"
+TARGET="${POSITIONAL[1]}"
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Refusals. Every one of these runs before anything is created or launched,
+#  and before the mask assertion, so a refusal can never be mistaken for it.
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── the target must be a FILE, never a disk ─────────────────────────────────
+# `--via-loopback` means "install into an image file". A block device here is
+# either a typo or the real installer's job, and neither belongs in the lab.
+case "$TARGET" in
+    /dev/*) refuse "target-is-a-device" \
+        "TARGET is $TARGET, which is under /dev." \
+        "This wrapper runs loopback installs into IMAGE FILES only." \
+        "Installing onto real hardware is installer/apex-install's job, from the live ISO." ;;
+esac
+if [ -b "$TARGET" ]; then
+    refuse "target-is-a-device" \
+        "TARGET $TARGET is a block device." \
+        "This wrapper runs loopback installs into IMAGE FILES only."
+fi
+
+# ── never in RAM ────────────────────────────────────────────────────────────
+# /tmp on these machines is a 15 GB tmpfs on 29 GB of RAM. The sdboot lab's own
+# first runs put 20 GiB disk images there and cost the machine its memory
+# headroom before it was noticed (ROADMAP/evidence/sdboot-image-20260920-lab.md).
+TARGET_DIR="$(cd "$(dirname "$TARGET")" 2>/dev/null && pwd || true)"
+[ -n "$TARGET_DIR" ] || die "the directory holding $TARGET does not exist"
+case "$TARGET_DIR" in
+    /tmp|/tmp/*|/dev/shm|/dev/shm/*)
+        refuse "target-is-in-ram" \
+            "TARGET lives under $TARGET_DIR, which is a tmpfs — the image would be held in RAM." \
+            "Put it on real disk: /var/lab-scratch/." ;;
+esac
+if command -v stat >/dev/null 2>&1; then
+    fstype="$(stat -f -c %T "$TARGET_DIR" 2>/dev/null || echo unknown)"
+    if [ "$fstype" = tmpfs ] || [ "$fstype" = ramfs ]; then
+        refuse "target-is-in-ram" \
+            "TARGET lives on a $fstype at $TARGET_DIR — the image would be held in RAM." \
+            "Put it on real disk: /var/lab-scratch/."
+    fi
+fi
+
+# ── a caller-supplied mount must not re-expose the host's firmware ──────────
+# A tmpfs over /sys/firmware/efi/efivars is undone by ANY bind of an ancestor,
+# so the ancestors are refused too. `-v /sys:/sys` is the realistic one: it
+# looks harmless and hands the container the real efivarfs.
+EFIVARS_PARENTS="/sys /sys/firmware /sys/firmware/efi /sys/firmware/efi/efivars"
+
+# The destination field differs per flag and getting it wrong is how a check
+# like this passes everything: `-v SRC:DST[:opts]`, `--tmpfs DST[:opts]`,
+# `--mount type=...,target=DST`.
+spec_destination() {   # $1 = volume|tmpfs|mount, $2 = the spec
+    local kind="$1" spec="$2" dst=""
+    case "$kind" in
+        tmpfs)  dst="${spec%%:*}" ;;
+        mount)  case "$spec" in
+                    *target=*)      dst="${spec##*target=}";      dst="${dst%%,*}" ;;
+                    *destination=*) dst="${spec##*destination=}"; dst="${dst%%,*}" ;;
+                esac ;;
+        volume) case "$spec" in
+                    *:*) dst="${spec#*:}"; dst="${dst%%:*}" ;;
+                    *)   dst="$spec" ;;
+                esac ;;
+    esac
+    printf '%s' "$dst"
+}
+
+check_not_firmware() {   # $1 = a destination path
+    local dst="${1%/}" p
+    [ -n "$dst" ] || return 0
+    for p in $EFIVARS_PARENTS; do
+        [ "$dst" = "$p" ] || continue
+        refuse "caller-unmasks-efivars" \
+            "a --podman-arg mounts something at $dst." \
+            "That is /sys/firmware/efi/efivars or an ancestor of it, so the host's real" \
+            "EFI variables would be visible inside a --privileged container — which is" \
+            "exactly what deleted Boot0000 on 2026-09-20. A tmpfs over the leaf is undone" \
+            "by a bind of any parent, so the parents are refused too." \
+            "If you need something from /sys, mount it at a path that is not a parent" \
+            "of /sys/firmware/efi/efivars."
+    done
+}
+
+# podman takes the destination as the NEXT argument for the bare forms, so the
+# scan is a two-state machine rather than a per-argument test.
+expect_kind=""
+for a in ${EXTRA_PODMAN[@]+"${EXTRA_PODMAN[@]}"}; do
+    if [ -n "$expect_kind" ]; then
+        check_not_firmware "$(spec_destination "$expect_kind" "$a")"
+        expect_kind=""
+        continue
+    fi
+    case "$a" in
+        -v|--volume) expect_kind=volume ;;
+        --tmpfs)     expect_kind=tmpfs ;;
+        --mount)     expect_kind=mount ;;
+        --volume=*)  check_not_firmware "$(spec_destination volume "${a#--volume=}")" ;;
+        --tmpfs=*)   check_not_firmware "$(spec_destination tmpfs  "${a#--tmpfs=}")" ;;
+        --mount=*)   check_not_firmware "$(spec_destination mount  "${a#--mount=}")" ;;
+        # One --podman-arg holding the whole thing, e.g. "-v /sys:/sys". These
+        # must come BEFORE -v?* or that pattern swallows them and reads the
+        # source path as the destination.
+        "-v "*|"--volume "*) check_not_firmware "$(spec_destination volume "${a#* }")" ;;
+        "--tmpfs "*)         check_not_firmware "$(spec_destination tmpfs  "${a#* }")" ;;
+        "--mount "*)         check_not_firmware "$(spec_destination mount  "${a#* }")" ;;
+        -v?*)        check_not_firmware "$(spec_destination volume "${a#-v}")" ;;
+    esac
+done
+[ -z "$expect_kind" ] || die "--podman-arg $expect_kind was given with no destination after it"
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  The argv. Built here so that no caller can leave a piece of it out.
+# ═════════════════════════════════════════════════════════════════════════════
+PODMAN_ARGS=(run --rm --privileged --pid=host
+             --security-opt label=type:unconfined_t
+             -v /var/lib/containers:/var/lib/containers
+             -v /dev:/dev)
+
+# ── THE MASK. Removing this line is what tests/test-bootc-install-guard.sh
+# ── mutates, and the assertion below is what must go red when it does.
+PODMAN_ARGS+=(--tmpfs /sys/firmware/efi/efivars)   # efivars-mask
+
+PODMAN_ARGS+=(-v "$TARGET_DIR:/work")
+PODMAN_ARGS+=(${EXTRA_PODMAN[@]+"${EXTRA_PODMAN[@]}"})
+PODMAN_ARGS+=("$IMAGE" bootc install to-disk --via-loopback --generic-image --wipe
+              --filesystem "$FILESYSTEM")
+[ -n "$BOOTLOADER" ] && PODMAN_ARGS+=(--bootloader "$BOOTLOADER")
+PODMAN_ARGS+=(${EXTRA_BOOTC[@]+"${EXTRA_BOOTC[@]}"})
+PODMAN_ARGS+=("/work/$(basename "$TARGET")")
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  efivars-mask-present — the named assertion.
+#
+#  It reads the ASSEMBLED ARGV, not a variable that was set and never used, and
+#  it compares against the literal path written right here rather than against
+#  the constant used to build the argv, so a mutation of either one is caught.
+# ═════════════════════════════════════════════════════════════════════════════
+assert_efivars_mask_present() {
+    local i v found=0
+    for (( i = 0; i < ${#PODMAN_ARGS[@]}; i++ )); do
+        v=""
+        case "${PODMAN_ARGS[i]}" in
+            --tmpfs)   v="${PODMAN_ARGS[i+1]:-}" ;;
+            --tmpfs=*) v="${PODMAN_ARGS[i]#--tmpfs=}" ;;
+            *)         continue ;;
+        esac
+        v="${v%%:*}"; v="${v%/}"
+        [ "$v" = "/sys/firmware/efi/efivars" ] && found=1
+    done
+    if [ "$found" != 1 ]; then
+        printf '\n!!! bootc-install-lab ASSERTION FAILED [efivars-mask-present]\n' >&2
+        printf '    The podman argv about to run carries no tmpfs over\n' >&2
+        printf '    /sys/firmware/efi/efivars, so a --privileged container would see this\n' >&2
+        printf '    machine'"'"'s real UEFI boot variables read-write.\n' >&2
+        printf '    Nothing was launched. This is the 2026-09-20 breakage, refused.\n' >&2
+        printf '    argv: %s\n' "${PODMAN_ARGS[*]}" >&2
+        exit 6
+    fi
+}
+assert_efivars_mask_present
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Launch
+# ═════════════════════════════════════════════════════════════════════════════
+GUARD=("$NVRAM_GUARD" --label "bootc-install-lab:$(basename "$TARGET")")
+[ -n "$OUT" ] && GUARD+=(--out "$OUT")
+GUARD+=(--)
+
+if [ "$DRY_RUN" = 1 ]; then
+    printf 'bootc-install-lab --dry-run: nothing was launched. The command is:\n\n'
+    printf '%q ' "${GUARD[@]}" podman "${PODMAN_ARGS[@]}"
+    printf '\n\nefivars-mask-present: ok (--tmpfs /sys/firmware/efi/efivars is in the argv)\n'
+    exit 0
+fi
+
+if [ ! -e "$TARGET" ]; then
+    info "creating $TARGET ($SIZE)"
+    truncate -s "$SIZE" "$TARGET"
+fi
+
+[ -x "$NVRAM_GUARD" ] || die "$NVRAM_GUARD is missing or not executable — the second layer is not optional"
+
+info "image:  $IMAGE"
+info "target: $TARGET"
+info "podman run ${PODMAN_ARGS[*]:1}"
+exec "${GUARD[@]}" podman "${PODMAN_ARGS[@]}"
