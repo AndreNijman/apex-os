@@ -370,12 +370,34 @@ needs it to expose, stated now so they are designed in rather than retrofitted:
    a kernel image has to be rewritten at exactly the wrong moment. It should
    also be able to attach a `.sbat` section, which is what makes a signed
    artifact revocable by SBAT policy instead of by DBX.
-3. **The verification gate moves with the signature.** `AGENTS.md` requires the
-   signature to be read back out of the built artifact — `sbverify` on the
-   kernel image today. Inside a UKI the kernel's own signature is not what the
-   firmware checks; the UKI's is. So the `sbverify` gate has to run against the
-   UKI, and a build that produces a UKI but verifies only the inner kernel is
-   asserting the wrong thing.
+3. **The signature AND its gate move to the UKI the moment a UKI exists.**
+   This is the one that produces an unbootable machine with every assertion
+   still green, so it is written as a rule rather than a preference:
+
+   > Once a UKI is the object the firmware loads, signing the inner `vmlinuz`
+   > signs something the firmware never validates. The kernel is signed, the
+   > check that looks at the kernel passes, and the thing that actually boots
+   > is unsigned. Nothing goes red until a real machine refuses to boot.
+
+   The kernel unit (merge `74b777ac`) verified the pieces this needs, measured
+   rather than assumed: `vmlinuz` is a real `pei-x86-64` PE with
+   `CONFIG_EFI_STUB=y` asserted, `sbsign` runs on it with rc=0 and `sbverify`
+   confirms, and `/usr/share/apex-os/kernel/{build.txt,kernel.pin}` carry
+   consumable provenance. So the signing path works end to end; what must not
+   happen is the signature staying on the kernel once the UKI becomes the boot
+   object. `AGENTS.md`'s Secure Boot invariant — read the signature out of the
+   built artifact — then means `sbverify` against the **UKI**.
+
+   Two facts from that unit that this design should not get wrong:
+
+   * **The kernel image is `FROM scratch`, RPMs only, 186.9 MiB, and no user
+     ever downloads it.** The fleet update cost is unchanged by it. Nothing in
+     `docs/update-cost.md`'s accounting for this pivot moves because of the
+     kernel.
+   * **There is no shell in that image.** `build-local.sh` read a verdict
+     through `/bin/sh` on it, always got an empty string, and would have
+     aborted a successful 74-minute build. Anything here that inspects the
+     kernel image must read files out of it, not shell into it.
 
 ### Before this is pointed at katana or the L16
 
@@ -389,7 +411,10 @@ In order, and none of them are optional:
    Boot on at all.
 2. A sealed UKI built by `bootc container ukify` from the APEX image, booting
    in that guest — including the credential mechanism above actually changing
-   the keymap at a LUKS prompt.
+   the keymap at a LUKS prompt. **The same change must move the MOK signature
+   and the `sbverify` gate from the kernel to the UKI**, in one step: a build
+   that emits a UKI while still signing and verifying only the inner kernel is
+   green and unbootable.
 3. ~~The blessing fix proven on the APEX image.~~ **Done, 2026-09-21** — entry
    counted, booted, suffix stripped, zero AVCs, `LAB-bless-result: active /
    success`. What remains from this gate is the cheap half: the *reverted*
