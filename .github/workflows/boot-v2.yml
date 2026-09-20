@@ -37,6 +37,11 @@ on:
     branches: [main]
     paths:
       - "files/scripts/boot-v2/**"
+      # L-003's shipped enrolment path. Named here because the four `enroll-*`
+      # scenarios exercise THIS file and nothing else does: without the filter a
+      # PR that changes only the enrolment logic skips this workflow, and a
+      # skipped job counts as success.
+      - "files/system/libexec/apex-luks-enroll"
       - "files/system/libexec/apex-boot-health"
       - "files/system/units/apex-boot-*.service"
       - "bootlab/**"
