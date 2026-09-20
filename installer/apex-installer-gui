@@ -613,7 +613,18 @@ class Installer(Adw.Application):
         self.connect("activate", self.startup)
         self.ed = edition()
         self.accent = ACCENTS.get(self.ed, ACCENTS["daily"])
-        self.answers = {"mode": "disk", "rootfs": "btrfs"}
+        # ── "LUKS2 by default" lives HERE ────────────────────────────────
+        # The engine refuses to guess: it needs `encrypt=` spelled out in the
+        # answers file. "By default" is therefore a property of the question
+        # this front end asks — the box arrives ticked — and not of the
+        # mechanism, which is the only place a default can be seen and changed
+        # by the person it affects.
+        self.answers = {"mode": "disk", "rootfs": "btrfs", "encrypt": "yes"}
+        # Captured from the engine's stdout during the install. SECRET: it is
+        # shown on the final page and written to the USB stick by the engine,
+        # and it is never put in the answers file or any log.
+        self.recovery_key = ""
+        self.recovery_saved = ""
         self.disk = None
         self.target = None
         self.esp = ""
@@ -683,6 +694,7 @@ class Installer(Adw.Application):
                             ("keyboard", self.p_keyboard), ("wifi", self.p_wifi),
                             ("disk", self.p_disk), ("mode", self.p_mode),
                             ("part", self.p_part), ("account", self.p_account),
+                            ("encrypt", self.p_encrypt),
                             ("secureboot", self.p_secureboot),
                             ("confirm", self.p_confirm), ("run", self.p_run),
                             ("done", self.p_done)):
@@ -691,6 +703,7 @@ class Installer(Adw.Application):
                          "keyboard": self.p_keyboard, "wifi": self.p_wifi,
                          "disk": self.p_disk, "mode": self.p_mode,
                          "part": self.p_part, "account": self.p_account,
+                         "encrypt": self.p_encrypt,
                          "secureboot": self.p_secureboot,
                          "confirm": self.p_confirm, "run": self.p_run,
                          "done": self.p_done}
@@ -1501,12 +1514,135 @@ class Installer(Adw.Application):
                     "Computer name must be letters, digits and hyphens only.")
                 return
             self.answers.update(username=u, hostname=h, password=p1)
-            self.go("secureboot" if self.sb_offer() else "confirm")
+            # Encryption is offered only in whole-disk mode, and the engine
+            # refuses the combination outright rather than inventing a place to
+            # put an unencrypted /boot inside somebody else's partition. Saying
+            # "no" here rather than leaving the key at its default is what stops
+            # the user meeting that refusal after the confirm page.
+            if self.answers["mode"] == "disk":
+                self.go("encrypt")
+            else:
+                self.answers["encrypt"] = "no"
+                self.go("secureboot" if self.sb_offer() else "confirm")
 
         back = "part" if self.answers["mode"] == "partition" else "mode"
         return self.frame("STEP 6 OF 7", "Create your account", None,
                           self.scrolled(body),
                           [(self.btn("Back", "apex-ghost", lambda *_: self.go(back)), False),
+                           (self.btn("Continue", "apex-go", nxt), True)])
+
+    # ── 5a. disk encryption — on by default, and refusable ───────────────────
+    def p_encrypt(self):
+        """The one page that decides whether this machine can be stolen.
+
+        Two things on it are not decoration and must not be "simplified" away:
+
+        * The passphrase field can SHOW ITS CHARACTERS (show_peek_icon). The
+          passphrase is typed again at a boot prompt that has one keyboard
+          layout, no input method and no way back. Letting the user see what
+          their keyboard actually produced, here, while a mistake still costs
+          nothing, is the cheapest anti-lockout measure that exists.
+        * The layout they chose is named on the page. `y`/`z` swap between US
+          and German keyboards, and a passphrase is exactly the place where
+          that matters and is invisible.
+
+        Declining is a first-class answer. An encrypted machine the owner
+        cannot open is worse than an unencrypted one, so "No" is a plain button
+        and not a hidden link.
+        """
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        card.add_css_class("apex-card")
+        i = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 2)
+        i.set_margin_top(SP * 4); i.set_margin_bottom(SP * 4)
+        i.set_margin_start(SP * 4); i.set_margin_end(SP * 4)
+        i.append(lbl("Everything on this disk is encrypted. Someone who takes the "
+                     "laptop, or the drive out of it, cannot read a thing without "
+                     "the passphrase.", "apex-dim"))
+        i.append(lbl("You will type this passphrase every time the machine starts, "
+                     "before anything else appears. It is NOT your login password.",
+                     "apex-dim"))
+        i.append(lbl("A recovery key is also made for you, and shown on the last "
+                     "screen. It opens the disk when the passphrase will not — "
+                     "including when the keyboard is typing the wrong characters. "
+                     "Write it down somewhere that is not this laptop.", "apex-dim"))
+        card.append(i)
+        body.append(card)
+
+        self.cb_encrypt = Gtk.CheckButton(
+            label="Encrypt this disk  (recommended)")
+        self.cb_encrypt.set_active(self.answers.get("encrypt", "yes") == "yes")
+        a11y(self.cb_encrypt, "Encrypt this disk",
+             "When on, the whole disk is encrypted and a passphrase is required "
+             "at every start.")
+        body.append(self.cb_encrypt)
+
+        self.e_luks1 = Gtk.PasswordEntry(show_peek_icon=True)
+        self.e_luks2 = Gtk.PasswordEntry(show_peek_icon=True)
+        self.e_luks1.set_property("placeholder-text", "Disk passphrase")
+        self.e_luks2.set_property("placeholder-text", "Repeat passphrase")
+        a11y(self.e_luks1, "Disk passphrase",
+             "Typed at every start, before the system loads. At least 8 "
+             "characters, ordinary letters, digits and punctuation only.")
+        a11y(self.e_luks2, "Repeat the disk passphrase")
+        body.append(self.e_luks1)
+        body.append(self.e_luks2)
+
+        layout = self.answers.get("keymap") or active_layout()[0] or "us"
+        variant = self.answers.get("keyvariant") or ""
+        body.append(lbl(f"Keyboard in use: {layout}{('  ' + variant) if variant else ''}"
+                        "   ·   use the eye icon to check what you actually typed",
+                        "apex-mono apex-dim"))
+
+        self.luks_err = lbl("", "apex-danger")
+        body.append(self.luks_err)
+
+        def toggled(_c):
+            on = self.cb_encrypt.get_active()
+            self.e_luks1.set_sensitive(on)
+            self.e_luks2.set_sensitive(on)
+            if not on:
+                self.luks_err.set_text("")
+        self.cb_encrypt.connect("toggled", toggled)
+        toggled(None)
+
+        def nxt(_b):
+            nxt_page = "secureboot" if self.sb_offer() else "confirm"
+            if not self.cb_encrypt.get_active():
+                self.answers["encrypt"] = "no"
+                self.answers.pop("lukspass", None)
+                self.go(nxt_page)
+                return
+            p1, p2 = self.e_luks1.get_text(), self.e_luks2.get_text()
+            if not p1:
+                self.luks_err.set_text("Choose a passphrase, or turn encryption off.")
+                return
+            if len(p1) < 8:
+                self.luks_err.set_text("The disk passphrase must be at least 8 characters.")
+                return
+            # The engine refuses non-ASCII for a reason it explains at length;
+            # refusing it HERE means the user finds out while they can still
+            # change it, instead of after the confirm page.
+            if any(ord(c) < 0x20 or ord(c) > 0x7e for c in p1):
+                self.luks_err.set_text(
+                    "The screen that asks for this passphrase runs before the system "
+                    "starts: it has no accents, no emoji and no input method. Please "
+                    "use ordinary letters, digits and punctuation. (Your login "
+                    "password is not restricted this way.)")
+                return
+            if p1 != p2:
+                self.luks_err.set_text("The two passphrases do not match.")
+                return
+            self.answers["encrypt"] = "yes"
+            self.answers["lukspass"] = p1
+            self.go(nxt_page)
+
+        return self.frame("STEP 6 OF 7", "Encrypt this disk",
+                          "On by default. You can turn it off — but a stolen "
+                          "laptop with an unencrypted disk is an open book.",
+                          self.scrolled(body),
+                          [(self.btn("Back", "apex-ghost", lambda *_: self.go("account")), False),
                            (self.btn("Continue", "apex-go", nxt), True)])
 
     # ── 5b. secure boot — shown only when the firmware has it enabled ────────
@@ -1683,8 +1819,9 @@ class Installer(Adw.Application):
                "without reinstalling.")
         skip_label = ("Skip — I'll turn Secure Boot off instead" if on
                       else "Skip — I don't use Secure Boot")
+        sb_back = "encrypt" if self.answers["mode"] == "disk" else "account"
         return self.frame("STEP 6 OF 7", "Secure Boot", sub, self.scrolled(body),
-                          [(self.btn("Back", "apex-ghost", lambda *_: self.go("account")), False),
+                          [(self.btn("Back", "apex-ghost", lambda *_: self.go(sb_back)), False),
                            (self.btn(skip_label, "apex-ghost", skip), True),
                            (self.btn("Enrol and continue", "apex-go", nxt), False)])
 
@@ -1790,6 +1927,17 @@ class Installer(Adw.Application):
         summary = (f"{self.answers['username']} @ {self.answers['hostname']}"
                    f"   ·   {self.ed}   ·   btrfs")
         rest.append(lbl(summary, "apex-mono apex-dim"))
+        # The encryption decision belongs on the page where the disk is
+        # confirmed, not only on the page where it was made. A user who ticked
+        # or unticked the box four screens ago must be able to see, at the point
+        # of no return, which way it went.
+        if self.answers.get("encrypt") == "yes":
+            rest.append(lbl("ENCRYPTED — a passphrase is required at every start, "
+                            "and a recovery key is shown when the install finishes.",
+                            "apex-mono apex-accent"))
+        else:
+            rest.append(lbl("NOT ENCRYPTED — anyone holding this disk can read it.",
+                            "apex-mono apex-danger"))
 
         rest.append(lbl("Type ERASE to confirm:", "apex-dim"))
         self.e_erase = Gtk.Entry()
@@ -1812,7 +1960,12 @@ class Installer(Adw.Application):
         self.e_erase.connect("activate",
                              lambda e: self.begin() if e.get_text().strip() == "ERASE" else None)
 
-        back = "secureboot" if self.sb_offer() else "account"
+        if self.sb_offer():
+            back = "secureboot"
+        elif self.answers["mode"] == "disk":
+            back = "encrypt"
+        else:
+            back = "account"
         return self.frame("STEP 7 OF 7", "Confirm",
                           "Nothing has been written yet. This is the last point at "
                           "which you can go back.", body,
@@ -1890,8 +2043,12 @@ class Installer(Adw.Application):
                 # mokpw is empty (or absent) when the user skipped enrolment or
                 # Secure Boot is off — the get() guard omits it and the engine
                 # skips the MOK step with an explanation.
+                # `encrypt` is ALWAYS written: the engine refuses an answers
+                # file without it, deliberately, so that a decision can never go
+                # missing between this front end and the disk. It is "yes" or
+                # "no", both truthy, so the get() guard below cannot drop it.
                 for k in ("mode", "disk", "target", "esp", "username", "password",
-                          "hostname", "rootfs", "mokpw",
+                          "hostname", "rootfs", "mokpw", "encrypt", "lukspass",
                           "keymap", "keyvariant", "timezone"):
                     if a.get(k):
                         f.write(f"{k}={a[k]}\n")
@@ -1911,11 +2068,34 @@ class Installer(Adw.Application):
         GLib.io_add_watch(self.proc.stdout, GLib.IO_IN | GLib.IO_HUP, self.on_output)
         return False
 
+    # The engine's protocol lines for the disk recovery key. They are prefixes
+    # rather than a side channel because stdout is the only channel this front
+    # end has, and a key that arrived by a route the front end did not know
+    # about would simply be lost.
+    RECOVERY_PREFIX = "APEX-INSTALL-RECOVERY-KEY: "
+    RECOVERY_SAVED_PREFIX = "APEX-INSTALL-RECOVERY-SAVED: "
+    RECOVERY_UNSAVED_PREFIX = "APEX-INSTALL-RECOVERY-UNSAVED: "
+
     def on_output(self, src, cond):
         line = src.readline()
         if line:
+            s_ = line.strip()
+            # Capture the key BEFORE anything is appended to the on-screen log.
+            # It belongs on a page of its own where it is large, selectable and
+            # acknowledged — not as one line of scrolling install chatter the
+            # user watches go past.
+            if s_.startswith(self.RECOVERY_PREFIX):
+                self.recovery_key = s_[len(self.RECOVERY_PREFIX):]
+                self.append_log("Recovery key created — it is shown when the "
+                                "install finishes.\n")
+                self.run_state.set_text("Recovery key created.")
+                return True
+            if s_.startswith(self.RECOVERY_SAVED_PREFIX):
+                self.recovery_saved = s_[len(self.RECOVERY_SAVED_PREFIX):]
+            elif s_.startswith(self.RECOVERY_UNSAVED_PREFIX):
+                self.recovery_saved = ""
             self.append_log(line)
-            s = line.strip()
+            s = s_
             if s and not s.startswith("+"):
                 self.run_state.set_text(s[:110])
             if "APEX-INSTALL-FAILED" in s:
@@ -2019,10 +2199,61 @@ class Installer(Adw.Application):
                 sc.set_child(view)
                 body.append(sc)
 
+        # ── THE RECOVERY KEY ─────────────────────────────────────────────────
+        # Shown whether the install succeeded or not. On success it is the way
+        # back into the machine; on failure the disk still carries a LUKS2
+        # header this key opens, and a user who wants to wipe or inspect it
+        # needs the key to do so. Either way, an encrypted disk whose recovery
+        # key was never shown to anybody is the stranding case this whole
+        # feature exists to prevent.
+        ack = None
+        if getattr(self, "recovery_key", ""):
+            rc_ = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            rc_.add_css_class("apex-warn")
+            ri = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 2)
+            ri.set_margin_top(SP * 4); ri.set_margin_bottom(SP * 4)
+            ri.set_margin_start(SP * 4); ri.set_margin_end(SP * 4)
+            ri.append(lbl("WRITE THIS DOWN — DISK RECOVERY KEY", "apex-danger"))
+            # Selectable, because on a machine with a working session the user
+            # may want to copy it, and monospace because it will be read back
+            # character by character off a screen.
+            ri.append(lbl(self.recovery_key, "apex-mono apex-accent", sel=True))
+            ri.append(lbl("If APEX-OS ever refuses your disk passphrase — you "
+                          "forgot it, the keyboard types the wrong characters, "
+                          "or automatic unlocking stops working — type this at "
+                          "the same prompt instead. It always works, and its "
+                          "letters are in the same place on nearly every "
+                          "keyboard layout.", "apex-dim"))
+            if getattr(self, "recovery_saved", ""):
+                ri.append(lbl(f"A copy is on the USB stick you booted from, as "
+                              f"{self.recovery_saved}. That stick lives in the "
+                              f"same bag as the laptop, so it protects nothing on "
+                              f"its own — move the key somewhere else and delete "
+                              f"that file.", "apex-dim"))
+            else:
+                ri.append(lbl("It could NOT be saved to the USB stick, so this "
+                              "screen is the only copy. Write it down now.",
+                              "apex-danger"))
+            ack = Gtk.CheckButton(label="I have written down the recovery key")
+            a11y(ack, "I have written down the recovery key",
+                 "Rebooting is enabled once this is ticked.")
+            ri.append(ack)
+            rc_.append(ri)
+            body.append(rc_)
+
         acts = []
         if ok:
-            acts.append((self.btn("Reboot now", "apex-go",
-                                  lambda *_: run(["systemctl", "reboot"], timeout=30)), True))
+            reboot_btn = self.btn("Reboot now", "apex-go",
+                                  lambda *_: run(["systemctl", "reboot"], timeout=30))
+            # A user who reboots past the recovery key never sees it again: the
+            # installer's RAM disk goes with the reboot. So the button waits
+            # for them to say they have it. "Stay in the installer" is always
+            # available, so this cannot trap anyone.
+            if ack is not None:
+                reboot_btn.set_sensitive(False)
+                ack.connect("toggled",
+                            lambda c, b=reboot_btn: b.set_sensitive(c.get_active()))
+            acts.append((reboot_btn, True))
             acts.insert(0, (self.btn("Stay in the installer", "apex-ghost",
                                      lambda *_: self.go("welcome")), False))
         else:

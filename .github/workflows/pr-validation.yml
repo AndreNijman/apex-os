@@ -1717,6 +1717,20 @@ jobs:
         working-directory: installer
         run: ./test-installer-keymap.sh
 
+      # L-002's encryption path. This is the FAST half — every refusal, the
+      # XKB-to-console keymap conversion, and the character-level check that
+      # says a German keyboard's `z` really is a `z` at the unlock prompt. It
+      # touches no block device beyond a loopback file it makes itself, and the
+      # dry-run cases assert that even that comes back untouched.
+      #
+      # The other half — a REAL `bootc install` onto a REAL LUKS2 volume —
+      # is installer/test-installer-luks-live.sh and needs root, a loop device
+      # and the 15 GB image, so it is recorded in tests/suites-not-in-ci.txt
+      # with that reason rather than pretending a runner could run it.
+      - name: Run installer disk-encryption suite
+        working-directory: installer
+        run: ./test-installer-luks.sh
+
       # P2-003's acceptance line ends "keyboard-only installer validated", and
       # this is the step that validates it. Not a sweep for missing labels: the
       # shipped GUI runs on a private Xvfb, xdotool delivers real X key events
