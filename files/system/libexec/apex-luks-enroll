@@ -605,9 +605,14 @@ fi
 
 enroll_err="$(mktemp)"
 trap 'rm -f "$enroll_err"' EXIT
-if ! "$CRYPTENROLL" --tpm2-device="$TPM2_DEVICE" \
-        "${POLICY_ARGS[@]}" "${pin_args[@]}" "${unlock_args[@]}" \
-        "$DEVICE" 2>"$enroll_err"
+# THE DEVICE AND ITS PCR SELECTION ARE ASSEMBLED ON ONE LINE, and that is a
+# requirement rather than a formatting preference: Containerfile.base refuses to
+# build an image in which `--tpm2-device=` appears on an executable line without
+# a PCR selection beside it, and a continuation would put the two halves on
+# different lines and trip a tripwire on correct code.
+enroll_args=(--tpm2-device="$TPM2_DEVICE" "${POLICY_ARGS[@]}")
+enroll_args+=("${pin_args[@]}" "${unlock_args[@]}" "$DEVICE")
+if ! "$CRYPTENROLL" "${enroll_args[@]}" 2>"$enroll_err"
 then
     cat "$enroll_err" >&2
     decline tpm2-enrolment-failed \
