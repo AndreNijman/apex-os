@@ -20,7 +20,7 @@ decision.
 
 Everything below that says *measured* is a command that ran in the VM lab, and
 the transcript is in `ROADMAP/evidence/sdboot-image-20260920-lab.md` or
-`ROADMAP/evidence/sdboot-image-20260921-decision.md`.
+`ROADMAP/evidence/sdboot-image-20260920-decision.md`.
 
 ### The pivot is a storage-backend change, not a bootloader flag
 
@@ -415,7 +415,7 @@ In order, and none of them are optional:
    and the `sbverify` gate from the kernel to the UKI**, in one step: a build
    that emits a UKI while still signing and verifying only the inner kernel is
    green and unbootable.
-3. ~~The blessing fix proven on the APEX image.~~ **Done, 2026-09-21** — entry
+3. ~~The blessing fix proven on the APEX image.~~ **Done, 2026-09-20** — entry
    counted, booted, suffix stripped, zero AVCs, `LAB-bless-result: active /
    success`. What remains from this gate is the cheap half: the *reverted*
    `apex-boot-count` renaming a staged entry in a guest. Both things it rests
@@ -451,7 +451,7 @@ condition is a skip rather than a failure.
 
 The condition is written against `LoaderBootCountPath` specifically, and that
 choice is load-bearing. An earlier note here said the laptop had no `Loader*`
-variables at all and only the katana did; re-checked 2026-09-21, **that is
+variables at all and only the katana did; re-checked 2026-09-20, **that is
 wrong, and wrong in the direction that matters**. The L16 carries `LoaderInfo`,
 `LoaderDevicePartUUID` and `LoaderSystemToken` too, and its `LoaderInfo` reads:
 
@@ -1374,6 +1374,18 @@ the container, where `/sys/firmware/efi/efivars` does not exist, so a check in
 there would inspect nothing. AGENTS.md boot-path rule 6. A `bootc install
 --via-loopback` goes through `tests/lab/bootc-install-lab` instead, which
 builds the podman argv itself and cannot be talked out of the efivars mask.
+
+Two practical notes, both learned the hard way:
+
+* **The guard needs no `sudo`** — efivars are world-readable and `efibootmgr
+  -v` works as an ordinary user (checked on the L16 as uid 1000). It does need
+  `efibootmgr` to exist: with `/sys/firmware/efi` present and the binary
+  missing it reports `could-not-snapshot` and **refuses to run the command at
+  all**, which is correct and is why `boot-v2.yml` installs it on the runner.
+* **`sudo` in front of `podman` changes which image store is used.** The
+  commands below build `apex-bootlab` rootless and run it rootless. If you
+  build as root, run as root — an image in the other store looks like an image
+  that does not exist.
 
 ```bash
 # on the katana, or any box with /dev/kvm and podman

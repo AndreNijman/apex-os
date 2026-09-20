@@ -1108,7 +1108,7 @@ RUN set -eux; \
 #     entries are dosfs_t, and PID 1 running /usr/lib/systemd/systemd-bless-boot
 #     (init_exec_t) stays in init_t, which Fedora 43's policy allows no rename
 #     on dosfs_t. Measured on the APEX image with the AVC in
-#     ROADMAP/evidence/sdboot-image-20260921-decision.md. Unrepaired, every
+#     ROADMAP/evidence/sdboot-image-20260920-decision.md. Unrepaired, every
 #     deployment would roll itself back on its fourth boot — the exact outcome
 #     rule 5 exists to prevent.
 #   * apex-boot-count writes the counter bootc does not. It renames the STAGED

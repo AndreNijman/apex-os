@@ -333,14 +333,25 @@ denied.
 setools (`type.ispermissive`). So denials inside it are logged and allowed. Two
 consequences:
 
-* The blessing's zero AVCs are still meaningful: a permissive domain *logs*
-  what it would have denied, and nothing was logged. Every permission
-  `systemd-bless-boot` used was genuinely allowed, the entrypoint included —
-  which is what the `apex_sdboot` module grants.
+* The blessing's zero AVCs are still meaningful, and it is worth being exact
+  about why: a permissive domain *logs* what it would have denied, and nothing
+  was logged for `systemd-bless-boot`. That the audit path works in this guest
+  is not an assumption either — the counter's denials in §7 came through the
+  same path in the same boot. So every permission the blessing used was
+  genuinely allowed, the entrypoint included, which is what the `apex_sdboot`
+  module grants.
+  **The in-guest `LAB-runtime-policy:` line came back EMPTY** — the setools
+  query against the loaded policy printed nothing and its failure was swallowed
+  by the probe's `2>&1 | tail -2`. So the module-is-loaded conclusion rests on
+  the absence of an entrypoint AVC, not on a direct read of the kernel's
+  policy. That is a sound inference and it is not the direct measurement, and
+  the next run should just fix the probe.
 * But the drop-in alone would probably work today even without the module,
   because permissiveness would tolerate the missing entrypoint. The module is
-  what makes this correct rather than tolerated, and it is what keeps it
-  working on the day Fedora makes `bootupd_t` enforcing. It stays.
+  therefore **necessary** for the day Fedora makes `bootupd_t` enforcing;
+  whether it is **sufficient** is unmeasured, because `dontaudit` rules hide
+  gaps even in a permissive domain. The next guest run should do `semodule -DB`
+  before boot 2 so anything dontaudit'd surfaces.
 
 ## 7. The counter must NOT be sent into that domain — measured, then reverted
 

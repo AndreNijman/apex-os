@@ -159,7 +159,7 @@ phase.
    * **The blessing must work or nothing else matters.** `systemd-bless-boot`
      could not rename a loader entry on a FAT ESP under enforcing SELinux —
      measured, with the AVC, in
-     `ROADMAP/evidence/sdboot-image-20260921-decision.md`. Unrepaired, every
+     `ROADMAP/evidence/sdboot-image-20260920-decision.md`. Unrepaired, every
      deployment rolls itself back on its fourth boot. Any change that touches
      `systemd-bless-boot.service`, the `apex_sdboot` policy module or
      `apex-boot-count` is touching that.
