@@ -7,6 +7,27 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// The human-facing version. The build metadata after it — the commit count and
+// the short SHA — is appended by `android/tools/release-version.sh`; this is
+// the only half a person chooses, and it is bumped by editing this line.
+val APEX_MARKETING_VERSION = "0.1.0"
+
+// Read an integer from the environment, or fail. NOT "or fall back": a
+// malformed `APEX_VERSION_CODE` silently becoming the default is how a release
+// ships with versionCode 1 and makes every later release uninstallable over
+// it. An absent variable is a local build and takes the default; a variable
+// that is PRESENT and unusable is a broken pipeline and stops it.
+fun intFromEnv(name: String, default: Int): Int {
+    val raw = System.getenv(name) ?: return default
+    if (raw.isBlank()) return default
+    val n = raw.toIntOrNull()
+        ?: throw GradleException("$name is set to '$raw', which is not an integer")
+    if (n < 1) {
+        throw GradleException("$name is $n; an Android versionCode must be a positive integer")
+    }
+    return n
+}
+
 android {
     namespace = "com.apexos.remote"
     // 36, which is what AGP 9 wants and what is actually installed. An
@@ -27,8 +48,32 @@ android {
         // by nothing, on exactly the phones least able to defend it.
         minSdk = 28
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // ── Version (android-release) ───────────────────────────────────────
+        //
+        // `versionCode` is the number Android compares to decide whether an
+        // APK is an upgrade, and it is the one value in this file that can
+        // permanently break an installed app. Android refuses to install a
+        // code lower than the installed one, so a release whose code went
+        // BACKWARDS cannot be installed over its predecessor — the user has to
+        // uninstall, and uninstalling this app destroys the paired device key.
+        // There is no server-side fix for a published regression.
+        //
+        // So it is not a literal any more. It comes from the environment, and
+        // `android/tools/release-version.sh` derives it from `git rev-list
+        // --count` on main and REFUSES to release a code that is not strictly
+        // greater than every code already published. Two independent ratchets,
+        // because one of them is a script and scripts get edited: the commit
+        // count only grows while main is never force-pushed, and the release
+        // tag `android-v<code>` cannot be created twice.
+        //
+        // The fallback is 1 rather than a computed value on purpose. A local
+        // build is a DEV build, it should be obvious in `adb shell dumpsys`
+        // that it is one, and a developer without git history should still be
+        // able to build. 1 is also the lowest possible code, so a release
+        // always installs over a local build and never the reverse.
+        versionCode = intFromEnv("APEX_VERSION_CODE", default = 1)
+        versionName = System.getenv("APEX_VERSION_NAME")?.takeIf { it.isNotBlank() }
+            ?: "$APEX_MARKETING_VERSION-dev"
 
         // P1-060's first two criteria are claims about what ANDROID does with
         // this code — a screen reader reading a label, a rotation surviving, a
@@ -105,6 +150,14 @@ android {
 
     buildFeatures {
         compose = true
+        // AGP 9 defaults this OFF, and the updater needs it: it compares
+        // `BuildConfig.VERSION_CODE` against the code in the release metadata
+        // to decide whether a newer build exists. Without this the class is
+        // not generated and `:app` does not compile — a loud failure, which is
+        // the good case. The quiet one would have been reading the version out
+        // of `PackageManager` instead and getting a value that is right until
+        // the day somebody sideloads over the top.
+        buildConfig = true
     }
 
     packaging {
