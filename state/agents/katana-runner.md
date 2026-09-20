@@ -57,11 +57,17 @@ Proof, not assertion: sha256 of all 1041 regular files before and after →
   session instead of throttling his builds.
 - **Ephemeral.** `.runner` says `"ephemeral": true`. Re-registered before every
   job by a root-only `ExecStartPre=+`, so the job never sees the credential.
-- **apex-os is PUBLIC.** The control that keeps fork code off the machine is the
-  repo setting `fork-pr-contributor-approval` = **`all_external_contributors`**
-  (changed from `first_time_contributors` on 2026-09-20). The `if:` guard in
-  each workflow is only a belt — a fork controls the workflow file on a
-  `pull_request` event. **Never add `pull_request_target` to a self-hosted job.**
+- **apex-os is PUBLIC.** Three layers, and only one is load-bearing:
+  **neither** self-hosted workflow has a `pull_request` trigger, so an ordinary
+  fork PR does not start them and a contributor's experience is unchanged (no
+  red check from a skipped job — they still get `pr-validation.yml` on
+  `ubuntu-24.04`); the `if: … head.repo.full_name == github.repository` guard
+  catches a future edit that adds one; and **the control** is the repo setting
+  `fork-pr-contributor-approval` = **`all_external_contributors`** (changed from
+  `first_time_contributors` on 2026-09-20), because on a `pull_request` event a
+  fork controls the workflow file and can add the trigger, point `runs-on` at
+  `katana` and delete the guard in one commit.
+  **Never add `pull_request_target` to a self-hosted job.**
 - `AndreNijman` is a **User, not an org**, so runner groups with a repository
   allowlist are not available. Repo-level registration is the only option.
 - A uid-scoped nft rule (`table inet apex_runner`) denies uid 960 all of RFC1918
