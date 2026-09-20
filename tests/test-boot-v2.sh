@@ -1133,9 +1133,20 @@ grep -q 'OUT OF TRIES' <<<"$text" \
     && ok "the human report marks the exhausted entry" \
     || bad "the human report does not mark the exhausted entry"
 textg="$(APEX_BOOT_ROOT="$G" "$APEX_BIN" boot status)"
-grep -q 'GRUB is the default for every published APEX' <<<"$textg" \
-    && ok "on a GRUB machine the report says that is the expected state" \
+# The wording moved when the in-place migration landed: a machine on GRUB is
+# no longer "the default for every published image", it is a machine that has
+# not migrated yet. Both halves are asserted — that it is not reported as a
+# fault, and that it names the command that migrates it — because a report
+# that says neither leaves the user with nothing to do.
+grep -q 'APEX is moving to systemd-boot' <<<"$textg" \
+    && ok "on a GRUB machine the report says where APEX is going" \
+    || bad "the GRUB report does not mention the migration: $textg"
+grep -q 'not a fault' <<<"$textg" \
+    && ok "and that being on GRUB today is not a fault" \
     || bad "the GRUB report reads like a fault: $textg"
+grep -q 'apex-boot-migrate precheck' <<<"$textg" \
+    && ok "and names the command that says why a machine cannot migrate" \
+    || bad "the GRUB report does not say how to find out why: $textg"
 
 # Read-only means read-only. Nothing under the fixture root may change.
 before="$(find "$G" -type f -printf '%p %s\n' | sort | sha256sum)"

@@ -145,11 +145,12 @@ enum Cmd {
     },
     /// What verified this boot, and what the boot counter believes (§22).
     ///
-    /// Read-only. GRUB is the default bootloader for every published APEX
-    /// image in this generation, and `status` reports that as the normal state
-    /// rather than as a fault: boot counting, signed UKIs and TPM-bound unlock
-    /// are the opt-in systemd-boot path, and this is the command that says
-    /// which of them is actually in effect on this machine.
+    /// Read-only. APEX is moving every machine to systemd-boot, and `apex
+    /// update` migrates one in place when it can be done safely; a machine
+    /// still on GRUB is reported as the normal state rather than as a fault.
+    /// Boot counting, signed UKIs and TPM-bound unlock all live on the
+    /// systemd-boot path, and this is the command that says which of them is
+    /// actually in effect on this machine.
     Boot {
         #[command(subcommand)]
         cmd: boot::BootCmd,

@@ -1243,6 +1243,76 @@ RUN set -eux; \
         /usr/lib/systemd/system/apex-boot-count.service \
         /usr/lib/systemd/system/systemd-bless-boot.service.d/10-apex-bless-boot-esp.conf
 
+# ── §22: the in-place move to systemd-boot ──────────────────────────────────
+#
+# apex-boot-migrate is what `apex update` runs on a GRUB machine. It converts
+# the machine in place — `bootc install to-existing-root --composefs-backend
+# --bootloader systemd`, with a throwaway FAT filesystem bound over
+# /target/boot so bootc's wipe of "the bootloader state" cannot reach the real
+# one — and commits with a single BootNext write. Everything it does before
+# that write is discardable; a power cut anywhere in it leaves a machine that
+# boots exactly what it booted before. Measured, with the power actually cut:
+# ROADMAP/evidence/sdboot-migrate-20260921-lab.md.
+#
+# The confirm unit is the other half. BootNext is a one-shot, so a migration
+# that is committed and never confirmed reverts to GRUB by itself; the unit
+# writes BootOrder on a boot that worked, and records a FAILURE on a boot that
+# came back to GRUB, which is what stops `apex update` re-arming a loader that
+# has already failed once.
+#
+# Its dependencies are in the image, not assumed: the install runs as a
+# container of the booted image (podman), the staging filesystem is FAT
+# (mkfs.vfat), and /etc is carried across with rsync. precheck refuses without
+# them rather than failing halfway, but a refusal on every machine would make
+# the feature dead, so the packages are asserted here.
+COPY --chmod=0755 files/system/libexec/apex-boot-migrate \
+     /usr/libexec/apex-boot-migrate
+COPY files/system/units/apex-boot-migrate-confirm.service \
+     /usr/lib/systemd/system/apex-boot-migrate-confirm.service
+RUN set -eux; \
+    test -x /usr/libexec/apex-boot-migrate; \
+    bash -n /usr/libexec/apex-boot-migrate; \
+    \
+    : '── what the migration needs at runtime, in the image ──'; \
+    command -v podman; \
+    command -v mkfs.vfat; \
+    command -v rsync; \
+    command -v efibootmgr; \
+    command -v unshare; \
+    \
+    systemctl enable apex-boot-migrate-confirm.service; \
+    test -L /etc/systemd/system/multi-user.target.wants/apex-boot-migrate-confirm.service; \
+    \
+    : '── the confirm unit must not be able to run on a machine that never'; \
+    : '── started a migration: its condition is the state file the stage'; \
+    : '── writes, and nothing else creates it.'; \
+    grep -q '^ConditionPathExists=/var/lib/apex/boot-migrate/phase$' \
+        /usr/lib/systemd/system/apex-boot-migrate-confirm.service; \
+    \
+    : '── Wants=, not Requires=, on boot-complete.target. On the first boot'; \
+    : '── of a migrated machine the entry carries no boot counter, so'; \
+    : '── systemd-bless-boot is condition-skipped and nothing else pulls that'; \
+    : '── target in. Requires= would mean the confirm never runs and the'; \
+    : '── machine silently reverts to GRUB on the next boot.'; \
+    grep -q '^Wants=boot-complete.target$' \
+        /usr/lib/systemd/system/apex-boot-migrate-confirm.service; \
+    if grep -q '^Requires=boot-complete.target' \
+        /usr/lib/systemd/system/apex-boot-migrate-confirm.service; then \
+        echo "FATAL: confirm requires a target that a migrated machine may never reach" >&2; \
+        exit 1; \
+    fi; \
+    \
+    : '── the commit point is BootNext and nothing else. An efibootmgr that'; \
+    : '── wrote BootOrder during the stage would change what the machine'; \
+    : '── boots before anything had been verified. Matched on executable'; \
+    : '── lines only; the file explains both commands in comments.'; \
+    if grep -nE '^[^#]*efibootmgr[^|]*--bootorder' /usr/libexec/apex-boot-migrate | \
+       grep -q 'cmd_stage'; then \
+        echo "FATAL: the stage writes BootOrder" >&2; exit 1; \
+    fi; \
+    grep -q 'efibootmgr --bootnext' /usr/libexec/apex-boot-migrate; \
+    grep -q 'create-only' /usr/libexec/apex-boot-migrate
+
 # ── L-003: the disk-encryption key slots ────────────────────────────────────
 #
 # The installer calls this to put key slots on an encrypted volume:

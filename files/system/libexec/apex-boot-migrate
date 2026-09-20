@@ -1,0 +1,883 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-boot-migrate — move a running APEX machine from ostree + GRUB to
+#  composefs + systemd-boot, in place, through `apex update`, without ever
+#  leaving the machine unbootable.
+#
+#  ═══ WHY THIS EXISTS ═══
+#
+#  The predecessor unit measured that `bootc install --bootloader systemd` is
+#  refused on the ostree backend and concluded that an existing machine cannot
+#  be migrated — that it is a backup-and-reinstall. Andre rejected that
+#  outcome: "active machines should automatically migrate with sudo apex
+#  install, not this dumbass reinstall shit. and also a failed or cancelled or
+#  power shut down ... should not fully break the boot."
+#
+#  He is right, and the conclusion was wrong. `bootc install to-existing-root
+#  --composefs-backend --bootloader systemd` DOES convert a running
+#  ostree + GRUB machine in place. It was measured doing exactly that in the VM
+#  lab on 2026-09-20 (ROADMAP/evidence/sdboot-migrate-20260920-lab.md).
+#
+#  What it will not do on its own is survive a power cut, because run bare it
+#  destroys the old boot path before the new one is selectable:
+#
+#      * it deletes /EFI/fedora — shimx64.efi, grubx64.efi, grub.cfg — which
+#        is the file the machine's own NVRAM entry points AT;
+#      * it overwrites /EFI/BOOT/BOOTX64.EFI, the removable-media fallback;
+#      * it wipes the root filesystem's /boot: grub2/, the BLS entries, and
+#        every ostree kernel.
+#
+#  Measured: after a bare run the guest booted only because the firmware fell
+#  through to the removable-media fallback, which bootc had just replaced with
+#  systemd-boot. Under Secure Boot that fallback is unsigned and would be
+#  refused, and the machine's own Boot#### entry points at a file that no
+#  longer exists. That is a brick, not a migration.
+#
+#  ═══ HOW THIS MAKES IT SAFE ═══
+#
+#  1. STAGE — nothing the firmware reads changes.
+#     The install runs with a staging directory bind-mounted over /target/boot
+#     inside the install container. Measured: the root filesystem's /boot
+#     survives untouched (grub2, loader.1/entries, ostree kernels), /EFI/fedora
+#     survives BYTE-IDENTICAL, and the only overwrite anywhere on the ESP is
+#     /EFI/BOOT/BOOTX64.EFI — which this script saves first and puts back.
+#     Everything else bootc writes is additive: /EFI/systemd/, /EFI/Linux/,
+#     /loader/. GRUB does not read any of those; it reads /boot/loader on the
+#     root filesystem, which is not touched.
+#     A power cut anywhere in this phase leaves a machine that boots exactly
+#     what it booted before, because nothing it boots from has changed.
+#
+#  2. COMMIT — one atomic EFI variable write.
+#     The new Boot#### entry is created with --create-only, so it is NOT in
+#     BootOrder and changes nothing. Then one SetVariable of **BootNext**
+#     selects systemd-boot for the next boot only. That single write is the
+#     commit point. Before it: the old path. After it: the new path, once.
+#     A power cut before it leaves the old path. A power cut after it leaves a
+#     machine that tries the new path once — and BootNext is consumed by the
+#     firmware before the loader runs, so if that boot fails for any reason the
+#     boot after it is the old path again, with no user action.
+#
+#  3. CONFIRM — one atomic EFI variable write, and only after proof.
+#     apex-boot-migrate-confirm.service runs after boot-complete.target on the
+#     first successful boot of the new path and writes BootOrder with the new
+#     entry first. GRUB stays installed and stays in BootOrder behind it.
+#
+#  GRUB IS NEVER REMOVED. It is demoted. That costs ~300 MB of /boot and ~5 MB
+#  of ESP and buys a recovery path that needs no USB stick.
+#
+#  ═══ AND IF IT CANNOT BE DONE SAFELY ═══
+#
+#  precheck refuses and the machine keeps working, on GRUB, exactly as it did.
+#  A refusal is a safe outcome; a half-migration is not. Every refusal names
+#  itself and says what would have to change.
+#
+#  Usage:
+#      apex-boot-migrate status     what phase this machine is in
+#      apex-boot-migrate precheck   can this machine migrate? (writes nothing)
+#      apex-boot-migrate stage      write the new path; change no boot variable
+#      apex-boot-migrate commit     the single atomic write (needs a stage)
+#      apex-boot-migrate auto       precheck + stage + commit (what apex update runs)
+#      apex-boot-migrate confirm    make it the default (runs after a good boot)
+#      apex-boot-migrate abort      discard an uncommitted stage
+#
+#  Test hooks, read by nothing but tests/test-boot-migrate.sh:
+#      APEX_MIGRATE_ROOT     alternative /sysroot
+#      APEX_MIGRATE_STATE    alternative state directory
+#      APEX_MIGRATE_ESP      an already-mounted ESP, instead of finding one
+#      APEX_MIGRATE_DRYRUN   print the install argv instead of running it
+#      APEX_MIGRATE_STORE    the booted storage backend, instead of asking bootc
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+SYSROOT="${APEX_MIGRATE_ROOT:-/sysroot}"
+STATE="${APEX_MIGRATE_STATE:-/var/lib/apex/boot-migrate}"
+ESP_OVERRIDE="${APEX_MIGRATE_ESP:-}"
+DRYRUN="${APEX_MIGRATE_DRYRUN:-0}"
+LOADER_PATH='\EFI\systemd\systemd-bootx64.efi'
+ENTRY_LABEL='APEX-OS'
+# Two deployments' worth of kernel+initramfs, plus the loader and slack. An ESP
+# that cannot hold this cannot hold an update, and a machine that discovers
+# that halfway through is the failure this whole script exists to avoid.
+ESP_SLACK_MIB=48
+
+log()    { printf 'apex-boot-migrate: %s\n' "$*" >&2; }
+refuse() { printf 'apex-boot-migrate: REFUSED [%s]\n' "$1" >&2; shift
+           printf '    %s\n' "$@" >&2
+           printf '    Nothing was changed. This machine keeps booting the way it does now.\n' >&2
+           exit 10; }
+fail()   { printf 'apex-boot-migrate: FAILED [%s]\n' "$1" >&2; shift
+           printf '    %s\n' "$@" >&2; exit 1; }
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Facts about this machine
+# ═════════════════════════════════════════════════════════════════════════════
+
+# The ESP, by GPT type GUID on the disk the root filesystem is on. Not by
+# /etc/fstab and not by label: on this machine's lineage the ESP is not mounted
+# at all, and katana's APEX entry lives on the ESP Windows created.
+ESP_TYPE_GUID=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+
+root_source() {
+    findmnt -n -o SOURCE --target "$SYSROOT" 2>/dev/null | head -1
+}
+
+root_disk() {
+    local src; src="$(root_source)"
+    [ -n "$src" ] || return 1
+    src="${src%%[*}"          # btrfs prints /dev/nvme0n1p5[/subvol]
+    # Walk up until the parent is a disk. One PKNAME is enough for a plain
+    # partition and WRONG for everything else: on a LUKS root the source is
+    # /dev/mapper/luks-… whose parent is the *partition*, so a single lookup
+    # returns nvme0n1p3, and find_esp then walks a partition's children and
+    # finds nothing. luks-installer is making encryption the default, so that
+    # would be every new machine refusing `no-esp`.
+    local cur="$src" parent type i=0
+    while [ "$i" -lt 8 ]; do
+        type="$(lsblk -ndo TYPE "$cur" 2>/dev/null | head -1)"
+        [ "$type" = disk ] && { basename "$cur"; return 0; }
+        parent="$(lsblk -no PKNAME "$cur" 2>/dev/null | head -1)"
+        [ -n "$parent" ] || return 1
+        cur="/dev/$parent"
+        i=$(( i + 1 ))
+    done
+    return 1
+}
+
+find_esp() {   # prints the ESP block device
+    local disk part
+    disk="$(root_disk)" || return 1
+    [ -n "$disk" ] || return 1
+    for part in $(lsblk -lno NAME "/dev/$disk" 2>/dev/null); do
+        [ "$part" = "$disk" ] && continue
+        local t; t="$(lsblk -dno PARTTYPE "/dev/$part" 2>/dev/null | tr 'A-Z' 'a-z')"
+        [ "$t" = "$ESP_TYPE_GUID" ] || continue
+        printf '/dev/%s\n' "$part"
+        return 0
+    done
+    return 1
+}
+
+esp_mounted_at=""      # set by with_esp
+esp_we_mounted=0
+
+with_esp() {   # mount the ESP read-write somewhere private; idempotent
+    if [ -n "$ESP_OVERRIDE" ]; then esp_mounted_at="$ESP_OVERRIDE"; return 0; fi
+    local dev; dev="$(find_esp)" || return 1
+    local here; here="$(findmnt -n -o TARGET -S "$dev" 2>/dev/null | head -1)"
+    if [ -n "$here" ]; then esp_mounted_at="$here"; return 0; fi
+    mkdir -p /run/apex-boot-migrate/esp || return 1
+    mount "$dev" /run/apex-boot-migrate/esp || return 1
+    esp_mounted_at=/run/apex-boot-migrate/esp
+    esp_we_mounted=1
+}
+
+release_esp() {
+    [ "$esp_we_mounted" = 1 ] || return 0
+    sync
+    umount /run/apex-boot-migrate/esp 2>/dev/null
+    esp_we_mounted=0
+}
+
+booted_store() {
+    # The test hook is here and not around the call sites: the phase logic in
+    # cmd_auto is only reachable on a machine whose store is ostreeContainer,
+    # so a fixture that cannot say so cannot exercise it at all.
+    [ -n "${APEX_MIGRATE_STORE:-}" ] && { printf '%s\n' "$APEX_MIGRATE_STORE"; return 0; }
+    bootc status --json 2>/dev/null |
+        python3 -c 'import sys,json
+d=json.load(sys.stdin); b=(d.get("status") or {}).get("booted") or {}
+print(b.get("store") or "unknown")' 2>/dev/null || echo unknown
+}
+
+staged_present() {
+    bootc status --json 2>/dev/null |
+        python3 -c 'import sys,json
+d=json.load(sys.stdin); print("yes" if (d.get("status") or {}).get("staged") else "no")' 2>/dev/null || echo unknown
+}
+
+booted_loader() {   # "systemd-boot 258.x" on the new path, empty on GRUB
+    local f=/sys/firmware/efi/efivars/LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+    [ -r "$f" ] || return 0
+    tr -d '\0' < "$f" | tr -cd '[:print:]'
+}
+
+# The kernel command line has to come across, or the machine boots into a
+# different system than the one it was running. On this lineage that is not
+# cosmetic: the installer puts per-machine arguments there, and a LUKS machine
+# that loses rd.luks.* does not ask for a passphrase, it fails to find a root.
+#
+# Read from /proc/cmdline, because that is what this machine is ACTUALLY
+# running — a BLS entry can have been edited since. The arguments bootc owns on
+# the new path are dropped: it computes root=, rw and boot= itself from the
+# filesystems it finds, writes composefs= from the digest it just deployed, and
+# BOOT_IMAGE/ostree/initrd belong to the path being left behind.
+carried_kargs() {
+    local w
+    for w in $(cat /proc/cmdline); do
+        case "$w" in
+            BOOT_IMAGE=*|root=*|rootflags=*|ro|rw|ostree=*|initrd=*|boot=*) continue ;;
+            composefs=*|systemd.mount-extra=*) continue ;;
+        esac
+        printf '%s\n' "$w"
+    done
+}
+
+deployment_kernel_bytes() {   # kernel + initramfs of the booted deployment
+    local kd total=0 f
+    kd="$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
+    [ -n "$kd" ] || { echo 0; return; }
+    for f in "$kd/vmlinuz" "$kd/initramfs.img"; do
+        [ -f "$f" ] && total=$(( total + $(stat -c %s "$f") ))
+    done
+    echo "$total"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  precheck — every reason this machine must not be touched
+# ═════════════════════════════════════════════════════════════════════════════
+cmd_precheck() {
+    local quiet="${1:-}"
+
+    [ "$(id -u)" = 0 ] || refuse "not-root" "This has to run as root."
+
+    [ -d /sys/firmware/efi ] || refuse "not-uefi" \
+        "This machine booted through legacy BIOS, not UEFI." \
+        "systemd-boot is an EFI application; there is nothing for it to be."
+
+    if [ "$(booted_store)" != ostreeContainer ]; then
+        refuse "already-migrated" \
+            "The booted deployment is not on the ostree backend (store: $(booted_store))." \
+            "This machine is already on the composefs + systemd-boot path."
+    fi
+
+    if [ "$(staged_present)" = yes ]; then
+        refuse "update-staged" \
+            "An OS update is already staged for the next boot." \
+            "Reboot into it first, then run the update again: migrating and" \
+            "finalising a staged ostree deployment in the same shutdown would" \
+            "give one machine two finalize paths."
+    fi
+
+    command -v mkfs.vfat >/dev/null 2>&1 || refuse "no-dosfstools" \
+        "mkfs.vfat is not in this image; the migration needs it for its staging filesystem."
+    command -v rsync >/dev/null 2>&1 || refuse "no-rsync" \
+        "rsync is not in this image; the migration needs it to carry /etc across."
+    command -v podman >/dev/null 2>&1 || refuse "no-podman" \
+        "podman is not in this image; the install has to run as a container of the image."
+
+    bootc install to-existing-root --help 2>/dev/null | grep -q -- --composefs-backend ||
+        refuse "bootc-too-old" \
+            "This machine's bootc has no --composefs-backend on install to-existing-root." \
+            "The migration needs it. Take an OS update first."
+
+    # Secure Boot. systemd-boot-unsigned is exactly what its name says, and
+    # Fedora's shim does not vouch for it. Committing a machine to a loader its
+    # firmware will refuse is a brick with every assertion green, so this is a
+    # refusal until APEX signs the loader and the key is enrolled — the
+    # decision docs/boot-v2.md records as open.
+    # Read the firmware variable, not mokutil. `command -v mokutil` being
+    # false is not "Secure Boot is off" — it is "this image has no mokutil",
+    # and the lab guest was exactly that, so the branch below had never fired
+    # on the machine it was written for. The efivarfs read needs `dd bs=1
+    # skip=4`; `tail -c +5` cannot read efivarfs at all (apex-boot-health hit
+    # the same thing). Byte 5 is the value; the first four are attributes.
+    local sb_var=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+    local sb=""
+    if [ -e "$sb_var" ]; then
+        sb="$(dd if="$sb_var" bs=1 skip=4 count=1 status=none 2>/dev/null | od -An -tu1 | tr -d ' \n')"
+        [ -n "$sb" ] || refuse "secure-boot-unknown" \
+            "$sb_var exists and could not be read, so whether this machine" \
+            "enforces Secure Boot is unknown. Committing a machine to an" \
+            "unsigned loader on a guess is how one becomes unbootable."
+    fi
+    if [ "$sb" = 1 ]; then
+        if [ ! -f /usr/share/apex-os/boot/sdboot-signed ]; then
+            refuse "secure-boot-unsigned-loader" \
+                "Secure Boot is enabled and this image's systemd-boot is unsigned." \
+                "The firmware would refuse the new loader and the machine would" \
+                "have nothing to boot. APEX has to sign systemd-bootx64.efi and" \
+                "get that key enrolled before any machine with Secure Boot on can" \
+                "migrate — docs/boot-v2.md, 'Secure Boot: a decision, not a" \
+                "measurement'. Until then this machine stays on GRUB, working."
+        fi
+    fi
+
+    with_esp || refuse "no-esp" \
+        "No EFI System Partition was found on the disk holding the root filesystem."
+
+    # Space. Two deployments plus the staged third is what a steady-state
+    # machine needs; refusing here is the whole reason the L16 does not get
+    # half a migration.
+    local need avail per
+    per="$(deployment_kernel_bytes)"
+    [ "$per" -gt 0 ] || refuse "no-kernel" \
+        "Could not measure this deployment's kernel and initramfs under /usr/lib/modules."
+    # Three, not two. The steady state is booted + rollback, and an update
+    # stages a third alongside them — the predecessor measured three
+    # directories on the ESP during an upgrade. An ESP sized for two passes
+    # this check and then cannot take its first update, which is a worse place
+    # to find out.
+    need=$(( per * 3 / 1024 + ESP_SLACK_MIB * 1024 ))     # KiB
+    avail="$(df -Pk "$esp_mounted_at" | awk 'NR==2{print $4}')"
+    # Anything already written by a previous stage counts as available: a
+    # re-run must not refuse because its own last attempt is still there.
+    local staged_kib=0
+    [ -d "$esp_mounted_at/EFI/Linux" ] && staged_kib="$(du -sk "$esp_mounted_at/EFI/Linux" | awk '{print $1}')"
+    if [ "$(( avail + staged_kib ))" -lt "$need" ]; then
+        release_esp
+        refuse "esp-too-small" \
+            "The EFI System Partition has $(( avail / 1024 )) MiB free and this" \
+            "machine needs $(( need / 1024 )) MiB — one deployment's kernel and" \
+            "initramfs is $(( per / 1024 / 1024 )) MiB, systemd-boot keeps the" \
+            "booted one and the rollback, and an update stages a third" \
+            "alongside them." \
+            "An ESP cannot be grown in place without moving the partition after" \
+            "it, so this machine stays on GRUB until its ESP is made bigger." \
+            "docs/boot-v2.md, 'The ESP is the binding constraint'."
+    fi
+
+    [ -f "$esp_mounted_at/EFI/BOOT/BOOTX64.EFI" ] || log \
+        "note: there is no /EFI/BOOT/BOOTX64.EFI to preserve on this ESP"
+
+    release_esp
+    [ "$quiet" = quiet ] || log "precheck: this machine can migrate safely"
+    return 0
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  stage — write the whole new boot path, change nothing the firmware reads
+# ═════════════════════════════════════════════════════════════════════════════
+cmd_stage() {
+    cmd_precheck quiet
+
+    mkdir -p "$STATE" || fail "no-state-dir" "Cannot create $STATE."
+    with_esp || fail "no-esp" "The ESP disappeared between precheck and stage."
+
+    # ── 1. save the one file bootc overwrites ────────────────────────────────
+    # The save happens ONCE, and never over an existing one. A re-run after a
+    # power cut that landed between bootc replacing this file and the restore
+    # would otherwise save systemd-boot as "the original" and then faithfully
+    # restore it — leaving the removable-media fallback permanently an
+    # unsigned loader, with every check in this script green.
+    local fallback="$esp_mounted_at/EFI/BOOT/BOOTX64.EFI"
+    local sdboot=/usr/lib/systemd/boot/efi/systemd-bootx64.efi
+    if [ -f "$fallback" ] && [ ! -f "$STATE/BOOTX64.EFI.orig" ]; then
+        if [ -f "$sdboot" ] &&
+           [ "$(sha256sum "$fallback" | awk '{print $1}')" = \
+             "$(sha256sum "$sdboot"   | awk '{print $1}')" ]; then
+            release_esp
+            fail "fallback-already-systemd-boot" \
+                "/EFI/BOOT/BOOTX64.EFI is already systemd-boot and there is no" \
+                "saved copy of what it was. A previous run was interrupted" \
+                "between replacing it and putting it back. Restore it by hand" \
+                "from the shim in /EFI/fedora before migrating this machine."
+        fi
+        cp -f "$fallback" "$STATE/BOOTX64.EFI.orig" || fail "save-fallback" \
+            "Could not save $fallback, which the install overwrites."
+        sha256sum "$STATE/BOOTX64.EFI.orig" | awk '{print $1}' > "$STATE/BOOTX64.EFI.sha"
+        log "saved the removable-media fallback ($(stat -c %s "$fallback") bytes)"
+    elif [ -f "$STATE/BOOTX64.EFI.orig" ]; then
+        log "keeping the removable-media fallback an earlier run saved"
+    fi
+
+    # ── 2. record what the old path looks like, so step 5 can prove it survived
+    ( cd "$esp_mounted_at" && find EFI/fedora -type f -exec sha256sum {} \; 2>/dev/null ) \
+        | sort -k2 > "$STATE/grub-esp.sha"
+    ls -1 "$SYSROOT/boot" > "$STATE/boot-before.list" 2>/dev/null
+
+    # ── 3. the install, with /target/boot bound away from the real one ───────
+    #
+    # The staging has to be a real filesystem, not a directory: bootc reads a
+    # UUID off /target/boot and fails with "No UUID found for /boot" against a
+    # plain bind. It is a throwaway FAT image on /var, and it stays EMPTY —
+    # measured — because with --bootloader systemd bootc finds the ESP by GPT
+    # type and writes the loader there. What the bind buys is that bootc's wipe
+    # of "the bootloader state" lands on this scratch filesystem instead of on
+    # the root filesystem's /boot, where GRUB's config and every ostree kernel
+    # live.
+    local stagedir=/run/apex-boot-migrate/stage-boot
+    local stageimg="$STATE/stage-boot.img"
+    umount "$stagedir" 2>/dev/null
+    rm -f "$stageimg"; mkdir -p "$stagedir"
+    truncate -s 64M "$stageimg" || fail "no-stage-image" "Cannot create $stageimg."
+    # The staging filesystem is given the REAL ESP's volume id, and that is the
+    # whole reason this step is delicate. bootc reads the UUID off /target/boot
+    # and bakes it into the kernel command line as `boot=UUID=…` and
+    # `systemd.mount-extra=UUID=…:/boot`. Measured: with a fresh volume id the
+    # migrated machine booted, could not find a filesystem with that UUID —
+    # the staging image is deleted minutes earlier — and dropped to emergency
+    # mode with boot.mount failed. Same id, and the cmdline names the ESP.
+    local espdev espuuid volid
+    espdev="$(find_esp)" || fail "no-esp" "The ESP disappeared."
+    espuuid="$(blkid -s UUID -o value "$espdev" 2>/dev/null)"
+    volid="$(printf '%s' "$espuuid" | tr -d -)"
+    [ ${#volid} -eq 8 ] || fail "esp-uuid" \
+        "The ESP's volume id is '$espuuid', which is not a FAT volume id." \
+        "Without it the migrated machine would be told to mount a filesystem" \
+        "that does not exist at /boot."
+    mkfs.vfat -n APEXSTAGE -i "$volid" "$stageimg" >/dev/null 2>&1 ||
+        fail "no-mkfs-vfat" "mkfs.vfat failed; dosfstools is required for the migration."
+    mount -o loop "$stageimg" "$stagedir" ||
+        fail "no-stage-mount" "Could not mount the staging filesystem."
+
+    local image
+    image="$(bootc status --json | python3 -c 'import sys,json
+d=json.load(sys.stdin); b=(d.get("status") or {}).get("booted") or {}
+i=((b.get("image") or {}).get("image") or {})
+print(i.get("image") or "")')"
+    [ -n "$image" ] || fail "no-image" "Cannot read the booted image reference."
+
+    # The migration deploys the image this machine is ALREADY running, by
+    # digest. That is deliberate: it makes the migration a change of boot path
+    # and nothing else — same /usr, same /etc content, so the /etc carried
+    # across in step 4 is exactly right, and a machine that reboots into it
+    # gets no other surprise at the same time. New content arrives on the next
+    # ordinary `apex update`, through the new path.
+    local digest
+    digest="$(bootc status --json | python3 -c 'import sys,json
+d=json.load(sys.stdin); b=(d.get("status") or {}).get("booted") or {}
+print(((b.get("image") or {}).get("imageDigest")) or "")')"
+    log "migrating to the image this machine is already running: $image ($digest)"
+
+    # The install has to run as a container of the image being installed. The
+    # image is ALREADY on this disk — it is what the machine booted — so it is
+    # copied out of bootc's own storage rather than downloaded again. Measured
+    # in the lab: `bootc image copy-to-storage` moves it locally, with no
+    # network, and lands it under the fixed name `localhost/bootc`.
+    #
+    # `--target-imgref "$image"` is not optional: without it the migrated
+    # machine would record `localhost/bootc` as the thing to update from, and
+    # the first `apex update` after the migration would fail on a registry
+    # called localhost.
+    local runimage="$image"
+    if ! podman image exists "$image" 2>/dev/null; then
+        log "making the booted image available to podman (no download: it is already on this disk)"
+        bootc image copy-to-storage 2>&1 | grep -v '^Copying blob' | sed 's/^/    /' >&2 ||
+            fail "image-unavailable" \
+                "The booted image is not in podman's storage and bootc could not copy it there."
+        runimage=localhost/bootc
+        podman image exists "$runimage" || fail "image-unavailable" \
+            "bootc image copy-to-storage reported success but $runimage is not in podman's storage."
+    fi
+
+    mount -o remount,rw "$SYSROOT" 2>/dev/null
+
+    local -a kargs=()
+    local k
+    while IFS= read -r k; do [ -n "$k" ] && kargs+=(--karg "$k"); done < <(carried_kargs)
+    log "carrying $(carried_kargs | wc -l) kernel arguments across: $(carried_kargs | paste -sd' ' -)"
+
+    local -a argv=(podman run --rm --privileged --pid=host
+        -v "$SYSROOT:/target"
+        -v "$stagedir:/target/boot"
+        -v /var/lib/containers:/var/lib/containers
+        --security-opt label=type:unconfined_t
+        "$runimage"
+        bootc install to-existing-root
+            --composefs-backend --bootloader systemd
+            --generic-image
+            --target-imgref "$image"
+            ${kargs[@]+"${kargs[@]}"}
+            /target)
+
+    if [ "$DRYRUN" = 1 ]; then
+        printf 'apex-boot-migrate: DRY RUN, would run:\n'
+        printf '    %q' "${argv[@]}"; printf '\n'
+        release_esp
+        return 0
+    fi
+
+    log "installing the composefs deployment (the old path is not touched)"
+    if ! "${argv[@]}"; then
+        umount "$stagedir" 2>/dev/null; rm -f "$stageimg"
+        release_esp
+        fail "install-failed" \
+            "bootc install to-existing-root failed. Nothing committed; this" \
+            "machine still boots the way it did. Re-running is safe."
+    fi
+
+    # If bootc ever starts writing the loader into /target/boot instead of
+    # finding the ESP itself, this catches it before anything is committed: the
+    # boot files would be on a scratch image about to be deleted.
+    local stray; stray="$(find "$stagedir" -mindepth 1 | head -5)"
+    umount "$stagedir" 2>/dev/null; rm -f "$stageimg"
+    if [ -n "$stray" ]; then
+        release_esp
+        fail "loader-went-to-staging" \
+            "bootc wrote into the staging filesystem instead of the ESP:" \
+            "$stray" \
+            "Nothing is committed. This needs a look before any machine migrates."
+    fi
+
+    # ── 4. put the old path's state back, and join the machine's data ────────
+    if [ -f "$STATE/BOOTX64.EFI.orig" ]; then
+        # Written to a temporary name and renamed, so the moment of replacement
+        # is one directory operation rather than a half-written loader. This
+        # file is the removable-media fallback; nothing in BootOrder points at
+        # it, so even a torn write here cannot stop the machine booting.
+        cp -f "$STATE/BOOTX64.EFI.orig" "$esp_mounted_at/EFI/BOOT/BOOTX64.NEW" &&
+        mv -f "$esp_mounted_at/EFI/BOOT/BOOTX64.NEW" "$fallback" &&
+        sync
+        local want got
+        want="$(cat "$STATE/BOOTX64.EFI.sha")"
+        got="$(sha256sum "$fallback" | awk '{print $1}')"
+        [ "$want" = "$got" ] || fail "fallback-not-restored" \
+            "The removable-media fallback did not come back byte-identical." \
+            "Restore it by hand from $STATE/BOOTX64.EFI.orig before rebooting."
+        log "restored /EFI/BOOT/BOOTX64.EFI to what it was"
+    fi
+
+    join_state || { release_esp; fail "state-join" "Could not join /var and /etc."; }
+
+    # ── 5. prove the old path is still there, and the new one is complete ────
+    local newsha; newsha="$( cd "$esp_mounted_at" && find EFI/fedora -type f -exec sha256sum {} \; 2>/dev/null | sort -k2 )"
+    if ! diff -q <(printf '%s\n' "$newsha") "$STATE/grub-esp.sha" >/dev/null; then
+        release_esp
+        fail "grub-esp-moved" \
+            "GRUB's files on the ESP are not what they were before the install." \
+            "The migration is NOT committed and this machine still boots GRUB," \
+            "but something wrote where nothing should have. Do not reboot into" \
+            "the new path until that is understood."
+    fi
+    for p in "EFI/systemd/systemd-bootx64.efi" "loader/entries.srel"; do
+        [ -e "$esp_mounted_at/$p" ] || { release_esp; fail "incomplete-stage" \
+            "The install reported success but $p is not on the ESP."; }
+    done
+    local entries; entries="$(find "$esp_mounted_at/loader/entries" -name '*.conf' 2>/dev/null | wc -l)"
+    [ "$entries" -ge 1 ] || { release_esp; fail "no-entries" \
+        "No Type #1 loader entry was written."; }
+    # An entry naming a kernel that is not there is a machine that boots into a
+    # loader and stops. Follow the entry to the files it names.
+    local ent lin ini
+    ent="$(find "$esp_mounted_at/loader/entries" -name '*.conf' | head -1)"
+    lin="$(sed -n 's/^linux  *//p' "$ent" | head -1)"
+    ini="$(sed -n 's/^initrd  *//p' "$ent" | head -1)"
+    # The cmdline the machine will boot with must name the real ESP. This is
+    # the assertion that would have caught the staging UUID leaking through.
+    local entboot
+    entboot="$(sed -n 's/^options .*boot=UUID=\([^ ]*\).*/\1/p' "$ent" | head -1)"
+    if [ -n "$entboot" ] && [ -n "$espuuid" ] && [ "$entboot" != "$espuuid" ]; then
+        release_esp
+        fail "entry-names-wrong-boot" \
+            "The staged entry says boot=UUID=$entboot but the ESP is $espuuid." \
+            "That machine would boot and then fail to mount /boot. Not committed."
+    fi
+    for p in "$lin" "$ini"; do
+        [ -n "$p" ] || { release_esp; fail "entry-incomplete" \
+            "$(basename "$ent") names no $( [ -z "$lin" ] && echo kernel || echo initrd )."; }
+        [ -s "$esp_mounted_at/$p" ] || { release_esp; fail "kernel-missing" \
+            "$(basename "$ent") points at $p, which is not on the ESP."; }
+    done
+    [ -d "$SYSROOT/boot/grub2" ] || { release_esp; fail "grub-boot-wiped" \
+        "The root filesystem's /boot/grub2 is gone — the containment failed."; }
+
+    echo staged > "$STATE/phase"
+    sync
+
+    # The image was copied out of bootc's storage into podman's to run the
+    # install as a container of it. That copy is a THIRD full copy of the image
+    # on this disk — APEX's is 15 GB — and it has done its job. Removing it is
+    # the difference between a migration that costs a deployment and one that
+    # costs a deployment plus the whole image again. katana's /var is tight.
+    if [ "${runimage:-}" = localhost/bootc ]; then
+        podman rmi localhost/bootc >/dev/null 2>&1 &&
+            log "removed the working copy of the image ($(basename "$runimage"))"
+    fi
+    # The root was remounted read-write for the install. Put it back.
+    mount -o remount,ro "$SYSROOT" 2>/dev/null
+
+    release_esp
+    log "staged: the new boot path is written and nothing the firmware reads has changed"
+    return 0
+}
+
+# The machine's data has to be in both paths, because both have to be bootable.
+#
+# bootc gives the composefs deployment a FRESH stateroot: its var is empty and
+# its etc is the image's. Measured: a bare migration comes up with an empty
+# /var — no /var/home, no user — which is not a migration, it is a reinstall
+# wearing one.
+#
+# /var is MOVED into the composefs stateroot and a symlink is left behind for
+# the ostree path, and the direction matters. The obvious arrangement — leave
+# /var where ostree has it and symlink the composefs stateroot at it — was
+# tried first and the migrated machine came up with **/var mounted read-only**:
+# bootc's initramfs binds the stateroot var while the physical root is still
+# writable and the bind keeps rw, and through the symlink it did not. Measured
+# both ways in the same guest:
+#
+#     stock composefs        /dev/vda3 /var ext4 rw   (and /sysroot ro)
+#     symlinked stateroot    /dev/vda3 /var ext4 ro   -> every write EROFS
+#
+# So the composefs path gets a real directory where it expects one, and the
+# ostree path — which is now the fallback — gets the symlink. Nothing is
+# copied and nothing is deleted: this is two renames inside one filesystem,
+# and the user's data is only ever at one of two names.
+#
+# The crash window is named rather than hidden. Between the second rename and
+# the symlink, /ostree/deploy/default/var does not exist. A power cut there
+# leaves a machine that still BOOTS the old path — ostree creates the
+# directory if it is missing — with an empty-looking /var whose real contents
+# are one directory away, and re-running the migration repairs it. That is the
+# worst state this function can leave, it is not a brick, and it loses
+# nothing.
+#
+# /etc is COPIED, because it is per-deployment by design and the two paths
+# must be able to diverge. It is exact rather than approximate only because
+# the migration deploys the digest the machine is already running.
+join_state() {
+    local newvar oldvar newetc oldetc
+    newvar="$(find "$SYSROOT/state" -mindepth 3 -maxdepth 3 -name var 2>/dev/null | head -1)"
+    oldvar="$SYSROOT/ostree/deploy/default/var"
+    [ -n "$newvar" ] || { log "no new stateroot var found under $SYSROOT/state"; return 1; }
+
+    if [ -L "$oldvar" ]; then
+        log "/var is already joined"
+    elif [ -d "$oldvar" ] && [ ! -L "$newvar" ]; then
+        local rel
+        rel="$(realpath -m --relative-to="$(dirname "$oldvar")" "$newvar")"
+        # The ostree stateroot's var is a MOUNTPOINT on a running machine —
+        # /sysroot/ostree/deploy/default/var is mounted from the same device —
+        # so renaming it is EBUSY. Unmounting it for real would take /var out
+        # from under the running system. Both are avoided by doing the rename
+        # inside a private mount namespace: the unmount is visible only here,
+        # the rename lands on the filesystem, and the /var the machine is
+        # actually using keeps working because a mount follows the inode and
+        # not the path. Measured: after this, `touch /var/tmp/...` still
+        # succeeds in the parent namespace.
+        unshare -m --propagation private bash -c '
+            set -e
+            umount -l "$1" 2>/dev/null || true
+            [ -d "$2" ] && mv -f "$2" "$2.fresh-from-image"
+            mv -f "$1" "$2"
+            ln -s "$3" "$1"
+            sync
+        ' _ "$oldvar" "$newvar" "$rel" || return 1
+        [ -L "$oldvar" ] || { log "the /var join did not leave a symlink behind"; return 1; }
+        log "joined /var: moved the machine's var into the composefs stateroot,"
+        log "             left $oldvar -> $rel for the GRUB path"
+    else
+        log "cannot join /var: $oldvar is not a directory and not a symlink"
+        return 1
+    fi
+
+    newetc="$(find "$SYSROOT/state/deploy" -mindepth 2 -maxdepth 2 -type d -name etc 2>/dev/null | head -1)"
+    oldetc="$(find "$SYSROOT/ostree/deploy/default/deploy" -mindepth 2 -maxdepth 2 -type d -name etc 2>/dev/null | head -1)"
+    if [ -n "$newetc" ] && [ -n "$oldetc" ]; then
+        rsync -aAXH --delete "$oldetc/" "$newetc/" || return 1
+        log "carried /etc across ($(du -sh "$newetc" | awk '{print $1}'))"
+    else
+        log "could not locate one of the /etc trees (new='$newetc' old='$oldetc')"
+        return 1
+    fi
+    sync
+    return 0
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  commit — the single atomic write
+# ═════════════════════════════════════════════════════════════════════════════
+cmd_commit() {
+    [ "$(cat "$STATE/phase" 2>/dev/null)" = staged ] || refuse "nothing-staged" \
+        "There is no staged migration to commit."
+
+    local dev disk part
+    dev="$(find_esp)" || fail "no-esp" "The ESP is gone."
+    disk="$(lsblk -no PKNAME "$dev" | head -1)"
+    part="$(cat "/sys/class/block/$(basename "$dev")/partition" 2>/dev/null)"
+    [ -n "$disk" ] && [ -n "$part" ] || fail "no-esp-address" \
+        "Could not work out the disk and partition number of $dev."
+
+    efibootmgr | sed -n 's/^BootOrder: //p' > "$STATE/bootorder.before"
+
+    # An entry for this loader may already exist — from a previous run whose
+    # power was cut between these two writes, which is one of the states this
+    # was tested in. Creating a second one would leave the firmware menu with a
+    # growing pile of identical entries.
+    local num
+    num="$(efibootmgr -v | grep -F "$LOADER_PATH" | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p' | head -1)"
+    if [ -n "$num" ]; then
+        log "reusing the systemd-boot entry a previous run created (Boot$num)"
+    else
+        # --create-only: the entry is written but NOT put into BootOrder, so
+        # this write changes nothing about what boots. A power cut here leaves
+        # an unused variable behind and a machine that boots exactly as before
+        # — measured.
+        num="$(efibootmgr --create-only --disk "/dev/$disk" --part "$part" \
+                  --label "$ENTRY_LABEL" --loader "$LOADER_PATH" 2>&1 |
+               sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\)\*\? .*/\1/p' | tail -1)"
+        [ -n "$num" ] || num="$(efibootmgr -v | grep -F "$LOADER_PATH" |
+                                sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p' | head -1)"
+    fi
+    [ -n "$num" ] || fail "no-entry" "Could not create or find the systemd-boot entry."
+    echo "$num" > "$STATE/bootnum"
+    efibootmgr -v | grep -q "^Boot$num" || fail "entry-missing" \
+        "efibootmgr reported Boot$num but it is not in the variable store."
+
+    # ══ THE COMMIT ══ one SetVariable. Before it the old path; after it the
+    # new path, once. The firmware consumes BootNext before it launches
+    # anything, so a machine that fails to boot the new path boots the old one
+    # next, with nobody having to do anything.
+    efibootmgr --bootnext "$num" >/dev/null || fail "bootnext-failed" \
+        "Could not set BootNext. Nothing is committed; this machine still boots GRUB."
+
+    echo committed > "$STATE/phase"
+    # Which boot committed, so a second `apex update` in the SAME boot does not
+    # fall through and run the whole install again over a complete deployment.
+    cat /proc/sys/kernel/random/boot_id > "$STATE/committed-boot" 2>/dev/null
+    sync
+    log "committed: the next boot is systemd-boot (Boot$num). If it does not come up,"
+    log "the boot after it is GRUB again — BootNext is a one-shot and the firmware"
+    log "consumes it before the loader runs."
+    return 0
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  confirm — after boot-complete.target on the new path
+# ═════════════════════════════════════════════════════════════════════════════
+cmd_confirm() {
+    [ "$(cat "$STATE/phase" 2>/dev/null)" = committed ] || { log "nothing to confirm"; return 0; }
+    case "$(booted_loader)" in
+        *systemd-boot*) ;;
+        *)
+            # Committed, and this boot is NOT the new path. BootNext is a
+            # one-shot: the firmware consumed it, so the trial has already
+            # happened and it did not end here. Either the loader was refused
+            # or that boot did not get far enough to confirm itself.
+            #
+            # This is recorded rather than shrugged at, because the machine is
+            # otherwise indistinguishable from one that has not rebooted yet —
+            # and `apex update` would then commit again, and the user would
+            # reboot into the same failure every time. A failed migration is
+            # not retried without being asked.
+            echo failed > "$STATE/phase"
+            date -Is > "$STATE/failed-at" 2>/dev/null
+            sync
+            log "the migration's trial boot did not come up: this boot is not"
+            log "systemd-boot and BootNext has been consumed. Recorded as failed."
+            log "This machine is working, on GRUB, with everything it had."
+            log "Nothing will retry on its own. To try again: apex-boot-migrate retry"
+            return 0 ;;
+    esac
+    local num; num="$(cat "$STATE/bootnum" 2>/dev/null)"
+    [ -n "$num" ] || { log "no recorded boot entry number"; return 0; }
+
+    local order rest
+    order="$(efibootmgr | sed -n 's/^BootOrder: //p')"
+    rest="$(printf '%s' "$order" | tr ',' '\n' | grep -v -i -x "$num" | paste -sd, -)"
+    # One SetVariable again. GRUB's entry is kept, behind this one: it is the
+    # recovery path, and it costs nothing to leave it there.
+    efibootmgr --bootorder "$num${rest:+,$rest}" >/dev/null || {
+        log "could not write BootOrder; the machine still boots through BootNext next time"
+        return 0
+    }
+    echo confirmed > "$STATE/phase"
+    sync
+    log "confirmed: systemd-boot is the default. GRUB is still installed, behind it."
+    return 0
+}
+
+cmd_abort() {
+    case "$(cat "$STATE/phase" 2>/dev/null)" in
+        staged|"") ;;
+        *) refuse "already-committed" "This migration is past its commit point." ;;
+    esac
+    rm -f "$STATE/phase"
+    log "the staged migration is discarded. The files it wrote are inert:"
+    log "nothing in BootOrder points at them."
+    return 0
+}
+
+cmd_retry() {
+    [ "$(cat "$STATE/phase" 2>/dev/null)" = failed ] || refuse "nothing-failed" \
+        "There is no failed migration to retry."
+    # Back to `staged`, not to nothing: everything the stage wrote is still on
+    # this machine and still correct, so the retry is one EFI variable write.
+    echo staged > "$STATE/phase"
+    rm -f "$STATE/failed-at"
+    sync
+    log "armed again. The next 'apex-boot-migrate auto' — or 'apex update' —"
+    log "will commit, and the boot after it tries systemd-boot once more."
+    return 0
+}
+
+cmd_status() {
+    printf 'phase:        %s\n' "$(cat "$STATE/phase" 2>/dev/null || echo 'not started')"
+    printf 'store:        %s\n' "$(booted_store)"
+    printf 'loader:       %s\n' "$(booted_loader || echo 'GRUB (no LoaderInfo)')"
+    printf 'boot entry:   %s\n' "$(cat "$STATE/bootnum" 2>/dev/null || echo none)"
+    printf 'BootOrder:    %s\n' "$(efibootmgr 2>/dev/null | sed -n 's/^BootOrder: //p')"
+}
+
+# Exit 3 means "there is nothing to do here", as distinct from exit 10's
+# "this machine must not be migrated". `apex update` prints an explanation for
+# the second and nothing at all for the first: a machine that has already
+# migrated must not be told on every single update that it is staying on GRUB.
+NOTHING_TO_DO=3
+
+cmd_auto() {
+    local phase; phase="$(cat "$STATE/phase" 2>/dev/null || true)"
+
+    # Already there. Checked on the phase as well as on the backend, because a
+    # user who picks GRUB out of the firmware menu on a confirmed machine is
+    # booted on ostreeContainer and would otherwise pass precheck and stage the
+    # whole thing again.
+    if [ "$phase" = confirmed ]; then return "$NOTHING_TO_DO"; fi
+    case "$(booted_loader)" in *systemd-boot*) return "$NOTHING_TO_DO" ;; esac
+    if [ "$(booted_store)" != ostreeContainer ]; then return "$NOTHING_TO_DO"; fi
+
+    if [ "$phase" = committed ]; then
+        local now committed_in
+        now="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+        committed_in="$(cat "$STATE/committed-boot" 2>/dev/null || true)"
+        if [ -n "$now" ] && [ "$now" = "$committed_in" ]; then
+            # Committed during THIS boot. Nothing more can be done until the
+            # machine reboots, and running the install again over a complete
+            # composefs deployment is not "nothing".
+            log "already committed in this boot: reboot to finish the migration"
+            return 0
+        fi
+        # Committed in an earlier boot and we are still on GRUB, so the trial
+        # has been and gone. The confirm unit records this too; doing it here
+        # as well means a machine whose unit never ran still cannot loop.
+        echo failed > "$STATE/phase"
+        date -Is > "$STATE/failed-at" 2>/dev/null
+        sync
+        phase=failed
+    fi
+
+    if [ "$phase" = failed ]; then
+        refuse "last-attempt-failed" \
+            "The last migration was committed and its trial boot did not come up" \
+            "($(cat "$STATE/failed-at" 2>/dev/null || echo 'time not recorded'))." \
+            "This machine is on GRUB and working. Committing again would just" \
+            "spend another reboot on the same failure, so it is not done" \
+            "automatically: run 'apex-boot-migrate retry' to arm it once more."
+    fi
+    # A machine that already has a complete stage — because the last run's
+    # power was cut after staging and before the commit — does not stage
+    # again. Everything the stage wrote is still there and still correct.
+    if [ "$phase" = staged ]; then
+        log "a complete stage from an earlier run is already on this machine"
+        cmd_commit || return $?
+        log "this machine will boot systemd-boot next time. Reboot when you like."
+        return 0
+    fi
+    cmd_precheck quiet || return $?
+    cmd_stage || return $?
+    cmd_commit || return $?
+    log "this machine will boot systemd-boot next time. Reboot when you like."
+    return 0
+}
+
+case "${1:-status}" in
+    status)   cmd_status ;;
+    precheck) cmd_precheck ;;
+    stage)    cmd_stage ;;
+    commit)   cmd_commit ;;
+    confirm)  cmd_confirm ;;
+    abort)    cmd_abort ;;
+    retry)    cmd_retry ;;
+    auto)     cmd_auto ;;
+    *) printf 'usage: apex-boot-migrate {status|precheck|stage|commit|confirm|retry|abort|auto}\n' >&2; exit 2 ;;
+esac

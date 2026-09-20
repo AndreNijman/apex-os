@@ -42,8 +42,143 @@ neither of which can be inside a UKI signed in CI.
 
 `bootc install … --bootloader systemd --composefs-backend` installs, boots and
 upgrades. So every APEX machine that boots systemd-boot is a machine whose root
-storage is composefs-backed, and **there is no in-place ostree → composefs
-converter**: `bootc --help` on 1.16.10 and 1.16.13 lists no migration verb.
+storage is composefs-backed.
+
+**That does not make it a reinstall, and the sentence that used to stand here
+saying it did was wrong.** `bootc --help` lists no migration verb, which is
+where that conclusion came from; but `bootc install to-existing-root` takes
+`--composefs-backend` and `--bootloader systemd`, and run against a live
+ostree + GRUB machine it converts it in place. Measured 2026-09-21, on a guest
+booted from an ordinary GRUB install:
+
+```
+Installing image: docker://localhost/sdmig:v2
+Bootloader: systemd
+Installing bootloader via systemd-boot
+Installation complete!
+```
+
+The next section is the whole of what APEX had to add to make that safe.
+
+## Migrating a machine that already exists
+
+Andre, 2026-09-20, on being told the answer was a reinstall: *"it cannot be
+that. active machines should automitcally migrate with sudo apex install, not
+this dumbass reinstall shit. and also a failed or cancelled or power shut down
+or something sudo apex install in this change should not fully break the boot
+and actual system or whatever, everything should safely migrate."*
+
+`files/system/libexec/apex-boot-migrate` is that, and `apex update` runs it
+with no flag and nothing for the user to choose.
+
+### What the bare bootc command does to a machine, measured
+
+Run with nothing around it, `bootc install to-existing-root --composefs-backend
+--bootloader systemd`:
+
+| | before | after |
+| --- | --- | --- |
+| `/EFI/fedora/shimx64.efi` — **what Boot0000 points at** | present | **deleted** |
+| `/EFI/fedora/{grubx64.efi,grub.cfg,BOOTX64.CSV,…}` | present | **deleted** |
+| `/EFI/BOOT/BOOTX64.EFI` | shim | **systemd-boot** |
+| root filesystem `/boot` — grub2/, BLS entries, ostree kernels | present | **wiped** |
+
+The guest that did that still booted, and that is the dangerous part: it booted
+only because the firmware fell through to the removable-media fallback, which
+bootc had just replaced with an unsigned systemd-boot. On a machine with Secure
+Boot on, that fallback is refused and the machine's own boot entry points at a
+file that is gone.
+
+### The three phases, and where the commit is
+
+**STAGE — nothing the firmware reads changes.** The install runs with a
+throwaway FAT filesystem bound over `/target/boot` inside the container, so
+bootc's wipe of "the bootloader state" lands on scratch. Measured with that
+bind in place: `/EFI/fedora` is **byte-identical** before and after, the root
+filesystem's `/boot` is untouched, and the only overwrite anywhere on the ESP
+is `/EFI/BOOT/BOOTX64.EFI` — which the migration saves first and puts back,
+verified by sha256. Everything else bootc writes is additive: `/EFI/systemd/`,
+`/EFI/Linux/`, `/loader/`. GRUB reads none of those; it reads `/boot/loader` on
+the root filesystem.
+
+Two details that are easy to get wrong and were both measured going wrong
+first:
+
+* the staging must be a real filesystem, because bootc reads a UUID off
+  `/target/boot` and fails with `No UUID found for /boot` against a plain bind;
+* and it must carry **the real ESP's volume id**, because bootc bakes that UUID
+  into the kernel command line as `boot=UUID=…`. With a fresh one the migrated
+  machine booted, could not find a filesystem with that UUID — the staging
+  image is deleted minutes earlier — and dropped to emergency mode on
+  `boot.mount`. There is an assertion for exactly that now.
+
+**COMMIT — one EFI variable write.** The `Boot####` entry is created with
+`--create-only`, so it is not in `BootOrder` and changes nothing. Then one
+`SetVariable` of **`BootNext`**. That is the commit point, and it is
+self-healing: the firmware consumes `BootNext` before it launches anything, so
+a machine that fails to come up on the new path boots the old one next, with
+nobody doing anything.
+
+**CONFIRM — one more write, after proof.** `apex-boot-migrate-confirm.service`
+runs after `boot-complete.target` on both paths while a migration is in flight.
+On systemd-boot it writes `BootOrder` with the new entry first and GRUB behind
+it. On GRUB it records the migration as **failed**, which is what stops `apex
+update` spending a reboot on the same broken loader every time; `apex-boot-
+migrate retry` re-arms it deliberately.
+
+### The machine's data comes with it
+
+A migration that loses `/var/home` is a reinstall wearing a migration's name,
+and bootc gives the composefs deployment a **fresh** stateroot — measured, the
+first migrated guest came up with an empty `/var` and no user.
+
+* **`/var` is moved** into the composefs stateroot, with a symlink left where
+  ostree looks, so both boot paths see one `/var` and the GRUB fallback is a
+  working machine rather than an empty one. The direction matters: the obvious
+  arrangement — leave `/var` where it is, symlink the stateroot at it — was
+  tried first and the machine came up with **`/var` mounted read-only**. And
+  the rename happens inside a private mount namespace, because the ostree
+  stateroot's var is a mountpoint on a running machine and a plain rename is
+  `EBUSY`.
+* **`/etc` is copied** from the old deployment to the new one. That is exact
+  rather than approximate only because the migration deploys **the digest the
+  machine is already running**: same image, so the image's `/etc` is the same
+  and what is carried is precisely the local modifications. New content arrives
+  on the next ordinary `apex update`, through the new path.
+
+### What it costs
+
+Stated rather than buried, because Andre tracks this per machine:
+
+* the ostree repo and its deployment **stay** — that is the recovery path, and
+  on APEX it is most of 15 GB;
+* `/composefs` is a second copy of the image content on the same disk;
+* the install has to run as a container of the booted image, so the image is
+  copied out of bootc's storage into podman's — a **third** copy. That one is
+  deleted as soon as the install succeeds, and `bootc image copy-to-storage`
+  does it locally, with no download.
+
+So a migrated machine carries roughly two copies of its image until someone
+deletes the ostree deployment, and nothing in this unit deletes it. On katana's
+tight `/var` that matters; the precheck does **not** currently measure free
+space on the root filesystem, and it should.
+
+### When it refuses
+
+A machine that cannot migrate safely stays on GRUB, working, and says why.
+Every refusal is named, and `apex update` carries on and takes its ordinary
+image update.
+
+| refusal | what it means |
+| --- | --- |
+| `secure-boot-unsigned-loader` | Secure Boot is on and this image's systemd-boot is unsigned. The firmware would refuse the new loader. **This is the L16 today.** |
+| `esp-too-small` | the ESP cannot hold two deployments plus a staged third. **This is also the L16 today**: 600 MiB against ~1.1 GiB needed. |
+| `update-staged` | an ostree update is already staged; one shutdown must not have two finalize paths |
+| `already-migrated` | the booted deployment is not on the ostree backend |
+| `bootc-too-old` | no `--composefs-backend` on `install to-existing-root` |
+| `no-esp`, `not-uefi`, `no-dosfstools`, `no-rsync`, `no-podman` | the machine or the image is missing something the migration needs |
+| `last-attempt-failed` | the previous commit's trial boot did not come up. Not retried on its own. |
+
 
 ### What boots through systemd-boot today, measured
 

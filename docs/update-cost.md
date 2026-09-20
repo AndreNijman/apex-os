@@ -401,6 +401,29 @@ polkit-authorised D-Bus API — which is how an unprivileged desktop is supposed
 to change power state. Gating those would break the desktop's power controls in
 order to improve an error message.
 
+## Also changed: the one update that migrates the boot path
+
+`apex update` on a machine still booting GRUB runs the in-place move to
+composefs + systemd-boot **instead of** `bootc upgrade` (docs/boot-v2.md,
+"Migrating a machine that already exists"). Two things about its cost, because
+this document exists so that nobody has to find them out on a full disk:
+
+* **It downloads nothing.** The migration deploys the digest the machine is
+  already running, and the install has to run as a container of that image, so
+  the image is copied out of bootc's own storage with `bootc image
+  copy-to-storage` — local, no registry round trip. That copy is deleted as
+  soon as the install succeeds.
+* **It roughly doubles the image's footprint on disk, and leaves it that way.**
+  The ostree repo and deployment stay — that is the recovery path — and
+  `/composefs` is a second copy of the same content. Nothing in the migration
+  deletes the old one, deliberately: a machine that can still boot GRUB is a
+  machine that cannot be bricked by this change. Reclaiming it is a later,
+  separate decision, and until it is taken a migrated APEX machine carries
+  about 15 GB it did not carry before.
+
+That is a disk cost, not a download cost, so it does not move the numbers above
+— but on katana, whose `/var` is tight, it is the number that matters.
+
 ## CI build time — what was measured, and what actually helped
 
 Profiled rather than guessed (run 30775672845):

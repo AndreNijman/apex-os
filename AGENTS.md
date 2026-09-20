@@ -141,8 +141,24 @@ phase.
      (`bootupd is required for ostree-based installs`), because bootupd ships
      only a grub2+shim payload and ostree's entries and kernels live on btrfs,
      which sd-boot cannot read. Only `--composefs-backend` works, and there is
-     no in-place ostree → composefs converter, so **an existing machine cannot
-     be converted; it is a reinstall.**
+     `bootc --help` lists no migration verb — but **`bootc install
+     to-existing-root --composefs-backend --bootloader systemd` converts a
+     running machine in place**, measured 2026-09-21, and `apex update` is
+     what runs it. It is a reinstall for nobody.
+   * **The migration commits at exactly one write, and everything before it is
+     discardable.** Run bare, that bootc command deletes `/EFI/fedora` — the
+     file the machine's own NVRAM entry points at — overwrites
+     `/EFI/BOOT/BOOTX64.EFI`, and wipes the root filesystem's `/boot`. So the
+     install runs with a throwaway FAT filesystem bound over `/target/boot`,
+     the fallback is saved and put back, and the commit is a single `BootNext`
+     — a one-shot the firmware consumes before the loader runs, so a new path
+     that does not come up is followed by the old one with nobody doing
+     anything. `files/system/libexec/apex-boot-migrate`, proven with the power
+     actually cut: `ROADMAP/evidence/sdboot-migrate-20260921-lab.md`.
+   * **GRUB is demoted, never removed.** A machine that cannot migrate safely
+     refuses and keeps working: Secure Boot with an unsigned loader, an ESP
+     too small for two deployments, an update already staged. A refusal is a
+     safe outcome; a half-migration is not.
    * **Nothing in the image may install a bootloader**, and that is unchanged:
      no `bootctl install`, `bootctl update`, `bootupctl`, `grub2-install` or
      `efibootmgr -c`, and `tests/test-boot-v2.sh` scans every shipped unit and
