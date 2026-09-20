@@ -281,25 +281,37 @@ nvram_probe() {
         note() { :; }
         . "$1"
         set_nvram_args_for "$2"
-        printf "%s\n" "${NVRAM_ARGS[*]-}"
+        printf "%s %s\n" "${NVRAM_BOOTC_ARGS[*]-}" "${NVRAM_ARGS[*]-}"
     ' _ "$NVFNS" "$dev" 2>/dev/null
 }
 
 got=$(nvram_probe "$ENGINE" /dev/loop9 "$FAKESYS")
+# THE PREVENTION, and it is the bootc flag and not the mount. MEASURED
+# 2026-09-20 22:12: a loopback install ran with the tmpfs mask applied and
+# logged, and STILL executed `efibootmgr --create --disk /dev/loop1` against
+# this machine. bootc needs --pid=host and re-enters the host mount namespace
+# for the bootloader step, so the container's own mounts are not where bootupd
+# looks. `bootc install --generic-image` skips the firmware step outright.
+case "$got" in
+    *"--generic-image"*)
+        ok "a loop-backed target skips the firmware step" "$got" ;;
+    EXTRACT-FAILED*)
+        bad "a loop-backed target skips the firmware step" "could not extract the functions from the engine" ;;
+    *)  bad "a loop-backed target skips the firmware step" "got '${got:-<empty>}'" ;;
+esac
+# Defence in depth, kept and asserted, but never again mistaken for the guard.
 case "$got" in
     *"--tmpfs /sys/firmware/efi/efivars"*)
-        ok "a loop-backed target masks efivars in the container" "$got" ;;
-    EXTRACT-FAILED)
-        bad "a loop-backed target masks efivars in the container" "could not extract the functions from the engine" ;;
-    *)  bad "a loop-backed target masks efivars in the container" "got '${got:-<empty>}'" ;;
+        ok "and still masks efivars in the container" "second layer, not the first" ;;
+    *)  bad "and still masks efivars in the container" "got '${got:-<empty>}'" ;;
 esac
 
 # The inverse, and it is the one that must not regress: a REAL disk still gets
 # the firmware, because a real install has to create a boot entry or the
 # machine it just installed will not start.
 got=$(nvram_probe "$ENGINE" /dev/nvme0n1 "$FAKESYS")
-if [ -z "$got" ]; then
-    ok "a real block device still reaches the firmware" "no podman arguments added"
+if [ -z "$(printf '%s' "$got" | tr -d '[:space:]')" ]; then
+    ok "a real block device still reaches the firmware" "no extra arguments added"
 else
     bad "a real block device still reaches the firmware" "engine would have added '$got'"
 fi
@@ -308,7 +320,7 @@ fi
 # tree is invisible and /dev/loop9 (which does not exist here) is not loop.
 # A seam that could HIDE a loop device would be able to re-create the incident.
 got=$(nvram_probe "$ENGINE" /dev/loop9 "")
-if [ -z "$got" ]; then
+if [ -z "$(printf '%s' "$got" | tr -d '[:space:]')" ]; then
     ok "the test seam cannot hide a real loop device" "unset override -> real sysfs only"
 else
     bad "the test seam cannot hide a real loop device" "got '$got' with the override unset"
@@ -339,7 +351,7 @@ nvscan=$(awk '
       while (l[j] ~ /\\$/ && j < NR) { j++; cmd = cmd " " l[j] }
       if (cmd ~ /bootc install/) {
         inst++
-        if (l[i-1] ~ /set_nvram_args_for/ && cmd ~ /NVRAM_ARGS/) good++
+        if (l[i-1] ~ /set_nvram_args_for/ && cmd ~ /NVRAM_ARGS/ && cmd ~ /NVRAM_BOOTC_ARGS/) good++
         else printf "UNGUARDED-INSTALL:%d ", i
       } else if (cmd ~ /LUKS_ENROLL_PATH/) {
         enrol++
@@ -395,7 +407,7 @@ else
           if (l[i] !~ /run --rm --privileged/) continue
           cmd = l[i]; j = i
           while (l[j] ~ /\\$/ && j < NR) { j++; cmd = cmd " " l[j] }
-          if (cmd ~ /bootc install/ && !(l[i-1] ~ /set_nvram_args_for/ && cmd ~ /NVRAM_ARGS/))
+          if (cmd ~ /bootc install/ && !(l[i-1] ~ /set_nvram_args_for/ && cmd ~ /NVRAM_ARGS/ && cmd ~ /NVRAM_BOOTC_ARGS/))
             printf "UNGUARDED-INSTALL:%d ", i
         }
       }' "$MUT_SITE")
@@ -405,20 +417,21 @@ else
     esac
 fi
 
-# MUTATION. Remove the one line that builds the mask and the loop case must
-# stop masking. One line, deleted by an exact match, so the mutant still parses.
+# MUTATION. Remove the one line that adds --generic-image and the loop case
+# must stop skipping the firmware. One line, deleted by an exact match, so the
+# mutant still parses.
 MUT_NV="$WORK/mutant-nvram"
 cp "$ENGINE" "$MUT_NV"
-sed -i '/^    NVRAM_ARGS=(--tmpfs \/sys\/firmware\/efi\/efivars)$/d' "$MUT_NV"
+sed -i '/^    NVRAM_BOOTC_ARGS=(--generic-image)$/d' "$MUT_NV"
 if cmp -s "$ENGINE" "$MUT_NV"; then
-    bad "mutant: efivars mask" "the mutation changed nothing — the sed program matched no line"
+    bad "mutant: the firmware-skip flag" "the mutation changed nothing — the sed program matched no line"
 elif ! bash -n "$MUT_NV" 2>/dev/null; then
-    bad "mutant: efivars mask" "the mutant does not parse; the mutation ate more than its line"
+    bad "mutant: the firmware-skip flag" "the mutant does not parse; the mutation ate more than its line"
 else
     got=$(nvram_probe "$MUT_NV" /dev/loop9 "$FAKESYS")
     case "$got" in
-        *"--tmpfs"*) bad "mutant: efivars mask" "the mask survived its own deletion — the case proves nothing" ;;
-        *)           ok "mutant: efivars mask" "mask removed -> loopback target no longer masked" ;;
+        *"--generic-image"*) bad "mutant: the firmware-skip flag" "it survived its own deletion — the case proves nothing" ;;
+        *)                   ok "mutant: the firmware-skip flag" "removed -> a loopback target would write NVRAM again" ;;
     esac
 fi
 
