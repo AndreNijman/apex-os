@@ -7,6 +7,11 @@ some `scx_bpf_*` kfuncs carry no `bpf_kfunc` DECL_TAG in the kernel's BTF, and l
 
 **It is now the answer. Measured, not read off a changelog.**
 
+> **And as of 2026-09-20 it is no longer only an A/B over someone else's
+> kernel.** APEX built its own with the pinned pahole 1.32, and both readers
+> call the result clean — **0 of 68 `scx_bpf_*` kfuncs untagged**, the shipped
+> reader's first `verdict: ok` on any kernel in existence. §4.5 has the run.
+
 ---
 
 ## 1. The headline
@@ -295,6 +300,146 @@ this repository's dominant defect family. It was produced by compiling a
 two-line C file with `-g` and running `pahole --btf_encode_detached` over it —
 a real BTF blob that simply contains no sched-ext.
 
-### 4.5 The end-to-end run
+### 4.5 The end-to-end run: it passes, and the gate returned 0 for the first time
 
-<!-- PENDING: filled in when the rebuilt tier finishes. -->
+`podman build -f Containerfile.kernel -t apex-kernel:local .`, 2026-09-20, unit
+`kb-build2`, from commit `a5ce7437` (neither `kernel/kernel.pin` nor
+`Containerfile.kernel` moved after it). **`EXIT=0`.**
+
+```text
+START                 2026-09-20T12:56:12Z
+rpmbuild starting at  2026-09-20T12:59:03Z
+rpmbuild took         73m42s at -j12
+END                   2026-09-20T14:13:07Z          (76m55s total wall)
+vmlinux               498,397,712 bytes
+CONFIG_PAHOLE_VERSION=132 (as pinned)
+CONFIG_SCHED_CLASS_EXT=y · CONFIG_DEBUG_INFO_BTF=y · CONFIG_EFI_STUB=y
+CONFIG_MODULE_ALLOW_BTF_MISMATCH is not set (deliberate)
+```
+
+**`CONFIG_PAHOLE_VERSION=132` is the line that proves the pin did something.**
+CachyOS's config ships `=131`; the symbol has no prompt, so `make olddefconfig`
+discards the stored value and recomputes it from the buildroot's pahole. 132 is
+the pinned toolchain, asserted rather than hoped for.
+
+#### Both readers, inside the build
+
+```text
+--- reading 1 of 2: bpftool, the root cause (did pahole emit the tag?)
+btf-xcheck: 68 scx_bpf_* names examined (47 *_impl resolve_btfids twins excluded)
+btf-xcheck: 308 bpf_kfunc DECL_TAGs in this BTF
+btf-xcheck: 0 scx_bpf_* names carry NO bpf_kfunc DECL_TAG
+btf-xcheck: PASS — every scx_bpf_* name carries the tag
+--- reading 2 of 2: apexd kernelbtf.rs, the symptom — THIS ONE IS THE GATE
+kernel BTF gate: /build/vmlinux.btf (6,562,087 bytes)
+  verdict : ok
+  reading : kernel BTF: sched-ext kfunc prototypes are the shape BPF schedulers expect
+PASS: this kernel can load a sched-ext scheduler.
+both readers agree: this kernel's scx_bpf_* kfuncs are intact
+```
+
+**This is the first time `apex-kernel-btf-gate` has ever returned 0.** Every BTF
+that existed before this kernel carried the defect, so the gate had been
+validated only negatively — four inputs, all exit 1. It now has a positive
+control.
+
+#### The arithmetic that confirms the mechanism
+
+§4.3 established that `resolve_btfids` creates one `*_impl` twin per kfunc whose
+implicit argument it actually strips. If that is right, a kernel in which 18
+more kfuncs became eligible should produce exactly 18 more twins:
+
+| kernel | untagged | `*_impl` twins |
+|---|---|---|
+| Fedora's stock 7.2.6 (pahole 1.30) | 18 | 29 |
+| **this build (pahole 1.32)** | **0** | **47** |
+
+**29 + 18 = 47.** Exactly. The 18 kfuncs pahole 1.30 left untagged are the 18
+`resolve_btfids` was skipping, and under 1.32 it processes all of them. That is
+a prediction of the §4.3 model, not a number it was fitted to.
+
+The DECL_TAG count agrees with the A/B independently: **308** here, **308** for
+pahole 1.32 in §1's table, against 288 for both 1.30 and the shipped kernel.
+
+#### Verified again from outside the container
+
+The build's own gate could in principle pass for a reason peculiar to the
+builder image. Both readers were re-run against the `vmlinux.btf` extracted from
+the finished image (`podman create` + `podman cp` — `FROM scratch` has no
+shell):
+
+| reader | where | result |
+|---|---|---|
+| `apex-kernel-btf-gate`, host-built binary | the host | `verdict: ok`, **exit 0** |
+| `btf-xcheck.sh` | a clean `fedora:43` container | 68 examined, 0 untagged, **exit 0** |
+
+#### What it produced
+
+```text
+kver    7.2.6-cachyos1.apex1.fc43.x86_64   (matches core's *cachyos* glob)
+cc      gcc (GCC) 15.3.1 20260722 (Red Hat 15.3.1-1)
+dwarves 1.32-1.fc43 · pahole_version 132 · btf_scx=usable · rpms=5
+```
+
+| rpm | bytes |
+|---|---|
+| `kernel-cachyos-modules` | 151,446,434 |
+| `kernel-cachyos-devel` | 19,361,540 |
+| `kernel-cachyos-core` | 18,332,257 |
+| `kernel-cachyos` | 6,637 |
+| `kernel-cachyos-devel-matched` | 6,529 |
+| **total** | **189,153,397 (180.4 MiB)** |
+
+The published image is **196,028,338 bytes (186.9 MiB)** — the RPMs, the config,
+the BTF blob and the pin, and nothing else, because it is `FROM scratch`. **No
+user ever downloads it**; only the `core` build pulls it. `vmlinux` itself
+(475 MiB) is deliberately not shipped.
+
+#### The core contract, checked before trusting a 50-minute core build
+
+`RPMS=… ./tests/check-kernel-contract.sh` installs the produced RPMs into a
+scratch `fedora-bootc:43` and checks every assumption `Containerfile.core`
+makes. **All pass, `fail=0`, exit 0**: the four hard-gated packages; the
+`ls -d /usr/lib/modules/*cachyos*` glob matching **exactly one** directory;
+`vmlinuz`/`config`/`System.map`/`build` present; `sign-file` executable and
+`CONFIG_MODULE_SIG_HASH` readable (module signing dies without either);
+`depmod -a`; `vmlinuz` starting with `MZ`, so it is a real PE that `sbsign` can
+sign and a UKI can use as a stub; and `SCHED_CLASS_EXT`, `DEBUG_INFO_BTF`,
+`DEBUG_INFO_BTF_MODULES` and `SCHED_BORE` all `=y` with
+`MODULE_ALLOW_BTF_MISMATCH` unset.
+
+That test had to be repaired before it could say anything. Run for the first
+time today — it had never been runnable, because it needs RPMs — it turned out
+to execute **zero** checks and exit 0: `podman run` without `-i` gives the
+container an empty stdin, so `bash -s` read EOF and the whole heredoc of
+contracts was discarded. The verdict above is from the repaired version, which
+fails on a negative control.
+
+#### Cost, now measured end to end rather than estimated
+
+* **73m42s of `rpmbuild`, 76m55s wall.** Longer than the first run's 49m14s, and
+  the difference is not the kernel: an unrelated CPU-heavy application was
+  running on this machine throughout. `-j12` on 16 cores does not get 12 cores
+  when something else wants four. The honest figure for a quiet machine is the
+  first run's, ~45–50 minutes.
+* **Disk:** `/var` went 450 GB free to 398 GB observed mid-build. The ~100 GB
+  figure from the first run stays the one to plan against — this run was
+  sampled rather than watched, and the tree is deleted inside the same `RUN`, so
+  the low point is easy to miss.
+* **Fleet cost: unchanged.** `core` installs the same kernel from a different
+  source.
+
+#### What is now proven rather than inferred
+
+§3 said the A/B "does not prove a full APEX kernel built with 1.32 loads a
+scheduler", and that the end-to-end proof is "a built kernel whose
+post-`resolve_btfids` BTF the shipped reader calls `Usable`". **That kernel now
+exists and the shipped reader calls it exactly that** — from inside the build,
+and again from outside it.
+
+One thing is still inferred, and saying so is the point of this section. The
+reader's verdict is that the prototypes are the shape libbpf expects. **No scx
+scheduler has been loaded on this kernel**, because that needs it booted on real
+hardware, which this unit deliberately did not do. The remaining gap is
+`scx_lavd` actually attaching on a machine running an image built from these
+RPMs.
