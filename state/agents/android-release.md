@@ -6,7 +6,8 @@ ask: Andre, directly — *"add the android app to releases"*, sharpened to
   github releases make the page"*
 repo: apex-os
 worktree: `/var/tmp/apex-work/wt-android-release`, branch `task/android-release`
-  (**pushed, not merged**; merged `origin/roadmap/v2.2` @ `4c2478fc` cleanly)
+  (**pushed, not merged**; tip `e57909ae`, 9 ahead / 0 behind `origin/roadmap/v2.2`
+  @ `b5f696cb`, merged twice cleanly)
 owns: `android/**`, `.github/workflows/release-android.yml`,
   `tests/test-android-release.sh`, `docs/android-app.md`, the README's phone
   section. Does NOT own `installer/**`, the boot path, the kernel.
@@ -24,6 +25,8 @@ files and three modified ones were sitting uncommitted. They are committed now.
 * `73e60681` the in-app updater
 * `ac7db108` the window reaches the metadata and the page
 * `4ca2a20e` `docs/android-app.md`, README, the page evidence
+* `5f1c176f` the page regenerated from a real signed release build
+* plus a second merge of `roadmap/v2.2`, after which both suites were re-run
 
 ## THE THREE DEFECTS IN THE INHERITED WORK — all found by running it
 
@@ -116,7 +119,13 @@ Nothing is half-done. In rough order of value:
    without one.
 5. The in-app install path has never run on a phone, and says so in its own
    comments and in `docs/android-app.md`. First device that appears, install an
-   older APK and update over it.
+   older APK and update over it. **If the install prompt never appears, suspect
+   this first:** `UpdateInstallReceiver` calls `startActivity` from a
+   `BroadcastReceiver`, and API 34+ restricts background activity launches. It
+   should be fine — the user has just tapped Update, so the app is visible —
+   but the fallback is a `PendingIntent.getActivity` aimed at `MainActivity`
+   handling `STATUS_PENDING_USER_ACTION` there instead. Written down so nobody
+   rediscovers it with a phone in their hand.
 
 ## LOCAL BUILD TRAPS
 
