@@ -12,9 +12,14 @@ decision.** The build tree is ~100 GB and a hosted GitHub runner has 14 GB.
 
 Repo `apex-os`, branch `task/kernel-build`, worktree
 `/var/tmp/apex-work/wt-kernel-build`.
-Merged `origin/roadmap/v2.2` (`4c2478fc`) in cleanly at `6150e25c` — no
-conflicts, and the v2.2 delta touched none of this unit's files.
-Not landed. No PR.
+Tip **`fe9200f3`**, pushed, `HEAD == origin/task/kernel-build` (checked).
+`origin/roadmap/v2.2` (`3855ed4a`) merged in **twice** and cleanly — at `6150e25c`
+and again at the end of the round, so the branch is **0 behind / 21 ahead**.
+Neither merge touched one of this unit's files; the second brought in
+`windows-installer/**`, which is another unit's and is NOT in the `apexd/`
+cargo workspace, so the Rust gates are unaffected by it.
+`git merge-tree origin/roadmap/v2.2 HEAD` → **exit 0, no conflicts**, run
+against v2.2 as it stands now. Not landed. No PR.
 
 Commits this round (all pushed):
 
@@ -285,10 +290,14 @@ file means the kernel tier must be rebuilt before it can feed core.**
    BTF would be reported as "the two readers disagree". Misleading, not unsafe —
    it still fails the build. Distinguish the two exits.
 
-5. **Report it upstream. Still nobody has.** This is now a strong report: pahole
+5. **Report it upstream. Still nobody has**, and the report got materially
+   stronger today. It is no longer an A/B over somebody else's kernel: pahole
    1.30 drops the `bpf_kfunc` DECL_TAG for 18 of 68 `scx_bpf_*` kfuncs on
-   Fedora's own 7.2.6 kernel, 1.32 drops none, with a reproduction script
-   (`kernel/research/run-ab.sh`) and a second independent reader agreeing.
+   Fedora's own 7.2.6, 1.32 drops none, **and a kernel actually built with 1.32
+   comes out with 0 of 68 untagged and 47 `*_impl` twins where the 1.30 kernel
+   has 29** — `29 + 18 = 47`, which is the mechanism arithmetic and the most
+   convincing single line in the whole file. There is a reproduction script
+   (`kernel/research/run-ab.sh`, ~36 s) and two independent readers agreeing.
    Both the COPR maintainer and the dwarves list want this.
 
 6. **The residual reproducibility hole, named so it is not rediscovered.** The
@@ -328,6 +337,13 @@ UKI. Stage 1b signing the inner image with nothing signing the UKI is a machine
 that will not boot under Secure Boot, with every existing assertion still green.
 That ordering — build → UKI assembly → sign the UKI — is worth settling between
 us before either lands.
+
+**`windows-installer` (landed on v2.2 late this round) — a courtesy note, not a
+claim on your files.** `tests/check-shellcheck-coverage.sh` discovers scripts
+under `tests`, `files`, `android/tools` and now `kernel`. `windows-installer/`
+is not among those roots, so `build-windows.sh` and anything else shell in
+there is linted by nothing. That file's header explains why that matters
+better than this card can. Your call whether to add the root.
 
 **`luks-installer` — L-002's "initramfs keymap is always `us`".** Flagged, not
 fixed; it is theirs. Owning the kernel does **not** change it and nobody should

@@ -8374,6 +8374,57 @@ tasks:
     that default would seal the volume key to the SRK and nothing else, so any OS booted on the same hardware
     could unseal it. Whatever turns encryption on must pass --tpm2-pcrs= or --tpm2-public-key-pcrs= explicitly,
     and a test must assert the enrolled token actually carries a policy rather than that the command exited 0.
+    ROUND 32 (2026-09-20) - STATUS UNCHANGED, still blocked, but BLOCKER (2) IS GONE and BLOCKER (3) is closed in
+    a way that was measured rather than asserted. Branch apex-os task/luks-installer, merged from roadmap/v2.2
+    b5f696cb, tip f0ec87de. BLOCKER (2), 'the installer cannot encrypt at all', is no longer true: encrypt=yes
+    builds ESP + plain ext4 /boot + LUKS2 -> btrfs, calls /usr/libexec/apex-luks-enroll, proves BOTH the
+    passphrase and the recovery key open the volume BEFORE the install, surfaces the recovery key to the user
+    behind an acknowledgement checkbox that gates Reboot, and installs with bootc install to-filesystem.
+    installer/test-installer-luks.sh is 57 passed / 0 failed in CI. BLOCKER (3): the keymap is no longer 'always
+    us' and the proof is a KEYSTROKE, not a config file. installer/test-installer-keymap-boot.sh boots FIVE real
+    guests off the SHIPPED initramfs against a real LUKS2 volume and types the passphrase on an emulated keyboard
+    through QMP send-key, which takes key POSITIONS named after the US layout: passphrase apexzed1, key positions
+    a p e x y e d 1, and QWERTZ puts z where QWERTY has y. With vconsole.keymap=de on the kernel command line the
+    volume unlocks and the guest reads a plaintext marker out of it; with no keymap channel the identical
+    keystrokes are refused by systemd-cryptsetup. 12 passed / 0 failed. THE UKI SEAM IS BUILT AND ITS OBVIOUS
+    VERSION DOES NOT WORK: systemd-vconsole-setup(8) says vconsole.conf and the kernel command line take
+    precedence over the vconsole.keymap credential, and dracut bakes /etc/vconsole.conf with KEYMAP=us into the
+    initramfs, so a .cred on the ESP is INERT - boot 3 shows it arriving in /run/credentials/@system and losing.
+    files/dracut/apex-unlock-hint/apex-vconsole-credential, ordered Before=systemd-vconsole-setup and pulled in by
+    sysinit.target.wants, applies it and stands down when a karg already decided; boot 4 unlocks with no karg,
+    boot 5 proves the command line still wins. apex-install writes loader/credentials/vconsole.keymap.cred on
+    every encrypted install. NOT PROVEN: the ESP-to-initrd hop. Boots 3 and 4 deliver the credential over SMBIOS
+    type 11, which shows systemd honours a SYSTEM CREDENTIAL, not that sd-boot reads \loader\credentials\*.cred;
+    that needs luks-enroll's run-scenarios, and is requested on the card. A FIFTEEN-KEYMAP STRANDING CASE FOUND
+    AND FIXED: apex-install's passphrase rule rested on the claim that every printable ASCII character is
+    reachable on every kbd keymap. Across the 562 keymaps the image ships that is false for 15 - hr-unicode,
+    rs-latinunicode, ba-unicode, me-latinunicode and epo-legacy have no q, w, x or y anywhere in their tables; vn,
+    kz-latin and cm-azerty have no digit 1; it-geo, ge-ergonomic and fa are missing much of the alphabet. The
+    engine now resolves an UNLOCK keymap separately from the console keymap, before anything is erased, and falls
+    back to us for that one prompt when the chosen layout has no key for a character of the passphrase, naming the
+    characters; the installed system keeps the owner's layout because the karg is omitted when the unlock keymap
+    is us. ru is NOT in that list and the first version of this measurement said it was: its Cyrillic is on AltGr
+    and keycode 30 = +a sits in the base plane, but the analysis used a regex anchored to column 0 and never saw
+    the indented lines. Both that and the anchoring bug that made fi look like a keyboard with no 1, no 7 and no e
+    are mutants in installer/keymap-checks.sh now, 32 passed / 0 failed. AND THE 2026-09-20 BOOT BREAKAGE WAS
+    REPRODUCED, FOUR HOURS AFTER ITS GUARD LANDED. A live loopback install at 21:53 moved this laptop's Boot0000
+    from the real ESP to the 1 GiB ESP inside the disk image, WITH the efivars tmpfs mask applied and logged 19
+    minutes earlier. tests/lab/nvram-guard caught it; the host was repaired from the guard's own before-snapshot
+    and efibootmgr -v plus the efivarfs sha256 of Boot0000, Boot0004 and BootOrder are byte-identical to the
+    pre-run state, and the machine was never rebooted broken. The mask cannot work: bootc requires --pid=host and
+    re-enters the HOST mount namespace for the bootloader step, and an unmasked privileged container here shows
+    ZERO entries under /sys/firmware/efi/efivars, so the write never went through the container's namespace at
+    all. The prevention is bootc install --generic-image, 'Changes to the system firmware will be skipped', now on
+    all four bootc call sites in apex-install whenever the target is loop-backed. tests/lab/bootc-install-lab
+    builds its argv with --pid=host and relies on the same mask, so ITS first layer has the same hole and every
+    lab loopback install still depends on nvram-guard catching the write after the fact; that is efivars-guard's
+    file, reported and not edited. WHY THIS STAYS BLOCKED, three things. (a) NO DISK THIS INSTALLER PRODUCED HAS
+    EVER BEEN BOOTED - the keymap proof uses a bare volume and a direct kernel boot with no firmware, no
+    bootloader and no ostree pivot, so bootloader -> initramfs -> unlock -> pivot -> login is unexercised. (b) No
+    encrypted install has completed end to end since the useradd /proc fix: run 5 died at the NVRAM guard and run
+    6, with --generic-image, was still running when this was written. (c) L-001's silicon cases are unchanged -
+    the TPM clear and the TPM-removed case are still unqualified, and NEW BLOCKER (4) from round 31,
+    systemd-cryptenroll --tpm2-device=auto binding to no PCRs, is apex-luks-enroll's and is untouched here.
 - id: L-003
   title: Enable TPM auto-unlock by default where safe
   priority: Later

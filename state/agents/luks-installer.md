@@ -1,85 +1,119 @@
 # luks-installer — L-002, "Enable LUKS2 by default"
 
 Branch `task/luks-installer` in **apex-os**, worktree
-`/var/tmp/apex-work/wt-luks-installer`, from `roadmap/v2.2` @ `303221d5`.
-Not landed. Do not commit to `roadmap/v2.2`.
+`/var/tmp/apex-work/wt-luks-installer`. Merged `origin/roadmap/v2.2` @
+`b5f696cb` cleanly on 2026-09-20. Not landed. Do not commit to `roadmap/v2.2`.
+
+## READ THIS FIRST — the guard in tests/lab does not prevent what it says
+
+`tests/lab/bootc-install-lab` inserts `--tmpfs /sys/firmware/efi/efivars` and
+calls that the primary guard. **It is not one.** Measured here on 2026-09-20 at
+22:12: a loopback `bootc install to-filesystem` ran with that mask applied and
+logged, and still executed
+
+```
+efibootmgr -b 0000 -B
+efibootmgr --create --disk /dev/loop1 --part 1 --loader \EFI\fedora\shimx64.efi
+```
+
+against this laptop — the 2026-09-20 boot breakage, reproduced four hours after
+its guard landed. `bootc` needs `--pid=host` and **re-enters the host's mount
+namespace** for the bootloader step, so the container's mounts are irrelevant.
+Checked, not deduced: an unmasked privileged container here shows ZERO entries
+under `/sys/firmware/efi/efivars`.
+
+The prevention is `bootc install --generic-image` ("Changes to the system
+firmware will be skipped"). `apex-install` passes it on all four `bootc
+install` call sites when the target is loop-backed. **`bootc-install-lab` still
+does not**, and its argv is built for the caller, so every lab loopback install
+still depends on `nvram-guard` catching the write after it happens. That is
+`efivars-guard`'s to fix and is the single most important thing in this card.
+
+The host was repaired the same session from the guard's own before-snapshot
+(`efibootmgr -b 0000 -B`, then `--create --disk /dev/nvme0n1 --part 1 --loader
+'\EFI\fedora\shimx64.efi' --label 'APEX-OS'`). `efibootmgr -v` and the efivarfs
+sha256 of Boot0000/Boot0004/BootOrder are byte-identical to the pre-run
+snapshot. The machine was never rebooted broken.
 
 ## What this unit changed
 
-The installer could not create an encrypted disk at all. Every `crypto_LUKS`
-branch in `installer/apex-install` was a refusal to overwrite an existing
-header; there was no `luksFormat` anywhere in the tree. There is now a real
-path, and it has done a real `bootc install` onto a real LUKS2 volume.
-
 | file | what |
 |------|------|
-| `installer/apex-install` | `encrypt=yes` builds ESP + plain ext4 `/boot` + LUKS2→btrfs and installs with `bootc install to-filesystem`; calls `/usr/libexec/apex-luks-enroll`; proves BOTH keys open the volume before the install; surfaces the recovery key; writes `/etc/crypttab`; converts XKB layout → console keymap and puts it on the kernel command line |
-| `installer/apex-installer-gui` | new **encrypt** page (box ticked by default, show-characters passphrase field, layout named); recovery key captured off stdout and shown on the last page behind an acknowledgement checkbox that gates Reboot |
-| `Containerfile.core` | `cryptsetup` + `kbd` pinned explicitly with file-level assertions; the `99apex-unlock-hint` dracut module copied in |
-| `Containerfile.apex` | the final dracut run now asserts systemd-cryptsetup, the crypt module, the tpm2 token plugin, non-`us` keymaps and the hint module are in the shipped initramfs |
-| `files/branding/plymouth/*/apex-os.script` | `message()` was `{ }` in both themes; it now draws |
-| `files/dracut/apex-unlock-hint/` | new dracut module: posts the console keymap and "use your recovery key" just before the passphrase prompt |
-| `installer/test-installer-luks.sh` | **CI**, 36 assertions, all refusals + keymap conversion + character-level keyboard checks, 6 mutants |
-| `installer/test-installer-luks-live.sh` | **not CI**: a real `bootc install` onto a loopback LUKS2 volume |
-| `tests/check-suites-run-in-ci.sh` | discovered `tests/test-*.sh` only; now `installer/test-*.sh` too |
-| `docs/disk-encryption.md` | new |
+| `installer/apex-install` | `encrypt=yes` builds ESP + plain ext4 `/boot` + LUKS2→btrfs, installs with `bootc install to-filesystem`, calls `/usr/libexec/apex-luks-enroll`, proves BOTH keys open the volume before installing, surfaces the recovery key, writes `/etc/crypttab`; **NEW:** `--generic-image` + efivars tmpfs for loop-backed targets; an UNLOCK keymap resolved separately from the console keymap; `loader/credentials/vconsole.keymap.cred` written to the ESP |
+| `files/dracut/apex-unlock-hint/apex-vconsole-credential{,.service}` | **NEW.** Applies a `vconsole.keymap` system credential to the initramfs's own `/etc/vconsole.conf` before `systemd-vconsole-setup`, and stands down if the kernel command line already decided. This is the UKI-era keymap channel |
+| `installer/test-installer-keymap-boot.sh` + `keymap-boot-drive.py` | **NEW, not CI.** Five real guests, shipped initramfs, real LUKS2 volume, passphrase typed on an emulated keyboard through QMP. 12 passed / 0 failed |
+| `installer/test-installer-luks.sh` | 57 passed / 0 failed. NVRAM section (5 assertions + 2 mutants) and, through `keymap-checks.sh`, 14 typeability assertions + 2 mutants |
+| `installer/test-installer-luks-live.sh` | now runs the engine inside `tests/lab/nvram-guard` and asserts its verdict; asserts the ESP credential and that bootupd never ran `efibootmgr` |
+| `Containerfile.apex` | asserts both shim halves are in the shipped initramfs, naming `sysinit.target.wants` |
+| `docs/disk-encryption.md` | the UKI seam is measured now, not predicted |
 
-## The two things a stranger most needs to know
+## The three things a stranger most needs to know
 
-1. **`encrypt=` is now MANDATORY in the answers file.** The engine refuses a
-   file without it rather than defaulting either way. Existing suites were
-   given `encrypt=no`. The GUI always writes it, ticked.
-2. **The keymap fix is a kernel argument, not an initramfs rebuild.** The
-   initramfs is baked at image build, `--no-hostonly`, so it is identical on
-   every machine; `systemd-vconsole-setup` inside it parses `vconsole.keymap=`
-   from `/proc/cmdline`, which is the one per-machine channel that exists
-   today. **This breaks when APEX moves to sd-boot + UKIs** (the cmdline is
-   inside the signed PE). See `docs/disk-encryption.md` § "The seam" — the
-   replacement is a systemd credential on the ESP or a UKI addon, and it is
-   one function in the engine.
+1. **The keymap property is measured as a user experiences it.**
+   `installer/test-installer-keymap-boot.sh` boots the *shipped* initramfs and
+   types the physical key positions `a p e x y e d 1` through QMP `send-key`.
+   On `de` the `y` key produces `z`, the passphrase `apexzed1` is right, and
+   the volume unlocks; on `us` the identical keystrokes are refused. Five
+   boots, and runs 3 and 5 are what make run 4 mean anything.
+2. **A systemd credential on the ESP is INERT on its own.**
+   `systemd-vconsole-setup(8)`: vconsole.conf and the kernel command line take
+   precedence over the credential, and dracut bakes `/etc/vconsole.conf`
+   (`KEYMAP=us`) into the initramfs. Boot 3 shows the credential arriving in
+   `/run/credentials/@system` and losing. `apex-vconsole-credential` is what
+   makes it count, and it must be pulled in by **`sysinit.target.wants`** —
+   `initrd.target.wants`, where this module's other unit lives, runs far too
+   late.
+3. **15 of the 562 shipped keymaps cannot type an ASCII passphrase.**
+   `hr-unicode` and four relatives have no `q w x y` anywhere; `vn`,
+   `kz-latin`, `cm-azerty` have no `1`; `it-geo`, `ge-ergonomic`, `fa` are
+   missing much of the alphabet. The engine resolves an UNLOCK keymap, falls
+   back to `us` for that one prompt, and names the characters that forced it.
+   `ru` is NOT in that list — the first measurement said it was, because the
+   regex was anchored to column 0 and never saw the indented `keycode` lines.
 
 ## NEXT
 
-1. **Re-run `installer/test-installer-luks-live.sh`** (needs `sudo -n`, podman,
-   `localhost/apex-os:daily` in ROOT storage, ~25 GB on `/var/lab-scratch` —
-   never `/tmp`, which is a tmpfs and filled the machine once already). Two
-   runs got as far as *"Installation complete!"* — partitioning, LUKS2,
-   enrolment, both-key verification, btrfs, and the whole `bootc install` — and
-   then failed at `useradd --root`: *"failure while writing changes to
-   /etc/passwd"*. The write probe added after run 1 shows the filesystem is
-   **not** read-only, so the read-only-remount theory is dead.
-   A control install with `encrypt=no` on the same host (the long-standing
-   `bootc install to-disk` path, which this unit did not touch) was running
-   when this card was written: **read `/var/lab-scratch/control1.log` first.**
-   If the control fails the same way, the cause is this host — it runs SELinux
-   **enforcing** and the live ISO boots `selinux=0`; the journal shows
-   `mac_admin` denials against `chcon` from inside bootc's container at exactly
-   the install times. If the control SUCCEEDS, the fault is in the encrypted
-   path's post-install and is this unit's to fix.
-2. **Run `installer/test-installer.sh`** — its GUI half renders every page in
-   the registry at 1024x600 and 1366x768, and the new `encrypt` page has not
-   been through it. Same for `installer/test-installer-a11y.sh` (AT-SPI).
-3. **Ask `luks-enroll` for two things** (see the report): a `run-scenarios`
-   case that boots an encrypted volume with `vconsole.keymap=de` and types a
-   passphrase containing a `z` through QMP `sendkey`; and confirmation that
-   their token is one `tpm2-device=auto` discovers.
-4. **Tell `sdboot-image` what the installer needs**: one string
-   (`vconsole.keymap=<name>`) delivered to the initrd per machine, without
-   re-signing. Recommended: `systemd-vconsole-setup` reads a `vconsole.keymap`
-   **system credential**, and both sd-boot and sd-stub pass credentials from
-   the ESP.
-5. `ROADMAP/roadmap.yaml` L-002 evidence was updated by this unit; L-002 stays
-   **blocked**. The remaining blockers are named there.
+1. **Finish the live install.** `installer/test-installer-luks-live.sh` run 6
+   was started at 2026-09-20 ~23:05 with the `--generic-image` fix in place;
+   read `/var/lab-scratch/luks-installer-msgs/r2/live-run6.log` first. Run 5
+   died at the NVRAM guard, so **no encrypted install has completed end to end
+   since the `/proc` fix for `useradd`**. Needs `sudo -n`, root podman,
+   `localhost/apex-os:daily`, ~25 GB on `/var/lab-scratch` — never `/tmp`.
+   **Check `sudo efibootmgr -v` names PARTUUID `1c417de2-…` before and after.**
+2. **Boot a disk this installer produced.** Nothing has. The keymap boot test
+   uses a bare volume and a direct kernel boot: no firmware, no bootloader, no
+   ostree pivot. The recipe is one OVMF boot in the `apex-bootlab` container
+   against the live suite's `target.img` (`OVMF_CODE_4M.secboot.qcow2`, QMP
+   `send-key` the passphrase, watch serial for the pivot to `/sysroot`).
+3. **Ask `luks-enroll` for the hop this unit could not measure.** Boots 3 and 4
+   deliver the credential over **SMBIOS type 11**, which proves
+   systemd-vconsole-setup honours a *system credential*. It does NOT prove
+   sd-boot reads `\loader\credentials\*.cred` off the ESP and passes it
+   through sd-stub. Their `run-scenarios` has the whole signed-UKI chain: put
+   the `.cred` on the lab ESP, no karg, type `y`, expect `z` to unlock.
+4. **Tell `sdboot-image`** the installer's requirement is exactly one string,
+   `vconsole.keymap=<name>`, reaching the initrd per machine without
+   re-signing, and that the implementation assumed here is the ESP credential
+   plus `apex-vconsole-credential`. If they choose UKI `.cmdline` addons
+   instead, the installer side is one function and the shim becomes dead weight
+   rather than wrong.
+5. **`localectl set-keymap` after install updates neither the karg nor the
+   `.cred`.** `/etc/vconsole.conf`'s comment tells the user to change both; no
+   tool does it. That is a real second stranding path and nothing covers it.
+6. **`tests/lab/bootc-install-lab` needs `--generic-image`** — see the top of
+   this card. Not this unit's file.
 
 ## Traps this unit paid for
 
-* `/tmp` is a 15 GB **tmpfs**. A 30 GB loopback image there broke the Bash tool
-  for twenty minutes. Use `/var/lab-scratch`.
-* `printf … | grep -q` under `pipefail` returns 141 on a match. The passphrase
-  ASCII check uses `grep -qv` on a **here-string** instead, and says why.
-* A `sed '/text/,+Nd'` mutation over a multi-line `die` string eats the next
-  statement, and a mutant that cannot parse looks exactly like a mutation that
-  worked. All mutants here are one-line inversions.
-* `find /usr/lib/kbd/keymaps -name us.map.gz -print -quit` can return the
-  **Atari** keymap, which uses different keycodes entirely — "the US keymap
-  types nothing" was a wrong answer dressed as a failure.
+* `/tmp` is a 15 GB **tmpfs**. Use `/var/lab-scratch`.
+* `grep` with a pattern containing `[` or `]` is a character class. Three
+  keymap-boot runs that had plainly succeeded were reported as failures until
+  `serial_has` grew `-F`.
+* An apostrophe inside a single-quoted awk program ends the program. The X
+  keysym table had one.
+* A keycode pattern anchored to `^` misses the xkb maps that write one plane
+  per line with the modifiers in front (`shift keycode 2 = …`).
+* Dockerfile comment lines inside a `RUN … \` continuation are stripped by the
+  parser, so they must NOT end with a backslash.
+* `bash`'s `printf '%b' '\x61'` did not produce `a` here; it dropped the `\x`.
+  The characters are built inside awk with `printf "%c"` instead.
