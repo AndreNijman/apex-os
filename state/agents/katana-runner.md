@@ -9,10 +9,29 @@ Repo `apex-os`, branch **`task/katana-runner`**, worktree
 `ec7b3ccf`. All commits pushed.
 
 ```
+b4f8b8b1 docs(evidence): record the measured OOM and cap numbers, not the intent
+81f6a24f docs(evidence): say which of the three fork-PR layers is load-bearing
+c06a48a0 ci(katana): three hardening fixes found by reading the files again
+ea8b42f8 docs(update-cost): answer the CI question the kernel tier could not answer
+f42ed421 docs(evidence): cite .runner for ephemeral, not just the behaviour
 79ac97f5 docs(evidence): what was done to katana's disk and what the runner may run
 5e0e0da2 ci(kernel): build the kernel on katana, because 100 GB does not fit in 14 GB
 3c9f5e86 ci(katana): prove what a self-hosted job cannot reach, rather than assuming it
 ```
+
+Diff against `roadmap/v2.2` is five files and nothing else:
+`.github/workflows/katana-probe.yml` (new), `.github/workflows/kernel-build.yml`
+(new), `ROADMAP/evidence/katana-runner-20260920.md` (new),
+`docs/update-cost.md`, and `Containerfile.kernel` — the last being the only
+file belonging to another unit's history, changed additively (a
+`KERNEL_BUILD_JOBS` ARG defaulting to 12, which reproduces the old behaviour
+exactly). Nothing touches `installer/**`, `files/desktop/**`, the shell, or any
+boot stanza.
+
+**`c06a48a0` was committed after the kernel run started and is not in the code
+that run executed** — pushing it would have cancelled the build via
+`cancel-in-progress`. It changes the contract step's `RPMS=` derivation and the
+workflow's push-branch filter, so the next run is the first to exercise them.
 
 **The machine changes are NOT in this branch and cannot be.** They are recorded
 in full, with a removal recipe, at
