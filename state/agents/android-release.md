@@ -6,7 +6,7 @@ ask: Andre, directly — *"add the android app to releases"*, sharpened to
   github releases make the page"*
 repo: apex-os
 worktree: `/var/tmp/apex-work/wt-android-release`, branch `task/android-release`
-  (**pushed, not merged**; tip `e57909ae`, 9 ahead / 0 behind `origin/roadmap/v2.2`
+  (**pushed, not merged**; tip `5dc2b5aa`, 10 ahead / 0 behind `origin/roadmap/v2.2`
   @ `b5f696cb`, merged twice cleanly)
 owns: `android/**`, `.github/workflows/release-android.yml`,
   `tests/test-android-release.sh`, `docs/android-app.md`, the README's phone
@@ -26,7 +26,8 @@ files and three modified ones were sitting uncommitted. They are committed now.
 * `ac7db108` the window reaches the metadata and the page
 * `4ca2a20e` `docs/android-app.md`, README, the page evidence
 * `5f1c176f` the page regenerated from a real signed release build
-* plus a second merge of `roadmap/v2.2`, after which both suites were re-run
+* `5dc2b5aa` an install effect that cancelled the install it had just started
+* plus a second merge of `roadmap/v2.2`, after which everything was re-run
 
 ## THE THREE DEFECTS IN THE INHERITED WORK — all found by running it
 
@@ -126,6 +127,17 @@ Nothing is half-done. In rough order of value:
    but the fallback is a `PendingIntent.getActivity` aimed at `MainActivity`
    handling `STATUS_PENDING_USER_ACTION` there instead. Written down so nobody
    rediscovers it with a phone in their hand.
+
+## A FLAKE THAT IS NOT YOURS
+
+`RelayDiallerTest > a failed dial leaves no socket open` fails intermittently
+under load: *"sockets the client left open ==> expected: <20> but was: <19>"*.
+It asserts a count the server double's accept thread has to observe, so the
+twentieth close can simply not have been seen yet. **It fails identically on a
+clean `origin/roadmap/v2.2` worktree with none of this branch's changes**, and
+it passes on an unloaded machine — checked both ways rather than assumed,
+because the file is not in this branch's diff at all. Do not chase it from
+here; if it starts failing in CI it wants a wait-for rather than a bare count.
 
 ## LOCAL BUILD TRAPS
 
