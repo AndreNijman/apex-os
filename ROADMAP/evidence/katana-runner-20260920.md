@@ -293,6 +293,37 @@ reads it as "the `--ephemeral` flag did not take". Two things say otherwise:
 `"disableUpdate": true`, and the listener **exits after one job** and is
 re-registered, which a non-ephemeral runner does not do.
 
+### Rootless podman, checked against what the kernel tier actually does
+
+The kernel build runs **rootless** — `build-local.sh` uses `sudo podman` and the
+workflow cannot, because `ghrunner` has no sudo. Four things were verified as
+`ghrunner` in the unit's own environment rather than assumed:
+
+* `podman info` → rootless, graphroot
+  `/var/lab/runner/.local/share/containers/storage` — i.e. on the **new
+  partition**, not on the 95 %-full `apex-root`. This matters: the default
+  would have been under a home on `/var`, and the build would have filled the
+  system disk.
+* A container runs, resolves DNS and reaches `api.github.com` over HTTPS.
+* `newuidmap`/`newgidmap` work, which is why `NoNewPrivileges=` is not set —
+  it would block the file capabilities they rely on.
+* **`tests/check-kernel-contract.sh`'s exact invocation shape** —
+  `podman run --rm -i -v "$RPMS":/krpms:z … /bin/bash -s <<EOS` — was run as
+  `ghrunner` with a throwaway directory. The heredoc executed and an `exit 7`
+  came back as rc=7. That is the precise defect the kernel unit fixed (`-i`
+  missing meant the container got empty stdin, the contracts were silently
+  discarded and the script exited 0), so it is worth knowing it still holds
+  rootless and under an SELinux `:z` relabel of a directory on the new
+  filesystem.
+
+There is one podman warning on every run, and it is cosmetic:
+`"cgroupv2 manager is set to systemd but there is no systemd user session
+available" … falling back to cgroupfs`. That is a *consequence of a deliberate
+choice* — `ghrunner` has no lingering user manager, so every process it starts
+lives in the service's own cgroup and `KillMode=control-group` can reap all of
+them. Enabling linger to silence the warning would create somewhere for a job's
+processes to survive.
+
 ### Which jobs target it
 
 **Only the kernel build.** `Containerfile.kernel` needs a ~100 GB tree and a
