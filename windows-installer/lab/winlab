@@ -412,25 +412,35 @@ cmd_run() {
         echo "--- transport contents ---"
         mdir -i /w/run-transport.raw@@1048576 ::
 
-        fixa=(-drive "id=fa,file=/w/fixture-a.raw,format=raw,if=none"
-              -device "ide-hd,drive=fa,bus=ahci.2,model=APEX-FIXTURE-A,serial=FIXA00000001")
-        fixb=(-drive "id=fb,file=/w/fixture-b.raw,format=raw,if=none"
-              -device "nvme,drive=fb,serial=FIXB00000002")
-        order=("${fixa[@]}" "${fixb[@]}")
-        [ "$SWAP" = yes ] && order=("${fixb[@]}" "${fixa[@]}")
+        # --swap changes the AHCI PORT the fixture sits on, not the order of
+        # the arguments. Reordering `-device` proves nothing: ich9-ahci is a
+        # fixed q35 device, nvme takes the next free PCI slot whichever way
+        # round they are written, and Windows numbers storahci disks by port
+        # and then stornvme — so the first attempt at this produced byte-
+        # identical Get-Disk tables in both runs and demonstrated nothing at
+        # all. Exchanging the ports of the transport and fixture A does move
+        # the numbers, which is the whole point: the identity the tool prints
+        # must not move with them.
+        trport=1; faport=2
+        [ "$SWAP" = yes ] && { trport=2; faport=1; }
 
         rc=0
         QEMU_TIMEOUT=900 qemu_run disk \
             -drive "id=tr,file=/w/run-transport.raw,format=raw,if=none" \
-            -device "ide-hd,drive=tr,bus=ahci.1,model=APEX-LAB-TRANSPORT,serial=TRN0000000001" \
-            "${order[@]}" || rc=$?
+            -device "ide-hd,drive=tr,bus=ahci.$trport,model=APEX-LAB-TRANSPORT,serial=TRN0000000001" \
+            -drive "id=fa,file=/w/fixture-a.raw,format=raw,if=none" \
+            -device "ide-hd,drive=fa,bus=ahci.$faport,model=APEX-FIXTURE-A,serial=FIXA00000001" \
+            -drive "id=fb,file=/w/fixture-b.raw,format=raw,if=none" \
+            -device "nvme,drive=fb,serial=FIXB00000002" || rc=$?
         echo "qemu exited rc=$rc"
 
         virt-fw-vars -i "$VARS" --print 2>/dev/null |
             grep -E "^(Boot[0-9]{4}|BootOrder)" | sort > /w/fw-after.txt
 
-        echo "═══ GUEST RESULT ═══"
-        mtype -i /w/run-transport.raw@@1048576 ::/result.txt 2>/dev/null ||
+        tag=normal; [ "$SWAP" = yes ] && tag=swapped
+        mtype -i /w/run-transport.raw@@1048576 ::/result.txt >"/w/guest-$tag.txt" 2>/dev/null
+        echo "═══ GUEST RESULT ($tag; also saved as /w/guest-$tag.txt) ═══"
+        cat "/w/guest-$tag.txt" 2>/dev/null ||
             echo "(no result.txt — the guest produced nothing)"
         echo "═══ STATUS ═══"
         mtype -i /w/run-transport.raw@@1048576 ::/status.txt 2>/dev/null ||

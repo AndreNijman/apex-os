@@ -17,9 +17,9 @@
 //! ═══ WHAT IT WILL NOT DO ═══
 //!
 //! Nothing in this module opens a handle for writing, and nothing dismounts,
-//! offlines or force-unlocks anything. `lock_volume` asks Windows for the
-//! volume and accepts the answer; a refusal is a refusal, not a thing to
-//! retry with more force.
+//! offlines or force-unlocks anything. It asks Windows what it is using and
+//! accepts the answer; a refusal is a refusal, not a thing to retry with more
+//! force.
 
 #![cfg(windows)]
 
@@ -44,7 +44,12 @@ const IOCTL_DISK_GET_DRIVE_LAYOUT_EX: u32 = 0x0007_0050;
 const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405C;
 const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D_1400;
 const IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: u32 = 0x0056_0000;
-const FSCTL_LOCK_VOLUME: u32 = 0x0009_0018;
+// FSCTL_LOCK_VOLUME (0x00090018) is deliberately ABSENT. Windows creates no
+// volume object for a Linux-filesystem-type partition — measured in the lab —
+// and a partition that does have one is refused before any lock would be
+// attempted. A lock call here could only ever run on a partition already
+// refused, and safety code that never executes reads as coverage. The write
+// path's exclusivity mechanism is described in ARCHITECTURE.md.
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_PATH_NOT_FOUND: u32 = 3;
@@ -171,11 +176,6 @@ impl Device {
         Ok(out)
     }
 
-    /// FSCTL_LOCK_VOLUME. Succeeds only when no other handle has the volume
-    /// open — which is precisely the question being asked.
-    pub fn lock_volume(&self) -> io::Result<()> {
-        self.ioctl(FSCTL_LOCK_VOLUME, &[], 0).map(|_| ())
-    }
 }
 
 fn u32at(b: &[u8], o: usize) -> u32 {
