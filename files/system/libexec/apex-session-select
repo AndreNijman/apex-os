@@ -16,10 +16,14 @@
 #
 #  WHY IT DOES NOT AUTO-LOGIN
 #  SteamOS and Bazzite hand you straight back into the new session because they
-#  configure display-manager autologin. APEX-OS deliberately does not: the end
-#  state for both machines is LUKS2 + TPM2 full-disk encryption, and quietly
-#  adding a passwordless graphical login to that is a security change nobody
-#  asked for. Switching modes costs one password entry at the greeter.
+#  configure display-manager autologin. APEX-OS deliberately does not, and the
+#  reason is stated as it actually stands rather than as an end state: the
+#  installer now offers full-disk LUKS2 with the box ticked (see
+#  docs/disk-encryption.md), so a machine installed today is normally
+#  encrypted, while TPM auto-unlock is NOT on by default and is still gated on
+#  L-003. Either way, quietly adding a passwordless graphical login is a
+#  security change nobody asked for. Switching modes costs one password entry
+#  at the greeter.
 #
 #  SAFETY
 #  The requested session is validated against the .desktop files actually

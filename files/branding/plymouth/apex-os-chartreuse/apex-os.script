@@ -66,6 +66,7 @@ wordmark.SetOpacity(0);
 # --- password prompt sprites (LUKS) ---
 prompt_sprite = Sprite();
 bullet_sprite = Sprite();
+message_sprite = Sprite();
 dim = 1;
 
 t = 0;
@@ -227,7 +228,32 @@ fun display_normal () {
   bullet_sprite.SetOpacity(0);
 }
 
-fun message (text) { }
+# --- messages ---
+#
+# This used to be an empty function, and an empty message() is not "no
+# decoration": it is plymouth accepting `plymouth message --text=...`, calling
+# this, and DROPPING IT. Everything the boot has to tell the user went nowhere.
+#
+# It matters most at exactly one screen. On an encrypted machine the passphrase
+# prompt is the last thing between the owner and their data, and it is drawn
+# before any filesystem is mounted, so it is the only place that can say which
+# keyboard layout is live or that a recovery key is what is wanted now. A user
+# who cannot be told any of that, at a prompt that accepts nothing else, is the
+# stranding case.
+#
+# Drawn UNDER the bullets and slightly below them, so it never covers the
+# prompt or the characters the user is counting. An empty text clears it,
+# which is how plymouth asks for the message to go away.
+fun message (text) {
+  if (text == "") {
+    message_sprite.SetOpacity(0);
+    return;
+  }
+  mimg = Image.Text(text, 0.62, 0.66, 0.72);
+  message_sprite.SetImage(mimg);
+  message_sprite.SetPosition(cx - mimg.GetWidth() / 2, cy + base / 8 + base / 6, 20);
+  message_sprite.SetOpacity(1);
+}
 
 Plymouth.SetRefreshFunction(refresh);
 Plymouth.SetDisplayPasswordFunction(display_password);

@@ -436,7 +436,7 @@ if ! ensure_engine_image; then
 else
     ok "the engine can reach its own validation (APEX_IMAGE=$ENGINE_IMAGE)"
     ANS="$W/answers"
-    printf 'mode=disk\ndisk=/dev/zzz-does-not-exist\nusername=u\npassword=pw\nhostname=apex\nkeymap=NOT_A_LAYOUT\n' > "$ANS"
+    printf 'mode=disk\ndisk=/dev/zzz-does-not-exist\nusername=u\npassword=pw\nhostname=apex\nencrypt=no\nkeymap=NOT_A_LAYOUT\n' > "$ANS"
     out="$(engine "$ANS")"
     if grep -q 'Unexpected error on line' <<<"$out"; then
         bad "a nonsense layout is refused" "the ERR trap fired instead of a clean refusal"
@@ -449,7 +449,7 @@ else
     # And a real one must NOT be refused for being a layout — it has to get past
     # this check and fail later on the absent disk, or the validator is simply
     # rejecting everything and assertion (1) above proves nothing.
-    printf 'mode=disk\ndisk=/dev/zzz-does-not-exist\nusername=u\npassword=pw\nhostname=apex\nkeymap=de\n' > "$ANS"
+    printf 'mode=disk\ndisk=/dev/zzz-does-not-exist\nusername=u\npassword=pw\nhostname=apex\nencrypt=no\nkeymap=de\n' > "$ANS"
     out="$(engine "$ANS")"
     if grep -qiF "is not a keyboard layout" <<<"$out"; then
         bad "a real layout is not refused" "the validator rejects valid layouts too"
