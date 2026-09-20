@@ -161,6 +161,13 @@ echo "── can the owner TYPE their passphrase on the layout they chose? ─�
 #   fa                                 Persian; almost no Latin at all
 #
 # These assertions run the engine's own functions against the real tree.
+# `cmp` is NOT in the container this file runs in. MEASURED: inside
+# quay.io/fedora/fedora:43 with kbd, systemd and xkeyboard-config installed,
+# `cmp -s a b` prints "command not found" and exits 127, which reads as "the
+# files differ" — so the guard that catches a mutation matching nothing was
+# inert in exactly the environment CI uses. Compared with the shell instead.
+same_file() { [ "$(cat "$1")" = "$(cat "$2")" ]; }
+
 TFNS="$WORK/typeable-fns.sh"
 sed -n '/^_keymap_cat()/,/^}/p;/^_keymap_text()/,/^}/p;/^keymap_ascii_set()/,/^}/p;/^keymap_can_type()/,/^}/p' "$ENGINE" > "$TFNS"
 if ! grep -q 'keymap_can_type' "$TFNS"; then
@@ -208,7 +215,7 @@ else
     # matter is not being tested.
     MUT="$WORK/mutant-keysym-names"
     sed '/^          nd = split("one two three/,/^          for (i = 1; i <= nd; i++)/d' "$TFNS" > "$MUT"
-    if cmp -s "$TFNS" "$MUT"; then
+    if same_file "$TFNS" "$MUT"; then
         printf 'FAIL  %-46s the mutation matched nothing\n' "mutant: the keysym name table"; _f=$((_f+1))
     elif ! bash -n "$MUT" 2>/dev/null; then
         printf 'FAIL  %-46s the mutant does not parse\n' "mutant: the keysym name table"; _f=$((_f+1))
@@ -226,7 +233,7 @@ else
     # and no `e`, which is how this was found.
     MUT2="$WORK/mutant-anchor"
     sed 's|/keycode\[\[:space:\]\]+\[0-9\]+\[\[:space:\]\]\*=/ {|/^keycode[[:space:]]+[0-9]+[[:space:]]*=/ {|' "$TFNS" > "$MUT2"
-    if cmp -s "$TFNS" "$MUT2"; then
+    if same_file "$TFNS" "$MUT2"; then
         printf 'FAIL  %-46s the mutation matched nothing\n' "mutant: the unanchored keycode pattern"; _f=$((_f+1))
     else
         got=$(bash -c '. "$1"; keymap_can_type apexzed1 "$2" fi' _ "$MUT2" "$T" 2>/dev/null)
