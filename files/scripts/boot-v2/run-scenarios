@@ -1971,17 +1971,38 @@ enroll_root() {
 # that STDOUT carries machine lines and STDERR carries the prose for a person.
 # A scenario that grepped a merged log could not tell the two apart and would
 # pass a script that printed its machine lines into the prose.
+# Every scenario in this family is bounded. Nothing here may wait for a person.
+#
+# MEASURED, TWICE, AND THE FIRST FIX WAS NOT ENOUGH. `systemd-cryptenroll
+# --tpm2-with-pin=yes` asks for the new PIN, and the harness sat on that prompt
+# for seven minutes with fifteen green lines already printed above it. Closing
+# stdin looked like the fix; it is not. With stdin on /dev/null and no terminal
+# at all, the same command blocked for THIRTY-SIX MINUTES inside the container,
+# because systemd falls back to its ask-password SOCKET protocol and waits for
+# an agent that will never come. `$NEWPIN` is what makes the non-interactive
+# path work, and a scenario that forgets it must FAIL rather than hang.
+#
+# So the bound is external and applies to every invocation. 120 s is roughly
+# forty times the slowest thing any of these scenarios legitimately does.
+ENROLL_TIMEOUT=120
+
 enroll_run() {
     local prefix="$1"; shift
     local rc=0
-    # STDIN IS /dev/null, ALWAYS. MEASURED: the --with-pin case ran
-    # `systemd-cryptenroll --tpm2-with-pin=yes`, which asks for the new PIN on
-    # the terminal, and the whole harness sat there for seven minutes until it
-    # was killed by hand — with fifteen green lines already printed above it.
-    # A test that can block is a test that turns into a CI timeout somebody
-    # reads as flakiness. With no stdin the prompt fails instantly and the
-    # scenario records what happened.
-    "$ENROLL" "$@" >"$prefix.out" 2>"$prefix.err" </dev/null || rc=$?
+    timeout "$ENROLL_TIMEOUT" "$ENROLL" "$@" \
+        >"$prefix.out" 2>"$prefix.err" </dev/null || rc=$?
+    # `timeout` reports 124 for a kill. Recorded in the captured stderr so the
+    # scenario's own assertions have something to read, rather than silently
+    # looking like a script that printed nothing.
+    (( rc == 124 )) && printf 'TIMED OUT after %ss\n' "$ENROLL_TIMEOUT" >>"$prefix.err"
+    printf '%s\n' "$rc"
+}
+
+# enroll_check DEV OUT — `--check`, bounded the same way. Prints the exit code.
+enroll_check() {
+    local dev="$1" out="$2" rc=0
+    timeout "$ENROLL_TIMEOUT" "$ENROLL" --check --device "$dev" \
+        >"$out" 2>&1 </dev/null || rc=$?
     printf '%s\n' "$rc"
 }
 
@@ -2042,7 +2063,8 @@ enroll_assert_unseal() {
     local copy="$img.unseal-probe"
     cp "$img" "$copy"
     local rc=0
-    PASSWORD="" systemd-cryptenroll --unlock-tpm2-device="$ENROLL_TPM" \
+    PASSWORD="" timeout "$ENROLL_TIMEOUT" systemd-cryptenroll \
+        --unlock-tpm2-device="$ENROLL_TPM" \
         --recovery-key "$copy" >/dev/null 2>"$copy.err" </dev/null || rc=$?
     if [[ "$want" == unseals ]]; then
         if (( rc == 0 )); then ok "$what: the TPM2 slot unsealed the volume"
@@ -2118,8 +2140,8 @@ scenario_enroll_sb_on() {
     fi
 
     # ── the gate, run separately against the volume it just wrote ──────────
-    local crc=0
-    "$ENROLL" --check --device "$img" >"$WORK/enroll-sbon.check.out" 2>&1 </dev/null || crc=$?
+    local crc
+    crc="$(enroll_check "$img" "$WORK/enroll-sbon.check.out")"
     assert_eq 0 "$crc" "enroll-sb-on: --check accepts the volume it enrolled"
 
     # ── does it actually unseal, and does it stop when PCR 7 moves? ────────
@@ -2252,8 +2274,8 @@ scenario_enroll_sb_off() {
     fi
 
     # --check agrees, from outside, that there is no TPM slot here.
-    local crc=0
-    "$ENROLL" --check --device "$img" >"$WORK/enroll-sboff.check.out" 2>&1 </dev/null || crc=$?
+    local crc
+    crc="$(enroll_check "$img" "$WORK/enroll-sboff.check.out")"
     assert_eq 0 "$crc" "enroll-sb-off: --check exit status"
     assert_eq "absent" "$(enroll_field "$WORK/enroll-sboff.check.out" tpm2)" \
         "enroll-sb-off: --check reports no TPM slot"
@@ -2394,8 +2416,9 @@ print("pcrs=%s hash=%s" % (t[0].get("tpm2-pcrs"), t[0].get("tpm2-policy-hash")))
     fi
 
     # ── the gate ───────────────────────────────────────────────────────────
-    local rc=0
-    "$ENROLL" --check --device "$img" >"$WORK/enroll-bare.out" 2>"$WORK/enroll-bare.err" </dev/null || rc=$?
+    local rc
+    rc="$(enroll_check "$img" "$WORK/enroll-bare.out")"
+    cp "$WORK/enroll-bare.out" "$WORK/enroll-bare.err"
     assert_eq 2 "$rc" "enroll-bare-policy: --check REFUSES the empty policy"
     assert_eq "unsafe" "$(enroll_field "$WORK/enroll-bare.out" tpm2)" \
         "enroll-bare-policy: --check machine line"
@@ -2422,8 +2445,7 @@ print("pcrs=%s hash=%s" % (t[0].get("tpm2-pcrs"), t[0].get("tpm2-policy-hash")))
             --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
             --probe-root "$root")"
     assert_eq 0 "$rc" "enroll-bare-policy: the good volume enrols"
-    rc=0
-    "$ENROLL" --check --device "$goodimg" >"$WORK/enroll-bare-good.check.out" 2>&1 </dev/null || rc=$?
+    rc="$(enroll_check "$goodimg" "$WORK/enroll-bare-good.check.out")"
     assert_eq 0 "$rc" "enroll-bare-policy: --check ACCEPTS a volume bound to PCR 7 (both arms)"
 
     # ── and the production script REPAIRS a volume that already has the bad
@@ -2442,8 +2464,7 @@ print("pcrs=%s hash=%s" % (t[0].get("tpm2-pcrs"), t[0].get("tpm2-policy-hash")))
             ok "enroll-bare-policy: the repaired volume is bound to PCR 7" ;;
         *)  bad "enroll-bare-policy: the repaired volume is still not bound to PCR 7" ;;
     esac
-    rc=0
-    "$ENROLL" --check --device "$fiximg" >/dev/null 2>&1 </dev/null || rc=$?
+    rc="$(enroll_check "$fiximg" "$WORK/enroll-bare-fix.check.out")"
     assert_eq 0 "$rc" "enroll-bare-policy: --check now accepts the repaired volume"
     enroll_assert_recovery "$fiximg" "$fixrec" "enroll-bare-policy, repaired"
 }
