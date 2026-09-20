@@ -40,61 +40,80 @@
 
 | file | what |
 | --- | --- |
-| `files/system/selinux/apex_sdboot.te` | two-rule policy module: `bootupd_t` may enter through `init_exec_t` (the blessing) and `bin_t` (apex-boot-count) |
+| `files/system/selinux/apex_sdboot.te` | one-rule policy module: `bootupd_t` may enter through `init_exec_t` |
 | `files/system/selinux/verify-apex-sdboot.py` | reads the rule back out of the **binary** policy |
 | `files/system/units/10-apex-bless-boot-esp.conf` | `SELinuxContext=-…:bootupd_t:s0` on `systemd-bless-boot.service` |
 | `files/system/libexec/apex-boot-count` | renames the **staged** entry to `+3-0`, chosen by composefs digest |
-| `files/system/units/apex-boot-count.service` | `ExecStop`, `After=bootc-finalize-staged.service`, conditioned on `entries.srel`, runs in `bootupd_t` |
+| `files/system/units/apex-boot-count.service` | `ExecStop`, `After=bootc-finalize-staged.service`, conditioned on `entries.srel`, deliberately NO `SELinuxContext=` |
 | `Containerfile.core` | `systemd-boot-unsigned`, `systemd-ukify`, `checkpolicy`, `python3-setools`; compiles + verifies the module |
 | `Containerfile.base` | ships the drop-in, helper and unit; cross-tier `semodule -l` assertion |
 | `files/system/libexec/apex-boot-health` | **bug fix**: `tail -c +5` cannot read efivarfs; `dd bs=1 skip=4` can |
-| `tests/test-boot-v2.sh` | +26 checks, mutation-tested; 148 pass |
+| `tests/test-boot-v2.sh` | +32 checks, mutation-tested; 150 pass |
 | `docs/boot-v2.md`, `AGENTS.md` | the pivot design and the contract |
 | `.github/workflows/boot-v2.yml`, docs | every host-side `podman run … apex-bootlab` wrapped in `nvram-guard` |
 
 The whole `Containerfile` stanza set was run in a real `podman build` before
 being committed (`/var/lab-scratch/sdboot-image-agent/coretest/Containerfile`).
 
-## The two defects that decide whether the pivot works at all
+## The defects that decide whether the pivot works at all
 
-* **`systemd-bless-boot` cannot rename a loader entry on a FAT ESP.** AVC:
-  `init_t` → `dosfs_t:file rename` denied, enforcing, on the APEX image. Fedora
-  has no domain for the worker. Unrepaired, every deployment rolls back on its
-  fourth boot. Repaired at the policy level; **not yet proven in a boot.**
+* **`systemd-bless-boot` could not rename a loader entry on a FAT ESP.** AVC:
+  `init_t` → `dosfs_t:file rename` denied, enforcing, on the APEX image.
+  Fedora has no domain for the worker. Unrepaired, every deployment rolls back
+  on its fourth boot. **Repaired, and PROVEN IN A BOOT on 2026-09-21**:
+  `Marked boot as 'good'`, suffix stripped, zero AVCs.
 * **`bootc` writes no boot counter**, so the health gate the image asserts is
-  inert on a machine installed exactly as bootc leaves it.
-* **`apex-boot-count` would have hit the identical SELinux wall** — it renames
-  a `.conf` on the same FAT ESP from a `bin_t` helper, so PID 1 leaves it in
-  `init_t`. Found by reading the change, not by a boot. Same repair. The
-  failure modes differ and it matters: the blessing failing rolls a deployment
-  back; the counter failing just means no counter, which is the status quo.
+  inert on a machine installed exactly as bootc leaves it. `apex-boot-count`
+  writes it, into the staged entry.
+* **The symmetric fix for `apex-boot-count` is wrong**, and the guest showed it
+  while appearing to pass. `type_transition init_t bin_t:process
+  unconfined_service_t` exists and `init_exec_t` has none, so a `/usr/libexec`
+  helper is already unconfined and can rename `dosfs_t`; the systemd binary is
+  not. Forcing `bootupd_t` there confined it and logged
+  `avc: denied … path="/proc/cmdline"` — the read the counter depends on.
+  Reverted; the unit must carry no `SELinuxContext=`, and two assertions say so.
+* **`bootupd_t` is a permissive domain in Fedora 43** (one of 41). The
+  blessing's zero AVCs still mean something — a permissive domain logs what it
+  would deny, and nothing was logged — but the drop-in alone would probably
+  work today without the module. The module is what makes it correct rather
+  than tolerated, and what survives that domain becoming enforcing.
 
 ## NEXT — for a stranger
 
 Everything below is pushed; nothing is half-applied. Start here.
 
-1. **Close gate 3: prove the blessing in a booted guest.** This is the single
-   highest-value thing left and it is a few hours.
-   - Build `fedora-bootc:43` + `systemd-boot-unsigned` + `apex_sdboot.pp` +
-     the drop-in + a trivial `RequiredBy=boot-complete.target` oneshot (stock
-     fedora-bootc never reaches that target, which is why the predecessor's
-     guests never blessed).
-   - Install with **`tests/lab/bootc-install-lab IMAGE TARGET.img --bootloader
-     systemd -- --composefs-backend`** — never a hand-written `podman run`.
-     AGENTS.md rule 6. Lab dir `/var/lab-scratch/sdboot-lab`, **never `/tmp`**.
-   - Boot once, rename the entry to `+3-0`, boot again, and check the suffix is
-     gone and no AVC appeared. `/var/lab-scratch/sdboot-lab/boot-apex.sh` is the
-     qemu wrapper the predecessor used.
-   - **Watch for a second AVC.** `bootupd_t` was probed for the other
-     permissions `systemd-bless-boot` needs and all were present *except* block
-     device access: `bootupd_t → fixed_disk_device_t:blk_file` is `getattr`
-     only, and systemd's ESP verification can open the block device with
-     libblkid. If that denial appears, add exactly what the AVC names to
-     `apex_sdboot.te` — do not pre-emptively widen it.
-   - On a booted bootc machine **`semodule -l` may list nothing** (the module
-     store under `/var/lib/selinux` is not part of the deployment;
-     `/etc/selinux/targeted/policy/policy.NN` is). The runtime proof is setools
-     against the binary policy, or the absence of the AVC — not `semodule -l`.
+1. **Re-run the guest with the REVERTED counter** — the only loose end from
+   gate 3, and the cheap half. Everything is still on disk, so this is one
+   cached rebuild, one install and two boots, roughly 40 minutes:
+
+   ```
+   # the lab image, built from the predecessor's APEX + sd-boot image
+   cd /var/lab-scratch/sdboot-image-agent/blesslab
+   cp /var/tmp/apex-work/wt-sdboot-image/files/system/{selinux/apex_sdboot.te,units/apex-boot-count.service,libexec/apex-boot-count} .
+   sudo podman build -t localhost/apex-sdboot:bless3 -f Containerfile.apexbless .
+
+   cd /var/tmp/apex-work/wt-sdboot-image
+   sudo tests/lab/bootc-install-lab --size 43G \
+     localhost/apex-sdboot:bless3 /var/lab-scratch/sdboot-lab/bless3.img \
+     --bootloader systemd \
+     -- --composefs-backend --karg console=ttyS0,115200n8 \
+        --karg systemd.journald.forward_to_console=1
+
+   # two boots; lab-run.sh stages on the first and probes on the second
+   sudo tests/lab/nvram-guard --label b1 -- podman run --rm --device /dev/kvm \
+     -v /var/lab-scratch/sdboot-lab:/work localhost/apex-bootlab \
+     -c '/work/boot-apex.sh /work/bless3.img /work/bless3-b1.serial 420'
+   ```
+
+   Read `LAB-COUNTER` as a pass only if `bootc_lab-43-1+3-0.conf` appears AND
+   `LAB-avc2` is empty. A rename with denials under it is the failure that
+   looked like a pass last time — `bootupd_t` is permissive, so it logs rather
+   than refuses.
+
+   Two things that cost time last round: the images live in the **root** podman
+   store (`sudo podman images`), not the user one; and a `podman build` that
+   the harness backgrounds can be SIGTERMed and still exit 0, so check the
+   image actually exists afterwards.
 2. **Take the Secure Boot decision** (docs/boot-v2.md, "Secure Boot: a
    decision, not a measurement"): APEX-signed sd-boot the user enrols, or a
    shim → sd-boot chain APEX authors. Everything in phase 2 waits on it.

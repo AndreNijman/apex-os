@@ -12,18 +12,21 @@ decision.** The build tree is ~100 GB and a hosted GitHub runner has 14 GB.
 
 Repo `apex-os`, branch `task/kernel-build`, worktree
 `/var/tmp/apex-work/wt-kernel-build`.
-Tip **`fe9200f3`**, pushed, `HEAD == origin/task/kernel-build` (checked).
+Tip **`26abfb18`**, pushed, `HEAD == origin/task/kernel-build` (checked).
 `origin/roadmap/v2.2` (`3855ed4a`) merged in **twice** and cleanly — at `6150e25c`
-and again at the end of the round, so the branch is **0 behind / 21 ahead**.
+and again at the end of the round, so the branch is **0 behind / 22 ahead**.
 Neither merge touched one of this unit's files; the second brought in
-`windows-installer/**`, which is another unit's and is NOT in the `apexd/`
-cargo workspace, so the Rust gates are unaffected by it.
+`windows-installer/**`, which is another unit's and is NOT a member of the
+`apexd/` cargo workspace, so **the apexd workspace's** Rust gates are unaffected
+by it. Whether `pr-validation.yml` has a separate cargo step for that crate was
+not checked — it is not this unit's file.
 `git merge-tree origin/roadmap/v2.2 HEAD` → **exit 0, no conflicts**, run
 against v2.2 as it stands now. Not landed. No PR.
 
 Commits this round (all pushed):
 
 ```
+26abfb18 fix(kernel): tell "the readers disagree" from "only one reader ran"
 8508e9b1 docs(evidence): APEX built the kernel, and the gate returned 0 for
          the first time
 07f58337 fix(tests): lint kernel/ too, and stop the drift check failing that
@@ -174,11 +177,17 @@ so **the koji NVR pin cannot be relaxed yet.**
 
 ## Things checked this round rather than inherited
 
-* **Signing is untouched.** The diff of `Containerfile.core` on this branch
+* **Signing is untouched AND the kernel is genuinely signable — measured, not
+  inferred from two bytes.** The diff of `Containerfile.core` on this branch
   against `roadmap/v2.2`, grepped for `sbsign|kernel-signed|secureboot|
-  sign-file|MODULE_SIG`, is **empty**. `/usr/share/apex-os/secureboot/
-  kernel-signed` stays honest with no edit, and `Containerfile.release`'s
-  assertion of it needs no change.
+  sign-file|MODULE_SIG`, is **empty**, so `/usr/share/apex-os/secureboot/
+  kernel-signed` stays honest and `Containerfile.release`'s assertion needs no
+  change. Beyond that, `sbsign` was actually run against the `vmlinuz` pulled
+  out of `kernel-cachyos-core`, exactly as Stage 1b does it: `objdump -f` says
+  **`pei-x86-64`**, `sbverify` says "No signature table present", `sbsign`
+  exits 0, and `sbverify --list` on the result shows `signature 1`. The `MZ`
+  check in the contract test is necessary but not sufficient, and this kernel
+  comes from a toolchain APEX has never shipped before.
 * **The four config assertions will pass.** Read out of the pinned config
   (`/var/lab-scratch/kernel-build/src/config`): `CONFIG_SCHED_CLASS_EXT=y`,
   `CONFIG_DEBUG_INFO_BTF=y`, `CONFIG_EFI_STUB=y`, and
@@ -221,9 +230,13 @@ exit 0), and `tests/check-kernel-contract.sh` passes `fail=0` against the real
 RPMs. Extracted artefacts kept at **`/var/lab-scratch/kernel-build/out2/`**
 (`rpms/`, `manifest/`), build log `…/logs/build2.log`.
 
-**`29 + 18 = 47`** — Fedora's kernel has 18 untagged kfuncs and 29 `*_impl`
-twins; ours has 0 untagged and 47 twins. That is the §4.3 model predicting a
-number rather than being fitted to one.
+**`29 + 18 = 47`**, and the names were diffed rather than left as a suggestive
+sum: our 47 twins are a **strict superset** of the shipped kernel's 29, and the
+18 we gained are **name for name exactly** the 18 kfuncs pahole 1.30 left
+untagged (both `comm` directions empty). Do **not** read it as "tagged means
+stripped": a twin appears only per kfunc whose implicit argument is actually
+removed, and **47 of the 68 tagged names have a twin while 21 do not**, because
+those 21 carry no `struct bpf_prog_aux *` at all.
 
 **Provenance:** built from commit `a5ce7437`; neither `kernel/kernel.pin` nor
 `Containerfile.kernel` has moved since. `Containerfile.core` `cmp`s the build
@@ -247,8 +260,14 @@ file means the kernel tier must be rebuilt before it can feed core.**
    execution.** Everything the kernel tier owes core is now verified, so the
    next real step is a core build that consumes it, which is also the first
    chance to see the cross-tier contracts (`btf_scx=usable`, the `kver` check,
-   the `kernel.pin` `cmp`) fire for real. Mind the rootless-vs-sudo store note
-   above, and expect ~45–50 minutes for core on top.
+   the `kernel.pin` `cmp`) fire for real. Expect ~45–50 minutes for core on top.
+
+   **First, move the image, or you will silently recompile the kernel.** It is
+   in the ROOTLESS store; `build-local.sh` uses `sudo podman`, whose
+   `image exists` check will miss it and call `build_kernel`:
+   ```sh
+   podman save localhost/apex-kernel:local | sudo podman load
+   ```
 
    Do NOT re-run the kernel build to get there. If a rebuild ever is needed and
    it **fails**, do not `podman build` again either — a failed `RUN` layer is
@@ -284,11 +303,15 @@ file means the kernel tier must be rebuilt before it can feed core.**
    drift workflow will say when it moves; that is literally one of the things it
    watches. The *gate* is what makes the relaxation safe rather than a hope.
 
-4. **A wart in the two-reader wiring, small and worth fixing.** `btf-xcheck`
-   exits **2** for "unreadable" and **1** for "defect found", but
-   `Containerfile.kernel` collapses both into `XCHECK=fail`, so an unreadable
-   BTF would be reported as "the two readers disagree". Misleading, not unsafe —
-   it still fails the build. Distinguish the two exits.
+4. **(FIXED this round, recorded so nobody re-fixes it.)** `btf-xcheck` exits
+   **2** for "unreadable" and **1** for "defect found", and
+   `Containerfile.kernel` used to collapse both into one boolean — so an
+   unreadable BTF came out as "the two readers disagree", sending the reader
+   hunting for untagged names that were never printed. The real shape was
+   **one reader silently did not run**, which is worse than misleading, because
+   this tier's whole claim is that two independent readings agree. The exit code
+   is now kept and switched on, with its own message; all three branches were
+   exercised.
 
 5. **Report it upstream. Still nobody has**, and the report got materially
    stronger today. It is no longer an A/B over somebody else's kernel: pahole
