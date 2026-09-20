@@ -2,7 +2,7 @@
 items: L-003
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-luks-enroll
-branch: task/luks-enroll — 9 commits, `62db5703..bcaa55ff`, all PUSHED, not landed
+branch: task/luks-enroll — 12 commits, `62db5703..2779984c`, all PUSHED, not landed
 base: roadmap/v2.2 @ 303221d5
 evidence: ROADMAP/evidence/L-003-enrolment-20260920.md
 paired with: `luks-installer`, which owns `installer/**`. This unit owns the
@@ -186,7 +186,7 @@ stopped from replaying the extends.** I could not construct one.
 | `tests/check-shellcheck-coverage.sh` | 172 discovered, 0 newly failing, 0 now clean |
 | `tests/check-doc-verbs.sh` | 264 valid, 8 deliberate, 0 not a command; 194 documented, 0 undocumented and undeclared, 0 stale |
 | `shellcheck -S warning -x` | clean on all four changed shell files |
-| mutation sweep | **11 mutants, 11 caught, 0 survivors**; baseline 75/0 before and after; every restore byte-identical by sha256 |
+| mutation sweep | **11 mutants, 11 caught, 0 survivors**; baseline 75/0 before and after; every restore byte-identical by sha256. Read WHICH line went red, not just that the run did: `m7` was first caught by the timeout bound before reaching the `pin=no` assertion, which is why the scenario now sets an inert `$NEWPIN` on the default enrolment; `m2` is caught by the unenforced-PCR refusal rather than the binding read-back, because swtpm's PCR 0 is zeros, and the lab did not prove that second arm |
 | stop-slop | run over the prose I added; the repo-wide checker flags the whole 850-line `docs/boot-v2.md` equally, so I fixed the genuine issues in my own text and left the file's established voice alone |
 
 The three new `Containerfile.base` assertions were each run against a mutant and
