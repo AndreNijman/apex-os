@@ -1,0 +1,78 @@
+# kernel.pin — every input that decides what APEX's kernel IS.
+#
+# "What kernel are we on, and what built its BTF?" must be a `cat`, not an
+# archaeology exercise through a COPR build log. That question took the
+# kernel-btf-scx unit a full round to answer for a kernel APEX did not build.
+#
+# Changing any line here is what makes the kernel tier rebuild. Nothing else
+# does, and nothing else should: an unrelated Containerfile.core edit must not
+# silently produce a different kernel binary.
+#
+# Every URL is content-addressed by the sha256 below it, and every one of them
+# is a PERMANENT url — a git tag, a commit sha, or a koji NVR path. The COPR
+# spec this is derived from fetches two of its three sources from `master`
+# branch URLs (its Source1 config and its Patch0 BORE patch), so the upstream
+# build is not reproducible even to itself. Those are pinned to commits here.
+#
+# format: KEY=VALUE, `#` comments, no shell expansion. Read by
+# Containerfile.kernel and by tests/check-kernel-pin.sh.
+
+# ── The tree ────────────────────────────────────────────────────────────────
+# CachyOS's kernel tree. BORE + sched_ext + the CachyOS patch set.
+KERNEL_VERSION=7.2.6
+KERNEL_TAG=cachyos-7.2.6-1
+KERNEL_TAG_OBJECT=ad989a1d77e9ffdf2c1a92f67b75707bae0dda74
+KERNEL_SRC_URL=https://github.com/CachyOS/linux/archive/refs/tags/cachyos-7.2.6-1.tar.gz
+KERNEL_SRC_SHA256=df0e592cb404cc650664241820d53385b76b4fb284f2ab33ffa9bf9f7d43243d
+
+# ── The config ──────────────────────────────────────────────────────────────
+# Upstream fetches this from `master`, so it moves under them without the NVR
+# changing. Pinned to the commit that was current when this kernel was adopted.
+KERNEL_CONFIG_URL=https://raw.githubusercontent.com/CachyOS/linux-cachyos/6676e72b85eb9e30d079a8c3dcdf93aedd1e8226/linux-cachyos/config
+KERNEL_CONFIG_SHA256=3df33112e3357feb6a899bbfc006f2ded15226d1b2eb741ac986d581b9ca7773
+
+# ── The BORE patch ──────────────────────────────────────────────────────────
+# Same problem, same fix: upstream's Patch0 is a `master` URL.
+KERNEL_PATCH_BORE_URL=https://raw.githubusercontent.com/CachyOS/kernel-patches/c9ed808e86cc1f5fafdbe208627533ee10499b5b/7.2/sched/0001-bore-cachy.patch
+KERNEL_PATCH_BORE_SHA256=1809a4d4d6508a2a3f92cd8b3b385640583f90bd6cee46584f4bf105affd24a0
+
+# ── The toolchain that broke, and the version that fixes it ─────────────────
+# THIS IS THE LINE THIS WHOLE TIER EXISTS FOR.
+#
+# ROADMAP/evidence/kernel-build-20260920.md: pahole 1.30 leaves 18 of 68
+# scx_bpf_* kfuncs with no `bpf_kfunc` DECL_TAG, so resolve_btfids never strips
+# their implicit `struct bpf_prog_aux *` and no sched-ext scheduler can load.
+# pahole 1.32 over the same DWARF leaves 0 of 68. Measured, not assumed.
+#
+# The COPR spec's `BuildRequires: dwarves` is UNVERSIONED — it takes whatever
+# the buildroot happens to have, which is precisely how this defect shipped
+# three times. Pinning it by NVR is the fix, and the build gate is what keeps
+# the pin honest.
+#
+# 1.32-1.fc43 is in Fedora 43 updates-testing, not stable, which is why these
+# are koji NVR URLs rather than a `dnf install dwarves`. This is a BUILD input;
+# nothing ships dwarves to a user.
+DWARVES_NVR=1.32-1.fc43
+DWARVES_RPM_URL=https://kojipkgs.fedoraproject.org/packages/dwarves/1.32/1.fc43/x86_64/dwarves-1.32-1.fc43.x86_64.rpm
+DWARVES_RPM_SHA256=3f1392b9ce3ea7dadb19105bb40396d3b14afe0ca0db19c3909a20491cc0dbf4
+LIBDWARVES_RPM_URL=https://kojipkgs.fedoraproject.org/packages/dwarves/1.32/1.fc43/x86_64/libdwarves1-1.32-1.fc43.x86_64.rpm
+LIBDWARVES_RPM_SHA256=271c6d36bc4030ef883527abcf51a0468826f52e2b484f51a23ac15952ba7932
+
+# The numeric CONFIG_PAHOLE_VERSION the kernel's own Kconfig must end up with,
+# asserted against the built config. 1.32 -> 132. If dwarves is not actually
+# the pinned one, `scripts/Makefile.btf` silently picks a different flag set and
+# this is the reading that notices.
+PAHOLE_VERSION_EXPECTED=132
+
+# ── Release identity ────────────────────────────────────────────────────────
+# `rpm -qa` must distinguish an APEX-built kernel from the COPR's. Upstream's
+# release is `cachyos1.fc43`; ours becomes `cachyos1.apex<N>.fc43`. Bump
+# APEX_KERNEL_BUILD when a rebuild's inputs change but the kernel version does
+# not. The string still contains `cachyos`, which Containerfile.core's
+# `ls -d /usr/lib/modules/*cachyos*` kver glob depends on.
+APEX_KERNEL_BUILD=1
+
+# ── Builder base ────────────────────────────────────────────────────────────
+# Fedora 43, matching the buildroot the COPR uses, so GCC stays 15.3.x and the
+# only variable this tier changes against the upstream build is pahole.
+BUILDER_BASE=registry.fedoraproject.org/fedora:43
