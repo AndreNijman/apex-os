@@ -2086,11 +2086,15 @@ class Installer(Adw.Application):
             # user watches go past.
             if s_.startswith(self.RECOVERY_PREFIX):
                 self.recovery_key = s_[len(self.RECOVERY_PREFIX):]
-                self.append_log("Recovery key created — it is shown when the "
-                                "install finishes.\n")
-                self.run_state.set_text("Recovery key created.")
-                return True
-            if s_.startswith(self.RECOVERY_SAVED_PREFIX):
+                # Deliberately NOT `return True` here. Returning early skips the
+                # HUP check below, so if this were ever the last line the engine
+                # wrote, finish() would never run and the installer would sit on
+                # the progress page for ever. Fall through with the raw line
+                # replaced instead.
+                line = ("Recovery key created — it is shown when the install "
+                        "finishes.\n")
+                s_ = "Recovery key created."
+            elif s_.startswith(self.RECOVERY_SAVED_PREFIX):
                 self.recovery_saved = s_[len(self.RECOVERY_SAVED_PREFIX):]
             elif s_.startswith(self.RECOVERY_UNSAVED_PREFIX):
                 self.recovery_saved = ""
