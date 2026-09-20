@@ -907,6 +907,15 @@ sudo files/scripts/boot-v2/apex-stage-root --output ~/bootlab-work/apex-root
 # Take it from the running system, not from this document:
 cat /proc/cmdline
 
+# Every host-side launch of the boot lab goes through nvram-guard. It reads
+# `efibootmgr -v` and the efivarfs Boot* digests before and after and fails the
+# run if this machine's boot entries moved. It cannot prevent a write; it turns
+# "found at the next power-on" into "found when the command returns", which is
+# the difference between a five-minute fix and an unbootable laptop
+# (BOOT-BREAKAGE-2026-09-20.md). AGENTS.md boot-path rule 6. The check belongs
+# HERE and not inside run-scenarios, because inside the container there are no
+# host EFI variables to read.
+./tests/lab/nvram-guard -- \
 podman run --rm -v ~/bootlab-work:/work:z apex-bootlab -c '
   /work/apex-os/files/scripts/boot-v2/apex-mkuki \
       --output /work/apex-<deployment>.efi \
@@ -929,9 +938,20 @@ sudo mokutil --import /path/to/your-cert.der
 #   Verify before going further:
 mokutil --list-enrolled | grep -i "<your CN>"
 
-# ── 3. install systemd-boot and place the UKI ──
+# ── 3. check the ESP has room, BEFORE writing anything to it ──
+#   A UKI is the kernel plus the initramfs: 374 MiB on the L16 today. Know the
+#   number for this machine and the free space you have, and stop here if it
+#   does not fit. This is a ONE-deployment test, not a migration — two APEX
+#   deployments plus a staged third need about 1.1 GiB of ESP.
+du -b "/usr/lib/modules/$(uname -r)"/{vmlinuz,initramfs.img}
+df -h /boot/efi
+
+# ── 4. install systemd-boot and place the UKI ──
 #   `bootctl install` writes the ESP and adds an NVRAM entry. Nothing in this
 #   repository runs it for you.
+#   Capture the boot entries first: this is what you compare against, and it is
+#   what proves the Windows entry on a dual-boot machine was not touched.
+sudo efibootmgr -v | tee ~/efibootmgr.before
 sudo bootctl install
 sudo mkdir -p /boot/efi/EFI/Linux
 #   +3-0 is the boot counter: three tries, none used.
@@ -939,7 +959,34 @@ sudo cp ~/bootlab-work/apex-<deployment>.efi \
         /boot/efi/EFI/Linux/apex-<deployment>+3-0.efi
 sudo bootctl list                   # the entry must appear, with 3 tries left
 
-# ── 4. reboot, and check ──
+#   Per-machine settings go beside the UKI as credentials, because a signed
+#   UKI's command line cannot carry them. A keymap, for instance — the setting
+#   that decides whether you can type your own LUKS passphrase:
+printf 'de' | sudo tee /boot/efi/loader/credentials/vconsole.keymap.cred
+#   Plaintext is right for a keymap and WRONG for anything that unlocks the
+#   disk: a .cred on the ESP is unauthenticated and anyone who can write the
+#   ESP can change it. It is measured into PCR 12, so a TPM policy notices, but
+#   nothing refuses to boot on its own. Secrets go through
+#   `systemd-creds encrypt --with-key=tpm2`.
+
+# ── 5. compare the boot entries. Additive means ADDITIVE. ──
+sudo efibootmgr -v | tee ~/efibootmgr.after
+#   The existing entries must be byte-identical; only a new one may appear.
+diff <(grep -v '^BootOrder:' ~/efibootmgr.before) \
+     <(grep -v '^BootOrder:' ~/efibootmgr.after)
+#   On a machine that also boots Windows, this is the line that matters:
+cmp <(grep -i 'Windows Boot Manager' ~/efibootmgr.before) \
+    <(grep -i 'Windows Boot Manager' ~/efibootmgr.after) \
+  && echo "Windows entry unchanged"
+#   If the Windows entry moved, STOP and restore it from ~/efibootmgr.before
+#   before rebooting.
+
+# ── 6. make the first reboot a TEST, not a commitment ──
+#   BootNext applies to exactly one boot and the firmware clears it. GRUB stays
+#   first in BootOrder, so if systemd-boot does not come up, the boot after
+#   that is the machine you had this morning.
+sudo efibootmgr | grep -i 'Linux Boot Manager'     # note its BootXXXX number
+sudo efibootmgr --bootnext XXXX
 sudo systemctl reboot
 #   after it comes up:
 apex boot status
@@ -950,8 +997,15 @@ apex boot status
 
 If it does **not** come up: the boot counter is doing its job. Three failed
 attempts and systemd-boot selects the previous entry by itself. GRUB is still
-installed and still in the firmware's boot order; pick it from the firmware boot
-menu.
+installed and still first in the firmware's boot order, and `BootNext` is
+already spent, so the next power-on is the machine you had before.
+
+**This is a test and not a migration, and the difference is not pedantry.** The
+UKI you just placed is a snapshot of one deployment. `bootc upgrade` on this
+machine keeps writing ostree BLS entries under `/boot`, which systemd-boot
+cannot read, so the UKI goes stale at the next update and nothing refreshes it.
+Getting a machine onto systemd-boot *permanently* means installing it onto the
+composefs backend, which means reinstalling — see the pivot section at the top.
 
 ### TPM-bound unlock
 
@@ -1120,10 +1174,18 @@ named failure.
 
 ## Running the harness yourself
 
+Every launch below is wrapped in `tests/lab/nvram-guard`, and that is not
+decoration. The check has to live on the HOST side: `run-scenarios` runs inside
+the container, where `/sys/firmware/efi/efivars` does not exist, so a check in
+there would inspect nothing. AGENTS.md boot-path rule 6. A `bootc install
+--via-loopback` goes through `tests/lab/bootc-install-lab` instead, which
+builds the podman argv itself and cannot be talked out of the efivars mask.
+
 ```bash
 # on the katana, or any box with /dev/kvm and podman
 podman build -t apex-bootlab -f bootlab/Containerfile .
 mkdir -p ~/bootlab-work/out
+./tests/lab/nvram-guard --label bootlab -- \
 podman run --rm --device /dev/kvm -v ~/bootlab-work:/work:z \
     -v "$PWD:/work/repo:z" apex-bootlab -c \
     '/work/repo/files/scripts/boot-v2/run-scenarios --work /work/out'
@@ -1131,6 +1193,7 @@ podman run --rm --device /dev/kvm -v ~/bootlab-work:/work:z \
 # the two scenarios that need a real APEX image are requested by name, and
 # hard-fail rather than skipping if the staged root is missing:
 sudo files/scripts/boot-v2/apex-stage-root --output ~/bootlab-work/out/apex-root
+./tests/lab/nvram-guard --label bootlab-apex -- \
 podman run --rm --device /dev/kvm -v ~/bootlab-work:/work:z \
     -v "$PWD:/work/repo:z" apex-bootlab -c \
     '/work/repo/files/scripts/boot-v2/run-scenarios --work /work/out apex-image luks-tpm'
@@ -1147,6 +1210,7 @@ image's, because moving PCR 0 needs two firmwares differing only in code:
 
 ```bash
 # the older Fedora build, extracted from its rpm — any different revision works
+./tests/lab/nvram-guard --label bootlab-fw-alt -- \
 podman run --rm --device /dev/kvm -v ~/bootlab-work:/work:z \
     -v "$PWD:/work/repo:z" -e APEX_BOOTLAB_FW_ALT=/work/OVMF_CODE_4M.secboot.qcow2 \
     apex-bootlab -c \

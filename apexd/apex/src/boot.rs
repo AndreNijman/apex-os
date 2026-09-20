@@ -27,10 +27,11 @@
 //!
 //! ## The bootloader this expects to find
 //!
-//! GRUB, on every published image. §22's recommendation is to keep it for this
-//! generation and AGENTS.md's boot-path rule 5 makes that a contract, so
-//! `bootloader: "grub"` with `bootCounting: false` is the normal, correct
-//! answer and the report says so in plain words rather than looking like a
+//! GRUB, on every image published so far. APEX is moving to systemd-boot
+//! (AGENTS.md boot-path rule 5, docs/boot-v2.md), but a machine only gets it by
+//! being installed onto the composefs backend, so `bootloader: "grub"` with
+//! `bootCounting: false` stays the normal, correct answer for an existing
+//! machine and the report says so in plain words rather than looking like a
 //! degraded state.
 
 use std::collections::BTreeMap;
