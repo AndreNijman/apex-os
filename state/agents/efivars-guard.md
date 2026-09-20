@@ -4,7 +4,7 @@ items: none (this unit is in neither `roadmap.yaml` nor `dispatch.json`; it was
        dispatched directly off Andre's own write-up)
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-efivars-guard
-branch: task/efivars-guard — 3 commits, `4c2478fc..5e23536a`, all PUSHED, not landed
+branch: task/efivars-guard — 5 commits, `4c2478fc..e4c25678`, all PUSHED, not landed
 base: roadmap/v2.2 @ 4c2478fc
 evidence: ROADMAP/evidence/efivars-guard-20260920.md
 files owned: tests/lab/bootc-install-lab, tests/lab/nvram-guard,
@@ -20,7 +20,7 @@ touched of another unit's territory: **nothing**. No `installer/**`, no
 
 Read this before picking it up cold.
 
-1. **The unit is done and green, and nothing here is blocking.** 49 assertions,
+1. **The unit is done and green, and nothing here is blocking.** 52 assertions,
    0 failures, wired into `pr-validation.yml`'s `static` job. The branch is
    pushed and wants landing into `roadmap/v2.2` by an integrator, as a MERGE —
    round 10 changed the mechanism and a cherry-pick will conflict.
@@ -99,9 +99,14 @@ need no launch.
 * **each NVRAM source is load-bearing on its own** — the efivarfs digests and
   `efibootmgr -v` are moved independently and each alone must produce
   `nvram-changed`.
-* **the repo scan is proven against planted fixtures both ways** before its
-  clean verdict on the repository is believed, because there are zero loopback
+* **the repo scan is proven against planted fixtures three ways** — unmasked
+  caught, masked passed, mask-only-in-a-comment caught — before its clean
+  verdict on the repository is believed, because there are zero loopback
   callers today and a scan that finds nothing proves nothing.
+* **the repo scan cannot pass over zero files** — the list is asserted against
+  a floor and must contain `installer/apex-install`. Run from a copy with no
+  `.git` (the tarball-checkout case) the suite goes red with two named
+  failures, where the first version of it printed a green scan.
 
 ## Read-only evidence from this machine
 
