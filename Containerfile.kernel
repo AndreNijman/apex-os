@@ -56,7 +56,7 @@
 # ── The gate, built from this repo's own reader ─────────────────────────────
 # apexd-core is the crate that owns kernelbtf.rs. Building only this one bin
 # keeps the stage to the four crates it needs rather than the whole workspace.
-FROM registry.fedoraproject.org/fedora:43 AS gate-builder
+FROM registry.fedoraproject.org/fedora@sha256:84325c671db8a23b0679e04fb863d4081d98c4fc4ae9c9d5bcd883b4cea4e003 AS gate-builder
 RUN dnf5 -y install cargo rust >/dev/null && dnf5 clean all
 ENV CARGO_HOME=/build/.cargo
 COPY apexd/ /build/apexd/
@@ -68,7 +68,7 @@ RUN set -eux; \
     /out/apex-kernel-btf-gate 2>&1 | head -1 || true
 
 # ── The kernel ──────────────────────────────────────────────────────────────
-FROM registry.fedoraproject.org/fedora:43 AS kbuild
+FROM registry.fedoraproject.org/fedora@sha256:84325c671db8a23b0679e04fb863d4081d98c4fc4ae9c9d5bcd883b4cea4e003 AS kbuild
 
 COPY kernel/kernel.pin /build/kernel.pin
 COPY kernel/kernel-cachyos.spec /build/kernel-cachyos.spec
