@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Unattended answer file for the APEX Windows installer lab.
+
+  WHY THE NUMBERS ARE WHAT THEY ARE
+
+  /IMAGE/INDEX 1 is "Windows Server 2022 SERVERSTANDARDCORE" — Server Core, read
+  out of install.wim with `wiminfo`, not guessed. A wrong index makes Setup stop
+  on an edition picker that a headless run cannot see or dismiss. Core rather
+  than Desktop Experience because it installs 8.35 GB instead of 14.4 GB and
+  carries the entire Win32 storage stack, PowerShell and diskpart, which is all
+  the installer under test needs.
+
+  The ESP is 100 MB. That is not a convenience: it is the constraint the whole
+  architecture has to survive. Windows' own default system partition is 100 MB,
+  and the shared-ESP rule means APEX has to fit its boot files into whatever
+  Windows left over. Sizing it generously here would have hidden the single most
+  important fact the lab exists to measure.
+
+  AutoLogon exists for exactly one logon and then Windows disables it again,
+  because FirstLogonCommands only run at an interactive logon and Server Core
+  has nobody to perform one. Everything after the golden image is made runs
+  from an ON-START scheduled task as SYSTEM, with no logon session at all: a
+  headless guest that depends on a session has one more thing that can silently
+  not happen. FirstLogonCommands also run exactly once, and that once is spent
+  making the golden image, so nothing durable may live in them.
+
+  PowerShell here is 5.1, which is what Server 2022 ships. No ternary operator,
+  no `??`, no `-Parallel`. The syntax that works in a modern terminal is not
+  the syntax that runs in this guest.
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+
+  <settings pass="windowsPE">
+    <component name="Microsoft-Windows-International-Core-WinPE"
+               processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35"
+               language="neutral" versionScope="nonSxS">
+      <SetupUILanguage><UILanguage>en-US</UILanguage></SetupUILanguage>
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+
+    <component name="Microsoft-Windows-Setup"
+               processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35"
+               language="neutral" versionScope="nonSxS">
+      <DiskConfiguration>
+        <WillShowUI>OnError</WillShowUI>
+        <Disk wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+          <DiskID>0</DiskID>
+          <WillWipeDisk>true</WillWipeDisk>
+          <CreatePartitions>
+            <CreatePartition wcm:action="add">
+              <Order>1</Order><Type>EFI</Type><Size>100</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>2</Order><Type>MSR</Type><Size>16</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>3</Order><Type>Primary</Type><Extend>true</Extend>
+            </CreatePartition>
+          </CreatePartitions>
+          <ModifyPartitions>
+            <ModifyPartition wcm:action="add">
+              <Order>1</Order><PartitionID>1</PartitionID>
+              <Label>System</Label><Format>FAT32</Format>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>2</Order><PartitionID>2</PartitionID>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>3</Order><PartitionID>3</PartitionID>
+              <Label>Windows</Label><Letter>C</Letter><Format>NTFS</Format>
+            </ModifyPartition>
+          </ModifyPartitions>
+        </Disk>
+      </DiskConfiguration>
+
+      <ImageInstall>
+        <OSImage>
+          <InstallFrom>
+            <MetaData wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+              <Key>/IMAGE/INDEX</Key><Value>1</Value>
+            </MetaData>
+          </InstallFrom>
+          <InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>
+          <WillShowUI>OnError</WillShowUI>
+        </OSImage>
+      </ImageInstall>
+
+      <UserData>
+        <AcceptEula>true</AcceptEula>
+        <FullName>APEX lab</FullName>
+        <Organization>APEX</Organization>
+      </UserData>
+    </component>
+  </settings>
+
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35"
+               language="neutral" versionScope="nonSxS">
+      <ComputerName>APEXWINLAB</ComputerName>
+      <TimeZone>UTC</TimeZone>
+    </component>
+  </settings>
+
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35"
+               language="neutral" versionScope="nonSxS">
+      <UserAccounts>
+        <AdministratorPassword>
+          <!-- A throwaway credential for a throwaway lab guest that has no
+               network device attached. It is written here in the open on
+               purpose: nothing about this guest is a secret, and a lab whose
+               password lives somewhere else is a lab nobody else can run. -->
+          <Value>ApexLab!2026</Value>
+          <PlainText>true</PlainText>
+        </AdministratorPassword>
+      </UserAccounts>
+      <!-- AutoLogon exists for exactly one logon, because FirstLogonCommands
+           below run at the first INTERACTIVE logon and Server Core has nobody
+           to perform one. LogonCount 1 means Windows disables it again by
+           itself, so the golden image does not ship a machine that logs a
+           privileged session in every time it boots. Everything after the
+           golden runs from the on-start task instead, with no session at all. -->
+      <AutoLogon>
+        <Enabled>true</Enabled>
+        <Username>Administrator</Username>
+        <LogonCount>1</LogonCount>
+        <Password>
+          <Value>ApexLab!2026</Value>
+          <PlainText>true</PlainText>
+        </Password>
+      </AutoLogon>
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideLocalAccountScreen>true</HideLocalAccountScreen>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <NetworkLocation>Work</NetworkLocation>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+          <Order>1</Order>
+          <CommandLine>cmd /c md C:\apexlab</CommandLine>
+          <Description>lab directory</Description>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+          <Order>2</Order>
+          <!-- The agent is fetched from the APEXLAB transport volume, by
+               LABEL, not from the install media and not by walking drive
+               letters. Both of the obvious alternatives were wrong: the
+               install CD is detached after Setup's first phase, so a copy
+               from it finds nothing and leaves a scheduled task pointing at a
+               script that does not exist — a golden image that boots
+               perfectly and then does nothing at all, with no error anywhere.
+               A drive-letter loop has the same failure whenever the letters
+               land somewhere the loop did not guess. -->
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'APEXLAB' -and $_.DriveLetter }; if ($v) { Copy-Item -Force ($v[0].DriveLetter + ':\apexlab-agent.ps1') 'C:\apexlab\agent.ps1' }"</CommandLine>
+          <Description>copy the lab agent off the APEXLAB transport volume</Description>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+          <Order>3</Order>
+          <CommandLine>cmd /c schtasks /create /tn ApexLabAgent /tr "powershell -NoProfile -ExecutionPolicy Bypass -File C:\apexlab\agent.ps1" /sc onstart /ru SYSTEM /rl highest /f</CommandLine>
+          <Description>register the on-start lab agent</Description>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+          <Order>4</Order>
+          <!-- The completion marker goes on the APEXLAB transport volume, not
+               on C:. The harness reads it from outside with mtools between
+               boots; reading it out of NTFS would mean parsing NTFS from the
+               host to answer "did Setup finish", which is a lot of machinery
+               for a yes/no. -->
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'APEXLAB' -and $_.DriveLetter }; if ($v) { Set-Content -Path ($v[0].DriveLetter + ':\golden.txt') -Value $(if (Test-Path 'C:\apexlab\agent.ps1') { 'GOLDEN-READY' } else { 'GOLDEN-BROKEN-NO-AGENT' }) }"</CommandLine>
+          <Description>mark the golden image complete</Description>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+          <Order>5</Order>
+          <CommandLine>cmd /c shutdown /s /t 3 /f</CommandLine>
+          <Description>power off; the harness takes the image from here</Description>
+        </SynchronousCommand>
+      </FirstLogonCommands>
+    </component>
+  </settings>
+</unattend>
