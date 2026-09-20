@@ -1,0 +1,66 @@
+#!/bin/sh
+# apex-switcher — the keybind side of the APEX Shell window switcher.
+#
+#     apex-switcher next | prev | commit | cancel
+#
+# ── Why this exists at all, rather than binding `apex shell switcher …` ──────
+#
+# The switcher is hold-Alt-tap-Tab-release-Alt, and the release has to reach the
+# shell. A layer-shell surface that took keyboard focus could watch for it
+# itself, but taking keyboard focus is exactly how a switcher steals focus from
+# the window it is about to activate — the defect this whole unit exists to
+# remove. So the compositor reports the release instead:
+#
+#   Hyprland   bind with `release = true` on Alt_L / Alt_R (apex/keybindings.lua)
+#   labwc      <keybind key="Alt_L" onRelease="yes"> (rc.xml)
+#
+# Both of those fire on EVERY Alt release for as long as the machine is on, not
+# only while the switcher is open. `apex shell switcher commit` would mean two
+# processes — this one and a `qs ipc call` — every time anybody let go of Alt.
+#
+# So the closed-state path here is one `[ -e ]` and an exit. The shell touches
+# the flag when the switcher opens and removes it when it closes, so "is it
+# open" is answered without talking to the shell at all.
+#
+# ── The flag is a hint, never an authority ──────────────────────────────────
+#
+# A shell that crashed mid-switch leaves the flag behind. That costs one wasted
+# IPC call on the next Alt release, which then finds no handler and returns
+# non-zero, and `next` clears the flag before opening anyway. It is not a lock
+# and nothing is protected by it; it is a cheap "probably not worth asking".
+#
+# `next` and `prev` never consult the flag: they are only bound to ALT+Tab, so
+# they already cost nothing when nobody is switching, and a stale flag must not
+# be able to stop the switcher opening.
+set -u
+
+usage() {
+    echo "usage: apex-switcher next|prev|commit|cancel" >&2
+    exit 2
+}
+
+[ "$#" -eq 1 ] || usage
+
+runtime="${XDG_RUNTIME_DIR:-}"
+if [ -z "$runtime" ]; then
+    runtime="/run/user/$(id -u)"
+fi
+flag="${runtime}/apex-shell/switcher-open"
+
+case "$1" in
+    next|prev)
+        ;;
+    commit|cancel)
+        # Nothing is open, so there is nothing to commit or cancel. This is the
+        # path that runs on every Alt release and it must stay this cheap.
+        [ -e "$flag" ] || exit 0
+        ;;
+    *)
+        usage
+        ;;
+esac
+
+# `exec`, so no shell is left waiting on the IPC call. `apex` resolves the
+# shell's path itself and reports a missing or dead shell properly; a raw
+# `qs -p … ipc call` here would have to hardcode one.
+exec apex shell switcher "$1"

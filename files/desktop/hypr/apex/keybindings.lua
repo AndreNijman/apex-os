@@ -124,6 +124,51 @@ for key, direction in pairs(directions) do
          { description = "Move window " .. direction })
 end
 
+-- ── Alt-Tab window switcher ──────────────────────────────────────────────────
+-- The APEX Shell switcher: every window on every workspace, most-recently-used
+-- first. It is bound HERE rather than in the shell's keybind model, and that is
+-- a deliberate limitation rather than an oversight — see below.
+--
+-- ── Hold Alt, tap Tab, release Alt ───────────────────────────────────────────
+-- The release is what makes it an alt-tab rather than a menu, and the shell
+-- cannot see it: a switcher that took keyboard focus in order to watch for the
+-- Alt release would itself be taking focus away from the window it is about to
+-- give focus to, which is the bug this whole unit exists to fix. So the
+-- compositor reports the release instead, and the shell's overlay never asks
+-- for the keyboard at all.
+--
+-- `release = true` is Hyprland's `bindr`. `transparent = true` is its `t` flag:
+-- the release still reaches the focused application, so holding Alt for an
+-- application's own Alt-something shortcut is unaffected.
+--
+-- Both Alt keys, because a keyboard has two and a user who started the switch
+-- with the right-hand one has to be able to finish it.
+--
+-- ── Why this is not in the shell's keybind model ─────────────────────────────
+-- That model has no concept of a key RELEASE, so a rebind made in APEX Settings
+-- would move the "next" bind and leave the commit on Alt — a switcher you can
+-- open and cannot close. Until the model can express a release, the combination
+-- stays fixed and stays here. The Keybinds page says so rather than offering a
+-- control that would half-work.
+--
+-- ── The cost of the release bind, stated ─────────────────────────────────────
+-- It fires on EVERY Alt release, all day, not only while the switcher is open.
+-- That is why the target is /usr/libexec/apex-switcher and not `apex shell …`
+-- directly: the helper's whole closed-state path is one `[ -e ]` test on a file
+-- under XDG_RUNTIME_DIR and an exit. One short-lived shell per Alt release,
+-- never the shell's IPC.
+local switcher = "/usr/libexec/apex-switcher"
+bind("ALT",           "Tab",    hl.dsp.exec_cmd(switcher .. " next"),
+     { description = "Window switcher" })
+bind("ALT SHIFT",     "Tab",    hl.dsp.exec_cmd(switcher .. " prev"),
+     { description = "Window switcher (reverse)" })
+bind("ALT",           "Escape", hl.dsp.exec_cmd(switcher .. " cancel"),
+     { description = "Cancel the window switcher" })
+bind("ALT", "Alt_L", hl.dsp.exec_cmd(switcher .. " commit"),
+     { release = true, transparent = true, description = "Commit the window switcher" })
+bind("ALT", "Alt_R", hl.dsp.exec_cmd(switcher .. " commit"),
+     { release = true, transparent = true, description = "Commit the window switcher" })
+
 -- ── Workspaces ───────────────────────────────────────────────────────────────
 -- 1-9 then 0, where 0 is workspace 10.
 for i = 1, 10 do
