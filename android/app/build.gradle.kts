@@ -150,6 +150,14 @@ android {
 
     buildFeatures {
         compose = true
+        // AGP 9 defaults this OFF, and the updater needs it: it compares
+        // `BuildConfig.VERSION_CODE` against the code in the release metadata
+        // to decide whether a newer build exists. Without this the class is
+        // not generated and `:app` does not compile — a loud failure, which is
+        // the good case. The quiet one would have been reading the version out
+        // of `PackageManager` instead and getting a value that is right until
+        // the day somebody sideloads over the top.
+        buildConfig = true
     }
 
     packaging {

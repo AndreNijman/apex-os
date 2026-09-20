@@ -14,7 +14,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -24,6 +27,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.apexos.remote.update.AppUpdater
+import com.apexos.remote.update.UpdateBanner
+import com.apexos.remote.update.UpdateUi
 import com.apexos.remote.ui.agent.AgentCenterScreen
 import com.apexos.remote.ui.agent.HelpScreen
 import com.apexos.remote.ui.agent.ApprovalsScreen
@@ -89,6 +95,15 @@ fun ApexRemoteApp(
     viewModel: RemoteViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val appContext = LocalContext.current.applicationContext
+    // The APPLICATION context, not the activity's. This object outlives a
+    // rotation and an install prompt, and holding an activity across either is
+    // how a leak becomes a crash.
+    val updater = remember(appContext) { AppUpdater(appContext) }
+    // Pressing Update is a state change, not a suspend call: a composable
+    // cannot start one, and a `rememberCoroutineScope` launched from a button
+    // would keep running after the screen that owned it had gone.
+    var installing by remember { mutableStateOf(false) }
 
     ApexRemoteTheme(useDynamicColour = state.settings.dynamicColour) {
         val navigation = rememberNavController()
@@ -145,7 +160,36 @@ fun ApexRemoteApp(
                     onClearCrash = { viewModel.clearCrash() },
                     onLock = { viewModel.lock() },
                     onDismiss = { viewModel.dismiss() },
+                    updateBanner = {
+                        UpdateBanner(
+                            state = updater.state,
+                            // Re-read on every recomposition rather than
+                            // remembered. The user may have just come back
+                            // from the Settings page that grants it, and a
+                            // cached `false` would leave them looking at the
+                            // Allow button they had already pressed.
+                            mayInstall = updater.mayInstall(),
+                            onInstall = { installing = true },
+                            onAllowSources = {
+                                runCatching { context.startActivity(updater.sourcesSettings()) }
+                            },
+                            onDismiss = { updater.dismiss() },
+                        )
+                    },
                 )
+                // The check, and the install, both here rather than in the
+                // view model. `AppUpdater` is about this app's own APK and has
+                // nothing to do with the machines the view model holds; the
+                // one thing it needs is a Context, which a view model is the
+                // wrong place to keep.
+                LaunchedEffect(Unit) { updater.check() }
+                LaunchedEffect(installing) {
+                    val offer = (updater.state as? UpdateUi.Available)?.offer
+                    if (installing && offer != null) {
+                        installing = false
+                        updater.install(offer)
+                    }
+                }
             }
             composable(Destinations.PAIRING) {
                 PairingScreen(

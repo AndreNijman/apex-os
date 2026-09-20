@@ -75,6 +75,16 @@ fun MachinesScreen(
     onDynamicColour: (Boolean) -> Unit,
     onLock: () -> Unit,
     onDismiss: () -> Unit,
+    /**
+     * The app's own update row, passed in rather than built here.
+     *
+     * A slot, because this screen is about the machines a phone is paired with
+     * and knows nothing about GitHub, `PackageInstaller` or versionCodes —
+     * and because a default of "draw nothing" keeps every existing caller,
+     * including the on-device Compose tests, compiling and behaving exactly as
+     * before.
+     */
+    updateBanner: @Composable () -> Unit = {},
 ) {
     var forgetting by remember { mutableStateOf<PairedMachine?>(null) }
     var settingsOpen by remember { mutableStateOf(false) }
@@ -100,6 +110,11 @@ fun MachinesScreen(
                 .background(MaterialTheme.colorScheme.background)
                 .padding(padding),
         ) {
+            // First, above every other notice. It is the only one that is
+            // about the app rather than about a machine, and the reason a
+            // person is seeing an odd message from a machine may well be that
+            // this app is the half that is out of date.
+            updateBanner()
             state.gateWarning?.let { Notice(it, alarming = true) }
             state.busy?.let { Notice(it, alarming = false) }
             state.failure?.let { Notice(it, alarming = true, onDismiss = onDismiss) }
