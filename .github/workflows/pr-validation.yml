@@ -398,6 +398,25 @@ jobs:
             *)  exit "$rc" ;;
           esac
 
+          # Same clone, same shape, a different contract: apexd's power tiers
+          # against the shell's picker. tier.rs states in prose that the IDs
+          # "must match the strings the D-Bus API and the apex-shell
+          # PowerProfileService use verbatim" — and nothing enforced it, so the
+          # picker went on offering `ultra` and `ultra-max` for a release after
+          # apexd stopped parsing them. Two buttons that could only fail, found
+          # by Andre looking at the page rather than by any test on either side,
+          # because each side was internally consistent.
+          set +e
+          python3 files/scripts/check-tier-parity \
+            --service /tmp/apex-shell-parity/src/services/system/PowerProfileService.qml
+          rc=$?
+          set -e
+          case "$rc" in
+            0)  echo "tier parity holds" ;;
+            77) echo "::notice::apex-shell unavailable; tier parity not checked" ;;
+            *)  exit "$rc" ;;
+          esac
+
       - name: §24 every session APEX ships has a decided portal backend set
         if: ${{ !cancelled() }}
         run: |
