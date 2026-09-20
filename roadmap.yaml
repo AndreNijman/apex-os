@@ -8305,6 +8305,60 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
+    ROUND 32 (2026-09-20), unit `luks-enroll`, branch task/luks-enroll off roadmap/v2.2 303221d5, PUSHED and NOT
+    landed. STATUS UNCHANGED - still blocked, and deliberately: the acceptance is 'Measured boot + TPM unlock +
+    recovery path validated' and it depends on L-002, whose installer is another unit's. WHAT NOW EXISTS is the
+    thing an installer calls: files/system/libexec/apex-luks-enroll, shipped by Containerfile.base as
+    /usr/libexec/apex-luks-enroll, interface `--device DEV --recovery-out PATH`. Full record:
+    ROADMAP/evidence/L-003-enrolment-20260920.md. A RECOVERY KEY IS ENROLLED FIRST ON EVERY PATH and the exit
+    status is 0 in every declined case, so an installer cannot read 'no TPM slot' as a failed install. THE BINDING
+    IS CHOSEN, NOT HARDCODED: policy_select is a best-first table (signed-pcr11, then pcr7) and each probe tests
+    its own preconditions, so the bootloader pivot to systemd-boot needs no restructure - probe_signed_pcr11 is
+    written and reachable, requiring an sd-stub boot (StubInfo efivar), a published key at
+    /run/systemd/tpm2-pcr-public-key.pem and a PCR 11 that is measurably non-zero, and IT HAS NEVER BEEN EXERCISED
+    because nothing in the lab boots the shipped script under sd-stub. On a machine today that means: Secure Boot
+    on -> a TPM slot bound to PCR 7 with a non-zero policy hash; Secure Boot off -> no TPM slot, recovery key, and
+    prose naming Secure Boot, what to change, where, and the command to re-run; no TPM -> no TPM slot, recovery
+    key, and the PTT/fTPM firmware settings to look for. Also tested: setup-mode (SecureBoot reads 1 with no
+    platform key) and pcr-uninitialised (Secure Boot claims on but PCR 7 was never extended - the slot is created
+    and then REMOVED again). MEASURED IN THE BOOT LAB ON KATANA, swtpm only, no real disk encrypted and katana's
+    TPM neither cleared nor touched: (1) a bare systemd-cryptenroll --tpm2-device with no PCR selection writes
+    tpm2-pcrs [], NO tpm2-pcr-bank field at all and a 64-zero policy hash, and exits 0 - L-001's silicon finding
+    now reproduced in the lab; (2) --tpm2-pcrs=7 against an unextended PCR 7 produces a PERFECTLY GOOD-LOOKING
+    NON-ZERO POLICY HASH while printing 'PCR policy effectively unenforced' on stderr, so the policy-hash
+    assertion CANNOT catch that case and both checks are needed; (3) --unlock-tpm2-device succeeds only on a real
+    unseal and refuses once PCR 7 moves, so the security property is testable with no guest and no device-mapper;
+    (4) cryptsetup open --test-passphrase --key-file needs no device-mapper; (5) the TPM2 PIN env var is NEWPIN,
+    not NEWPASSWORD; (6) tpm2-tools falls back to /dev/tpmrm0 when TPM2TOOLS_TCTI is unset and prints
+    TPM2_PT_MAX_AUTH_FAIL on ONE line on 5.7; (7) podman drops CAP_MKNOD so the TPM-node fixture is a symlink to
+    /dev/null; (8) tpm2-tools reaches the image only as a dependency of clevis and is pinned by no line in
+    Containerfile.core. GATES: four new scenarios in run-scenarios' DEFAULT set (enroll-sb-on, enroll-sb-off,
+    enroll-no-tpm, enroll-bare-policy) at 75 passed / 0 failed / 0 could-not-run; tests/test-boot-v2.sh 120 passed
+    / 0 failed with a new static section that runs on every PR with no lab; check-containerfile-assertions 197
+    checked / 0 failed / 0 inert; shellcheck coverage clean; doc-verbs 194 documented / 0 undocumented and
+    undeclared / 0 stale. THE NEGATIVE CONTROL IS THE POINT: enroll-bare-policy enrols a volume WITHOUT the
+    production script, verifies the control is known-bad rather than assuming it, and requires --check to exit 2.
+    Three Containerfile.base build assertions (no PCR 0, no TPM2 device named without a PCR selection beside it,
+    no boot-path command) were each run against a mutant and against a comment-only control before being
+    committed. MUTATION SWEEP, each mutant restored with plain cp and verified byte-identical by sha256, baseline
+    green before and after: dropping the Secure Boot clause from probe_pcr7, binding PCR 0, enrolling with no PCR
+    selection, making --check always exit 0, faking the recovery key, removing the TPM device-node check, and
+    binding PCR 7 AND 11 were ALL CAUGHT. A HARNESS DEFECT FOUND AND FIXED, MEASURED TWICE: systemd-cryptenroll
+    --tpm2-with-pin=yes blocked the harness for seven minutes on a terminal prompt, and then for THIRTY-SIX
+    MINUTES with stdin on /dev/null and no terminal at all, because systemd falls back to its ask-password SOCKET
+    protocol and waits for an agent that never comes; every invocation is now bounded by timeout(1). THE ONE
+    CLAUSE OF THE ORCHESTRATOR'S DIRECTION NOT FOLLOWED, stated rather than quietly worked around: signed PCR 11
+    is still gated on Secure Boot. A signed policy is PolicyAuthorize over a PolicyPCR digest; the signature ships
+    in the UKI's .pcrsig section and is PUBLIC, PCR 11 starts at zero every boot, tpm2_pcrextend 11 works from
+    plain root (tpm2_pcrreset 11 answers 'bad locality'), and every digest that composes the signed value is a
+    hash of public material - so an attacker who can boot any kernel replays the extends and unseals without
+    APEX's private key, and building our own kernel does not change it because they need our PCR VALUE and not our
+    kernel. L-001 s3.1 and the lab script's own header say the same thing. Overruling it is one clause in one
+    probe; --with-pin is the honest route for a machine that will not enable Secure Boot. WHAT IS STILL OPEN: the
+    in-BOOT half of the PCR 7 binding is UNPROVEN - the scenarios prove what the header holds and that the slot
+    unseals and stops unsealing when PCR 7 moves, all host-side, while luks-tpm boots a real guest only against
+    the lab's signed PCR 11 policy; a guest scenario for a PCR-7-bound volume needs a staged APEX root and belongs
+    in STAGED. No image build was run, probe_signed_pcr11 has never been taken, and the installer is L-002's.
     ROUND 29 (2026-09-18), STATUS UNCHANGED, still blocked; recorded so the reason lives in the item rather than
     only in an agent card. THE ACCEPTANCE IS 'Measured boot + TPM unlock + recovery path validated', and all three
     are validated in a VM against swtpm. apex-os files/scripts/boot-v2/run-scenarios covers measured boot and TPM
