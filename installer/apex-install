@@ -172,13 +172,34 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # See BOOT-BREAKAGE-2026-09-20.md and AGENTS.md "Touching a machine's boot
 # path".
 #
-# So when, and ONLY when, the target is loop-backed, the install container gets
-# an empty tmpfs over efivars. efivarfs is the only channel to NVRAM, so with
-# it masked `efibootmgr` finds no variables, bootupd writes the ESP and leaves
-# the firmware alone, and the disk image is complete for the machine that will
-# eventually boot it. Measured, not assumed: the sdboot lab ran seven masked
-# loopback installs that night and produced bootable ESPs without moving one
-# NVRAM byte; the eighth was unmasked and is the incident above.
+# So when, and ONLY when, the target is loop-backed, two things change.
+#
+# 1. `bootc install --generic-image`. This is THE prevention. bootc's own
+#    documentation for it: "All bootloader types will be installed - Changes to
+#    the system firmware will be skipped." The ESP still gets a complete
+#    bootloader, including the removable-media path, so the image boots on the
+#    machine it is built for; the firmware of the machine building it is not
+#    touched.
+#
+# 2. An empty tmpfs over /sys/firmware/efi/efivars in the container. This is
+#    defence in depth and NOTHING MORE, and saying so matters, because the
+#    first version of this code shipped the mask alone and believed it was the
+#    fix. MEASURED 2026-09-20, 22:12: with the mask applied and logged, a
+#    loopback `bootc install to-filesystem` still ran
+#
+#        efibootmgr -b 0000 -B
+#        efibootmgr --create --disk /dev/loop1 --part 1 ...
+#
+#    against the host, and tests/lab/nvram-guard caught it. The reason is
+#    `--pid=host`, which bootc requires: it re-enters the host's MOUNT
+#    namespace for the bootloader step, so the container's own mounts are not
+#    where bootupd is looking. Checked rather than deduced — an unmasked
+#    privileged container on this machine shows ZERO entries under
+#    /sys/firmware/efi/efivars, so the write cannot have gone through the
+#    container's namespace at all.
+#
+#    The mask stays because it costs nothing and covers any future step that
+#    does stay inside the container. It is not the guard.
 #
 # The test is the SYSFS BACKING FILE, never the device name. `/dev/loop1` can
 # be renamed or symlinked; `/sys/class/block/<name>/loop/backing_file` exists
@@ -192,6 +213,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # a disk image with no firmware entry, which the next boot of the machine that
 # owns the image fixes; the failure mode of a wrong "no" is the incident above.
 NVRAM_ARGS=()
+NVRAM_BOOTC_ARGS=()
 disk_is_loopback() {  # $1=block device path — 0 if the kernel calls it a loop
   local d base
   d=$(readlink -f "${1:-}" 2>/dev/null || true)
@@ -209,16 +231,18 @@ disk_is_loopback() {  # $1=block device path — 0 if the kernel calls it a loop
 set_nvram_args_for() {  # $1=target block device
   local base backing
   NVRAM_ARGS=()
+  NVRAM_BOOTC_ARGS=()
   if disk_is_loopback "$1"; then
     NVRAM_ARGS=(--tmpfs /sys/firmware/efi/efivars)
+    NVRAM_BOOTC_ARGS=(--generic-image)
     base=$(basename "$(readlink -f "$1")")
     backing=$(cat "/sys/class/block/$base/loop/backing_file" 2>/dev/null \
              || cat "${APEX_SYSFS_BLOCK:-/nonexistent}/$base/loop/backing_file" 2>/dev/null \
              || echo unknown)
-    log "nvram: $1 is loop-backed ($backing) — masking /sys/firmware/efi/efivars in the install container"
-    note "Loopback target: this machine's UEFI boot entries are masked off and will not be touched."
+    log "nvram: $1 is loop-backed ($backing) — bootc --generic-image, plus a tmpfs over /sys/firmware/efi/efivars"
+    note "Loopback target: the firmware step is skipped and this machine's UEFI boot entries will not be touched."
   else
-    log "nvram: $1 is a real block device — the install container sees the firmware, as a real install must"
+    log "nvram: $1 is a real block device — bootc writes a boot entry, as a real install must"
   fi
 }
 
@@ -607,6 +631,178 @@ console_keymap_for() {  # $1=xkb layout(s)  $2=xkb variant  $3=deploy dir or ""
   [ -n "$hit" ] || hit=us
   printf '%s\n' "$hit"
   return 0
+}
+
+# ── Can the owner actually TYPE their passphrase at that prompt? ────────────
+#
+# The passphrase validation above restricts the passphrase to printable ASCII,
+# and the comment there used to say "every printable ASCII character is
+# reachable on every kbd keymap". MEASURED 2026-09-20, against the keymap tree
+# the image ships, and it is FALSE:
+#
+#   keymap        ASCII letters reachable anywhere in the table
+#   us de fr      yes
+#   bg_bds-utf8   yes  (Cyrillic is on a second group; Latin is the base plane)
+#   gr ua         yes  (same shape)
+#   jp106         yes  (inherited through `include "qwerty-layout"`)
+#   il            yes, but capitals are on Shift and lowercase on the CapsLock
+#                 plane — hard, not impossible
+#   ru ara fa     NO. Not one Latin letter anywhere in the table.
+#
+# So a Russian, Arabic or Persian owner chooses an ASCII passphrase the
+# installer accepts, the machine loads their layout at the unlock prompt, and
+# not one letter of that passphrase can be produced. That is L-002's stranding
+# case exactly, with the recovery key as the only way back in.
+#
+# The fix is not to refuse their passphrase — no ASCII passphrase would ever
+# pass — and not to refuse their layout. It is to load `us` AT THE UNLOCK
+# PROMPT ONLY, and say so. The installed system keeps their layout: the karg is
+# omitted entirely when the unlock keymap is `us` (see the LUKS_KARGS block),
+# so the initramfs falls back to the kernel's built-in US table and the booted
+# system reads its own /etc/vconsole.conf, which still names their choice.
+#
+# These three functions are extracted and exercised by
+# installer/test-installer-luks.sh against the real keymap tree.
+
+_keymap_cat() {  # $1=file — its text, gzipped or not
+  case "$1" in
+    *.gz) zcat "$1" 2>/dev/null ;;
+    *)    cat "$1" 2>/dev/null ;;
+  esac
+}
+
+# _keymap_text TREE FILE DEPTH — the keymap's own text plus, recursively, the
+# text of everything it `include`s. The includes are not optional detail:
+# jp106 has no Latin letters of its own and gets all of them from
+# `include "qwerty-layout"`, so a parser that stopped at the top file would
+# condemn every Japanese keyboard.
+_keymap_text() {
+  local tree="$1" f="$2" d="${3:-3}" txt inc p
+  [ -r "$f" ] || return 0
+  txt=$(_keymap_cat "$f")
+  [ -n "$txt" ] || return 0
+  printf '%s\n' "$txt"
+  [ "${d:-0}" -le 0 ] && return 0
+  printf '%s\n' "$txt" \
+    | sed -n 's/^[[:space:]]*include[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | while read -r inc; do
+        inc=${inc##*/}
+        inc=${inc%.gz}
+        p=$(find "$tree" -type f \
+              \( -name "$inc" -o -name "$inc.gz" \
+              -o -name "$inc.inc" -o -name "$inc.inc.gz" \
+              -o -name "$inc.map" -o -name "$inc.map.gz" \) 2>/dev/null \
+            | sort | head -1)
+        [ -n "$p" ] && [ "$p" != "$f" ] && _keymap_text "$tree" "$p" $((d - 1))
+      done
+}
+
+# keymap_ascii_set TREE NAME — every printable-ASCII character the named
+# console keymap can produce, in any plane, as one string. Empty output means
+# the question could not be answered, which is NOT the same as "none".
+keymap_ascii_set() {
+  local tree="$1" name="$2" f raw
+  # An absolute path is taken as the keymap FILE itself. The engine never uses
+  # that form — it has a name — but the suite sweeps all 562 keymaps in the
+  # tree, and one `find` over the whole tree per keymap turned a check into a
+  # coffee break.
+  case "$name" in
+    /*) f="$name" ;;
+    *)  f=$(find "$tree/xkb" "$tree/legacy/i386" "$tree/i386" -type f \
+              \( -name "$name.map" -o -name "$name.map.gz" \) 2>/dev/null | head -1) ;;
+  esac
+  [ -n "$f" ] || return 1
+  raw=$(_keymap_text "$tree" "$f" 3)
+  [ -n "$raw" ] || return 1
+  # The characters are produced INSIDE awk, with a hand-built hex table and
+  # `printf "%c"`. The obvious route — emit hex, convert with
+  # `printf '%b' '\xNN'` — was written first and is WRONG: this bash drops the
+  # `\x` and leaves the digits, so `us` came back as a set of hex characters
+  # containing no letters and every keymap on the machine was declared
+  # untypeable. gawk's strtonum() is avoided for the opposite reason: it is not
+  # in POSIX awk and the live environment's awk is not guaranteed to be gawk.
+  printf '%s\n' "$raw" | awk '
+      BEGIN {
+          for (i = 0; i < 16; i++) {
+              H[substr("0123456789", i + 1, 1)] = i
+              H[substr("abcdef", i - 9, 1)] = i
+              H[substr("ABCDEF", i - 9, 1)] = i
+          }
+          # The two subtrees spell the same thing three ways. xkb-converted maps
+          # use +U+0031; the legacy maps use X keysym NAMES — one, exclam,
+          # slash. Without this table every legacy map looked as though it had
+          # no digits and no punctuation, and bg_bds-utf8, gr, ua and jp106
+          # were all wrongly condemned: their LETTERS are single characters and
+          # survived, their DIGITS are names and did not.
+          #
+          # The characters are built from their code points rather than written
+          # out, because this whole program is inside a single-quoted shell
+          # string and an apostrophe in it ends the program. That is not a
+          # hypothetical: the first version of this table had one.
+          nd = split("one two three four five six seven eight nine zero", D, " ")
+          for (i = 1; i <= nd; i++) N[D[i]] = (i % 10)
+          nm = split("space 32 exclam 33 quotedbl 34 numbersign 35 dollar 36 " \
+                     "percent 37 ampersand 38 apostrophe 39 parenleft 40 " \
+                     "parenright 41 asterisk 42 plus 43 comma 44 minus 45 " \
+                     "period 46 slash 47 colon 58 semicolon 59 less 60 " \
+                     "equal 61 greater 62 question 63 at 64 bracketleft 91 " \
+                     "backslash 92 bracketright 93 asciicircum 94 " \
+                     "underscore 95 grave 96 braceleft 123 bar 124 " \
+                     "braceright 125 asciitilde 126", NM, " ")
+          for (i = 1; i < nm; i += 2) N[NM[i]] = sprintf("%c", NM[i + 1] + 0)
+      }
+      # NOT anchored to the start of the line. Half the xkb-converted maps
+      # write every plane on its own line with the modifiers in front —
+      # `plain keycode 2 = U+0031`, `shift keycode 2 = U+0021` — and an
+      # anchored pattern skipped all of them. Measured: with the anchor, the
+      # Finnish map appeared to have no `1`, no `7` and no `e`, and `fi` was
+      # reported as a keyboard that cannot type a Latin passphrase.
+      /keycode[[:space:]]+[0-9]+[[:space:]]*=/ {
+          sub(/^[^=]*=/, "")
+          n = split($0, a, /[ \t]+/)
+          for (i = 1; i <= n; i++) {
+              s = a[i]; sub(/^\+/, "", s)
+              if (s ~ /^U\+00[0-9a-fA-F][0-9a-fA-F]$/) {
+                  d = H[substr(s, 5, 1)] * 16 + H[substr(s, 6, 1)]
+                  if (d >= 32 && d <= 126) printf "%c", d
+              } else if (length(s) == 1) {
+                  printf "%s", s
+              } else if (s in N) {
+                  printf "%s", N[s]
+              }
+          }
+      }'
+}
+
+# keymap_can_type PASSPHRASE TREE NAME — prints `yes`, `unknown`, or
+# `no:<the characters it cannot produce>`.
+#
+# `unknown` is a third answer and not a polite `no`: a keymap this parser did
+# not understand must leave the existing behaviour alone. Condemning a layout
+# on a parse failure would silently move a working machine to `us`.
+keymap_can_type() {
+  local pass="$1" tree="$2" name="$3" set c i
+  set=$(keymap_ascii_set "$tree" "$name" 2>/dev/null) || { printf 'unknown'; return 0; }
+  [ -n "$set" ] || { printf 'unknown'; return 0; }
+  # A table that yielded a handful of characters is a table that was not read,
+  # not a keyboard with six keys. Even the most Cyrillic map has digits and
+  # punctuation: `ru` yields 0 letters but 20-odd other printable characters.
+  [ "${#set}" -ge 10 ] || { printf 'unknown'; return 0; }
+  local missing=""
+  i=0
+  while [ "$i" -lt "${#pass}" ]; do
+    c=${pass:$i:1}
+    case "$set" in
+      *"$c"*) : ;;
+      *)      case "$missing" in *"$c"*) : ;; *) missing="$missing$c" ;; esac ;;
+    esac
+    i=$((i + 1))
+  done
+  # The characters are named, not just counted. "your keyboard cannot type this
+  # passphrase" is a sentence the owner cannot act on; "it cannot type x or q"
+  # is.
+  [ -n "$missing" ] && { printf 'no:%s' "$missing"; return 0; }
+  printf 'yes'
 }
 
 # ── shared post-install: locale + keyboard layout in the target ──────────────
@@ -1015,6 +1211,7 @@ answers file carrying encrypt=yes and lukspass=." ;;
     ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
     ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
     bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
+      ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
       --karg quiet --karg splash ${EXTRA_KARGS[@]+"${EXTRA_KARGS[@]}"} \
       ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
       "$DISK" 2>&1 | tee -a "$LOG"
@@ -1222,8 +1419,14 @@ encryption off to install into this partition unencrypted."
   # keymap, no input method, no compose key and no dead keys. A passphrase
   # containing a character the console keymap cannot produce is a passphrase
   # the owner cannot type on their own machine, at the one prompt that has no
-  # way back. Every printable ASCII character is reachable on every kbd keymap;
-  # nothing outside that set is.
+  # way back. Nothing outside printable ASCII is reachable on a kbd keymap at
+  # all — no accents, no input method, no compose key.
+  #
+  # What is NOT true, and the old version of this comment claimed it was, is
+  # that every printable ASCII character is reachable on every kbd keymap.
+  # `ru`, `ara` and `fa` carry no Latin letter anywhere in their tables.
+  # keymap_can_type() handles that case; see its header. The restriction here
+  # stands on its own either way.
   # `grep -v` on a HERE-STRING, deliberately, and not `printf … | grep -q`:
   # under `pipefail` a matching `grep -q` can return 141 (it exits before the
   # writer finishes, the writer takes SIGPIPE) and the `if` then reads a real
@@ -1328,6 +1531,29 @@ else
   # conversion and must not be run through one.
   CONSOLE_KEYMAP=$(sed -n 's/^KEYMAP=//p' /etc/vconsole.conf 2>/dev/null | tr -d '"' | head -1 || true)
   log "keyboard: no operator choice; carrying the live console keymap '${CONSOLE_KEYMAP:-us}'"
+fi
+
+# ── the keymap the UNLOCK PROMPT will use, which is not always theirs ───────
+# Decided here, with every disk still intact, so the decision can be shown to
+# the operator before anything is erased. See keymap_can_type().
+UNLOCK_KEYMAP="$CONSOLE_KEYMAP"
+if [ "${ENCRYPT:-no}" = yes ] && [ -n "$CONSOLE_KEYMAP" ] && [ "$CONSOLE_KEYMAP" != us ]; then
+  _kmverdict=$(keymap_can_type "$LUKSPASS" /usr/lib/kbd/keymaps "$CONSOLE_KEYMAP")
+  case "$_kmverdict" in
+    yes)
+      log "keyboard: console keymap '$CONSOLE_KEYMAP' can type this passphrase; the unlock prompt will use it" ;;
+    no:*)
+      UNLOCK_KEYMAP=us
+      _kmiss=${_kmverdict#no:}
+      log "keyboard: console keymap '$CONSOLE_KEYMAP' cannot produce [$_kmiss] anywhere in its table — the unlock prompt will use 'us' instead"
+      note "Your keyboard layout cannot type this passphrase at the disk-unlock screen."
+      note "  The characters it has no key for at all: $_kmiss"
+      note "  That ONE screen will use the US layout, so every character of the"
+      note "  passphrase you just chose has a key. The login screen, the desktop and"
+      note "  the console all keep your own layout." ;;
+    *)
+      log "keyboard: could not read keymap '$CONSOLE_KEYMAP' to check the passphrase is typeable; leaving the unlock prompt on it" ;;
+  esac
 fi
 
 printf '%s' "$USERNAME" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' \
@@ -1765,6 +1991,7 @@ if [ "$INSTALL_MODE" = partition ]; then
       ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
       bootc install to-filesystem \
         --skip-fetch-check --acknowledge-destructive \
+        ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
         --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
         "$TROOT" 2>&1 | tee -a "$LOG"
     rc=${PIPESTATUS[0]}
@@ -1983,8 +2210,8 @@ elif [ "$ENCRYPT" = yes ]; then
     if [ "$LUKS_TPM_TOKEN" = 1 ]; then
       LUKS_KARGS+=(--karg "rd.luks.options=$LUKS_UUID=tpm2-device=auto")
     fi
-    if [ -n "$CONSOLE_KEYMAP" ] && [ "$CONSOLE_KEYMAP" != us ]; then
-      LUKS_KARGS+=(--karg "rd.vconsole.keymap=$CONSOLE_KEYMAP" --karg "vconsole.keymap=$CONSOLE_KEYMAP")
+    if [ -n "${UNLOCK_KEYMAP:-}" ] && [ "${UNLOCK_KEYMAP:-}" != us ]; then
+      LUKS_KARGS+=(--karg "rd.vconsole.keymap=$UNLOCK_KEYMAP" --karg "vconsole.keymap=$UNLOCK_KEYMAP")
     fi
     BOOT_UUID=$(blkid -s UUID -o value "$BOOT_PART" 2>>"$LOG" || true)
     if [ -n "$BOOT_UUID" ]; then
@@ -1999,6 +2226,7 @@ elif [ "$ENCRYPT" = yes ]; then
       ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
       bootc install to-filesystem \
         --skip-fetch-check --acknowledge-destructive \
+        ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
         --karg quiet --karg splash "${LUKS_KARGS[@]}" \
         ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
         "$TROOT" 2>&1 | tee -a "$LOG"
@@ -2031,10 +2259,10 @@ elif [ "$ENCRYPT" = yes ]; then
   #
   # Same `us` rule as the karg: a machine that lands on exactly `us` gets no
   # channel at all, so `localectl set-keymap` later is not fighting a file.
-  if [ "${rc:-0}" = 0 ] && [ -n "$CONSOLE_KEYMAP" ] && [ "$CONSOLE_KEYMAP" != us ]; then
+  if [ "${rc:-0}" = 0 ] && [ -n "${UNLOCK_KEYMAP:-}" ] && [ "${UNLOCK_KEYMAP:-}" != us ]; then
     if mkdir -p "$TROOT/boot/efi/loader/credentials" 2>>"$LOG" \
-       && printf '%s' "$CONSOLE_KEYMAP" > "$TROOT/boot/efi/loader/credentials/vconsole.keymap.cred" 2>>"$LOG"; then
-      log "luks: wrote ESP credential loader/credentials/vconsole.keymap.cred = $CONSOLE_KEYMAP"
+       && printf '%s' "$UNLOCK_KEYMAP" > "$TROOT/boot/efi/loader/credentials/vconsole.keymap.cred" 2>>"$LOG"; then
+      log "luks: wrote ESP credential loader/credentials/vconsole.keymap.cred = $UNLOCK_KEYMAP"
     else
       # NOT fatal, and the log says which half is missing. The karg above is
       # what this machine boots with today; the credential is for a bootloader
@@ -2089,6 +2317,7 @@ else
     ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
     ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
     bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
+      ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
       --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
       "$DISK" 2>&1 | tee -a "$LOG"
   rc=${PIPESTATUS[0]}
