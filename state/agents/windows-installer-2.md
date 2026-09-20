@@ -55,6 +55,12 @@ text, 14 unit tests that run on Linux), `src/main.rs` gains `survey` and
    that the outer shell runs. `bash -n` does **not** catch it: the result is
    still valid syntax.
 7. `File::metadata().len()` is 0 on a `\\.\PhysicalDriveN` handle.
+8. Do not edit a bash script while it is running. bash reads a script in
+   chunks and seeks by byte offset, so rewriting the file shifts everything
+   under it: a 30-minute suite run finished every assertion and then died on
+   `syntax error near unexpected token` in its own summary line.
+9. `--swap` in `winlab run` must change AHCI PORTS. Reordering `-device`
+   arguments changes nothing Windows can see.
 
 ## NEXT
 
