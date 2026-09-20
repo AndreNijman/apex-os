@@ -232,6 +232,10 @@ cmd_golden() {
             printf "label: gpt\nsize=60MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=APEXLAB\n" |
                 sfdisk /w/transport.raw >/dev/null 2>&1
             mformat -i /w/transport.raw@@1048576 -F -v APEXLAB ::
+            # The agent rides in on the transport, not on the install CD: the
+            # CD is detached after the first Setup phase and a copy from it
+            # silently finds nothing.
+            mcopy -i /w/transport.raw@@1048576 /lab/apexlab-agent.ps1 ::/
         }
 
         phase=1
@@ -257,6 +261,11 @@ cmd_golden() {
             phase=$((phase+1))
         done
 
+        marker="$(mtype -i /w/transport.raw@@1048576 ::/golden.txt 2>/dev/null | tr -d "\r\n")"
+        case "$marker" in
+            GOLDEN-READY) echo "golden marker: $marker" ;;
+            *) echo "FATAL: golden marker is \"$marker\", not GOLDEN-READY" >&2; exit 1 ;;
+        esac
         mdir -i /w/transport.raw@@1048576 ::/golden.txt >/dev/null 2>&1 || {
             echo "FATAL: Setup never produced the completion marker" >&2
             echo "--- partitions the guest left on the system disk ---" >&2
@@ -319,13 +328,18 @@ cmd_fixtures() {
             rm -f "$1"; qemu-img create -f raw "$1" "$2" >/dev/null
             printf "%s" "$3" | sfdisk "$1" >/dev/null
         }
-        mk /w/fixture-a.raw 1600M "label: gpt
-size=512MiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"APEX-TARGET-A\"
-size=256MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=\"Windows data\"
-size=256MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=\"Blank basic\"
+        # The partitions are 17 GiB because the installer refuses anything
+        # under 16 decimal GB, which is the number installer/apex-install
+        # refuses too. Fixtures small enough to be convenient would have
+        # exercised every rule except the one that fires in real life. The
+        # images are sparse: 17 GiB of zeroes costs no disk.
+        mk /w/fixture-a.raw 36G "label: gpt
+size=17GiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"APEX-TARGET-A\"
+size=1GiB,  type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=\"Windows data\"
+size=17GiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=\"Blank basic\"
 "
-        mk /w/fixture-b.raw 1024M "label: gpt
-size=768MiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"APEX-TARGET-B\"
+        mk /w/fixture-b.raw 18G "label: gpt
+size=17GiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"APEX-TARGET-B\"
 "
         # Partition 2 gets a real NTFS filesystem. Offsets come from sfdisk
         # rather than arithmetic, so a layout change cannot silently format the

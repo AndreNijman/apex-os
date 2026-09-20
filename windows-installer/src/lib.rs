@@ -1,4 +1,14 @@
-//! Read-only image laboratory. No raw-device or installation capability.
+//! GPT enumeration and all-bytes content inspection, plus — on Windows — the
+//! storage, ownership and locking layer the installer is built on.
+//!
+//! The GPT reader here is deliberately the *only* GPT reader: on Windows it is
+//! pointed at `\\.\PhysicalDriveN` and its answer is compared against what
+//! Windows itself reports through `IOCTL_DISK_GET_DRIVE_LAYOUT_EX`. Two
+//! independent sources that have to agree is worth more than either alone.
+pub mod plan;
+#[cfg(windows)]
+pub mod windows;
+
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path};
@@ -61,13 +71,13 @@ pub fn open_image(path: &Path) -> io::Result<File> {
     if !f.metadata()?.is_file() { return Err(refuse("opened handle is not a regular file")); }
     Ok(f)
 }
-fn at(f: &mut File, offset: u64, size: usize) -> io::Result<Vec<u8>> {
+fn at<R: Read + Seek>(f: &mut R, offset: u64, size: usize) -> io::Result<Vec<u8>> {
     f.seek(SeekFrom::Start(offset))?;
     let mut b = vec![0;size];
     f.read_exact(&mut b)?;
     Ok(b)
 }
-fn header(f: &mut File, lba: u64, alternate: u64) -> io::Result<Vec<u8>> {
+fn header<R: Read + Seek>(f: &mut R, lba: u64, alternate: u64) -> io::Result<Vec<u8>> {
     let h = at(f, lba * 512, 512)?;
     if &h[..8] != b"EFI PART" || u32le(&h[8..]) != 0x10000 || u32le(&h[12..]) != 92
         || u32le(&h[20..]) != 0 || u64le(&h[24..]) != lba || u64le(&h[32..]) != alternate {
@@ -82,6 +92,17 @@ fn header(f: &mut File, lba: u64, alternate: u64) -> io::Result<Vec<u8>> {
 /// entries, mirrored tables. Unsupported layouts are refused, not guessed.
 pub fn enumerate(f: &mut File) -> io::Result<Layout> {
     let len = f.metadata()?.len();
+    enumerate_in(f, len)
+}
+/// The same enumeration against anything seekable, with the length supplied
+/// rather than asked of the object.
+///
+/// This split is not tidiness. `File::metadata().len()` answers **0** for a
+/// handle on `\\.\PhysicalDriveN`, so a reader that asks the handle how big
+/// it is decides every physical disk is too small to hold a GPT and refuses
+/// the machine it was pointed at. On Windows the length comes from
+/// `IOCTL_DISK_GET_LENGTH_INFO` instead.
+pub fn enumerate_in<R: Read + Seek>(f: &mut R, len: u64) -> io::Result<Layout> {
     if len < 68 * 512 || len % 512 != 0 { return Err(refuse("invalid image length")); }
     let last = len / 512 - 1;
     let mbr = at(f, 0, 512)?;

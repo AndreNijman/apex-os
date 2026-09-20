@@ -17,11 +17,17 @@
   Windows left over. Sizing it generously here would have hidden the single most
   important fact the lab exists to measure.
 
-  There is no AutoLogon and no FirstLogonCommands-driven agent. The lab agent is
-  registered as an ON-START scheduled task running as SYSTEM, because a headless
-  guest that depends on a logon session has one more thing that can silently not
-  happen. FirstLogonCommands run exactly once and that once is consumed making
-  the golden image, so anything durable must not live there.
+  AutoLogon exists for exactly one logon and then Windows disables it again,
+  because FirstLogonCommands only run at an interactive logon and Server Core
+  has nobody to perform one. Everything after the golden image is made runs
+  from an ON-START scheduled task as SYSTEM, with no logon session at all: a
+  headless guest that depends on a session has one more thing that can silently
+  not happen. FirstLogonCommands also run exactly once, and that once is spent
+  making the golden image, so nothing durable may live in them.
+
+  PowerShell here is 5.1, which is what Server 2022 ships. No ternary operator,
+  no `??`, no `-Parallel`. The syntax that works in a modern terminal is not
+  the syntax that runs in this guest.
 -->
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
 
@@ -146,8 +152,17 @@
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>2</Order>
-          <CommandLine>cmd /c for %d in (D E F G H I J) do @if exist %d:\apexlab-agent.ps1 copy /y %d:\apexlab-agent.ps1 C:\apexlab\agent.ps1</CommandLine>
-          <Description>copy the lab agent off the install media</Description>
+          <!-- The agent is fetched from the APEXLAB transport volume, by
+               LABEL, not from the install media and not by walking drive
+               letters. Both of the obvious alternatives were wrong: the
+               install CD is detached after Setup's first phase, so a copy
+               from it finds nothing and leaves a scheduled task pointing at a
+               script that does not exist — a golden image that boots
+               perfectly and then does nothing at all, with no error anywhere.
+               A drive-letter loop has the same failure whenever the letters
+               land somewhere the loop did not guess. -->
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'APEXLAB' -and $_.DriveLetter }; if ($v) { Copy-Item -Force ($v[0].DriveLetter + ':\apexlab-agent.ps1') 'C:\apexlab\agent.ps1' }"</CommandLine>
+          <Description>copy the lab agent off the APEXLAB transport volume</Description>
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
           <Order>3</Order>
@@ -161,7 +176,7 @@
                boots; reading it out of NTFS would mean parsing NTFS from the
                host to answer "did Setup finish", which is a lot of machinery
                for a yes/no. -->
-          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'APEXLAB' -and $_.DriveLetter }; if ($v) { Set-Content -Path ($v[0].DriveLetter + ':\golden.txt') -Value 'GOLDEN-READY' }"</CommandLine>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$v = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'APEXLAB' -and $_.DriveLetter }; if ($v) { Set-Content -Path ($v[0].DriveLetter + ':\golden.txt') -Value $(if (Test-Path 'C:\apexlab\agent.ps1') { 'GOLDEN-READY' } else { 'GOLDEN-BROKEN-NO-AGENT' }) }"</CommandLine>
           <Description>mark the golden image complete</Description>
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
