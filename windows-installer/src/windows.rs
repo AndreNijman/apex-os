@@ -413,8 +413,13 @@ pub fn layout(dev: &Device) -> io::Result<(String, Vec<WinPartition>)> {
         if e[32..48].iter().all(|v| *v == 0) {
             continue;
         }
+        // Name is WCHAR[36] at offset 72: 32 (union start) + 16 (type GUID)
+        // + 16 (partition GUID) + 8 (attributes). Reading it from 104 — one
+        // GUID too far in — produced "tion" for "EFI system partition" on a
+        // real Windows disk, which is a plausible-looking string and exactly
+        // the failure mode a byte-offset parser has.
         let name_u16: Vec<u16> =
-            e[104..144].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            e[72..144].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         out.push(WinPartition {
             number: u32at(e, 24),
             offset: u64at(e, 8),
@@ -557,7 +562,7 @@ impl Volume {
         let fs = if self.filesystem.is_empty() { "unrecognised filesystem".to_string() } else { self.filesystem.clone() };
         let label =
             if self.label.is_empty() { String::new() } else { format!(", label {:?}", self.label) };
-        format!("{} — {}{}, volume {}", where_, fs, label, self.name)
+        format!("{} -- {}{}, volume {}", where_, fs, label, self.name)
     }
 }
 

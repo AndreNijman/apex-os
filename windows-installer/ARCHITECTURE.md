@@ -112,6 +112,32 @@ A stock Windows ESP is **100 MB**. That is not a guess: it is what Windows Setup
 creates, and `lab/autounattend.xml` deliberately asks for exactly that so the
 lab measures the real constraint rather than a comfortable one.
 
+### The number, measured rather than quoted
+
+Taken from inside a real Windows Server 2022 guest in `windows-installer/lab/`,
+by mounting the ESP and asking Windows how much of it is left:
+
+```
+esp-total-bytes: 100663296     96.0 MiB
+esp-used-bytes :  29087744     27.7 MiB   EFI/Microsoft/Boot + EFI/Boot
+esp-free-bytes :  71575552     68.3 MiB
+```
+
+Almost all of the 27.7 MiB Windows uses is `EFI/Microsoft/Boot` — `bootmgfw.efi`
+plus 33 language directories of `.mui` files and 16 boot fonts. That is the
+floor on a clean install with nothing else on the machine; a real laptop with a
+vendor diagnostic partition entry or a second Linux will have less.
+
+So, against the two paths:
+
+| path | needs | fits in 68.3 MiB? |
+| --- | --- | --- |
+| ostree + GRUB | 7.47 MiB | **yes**, with 60 MiB to spare |
+| systemd-boot + composefs | ~1.1 GiB | **no**, short by a factor of 16 |
+
+One deployment alone on the composefs path is 374 MiB — still five times the
+whole free space. There is no version of this that fits.
+
 `docs/boot-v2.md:58` already records that even an **APEX** machine's ESP is too
 small for the composefs path — 600 MiB on the L16 against the ~1.1 GiB needed.
 A 100 MB Windows ESP is not close.

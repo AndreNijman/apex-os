@@ -211,7 +211,12 @@ else
             bad "guest: $1 (no line matching $2)"; fi
     }
     assert_guest "the survey reached its own conclusion" 'survey-complete'
-    assert_guest "the on-disk GPT and Windows' table agreed on every disk" 'the on-disk GPT and Windows. partition table AGREE'
+    assert_guest "the on-disk GPT and Windows' table agreed on every disk" 'partition table AGREE'
+    if grep -q 'DISAGREE' "$guest_log"; then
+        bad "guest: at least one disk's two partition-table readings disagreed"
+    else
+        ok "guest: no disk had disagreeing partition-table readings"
+    fi
     assert_guest "the EFI system partition was refused as a protected type" 'REFUSED \(protected partition type\)'
     assert_guest "a partition Windows has mounted was refused, and the mount named" \
                  'REFUSED \(in use by Windows\).*mounted at'

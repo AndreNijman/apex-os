@@ -253,7 +253,7 @@ pub fn confirmation_text(
     };
     let name = if p.name.is_empty() { "(unnamed)".to_string() } else { format!("{:?}", p.name) };
     format!(
-        "ERASE AND INSTALL — read this before continuing.\n\
+        "ERASE AND INSTALL -- read this before continuing.\n\
          \n\
          APEX will be written to ONE partition:\n\
          \n\
@@ -437,6 +437,38 @@ mod tests {
             without.contains("every byte was checked"),
             "an absent label must be stated as checked, not merely omitted:\n{without}"
         );
+    }
+
+    #[test]
+    fn everything_this_program_prints_is_ascii() {
+        // A fresh Windows Server console is not UTF-8. The first guest run
+        // rendered every em dash in this program's output as "???", which
+        // turned readable sentences into noise and broke the harness's own
+        // assertions at the same time. ASCII is not a style preference here;
+        // it is the character set the target machine can display.
+        let mut texts = vec![confirmation_text(
+            &disk(),
+            &part(LINUX_FILESYSTEM, BIG, 0),
+            Some("DATA"),
+            BIG,
+        )];
+        for t in [LINUX_FILESYSTEM, WINDOWS_BASIC_DATA, EFI_SYSTEM, MICROSOFT_RESERVED,
+                  WINDOWS_RECOVERY, "00000000-0000-0000-0000-000000000000"] {
+            if let Verdict::Refused(r) = assess(&part(t, 1024, 1), &[]) {
+                texts.push(r.to_string());
+            }
+            texts.push(type_name(t).to_string());
+        }
+        if let Verdict::Refused(r) = assess(&part(LINUX_FILESYSTEM, BIG, 0),
+                                            &[Claim { what: "mounted at C:\\".into() }]) {
+            texts.push(r.to_string());
+        }
+        texts.push(cross_check(&[part(LINUX_FILESYSTEM, BIG, 0)], &[]).unwrap_err());
+        for t in texts {
+            if let Some(c) = t.chars().find(|c| !c.is_ascii()) {
+                panic!("non-ASCII {c:?} in text shown to a Windows console:\n{t}");
+            }
+        }
     }
 
     #[test]
