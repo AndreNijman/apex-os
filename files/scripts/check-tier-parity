@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Assert that apexd's power tiers and APEX Shell's picker agree.
+
+WHY THIS EXISTS
+
+`apexd-core/src/tier.rs` opens by stating the contract in words:
+
+    The three tier IDs are the wire contract: they must match the strings the
+    D-Bus API and the apex-shell `PowerProfileService` use verbatim:
+    `performance`, `balanced`, `power-saver`.
+
+Nothing enforced it. On 2026-09-20 Andre pointed at two buttons on the System
+page -- "Ultra-Max" and "Ultra Performance" -- and said they do nothing any
+more. He was right, and they had been dead for a whole release cycle: apexd
+removed the `ultra` and `ultra-max` tiers in the universal-hardware pass, and
+`apexd-core/tests/tier_plan.rs` asserts that neither string parses into a Tier.
+The shell kept offering both, so pressing one ran `apex tier ultra`, got a
+non-zero exit, and let the optimistic label snap back on the next poll.
+
+Each side was internally consistent and correct on its own terms. Only the
+join was wrong, which is why neither repository's tests caught it.
+
+Both directions are failures, and for different reasons:
+
+  * an ID the SHELL offers that apexd will not parse -- a button that can only
+    fail. This is the defect above.
+  * an ID apexd HAS that the shell does not offer -- a working tier nobody can
+    reach from the UI, which reads as a missing feature rather than a missing
+    control.
+
+Labels are checked too. `Tier::label()` says it "matches the shell's picker
+labels", and a label that drifts makes the two surfaces disagree in front of
+the user even when the IDs are fine.
+
+USAGE
+
+    check-tier-parity [--tier-rs PATH] [--service PATH]
+
+Defaults to this repository's tier.rs and a sibling apex-shell checkout. Exits
+0 when they agree, 1 when they do not, and 77 (skip) when the shell checkout
+cannot be found -- CI for apex-os alone must not fail because the other
+repository is not present.
+"""
+
+import argparse
+import os
+import re
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+OS_ROOT = os.path.dirname(os.path.dirname(HERE))
+DEFAULT_TIER_RS = os.path.join(OS_ROOT, "apexd/apexd-core/src/tier.rs")
+DEFAULT_SERVICE = os.path.join(
+    os.path.dirname(OS_ROOT),
+    "apex-shell/src/services/system/PowerProfileService.qml",
+)
+
+
+def parse_tier_rs(path):
+    """Return [(id, label)] in declaration order, from the two match blocks.
+
+    Read from as_str() and label() rather than from the enum, because those are
+    the functions that actually produce the wire string and the picker label.
+    """
+    src = open(path, encoding="utf-8").read()
+
+    def arms(fn_name):
+        # The body of `pub const fn <fn_name>(self) -> &'static str { match ... }`
+        m = re.search(
+            r"fn\s+" + re.escape(fn_name) + r"\s*\(self\)[^{]*\{(.*?)\n    \}",
+            src,
+            re.S,
+        )
+        if not m:
+            raise SystemExit(f"FAIL  {path}: no {fn_name}() match block found")
+        return dict(re.findall(r"Tier::(\w+)\s*=>\s*\"([^\"]+)\"", m.group(1)))
+
+    ids = arms("as_str")
+    labels = arms("label")
+
+    if not ids:
+        raise SystemExit(f"FAIL  {path}: as_str() yielded no tiers")
+    missing = set(ids) - set(labels)
+    if missing:
+        raise SystemExit(
+            "FAIL  {}: variants with an ID but no label: {}".format(
+                path, ", ".join(sorted(missing))
+            )
+        )
+
+    # Declaration order of the enum is the canonical high->low ladder.
+    order = re.findall(r"^\s*Tier::(\w+),", src, re.M)
+    seen, ladder = set(), []
+    for v in order:
+        if v in ids and v not in seen:
+            seen.add(v)
+            ladder.append(v)
+    for v in ids:  # anything ALL did not mention, so nothing is silently dropped
+        if v not in seen:
+            ladder.append(v)
+    return [(ids[v], labels[v]) for v in ladder]
+
+
+def parse_service_qml(path):
+    """Return [(id, label)] in list order from the `profiles:` array."""
+    src = open(path, encoding="utf-8").read()
+    m = re.search(r"readonly\s+property\s+var\s+profiles\s*:\s*\[(.*?)\n    \]", src, re.S)
+    if not m:
+        raise SystemExit(f"FAIL  {path}: no `profiles:` array found")
+    body = m.group(1)
+    # Strip comments so a commented-out entry is not read as a live one.
+    body = re.sub(r"//[^\n]*", "", body)
+    entries = re.findall(
+        r"\{\s*\"id\"\s*:\s*\"([^\"]+)\"\s*,\s*\"label\"\s*:\s*\"([^\"]+)\"\s*\}", body
+    )
+    if not entries:
+        raise SystemExit(f"FAIL  {path}: `profiles:` array parsed to nothing")
+    return entries
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tier-rs", default=DEFAULT_TIER_RS)
+    ap.add_argument("--service", default=DEFAULT_SERVICE)
+    args = ap.parse_args()
+
+    if not os.path.exists(args.tier_rs):
+        print(f"FAIL  apexd tier source not found: {args.tier_rs}")
+        return 1
+    if not os.path.exists(args.service):
+        print(f"SKIP  apex-shell checkout not found: {args.service}")
+        return 77
+
+    daemon = parse_tier_rs(args.tier_rs)
+    shell = parse_service_qml(args.service)
+    d_ids = [i for i, _ in daemon]
+    s_ids = [i for i, _ in shell]
+    d_label = dict(daemon)
+    s_label = dict(shell)
+
+    print(f"      apexd  : {', '.join(d_ids)}")
+    print(f"      shell  : {', '.join(s_ids)}")
+
+    fails = 0
+
+    for i in s_ids:
+        if i not in d_label:
+            print(f"FAIL  the shell offers '{i}', which apexd will not parse — that button can only fail")
+            fails += 1
+
+    for i in d_ids:
+        if i not in s_label:
+            print(f"FAIL  apexd has tier '{i}' and the shell offers no control for it — unreachable")
+            fails += 1
+
+    for i in s_ids:
+        if i in d_label and d_label[i] != s_label[i]:
+            print(f"FAIL  label for '{i}' differs: apexd {d_label[i]!r} vs shell {s_label[i]!r}")
+            fails += 1
+
+    if d_ids != s_ids:
+        print(f"FAIL  order differs: apexd {d_ids} vs shell {s_ids} — the picker is a high→low ladder")
+        fails += 1
+
+    if fails:
+        print(f"\ntier parity: {fails} disagreement(s)")
+        return 1
+    print(f"\ntier parity: {len(d_ids)} tiers, ids labels and order all agree")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
