@@ -177,7 +177,24 @@ present protect his interactive session rather than capping his builds:
 
 * `IOWeight=50` — the build yields disk bandwidth, not CPU.
 * `OOMScoreAdjust=300` — under memory pressure the **build** is killed, not his
-  desktop. Child processes inherit this, so it covers the container too.
+  desktop.
+
+Measured during the first real kernel build rather than assumed:
+
+```
+CPUQuotaPerSecUSec=infinity   MemoryMax=infinity   MemoryHigh=infinity
+AllowedCPUs=(empty, i.e. all)  IOWeight=50  OOMScoreAdjust=300
+
+pid 130012  adj=300  Runner.Listener
+pid 239413  adj=500  cc1          <- the compile inherits it and podman adds more
+pid 240009  adj=500  cc1
+pid 240024  adj=500  cc1
+18 cc1 processes on 20 cores; load average 20.6
+```
+
+Andre's own processes sit at the default `oom_score_adj=0`, so every one of
+these dies before anything of his does. That is the whole of the "protect his
+session" mechanism — there is no cap anywhere on how fast the build may go.
 
 `Containerfile.kernel`'s compile parallelism became a build ARG in the same
 branch: default stays 12 (the value it was measured at on a 29 GiB box), and CI
