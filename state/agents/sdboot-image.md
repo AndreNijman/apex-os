@@ -40,11 +40,11 @@
 
 | file | what |
 | --- | --- |
-| `files/system/selinux/apex_sdboot.te` | one-rule policy module: `bootupd_t` may enter through `init_exec_t` |
+| `files/system/selinux/apex_sdboot.te` | two-rule policy module: `bootupd_t` may enter through `init_exec_t` (the blessing) and `bin_t` (apex-boot-count) |
 | `files/system/selinux/verify-apex-sdboot.py` | reads the rule back out of the **binary** policy |
 | `files/system/units/10-apex-bless-boot-esp.conf` | `SELinuxContext=-…:bootupd_t:s0` on `systemd-bless-boot.service` |
 | `files/system/libexec/apex-boot-count` | renames the **staged** entry to `+3-0`, chosen by composefs digest |
-| `files/system/units/apex-boot-count.service` | `ExecStop`, `After=bootc-finalize-staged.service`, conditioned on `entries.srel` |
+| `files/system/units/apex-boot-count.service` | `ExecStop`, `After=bootc-finalize-staged.service`, conditioned on `entries.srel`, runs in `bootupd_t` |
 | `Containerfile.core` | `systemd-boot-unsigned`, `systemd-ukify`, `checkpolicy`, `python3-setools`; compiles + verifies the module |
 | `Containerfile.base` | ships the drop-in, helper and unit; cross-tier `semodule -l` assertion |
 | `files/system/libexec/apex-boot-health` | **bug fix**: `tail -c +5` cannot read efivarfs; `dd bs=1 skip=4` can |
@@ -63,6 +63,11 @@ being committed (`/var/lab-scratch/sdboot-image-agent/coretest/Containerfile`).
   fourth boot. Repaired at the policy level; **not yet proven in a boot.**
 * **`bootc` writes no boot counter**, so the health gate the image asserts is
   inert on a machine installed exactly as bootc leaves it.
+* **`apex-boot-count` would have hit the identical SELinux wall** — it renames
+  a `.conf` on the same FAT ESP from a `bin_t` helper, so PID 1 leaves it in
+  `init_t`. Found by reading the change, not by a boot. Same repair. The
+  failure modes differ and it matters: the blessing failing rolls a deployment
+  back; the counter failing just means no counter, which is the status quo.
 
 ## NEXT — for a stranger
 
