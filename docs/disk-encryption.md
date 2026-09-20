@@ -150,13 +150,47 @@ a command line handed to it by the boot loader when Secure Boot is on. So the
 sd-boot + UKIs.
 
 The replacement that needs no re-signing is a **system credential**:
-`systemd-vconsole-setup` reads `vconsole.keymap` as a credential, and both
+`systemd-vconsole-setup.service` carries `ImportCredential=vconsole.*`, and both
 `systemd-boot` (`\loader\credentials\*.cred`) and `systemd-stub`
 (`\EFI\Linux\<uki>.efi.extra.d\*.cred`) pass credentials from the ESP into the
-initrd. A **UKI addon** contributing a `.cmdline` section is the other
-candidate. Whichever the boot-path work settles on, the installer's side is one
-function — everything upstream of it (XKB → console keymap) is unchanged, and
-what has to be handed to the machine is a single string.
+initrd.
+
+**This is settled and built, and it took one measurement to find out that the
+obvious version of it does not work.**
+
+`systemd-vconsole-setup(8)`, about the `vconsole.keymap` credential: *"The
+matching options in vconsole.conf and on the kernel command line take
+precedence over these credentials."* APEX's image ships `/etc/vconsole.conf`
+with `KEYMAP=us`, and dracut's i18n module copies that file **into the
+initramfs**. So the credential arrives, loses to a baked-in `us`, and a `.cred`
+on the ESP on its own is **inert**. That is not a deduction from the manual: a
+guest was booted with the credential and nothing else, the credential is
+visible in its `/run/credentials/@system`, its `/etc/vconsole.conf` still says
+`KEYMAP=us`, and the unlock was refused.
+
+Three pieces make it work, and each is measured by
+`installer/test-installer-keymap-boot.sh`:
+
+| piece | file | what it does |
+| --- | --- | --- |
+| the credential on the ESP | `installer/apex-install` | writes `loader/credentials/vconsole.keymap.cred` on every encrypted install, alongside the karg. GRUB ignores it; a machine installed today needs no migration when the pivot happens |
+| the shim that makes it count | `files/dracut/apex-unlock-hint/apex-vconsole-credential` | runs `Before=systemd-vconsole-setup.service`, pulled in by `sysinit.target.wants`, and writes the credential's value into the **initramfs's own** `/etc/vconsole.conf` — a tmpfs, gone at switch-root. Nothing on disk is touched |
+| the precedence guard | the same script's first loop | a kernel command line that already sets `vconsole.keymap=` wins, and the shim says so and exits. Every machine installed before the pivot keeps working exactly as it does now |
+
+The `.wants` directory is load-bearing and `Containerfile.apex` asserts it by
+name. `systemd-vconsole-setup` is ordered `Before=sysinit.target`, so a unit
+pulled in by `initrd.target.wants` — which is where this module's other unit
+lives — would run long after the keymap it is trying to set had been loaded.
+That failure is completely silent; it shows up as an owner who cannot type
+their passphrase.
+
+A **UKI addon** contributing a `.cmdline` section remains the other candidate,
+and it is a better one in one respect: an addon is signed, and a `.cred` on the
+ESP of a machine without Secure Boot is writable by anyone who can reach the
+disk. The shim validates the credential as a keymap name for that reason and
+drops anything else. If `sdboot-image` settles on addons instead, the
+installer's side is one function and the shim becomes dead weight rather than
+wrong.
 
 ---
 
@@ -204,10 +238,19 @@ new recovery key, and `cryptsetup luksChangeKey` changes the passphrase.
 * **No TPM enrolment is exercised by the installer's own tests.** The installer
   calls the helper and checks what came back; whether a TPM keyslot is safe is
   `apex-luks-enroll`'s decision and `docs/boot-v2.md`'s evidence.
-* **Nothing has booted from an encrypted disk built this way.** The install is
-  tested end to end on a loopback file — both keys open the volume, the
-  bootloader entry carries the right UUIDs and keymap — but a VM boot that
-  types a passphrase at the real prompt belongs to
+* **A passphrase has been typed at a real unlock prompt; a disk this installer
+  produced has still never been booted.** Those are two different claims and
+  the difference matters.
+
+  `installer/test-installer-keymap-boot.sh` boots the shipped initramfs against
+  a real LUKS2 volume and types the passphrase on an emulated keyboard, so the
+  keymap property is measured as an owner experiences it: the same key
+  positions unlock the volume on `de` and are refused on `us`. What that guest
+  does **not** use is a disk this installer partitioned — it is a bare volume,
+  reached by a direct kernel boot with no firmware and no bootloader.
+
+  So the chain bootloader → initramfs → unlock → ostree pivot → login has not
+  been exercised on an installer-built disk. That boot belongs to
   `files/scripts/boot-v2/run-scenarios`, and is requested there.
 * **In-place encryption of an existing install is not offered**, and should not
   be: `cryptsetup reencrypt` on a live root is the single most dangerous thing
