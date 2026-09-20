@@ -131,7 +131,7 @@ Three verdicts, never a boolean, following `tests/chaos/lib.sh` and
 
 ## 4. How both directions were proven without reproducing the damage
 
-`tests/test-bootc-install-guard.sh`, **49 assertions, 0 failures**, wired into
+`tests/test-bootc-install-guard.sh`, **52 assertions, 0 failures**, wired into
 `pr-validation.yml`'s `static` job. `podman` and `efibootmgr` are stubs on
 `PATH`; the firmware root is a fixture tree behind `APEX_NVRAM_EFI_ROOT`. The
 assertion under test is about *launch arguments*, which need no launch.
@@ -146,7 +146,8 @@ assertion under test is about *launch arguments*, which need no launch.
 | the guard never writes NVRAM | every recorded `efibootmgr` argv is asserted to be exactly `-v` |
 | an unmeasurable run is not a pass | empty `efibootmgr` output → rc 4, and a marker file proves the command **did not run** |
 | a non-UEFI host is not a pass either | fixture root removed → command runs, its rc 7 is propagated, verdict `could-not-run`, and "verified" appears nowhere |
-| the repo scan works | planted fixtures **both ways** — the 2026-09-20 command shape is caught, the same command with the mask is not — before the repo's own clean verdict is believed |
+| the repo scan works | planted fixtures **three ways** — the 2026-09-20 command shape is caught, the same command with the mask is not, and a mask present only in a trailing comment is still caught — before the repo's own clean verdict is believed |
+| the repo scan is not vacuous | the file list is captured and asserted against a floor (842 files today), and `installer/apex-install` — a file that really holds a `bootc install` line — must be inside it. Proven by running the suite from a copy with no `.git`: two named failures where the old version printed a green scan |
 
 And the suite was proven to fail on a **real** regression, not only a copied
 one: deleting the mask line from the shipped `tests/lab/bootc-install-lab` in
@@ -154,12 +155,20 @@ the working tree turns the run red with seven named failures, headed by
 `the shipped wrapper has exactly one mask-injection line: want '1', got '0'`.
 The line was restored from git immediately afterwards.
 
-One trap paid for here: `awk` over every tracked file **aborts with a glibc
-malloc assertion** on `files/branding/plymouth/previews/preview-gold.gif` and
+Two traps paid for here. `git ls-files` can come back **empty** — CI checkout
+falls back to a tarball with no `.git`, which this repository has already been
+bitten by — and an empty list made the scan report *"no tracked file runs an
+unmasked `--via-loopback` install"* having read nothing at all. And `awk` over
+every tracked file **aborts with a glibc malloc assertion** on `files/branding/plymouth/previews/preview-gold.gif` and
 the wallpaper JPEG — and the aborted scan still printed *"no tracked file runs
 an unmasked `--via-loopback` install"*. Binary files are now skipped
-explicitly. A scanner that crashed on part of the tree and reported a clean
-result is this repository's signature defect, and it was live for one run.
+explicitly. A scanner that crashed on part of the tree — or read no tree at
+all — and reported a clean result is this repository's signature defect, and
+both versions of it were live in this suite for one run each.
+
+A third: the scan accepted a mask that existed only in a trailing comment, and
+exempted any line merely *mentioning* `bootc-install-lab`. Comments are cut
+before both tests now, and the useless exemption is gone.
 
 ## 5. The residual gap, stated rather than implied
 
