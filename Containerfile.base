@@ -1162,8 +1162,11 @@ RUN set -eux; \
     test -s /usr/lib/systemd/system/systemd-bless-boot.service.d/10-apex-bless-boot-esp.conf; \
     grep -q '^SELinuxContext=-system_u:system_r:bootupd_t:s0$' \
         /usr/lib/systemd/system/systemd-bless-boot.service.d/10-apex-bless-boot-esp.conf; \
-    : 'The leading dash is what keeps a machine that cannot set the context'; \
-    : 'booting instead of rolling back, so it is asserted, not trusted.'; \
+    : 'The leading dash makes a FAILURE TO SET the context non-fatal, which'; \
+    : 'covers SELinux disabled or a policy without bootupd_t. It does NOT'; \
+    : 'cover this module going missing on an enforcing machine: setexeccon'; \
+    : 'then succeeds and the kernel denies the execve. That case is what the'; \
+    : 'cross-tier semodule assertion below is for.'; \
     \
     : 'The drop-in is only half the repair: the transition it asks for needs'; \
     : 'the apex_sdboot policy module, which is COMPILED IN Containerfile.core'; \

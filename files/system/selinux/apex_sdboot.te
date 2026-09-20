@@ -52,6 +52,14 @@
 # (files/system/units/10-apex-bless-boot-esp.conf); nothing else in the system
 # asks to enter bootupd_t through an init_exec_t binary.
 #
+# THIS MODULE AND THAT DROP-IN ARE A PAIR, AND THE FAILURE IS NOT SYMMETRIC.
+# The drop-in's `-` prefix makes a FAILURE TO SET the context non-fatal, which
+# covers SELinux being disabled or a policy without bootupd_t. It does NOT
+# cover this module going missing on an enforcing machine: setexeccon then
+# succeeds and the kernel denies the execve, the unit fails, and the machine
+# rolls itself back on the fourth boot. Containerfile.base asserts
+# `semodule -l | grep -qx apex_sdboot` for exactly that case.
+#
 # The long-term fix belongs upstream: systemd-bless-boot should have a domain
 # of its own in selinux-policy. When it gets one, delete this module and the
 # drop-in together.
