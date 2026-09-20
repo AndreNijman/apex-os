@@ -6,8 +6,8 @@ it so that you can also just use alt tab to cycle. build a full alt+tab switcher
 thing and it goes for all windows including windows in other workspaces."
 
 Branches, both pushed, neither landed:
-  apex-os     task/focus-switcher   (from roadmap/v2.2 @ 3855ed4a) — 3 commits
-  apex-shell  task/focus-switcher   (from roadmap/v2.2 @ b04c035)  — 2 commits
+  apex-os     task/focus-switcher   (from roadmap/v2.2 @ 3855ed4a) — 5 commits
+  apex-shell  task/focus-switcher   (from roadmap/v2.2 @ b04c035)  — 3 commits
 Worktrees: /var/tmp/apex-work/wt-focus-switcher, /var/tmp/apex-work/wt-focus-shell
 
 ## What each session does now
@@ -15,8 +15,10 @@ Worktrees: /var/tmp/apex-work/wt-focus-switcher, /var/tmp/apex-work/wt-focus-she
 Hyprland  SUPER+arrow moves focus and the POINTER goes with it
           (`cursor { no_warps = false }` pinned in apex/input-defaults.lua).
           ALT+Tab opens the APEX Shell switcher; ALT+SHIFT+Tab steps back;
-          releasing ALT commits (Alt_L/Alt_R, `release = true, transparent =
-          true`); ALT+Return also commits; ALT+Escape cancels.
+          releasing ALT commits — Alt_L and Alt_R, each with and without SHIFT
+          (after ALT+SHIFT+Tab the fingers do not leave both modifiers at the
+          same instant). ALT+Return also commits; ALT+Escape cancels. Every
+          bind but ALT+Tab itself is `non_consuming = true`.
 labwc     SUPER+arrow still moves the WINDOW (labwc has no directional-focus
           action) and now warps the cursor with it, so a followMouse session
           does not hand focus to whatever the move uncovered. ALT+Tab is
@@ -54,6 +56,20 @@ niri      Unchanged behaviour, but ALT+Tab is now WRITTEN rather than
   `CompositorService.focusWindow()` first and falls back to `activate()`.
   Whether activate() works on a real desk is UNKNOWN — the AppDock has always
   relied on it, so probably, but nothing here proves it.
+* **`transparent` is not the pass-through flag.** Hyprland's `t` means "cannot
+  be shadowed by another bind" and still eats the key; `n`,
+  `non_consuming = true`, is the one that lets the application see it. And the
+  wrong name is SILENT: `nonConsuming`, `consume = false` and `ignore_mods` are
+  all accepted by hl.bind and all leave `non_consuming: false`. Asserted per
+  bind against a running instance now, because a config grep cannot tell them
+  apart.
+* **The single tap is a race between two processes.** ALT+Tab and the ALT
+  release are each a spawn + `apex` + `qs ipc call`, ~60ms apart at the
+  keyboard. The flag file has to be written by the HELPER on `next`, not by the
+  shell at the end of that chain, or the release finds no flag and the commit
+  is dropped. They can still overtake each other, so the shell remembers a
+  commit that arrived with nothing open for 600ms and the `next` that opens
+  within that window commits immediately.
 * The live L16 binds SUPER+arrow TWICE (`movefocus l` on both `left` and
   `LEFT`): hyprlang's `unbind` is case-sensitive, so the shell's generated
   `unbind = SUPER, LEFT` never removed the seed's `bind = $mainMod, left`. One
@@ -63,8 +79,8 @@ niri      Unchanged behaviour, but ALT+Tab is now WRITTEN rather than
 
 ## Suites (all green here)
 
-  apex-os     tests/test-apex-hypr-focus.sh        17 passed, 0 failed
-  apex-shell  tests/run-window-switcher-test.sh    11 passed, 0 failed
+  apex-os     tests/test-apex-hypr-focus.sh        19 passed, 0 failed
+  apex-shell  tests/run-window-switcher-test.sh    13 passed, 0 failed
   apex-shell  tests/run-switcher-activate-test.sh   7 passed, 0 failed
   apex-shell  tests/run-niri-keybinds-test.sh      16 inner assertions
 
@@ -102,3 +118,13 @@ worktree layout).
      not need to — niri has no focus-follows-mouse by default, so nothing
      steals focus — but "super+arrow moves the mouse" is literally false there.
      One line in apex-input-apply's `gen_niri`, inside the `input {` block.
+5. **labwc's ALT+Tab still has Andre's bug**, and it is written down rather
+   than guessed at. labwc's switcher spans every desktop now but does not warp
+   the pointer, so under `<followMouse>yes</followMouse>` the next mouse
+   movement hands focus to whatever is under the cursor.
+   `<action name="WarpCursor" to="window"/>` would fix it IF it ran after the
+   cycle rather than at key-press time — and nothing here can tell which,
+   because labwc has no IPC and the pointer cannot be read back headlessly. An
+   unverified warp risks warping to the OLD window before the cycle starts.
+   Settling it needs either a labwc source read or a client that reports its
+   own pointer position.
