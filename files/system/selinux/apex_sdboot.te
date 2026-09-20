@@ -1,0 +1,97 @@
+# apex_sdboot — let the boot blessing rename a loader entry on the ESP.
+#
+# ── the defect this exists for ────────────────────────────────────────────
+#
+# On the composefs + systemd-boot path the ESP is mounted at /boot, so the
+# Type #1 loader entries systemd-bless-boot has to rename are FAT files
+# labelled dosfs_t. Measured on the APEX image in the VM lab, SELinux
+# enforcing (ROADMAP/evidence/sdboot-image-20260920-decision.md):
+#
+#   systemd-bless-boot[1609]: Failed to rename
+#       '/loader/entries/bootc_fedora-43-1+2-1.conf'
+#    to '/loader/entries/bootc_fedora-43-1.conf': Permission denied
+#   avc: denied { rename } comm="systemd-bless-b" dev="vda2"
+#       scontext=system_u:system_r:init_t:s0
+#       tcontext=system_u:object_r:dosfs_t:s0 tclass=file permissive=0
+#
+# In the same boot, `mv` on the same file in the same directory worked, and
+# re-running the same binary from a shell worked. It is the SELinux domain and
+# nothing else.
+#
+# /usr/lib/systemd/systemd-bless-boot is labelled init_exec_t, so PID 1
+# executing it leaves the process in init_t. Fedora 43's policy has
+# systemd_bless_boot_generator_t for the GENERATOR and no domain at all for the
+# worker, and init_t is allowed no rename/create/unlink/open on dosfs_t:file
+# and no add_name/write on dosfs_t:dir. It has none of them on boot_t either,
+# so mounting the ESP with a context= option would not have helped.
+#
+# Without this the blessing fails on every boot, the +N-M counter is never
+# stripped, and every deployment rolls itself back on its fourth boot. That is
+# the exact outcome the boot-path contract exists to prevent.
+#
+# ── why bootupd_t rather than widening init_t ─────────────────────────────
+#
+# bootupd_t is the domain Fedora built for a root process that writes
+# bootloader state onto the ESP: it already holds full management of dosfs_t
+# files and directories, and read access to efivarfs_t, which is what
+# systemd-bless-boot needs to read LoaderBootCountPath. Sending the blessing
+# there costs one permission. Granting init_t rename on dosfs_t would instead
+# hand every service that never leaves init_t write access to every FAT
+# filesystem on the machine, including a user's USB stick.
+#
+# Checked against the live policy with setools rather than assumed:
+#
+#   init_t -> bootupd_t:process  { transition siginh rlimitinh noatsecure } ALLOW
+#   bootupd_t -> init_t:fd use                                             ALLOW
+#   bootupd_t -> init_t:unix_stream_socket connectto                       ALLOW
+#   bootupd_t -> dosfs_t:file { rename create unlink open read write … }   ALLOW
+#   bootupd_t -> init_exec_t:file entrypoint                               DENY  <- the gap
+#
+# So the module is one rule wide. The transition is only ever requested by the
+# SELinuxContext= drop-in this repository ships beside it
+# (files/system/units/10-apex-bless-boot-esp.conf); nothing else in the system
+# asks to enter bootupd_t through an init_exec_t binary.
+#
+# THIS MODULE AND THAT DROP-IN ARE A PAIR, AND THE FAILURE IS NOT SYMMETRIC.
+# The drop-in's `-` prefix makes a FAILURE TO SET the context non-fatal, which
+# covers SELinux being disabled or a policy without bootupd_t. It does NOT
+# cover this module going missing on an enforcing machine: setexeccon then
+# succeeds and the kernel denies the execve, the unit fails, and the machine
+# rolls itself back on the fourth boot. Containerfile.base asserts
+# `semodule -l | grep -qx apex_sdboot` for exactly that case.
+#
+# The long-term fix belongs upstream: systemd-bless-boot should have a domain
+# of its own in selinux-policy. When it gets one, delete this module and the
+# drop-in together.
+
+# ── why ONLY systemd-bless-boot needs this, and apex-boot-count does not ──
+#
+# apex-boot-count renames a .conf inside /boot/loader/entries.staged — the same
+# FAT ESP, the same dosfs_t, from a systemd ExecStop — so it looks like it
+# needs the same treatment. It does not, and the reason is one type_transition:
+#
+#   type_transition init_t bin_t:process unconfined_service_t;   EXISTS
+#   type_transition init_t init_exec_t:process …                 NONE
+#
+# /usr/libexec/apex-boot-count is bin_t, so systemd runs it in
+# unconfined_service_t, which carries files_unconfined_type and renames a
+# dosfs_t file unaided. /usr/lib/systemd/systemd-bless-boot is init_exec_t,
+# gets no transition, and stays in init_t — which is the whole defect.
+#
+# This was tried the other way first: a bin_t entrypoint plus a
+# SELinuxContext= drop-in on apex-boot-count. That CONFINES a process that was
+# already unconfined, into a domain built for a Rust daemon — `bootupd_t ->
+# proc_t:file` is `map` only, so the helper could not read /proc/cmdline and
+# its own safe-fail would have reported "refusing" forever. Reverted, and
+# recorded here so it is not re-added by the next person who notices the
+# symmetry.
+
+module apex_sdboot 1.0.0;
+
+require {
+    type bootupd_t;
+    type init_exec_t;
+    class file { entrypoint execute getattr map open read };
+}
+
+allow bootupd_t init_exec_t:file { entrypoint execute getattr map open read };

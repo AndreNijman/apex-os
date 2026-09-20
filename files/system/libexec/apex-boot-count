@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  apex-boot-count — put a boot counter on the deployment bootc just staged.
+#
+#  WHY THIS EXISTS
+#
+#  bootc writes no boot counter. Four installs and two upgrades in the VM lab
+#  produced entry filenames of the form `bootc_<osid>-<ver>-<N>.conf` with no
+#  `+N-M` suffix, and a loader.conf whose timeout and console-mode are both
+#  commented out. On a machine installed exactly as bootc leaves it,
+#  LoaderBootCountPath never appears, apex-boot-health.service and
+#  apex-boot-notice.service are both skipped by their ConditionPathExists,
+#  systemd-bless-boot never runs, and a broken update has nothing to roll it
+#  back. The health gate the image asserts so carefully is inert.
+#
+#  WHY IT RENAMES THE *STAGED* ENTRY AND NOT THE LIVE ONE
+#
+#  Measured across eleven guest boots (ROADMAP/evidence/sdboot-image-20260920-lab.md):
+#  renaming the live entry is DESTROYED by the next upgrade — `bootc upgrade`
+#  does not edit entries/, it writes a fresh uncounted set into
+#  /boot/loader/entries.staged/ and bootc-finalize-staged.service replaces the
+#  whole entries/ directory at shutdown. Renaming inside entries.staged/
+#  survives that swap: the counter was decremented by systemd-boot on each of
+#  three boots and at +0-3 sd-boot selected the previous deployment by itself,
+#  with systemd-bless-boot masked throughout, so the rollback was the counter's
+#  doing and nothing else's.
+#
+#  So this is a rename in a directory bootc is about to install. It never
+#  writes a live boot path, never runs bootctl/bootupctl/efibootmgr, and never
+#  creates or deletes a boot entry.
+#
+#  WHICH ENTRY GETS THE COUNTER
+#
+#  Not "the newest", which would be a guess. The booted deployment identifies
+#  itself on the kernel command line as `composefs=<verity>`, and every staged
+#  entry carries the same token in its `options` line. The entry that gets the
+#  counter is the one whose digest is NOT the booted one. Exactly one, or this
+#  refuses: guessing on a boot path is how a machine stops booting.
+#
+#  (After `bootc rollback` the staged set is {booted, previous}, so the
+#  previous deployment is the one counted. That is deliberate: if the
+#  deployment the user rolled back to also fails, three tries later the machine
+#  returns to the one it is on now.)
+#
+#  Usage:  apex-boot-count stage        rename the staged entry (ExecStop)
+#          apex-boot-count show         print what it would do, change nothing
+#
+#  APEX_BOOT_ESP overrides /boot and APEX_BOOT_CMDLINE overrides /proc/cmdline,
+#  for tests/test-boot-v2.sh. Neither is read from the environment of anything
+#  but a test.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+ESP="${APEX_BOOT_ESP:-/boot}"
+CMDLINE_FILE="${APEX_BOOT_CMDLINE:-/proc/cmdline}"
+TRIES="${APEX_BOOT_TRIES:-3}"
+STAGED="$ESP/loader/entries.staged"
+
+log() { printf 'apex-boot-count: %s\n' "$*" >&2; }
+
+# `set -e` is deliberately not used: this runs at shutdown, and a non-zero exit
+# here must never hold up or fail the shutdown transaction. Every failure path
+# below logs its reason and returns 0 — the worst case is a deployment without
+# a counter, which is exactly the status quo.
+
+main() {
+    local mode="${1:-stage}"
+    case "$mode" in
+        stage|show) ;;
+        *) log "unknown mode '$mode' (want: stage | show)"; return 0 ;;
+    esac
+
+    if [[ ! -d "$STAGED" ]]; then
+        log "nothing staged ($STAGED does not exist); nothing to do"
+        return 0
+    fi
+
+    # The entries.srel marker is what tells a Type #1 ESP apart from ostree's
+    # /boot/loader. On a GRUB machine it does not exist at all — checked on the
+    # L16, whose /boot/loader is a symlink to loader.0 holding only entries/.
+    local srel="$ESP/loader/entries.srel"
+    if [[ -r "$srel" ]]; then
+        local sreltype
+        sreltype="$(tr -d '[:space:]' < "$srel")"
+        if [[ "$sreltype" != type1 ]]; then
+            log "$srel says '$sreltype', not 'type1'; refusing to touch it"
+            return 0
+        fi
+    else
+        log "$srel absent — this is not a Type #1 loader directory; nothing to do"
+        return 0
+    fi
+
+    local -a entries=()
+    local f
+    for f in "$STAGED"/*.conf; do
+        [[ -e "$f" ]] || continue
+        entries+=("$f")
+    done
+    if (( ${#entries[@]} == 0 )); then
+        log "$STAGED holds no .conf entries; nothing to do"
+        return 0
+    fi
+
+    # Idempotence, and a hard stop if something else already counts. A second
+    # rename would reset a counter that systemd-boot has already decremented.
+    for f in "${entries[@]}"; do
+        if [[ "$(basename "$f")" == *+[0-9]* ]]; then
+            log "$(basename "$f") already carries a counter; leaving the staged set alone"
+            return 0
+        fi
+    done
+
+    local booted
+    booted="$(booted_digest)"
+    if [[ -z "$booted" ]]; then
+        log "no composefs= token on $CMDLINE_FILE; cannot tell which entry is new, refusing"
+        return 0
+    fi
+
+    local -a fresh=()
+    for f in "${entries[@]}"; do
+        local d
+        d="$(entry_digest "$f")"
+        if [[ -z "$d" ]]; then
+            log "$(basename "$f") has no composefs= in its options line; refusing to guess"
+            return 0
+        fi
+        [[ "$d" == "$booted" ]] || fresh+=("$f")
+    done
+
+    if (( ${#fresh[@]} == 0 )); then
+        log "every staged entry is the booted deployment; nothing new to count"
+        return 0
+    fi
+    if (( ${#fresh[@]} > 1 )); then
+        log "${#fresh[@]} staged entries differ from the booted deployment; refusing to guess which to count"
+        return 0
+    fi
+
+    local src="${fresh[0]}"
+    local dst="${src%.conf}+${TRIES}-0.conf"
+
+    if [[ "$mode" == show ]]; then
+        printf '%s -> %s\n' "$(basename "$src")" "$(basename "$dst")"
+        return 0
+    fi
+
+    if mv -n -- "$src" "$dst"; then
+        log "counted $(basename "$src") as $(basename "$dst")"
+    else
+        log "could not rename $(basename "$src"); this deployment boots without a counter"
+    fi
+    return 0
+}
+
+# The booted deployment's composefs digest, from the kernel command line the
+# stub or the loader handed us: `... rw <kargs> composefs=<128 hex>`.
+booted_digest() {
+    local tok
+    for tok in $(cat "$CMDLINE_FILE" 2>/dev/null); do
+        case "$tok" in
+            composefs=*) printf '%s' "${tok#composefs=}"; return 0 ;;
+        esac
+    done
+    return 0
+}
+
+# A Type #1 entry's options line, same token.
+entry_digest() {
+    local line tok
+    while IFS= read -r line; do
+        case "$line" in
+            options\ *|options$'\t'*)
+                for tok in ${line#options}; do
+                    case "$tok" in
+                        composefs=*) printf '%s' "${tok#composefs=}"; return 0 ;;
+                    esac
+                done
+                ;;
+        esac
+    done < "$1"
+    return 0
+}
+
+main "$@"

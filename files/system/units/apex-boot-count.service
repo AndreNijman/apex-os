@@ -1,0 +1,72 @@
+[Unit]
+Description=APEX boot counter for the staged deployment
+Documentation=file:///usr/share/doc/apex/boot-v2.md
+
+# ── the whole unit is an ExecStop, and the ordering is what makes it work ──
+#
+# bootc-finalize-staged.service is itself an ExecStop: at shutdown it runs
+# `bootc composefs-finalize-staged`, which REPLACES /boot/loader/entries with
+# the contents of /boot/loader/entries.staged. Anything written into a filename
+# in the live directory is discarded with it — measured, four boots.
+#
+# systemd stops units in the reverse of the order it started them, so
+# After= here means this unit's ExecStop runs BEFORE bootc's. The counter
+# therefore lands on a file bootc is about to install, and the install itself
+# is bootc's own atomic directory swap. Nothing writes a live boot path.
+DefaultDependencies=no
+After=bootc-finalize-staged.service
+Before=final.target
+Conflicts=final.target
+# The ESP is an automount on this path; keep it mounted until we have stopped.
+RequiresMountsFor=/boot
+
+# ── inert on a GRUB machine, and it must be a condition that is true FROM
+# ── INSTALL TIME, which LoaderBootCountPath is not
+#
+# apex-boot-health and apex-boot-notice condition on
+# /sys/firmware/efi/efivars/LoaderBootCountPath-…, which systemd-boot sets only
+# when it booted the machine WITH a counter already in effect. This unit is
+# what writes the first counter, so that variable is absent exactly when this
+# unit is most needed, and a unit whose condition failed at start is never
+# stopped — its ExecStop would never run.
+#
+# entries.srel is the Boot Loader Specification's own marker for a Type #1
+# entry directory. bootc writes it on the ESP on the systemd-boot path; on a
+# GRUB/ostree machine it does not exist — checked on the L16, whose
+# /boot/loader is a symlink to loader.0 holding nothing but entries/. A failed
+# condition is a skip, not a failure, so this cannot affect a GRUB boot.
+ConditionPathExists=/boot/loader/entries.srel
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/libexec/apex-boot-count stage
+# ── NO SELinuxContext=, and that is a measured decision, not an omission ──
+#
+# This renames a file on the same FAT ESP that defeated systemd-bless-boot, so
+# the obvious move is to give it the same `SELinuxContext=…:bootupd_t:s0`
+# drop-in. That is WRONG, and it was tried in a guest before being reverted.
+#
+# The policy has `type_transition init_t bin_t:process unconfined_service_t`
+# and NO transition for init_exec_t. So:
+#
+#   /usr/lib/systemd/systemd-bless-boot  is init_exec_t -> stays init_t
+#                                        -> no rename on dosfs_t -> the AVC
+#   /usr/libexec/apex-boot-count         is bin_t       -> unconfined_service_t
+#                                        -> which holds files_unconfined_type
+#                                        -> renames dosfs_t fine, unaided
+#
+# Forcing bootupd_t here CONFINES a process that was already unconfined, into
+# a domain built for a Rust daemon: `bootupd_t -> proc_t:file` is `map` only,
+# so reading /proc/cmdline is denied and this helper's own safe-fail would
+# report "no composefs= token … refusing" — a silent no-op that looks like a
+# pass. Leave it unconfined, like every other APEX helper in /usr/libexec.
+# A boot counter is worth a few seconds and never worth a hung shutdown.
+TimeoutStopSec=30s
+
+[Install]
+# WantedBy, not RequiredBy: a machine that cannot start this must still boot.
+# The cost of it not running is a deployment without automatic rollback, which
+# is what every APEX machine has today.
+WantedBy=multi-user.target
