@@ -68,7 +68,9 @@ real life. The images are sparse.
 two Windows guest boots:
 
 ```
-    PASS  no disk, file or firmware WRITE API appears in the source
+    PASS  no disk, file or firmware WRITE API appears in the source by name
+    PASS  every declared IOCTL code (5) is on the read-only allowlist
+    PASS  no IOCTL code is passed as a bare numeric literal
     PASS  the Windows cross-build completed
     PASS  a binary was produced
     PASS  it is a PE32+ x86-64 Windows binary
@@ -95,7 +97,7 @@ two Windows guest boots:
     PASS  guest: Windows numbered APEX-FIXTURE-A as disk 2 and then as disk 1
     PASS  guest: the confirmation text is identical across both enumeration orders
     PASS  guest: the confirmation text contains no device index
-    apex-windows-installer: 27 passed, 0 failed, 0 could-not-run
+    apex-windows-installer: 29 passed, 0 failed, 0 could-not-run
 ```
 
 ---
