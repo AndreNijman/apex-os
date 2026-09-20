@@ -1,0 +1,24 @@
+[Unit]
+Description=APEX-OS: say what the disk unlock prompt is using
+Documentation=man:plymouth(8)
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+ConditionKernelCommandLine=rd.luks.uuid
+After=plymouth-start.service
+# Ordered before anything that could ask for the passphrase. cryptsetup.target
+# is what systemd-cryptsetup-generator hangs its units off; the ask-password
+# agents are named explicitly because a message posted after the prompt is
+# drawn is a message the user reads too late.
+Before=cryptsetup.target systemd-ask-password-plymouth.service systemd-ask-password-console.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/apex-unlock-hint
+# A hint that fails must never be the reason a machine does not boot.
+SuccessExitStatus=0 1
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=initrd.target

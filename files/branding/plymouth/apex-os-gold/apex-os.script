@@ -66,6 +66,7 @@ wordmark.SetOpacity(0);
 # --- password prompt sprites (LUKS) ---
 prompt_sprite = Sprite();
 bullet_sprite = Sprite();
+message_sprite = Sprite();
 dim = 1;
 
 t = 0;
@@ -227,7 +228,23 @@ fun display_normal () {
   bullet_sprite.SetOpacity(0);
 }
 
-fun message (text) { }
+# --- messages ---
+# The same function, and the same reason, as the chartreuse theme: an empty
+# message() means plymouth accepts `plymouth message --text=...` and silently
+# drops it, so nothing the boot needs to tell the user — which keyboard layout
+# the passphrase prompt is using, that a recovery key is what is wanted now —
+# ever reaches a screen. Both themes must carry it or the one that does not is
+# a machine whose unlock prompt cannot explain itself.
+fun message (text) {
+  if (text == "") {
+    message_sprite.SetOpacity(0);
+    return;
+  }
+  mimg = Image.Text(text, 0.62, 0.66, 0.72);
+  message_sprite.SetImage(mimg);
+  message_sprite.SetPosition(cx - mimg.GetWidth() / 2, cy + base / 8 + base / 6, 20);
+  message_sprite.SetOpacity(1);
+}
 
 Plymouth.SetRefreshFunction(refresh);
 Plymouth.SetDisplayPasswordFunction(display_password);

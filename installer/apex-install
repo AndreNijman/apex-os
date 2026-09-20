@@ -497,21 +497,37 @@ console_keymap_for() {  # $1=xkb layout(s)  $2=xkb variant  $3=deploy dir or ""
   fi
   if [ -z "$hit" ]; then hit=$(kbd_has "$kdir" "$layout"); fi
   # 2. systemd's conversion table — exact layout+variant row first, …
+  #
+  #    The table's xlayout column is frequently a LIST: Bulgarian is written
+  #    `bg,us`, Greek `gr,us`, Georgian `ge,us`, because those layouts ship with
+  #    a latin group to toggle to. A plain `$2 == layout` test matches none of
+  #    them, which is how `bg` ended up falling all the way through to `us`
+  #    while /usr/lib/kbd/keymaps/legacy/…/bg_bds-utf8.map.gz sat there unused.
+  #    So a row also counts when the wanted layout is the FIRST of its list.
   if [ -z "$hit" ] && [ -f "$mapf" ]; then
     hit=$(awk -v l="$layout" -v v="$variant" \
       'BEGIN{ if (v=="") v="-" }
        /^#/ { next }
-       NF>=2 { xv=(NF>=4 ? $4 : "-"); if ($2==l && xv==v) { print $1; exit } }' \
+       NF>=2 { xv=(NF>=4 ? $4 : "-")
+               if (($2==l || index($2, l ",")==1) && xv==v) { print $1; exit } }' \
       "$mapf" 2>/dev/null || true)
   fi
   # 3. … then any row for this layout at all. A `ch` (Swiss) install must land
   #    on `sg` even though every ch row in the table carries a variant.
   if [ -z "$hit" ] && [ -f "$mapf" ]; then
     hit=$(awk -v l="$layout" \
-      '/^#/ { next } NF>=2 { if ($2==l) { print $1; exit } }' \
+      '/^#/ { next } NF>=2 { if ($2==l || index($2, l ",")==1) { print $1; exit } }' \
       "$mapf" 2>/dev/null || true)
   fi
-  # 4. `us` is the kernel built-in, so falling back to it changes nothing that
+  # 4. The table names keymaps that a given kbd build may not actually ship —
+  #    measured: its `ge` row names a `ge` keymap that does not exist anywhere
+  #    in Fedora 43's kbd. Taking its word for it would put a name in
+  #    /etc/vconsole.conf and on the kernel command line that loadkeys cannot
+  #    load, which is the exact failure this function exists to remove, merely
+  #    moved one step later. So the table's answer is checked against the
+  #    keymap tree, the same way a direct hit was.
+  if [ -n "$hit" ]; then hit=$(kbd_has "$kdir" "$hit"); fi
+  # 5. `us` is the kernel built-in, so falling back to it changes nothing that
   #    was not already going to happen — but it is a FALLBACK and the caller
   #    logs it as one, rather than the silent fallback this comment is about.
   [ -n "$hit" ] || hit=us
@@ -1234,9 +1250,22 @@ printf '%s' "$HOSTNAME" | grep -Eq '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?
 # file says, and `bootc install to-disk --wipe /dev/sda3` happily writes a GPT
 # *inside a partition* — destroying that partition and yielding something no
 # firmware will boot, while the neighbouring OS's entries rot.
+#
+# `loop` is accepted alongside `disk`, and that is NOT a hole in this guard. A
+# loop device IS a whole block device with its own partition table — writing a
+# GPT to one is meaningful and is how a disk image gets built — whereas the
+# thing this guard exists to refuse is a PARTITION, which still fails. It is
+# here because the encrypted install path cannot be tested any other way: a real
+# `bootc install` onto a real LUKS2 volume has to happen on SOMETHING, and the
+# rule for this work is loopback files and VMs only, never a real disk. An
+# install path that has only ever been reasoned about is not a tested install
+# path. The graphical front end never offers a loop device (it enumerates with
+# `lsblk … TYPE=="disk"`), so this widens nothing a user can reach by accident.
 _dtype=$(lsblk -dno TYPE "$DISK" 2>/dev/null | tr -d ' ' || true)
-[ "$_dtype" = disk ] \
-  || die "$DISK is a '${_dtype:-unknown}', not a whole disk. Refusing — installing onto anything else produces a system that will not boot. Nothing has been erased."
+case "$_dtype" in
+  disk|loop) : ;;
+  *) die "$DISK is a '${_dtype:-unknown}', not a whole disk. Refusing — installing onto anything else produces a system that will not boot. Nothing has been erased." ;;
+esac
 if findmnt -rno SOURCE | grep -qE "^${DISK}([0-9p]|$)"; then
   die "$DISK (or a partition of it) is currently mounted — refusing."
 fi
@@ -1863,9 +1892,28 @@ elif [ "$ENCRYPT" = yes ]; then
     rc=${PIPESTATUS[0]}
     { echo "--- boot + ESP after install ---"; find "$TROOT/boot" -maxdepth 3; } >>"$LOG" 2>&1 || true
   fi
-  umount "$TROOT/boot/efi" 2>/dev/null || true
-  umount "$TROOT/boot"     2>/dev/null || true
-  umount "$TROOT"          2>/dev/null || true
+  # ── EVERY mount under $TROOT has to go, and it has to be CHECKED ─────────
+  # Two things put mounts here that a plain `umount $TROOT` does not remove.
+  # The podman run above shares this tree `rshared`, so mounts bootc makes
+  # inside the container appear on the HOST as well; and `bootc install
+  # to-filesystem` FINALIZES by remounting the target read-only (its own log
+  # says "Finalizing filesystem root").
+  #
+  # Leaving one behind is not cosmetic. btrfs shares one superblock per
+  # filesystem, so mounting the same volume a second time — which is exactly
+  # what the account step below does — inherits the read-only flag of the mount
+  # that is still there. The result is the account step failing with
+  # `useradd: failure while writing changes to /etc/passwd` on a machine whose
+  # install went perfectly. Measured on the loopback install, 2026-09-20.
+  umount -R "$TROOT/boot/efi" 2>/dev/null || true
+  umount -R "$TROOT/boot"     2>/dev/null || true
+  umount -R "$TROOT"          2>/dev/null || true
+  if findmnt -rno TARGET --target "$TROOT" 2>/dev/null | grep -qx "$TROOT"; then
+    umount -Rl "$TROOT" 2>>"$LOG" || true
+  fi
+  if [ "${rc:-0}" = 0 ] && findmnt -rno TARGET --target "$TROOT" 2>/dev/null | grep -qx "$TROOT"; then
+    rc=78; echo "could not release $TROOT after the install" | tee -a "$LOG"
+  fi
 else
   # --net=host: no netavark needed in the live env; bootc install is offline.
   # Set BEFORE the call: `--wipe` destroys the disk immediately, so a Ctrl+C one
@@ -1925,6 +1973,10 @@ again to try again." ;;
 
 $DISK has been erased. Your other disks were not touched. Start the installer
 again to try again." ;;
+  78) die "APEX-OS was installed on $DISK, but the installer could not release the filesystems afterwards, so it could not create your account (see $LOG).
+
+Do not reboot expecting to log in. Start the installer again — a second run on
+the same disk is safe, and it will redo the whole install." ;;
   90) die "Could not format $TARGET as $ROOTFS_TYPE (mkfs failed — see $LOG). The partition was NOT changed; your other partitions are untouched." ;;
   91) die "Could not mount the freshly formatted $TARGET (see $LOG). $TARGET was reformatted and is now empty; your other partitions are untouched." ;;
   92) die "Could not read/mount the EFI System Partition $ESP_DEV (see $LOG). Nothing was formatted; $TARGET and your other partitions are untouched." ;;
@@ -1967,7 +2019,24 @@ else
   done
 fi
 [ -n "$root_part" ] || die "Installed root filesystem not found on $DISK after bootc reported success. The OS is installed but the account could not be created."
-mount "$root_part" "$MNT" 2>>"$LOG" || die "Could not mount the new root ($root_part) to create your account."
+mount -o rw "$root_part" "$MNT" 2>>"$LOG" || die "Could not mount the new root ($root_part) to create your account."
+# PROVE it is writable rather than discovering it inside useradd.
+#
+# `bootc install to-filesystem` finalizes by remounting the target read-only,
+# and btrfs shares one superblock per filesystem — so if any earlier mount of
+# this volume is still around, this one is read-only no matter what `-o rw`
+# says. useradd reports that as "failure while writing changes to /etc/passwd",
+# which sends the reader looking at shadow-utils and SELinux instead of at a
+# mount flag. Ask the question directly, and name the answer.
+if ! touch "$MNT/.apex-write-probe" 2>>"$LOG"; then
+  umount "$MNT" 2>/dev/null || true
+  die "The freshly installed root ($root_part) mounted READ-ONLY, so your account could not be created.
+
+APEX-OS is installed on $DISK but has no account on it — do not reboot
+expecting to log in. Start the installer again; a second run on the same disk
+is safe."
+fi
+rm -f "$MNT/.apex-write-probe" 2>/dev/null || true
 # ostree layout: the deployed root is the newest dir under ostree/deploy/*/deploy/*.0
 # `|| true`: no glob match makes the pipeline non-zero → ERR trap. The explicit
 # emptiness check on the next line is what should report the problem.
