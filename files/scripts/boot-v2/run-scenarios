@@ -2092,7 +2092,17 @@ scenario_enroll_sb_on() {
     rec="$WORK/enroll-sbon.recovery-key"
     enroll_volume "$img"
 
-    rc="$(enroll_run "$WORK/enroll-sbon" --device "$img" --recovery-out "$rec" \
+    # NEWPIN IS SET ON THE DEFAULT ENROLMENT ON PURPOSE, and it is not a
+    # convenience. The default path asks for no PIN, so this variable is inert
+    # — which makes the `pin=no` assertion below a stronger claim than it looks:
+    # the enrolment had a PIN available for the taking and did not take it.
+    #
+    # It also makes the "PIN on by default" mutant die on the assertion written
+    # for it. MEASURED: without it that mutant was caught by the timeout bound
+    # instead, because an un-PINned `--tpm2-with-pin=yes` blocks on systemd's
+    # ask-password socket — a real kill, but one that never reaches `pin=no`, so
+    # the assertion this scenario exists to make went untested.
+    rc="$(NEWPIN=1234 enroll_run "$WORK/enroll-sbon" --device "$img" --recovery-out "$rec" \
             --unlock-key-file "$ENROLL_KEYFILE" --tpm2-device "$ENROLL_TPM" \
             --probe-root "$root")"
     assert_eq 0 "$rc" "enroll-sb-on: exit status"
@@ -2116,7 +2126,7 @@ scenario_enroll_sb_on() {
         *) bad "enroll-sb-on: tpm2 line is '$tpm2', expected to start '$want_prefix'" ;;
     esac
     case "$tpm2" in
-        *" pin=no") ok "enroll-sb-on: no PIN was set (the default is opt-out of nothing)" ;;
+        *" pin=no") ok "enroll-sb-on: no PIN, with NEWPIN set and available to take" ;;
         *) bad "enroll-sb-on: the default enrolment set a PIN: '$tpm2'" ;;
     esac
     local hash
