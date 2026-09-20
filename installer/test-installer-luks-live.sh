@@ -244,7 +244,15 @@ LUKS_PART=$(sudo -n bash -c "for c in ${LOOP}p3 ${LOOP}3; do [ -b \$c ] && echo 
 echo
 echo "── the layout ─────────────────────────────────────────────────────────"
 nparts=$(sudo -n sgdisk -p "$LOOP" 2>/dev/null | awk '/^ +[0-9]+ /{n++} END{print n+0}')
-if [ "$nparts" = 3 ]; then ok "three partitions"; else bad "three partitions" "got $nparts"; fi
+# FOUR: ESP, /boot, the LUKS volume, and a 1 MiB BIOS boot partition. The last
+# is what lets bootupd install the i386-pc GRUB component, which it does on any
+# loopback install because that path passes bootc --generic-image to keep the
+# building machine's NVRAM out of it. Without it, `grub2-install` refuses to
+# use blocklists and the install fails with the volume already encrypted.
+if [ "$nparts" = 4 ]; then ok "four partitions"; else bad "four partitions" "got $nparts"; fi
+t4=$(sudo -n bash -c "for c in ${LOOP}p4 ${LOOP}4; do [ -b \$c ] && lsblk -dno PARTTYPE \$c && break; done" 2>/dev/null | tr 'A-Z' 'a-z')
+if [ "$t4" = "21686148-6449-6e6f-744e-656564454649" ]; then ok "p4 is a BIOS boot partition"
+else bad "p4 is a BIOS boot partition" "type $t4"; fi
 t1=$(sudo -n lsblk -dno PARTTYPE "$ESP_PART" 2>/dev/null | tr 'A-Z' 'a-z')
 t3=$(sudo -n lsblk -dno PARTTYPE "$LUKS_PART" 2>/dev/null | tr 'A-Z' 'a-z')
 if [ "$t1" = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" ]; then ok "p1 is an EFI System Partition"
