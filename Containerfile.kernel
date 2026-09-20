@@ -234,17 +234,30 @@ RUN set -eux; \
     # no code: sh + bpftool here, apexd's kernelbtf.rs there. `if …; then` and
     # not `!`, because `set -e` does not apply to an inverted command.
     echo "--- reading 1 of 2: bpftool, the root cause (did pahole emit the tag?)"; \
-    if apex-btf-xcheck /build/vmlinux.btf; then XCHECK=pass; else XCHECK=fail; fi; \
+    # Keep the EXIT CODE, not a pass/fail boolean. btf-xcheck exits 1 for "a tag
+    # is missing" and 2 for "I could not read this BTF at all", and collapsing
+    # those loses the difference between the two readers DISAGREEING and only
+    # one of them having run. The second, reported as the first, sends whoever
+    # reads it hunting for untagged names that were never printed.
+    if apex-btf-xcheck /build/vmlinux.btf; then XRC=0; else XRC=$?; fi; \
     echo "--- reading 2 of 2: apexd kernelbtf.rs, the symptom — THIS ONE IS THE GATE"; \
     apex-kernel-btf-gate /build/vmlinux.btf; \
-    test "${XCHECK}" = "pass" \
-        || { echo "FATAL: the two readers disagree about this kernel's BTF."; \
-             echo "       apex-kernel-btf-gate says the published prototypes are clean, and"; \
-             echo "       the bpftool reading above says a bpf_kfunc DECL_TAG is missing."; \
-             echo "       One of them is wrong and this kernel does not ship until it is"; \
-             echo "       known which. Start from the untagged names printed above."; \
-             exit 1; }; \
-    echo "both readers agree: this kernel's scx_bpf_* kfuncs are intact"; \
+    case "${XRC}" in \
+        0) echo "both readers agree: this kernel's scx_bpf_* kfuncs are intact" ;; \
+        1) echo "FATAL: the two readers disagree about this kernel's BTF."; \
+           echo "       apex-kernel-btf-gate says the published prototypes are clean, and"; \
+           echo "       the bpftool reading above says a bpf_kfunc DECL_TAG is missing."; \
+           echo "       One of them is wrong and this kernel does not ship until it is"; \
+           echo "       known which. Start from the untagged names printed above."; \
+           exit 1 ;; \
+        *) echo "FATAL: only ONE reader actually ran. apex-btf-xcheck exited ${XRC},"; \
+           echo "       which is its 'I could not read this BTF' code, not a verdict —"; \
+           echo "       so there are no untagged names above to go and look at. The gate"; \
+           echo "       passed, but it passed unaccompanied, and this tier requires two"; \
+           echo "       independent readings. Fix the reader (bpftool present? is the"; \
+           echo "       blob a raw BTF?) rather than the kernel."; \
+           exit 1 ;; \
+    esac; \
     \
     echo "=== collecting ==="; \
     mkdir -p /rpms /manifest; \
