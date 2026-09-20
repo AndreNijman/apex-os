@@ -209,7 +209,9 @@ phase.
    against the ESP inside the image file being built; Andre's laptop would not
    boot and was repaired from a live USB. The tmpfs was added the same evening
    and called the fix. At 21:53 a second install ran **with the mask applied
-   and logged** and moved `Boot0000` again. `nvram-guard` caught that one when
+   and its promise printed** — *"this machine's UEFI boot entries are masked
+   off and will not be touched"* — and moved `Boot0000` again four log lines
+   later. `nvram-guard` caught that one when
    the command returned and the exact bytes were restored from its own
    before-snapshot. Neither run contained the string `--via-loopback`; both
    were `apex-install` on a `to-filesystem` install against a loop device.
