@@ -2308,6 +2308,17 @@ async fn cmd_game(cmd: GameCmd) -> i32 {
                     // the L16, measured — "present" is true and tells somebody
                     // debugging absent clock locks nothing at all.
                     println!("nvidia-smi: {}", apexd_core::gpu::nvidia_smi_state().as_str());
+                    // Same rule, one tier over. Without this the degraded view
+                    // said nothing at all about sched-ext, so the one surface
+                    // a user reaches when the daemon is down was the one that
+                    // could not tell them their kernel refuses every
+                    // scheduler. `scx_state` needs the daemon; this does not.
+                    let btf = apexd_core::kernelbtf::scx_btf_support(Path::new("/sys"));
+                    println!("scx       : {}", cfg.scx);
+                    println!("scx_btf   : {}", btf.verdict());
+                    if btf.blocks_loading() {
+                        println!("            {}", btf.describe());
+                    }
                 }
             }
             0

@@ -1156,6 +1156,71 @@ RUN set -eux; \
         /usr/lib/systemd/system/apex-boot-health.service \
         /usr/lib/systemd/system/apex-boot-notice.service
 
+# ── L-003: the disk-encryption key slots ────────────────────────────────────
+#
+# The installer calls this to put key slots on an encrypted volume:
+#
+#     /usr/libexec/apex-luks-enroll --device <dev> --recovery-out <path>
+#
+# A recovery key ALWAYS, and a TPM2 slot only where the machine can actually
+# enforce one — which today means Secure Boot enabled, and never with the bare
+# `--tpm2-device=auto` form that binds to no PCRs at all while exiting 0.
+#
+# It is NOT enabled by anything here and no unit runs it. There is no timer, no
+# generator and no first-boot hook: it does something irreversible to a disk, so
+# the only thing that may call it is a caller that already decided to.
+COPY --chmod=0755 files/system/libexec/apex-luks-enroll \
+     /usr/libexec/apex-luks-enroll
+RUN set -eux; \
+    test -x /usr/libexec/apex-luks-enroll; \
+    bash -n /usr/libexec/apex-luks-enroll; \
+    \
+    : '── the three programs it names by absolute path must be here ──'; \
+    : 'It hardcodes them deliberately: it runs as root from the installer,'; \
+    : 'and a program name that came from the environment would be a hole.'; \
+    : 'So the paths it hardcodes have to be the paths this image has.'; \
+    test -x /usr/sbin/cryptsetup; \
+    test -x /usr/bin/systemd-cryptenroll; \
+    test -x /usr/bin/python3; \
+    : 'systemd-cryptenroll cannot unseal a TPM2 token without the LUKS2'; \
+    : 'token handler, and that ships in a different package from the'; \
+    : 'binary. Without it a TPM-bound volume asks for a passphrase at every'; \
+    : 'boot and the enrolment looks like it silently did nothing.'; \
+    test -f /usr/lib64/cryptsetup/libcryptsetup-token-systemd-tpm2.so; \
+    : '--with-pin reads this parts lockout counters off the chip rather'; \
+    : 'than quoting numbers from documentation, and needs tpm2-tools to.'; \
+    : 'MEASURED 2026-09-20: tpm2-tools reaches this image only as a'; \
+    : 'dependency of clevis (rpm -q --whatrequires tpm2-tools -> clevis) and'; \
+    : 'is pinned by no line in Containerfile.core. If this assertion is what'; \
+    : 'failed your build, clevis stopped pulling it in: add tpm2-tools to'; \
+    : 'core explicitly rather than deleting this line, or --with-pin goes'; \
+    : 'back to telling users their lockout numbers are unknown.'; \
+    test -x /usr/bin/tpm2_getcap; \
+    \
+    : '── it must never bind a PCR this program has ruled out ──'; \
+    : 'PCR 0 moves on a firmware update and would strand a user on a BIOS'; \
+    : 'update. The match is on EXECUTABLE lines only: the file explains at'; \
+    : 'length why PCR 0 is not used, and a tripwire a comment can trip is a'; \
+    : 'tripwire nobody can keep green.'; \
+    if grep -nE "^[^#]*--tpm2-(public-key-)?pcrs=[^ ]*\\b0\\b" \
+        /usr/libexec/apex-luks-enroll; then \
+        echo "FATAL: apex-luks-enroll binds PCR 0" >&2; exit 1; \
+    fi; \
+    : '── and it must never enrol without naming its PCRs ──'; \
+    : 'The bare form exits 0 and seals to the storage key and nothing else.'; \
+    : 'MEASURED on systemd 258.10: tpm2-pcrs [], policy hash 32 zero bytes.'; \
+    if grep -nE "^[^#]*--tpm2-device=" /usr/libexec/apex-luks-enroll \
+        | grep -vE "POLICY_ARGS|tpm2-pcrs|--tpm2-device=PATH|unlock-tpm2-device"; then \
+        echo "FATAL: an enrolment names a TPM2 device with no PCR selection beside it" >&2; \
+        exit 1; \
+    fi; \
+    \
+    : '── nothing shipped may touch a real boot path ──'; \
+    if grep -nE "^[^#]*\\b(bootctl[[:space:]]+(install|update)|bootupctl|grub2-install|efibootmgr[[:space:]]+-[cBo])" \
+        /usr/libexec/apex-luks-enroll; then \
+        echo "FATAL: apex-luks-enroll runs a boot-path command" >&2; exit 1; \
+    fi
+
 # ── §48: the disk-health warning ────────────────────────────────────────────
 # A USER timer, because notify-send needs a session bus and root has none. It
 # is ENABLED by default, unlike apex-agentd and apex-aid: those start a daemon
