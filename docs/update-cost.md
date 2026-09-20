@@ -49,7 +49,8 @@ The image is now built in three tiers instead of two:
 
 | Tier | File | Contents | Rebuilds when |
 |------|------|----------|---------------|
-| **core** | `Containerfile.core` | kernel + MOK signing, firmware, desktop/greeter stack, scx, Bazaar, codecs, baked apps, printing, input methods, fonts, dev toolchain, zsh/starship, awww/matugen/yazi, OS branding & locale | `Containerfile.core` or `kernel/**` changes · `force_core` · the weekly cron finds a **new** `fedora-bootc` digest |
+| **kernel** | `Containerfile.kernel` | the kernel itself, compiled from pinned source with a pinned `dwarves` | `kernel/**` changes — i.e. `kernel/kernel.pin` moves |
+| **core** | `Containerfile.core` | kernel *install* + MOK signing, firmware, desktop/greeter stack, scx, Bazaar, codecs, baked apps, printing, input methods, fonts, dev toolchain, zsh/starship, awww/matugen/yazi, OS branding & locale | `Containerfile.core` or `kernel/**` changes · `force_core` · the weekly cron finds a **new** `fedora-bootc` digest |
 | **base** | `Containerfile.base` | apexd + apex CLI, sysprofiles, D-Bus/polkit/units, every `files/**` COPY, the vendored APEX Shell | `Containerfile.base`, `apexd/**`, `config/**`, `files/**` change, or core rebuilt |
 | **image** | `Containerfile.apex` | edition stamp, gaming-session files, Plymouth theme, final initramfs | every run |
 
@@ -70,6 +71,117 @@ digests, so `bootc` recognises blobs it already has and downloads none of them.
 That is the whole mechanism. It needs no build cache and no registry cache, and
 it cannot silently stop working: if the core digest moves, the layers move; if
 it does not, they do not.
+
+### The fourth tier: the kernel
+
+APEX builds its own kernel (`ROADMAP/evidence/kernel-build-20260920.md` says
+why — every kernel it shipped before was unable to load a sched-ext scheduler).
+That compile is ~45 minutes, and the obvious place for it is `core`, because
+the rule below says anything that compiles a third-party program goes there.
+
+It is not in `core`, for a reason this document is the right place to record:
+**`core` is built with no layer cache.** There is no `--cache-from` any more and
+scheduled and forced runs pass `--no-cache` outright. So a kernel compile inside
+`core` is paid in full on every `core` rebuild — and the "Rebuilds when" column
+above says `core` rebuilds for a `Containerfile.core` edit, a `force_core`, or a
+new `fedora-bootc` digest. None of those are kernel changes.
+
+The cost that matters is not the 45 minutes, though. It is that each of those
+rebuilds would produce a **different kernel binary**: new `vmlinuz`, new
+modules, new BTF, akmods rebuilt against it and re-signed — all as a side effect
+of an edit that had nothing to do with the kernel, with nothing tying the kernel
+to its own inputs. `kernel/kernel.pin` exists so that the kernel moves when the
+kernel's inputs move and at no other time.
+
+So the kernel uses the same mechanism `base` uses to consume `core`: a
+separately published image, pinned by digest. `Containerfile.core` keeps the
+`dnf` transaction that *installs* the RPMs — which is what the rule below is
+actually about — and gets them from the kernel image:
+
+```dockerfile
+ARG APEX_KERNEL_IMAGE=localhost/apex-kernel:local
+FROM ${APEX_KERNEL_IMAGE} AS kernel-rpms
+…
+COPY --from=kernel-rpms /rpms     /tmp/apex-kernel-rpms
+COPY --from=kernel-rpms /manifest /tmp/apex-kernel-manifest
+```
+
+**The fleet download cost is unchanged.** `core` moving is a full multi-gigabyte
+download either way; the kernel image itself is never pulled by a user, only by
+the `core` build. What changes is that `core` stops moving for kernel reasons
+and the kernel stops moving for `core` reasons.
+
+Two things cross this new tier boundary and must survive any future edit, in the
+same way `/usr/lib/apex-kver` crosses core→gaming: the manifest's `btf_scx`
+verdict, which `core` refuses to install without, and its `kver`, which `core`
+checks against the kernel that actually landed in the rpmdb. Both are copied to
+`/usr/share/apex-os/kernel/` so a running machine can answer what it is booting
+and what built its BTF.
+
+#### What owning the kernel obliges us to, permanently
+
+This is the half of the decision that is not a build cost, and it is the half
+that outlives whoever took it.
+
+Before, security updates arrived by themselves: CachyOS tagged a release, the
+COPR rebuilt `kernel-cachyos`, and APEX picked it up on the next `force_core`.
+Nobody had to do anything. Now `KERNEL_TAG` and `KERNEL_SRC_SHA256` in
+`kernel/kernel.pin` decide which kernel APEX ships, and they move when a person
+moves them.
+
+The failure mode is quiet, which is what makes it dangerous. **An unbumped pin
+is a kernel that stops receiving security fixes while every gate in this
+repository stays green.** The sha256 still verifies — against the old tarball.
+The BTF gate still passes — the old kernel's BTF is still fine. CI is all
+ticks. Green here means "this is the kernel you pinned"; it has never meant
+"this kernel is current", and no other check in the repository can tell the
+difference.
+
+So the obligation is not "remember to bump the kernel". It is a mechanism:
+
+* **`tests/check-kernel-drift.sh`** asks whether each pinned input is still
+  current — is there a newer stable `cachyos-7.2.x` tag (the security-update
+  question), has the pinned `dwarves` moved in or out of Fedora, do all five
+  pinned URLs still resolve. It has **three** outcomes, not two: `0` no drift,
+  `1` drift, `2` a lookup could not be performed — which is neither a pass nor
+  drift, and fails.
+* **`.github/workflows/kernel-drift.yml`** runs it weekly, on every change to
+  the pin, and on demand; it keeps a single issue open until the pin is current
+  again. It compiles nothing.
+
+Two things that check is *not*, so nobody relies on it for them. It does not
+tell you a CVE exists — it tells you CachyOS has tagged something you are not
+on. And it cannot tell you a kernel you already pinned has become unsafe; only
+a newer tag can do that.
+
+Bumping the pin costs a ~45-minute kernel-tier rebuild and then a `core`
+rebuild, which is the usual ~5 GB to the fleet. That is the real recurring
+price of owning the kernel, and it is per security update, not per year.
+
+#### The CI question this tier cannot answer for itself
+
+**Nothing builds the kernel image in CI yet, and it needs a decision rather
+than an implementation.** `.github/workflows/build-image.yml` needs a `kernel`
+job that runs before `core` and passes its digest as
+`--build-arg APEX_KERNEL_IMAGE=…@sha256:…`. Writing that job is an afternoon.
+Running it is the problem:
+
+> **The build tree is ~100 GB** — measured, not estimated: `/var` on the
+> development machine went 552 GB free to 453 GB during the compile. **A hosted
+> GitHub runner has 14 GB.**
+
+So this is not "slower on a hosted runner", it is *cannot run on one at all*,
+before the CPU argument starts. The two realistic options, with what each
+actually costs:
+
+| option | what it costs | what it changes about the product |
+|---|---|---|
+| **Self-hosted runner on katana** | 20 cores and podman are already there, so the compile is roughly what it is locally. Needs ≥120 GB free on katana's `/var`, which is *tight* — check before committing. Adds a machine the release path depends on being up, and a self-hosted runner executing untrusted PR code is its own security decision. | Nothing. Same kernel, same config. |
+| **Restructure the spec to build far fewer modules** (`_build_minimal 1` plus a `modprobed.db`) | Brings the tree within a hosted runner's disk. | **Changes what hardware the kernel supports**, because the module set is built from one machine's `modprobed.db`. That is a product decision about which machines APEX boots on, not a CI optimisation. |
+
+Until one is chosen, the kernel image is built by hand and `core` is pointed at
+it with `--build-arg`. That works and is honest, but it means a release depends
+on somebody's laptop, which is the thing this table exists to make visible.
 
 ### The rule for new content
 

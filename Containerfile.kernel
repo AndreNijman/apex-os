@@ -1,0 +1,319 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  Containerfile.kernel — APEX builds its own kernel.
+#
+#  WHY THIS IS ITS OWN TIER AND NOT A STAGE IN Containerfile.core
+#
+#  The rule in docs/update-cost.md is "if it runs dnf, downloads, or compiles a
+#  third-party program, it belongs in Containerfile.core". A kernel compile is
+#  all three, so core is where it looks like it goes. It does not, for one
+#  measured reason: **CI builds core with no layer cache at all.**
+#  build-image.yml says so in as many words ("No CACHE_PREFIX: nothing reads or
+#  writes a registry build cache any more") and passes `--no-cache` outright on
+#  scheduled and forced runs. So a kernel compile inside core would be paid in
+#  full on every core rebuild — and core rebuilds for reasons that have nothing
+#  to do with the kernel: a package added to the desktop stack, a new
+#  fedora-bootc digest, an AI-app version bump.
+#
+#  Worse than the 45 minutes: each of those rebuilds would produce a DIFFERENT
+#  KERNEL BINARY. New vmlinuz, new modules, new BTF, akmods rebuilt against it,
+#  everything re-signed — all as a side effect of an edit that had nothing to do
+#  with the kernel, and with nothing pinning the kernel to its own inputs. The
+#  whole point of kernel.pin is that the kernel moves when the kernel's inputs
+#  move.
+#
+#  So this tier uses the mechanism this repository already proved: **a
+#  separately published image consumed by digest**, exactly as `base` consumes
+#  `core` via `FROM …@sha256:…`. The compile happens when kernel/** changes and
+#  at no other time. Core keeps the dnf transaction that INSTALLS the kernel —
+#  which is what the tier rule is actually about — and gets the RPMs from here:
+#
+#      COPY --from=ghcr.io/andrenijman/apex-os:kernel@sha256:… /rpms /tmp/krpms
+#      RUN dnf5 -y install /tmp/krpms/*.rpm
+#
+#  The fleet download cost is unchanged: core moving is a full download either
+#  way. What changes is that core stops moving for kernel reasons and the kernel
+#  stops moving for core reasons.
+#
+#  WHAT THIS BUILD CHANGES AGAINST THE COPR BUILD IT REPLACES — ONE VARIABLE
+#
+#  Same tree, same config, same spec, same Fedora 43 buildroot, same GCC. The
+#  only deliberate difference is **pahole 1.32 instead of 1.30**, because that
+#  is the difference that fixes the defect
+#  (ROADMAP/evidence/kernel-build-20260920.md: 18 of 68 kfuncs untagged under
+#  1.30, 0 of 68 under 1.32, measured on a real 7.2.6 kernel's DWARF). Holding
+#  everything else constant is what makes the fix attributable.
+#
+#  THE ASSERTION THAT MATTERS
+#
+#  A kernel build that can ship the exact bug it exists to fix is the "gate that
+#  inspects nothing" — this repository's dominant defect family, five of which
+#  cost five days of image builds. So the build dumps .BTF out of the vmlinux it
+#  just linked and runs apex-kernel-btf-gate over it, which reuses the SAME
+#  reader `apex game status` answers from. It exits 0 on `Usable` and on nothing
+#  else. A kernel with the defect cannot leave this file.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── The gate, built from this repo's own reader ─────────────────────────────
+# apexd-core is the crate that owns kernelbtf.rs. Building only this one bin
+# keeps the stage to the four crates it needs rather than the whole workspace.
+FROM registry.fedoraproject.org/fedora@sha256:84325c671db8a23b0679e04fb863d4081d98c4fc4ae9c9d5bcd883b4cea4e003 AS gate-builder
+RUN dnf5 -y install cargo rust >/dev/null && dnf5 clean all
+ENV CARGO_HOME=/build/.cargo
+COPY apexd/ /build/apexd/
+COPY config/ /build/config/
+RUN set -eux; \
+    cd /build/apexd; \
+    cargo build --release --locked -p apexd-core --bin apex-kernel-btf-gate; \
+    install -Dm755 target/release/apex-kernel-btf-gate /out/apex-kernel-btf-gate; \
+    /out/apex-kernel-btf-gate 2>&1 | head -1 || true
+
+# ── The kernel ──────────────────────────────────────────────────────────────
+FROM registry.fedoraproject.org/fedora@sha256:84325c671db8a23b0679e04fb863d4081d98c4fc4ae9c9d5bcd883b4cea4e003 AS kbuild
+
+COPY kernel/kernel.pin /build/kernel.pin
+COPY kernel/kernel-cachyos.spec /build/kernel-cachyos.spec
+COPY kernel/btf-xcheck.sh /usr/local/bin/apex-btf-xcheck
+COPY --from=gate-builder /out/apex-kernel-btf-gate /usr/local/bin/apex-kernel-btf-gate
+
+# Build dependencies. Transcribed from the spec's own BuildRequires, plus the
+# tools rpmbuild itself needs. `dwarves` is DELIBERATELY ABSENT from this list:
+# it is installed from the pin in the next step, and letting dnf resolve it here
+# would reintroduce the exact "whatever the buildroot happened to have" defect
+# this tier exists to fix.
+RUN set -eux; \
+    sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf; \
+    dnf5 -y install \
+        bc bison flex gcc gcc-c++ gettext-devel kmod make \
+        openssl openssl-devel elfutils-devel elfutils-libelf-devel \
+        perl-Carp perl-devel perl-generators perl-interpreter \
+        python3-devel python3-pyyaml python-srpm-macros \
+        clang lld llvm \
+        rpm-build rpmdevtools cpio tar xz zstd gzip \
+        findutils diffutils patch which hostname \
+        binutils bpftool curl ca-certificates; \
+    dnf5 clean all
+
+# ── The pinned toolchain ────────────────────────────────────────────────────
+# Fetch by NVR URL, verify by sha256 BEFORE installing, then prove the running
+# pahole is the pinned one. Each of the three steps can fail on its own and says
+# which failed. `dnf5 install <local rpm>` on an already-satisfiable name would
+# otherwise happily take the repo's 1.30.
+RUN set -eux; \
+    set -a; . /build/kernel.pin; set +a; \
+    mkdir -p /build/dw; cd /build/dw; \
+    curl -fsSL -o dwarves.rpm "${DWARVES_RPM_URL}"; \
+    curl -fsSL -o libdwarves.rpm "${LIBDWARVES_RPM_URL}"; \
+    echo "${DWARVES_RPM_SHA256}  dwarves.rpm"     | sha256sum -c -; \
+    echo "${LIBDWARVES_RPM_SHA256}  libdwarves.rpm" | sha256sum -c -; \
+    dnf5 -y install ./libdwarves.rpm ./dwarves.rpm; \
+    dnf5 clean all; \
+    GOT="$(pahole --version)"; \
+    echo "pahole in buildroot: ${GOT} (pin says ${DWARVES_NVR})"; \
+    case "${GOT}" in \
+        "v${DWARVES_NVR%%-*}") : ;; \
+        *) echo "FATAL: buildroot pahole is '${GOT}', pin requires v${DWARVES_NVR%%-*}"; exit 1 ;; \
+    esac; \
+    rm -rf /build/dw
+
+# ── Sources, each verified against the pin ──────────────────────────────────
+RUN set -eux; \
+    set -a; . /build/kernel.pin; set +a; \
+    mkdir -p /build/rpm/SOURCES /build/rpm/SPECS; \
+    cd /build/rpm/SOURCES; \
+    curl -fsSL -o "${KERNEL_TAG}.tar.gz"     "${KERNEL_SRC_URL}"; \
+    curl -fsSL -o config                     "${KERNEL_CONFIG_URL}"; \
+    curl -fsSL -o 0001-bore-cachy.patch      "${KERNEL_PATCH_BORE_URL}"; \
+    echo "${KERNEL_SRC_SHA256}  ${KERNEL_TAG}.tar.gz"      | sha256sum -c -; \
+    echo "${KERNEL_CONFIG_SHA256}  config"                 | sha256sum -c -; \
+    echo "${KERNEL_PATCH_BORE_SHA256}  0001-bore-cachy.patch" | sha256sum -c -; \
+    cp /build/kernel-cachyos.spec /build/rpm/SPECS/; \
+    ls -l
+
+# ── Build, gate, collect ────────────────────────────────────────────────────
+# One RUN on purpose. The kernel build tree is ~100 GB — measured 2026-09-20,
+# this machine's /var went 552 GB free to 453 GB during the compile — and must
+# not become a layer; the gate must run against the vmlinux this build produced
+# rather than against something recovered later; and the tree is deleted before
+# the layer closes.
+#
+# `-j12`, not `-j$(nproc)`: 16 parallel GCCs plus pahole's ~1 GB peak over a
+# 500 MB vmlinux is how a 29 GB box starts swapping.
+RUN set -eux; \
+    set -a; . /build/kernel.pin; set +a; \
+    cd /build/rpm/SPECS; \
+    # The dist tag decides the RPM release string, so it must follow the
+    # builder we are actually in rather than a hardcoded 43 that silently
+    # disagrees with BUILDER_BASE the day that pin moves.
+    FEDVER="$(. /etc/os-release; echo "${VERSION_ID}")"; \
+    test -n "${FEDVER}" || { echo "FATAL: no VERSION_ID in the builder's os-release"; exit 1; }; \
+    echo "builder is Fedora ${FEDVER}; release will be cachyos1.apex${APEX_KERNEL_BUILD}.fc${FEDVER}"; \
+    # `--noclean` IS LOAD-BEARING, DO NOT DROP IT. rpm >= 4.20 runs an
+    # `Executing(rmbuild)` phase after a successful build that deletes
+    # %{buildsubdir} — the whole kernel source tree, vmlinux included. Without
+    # this flag rpmbuild succeeds, the tree evaporates, and the gate below has
+    # nothing to read: a 49-minute build that dies one second after the kernel
+    # is finished. That is exactly how the 2026-09-20 run failed. Measured on
+    # fedora:43 / rpm 6.0.2: default leaves 0 vmlinux under BUILD, --noclean
+    # leaves it. The spec defines no %clean, so the flag has no other effect.
+    #
+    # NOT `rpmbuild … | tail`: `set -e` sees only the LAST command in a
+    # pipeline, so a failed rpmbuild piped to tail exits 0 and the build
+    # marches on to assert against a kernel that was never linked. Redirect,
+    # test explicitly, print the tail either way.
+    T0="$(date -u +%s)"; \
+    echo "rpmbuild starting at $(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+    if ! rpmbuild -bb kernel-cachyos.spec \
+            --define "_topdir /build/rpm" \
+            --define "dist .apex${APEX_KERNEL_BUILD}.fc${FEDVER}" \
+            --define "_smp_build_ncpus 12" \
+            --noclean \
+            > /build/rpmbuild.log 2>&1; then \
+        echo "FATAL: rpmbuild failed — last 120 lines:"; \
+        tail -120 /build/rpmbuild.log; \
+        exit 1; \
+    fi; \
+    T1="$(date -u +%s)"; \
+    tail -15 /build/rpmbuild.log; \
+    # The compile time is a number this tier is judged on and the rpmbuild log
+    # dies with this layer, so print it where the build log keeps it.
+    echo "rpmbuild took $(( (T1 - T0) / 60 ))m$(( (T1 - T0) % 60 ))s at -j12"; \
+    \
+    echo "=== locating the vmlinux this build linked ==="; \
+    find /build/rpm/BUILD -maxdepth 4 -type f -name vmlinux > /build/vmlinux-found || true; \
+    NVM="$(wc -l < /build/vmlinux-found)"; \
+    # Exactly one, not `head -1`. The gate must read THE vmlinux this build
+    # linked; if that ever stops being unambiguous, picking the first silently
+    # is how a gate ends up inspecting the wrong artefact.
+    test "${NVM}" = "1" \
+        || { echo "FATAL: expected exactly 1 vmlinux under /build/rpm/BUILD, found ${NVM}"; \
+             cat /build/vmlinux-found; \
+             echo "       If this is 0: rpm >= 4.20 deletes the build tree in its rmbuild"; \
+             echo "       phase unless --noclean is passed to rpmbuild. Check that flag first."; \
+             find /build/rpm/BUILD -maxdepth 3 -type d | head -20; exit 1; }; \
+    VMLINUX="$(cat /build/vmlinux-found)"; \
+    echo "vmlinux: ${VMLINUX} ($(stat -c %s "${VMLINUX}") bytes)"; \
+    \
+    echo "=== the config this kernel was actually built with ==="; \
+    CONF="$(dirname "${VMLINUX}")/.config"; \
+    test -s "${CONF}" || { echo "FATAL: no .config beside ${VMLINUX}"; exit 1; }; \
+    GOTPAHOLE="$(sed -n 's/^CONFIG_PAHOLE_VERSION=//p' "${CONF}")"; \
+    test -n "${GOTPAHOLE}" \
+        || { echo "FATAL: CONFIG_PAHOLE_VERSION absent from ${CONF} — BTF generation did not run"; exit 1; }; \
+    test "${GOTPAHOLE}" = "${PAHOLE_VERSION_EXPECTED}" \
+        || { echo "FATAL: kernel was built with CONFIG_PAHOLE_VERSION=${GOTPAHOLE}, pin requires ${PAHOLE_VERSION_EXPECTED}"; exit 1; }; \
+    echo "CONFIG_PAHOLE_VERSION=${GOTPAHOLE} (as pinned)"; \
+    for opt in CONFIG_SCHED_CLASS_EXT CONFIG_DEBUG_INFO_BTF CONFIG_EFI_STUB; do \
+        grep -q "^${opt}=y" "${CONF}" \
+            || { echo "FATAL: ${opt} is not =y in the built config"; grep -E "^#? *${opt}" "${CONF}" || true; exit 1; }; \
+        echo "${opt}=y"; \
+    done; \
+    if grep -q '^CONFIG_MODULE_ALLOW_BTF_MISMATCH=y' "${CONF}"; then \
+        echo "FATAL: CONFIG_MODULE_ALLOW_BTF_MISMATCH=y. That option exists to TOLERATE the"; \
+        echo "       defect this tier exists to eliminate. A kernel we build should have"; \
+        echo "       correct BTF, not permission to have wrong BTF."; \
+        exit 1; \
+    fi; \
+    echo "CONFIG_MODULE_ALLOW_BTF_MISMATCH is not set (deliberate)"; \
+    \
+    echo "=== THE GATE: does this kernel's BTF carry the kfunc defect? ==="; \
+    objcopy --dump-section .BTF=/build/vmlinux.btf "${VMLINUX}" /dev/null; \
+    test -s /build/vmlinux.btf \
+        || { echo "FATAL: .BTF section is empty or absent in ${VMLINUX}"; exit 1; }; \
+    \
+    # TWO readers, deliberately, and both must say clean.
+    #
+    # This gate had never passed on a real kernel before this build existed —
+    # every BTF available to test it against carried the defect, so every test
+    # was a negative one. If the authoritative reader fails here, "the kernel
+    # is genuinely broken" and "the reader is wrong about this particular BTF"
+    # are indistinguishable from one reading, and telling them apart costs
+    # another 45 minutes. So the bpftool reading runs FIRST and prints, whatever
+    # it finds, before the reader that can abort the build.
+    #
+    # They ask different questions on purpose (root cause vs symptom) and share
+    # no code: sh + bpftool here, apexd's kernelbtf.rs there. `if …; then` and
+    # not `!`, because `set -e` does not apply to an inverted command.
+    echo "--- reading 1 of 2: bpftool, the root cause (did pahole emit the tag?)"; \
+    # Keep the EXIT CODE, not a pass/fail boolean. btf-xcheck exits 1 for "a tag
+    # is missing" and 2 for "I could not read this BTF at all", and collapsing
+    # those loses the difference between the two readers DISAGREEING and only
+    # one of them having run. The second, reported as the first, sends whoever
+    # reads it hunting for untagged names that were never printed.
+    if apex-btf-xcheck /build/vmlinux.btf; then XRC=0; else XRC=$?; fi; \
+    echo "--- reading 2 of 2: apexd kernelbtf.rs, the symptom — THIS ONE IS THE GATE"; \
+    apex-kernel-btf-gate /build/vmlinux.btf; \
+    case "${XRC}" in \
+        0) echo "both readers agree: this kernel's scx_bpf_* kfuncs are intact" ;; \
+        1) echo "FATAL: the two readers disagree about this kernel's BTF."; \
+           echo "       apex-kernel-btf-gate says the published prototypes are clean, and"; \
+           echo "       the bpftool reading above says a bpf_kfunc DECL_TAG is missing."; \
+           echo "       One of them is wrong and this kernel does not ship until it is"; \
+           echo "       known which. Start from the untagged names printed above."; \
+           exit 1 ;; \
+        *) echo "FATAL: only ONE reader actually ran. apex-btf-xcheck exited ${XRC},"; \
+           echo "       which is its 'I could not read this BTF' code, not a verdict —"; \
+           echo "       so there are no untagged names above to go and look at. The gate"; \
+           echo "       passed, but it passed unaccompanied, and this tier requires two"; \
+           echo "       independent readings. Fix the reader (bpftool present? is the"; \
+           echo "       blob a raw BTF?) rather than the kernel."; \
+           exit 1 ;; \
+    esac; \
+    \
+    echo "=== collecting ==="; \
+    mkdir -p /rpms /manifest; \
+    find /build/rpm/RPMS -type f -name '*.rpm' -exec cp -t /rpms {} +; \
+    ls -l /rpms; \
+    N="$(find /rpms -name '*.rpm' | wc -l)"; \
+    # BY NAME, not by count. `-ge 4` would pass on four debuginfo subpackages
+    # and the missing one would surface 50 minutes later as core's `rpm -q`
+    # hard-gate failing — which is the expensive way to learn it. These are
+    # exactly the four Containerfile.core installs and then asserts.
+    rpm -qp --qf '%{NAME}\n' /rpms/*.rpm | sort -u > /build/rpm-names; \
+    cat /build/rpm-names; \
+    for want in kernel-cachyos kernel-cachyos-core kernel-cachyos-modules \
+                kernel-cachyos-devel-matched; do \
+        grep -qx "${want}" /build/rpm-names \
+            || { echo "FATAL: this build produced no ${want} — Containerfile.core installs and rpm -q's it"; exit 1; }; \
+        echo "produced: ${want}"; \
+    done; \
+    KVER="$(rpm -qp --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' /rpms/kernel-cachyos-core-*.rpm | head -1)"; \
+    test -n "${KVER}" || { echo "FATAL: cannot read the kernel version off its own rpm"; exit 1; }; \
+    # Containerfile.core finds the kernel with `ls -d /usr/lib/modules/*cachyos*`.
+    # If a release-string change ever stopped matching that glob, core would
+    # fail on an unset KVER with nothing saying why. Assert it here, where the
+    # string is made.
+    case "${KVER}" in \
+        *cachyos*) echo "kver: ${KVER} (matches core's *cachyos* glob)" ;; \
+        *) echo "FATAL: kver '${KVER}' does not contain 'cachyos'; Containerfile.core's kver glob would find nothing"; exit 1 ;; \
+    esac; \
+    CCVER="$(sed -n 's/^CONFIG_CC_VERSION_TEXT="\(.*\)"$/\1/p' "${CONF}")"; \
+    cp "${CONF}" /manifest/config; \
+    cp /build/vmlinux.btf /manifest/vmlinux.btf; \
+    cp /build/kernel.pin /manifest/kernel.pin; \
+    { echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+      echo "kernel_tag=${KERNEL_TAG}"; \
+      echo "kernel_version=${KERNEL_VERSION}"; \
+      echo "kver=${KVER}"; \
+      echo "dwarves=${DWARVES_NVR}"; \
+      echo "pahole_version=${GOTPAHOLE}"; \
+      echo "builder=fedora:${FEDVER}"; \
+      echo "cc=${CCVER}"; \
+      echo "btf_scx=usable"; \
+      echo "rpms=${N}"; } > /manifest/kernel-build.txt; \
+    cat /manifest/kernel-build.txt; \
+    rm -rf /build/rpm/BUILD /build/rpm/BUILDROOT /build/vmlinux.btf
+
+# ── What core consumes ──────────────────────────────────────────────────────
+# `FROM scratch` so this image is nothing but the artefacts: no base layers to
+# re-download, and `COPY --from=…@sha256:…` in core reaches them directly.
+FROM scratch
+COPY --from=kbuild /rpms /rpms
+COPY --from=kbuild /manifest /manifest
+# One label, deliberately. A `org.apexos.kernel.tag="cachyos-7.2.6-1"` here
+# would be a second copy of kernel.pin that nothing makes agree with the first,
+# and the day the pin moves it becomes a confident lie in `skopeo inspect`.
+# /manifest/kernel-build.txt is written by the build that produced these RPMs,
+# carries the kver, the toolchain and the BTF verdict, and cannot disagree with
+# them. /manifest/kernel.pin is the inputs it came from.
+LABEL org.apexos.tier="kernel" \
+      org.apexos.kernel.manifest="/manifest/kernel-build.txt"
