@@ -2380,7 +2380,7 @@ jobs:
               [ "$skipped" -gt 0 ] || { echo "::error::test-apex-hypr-focus.sh asserted nothing and did not say why"; exit 1; }
               echo "::warning::test-apex-hypr-focus.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc + Hyprland + quickshell and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 17 assertions only ever run on a machine with the compositors installed."
           else
-              [ "$passed" -ge 17 ] || { echo "::error::only $passed apex hypr-focus assertions ran; 17 ran on 2026-09-20, so some no longer execute"; exit 1; }
+              [ "$passed" -ge 19 ] || { echo "::error::only $passed apex hypr-focus assertions ran; 19 ran on 2026-09-20, so some no longer execute"; exit 1; }
           fi
 
       # The input half of the same argument. test-apex-input.sh proves each
