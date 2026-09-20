@@ -106,6 +106,39 @@ vendors' own release cadence. Pushing them up a tier to make bumps cheaper is
 not available — a `dnf` transaction above `core` puts an rpmdb-sized layer into
 every user's next update, which is the problem this whole document is about.
 
+### What the systemd-boot pivot added
+
+The smallest thing `core` has taken, recorded because the pivot sounds
+expensive and the packages are not what makes it so. Measured with
+`dnf5 install --assumeno` inside `ghcr.io/andrenijman/apex-os:daily`:
+
+```
+Installing:  systemd-boot-unsigned  248.9 KiB
+             systemd-ukify           99.9 KiB
+Installing dependencies: python3-cffi, python3-cryptography, python3-pefile,
+             python3-ply, python3-pycparser, python3-zstandard
+Total size of inbound packages is 3 MiB. … 12 MiB extra will be used.
+```
+
+`checkpolicy`, `policycoreutils` and `python3-setools` were **already
+installed** — they are named in the same transaction only to make the
+dependency explicit, the way `efibootmgr` is, so a future change that drops
+them fails the build instead of turning the boot blessing into a silent
+rollback loop.
+
+The `apex_sdboot` SELinux module is the other half. `semodule -N -i` grows
+`/etc/selinux` by **466 bytes**, but rewrites `policy.35`, which is **3.8 MB**,
+and an OCI layer carries a changed file whole. That is why the module is
+compiled in `core` and not in the files tier: 4 MB once, rather than 4 MB in
+every thin-tier update.
+
+`systemd-boot-unsigned` has to be in the shipped image and cannot be a
+build-only tool like `sbsigntools`: `bootc install --bootloader systemd` copies
+the loader **out of the image being installed**. With the package absent, bootc
+printed "Installing bootloader via systemd-boot", exited 0, and produced an ESP
+with an empty `/EFI/systemd/` and no loader binary anywhere — an unbootable
+disk from a successful install.
+
 ### What the screen reader added
 
 The other end of the same scale, and worth recording next to the AI apps
