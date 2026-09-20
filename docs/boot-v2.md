@@ -52,7 +52,7 @@ converter**: `bootc --help` on 1.16.10 and 1.16.13 lists no migration verb.
 | `bootc install --bootloader systemd --composefs-backend` | installs, and the guest reaches a login prompt under OVMF |
 | `bootc upgrade` on that machine | writes a correct new entry; dedupes the ESP directory when kernel+initramfs are unchanged, writes a second one when the initramfs moves |
 | rollback by boot counter | **proven** — at `+0-3` sd-boot selected the previous deployment by itself, with `systemd-bless-boot` masked throughout |
-| `systemd-bless-boot` on the APEX image | **fails, enforcing SELinux denial** — see below. Unfixed, every deployment would roll back on its fourth boot |
+| `systemd-bless-boot` on the APEX image | **was failing on an enforcing SELinux denial; repaired and proven in a boot** — see below |
 | Secure Boot on this path | not yet measured; every lab boot was non-SB OVMF |
 | a sealed UKI on this path | not yet built; `bootc container ukify` exists and has not been run |
 | the ESP an existing APEX machine has | **too small** — 600 MiB on the L16 against ~1.1 GiB needed |
@@ -98,6 +98,38 @@ permission the transition is missing — `bootupd_t` may use `init_exec_t` as an
 entrypoint. `init_t → bootupd_t:process transition` and `bootupd_t`'s journal
 and fd access are already allowed through the `daemon` attribute, checked
 rather than assumed.
+
+**It is proven in a boot, not only in the policy.** Same image lineage, same
+backend, same enforcing SELinux as the run that failed, installed through
+`tests/lab/bootc-install-lab` and booted twice under OVMF:
+
+```
+systemd-bless-boot[1210]: Marked boot as 'good'. (Boot attempt counter is at 1.)
+systemd[1]: Finished systemd-bless-boot.service
+LAB-enforce:       Enforcing
+LAB-bless-result:  active / success
+LAB-entries-after: bootc_fedora-43-1.conf      <- the +3-0 suffix is gone
+LAB-avc:           <empty>
+```
+
+One caveat that changes what that proves: **`bootupd_t` is a permissive domain
+in Fedora 43** — one of 41. Denials inside it are logged and allowed. The zero
+AVCs are still meaningful, because a permissive domain logs what it would have
+denied and nothing was logged; but the drop-in alone would probably work today
+even without the module. The module is what makes this correct rather than
+tolerated, and what keeps it working on the day that domain becomes enforcing.
+
+**And the symmetric change to `apex-boot-count` is wrong** — it was tried in the
+same guest and reverted. `/usr/libexec` is `bin_t`, and the policy has
+`type_transition init_t bin_t:process unconfined_service_t` while `init_exec_t`
+has no transition at all. So the helper was already unconfined and could rename
+a `dosfs_t` file unaided; forcing `bootupd_t` confined it into a domain whose
+`proc_t:file` access is `map` only, and the guest logged
+`avc: denied { read } comm="cat" path="/proc/cmdline" scontext=bootupd_t` while
+still appearing to pass, because the domain is permissive. `/proc/cmdline` is
+where the counter reads the booted composefs digest, so on an enforcing
+`bootupd_t` it would silently stop writing counters. `Containerfile.base` and
+the test suite now assert that unit carries **no** `SELinuxContext=`.
 
 The `-` prefix covers one family of failure and it is worth naming which.
 `systemd.exec(5)`: with the dash, *"failing to set the SELinux security context
@@ -358,8 +390,11 @@ In order, and none of them are optional:
 2. A sealed UKI built by `bootc container ukify` from the APEX image, booting
    in that guest — including the credential mechanism above actually changing
    the keymap at a LUKS prompt.
-3. The blessing fix proven on the APEX image: entry counted, boot, suffix
-   stripped, `bootc status` still showing a usable rollback.
+3. ~~The blessing fix proven on the APEX image.~~ **Done, 2026-09-21** — entry
+   counted, booted, suffix stripped, zero AVCs, `LAB-bless-result: active /
+   success`. What remains from this gate is the cheap half: the *reverted*
+   `apex-boot-count` renaming a staged entry in a guest. Both things it rests
+   on are measured; the shipped combination has not been through a boot.
 4. A Windows-entry assertion: an `efibootmgr -v` capture before and after an
    install into a lab disk that carries a `Windows Boot Manager` entry,
    compared with `cmp`, failing if anything moved. Katana's APEX `Boot0000`
@@ -444,6 +479,8 @@ machine and on a machine with nothing staged.
 | LUKS2 + TPM, lab | `files/scripts/boot-v2/apex-luks-enroll` | signed PCR 11 policy plus a recovery key, against a software TPM. A different program from the row above; see "TPM-bound unlock" |
 | VM harness | `files/scripts/boot-v2/run-scenarios` | fifteen scenarios, all booting real guests under Secure Boot enforcing |
 | health gate | `files/system/libexec/apex-boot-health` | the `boot-complete.target` gate, and the rollback notice |
+| boot counter | `files/system/libexec/apex-boot-count` | renames the STAGED entry to `+3-0` so bootc's uncounted set gets a counter; picks the entry by composefs digest, refuses on ambiguity |
+| blessing repair | `files/system/selinux/apex_sdboot.te` + `files/system/units/10-apex-bless-boot-esp.conf` | lets `systemd-bless-boot` rename an entry on a FAT ESP, which `init_t` cannot |
 | reporting | `apex boot status` | read-only; what verified this boot and what the counter believes |
 | CI | `.github/workflows/boot-v2.yml` | builds the lab, boots the scenarios, publishes nothing |
 
