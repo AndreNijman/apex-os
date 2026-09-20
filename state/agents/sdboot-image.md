@@ -53,7 +53,16 @@
 | `.github/workflows/boot-v2.yml`, docs | every host-side `podman run … apex-bootlab` wrapped in `nvram-guard` |
 
 The whole `Containerfile` stanza set was run in a real `podman build` before
-being committed (`/var/lab-scratch/sdboot-image-agent/coretest/Containerfile`).
+being committed (`/var/lab-scratch/sdboot-image-agent/coretest/Containerfile`),
+and the one refusal that could only ever pass — a `! grep` in mid-chain, which
+errexit ignores — was caught by `tests/check-containerfile-assertions.sh` and
+rewritten as an `if … exit 1`, then tested both ways in a build.
+
+Lab artefacts, all under `/var/lab-scratch/sdboot-image-agent/` and
+`/var/lab-scratch/sdboot-lab/`: `blesslab/` (the guest image sources),
+`bless2.img` (43 GB, the installed guest), `bless2-b1.serial` /
+`bless2-b2.serial` (the two boots), `install2.log`, `nvram/` (the guard's
+snapshot pairs). Delete the .img when done; it is the biggest thing here.
 
 ## The defects that decide whether the pivot works at all
 
@@ -117,9 +126,19 @@ Everything below is pushed; nothing is half-applied. Start here.
 2. **Take the Secure Boot decision** (docs/boot-v2.md, "Secure Boot: a
    decision, not a measurement"): APEX-signed sd-boot the user enrols, or a
    shim → sd-boot chain APEX authors. Everything in phase 2 waits on it.
-3. **Tell `kernel-build` the three asks** in that document: kernel and
-   initramfs stay at `/usr/lib/modules/<kver>/`; the MOK signer must handle an
-   arbitrary PE and attach `.sbat`; the `sbverify` gate moves to the UKI.
+3. **The kernel landed (merge `74b777ac`) and one of the three asks is now a
+   RULE, not a request.** Signing only the inner `vmlinuz` once a UKI exists
+   gives **an unbootable machine with every assertion green** — the kernel is
+   signed, the kernel check passes, and the object the firmware loads is
+   unsigned. `AGENTS.md`'s Secure Boot invariant now says the built artifact is
+   whatever the firmware loads, and `docs/boot-v2.md` gate 2 requires the
+   signature and the `sbverify` gate to move to the UKI in the same change that
+   produces one. The remaining two asks stand: kernel and initramfs stay at
+   `/usr/lib/modules/<kver>/`, and the MOK signer must handle an arbitrary PE
+   and attach `.sbat`. Two facts to not re-derive: the kernel image is
+   `FROM scratch`, 186.9 MiB, and no user downloads it (this pivot's
+   update-cost accounting is unaffected); and it has **no shell**, so read
+   files out of it rather than shelling in.
 4. **Phase 2 work, in order**: `bootc container ukify` against the APEX image;
    a credential changing the keymap at a real LUKS prompt in a guest (this is
    what `luks-installer` will want to see); then `apex-boot-count`'s second
