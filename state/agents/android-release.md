@@ -1,94 +1,133 @@
 # android-release — publish the Android client, and stop it drifting from the OS
 
-ask: Andre, directly — *"add the android app to releases"*, then sharpened to
-  *"maybe make the apk auto updating"* and *"not some suckky system where half
-  the time peoples things wont work."*
+ask: Andre, directly — *"add the android app to releases"*, sharpened to
+  *"figure out and make it good, not some suckky system where half the time
+  peoples things wont work, also maybe make the apk auto updating. use the
+  github releases make the page"*
 repo: apex-os
 worktree: `/var/tmp/apex-work/wt-android-release`, branch `task/android-release`
-  (created 2026-09-20 off `roadmap/v2.2` @ `303221d5`; **pushed, not merged**)
-owns: `android/**` and the new release workflow. Does NOT own `apexd/**`,
-  `installer/**`, `Containerfile.*`, the kernel.
+  (**pushed, not merged**; merged `origin/roadmap/v2.2` @ `4c2478fc` cleanly)
+owns: `android/**`, `.github/workflows/release-android.yml`,
+  `tests/test-android-release.sh`, `docs/android-app.md`, the README's phone
+  section. Does NOT own `installer/**`, the boot path, the kernel.
 
-## STATUS — IN PROGRESS
+## STATUS — COMPLETE except for one decision that is not an agent's to take
 
-Done and pushed:
+Six commits, all pushed. `a7d935ea` was the previous agent's; the rest are this
+round's. **The previous agent's card lagged its worktree badly** — five whole
+files and three modified ones were sitting uncommitted. They are committed now.
 
-* `a7d935ea` — `versionCode` comes from `APEX_VERSION_CODE` instead of the
-  literal `1`. Verified by building the debug APK both ways and reading
-  `output-metadata.json`.
+* `49900bc3` the inherited work: version window + the three release scripts +
+  the workflow + both suites
+* `c4d9c643` merge `roadmap/v2.2`
+* `e5cf7a3b` three real defects in that inherited work (below)
+* `73e60681` the in-app updater
+* `ac7db108` the window reaches the metadata and the page
+* `4ca2a20e` `docs/android-app.md`, README, the page evidence
 
-## THE CORRECTION THAT MATTERS MOST
+## THE THREE DEFECTS IN THE INHERITED WORK — all found by running it
 
-**The brief said the Android wire is at `PROTOCOL_VERSION` 11. It is not.**
-Two different constants, and confusing them sends you to the wrong file:
+The previous agent wrote the window and never executed it. None of these is
+subtle once the suite runs; all three are invisible if it does not.
 
-* `apexd/apex-remote-core/src/lib.rs:55` — **`REMOTE_PROTOCOL_VERSION = 1`**.
-  This is the Android ↔ `apex-remoted` wire. Mirrored at
-  `android/core/src/main/kotlin/com/apexos/remote/core/Client.kt:300`.
-* `apexd/apex-agent-core/src/protocol.rs:169` — `PROTOCOL_VERSION = 11`. This
-  travels *inside* the Noise tunnel and Android already handles it leniently
-  (`ignoreUnknownKeys = true`, `Sessions.kt:222`) and never compares it. It is
-  not a compatibility problem and needs nothing.
+1. **`Client.pair` handshook at `versions.first()`, not `offer.v`** — its own
+   comment three lines above said it must use the desktop's. The revision goes
+   into the Noise prologue, so pairing against an older desktop failed and told
+   the user the machine *"did not prove it holds the key from the QR code"*.
+2. **`openSessionAcrossVersions` caught `Throwable` and continued**, which its
+   doc comment explicitly forbade. A dead socket would have cost one dial per
+   revision and then been reported as a protocol problem.
+3. **The suite did not fail on (1) — it HUNG.** Fourteen minutes, killed by
+   hand. `PipedInputStream.read` only notices a dead writer that has already
+   written, and the fake responder died before writing a byte. Both responders
+   now close their sink in a `finally` and the class carries `@Timeout(30)`.
 
-## THE SHIPPED DEFECT THIS UNIT FOUND
+Both fixes are **mutation-checked**: reverting either fails exactly one named
+test. The first mutation attempt hit the WRONG `catch` block (there are two
+identical ones) and proved nothing — check what you mutated actually changed.
 
-A version mismatch on an **already-paired** machine is reported to the user as
-*"this machine does not accept this device: it is not paired, or it has been
-revoked."* — `Client.kt:108-125`. The version is never mentioned.
+## WHAT THIS ROUND BUILT
 
-Why: the version is bound into the Noise prologue
-(`apex-remote-core/src/noise.rs:129`), never transmitted. The daemon
-(`apex-remoted/src/serve.rs:180-189`) **never inspects a version** — it builds
-the responder with its own constant, the AEAD tag fails, and it drops the
-socket with one journald line. Pairing is fine (`Client.kt:37-43` checks
-`offer.v` explicitly and says the right thing); reconnecting is not.
+* **In-app updater.** Decisions in `:core` (`core/…/update/Updates.kt`, 19
+  tests), Android glue in `:app` (`app/…/update/`). Streams the APK from the
+  release into a `PackageInstaller` session while hashing, and commits only if
+  the digest agrees — so no FileProvider, no download directory, nothing new
+  for `InsecureStorageTest` or `no-second-write-path.sh`.
+* **NOT `/releases/latest`.** Measured: this repo's Releases page already holds
+  `v1.0.0` and `v0.1.0`, both OS ISOs, and that endpoint answers `v1.0.0`. An
+  updater built on it finds no APK and says "up to date" forever. Releases are
+  picked out by their `android-v<code>` tag.
+* **The window reaches the page.** `SUPPORTED_REMOTE_PROTOCOL_VERSIONS` is a
+  literal so `release-artifacts.sh` can read it; it refuses anything that is
+  not a plain integer list, and `release-notes.sh` refuses to write a page from
+  metadata with no window. The old page promised "an app one revision behind
+  still connects" on a build whose window is one entry long.
+* **Floors:** core 421 → 526, app 33 → 53, both read from the results XML.
+* **`tests/test-android-release.sh` was run by nothing.** Wired into
+  pr-validation's android job, and the android path selector now also matches
+  that suite and `release-android.yml` — a release-workflow-only change used to
+  select no job that runs its gate.
 
-So bumping `REMOTE_PROTOCOL_VERSION` today tells every installed phone it has
-been revoked. That is exactly the failure Andre described.
+## PROVED WITHOUT PUBLISHING
+
+`release-artifacts.sh` was run end to end against a throwaway keystore in
+`/var/lab-scratch` (shredded afterwards; **not** a release key). Exit 0 through
+`assembleRelease`, `bundleRelease` and `verifyReleaseSigning`. Read back off the
+artefacts: `aapt2 dump badging` says versionCode `1330`, the APK carries a v2/v3
+signature, the AAB passes `jarsigner -verify`, and the built manifest carries
+`REQUEST_INSTALL_PACKAGES`. The page generated from that build is
+`ROADMAP/evidence/android-release-page-20260920.md`.
+
+**No release was created and no tag was moved.** `release-android.yml` is
+`workflow_dispatch`-only, main-only, and `dry_run` defaults to true.
+
+## THE DECISION ANDRE MUST MAKE — STILL DO NOT MAKE IT FOR HIM
+
+**No Android signing key exists.** `gh secret list -R AndreNijman/apex-os`
+returns exactly `APEX_SB_CRT_B64` and `APEX_SB_KEY_B64`. None of the four
+`APEX_KEYSTORE*`/`APEX_KEY*` secrets is set, so `release-android.yml` refuses on
+its first real step and `pr-validation.yml` has only ever taken its unsigned
+branch.
+
+Sharpened this round, measured not assumed: `apksigner rotate` in build-tools
+36.0.0 produces a v3 `SigningCertificateLineage`, and this app already enables
+v3. So the key can be **rotated while the old one still exists**; it becomes
+unrecoverable only once the old one is gone. The decision is therefore about the
+BACKUP, and it has three parts — where it is generated, where the only copy
+lives, and whether the passwords follow `apex-secretd` or the Secure Boot
+pattern. Written up at the end of `docs/android-app.md`.
 
 ## NEXT
 
-1. **Protocol version window in `android/core`.** Retry the handshake across a
-   supported list instead of a single constant — the prologue is hashed, never
-   sent, so a client can simply try each version. `openSession` takes
-   `versions: List<Int>`; `Client.pair` accepts `offer.v in versions` rather
-   than `!=`. When the whole window fails, name BOTH causes and print the
-   window. Test with a synthetic `{1,2}` window against
-   `ClientTranscriptTest`'s fake server — the production list is `{1}` and a
-   test on it proves nothing. Bump the 421 floor in `pr-validation.yml`.
-2. **Release flow.** `android/tools/release-version.sh` (gate) +
-   `release-artifacts.sh` (build), `.github/workflows/release-android.yml`,
-   `tests/test-android-release.sh` with a fake `gh`. Follow the **Secure Boot**
-   ritual (`build-image.yml:501-573`), not `pr-validation.yml`'s: `$RUNNER_TEMP`,
-   `chmod 600`, validate with `keytool -list` before the build, `shred`.
-3. **In-app auto-update.** Traps found but not yet paid: AGP 9 defaults
-   `buildFeatures.buildConfig` OFF (needed for `BuildConfig.VERSION_CODE`); the
-   download directory must not break `android/tools/no-second-write-path.sh`;
-   a FileProvider is a new manifest element beside `ManifestTest`'s FIXED
-   permission set, which will go red when `REQUEST_INSTALL_PACKAGES` is added.
-4. Docs page + the Releases page body.
+Nothing is half-done. In rough order of value:
 
-## THE DECISION ANDRE MUST MAKE — DO NOT MAKE IT FOR HIM
+1. **Andre decides the signing key** (above). Until then no release can be cut,
+   which is the correct failure — an unsigned APK cannot be installed at all.
+2. **Once the four secrets exist, dispatch `release-android.yml` with
+   `dry_run: true`** and read the summary. That is the one path no local run can
+   exercise: `$RUNNER_TEMP`, the `secrets` context, cosign keyless. Only then
+   turn `dry_run` off.
+3. **When `REMOTE_PROTOCOL_VERSION` next moves**, add the old revision to
+   `SUPPORTED_REMOTE_PROTOCOL_VERSIONS` in the SAME commit, and check the
+   daemon can still serve it. The window is a promise about whole sessions, not
+   just handshakes.
+4. `isMinifyEnabled` is still false. Turning R8 on needs `kotlinx.serialization`
+   keep-rules and the failure is at runtime on a device — do not turn it on
+   without one.
+5. The in-app install path has never run on a phone, and says so in its own
+   comments and in `docs/android-app.md`. First device that appears, install an
+   older APK and update over it.
 
-**No Android signing key exists.** Measured, not assumed:
-`gh secret list -R AndreNijman/apex-os` returns exactly `APEX_SB_CRT_B64` and
-`APEX_SB_KEY_B64`. None of `APEX_KEYSTORE_BASE64`, `APEX_KEYSTORE_PASSWORD`,
-`APEX_KEY_ALIAS`, `APEX_KEY_PASSWORD` is set, so `pr-validation.yml`'s release
-step has never signed anything and has only ever taken its unsigned branch.
+## LOCAL BUILD TRAPS
 
-Lose that key and **every installed app is permanently unable to upgrade** —
-Android refuses an update signed by a different key, and uninstalling to fix it
-destroys the paired device key. No agent should generate it.
-
-## LOCAL BUILD TRAP
-
-`/usr/lib/jvm/java-21-openjdk/conf` is a **dangling symlink** into a missing
-`/etc/java`, so every gradle invocation dies with
-`InternalError: Error loading java.security file`. It is owned by no rpm.
-Working JDK 21 unpacked at `/var/tmp/apex-android-release-jdk/jdk-21.0.12.1+1`.
+`/usr/lib/jvm/java-21-openjdk/conf` is a dangling symlink, so the system JDK
+dies with `InternalError: Error loading java.security file`. Working JDK:
 
 ```
 export JAVA_HOME=/var/tmp/apex-android-release-jdk/jdk-21.0.12.1+1
 export ANDROID_HOME=/var/tmp/android-sdk
 cd /var/tmp/apex-work/wt-android-release/android && ./gradlew --no-daemon :core:test
 ```
+
+A cold `:core:test` is ~35s; `:app:assembleDebug` is ~3min. Espresso stays
+pinned at 3.7.0.
