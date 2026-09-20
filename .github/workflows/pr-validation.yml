@@ -703,6 +703,22 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-bootc-install-guard.sh
 
+      # windows-installer/ is Windows-targeted code in a repository that is
+      # developed, built and tested entirely on Linux, so every one of its unit
+      # tests compiles for the HOST and the Windows-only paths are skipped by
+      # cfg(). Its first round shipped 655 lines and recorded honestly that no
+      # .exe had ever been built here — the toolchain looked unavailable
+      # because APEX is bootc and read-only, so `dnf install` on the host is
+      # refused. It installs fine in a container.
+      #
+      # This builds the real PE32+ binary and RUNS it under wine. The exit code
+      # is not the assertion: a binary that dies in the loader exits non-zero
+      # exactly like one that ran and refused, so the check is on the program's
+      # own usage text and its read-only disclaimer reaching the user.
+      - name: the Windows binary builds, and it runs
+        if: ${{ !cancelled() }}
+        run: ./tests/test-windows-installer.sh
+
       # §27's trust readout, structural half. In `static` because the check
       # that matters most here compares two files in DIFFERENT selectors: the
       # cosign identity in .github/workflows/build-image.yml against the one
