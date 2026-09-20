@@ -1944,8 +1944,11 @@ RUN set -eux; \
 # drop-in that requests the transition ships from Containerfile.base.
 #
 # Compiled HERE and not in the files tier on purpose: this is compilation, and
-# `semodule -i` rebuilds the binary policy under /etc — roughly 20 MB that
-# would otherwise be re-fetched by every machine on every thin-tier update.
+# `semodule -i` rewrites the binary policy under /etc. Measured in
+# ghcr.io/andrenijman/apex-os:daily: /etc/selinux grows by 466 bytes, but
+# policy.35 (3.8 MB) is rewritten whole, and an OCI layer carries a changed
+# file whole — so doing it in the thin tier would put ~4 MB into every update.
+# docs/update-cost.md, "What the systemd-boot pivot added".
 COPY files/system/selinux/apex_sdboot.te /usr/share/apex-os/selinux/apex_sdboot.te
 COPY files/system/selinux/verify-apex-sdboot.py \
      /usr/share/apex-os/selinux/verify-apex-sdboot.py

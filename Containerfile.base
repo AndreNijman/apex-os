@@ -1170,8 +1170,9 @@ RUN set -eux; \
     \
     : 'The drop-in is only half the repair: the transition it asks for needs'; \
     : 'the apex_sdboot policy module, which is COMPILED IN Containerfile.core'; \
-    : '(compiling belongs in the slow tier, and rebuilding the binary policy'; \
-    : 'here would put ~20 MB of /etc into every thin-tier update).'; \
+    : '(compiling belongs in the slow tier, and `semodule -i` rewrites the'; \
+    : 'binary policy -- measured at 3.8 MB for policy.35 in the daily image --'; \
+    : 'which would land in every thin-tier update if it were done here).'; \
     : 'Asserted across the tier boundary, cheaply, so a core change that drops'; \
     : 'it fails here rather than on somebody machine four boots later.'; \
     semodule -l | grep -qx apex_sdboot; \
