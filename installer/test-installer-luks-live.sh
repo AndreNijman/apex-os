@@ -121,6 +121,20 @@ cleanup() {
     sudo -n umount "$MNT"          2>/dev/null
     sudo -n umount "$BOOTMNT"      2>/dev/null
     [ -n "$MAPPER" ] && sudo -n cryptsetup close "$MAPPER" 2>/dev/null
+    # $MAPPER is the mapper THIS SUITE opened. The ENGINE opens one too, named
+    # luks-<uuid>, and when the run dies before the suite has read that uuid —
+    # which is exactly what happened when nvram-guard aborted run 5 — nothing
+    # closed it, the dm device kept the loop device open, and `losetup -d`
+    # failed silently for hours afterwards. So the holders are asked instead of
+    # remembered: anything mapped on top of a partition of OUR loop device, and
+    # nothing else.
+    if [ -n "$LOOP" ]; then
+        for _h in /sys/class/block/"$(basename "$LOOP")"*/holders/*; do
+            [ -e "$_h" ] || continue
+            _dm=$(cat "$_h/dm/name" 2>/dev/null) || continue
+            [ -n "$_dm" ] && sudo -n cryptsetup close "$_dm" 2>/dev/null
+        done
+    fi
     [ -n "$LOOP" ] && sudo -n losetup -d "$LOOP" 2>/dev/null
     # Keep the artefacts when anything failed: a suite that deletes the engine
     # output it just told you to read is a suite you cannot act on.
