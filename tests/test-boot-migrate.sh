@@ -317,7 +317,13 @@ if [[ "$rc" == 0 ]] && grep -q 'reboot to finish' <<<"$out"; then
 else
     bad "auto re-ran on a machine committed in this same boot (rc=$rc): $out"
 fi
-if grep -q 'committed-boot' "$CODE"; then
+# Specifically: the COMMIT writes it. Checking that the file is merely
+# mentioned passes while nothing creates it — the fixture writes one itself,
+# so that weaker assertion survived the mutation that removed the write.
+commit_body() {
+    awk '/^cmd_commit\(\) \{/{inside=1} inside{print} inside && /^\}/{exit}' "$CODE"
+}
+if commit_body | grep -q 'committed-boot'; then
     ok "the commit records which boot it happened in"
 else
     bad "nothing records the committing boot, so a second update cannot tell"
