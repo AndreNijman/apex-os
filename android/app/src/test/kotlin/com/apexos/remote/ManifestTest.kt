@@ -119,7 +119,7 @@ class ManifestTest {
     }
 
     @Test
-    fun `the permissions this app does declare are the four it can justify`() {
+    fun `the permissions this app does declare are the five it can justify`() {
         // A fixed set rather than a floor. A permission added without a reason
         // fails here and has to be argued for in a diff, which is the only
         // moment anybody reads the list.
@@ -137,6 +137,13 @@ class ManifestTest {
                 "android.permission.ACCESS_NETWORK_STATE",
                 // An agent waiting for you is the reason to carry this app.
                 "android.permission.POST_NOTIFICATIONS",
+                // The app updates itself, because nothing else can: the phone
+                // is not running APEX-OS and `apex update` cannot reach an
+                // APK. It earns the right to ASK and nothing more -- Android
+                // still draws the install prompt, and so does GrapheneOS.
+                // Argued at length in the manifest and in docs/android-app.md,
+                // including why the DESKTOP AI apps are ruled the other way.
+                "android.permission.REQUEST_INSTALL_PACKAGES",
             ),
             "the declared permissions changed: $declared",
         )
@@ -161,6 +168,37 @@ class ManifestTest {
                     "and drops whatever the terminal was attached to",
             )
         }
+    }
+
+    @Test
+    fun `the install-status receiver exists and is not exported`() {
+        // `PackageInstaller.commit()` draws nothing by itself. It broadcasts
+        // STATUS_PENDING_USER_ACTION carrying the intent that raises the
+        // user's install prompt, and a build that committed sessions with no
+        // receiver to read that broadcast would have an update that silently
+        // never happened — which is the shape of failure this whole unit was
+        // asked to eliminate, one layer down.
+        //
+        // A manifest assertion and not a behavioural one, said plainly: no
+        // test in this repository installs anything, because there is no
+        // device. What is checked here is that the declaration the flow
+        // depends on is present and is closed to every sender but the system.
+        val name = ".update.UpdateInstallReceiver"
+        assertTrue(
+            manifest.contains("\"" + name + "\""),
+            "the install-status receiver is not declared, so committing an update session " +
+                "would never raise the prompt that installs it",
+        )
+        val receiver = manifest.substringAfter(name).substringBefore("</receiver>")
+        assertTrue(
+            receiver.contains("android:exported=\"false\""),
+            "the install-status receiver is exported, so any app on the phone could send it " +
+                "an install status",
+        )
+        assertTrue(
+            receiver.contains("com.apexos.remote.UPDATE_STATUS"),
+            "the receiver does not listen for the action the updater sends",
+        )
     }
 
     @Test

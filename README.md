@@ -296,6 +296,42 @@ explicit `--allow-unsigned` for that file, and `apex pkg list` says so afterward
 Already have layered packages? `sudo apex pkg adopt` converts them and restores
 updates. See [docs/packages.md](docs/packages.md).
 
+## The phone app
+
+APEX Remote pairs a phone with one of your machines — over your network, or
+through a relay when you are away from it — and lets you watch and drive what is
+running on it: agent sessions, approvals, and a real terminal. It talks only to
+machines you have paired by scanning a QR code off their screen; there is no
+account and no server of ours in the middle.
+
+Download the `apex-remote-*.apk` from the same
+[Releases page](https://github.com/AndreNijman/apex-os/releases) as the ISO, and
+check it against the `.sha256` beside it. Each release explains, for somebody who
+has never sideloaded an app, exactly what Android will ask and how to answer it.
+
+Every APEX Remote APK is signed by one certificate, and this is its SHA-256
+fingerprint:
+
+<!-- fingerprint:begin -->
+UNSET
+<!-- fingerprint:end -->
+
+`apksigner verify --print-certs apex-remote-<version>.apk` prints the
+certificate that actually signed your download; it must be that value. (`UNSET`
+means no release has been signed yet.) Android enforces the same thing from then
+on: an update signed by any other key will not install over it.
+
+Once installed the app keeps itself current — it checks the Releases page and
+offers, and Android still shows its own install prompt before anything is
+replaced. On the machine, `apex remote status` says whether the service is
+running and which protocol version it speaks. Pairing is `apex remote pair`.
+
+[docs/android-app.md](docs/android-app.md) covers how the release is built, how
+the version is derived, and what happens when the app and the machine are
+different ages. [docs/android-signing.md](docs/android-signing.md) covers the
+signing key: who holds it, why GitHub is not its backup, and how it can be
+rotated. [docs/remote.md](docs/remote.md) covers the app itself.
+
 ## Repository layout
 
 | Path | Contents |
@@ -311,6 +347,7 @@ updates. See [docs/packages.md](docs/packages.md).
 | `files/scripts/` | Build and runtime helper scripts |
 | `apexd/` | apexd system daemon source |
 | `config/sysprofiles/` | Per-machine hardware tuning profiles |
+| `android/` | APEX Remote, the Android client (`:core` protocol, `:app` UI) |
 | `tests/` | Image and integration tests |
 | `docs/` | Project documentation |
 | `.github/workflows/` | CI (image build, sign, publish) |
