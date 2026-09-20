@@ -52,6 +52,7 @@ run_mig() {   # run the engine with a fixture state dir; never touches this mach
     APEX_MIGRATE_ROOT="$TMP/sysroot" \
     APEX_MIGRATE_ESP="$TMP/esp" \
     APEX_MIGRATE_DRYRUN=1 \
+    APEX_MIGRATE_STORE="${STORE:-ostreeContainer}" \
         bash "$MIG" "$@" 2>&1
 }
 
@@ -287,6 +288,85 @@ for dep in podman mkfs.vfat rsync efibootmgr unshare; do
         && ok "the image asserts $dep is present" \
         || bad "$dep is a runtime dependency of the migration and is not asserted"
 done
+
+# ═════════════════════════════════════════════════════════════════════════════
+sec "the five holes the review found, each with the assertion that would catch it"
+
+# 1. A migrated machine must not be told on every update that it stays on GRUB.
+rm -rf "$TMP/state"; mkdir -p "$TMP/state"
+echo confirmed > "$TMP/state/phase"
+# `set -e` would kill the suite on the non-zero exit these cases are ABOUT,
+# so every one of them captures the code instead of letting it propagate.
+rc=0; run_mig auto >/dev/null 2>&1 || rc=$?
+if [[ "$rc" == 3 ]]; then
+    ok "auto on a confirmed machine exits 3 (nothing to do), not 10 (refused)"
+else
+    bad "auto on a confirmed machine exits $rc — apex update would print a refusal forever"
+fi
+grep -q 'Ok(3) => false' "$OPS" \
+    && ok "apex update treats exit 3 as silence" \
+    || bad "apex update does not handle the 'nothing to do' code"
+
+# 2. Two updates in one boot must not re-run the install.
+rm -rf "$TMP/state"; mkdir -p "$TMP/state"
+echo committed > "$TMP/state/phase"
+cat /proc/sys/kernel/random/boot_id > "$TMP/state/committed-boot"
+rc=0; out="$(run_mig auto 2>&1)" || rc=$?
+if [[ "$rc" == 0 ]] && grep -q 'reboot to finish' <<<"$out"; then
+    ok "committed in this boot: auto says reboot, and runs no install"
+else
+    bad "auto re-ran on a machine committed in this same boot (rc=$rc): $out"
+fi
+if grep -q 'committed-boot' "$CODE"; then
+    ok "the commit records which boot it happened in"
+else
+    bad "nothing records the committing boot, so a second update cannot tell"
+fi
+# committed in an EARLIER boot, still on GRUB, is the failed case
+echo committed > "$TMP/state/phase"
+echo "not-this-boot" > "$TMP/state/committed-boot"
+out="$(run_mig auto 2>&1)" || true
+if grep -q 'REFUSED \[last-attempt-failed\]' <<<"$out"; then
+    ok "committed in an earlier boot and still on GRUB is recorded as failed"
+else
+    bad "a trial boot that never happened is retried: $out"
+fi
+
+# 3. The saved fallback must never be overwritten by a re-run.
+if grep -q 'fallback-already-systemd-boot' "$CODE"; then
+    ok "refuses when the fallback is already systemd-boot with nothing saved"
+else
+    bad "a re-run could save systemd-boot as 'the original' fallback"
+fi
+if grep -qE '\[ ! -f "\$STATE/BOOTX64.EFI.orig" \]' "$CODE"; then
+    ok "the fallback is saved once and never over an existing copy"
+else
+    bad "the fallback save is unconditional — a re-run destroys the good copy"
+fi
+
+# 4. The ESP has to hold three deployments, which is what the message says.
+if grep -q 'need=$(( per \* 3 / 1024' "$CODE"; then
+    ok "the ESP check sizes for three deployments"
+else
+    bad "the ESP check sizes for fewer deployments than an update needs"
+fi
+
+# 5. A LUKS root must still find its ESP.
+if grep -q 'lsblk -ndo TYPE' "$CODE"; then
+    ok "root_disk walks up to a real disk (LUKS roots have a partition parent)"
+else
+    bad "root_disk takes one PKNAME — every encrypted machine would refuse no-esp"
+fi
+
+# and the Secure Boot state is read, not inferred from mokutil being installed
+if grep -q 'SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c' "$CODE"; then
+    ok "Secure Boot is read out of efivarfs"
+else
+    bad "Secure Boot is inferred from a tool's presence — absent tool reads as 'off'"
+fi
+grep -q 'secure-boot-unknown' "$CODE" \
+    && ok "an unreadable SecureBoot variable is a refusal, not a guess" \
+    || bad "an unreadable SecureBoot variable is treated as 'off'"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
