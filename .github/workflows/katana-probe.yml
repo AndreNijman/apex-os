@@ -90,9 +90,28 @@ jobs:
           echo "--- the runner's own credential ---"
           deny "read the token that registers the runner" cat /etc/apex-runner/gh-token
 
+          echo "--- the runner's own backups of Andre's data ---"
+          # This unit archived his Steam Proton prefix while repartitioning.
+          # It is his data, this unit put it there, and a prefix can carry
+          # cached credentials — so the probe checks what it created, not only
+          # what was already on the machine.
+          deny "read the backup of his Steam prefix" ls /var/lib/apex/katana-runner-20260920
+
           echo "--- tamper with the runner itself ---"
           deny "write into the runner's bin/"    touch /var/lab/runner/actions-runner/bin/pwned
           deny "edit the runner's systemd unit"  touch /etc/systemd/system/apex-github-runner.service
+          # THE ATTACK THE ABOVE TWO DO NOT COVER, and which succeeded until
+          # 2026-09-20: write permission on a DIRECTORY lets you rename or
+          # unlink entries in it whatever their ownership. `touch bin/pwned` is
+          # refused while `mv bin bin.x && cp -r bin.x bin` is not — and that
+          # owns every later job, straight through the ephemeral boundary.
+          # The top level is 1775 (sticky) so ghrunner can still create the
+          # .runner/.credentials it needs but cannot touch root's entries.
+          deny "rename a root-owned file at the runner's top level" \
+               mv /var/lab/runner/actions-runner/.root-decoy /var/lab/runner/actions-runner/.root-decoy.x
+          deny "replace the runner's bin/ wholesale" \
+               mv /var/lab/runner/actions-runner/bin /var/lab/runner/actions-runner/bin.x
+          deny "delete the runner's run.sh" rm -f /var/lab/runner/actions-runner/run.sh
 
           echo "--- Andre's LAN ---"
           deny "reach the router"                curl -sS --max-time 5 -o /dev/null http://192.168.1.1/
