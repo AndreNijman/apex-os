@@ -3133,6 +3133,88 @@ RUN set -eux; \
         ; then echo "FATAL: the keybinding hard-codes a browser instead of the wrapper"; exit 1; fi; \
     echo "zen: first-boot flatpak; firefox keeps the web handlers; SUPER+W follows the default"
 
+# ── The window switcher's keybind side ───────────────────────────────────────
+# ALT+Tab opens the APEX Shell switcher and releasing ALT commits it. The
+# release is reported by the COMPOSITOR — Hyprland's `release = true` bind and
+# labwc's `onRelease="yes"` keybind — rather than by a shell surface that took
+# keyboard focus to watch for it, because taking keyboard focus is how a
+# switcher steals focus from the window it is about to activate.
+#
+# Both of those fire on every Alt release for as long as the machine is on, so
+# the helper's closed-state path is asserted here to be exactly that: a test and
+# an exit, with no `apex` invocation. The stub below FAILS the build if the
+# closed path calls it, which is the only way to check a cost rather than
+# describe one.
+COPY --chmod=0755 files/system/libexec/apex-switcher /usr/libexec/apex-switcher
+RUN set -eux; \
+    test -x /usr/libexec/apex-switcher; \
+    sh -n /usr/libexec/apex-switcher; \
+    : 'Hyprland: the four binds exist and the release ones are releases.'; \
+    grep -q '"/usr/libexec/apex-switcher"' /usr/share/apex/hypr/apex/keybindings.lua; \
+    for _k in 'switcher .. " next"' 'switcher .. " prev"' \
+              'switcher .. " cancel"' 'switcher .. " commit"'; do \
+        grep -qF "$_k" /usr/share/apex/hypr/apex/keybindings.lua; \
+    done; \
+    for _c in 'bind("ALT",       "Alt_L"' 'bind("ALT",       "Alt_R"' \
+              'bind("ALT SHIFT", "Alt_L"' 'bind("ALT SHIFT", "Alt_R"'; do \
+        grep -qF "$_c" /usr/share/apex/hypr/apex/keybindings.lua; \
+    done; \
+    if ! grep -q 'release  = { release = true, non_consuming = true' \
+        /usr/share/apex/hypr/apex/keybindings.lua \
+        ; then echo "FATAL: the switcher release binds are not release + non-consuming"; exit 1; fi; \
+    : 'non_consuming, NOT transparent. `t` means "cannot be shadowed by'; \
+    : 'another bind" and still eats the key; `n` is what passes it on. Three'; \
+    : 'other plausible spellings are accepted by hl.bind and silently do'; \
+    : 'nothing, so this is checked here and asserted against a running'; \
+    : 'instance in tests/test-apex-hypr-focus.sh.'; \
+    : 'ALT+Return is the commit that does not depend on release semantics.'; \
+    grep -q 'bind("ALT",       "Return"' /usr/share/apex/hypr/apex/keybindings.lua; \
+    if ! grep -q 'commit   = { non_consuming = true' \
+        /usr/share/apex/hypr/apex/keybindings.lua \
+        ; then echo "FATAL: ALT+Return would eat ALT+Return from every application"; exit 1; fi; \
+    : 'labwc keeps its OWN switcher, because labwc-config(5) says onRelease is'; \
+    : 'for a modifier used WITHOUT another key -- measured: it never fires'; \
+    : 'after A-Tab. What it was missing is the cross-desktop attribute.'; \
+    grep -q '<action name="NextWindow" workspace="all"/>'     /usr/share/apex/labwc/rc.xml; \
+    grep -q '<action name="PreviousWindow" workspace="all"/>' /usr/share/apex/labwc/rc.xml; \
+    if grep -q 'apex-switcher' /usr/share/apex/labwc/rc.xml \
+        ; then echo "FATAL: labwc binds the shell switcher, which it cannot commit"; exit 1; fi; \
+    : 'The closed-state path must not reach the shell. A stub apex that fails'; \
+    : 'the build if it is called is the only honest way to assert that.'; \
+    mkdir -p /tmp/switcher-probe/bin /tmp/switcher-probe/run; \
+    printf '#!/bin/sh\nexit 97\n' > /tmp/switcher-probe/bin/apex; \
+    chmod +x /tmp/switcher-probe/bin/apex; \
+    PATH="/tmp/switcher-probe/bin:$PATH" XDG_RUNTIME_DIR=/tmp/switcher-probe/run \
+        /usr/libexec/apex-switcher commit; \
+    PATH="/tmp/switcher-probe/bin:$PATH" XDG_RUNTIME_DIR=/tmp/switcher-probe/run \
+        /usr/libexec/apex-switcher cancel; \
+    : 'and with the flag present it MUST reach the shell — 97 from the stub.'; \
+    mkdir -p /tmp/switcher-probe/run/apex-shell; \
+    touch /tmp/switcher-probe/run/apex-shell/switcher-open; \
+    _rc=0; \
+    PATH="/tmp/switcher-probe/bin:$PATH" XDG_RUNTIME_DIR=/tmp/switcher-probe/run \
+        /usr/libexec/apex-switcher commit || _rc=$?; \
+    if [ "$_rc" -ne 97 ]; then \
+        echo "FATAL: apex-switcher commit did not reach the shell with the flag set (rc=$_rc)"; \
+        exit 1; fi; \
+    : 'next/prev must never consult the flag, so a stale one cannot wedge it.'; \
+    rm -f /tmp/switcher-probe/run/apex-shell/switcher-open; \
+    _rc=0; \
+    PATH="/tmp/switcher-probe/bin:$PATH" XDG_RUNTIME_DIR=/tmp/switcher-probe/run \
+        /usr/libexec/apex-switcher next || _rc=$?; \
+    if [ "$_rc" -ne 97 ]; then \
+        echo "FATAL: apex-switcher next did not reach the shell (rc=$_rc)"; exit 1; fi; \
+    : 'and `next` must have WRITTEN the flag before reaching the shell. This is'; \
+    : 'the single-tap race: a quick ALT+Tab lets go of ALT about 60ms after Tab'; \
+    : 'goes down, and a flag written by the shell at the end of a'; \
+    : 'spawn -> apex -> qs ipc -> Process chain does not exist yet when the'; \
+    : 'release arrives. The commit is then dropped and the switcher is left'; \
+    : 'open on the wrong entry.'; \
+    if [ ! -e /tmp/switcher-probe/run/apex-shell/switcher-open ]; then \
+        echo "FATAL: apex-switcher next did not write the flag before the IPC"; exit 1; fi; \
+    rm -rf /tmp/switcher-probe; \
+    echo "switcher: ALT+Tab opens it, the Alt release commits it, and a closed switcher costs one stat"
+
 # The whole apex-greet tree lands at /usr/share/apex-greet so the QML's
 # Qt.resolvedUrl("assets/…") resolves in place; the wallpaper is dropped where
 # GreetSurface.qml expects it; greetd-config.toml becomes the live greetd

@@ -45,6 +45,23 @@ than moving focus — labwc has no directional-focus action. This generator
 reproduces that mapping so switching to generated output changes no behaviour.
 It is wrong and it is recorded as wrong; fixing it is a UX decision about what
 SUPER+Left should do on a floating desktop, not a detail of this generator.
+
+WHY EVERY ARROW BINDING ALSO WARPS THE CURSOR
+
+Both arrow mappings move a window, and the session sets
+<followMouse>yes</followMouse>. Move a window out from under a stationary
+pointer and labwc hands focus to whatever the move uncovered — the window you
+just moved loses focus without you touching anything, which is the labwc
+spelling of the Hyprland complaint this generator's sibling change fixes.
+
+`<action name="WarpCursor" to="window"/>` carries the pointer to the middle of
+the active window, so it arrives with the window instead of being left behind.
+It is a second <action> inside the same <keybind>: labwc runs a keybind's
+actions in order, and WarpCursor acts on whatever is active when it runs.
+
+The pair is generated rather than hand-written in rc.xml because these bindings
+live inside the generated span — `check` compares the shipped file against this
+function's output, so a WarpCursor added only to rc.xml would fail the build.
 """
 
 import argparse
@@ -113,24 +130,26 @@ APPS = {
     "$fileManager": "thunar",
 }
 
+# Carry the pointer to the middle of the active window. Appended to every
+# binding that MOVES a window, because <followMouse>yes</followMouse> gives
+# focus to whatever a move uncovers — see the module docstring.
+WARP_CURSOR = '<action name="WarpCursor" to="window"/>'
+
 # Hyprland dispatcher -> the labwc action element. None = no equivalent.
 DISPATCH = {
     "killactive": '<action name="Close"/>',
     "fullscreen": '<action name="ToggleFullscreen"/>',
     "togglefloating": '<action name="ToggleAlwaysOnTop"/>',
     # See the header: MoveToEdge moves the window, and the shell calls this
-    # "Focus Left". Reproduced, not invented here.
+    # "Focus Left". Reproduced, not invented here — but now followed by the
+    # WarpCursor that keeps the moved window focused under <followMouse>yes</>.
     "movefocus": {
-        "l": '<action name="MoveToEdge" direction="left"/>',
-        "r": '<action name="MoveToEdge" direction="right"/>',
-        "u": '<action name="MoveToEdge" direction="up"/>',
-        "d": '<action name="MoveToEdge" direction="down"/>',
+        d: f'<action name="MoveToEdge" direction="{w}"/>\n{WARP_CURSOR}'
+        for d, w in (("l", "left"), ("r", "right"), ("u", "up"), ("d", "down"))
     },
     "movewindow": {
-        "l": '<action name="SnapToEdge" direction="left"/>',
-        "r": '<action name="SnapToEdge" direction="right"/>',
-        "u": '<action name="SnapToEdge" direction="up"/>',
-        "d": '<action name="SnapToEdge" direction="down"/>',
+        d: f'<action name="SnapToEdge" direction="{w}"/>\n{WARP_CURSOR}'
+        for d, w in (("l", "left"), ("r", "right"), ("u", "up"), ("d", "down"))
     },
     "pseudo": None,
     "layoutmsg": None,
@@ -313,7 +332,14 @@ def generate(binds, indent="    "):
             continue
         key = to_labwc(entry.get("mods", ""), entry["key"])
         lines.append(f'<keybind key="{key}">')
-        lines.append(f"  {act}")
+        # A mapping may be more than one <action> — the arrow bindings add a
+        # WarpCursor. Split on the newline so each lands as its own ELEMENT of
+        # `lines`, because the indent below is applied per element: a two-line
+        # string appended whole is indented once and the second action comes out
+        # against the left margin. `check` catches that, which is how it was
+        # found, but the generated file is also read by people.
+        for one in act.split("\n"):
+            lines.append(f"  {one}")
         lines.append("</keybind>")
 
     lines.append(END)
