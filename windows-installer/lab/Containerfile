@@ -51,6 +51,10 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         `# Windows/Panther/setuperr.log comes out of a guest that died` \
         `# headless. gdisk/util-linux read the partition tables.` \
         p7zip p7zip-plugins gdisk util-linux parted e2fsprogs \
+        `# mkntfs builds the not-empty fixture partition. A Linux-made NTFS` \
+        `# is good enough for the claim being made: Windows mounts it, gives` \
+        `# it a letter, and the installer must then refuse it by name.` \
+        ntfsprogs \
         `# virt-fw-vars prints an OVMF varstore's boot entries from outside` \
         `# the guest. The before/after diff of Boot#### and BootOrder is the` \
         `# assertion that the Windows entry was not touched — an assertion,` \
