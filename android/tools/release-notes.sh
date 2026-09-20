@@ -64,10 +64,10 @@ window_lo=$(printf '%s' "$window" | tr ',' '\n' | sort -n | head -1)
 window_hi=$(printf '%s' "$window" | tr ',' '\n' | sort -n | tail -1)
 if [ "$window_lo" = "$window_hi" ]; then
     compat="This build speaks exactly one revision of that protocol, **v$window_hi**, and no
-other. Today that is the only revision there is, so every APEX machine speaks
-it. When a second one appears, a later build of this app will speak both and
-try each in turn -- which is why, when it cannot connect, it tells you the
-version may be the problem instead of claiming your phone has been unpaired."
+other — today that is the only revision there is, so every APEX machine speaks
+it. When a second one appears, a later build of this app will speak both and try
+each in turn. That is why, when it cannot connect, it tells you the version may
+be the cause instead of claiming your phone has been unpaired."
 else
     compat="They do not have to match exactly. This build speaks **v$window_lo to v$window_hi**
 and tries each in turn, so an app that has run ahead of your machine still
