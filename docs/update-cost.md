@@ -179,9 +179,47 @@ actually costs:
 | **Self-hosted runner on katana** | 20 cores and podman are already there, so the compile is roughly what it is locally. Needs ≥120 GB free on katana's `/var`, which is *tight* — check before committing. Adds a machine the release path depends on being up, and a self-hosted runner executing untrusted PR code is its own security decision. | Nothing. Same kernel, same config. |
 | **Restructure the spec to build far fewer modules** (`_build_minimal 1` plus a `modprobed.db`) | Brings the tree within a hosted runner's disk. | **Changes what hardware the kernel supports**, because the module set is built from one machine's `modprobed.db`. That is a product decision about which machines APEX boots on, not a CI optimisation. |
 
-Until one is chosen, the kernel image is built by hand and `core` is pointed at
-it with `--build-arg`. That works and is honest, but it means a release depends
-on somebody's laptop, which is the thing this table exists to make visible.
+##### ANSWERED 2026-09-20: the self-hosted runner, and the disk objection went away
+
+Andre chose the first option and paid for it properly rather than squeezing it
+in. The objection in that row — *"needs ≥120 GB free on katana's `/var`, which
+is tight"* — was not just tight, it was **false**: katana's `/var` had **51 GB**
+free, so the build could not have run there at all. It does not use `/var` any
+more.
+
+Katana's second drive was repartitioned: the `games` filesystem shrank from
+1362 GiB to 862 GiB (it was 5 % used) and the freed 500 GiB became a partition
+mounted at **`/var/lab`**, which is where the runner's work directory and its
+container storage live. 484 GB free. The Windows, ESP and recovery partitions
+on that disk were not touched — `ROADMAP/evidence/katana-runner-20260920.md`
+has the before/after tables, the GPT backup location, and the integrity proof.
+
+So the standing costs of this choice, stated rather than implied:
+
+* **GitHub Actions minutes for this tier: zero.** The compile runs on hardware
+  Andre already owns, at `-j$(nproc)` = 20 rather than the 12 the tier was
+  measured at.
+* **A release now depends on katana being up**, which is the cost this table
+  exists to make visible. It has moved from "somebody's laptop, by hand" to
+  "a named machine, automatically" — better, not free.
+* **The security decision that row flagged was made, not skipped.** `apex-os`
+  is public, so fork pull requests are untrusted code. They never reach the
+  runner: the repository requires approval for **all** external contributors,
+  and every self-hosted job additionally refuses a PR whose head is a fork.
+  Fork PRs keep getting full CI on `ubuntu-24.04`. The runner is ephemeral and
+  runs as an unprivileged user that cannot read Andre's home or reach his LAN,
+  and a probe workflow asserts all of that on every change rather than trusting
+  it. Details, including what is *not* covered, are in the evidence file.
+
+`.github/workflows/kernel-build.yml` is what runs there. **It is a proof, not
+yet the producer**: it builds `localhost/apex-kernel:ci` and publishes nothing,
+while `Containerfile.core` still consumes
+`ghcr.io/andrenijman/apex-os:kernel@sha256:…`. Closing that last gap needs a
+`packages: write` token and a `podman login` on the runner — deliberately not
+done here, because handing a registry push credential to a build host is its
+own decision. **Until it is, `core` is still pointed at a hand-built kernel
+image with `--build-arg`, and a green kernel-build run does not mean the kernel
+tier ships from CI.**
 
 ### The rule for new content
 
