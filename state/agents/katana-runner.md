@@ -103,5 +103,25 @@ to go red when handed a leak.
    active, and the runner unit has `RequiresMountsFor=/var/lab/runner` — but
    nobody has actually rebooted katana and watched `/var/lab` and the runner
    come back.
-5. Optional: the runner is registered to `apex-os` only. `apex-shell` has its
+5. **`kernel-build.yml` is a proof, not the producer, and a green run must not
+   be read as "the kernel tier ships from CI".** It builds
+   `localhost/apex-kernel:ci` and publishes nothing, while `Containerfile.core`
+   consumes `ghcr.io/andrenijman/apex-os:kernel@sha256:…`. Closing that needs
+   `packages: write`, a `podman login` step and a registry push credential on
+   the build host — a separate decision, deliberately not taken here.
+   `docs/update-cost.md` now says this next to the question it answers.
+6. **The new partition relieves `apex-root` only if something moves onto it,
+   and so far only the runner has.** Measured while this unit ran: katana's
+   `apex-root` is **95 % full (900 G of 954 G)** and `/var/home/andre` is
+   **841 GB** of that — `.local` 506 GB (Steam, plus 41 GB of his podman
+   storage), `Projects` 117 GB, `Pictures` 84 GB, `win-backup` 43 GB,
+   `.ollama` 26 GB, `.npm` 22 GB, `bootlab-work` 19 GB, and 18 GB of build
+   scratch in `/var/tmp` (`apex-build` alone is 12 GB). **None of it was
+   moved** — it is Andre's data and relocating it was not what this unit was
+   asked to do. The safe, obviously-development candidates, if he wants them
+   moved onto `/var/lab`: `/var/tmp/apex-build` and the `p0-004*`/`apex-p0021`
+   scratch trees, `~/bootlab-work`, and his rootless podman graphroot (a
+   `~/.config/containers/storage.conf` `graphroot` change plus a
+   `podman system reset`). `~/.npm` is cache and is simply purgeable.
+7. Optional: the runner is registered to `apex-os` only. `apex-shell` has its
    own CI and would need its own registration if it ever wants katana.
