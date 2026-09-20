@@ -119,7 +119,7 @@ class ManifestTest {
     }
 
     @Test
-    fun `the permissions this app does declare are the four it can justify`() {
+    fun `the permissions this app does declare are the five it can justify`() {
         // A fixed set rather than a floor. A permission added without a reason
         // fails here and has to be argued for in a diff, which is the only
         // moment anybody reads the list.
