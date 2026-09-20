@@ -6,9 +6,14 @@ the current remote tip. No push to `roadmap/v2.2`, no PR.
 
 The previous record (2026-09-20) ended with: *"No Windows disk enumeration,
 volume ownership/lock validation, GUI, destructive confirmation, payload
-deployment, additive bootloader transaction or undo is implemented."* Four of
-those seven are now implemented and measured on a real Windows. Three are not.
-This file says which is which and how each claim was checked.
+deployment, additive bootloader transaction or undo is implemented."*
+
+Of those seven: **disk enumeration and ownership validation now exist and are
+measured on a real Windows.** The **destructive confirmation text** exists,
+is unit-tested and is printed — but nothing prompts for it, because nothing
+would act on the answer. **Locking turned out not to apply** and why is below.
+**The GUI, payload deployment, the bootloader transaction and undo do not
+exist at all.** This file says how each claim that is made was checked.
 
 ---
 
@@ -108,6 +113,25 @@ eight partitions. Verbatim from the guest's own output:
 - **The firmware variables were byte-identical before and after**, compared by
   `virt-fw-vars` outside the guest: `IDENTICAL — no boot entry and no boot
   order changed`.
+
+### The enumeration-order claim, made properly
+
+The whole reason the confirmation text names a serial number and not a disk
+number is that disk numbers move. So the job runs twice, and the second run
+puts fixture A on a different AHCI port:
+
+```
+guest: Windows numbered APEX-FIXTURE-A as disk 2 and then as disk 1
+guest: the confirmation text is identical across both enumeration orders
+```
+
+Both halves are asserted, and in that order. The first attempt at this reversed
+the order of the `-device` arguments instead of the ports, which changed
+nothing: `ich9-ahci` is a fixed q35 device, `nvme` takes the next free PCI slot
+either way, and Windows numbers storahci before stornvme. Both runs produced
+byte-identical `Get-Disk` tables, so comparing their output would have proved
+nothing while looking like proof. The suite now fails if the disk number did
+**not** move, before it compares anything.
 
 ### Three defects the guest found that nothing else could have
 
