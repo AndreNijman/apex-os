@@ -187,7 +187,17 @@ jobs:
           # build it — and because without this rule an Android-only change
           # matches nothing, every selector stays false, every job is skipped,
           # and a skipped job counts as success at the `result` gate.
-          grep -Eq '^android/' <<<"$files" && android=true
+          #
+          # `tests/test-android-release.sh` and the release workflow are in
+          # this selector too, and it is the eighth instance of the bug the
+          # comments above describe. The release suite is ABOUT the release
+          # workflow and the three scripts under `android/tools/`; a PR that
+          # edited only `.github/workflows/release-android.yml` would have set
+          # `engine=true` (the workflows selector) and `android=false`, and the
+          # android job is the only one that runs that suite. The gate whose
+          # job is to hold the release flow would not have run on a change to
+          # the release flow.
+          grep -Eq '^(android/|tests/test-android-release\.sh|\.github/workflows/release-android\.yml)' <<<"$files" && android=true
 
           # The fail-towards-running rule, applied.
           if [ -z "${base:-}" ] || [ -z "${head:-}" ]; then
@@ -3522,8 +3532,15 @@ jobs:
           #
           # 295 -> 421 with P1-056/057/058's models, P1-059's handoff rules and
           # P1-060's help parity suite.
-          test "$total" -ge 421 \
-            || { echo "::error::only $total protocol tests ran; expected at least 421"; exit 1; }
+          #
+          # 421 -> 526 with android-release's protocol version window
+          # (VersionWindowTest, 10) and the in-app updater (UpdatesTest, 19).
+          # Measured on 2026-09-20 by running the suite and reading the figure
+          # out of `core/build/test-results/test/*.xml`, not by counting `@Test`
+          # annotations — a test that does not RUN is exactly what this floor
+          # exists to catch, and counting the source would count it anyway.
+          test "$total" -ge 526 \
+            || { echo "::error::only $total protocol tests ran; expected at least 526"; exit 1; }
 
       # The rule InsecureStorageTest rests on. That test walks a directory and
       # accounts for every byte in it, which is evidence about app storage only
@@ -3565,8 +3582,12 @@ jobs:
           # 6 -> 10 with P1-054's start screen, 10 -> 33 with P1-056/057/058's
           # screens and P1-059/060's manifest assertions. Same reasoning as the
           # core floor above: a floor that has been overtaken stops being one.
-          test "$total" -ge 33 \
-            || { echo "::error::only $total app tests ran; expected at least 33"; exit 1; }
+          #
+          # 33 -> 53, measured on 2026-09-20 from this module's own results
+          # XML after android-release added the install-status receiver
+          # assertion and `roadmap/v2.2` brought the rest.
+          test "$total" -ge 53 \
+            || { echo "::error::only $total app tests ran; expected at least 53"; exit 1; }
 
       # The guide's prose, under the same stop-slop checker the desktop's help
       # passes. It reports NOT CHECKED and exits 0 when the skill is absent,
@@ -3640,6 +3661,23 @@ jobs:
       - name: Shred the keystore
         if: always()
         run: rm -f ci-release.jks
+
+      # ── The release flow itself ──────────────────────────────────────────
+      #
+      # `release-version.sh` is the only thing standing between a dispatch and
+      # a published APK whose versionCode went backwards, and that mistake is
+      # not recoverable: Android refuses to install a lower code over a higher
+      # one, and the user's only escape is to uninstall — which destroys this
+      # app's paired device key. So the gate is exercised on every android
+      # change rather than being discovered to be broken on the day somebody
+      # cuts a release.
+      #
+      # It runs from the repository root, not `android/`, because it builds a
+      # fixture repository and invokes `tests/` and `.github/` by path. The
+      # suite counts its own assertions and exits 2 if it asserted nothing.
+      - name: The release flow refuses what it must
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-android-release.sh
 
   result:
     name: PR validation

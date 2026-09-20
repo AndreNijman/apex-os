@@ -296,6 +296,28 @@ explicit `--allow-unsigned` for that file, and `apex pkg list` says so afterward
 Already have layered packages? `sudo apex pkg adopt` converts them and restores
 updates. See [docs/packages.md](docs/packages.md).
 
+## The phone app
+
+APEX Remote pairs a phone with one of your machines — over your network, or
+through a relay when you are away from it — and lets you watch and drive what is
+running on it: agent sessions, approvals, and a real terminal. It talks only to
+machines you have paired by scanning a QR code off their screen; there is no
+account and no server of ours in the middle.
+
+Download the `apex-remote-*.apk` from the same
+[Releases page](https://github.com/AndreNijman/apex-os/releases) as the ISO, and
+check it against the `.sha256` beside it. Each release explains, for somebody who
+has never sideloaded an app, exactly what Android will ask and how to answer it.
+
+Once installed the app keeps itself current — it checks the Releases page and
+offers, and Android still shows its own install prompt before anything is
+replaced. On the machine, `apex remote status` says whether the service is
+running and which protocol version it speaks. Pairing is `apex remote pair`.
+
+[docs/android-app.md](docs/android-app.md) covers how the APK is signed, how the
+version is derived, and what happens when the app and the machine are different
+ages. [docs/remote.md](docs/remote.md) covers the app itself.
+
 ## Repository layout
 
 | Path | Contents |
@@ -311,6 +333,7 @@ updates. See [docs/packages.md](docs/packages.md).
 | `files/scripts/` | Build and runtime helper scripts |
 | `apexd/` | apexd system daemon source |
 | `config/sysprofiles/` | Per-machine hardware tuning profiles |
+| `android/` | APEX Remote, the Android client (`:core` protocol, `:app` UI) |
 | `tests/` | Image and integration tests |
 | `docs/` | Project documentation |
 | `.github/workflows/` | CI (image build, sign, publish) |

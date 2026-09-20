@@ -52,7 +52,7 @@ class ClientTranscriptTest {
             identity = InMemoryStaticKey(deviceSecret),
             deviceName = "pixel-8",
             userVerification = true,
-            version = version,
+            versions = listOf(version),
             ephemerals = initiatorEphemeral,
         )
         // The whole outbound stream, byte for byte: `P`, then the length
@@ -95,7 +95,7 @@ class ClientTranscriptTest {
                 identity = InMemoryStaticKey(deviceSecret),
                 deviceName = "pixel-8",
                 userVerification = true,
-                version = version,
+                versions = listOf(version),
                 ephemerals = initiatorEphemeral,
             )
         }
@@ -114,7 +114,7 @@ class ClientTranscriptTest {
                 identity = InMemoryStaticKey(deviceSecret),
                 deviceName = "phone\nAPPROVED",
                 userVerification = true,
-                version = version,
+                versions = listOf(version),
                 ephemerals = initiatorEphemeral,
             )
         }
@@ -157,7 +157,7 @@ class ClientTranscriptTest {
                 identity = InMemoryStaticKey(deviceSecret),
                 deviceName = "pixel-8",
                 userVerification = true,
-                version = version,
+                versions = listOf(version),
                 ephemerals = initiatorEphemeral,
             )
         }
@@ -186,7 +186,7 @@ class ClientTranscriptTest {
                 identity = InMemoryStaticKey(deviceSecret),
                 deviceName = "pixel-8",
                 userVerification = true,
-                version = version,
+                versions = listOf(version),
                 ephemerals = initiatorEphemeral,
             )
         }
