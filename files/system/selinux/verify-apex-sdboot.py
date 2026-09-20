@@ -19,7 +19,8 @@ import setools
 
 WANT = "entrypoint"
 SRC = "bootupd_t"
-TGT = "init_exec_t"
+# init_exec_t is systemd-bless-boot; bin_t is /usr/libexec/apex-boot-count.
+TARGETS = ("init_exec_t", "bin_t")
 
 candidates = sorted(glob.glob("/etc/selinux/targeted/policy/policy.*"))
 if not candidates:
@@ -27,16 +28,16 @@ if not candidates:
 policy_path = candidates[-1]
 
 policy = setools.SELinuxPolicy(policy_path)
-query = setools.TERuleQuery(policy, source=SRC, target=TGT, tclass=["file"])
-perms = set()
-for rule in query.results():
-    if rule.ruletype == setools.TERuletype.allow:
-        perms.update(str(p) for p in rule.perms)
-
-if WANT not in perms:
-    sys.exit(
-        "apex_sdboot did not grant %s -> %s:file %s in %s; got %r"
-        % (SRC, TGT, WANT, policy_path, sorted(perms))
-    )
-
-print("apex_sdboot verified in %s: %s -> %s:file %s" % (policy_path, SRC, TGT, sorted(perms)))
+for tgt in TARGETS:
+    query = setools.TERuleQuery(policy, source=SRC, target=tgt, tclass=["file"])
+    perms = set()
+    for rule in query.results():
+        if rule.ruletype == setools.TERuletype.allow:
+            perms.update(str(p) for p in rule.perms)
+    if WANT not in perms:
+        sys.exit(
+            "apex_sdboot did not grant %s -> %s:file %s in %s; got %r"
+            % (SRC, tgt, WANT, policy_path, sorted(perms))
+        )
+    print("apex_sdboot verified in %s: %s -> %s:file %s"
+          % (policy_path, SRC, tgt, sorted(perms)))

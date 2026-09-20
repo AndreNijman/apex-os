@@ -42,6 +42,20 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/true
 ExecStop=/usr/libexec/apex-boot-count stage
+# ── the same SELinux repair systemd-bless-boot needs, for the same reason ──
+#
+# This renames a file on the FAT ESP. /usr/libexec is bin_t, so PID 1 running
+# it leaves the process in init_t, and Fedora 43 allows init_t no rename on
+# dosfs_t — the AVC that stopped the blessing would stop this too. bootupd_t is
+# the domain allowed to write bootloader state onto a FAT ESP; the entrypoint
+# it needs is granted by the apex_sdboot policy module.
+#
+# The `-` prefix covers a machine where the context cannot be SET (SELinux off
+# or permissive, or a policy with no bootupd_t). It does not cover an enforcing
+# machine with the module missing — there the execve is denied and this unit
+# fails. That failure is safe: no counter is written, which is exactly what
+# every APEX machine has today.
+SELinuxContext=-system_u:system_r:bootupd_t:s0
 # A boot counter is worth a few seconds and never worth a hung shutdown.
 TimeoutStopSec=30s
 
