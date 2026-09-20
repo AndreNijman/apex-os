@@ -99,8 +99,8 @@ eight partitions. Verbatim from the guest's own output:
   already given a RAW basic-data partition a drive letter. That is the design's
   claim about basic-data partitions, demonstrated rather than argued.
 - **The eligible partition was read to the last byte**:
-  `lock  no volume object covers this partition, so Windows has not mounted it
-  and there is nothing to lock`, then
+  `exclusivity no volume object covers this partition, re-checked against a
+  fresh volume enumeration`, then
   `ALL-ZERO CONTENT: 18253611008/18253611008 bytes read.` — 17 GiB, through a
   `\\.\PhysicalDriveN` handle, not an image file.
 - **The confirmation named the disk by `FIXA00000001`** and contains no
@@ -136,11 +136,17 @@ console is not UTF-8, and every em dash in the program's output arrived as
   and is unit-tested; the screen that shows it does not.
 - **No destructive confirmation prompt.** `inspect` prints the text and stops.
   Nothing asks for consent because nothing would act on it.
-- **`FSCTL_LOCK_VOLUME` has never succeeded**, because every partition that got
-  as far as the lock step had no volume object for Windows to lock. The code
-  path that takes a lock on a volume that *does* exist has therefore not been
-  exercised — only the path that refuses when the lock fails, and the path that
-  reports honestly that there was nothing to lock.
+- **There is no volume lock, by construction rather than by omission.**
+  Windows creates no volume object for a Linux-filesystem-type partition —
+  measured on both eligible fixtures — and a partition that does have one has
+  already been refused, because an overlapping volume is what "in use by
+  Windows" means. An earlier draft carried an `FSCTL_LOCK_VOLUME` call that
+  could not be reached on any input; it was removed rather than left in place,
+  because safety code that never executes reads as coverage. What runs instead
+  is a fresh volume enumeration immediately before the content is read, and a
+  refusal if that enumeration could not be completed. The exclusivity
+  mechanism the *write* path will need is described in `ARCHITECTURE.md`; it
+  does not exist yet.
 - **The build is the GNU target, not MSVC, and is unsigned.** No Authenticode,
   no static-CRT MSVC build, no supply-chain review.
 - **No 4Kn disk, no BitLocker, no Storage Spaces, no dynamic disk, no hot

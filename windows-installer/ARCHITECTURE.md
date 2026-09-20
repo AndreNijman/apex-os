@@ -228,6 +228,40 @@ intention written in a comment.
 
 ---
 
+## Exclusivity: there is nothing to lock, and that changes the write path
+
+The obvious design is to take `FSCTL_LOCK_VOLUME` on the target and write
+through the locked volume handle, which confines the writes to the extent by
+construction rather than by arithmetic. It does not work here, and the reason
+is a measurement rather than an opinion.
+
+**Windows creates no volume object for a Linux-filesystem-type partition.**
+Measured in the lab on both eligible fixtures: no volume, no drive letter, no
+`\\?\Volume{…}` name, nothing to open and therefore nothing to lock. And a
+partition that *does* have a volume is one this program has already refused,
+because an overlapping volume is what "in use by Windows" means. So a lock call
+could only ever run on a partition that was already refused.
+
+What the write path gets instead, and what a reviewer should hold it to:
+
+- writes go through `\\.\PhysicalDriveN` at the verified byte offset, with
+  every offset and length validated against the partition extent before the
+  call, never after;
+- the volume list is **re-enumerated immediately before each write**, and the
+  write is refused if anything now overlaps the extent. The survey's answer
+  from ten seconds ago is not evidence about now;
+- a volume enumeration that could not be completed is a refusal, not an
+  absence of claims;
+- Windows itself is the backstop: it refuses writes through a
+  `PhysicalDrive` handle to regions a mounted volume owns. That is a property
+  of the platform and not of this program's arithmetic, which is exactly what
+  makes it worth having as the second line.
+
+The `inspect` command already performs the re-enumeration and prints what it
+found, so the check exists and runs before any write does.
+
+---
+
 ## What is undone by "undo", and what is not
 
 Reversible, because it was additive:
