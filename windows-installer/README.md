@@ -155,6 +155,10 @@ A future elevated writer accepts an immutable plan, not a drive number. It must:
   mounted/in-use ownership. Unknown state refuses. Do not offline the whole
   Windows disk or force-unlock anything. Prove exclusive target access for the
   entire validation/write interval, including RAW partitions without a volume.
+  **Measured since this was written: an eligible target has no volume object at
+  all, so there is nothing to lock.** See `ARCHITECTURE.md`, "Exclusivity";
+  the mechanism is offset validation plus a volume re-enumeration immediately
+  before each write, not `FSCTL_LOCK_VOLUME`.
 - Bind selection to GPT disk GUID + unique partition GUID + offset/length +
   physical sector geometry + device model/serial/storage ID. Refuse missing or
   ambiguous identity, cloned GUIDs and duplicate IDs. Re-resolve after reboot or

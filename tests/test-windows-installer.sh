@@ -114,7 +114,12 @@ esac
 #  image lab before this; it was a file you had to know to type.
 unit_log="$OUT/unit.log"
 if podman run --rm -v "$PWD/windows-installer":/src:ro,z "$IMAGE" bash -euo pipefail -c '
-        dnf install -y -q --setopt=install_weak_deps=False rust cargo python3 >/dev/null
+        # e2fsprogs is not incidental: one image-lab case makes a real
+        # ext4 filesystem in a scratch partition image and requires the
+        # validator to refuse it. Without mkfs.ext4 that case SKIPS, and a
+        # skipped case is the one that would have caught a signature-based
+        # shortcut creeping into the content scan.
+        dnf install -y -q --setopt=install_weak_deps=False rust cargo python3 e2fsprogs >/dev/null
         cp -r /src /build && cd /build
         cargo test --offline --locked 2>&1
         cargo build --offline --locked 2>&1
@@ -124,8 +129,15 @@ if podman run --rm -v "$PWD/windows-installer":/src:ro,z "$IMAGE" bash -euo pipe
     n="$(grep -c '^test .* ok$' "$unit_log")"
     ok "the partition-eligibility and confirmation rules pass ($n unit tests)"
     lab_n="$(sed -n '/APEX_IMAGE_LAB_BEGIN/,$p' "$unit_log" | grep -oE 'Ran [0-9]+ tests' | grep -oE '[0-9]+')"
-    if sed -n '/APEX_IMAGE_LAB_BEGIN/,$p' "$unit_log" | grep -q '^OK$'; then
+    lab_tail="$(sed -n '/APEX_IMAGE_LAB_BEGIN/,$p' "$unit_log" | grep -E '^OK( |$)|^FAILED')"
+    if [ "$lab_tail" = OK ]; then
         ok "the GPT image laboratory passes (${lab_n:-?} cases, against the compiled binary)"
+    elif [ -n "$lab_tail" ] && [ "${lab_tail#OK}" != "$lab_tail" ]; then
+        # unittest writes "OK (skipped=1)". A skipped case is not a pass, and
+        # the one that skips is the one that builds a real ext4 filesystem --
+        # exactly the case that would catch a signature-based shortcut in the
+        # content scan. Say so rather than counting it green.
+        bad "the GPT image laboratory did not run every case: $lab_tail"
     else
         bad "the GPT image laboratory failed"
         sed -n '/APEX_IMAGE_LAB_BEGIN/,$p' "$unit_log" | tail -20 | sed 's/^/        /'
