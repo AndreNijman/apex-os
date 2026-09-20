@@ -2005,6 +2005,44 @@ elif [ "$ENCRYPT" = yes ]; then
     rc=${PIPESTATUS[0]}
     { echo "--- boot + ESP after install ---"; find "$TROOT/boot" -maxdepth 3; } >>"$LOG" 2>&1 || true
   fi
+  # ── the same keymap, by the channel that survives a signed UKI ───────────
+  #
+  # The karg above is the channel that works today, on GRUB. It stops working
+  # the day this machine boots a Unified Kernel Image: the command line is
+  # inside the signed PE, an installer cannot add to it without invalidating
+  # the signature, and it cannot re-sign.
+  #
+  # What survives is a systemd credential. systemd-boot reads
+  # `\loader\credentials\*.cred` off the ESP and sd-stub passes them to the
+  # initrd as system credentials, and `systemd-vconsole-setup.service` already
+  # carries `ImportCredential=vconsole.*`. So the file is written now, on every
+  # encrypted install, rather than on the day of the pivot: GRUB ignores it
+  # completely, and a machine installed today then carries its own layout into
+  # a UKI world with nothing to migrate.
+  #
+  # MEASURED, and the reason the dracut module exists: a .cred on its own is
+  # INERT. systemd-vconsole-setup(8) says the matching options in
+  # vconsole.conf and on the kernel command line take precedence over these
+  # credentials, and dracut bakes /etc/vconsole.conf (KEYMAP=us) into the
+  # initramfs. installer/test-installer-keymap-boot.sh boots a guest with the
+  # credential and no shim and watches the unlock fail, then the same guest
+  # with files/dracut/apex-unlock-hint's apex-vconsole-credential and watches
+  # it succeed. Both halves are needed; neither is assumed.
+  #
+  # Same `us` rule as the karg: a machine that lands on exactly `us` gets no
+  # channel at all, so `localectl set-keymap` later is not fighting a file.
+  if [ "${rc:-0}" = 0 ] && [ -n "$CONSOLE_KEYMAP" ] && [ "$CONSOLE_KEYMAP" != us ]; then
+    if mkdir -p "$TROOT/boot/efi/loader/credentials" 2>>"$LOG" \
+       && printf '%s' "$CONSOLE_KEYMAP" > "$TROOT/boot/efi/loader/credentials/vconsole.keymap.cred" 2>>"$LOG"; then
+      log "luks: wrote ESP credential loader/credentials/vconsole.keymap.cred = $CONSOLE_KEYMAP"
+    else
+      # NOT fatal, and the log says which half is missing. The karg above is
+      # what this machine boots with today; the credential is for a bootloader
+      # it does not yet run. Failing a completed encrypted install over it
+      # would be the wrong trade by a wide margin.
+      log "luks: WARNING could not write the ESP vconsole.keymap credential — the kernel argument still carries the keymap on this machine"
+    fi
+  fi
   # ── EVERY mount under $TROOT has to go, and it has to be CHECKED ─────────
   # Two things put mounts here that a plain `umount $TROOT` does not remove.
   # The podman run above shares this tree `rshared`, so mounts bootc makes
