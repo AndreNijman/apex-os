@@ -42,20 +42,26 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/true
 ExecStop=/usr/libexec/apex-boot-count stage
-# ── the same SELinux repair systemd-bless-boot needs, for the same reason ──
+# ── NO SELinuxContext=, and that is a measured decision, not an omission ──
 #
-# This renames a file on the FAT ESP. /usr/libexec is bin_t, so PID 1 running
-# it leaves the process in init_t, and Fedora 43 allows init_t no rename on
-# dosfs_t — the AVC that stopped the blessing would stop this too. bootupd_t is
-# the domain allowed to write bootloader state onto a FAT ESP; the entrypoint
-# it needs is granted by the apex_sdboot policy module.
+# This renames a file on the same FAT ESP that defeated systemd-bless-boot, so
+# the obvious move is to give it the same `SELinuxContext=…:bootupd_t:s0`
+# drop-in. That is WRONG, and it was tried in a guest before being reverted.
 #
-# The `-` prefix covers a machine where the context cannot be SET (SELinux off
-# or permissive, or a policy with no bootupd_t). It does not cover an enforcing
-# machine with the module missing — there the execve is denied and this unit
-# fails. That failure is safe: no counter is written, which is exactly what
-# every APEX machine has today.
-SELinuxContext=-system_u:system_r:bootupd_t:s0
+# The policy has `type_transition init_t bin_t:process unconfined_service_t`
+# and NO transition for init_exec_t. So:
+#
+#   /usr/lib/systemd/systemd-bless-boot  is init_exec_t -> stays init_t
+#                                        -> no rename on dosfs_t -> the AVC
+#   /usr/libexec/apex-boot-count         is bin_t       -> unconfined_service_t
+#                                        -> which holds files_unconfined_type
+#                                        -> renames dosfs_t fine, unaided
+#
+# Forcing bootupd_t here CONFINES a process that was already unconfined, into
+# a domain built for a Rust daemon: `bootupd_t -> proc_t:file` is `map` only,
+# so reading /proc/cmdline is denied and this helper's own safe-fail would
+# report "no composefs= token … refusing" — a silent no-op that looks like a
+# pass. Leave it unconfined, like every other APEX helper in /usr/libexec.
 # A boot counter is worth a few seconds and never worth a hung shutdown.
 TimeoutStopSec=30s
 

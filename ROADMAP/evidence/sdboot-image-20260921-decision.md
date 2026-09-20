@@ -274,3 +274,126 @@ partition-mode installs like this laptop it is not created at all.
 * No sealed UKI has been built from the APEX image.
 * No machine was migrated, and none should be until the five gates in
   `docs/boot-v2.md` are closed.
+
+## 6. The blessing, proven in a booted guest — gate 3 is closed
+
+APEX image + `systemd-boot-unsigned` + the `apex_sdboot` module + the drop-in,
+installed through `tests/lab/bootc-install-lab` (`--bootloader systemd --
+--composefs-backend`), booted twice under OVMF. Both host-side launches went
+through `tests/lab/nvram-guard`; all three verdicts were `verified — boot
+variables identical before and after`.
+
+The install's own partition table, which also settles the LUKS-discovery
+contract and the BIOS question on this backend:
+
+```
+/dev/loop2p1    2048     4095     2048   1M BIOS boot
+/dev/loop2p2    4096  2101247  2097152   1G EFI System
+/dev/loop2p3 2101248 90175487 88074240  42G Linux root (x86-64)
+Bootloader: systemd
+Installation complete!
+```
+
+**Boot 1** — entry renamed by hand to carry a counter, then poweroff:
+
+```
+LAB-enforce: Enforcing
+LAB-entries: bootc_fedora-43-1.conf
+LAB-bcp: ABSENT
+LAB-entries-after: bootc_fedora-43-1+3-0.conf
+```
+Zero AVCs in the whole boot.
+
+**Boot 2** — systemd-boot decremented the counter and the blessing ran:
+
+```
+systemd-bless-boot[1210]: Marked boot as 'good'. (Boot attempt counter is at 1.)
+systemd[1]: Finished systemd-bless-boot.service - Mark the Current Boot Loader Entry as Good.
+
+LAB-enforce:       Enforcing
+LAB-bcp:           LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+LAB-bless-ctx:     SELinuxContext=-system_u:system_r:bootupd_t:s0
+LAB-bless-result:  active / success
+    Drop-In: /usr/lib/systemd/system/systemd-bless-boot.service.d
+             └─10-apex-bless-boot-esp.conf
+    Process: 1210 ExecStart=… (code=exited, status=0/SUCCESS)
+LAB-entries-after: bootc_fedora-43-1.conf      <- the +3-0 suffix is gone
+LAB-avc:           <empty>
+LAB-health:        active
+```
+
+Same image lineage, same backend, same enforcing SELinux as the run that
+failed with `Permission denied` and `avc: denied { rename } … init_t →
+dosfs_t`. The counter is stripped, the deployment is blessed, and nothing was
+denied.
+
+### One caveat that has to be stated, because it changes what is proven
+
+**`bootupd_t` is a permissive domain in Fedora 43** — one of 41, confirmed with
+setools (`type.ispermissive`). So denials inside it are logged and allowed. Two
+consequences:
+
+* The blessing's zero AVCs are still meaningful: a permissive domain *logs*
+  what it would have denied, and nothing was logged. Every permission
+  `systemd-bless-boot` used was genuinely allowed, the entrypoint included —
+  which is what the `apex_sdboot` module grants.
+* But the drop-in alone would probably work today even without the module,
+  because permissiveness would tolerate the missing entrypoint. The module is
+  what makes this correct rather than tolerated, and it is what keeps it
+  working on the day Fedora makes `bootupd_t` enforcing. It stays.
+
+## 7. The counter must NOT be sent into that domain — measured, then reverted
+
+The same guest tested `apex-boot-count` with the symmetric drop-in, by building
+a staged set by hand and stopping the unit. It renamed the right file:
+
+```
+LAB-staged-before: bootc_lab-43-0.conf bootc_lab-43-1.conf
+LAB-count-result:  success
+LAB-staged-after:  bootc_lab-43-0.conf bootc_lab-43-1+3-0.conf
+```
+
+and it should not be read as a pass, because of what it logged doing it:
+
+```
+avc: denied { read open getattr } comm="bash" path="/etc/passwd"
+     scontext=system_u:system_r:bootupd_t:s0 tcontext=passwd_file_t permissive=1
+avc: denied { read open }        comm="cat"  path="/proc/cmdline"
+     scontext=system_u:system_r:bootupd_t:s0 tcontext=proc_t     permissive=1
+```
+
+`/proc/cmdline` is where the helper reads the booted deployment's `composefs=`
+digest — the whole basis on which it chooses which entry to count. On an
+enforcing `bootupd_t` that read fails, the helper takes its own safe path and
+logs "no composefs= token … refusing", and the counter is silently never
+written. It passed here only because the domain is permissive.
+
+The root cause is one type_transition, queried out of the live policy:
+
+```
+type_transition init_t bin_t:process       unconfined_service_t;   EXISTS
+type_transition init_t init_exec_t:process …                       NONE
+```
+
+`/usr/libexec/apex-boot-count` is `bin_t`, so systemd already runs it in
+`unconfined_service_t`, which carries `files_unconfined_type` and renames a
+`dosfs_t` file unaided. `/usr/lib/systemd/systemd-bless-boot` is `init_exec_t`,
+gets no transition, and stays in `init_t` — which is the entire defect, and why
+only the blessing needs the module.
+
+There is independent evidence for the unconfined path from the predecessor's
+own diagnostic: `bless-diag.service` ran `/usr/local/bin/bless-diag.sh`, a
+`bin_t` script started by systemd on the APEX image with SELinux enforcing, and
+its `mv` on the very entry `systemd-bless-boot` could not rename **succeeded**.
+That was visible the whole time and was read as "the filesystem is fine" rather
+than as "a `bin_t` helper is in a different domain".
+
+So the drop-in and the `bin_t` allow were reverted, the module is back to one
+rule, and `Containerfile.base` and `tests/test-boot-v2.sh` now assert that
+`apex-boot-count` carries **no** `SELinuxContext=` — the mistake is easier to
+re-make than to find.
+
+**Still not proven:** the reverted counter renaming a staged entry in a guest.
+The two things it rests on are each measured — the type_transition above, and
+`bless-diag.sh`'s successful `mv` — but the exact shipped combination has not
+been through a boot. It is the cheap half of the next lab run.
