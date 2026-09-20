@@ -122,11 +122,32 @@ fi
 # Keys the build reads. `${KERNEL_SRC_URL}` etc.
 before=$fail
 mapfile -t used < <(grep -oE '\$\{[A-Z0-9_]+\}' "$CF" | tr -d '${}' | sort -u)
-# Names that come from Docker ARG/ENV or the shell rather than the pin.
-NOT_FROM_PIN="APEX_KERNEL_IMAGE|FEDVER|KVER|CONF|VMLINUX|GOTPAHOLE|CCVER|MAN|BTF|WANT_KVER|GOT_KVER|GOT|VERSION_ID|N"
+
+# Names the Containerfile's own shell assigns, so they are locals and not pin
+# keys. DERIVED from the file rather than listed by hand: a hand-maintained
+# list makes every new local variable in the build a spurious failure here, and
+# the pressure that creates is to keep widening the list until it stops
+# catching the `${KERNEL_SRC_URI}` typo it exists for. (It was already 13 names
+# long and two more locals broke it.)
+declare -A LOCAL=()
+while read -r a; do
+    [ -n "$a" ] && LOCAL[$a]=1
+done < <(grep -oE '(^|[[:space:];&|(])[A-Z][A-Z0-9_]*=' "$CF" \
+         | grep -oE '[A-Z][A-Z0-9_]*' | sort -u)
+
+# These come from outside the shell entirely: a Docker ARG, or /etc/os-release.
+NOT_FROM_PIN="APEX_KERNEL_IMAGE|VERSION_ID"
 
 for u in "${used[@]}"; do
     [[ "$u" =~ ^($NOT_FROM_PIN)$ ]] && continue
+    # A name that is both a pin key and assigned by the build's own shell is
+    # shadowing: the pin would be silently overridden by whatever the RUN set,
+    # and every other assertion here would still pass.
+    if [ -n "${LOCAL[$u]+x}" ] && [ -n "${VAL[$u]+x}" ]; then
+        err "$CF assigns $u itself, but $PIN also defines it — the local shadows the pin"
+        continue
+    fi
+    [ -n "${LOCAL[$u]+x}" ] && continue
     if [ -z "${VAL[$u]+x}" ]; then
         err "$CF reads \${$u} but $PIN does not define it — it would expand empty"
     fi
