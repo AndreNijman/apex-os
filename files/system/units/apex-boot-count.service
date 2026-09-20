@@ -1,0 +1,52 @@
+[Unit]
+Description=APEX boot counter for the staged deployment
+Documentation=file:///usr/share/doc/apex/boot-v2.md
+
+# ── the whole unit is an ExecStop, and the ordering is what makes it work ──
+#
+# bootc-finalize-staged.service is itself an ExecStop: at shutdown it runs
+# `bootc composefs-finalize-staged`, which REPLACES /boot/loader/entries with
+# the contents of /boot/loader/entries.staged. Anything written into a filename
+# in the live directory is discarded with it — measured, four boots.
+#
+# systemd stops units in the reverse of the order it started them, so
+# After= here means this unit's ExecStop runs BEFORE bootc's. The counter
+# therefore lands on a file bootc is about to install, and the install itself
+# is bootc's own atomic directory swap. Nothing writes a live boot path.
+DefaultDependencies=no
+After=bootc-finalize-staged.service
+Before=final.target
+Conflicts=final.target
+# The ESP is an automount on this path; keep it mounted until we have stopped.
+RequiresMountsFor=/boot
+
+# ── inert on a GRUB machine, and it must be a condition that is true FROM
+# ── INSTALL TIME, which LoaderBootCountPath is not
+#
+# apex-boot-health and apex-boot-notice condition on
+# /sys/firmware/efi/efivars/LoaderBootCountPath-…, which systemd-boot sets only
+# when it booted the machine WITH a counter already in effect. This unit is
+# what writes the first counter, so that variable is absent exactly when this
+# unit is most needed, and a unit whose condition failed at start is never
+# stopped — its ExecStop would never run.
+#
+# entries.srel is the Boot Loader Specification's own marker for a Type #1
+# entry directory. bootc writes it on the ESP on the systemd-boot path; on a
+# GRUB/ostree machine it does not exist — checked on the L16, whose
+# /boot/loader is a symlink to loader.0 holding nothing but entries/. A failed
+# condition is a skip, not a failure, so this cannot affect a GRUB boot.
+ConditionPathExists=/boot/loader/entries.srel
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/libexec/apex-boot-count stage
+# A boot counter is worth a few seconds and never worth a hung shutdown.
+TimeoutStopSec=30s
+
+[Install]
+# WantedBy, not RequiredBy: a machine that cannot start this must still boot.
+# The cost of it not running is a deployment without automatic rollback, which
+# is what every APEX machine has today.
+WantedBy=multi-user.target

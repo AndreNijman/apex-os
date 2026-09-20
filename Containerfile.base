@@ -1084,36 +1084,94 @@ RUN set -eux; \
 # What does NOT ship, deliberately:
 #
 #   * No bootloader installation. Nothing in this image runs `bootctl install`,
-#     `bootctl update`, `bootupctl` or `efibootmgr -c`. GRUB stays the default
-#     for the published image in this generation — one image, so every APEX
-#     machine (AGENTS.md boot-path rule 5; §22's own recommendation is to keep it while the
-#     OSTree/bootc install path depends on it, and to keep it for legacy BIOS
-#     regardless). Enrolling a machine on the systemd-boot path is a
-#     documented, user-initiated procedure in docs/boot-v2.md, not a script —
-#     there is no rollback for an ESP a script overwrote.
-#   * No systemd-boot binary and no ukify. Both would be dnf transactions and
-#     therefore belong in Containerfile.core, and neither is needed by the two
-#     units below: boot counting is decremented by the bootloader in the ESP
-#     and blessed by systemd-bless-boot, which is already in the systemd
-#     package this image has. `apex boot status` reads `bootctl list`, which
-#     ships in systemd-udev — asserted below rather than assumed.
+#     `bootctl update`, `bootupctl` or `efibootmgr -c` — AGENTS.md boot-path
+#     rule 5. Andre decided on 2026-09-20 that APEX moves to systemd-boot on
+#     every machine, and that does not change this line: an ESP a script
+#     overwrote has no rollback, the machine that boots systemd-boot is a
+#     machine bootc INSTALLED that way (the composefs backend; the ostree
+#     backend refuses `--bootloader systemd` outright), and an already-installed
+#     machine cannot be converted in place. Enrolment stays the documented,
+#     user-initiated procedure in docs/boot-v2.md.
+#   * No systemd-boot binary and no ukify HERE. Both are dnf transactions and
+#     therefore belong in Containerfile.core, which is where the pivot put
+#     them — `systemd-boot-unsigned` has to be in the shipped image because
+#     `bootc install --bootloader systemd` copies the loader OUT of the image
+#     being installed, and without it bootc exits 0 leaving an unbootable ESP.
+#     `apex boot status` reads `bootctl list`, which ships in systemd-udev —
+#     asserted below rather than assumed.
 #
-# Both units carry ConditionPathExists on systemd-boot's LoaderBootCountPath
-# EFI variable, which is the same switch systemd-bless-boot-generator uses. On
-# a GRUB machine that variable does not exist, so neither unit starts, and a
-# failed condition counts as a skip rather than a failure — enabling them here
-# cannot affect a GRUB boot. tests/test-boot-v2.sh asserts that condition is
-# present on every unit this block enables, because an enabled unit without it
-# would be the exact way "opt-in" silently becomes "default".
+# What the pivot ADDED here, and why each piece is a precondition rather than a
+# default change:
+#
+#   * The boot blessing had to be repaired before a counter could be written at
+#     all. On the composefs path the ESP is mounted at /boot, so the loader
+#     entries are dosfs_t, and PID 1 running /usr/lib/systemd/systemd-bless-boot
+#     (init_exec_t) stays in init_t, which Fedora 43's policy allows no rename
+#     on dosfs_t. Measured on the APEX image with the AVC in
+#     ROADMAP/evidence/sdboot-image-20260921-decision.md. Unrepaired, every
+#     deployment would roll itself back on its fourth boot — the exact outcome
+#     rule 5 exists to prevent.
+#   * apex-boot-count writes the counter bootc does not. It renames the STAGED
+#     entry, which `bootc-finalize-staged` is about to install, because a
+#     rename in the live directory is discarded by the next upgrade.
+#
+# The health and notice units carry ConditionPathExists on systemd-boot's
+# LoaderBootCountPath EFI variable, which is the same switch
+# systemd-bless-boot-generator uses. On a GRUB machine that variable does not
+# exist, so neither unit starts, and a failed condition counts as a skip rather
+# than a failure — enabling them here cannot affect a GRUB boot.
+# tests/test-boot-v2.sh asserts that every unit this block enables carries a
+# condition that is false on a GRUB machine, because an enabled unit without
+# one would be the exact way "opt-in" silently becomes "default".
+#
+# apex-boot-count is conditioned on /boot/loader/entries.srel instead, and the
+# difference is not a lapse. LoaderBootCountPath exists only when systemd-boot
+# booted the machine with a counter ALREADY in effect; this unit is what writes
+# the first one, so that variable is absent exactly when it is needed. Worse,
+# it does its work in ExecStop, and a unit whose condition failed at start is
+# never stopped — the ExecStop would simply never run. entries.srel is the Boot
+# Loader Specification's own marker for a Type #1 entry directory: bootc writes
+# it on the ESP on the systemd-boot path, and on a GRUB/ostree machine it does
+# not exist (checked on the L16, whose /boot/loader is a symlink to loader.0
+# holding nothing but entries/).
 COPY files/system/libexec/apex-boot-health /usr/libexec/apex-boot-health
+COPY files/system/libexec/apex-boot-count /usr/libexec/apex-boot-count
 COPY files/system/units/apex-boot-health.service \
      /usr/lib/systemd/system/apex-boot-health.service
 COPY files/system/units/apex-boot-notice.service \
      /usr/lib/systemd/system/apex-boot-notice.service
+COPY files/system/units/apex-boot-count.service \
+     /usr/lib/systemd/system/apex-boot-count.service
+COPY files/system/units/10-apex-bless-boot-esp.conf \
+     /usr/lib/systemd/system/systemd-bless-boot.service.d/10-apex-bless-boot-esp.conf
 COPY docs/boot-v2.md /usr/share/doc/apex/boot-v2.md
 RUN set -eux; \
-    chmod 0755 /usr/libexec/apex-boot-health; \
+    chmod 0755 /usr/libexec/apex-boot-health /usr/libexec/apex-boot-count; \
     bash -n /usr/libexec/apex-boot-health; \
+    bash -n /usr/libexec/apex-boot-count; \
+    \
+    : '── the blessing must be able to write a FAT ESP, or nothing else here'; \
+    : '── matters: an unblessed entry keeps its +N-M counter and the machine'; \
+    : '── rolls itself back on the fourth boot.'; \
+    : 'Measured on the APEX image, SELinux enforcing, composefs + sd-boot:'; \
+    : '  systemd-bless-boot: Failed to rename ...+2-1.conf -> ...conf: EACCES'; \
+    : '  avc: denied { rename } scontext=init_t tcontext=dosfs_t tclass=file'; \
+    : 'The drop-in sends it into bootupd_t, the domain Fedora built for'; \
+    : 'writing bootloader state onto a FAT ESP, and the policy module grants'; \
+    : 'the one permission that transition was missing.'; \
+    test -s /usr/lib/systemd/system/systemd-bless-boot.service.d/10-apex-bless-boot-esp.conf; \
+    grep -q '^SELinuxContext=-system_u:system_r:bootupd_t:s0$' \
+        /usr/lib/systemd/system/systemd-bless-boot.service.d/10-apex-bless-boot-esp.conf; \
+    : 'The leading dash is what keeps a machine that cannot set the context'; \
+    : 'booting instead of rolling back, so it is asserted, not trusted.'; \
+    \
+    : 'The drop-in is only half the repair: the transition it asks for needs'; \
+    : 'the apex_sdboot policy module, which is COMPILED IN Containerfile.core'; \
+    : '(compiling belongs in the slow tier, and rebuilding the binary policy'; \
+    : 'here would put ~20 MB of /etc into every thin-tier update).'; \
+    : 'Asserted across the tier boundary, cheaply, so a core change that drops'; \
+    : 'it fails here rather than on somebody machine four boots later.'; \
+    semodule -l | grep -qx apex_sdboot; \
     \
     : '── the upstream mechanism must actually be in this image ──'; \
     : 'systemd-bless-boot is what strips the +N-M suffix. Without it the'; \
@@ -1135,6 +1193,7 @@ RUN set -eux; \
     \
     systemctl enable apex-boot-health.service; \
     systemctl enable apex-boot-notice.service; \
+    systemctl enable apex-boot-count.service; \
     \
     : '── postconditions on the enablement, not just on the enable command ──'; \
     : 'RequiredBy vs WantedBy is the difference between "a failed health'; \
@@ -1142,19 +1201,32 @@ RUN set -eux; \
     : 'so the symlink systemctl actually created is what gets checked.'; \
     test -L /etc/systemd/system/boot-complete.target.requires/apex-boot-health.service; \
     test -L /etc/systemd/system/boot-complete.target.wants/apex-boot-notice.service; \
+    test -L /etc/systemd/system/multi-user.target.wants/apex-boot-count.service; \
     : 'And each enabled unit must be inert without systemd-boot counting.'; \
     for u in apex-boot-health apex-boot-notice; do \
         grep -q '^ConditionPathExists=/sys/firmware/efi/efivars/LoaderBootCountPath-' \
             "/usr/lib/systemd/system/$u.service"; \
     done; \
+    : 'apex-boot-count cannot use that variable — it is what writes the first'; \
+    : 'counter, and it works in ExecStop, which never runs for a unit whose'; \
+    : 'start condition failed. entries.srel is absent on a GRUB machine.'; \
+    grep -q '^ConditionPathExists=/boot/loader/entries.srel$' \
+        /usr/lib/systemd/system/apex-boot-count.service; \
+    : 'and the ordering that makes the ExecStop land before bootc swaps the'; \
+    : 'directory in: systemd stops units in reverse start order.'; \
+    grep -q '^After=bootc-finalize-staged.service$' \
+        /usr/lib/systemd/system/apex-boot-count.service; \
     : 'Nothing in the shipped payload may touch a real boot path. Matched on'; \
     : 'the executable lines only: a comment naming the command it refuses to'; \
     : 'run must not fail this, and the units and helper both contain such'; \
     : 'comments on purpose.'; \
     ! grep -nE '^[^#]*\b(bootctl[[:space:]]+(install|update)|bootupctl|grub2-install|efibootmgr[[:space:]]+-[cBo])' \
         /usr/libexec/apex-boot-health \
+        /usr/libexec/apex-boot-count \
         /usr/lib/systemd/system/apex-boot-health.service \
-        /usr/lib/systemd/system/apex-boot-notice.service
+        /usr/lib/systemd/system/apex-boot-notice.service \
+        /usr/lib/systemd/system/apex-boot-count.service \
+        /usr/lib/systemd/system/systemd-bless-boot.service.d/10-apex-bless-boot-esp.conf
 
 # ── L-003: the disk-encryption key slots ────────────────────────────────────
 #
