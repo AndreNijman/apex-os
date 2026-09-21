@@ -1,8 +1,11 @@
-## LANDABLE — `810a246c`
+## LANDABLE — `b4e7ba84`
 
-Round 38's payload-write result is **no longer UNPROVEN**: host-side byte
-verification is done (13 checks, 0 failures) and
-`ROADMAP/evidence/windows-installer-3-20260921.md` exists. The round found that
+**Both of round 38's UNPROVEN results are now proven.** (a) payload-write's
+host-side byte verification is done — 13 checks, 0 failures; (b)
+`bitlocker-discover` **ran to completion** for the first time (2 boots, 85 s,
+`JOB COMPLETE`, `STATUS PASS`, firmware IDENTICAL) and a defect in the job
+itself was found and fixed in the same round. Evidence for both:
+`ROADMAP/evidence/windows-installer-3-20260921.md`. The round found that
 ARCHITECTURE.md's "Windows itself is the backstop" claim is **false as
 written** — Windows refuses a PhysicalDrive write into a mounted NTFS volume
 but does NOT refuse one into a lettered RAW volume — and the doc now says so.
@@ -533,3 +536,45 @@ not discover afterwards:** the qemu line in `winlab` has no `-tpmdev`, so
 BitLocker is almost certainly OFF in this guest — the run proves the job
 COMPLETES and reads the profile API correctly; it does not answer the PCR-5
 question. Say that rather than letting "bitlocker-discover verified" imply more.
+
+### DONE this round — item 1b, bitlocker-discover run to completion (17:47)
+Commits `60a38305`, `a088c5ae`, `b4e7ba84`, pushed. Two boots, 85 s,
+`APEXLAB-RUN-EXIT 0`, `STATUS PASS`, firmware IDENTICAL. Log
+`/var/lab-scratch/winlab/bl-discover.log` (23 kB, was 351 B and truncated).
+- **Three BitLocker states measured** and two of them are indistinguishable
+  through the obvious lens: `ProtectionStatus` alone cannot tell *not
+  encrypted* from *encrypted-but-suspended* (both `0`; `ConversionStatus`
+  separates them), and the raw sector-0 OEM ID cannot tell *protected* from
+  *suspended* (both `-FVE-FS-`). The second bites exactly on a disk Windows
+  does not manage, where there is NO WMI row and the raw signature is all
+  there is — so the only correct answer there is to refuse.
+- **Defect in the job, found and fixed**: `manage-bde -protectors -disable`
+  takes `-RebootCount` only on the OS volume; on the data volume Windows
+  rejected it with `0x80310028` and the job then labelled the next dump
+  "protection suspended" while the volume still read `ProtectionStatus=1`. It
+  now asserts the number moved before labelling anything, and re-runs clean
+  (`SUSPEND-EFFECTIVE: YES`).
+- **must-measure item 5 (PCR 5) is ANSWERED FOR THE NO-TPM CASE AND NOT
+  CLOSED.** This guest has no TPM (`Win32_Tpm` zero instances, `Get-Tpm`
+  `TpmPresent=False`) and no `…\Policies\Microsoft\FVE` key at all, so nothing
+  binds PCR 5 because there is no platform validation profile. **Closing it
+  needs `swtpm` in the lab image** (`localhost/apex-winlab` has none), a
+  `-tpmdev`/`tpm-tis` guest and an OS volume with a TPM protector. The reading
+  code is in and a parser bug was fixed before it could fire (manage-bde puts
+  several PCR numbers on ONE line; a per-line regex would have reported
+  `pcr5-bound: NO` for a profile reading `0, 2, 4, 5, 11`).
+
+### NEXT (updated 17:47)
+Write and run `windows-installer/lab/jobs/gpt-write-mechanism/run.ps1`: the
+measurement `docs/apex-owns-its-esp.md` (second decision, `b137f03f`) says is
+mine and calls deliberately undecided — **raw sector write to LBA 2–33 vs
+`IOCTL_DISK_SET_DRIVE_LAYOUT_EX`**, and whether Windows permits either on a
+**LIVE SYSTEM DISK** (`\\.\PhysicalDrive0`), which the doc says is unverified.
+Then `IOCTL_DISK_UPDATE_PROPERTIES` (0x70140) for the stale-view problem. Verify
+host-side from `run.qcow2` against pristine `golden.raw` with the same
+`hostverify.py` pattern, against the doc's six invariants.
+**Chosen over must-measure #1/#2/#4 (the second-ESP items) deliberately**: the
+advisor and the decision doc both make the mechanism the higher-value single
+boot, and "#2 across a feature update" is not doable in this lab at all — there
+is no update media. If #1/#2/#4 are not reached this round they stay open with
+that reason; say so rather than implying they were done.

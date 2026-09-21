@@ -1,6 +1,6 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-21T17:34+0800",
+ "updated": "2026-09-21T17:38+0800",
  "_round": "Round 39 STARTED 2026-09-21T17:08+0800 by the autoresume timer, after the round-38 session hit a usage limit at 14:59 (autoresume.log: 'resume session ended (exit 1)'). All six round-38 agents were dead \u2014 `ps` showed no subagent claude process \u2014 and NONE was messaged. Six fresh agents dispatched with the same slugs, each carrying a ROUND 39 CONTINUATION section appended to its card. CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 is set in this session's env (checked, not assumed), so agents are not SIGTERMed 600s after the final response; the hard bound is `timeout 4h`, which ends this session at about 21:08 AWST.",
  "_landed_this_round": [
   {
@@ -25,6 +25,14 @@
    "what": "The kernel tier is published and PINNED. kernel-build.yml pushes to an immutable `kernel-<kver>-<sha7>` tag with --digestfile and makes the floating `:kernel` name afterwards by an in-registry skopeo copy, only from main or roadmap/**. Containerfile.core declares APEX_KERNEL_IMAGE before the first FROM -- without that the override had nothing to attach to and the build answered 'no FROM statement found' even when build-local.sh passed the right value. The pin is a DIGEST, not a floating tag, because core's `btf_scx=usable` refusal is worth much less if the image behind the name can be repointed after the check. tests/check-kernel-image-pin.sh gates it both ways including a QUOTED pin, which CI's resolve step cannot parse.",
    "why_now": "The agent signalled `## LANDABLE` at e58d39bc and said explicitly that the CI core build is only the confirmation half. In practice this merge is ONE FILE -- the evidence doc -- because all the code arrived an hour earlier inside the task/kernel-akmods merge (259d8976), which had merged this branch to resolve the build-image.yml collision. Recorded as its own merge anyway, so the unit's landing is visible and does not read as landed-then-rewritten in six months.",
    "gates_after_merge": "check-no-conflict-markers PASS; check-kernel-image-pin PASS; check-shellcheck-coverage 202 discovered / 0 newly failing; test-run-recovery-reachable 28/0; check-suites-run-in-ci 104 suites, 97 run, 7 exempt, 0 unrun and undeclared."
+  },
+  {
+   "merge": "1156daa4",
+   "branch": "fix/doc-verbs-speech-quote",
+   "at": "2026-09-21T17:38+0800",
+   "what": "roadmap/v2.2's CI has been RED on every commit since docs/apex-owns-its-esp.md landed, and nobody had noticed. `tests/check-doc-verbs.sh`'s `mentions()` scans PROSE, not only backticked text, so it read Andre's verbatim decision -- 'maybe it should build a new esp for apex or something' -- as a two-word verb, asked the CLI for it, and refused. That failed the `Docs and the CLI agree, in both directions` step and through it `Require every applicable test`. Recorded in tests/doc-verbs-allow with its reason rather than fixed in the document: the document's entire value is that the decision is in Andre's own words, and rewording him to satisfy a regex destroys the only thing it is for.",
+   "why_now": "Found by the orchestrator, not by an agent: `gh run list` after the kernel landings showed the two preceding roadmap/v2.2 runs (35582430113, 35581614026) already red. The extractor's real limitation -- it cannot tell an English function word from a subcommand name -- is written down next to the allow entry as the separate change it deserves, rather than smuggled in behind a doc fix.",
+   "gates_after_merge": "check-doc-verbs whole gate: 273 valid, 9 deliberate, 0 not a command; command surface 195 documented, 111 declared undocumented, 0 undocumented and undeclared, 0 stale. Proven BOTH ways: a scratch file naming `apex frobnicate` still gives BAD and exit 1. check-no-conflict-markers PASS."
   }
  ],
  "_status_recorded_this_round": "NONE. None of the three landings maps to a numbered roadmap item -- kernel-akmods and kernel-publish are image blockers, and the shellcheck fix is gate hygiene. Counts unchanged at 92 done / 35 partial / 0 todo / 1 blocked of 128.",
