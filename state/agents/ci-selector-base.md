@@ -99,31 +99,66 @@ branch is an oversight rather than a decision.
 
 ## NEXT
 
-- Poll run 35650126791 (`gh run view 35650126791`) — the step-4 full-matrix
-  `workflow_dispatch` on `roadmap/v2.2`, dispatched 20:17Z — and record which
-  of the five jobs are red. Meanwhile write
-  `tests/check-ci-selector-parity.sh` in
-  /var/tmp/apex-work/wt-ci-selector-base.
+- Wait for `Package engine` on run 35650126791 (`gh run view 35650126791`,
+  from /var/tmp/apex-work/wt-ci-selector-base), then write
+  `ROADMAP/evidence/ci-selector-base-20260922.md` with the step-4 report and
+  the red/green transcripts already in /var/lab-scratch/ci-selector-base.
+  Also still owed: the `build-image.yml` decision paragraph (BOUNDS).
 
 ## DONE
 
-- Worktree /var/tmp/apex-work/wt-ci-selector-base on `task/ci-selector-base`
-  cut from origin/roadmap/v2.2 @ 6fa9ddbc. Lab /var/lab-scratch/ci-selector-base.
-- Step 4 STARTED: full-matrix run dispatched as 35650126791.
+- **Fix + gate committed and pushed: `task/ci-selector-base` @ `79ce1dc9`.**
+  `pr-validation.yml`'s `push` arm now classifies an integration branch against
+  `git merge-base origin/main "$head"`; task branches keep `event.before`.
+  New gate `tests/check-ci-selector-parity.sh`, wired into `static`.
+- Gate proved BOTH ways: 5 passed / 2 failed against `HEAD:` (pre-fix copy at
+  /var/lab-scratch/ci-selector-base/pr-validation.BEFORE.yml), 7/0 after.
+  Three mutants each fail exactly their own assertion —
+  mut-all-branches (task narrowing), mut-select-all (parity),
+  mut-no-zero-fallback (both fallbacks, rc=128).
+- Local gates green: check-suites-run-in-ci (107 suites, 100 in CI, 0 unrun),
+  check-shellcheck-coverage (206 scripts, 0 newly failing), no-conflict-markers.
+- Step 4 full-matrix run dispatched and mostly read: 35650126791.
+- Run block measured 9,160 -> 10,959 chars against the 21,000 cap.
 
 ## IN PROGRESS
 
-- Measuring which jobs every push run on roadmap/v2.2 actually ran
-  (`/var/lab-scratch/ci-selector-base/push-runs.tsv`, 166 runs).
+- Evidence file not yet written.
 
 ## FOUND
 
+- **The card's premise is slightly wrong and the corrected numbers are
+  stronger.** `Installer safety and UI` did NOT run on zero pushes: over all
+  166 push runs of pr-validation on `roadmap/v2.2` it was selected by 9
+  (5 green, 4 red — 35518416643, 35566068754, 35611127672, 35649643570).
+  The real measure: only **2 of 166** push runs classified all four selectable
+  jobs, **28 classified none of them** (green having run only `Static
+  validation`), and the merge-shaped classification of the tip selects all
+  four (828 files differ from `main`). Data:
+  /var/lab-scratch/ci-selector-base/{push-runs.tsv,jobs.tsv}.
+- **STEP 4, run 35650126791, `workflow_dispatch` on roadmap/v2.2 @ 6fa9ddbc,
+  classified over 57f593ad..6fa9ddbc, all four jobs selected:**
+  - Static validation ✓, Select tests ✓, Rust validation ✓, Android client ✓
+  - **Installer safety and UI ✗ — `Run installer disk-encryption suite`,
+    exit 1. NEW: this is not the locale/keymap red that 6fa9ddbc fixed
+    (locale ✓ and keyboard ✓ in this very run). Its own unit.**
+  - `Run installer accessibility audit` reported `-` because the failing step
+    above it skipped it — that step has no `if: !cancelled()`, unlike the
+    engine job's gates. So the a11y audit's state on this tree is UNKNOWN,
+    which is its own (small) unit.
+  - Package engine: still running at the time of writing.
 - `git merge-base origin/main "$head"` DOES resolve on the runner:
-  run 35647188306 logged `classified workflow_dispatch over
-  57f593ad..9c389baf`, and 57f593ad is the tip of `main`. So
-  actions/checkout@v4 with fetch-depth: 0 leaves refs/remotes/origin/main
-  present. The merge-base fix is therefore usable on `push` too — measured,
-  not assumed.
+  run 35647188306 logged `classified workflow_dispatch over 57f593ad..9c389baf`
+  and 57f593ad is the tip of `main`. actions/checkout@v4 with fetch-depth: 0
+  leaves refs/remotes/origin/main present. Measured, not assumed.
+- **The `pull_request` arm uses a two-dot `git diff base.sha head`, not a
+  merge base.** When `main` moves after the PR opens, the PR over-runs — it
+  classifies main's own new paths as changes, inverted. Consistent with the
+  file's "too much, never too little" rule, so left alone. Noted, not fixed.
+- If a branch in `on.push.branches` were ever `main` itself, merge-base would
+  equal head, the diff would be empty, every selector false, every job skipped
+  and `result` green. The new list assertion forces that decision into the
+  open rather than preventing it. Noted, not guarded.
 
 ## BLOCKED ON
 

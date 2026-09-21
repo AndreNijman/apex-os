@@ -12,11 +12,20 @@ orchestrator.
 
 ## NEXT
 
-- Create the worktree/branch, then build the RED half: a suite that runs the
-  shipped `extract_rpms` over a real wine-core rpm in a Fedora 43 container and
-  counts dangling symlinks in the payload. Expect 12.
+- Write `tests/test-apex-pkg-alternatives.sh`: privileged fedora:43 container,
+  `dnf download wine-core`, source the engine, three legs — RED with
+  `apply_alternatives(){ :; }`, GREEN with the real one, negative control
+  breaking one link by hand — then wire it into `pr-validation.yml`'s `engine`
+  job next to the etc-label step.
 
 ## DONE
+
+- `9607c5bc` on `task/pkg-alternatives` (base `origin/roadmap/v2.2` @
+  `6fa9ddbc`): the engine fix. New in `files/system/libexec/apex-pkg` —
+  `alternatives_record`, `payload_link_resolves`, `dangling_links`,
+  `alternatives_replay`, `alternatives_candidates`, `alternatives_place`,
+  `apply_alternatives`; called from `rebuild_extension` between `extract_rpms`
+  and `fix_caches`. NOT yet run end to end.
 
 ## IN PROGRESS
 

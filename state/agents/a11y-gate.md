@@ -31,40 +31,96 @@ the "greeter nobody has asked" state the brief says a pristine zero needs.
 
 ## NEXT
 
-- Run walk #1 (`tests/atspi-walk.py --count`, sha256 `8593c3f8…`) as `greetd`
-  against `/run/user/973/bus` on the pristine greeter pid 13414, with the
-  greeter's `/proc/13414/environ` read out first via
-  `sudo cat /proc/13414/environ | tr '\0' '\n'` (note: `sudo tr < /proc/...`
-  redirects as the CALLING user and is permission-denied — use `sudo cat |`).
-  Then set `ScreenReaderEnabled` alone on that bus and walk #2 on the same pid.
-  Logs to katana `/var/lab/scratch/a11y-gate/`.
+- Walk J2: set `ScreenReaderEnabled` alone on the ISOLATED private bus
+  (`env XDG_CONFIG_HOME=/var/lab/scratch/a11y-gate/iso/config
+  DBUS_SESSION_BUS_ADDRESS=$(cat /var/lab/scratch/a11y-gate/iso/bus.addr)
+  busctl --user set-property org.a11y.Bus /org/a11y/bus org.a11y.Status
+  ScreenReaderEnabled b true`) and re-run
+  `/var/lab/scratch/a11y-gate/iso/walk-iso.sh` against the SAME apex-shell pid
+  **17179**, which started 04:22:50 with the gate off. Then write
+  `ROADMAP/evidence/a11y-gate-20260922.md`, commit, push, mark LANDABLE.
+- Teardown when done: `systemctl --user stop a11ygate-iso a11ygate-atspi
+  a11ygate-registryd a11ygate-iso-deadman.timer` and
+  `sudo systemctl stop a11ygate-deadman.timer` (disarm the dead-men FIRST).
+  Leave `restore-s89-shell.service` RUNNING — it is session 89's shell (see
+  FOUND); stopping it would take their bar away a second time.
 
 ## DONE
 
 - Read both landed evidence files in full.
-- Established seat state (see above) and the a11y state of both users:
-  `andre` gsetting **true** (dconf db created 03:51:08 by the other agent),
-  `org.a11y.Status` on uid 1000 `IsEnabled=true ScreenReaderEnabled=false`;
-  `greetd` gsetting **false**, `org.a11y.Status` both **false**.
-- Worktree `/var/tmp/apex-work/wt-a11y-gate`, branch `task/a11y-gate` @ 6fa9ddbc.
+- **Walk 1 / Walk 2 at the greeter, and they answer the question.** Greeter
+  session c2, `qs -p /usr/share/apex-greet/shell.qml` pid 13414, started
+  03:55:21, 42 env keys, only Qt variable `QT_QPA_PLATFORMTHEME=qt6ct`, no
+  accessibility variable of any kind.
+  - 04:15:41 gsetting `false`, `IsEnabled false`, `ScreenReaderEnabled false`
+    -> **0 applications on the bus**, empty dump.
+  - 04:15:54 `ScreenReaderEnabled` set to true over D-Bus, nothing else.
+  - 04:15:57, SAME pid 13414 -> **1 application**, `role=application
+    name=quickshell`. Stable at t+30 s. **The bridge retrofits.**
+- **The greeter's ChildCount is 0 for a measured reason that is not the gate:**
+  session c2 is on VT 1 while `ActiveSession=89`, and its own sway answers
+  `swaymsg -t get_outputs` -> `[]`. No outputs, no layer surfaces, no frames.
+- **Restored the greeter byte-perfectly**: dconf db back to sha256
+  `af3a30ec058a085c4b85e1a7e45f0753670c8ed31c14893eddbd8fd512b38c08`, 432 bytes,
+  the exact pre-experiment hash; all four readings back to false; greetd never
+  restarted; greeter still pid 13414.
+- Isolated headless rig for apex-shell built and running: `a11ygate-iso`
+  (sway headless + quickshell), `a11ygate-atspi`, `a11ygate-registryd`, all
+  user units, on a private D-Bus session bus and a private `XDG_CONFIG_HOME`,
+  so nothing of session 89's is touched. Walk I1/J1 -> 0 applications.
 
 ## IN PROGRESS
 
-- `ROADMAP/evidence/a11y-gate-20260922.md` — not yet started.
+- `ROADMAP/evidence/a11y-gate-20260922.md` — not yet written. All logs are on
+  katana in `/var/lab/scratch/a11y-gate/` (`walk1.log`, `walk2.log`,
+  `walk2b.log`, `walk3-residue.log`, `iso-walk*.log`).
 
 ## FOUND
 
-- `IsEnabled=true` on uid 1000 with `ScreenReaderEnabled=false` is direct
-  confirmation of the mirroring half of the final-qual hypothesis: nothing but
-  the gsetting is true for `andre`, and at-spi-bus-launcher has put that into
-  `org.a11y.Status.IsEnabled`. So the gsetting is A writer of the gate; whether
-  it is THE gate is what the two walks decide.
-- Session 89's quickshell (12634) started 03:53:08, i.e. **after** the gsetting
-  went true at 03:51:08 — so it is NOT a clean control and must not be used.
+1. **Setting `org.a11y.Status.ScreenReaderEnabled` WRITES THE GSETTING BACK.**
+   Measured twice. At the greeter: before the write the dconf db was
+   `af3a30ec…` with `toolkit-accessibility=false`; the single D-Bus property
+   write at 04:15:54.660 left the db rewritten at 04:15:54.692 with BOTH
+   `screen-reader-enabled=true` AND `toolkit-accessibility=true`. In the
+   isolated rig, which had NO dconf database at all, the same write CREATED
+   `config/dconf/user` at 04:21:03.420. So "set `ScreenReaderEnabled` alone,
+   specifically not the gsetting" is **not achievable through this interface** —
+   at-spi-bus-launcher couples them.
+2. **The coupling is one-way.** Setting `ScreenReaderEnabled` back to false
+   leaves `toolkit-accessibility` **true** and `IsEnabled` **true**. A run that
+   "puts the flag back" and stops there leaves accessibility ON for the next
+   process that starts. Restoring needs an explicit gsettings write.
+3. **This undermines the dated counter-example in `katana-final-qual` §5.** That
+   file infers "andre had no dconf user database at all until 03:51:08" from the
+   db's mtime. Finding 1 says their own `ScreenReaderEnabled` write at ~03:48:5x
+   would itself have created that db; an mtime read later cannot distinguish
+   "created at 03:51:08" from "created at 03:48 and rewritten at 03:51:08".
+4. **`org.a11y.Bus` cannot be D-Bus-activated on a private session bus on this
+   image**: `Activated service 'org.a11y.Bus' failed: Failed to execute program
+   org.a11y.Bus: Permission denied`, with **no AVC logged**. The
+   `SystemdService=at-spi-dbus-bus.service` route works, the `Exec=` route does
+   not. Any CI harness that stands up a private a11y bus (`tests/lib/atspi.sh`)
+   has to start `/usr/libexec/at-spi-bus-launcher` itself.
+5. **Qt tries `Embed` ONCE.** With the gate flipped on but no registry present,
+   quickshell logged `qt.accessibility.atspi: Error in contacting registry:
+   "org.freedesktop.DBus.Error.NameHasNoOwner"` at the exact second of the write
+   — proof the running process reacts to the property — and then never retried,
+   even after the registry appeared and the flag was toggled again.
+6. **I killed session 89's shell and put it back.** `pkill -x -u 1000 -f
+   "quickshell -c /usr/share/apex-shell"` matched the OTHER agent's pid 12634 as
+   well as my own 16298 — the two command lines are identical. Their Hyprland,
+   Xwayland, polkit agent and awww-daemon were untouched; only the bar died, at
+   ~04:22:47. Restored at 04:24 as user unit `restore-s89-shell.service`, pid
+   17584, and `hyprctl layers` shows quickshell layer surfaces back on BOTH
+   outputs (1920x40 bars at 0,0 and 1920,0). Two differences from the original,
+   stated rather than hidden: the new process is in `app.slice`, not
+   `session-89.scope`, and it was started at 04:24 rather than 03:53.
+   `hyprctl dispatch exec` could not be used — this Hyprland parses dispatch
+   arguments as Lua and rejects `exec`, `exec(...)` and `hl.dsp.exec(...)`.
 
 ## BLOCKED ON
 
-- nothing. Not blocked by the seat: the greeter route avoids it entirely.
+- nothing.
 
 ---
 
