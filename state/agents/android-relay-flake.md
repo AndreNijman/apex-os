@@ -1,6 +1,6 @@
 ## LANDABLE
 
-**`dc7a470f`** — the flake is confirmed, closed and proven red both ways; the
+**`0990aecd`** — the flake is confirmed, closed and proven red both ways; the
 assertion it guards is byte-for-byte unchanged. Merges cleanly onto
 `roadmap/v2.2` (checked against tip `11c45d36`, not against the cut point).
 `:app` 53/0, `:core` 526/0. Three files, all inside the unit's bounds:
@@ -101,10 +101,17 @@ the timeout instead of instantly.
 
 ## NEXT
 
-- Orchestrator lands `dc7a470f`. Nothing else is outstanding; the only thing
-  left running is CI run **35586292689** (`workflow_dispatch` on
-  `task/android-relay-flake`), which is confirmation, not a gate — both suites
-  were already run locally at the counts CI asserts.
+- Orchestrator lands `0990aecd`. Nothing else is outstanding.
+- Still in flight, confirmation rather than a gate: CI run **35586292689**
+  (`workflow_dispatch` on this branch, against `252d0d5b`; the two commits
+  since change only comments and markdown). `Select tests`, `Static
+  validation` and `Rust validation` are already green there. **`Installer
+  safety and UI` has FAILED in that run and it is not this branch** — the
+  whole diff is `android/` plus one evidence file, and that suite does not
+  read either. It runs at all only because `workflow_dispatch` diffs against
+  `merge-base origin/main` and therefore selects every suite, which a
+  `roadmap/v2.2` push never does (there it is `skipped`). Read the **Android
+  client** job's own conclusion and nothing else when judging this unit.
 
 ## DONE
 

@@ -43,37 +43,80 @@ Predecessor cards to read before touching anything:
 its work is already MERGED into this branch at 3e235bc1 — do not redo it),
 `ROADMAP/state/agents/efivars-guard-2.md` (`--generic-image`, already resolved).
 
-## NEXT (round 39b — CURRENT, written 18:12 AWST by the round-39 continuation agent)
+## NEXT (round 39b — CURRENT, updated 18:15 AWST)
 
-**NEXT, one line:** read `/var/lab/scratch/luks-boot/run-signed1.log` on katana
-for the literal `EXIT_CODE=` line — `luks-pcr7s-run1.service`, launched 18:10,
-running the new `luks-pcr7-signed` scenario at `ef0fa0ce`.
+**NEXT, one line:** read `/var/lab/scratch/luks-boot/run-signed2.log` on katana
+for the literal `EXIT_CODE=` line (`luks-pcr7s-run2.service`, launched 18:12,
+validating the new boot C at `4029965f`); if green, launch the FULL default
+STAGED set — all nine scenarios in one `$WORK` — the same way.
 
-Then, in order:
-1. (RUNNING) `luks-pcr7-signed` — committed `ef0fa0ce`, pushed. Boot A builds
-   the UKI WITH `--pcr-key`/`--pcr-pubkey` via `luks_uki`; boot B boots a
-   DIFFERENT UKI signed by the same key so PCR 11 moves. If green, add boot C
-   (foreign-key UKI -> REFUSED + recovery unlock).
-2. L-002 remainder: the ESP-fallback check in
-   `installer/test-installer-luks-boot.sh:234`. Being done on the L16 against
-   the KEPT disk `/var/lab-scratch/apex-luks-boot.GLHdmI/target.img` — no
-   25-minute reinstall needed.
-3. Run the FULL default STAGED set together once (now nine scenarios).
-4. L-003's remaining integration gap — the real `apex-luks-enroll` through
-   `apex-install`, and a TPM auto-unlock of an installer-produced GRUB+shim
-   disk. That is what takes L-003 from `partial` to `done`; it is NOT in
-   today's scope.
+Then:
+1. Evidence file + `set-status` for both items, prepended with
+   `round24-prepend.py`. L-003 stays `partial`, L-002 -> `done` is defensible.
+2. `## LANDABLE` at the top of this card once the gate set is re-run.
+3. NOT today: L-003's remaining integration gap — the real `apex-luks-enroll`
+   through `apex-install`, and a TPM auto-unlock of an installer-produced
+   GRUB+shim disk. That is what takes L-003 from `partial` to `done`.
 
 ## DONE (round 39b)
 - Read the card, `run-scenarios`' `luks-pcr7`/`luks-tpm`/`luks_uki`, the shipped
   `apex-luks-enroll`'s `probe_signed_pcr11` and `tpm2_report`, and
   `guest-luks-{enroll,probe}.sh` in full before writing anything.
-- `ef0fa0ce feat(boot-v2): luks-pcr7-signed …` — 214 lines, ONE file
-  (`files/scripts/boot-v2/run-scenarios`), registered in `STAGED`. PUSHED.
-  `bash -n` clean, `shellcheck -S warning -x` clean, and the
-  defined-vs-`--list` set comparison that `test-boot-v2.sh` makes agrees.
-- Launched it on katana as `luks-pcr7s-run1.service` (18:10), `systemd-run
-  --user` after probing the user bus, wrapper appends a literal `EXIT_CODE=`.
+- **`ef0fa0ce feat(boot-v2): luks-pcr7-signed …`** — 214 lines, ONE file,
+  registered in `STAGED`. **RAN GREEN FIRST TIME on katana: 21 passed, 0
+  failed, `EXIT_CODE=0`** (`run-signed1.log`, 17:58–18:03, loadavg 20 from an
+  unrelated ghrunner build). See FOUND #14 and #15 — both headline results.
+- **`e8f1a97d fix(installer): the ESP fallback check never ran, and it had an
+  answer`** — L-002's remainder. Diagnosed, fixed, and TESTED BOTH WAYS against
+  the ESP of the very disk round 38 booted. See FOUND #16 and #17.
+- **`4029965f feat(boot-v2): luks-pcr7-signed grows its refusal arm`** — boot C,
+  the foreign-signature refusal + recovery unlock. Validating now.
+- All three PUSHED to `origin/task/luks-boot`. `bash -n` + `shellcheck -S
+  warning -x` clean on both changed files; the defined-vs-`--list` set
+  comparison `test-boot-v2.sh` makes agrees.
+
+## FOUND (round 39b)
+14. **The shipped script chose `binding=signed-pcr11` by itself, live, in a
+   real boot — the first time that has happened.** `serial-pcr7s-a.log`:
+   `tpm2: enrolled binding=signed-pcr11 pcrs=11 bank=sha256 hash=… pin=no`,
+   with NOT ONE of `probe_signed_pcr11`'s four refusals on stderr. The
+   predecessor's prediction was exactly right: `--pcr-key`/`--pcr-pubkey` on
+   boot A's UKI was the whole delta. `pcr11-pre-enroll=67C898CF5754…`,
+   `secure-boot-byte=1`, and the passphrase still opened the volume afterwards.
+15. **The signed policy survived a UKI change that MOVED PCR 11, against a
+   token the shipped script wrote.** Boot B's different UKI measured
+   `40D080B3C463…` where boot A enrolled at `67C898CF5754…`, and
+   `tpm-unlock=SUCCESS` + `plaintext-marker=written`. **A value-bound policy
+   would have refused.** That is the entire reason `signed-pcr11` sits above
+   `pcr7` in the shipped table, and until now the ordering had only ever been
+   justified by a token the LAB enrolled host-side (`luks-tpm`), never by one
+   APEX chose for itself.
+16. **L-002's ESP-fallback answer, measured: the loader IS there.** Mounted the
+   kept `/var/lab-scratch/apex-luks-boot.GLHdmI/target.img` read-only over a
+   fresh `losetup -r`: `EFI/BOOT/BOOTX64.EFI` **949,424 bytes** (shim), beside
+   `EFI/BOOT/fbx64.efi` and the full `EFI/fedora` tree (shimx64, grubx64,
+   mmx64, BOOTX64.CSV, grub.cfg). So the check round 38 never ran WOULD have
+   passed, and it took no reinstall to find out.
+17. **"Would change RO state" is worse than a check that did not run.** The
+   kernel prints it from `get_tree_bdev()` when a LIVE superblock for that
+   block device has a different `SB_RDONLY` flag — so the ESP was still mounted
+   **read-write** at that moment; mount namespaces are irrelevant, a superblock
+   is global. Twenty lines later the suite detaches the loop and hands the
+   IMAGE FILE to a qemu in another container, explicitly so the boot sees what
+   an independent reader would — a live rw vfat mount breaks exactly that, and
+   the `losetup -d` fails silently under its own `2>/dev/null`. The fix asks
+   `findmnt` FIRST, names the holder (target/source/options + `fuser`), and
+   unmounts ONLY holders under `$WORK`. Lifted out of the suite and run twice:
+   clean -> 2 passed / 0 failed, fallback present; with a deliberate live rw
+   mount -> holder detected and named, suite FAILS, and the fallback check
+   **still answers**.
+18. **`welcome-seen` was never asserted by anything** — `luks-boot-drive.py`
+   prints it, the suite reads three other fields and not this one. So the
+   round-38 note "welcome-seen still needs a decision" was about an
+   informational field, not a failing check. Decided and written down in the
+   suite: not a criterion, because everything after `Switching root` belongs to
+   the installed system and first-boot welcome needs a graphical session this
+   headless serial guest never starts. Still reported.
 
 ## NEXT (round 39 — L-003) — superseded by the section above, kept for history
 1. **The next real piece of work is NOT this branch.** Add a `luks-pcr7-signed`
