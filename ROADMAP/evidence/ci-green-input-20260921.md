@@ -251,6 +251,31 @@ can go green once on nothing:
 
 <!-- CI-RESULTS -->
 
+## Out of scope, and it will block the merge: the installer job is red too
+
+Found while verifying this branch, not fixed — the brief's bounds are the
+suites above. Run `35647154151`, job `Installer safety and UI`:
+
+```
+── the engine honours the operator's choice ──
+PASS  an explicit layout reaches the X11 keyboard config
+FAIL  …and the console keymap  — want [de] got []
+...
+installer-locale: 25 passed, 1 failed, 0 skipped
+```
+
+`installer/test-installer-locale.sh`, the `set_locale_keymap_in` section: the
+operator's chosen layout reaches the X11 keyboard config and the console keymap
+comes back empty.
+
+**Why nobody has seen it.** The `changes` selector diffs a `push` on
+`roadmap/v2.2` against the previous push, and leaves `installer=false` for most
+landings — a skipped job counts as success. `workflow_dispatch` and
+`pull_request` both diff against `merge-base origin/main`, so they run
+everything. That means the merge-to-main PR, which is what A.4 is asking Andre
+to approve, **will run this job and it will fail**. It needs a unit of its own
+before that PR is opened.
+
 ## For the orchestrator, and for the merge-to-main gate
 
 The thing that gates Andre's approval is `PR validation` on `roadmap/v2.2`,
