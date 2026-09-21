@@ -835,6 +835,22 @@ RUN set -eux; \
 #     ──────────────────
 #     per deployment 114.6 MiB  ×  3 + 48 MiB = 392 MiB   →  fits.
 #
+# SHIPPED, and better, because the kernel moved. The figures above are a lab
+# chroot on 7.2.5-cachyos1. Build run 35624291221 was the first to run this
+# configuration end to end, on the APEX kernel tier's
+# 7.2.6-cachyos1.apex1.fc43.x86_64, and the deployment it produced — read off
+# katana, which boots it — is:
+#
+#     initramfs   88,935,408 B   84.8 MiB
+#     vmlinuz     16,906,312 B   16.1 MiB
+#     ────────────────────────
+#     per deployment 100.9 MiB  ×  3 + 48 MiB = 351 MiB   →  fits, 161 spare.
+#
+# Corroborated by `du` on katana's three deployment directories: 101M for this
+# build against 376M and 376M for the two before it. Seventeen gates ran in that
+# build and all seventeen passed. See
+# ROADMAP/evidence/initramfs-slim2-20260922.md.
+#
 # ═══ FINDING 1 — the nouveau blacklist stays ═════════════════════════════════
 #
 # nouveau is NOT blacklisted by anything else. RPMFusion ships its blacklist
