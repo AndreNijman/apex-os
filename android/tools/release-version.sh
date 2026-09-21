@@ -89,7 +89,7 @@ case "$marketing" in
 esac
 
 # ── The release commit ───────────────────────────────────────────────────────
-head_sha=$(git rev-parse HEAD 2>/dev/null) || fatal "not a git repository, or HEAD is unborn"
+git rev-parse HEAD >/dev/null 2>&1 || fatal "not a git repository, or HEAD is unborn"
 short_sha=$(git rev-parse --short=8 HEAD 2>/dev/null) || fatal "cannot shorten HEAD"
 
 # ── Ratchet 1: the release commit must be on main ────────────────────────────
