@@ -163,10 +163,13 @@ YAML with nothing but python3's standard library, deliberately, because the
 runner image is not contracted to carry PyYAML and a gate that cannot run is
 worth nothing.
 
-The rest of that run reproduces the base exactly — `Static validation`,
-`Select tests`, `Rust validation` and `Android client` green,
-`Installer safety and UI` red on the same disk-encryption step. The change adds
-no new red.
+The rest of that run, measured step by step rather than by job colour:
+`Static validation`, `Select tests`, `Rust validation` and `Android client`
+green; `Installer safety and UI` red at `Run installer disk-encryption suite`,
+the same step and the same position as on `roadmap/v2.2` (safety, locale and
+keyboard green above it, the accessibility audit skipped below it).
+`Package engine` had not finished when this was written — see the card's DONE
+for its outcome if it is needed; on the base it was red on `mux-layouts` alone.
 
 The five assertions that pass in both directions are the point of the second
 list: they are the evidence that the fallbacks were not regressed while the
