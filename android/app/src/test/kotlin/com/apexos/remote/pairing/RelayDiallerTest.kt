@@ -8,6 +8,7 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.concurrent.ArrayBlockingQueue
@@ -139,8 +140,26 @@ class RelayDiallerTest {
                 }
             }
             // Every one of those connections was closed from this end, which
-            // the double sees as a read returning end-of-stream.
-            assertEquals(20, relay.closedByClient, "sockets the client left open")
+            // the double sees as a read returning end-of-stream — on ITS
+            // thread, and not on this one.
+            //
+            // Waiting for that observation is not politeness, it is the
+            // difference between a gate and a coin toss. The twentieth dial
+            // can throw and this line can run before the acceptor has returned
+            // from its twentieth `read`, and the count is 19. Nothing ordered
+            // the two threads, so nothing stopped it: CI run 35584033343 hit
+            // exactly that on a commit whose entire diff was one markdown
+            // file, and a gate that goes red on a markdown file teaches
+            // everybody to re-run CI instead of reading it.
+            //
+            // The wait is BOUNDED and the assertion is untouched, so a client
+            // that really leaked a descriptor still fails here. It fails on
+            // the deadline rather than instantly, which is the right price.
+            assertEquals(
+                20,
+                relay.closedByClient(expecting = 20),
+                "sockets the client left open",
+            )
         } finally {
             relay.close()
         }
@@ -256,9 +275,16 @@ class RelayDiallerTest {
         private val received = ByteArrayOutputStream()
         private var live: Socket? = null
 
+        /**
+         * Connections the acceptor thread watched the client close.
+         *
+         * Private, and read only through [closedByClient], because a bare
+         * getter hands the test thread whatever happened to be true at the
+         * instant it looked — which is a race with a volatile read in it, not
+         * a fixed one.
+         */
         @Volatile
-        var closedByClient = 0
-            private set
+        private var closed = 0
 
         val port: Int get() = listener.localPort
 
@@ -299,7 +325,28 @@ class RelayDiallerTest {
             if (!upgrade) {
                 // The client should close this from its end; counting that is
                 // how the leak test sees a descriptor it did not get back.
-                if (input.read() < 0) closedByClient++
+                //
+                // With a deadline on the read, because the FAILING case is the
+                // whole point of the test and without one it is unreadable.
+                // This acceptor serves one connection at a time, so a client
+                // that really leaked would leave this read blocked for ever;
+                // every later dial would then fail on its own 25-second
+                // handshake timeout, and `Opening.accept` wraps that
+                // `SocketTimeoutException` — like every other `IOException` —
+                // into a `RelayException`, which `assertThrows` accepts. The
+                // leak test would spend eight minutes throwing the right
+                // exception for the wrong reason before the count finally
+                // failed. Giving up here instead costs a failing run
+                // [PATIENCE_MS] per attempt and lets it fail saying "sockets
+                // the client left open", which is what went wrong.
+                socket.soTimeout = PATIENCE_MS
+                try {
+                    if (input.read() < 0) closed++
+                } catch (e: SocketTimeoutException) {
+                    // NOT counted, deliberately. A connection this end had to
+                    // give up waiting on is precisely the descriptor the test
+                    // is looking for.
+                }
                 socket.close()
                 return
             }
@@ -320,9 +367,29 @@ class RelayDiallerTest {
         fun requestHead(): String = heads.poll(5, TimeUnit.SECONDS)
             ?: throw AssertionError("the client sent no request")
 
+        /**
+         * How many connections the client closed, once [expecting] of them
+         * have been seen — or however many were seen when the deadline ran
+         * out, which is what makes a real leak FAIL here rather than hang.
+         *
+         * The shape [carried] already takes, and for the same reason: both are
+         * the test thread waiting on the acceptor thread. Returning the count
+         * rather than asserting on it keeps the assertion, and its message, in
+         * the test that cares.
+         */
+        fun closedByClient(expecting: Int): Int {
+            val deadline = System.currentTimeMillis() + PATIENCE_MS
+            while (System.currentTimeMillis() < deadline) {
+                val seen = closed
+                if (seen >= expecting) return seen
+                Thread.sleep(5)
+            }
+            return closed
+        }
+
         /** The carried bytes, once [n] of them have arrived. */
         fun carried(n: Int): ByteArray {
-            val deadline = System.currentTimeMillis() + 5_000
+            val deadline = System.currentTimeMillis() + PATIENCE_MS
             while (System.currentTimeMillis() < deadline) {
                 synchronized(received) { if (received.size() >= n) return received.toByteArray() }
                 Thread.sleep(5)
@@ -409,6 +476,20 @@ class RelayDiallerTest {
             val b = input.read()
             if (b < 0) throw AssertionError("the client frame ended early")
             return b
+        }
+
+        private companion object {
+            /**
+             * How long either thread waits for the other before calling it a
+             * failure.
+             *
+             * Long enough that scheduling never reaches it — the close this
+             * waits for happens microseconds after the client reads the
+             * response, so five seconds is four orders of magnitude of
+             * headroom on the loadedest runner — and short enough that the
+             * failing case still reports in a time a person will wait.
+             */
+            const val PATIENCE_MS = 5_000
         }
     }
 }
