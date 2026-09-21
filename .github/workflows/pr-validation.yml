@@ -820,6 +820,19 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-apex-firmware.sh
 
+      # The initramfs gates, run against captured listings rather than inside a
+      # 40-minute image build. They were inline Containerfile greps until
+      # 2026-09-21, which is why one of them shipped asserting
+      # `! grep 'kernel/drivers/net/ethernet/'` against a slim initramfs that
+      # contains eleven files under kernel/drivers/net — a FATAL on the very
+      # artifact it existed to pass, invisible until a build ran it. This step
+      # is what makes that class visible in two seconds: it asserts every
+      # gate's verdict by name on a fat listing AND a slim one, so a gate that
+      # cannot go red fails here.
+      - name: initramfs budget — every gate proven red on a fat image and green on a slim one
+        if: ${{ !cancelled() }}
+        run: ./tests/test-apex-initramfs-budget.sh
+
       # §33's qualification database, structural half. The two properties it
       # guards are both one-line changes away: a consent gate that reads
       # "not declined" instead of "granted" starts recording on a machine
