@@ -94,6 +94,27 @@ gets past the kernel-rpms stage and the cross-tier contract RUN".
 6. Katana's runner is **online and idle**, `/var/lab` has 479 GiB free, and
    `/usr/bin/skopeo` exists there — all three checked before dispatching.
 
+## ROUND 2 — what this agent added on top of `2cd11c6f`
+
+- `d5441e93` merged `origin/roadmap/v2.2` (13 commits, all boot-v2/docs) into the
+  branch. **Zero file overlap** with anything this unit touches, so the CI proof
+  runs against the tree that will actually land. Checked, not assumed:
+  `git diff --name-only 76aa2b95..origin/roadmap/v2.2` and the same against HEAD
+  share no path.
+- `b981e348` wires the gate into `build-local.sh`'s `build_core()`. `2cd11c6f`'s
+  message claimed build-local.sh got the gate; it had only got a corrected
+  comment. Placed INSIDE `build_core()` because
+  `tests/test-build-local-shell-ref.sh` copies build-local.sh alone into a
+  throwaway repo with no `tests/` and runs it with a bogus target — that suite
+  still passes 25/25.
+- Housekeeping observed while checking the branch, none of it this unit's:
+  `tests/check-shellcheck-coverage.sh` fails on `android/tools/release-version.sh`
+  (untouched here, present on the base); `tests/check-kernel-drift.sh` exits 2
+  "COULD NOT TELL — 1 lookup could not be performed" on this laptop, a network
+  lookup; and `Containerfile.core`'s ARG comment cites
+  `ROADMAP/evidence/kernel-build-20260921.md`, which exists on NO branch —
+  repointed to this unit's evidence file when the digest landed.
+
 ## GATE PROOF — both directions, run 2026-09-21 (round 2 agent)
 
 Harness: `/var/lab-scratch/kernel-publish/mutate.sh` copies the four files the
