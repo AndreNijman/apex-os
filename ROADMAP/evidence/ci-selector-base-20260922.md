@@ -191,8 +191,8 @@ claim about the event.
 | Select tests | green |
 | Rust validation | green (3m34s) |
 | Android client | green (3m40s) |
-| **Installer safety and UI** | **RED** |
-| Package engine | see below |
+| **Installer safety and UI** | **RED** — one step, three causes |
+| **Package engine** | **RED** (15m15s) — one step of 30, the known `mux-layouts` flake |
 
 **None of these are fixed here. Each is its own unit; a round that fixes five
 unrelated reds cannot say which fix did what.**
@@ -250,13 +250,32 @@ skipped in every installer job since. The `installer` job's steps carry no `if: 
 this. So the installer job's later steps are switched off by any earlier red.
 Small, mechanical, and its own unit.
 
-### Package engine
+### RED 3 — `Package engine`: `mux-layouts`, and nothing else
 
-Still running when this file was written; see `## FOUND` on the agent card
-`ROADMAP/state/agents/ci-selector-base.md` for the recorded outcome. Its two
-known flakes (`secret-broker` SIGKILL, `mux-layouts`) and the documented
-`test-apex-plugin.sh` "expect red until apex-shell PR #9" are pre-existing and
-recorded in `ROADMAP/evidence/ci-green-input-20260921.md`.
+15m15s, one failing step of 30: `Run terminal layout template assertions`.
+
+```
+FAIL  build creates the zellij session
+FAIL  the layout landed as a tab zellij can describe
+FAIL  the layout landed exactly once (0 apex tabs)
+mux-layouts: 44 passed, 3 failed, 0 skipped
+```
+
+That is the flake `ci-green-input` characterised on 2026-09-21
+(`ROADMAP/evidence/ci-green-input-20260921.md`): all twelve sends return rc=0
+with empty stderr, so retrying is not the cure, and 6 → 12 attempts bought
+nothing. Its own unit; not touched here.
+
+Two things in the same job are worth recording because they are *not* red:
+
+- `secret-broker: 93 passed, 0 failed`. The `killed by signal 9` flake did not
+  fire this time. One green run is not a fix — at the rate that unit measured,
+  green is the more likely outcome of any single run.
+- `apex-plugin: 117 passed, 0 failed`. **The comment on that step
+  ("EXPECT THIS RED UNTIL apex-shell PR #9 MERGES", the last step in the job
+  and placed last for that reason) is stale: apex-shell PR #9 merged
+  2026-09-03.** The step is green and has no reason to be treated as expected
+  red any more. Out of this unit's bounds; named for whoever takes it.
 
 ## `build-image.yml` — the same shape, and the decision NOT to change it
 
