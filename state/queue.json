@@ -1,6 +1,6 @@
 {
  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
- "updated": "2026-09-22T03:55+0800",
+ "updated": "2026-09-22T04:20+0800",
  "concurrency_ceiling": 6,
  "units": [
   {
@@ -615,7 +615,8 @@
    "after": [],
    "conflicts": [],
    "note": "Qualify the FINAL image on katana, which is already booted on it. P1-043 through apexd, P2-005/006/007, P2-003 a11y, P1-038 session rows. Dispatched round 40. The largest single unblock of partials on the board.",
-   "dispatched": "2026-09-22 round 40"
+   "dispatched": "2026-09-22 round 40",
+   "closed": "CLOSED 2026-09-22 (round 40) -- all four items measured and landed as merge d7f504a7. P1-043's apexd path is CONFIRMED ON HARDWARE. What is left of the items it touched is NOT this unit's and mostly not an agent's: P1-038 rows 13/14/15 were lost to a seat collision and want a re-run on a serialised seat; VRR stays permanently could-not-run on katana (no connector exposes vrr_capable) and physical output hotplug needs somebody at the machine; P2-003's remaining gap is that the bar carries no accessibility markup at all (the markup that EXISTS reaches the bus -- that is the finding), plus the Qt defect underneath, which is Andre's to file. TWO THINGS THIS UNIT FOUND THAT NEED SOMEBODY: unit gaming-scx-2 (seeded, not dispatched), and katana-p1038-apps-20260922.md is WRONG about wine and needs correcting."
   },
   {
    "id": "sdboot-migrate-3",
@@ -631,6 +632,13 @@
    "note": "Continuation of initramfs-slim items 4-6: attributed size matrix, cross-build reproducibility, VM boot proof. Dispatched round 40.",
    "dispatched": "2026-09-22 round 40",
    "closed": "CLOSED 2026-09-22 (round 40) -- items 4, 5 and 6 done and landed as merge 57d09820. The predecessor's one stated open risk is spent: build 35624291221 ran the COPY and the budget predicate together, 17 gates / 17 passed. Item 5 SPLIT IN TWO rather than resolving one way: the initramfs IS bit-reproducible across two --no-cache builds from one parent (cmp clean), but the LAYER digest still moves because the tar records its mtime -- 14 distinct final layers across all 14 published apex-<sha> tags, so bootc's content dedup has never had the chance to fire. `podman build --timestamp 0` fixes it and is recorded as a lever NOT adopted. That also answers sdboot-xbootldr NEXT #2, and the round closed its #3 and #6 too. RE-OPEN CONDITION: none for the size work. If anyone adopts --timestamp 0, that is a new unit and needs a real image build behind it."
+  },
+  {
+   "id": "gaming-scx-2",
+   "after": [],
+   "conflicts": [],
+   "note": "SEEDED NOT DISPATCHED 2026-09-22 (round 40). Two sched-ext defects found by katana-final-qual on the first hardware that could ever execute this path. (a) scx_ops_matches() compares against 'lavd' but root/ops reads 'lavd_1.1.3_x86_64_unknown_linux_gnu' -- every correct load is reported as the wrong scheduler. (b) The switch branch races: scx_settle_until(Enabled) is satisfied by the scheduler being REPLACED rather than by the new one attaching, and the later scx.observed read lands in the ~1.26 s disabled trough. NEEDS A DESIGN DECISION, which is why it was not patched inside a qualification unit. Spec is the timing log in ROADMAP/evidence/katana-final-qual-20260922.md.",
+   "seeded": "2026-09-22 round 40"
   }
  ],
  "_completed_units": {

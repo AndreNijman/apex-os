@@ -8,14 +8,19 @@ lab: /var/lab-scratch/ci-green-input
 
 Dispatched round 39; re-dispatched round 40, 2026-09-22.
 
+## LANDABLE 65be1e49
+
+Branch `task/ci-green-input`, 8 commits on `origin`. The three that change code
+are `cd3c06b6` (apex-input suite), `762c5204` (secret-broker suite),
+`9c389baf` (`apex-mux` + mux-layouts suite); the rest is
+`ROADMAP/evidence/ci-green-input-20260921.md`. Land by merge.
+
 ## NEXT
 
-- Pull the two new diagnostic blocks out of the CI logs and paste them into
-  `ROADMAP/evidence/ci-green-input-20260921.md` at `<!-- CI-RESULTS -->`:
-  `gh api repos/AndreNijman/apex-os/actions/jobs/<job>/logs` for run
-  **35647154151** (mux-layouts red -> `apex-mux: what each send reported`) and
-  run **35647177148** (secret-broker red -> `the wait ended because: ...`).
-  Then mark `## LANDABLE <sha>`.
+- Nothing in this unit. Two follow-ups belong to OTHER units and are written up
+  in the evidence file — see FOUND: the installer-locale console-keymap red
+  (deterministic, 4/4, and it WILL fail the merge-to-main PR), and the
+  `killed by signal 9` on a confined session in CI (an `apexd/` question).
 
 ## DONE
 
@@ -32,10 +37,17 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
   payoff, not a setback**: each fired with the new diagnostics in place, so for
   the first time the CI log says what actually happened. Four runs cannot show
   a flake is cured and no such claim is made.
-- **Branch `task/ci-green-input` pushed at `e5eaebac`, 6 commits.** The three
-  code commits are `cd3c06b6`, `762c5204`, `9c389baf`; the rest is evidence.
+- **All four runs report overall `failure`, and that is NOT this unit.** The
+  overall tick could never have been green: `Installer safety and UI` fails in
+  **4 of 4** (deterministic, pre-existing, out of bounds — see FOUND). Read the
+  step conclusions, not the tick.
+- **`apex-input: 103 passed, 0 failed, 8 skipped` in CI — exactly the predicted
+  number** (93 + the 7 repaired + 3 new; the strengthened assertion is in the
+  niri-only section, which skips on the runner). Diffing **all 41 suite summary
+  lines** against baseline run `35625128495` changes exactly that one line, so
+  nothing else moved.
 - Evidence written and pushed: `ROADMAP/evidence/ci-green-input-20260921.md`
-  (`0549f7e5`, extended by `a0d122da` and `e5eaebac`). **Checked, not assumed:**
+  (`0549f7e5`, extended through `65be1e49`). **Checked, not assumed:**
   `gh run view <id> --json headSha` says all four in-flight runs checked out
   `9c389baf`; every later commit is docs-only, so the code under test is the
   code that will land.
@@ -150,6 +162,28 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
   "started and stalled at line N", and prints a diagnosis that was false on the
   very run it fired on. It should say where the transcript stopped.
 
+- **THE `secret-broker` MECHANISM IS NOW NAMED, and every previous report of
+  it was wrong.** Run `35647177148`, with the new gate:
+  `the session left before printing DONE (killed by signal 9)`, `waited 0s`,
+  `transcript is 59 bytes`, `outcome  killed by signal 9`. **The confined
+  session is SIGKILLed immediately** — not a sandbox that failed to come up,
+  not a sysctl, not slowness.
+  The obvious follow-up hypothesis was TESTED AND REFUTED rather than written
+  down as fact: `apex-agent-core/src/sandbox.rs` passes `--die-with-parent`,
+  the `fork()` is on a per-connection `apex-agentd-conn` thread, and Linux
+  `PR_SET_PDEATHSIG` is parent-THREAD-scoped — so a detached session ought to
+  die with its client. It does not here: a probe
+  (`/var/lab-scratch/ci-green-input/pdeath-probe.sh`) ran
+  `apex agent run -d -- sh -c 'echo LINE1; sleep 6; echo DONE-LATE'`, watched
+  `apex agent status`, and got `starting -> working -> complete`,
+  `outcome exited 0`, both lines. **Needs an `apexd/` unit.**
+- **THE `mux-layouts` DROP IS NOT CURED BY RETRYING, which the shipped comment
+  assumed it was.** Run `35647154151`: all **twelve** sends returned `rc=0`
+  with **empty stderr**, both IPC forms alternating, and
+  `zellij list-sessions` showed the session alive with only
+  `tab name="Tab #1"` — zellij's own scratch tab — 42 s in. So the top-level
+  form is not failing on the runner, and 6 -> 12 attempts bought nothing.
+  Whoever picks this up should not spend a round adding more attempts.
 - **OUT OF SCOPE BUT IT WILL BLOCK THE MERGE: `Installer safety and UI` is
   red too, and a push to `roadmap/v2.2` never sees it.** Run 35647154151 on
   this branch:

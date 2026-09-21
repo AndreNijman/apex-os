@@ -27,24 +27,26 @@ conclusion is WRONG — do not revive it.
 
 ## NEXT
 
-- **Run B boot 3 — the migration RETRY on a grown disk — is RUNNING** as user
-  unit `sdb3-boot-b2r` (launched 03:55 AWST, ceiling 5400 s), action
-  `act-unit-3b.sh`. Boot 2's attempt died with ENOSPC (see FOUND, the headline);
-  the host grew `apexmig-b.img` from 45 G to 90 G and p3 from 43 GiB to 88 GiB
-  with `sgdisk -e` + `growpart` + `btrfs filesystem resize max`, leaving 65 GiB
-  free, and the retry action clears the partial podman storage the failed
-  attempt left behind. When it powers off, read `auto rc=` and the
-  `### the entry the stage wrote — IS IT COUNTED?` block.
-- Then boot 4, the MIGRATED boot, which is where item 3 is decided:
-  `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-check-3.sh`,
-  set the qemu ceiling in `/var/lab-scratch/sdboot-migrate-3/run-boot-b.sh`
-  back to 1800, then `systemd-run --user --unit=sdb3-boot-b4 --collect
+- **Run B boot 4 — the migration with the `join_state` fix (`b5e8ddcb`) on the
+  control disk — is RUNNING** as user unit `sdb3-boot-b4` (launched 04:04
+  AWST, ceiling 5400 s), action `act-unit-3c.sh`. A Monitor is armed on it.
+  Expect `auto rc=0`, `phase: committed`, and the ESP entry renamed to
+  `bootc_fedora-43-1+3-0.conf` by the uncommitted `count_staged_entry` splice.
+- Then boot 5, the MIGRATED boot, where item 3 is decided:
+  `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-check-3.sh`, set the
+  ceiling in `/var/lab-scratch/sdboot-migrate-3/run-boot-b.sh` back to **1800**,
+  then `systemd-run --user --unit=sdb3-boot-b5 --collect
   /var/lab-scratch/sdboot-migrate-3/run-boot-b.sh`.
-  **Never pass `--fresh-nvram`** — `BootNext`, which the commit writes, lives in
+  **Never `--fresh-nvram`** — `BootNext` lives in
   `/work/nvram-persist/VARS-apexmig-b.img.fd`.
-- Then append run B's sections to
-  `ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md` (run A is already in it
-  and committed as `5cdaaa39`), commit, push, and mark `## LANDABLE <sha>`.
+- Then append run B sections 4 and 5 to
+  `ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md` (sections 0-3 are
+  committed), commit, push, mark `## LANDABLE <sha>`.
+- If the session dies here: `task/sdboot-migrate-3` is pushed at `b5e8ddcb` and
+  is already worth landing on its own — two evidence commits and one real fix
+  with tests. Only the item-3 splice and run B's last two sections are missing.
+  The spliced engine is backed up at
+  `/var/lab-scratch/sdboot-migrate-3/engine-splice-and-joinfix.bak`.
 
 ### The item-3 decision rule, written down BEFORE the log exists
 
@@ -73,8 +75,9 @@ fourth one.
 | apexmig-a (512 MiB ESP) | 2 | `act-migrate-3.sh` | **DONE — refused** |
 | apexmig-b (2 GiB ESP) | 1 | `act-prep-3.sh` + `rsync-3` | **DONE** |
 | apexmig-b | 2 | `act-unit-3.sh` (the migration) | **DONE — ENOSPC, see FOUND** |
-| apexmig-b | 3 | `act-unit-3b.sh` (retry, grown disk) | RUNNING |
-| apexmig-b | 4 | `act-check-3.sh` (the MIGRATED boot) | — |
+| apexmig-b | 3 | `act-unit-3b.sh` (retry, grown disk) | **DONE — install OK, state-join failed** |
+| apexmig-b | 4 | `act-unit-3c.sh` (with the join_state fix) | RUNNING |
+| apexmig-b | 5 | `act-check-3.sh` (the MIGRATED boot) | — |
 
 Every boot: `./setctl.sh <action> <extra files…>` first, and the qemu launch
 needs **both** `-v …:/work:z` and `--oci /work/oci-dummy-3.img`.
@@ -152,6 +155,46 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
   It stays uncommitted until run B's migrated boot says whether blessing works.
 
 ## FOUND
+
+- **THE OTHER BIG ONE, and it is FIXED on this branch: `join_state` selected
+  the deployment's SYMLINK to the stateroot var instead of the real
+  directory, so a completely successful install then failed `state-join`.**
+  Run B boot 3 (the retry on the grown disk): `Bootloader: systemd /
+  Installing bootloader via systemd-boot / Installation complete!`, the
+  removable-media fallback restored, six kernel arguments carried — and then
+
+      apex-boot-migrate: cannot join /var: /sysroot/ostree/deploy/default/var
+          is not a directory and not a symlink
+      apex-boot-migrate: FAILED [state-join]
+      auto rc=1
+
+  The message blames the wrong path. Loop-mounted the disk and read the real
+  layout: bootc's composefs tree has TWO things called `var` exactly three
+  levels under `$SYSROOT/state` —
+
+      state/os/default/var                      (the real directory)
+      state/deploy/<digest>/var -> ../../os/default/var    (a symlink)
+
+  and `join_state` selected with `find … -name var | head -1` and **no type
+  filter**. `find` walks in readdir order, so `head -1` returns whichever the
+  filesystem hands back first; here it returned the symlink, `[ ! -L "$newvar" ]`
+  was false, and the else branch fired. **The migration's success depended on
+  readdir order** — the predecessor's ext4 fedora-bootc guest got the directory
+  first, which is exactly why two rounds of lab work never saw it. The `etc`
+  lookup thirty lines below has always carried `-type d`; this one did not.
+  Fixed in `b5e8ddcb` with three behavioural assertions whose expression is
+  **extracted from the source** so a copy cannot drift, verified to fail both
+  ways (reverting only `-type d` turns two of them red and names the symlink
+  it wrongly picked). 86/86.
+- **The migrated entry really does carry `:ro`, on the real image.** From the
+  ESP after that install:
+  `systemd.mount-extra=UUID=8A5D-0AB8:/boot:auto:ro`, alongside
+  `boot=UUID=8A5D-0AB8`, `composefs=5a049b1c…` and `rootflags=subvol=/`
+  (the btrfs karg `to-filesystem` added, carried across correctly). So the
+  hypothesis in this card's ro/rw bullet is confirmed *for the cmdline*; what
+  it does to `systemd-bless-boot` is still unmeasured, because the stage aborts
+  at `join_state` **before** `count_staged_entry` runs — the entry on the ESP is
+  `bootc_fedora-43-1.conf`, uncounted.
 
 - **THE HEADLINE. `root-space` passed and the machine ran out of disk anyway.**
   Run B boot 2, the real migration on the 2 GiB-ESP guest. The precheck that
