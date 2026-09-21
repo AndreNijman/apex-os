@@ -303,22 +303,63 @@ zellij_build() {
     # 3s of polling against a landing that is consistently under 300ms, so a
     # re-send cannot race a slow first one into a second `apex` tab — and the
     # suite asserts there is exactly one, so that is checked rather than hoped.
+    # WHAT EVERY SEND REPORTED IS NOW KEPT. `mux-layouts` was red on 4 of the 8
+    # most recent roadmap/v2.2 runs whose `Package engine` job actually ran —
+    # against a byte-identical apex-mux (blob afe43acead) and a byte-identical
+    # suite (d8658e648e) at every one of those SHAs, so this drop is the cause
+    # and no change is. Every one of those reds said exactly one thing: "never
+    # became a tab". Not which of the two forms was tried, not whether it even
+    # exited 0, not what it printed — because both sends had stdout AND stderr
+    # on /dev/null. The failure happens on a machine nobody can log in to, so
+    # the record below is the whole difference between a fifth red that says
+    # nothing and one that can be read.
+    #
+    # Twelve attempts rather than six, for the reason the loop exists at all
+    # and which is measured above: a request the server accepts and discards is
+    # cured by an identical one a moment later, and run 35624291380 exhausted
+    # all six. The ordinary case lands on the first send in under 300 ms and
+    # pays nothing for the other eleven; only the failing path spends the extra
+    # 18s, and it now spends it producing evidence.
     attempt=0
-    while [ "$attempt" -lt 6 ]; do
+    zrec=""
+    zlanded=0
+    zerrf="$(mktemp 2>/dev/null)" || zerrf=""
+    [ -n "$zerrf" ] || zerrf="${TMPDIR:-/tmp}/apex-mux-zellij.$$.err"
+    while [ "$attempt" -lt 12 ]; do
+        zrc=0
         if [ "$((attempt % 2))" -eq 0 ]; then
+            zform="action new-tab"
             zellij --session "$session" action new-tab --layout-string "$layout" \
-                >/dev/null 2>&1
+                >/dev/null 2>"$zerrf" || zrc=$?
         else
-            zellij --session "$session" --layout-string "$layout" >/dev/null 2>&1
+            zform="top-level    "
+            zellij --session "$session" --layout-string "$layout" \
+                >/dev/null 2>"$zerrf" || zrc=$?
         fi
+        zerr="$(tr '\n' ' ' < "$zerrf" 2>/dev/null | cut -c1-200)" || zerr=""
+        zrec="${zrec}
+    #$((attempt + 1)) ${zform}  rc=${zrc}  ${zerr}"
         polled=0
         while [ "$polled" -lt 30 ]; do
-            zellij_landed "$session" && return 0
+            if zellij_landed "$session"; then zlanded=1; break; fi
             polled=$((polled + 1))
             sleep 0.1
         done
+        if [ "$zlanded" = 1 ]; then break; fi
         attempt=$((attempt + 1))
     done
+    rm -f "$zerrf"
+    if [ "$zlanded" = 1 ]; then return 0; fi
+
+    printf 'apex-mux: what each send reported —%s\n' "$zrec" >&2
+    printf 'apex-mux: zellij list-sessions —\n' >&2
+    zellij list-sessions 2>&1 | sed 's/^/    /' >&2 || :
+    # The tab names only. A whole dump-layout is ~300 lines of swap layouts
+    # that say nothing about the question, and burying the answer is how a
+    # diagnostic stops being one.
+    printf 'apex-mux: the tabs this session DOES have —\n' >&2
+    zellij --session "$session" action dump-layout 2>&1 \
+        | grep -E 'tab name=|^(error|Error)' | head -20 | sed 's/^/    /' >&2 || :
     die "the zellij layout never became a tab in session '$session'"
 }
 

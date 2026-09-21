@@ -467,12 +467,55 @@ elif [ -z "$sid" ]; then
     sed 's/^/      /' "${WORK}/run.err"
 else
     ok "a confined session started (id ${sid})"
-    for _ in $(seq 1 100); do
-        "$APEX" agent logs "$sid" 2>/dev/null | grep -q DONE && break
+    # ── waiting for the script, and knowing WHY the wait ended ───────────────
+    #
+    # The old wait was `for _ in $(seq 1 100); sleep 0.25` and nothing else: it
+    # could not tell a session that had already DIED from one that was merely
+    # slow, so it spent the full 25 s either way and then reported a cause it
+    # had not measured. That misreport is on the record twice — runs
+    # 35616795800 and 35625128495 both printed "the sandbox did not come up"
+    # when the same job's own bwrap probe had passed
+    # (kernel.apparmor_restrict_unprivileged_userns = 0, "bubblewrap works: a
+    # confined session can be built"), the session had started, and the FIRST
+    # line of inside.sh had reached the transcript. Whatever went wrong, the
+    # sandbox coming up was not it.
+    #
+    # Those two runs are the only reds in eight, on a byte-identical
+    # tests/test-secret-broker.sh and a byte-identical apexd/ tree, and both
+    # stopped at exactly one transcript line. The runtime writes transcripts
+    # through an unbuffered File (`Session::write_log`), so that one line is
+    # all the session ever produced. The one state that fits — and that the old
+    # loop had no way to see — is a session that went away after its first
+    # command.
+    #
+    # So the wait now ends on one of three things and says which:
+    #   DONE        the script finished
+    #   left        the session is gone; stop waiting AT ONCE and report its
+    #               exit status, which is the answer the old loop threw away
+    #   deadline    still alive, still producing nothing
+    #
+    # The ceiling is 90 s rather than 25 s, and that is only defensible because
+    # "gone" no longer waits at all: a dead session fails in well under a
+    # second, and the longer ceiling is spent only on a session that is alive.
+    sb_started="$(date +%s)"
+    sb_deadline="$((sb_started + 90))"
+    sb_why="deadline: still alive and still producing nothing"
+    while :; do
+        logs="$("$APEX" agent logs "$sid" 2>/dev/null)"
+        case "$logs" in *DONE*) sb_why="done"; break ;; esac
+        sb_outcome="$("$APEX" agent status "$sid" 2>/dev/null | sed -n 's/^outcome  *//p')"
+        if [ -n "$sb_outcome" ]; then
+            sb_why="the session left before printing DONE (${sb_outcome})"
+            # One more read: the transcript may have gained its last bytes
+            # between the read above and the process being reaped.
+            logs="$("$APEX" agent logs "$sid" 2>/dev/null)"
+            break
+        fi
+        [ "$(date +%s)" -ge "$sb_deadline" ] && break
         sleep 0.25
     done
-    logs="$("$APEX" agent logs "$sid" 2>/dev/null)"
-    printf '%s\n' "$logs" | sed 's/^/      | /' | head -20
+    sb_waited="$(( $(date +%s) - sb_started ))"
+    printf '%s\n' "$logs" | sed 's/^/      | /' | head -40
 
     # THE SCRIPT MUST HAVE RUN. Without this gate every assertion below passes
     # vacuously when the sandbox fails to build — which is exactly what
@@ -482,11 +525,29 @@ else
     # "the credential file is unreachable" passed because nothing tried to
     # read it. A test that passes for the wrong reason is worse than one that
     # fails.
-    if ! printf '%s' "$logs" | grep -q DONE; then
+    case "$logs" in *DONE*) sb_ran=1 ;; *) sb_ran=0 ;; esac
+    if [ "$sb_ran" = 0 ]; then
         bad "the session's script actually ran"
-        printf '      the sandbox did not come up, so nothing below was tested\n'
-        printf '      (a "uid map: Permission denied" here means unprivileged\n'
-        printf '       user namespaces are blocked — see the CI sysctl)\n'
+        # Everything a reader needs to name the cause without another run,
+        # because this fails on a machine nobody can log in to. The old text
+        # asserted a cause instead; this states observations.
+        printf '      nothing below was tested. the wait ended because: %s\n' "$sb_why"
+        printf '      waited %ss; the transcript is %s bytes and stops at:\n' \
+            "$sb_waited" "$(printf '%s' "$logs" | wc -c)"
+        printf '%s\n' "$logs" | tail -3 | sed 's/^/        | /'
+        printf '      apex agent status %s:\n' "$sid"
+        "$APEX" agent status "$sid" 2>&1 | sed 's/^/        /'
+        printf '      stderr of `apex agent run`:\n'
+        sed 's/^/        /' "${WORK}/run.err"
+        printf '      the agent runtime'"'"'s own log, last 20 lines:\n'
+        tail -20 "${WORK}/agentd.log" 2>/dev/null | sed 's/^/        /'
+        # The userns hint is printed only when it is TRUE. Printing it
+        # unconditionally is how two runs came to blame a sysctl that the same
+        # job had already proved was clear.
+        if grep -qi 'uid map\|user namespace' "${WORK}/run.err" 2>/dev/null; then
+            printf '      ("uid map: Permission denied" above means unprivileged user\n'
+            printf '       namespaces are blocked — see the CI sysctl)\n'
+        fi
     else
         ok "the session's script actually ran"
 
