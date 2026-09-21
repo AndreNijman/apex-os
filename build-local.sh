@@ -335,6 +335,19 @@ build_core() {
         echo "== core == reusing existing $CORE_IMG (pass --force-core to rebuild)"
         return 0
     fi
+    # Milliseconds, and it guards the one line whose failure costs a 45-minute
+    # local build: `FROM ${APEX_KERNEL_IMAGE}`. The override below means the
+    # DEFAULT in Containerfile.core cannot break a local build -- but the other
+    # half of that same line can and did: an ARG declared after the first FROM
+    # is invisible to every FROM including its own, so `FROM ${APEX_KERNEL_IMAGE}`
+    # expanded empty HERE too, with a freshly built kernel image sitting right
+    # there and --build-arg passed correctly. CI grew this gate in the same
+    # change; a local build should not have to be the one that finds out.
+    #
+    # Inside build_core() rather than at the top of the file on purpose:
+    # tests/test-build-local-shell-ref.sh copies THIS SCRIPT alone into a
+    # throwaway repo with no tests/ directory and runs it with a bogus target.
+    ./tests/check-kernel-image-pin.sh
     build_kernel
     echo "== core == (this is the slow one, ~45 min)"
     sudo podman build --isolation=chroot \
