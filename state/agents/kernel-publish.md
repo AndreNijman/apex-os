@@ -321,3 +321,36 @@ Everything else can be re-derived from git; the next action cannot.
   scratchpad is shared between agents: use your own subdirectory.
 - Long builds run in the FOREGROUND or under `systemd-run --user`; a
   backgrounded `podman` gets SIGTERMed and still exits 0.
+
+---
+
+## ROUND 39 AGENT — started 2026-09-21 ~17:30 AWST
+
+Working log, newest at the bottom.
+
+- **Digest re-verified against the registry before pinning**, not taken from
+  this card: `skopeo inspect --no-creds docker://ghcr.io/andrenijman/apex-os@sha256:2ff544dd…`
+  resolves, `Created 2026-09-21T04:05:50Z`, labels `org.apexos.tier = kernel`
+  and `org.apexos.kernel.manifest = /manifest/kernel-build.txt`, and its only
+  `kernel*` tag is `kernel-7.2.6-cachyos1.apex1.fc43.x86_64-544143e`. Right image.
+- **`origin/roadmap/v2.2` had moved again**, past the `71bc2177` this card names:
+  now `b137f03f` (+3 commits, `docs/apex-owns-its-esp.md`, `docs/boot-v2.md`,
+  `windows-installer/ARCHITECTURE.md` — docs only, zero overlap with my six
+  files). Merged clean as `8291bf5b`.
+- **`72bab38d` — THE PIN IS IN, and pushed.** `Containerfile.core:112` is now
+  `ARG APEX_KERNEL_IMAGE=ghcr.io/andrenijman/apex-os@sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6`.
+  Checked against `build-image.yml:534`'s resolve regex directly (it is stricter
+  than the gate's — one space, no quotes): the `sed -nE` matches and prints the ref.
+- **Gates on the real tree, all exit 0**: `check-kernel-image-pin.sh` 13/13 ok
+  → "the kernel pin is sound"; `check-no-conflict-markers.sh`;
+  `check-containerfile-assertions.sh`; `check-kernel-pin.sh` ("all checks passed",
+  confirming its `CF=Containerfile.kernel` scope still does not touch my line).
+- Commit carries **no AI attribution** — the two commits before it on this
+  branch (`2cd11c6f`, `544143e1`) do carry `Co-Authored-By`/`Claude-Session`
+  trailers, which is against Andre's standing rule; I did not copy the habit.
+
+### NEXT (round 39)
+Re-run the gate-red mutants on the NOW-PINNED tree (mutate.sh's base is the real
+worktree, so its base changed under it — diff each mutant before trusting its
+exit code), then write `## LANDABLE 72bab38d` at the top of this card, then
+`gh workflow run build-image.yml --ref task/kernel-publish -f force_core=true`.
