@@ -173,6 +173,78 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
+sec "the esp-too-small refusal names the XBOOTLDR partition it cannot use"
+# Everyone who reads esp-too-small on a machine that has a spare XBOOTLDR
+# partition has the same idea within a minute, because the Boot Loader
+# Specification is written for exactly that layout and systemd-boot reads it
+# fine. bootc's composefs backend does not write it -- the BLSCompatible arm of
+# setup_composefs_bls_boot mounts the ESP unconditionally -- so the refusal has
+# to say so. docs/boot-v2.md, "XBOOTLDR: the Boot Loader Specification allows
+# it, bootc does not implement it".
+if grep -q 'XBOOTLDR_TYPE_GUID=bc13c2ff-59e6-4262-a352-b275fd6f7172' "$CODE"; then
+    ok "the engine knows the XBOOTLDR type GUID"
+else
+    bad "XBOOTLDR_TYPE_GUID is missing or not bc13c2ff-59e6-4262-a352-b275fd6f7172"
+fi
+# The note must be attached to the esp-too-small refusal and nowhere else: a
+# note printed on a machine that is migrating fine would be noise.
+esp_refusal_block="$(awk '/refuse "esp-too-small"/{inside=1} inside{print} inside && /docs\/boot-v2.md/{exit}' "$CODE")"
+if grep -q 'xbnote' <<<"$esp_refusal_block"; then
+    ok "the esp-too-small refusal carries the XBOOTLDR note"
+else
+    bad "esp-too-small says nothing about XBOOTLDR — the next reader will spend an evening on it"
+fi
+
+# And the finder itself, run for real against a fake block layout, both ways.
+# A grep alone would pass on a find_xbootldr that never matches anything.
+FAKEBIN="$TMP/fakebin"; mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/findmnt" <<'FAKE'
+#!/usr/bin/env bash
+echo /dev/faked1p3
+FAKE
+cat > "$FAKEBIN/lsblk" <<'FAKE'
+#!/usr/bin/env bash
+dev="${*: -1}"; flags="$*"
+case "$flags" in
+    *-ndo\ TYPE*|*-dno\ TYPE*)
+        case "$dev" in */faked1) echo disk ;; *) echo part ;; esac ;;
+    *PKNAME*)   echo faked1 ;;
+    *-lno\ NAME*) printf 'faked1\nfaked1p1\nfaked1p2\nfaked1p3\n' ;;
+    *PARTTYPE*)
+        case "$dev" in
+            */faked1p1) echo c12a7328-f81f-11d2-ba4b-00a0c93ec93b ;;
+            */faked1p2) echo "${FAKE_P2_TYPE:-bc13c2ff-59e6-4262-a352-b275fd6f7172}" ;;
+            *)          echo 4f68bce3-e8cd-4db1-96e7-fbcaf984b709 ;;
+        esac ;;
+esac
+FAKE
+chmod +x "$FAKEBIN/findmnt" "$FAKEBIN/lsblk"
+
+# The engine's own definitions, lifted verbatim: from `set -uo pipefail` down to
+# the line that ends the block of finders. Testing a copy would test the copy.
+FINDERS="$TMP/finders.sh"
+sed -n '/^set -uo pipefail/,/^esp_mounted_at=/p' "$MIG" | head -n -1 > "$FINDERS"
+grep -q 'find_xbootldr()' "$FINDERS" || { echo "FATAL: find_xbootldr not in the extracted range" >&2; exit 1; }
+
+probe_xbootldr() {   # $1 = the GPT type to give the fake p2
+    FAKE_P2_TYPE="$1" PATH="$FAKEBIN:$PATH" bash -c \
+        'source "$1"; if out="$(find_xbootldr)"; then printf "FOUND:%s\n" "$(tr "\n" "," <<<"$out")"; else printf "NONE\n"; fi' \
+        _ "$FINDERS" 2>&1
+}
+got="$(probe_xbootldr bc13c2ff-59e6-4262-a352-b275fd6f7172)"
+if [[ "$got" == FOUND:/dev/faked1p2* ]]; then
+    ok "find_xbootldr finds an EA00 partition on the root disk"
+else
+    bad "find_xbootldr missed an XBOOTLDR partition: $got"
+fi
+got="$(probe_xbootldr 0fc63daf-8483-4772-8e79-3d69d8477de4)"
+if [[ "$got" == NONE ]]; then
+    ok "find_xbootldr reports nothing when no partition is XBOOTLDR-typed"
+else
+    bad "find_xbootldr matched a plain Linux partition: $got"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
 sec "the state machine"
 rm -rf "$TMP/state"; mkdir -p "$TMP/state" "$TMP/esp" "$TMP/sysroot"
 
