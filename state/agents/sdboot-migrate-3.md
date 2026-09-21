@@ -61,7 +61,52 @@ conclusion is WRONG — do not revive it.
   `count_staged_entry` splice; a backup is
   `/var/lab-scratch/sdboot-migrate-3/engine-all.bak`.
 
-### The item-3 decision rule, written down BEFORE the log exists
+### ITEM 3 — the disposition, as far as it is measured
+
+**Status: NOT landable, and the splice is to be dropped unless the migrated
+boot in guest C contradicts what follows.** The decision rule below was written
+before any of the evidence existed, and is kept so it can be applied by anyone.
+
+What is already measured, and does not depend on guest C:
+
+1. **The migrated cmdline carries `systemd.mount-extra=UUID=…:/boot:auto:ro`.**
+   Read off the ESP of a real migrated APEX/btrfs install (evidence section 4),
+   not inferred from the predecessor's ext4 guest.
+2. **That `ro` is hardcoded in bootc and cannot be changed by this engine.**
+   `crates/lib/src/install.rs:2686-2689`, appended unconditionally after every
+   branch that produces a boot MountSpec. `cmd_stage` already mounts the
+   staging filesystem rw and it makes no difference.
+3. **On the composefs path the ESP IS `/boot`**, and stripping a `+N-M` suffix
+   is a rename on that filesystem. `mnt_want_write()` fails EROFS before
+   SELinux is consulted, so the `apex_sdboot` + `bootupd_t` work that APEX
+   already ships cannot help.
+
+Taken together that says a counted entry on a migrated machine would be
+written and then never blessed. **The consequence, stated precisely rather than
+as "it rolls back":** systemd-boot decrements the counter on every boot and at
+`+0-3` marks the entry bad. With exactly one Type #1 entry — which is what a
+migrated machine has — sd-boot still boots the least-bad entry, so the machine
+is **not bricked**; it reports every boot as failed forever and
+`apex-boot-health`/`systemd-bless-boot` never converge. That is worse than
+today's inert `Wants=`, which is why the splice does not land.
+
+**So the shape of the real fix is not a rename at all**: it is to stop bootc
+emitting the karg. bootc supports exactly that — *"An empty boot mount spec
+signals to omit the mountspec kargs"*, `install.rs:2666-2673`, issue #1441 —
+but `--boot-mount-spec` is exposed on `to-filesystem` and **not** on
+`to-existing-root`, which is what the migration uses. The reachable route is an
+install config dropin (`liboverdrop::scan(SYSTEMD_CONVENTIONAL_BASES,
+"bootc/install", ["toml"])`, e.g. `/usr/lib/bootc/install/*.toml` with
+`boot_mount_spec = ""`), and the caveat is that such a dropin is image-wide and
+would change every `to-disk` install too. That is the next unit's decision, and
+it is a different unit's work: it is a Containerfile change, not an engine one.
+
+Until that is settled, `apex-boot-migrate-confirm.service` stays at
+`Wants=boot-complete.target`, the Containerfile.base assertion and the two
+`tests/test-boot-migrate.sh` pins at ~247-256 stay as they are, and
+`sdboot-migrate-2`'s NEXT item 2 stays open.
+
+### The item-3 decision rule, written down BEFORE the log existed
 
 Read the entry filename on the migrated boot's live ESP:
 
@@ -91,7 +136,8 @@ fourth one.
 | apexmig-b | 3 | `act-unit-3b.sh` (retry, grown disk) | **DONE — install OK, state-join failed** |
 | apexmig-b | 4 | `act-unit-3c.sh` (join_state fix) | **DONE — bootc "File exists"** |
 | apexmig-b | 5 | `act-unit-3c.sh` (all fixes, state cleared) | **DONE — /var joined; no loader on the ESP** |
-| apexmig-c (2 GiB ESP, image v2) | 1 | `act-unit-3c.sh` | image building |
+| apexmig-c (2 GiB ESP, image **v2**, 70 G) | install | — | RUNNING (`sdb3-install-c4`) |
+| apexmig-c | 1 | `act-unit-3c.sh` (the migration) | chained by Monitor |
 | apexmig-c | 2 | `act-check-3.sh` (the MIGRATED boot) | — |
 
 Every boot: `./setctl.sh <action> <extra files…>` first, and the qemu launch
@@ -554,6 +600,16 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
   with `sudo podman build` for anything the lab's root-side tools will install.
   (`localhost/apex-sdmig:v1` exists in BOTH stores with different image IDs,
   which is why nothing tripped over this until now.)
+- **Operational note, paid for here: a chained Monitor and a manual launch can
+  start the SAME install twice, and `systemctl --user stop` does not kill it.**
+  Two `to-filesystem-lab` runs were briefly writing the same 70 G image. The
+  user unit went `inactive` immediately while its root-owned `sudo`/`bash`/
+  `podman`/`bootc` descendants kept running — a user manager cannot signal
+  them. They had to be killed by explicit PID (never `pkill -f`, per the
+  standing rule), in child-first order, and the loop devices only released
+  after the last `bootc install` died. Before launching anything that takes a
+  loop device, check `ps -eo pid,args | grep '[t]o-filesystem-lab'` rather than
+  the unit's state.
 - `lab-run.service` in `localhost/apex-sdmig:v1` bakes `TimeoutStartSec=900`,
   set by the predecessor against a 2 GB fedora-bootc guest. Run B's migration
   copies an 11.5 GB image into podman storage and then writes a third copy into
