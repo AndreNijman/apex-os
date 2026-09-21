@@ -142,3 +142,51 @@ partition itself.
 
 ## BLOCKED ON
 - nothing
+
+---
+
+## windows-installer-3b — FRESH continuation, 2026-09-21 (a new agent, prior one gone)
+
+The card above lags its own commits (the "agent cards lag their commits" trap).
+Verified against `git`, not assumed:
+
+1. **The "single highest-value next edit" is ALREADY DONE.** The plan.rs remedy
+   text now says BOTH `set id={LINUX_FILESYSTEM}` AND
+   `gpt attributes=0x0000000000000000`, landed as commit `ccacf128`, and a unit
+   test in `plan.rs` asserts the remedy contains `gpt attributes=0x0000000000000000`.
+   `cargo test` = 14 passed. Nothing to do here; reporting it as pre-existing.
+2. **The payload-write job was WRITTEN but NEVER RUN.** `lab/jobs/payload-write/run.ps1`
+   exists (commit `6828591e`) and is thorough, but there is no
+   `/var/lab-scratch/winlab/payload-write.log` — it never touched a guest.
+   This round's real work: RUN it, one boot, and verify host-side.
+3. **`bl-discover` (bitlocker-discover) was interrupted mid-boot last round.**
+   `bl-discover.log` is 351 bytes cut off at "boot 1 of at most 2", and the last
+   `winlab run` left `guest-normal.txt` = "(no result.txt from boot 1)" (the
+   card's claim that survey restored it is FALSE on disk right now). The
+   bitlocker-discover job is committed-but-UNPROVEN; the orchestrator must not
+   treat it as verified. It is out of scope this round (2 boots, and it is the
+   thing that died last time).
+
+### PLAN this round (scope A, confirmed with advisor)
+- Rebuild the exe (`winlab build`) — the 10:24 exe predates ccacf128; behaviour
+  identical (remedy text only) but rebuild so the claim is clean. Do NOT rebuild
+  fixtures: `fixture-a.raw` @ 10:20 is the pristine backing file and the
+  host-side comparison baseline.
+- Run `payload-write` foreground, one boot, tee to payload-write.log.
+- Host-verify from a COPY of run-fixture-a.qcow2 (survey restore rm -f's it):
+  qemu-img map (depth==0 = the guest's dirty set), sha256 the 4MiB at p1.Offset
+  vs the guest's PAYLOAD-SHA256, cmp p2/p3 first sectors vs pristine.
+- Restore guest-normal.txt via a real survey run; verify `grep survey-complete`.
+- Run tests/test-windows-installer.sh (no APEX_WINLAB_GUEST) to prove stages 0-3
+  green => section 0 write-API gate UNCHANGED.
+- Tighten ARCHITECTURE.md Exclusivity with what the guest actually measured.
+- Evidence -> ROADMAP/evidence/ (lands with the branch).
+
+### The write-path gate question, answered up front
+The .exe still does not write; payload deployment is proven from the PowerShell
+side of the lab, exactly as the hard constraint requires. Section 0 of
+`tests/test-windows-installer.sh` is UNCHANGED. A real .exe write path is a
+future round that must redesign that gate and prove it fails both ways; and note
+the card's proposed "default build lacks WriteFile" redesign would still ship a
+read-only app, so it does not by itself satisfy "the app does the whole stack" —
+that needs a write-through-one-audited-function safety model, a separate round.

@@ -102,17 +102,56 @@ unreachable by construction on the only path that would ever want it. Same
 family as the memory note "A gate that runs and inspects nothing" and
 "errexit skips `!` commands".
 
-That is silence #1. There is a **second** silence: `akmods` prints its own
-`[FAILED]` / "see ... for details" marker before returning 1 and that is not in
-the log either, so akmods is redirecting its own output somewhere. Both have to
-be answered; the reproducer is instrumented for both.
+That is silence #1, and it is real.
+
+### 2026-09-21 — CORRECTION: the "second silence" as first written was wrong
+
+An earlier version of this card said akmods "is redirecting its own output
+somewhere". Read the script, it does not. `/usr/sbin/akmods` 0.6.2:
+
+- `akmods_echo 1 2 --failure` calls `echo_failure`, which writes `[FAILED]` to
+  **inherited stdout**.
+- `akmods_echo 2 1 "Building rpms failed; see …failed.log for details"` writes
+  to **inherited stderr**.
+- The only thing akmods redirects is `akmodsbuild`'s own output, into
+  `/var/cache/akmods/<kmod>/.last.log`.
+
+And the container's stderr demonstrably reached `core-build.log`: the
+`+ akmods --force …` lines in it are `set -x` traces, which bash writes to
+fd 2. The wrapper was `{ ./build-local.sh core; ec=$?; } >> log 2>&1`
+(journal, unit `kernel-build-2-core`), so both streams were captured.
+
+So neither marker is missing because it was redirected. **Neither marker was
+ever emitted.** Add the third absence nobody had noticed: a failed
+`podman build` always prints
+`Error: building at STEP "RUN …": while running runtime: exit status N`, and
+that is not in the log either. The log's final line has no trailing newline.
+
+Measured facts about that run, from `journalctl --user -u kernel-build-2-core`:
+started 10:30:46, `Main process exited, code=exited, status=1/FAILURE` at
+10:46:27 — **15 min 41 s, a clean exit 1, not a signal, not an OOM kill**. The
+card's "35-40 minutes in" is wrong; akmods had been running about five minutes.
+
+### 2026-09-21 — the reproducer is free: the pre-akmods layer is still in root's storage
+
+No need to rebuild anything from `fedora-bootc:43`. The failing build's last
+committed layer is **`b45ec0aeb90a`**, and `podman history` on it ends at
+`ARG APEX_AKMODS …` — i.e. it is exactly the state entering the akmods RUN
+(`[3/3] STEP 19/69` in `core-build.log` line 646). Kernel installed,
+`/usr/src/kernels/${KVER}` present, RPMFusion not yet enabled.
+
+`/var/lab-scratch/kernel-akmods/repro/Containerfile.repro` is
+`FROM b45ec0aeb90a` + the dnf half as one cached RUN + the akmods call as a
+second RUN, guarded with `rc=0; akmods … || rc=$?` and dumping `.last.log`,
+`*.failed.log` and `/var/log/akmods/akmods.log`. Built with
+`--isolation=chroot` to match the real build exactly. Also checked before
+theorising: `kernel-cachyos-devel` does Provide
+`kernel-devel-uname-r = 7.2.6-cachyos1.apex1.fc43.x86_64`, so the kmodtool
+BuildRequires is satisfiable.
 
 ## NEXT
 
-- Build the minimal reproducer in `/var/lab-scratch/kernel-akmods`:
-  fedora-bootc:43 + APEX kernel RPMs + `akmods`/`akmod-nvidia` only, with the
-  akmods call wrapped in `if ! ...` and every file under `/var/cache/akmods`
-  enumerated and catted. Skips the 35-minute desktop transaction entirely.
+- Read the reproducer result out of `/var/lab-scratch/kernel-akmods/repro/repro.log`.
 
 ## BLOCKED ON
 
