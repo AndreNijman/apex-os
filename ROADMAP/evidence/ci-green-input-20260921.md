@@ -251,6 +251,29 @@ can go green once on nothing:
 
 <!-- CI-RESULTS -->
 
+## For the orchestrator, and for the merge-to-main gate
+
+The thing that gates Andre's approval is `PR validation` on `roadmap/v2.2`,
+and after this lands it will **still flake at some rate**. Two of the three
+suites here were never regressions and are not claimed fixed. What changes is
+that the next red is readable instead of misleading:
+
+* `secret-broker` — look for the line `the wait ended because: …`. If it says
+  `the session left before printing DONE (exited N)` or `(killed by signal N)`,
+  that names the mechanism: a SIGSYS points at seccomp under bwrap 0.9.0, a
+  SIGKILL at something reaping the session, `exited 127` at the shim's PATH.
+  The old text could not have told you any of that.
+* `mux-layouts` — look for `apex-mux: what each send reported —`. If all six
+  `top-level` attempts show a non-zero rc, then on the runner only six of the
+  twelve sends were ever real and the alternation is half dead there — which is
+  exactly the question `zellij_build`'s existing comment says "is not
+  understood".
+
+So the gate needs a stated policy rather than a lucky tick: either N
+consecutive green `Package engine` runs on `roadmap/v2.2`, or a decision taken
+on the two flakes with the diagnostics above in hand. A single green run on a
+branch with a 2-in-8 flake is p≈0.75 of happening by itself.
+
 ## What is NOT claimed
 
 * The mechanism behind the `secret-broker` stall is **not** named. What is
