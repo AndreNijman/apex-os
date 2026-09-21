@@ -10,14 +10,14 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
 
 ## NEXT
 
-- secret-broker. First, is it a flake or a regression?
-  `gh run list --workflow pr-validation.yml --branch roadmap/v2.2 --limit 15`,
-  then for each run whose `Package engine` job actually RAN, read its
-  `secret-broker: N passed, M failed` line. If it was green at an earlier SHA
-  on the same test code, bisect `<green>..e02561fb` over `apexd/`,
-  `tests/test-secret-broker.sh`, `tests/in-login-session.sh`. In parallel,
-  reproduce locally ALONE under `systemd-run --user` with
-  `APEX_REQUIRE_SANDBOX=1` (cold cargo build in this worktree — minutes).
+- Confirm `tests/test-mux-layouts.sh` is green locally (running as
+  `ci-green-input-mux1.service` -> `/var/lab-scratch/ci-green-input/mux-local-1.log`),
+  mutation-test the new apex-mux diagnostics by forcing `zellij_landed` false,
+  then commit secret-broker and apex-mux as TWO separate commits, push, and
+  `gh workflow run pr-validation.yml --ref task/ci-green-input` **at least 4
+  times** — the baseline is 4/8 red for mux-layouts and 2/8 for secret-broker,
+  so one green run proves nothing. Read `Package engine`'s conclusion via
+  `gh run view <id> --json jobs`, not the overall tick.
 
 ## DONE
 
@@ -31,10 +31,19 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
 
 ## IN PROGRESS
 
-- Branch `task/ci-green-input` is at `cd3c06b6`, pushed, one commit ahead of
-  `f3b1b3d4`.
-- secret-broker + mux-layouts: flake mechanism not yet named. Nothing written
-  for either.
+- Branch `task/ci-green-input` is at `cd3c06b6`, pushed. Two further changes
+  are written but NOT yet committed in
+  `/var/tmp/apex-work/wt-ci-green-input`:
+  - `tests/test-secret-broker.sh` — the confined-session wait is now
+    state-aware (DONE / session-left / deadline), fails at once on a session
+    that has gone, raises the ceiling 25s -> 90s, and on failure prints the
+    transcript byte count, the wait reason, `apex agent status`, `run.err` and
+    the tail of `agentd.log`. The false uid-map hint is now conditional on
+    `run.err` actually saying it. Verified green locally: `93 passed, 0 failed`.
+  - `files/system/libexec/apex-mux` — `zellij_build` keeps each send's form,
+    rc and stderr instead of `>/dev/null 2>&1`, prints them plus
+    `zellij list-sessions` and the layout the session DOES have before dying,
+    and retries 12 times instead of 6.
 
 ## FOUND
 

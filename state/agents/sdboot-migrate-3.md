@@ -54,12 +54,19 @@ conclusion is WRONG — do not revive it.
 Every boot: `./setctl.sh <action> <extra files…>` first, and the qemu launch
 needs **both** `-v …:/work:z` and `--oci /work/oci-dummy-3.img`.
 
-Evidence file: `ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md`, NOT the
+Evidence file: `ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md` (committed
+with run A in it already), NOT the
 `sdboot-migrate-2-20260921-lab.md` the inherited card names — that name was a
 dead unit's plan for a run that never happened, and this is unit 3 measuring on
 09-22.
 
 ## DONE
+
+- **Committed and pushed `5cdaaa39`** on `task/sdboot-migrate-3`:
+  `ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md`, sections 0 and 1 —
+  the four rig defects and the whole of run A. Run B's sections are still to
+  be appended to the same file. NOT yet LANDABLE: the run-B half is missing
+  and the item-3 decision is not taken.
 
 - **RUN A IS MEASURED AND IT REFUSED.** Serial log
   `/var/lab-scratch/sdboot-migrate-2/apexmig-a-3.serial`, guest boot 2, real
@@ -198,6 +205,47 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
   and the serial log says the experiment simply had nothing to do. Worked
   around with a 4 MiB `oci-dummy-3.img` in the `--oci` slot rather than by
   editing the baked driver.
+- **The published `ghcr.io/andrenijman/apex-os:daily` image cannot migrate at
+  all, because it has no `rsync`.** Measured in run A: `precheck --explain`
+  returns `REFUSE no-rsync` and — because `no-rsync` is evaluated BEFORE the
+  ESP checks — plain `precheck` and `auto` both stop there and never reach
+  `esp-too-small`. `roadmap/v2.2`'s `Containerfile.base:1283` does `dnf5 -y
+  install rsync` and asserts `command -v rsync` at 1296, so this is the daily
+  tag lagging the branch rather than a defect in the branch. Two things follow:
+    * **`precheck --explain` earned its keep on its first real use.** Without
+      the verb `task/migrate-preconditions` landed, run A would have produced
+      `REFUSED [no-rsync]` and NOTHING about the ESP, and the 512 MiB refusal
+      this unit exists to measure would have been unmeasurable on this image.
+    * Run B needs rsync present or its migration cannot start. Handled as a
+      named lab accommodation in `act-prep-3.sh`, not by editing the engine:
+      the host's `/usr/bin/rsync` is carried on the control disk and installed
+      to `/usr/local/bin/rsync` (writable `/var/usrlocal` on ostree, and ahead
+      of `/usr/bin` on systemd's default PATH). Every shared library it needs
+      was checked present in the image first, and the binary was executed
+      inside the image before being relied on: rsync 3.5.0, ACLs + xattrs +
+      hardlinks compiled in, which is what `rsync -aAXH --delete` needs.
+- **`to-filesystem-lab`, as the predecessor left it, cannot produce a working
+  disk — it makes no BIOS-BOOT partition.** First run of it in this program:
+
+      /usr/sbin/grub2-install: error: filesystem `btrfs' doesn't support blocklists.
+      error: boot data installation failed: installing component BIOS to device
+             /dev/loop1: installing GRUB on /dev/loop1
+
+  bootupd installs the BIOS component as well as the EFI one; with no `ef02`
+  partition `grub2-install --target i386-pc` has nowhere to embed core.img, and
+  on btrfs it cannot fall back to blocklists the way it could on ext4. `bootc
+  install to-disk` creates that partition itself — run A's disk has `p1 1M EF02
+  BIOS-BOOT` — so a hand-partitioned lab disk has to as well or it is not the
+  same machine. The install still reaches "deploy" and writes loader entries
+  into the root's `/boot`, so **the failure leaves a disk that looks plausible
+  and has a completely empty ESP** — the same shape as the corpse the inherited
+  card called an intact rig. Patched in
+  `/var/lab-scratch/sdboot-migrate-3/to-filesystem-lab-3` (ef02 1 MiB + ef00
+  ESP + 8300 root, parts renumbered), with the measured error in the comment.
+- Both of this unit's launcher wrappers reported `rc=0` for a command that
+  exited 1: `echo "=== $(date -Is) … rc=$? ==="` runs the `date` command
+  substitution first, which resets `$?`. Fixed by capturing `rc=$?` on its own
+  line. The real exit status was in `to-filesystem-lab`'s own `install rc=1`.
 - `lab-run.service` in `localhost/apex-sdmig:v1` bakes `TimeoutStartSec=900`,
   set by the predecessor against a 2 GB fedora-bootc guest. Run B's migration
   copies an 11.5 GB image into podman storage and then writes a third copy into

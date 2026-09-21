@@ -8,19 +8,38 @@ lab: /var/lab-scratch/initramfs-slim-2
 
 Dispatched round 40, 2026-09-22 ~03:30 AWST, by the autoresume orchestrator.
 
-## LANDABLE — `ba9a417a` (more coming; see NEXT)
+## LANDABLE — `f3a00c7d`
 
-Three commits, all pushed to `origin/task/initramfs-slim-2`. Evidence file plus
-the correction of two claims the first real build disproved. Nothing in the
-branch changes a build step — it is documentation and measurement only, so the
-landing risk is nil.
+Four commits, all pushed to `origin/task/initramfs-slim-2`, cut from
+`origin/roadmap/v2.2` @ `f3b1b3d4`. **Nothing in this branch changes a build
+step** — every change is a comment, a doc or an evidence file, so the landing
+risk is nil and no image build is needed to validate it. Green:
+`check-containerfile-assertions`, `check-doc-verbs`, `check-no-conflict-markers`,
+`check-suites-run-in-ci`, `test-containerfile-order` (24/24),
+`test-apex-initramfs-budget` (35/35).
+
+* `97850c6d` `ROADMAP/evidence/initramfs-slim2-20260922.md` — 7 sections.
+* `572bf7be` `Containerfile.apex` + `docs/update-cost.md` — the two claims the
+  first real build disproved, and the ~275 MiB-per-update download win.
+* `ba9a417a` `Containerfile.core` + the predecessor's evidence file — the lab
+  figures marked superseded where a reader would have trusted them.
+* `f3a00c7d` `docs/boot-v2.md` + `migrate-preconditions`' evidence — katana
+  passes precheck; three other units' open items closed.
+
+**The headline, for whoever writes the roadmap entry:** `esp-too-small` is
+retired. katana's `apex-boot-migrate precheck` answers "This machine can
+migrate", rc=0, every check OK — the first APEX machine that does.
 
 ## NEXT
 
-- Add section 7 to `ROADMAP/evidence/initramfs-slim2-20260922.md` recording the
-  katana precheck below, update `docs/boot-v2.md`'s `esp-too-small` row and
-  `ROADMAP/evidence/migrate-preconditions-20260921.md` §5 (both still say the
-  512 MiB ESP is the blocker), commit, push, re-mark LANDABLE with the new sha.
+- Nothing blocking; the branch is LANDABLE at `f3a00c7d`. If the orchestrator
+  wants more from this unit, the one experiment left worth running is the
+  `--timestamp` lever (§5b of the evidence): add `--timestamp` to the three
+  `podman build` calls in `.github/workflows/build-image.yml`, run ONE image
+  build, and check whether the apex-tier layer digest is stable across two
+  builds of an unchanged input. If it is, every machine stops re-downloading
+  84.5 MiB per update. Do not take it without that build — it rewrites every
+  mtime in the image and its interaction with ostree is unmeasured.
 
 ## DONE
 
@@ -192,7 +211,7 @@ timestamp 2026-09-21T17:42:03Z) and carries three deployments:
 Exact shipped bytes read off katana: `initramfs.img` **88,935,408 B**,
 `vmlinuz` **16,906,312 B** → **105,841,720 B = 100.94 MiB per deployment**,
 `need = 3 x 100.94 + 48 = 351 MiB`. katana's own ESP is `nvme1n1p2`,
-**512 MiB** → **fits with 161 MiB spare**. Against `migrate-preconditions`'
+**512 MiB**; the engine measures 503 MiB FAT free against 350 needed — **153 MiB spare**. Against `migrate-preconditions`'
 ceilings (katana 154 MiB, L16 180 MiB) both clear.
 
 ### `/root` is a dangling symlink in the image, and dracut says FAILED then exits 0
