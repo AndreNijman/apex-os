@@ -82,9 +82,37 @@ the reason this has cost two rounds already. See the memory note
 - Do not land onto `roadmap/v2.2` yourself and do not push `main` or open a PR.
 - Write this card as you go, not at the end.
 
+## FINDINGS AS THEY LAND
+
+### 2026-09-21 — why the failure log could not be read (confirmed by reading, not guessed)
+
+The akmods RUN opens with `set -eux`. The loop body is:
+
+```
+akmods --force --kernels "${KVER}" --kmod "${k}"; \
+RPM="$(ls -1 ...)"; \
+test -n "${RPM}" && test -f "${RPM}" \
+    || { echo "FATAL: ..."; sed -n '1,80p' /var/cache/akmods/${k}/*.failed.log ...; exit 1; }
+```
+
+`akmods` is an unguarded simple command. Under `set -e` its non-zero exit
+terminates the shell **immediately** — the `RPM=` assignment, the `test`, and
+therefore the `sed` that dumps `*.failed.log` never execute. The dump is
+unreachable by construction on the only path that would ever want it. Same
+family as the memory note "A gate that runs and inspects nothing" and
+"errexit skips `!` commands".
+
+That is silence #1. There is a **second** silence: `akmods` prints its own
+`[FAILED]` / "see ... for details" marker before returning 1 and that is not in
+the log either, so akmods is redirecting its own output somewhere. Both have to
+be answered; the reproducer is instrumented for both.
+
 ## NEXT
 
-- (nothing yet — first action is to reproduce the failure and capture its log)
+- Build the minimal reproducer in `/var/lab-scratch/kernel-akmods`:
+  fedora-bootc:43 + APEX kernel RPMs + `akmods`/`akmod-nvidia` only, with the
+  akmods call wrapped in `if ! ...` and every file under `/var/cache/akmods`
+  enumerated and catted. Skips the 35-minute desktop transaction entirely.
 
 ## BLOCKED ON
 
