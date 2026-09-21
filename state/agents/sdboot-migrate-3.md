@@ -167,6 +167,39 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
 
 ## FOUND
 
+- **Where the `:ro` comes from, read out of bootc's source rather than guessed —
+  and it is NOT something `apex-boot-migrate`'s mount options can change.**
+  `crates/lib/src/install.rs:2686-2689` (bootc source tree already on this
+  machine at `/var/lab-scratch/sdboot-xbootldr/bootc-src`):
+
+      // Ensure that we mount /boot readonly because it's really owned by
+      // bootc/ostree and we don't want e.g. apt/dnf trying to mutate it.
+      if let Some(boot) = boot.as_mut() {
+          boot.push_option("ro");
+      }
+
+  **Unconditional.** It is appended after every branch that can produce a boot
+  MountSpec, so mounting the staging filesystem rw — which `cmd_stage` already
+  does — cannot affect it. `bootc_composefs/boot.rs:677-687` then formats it
+  into `systemd.mount-extra={src}:/boot:{fstype}:{options}`.
+  **Why an ordinary composefs machine is `rw` and a migrated one is `ro`:** on
+  an ordinary install the ESP simply *is* `/boot`, bootc finds no separate
+  `/boot` partition, `boot` is `None`, and **no mount-extra karg is emitted at
+  all**. The migration's staging bind at `/target/boot` is exactly what makes
+  bootc believe there IS a separate /boot. That reconciles the two
+  measurements (`sdboot-image-20260920-decision.md:45` rw vs this run's ro)
+  without either being wrong.
+  **The lever, for whoever picks this up:** an EMPTY boot mount spec makes
+  bootc omit the mountspec kargs entirely — `install.rs:2666-2673`, *"An empty
+  boot mount spec signals to omit the mountspec kargs"*, bootc issue #1441.
+  The `--boot-mount-spec` CLI flag is exposed on `to-filesystem` but **NOT on
+  `to-existing-root`** (checked against the shipped binary, both `--help`s), so
+  the migration cannot pass it. The reachable route is the install config
+  dropin — `liboverdrop::scan(SYSTEMD_CONVENTIONAL_BASES, "bootc/install",
+  ["toml"])`, e.g. `/usr/lib/bootc/install/*.toml` with `boot_mount_spec = ""`.
+  Caveat that must be thought about first: such a dropin is image-wide and
+  would also change every `to-disk` install, not just the migration.
+
 - **`bootc install to-existing-root --composefs-backend` is NOT idempotent, and
   the engine told the user the opposite. FIXED in `4f6678e3`.** Run B boot 4,
   re-running after boot 3's install had succeeded and only `join_state` failed:

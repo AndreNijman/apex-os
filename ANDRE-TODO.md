@@ -98,10 +98,31 @@ deliberately unfiled because posting on a public tracker under your name is your
 call, not an agent's.
 **You do:** say "file it" (and, if you want, under which account).
 
-### 4. Approve the merge to `main` — closes **`final`**
-Everything has been held off `main` all program, by your instruction. The image
-now builds green in CI for the first time. This is the last gate.
-**You do:** say go, after the image qualification below.
+### 4. Approve the merge to `main` — **HOLD, do not do this yet**
+Updated 2026-09-22. The image now builds green for the first time, so this
+*looked* like the last gate. It is not, and the reason is worth knowing.
+
+**Every green you and I have read on `roadmap/v2.2` was partly green on jobs
+that never ran.** The `changes` path selector classifies a **push** against the
+branch's *previous tip*, so only that push's paths count — while a **pull
+request** classifies against `main`, i.e. the whole branch diff. A branch can
+therefore be green on every push for weeks and red the moment it is proposed
+for merge. `workflow_dispatch` ten lines away already uses the merge-base with
+`main`, which is the correct behaviour, so the `push` case looks like an
+oversight rather than a decision.
+
+That has already produced one real red: **`Installer safety and UI` was failing
+deterministically** on `roadmap/v2.2` and nobody could see it. I fixed and
+landed that one (`6fa9ddbc`) — the engine was innocent; the suite was measuring
+its own extraction.
+
+**`installer` is one job of five.** The same blind spot applies to `rust`,
+`engine` and `android`, and nobody has looked. A full-matrix run is going now
+to report what surfaces, deliberately *without* fixing anything, so each red
+can be attributed to its own fix.
+
+**You do:** nothing yet. Wait for that report. Merging now would hit whatever
+it finds, at the least convenient moment.
 
 ### 5. Two firewall scope questions — cosmetic, but they're yours
 Currently LLMNR is accepted on **every interface**, and mDNS accepts **unicast
