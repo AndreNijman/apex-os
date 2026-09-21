@@ -50,7 +50,7 @@ ALL=(prereq signed-uki reproducible negative-unsigned negative-foreign
 # of ALL so a default run cannot silently skip them and still report success:
 # they are requested by name and hard-fail when their input is missing.
 STAGED=(apex-image luks-tpm luks-tpm-clear luks-firmware-change
-        luks-firmware-code luks-no-tpm luks-s3)
+        luks-firmware-code luks-no-tpm luks-s3 luks-pcr7)
 if (( LIST )); then printf '%s\n' "${ALL[@]}" "${STAGED[@]}"; exit 0; fi
 (( ${#SCENARIOS[@]} )) || SCENARIOS=("${ALL[@]}")
 
@@ -1829,6 +1829,321 @@ scenario_luks_s3() {
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  L-003, PCR 7 IN BOOT — the one host-side testing cannot reach
+#
+#  Every enroll-* scenario below reads Secure Boot state from a --probe-root
+#  FIXTURE. luks-firmware-change's own control volume binds PCR 7 to a VALUE
+#  IT CHOSE, via `--tpm2-pcrs="7:sha256=<value>"` — a lab-only syntax the
+#  shipped script never uses; its header says so ("Built here rather than
+#  through apex-luks-enroll, deliberately... an instrument, not a product
+#  path"). Neither exercises the bare, LIVE-READ `--tpm2-pcrs=7` the shipped
+#  script's probe_pcr7 actually runs, against a TPM whose PCR 7 was just
+#  extended by a REAL Secure-Boot-enforcing (v)UEFI chain.
+#
+#  It has to run INSIDE a guest, and it has to enrol WHILE THAT GUEST'S BOOT IS
+#  STILL THE LIVE PROCESS. TPM PCRs are volatile: swtpm's
+#  `--flags startup-clear` resets them on every fresh `swtpm socket` start,
+#  same as real hardware resets them on every power cycle. PCR 7 is
+#  REPRODUCIBLE across separate boots — it measures the SecureBoot variable and
+#  the CERTIFICATE that verified each loaded image, not the image itself, so
+#  the same firmware + same enrolled keys + same signing cert produce the same
+#  PCR 7 every time — which is what lets an EARLIER, SEPARATE enrolment still
+#  unseal on a LATER boot (boot B below). But enrolling in the first place
+#  needs to READ a live PCR 7, and the only place that value exists outside a
+#  real firmware boot is inside a guest that has just finished one; a host-side
+#  process cannot reach in — QEMU is the sole client on swtpm's data socket for
+#  the guest's whole lifetime.
+#
+#  So guest-luks-enroll.sh, systemd-cryptenroll, python3 (the shipped script's
+#  own tpm2_report/token_types/keyslot_count parse `cryptsetup luksDump
+#  --dump-json-metadata` with it) and od (efivar_byte5) all travel via
+#  --extra-initrd: none of the four ships in the generic dracut initramfs,
+#  measured absent with lsinitrd against a root staged straight off katana's
+#  own live install, not assumed.
+# ═════════════════════════════════════════════════════════════════════════════
+
+# install_real HOOKDIR SRC_ABS_PATH [MODE] — copy an absolute host path into a
+# hook payload tree, normalising /lib64, /lib, /bin, /sbin to their usr/...
+# targets first.
+#
+# This initramfs is usrmerged (`lib64 -> usr/lib64`, `bin -> usr/bin`, measured
+# with lsinitrd). `ldd` reports some resolved paths as /lib64/X and others as
+# /usr/lib64/X depending on how glibc's loader walked the symlink, and a cpio
+# entry that creates /lib64 as a REAL DIRECTORY shadows that symlink and takes
+# every library the initramfs already had down with it — apex-image's hook
+# comment documents the identical trap for usr/lib/dracut/hooks. Normalising
+# every path here, rather than trusting whatever ldd printed, is what avoids it.
+install_real() {
+    local hookdir="$1" src="$2" mode="${3:-0755}" dst="$2"
+    case "$dst" in
+        /lib64/*) dst="/usr/lib64/${dst#/lib64/}" ;;
+        /lib/*)   dst="/usr/lib/${dst#/lib/}" ;;
+        /bin/*)   dst="/usr/bin/${dst#/bin/}" ;;
+        /sbin/*)  dst="/usr/sbin/${dst#/sbin/}" ;;
+    esac
+    install -D -m "$mode" "$src" "$hookdir$dst"
+}
+
+# build_pcr7_enroll_bundle HOOKDIR PASSPHRASE_FILE — the payload common to any
+# UKI that has to run the REAL shipped apex-luks-enroll inside a guest: the
+# script itself, systemd-cryptenroll and od (both absent from the generic
+# initramfs, measured with lsinitrd), python3 plus the exact stdlib closure
+# `import json` needs (discovered by actually importing it with site disabled
+# and reading sys.modules back — not by guessing which files a json.dumps
+# needs), and a hook that runs it against /dev/vdb.
+#
+# PYTHONHOME/LD_LIBRARY_PATH are not set anywhere in the guest for this: it is
+# unnecessary because every file lands at the SAME absolute path a real
+# install uses (usr/bin/python3, usr/lib64/pythonX.Y/...), which is exactly
+# where python3 looks for its own stdlib relative to argv[0]. Verified
+# standalone, isolated with an artificial prefix (which is what DID need the
+# env vars), before this function was written.
+build_pcr7_enroll_bundle() {
+    local hookdir="$1" passfile="$2"
+    rm -rf "$hookdir"
+    mkdir -p "$hookdir/var/lib/dracut/hooks/pre-mount" "$hookdir/usr/libexec"
+    install -m 0755 "$HERE/guest-luks-enroll.sh" \
+        "$hookdir/var/lib/dracut/hooks/pre-mount/50-apex-luks-enroll.sh"
+    install -m 0400 "$passfile" "$hookdir/apex-bootlab-passphrase"
+    install -m 0755 "$HERE/../../system/libexec/apex-luks-enroll" \
+        "$hookdir/usr/libexec/apex-luks-enroll"
+
+    # systemd-cryptenroll and od: present on the boot lab's OWN /usr (this
+    # scenario runs inside the apex-bootlab container, which carries the same
+    # systemd/cryptsetup/coreutils stack the APEX image does), absent from the
+    # STAGED APEX INITRAMFS. The two are different things; this project has
+    # been bitten before by conflating a build box's tools with a guest's.
+    local bin path
+    for bin in systemd-cryptenroll od; do
+        path="$(command -v "$bin")" || die "the boot lab container has no $bin to bundle"
+        install_real "$hookdir" "$path" 0755
+    done
+    local lib
+    for lib in $(ldd "$(command -v systemd-cryptenroll)" \
+                 | awk '/=>/{print $3} !/=>/{if ($1 ~ /^\//) print $1}'); do
+        [[ -f "$lib" ]] || continue
+        install_real "$hookdir" "$lib" 0755
+    done
+
+    local py pylib pyver pymods f
+    py="$(command -v python3)" || die "the boot lab container has no python3 to bundle"
+    install_real "$hookdir" "$py" 0755
+    pylib="$(ldd "$py" | awk '/libpython/{print $3}')"
+    [[ -n "$pylib" ]] || die "could not find python3's own shared library to bundle"
+    install_real "$hookdir" "$pylib" 0755
+    pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    pymods="$(python3 -S -c '
+import json, sys
+for m in sys.modules.values():
+    f = getattr(m, "__file__", None)
+    if f: print(f)
+')"
+    [[ -n "$pymods" ]] || die "python3 -S -c \"import json\" produced no module file list"
+    while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        install_real "$hookdir" "$f" 0644
+    done <<<"$pymods"
+
+    ( cd "$hookdir" && find . -print0 | cpio --null -o -H newc --quiet )
+    info "PCR7 enrolment bundle: apex-luks-enroll, systemd-cryptenroll, python3 $pyver + json, od"
+}
+
+scenario_luks_pcr7() {
+    log "luks-pcr7: L-003, the in-BOOT half of the PCR 7 binding"
+    luks_require_root
+    local root="$LUKS_ROOT"
+
+    # ── the volume, host-side, with a KNOWN passphrase the guest presents via
+    #    --unlock-key-file ───────────────────────────────────────────────────
+    local img="$WORK/luks-pcr7.img"
+    enroll_volume "$img"
+
+    # ── boot A: enrol, live, inside the guest, against THIS boot's own real
+    #    PCR 7. No --pcr-key/--pcr-pubkey on the UKI: sd-stub still measures
+    #    (this UKI is Secure-Boot-signed) but publishes no
+    #    tpm2-pcr-public-key.pem, so probe_signed_pcr11's readability check
+    #    fails and policy_select falls through to pcr7 — that fallthrough, not
+    #    a --policy flag forcing it, is the property under test. A machine
+    #    without the systemd-boot pivot is in exactly this state today. ──────
+    build_pcr7_enroll_bundle "$WORK/luks-pcr7-hook-a" "$ENROLL_KEYFILE" \
+        > "$WORK/luks-pcr7-hook-a.cpio"
+    [[ -s "$WORK/luks-pcr7-hook-a.cpio" ]] || { bad "empty PCR7 enrolment bundle"; return; }
+    "$HERE/apex-mkuki" --output "$WORK/uki-pcr7-a.efi" --from-root "$root" \
+        --cmdline "$CMDLINE_BASE apex.bootlab.entry=pcr7a rd.timeout=10 plymouth.enable=0 rd.plymouth=0" \
+        --deployment pcr7a --variant gaming \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --extra-initrd "$WORK/luks-pcr7-hook-a.cpio" >/dev/null \
+        || { bad "apex-mkuki failed for the PCR7 enrolment UKI"; return; }
+
+    local state="$WORK/tpm-pcr7"
+    rm -rf "$state"
+    local disk="$WORK/disk-pcr7-a.img" vars="$WORK/vars-pcr7-a.fd" ser="$WORK/serial-pcr7-a.log" rc=0
+    "$HERE/apex-mkesp" --disk "$disk" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "pcr7a:0:$WORK/uki-pcr7-a.efi" --default 'apex-pcr7a*' >/dev/null
+    fresh_vars "$vars"
+    vm_boot --disk "$disk" --vars "$vars" --name pcr7-enrol --serial "$ser" \
+            --tpm-state "$state" --extra-disk "$img" \
+            --mem 4096 --timeout 300 || rc=$?
+    assert_eq 0 "$rc" "pcr7 enrol boot: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: apex-initramfs-reached"
+    assert_serial_has "$ser" "APEX-BOOTLAB: have-systemd-cryptenroll=yes"
+    assert_serial_has "$ser" "APEX-BOOTLAB: have-apex-luks-enroll=yes"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-device=present"
+    if grep -aq "APEX-BOOTLAB: have-python3=yes" "$ser"; then
+        ok "the bundled python3 ran inside the guest"
+    else
+        bad "python3 did not report itself present — the bundle did not reach the guest correctly"
+    fi
+
+    local pcr7_pre
+    pcr7_pre="$(luks_serial_field "$ser" pcr7-pre-enroll)"
+    if luks_pcr_is_real "$pcr7_pre"; then
+        ok "PCR 7 was already a real measurement before enrolment ($pcr7_pre)"
+    else
+        bad "PCR 7 read '$pcr7_pre' before enrolment — not a real firmware measurement, enrolling against it proves nothing"
+        return
+    fi
+
+    # policy_select fell through PAST signed-pcr11, for the documented reason —
+    # not because signed-pcr11 is broken, but because this UKI never published
+    # a PCR-11 signing key for sd-stub to hand it.
+    assert_serial_has "$ser" \
+        "APEX-BOOTLAB: enroll-err:   not using signed-pcr11: this machine did not boot through sd-stub, so nothing measured a UKI into PCR 11"
+    assert_serial_has "$ser" "APEX-BOOTLAB: enroll-exit=0"
+
+    local tpm2field
+    tpm2field="$(grep -ao 'APEX-BOOTLAB: enroll-out: tpm2: enrolled binding=[a-z0-9-]* pcrs=[0-9]* bank=[a-z0-9]* hash=[[:xdigit:]]* pin=[a-z]*' "$ser" | head -1)"
+    case "$tpm2field" in
+        *"binding=pcr7 pcrs=7 bank=sha256 hash="*)
+            ok "the shipped script chose binding=pcr7, live, against a real boot" ;;
+        *)
+            bad "the shipped script's tpm2: line was '$tpm2field' — expected binding=pcr7" ;;
+    esac
+
+    local recovery=""
+    recovery="$(luks_serial_field "$ser" recovery-key)"
+    if [[ -n "$recovery" && "$recovery" != "<not"* ]]; then
+        printf '%s\n' "$recovery" > "$WORK/luks-pcr7-recovery.key"
+        ok "captured the recovery key the guest generated"
+    else
+        bad "no recovery key came back from the enrolment boot — boot C's refusal arm has no fallback to test"
+    fi
+    cp "$ser" "$WORK/serial-pcr7-a.log"
+
+    # ── boot B: SAME vars template, SAME UKI signing cert, SAME swtpm state
+    #    DIRECTORY — but a FRESH swtpm PROCESS, which resets every PCR to zero
+    #    on startup-clear. Reproduced, not reused: the firmware has to
+    #    re-extend PCR 7 back to the SAME value on its own, or "reproducible"
+    #    was only ever true within one process. Plain guest-luks-probe.sh: no
+    #    enrolment tooling needed to ATTACH, only to CREATE, the token. ──────
+    local hookdir_b="$WORK/luks-pcr7-hook-b"
+    rm -rf "$hookdir_b"; mkdir -p "$hookdir_b/var/lib/dracut/hooks/pre-mount"
+    install -m 0755 "$HERE/guest-luks-probe.sh" \
+        "$hookdir_b/var/lib/dracut/hooks/pre-mount/50-apex-luks-probe.sh"
+    ( cd "$hookdir_b" && find . -print0 | cpio --null -o -H newc --quiet ) \
+        > "$WORK/luks-pcr7-hook-b.cpio"
+    "$HERE/apex-mkuki" --output "$WORK/uki-pcr7-b.efi" --from-root "$root" \
+        --cmdline "$CMDLINE_BASE apex.bootlab.entry=pcr7b apex.bootlab.luks=unlock rd.timeout=10 plymouth.enable=0 rd.plymouth=0" \
+        --deployment pcr7b --variant gaming \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --extra-initrd "$WORK/luks-pcr7-hook-b.cpio" >/dev/null \
+        || { bad "apex-mkuki failed for the PCR7 unlock UKI"; return; }
+
+    local diskb="$WORK/disk-pcr7-b.img" varsb="$WORK/vars-pcr7-b.fd" serb="$WORK/serial-pcr7-b.log"
+    "$HERE/apex-mkesp" --disk "$diskb" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "pcr7b:0:$WORK/uki-pcr7-b.efi" --default 'apex-pcr7b*' >/dev/null
+    fresh_vars "$varsb"
+    rc=0
+    vm_boot --disk "$diskb" --vars "$varsb" --name pcr7-unlock --serial "$serb" \
+            --tpm-state "$state" --extra-disk "$img" \
+            --mem 4096 --timeout 240 || rc=$?
+    assert_eq 0 "$rc" "pcr7 unlock boot: clean guest poweroff"
+    assert_serial_has "$serb" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has "$serb" "APEX-BOOTLAB: plaintext-marker=written"
+    # No signature was needed or used. This is what distinguishes this
+    # scenario from every luks-tpm* one: the token is bound BY VALUE to PCR 7,
+    # not by a PolicyAuthorize signature, so sd-stub publishing nothing here
+    # is correct, not a fixture gap.
+    assert_serial_has "$serb" "APEX-BOOTLAB: pcr-signature=<absent>"
+
+    local pcr7_b pcr11_a pcr11_b
+    pcr7_b="$(luks_serial_field "$serb" pcr7)"
+    if luks_pcr_is_real "$pcr7_b" && [[ "$(tr 'A-F' 'a-f' <<<"$pcr7_b")" == "$(tr 'A-F' 'a-f' <<<"$pcr7_pre")" ]]; then
+        ok "PCR 7 reproduced across two independent swtpm sessions ($pcr7_b)"
+    else
+        bad "PCR 7 did not reproduce: enrolled against '$pcr7_pre', this boot measured '$pcr7_b'"
+    fi
+    pcr11_a="$(luks_serial_field "$ser" pcr11)"
+    pcr11_b="$(luks_serial_field "$serb" pcr11)"
+    if [[ -n "$pcr11_a" && -n "$pcr11_b" && "$pcr11_a" != "$pcr11_b" ]]; then
+        ok "PCR 11 differs between the two boots (different UKIs) while PCR 7 held — the binding really is to PCR 7, not to whatever this UKI measures"
+    fi
+    cp "$serb" "$WORK/serial-pcr7-b.log"
+
+    # ── boot C: the Secure Boot state changes (a dbx revocation update, same
+    #    technique luks-firmware-change uses for its control volume); PCR 7
+    #    must move and the slot must refuse, in a REAL guest, for the first
+    #    time in this harness ──────────────────────────────────────────────
+    local dbx="" cand
+    for cand in /usr/share/edk2/ovmf/DBXUpdate-*.x64.bin; do
+        [[ -f "$cand" ]] && { dbx="$cand"; break; }
+    done
+    if [[ -z "$dbx" ]]; then
+        cannot "no DBXUpdate-*.x64.bin in this lab image, so boot C's firmware-state change could not be applied"
+        return
+    fi
+    local varsc="$WORK/vars-pcr7-c.fd"
+    fresh_vars "$varsc"
+    virt-fw-vars --input "$varsc" --output "$varsc" --add-dbx "$dbx" >/dev/null 2>&1 \
+        || { bad "virt-fw-vars could not append the dbx update for boot C"; return; }
+
+    local hookdir_c="$WORK/luks-pcr7-hook-c"
+    rm -rf "$hookdir_c"; mkdir -p "$hookdir_c/var/lib/dracut/hooks/pre-mount"
+    install -m 0755 "$HERE/guest-luks-probe.sh" \
+        "$hookdir_c/var/lib/dracut/hooks/pre-mount/50-apex-luks-probe.sh"
+    local have_recovery=0
+    if [[ -s "$WORK/luks-pcr7-recovery.key" ]]; then
+        install -m 0400 "$WORK/luks-pcr7-recovery.key" "$hookdir_c/apex-bootlab-recovery-key"
+        have_recovery=1
+    fi
+    ( cd "$hookdir_c" && find . -print0 | cpio --null -o -H newc --quiet ) \
+        > "$WORK/luks-pcr7-hook-c.cpio"
+    "$HERE/apex-mkuki" --output "$WORK/uki-pcr7-c.efi" --from-root "$root" \
+        --cmdline "$CMDLINE_BASE apex.bootlab.entry=pcr7c apex.bootlab.luks=unlock rd.timeout=10 plymouth.enable=0 rd.plymouth=0" \
+        --deployment pcr7c --variant gaming \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --extra-initrd "$WORK/luks-pcr7-hook-c.cpio" >/dev/null \
+        || { bad "apex-mkuki failed for the PCR7 firmware-change UKI"; return; }
+
+    local diskc="$WORK/disk-pcr7-c.img" serc="$WORK/serial-pcr7-c.log"
+    "$HERE/apex-mkesp" --disk "$diskc" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "pcr7c:0:$WORK/uki-pcr7-c.efi" --default 'apex-pcr7c*' >/dev/null
+    rc=0
+    vm_boot --disk "$diskc" --vars "$varsc" --name pcr7-fw-change --serial "$serc" \
+            --tpm-state "$state" --extra-disk "$img" \
+            --mem 4096 --timeout 240 || rc=$?
+    assert_eq 0 "$rc" "pcr7 firmware-change boot: clean guest poweroff"
+    assert_serial_has "$serc" "APEX-BOOTLAB: tpm-unlock=REFUSED"
+    assert_serial_lacks "$serc" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    local pcr7_c
+    pcr7_c="$(luks_serial_field "$serc" pcr7)"
+    if luks_pcr_is_real "$pcr7_c" && [[ "$pcr7_c" != "$pcr7_b" ]]; then
+        ok "PCR 7 changed after the dbx update ($pcr7_b -> $pcr7_c), and the slot refused"
+    else
+        bad "PCR 7 is '$pcr7_c' after the dbx update (was '$pcr7_b') — the change did not register, so the refusal proves nothing"
+    fi
+    if (( have_recovery )); then
+        assert_serial_has "$serc" "APEX-BOOTLAB: recovery-unlock=SUCCESS"
+    else
+        cannot "no recovery key was captured from boot A, so the refusal arm's recovery path is untested this run"
+    fi
+    cp "$serc" "$WORK/serial-pcr7-c.log"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  L-003 — the SHIPPED enrolment path, /usr/libexec/apex-luks-enroll
 # ═════════════════════════════════════════════════════════════════════════════
 #
@@ -1842,8 +2157,11 @@ scenario_luks_s3() {
 #  What they do NOT prove, said here rather than left implied: that the slot
 #  unlocks at BOOT. `luks-tpm` boots a real guest for that, against the signed
 #  PCR 11 policy the lab builds a UKI for. On the PCR 7 binding the production
-#  script chooses today, the in-boot half is unproven in this harness — see
-#  ROADMAP/state/agents/luks-enroll.md.
+#  script chooses on a machine with no systemd-boot pivot, the in-boot half is
+#  now `luks-pcr7`, above this section — it runs the SHIPPED script live,
+#  inside the guest, because a value-bound `--tpm2-pcrs=7` can only be enrolled
+#  against a PCR 7 that boot actually measured. See ROADMAP/state/agents/
+#  luks-enroll.md and luks-enroll-2.md for how that gap was found and closed.
 #
 #  The unseal itself IS proven here, without device-mapper and without a guest:
 #  `systemd-cryptenroll --unlock-tpm2-device=…` only succeeds if the TPM2 slot
