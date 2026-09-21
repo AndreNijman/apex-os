@@ -94,6 +94,43 @@ gets past the kernel-rpms stage and the cross-tier contract RUN".
 6. Katana's runner is **online and idle**, `/var/lab` has 479 GiB free, and
    `/usr/bin/skopeo` exists there — all three checked before dispatching.
 
+## GATE PROOF — both directions, run 2026-09-21 (round 2 agent)
+
+Harness: `/var/lab-scratch/kernel-publish/mutate.sh` copies the four files the
+gate reads into a throwaway tree, applies ONE mutation, runs the gate.
+`m0` is the tree with a placeholder digest pinned — the state the branch will be
+in once the real digest lands.
+
+| mutant | what it does | gate |
+|---|---|---|
+| m0-pinned | digest default | **exit 0** "the kernel pin is sound" |
+| (tree as committed) | `localhost/apex-kernel:local` | exit 1 — the localhost branch |
+| m1-tag | `ghcr.io/andrenijman/apex-os:kernel` | exit 1 — "not a digest" |
+| m2-wrong-repo | a digest on `ghcr.io/attacker/apex-os` | exit 1 — "not a digest reference on …" |
+| m3-empty | `ARG APEX_KERNEL_IMAGE=` | exit 1 — "no default value" |
+| m4-arg-after-from | ARG moved below the first FROM | exit 1 — names both line numbers |
+| m5-no-local-override | `build-local.sh` drops `--build-arg` | exit 1 |
+| m6-copr-fallback | a `dnf5 install kernel-cachyos` added | exit 1 — "installs kernel-cachyos from a repository" |
+| m7-no-btf | the `btf_scx=usable` refusal removed | exit 1 |
+| m8-no-digestfile | `--digestfile` removed from kernel-build.yml | exit 1 |
+
+`build-image.yml`'s resolve step was proven the same way WITHOUT spending a CI
+run, by copying its body verbatim into
+`/var/lab-scratch/kernel-publish/resolve-probe.sh`:
+
+- today's `localhost` default → the regex finds no ref, prints the `::error::`
+  pair and the offending line, exit 1.
+- a well-formed but unpublished digest → all **five** attempts fail with
+  `manifest unknown`, the loop does not die early under `set -e` (probed
+  separately: `[ x -lt n ] && sleep` as the last command of a loop body does NOT
+  trip errexit), the final `::error::` fires, exit 1.
+- a digest that IS published → `resolved on attempt 1`, exit 0.
+
+Incidental finding while doing that: **`ghcr.io/andrenijman/apex-os` is PUBLIC.**
+`skopeo inspect --no-creds` resolves `:daily` fine. Several comments in
+`build-image.yml` say "the packages are private" and hand credentials around on
+that basis. Harmless, but the comments are stale.
+
 ## BOUNDS I AM HOLDING TO
 
 - The runner's isolation is not loosened. The push uses the job's own
