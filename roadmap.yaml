@@ -2556,13 +2556,43 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Automated already: screenshots, multi-monitor, lock and idle, scaling. 18 matrix rows needed real applications
-    on a real session; the step-by-step list is in state/agents/p1-038.md. || ROUND 39d 2026-09-22 - THE
-    APPLICATION PREREQUISITE IS GONE. Andre gave standing permission to use katana, so the applications the rows
-    need are installed there and evidence is ROADMAP/evidence/katana-p1038-apps-20260922.md: obs, libreoffice,
-    blender, wine64 and chromium-browser in the system extension (692 packages, 3.8 GB, backed up to
-    /var/lib/apex-user.raw.bak-20260922 and SHA-compared before the engine was run at all, because that file holds
-    Steam's 219 packages), plus Discord and VS Code as Flatpaks, with firefox, steam and gamescope already
+    ROUND 40 2026-09-22 - A LABWC SESSION CAME UP FROM GREETD ON THIS IMAGE AND TWO FLOORS WERE MEASURED; THREE
+    ROWS WERE LOST TO A SECOND AGENT ON THE SAME SEAT. Evidence ROADMAP/evidence/katana-final-qual-20260922.md
+    section 4. Session 68 on seat0/tty1, Type=wayland, with labwc 9632, quickshell -c /usr/share/apex-shell 9702,
+    Xwayland, xdg-desktop-portal-gtk and polkit-mate-authentication-agent-1 all registering; both outputs
+    enumerable in full through wlr-randr (HDMI-A-1 Lenovo R25f-30 1920x1080@239.96 at 1920,0 and eDP-1 AU
+    Optronics 0x978F 1920x1080@144.03 at 0,0, both transform normal scale 1.0, Adaptive Sync disabled on BOTH
+    which re-confirms VRR is permanently unmeasurable here). FLOORS, and a floor is not the row: row 11
+    LibreOffice PASSES its floor - soffice --writer maps libvcllo.so with libgtk-3.so.0.2420.32 and
+    libwayland-client.so.0.26.0, so the gtk3 VCL plugin on Wayland, though the qt6 half still needs a person; row
+    12 Blender PASSES its floor - it runs and maps libwayland-client, libX11 and libxcb, so the maps cannot decide
+    its GHOST backend and no backend line was printed. ROW 8 IS BLOCKED ON A BROKEN INSTALL, NOT ON THE
+    COMPOSITOR: wine64 exists but wineserver, wineboot and winecfg are ALL ABSENT on katana, and wine64 notepad
+    creates ~/.wine and then dies with 'wine: could not exec wineserver'. That corrects
+    katana-p1038-apps-20260922.md, which states that wineboot is present. ROWS 13, 14 and 15 (fractional scaling,
+    rotation, refresh-rate switching) ARE COULD-NOT-RUN because a SECOND ROADMAP AGENT was working on the same
+    physical seat: sudo's journal for 03:35-03:55 carries systemd-run --unit=qual-sess-hyprland
+    /usr/bin/start-hyprland three times, systemctl stop of the same five times, chvt 2 three times,
+    apex-greet-wallpaper four times, gsettings get org.gnome.desktop.interface toolkit-accessibility three times
+    and python3 /tmp/a11y-probe.py - a P2-003 Hyprland run. Its chvt 2 at 03:53:07 took seat0, an inactive
+    session's compositor has no outputs, and wlr-randr then correctly answered 'unknown output' and --json [].
+    NEITHER UNIT'S CARD MENTIONS THE OTHER; seat0 work needs serialising. This unit stood down rather than
+    competing: disarmed its own dead-man first because that timer restarts greetd, restored
+    /etc/greetd/config.toml from the backup WITHOUT restarting greetd (cmp identical, sha256 d7298f54..., 0
+    initial_session lines, /run/greetd.run present so the next restart starts the greeter), terminated ONLY its
+    own session 68, and chvt 2'd the seat back to the other agent's session 89. 0 failed units, game inactive,
+    sched_ext disabled, no leftover applications or timers. Rows 1-5 stay could-not-run (a portal picker is a
+    dialog somebody chooses in; Discord and Chromium can raise a keyring prompt on a screen nobody is at), rows
+    6-7 are NOT re-run because katana-image-qual-20260919.md section 6.3 already reached Steam Big Picture inside
+    gamescope on the RTX 3070 here, row 9 could-not-run on the keyring risk, row 10 JetBrains deliberately not
+    installed, row 16 VRR permanently unmeasurable, row 17 suspend refused on risk with nobody at the machine, row
+    18 hotplug needs a person. Automated already: screenshots, multi-monitor, lock and idle, scaling. 18 matrix
+    rows needed real applications on a real session; the step-by-step list is in state/agents/p1-038.md. || ROUND
+    39d 2026-09-22 - THE APPLICATION PREREQUISITE IS GONE. Andre gave standing permission to use katana, so the
+    applications the rows need are installed there and evidence is ROADMAP/evidence/katana-p1038-apps-20260922.md:
+    obs, libreoffice, blender, wine64 and chromium-browser in the system extension (692 packages, 3.8 GB, backed
+    up to /var/lib/apex-user.raw.bak-20260922 and SHA-compared before the engine was run at all, because that file
+    holds Steam's 219 packages), plus Discord and VS Code as Flatpaks, with firefox, steam and gamescope already
     present. JetBrains deliberately not installed - a proprietary toolbox for one row. THIS REMOVES THE
     PREREQUISITE AND NOT THE MEASUREMENT: no row is claimed to pass, the rows still need a session to run in, and
     the hardware-blocked ones are unchanged (VRR cannot be tested on katana at all because no connector exposes
@@ -4967,24 +4997,44 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    ROUND 40 2026-09-22 - THE SHELL PUBLISHES A REAL ACCESSIBILITY TREE. Evidence
-    ROADMAP/evidence/katana-final-qual-20260922.md section 3. No greetd teardown was needed and none was done: THE
-    GREETER IS ITSELF A LIVE QUICKSHELL SESSION (qs -p /usr/share/apex-greet/shell.qml, pid 1791, user greetd,
-    seat0, with at-spi2-registryd and the a11y bus already up). Walked with the repository's own
-    tests/atspi-walk.py, sha256-compared on the machine. SHIPPED STATE: ZERO applications on the a11y bus, not
-    one, because org.a11y.Status.IsEnabled is false and Qt's bridge never registers - the one-node reading on
-    record came from a harness that had accessibility on. Setting ScreenReaderEnabled=true, which is exactly what
-    Orca does on connecting: 1 application, 17 NODES, max depth 2, TWO FRAMES ONE PER OUTPUT (sway IPC confirms 2
-    active outputs, HDMI-A-1 1920x1080@239.96 and eDP-1 1920x1080@144.03, both scale 1.0), 11 named nodes and 12
-    nodes exposing org.a11y.atspi.Action with Press and SetFocus. The password field has an EMPTY name and keeps
-    its description, which is the Accessible.passwordEdit behaviour check-lockscreen-a11y.sh asserts on the QML
-    side and which had never been confirmed on the bus. quickshell-git-0.3.1^860.gitc6a5160 carries upstream
-    916a0dd. NOTE for whoever reads check-quickshell-a11y-cause.sh: that suite pins QT's behaviour and will NOT go
-    red from this - what changed is that quickshell no longer has the shape. run-lockscreen-atspi.sh section 5's
-    skipped read-back assertions are what should be revisited. A FIRST DRAFT OF THIS EVIDENCE CLAIMED THERE WAS NO
-    WAY TO TURN ACCESSIBILITY ON AND THAT WAS WRONG: sway-greet.conf binds exactly one key, bindsym --to-code
-    Mod4+Mod1+s exec /usr/libexec/apex-screen-reader toggle, the script is on the image and answers status=off
-    rc=1 as documented. Confirmed by reading the process environment rather than assuming: pid 1791 carries no
+    ROUND 40 ADDENDUM 2026-09-22 - THE REAL SHELL, NOT JUST THE GREETER. Evidence
+    ROADMAP/evidence/katana-final-qual-20260922.md section 4.1, measured in a real labwc session on katana.
+    run-lockscreen-atspi.sh records the shell as 'root | role=application | name=quickshell | ChildCount=0'.
+    Measured now with ScreenReaderEnabled set: THREE applications on the user session's a11y bus (quickshell,
+    polkit-mate-authentication-agent-1, xdg-desktop-portal-gtk) and quickshell publishes NINE nodes - the
+    application plus EIGHT frames - at max depth 1. So ChildCount moved from 0 to 8. WHAT DID NOT ARRIVE IS
+    ANYTHING INSIDE THEM: every frame is unnamed, childless and exposes no action, and re-walking at t+5s and
+    t+15s gives the same 11 total nodes, so it is not laziness. THEN THE SESSION WAS LOCKED, which is the surface
+    that suite is named for, and the lock screen IS REACHABLE: 17 nodes, two more frames one per output, each
+    carrying a text node with an EMPTY name and the description 'Type your password and press Enter to unlock.'
+    plus a label, both focusable with SetFocus. So the conclusion is sharper than 'P2-003 is fixed': THE MARKUP
+    THAT EXISTS NOW REACHES THE BUS AND THE BAR HAS NONE. The lock screen is marked up and appears; the bar's
+    eight frames are empty because nothing is attached to their contents. That is the concrete bounded next task
+    and it could not have been seen before this image. TWO TRAPS FOR WHOEVER MEASURES THIS NEXT. (1) ASK FOR THE
+    BUS ADDRESS, DO NOT GUESS THE PATH: in a user session it is /run/user/1000/at-spi/bus_0, not .../at-spi/bus,
+    and it does not exist until something calls org.a11y.Bus.GetAddress - this round stat'd the path first and got
+    a false 'no accessibility bus' on a healthy session. (2) loginctl unlock-session DOES NOT unlock the APEX lock
+    screen; LockedHint stayed yes. Arguably correct, since a lock any process on the bus can lift is not a lock,
+    but it is undocumented and it strands an unattended run. Recorded, not graded. A SECOND ROADMAP AGENT was
+    doing P2-003 Hyprland work on the same seat during this run; see the P1-038 entry. ROUND 40 2026-09-22 - THE
+    SHELL PUBLISHES A REAL ACCESSIBILITY TREE. Evidence ROADMAP/evidence/katana-final-qual-20260922.md section 3.
+    No greetd teardown was needed and none was done: THE GREETER IS ITSELF A LIVE QUICKSHELL SESSION (qs -p
+    /usr/share/apex-greet/shell.qml, pid 1791, user greetd, seat0, with at-spi2-registryd and the a11y bus already
+    up). Walked with the repository's own tests/atspi-walk.py, sha256-compared on the machine. SHIPPED STATE: ZERO
+    applications on the a11y bus, not one, because org.a11y.Status.IsEnabled is false and Qt's bridge never
+    registers - the one-node reading on record came from a harness that had accessibility on. Setting
+    ScreenReaderEnabled=true, which is exactly what Orca does on connecting: 1 application, 17 NODES, max depth 2,
+    TWO FRAMES ONE PER OUTPUT (sway IPC confirms 2 active outputs, HDMI-A-1 1920x1080@239.96 and eDP-1
+    1920x1080@144.03, both scale 1.0), 11 named nodes and 12 nodes exposing org.a11y.atspi.Action with Press and
+    SetFocus. The password field has an EMPTY name and keeps its description, which is the Accessible.passwordEdit
+    behaviour check-lockscreen-a11y.sh asserts on the QML side and which had never been confirmed on the bus.
+    quickshell-git-0.3.1^860.gitc6a5160 carries upstream 916a0dd. NOTE for whoever reads
+    check-quickshell-a11y-cause.sh: that suite pins QT's behaviour and will NOT go red from this - what changed is
+    that quickshell no longer has the shape. run-lockscreen-atspi.sh section 5's skipped read-back assertions are
+    what should be revisited. A FIRST DRAFT OF THIS EVIDENCE CLAIMED THERE WAS NO WAY TO TURN ACCESSIBILITY ON AND
+    THAT WAS WRONG: sway-greet.conf binds exactly one key, bindsym --to-code Mod4+Mod1+s exec
+    /usr/libexec/apex-screen-reader toggle, the script is on the image and answers status=off rc=1 as documented.
+    Confirmed by reading the process environment rather than assuming: pid 1791 carries no
     QT_LINUX_ACCESSIBILITY_ALWAYS_ON and no other QT_/A11Y/NO_AT_BRIDGE variable, 40 env keys, the only Qt one
     being QT_QPA_PLATFORMTHEME=qt6ct. THE TRAP FOR AUDITORS: anything that inspects the a11y bus without claiming
     to be a screen reader sees an empty bus and would wrongly report the shell as publishing nothing. Queue items

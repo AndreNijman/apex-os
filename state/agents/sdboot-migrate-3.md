@@ -87,11 +87,19 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
 
 ## DONE
 
-- **Committed and pushed `5cdaaa39`** on `task/sdboot-migrate-3`:
-  `ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md`, sections 0 and 1 —
-  the four rig defects and the whole of run A. Run B's sections are still to
-  be appended to the same file. NOT yet LANDABLE: the run-B half is missing
-  and the item-3 decision is not taken.
+- **Committed and pushed, `task/sdboot-migrate-3` now at `ebbbab54`:**
+  * `5cdaaa39` — evidence sections 0 and 1: the four rig defects and the whole
+    of run A (the 512 MiB refusal, the `no-rsync` discovery, the root-space
+    check's first real firing).
+  * `ebbbab54` — evidence sections 2 and 3: run B's clean precondition table
+    and the ENOSPC defect, **plus** the one-comment correction to
+    `ESP_SLACK_MIB`'s header in `files/system/libexec/apex-boot-migrate`
+    (it said "two deployments'" while the check does `per * 3`).
+  `tests/test-boot-migrate.sh` 83/83 on the pushed tip.
+  **NOT yet LANDABLE** — the migrated boot has not happened and the item-3
+  decision is not taken. The `count_staged_entry` splice is deliberately still
+  uncommitted in the worktree; a backup of the spliced file is at
+  `/var/lab-scratch/sdboot-migrate-3/engine-with-splice.bak`.
 
 - **RUN A IS MEASURED AND IT REFUSED.** Serial log
   `/var/lab-scratch/sdboot-migrate-2/apexmig-a-3.serial`, guest boot 2, real
@@ -171,9 +179,15 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
   ENOSPC, all of it before `/composefs` was touched at all. The `du` estimate is
   also an underestimate of what lands: the ostree repo is deduplicated, and the
   containers-storage extraction is not.
-  **The multiplier is wrong, not the idea.** Somebody has to re-derive it from a
-  measured peak, not from an argument, and `docs/update-cost.md` records the
-  argument that produced the 2x.
+  **The multiplier is wrong, not the idea.** The retry, on an 88 GiB root, is
+  measuring the true peak directly as host-image growth from the 13 GB the
+  install left: it passed 43 GB (where the 43 GiB guest died), then 51, 53,
+  **54 GB** and was still climbing — i.e. **more than 40 GB of growth against a
+  24 GiB prediction, already over 3x the repo**. Whoever fixes the check should
+  take the multiplier from this measured peak and update the
+  `tests/test-boot-migrate.sh` assertion that currently pins it ("the root check
+  sizes for two image copies"), plus the paragraph in `docs/update-cost.md`
+  that produced the 2x by argument.
 - **The containment held, which is the other half of the result.** After a
   hard failure in the middle of the migration: `phase: not started`, no
   `boot entry`, `BootOrder` byte-identical, `BootCurrent: 000A` still

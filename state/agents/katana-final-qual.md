@@ -128,14 +128,28 @@ machine. Say so; do not proxy them and grade them green.
 - On katana use `/var/lab/scratch`. On the L16 use `/var/lab-scratch`, never
   `/tmp` (it is a 15 GB tmpfs on 29 GB of RAM and filling it kills the machine).
 
+## LANDABLE a09bf1c6a27db53bcd720aac54b3700e93f5dd01
+
+`task/katana-final-qual`, 5 commits, **evidence only — no code**. Pushed.
+Sole file: `ROADMAP/evidence/katana-final-qual-20260922.md` (787 lines).
+`roadmap.yaml` is already updated for all six items (prepend, old text intact).
+
 ## NEXT
 
-- Write evidence section 4 (P1-038) into
-  `ROADMAP/evidence/katana-final-qual-20260922.md` from
-  `katana:/var/lab/scratch/katana-final-qual/item4{a,b}.log`, commit, push,
-  then `set-status.py`-prepend P1-038 and mark `## LANDABLE <sha>` here.
-  **Do NOT take katana's seat again this round** — another agent is running a
-  Hyprland qualification on tty2 (see FOUND).
+**Nothing on katana for this unit. All four items are measured and written.**
+What a stranger should do with this card:
+
+1. Land `task/katana-final-qual` (merge, evidence only).
+2. **Dispatch `gaming-scx-2`** with the three FOUND sched-ext items as its spec
+   and `katana:/var/lab/scratch/katana-final-qual/rowC1-timing.log` as the
+   measurement it must not re-derive. This unit qualifies; it does not patch,
+   and defects (a) and (b) need a design decision the timing informs but does
+   not settle: what should the `switch` predicate do when the requested name
+   equals the outgoing one, and which of the two `scx_state` reads survives.
+3. **Serialise seat0 work on katana.** Round 40 put two agents on one physical
+   seat (see FOUND).
+4. Correct `katana-p1038-apps-20260922.md`: it says `wineboot` is present and
+   it is not, and `wineserver` is missing too.
 
 ## DONE
 
@@ -148,6 +162,9 @@ machine. Say so; do not proxy them and grade them green.
   C are runnable for the first time in this program.
 
 ## IN PROGRESS
+
+- Nothing. Every measurement taken is written into the evidence file and every
+  status is in `roadmap.yaml`.
 
 ## FOUND
 
@@ -243,4 +260,8 @@ machine. Say so; do not proxy them and grade them green.
 
 ## BLOCKED ON
 
-- nothing
+- Nothing for this unit. Three things are blocked for the roadmap and each is
+  named above rather than left as a gap: the wine install on katana is broken
+  (row 8), katana's connectors expose no `vrr_capable` at all (row 16,
+  permanent), and rows that need a portal picker, a keyring-safe launch, a
+  cable or a person are could-not-run by design.

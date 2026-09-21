@@ -145,6 +145,23 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
   "started and stalled at line N", and prints a diagnosis that was false on the
   very run it fired on. It should say where the transcript stopped.
 
+- **OUT OF SCOPE BUT IT WILL BLOCK THE MERGE: `Installer safety and UI` is
+  red too, and a push to `roadmap/v2.2` never sees it.** Run 35647154151 on
+  this branch:
+
+  ```
+  installer-locale: 25 passed, 1 failed, 0 skipped
+  FAIL  …and the console keymap  — want [de] got []
+  ```
+
+  (`installer/test-installer-locale.sh`, the `set_locale_keymap_in` section:
+  an explicit layout reaches the X11 keyboard config but the console keymap
+  comes back empty.) It does not show on `roadmap/v2.2` pushes because the
+  `changes` selector diffs against the previous push and leaves `installer`
+  false — but a `pull_request` to `main` diffs against `main`, so **every job
+  runs and this one fails**. It needs its own unit before A.4 can be answered.
+  I did not touch it: the brief's bounds are the two suites.
+
 ## BLOCKED ON
 
 - nothing
