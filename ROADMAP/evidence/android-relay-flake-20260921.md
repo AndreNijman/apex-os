@@ -170,7 +170,44 @@ Local, and on CI.
 :core:test              526 tests, 0 failures   (the workflow's floor is 526)
 ```
 
-CI run **35586292689**, `workflow_dispatch` on `task/android-relay-flake`.
+CI run **35586292689**, `workflow_dispatch` on `task/android-relay-flake`,
+dispatched against `252d0d5b`; every commit after it changes only comments and
+markdown.
+
+```
+Select tests:            success
+Static validation:       success
+Rust validation:         success
+Android client:          success   <- the gate this unit is about
+Installer safety and UI: failure   <- not this branch, see below
+Package engine:          failure   <- not this branch, already red on the base
+```
+
+**Neither failure is this branch, and neither should muddy the signal.** The
+whole diff is `android/` plus one markdown file, and neither of those suites
+reads either path.
+
+- `Package engine` is **already failing on `roadmap/v2.2`**, at this branch's
+  own cut point `69253336` and again at `4e7aa3fa`. The failures are
+  `Run input-settings assertions` (the generated Hyprland input/keybind config)
+  and `Run terminal layout template assertions` (zellij tabs) — pre-existing,
+  and somebody else's unit.
+- `Installer safety and UI` fails one assertion in the locale/timezone suite:
+  `…and the console keymap — want [de] got []`. It is the
+  runner-is-a-second-environment class this repository has hit before, not a
+  regression here.
+
+Worth one line to the orchestrator, because it is the same disease this unit
+treats: **those two jobs are `skipped` on every `roadmap/v2.2` push**, because
+the path selector picks suites from the diff. They ran here only because
+`workflow_dispatch` diffs against `merge-base origin/main` and therefore
+selects everything. A suite that is skipped counts as success, which is how a
+red `Installer` job can sit unnoticed on the integration branch. That is a
+different unit, and it is worth one.
+
+Locally the fixed test was also run **25 consecutive times** (`--rerun`, fresh
+JVM each time): 25 pass, 0 fail. The deterministic probe above is the stronger
+evidence; this is only the absence of a residual tail.
 
 ## One trap for the next agent on this laptop
 
