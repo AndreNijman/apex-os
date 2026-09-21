@@ -152,6 +152,16 @@ the live deployment and the build log derives it from the files dracut wrote.
   154 MiB is met with **53 MiB to spare**, and its §5 conclusion ("512 MiB
   still strands it, both wait on `initramfs-slim`") is discharged.
 
+### One of those OKs has no margin, and a stranger should know which
+
+`OK root-space: 43 GiB free, 43 GiB needed` is a **zero-margin pass**. katana's
+root filesystem is 96% full — `df` says 907 G used of 954 G, 44 G available —
+so the check clears by less than a gigabyte and will start refusing the moment
+anything lands on that disk. The ESP check has 153 MiB of headroom; this one has
+effectively none. Not a defect of this unit or of the engine, but
+`sdboot-migrate-2`, which runs `stage` next on this machine, needs to know that
+"every check OK" was true at 03:50 on 2026-09-22 and is not a durable property.
+
 What this does **not** show: that migrating succeeds. Only that nothing refuses
 it. `stage`, `commit`, the trial boot and `confirm` on real hardware remain
 `sdboot-migrate-2`'s work, and deliberately nothing beyond `precheck` was run.
@@ -224,8 +234,12 @@ only, no image pulled (cached in `/var/lab-scratch/initramfs-slim-2/manifests/`)
   `Containerfile.apex` is **one** layer;
 * **14 of 14 final layer digests are distinct** — no APEX update has ever
   reused the previous apex-tier layer;
-* each of the 14 sits on **its own** `base-<same sha>`: no two apex builds have
-  ever shared a parent, so content dedup never had the opportunity;
+* **no two of them share a parent**, so content dedup never had the
+  opportunity: 12 of the 14 match a published `base-<their own sha>` layer for
+  layer, and the other two (`bd0c41ce`, `d12d3450`) match no published base tag
+  at all — not one matches somebody else's. (`9e9ab146` is also the older
+  12-layer design, before `--layers=false`, and is excluded from the
+  one-layer statements above.)
 * the 13 fat-era layers are not even the same compressed size as each other —
   358.1, 358.2, 359.0, 359.4, 359.5 MiB — so their *content* differed, not just
   their timestamps.
@@ -282,6 +296,42 @@ build that trusted `set -e` alone would ship a defective initramfs silently.
 The budget predicate is what actually inspects the artifact, which is the whole
 argument for having it.
 
+## 8. The dGPU gap in the boot proof is closed, on real hardware
+
+The predecessor's evidence lists, under what its boot proof does not cover:
+*"No dGPU. A guest has no NVIDIA card, so the cosmetic cost this branch accepts
+— firmware-resolution splash on a dGPU-attached panel, then a visible mode
+change at handover — is unmeasured."* katana has an RTX 3070 and an Intel iGPU
+and is booted on the shipped slim initramfs. Its own kernel log, read-only:
+
+```
+02:11:50  Console: colour dummy device 80x25
+02:11:51  simple-framebuffer simple-framebuffer.0: [drm] Registered 1 planes with drm panic
+02:11:51  [drm] Initialized simpledrm 1.0.0 for simple-framebuffer.0 on minor 0
+02:11:51  simple-framebuffer simple-framebuffer.0: [drm] fb0: simpledrmdrmfb frame buffer device
+02:11:51  fbcon: Deferring console take-over
+02:11:55  [drm] [nvidia-drm] [GPU ID 0x00000100] Loading driver
+02:11:55  fbcon: i915drmfb (fb0) is primary device
+02:11:57  [drm] Initialized nvidia-drm 0.0.0 for 0000:01:00.0 on minor 2
+02:11:57  nvidia 0000:01:00.0: [drm] fb1: nvidia-drmdrmfb frame buffer device
+02:11:59  fbcon: Taking over console
+02:11:59  Console: switching to colour frame buffer device 240x67
+```
+
+**simpledrm bound the framebuffer UEFI's GOP set up, one second into the boot,
+with zero KMS drivers and zero firmware in the initramfs, on a machine with a
+discrete NVIDIA GPU.** That is the same result the guest gave under a blacklist,
+now on the hardware class the design is actually for.
+
+The cost the branch accepted is measured rather than assumed too: **eight
+seconds** at firmware resolution — simpledrm at +1 s, real KMS at +5 s, console
+take-over at +9 s. It is the **iGPU** (`i915drmfb`) that claims `fb0` as primary,
+not nvidia, which lands on `fb1`.
+
+Incidentally confirms `Containerfile.core`'s FINDING 1: the live kernel command
+line carries `rd.driver.blacklist=nouveau modprobe.blacklist=nouveau`, and no
+nouveau line appears anywhere in the boot.
+
 ## What this file does not prove
 
 * **Cross-host reproducibility is still untested.** 5a is two builds on one
@@ -293,4 +343,12 @@ argument for having it.
 * **katana was read, never modified.** `bootc status`, `ls -l`, `du`, `df`,
   `lsblk`, `uname` only.
 * **No new VM boot** — the two-boot proof in the predecessor's evidence stands
-  and was not re-run against the image-built initramfs.
+  and was not re-run against the image-built initramfs. §8 is a reading of
+  katana's own boot, not a controlled experiment: nothing was blacklisted and
+  nothing was varied.
+* **`Containerfile.core`'s budget comment still quotes the lab figures** (98.5 /
+  114.6 MiB, `392 MiB`). Correcting it was written and then deliberately
+  reverted out of this branch: the `changes` job filters `core` on the *path*
+  `Containerfile.core`, so a comment-only edit costs a 1h8m core rebuild and
+  ~5 GB to every machine — exactly what `docs/update-cost.md` argues against.
+  Fold it into the next commit that already forces a core rebuild.
