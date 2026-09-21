@@ -691,5 +691,72 @@ else
     ok "nothing claims APEX_MIGRATE_ESP steers where bootc writes"
 fi
 
+# ═════════════════════════════════════════════════════════════════════════════
+sec "A half-finished composefs deployment is refused — behavioural, both ways"
+# `bootc install to-existing-root --composefs-backend` is not idempotent.
+# Measured 2026-09-22 on the real image: an attempt whose install succeeded and
+# whose join_state then failed left $SYSROOT/state and $SYSROOT/composefs
+# behind, and every later attempt died INSIDE bootc with
+#   "Setting up composefs boot: Writing composefs state:
+#    Failed to create symlink for /var: File exists (os error 17)"
+# while this engine's own message said "Re-running is safe".
+# ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md, section 5.
+#
+# Three fixtures, differing only in what is on the fake sysroot and what phase
+# is recorded, so the refusal cannot pass by being unconditional and cannot
+# pass by being deleted.
+explain_with_root() {   # $1 = fixture sysroot, $2 = fixture state dir
+    APEX_MIGRATE_STATE="$2" \
+    APEX_MIGRATE_ROOT="$1" \
+    APEX_MIGRATE_ESP="$TMP/esp-own" \
+    APEX_MIGRATE_FAKEROOT="$TMP/fakeroot" \
+    APEX_MIGRATE_STORE=ostreeContainer \
+        bash "$MIG" precheck --explain 2>&1
+}
+mkdir -p "$TMP/sr-clean" "$TMP/st-clean" \
+         "$TMP/sr-partial/composefs" "$TMP/sr-partial/state" "$TMP/st-partial" \
+         "$TMP/st-staged"
+echo staged > "$TMP/st-staged/phase"
+pi_clean="$(explain_with_root "$TMP/sr-clean"   "$TMP/st-clean"  || true)"
+pi_part="$( explain_with_root "$TMP/sr-partial" "$TMP/st-partial" || true)"
+pi_staged="$(explain_with_root "$TMP/sr-partial" "$TMP/st-staged" || true)"
+
+if grep -qE '^REFUSE +partial-install' <<<"$pi_part"; then
+    ok "a leftover composefs deployment with no phase recorded is REFUSED (partial-install)"
+else
+    bad "a half-finished composefs deployment is allowed through — the next run dies inside bootc with 'File exists'"
+fi
+# `^REFUSE +partial-install`, anchored, not a bare substring: the passing
+# verdict is named `no-partial-install` and a loose grep matches that too —
+# which it did, on the first run of this assertion.
+if grep -qE '^REFUSE +partial-install' <<<"$pi_clean"; then
+    bad "partial-install fires on a sysroot with no leftovers — it is unconditional, so it proves nothing"
+else
+    ok "a sysroot with no leftovers raises no partial-install verdict"
+fi
+# The phase guard is the part that makes this safe to ship: a STAGED migration
+# has a composefs deployment on purpose, and refusing there would break the
+# one case the predecessor built the state machine for — a power cut between
+# the stage and the commit.
+if grep -qE '^REFUSE +partial-install' <<<"$pi_staged"; then
+    bad "partial-install fires on a STAGED migration — it would refuse the machine its own completed stage"
+else
+    ok "partial-install ignores a staged migration's composefs deployment"
+fi
+# A refusal nobody can act on strands the machine, which is the whole complaint
+# against the message this replaces.
+if grep -A 20 'refuse "partial-install"' "$CODE" | grep -q 'by hand'; then
+    ok "the partial-install refusal says what to do about it"
+else
+    bad "partial-install states no remedy, so a user is stuck exactly as before"
+fi
+# And the message it replaces must be gone: "Re-running is safe" full stop was
+# false, and a reader who believed it re-ran forever.
+if grep -q 'machine still boots the way it did. Re-running is safe."' "$CODE"; then
+    bad "install-failed still promises 'Re-running is safe' without qualification — measured false"
+else
+    ok "install-failed no longer promises an unqualified 'Re-running is safe'"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
