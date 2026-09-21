@@ -103,7 +103,11 @@ def summarise(offsets):
 
 # ─────────────────────────────── fixture-a: where the mechanisms ran ────────
 print('=== fixture-a: the disk both mechanisms were run against ===')
-FA, FAP = '/o/gptmech-fa.raw', '/w/fixture-a.raw'
+MODE = os.environ.get('APEX_GPT_MODE', 'm2')
+FA  = os.environ.get('APEX_GPT_FA',  '/o/gptmech-fa.raw')
+MAP = os.environ.get('APEX_GPT_MAP', '/o/gptmech-fa-map.json')
+FAP = '/w/fixture-a.raw'
+print(f'(mechanism under test: {MODE.upper()}; image {FA})')
 size = os.path.getsize(FAP)
 check(os.path.getsize(FA) == size, 'fixture-a sizes match', f'{size}')
 
@@ -149,7 +153,7 @@ for pid, a, b in changed:
           f'{pid[:8]}… {a[1][:8]}… -> {b[1][:8]}…')
 
 # Where on the disk did bytes actually move?
-ext = written_extents('/o/gptmech-fa-map.json')
+ext = written_extents(MAP)
 note(f'guest-written extents on fixture-a: {len(ext)}, '
      f'{sum(b-a for a,b in ext)} bytes')
 P1, P2, P3 = (1048576, 18254659584), (18254659584, 19328401408), (19328401408, 37582012416)
@@ -193,6 +197,11 @@ check(len(d) + len(d2) > 0 and not in_p1 and not in_p3,
 
 # The relocation, stated as its own finding rather than buried in a byte list.
 moved = pre_pri['elba'] != post_pri['elba']
+check(moved == (MODE == 'm2'),
+      'the entry array moved if and only if SET_DRIVE_LAYOUT_EX was used',
+      f"mechanism {MODE.upper()}: array {'moved' if moved else 'stayed put'} "
+      f"(LBA {pre_pri['elba']} -> {post_pri['elba']}) — the raw "
+      f"read-modify-write edits in place, so it leaves exactly one table")
 note(f"PRIMARY ENTRY ARRAY: LBA {pre_pri['elba']} -> {post_pri['elba']} "
      f"({'MOVED by SET_DRIVE_LAYOUT_EX' if moved else 'not moved'})")
 # WHY it moved, which decides whether the hazard applies to real machines at
@@ -203,7 +212,7 @@ note(f"PRIMARY ENTRY ARRAY: LBA {pre_pri['elba']} -> {post_pri['elba']} "
 # land back where it started. This is a falsifiable rule, so it is checked.
 arr_sectors = post_pri['n'] * post_pri['esz'] // SEC
 note(f"FirstUsableLBA = {post_pri['first']}, array is {arr_sectors} sectors")
-check(post_pri['elba'] + arr_sectors == post_pri['first'],
+if moved: check(post_pri['elba'] + arr_sectors == post_pri['first'],
       'the relocated array ends exactly at FirstUsableLBA',
       f"{post_pri['elba']} + {arr_sectors} == {post_pri['first']} — so the "
       f"destination is a function of FirstUsableLBA, not a fixed LBA. On a "
