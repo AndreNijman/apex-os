@@ -100,9 +100,26 @@ else
 fi
 
 # ── 2. the default is a published digest, not a local name and not a tag ────
-default=$(sed -nE 's/^ARG[[:space:]]+APEX_KERNEL_IMAGE=(.*)$/\1/p' "$CF" | head -1)
+raw=$(sed -nE 's/^ARG[[:space:]]+APEX_KERNEL_IMAGE=(.*)$/\1/p' "$CF" | head -1)
 # Strip an optional quoting, which the Dockerfile parser also accepts.
-default=${default%\"}; default=${default#\"}
+default=${raw%\"}; default=${default#\"}
+
+# ...but THIS repository must not use it. build-image.yml's "Resolve the
+# kernel tier" step recovers the reference with
+#   sed -nE 's|^ARG APEX_KERNEL_IMAGE=(ghcr\.io/…@sha256:[0-9a-f]{64})$|\1|p'
+# which is anchored and allows no quotes. A quoted pin therefore builds
+# fine locally, passes a gate that strips quotes, and then dies in CI with
+# "is not a ghcr.io/andrenijman/apex-os@sha256:<64 hex> digest reference"
+# — a message that accuses the digest, which is correct, rather than the
+# quotes, which are the actual fault. Found by mutating a passing tree:
+# quoting the pin was the one mutant of ten that this gate let through.
+# The two parsers must agree, so the stricter one wins.
+if [ "$raw" != "$default" ]; then
+    err "$CF quotes its APEX_KERNEL_IMAGE default: $raw"
+    hint "The Dockerfile parser accepts that, but build-image.yml's resolve step"
+    hint "parses this line with an anchored regex that does not. Write it bare:"
+    hint "ARG APEX_KERNEL_IMAGE=$default"
+fi
 
 if [ -z "$default" ]; then
     err "$CF declares APEX_KERNEL_IMAGE with no default value. CI passes no"
