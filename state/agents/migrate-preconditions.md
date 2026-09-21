@@ -530,3 +530,42 @@ SUPERSEDED — it describes the thing `bc5c3822` forbids.
 (`SetFirmwareEnvironmentVariable`). ARCHITECTURE.md's "Into the firmware"
 section plans it; the denylist forbids it today. It is its own decision and was
 deliberately NOT folded into this one.
+
+## THIRD AND LAST PRODUCT DECISION — 2026-09-21. Nothing is left open.
+
+Landed as `3cff7466`. Full text at the end of `docs/apex-owns-its-esp.md`.
+
+**The tool writes UEFI boot variables itself**, mirroring EXACTLY what
+`files/system/libexec/apex-boot-migrate` already does on Linux. Do not invent a
+second design — there is one boot story across both platforms:
+
+1. Save `BootOrder` and the full entry list to a file FIRST. NVRAM has no backup
+   copy the way GPT does; the dump IS the backup.
+2. **Create-only**: write `BootXXXX`, do NOT touch `BootOrder`. After this step
+   the machine still boots exactly what it booted before.
+3. **One commit point: a single write of `BootNext`.** It is consumed by the
+   firmware before it launches anything, so a machine that fails to boot APEX
+   comes back to Windows BY ITSELF with nothing to undo. That property is the
+   only reason this is safe enough to do at all.
+4. `BootOrder` written only after a VERIFIED successful first boot, Windows Boot
+   Manager still in it, behind.
+5. Never delete, reorder or rewrite another OS's entry. **Additive only.**
+
+Windows' `{fwbootmgr}` BCD store was considered and REJECTED: it trades a
+dependency on Windows' ESP for a dependency on Windows' BCD, which a repair or
+feature update can rewrite. Do not reopen this without new evidence.
+
+**Variable allowlist — the gate sharpens, it does not weaken.**
+`SetFirmwareEnvironmentVariable` comes off the name denylist and is replaced by
+an allowlist of variable NAMES the source may contain: `BootOrder`, `BootNext`,
+`BootCurrent`, `Boot####`. Never `PK`, `KEK`, `db`, `dbx`, `SetupMode`,
+`OsIndications`, or anything vendor-namespaced. Plus a refusal of any name built
+at runtime rather than declared as a constant. Same shape and same reasoning as
+the existing IOCTL allowlist: the API takes an arbitrary name string, so a
+denylist of one API name proves nothing about what it is pointed at. Fails both
+ways.
+
+In the lab, firmware variables are a GUEST's. Never this machine's.
+
+**All three Windows product decisions (ESP, GPT writes, firmware writes) are now
+settled. There is nothing left waiting on Andre.**

@@ -1,6 +1,6 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-21T21:51+0800",
+ "updated": "2026-09-21T22:03+0800",
  "_round": "Round 39 STARTED 2026-09-21T17:08+0800 by the autoresume timer, after the round-38 session hit a usage limit at 14:59 (autoresume.log: 'resume session ended (exit 1)'). All six round-38 agents were dead \u2014 `ps` showed no subagent claude process \u2014 and NONE was messaged. Six fresh agents dispatched with the same slugs, each carrying a ROUND 39 CONTINUATION section appended to its card. CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 is set in this session's env (checked, not assumed), so agents are not SIGTERMed 600s after the final response; the hard bound is `timeout 4h`, which ends this session at about 21:08 AWST.",
  "_landed_this_round": [
   {
@@ -337,6 +337,17 @@
     "firmware writes": "STILL OPEN, still Andre's, deliberately not folded in"
    },
    "gate": "section 0 sharpens, never weakens; must still fail both ways. One binary or two is the implementation's call."
+  },
+  "firmware_write_policy_2026_09_21": {
+   "at": "2026-09-21T22:03+0800",
+   "by": "Claude, after Andre said 'complete everything' without reserving this one",
+   "status": "SETTLED",
+   "question": "May the Windows tool write UEFI firmware variables, or must the user run bcdedit?",
+   "answer": "THE TOOL WRITES THEM, additively only, mirroring apex-boot-migrate's proven Linux discipline exactly: save BootOrder + entry list first; create-only BootXXXX without touching BootOrder; ONE commit point, a single BootNext write, which the firmware consumes so a failed boot returns to Windows by itself with nothing to undo; BootOrder only after a verified successful first boot, Windows Boot Manager still in it behind; never delete/reorder/rewrite another OS's entry.",
+   "landed": "3cff7466",
+   "rejected": "Windows' {fwbootmgr} BCD store -- tempting because Windows builds the variable and handles vendor quirks, but it trades a dependency on Windows' ESP for a dependency on Windows' BCD, which a repair/reset/feature update can rewrite. The whole direction of this work is to stop depending on Windows.",
+   "gate": "SetFirmwareEnvironmentVariable comes OFF the name denylist, replaced by an ALLOWLIST of variable names (BootOrder, BootNext, BootCurrent, Boot####; never PK/KEK/db/dbx/SetupMode/OsIndications/vendor) plus a refusal of runtime-built names. Same shape as the IOCTL allowlist and for the same reason. Fails both ways.",
+   "why_not_the_L16_mistake": "Those incidents were bootc DELETING and recreating Boot0000 to point at an ESP inside a disk image being built -- a destructive rewrite of the live entry from a tool that had left its container. Every clause here is aimed at that: additive only, never delete, one-shot self-reverting commit, prior state on disk first."
   }
  },
  "_incident_two_orchestrators": "At 03:06 the apex-roadmap-resume.timer started its OWN `claude -p` orchestrator (pid 3849364), correctly, because the 3am usage limit had killed every one of this session's agents and it saw nothing alive. It landed four branches at 03:11 (p1-061, p2-b, p1-053c, p2-a) \u2014 good work, verified green by all three gates and kept. It was about to dispatch six agents when this session came back. TWO ORCHESTRATORS IS ACTIVELY HARMFUL: both dispatch to a ceiling of six, both write this file, and both use the same worktree paths, so two agents in /var/tmp/apex-work/wt-p2-f would corrupt each other. The duplicate was terminated before it dispatched (autoresume.log: 'resume session ended (exit 143)'), so nothing was lost. ROADMAP/state/AUTORESUME was LEFT IN PLACE deliberately \u2014 the mechanism is correct and is the only rescue if this session dies; it skips while agents are alive, which is why it only fired during the window when all of them were dead. The lesson is to re-dispatch promptly after a limit so the next timer check sees live agents and skips.",
@@ -601,5 +612,8 @@
   "why": "FIRST build-image run on roadmap/v2.2 since the akmods fix landed (259d8976, 17:28). Triggered by the interactive session. The previous roadmap/v2.2 run (35552604603, 01:58) died in 4m36s on the ARG-before-FROM defect; the one before that never got past akmods. This run is the decisive test of whether the image is unblocked -- verified before triggering that Containerfile.core:644 carries `akmods_rc=0` and files/scripts/check-run-recovery-reachable is present on the tip.",
   "do_not": "Do not trigger a second concurrent build-image run on roadmap/v2.2. Check this run first; ~50 min is the historical duration.",
   "expect": "If it still goes red in the akmods stage, the difference now is that the failure LOG is reachable -- .last.log, *.failed.log and /var/log/akmods/akmods.log are dumped. That was the whole point of 259d8976: every previous failure was silent."
- }
+ },
+ "_all_windows_decisions_settled": "ESP ownership (bc5c3822), GPT entry writes (b137f03f), firmware writes (3cff7466). NOTHING is waiting on Andre for the Windows unit.",
+ "_stale_branch_finding": "Seven apex-os task branches (p0-003-cred-broker, p0-004-policy-split, p0-005-permission-modes, p1-002-cloudflare, p1-020-agent-graph-daemon, p1-030-shell-integrations, p2-005-device-maturity) report as carrying unlanded work by BOTH `git cherry` AND `merge-base --is-ancestor`, and ALL SEVEN ARE STALE. Early rounds landed by cherry-pick so patch-ids differ forever and the old tip is not an ancestor. Verified on p0-004: the tip carries the six-dimension work AND policy.rs is 79,815 bytes against the branch's 45,691 -- landed, then built on heavily. p2-005's diff against the tip is empty outright. DO NOT re-investigate; the test that works is to grep the tip for the commit's distinctive feature and compare file sizes. Branches dated after ~2026-09-08 land by merge and a real unlanded report from those is probably real.",
+ "_android_install_pending_status": "STILL PENDING at 2026-09-21T22:03+0800 -- `adb devices` empty and no Pixel on USB. Needs Andre to plug the phone in; nothing else blocks it."
 }
