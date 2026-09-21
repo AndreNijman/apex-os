@@ -266,11 +266,38 @@ if ($phase -eq 2) {
         Emit "raw-enc-sector0: $($raw.hex)"
     } else { Emit "raw-enc: FAILED $($raw.error)" }
 
-    Emit "--- SUSPEND: manage-bde -protectors -disable $L -RebootCount 1 ---"
-    Emit ((& cmd /c "manage-bde -protectors -disable $L -RebootCount 1 2>&1") | Out-String -Width 200)
-    Emit "--- manage-bde -status (suspended) ---"
+    Emit "--- SUSPEND, attempt 1: the OS-volume form, on a DATA volume ---"
+    Emit "    (kept deliberately: the error it returns is itself the measurement)"
+    $suspend1 = (& cmd /c "manage-bde -protectors -disable $L -RebootCount 1 2>&1") | Out-String -Width 200
+    Emit $suspend1
+    if ($suspend1 -match '0x80310028') {
+        Emit "suspend-rebootcount-on-data-volume: REJECTED 0x80310028 (not the operating system drive) -- -RebootCount is an OS-volume-only switch"
+    }
+
+    Emit "--- SUSPEND, attempt 2: the data-volume form, no -RebootCount ---"
+    Emit ((& cmd /c "manage-bde -protectors -disable $L 2>&1") | Out-String -Width 200)
+
+    # Did it actually take? Ask the number, not the English. ProtectionStatus
+    # 1 = on, 0 = off/suspended; it is what the detector will branch on.
+    $psNow = $null
+    try {
+        $inst = Get-WmiObject -Namespace 'root\cimv2\security\MicrosoftVolumeEncryption' `
+                              -Class Win32_EncryptableVolume -ErrorAction Stop |
+                Where-Object { $_.DriveLetter -eq $L }
+        if ($inst) { $psNow = (@($inst)[0]).GetProtectionStatus().ProtectionStatus }
+    } catch { Emit "suspend-verify: could not read ProtectionStatus -- $($_.Exception.Message)" }
+    Emit "suspend-protectionstatus-after: [$psNow]"
+    if ($psNow -eq 0) {
+        Emit "SUSPEND-EFFECTIVE: YES -- ProtectionStatus went 1 -> 0 while the volume stays encrypted"
+        $tag = 'encrypted, protection SUSPENDED (verified: ProtectionStatus 0)'
+    } else {
+        Emit "SUSPEND-EFFECTIVE: NO -- ProtectionStatus is still [$psNow]. The dump below is NOT a suspended volume; do not read it as one."
+        $tag = 'encrypted, suspend attempted and NOT effective (ProtectionStatus still 1)'
+    }
+
+    Emit "--- manage-bde -status (after the suspend attempts) ---"
     Emit ((& cmd /c "manage-bde -status $L 2>&1") | Out-String -Width 200)
-    Dump-Wmi 'encrypted, protection suspended'
+    Dump-Wmi $tag
     $raw = Get-RawHex -Disk $part.DiskNumber -Offset $part.Offset -Count 512
     if ($raw.ok) { Emit "raw-susp-sector0: $($raw.hex)" } else { Emit "raw-susp: FAILED $($raw.error)" }
 
