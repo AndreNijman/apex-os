@@ -99,6 +99,13 @@ ENTRY_LABEL='APEX-OS'
 # that cannot hold this cannot hold an update, and a machine that discovers
 # that halfway through is the failure this whole script exists to avoid.
 ESP_SLACK_MIB=48
+# Slack on top of the doubled repo estimate for the ROOT filesystem check
+# below: filesystem overhead (btrfs metadata, ext4 reserved blocks), and the
+# staging FAT image cmd_stage also truncates on $SYSROOT (64M, noise next to
+# this). Generous on purpose — root-too-small is a refusal, not a failure
+# mid-copy, and the cost of guessing low is the thing this check exists to
+# avoid.
+ROOT_SLACK_MIB=512
 
 log()    { printf 'apex-boot-migrate: %s\n' "$*" >&2; }
 refuse() { printf 'apex-boot-migrate: REFUSED [%s]\n' "$1" >&2; shift
@@ -300,6 +307,49 @@ cmd_precheck() {
                 "migrate — docs/boot-v2.md, 'Secure Boot: a decision, not a" \
                 "measurement'. Until then this machine stays on GRUB, working."
         fi
+    fi
+
+    # Root filesystem space. This is a separate machine from the ESP check
+    # below, deliberately: the ESP holds only the loader and the UKIs, but
+    # `cmd_stage` does two things that need room on THIS filesystem instead —
+    # `bootc image copy-to-storage` drops a temporary copy of the booted
+    # image into /var/lib/containers, and the install itself writes a
+    # second, PERMANENT copy into /composefs (docs/update-cost.md, "Also
+    # changed: the one update that migrates the boot path" — about 15 GB on
+    # APEX, and nothing deletes the ostree deployment it sits next to,
+    # deliberately, because that is the recovery path). Both copies can exist
+    # at once, right up until the temporary one is removed at the end of
+    # stage, so the peak extra usage is roughly TWO image sizes, not one.
+    #
+    # `du` on the ostree repo is the estimate, not a download or a dry-run
+    # copy: it is the object store `bootc image copy-to-storage` would
+    # re-materialise, already on disk, so it costs seconds and no network —
+    # this check cannot itself run the machine out of the room it is
+    # checking for. It can overcount if the repo is carrying more history
+    # than one deployment's worth; that makes the refusal more conservative,
+    # never less.
+    local root_need root_avail repo_kib
+    repo_kib="$(du -sk "$SYSROOT/ostree/repo" 2>/dev/null | awk '{print $1}')"
+    case "$repo_kib" in ''|*[!0-9]*) repo_kib=0 ;; esac
+    [ "$repo_kib" -gt 0 ] || refuse "no-repo-size" \
+        "Could not measure the size of $SYSROOT/ostree/repo, so how much room" \
+        "the migration needs on the root filesystem is unknown." \
+        "Refusing rather than guessing on a copy this size."
+    root_need=$(( repo_kib * 2 + ROOT_SLACK_MIB * 1024 ))     # KiB
+    root_avail="$(df -Pk "$SYSROOT" | awk 'NR==2{print $4}')"
+    if [ "$root_avail" -lt "$root_need" ]; then
+        refuse "root-too-small" \
+            "The root filesystem has $(( root_avail / 1024 )) MiB free and this" \
+            "migration needs about $(( root_need / 1024 )) MiB — a temporary" \
+            "copy of the booted image in podman's storage, and a second," \
+            "permanent copy the install writes into /composefs, can both" \
+            "exist on this filesystem at once, before the temporary one is" \
+            "removed." \
+            "Nothing in the migration deletes the ostree deployment it is" \
+            "replacing, so this machine keeps paying for its current size" \
+            "AND needs room for the new copy on top of it." \
+            "docs/update-cost.md, 'Also changed: the one update that" \
+            "migrates the boot path'."
     fi
 
     with_esp || refuse "no-esp" \
