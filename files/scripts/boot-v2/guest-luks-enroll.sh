@@ -67,6 +67,39 @@ if [ -x /usr/libexec/apex-luks-enroll ]; then
 else
     say "have-apex-luks-enroll=NO"
 fi
+
+# `-x` above inspected the FILE. It says nothing about whether the kernel can
+# RUN it, and the difference is not academic: execve() returns ENOENT for a
+# missing SHEBANG INTERPRETER, so a perfectly present script reports
+# "No such file or directory" about a file that is plainly there. That exact
+# pair — `have-apex-luks-enroll=yes` next to `enroll-exit=127` — is what this
+# scenario's first real boot produced on 2026-09-21: the shipped script starts
+# `#!/usr/bin/env bash`, and the generic APEX initramfs carries `bash` but not
+# `env`. So name the interpreter and say whether it is there. Pure shell, no
+# sed/cut: a probe for missing commands must not itself need one.
+read -r apex_shebang < /usr/libexec/apex-luks-enroll 2>/dev/null || apex_shebang=""
+case "$apex_shebang" in
+    '#!'*)
+        apex_interp="${apex_shebang#\#!}"
+        while [ "${apex_interp# }" != "$apex_interp" ]; do apex_interp="${apex_interp# }"; done
+        apex_interp_arg="${apex_interp#* }"
+        apex_interp="${apex_interp%% *}"
+        [ "$apex_interp_arg" = "$apex_interp" ] && apex_interp_arg=""
+        if [ -x "$apex_interp" ]; then
+            say "enroll-interpreter=$apex_interp present"
+        else
+            say "enroll-interpreter=$apex_interp MISSING (execve fails ENOENT)"
+        fi
+        if [ -n "$apex_interp_arg" ]; then
+            if command -v "$apex_interp_arg" >/dev/null 2>&1; then
+                say "enroll-interpreter-arg=$apex_interp_arg present"
+            else
+                say "enroll-interpreter-arg=$apex_interp_arg MISSING"
+            fi
+        fi
+        ;;
+    *) say "enroll-interpreter=<no shebang read>" ;;
+esac
 [ -c /dev/tpmrm0 ] && say "tpm-device=present" || say "tpm-device=absent"
 
 # PCR 7 BEFORE enrolling, off sysfs, no tpm2-tools needed. This is what the
@@ -137,6 +170,26 @@ if [ -r "$enroll_out" ]; then
 fi
 if [ -r "$enroll_err" ]; then
     while IFS= read -r line; do say "enroll-err: $line"; done < "$enroll_err"
+fi
+
+# ── enrolling a TPM slot must never become the ONLY way in ──────────────────
+#
+# L-003 is "TPM auto-unlock by default, WHERE SAFE", and no reading of "safe"
+# survives an enrolment that quietly cost the user their passphrase. Prove it
+# in THIS boot, against the volume that was just enrolled, rather than
+# inferring it from a slot count: a header can list three key slots while one
+# of them no longer opens anything. `--test-passphrase` verifies a key against
+# the header and needs no device-mapper node, so it runs safely here in the
+# initramfs with the real root still unmounted.
+if command -v cryptsetup >/dev/null 2>&1; then
+    if cryptsetup open --test-passphrase --key-file /apex-bootlab-passphrase \
+           /dev/vdb >/dev/null 2>&1; then
+        say "passphrase-after-enrol=SUCCESS"
+    else
+        say "passphrase-after-enrol=FAILED"
+    fi
+else
+    say "passphrase-after-enrol=<no cryptsetup in this initramfs>"
 fi
 
 if [ -r /run/apex-bootlab-recovery-key ]; then
