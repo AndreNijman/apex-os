@@ -130,10 +130,20 @@ machine. Say so; do not proxy them and grade them green.
 
 ## NEXT
 
-- Read the four evidence files named above, then re-check `apex game status` and
-  `loginctl list-sessions` on katana, then start item 1.
+- Item 1 Row A: on katana, with nothing attached, run `sudo apex game start`
+  then read `/sys/kernel/sched_ext/state`, `enable_seq`, `root/ops` and
+  `apex game status | grep '^scx_'`. Record root/ops VERBATIM. Then `apex game
+  stop` (Row B). Lab dir `/var/lab/scratch/katana-final-qual` on katana.
 
 ## DONE
+
+- Orientation. Worktree `/var/tmp/apex-work/wt-katana-final-qual`, branch
+  `task/katana-final-qual` cut from `origin/roadmap/v2.2` @ `f3b1b3d4`.
+- Read all four evidence files + `docs/gaming-and-sessions.md` 6.6/6.8 +
+  `gaming-scx-20260920.md`. Machine re-checked 03:23 AWST: `apex game status
+  active=false`, only greetd on seat0/tty1, kernel 7.2.6-...apex1, uptime 1h11.
+  **`scx_btf : ok` on the booted image**, so run-book Row 0 = ok and Rows A and
+  C are runnable for the first time in this program.
 
 ## IN PROGRESS
 

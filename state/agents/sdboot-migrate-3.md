@@ -2,82 +2,74 @@
 
 items: none directly (design doc: docs/boot-v2.md, "Migrating a machine that already exists")
 repo: apex-os
-worktree: /var/tmp/apex-work/wt-sdboot-migrate-3 (create it)
-branch: task/sdboot-migrate-3, cut from origin/roadmap/v2.2
-lab: /var/lab-scratch/sdboot-migrate-2 (REUSE it — see below)
+worktree: /var/tmp/apex-work/wt-sdboot-migrate-3 (created, branch task/sdboot-migrate-3 @ f3b1b3d4)
+branch: task/sdboot-migrate-3, cut from origin/roadmap/v2.2 @ f3b1b3d4
+lab: /var/lab-scratch/sdboot-migrate-2 (REUSED as /work — the 48 GB image lives
+     there; new artefacts of THIS unit are suffixed `-3` inside it so provenance
+     is unambiguous. sdboot-migrate-2 is dead, so there is no live collision.)
 
 Dispatched round 40, 2026-09-22 ~03:30 AWST, by the autoresume orchestrator.
 
 ## WHAT LANDED AND WHAT DID NOT
 
 `task/sdboot-migrate-2` **landed** (tip `234cc4dc`, "refuse a migration the root
-filesystem cannot fit") — the root-filesystem free-space precheck is done and on
-`roadmap/v2.2`. Do not redo it. Read `sdboot-migrate-2.md` and
-`sdboot-migrate.md` for the history; `sdboot-migrate` corrected `sdboot-image`'s
-"no in-place converter, must reinstall" conclusion, and that conclusion is WRONG
-— do not revive it.
-
-**The lab run never finished.** `/var/lab-scratch/sdboot-migrate-2/` was last
-written 2026-09-21 10:46 and contains the rig but no results: `apexmig-a.img`
-(48 GB), `ctl.img`, `boot-mig.sh`, `lab-run.sh`, `lab-run.service`,
-`to-filesystem-lab`, and `sdboot-migrate-2-rename.patch`. There are **no serial
-logs**. The agent died before the guests booted. The rig is intact — reuse it
-rather than rebuilding 48 GB.
+filesystem cannot fit"). Do not redo it. `sdboot-migrate` corrected
+`sdboot-image`'s "no in-place converter, must reinstall" conclusion, and that
+conclusion is WRONG — do not revive it.
 
 ## WHAT IS LEFT, from sdboot-migrate-2's own NEXT
 
-1. **Run the APEX/btrfs lab.** Two guests: a 512 MiB ESP that must be REFUSED,
-   and a 2 GiB ESP that must migrate and boot. Both serial logs are the evidence.
-2. **Write `ROADMAP/evidence/sdboot-migrate-2-20260921-lab.md`** — same shape as
-   the predecessor's `sdboot-migrate-20260921-lab.md`, which is already on the
-   tip and is your template.
-3. **Decide the `+3-0` entry rename.** `sdboot-migrate-2-rename.patch` holds the
-   uncommitted `cmd_stage` change. It lands ONLY if the 2 GiB guest's migrated
-   boot shows `systemd-bless-boot` actually stripping the suffix and a clean
-   `journalctl`. If it does not, say so and drop the patch — a rename that is not
-   observed to be blessed is worse than no rename.
-
-## A COLLISION THAT IS ON RECORD — read before you edit
-
-`files/system/libexec/apex-boot-migrate` is touched by several units.
-`wt-sdboot-xbootldr` ran its own `bootc install` lab work against the same file
-concurrently in round 39; `task/migrate-preconditions` landed `f3280072` in that
-file too (the `esp-is-windows` refusal, 83/0). **Check for line-level overlap
-before editing, and expect a real three-way merge rather than independent
-cherry-picks.** Your branch is cut from a tip that already has all of it.
-
-## CONSTRAINTS I AM UNDER
-
-- Headless only. Never a window on Andre's desktop. This is L16 work.
-- `/var/lab-scratch`, never `/tmp` — it is a 15 GB tmpfs on 29 GB of RAM and
-  filling it kills the machine. Stdout-only Bash failures here are memory, not disk.
-- **Read `free -h` before every guest boot.** Another KVM lab unit
-  (`initramfs-slim-2`) may be running concurrently; a previous round saw
-  available memory fall to 1.3 GiB under two labs. If it is tight, wait rather
-  than start a guest.
-- qemu/podman in the FOREGROUND, or under `systemd-run --user`. Never `nohup &`
-  — a backgrounded podman is SIGTERMed, truncating the run while exiting 0.
-- Rootless VM traps already paid for, do not rediscover: uid 0's
-  `qemu:///session` is the SYSTEM socket, and virtiofsd's namespace sandbox
-  cannot nest inside a rootless podman userns.
-- Never push `main`, never open a PR, never land on `roadmap/v2.2`. Push your
-  branch and mark `## LANDABLE <sha>` on this card.
-- Never touch the HOST's boot path or NVRAM. A `bootc install` in a loopback lab
-  has rewritten host NVRAM TWICE in this program — the efivars tmpfs is INERT
-  because bootc leaves the container. `--generic-image` prevents it and
-  nvram-guard detects it. Use both.
+1. Run the APEX/btrfs lab: 512 MiB ESP guest must be REFUSED; 2 GiB ESP guest
+   must migrate and boot. Both serial logs are the evidence.
+2. Write `ROADMAP/evidence/sdboot-migrate-2-20260921-lab.md`.
+3. Decide the `+3-0` entry rename — lands ONLY if the 2 GiB guest's migrated
+   boot shows `systemd-bless-boot` actually stripping the suffix.
 
 ## NEXT
 
-- Read `/var/lab-scratch/sdboot-migrate-2/lab-run.sh` and `boot-mig.sh`, confirm
-  the rig still matches the current `apex-boot-migrate`, then launch the 512 MiB
-  refusal guest under `systemd-run --user`.
+- Copy `files/system/units/apex-boot-migrate-confirm.service` from the worktree
+  into /var/lab-scratch/sdboot-migrate-2/, write `act-migrate-3.sh` (act-migrate.sh
+  + the new `precheck --explain` verb), `./setctl.sh act-migrate-3.sh
+  /var/tmp/apex-work/wt-sdboot-migrate-3/files/system/libexec/apex-boot-migrate`,
+  then boot run A (512 MiB refusal) with:
+  `sudo /var/tmp/apex-work/wt-sdboot-migrate-3/tests/lab/nvram-guard --label apexmig-a --
+   podman run --rm --device /dev/kvm -v /var/lab-scratch/sdboot-migrate-2:/work
+   localhost/apex-bootlab -c '/work/boot-mig.sh /work/apexmig-a.img
+   /work/apexmig-a-3.serial 1800 --ctl /work/ctl.img'`
+  under `systemd-run --user` (never nohup).
 
 ## DONE
 
+- Orientation. Worktree `/var/tmp/apex-work/wt-sdboot-migrate-3` created on
+  branch `task/sdboot-migrate-3` from `origin/roadmap/v2.2` @ `f3b1b3d4`.
+
 ## IN PROGRESS
 
+- nothing committed yet.
+
 ## FOUND
+
+- **The rig is genuinely intact and run A's disk is already installed.**
+  `/var/lab-scratch/sdboot-migrate-2/apexmig-a.img` is a COMPLETED `bootc
+  install to-disk`: 45 GiB disk, `p1 BIOS-BOOT 1 MiB / p2 EFI-SYSTEM 512 MiB
+  ef00 / p3 root 44.5 GiB 8304`, 13 GB actually allocated. So APEX's own
+  default ESP on a GRUB/ostree `to-disk` install **is 512 MiB** — the question
+  sdboot-migrate-2 left open in act-unit-2.sh's last line is already answered by
+  the partition table it wrote. `localhost/apex-sdmig:v1` (11.5 GB) and
+  `localhost/apex-bootlab` (1.39 GB, the qemu container — the HOST has no
+  qemu-system-x86_64 at all) both still exist.
+- **The rename patch no longer applies.** `sdboot-migrate-2-rename.patch` was
+  cut against `234cc4dc`; `files/system/libexec/apex-boot-migrate` has moved
+  **+528/-33 lines** since, from `task/migrate-preconditions` and
+  `task/sdboot-xbootldr` landing (new `find_xbootldr`, `esp_candidates`,
+  `bitlocker_volumes`, `windows_loader_on_esp`, `cmd_explain`, `verdict`,
+  `APEX_MIGRATE_FAKEROOT`/`MOUNTDIR`). `git apply --check` fails at line 106.
+  The splice has to be redone by hand at the same two anchors, which both still
+  exist: the `ROOT_SLACK_MIB` constant block, and immediately after the
+  `grub-boot-wiped` check / before `echo staged > "$STATE/phase"` in `cmd_stage`
+  (now ~line 1082).
+- Memory at start: 29 Gi total, 24 Gi available, no other qemu/podman/bootc
+  process running (`ps aux` checked). `/var` has 254 GB free.
 
 ## BLOCKED ON
 

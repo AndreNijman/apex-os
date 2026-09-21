@@ -7878,10 +7878,24 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    ROUND 39b (2026-09-21) - partial, UNCHANGED, and the signed-PCR-11 branch is no longer forward-looking in the
-    lab. Branch task/luks-boot @ 1fb98233, PUSHED, LANDABLE, gates green (test-boot-v2 150/0, shellcheck coverage
-    204 discovered 0 newly failing, doc-verbs 0 undocumented-and-undeclared, containerfile-assertions rc=0,
-    suites-run-in-ci 105/98/7/0). NEW SCENARIO luks-pcr7-signed (ef0fa0ce, boot C in 4029965f), STAGED, one file
+    ROUND 40 (2026-09-22, autoresume orchestrator) - the 'run ALONE rather than with the STAGED set' caveat this
+    record has carried since round 39b IS NOW SPENT, and the result was read off katana rather than predicted.
+    luks-staged-run1.service ran ALL NINE staged scenarios in a single $WORK for the first time and finished
+    EXIT_CODE=0 at 2026-09-21T18:34:31+08:00 (721-line log at katana /var/lab/scratch/luks-boot/run-staged1.log,
+    LOADAVG-END 6.59). So there is no cross-scenario interference, which is the thing running them together was
+    meant to find out. TWO could-not-run rows, both honest and NEITHER about APEX: (1) a machine that never had a
+    TPM is not modelled by the scenario - it cannot enrol a systemd-tpm2 token at all, so it never reaches either
+    boot, and that is a question for the installer and apex-luks-enroll rather than for this scenario; (2) the S3
+    row reported no s3 field because the LAB FIRMWARE died on the resume path - ASSERT MemoryServices.c(203) in
+    OVMF - although qemu itself did observe the guest suspend and resume (suspended/woken/resumed all true,
+    woke_at 42.713), so the guest's silence is an edk2 defect and not an APEX one. L-003 STAYS partial and the
+    reasons are unchanged: 'by default' means the installer path, and no test has yet run the real
+    apex-luks-enroll through apex-install (the suites use a recovery-only stand-in); no installer-produced disk
+    has been TPM-auto-unlocked; and it is swtpm rather than silicon. ROUND 39b (2026-09-21) - partial, UNCHANGED,
+    and the signed-PCR-11 branch is no longer forward-looking in the lab. Branch task/luks-boot @ 1fb98233,
+    PUSHED, LANDABLE, gates green (test-boot-v2 150/0, shellcheck coverage 204 discovered 0 newly failing,
+    doc-verbs 0 undocumented-and-undeclared, containerfile-assertions rc=0, suites-run-in-ci 105/98/7/0). NEW
+    SCENARIO luks-pcr7-signed (ef0fa0ce, boot C in 4029965f), STAGED, one file
     (files/scripts/boot-v2/run-scenarios). It is luks-pcr7 with exactly one variable changed: boot A's UKI is
     built WITH --pcr-key/--pcr-pubkey. RAN GREEN FIRST TIME on katana under systemd-run --user: run1 21 passed 0
     failed EXIT_CODE=0 (boots A+B), run2 28 passed 0 failed EXIT_CODE=0 (boots A+B+C), logs
