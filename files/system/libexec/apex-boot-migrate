@@ -645,8 +645,10 @@ cmd_precheck() {
                 "the disk holding the root filesystem, and there is no flag on" \
                 "'install to-existing-root' that overrides it — so this machine" \
                 "needs an ESP of its OWN, earlier in that order, before it can" \
-                "migrate. That partition is APEX's to create; it is not something" \
-                "to do by hand." \
+                "migrate. That partition is APEX's to create, not something to do" \
+                "by hand — and APEX does NOT create it yet. That work is tracked;" \
+                "until it lands there is nothing here for you to do, and nothing" \
+                "you can type that will clear this." \
                 "Until then this machine keeps booting the way it does now, and" \
                 "Windows' boot files are not touched."
         fi
