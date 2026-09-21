@@ -14,6 +14,62 @@ Rough totals if you wanted all of it: **9 decisions you can make at a keyboard**
 for an hour**, and **12 that are blocked on things neither of us can supply**
 and are honestly finished as far as they can go.
 
+
+---
+
+## ✅ DONE 2026-09-21 — items 1, 2, 3 and 5 are closed, plus the phone
+
+**1. avahi — DONE.** Unmasked, enabled and running on the L16. Verified it does
+the thing it was blocking: one `avahi-browse` found a **FUJIFILM ApeosPrint
+C325/328 dw** on your LAN over `_ipp`, `_ipps` and `_pdl-datastream`. P2-005's
+printer and scanner rows are measurable on the L16 now.
+
+**2. katana's TPM — DONE, and it needed nobody at the machine.** Its PPI reports
+`5  4: User not required`, so the documented `echo 5 > ppi/request` + reboot path
+applied. Checked the risk before acting: **no LUKS on katana and no BitLocker
+anywhere** (every partition read for the `-FVE-FS-` signature), so it could not
+cost access to Windows data. Proven by the owner primary key's name changing,
+not by the reboot — `ppi/response` says Success before any reboot and means
+nothing. **You re-enrol Windows Hello on katana next time you boot Windows.**
+L-001's headline gap is closed; evidence in
+`ROADMAP/evidence/katana-tpm-clear-20260921.md`.
+
+**3. The Qt bug — NOT filed, deliberately, and this is the right outcome.**
+Upstream already fixed it. quickshell #1006 was closed **completed** on 28 Aug by
+commit `916a0dd`, "launch: avoid creating multiple QApplications" — which is the
+second remedy this program's own analysis named. #1144 reported the same symptom
+and the maintainer closed it as a **duplicate on 21 Sep**, hours before I looked.
+A third report would have been a duplicate of a fixed bug, under your name.
+
+The symptom persists on the L16 for a different reason: `v0.3.1` was tagged
+21 Aug, the fix landed 28 Aug seven commits later, so **no release carries it**,
+and your L16 boots a 5 Sep image with `quickshell-0.3.1`. `Containerfile.core`
+on `roadmap/v2.2` already installs `quickshell-git` for exactly this reason. So
+**P2-003 unblocks on an image update**, not on a bug report.
+
+What is genuinely unfiled is the Qt defect underneath — any app that destroys a
+`QCoreApplication` before creating a `QGuiApplication` permanently loses QtQuick
+accessibility. That needs bugreports.qt.io and there is no Qt credential on this
+machine. A ready-to-paste report, in your voice with no AI attribution and run
+through the stop-slop checker, is at **`~/qt-bug-draft.md`**.
+
+**5. The firewall scope questions — DECIDED on measurement.** LLMNR is no longer
+accepted at all: `systemd-resolved` ships `LLMNR=resolve`, which asks and never
+answers, so the old rule admitted packets to a service that discards them, on
+every interface, for no function. mDNS is now scoped to its multicast groups
+(`224.0.0.251`, `ff02::fb`), so discovery is untouched while a unicast probe from
+an arbitrary host is refused. The live suite reads 34 passed / 0 failed with
+three new cases asserting exactly that.
+
+**The Pixel 10a — DONE.** `apex-remote-1.0.0.apk`, versionCode 1573, installed
+and byte-identical on the device. **I caught something first:** the APK sitting
+in scratch from 20 Sep was signed `CN=THROWAWAY DO NOT SHIP`. Installing that on
+your daily would have meant no real release could ever update it, which is the
+exact failure the signing key exists to prevent. Rebuilt from the current tip and
+verified the signer is `9b2418f3…`, matching the published fingerprint.
+
+**Still yours, and unchanged:** back up `/var/home/andre/apex-android-signing`.
+
 ---
 
 ## A. Decisions — no hardware, minutes each
