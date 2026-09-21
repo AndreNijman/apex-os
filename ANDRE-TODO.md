@@ -121,10 +121,18 @@ compositor". **`libwacom` finds no tablet on either machine.** This isn't a
 wait-for-katana thing — somebody has to physically plug a tablet in.
 **You supply:** any Wacom-class tablet, once, for ten minutes.
 
-### 7. A second physical monitor — helps **P0-001**, **P1-038**, **P1-040**
-Multi-monitor and per-output scaling can't be simulated honestly. Several rows
-across three tasks need two real displays at different densities.
-**You supply:** a second monitor, ideally a different DPI to the laptop panel.
+### 7. ~~A second physical monitor~~ — **WRONG, you already have one**
+Corrected 2026-09-22. katana has **two connected displays at genuinely
+different densities**: `eDP-1` 1920x1080 on 38×22 cm (~128 DPI) and
+`HDMI-A-1` 1920x1080 on 54×30 cm (~90 DPI), the external one on the discrete
+card. Same resolution, 1.4× apart in density — which is exactly P1-040's case
+and why it was easy to miss.
+
+So **P0-001's multi-monitor row, P1-038's display rows and
+P1-040-per-output-scaling need nothing from you.** They need the new image and
+a session, both of which I can arrange. Evidence:
+`ROADMAP/evidence/katana-displays-20260922.md`.
+**You supply:** nothing.
 
 ### 8. A VRR-capable display — one row of **P1-038**
 Measured on katana: **no connector there exposes `vrr_capable` at all**, so VRR
