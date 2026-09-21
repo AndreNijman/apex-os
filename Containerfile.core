@@ -89,8 +89,27 @@
 # correct value with `--build-arg APEX_KERNEL_IMAGE=…`, because the override
 # has nothing to attach to before this point in the file. This is the first
 # time `core` was ever built against the real kernel tier, so the defect had
-# never been exercised. See ROADMAP/evidence/kernel-build-20260921.md.
-ARG APEX_KERNEL_IMAGE=localhost/apex-kernel:local
+# never been exercised. See ROADMAP/evidence/kernel-publish-20260921.md.
+#
+# The default below is a DIGEST of a published kernel image, not the floating
+# `:kernel` tag and not a localhost name. `core` refuses a kernel whose
+# manifest does not say `btf_scx=usable`, and that refusal is worth much less
+# if the image behind the name can be repointed after the check was made. A
+# localhost default is worse still: it exists only on a machine somebody has
+# hand-built a kernel on, CI is not one, and naming it is what stopped every
+# image build in the project (run 35552604603 on roadmap/v2.2). There is
+# deliberately NO fallback to the COPR kernel — one would silently reintroduce
+# the sched-ext BTF defect this tier exists to fix, invisibly, until a
+# scheduler failed to load on a user's machine months later.
+#
+# Building the kernel locally is unaffected: build-local.sh overrides this with
+# `--build-arg APEX_KERNEL_IMAGE=localhost/apex-kernel:local`. To refresh the
+# pin, re-run kernel-build.yml and paste the `ARG APEX_KERNEL_IMAGE=…` line its
+# run summary prints. The value below is from run 35557283953, immutable tag
+# `kernel-7.2.6-cachyos1.apex1.fc43.x86_64-544143e`. Exactly one space and no
+# quotes: build-image.yml's resolve step parses this line with a stricter
+# regex than tests/check-kernel-image-pin.sh, which enforces the rest.
+ARG APEX_KERNEL_IMAGE=ghcr.io/andrenijman/apex-os@sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6
 
 FROM quay.io/fedora/fedora-bootc:43 AS toolbuilder
 # /root is special in bootc images (symlink → /var/roothome), so cargo's default
