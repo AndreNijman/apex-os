@@ -130,14 +130,22 @@ machine. Say so; do not proxy them and grade them green.
 
 ## NEXT
 
-- Item 4 (P1-038): decide and execute. The 18 rows are listed in
-  `ROADMAP/state/agents/p1-038.md`. Most need a labwc USER session with
-  applications running, which means the greetd `initial_session` dance
-  (`/var/tmp/apex-work/scratch-katana-image-qual/greetd-set.sh` + the
-  `qual-greetd-restore` dead-man timer, both still on katana and documented in
-  `ROADMAP/state/agents/katana-image-qual.md`). Then write evidence section 4
-  and run `set-status.py` (PREPEND, never replace) for P1-043, P2-003, P2-005,
-  P2-006, P2-007, P1-038.
+- Item 4 (P1-038), bounded: arm `qual-greetd-restore` FIRST, then
+  `sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-set.sh <session-id>
+  "" <tag>` + `sudo systemctl restart greetd` (the script clears
+  `/run/greetd.run`; never restart greetd by hand instead). Measure FLOORS only
+  for rows 8 (wine64 XWayland window vs the bar exclusive zone), 11
+  (libreoffice VCL plugin from /proc/pid/maps), 12 (blender toplevel), 13/14/15
+  (wlr-randr scale/transform/mode, bar survives, quickshell pid unchanged).
+  **And the headline bonus: walk ANDRE'S a11y bus** at
+  `/run/user/1000/at-spi/bus` the same way section 3 walked the greeter's —
+  `run-lockscreen-atspi.sh`'s one-node reading was the SHELL, not the greeter.
+  Then `sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-restore.sh`
+  and assert: `cmp` config, 0 timers, greetd active, seat0 ActiveSession.
+  Rows 1-7, 9, 10, 16, 17, 18 = could-not-run with named reasons (portal
+  pickers and share targets need a person; Discord/VS Code/Chromium can raise
+  keyring prompts with nobody at the machine; JetBrains not installed; VRR has
+  no `vrr_capable` connector; hotplug and suspend need a person).
 
 ## DONE
 

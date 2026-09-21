@@ -8,12 +8,18 @@ lab: /var/lab-scratch/initramfs-slim-2
 
 Dispatched round 40, 2026-09-22 ~03:30 AWST, by the autoresume orchestrator.
 
-## LANDABLE — `f3a00c7d`
+## LANDABLE — `0ef2f6f1`
 
-Four commits, all pushed to `origin/task/initramfs-slim-2`, cut from
-`origin/roadmap/v2.2` @ `f3b1b3d4`. **Nothing in this branch changes a build
-step** — every change is a comment, a doc or an evidence file, so the landing
-risk is nil and no image build is needed to validate it. Green:
+Five commits, all pushed to `origin/task/initramfs-slim-2`, cut from
+`origin/roadmap/v2.2` @ `f3b1b3d4`. Merges clean (`merge-tree`: 0 conflicts).
+
+**Nothing in this branch changes a build step and nothing in it costs a
+rebuild.** Every change is a comment, a doc or an evidence file. It touches
+`Containerfile.apex`, whose tier rebuilds every run anyway, and deliberately
+does **not** touch `Containerfile.core`: the `changes` job filters `core` on
+the *path* (`build-image.yml:285`), so a comment-only edit there would trigger
+the 1h8m core job and ~5 GB to the fleet. That correction is written up as a
+known gap in the evidence instead. Green:
 `check-containerfile-assertions`, `check-doc-verbs`, `check-no-conflict-markers`,
 `check-suites-run-in-ci`, `test-containerfile-order` (24/24),
 `test-apex-initramfs-budget` (35/35).
@@ -25,6 +31,9 @@ risk is nil and no image build is needed to validate it. Green:
   figures marked superseded where a reader would have trusted them.
 * `f3a00c7d` `docs/boot-v2.md` + `migrate-preconditions`' evidence — katana
   passes precheck; three other units' open items closed.
+* `0ef2f6f1` — simpledrm measured on a dGPU machine (closing the
+  predecessor's "no dGPU" gap), the zero-margin `root-space` warning, a
+  precision fix in §5c, and the `Containerfile.core` hunk reverted for cost.
 
 **The headline, for whoever writes the roadmap entry:** `esp-too-small` is
 retired. katana's `apex-boot-migrate precheck` answers "This machine can
@@ -32,7 +41,7 @@ migrate", rc=0, every check OK — the first APEX machine that does.
 
 ## NEXT
 
-- Nothing blocking; the branch is LANDABLE at `f3a00c7d`. If the orchestrator
+- Nothing blocking; the branch is LANDABLE at `0ef2f6f1`. If the orchestrator
   wants more from this unit, the one experiment left worth running is the
   `--timestamp` lever (§5b of the evidence): add `--timestamp` to the three
   `podman build` calls in `.github/workflows/build-image.yml`, run ONE image
@@ -43,9 +52,9 @@ migrate", rc=0, every check OK — the first APEX machine that does.
 
 ## DONE
 
-- **`97850c6d` pushed to `origin/task/initramfs-slim-2`** —
-  `ROADMAP/evidence/initramfs-slim2-20260922.md`, 239 lines, the six
-  measurements below. Branch cut from `origin/roadmap/v2.2` @ `f3b1b3d4`.
+- Five commits pushed; see the LANDABLE block above for the per-commit list.
+- `ROADMAP/evidence/initramfs-slim2-20260922.md` is the unit's evidence, 8
+  sections, everything below plus the dGPU console measurement.
 
 - **Item 5 (cross-BUILD reproducibility) is ANSWERED and it splits in two.**
   All measurements below are on this machine today, recorded in
@@ -137,6 +146,30 @@ matches the build log's `3 x 100.9 + 48` to the rounding.
 * `migrate-preconditions` — katana's 154 MiB per-deployment ceiling is met with
   53 MiB to spare (100.9), and its `esp-too-small` line is now stale.
 
+### TWO WARNINGS FOR WHOEVER GOES NEXT
+
+* **`root-space` is a zero-margin pass.** The same precheck says `OK
+  root-space: 43 GiB free, 43 GiB needed`. katana's root is **96% full** (907 G
+  of 954 G). It clears by under a gigabyte and will start refusing the moment
+  anything lands there. `sdboot-migrate-2` runs `stage` on this machine next.
+* **`Containerfile.core`'s budget comment still quotes the lab figures** (98.5
+  / 114.6 MiB / 392 MiB). The fix was written and then reverted: the `changes`
+  job filters `core` on the path, so a comment-only edit costs a 1h8m core job
+  and ~5 GB to every machine. Fold it into the next commit that already forces
+  a core rebuild.
+
+### THE dGPU GAP IN THE BOOT PROOF IS CLOSED
+
+katana, RTX 3070 + Intel iGPU, booted on the shipped slim initramfs. Its own
+kernel log: `[drm] Initialized simpledrm 1.0.0 for simple-framebuffer.0` and
+`fb0: simpledrmdrmfb` at **+1 s**, `i915drmfb (fb0) is primary` at +5 s,
+`nvidia … fb1` at +7 s, `Console: switching to colour frame buffer device
+240x67` at +9 s. simpledrm bound the GOP framebuffer with zero KMS drivers and
+zero firmware in the initramfs, on hardware with a discrete GPU — the case the
+predecessor's evidence listed as unmeasured. The accepted cosmetic cost is
+**eight seconds** at firmware resolution, and it is the **iGPU** that takes
+`fb0`, not nvidia.
+
 ### ITEM 5 — the answer, measured
 
 **Content: reproducible. Layer: not.** Two independent
@@ -174,8 +207,10 @@ manifests cached in `/var/lab-scratch/initramfs-slim-2/manifests/`):
   `Containerfile.apex` is ONE layer**;
 * **14 of 14 have a distinct final layer digest** — no APEX update has ever
   reused the previous one;
-* every one of the 14 sits on **its own** `base-<same sha>`, so no two apex
-  builds have ever shared a parent — dedup never had the chance;
+* **no two share a parent** — 12 of the 14 match a published `base-<their own
+  sha>` layer for layer and the other two match no published base tag at all,
+  so dedup never had the chance (`9e9ab146` predates `--layers=false` and is
+  excluded from the one-layer statements);
 * the fat-era layers are not even the same SIZE as each other (358.1, 358.2,
   359.0, 359.4, 359.5 MiB), so the content differed, not just the timestamps.
 

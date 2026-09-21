@@ -2745,78 +2745,105 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    GPU parity across NVIDIA/AMD/Intel. LANDED on apex-os roadmap/v2.2 2026-09-08 (678bb5d -> e67fab9): 9b68be3
-    AMD and Intel had no GPU handling at all and a hybrid laptop's lab reported the wrong card, 454ae3a an
-    installed nvidia-smi is not an NVIDIA GPU and exit 9 is an answer, fbe59ef every apply persisted so a session
-    that died mid-countdown came back on a layout nobody confirmed. CORRECTS THE ROADMAP: docs/p3-progress.md says
-    closing the GPU row 'needs hardware nobody here has' and that is wrong - all three vendors are reachable and
-    were measured 2026-09-07, the L16 being AMD only (card1, 0x1002, Radeon 780M, gpu_busy_percent present) and
-    katana carrying both an Intel Alder Lake-P Iris Xe as boot_vga=1 and an NVIDIA RTX 3070 Mobile that nvidia-smi
-    answers for. THE DEFECT THIS CLOSED, and the correction to the program's own record: FINDINGS-round5 item 1
-    said 'apex ai status --json returns prose, not JSON'. Measured into separate files while fixing it, that
-    headline is WRONG - stdout was 803 bytes of valid JSON, stderr 50 bytes of prose, exit 0, and jq worked all
-    along; what fails is a caller that merges the streams with 2>&1, which is what the suite line did. The CAUSE
-    the finding named was right: PATH presence stood in for hardware, so an nvidia-smi that exists and exits 9
-    (driver not loaded, no card) read as a working NVIDIA GPU. Three states now, not two: no binary / present but
-    no usable driver / working. FINDINGS-round5.md carries an AMENDED section saying so, kept rather than
-    rewritten because the wrong headline is the lesson - a finding written from a suite's failure line inherits
-    that line's assumptions. Verified on the landed tip: test-apex-ai 44 passed / 0 failed, which was 43/1 on
-    1ab542c, so the last of round 5's two red suites is green; cargo test --locked --workspace --no-fail-fast 1993
-    passed / 0 failed across 30 binaries; gpu_parity 17 -> 24 tests; test-apex-display 70/0; test-apex-gaming
-    114/0; run-clippy clean in the container; no conflict markers. Mutation pairs MB1-MB4 all 23/1. REMAINDER, one
-    verification assertion: 'SmiOutcome::Ready is what a real loaded NVIDIA driver produces' needs the NVIDIA
-    machine while it is NOT gaming - katana ran steam/proton throughout the session, so it stayed read-only.
-    Functionally covered: 9b68be3 already measured nvidia-smi answering there, and 454ae3a does not touch that
-    path's parsing. || 2026-09-19, katana (RTX 3070 Mobile + Intel Iris Xe; card1=i915->eDP-1,
-    card2=nvidia->HDMI-A-1). DESKTOP IS CORRECT: all three desktop sessions -- labwc, Hyprland, niri -- drive the
-    external monitor through the RTX 3070 at 239.964 Hz, and nvidia-smi lists each compositor as a graphics
-    client. The wrong-card failure does not happen on the desktop. GAMING MODE IS NOT: gamescope selects the Intel
-    iGPU, opens card1, and therefore sees only eDP-1, so the monitor is never lit. The fix is measured rather than
-    guessed -- `--prefer-vk-device 10de:249d` selects NVIDIA, opens card2 and lights HDMI-A-1 at 240 Hz -- and
-    WLR_DRM_DEVICES is IGNORED, because gamescope's DRM backend is its own. Separately `--rt` is requested and
-    never granted: gamescope wants CAP_SYS_NICE, not RLIMIT_RTPRIO. Unit gaming-gpu owns both, plus the harder
-    question of choosing the GPU on an arbitrary hybrid laptop without a hardcoded device id. Full detail at
-    ROADMAP/evidence/katana-qualification-20260919.md sections 5.1, 6.1 and 6.2. ROUND gaming-gpu 2026-09-19 on
-    apex-os task/gaming-gpu (f666f5c1 -> 4fc0ab06, five commits, PUSHED NOT MERGED; merge-tree clean against the
-    newer tip b0e34371). Still partial: every fix below is verified headlessly and the hardware rows are a written
-    checklist at docs/gaming-and-sessions.md section 6, not a claim. 6.1 FIXED: the rule is the OUTPUT DECIDES THE
-    CARD, not "prefer the discrete GPU" -- a discrete GPU with no connector attached is a session with no screen.
-    External connectors (anything but eDP/LVDS/DSI) beat the built-in panel, then by name for determinism, and the
-    chosen connector s card supplies --prefer-vk-device vendor:device read from sysfs. No special case for a
-    single-GPU or an all-AMD machine and nothing about 10de:249d hardcoded; it lives in apexd-core
-    gpu::choose_display, surfaced as `apex gaming --gamescope-device-args`, consumed by apex-gaming-session. Every
-    path that cannot answer records a problem the session prints, because a silent fallback to the iGPU IS the
-    defect; it is deliberately not fatal, since refusing to start would regress every single-GPU machine. 6.2
-    FIXED by stopping the false claim: gamescope gates on CAP_SYS_NICE and never reads RLIMIT_RTPRIO, so --rt is
-    passed only when the capability is reachable (effective set, or a file capability on the binary) and otherwise
-    the log says which one is missing. NOTHING GRANTS IT, on purpose and recorded in three places: setcap cannot
-    write a read-only composefs /usr with gamescope arriving through a sysext overlay, and pam_cap would put
-    capabilities in the PERMITTED set of every process in the session including Steam s bwrap, which refuses to
-    start with any -- which is the unattributed 6.3 message. So granting the capability would trade frame pacing
-    for a Steam that does not start. 7.2 FIXED, found in review rather than in the evidence: the VRR probe globbed
-    /sys/class/drm/card*-*/vrr_capable, and DRM connector names are unique per CARD not per machine, so a hybrid
-    laptop s card1-HDMI-A-1 (iGPU, wired to nothing) sorts before card2-HDMI-A-1 and the probe answered about the
-    wrong screen -- 6.1 s mistake in different clothes. VRR moved into choose_display beside the connector it is a
-    question about, and the four outcomes (1 / 0 / this output publishes nothing while others do / nothing on this
-    machine publishes it) are now distinct, which is what 7.2 asked for. Section 6 status block FIXED as a defect
-    of the RENDERER, not of the one row: every filesystem-read row distinguishes EACCES from NotFound, reads as
-    `unknown` rather than `not measured`, carries permission_denied in the JSON, and one footer names every
-    refused row plus `sudo apex gaming`. Verified without katana: gpu_parity.rs 39 cases (15 new) over sysfs
-    fixtures including a namesake connector and a refused status; tests/test-apex-gaming-session.sh is NEW, 31
-    cases, RUNS the session with a fake gamescope recording its argv and the real apex binary through APEX_ROOT,
-    wired into pr-validation.yml and the hard ShellCheck gate; test-apex-gaming.sh 131 (17 new). Five mutations
-    each caught: 4 rows, 3 rows, 1, 2 and 2. cargo test and clippy -D warnings clean. Smoke-run on the real L16
-    /sys with no fixture: 1002:1900 matches lspci -nn exactly and `sudoers rule: unknown ... run sudo apex gaming`
-    is the section 6 defect answering on a live machine. Katana was NOT touched -- held by the TPM agent all
-    round, which also dual-boots Windows off a second NVMe. Agent card ROADMAP/state/agents/gaming-gpu.md. ||
-    2026-09-19 ROUND 33, unit katana-image-qual, on the rebased machine (apex-7f647470, sha256:be3bdd0c). THE
-    REMAINDER THIS ITEM NAMED IS CLOSED. 'SmiOutcome::Ready is what a real loaded NVIDIA driver produces' was held
-    open because katana ran steam and proton throughout the round-31 session. Measured with the machine idle, no
-    gamescope and no steam running and apex game status false: apex ai status --json returns 864 bytes on stdout,
-    0 bytes on stderr, valid JSON, rc 0, carrying accel [cuda, vulkan, cpu] and devices [{index 0, NVIDIA GeForce
-    RTX 3070 Laptop GPU, total_mib 8192, used_mib 41, budget_mib 7639}] -- live VRAM off a loaded driver, not a
-    PATH probe. nvidia-smi itself answers 'NVIDIA GeForce RTX 3070 Laptop GPU, 580.178.04', rc 0. The stream split
-    the old FINDINGS-round5 headline was really about is clean on this build. AND THE GAMING MODE DEFECT THIS ITEM
+    ROUND 40 2026-09-22 - GAMING MODE HAS NOW LOADED A SCHED-EXT SCHEDULER, THROUGH APEXD, ON HARDWARE. Evidence
+    ROADMAP/evidence/katana-final-qual-20260922.md section 1, on katana booted on apex-44c9a5cb with kernel
+    7.2.6-cachyos1.apex1. Run-book docs/gaming-and-sessions.md 6.8 Row 0 (scx_btf=ok), Row A, Row B, Row C1 and
+    Row C2 all run. Row A PASS: sudo apex game start took sched_ext/state disabled->enabled, enable_seq 1->2,
+    switch_all 0->1, root/ops appeared, the apex-game cgroup cpuset read 0-11, apex game status reported
+    scx_state=loaded, and ZERO occurrences of 'no scx scheduler running' in the apexd journal - so the verb was
+    read off the kernel, which is the whole of the 5c fix, and the refusal that appeared on every boot of three
+    earlier images is gone. Row B PASS: stop returned state=disabled, nr_rejected=0, root/ kobject gone, cgroup
+    gone, and the journal line 'sched-ext after exit: sched_ext/state is disabled'. Row C2 PASS and it is the
+    first execution ANYWHERE of the single named-verb retry: a scheduler attached by running the binary directly
+    makes the kernel say enabled while scx_loader has no bookkeeping, apexd chose switch, the loader refused with
+    'no scx scheduler running', and apexd retried once on the verb the loader named. TWO DEFECTS FOUND, both
+    first-ever hardware readings. (1) root/ops is NOT the bare struct_ops name. It reads
+    lavd_1.1.3_x86_64_unknown_linux_gnu, rusty_1.1.3_x86_64_unknown_linux_gnu and
+    rustland_1.1.3_x86_64_unknown_linux_gnu. gaming-scx-20260920.md section 5 predicted 'lavd' and said so was an
+    expectation; scx_ops_matches strips only a leading scx_ and compares for equality, so every successful load on
+    this machine is reported as the wrong scheduler in scx_detail, in notes and in the apexd journal. (2) THE
+    SWITCH BRANCH HAS A RACE, measured at 50ms sampling: a switch on this hardware is about 1.42s of
+    teardown-and-reattach (enabled(rusty) -> disabling at +0.129s -> disabled at +0.183s -> enabled(lavd) at
+    +1.547s) and scxctl returns 162ms in. scx_settle_until(Enabled) is satisfied by the scheduler being REPLACED,
+    so the read-back confirms a state that was already true before the command and the 2s budget is never spent;
+    and scx.observed is a second, later read that lands in the disabled trough, so apex game status reported
+    scx_state=not loaded about a session that had scx_lavd running. A false negative, the mirror of the false
+    positive 5c removed. Both need the scx_ops_matches fix first or a corrected predicate can never become true.
+    Also witnessed: the documented limitation that exit STOPS a pre-existing scheduler rather than restoring it,
+    with the journal naming the case; and 26 of 73 IRQ affinity writes refused EPERM on katana even as root,
+    reported honestly as irqs_refused=26. GPU parity across NVIDIA/AMD/Intel. LANDED on apex-os roadmap/v2.2
+    2026-09-08 (678bb5d -> e67fab9): 9b68be3 AMD and Intel had no GPU handling at all and a hybrid laptop's lab
+    reported the wrong card, 454ae3a an installed nvidia-smi is not an NVIDIA GPU and exit 9 is an answer, fbe59ef
+    every apply persisted so a session that died mid-countdown came back on a layout nobody confirmed. CORRECTS
+    THE ROADMAP: docs/p3-progress.md says closing the GPU row 'needs hardware nobody here has' and that is wrong -
+    all three vendors are reachable and were measured 2026-09-07, the L16 being AMD only (card1, 0x1002, Radeon
+    780M, gpu_busy_percent present) and katana carrying both an Intel Alder Lake-P Iris Xe as boot_vga=1 and an
+    NVIDIA RTX 3070 Mobile that nvidia-smi answers for. THE DEFECT THIS CLOSED, and the correction to the
+    program's own record: FINDINGS-round5 item 1 said 'apex ai status --json returns prose, not JSON'. Measured
+    into separate files while fixing it, that headline is WRONG - stdout was 803 bytes of valid JSON, stderr 50
+    bytes of prose, exit 0, and jq worked all along; what fails is a caller that merges the streams with 2>&1,
+    which is what the suite line did. The CAUSE the finding named was right: PATH presence stood in for hardware,
+    so an nvidia-smi that exists and exits 9 (driver not loaded, no card) read as a working NVIDIA GPU. Three
+    states now, not two: no binary / present but no usable driver / working. FINDINGS-round5.md carries an AMENDED
+    section saying so, kept rather than rewritten because the wrong headline is the lesson - a finding written
+    from a suite's failure line inherits that line's assumptions. Verified on the landed tip: test-apex-ai 44
+    passed / 0 failed, which was 43/1 on 1ab542c, so the last of round 5's two red suites is green; cargo test
+    --locked --workspace --no-fail-fast 1993 passed / 0 failed across 30 binaries; gpu_parity 17 -> 24 tests;
+    test-apex-display 70/0; test-apex-gaming 114/0; run-clippy clean in the container; no conflict markers.
+    Mutation pairs MB1-MB4 all 23/1. REMAINDER, one verification assertion: 'SmiOutcome::Ready is what a real
+    loaded NVIDIA driver produces' needs the NVIDIA machine while it is NOT gaming - katana ran steam/proton
+    throughout the session, so it stayed read-only. Functionally covered: 9b68be3 already measured nvidia-smi
+    answering there, and 454ae3a does not touch that path's parsing. || 2026-09-19, katana (RTX 3070 Mobile +
+    Intel Iris Xe; card1=i915->eDP-1, card2=nvidia->HDMI-A-1). DESKTOP IS CORRECT: all three desktop sessions --
+    labwc, Hyprland, niri -- drive the external monitor through the RTX 3070 at 239.964 Hz, and nvidia-smi lists
+    each compositor as a graphics client. The wrong-card failure does not happen on the desktop. GAMING MODE IS
+    NOT: gamescope selects the Intel iGPU, opens card1, and therefore sees only eDP-1, so the monitor is never
+    lit. The fix is measured rather than guessed -- `--prefer-vk-device 10de:249d` selects NVIDIA, opens card2 and
+    lights HDMI-A-1 at 240 Hz -- and WLR_DRM_DEVICES is IGNORED, because gamescope's DRM backend is its own.
+    Separately `--rt` is requested and never granted: gamescope wants CAP_SYS_NICE, not RLIMIT_RTPRIO. Unit
+    gaming-gpu owns both, plus the harder question of choosing the GPU on an arbitrary hybrid laptop without a
+    hardcoded device id. Full detail at ROADMAP/evidence/katana-qualification-20260919.md sections 5.1, 6.1 and
+    6.2. ROUND gaming-gpu 2026-09-19 on apex-os task/gaming-gpu (f666f5c1 -> 4fc0ab06, five commits, PUSHED NOT
+    MERGED; merge-tree clean against the newer tip b0e34371). Still partial: every fix below is verified
+    headlessly and the hardware rows are a written checklist at docs/gaming-and-sessions.md section 6, not a
+    claim. 6.1 FIXED: the rule is the OUTPUT DECIDES THE CARD, not "prefer the discrete GPU" -- a discrete GPU
+    with no connector attached is a session with no screen. External connectors (anything but eDP/LVDS/DSI) beat
+    the built-in panel, then by name for determinism, and the chosen connector s card supplies --prefer-vk-device
+    vendor:device read from sysfs. No special case for a single-GPU or an all-AMD machine and nothing about
+    10de:249d hardcoded; it lives in apexd-core gpu::choose_display, surfaced as `apex gaming
+    --gamescope-device-args`, consumed by apex-gaming-session. Every path that cannot answer records a problem the
+    session prints, because a silent fallback to the iGPU IS the defect; it is deliberately not fatal, since
+    refusing to start would regress every single-GPU machine. 6.2 FIXED by stopping the false claim: gamescope
+    gates on CAP_SYS_NICE and never reads RLIMIT_RTPRIO, so --rt is passed only when the capability is reachable
+    (effective set, or a file capability on the binary) and otherwise the log says which one is missing. NOTHING
+    GRANTS IT, on purpose and recorded in three places: setcap cannot write a read-only composefs /usr with
+    gamescope arriving through a sysext overlay, and pam_cap would put capabilities in the PERMITTED set of every
+    process in the session including Steam s bwrap, which refuses to start with any -- which is the unattributed
+    6.3 message. So granting the capability would trade frame pacing for a Steam that does not start. 7.2 FIXED,
+    found in review rather than in the evidence: the VRR probe globbed /sys/class/drm/card*-*/vrr_capable, and DRM
+    connector names are unique per CARD not per machine, so a hybrid laptop s card1-HDMI-A-1 (iGPU, wired to
+    nothing) sorts before card2-HDMI-A-1 and the probe answered about the wrong screen -- 6.1 s mistake in
+    different clothes. VRR moved into choose_display beside the connector it is a question about, and the four
+    outcomes (1 / 0 / this output publishes nothing while others do / nothing on this machine publishes it) are
+    now distinct, which is what 7.2 asked for. Section 6 status block FIXED as a defect of the RENDERER, not of
+    the one row: every filesystem-read row distinguishes EACCES from NotFound, reads as `unknown` rather than `not
+    measured`, carries permission_denied in the JSON, and one footer names every refused row plus `sudo apex
+    gaming`. Verified without katana: gpu_parity.rs 39 cases (15 new) over sysfs fixtures including a namesake
+    connector and a refused status; tests/test-apex-gaming-session.sh is NEW, 31 cases, RUNS the session with a
+    fake gamescope recording its argv and the real apex binary through APEX_ROOT, wired into pr-validation.yml and
+    the hard ShellCheck gate; test-apex-gaming.sh 131 (17 new). Five mutations each caught: 4 rows, 3 rows, 1, 2
+    and 2. cargo test and clippy -D warnings clean. Smoke-run on the real L16 /sys with no fixture: 1002:1900
+    matches lspci -nn exactly and `sudoers rule: unknown ... run sudo apex gaming` is the section 6 defect
+    answering on a live machine. Katana was NOT touched -- held by the TPM agent all round, which also dual-boots
+    Windows off a second NVMe. Agent card ROADMAP/state/agents/gaming-gpu.md. || 2026-09-19 ROUND 33, unit
+    katana-image-qual, on the rebased machine (apex-7f647470, sha256:be3bdd0c). THE REMAINDER THIS ITEM NAMED IS
+    CLOSED. 'SmiOutcome::Ready is what a real loaded NVIDIA driver produces' was held open because katana ran
+    steam and proton throughout the round-31 session. Measured with the machine idle, no gamescope and no steam
+    running and apex game status false: apex ai status --json returns 864 bytes on stdout, 0 bytes on stderr,
+    valid JSON, rc 0, carrying accel [cuda, vulkan, cpu] and devices [{index 0, NVIDIA GeForce RTX 3070 Laptop
+    GPU, total_mib 8192, used_mib 41, budget_mib 7639}] -- live VRAM off a loaded driver, not a PATH probe.
+    nvidia-smi itself answers 'NVIDIA GeForce RTX 3070 Laptop GPU, 580.178.04', rc 0. The stream split the old
+    FINDINGS-round5 headline was really about is clean on this build. AND THE GAMING MODE DEFECT THIS ITEM
     DESCRIBED IS FIXED ON HARDWARE. The selector's landed rule was run through a real greetd login and answered
     --prefer-vk-device 10de:249d --prefer-output HDMI-A-1; gamescope then selected the RTX 3070, opened
     /dev/dri/card2, enumerated only HDMI-A-1 and drove it at 1920x1080@240Hz, with the whole Steam stack on the
@@ -4940,10 +4967,37 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    ROUND 33 (2026-09-19, apex-shell task/p2-b-round33 tip df17c34, CI 35435459325 ALL THREE JOBS SUCCESS with
-    zero red steps): nothing was added to this row and that is said rather than padded. Both items this unit could
-    reach were P2-004 - the QTranslator host change and the guide's prose strings. Queue items 1 and 2, Orca at
-    the login screen and greeter audio, are STILL UNMEASURED and still need hardware; katana was owned by another
+    ROUND 40 2026-09-22 - THE SHELL PUBLISHES A REAL ACCESSIBILITY TREE. Evidence
+    ROADMAP/evidence/katana-final-qual-20260922.md section 3. No greetd teardown was needed and none was done: THE
+    GREETER IS ITSELF A LIVE QUICKSHELL SESSION (qs -p /usr/share/apex-greet/shell.qml, pid 1791, user greetd,
+    seat0, with at-spi2-registryd and the a11y bus already up). Walked with the repository's own
+    tests/atspi-walk.py, sha256-compared on the machine. SHIPPED STATE: ZERO applications on the a11y bus, not
+    one, because org.a11y.Status.IsEnabled is false and Qt's bridge never registers - the one-node reading on
+    record came from a harness that had accessibility on. Setting ScreenReaderEnabled=true, which is exactly what
+    Orca does on connecting: 1 application, 17 NODES, max depth 2, TWO FRAMES ONE PER OUTPUT (sway IPC confirms 2
+    active outputs, HDMI-A-1 1920x1080@239.96 and eDP-1 1920x1080@144.03, both scale 1.0), 11 named nodes and 12
+    nodes exposing org.a11y.atspi.Action with Press and SetFocus. The password field has an EMPTY name and keeps
+    its description, which is the Accessible.passwordEdit behaviour check-lockscreen-a11y.sh asserts on the QML
+    side and which had never been confirmed on the bus. quickshell-git-0.3.1^860.gitc6a5160 carries upstream
+    916a0dd. NOTE for whoever reads check-quickshell-a11y-cause.sh: that suite pins QT's behaviour and will NOT go
+    red from this - what changed is that quickshell no longer has the shape. run-lockscreen-atspi.sh section 5's
+    skipped read-back assertions are what should be revisited. A FIRST DRAFT OF THIS EVIDENCE CLAIMED THERE WAS NO
+    WAY TO TURN ACCESSIBILITY ON AND THAT WAS WRONG: sway-greet.conf binds exactly one key, bindsym --to-code
+    Mod4+Mod1+s exec /usr/libexec/apex-screen-reader toggle, the script is on the image and answers status=off
+    rc=1 as documented. Confirmed by reading the process environment rather than assuming: pid 1791 carries no
+    QT_LINUX_ACCESSIBILITY_ALWAYS_ON and no other QT_/A11Y/NO_AT_BRIDGE variable, 40 env keys, the only Qt one
+    being QT_QPA_PLATFORMTHEME=qt6ct. THE TRAP FOR AUDITORS: anything that inspects the a11y bus without claiming
+    to be a screen reader sees an empty bus and would wrongly report the shell as publishing nothing. Queue items
+    1 and 2 (Orca at the login screen, greeter audio) stay COULD-NOT-RUN: pressing the key makes the machine talk
+    and nobody is at katana. Measurable parts recorded instead - orca 49.7, speech-dispatcher 0.12.1, espeak-ng
+    1.51.1, python3-speechd and spd-say are all installed, 2 ALSA cards, and PIPEWIRE IS INACTIVE IN THE GREETD
+    SESSION, which is the first thing to check when somebody runs that row. Machine put back: both a11y properties
+    false and read back, greetd active, config.toml cmp-identical, seat0 ActiveSession c1, 0 failed units. One
+    residue stated: Qt does not unregister, so the count stays 1 until the greeter next starts. ROUND 33
+    (2026-09-19, apex-shell task/p2-b-round33 tip df17c34, CI 35435459325 ALL THREE JOBS SUCCESS with zero red
+    steps): nothing was added to this row and that is said rather than padded. Both items this unit could reach
+    were P2-004 - the QTranslator host change and the guide's prose strings. Queue items 1 and 2, Orca at the
+    login screen and greeter audio, are STILL UNMEASURED and still need hardware; katana was owned by another
     agent again this round and boots an image 131 commits behind the tip, so a greeter measurement there would
     describe the wrong build and none was taken or simulated. They are the oldest open things on this row. What
     DID move for accessibility indirectly: every a11y step in CI is green on the tip, including
@@ -5551,8 +5605,24 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Printing/scanning/network-share maturity. 36232f5 tests/test-device-image.sh 41 passed, mutation-proved seven
-    ways, adding gvfs-fuse/gvfs-gphoto2/gvfs-nfs and giving the share stack a floor after hplip hung every
+    ROUND 40 2026-09-22 - THE BOOTED-MACHINE LINES ANSWER, AND THE IPP PATH IS PROVED END TO END WITHOUT PAPER.
+    Evidence ROADMAP/evidence/katana-final-qual-20260922.md section 2, graded off what apex devices prints rather
+    than off raw nmcli, because the defect that round removed was the tool saying 'could not ask'. On katana: mDNS
+    (avahi) running and enabled, cups.socket enabled, queues none configured, sharing a printer off, this machine
+    serves nothing (no smbd, no nfs-server). TWO driverless printers on the LAN over mDNS - Canon TR4600 series at
+    192.168.1.121 and FUJIFILM ApeosPrint C325/328 dw at 192.168.1.213, both rp=ipp/print. ipptool -t
+    get-printer-attributes PASSES against BOTH, and the attributes are the printers' own rather than a stub:
+    printer-make-and-model matches each, printer-state idle on both, and the FUJIFILM reports its OWN
+    printer-state-reasons=toner-low-warning, which a fixture could not fake. So printing moves from 'discovery
+    reaches the machine' to 'the IPP conversation completes', with two vendors, one image and no paper; sending a
+    job still needs a person. Scanning: apex devices scan finds airscan:e0:Canon TR4600 series eSCL at
+    192.168.1.121 and scanimage -L independently repeats it. Shares: SMB, WebDAV, NFS, MTP and cameras all yes in
+    the file manager, mount.cifs and mount.nfs both present - the packages that round added, on a booted image for
+    the first time. Mounting a share from a server stays could-not-run for want of credentials. Also read and
+    worth keeping: SD card slot none because this kernel registered no MMC host, camera (PTP) tooling absent
+    because gphoto2 is not in the image, and this session's seat=none correctly describing the ssh session that
+    asked. Printing/scanning/network-share maturity. 36232f5 tests/test-device-image.sh 41 passed, mutation-proved
+    seven ways, adding gvfs-fuse/gvfs-gphoto2/gvfs-nfs and giving the share stack a floor after hplip hung every
     enumeration. 3142bbd fixed scan enumeration hanging on avahi's ABSENCE rather than its answer. fce0a99 `apex
     devices` as a verb covering cards, printers, scanners and shares. 5a7d0c6 makes 'there is none' and 'I could
     not look' stop arriving as the same answer. LANDED by integrate-4 at 95d068c, ZERO conflicts; run-clippy PASS.
@@ -5667,14 +5737,28 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Networking maturity. c823974 and f9ab0e7 add tests/test-device-services-netns.sh -- the firewall rules had
-    been read but never sent a packet through. 1adbdb2 fixes NetworkManager answering `full` for a link nobody can
-    route over. THE FINDING OWED TO P1-044, measured with positive controls: a hotspot could not work under the
-    shipped policy, three ways -- forward was policy drop, the DHCP rule matched replies rather than a client's
-    DISCOVER, and port 53 was shut. LANDED by integrate-4 at 95d068c. ROUND p2-c 2026-09-13, on task/p2-c-2
-    (pushed, tip 39d5e1e1, merged off roadmap/v2.2 e799422b). THE BUILT IMAGE EXISTS AND THE READINGS WERE
-    RETAKEN: ghcr.io/andrenijman/apex-os:base-d12d3450, whose /usr/libexec/apex-devices is byte-identical to the
-    tip's, and which carries every package P2-007 named -- gvfs-fuse, gvfs-nfs, gvfs-gphoto2, gvfs-mtp, gvfs-smb,
+    ROUND 40 2026-09-22 - links, connectivity and the hotspot safety line all answer on a booted machine. Evidence
+    ROADMAP/evidence/katana-final-qual-20260922.md section 2. links=4 with one row per interface (wlo1 wifi
+    connected, lo loopback connected externally, p2p-dev-wlo1 wifi-p2p disconnected, enp5s0 ethernet unavailable),
+    NOT 'could not reach NetworkManager'. connectivity='full, and checked', and the drop-in behind it is genuinely
+    image-shipped: /usr/etc/NetworkManager/conf.d/21-apex-connectivity.conf exists, is owned by no rpm which is
+    correct for a file the Containerfile writes, and its /etc merge copy is byte-identical by cmp. hotspot /
+    tethering='nothing known is in the way' and the forbidden reading 'not known - the firewall could not be
+    asked' does NOT appear; sudo apex firewall status answers and says 'not sharing this machine's connection on
+    any link', so the firewall really was asked. THE HOTSPOT ROW ITSELF STAYS COULD-NOT-RUN, for two independent
+    named reasons: katana has exactly one usable link (enp5s0 is unavailable, no cable) so nmcli device wifi
+    hotspot ifname wlo1 severs the ssh this session arrives over and leaves the machine off the network with
+    nobody at it; and the acceptance criterion needs a phone to join and resolve a name. The 802.1X exposure is
+    NOT APPLICABLE on katana - enterprise Wi-Fi (802.1X) reads 'no saved profile uses it' and system CA trust
+    store reads 'readable'. The two profiles on record are the L16's and nothing was modified. Networking
+    maturity. c823974 and f9ab0e7 add tests/test-device-services-netns.sh -- the firewall rules had been read but
+    never sent a packet through. 1adbdb2 fixes NetworkManager answering `full` for a link nobody can route over.
+    THE FINDING OWED TO P1-044, measured with positive controls: a hotspot could not work under the shipped
+    policy, three ways -- forward was policy drop, the DHCP rule matched replies rather than a client's DISCOVER,
+    and port 53 was shut. LANDED by integrate-4 at 95d068c. ROUND p2-c 2026-09-13, on task/p2-c-2 (pushed, tip
+    39d5e1e1, merged off roadmap/v2.2 e799422b). THE BUILT IMAGE EXISTS AND THE READINGS WERE RETAKEN:
+    ghcr.io/andrenijman/apex-os:base-d12d3450, whose /usr/libexec/apex-devices is byte-identical to the tip's, and
+    which carries every package P2-007 named -- gvfs-fuse, gvfs-nfs, gvfs-gphoto2, gvfs-mtp, gvfs-smb,
     samba-client, cifs-utils, bolt 0.9.11, pipewire-codec-aptx, bluez 5.87, sane-airscan, wireguard-tools,
     NetworkManager-openvpn/openconnect, dnsmasq (rpm-owned this time), libgphoto2, ipp-usb. Two tier facts that
     cost time and are written down so nobody repeats them: Containerfile.base opens FROM ${CORE}, so the chain is
@@ -5827,6 +5911,16 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
+    ROUND 40 2026-09-22 - hotplug, auto-mount and bluetooth answered from a booted machine. Evidence
+    ROADMAP/evidence/katana-final-qual-20260922.md section 2. hotplug (udev)='systemd-udevd is running',
+    auto-mount='udisks2 running', adapters=1 (hci0), radio='not blocked', headset codecs=aac aptx faststream g722
+    lc3 ldac opus-g opus sbc. Thunderbolt='no controller on this machine' and USB-C ports='the kernel exposes no
+    Type-C class' with the caveat that the ports may still work as plain USB - so the dock rows are COULD-NOT-RUN
+    on this hardware rather than failing. A CORRECTION TO THE STARTING SWEEP:
+    /var/lab-scratch/katana-measure/after.txt reported 'paired devices: 2', taken as bluetoothctl devices | wc -l.
+    That lists every device the adapter KNOWS. bluetoothctl devices Paired is 0 on katana and both devices read
+    Paired=no Bonded=no Trusted=yes on the bus. apex-devices asks the Paired form and prints 'none', so the tool
+    is right and the sweep was not. Recorded because the sweep is what a reader would have quoted.
     Bluetooth/dock/peripheral maturity, delivered through the same `apex devices` verb and suites as
     P2-005/P2-006. 5d5441b is the message pass -- what a user reads, in the voice the rest of the CLI uses. LANDED
     by integrate-4 at 95d068c; run-clippy PASS. Evidence: ROADMAP/evidence/P2-005-007-device-maturity.md. ROUND
