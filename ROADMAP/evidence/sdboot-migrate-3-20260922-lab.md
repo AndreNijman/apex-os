@@ -187,6 +187,10 @@ df /sysroot                 -> 45G total, 15G used, 31G avail
 2 × 12.1 GiB + 512 MiB ≈ 24 GiB, against 30 GiB free. The arithmetic the branch
 ships is the arithmetic that ran.
 
+**Do not read this as the check being validated.** All it shows is that the
+code path executes and computes what it says it computes. §3 is the same check,
+on the same image, letting a migration start that then ran out of disk.
+
 ### 1.3 A refusal really does write nothing
 
 ```
@@ -286,10 +290,22 @@ for, both measured here:
    content-addressed and deduplicated; the containers-storage extraction is
    not.
 
-Measured peak, read from the host's sparse image file: 13 GB → **43 GB**, i.e.
-the guest wrote ~28 GB onto a 43 GiB root before ENOSPC, with `/composefs`
-still empty. The estimate said 24 GiB total. The multiplier is wrong; the idea
-is right. Re-deriving it needs a measured peak rather than an argument.
+Measured, read from the host's sparse image file: 13 GB → **43 GB**, i.e. the
+guest wrote **~28 GB onto a 43 GiB root before ENOSPC, with `/composefs` still
+empty**. The estimate said 24 GiB *total*, and the largest single consumer had
+not started. That is enough to show the multiplier is wrong without knowing
+what the true peak is.
+
+A caution for whoever re-derives it: **the retry's host-image growth is not the
+peak.** Re-running on the same sparse file, after growing p3, counts blocks the
+failed attempt had already allocated and freed as fresh growth — that file
+reached 55 GB and the number means nothing. A real peak has to be sampled
+inside the guest, during a migration, on a disk that has not been used for one
+before. The fix then has to move three things together: `root_need` in
+`cmd_precheck`, the `tests/test-boot-migrate.sh` assertion that pins the
+literal `root_need=$(( repo_kib \* 2`, and the "It roughly doubles the image's
+footprint on disk" bullet in `docs/update-cost.md`, which is where the 2x came
+from as an argument rather than a measurement.
 
 ### The containment held, which is the other half of the result
 
@@ -308,3 +324,111 @@ BootCurrent:  000A   -> \EFI\fedora\shimx64.efi                        (unchange
 `apexd/apex/src/ops.rs` treats it as an error rather than as "carry on", which
 is the correct direction. The removable-media fallback had already been saved
 before anything was touched. Nothing needed repairing and re-running was safe.
+
+---
+
+## 4. The install succeeds, and then the migration dies joining `/var`
+
+With the root grown to 88 GiB — the ENOSPC defect of §3 recorded rather than
+engineered around — the same `auto` runs the whole install successfully:
+
+```
+OK      root-space    73 GiB free, 24 GiB needed
+apex-boot-migrate: keeping the removable-media fallback an earlier run saved
+apex-boot-migrate: migrating to the image this machine is already running:
+    localhost/apex-sdmig:v1 (sha256:629303a3…)
+  Copying local image docker://localhost/apex-sdmig:v1 to containers-storage:localhost/bootc ...
+  Pushed: containers-storage:localhost/bootc sha256:f0ac1bec…
+apex-boot-migrate: carrying 6 kernel arguments across: quiet splash
+    rd.driver.blacklist=nouveau modprobe.blacklist=nouveau
+    console=ttyS0,115200n8 systemd.journald.forward_to_console=1
+apex-boot-migrate: installing the composefs deployment (the old path is not touched)
+Bootloader: systemd
+Installing bootloader via systemd-boot
+Installation complete!
+apex-boot-migrate: restored /EFI/BOOT/BOOTX64.EFI to what it was
+```
+
+and then:
+
+```
+apex-boot-migrate: cannot join /var:
+    /sysroot/ostree/deploy/default/var is not a directory and not a symlink
+apex-boot-migrate: FAILED [state-join]
+auto rc=1
+```
+
+**The message blames the wrong path.** Loop-mounting the guest's root shows
+`/sysroot/ostree/deploy/default/var` is a perfectly ordinary directory. The
+path that failed the test is the other one. bootc's composefs layout has **two
+things called `var` exactly three levels under `$SYSROOT/state`**:
+
+```
+state/os/default/var                                  drwxr-xr-x   the real directory
+state/deploy/5a049b1c…/var -> ../../os/default/var    lrwxrwxrwx   a symlink to it
+```
+
+and `join_state` selected with
+
+```
+newvar="$(find "$SYSROOT/state" -mindepth 3 -maxdepth 3 -name var | head -1)"
+```
+
+— no type filter. `find` walks in **readdir order, not sorted**, so `head -1`
+returns whichever the filesystem hands back first. Here it returned the
+symlink, `[ ! -L "$newvar" ]` was false, the `elif` fell through, and the else
+branch printed a message about a completely different path.
+
+**The migration's success depended on readdir order.** The predecessor's ext4
+`fedora-bootc:43` guest got the directory first, so ~30 guest boots of lab work
+across two rounds never saw this. Same code, same bootc, different filesystem,
+opposite outcome. The `etc` lookup thirty lines below has carried `-type d`
+since it was written; this one did not.
+
+Fixed on this branch: `-type d` on the lookup, and a failure message that names
+which of the two paths failed. Three behavioural assertions cover it, and the
+expression they test is extracted from the source rather than copied, so a copy
+cannot keep passing after the source drifts. Verified to fail both ways —
+reverting only `-type d` turns two of them red and names the symlink it
+wrongly selected.
+
+### What the failure left behind, and the `:ro` confirmed
+
+The stage aborts before `phase` is written, so nothing was committed: `phase:
+not started`, `boot entry: none`, `BootOrder` unchanged. But the install had
+already run, so the ESP now carries the real migrated entry, and it answers a
+question this card had only inferred:
+
+```
+$ cat /loader/entries/bootc_fedora-43-1.conf
+title APEX-OS
+version 43
+linux  /EFI/Linux/bootc_composefs-5a049b1c…/vmlinuz
+initrd /EFI/Linux/bootc_composefs-5a049b1c…/initrd
+options root=UUID=ca9e0f69-… rootflags=subvol=/ rd.driver.blacklist=nouveau rw
+        boot=UUID=8A5D-0AB8 quiet splash modprobe.blacklist=nouveau
+        console=ttyS0,115200n8 systemd.journald.forward_to_console=1
+        composefs=5a049b1c…
+        systemd.mount-extra=UUID=8A5D-0AB8:/boot:auto:ro
+```
+
+Three things read straight off it:
+
+* **`systemd.mount-extra=…:/boot:auto:ro` is real on the APEX/btrfs path**, not
+  an artefact of the predecessor's ext4 guest. On the composefs path the ESP
+  *is* `/boot`, and stripping a `+N-M` boot counter is a rename on that
+  filesystem — so a read-only `/boot` is a live hazard for the entry-rename
+  question, and it is what §5 has to measure. For contrast, an ordinary
+  (non-migrated) composefs machine was measured at `/dev/vda2 /boot vfat
+  **rw**,nosuid,nodev,noexec,relatime`
+  (`ROADMAP/evidence/sdboot-image-20260920-decision.md:45`).
+* **`boot=UUID=8A5D-0AB8` names the real ESP**, which is the staging-UUID
+  defect the predecessor found, still fixed.
+* **`rootflags=subvol=/` carried across.** That karg is btrfs-only and appears
+  on this guest because `to-filesystem` put it there; `carried_kargs` passed it
+  through untouched, which is the correct behaviour and had never been
+  exercised.
+
+The entry is `bootc_fedora-43-1.conf` — **uncounted**. `count_staged_entry`,
+the uncommitted splice item 3 turns on, runs *after* `join_state` in
+`cmd_stage`, so this run never reached it.
