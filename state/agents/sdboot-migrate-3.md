@@ -27,18 +27,36 @@ conclusion is WRONG — do not revive it.
 
 ## NEXT
 
-- Run B boot 1 (prep) is RUNNING as user unit `sdb3-boot-b1`; serial
-  `/var/lab-scratch/sdboot-migrate-2/apexmig-b-3.serial`. When it powers off,
-  confirm from the serial that `rsync --version` printed 3.5.0 and
-  `TimeoutStartUSec=infinity`, then boot 2:
-  `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-unit-3.sh
-   /var/tmp/apex-work/wt-sdboot-migrate-3/files/system/libexec/apex-boot-migrate
-   apex-boot-migrate-confirm.service`
-  and **edit `/var/lab-scratch/sdboot-migrate-3/run-boot-b.sh` to pass `5400`
-  instead of `1800`** — boot 2 copies ~12 GB to podman storage and then bootc
-  writes ~12 GB into /composefs, and a `timeout`-killed qemu is a power cut,
-  not a result. Put it back to 1800 for boot 3.
-  **Never pass `--fresh-nvram` on boot 3: `BootNext` lives in that VARS file.**
+- **Run B boot 2, the actual migration, is RUNNING** as user unit
+  `sdb3-boot-b2` (launched 03:50 AWST, qemu ceiling 5400 s). Serial
+  `/var/lab-scratch/sdboot-migrate-2/apexmig-b-3.serial` — it is APPENDED to,
+  so boot 1's output is above boot 2's; `grep -a "LAB-BOOT: 2"` to find the
+  start. When it powers off:
+  1. read `auto rc=` and the `### the entry the stage wrote — IS IT COUNTED?`
+     block. The stage should have renamed the entry to `…+3-0.conf`.
+  2. then boot 3, the MIGRATED boot, which is where item 3 is decided:
+     `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-check-3.sh`
+     then set the qemu ceiling back to 1800 in
+     `/var/lab-scratch/sdboot-migrate-3/run-boot-b.sh` and
+     `systemd-run --user --unit=sdb3-boot-b3 --collect …/run-boot-b.sh`.
+     **Do NOT pass `--fresh-nvram`** — `BootNext`, which the commit wrote, lives
+     in `/work/nvram-persist/VARS-apexmig-b.img.fd`.
+
+### The item-3 decision rule, written down BEFORE the log exists
+
+Read the entry filename on the migrated boot's live ESP:
+
+| observed | meaning | verdict |
+| --- | --- | --- |
+| `name.conf` (bare) | sd-boot counted it AND bless stripped it | commit the splice, and do sdboot-migrate-2's NEXT item 2 in full (confirm unit `Wants=`→`Requires=`, the Containerfile.base assertion ~1292-1303, the two `tests/test-boot-migrate.sh` pins ~247-256) |
+| `name+2-1.conf` + **EROFS** | sd-boot counted it; bless could not write a ro `/boot` | **drop the splice.** This is the migration-specific cause and it is the answer. Do not try to fix the karg in this unit |
+| `name+2-1.conf` + **AVC on dosfs_t** | the SELinux cause, which the branch already fixes and this stale image lacks | inconclusive on its own — re-run boot 3's check after `setenforce 0` to separate it from the ro question before writing any verdict |
+| `name+3-0.conf` | sd-boot never counted it at all | drop the splice; the counter is not even reaching the loader |
+
+Whatever the answer, it goes in the evidence doc. A rename that is not
+*observed* to be blessed is worse than no rename: the counter decrements on
+every ordinary boot afterwards and sd-boot rolls a WORKING machine back on the
+fourth one.
 
 ### Guest bookkeeping — the persistent-NVRAM rig makes boot ORDER matter
 
@@ -50,7 +68,7 @@ conclusion is WRONG — do not revive it.
 | apexmig-a (512 MiB ESP) | 1 | none (ctl on vdb, see FOUND) | wasted |
 | apexmig-a (512 MiB ESP) | 2 | `act-migrate-3.sh` | **DONE — refused** |
 | apexmig-b (2 GiB ESP) | 1 | `act-prep-3.sh` + `rsync-3` | **DONE** |
-| apexmig-b | 2 | `act-unit-3.sh` + engine + confirm.service | — |
+| apexmig-b | 2 | `act-unit-3.sh` + engine + confirm.service | RUNNING |
 | apexmig-b | 3 | `act-check-3.sh` (the MIGRATED boot) | — |
 
 Every boot: `./setctl.sh <action> <extra files…>` first, and the qemu launch
@@ -244,6 +262,14 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
   card called an intact rig. Patched in
   `/var/lab-scratch/sdboot-migrate-3/to-filesystem-lab-3` (ef02 1 MiB + ef00
   ESP + 8300 root, parts renumbered), with the measured error in the comment.
+- **`lab-run.sh` pipes the action through `sed 's/^/LAB-ACT: /'`, and sed
+  BLOCK-buffers into a pipe.** Nothing an action prints reaches the serial log
+  until the whole action ends (or 4 KiB accumulates). A long step — the
+  migration is ~10 minutes — therefore looks identical to a hung guest:
+  `LAB-ACTION-BEGIN` and then silence. Do not interpret a quiet serial log as a
+  stall; watch `systemctl --user is-active` on the launcher unit instead. A
+  `stdbuf -oL`/`--unbuffered` in the baked driver would fix it, but that means
+  an image rebuild and is not worth one here.
 - Both of this unit's launcher wrappers reported `rc=0` for a command that
   exited 1: `echo "=== $(date -Is) … rc=$? ==="` runs the `date` command
   substitution first, which resets `$?`. Fixed by capturing `rc=$?` on its own

@@ -1,4 +1,4 @@
-# ci-green-input — the two reds on roadmap/v2.2's PR validation
+# ci-green-input — one regression and two flakes in roadmap/v2.2's PR validation
 
 items: none (no roadmap id — CI red on the integration branch, found by the orchestrator)
 repo: apex-os
@@ -20,12 +20,23 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
   output is the point of the last two commits, so read it and record it here.
   Baseline to beat: mux-layouts 4/8 red, secret-broker 2/8 red,
   apex-input 8/8 red.
-- Then write `ROADMAP/evidence/ci-green-input-20260921.md` and mark
+- The evidence file is ALREADY written and pushed (`0549f7e5`,
+  `ROADMAP/evidence/ci-green-input-20260921.md`); it has a `<!-- CI-RESULTS -->`
+  placeholder to fill with the four runs' outcomes. Then mark
   `## LANDABLE <sha>` on this card.
 
 ## DONE
 
-- **Branch `task/ci-green-input` pushed at `9c389baf`, 3 commits.**
+- **Branch `task/ci-green-input` pushed at `a0d122da`, 5 commits.**
+- Evidence written and pushed: `ROADMAP/evidence/ci-green-input-20260921.md`
+  (`0549f7e5`, extended by `a0d122da`). The 4 in-flight CI runs test
+  `9c389baf`; the two later commits are docs-only, so the code under test is
+  the code that will land.
+- **The new secret-broker gate is mutation-tested.** `exit 7` spliced into
+  `inside.sh` before its `echo DONE`: the gate now reports `the session left
+  before printing DONE (exited 7)` after `waited 0s` (against 25 s), prints
+  where the transcript stopped, `state failed`, `pid`, `outcome exited 7` and
+  the runtime log — and the false uid-map hint correctly did NOT print.
 - **apex-input is green and pushed: `cd3c06b6` on `origin/task/ci-green-input`.**
   `112 passed, 0 failed, 0 skipped` run alone (was 101/8/0). Suite-only change;
   the shipped provisioner is untouched and was never broken.
@@ -36,7 +47,9 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
 
 ## IN PROGRESS
 
-- Nothing uncommitted. CI has not yet been run on the branch.
+- Working tree clean, everything pushed. The only outstanding work is reading
+  the four in-flight CI runs (see NEXT) and filling the `<!-- CI-RESULTS -->`
+  placeholder in the evidence file.
 
 ## COMMITS
 
