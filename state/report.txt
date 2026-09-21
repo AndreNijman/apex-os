@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-21 22:09 AWST
+APEX ROADMAP — resume report — 2026-09-22 03:10 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,82 +16,12 @@ APEX ROADMAP — resume report — 2026-09-21 22:09 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  kernel-akmods dead 233m                                     task/kernel-akmods
-             head 444102fd docs(roadmap): the CI run was force_core=true, so akm
-             dirty 0 file(s), 0 unpushed, card 233m
-             NEXT - Read the reproducer result out of `/var/lab-scratch/kernel-akmod
-
-  kernel-publish dead 232m                                     task/kernel-publish
-             head 76a04c49 docs(evidence): core built green in CI against the pi
-             dirty 0 file(s), 0 unpushed, card 239m
-             NEXT Read the table above first. If run 35557283953 finished green, `gh
-
-  initramfs-slim dead 253m                                     task/initramfs-slim
-             head ede9a6f7 docs(initramfs): say "firmware-bearing", because the 
-             dirty 0 file(s), 0 unpushed, card 254m
-             NEXT 1. [done] read 847b5bfb, verify kernel config, verify repro hashes
-
-  migrate-preconditions dead 269m                                     task/migrate-preconditions
-             head f3280072 fix(boot): correct the ESP doc's mechanism claim, and
-             dirty 0 file(s), 0 unpushed, card 5m
-             NEXT 1. Mirror bootc's OWN ESP choice, do not invent one. Check whether
-
-  luks-boot  dead 232m  L-002,L-003                        task/luks-boot
-             head 1fb98233 Merge remote-tracking branch 'origin/roadmap/v2.2' in
-             dirty 0 file(s), 0 unpushed, card 235m
-             NEXT **NEXT, one line:** read `/var/lab/scratch/luks-boot/run-staged1.l
-
-  windows-installer-3 dead 232m                                     task/windows-installer-3
-             head ed30f92b fix(windows-lab): the usability probe could not fail 
-             dirty 0 file(s), 0 unpushed, card 5m
-             NEXT 1. Priority 4 (payload deployment), synthetic payload only. Write 
-
-  android-relay-flake dead 234m                                     task/android-relay-flake
-             head d6c827bd docs(roadmap): the CI outcome for android-relay-flake
-             dirty 0 file(s), 0 unpushed, card 235m
-             NEXT - Orchestrator lands `d6c827bd`. Nothing is outstanding.
-
-  ci-green-context dead 231m                                     task/ci-green-context
-             head 11c45d36 Merge task/initramfs-slim into roadmap/v2.2
-             dirty 0 file(s), ? unpushed, card 235m
-             NEXT - Reproduce the exclusion: show that `apexd/apex-backup-core/src/t
-
-  ci-green-input dead 233m                                     task/ci-green-input
-             head 11c45d36 Merge task/initramfs-slim into roadmap/v2.2
-             dirty 0 file(s), ? unpushed, card 235m
-             NEXT - Run `tests/test-apex-input.sh` alone and find the single cause b
-
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 3cff7466 Merge docs/firmware-write-policy into roadmap/v2.2
-    task/kernel-akmods
-      b237b247 docs(roadmap): akmods evidence — core is green, and the fix d   [0/10 added lines on tip]
-      2725da24 docs(roadmap): CI passed akmods on the UNGUARDED code — verdi   [0/10 added lines on tip]
-      444102fd docs(roadmap): the CI run was force_core=true, so akmods real   [0/6 added lines on tip]
-    task/kernel-publish
-      76a04c49 docs(evidence): core built green in CI against the pinned ker   [0/10 added lines on tip]
-    task/luks-boot
-      ef0fa0ce feat(boot-v2): luks-pcr7-signed, the shipped script choosing    [1/10 added lines on tip]
-      e8f1a97d fix(installer): the ESP fallback check never ran, and it had    [0/10 added lines on tip]
-      4029965f feat(boot-v2): luks-pcr7-signed grows its refusal arm   [2/10 added lines on tip]
-      6e4b464a docs(roadmap): evidence for signed-pcr11 in-boot selection, a   [0/10 added lines on tip]
-    task/windows-installer-3
-      9010930e test(windows): host-side byte verification of the payload wri   [0/10 added lines on tip]
-      60a38305 test(windows): bitlocker-discover reads the PCR validation pr   [0/10 added lines on tip]
-      a088c5ae fix(windows-lab): the bitlocker job never suspended anything,   [0/10 added lines on tip]
-      b4e7ba84 docs(windows): evidence for the bitlocker discovery run, and    [0/10 added lines on tip]
-      3acd27b5 test(windows): a job to measure the GPT write mechanism the d   [1/10 added lines on tip]
-      63e16ef5 fix(windows-lab): three defects that made the GPT job measure   [0/10 added lines on tip]
-      10166af3 docs(windows): the GPT write mechanism measured; SET_DRIVE_LA   [0/10 added lines on tip]
-      e6ecc4e9 docs(boot): record the GPT mechanism measurement in the decis   [1/10 added lines on tip]
-      28145f23 fix(windows): scope the SET_DRIVE_LAYOUT_EX relocation hazard   [0/10 added lines on tip]
-      978980f3 test(windows): measure mechanism 1's final state instead of a   [0/10 added lines on tip]
-      d47694cf test(windows): a job for the second-ESP question, scoped to w   [2/10 added lines on tip]
-      1f119377 fix(windows-lab): the second-ESP job reported a negative it h   [0/10 added lines on tip]
-      8898e58f docs(windows): second-ESP evidence, and the relocation predic   [0/10 added lines on tip]
-      ed30f92b fix(windows-lab): the usability probe could not fail either   [0/10 added lines on tip]
+  int-os:  tip f3b1b3d4 docs(roadmap): the kernel tier works — sched_ext load
+    (nothing — every task branch's content is on the integration tip)
 
   int-shell:  tip 9567586 Merge task/focus-switcher into roadmap/v2.2 (apex-shel
     (nothing — every task branch's content is on the integration tip)
@@ -128,12 +58,12 @@ APEX ROADMAP — resume report — 2026-09-21 22:09 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 12s Mon 2026-09-21
+  snapshot timer: active   last 38s Tue 2026-09-22
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    ea0c64e  apex-os-windows-installer-
-    apex-os    46bf497  int-os-
-    apex-os    f274256  roadmap-state
+    apex-os    896d23e  int-os-
+    apex-os    97dc2df  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    14a095f  wt-android-relay-flake-
     apex-os    dd974a7  wt-android-release-
@@ -141,7 +71,9 @@ APEX ROADMAP — resume report — 2026-09-21 22:09 AWST
     apex-os    c02272a  wt-base-os-
     apex-os    8957484  wt-build-verify-
     apex-os    6c9c17f  wt-clippy-
-    apex-os    3f41449  wt-ctxfix-
+    apex-os    a59c2a2  wt-ctxanchor-
+    apex-os    d08c11a  wt-ctxfix-
+    apex-os    68b8134  wt-devsvc-
     apex-os    1951fdc  wt-disposable-
     apex-os    2e3bbcd  wt-editors-
     apex-os    31a3d16  wt-editors2-
@@ -153,10 +85,8 @@ APEX ROADMAP — resume report — 2026-09-21 22:09 AWST
     apex-os    0a2f642  wt-followups-3-
     apex-os    a6e9909  wt-followups-4-
     apex-os    36ae373  wt-followups-5-
-    apex-os    59b7328  wt-followups-int3-
-    apex-os    884b151  wt-followups2-
 sed: couldn't flush stdout: Broken pipe
-    apex-shell 5b63e0c  apex-shell-
+    apex-shell dd7d583  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-
@@ -185,14 +115,13 @@ sed: couldn't flush stdout: Broken pipe
 ────────────────────────────────────────────────────────────────────────────
   next
 ────────────────────────────────────────────────────────────────────────────
-  9 agent(s) dispatched, ceiling 6
-
-  IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
-    kernel-akmods                                   The nvidia akmod will not build against the APEX kernel, and
+  0 agent(s) dispatched, ceiling 6
 
   READY (dependencies believed satisfied — confirm against the agent table above):
     luks-installer L-002                            The installer cannot create a LUKS2 volume at all
     luks-enroll    L-003                            TPM auto-unlock by default, where safe is a measured precond
+    kernel-akmods                                   The nvidia akmod will not build against the APEX kernel, and
+                   conflicts with kernel-build, kernel-publish
 
   HELD:
     final          after *
@@ -232,7 +161,7 @@ sed: couldn't flush stdout: Broken pipe
     gaming-scx — CLOSED BY HAND: CLOSED 2026-09-20 (round 33) -- fixed and landed as merge faa1992d. scxctl has TWO verbs and they are not interchangeable: `start` attaches when none is running, `switch` replaces one that is, and each REFUSES in the other's state. APEX loads nothing at boot so the first entry always finds none, and the code hardcoded `switch`. Swapping in `start` would have been the same mistake spelled differently -- correct on every machine APEX ships today, wrong on any machine already running a scheduler. The verb is now READ off /sys/kernel/sched_ext/state with one retry on whichever verb the loader's own error names; both refusal strings came out of the shipped scxctl 1.1.2 binary, not guesswork. THE STATUS WAS THE EXPENSIVE HALF: scxctl exiting 0 is a fact about scxctl. The writer now waits (bounded, 2 s) and reports what it read from the KERNEL. `not loaded` keeps its cause -- scxctl refused, or scxctl exited 0 and the kernel still reads disabled (the general form of this defect), or no CONFIG_SCHED_CLASS_EXT (a DEFINITE answer, not an unknown). `unknown` is only an unreadable state or one caught mid-transition, never rounded to either neighbour. Outcome gained a third variant because two could not hold `I could not tell`. SIBLING AUDIT, same shape next door: gpus_locked was cloned from the plan while run_nvidia_smi's refusal went unread, so a GPU whose lock was REJECTED was reported as locked; and game_exit discarded every outcome but a hard Err, so a refused restore was silent under a line asserting the machine had been put back. Both fixed. TWO DOCUMENTS CLAIMED KATANA RAN scx_lavd FOR 75 MINUTES. Nothing was running. Corrected in place and marked as corrections. RUN-BOOK: the `sched_ext/state expect: enabled` row is DELETED -- it read disabled throughout, so it passed on a file that never moved; the 6.6 destroy step is now `kill -9` the owner, because a greetd restart leaves the script alive to run its own trap and was testing the cooperative path; governor and sched-ext are now a named PAIR of non-discriminators on katana. ONE MUTATION ESCAPED THE FIRST PASS (MB11): nothing pinned the plan-time note, so restoring the sentence that had claimed a scheduler on three images turned nothing red -- a gate that inspects nothing, inside the work fixing a gate that inspects nothing. Two assertions added, caught both ways; the near-miss is in the evidence. KNOWN AND STATED: game mode STOPS a scheduler it found running rather than restoring it (`scxctl restore` would be the fix); that branch has never been reached. Three rows in 6.8 need hardware, including the `switch` branch a fixture cannot honestly stand in for.
     final-image — CLOSED BY HAND: CLOSED BY HAND (round 36, 2026-09-21). Per the unit's own card: 'Nothing in this unit is outstanding.' The image was built, both fixes (etc labelling, sched-ext verb) confirmed on katana hardware, evidence committed, P0-001 recorded partial. Everything left (merge apex-shell then apex-os to main, main build, L16 apex update+reboot) is Andre's / the held `final` unit's, not a dispatchable agent task.
     kernel-btf-scx — CLOSED BY HAND: CLOSED BY HAND (round 36, 2026-09-21). Diagnosis-only work; landed round 35 as part of the kernel-build merge. Continuation (deciding APEX builds its own kernel, building it, wiring core) happened under the kernel-build card and now continues as kernel-build-2. P1-043 stays partial/tracked there, not here. Re-open only if a reason emerges to redo the BTF diagnosis itself.
-    windows-installer — CLOSED BY HAND: CLOSED BY HAND (round 36, 2026-09-21). No card was ever written at this slug; round 35's real work landed under windows-installer-2 (a real Windows VM lab, three defects found). Continuing as windows-installer-3. Re-open only if this exact slug is needed for something windows-installer-2/3 do not own.
+    windows-installer — CLOSED BY HAND: PAUSED BY ANDRE 2026-09-21, not closed and not blocked. His words: 'stop all development of windows app, push to repo and everything, but show its archived and work is paused for now cause i dont see the need.' DO NOT DISPATCH THIS. Do not re-offer it as READY. Do not resume without Andre asking for it by name. All work to that moment is LANDED -- merge 9ecdff51 carries 15 commits, and 22605477 is the archive marker. windows-installer/PAUSED.md is the file to read first; README.md and ARCHITECTURE.md carry a banner pointing at it. tests/test-windows-installer.sh was RUN at the pause, not assumed: 13 passed, 0 failed, 1 could-not-run (the guest stage needs APEX_WINLAB_GUEST=1). CI keeps running these suites deliberately; a red suite while paused means something else in the repo moved and the right response is to record it and tell Andre, NOT to resume. The three product decisions in docs/apex-owns-its-esp.md are NOT withdrawn -- they also govern the Linux migration path, which is not paused.
     sdboot-image — CLOSED BY HAND: CLOSED BY HAND (round 36, 2026-09-21). This slug's code (bootupd_t SELinux module, apex-boot-count, the pivot design) landed round 35. Work continued under sdboot-migrate (in-place migration engine, which corrected this card's own 'no in-place converter, must reinstall' conclusion) and now continues as sdboot-migrate-2. Re-open only if fresh sdboot-image-specific work (not migration) is needed.
     android-release — CLOSED BY HAND: CLOSED BY HAND (round 38, 2026-09-21). task/android-release @ 5dc2b5aa IS an ancestor of roadmap/v2.2 (git merge-base --is-ancestor, checked), and so is task/android-signing; the Android landing was recorded on P1-052/P1-055/P1-057/P1-060 in round 37, so the note above saying NOT LANDED is stale. android-release-2 (a branch with zero commits of its own) established that the dry run `gh workflow run release-android.yml -f dry_run=true` is STRUCTURALLY blocked until roadmap/v2.2 reaches main: workflow_dispatch resolves the workflow file on the default branch (404 'not found on the default branch'; 9 workflows registered, release-android not among them). Nothing is left for an agent before `final`. Still Andre's: the keystore backup in dispatch.json _andre_must_do, and the signed-APK phone install in _android_install_pending (device not attached at 13:50 AWST round 38: adb devices empty, lsusb shows no android device).
 
