@@ -18,7 +18,8 @@
       "worktree": "/var/tmp/apex-work/wt-kernel-build-2",
       "branch": "task/kernel-build-2",
       "card": "ROADMAP/state/agents/kernel-build.md (predecessor; continuation card is kernel-build-2.md, written as-you-go)",
-      "dispatched": "2026-09-21T10:15+08:00"
+      "dispatched": "2026-09-21T10:15+08:00",
+      "agent_id": "abdf0a9417618ea3b"
     },
     {
       "slug": "sdboot-migrate-2",
@@ -27,7 +28,8 @@
       "worktree": "/var/tmp/apex-work/wt-sdboot-migrate-2",
       "branch": "task/sdboot-migrate-2",
       "card": "ROADMAP/state/agents/sdboot-migrate.md (predecessor; continuation card is sdboot-migrate-2.md)",
-      "dispatched": "2026-09-21T10:15+08:00"
+      "dispatched": "2026-09-21T10:15+08:00",
+      "agent_id": "afe3ac3bf2e8e4dd3"
     },
     {
       "slug": "windows-installer-3",
@@ -36,7 +38,8 @@
       "worktree": "/var/tmp/apex-work/wt-windows-installer-3",
       "branch": "task/windows-installer-3",
       "card": "ROADMAP/state/agents/windows-installer-2.md (predecessor; continuation card is windows-installer-3.md)",
-      "dispatched": "2026-09-21T10:15+08:00"
+      "dispatched": "2026-09-21T10:15+08:00",
+      "agent_id": "ad8e1a2f070489694"
     },
     {
       "slug": "luks-installer-2",
@@ -47,7 +50,8 @@
       "worktree": "/var/tmp/apex-work/wt-luks-installer-2",
       "branch": "task/luks-installer-2",
       "card": "ROADMAP/state/agents/luks-installer.md (predecessor; continuation card is luks-installer-2.md)",
-      "dispatched": "2026-09-21T10:15+08:00"
+      "dispatched": "2026-09-21T10:15+08:00",
+      "agent_id": "acd299b9623c8e730"
     },
     {
       "slug": "luks-enroll-2",
@@ -58,7 +62,8 @@
       "worktree": "/var/tmp/apex-work/wt-luks-enroll-2",
       "branch": "task/luks-enroll-2",
       "card": "ROADMAP/state/agents/luks-enroll.md (predecessor; continuation card is luks-enroll-2.md)",
-      "dispatched": "2026-09-21T10:15+08:00"
+      "dispatched": "2026-09-21T10:15+08:00",
+      "agent_id": "a977da6be078061d9"
     },
     {
       "slug": "android-release-2",
@@ -67,7 +72,8 @@
       "worktree": "/var/tmp/apex-work/wt-android-release-2",
       "branch": "task/android-release-2",
       "card": "ROADMAP/state/agents/android-signing.md (predecessor; continuation card is android-release-2.md)",
-      "dispatched": "2026-09-21T10:15+08:00"
+      "dispatched": "2026-09-21T10:15+08:00",
+      "agent_id": "ab9cc5fd0a55f6a09"
     }
   ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
