@@ -97,95 +97,119 @@ branch is an oversight rather than a decision.
 - Headless only. `/var/lab-scratch`, never `/tmp` (15 GB tmpfs on 29 GB RAM).
 - Long jobs under `systemd-run --user`, never `nohup &`.
 
+## LANDABLE addd0b85
+
+`task/ci-selector-base` @ `addd0b85` — 6 commits, pushed to origin.
+Three files: `.github/workflows/pr-validation.yml`,
+`tests/check-ci-selector-parity.sh`,
+`ROADMAP/evidence/ci-selector-base-20260922.md`.
+Merges clean, measured not assumed: at 2026-09-21 20:55Z `git fetch origin`
+left `origin/roadmap/v2.2` still at `6fa9ddbc` (the commit this branch was cut
+from) and `git merge-tree --write-tree origin/roadmap/v2.2 HEAD` returned 0
+with tree `31e170e0`. Re-check if the branch has moved since.
+
+**The one thing to look at on the first push after landing:** `Select tests`
+must log `::notice::classified push over 57f593ad..<new sha>` and dispatch all
+four jobs. Every measurement behind this fix was taken on `workflow_dispatch`
+runs, which use the same `git merge-base origin/main` call under the same
+checkout config — sound inference, but the changed `push` line itself has not
+run on a runner. Expect the branch's landings to get slower and louder: they
+will all run the full matrix from now on, which is the point.
+
 ## NEXT
 
-- ONLY thing outstanding: `Package engine` on run **35650126791** (step 4's
-  last job, ~15 min). `gh run view 35650126791` from
-  /var/tmp/apex-work/wt-ci-selector-base. Write its outcome into the
-  "Package engine" section of
-  `ROADMAP/evidence/ci-selector-base-20260922.md` (replace the
-  "still running when this file was written" paragraph — it must not point at
-  this card, which is not in git), commit, push, and mark `## LANDABLE <sha>`.
-  Everything else is done and pushed.
+- Nothing. Unit complete. If anything else is wanted here it is the follow-up
+  units named under FOUND, and each is its own card.
 
 ## DONE
 
-- **Fix + gate committed and pushed: `task/ci-selector-base` @ `79ce1dc9`.**
-  `pr-validation.yml`'s `push` arm now classifies an integration branch against
-  `git merge-base origin/main "$head"`; task branches keep `event.before`.
-  New gate `tests/check-ci-selector-parity.sh`, wired into `static`.
-- Gate proved BOTH ways: 5 passed / 2 failed against `HEAD:` (pre-fix copy at
-  /var/lab-scratch/ci-selector-base/pr-validation.BEFORE.yml), 7/0 after.
-  Three mutants each fail exactly their own assertion —
-  mut-all-branches (task narrowing), mut-select-all (parity),
-  mut-no-zero-fallback (both fallbacks, rc=128).
-- Local gates green: check-suites-run-in-ci (107 suites, 100 in CI, 0 unrun),
-  check-shellcheck-coverage (206 scripts, 0 newly failing), no-conflict-markers.
-- Step 4 full-matrix run dispatched and read: 35650126791 (all four jobs
-  selected; classified over 57f593ad..6fa9ddbc).
-- `ROADMAP/evidence/ci-selector-base-20260922.md` written, committed, pushed.
-- `build-image.yml` decision written into the evidence: do NOT change it — its
-  push trigger is `main` only, so the push IS the merge; it uses
-  dorny/paths-filter with fetch-depth 2; and the file records that having
-  build-image.yml in the `core` filter once cost a 55-minute rebuild and a
-  fleet-wide ~5 GB reissue for a CI-only commit.
-- **Gate green on a GitHub runner**: run 35651168049, `Static validation`
-  success, step "A push to the integration branch selects what the merge would"
-  reports 7 passed / 0 failed. The gate uses python3 stdlib only (no PyYAML)
-  precisely so it can run there.
-- **Pushed: `task/ci-selector-base` @ `b427e2f0`** (3 commits: fix+gate,
-  evidence, evidence update).
-- Run block measured 9,160 -> 10,959 chars against the 21,000 cap.
+- **Fix + gate: `pr-validation.yml`'s `push` arm classifies an integration
+  branch against `git merge-base origin/main "$head"`; task branches keep
+  `event.before` and both of its fallbacks.** `INTEGRATION_BRANCHES` in the
+  step, asserted equal to `on.push.branches`.
+- **`tests/check-ci-selector-parity.sh`**, wired into `static` — the job with
+  no selector, because `.github/workflows/` selects the ENGINE job and a gate
+  about the selector must not be one the selector can switch off. It extracts
+  the step's own `run:` block and executes it, so it cannot drift.
+- Gate proved BOTH ways: **5 passed / 2 failed** against the pre-fix workflow
+  (/var/lab-scratch/ci-selector-base/pr-validation.BEFORE.yml), **7 / 0** after,
+  and **7 / 0 on a GitHub runner** (run 35651168049, `Static validation`).
+  The five that pass in both directions are the evidence the fallbacks were not
+  regressed.
+- Three mutants, each failing only its own assertion
+  (/var/lab-scratch/ci-selector-base/mut-*.yml): merge-base for every branch →
+  task narrowing fails; base set to "" → parity fails; all-zeros fallback
+  deleted → both fallback assertions fail with **rc=128**, the exact failure
+  the step's own comment describes.
+- Step 4 done: full matrix run **35650126791**, all four jobs selected,
+  classified over 57f593ad..6fa9ddbc. Reds reported, none fixed.
+- `build-image.yml`: decided NOT to change, with the cost stated. Its push
+  trigger is `main` only, so there the push IS the merge; it classifies with
+  dorny/paths-filter at `fetch-depth: 2`; and its own comment records that
+  having `build-image.yml` in the `core` filter once cost a 55-minute rebuild
+  and a fleet-wide ~5 GB reissue for a CI-only commit.
+- `ROADMAP/evidence/ci-selector-base-20260922.md` written.
+- Local gates green after the change: check-suites-run-in-ci (107 suites, 100
+  in CI, 0 unrun), check-shellcheck-coverage (206 scripts, 0 newly failing),
+  check-no-conflict-markers.
+- `run:` block measured 9,160 -> 10,959 chars against the 21,000 cap.
 
 ## IN PROGRESS
 
-- One CI job outstanding: `Package engine` on 35650126791.
+- nothing
 
 ## FOUND
 
-- **The card's premise is slightly wrong and the corrected numbers are
-  stronger.** `Installer safety and UI` did NOT run on zero pushes: over all
-  166 push runs of pr-validation on `roadmap/v2.2` it was selected by 9
-  (5 green, 4 red — 35518416643, 35566068754, 35611127672, 35649643570).
-  The real measure: only **2 of 166** push runs classified all four selectable
-  jobs, **28 classified none of them** (green having run only `Static
-  validation`), and the merge-shaped classification of the tip selects all
-  four (828 files differ from `main`). Data:
-  /var/lab-scratch/ci-selector-base/{push-runs.tsv,jobs.tsv}.
-- **STEP 4, run 35650126791, `workflow_dispatch` on roadmap/v2.2 @ 6fa9ddbc,
-  classified over 57f593ad..6fa9ddbc, all four jobs selected:**
-  - Static validation ✓, Select tests ✓, Rust validation ✓, Android client ✓
-  - **Installer safety and UI ✗ — `Run installer disk-encryption suite`,
-    exit 1. NEW: this is not the locale/keymap red that 6fa9ddbc fixed
-    (locale ✓ and keyboard ✓ in this very run). Its own unit.**
-  - `Run installer accessibility audit` reported `-` because the failing step
-    above it skipped it — that step has no `if: !cancelled()`, unlike the
-    engine job's gates. So the a11y audit's state on this tree is UNKNOWN,
-    which is its own (small) unit.
-  - Package engine: see NEXT — still running.
-- **RED 1 is dated: `installer/test-installer-luks.sh` has NEVER passed in
-  CI.** It and its workflow step landed 2026-09-20 (`92bdf557`, extended by
-  `05b0ea55`). `Run installer disk-encryption suite` was SKIPPED in runs
-  35518416643 / 35566068754 / 35611127672 (the locale suite above it was red)
-  and FAILED in 35649643570 and 35650126791, the first two to reach it. So
-  `6fa9ddbc` did not break it — it uncovered it. The five green installer runs
-  of 2026-09-12/13 predate the step entirely.
-- **A stale comment in `pr-validation.yml`, out of my bounds:** the `engine`
-  job's last step says "EXPECT THIS RED UNTIL apex-shell PR #9 MERGES".
-  apex-shell PR #9 merged **2026-09-03**. Somebody should re-read that step's
-  premise; I did not touch it.
+Each of the four below is its own unit. None was fixed here.
+
+- **The card's premise was slightly wrong, and the corrected numbers are
+  stronger.** `Installer safety and UI` did not run on zero pushes: over all
+  **166** push runs of pr-validation on `roadmap/v2.2` it was selected by 9
+  (5 green, 4 red). The real measure is the distribution — only **2 of 166**
+  push runs classified all four selectable jobs, **28 classified none** (green
+  having run only `Static validation`), and the merge-shaped classification of
+  the tip selects all four (828 files differ from `main`). So 164 of 166
+  landings were checked against a smaller job set than the merge will use.
+  Data: /var/lab-scratch/ci-selector-base/{push-runs.tsv,jobs.tsv}.
+- **UNIT: `installer/test-installer-luks.sh` is red 24/7, and has NEVER passed
+  in CI.** Three separate causes: (1) `FAIL XKB bg resolves to console keymap
+  bg_bds-utf8 (end to end) KEYMAP=us`; (2) the no-keymap-data fallback measures
+  inside a container and the runner refuses it —
+  `cannot open run directory '/run/user/1001/crun': Permission denied` → OCI
+  permission denied → `FAIL the keymap checks reported a result`; (3) six
+  `--check-passphrase` assertions fail identically with
+  `APEX-INSTALL-FAILED: … localhost/apex-os:daily is not present`, **including
+  the mutant control**, so the suite cannot currently tell a broken guard from
+  a missing image. Dated: the suite and its step landed 2026-09-20
+  (`92bdf557`/`05b0ea55`); the step was SKIPPED in runs 35518416643,
+  35566068754 and 35611127672 because the locale suite above it was red, and
+  FAILED in 35649643570 and 35650126791, the first two to reach it.
+  `6fa9ddbc` uncovered this red, it did not cause it.
+- **UNIT: the `installer` job's steps have no `if: ${{ !cancelled() }}`.**
+  `Run installer accessibility audit` reported `-` in both recent runs because
+  a step above it failed. The `engine` job was given that guard after run
+  34714159369 for exactly this; the installer job never was. The a11y audit
+  last reported for itself on 2026-09-13.
+- **UNIT: `mux-layouts` — the known flake, 44/3, still the only red in
+  `Package engine`** (15m15s, one failing step of 30). `secret-broker` was
+  93/0 this run, which is not a fix.
+- **UNIT (tiny): a stale comment.** `pr-validation.yml`'s last engine step says
+  "EXPECT THIS RED UNTIL apex-shell PR #9 MERGES". PR #9 merged **2026-09-03**
+  and `apex-plugin` reports 117 passed / 0 failed. The step is placed last
+  *because* it was expected red; that premise is gone.
+- **The `pull_request` arm uses a two-dot `git diff base.sha head`, not a merge
+  base.** If `main` moves after the PR opens, the PR over-runs — main's own new
+  paths are classified as changes, inverted. Consistent with the file's "too
+  much, never too little" rule, so left alone. Noted, not fixed.
+- If a branch in `on.push.branches` were ever `main` itself, the merge base
+  would equal head, the diff would be empty, every selector false, every job
+  skipped and `result` green. The new list assertion forces that decision into
+  the open rather than preventing it.
 - `git merge-base origin/main "$head"` DOES resolve on the runner:
   run 35647188306 logged `classified workflow_dispatch over 57f593ad..9c389baf`
-  and 57f593ad is the tip of `main`. actions/checkout@v4 with fetch-depth: 0
-  leaves refs/remotes/origin/main present. Measured, not assumed.
-- **The `pull_request` arm uses a two-dot `git diff base.sha head`, not a
-  merge base.** When `main` moves after the PR opens, the PR over-runs — it
-  classifies main's own new paths as changes, inverted. Consistent with the
-  file's "too much, never too little" rule, so left alone. Noted, not fixed.
-- If a branch in `on.push.branches` were ever `main` itself, merge-base would
-  equal head, the diff would be empty, every selector false, every job skipped
-  and `result` green. The new list assertion forces that decision into the
-  open rather than preventing it. Noted, not guarded.
+  and 57f593ad is the tip of `main`, so `actions/checkout@v4` with
+  `fetch-depth: 0` leaves `refs/remotes/origin/main` present. Measured, because
+  the whole fix depends on it.
 
 ## BLOCKED ON
 

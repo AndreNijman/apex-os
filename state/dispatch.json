@@ -1,6 +1,6 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-22T06:05+0800",
+ "updated": "2026-09-22T06:40+0800",
  "_round": "ROUND 40, opened 2026-09-22 03:10 AWST by the AUTORESUME orchestrator (claude -p, holding ROADMAP/state/autoresume.lock). Round 39 is over and its own _round key says so. NOTHING WAS LANDED THIS ROUND BECAUSE THERE WAS NOTHING TO LAND: every branch whose card says LANDABLE is already an ancestor of roadmap/v2.2 -- kernel-akmods 444102fd, kernel-publish 76a04c49, luks-boot 1fb98233, migrate-preconditions f3280072, initramfs-slim ede9a6f7, plus windows-installer-3, sdboot-xbootldr, luks-enroll-2, luks-installer-2, kernel-build-2, sdboot-migrate-2, android-relay-flake, katana-runner, efivars-guard-2. Checked with merge-base --is-ancestor per branch, not read off the report. The 20 apex-os and 13 apex-shell branches that still report unmerged are the known pre-round-10 cherry-pick set (see _stale_branch_finding) and all show cherry_plus=0.",
  "_landed_this_round": [
   {
@@ -32,6 +32,16 @@
    "third_flake_found_locally": "tests/test-mux-layouts.sh:128 piped a command into `grep -q` under pipefail, where SIGPIPE turns a MATCH into exit 141. Measured 2 in 60. This is the same defect the repo already has a memory for and it keeps recurring.",
    "gates_after_merge": "check-no-conflict-markers PASS. check-suites-run-in-ci: 106 suites, 99 run, 7 exempt, 0 unrun and undeclared.",
    "orchestrator_error_recorded": "The merge commit was FIRST written with backticks inside a double-quoted -m argument, so zsh ran the quoted fragment as a command substitution and ate it out of the message. Caught before pushing, amended via `git commit -F` with a QUOTED heredoc. This repo already has a memory for exactly this ('backticks in prose executed against the live OS'); the lesson is that -m is as dangerous as a heredoc and commit messages containing shell metacharacters should always go through -F."
+  },
+  {
+   "merge": "4739e21b",
+   "branch": "task/a11y-gate",
+   "at": "2026-09-22T06:30+0800",
+   "what": "VERDICT: walk 1 = 0, walk 2 = 8, which is the table's first row. org.a11y.Status IS the gate, the gsetting is NOT, and a late enable DOES retrofit. katana-a11y-20260922.md is wrong in exactly one sentence ('Qt decides whether to publish when the application object is built. Turning the bridge on later does not retrofit it'); its author owns it and is amending it, and this branch deliberately does not touch it. katana-final-qual section 5's CONCLUSION survives; one line of its REASONING does not.",
+   "the_experiment_as_briefed_was_impossible_and_that_is_the_finding": "Setting org.a11y.Status.ScreenReaderEnabled WRITES THE GSETTING BACK INTO DCONF, so 'set the flag alone, not the gsetting' cannot be done through that interface. Measured twice, including on a profile with no database at all. The agent held the gsetting down PHYSICALLY instead: at-spi-bus-launcher under GSETTINGS_BACKEND=memory, so dconf could not move -- the tree appeared with the database keeping its sha256 AND its mtime and `gsettings get` still answering false. THE COUPLING IS ONE-WAY: putting the flag back down leaves toolkit-accessibility and IsEnabled true, so a run that stops there leaves accessibility on for everything that starts next.",
+   "the_8_is_explained_not_observed": "Four surfaces per output; both landed runs had two outputs. Adding a second headless output took one process from 4 frames to 8.",
+   "four_more_defects": "(1) org.a11y.Bus CANNOT be dbus-activated on a private session bus on this image -- Permission denied, and NO AVC logged, so 'no denial' does not mean 'not SELinux'. tests/lib/atspi.sh must start the launcher itself. (2) `dconf dump /` prints SYSTEM DEFAULTS -- an empty profile still dumps the APEX dark-mode keys -- so a dump is never evidence a user set anything, which is the hole in BOTH sessions' mtime reasoning. (3) Qt attempts Embed exactly ONCE, logging the registry failure in the same second as the write and never retrying. (4) The greeter's ChildCount is 0 for a measured reason that is NOT the gate: its VT is inactive and its own sway answers `swaymsg -t get_outputs` with [].",
+   "what_it_exposes_as_the_next_real_p2_003_work": "EVERY FRAME THE SHELL PUBLISHES IS EMPTY -- no name, no description, no Action interface. The gate is no longer what stands between a blind user and the shell; the missing markup is. That is shell-side work and is offered to the peer rather than claimed."
   }
  ],
  "_status_recorded_this_round": "See _the_state_that_matters_round40 and _incident_hung_interactive_session. Recording of the L-003 staged-run result is done by PREPEND, never bare set-status.py -- that script REPLACES the evidence field and has no append flag, and L-003's record is 16 KB carrying the round-32 history forward.",
@@ -93,7 +103,8 @@
    "branch": "task/a11y-gate",
    "card": "ROADMAP/state/agents/a11y-gate.md",
    "machine": "katana seat0 (exclusive, per _seat_split_agreed)",
-   "dispatched": "2026-09-22T04:32+0800"
+   "dispatched": "2026-09-22T04:32+0800",
+   "status": "COMPLETE -- landed as merge 4739e21b at 2026-09-22T06:30+0800"
   },
   {
    "slug": "pkg-alternatives",
@@ -620,5 +631,11 @@
   "why_it_still_deserves_a_unit": "It is invisible to every cheap check: command -v answers, --version prints, ls lists the symlink happily. It surfaces only when something is RUN. Unit pkg-alternatives dispatched with the gate specified as 'the extension contains no dangling symlink that an installed package owns', provable both ways.",
   "method_note": "THREE CHECKS DISAGREED AND EACH WAS RIGHT ABOUT A DIFFERENT QUESTION. `ls` does not follow symlinks and listed them present; `test -e` does follow and called them missing; `stat -c %s` said 4 bytes, the length of the target string, and that is what gave it away. The mirror-image error was made earlier the same night in the other direction -- concluding wine was ABSENT from `command -v wine`, when the shipped binary is wine64. When a file's existence is the question, say WHICH existence you mean."
  },
- "_division_of_labour_agreed": "The peer has capacity on the L16 and no seat contention there, and has offered to take whichever units the full-matrix run surfaces that this session would rather not carry. Report-don't-fix is agreed by both sessions for a stated reason: a round that fixes five unrelated reds at once cannot attribute any of them."
+ "_division_of_labour_agreed": "The peer has capacity on the L16 and no seat contention there, and has offered to take whichever units the full-matrix run surfaces that this session would rather not carry. Report-don't-fix is agreed by both sessions for a stated reason: a round that fixes five unrelated reds at once cannot attribute any of them.",
+ "_incident_pkill_matched_another_session": {
+  "what": "At 04:22:47 the a11y-gate agent ran `pkill -x -f \"quickshell -c /usr/share/apex-shell\"` intending its own headless shell, and it ALSO killed the peer session's shell -- identical command lines. Restored at 04:25 as transient unit restore-s89-shell.service, pid 17584.",
+  "verified_by_the_orchestrator_before_reporting": "restore-s89-shell.service active 11 min; exactly ONE quickshell process on the machine; seat0 still ActiveSession=89; 0 failed units; toolkit-accessibility `true` as found.",
+  "the_unit_must_be_left_alone": "It sits in app.slice rather than session-89.scope. Stopping it, or reaping app.slice, kills the peer's bars. The peer has been told.",
+  "the_lesson_the_seat_split_did_not_cover": "The two sessions agreed on who holds the SEAT, not on process-name patterns that match across sessions. A `pkill -f` on a shared machine must target a pid or a cgroup, NEVER a command-line pattern -- every APEX session runs the same shell command line by construction. Also recorded: `hyprctl dispatch exec` was unusable for the restore because that Hyprland parses dispatch args as Lua."
+ }
 }

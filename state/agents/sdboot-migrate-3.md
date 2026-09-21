@@ -148,6 +148,30 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
 
 ## DONE
 
+- **THE MIGRATION COMPLETES. `auto rc=0`, `phase: committed`.** Guest C
+  (2 GiB ESP, 70 G disk, image `apex-sdmig:v2` = what `roadmap/v2.2` builds),
+  serial `/var/lab-scratch/sdboot-migrate-2/apexmig-c-3.serial`, boot 1:
+
+      apex-boot-migrate: saved the removable-media fallback (949424 bytes)
+      Bootloader: systemd / Installing bootloader via systemd-boot / Installation complete!
+      apex-boot-migrate: restored /EFI/BOOT/BOOTX64.EFI to what it was
+      apex-boot-migrate: joined /var: moved the machine's var into the composefs stateroot,
+      apex-boot-migrate:              left …/ostree/deploy/default/var -> ../../../state/os/default/var
+      apex-boot-migrate: carried /etc across (47M)
+      apex-boot-migrate: counted the entry: bootc_fedora-43-1+3-0.conf (3 tries)
+      apex-boot-migrate: removed the working copy of the image (bootc)
+      apex-boot-migrate: staged: the new boot path is written and nothing the firmware reads has changed
+      apex-boot-migrate: committed: the next boot is systemd-boot (Boot000B).
+      auto rc=0
+      phase: committed   store: ostreeContainer   loader: GRUB 2.12   boot entry: 000B
+      BootOrder: 000A,…  (UNCHANGED — the commit is BootNext, not BootOrder)
+
+  Every step of the design works on a real APEX/btrfs machine: containment,
+  the fallback save/restore, the `/var` move, the `/etc` carry, the entry
+  count, the temporary-copy cleanup, and the single-`SetVariable` commit.
+  **Both of this unit's fixes are load-bearing in that run** — `join_state`
+  (which failed before `b5e8ddcb`) and the counted entry are both in it.
+
 - **Committed and pushed, `task/sdboot-migrate-3` now at `ebbbab54`:**
   * `5cdaaa39` — evidence sections 0 and 1: the four rig defects and the whole
     of run A (the 512 MiB refusal, the `no-rsync` discovery, the root-space

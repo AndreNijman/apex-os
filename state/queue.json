@@ -1,6 +1,6 @@
 {
  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
- "updated": "2026-09-22T05:50+0800",
+ "updated": "2026-09-22T06:40+0800",
  "concurrency_ceiling": 6,
  "units": [
   {
@@ -648,7 +648,8 @@
     "katana-final-qual"
    ],
    "note": "Settles what actually gates quickshell's accessibility tree, after two runs agreed on ChildCount=8 across two compositors and disagreed on the mechanism. Two-walk experiment, verdicts fixed in advance. Dispatched round 40. HOLDS KATANA'S SEAT0 EXCLUSIVELY.",
-   "dispatched": "2026-09-22 round 40"
+   "dispatched": "2026-09-22 round 40",
+   "closed": "CLOSED 2026-09-22 (round 40) -- landed as merge 4739e21b. The mechanism question is SETTLED by a two-walk experiment with verdicts fixed in advance: org.a11y.Status is the gate, the gsetting is not, a late enable does retrofit. WHAT REPLACES IT AS THE P2-003 BLOCKER IS NOT A GATE AT ALL: every frame the shell publishes is empty -- no name, no description, no Action interface -- so the missing markup is now the thing between a blind user and the shell. Offered to the peer session; not claimed here. Still Andre's and unchanged: the upstream Qt defect, unfiled by choice."
   },
   {
    "id": "installer-locale",
@@ -685,6 +686,13 @@
    "conflicts": [],
    "note": "pr-validation.yml's `changes` job classifies a push against github.event.before but a pull_request against main, so roadmap/v2.2 can be green on every push and red at the merge. workflow_dispatch already classifies against the merge base -- the precedent is in the same file. Told to re-run the full matrix and REPORT further hidden reds without fixing them. Dispatched round 40.",
    "dispatched": "2026-09-22 round 40"
+  },
+  {
+   "id": "shell-a11y-markup",
+   "after": [],
+   "conflicts": [],
+   "note": "SEEDED NOT DISPATCHED round 40, offered to the peer session. The a11y bridge now works and the shell publishes frames, but EVERY FRAME IS EMPTY -- no name, no description, no Action interface. apex-shell (QML) work, not apex-os. This is what P2-003 actually needs now.",
+   "seeded": "2026-09-22 round 40"
   }
  ],
  "_completed_units": {

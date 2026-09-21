@@ -29,9 +29,9 @@ with `org.a11y.Status` reading `IsEnabled=false ScreenReaderEnabled=false` and
 `greetd`'s own `toolkit-accessibility` reading `false` at 04:12. That is exactly
 the "greeter nobody has asked" state the brief says a pristine zero needs.
 
-## LANDABLE c058cdc31d861c375ff50dbdc1cd0e118096d23c
+## LANDABLE f3628863db1b47494f839dcade883980d0d9961f
 
-One commit on `origin/task/a11y-gate`, cut from `origin/roadmap/v2.2` @
+Two commits on `origin/task/a11y-gate`, cut from `origin/roadmap/v2.2` @
 `6fa9ddbc`. **Evidence only** — it adds
 `ROADMAP/evidence/a11y-gate-20260922.md` and changes no code, no Containerfile
 and no test. Green locally: `check-doc-verbs` (273 valid, 0 not a command) and
@@ -89,7 +89,7 @@ not (see FOUND 3).
   `ActiveSession=89`; 0 of this unit's timers, units or processes left; stale
   `/run/user/1000/at-spi/bus` socket removed, session's `bus_0` untouched;
   0 failed system units.
-- Branch pushed: `task/a11y-gate` @ `c058cdc3`.
+- Branch pushed: `task/a11y-gate` @ `f3628863` (2 commits).
 
 ## IN PROGRESS
 
