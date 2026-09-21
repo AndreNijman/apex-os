@@ -172,7 +172,7 @@ image update.
 | refusal | what it means |
 | --- | --- |
 | `secure-boot-unsigned-loader` | Secure Boot is on and this image's systemd-boot is unsigned. The firmware would refuse the new loader. **This is the L16 today.** |
-| `esp-too-small` | the ESP cannot hold two deployments plus a staged third. **This is also the L16 today**: 600 MiB against ~1.1 GiB needed. |
+| `esp-too-small` | the ESP cannot hold two deployments plus a staged third. It used to be the L16's second refusal too — 600 MiB against ~1.1 GiB. **The slim initramfs retired it:** at 100.9 MiB per deployment the requirement is 350 MiB, and on katana, booted on that image, `precheck` now answers `OK esp-space: 503 MiB free, 350 MiB needed` and `This machine can migrate` (2026-09-22, `ROADMAP/evidence/initramfs-slim2-20260922.md`). |
 | `update-staged` | an ostree update is already staged; one shutdown must not have two finalize paths |
 | `already-migrated` | the booted deployment is not on the ostree backend |
 | `bootc-too-old` | no `--composefs-backend` on `install to-existing-root` |
@@ -444,6 +444,11 @@ it, and the four things that must be measured before it is claimed to work.
 
 The 512 MiB ceiling still binds on machines whose ESP is already APEX's own —
 the L16 and every existing install — so the initramfs work is not retired.
+
+**Done, 2026-09-22.** The image built at `44c9a5cb` costs 100.9 MiB per
+deployment against 375.2 MiB, so `need` falls from 1173 MiB to 350 MiB.
+katana, booted on it, passes every `precheck` check with 153 MiB of ESP to
+spare. A 512 MiB ESP is no longer a ceiling anything runs into.
 
 ### XBOOTLDR: the Boot Loader Specification allows it, bootc does not implement it
 

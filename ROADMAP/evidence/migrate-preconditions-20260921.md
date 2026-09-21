@@ -176,3 +176,14 @@ fails the fit check by more than 2x, exactly as the L16 does.
 So "it has to work in 512" and the katana proof are the same requirement, and
 both wait on `initramfs-slim`. Not derived from their numbers; derived from
 katana's partition and this engine's own formula.
+
+> **MET, 2026-09-22 — `initramfs-slim` shipped and katana now passes.** The
+> image built at `44c9a5cb` costs **100.9 MiB per deployment** (initramfs
+> 88,935,408 B + vmlinuz 16,906,312 B, read off katana, which boots it), which
+> clears the 154 MiB ceiling above by **53 MiB**. `apex-boot-migrate precheck
+> --explain`, run read-only on katana, answers `OK esp-space: 503 MiB free,
+> 350 MiB needed` and `This machine can migrate`, rc=0 — every check OK, with
+> the `esp-changes-disk` note firing on real hardware for the first time.
+> The ceiling arithmetic in this section is unchanged and was right; what
+> changed is the number going into it. See
+> `ROADMAP/evidence/initramfs-slim2-20260922.md` §4.
