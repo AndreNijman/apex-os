@@ -1886,11 +1886,27 @@ install_real() {
 
 # build_pcr7_enroll_bundle HOOKDIR PASSPHRASE_FILE — the payload common to any
 # UKI that has to run the REAL shipped apex-luks-enroll inside a guest: the
-# script itself, systemd-cryptenroll and od (both absent from the generic
-# initramfs, measured with lsinitrd), python3 plus the exact stdlib closure
-# `import json` needs (discovered by actually importing it with site disabled
-# and reading sys.modules back — not by guessing which files a json.dumps
-# needs), and a hook that runs it against /dev/vdb.
+# script itself, python3 plus the exact stdlib closure `import json` needs
+# (discovered by actually importing it with site disabled and reading
+# sys.modules back — not by guessing which files a json.dumps needs), every
+# external command the shipped script invokes that the generic APEX initramfs
+# does NOT carry, and a hook that runs it against /dev/vdb.
+#
+# THE COMMAND LIST WAS DERIVED, NOT GUESSED, AND GUESSING COST A BOOT. The
+# first real run of this scenario (2026-09-21) died at `enroll-exit=127` on a
+# missing `/usr/bin/env` — the shipped script's `#!/usr/bin/env bash` — while
+# the bundle shipped only systemd-cryptenroll and od. The list below is the
+# intersection of (a) every token in command position in
+# files/system/libexec/apex-luks-enroll that names a real executable, against
+# (b) the actual `usr/bin`+`usr/sbin` inventory of a real APEX initramfs read
+# with lsinitrd. Note that lsinitrd prints symlinks as `usr/bin/awk -> gawk`,
+# so an inventory built from the LAST field silently loses every symlinked
+# name — `awk` and the whole `tpm2_*` family read as absent when they are
+# present. Match on the `usr/bin/<name>` field, not on `$NF`.
+#
+# Present in the initramfs, therefore deliberately NOT bundled: awk (→gawk),
+# basename, cat, chmod, cryptsetup, grep, mktemp, mv, readlink, rm, sed, tr,
+# and tpm2_getcap (a symlink into the one `tpm2` multicall binary).
 #
 # PYTHONHOME/LD_LIBRARY_PATH are not set anywhere in the guest for this: it is
 # unnecessary because every file lands at the SAME absolute path a real
@@ -1908,21 +1924,37 @@ build_pcr7_enroll_bundle() {
     install -m 0755 "$HERE/../../system/libexec/apex-luks-enroll" \
         "$hookdir/usr/libexec/apex-luks-enroll"
 
-    # systemd-cryptenroll and od: present on the boot lab's OWN /usr (this
-    # scenario runs inside the apex-bootlab container, which carries the same
-    # systemd/cryptsetup/coreutils stack the APEX image does), absent from the
-    # STAGED APEX INITRAMFS. The two are different things; this project has
+    # These are present on the boot lab's OWN /usr (this scenario runs inside
+    # the apex-bootlab container, which carries the same
+    # systemd/cryptsetup/coreutils stack the APEX image does) and absent from
+    # the STAGED APEX INITRAMFS. The two are different things; this project has
     # been bitten before by conflating a build box's tools with a guest's.
+    #
+    #   env      the shipped script's shebang (#!/usr/bin/env bash) AND its
+    #            `env "${getcap_env[@]}" tpm2_getcap` call. Without it the
+    #            kernel cannot start the script at all and reports ENOENT
+    #            against a file that is right there.
+    #   dirname  dirname "$RECOVERY_OUT" — runs before anything is enrolled,
+    #            so a bundle missing this fails the recovery key, not the TPM.
+    #   wc       wc -c on the generated recovery key, its length check.
+    #   head     head -3 of the enrolment stderr, the failure report.
+    #   od       od -An -tu1 -j4 -N1 on the SecureBoot efivar (efivar_byte5).
+    #   systemd-cryptenroll   the thing under test.
     local bin path
-    for bin in systemd-cryptenroll od; do
+    for bin in systemd-cryptenroll od env dirname wc head; do
         path="$(command -v "$bin")" || die "the boot lab container has no $bin to bundle"
         install_real "$hookdir" "$path" 0755
-    done
-    local lib
-    for lib in $(ldd "$(command -v systemd-cryptenroll)" \
-                 | awk '/=>/{print $3} !/=>/{if ($1 ~ /^\//) print $1}'); do
-        [[ -f "$lib" ]] || continue
-        install_real "$hookdir" "$lib" 0755
+        # ldd for EVERY bundled binary, not just systemd-cryptenroll: a
+        # coreutils binary needs only ld-linux + libc (both already in the
+        # initramfs, so these copies are redundant rather than wrong), but
+        # deriving it per binary means the next tool added here cannot arrive
+        # without its libraries.
+        local lib
+        for lib in $(ldd "$path" 2>/dev/null \
+                     | awk '/=>/{print $3} !/=>/{if ($1 ~ /^\//) print $1}'); do
+            [[ -f "$lib" ]] || continue
+            install_real "$hookdir" "$lib" 0755
+        done
     done
 
     local py pylib pyver pymods f
@@ -1945,7 +1977,7 @@ for m in sys.modules.values():
     done <<<"$pymods"
 
     ( cd "$hookdir" && find . -print0 | cpio --null -o -H newc --quiet )
-    info "PCR7 enrolment bundle: apex-luks-enroll, systemd-cryptenroll, python3 $pyver + json, od"
+    info "PCR7 enrolment bundle: apex-luks-enroll, systemd-cryptenroll, python3 $pyver + json, od, env, dirname, wc, head"
 }
 
 scenario_luks_pcr7() {
@@ -1990,6 +2022,17 @@ scenario_luks_pcr7() {
     assert_serial_has "$ser" "APEX-BOOTLAB: have-systemd-cryptenroll=yes"
     assert_serial_has "$ser" "APEX-BOOTLAB: have-apex-luks-enroll=yes"
     assert_serial_has "$ser" "APEX-BOOTLAB: tpm-device=present"
+    # The shipped script being PRESENT and the shipped script being RUNNABLE
+    # are different claims, and the first real run of this scenario proved it:
+    # `have-apex-luks-enroll=yes` sat next to `enroll-exit=127` because
+    # /usr/bin/env was not in the initramfs. Assert the interpreter, so the
+    # day a bundled command is dropped the serial log names it instead of
+    # leaving a 127 to be re-diagnosed from scratch.
+    if grep -aq "APEX-BOOTLAB: enroll-interpreter=.* MISSING" "$ser"; then
+        bad "the shipped script's shebang interpreter is missing from the guest: $(grep -ao 'APEX-BOOTLAB: enroll-interpreter=[^ ]* MISSING' "$ser" | head -1)"
+    else
+        ok "the shipped script's shebang interpreter is present in the guest"
+    fi
     if grep -aq "APEX-BOOTLAB: have-python3=yes" "$ser"; then
         ok "the bundled python3 ran inside the guest"
     else
@@ -2005,11 +2048,26 @@ scenario_luks_pcr7() {
         return
     fi
 
-    # policy_select fell through PAST signed-pcr11, for the documented reason —
-    # not because signed-pcr11 is broken, but because this UKI never published
-    # a PCR-11 signing key for sd-stub to hand it.
+    # policy_select fell through PAST signed-pcr11 — not because signed-pcr11
+    # is broken, but because this UKI never published a PCR-11 signing key for
+    # sd-stub to hand it.
+    #
+    # WHICH of probe_signed_pcr11's gates refuses is the whole point, and the
+    # first real run of this scenario (2026-09-21) asserted the wrong one. The
+    # probe refuses in order: Secure Boot off, then no StubInfo efivar, then no
+    # readable signing key, then PCR 11 unmeasured. What actually fires here is
+    # the THIRD. That is a stronger result than the second would have been:
+    # gates one and two PASSING is a measurement that this guest booted with
+    # Secure Boot enforcing AND genuinely came up through sd-stub, so the only
+    # thing standing between this lab and a signed-PCR-11 enrolment is building
+    # the UKI with --pcr-key. Assert the absence of the sd-stub refusal too, so
+    # the day that stops being true this says so instead of passing quietly.
     assert_serial_has "$ser" \
-        "APEX-BOOTLAB: enroll-err:   not using signed-pcr11: this machine did not boot through sd-stub, so nothing measured a UKI into PCR 11"
+        "APEX-BOOTLAB: enroll-err:   not using signed-pcr11: the boot did not publish a PCR signing key at /run/systemd/tpm2-pcr-public-key.pem"
+    assert_serial_lacks "$ser" \
+        "APEX-BOOTLAB: enroll-err:   not using signed-pcr11: this machine did not boot through sd-stub"
+    assert_serial_lacks "$ser" \
+        "APEX-BOOTLAB: enroll-err:   not using signed-pcr11: Secure Boot is off"
     assert_serial_has "$ser" "APEX-BOOTLAB: enroll-exit=0"
 
     local tpm2field
@@ -2021,15 +2079,53 @@ scenario_luks_pcr7() {
             bad "the shipped script's tpm2: line was '$tpm2field' — expected binding=pcr7" ;;
     esac
 
+    # "TPM auto-unlock by default, WHERE SAFE" (L-003) is not satisfied by an
+    # unlock that works; it is satisfied by an unlock that works AND leaves the
+    # user another way in. Enrolment rewrites the LUKS2 header, so the
+    # passphrase it was unlocked with has to be re-proved afterwards, in this
+    # same boot, against this same volume.
+    if grep -aq "APEX-BOOTLAB: passphrase-after-enrol=SUCCESS" "$ser"; then
+        ok "the original passphrase still opens the volume after enrolment"
+    else
+        bad "the passphrase did not verify after enrolment: $(luks_serial_field "$ser" passphrase-after-enrol) — enrolling a TPM slot must never be the only way in"
+    fi
+
     local recovery=""
     recovery="$(luks_serial_field "$ser" recovery-key)"
     if [[ -n "$recovery" && "$recovery" != "<not"* ]]; then
-        printf '%s\n' "$recovery" > "$WORK/luks-pcr7-recovery.key"
-        ok "captured the recovery key the guest generated"
+        # NO TRAILING NEWLINE. `cryptsetup --key-file <regular file>` uses
+        # EVERY BYTE of the file as the passphrase, so one '\n' turns a
+        # correct 71-byte recovery key into a wrong 72-byte one and boot C
+        # reports "Failed to activate with key file … (Key data incorrect?)" —
+        # which reads exactly like a broken recovery slot and is not one.
+        # Measured on katana 2026-09-21 against this very volume: 72 bytes
+        # REFUSED, the same key piped without the newline OPENS.
+        #
+        # The SHIPPED script already gets this right — it writes
+        # `systemd-cryptenroll`'s output through `tr -d '[:space:]'`, 71 bytes,
+        # and `apex-install` re-strips with `tr -d '\r\n'` before piping. Only
+        # this scenario had the bug, because it is the only one that has to
+        # recover the key from a guest's SERIAL LOG rather than from the file
+        # the script wrote; every other scenario installs `$LUKS_RECOVERY`
+        # straight through.
+        printf '%s' "$recovery" > "$WORK/luks-pcr7-recovery.key"
+        # Check the length HERE, host-side, rather than discovering it four
+        # minutes later inside boot C.
+        local reclen
+        reclen="$(wc -c < "$WORK/luks-pcr7-recovery.key")"
+        if [[ "$reclen" == 71 ]]; then
+            ok "captured the recovery key the guest generated (71 bytes, no trailing newline)"
+        else
+            bad "the captured recovery key is $reclen bytes, expected 71 — a key file with a trailing newline is a different passphrase to cryptsetup"
+        fi
     else
         bad "no recovery key came back from the enrolment boot — boot C's refusal arm has no fallback to test"
     fi
-    cp "$ser" "$WORK/serial-pcr7-a.log"
+    # No copy here: vm_boot was given --serial "$WORK/serial-pcr7-a.log"
+    # already, so the log is at its final name. `cp` onto itself fails
+    # ("are the same file"), and under this file's set -e that aborted the
+    # whole scenario after boot A on the first real run — boots B and C, the
+    # reproduction and the recovery arm, never ran at all.
 
     # ── boot B: SAME vars template, SAME UKI signing cert, SAME swtpm state
     #    DIRECTORY — but a FRESH swtpm PROCESS, which resets every PCR to zero
@@ -2080,7 +2176,11 @@ scenario_luks_pcr7() {
     if [[ -n "$pcr11_a" && -n "$pcr11_b" && "$pcr11_a" != "$pcr11_b" ]]; then
         ok "PCR 11 differs between the two boots (different UKIs) while PCR 7 held — the binding really is to PCR 7, not to whatever this UKI measures"
     fi
-    cp "$serb" "$WORK/serial-pcr7-b.log"
+    # No copy here: vm_boot was given --serial "$WORK/serial-pcr7-b.log"
+    # already, so the log is at its final name. `cp` onto itself fails
+    # ("are the same file"), and under this file's set -e that aborted the
+    # whole scenario after boot A on the first real run — boots B and C, the
+    # reproduction and the recovery arm, never ran at all.
 
     # ── boot C: the Secure Boot state changes (a dbx revocation update, same
     #    technique luks-firmware-change uses for its control volume); PCR 7
@@ -2140,7 +2240,11 @@ scenario_luks_pcr7() {
     else
         cannot "no recovery key was captured from boot A, so the refusal arm's recovery path is untested this run"
     fi
-    cp "$serc" "$WORK/serial-pcr7-c.log"
+    # No copy here: vm_boot was given --serial "$WORK/serial-pcr7-c.log"
+    # already, so the log is at its final name. `cp` onto itself fails
+    # ("are the same file"), and under this file's set -e that aborted the
+    # whole scenario after boot A on the first real run — boots B and C, the
+    # reproduction and the recovery arm, never ran at all.
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
