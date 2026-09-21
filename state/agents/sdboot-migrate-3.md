@@ -179,15 +179,22 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
   ENOSPC, all of it before `/composefs` was touched at all. The `du` estimate is
   also an underestimate of what lands: the ostree repo is deduplicated, and the
   containers-storage extraction is not.
-  **The multiplier is wrong, not the idea.** The retry, on an 88 GiB root, is
-  measuring the true peak directly as host-image growth from the 13 GB the
-  install left: it passed 43 GB (where the 43 GiB guest died), then 51, 53,
-  **54 GB** and was still climbing — i.e. **more than 40 GB of growth against a
-  24 GiB prediction, already over 3x the repo**. Whoever fixes the check should
-  take the multiplier from this measured peak and update the
-  `tests/test-boot-migrate.sh` assertion that currently pins it ("the root check
-  sizes for two image copies"), plus the paragraph in `docs/update-cost.md`
-  that produced the 2x by argument.
+  **The multiplier is wrong, not the idea.** The clean number is the FIRST
+  attempt's, and it is enough on its own: a 43 GiB root with 15 GiB used and
+  28 GiB free hit ENOSPC while `/composefs` was still empty, so the true peak
+  is **more than 28 GiB of growth where the check predicted 24 GiB total**, and
+  the largest single consumer had not even started.
+  **Do not quote the retry's host-image growth as the peak.** The retry runs on
+  the same sparse file the failed attempt already allocated up to 43 GB, so
+  `du` on it counts freed-and-reused blocks as growth; it reached 55 GB and that
+  figure is contaminated. The honest post-migration steady state has to be read
+  as `df` inside the guest, or by loop-mounting p3 afterwards.
+  Whoever fixes the check needs a peak sampled *during* a migration on a clean
+  disk, and must then update three things together: `root_need` in
+  `cmd_precheck`, the `tests/test-boot-migrate.sh` assertion at line ~522 that
+  pins the literal `root_need=$(( repo_kib \* 2`, and the "It roughly doubles
+  the image's footprint on disk" bullet in `docs/update-cost.md` (~line 416),
+  which is where the 2x came from as an argument.
 - **The containment held, which is the other half of the result.** After a
   hard failure in the middle of the migration: `phase: not started`, no
   `boot entry`, `BootOrder` byte-identical, `BootCurrent: 000A` still

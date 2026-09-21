@@ -4997,44 +4997,65 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    ROUND 40 ADDENDUM 2026-09-22 - THE REAL SHELL, NOT JUST THE GREETER. Evidence
-    ROADMAP/evidence/katana-final-qual-20260922.md section 4.1, measured in a real labwc session on katana.
-    run-lockscreen-atspi.sh records the shell as 'root | role=application | name=quickshell | ChildCount=0'.
-    Measured now with ScreenReaderEnabled set: THREE applications on the user session's a11y bus (quickshell,
-    polkit-mate-authentication-agent-1, xdg-desktop-portal-gtk) and quickshell publishes NINE nodes - the
-    application plus EIGHT frames - at max depth 1. So ChildCount moved from 0 to 8. WHAT DID NOT ARRIVE IS
-    ANYTHING INSIDE THEM: every frame is unnamed, childless and exposes no action, and re-walking at t+5s and
-    t+15s gives the same 11 total nodes, so it is not laziness. THEN THE SESSION WAS LOCKED, which is the surface
-    that suite is named for, and the lock screen IS REACHABLE: 17 nodes, two more frames one per output, each
-    carrying a text node with an EMPTY name and the description 'Type your password and press Enter to unlock.'
-    plus a label, both focusable with SetFocus. So the conclusion is sharper than 'P2-003 is fixed': THE MARKUP
-    THAT EXISTS NOW REACHES THE BUS AND THE BAR HAS NONE. The lock screen is marked up and appears; the bar's
-    eight frames are empty because nothing is attached to their contents. That is the concrete bounded next task
-    and it could not have been seen before this image. TWO TRAPS FOR WHOEVER MEASURES THIS NEXT. (1) ASK FOR THE
-    BUS ADDRESS, DO NOT GUESS THE PATH: in a user session it is /run/user/1000/at-spi/bus_0, not .../at-spi/bus,
-    and it does not exist until something calls org.a11y.Bus.GetAddress - this round stat'd the path first and got
-    a false 'no accessibility bus' on a healthy session. (2) loginctl unlock-session DOES NOT unlock the APEX lock
-    screen; LockedHint stayed yes. Arguably correct, since a lock any process on the bus can lift is not a lock,
-    but it is undocumented and it strands an unattended run. Recorded, not graded. A SECOND ROADMAP AGENT was
-    doing P2-003 Hyprland work on the same seat during this run; see the P1-038 entry. ROUND 40 2026-09-22 - THE
-    SHELL PUBLISHES A REAL ACCESSIBILITY TREE. Evidence ROADMAP/evidence/katana-final-qual-20260922.md section 3.
-    No greetd teardown was needed and none was done: THE GREETER IS ITSELF A LIVE QUICKSHELL SESSION (qs -p
-    /usr/share/apex-greet/shell.qml, pid 1791, user greetd, seat0, with at-spi2-registryd and the a11y bus already
-    up). Walked with the repository's own tests/atspi-walk.py, sha256-compared on the machine. SHIPPED STATE: ZERO
-    applications on the a11y bus, not one, because org.a11y.Status.IsEnabled is false and Qt's bridge never
-    registers - the one-node reading on record came from a harness that had accessibility on. Setting
-    ScreenReaderEnabled=true, which is exactly what Orca does on connecting: 1 application, 17 NODES, max depth 2,
-    TWO FRAMES ONE PER OUTPUT (sway IPC confirms 2 active outputs, HDMI-A-1 1920x1080@239.96 and eDP-1
-    1920x1080@144.03, both scale 1.0), 11 named nodes and 12 nodes exposing org.a11y.atspi.Action with Press and
-    SetFocus. The password field has an EMPTY name and keeps its description, which is the Accessible.passwordEdit
-    behaviour check-lockscreen-a11y.sh asserts on the QML side and which had never been confirmed on the bus.
-    quickshell-git-0.3.1^860.gitc6a5160 carries upstream 916a0dd. NOTE for whoever reads
-    check-quickshell-a11y-cause.sh: that suite pins QT's behaviour and will NOT go red from this - what changed is
-    that quickshell no longer has the shape. run-lockscreen-atspi.sh section 5's skipped read-back assertions are
-    what should be revisited. A FIRST DRAFT OF THIS EVIDENCE CLAIMED THERE WAS NO WAY TO TURN ACCESSIBILITY ON AND
-    THAT WAS WRONG: sway-greet.conf binds exactly one key, bindsym --to-code Mod4+Mod1+s exec
-    /usr/libexec/apex-screen-reader toggle, the script is on the image and answers status=off rc=1 as documented.
-    Confirmed by reading the process environment rather than assuming: pid 1791 carries no
+    ROUND 40 RECONCILIATION 2026-09-22 - TWO AGENTS MEASURED THIS ROW ON KATANA WITHIN ONE HOUR AND THEIR
+    CONCLUSIONS DIFFER ON THE MECHANISM. Evidence ROADMAP/evidence/katana-final-qual-20260922.md section 5. THEY
+    AGREE ON THE HEADLINE AND THAT IS A REAL CROSS-CHECK: katana-a11y-20260922.md measured quickshell ChildCount=8
+    in a HYPRLAND session and this unit measured 8 frames in a LABWC session, both with no LD_PRELOAD shim, both
+    with polkit-mate-authentication and xdg-desktop-portal-gtk also on the bus. Round 30 could only reach that 8
+    with a shim that ships nowhere. THEY DISAGREE ON THE GATE. katana-a11y-20260922.md concludes that Qt decides
+    whether to publish when the application object is built, that turning the bridge on later does not retrofit
+    it, and therefore that a machine whose org.gnome.desktop.interface toolkit-accessibility is false at login
+    ships an empty tree. THIS RUN IS A DATED COUNTER-EXAMPLE: quickshell pid 9702 started at 03:47:5x, the user
+    andre had NO ~/.config/dconf/user AT ALL (that file was CREATED at 03:51:08.251 by the other agent's own
+    gsettings set, and it is the only file in that directory), the process carried no
+    QT_LINUX_ACCESSIBILITY_ALWAYS_ON and no other accessibility variable, and at about 03:49 - after this unit set
+    org.a11y.Status.ScreenReaderEnabled ALONE over the session bus - the already-running process published 8
+    frames, and then 17 nodes when the session was locked, adding the lock surfaces live. So it retrofitted,
+    twice. HYPOTHESIS, STATED AS ONE: the property Qt's bridge watches at runtime is org.a11y.Status on the
+    accessibility bus, and the gsetting is what at-spi-bus-launcher mirrors INTO that property - one writer of the
+    gate rather than the gate. If that is right, the other run's first reading of 0 had another cause (the walk
+    landing before the bridge connected is the obvious candidate) and its proposed remedy is still worth doing for
+    a different reason: it makes the tree visible to an auditor who is not a screen reader. NEITHER CLAIM SHOULD
+    BE QUOTED WITHOUT THE OTHER until somebody runs the discriminating experiment, which is one session: start the
+    shell with toolkit-accessibility false and no org.a11y.Status write, walk and expect 0, then set
+    ScreenReaderEnabled alone and walk again - 8 means the gsetting is not the gate. ROUND 40 ADDENDUM 2026-09-22
+    - THE REAL SHELL, NOT JUST THE GREETER. Evidence ROADMAP/evidence/katana-final-qual-20260922.md section 4.1,
+    measured in a real labwc session on katana. run-lockscreen-atspi.sh records the shell as 'root |
+    role=application | name=quickshell | ChildCount=0'. Measured now with ScreenReaderEnabled set: THREE
+    applications on the user session's a11y bus (quickshell, polkit-mate-authentication-agent-1,
+    xdg-desktop-portal-gtk) and quickshell publishes NINE nodes - the application plus EIGHT frames - at max depth
+    1. So ChildCount moved from 0 to 8. WHAT DID NOT ARRIVE IS ANYTHING INSIDE THEM: every frame is unnamed,
+    childless and exposes no action, and re-walking at t+5s and t+15s gives the same 11 total nodes, so it is not
+    laziness. THEN THE SESSION WAS LOCKED, which is the surface that suite is named for, and the lock screen IS
+    REACHABLE: 17 nodes, two more frames one per output, each carrying a text node with an EMPTY name and the
+    description 'Type your password and press Enter to unlock.' plus a label, both focusable with SetFocus. So the
+    conclusion is sharper than 'P2-003 is fixed': THE MARKUP THAT EXISTS NOW REACHES THE BUS AND THE BAR HAS NONE.
+    The lock screen is marked up and appears; the bar's eight frames are empty because nothing is attached to
+    their contents. That is the concrete bounded next task and it could not have been seen before this image. TWO
+    TRAPS FOR WHOEVER MEASURES THIS NEXT. (1) ASK FOR THE BUS ADDRESS, DO NOT GUESS THE PATH: in a user session it
+    is /run/user/1000/at-spi/bus_0, not .../at-spi/bus, and it does not exist until something calls
+    org.a11y.Bus.GetAddress - this round stat'd the path first and got a false 'no accessibility bus' on a healthy
+    session. (2) loginctl unlock-session DOES NOT unlock the APEX lock screen; LockedHint stayed yes. Arguably
+    correct, since a lock any process on the bus can lift is not a lock, but it is undocumented and it strands an
+    unattended run. Recorded, not graded. A SECOND ROADMAP AGENT was doing P2-003 Hyprland work on the same seat
+    during this run; see the P1-038 entry. ROUND 40 2026-09-22 - THE SHELL PUBLISHES A REAL ACCESSIBILITY TREE.
+    Evidence ROADMAP/evidence/katana-final-qual-20260922.md section 3. No greetd teardown was needed and none was
+    done: THE GREETER IS ITSELF A LIVE QUICKSHELL SESSION (qs -p /usr/share/apex-greet/shell.qml, pid 1791, user
+    greetd, seat0, with at-spi2-registryd and the a11y bus already up). Walked with the repository's own
+    tests/atspi-walk.py, sha256-compared on the machine. SHIPPED STATE: ZERO applications on the a11y bus, not
+    one, because org.a11y.Status.IsEnabled is false and Qt's bridge never registers - the one-node reading on
+    record came from a harness that had accessibility on. Setting ScreenReaderEnabled=true, which is exactly what
+    Orca does on connecting: 1 application, 17 NODES, max depth 2, TWO FRAMES ONE PER OUTPUT (sway IPC confirms 2
+    active outputs, HDMI-A-1 1920x1080@239.96 and eDP-1 1920x1080@144.03, both scale 1.0), 11 named nodes and 12
+    nodes exposing org.a11y.atspi.Action with Press and SetFocus. The password field has an EMPTY name and keeps
+    its description, which is the Accessible.passwordEdit behaviour check-lockscreen-a11y.sh asserts on the QML
+    side and which had never been confirmed on the bus. quickshell-git-0.3.1^860.gitc6a5160 carries upstream
+    916a0dd. NOTE for whoever reads check-quickshell-a11y-cause.sh: that suite pins QT's behaviour and will NOT go
+    red from this - what changed is that quickshell no longer has the shape. run-lockscreen-atspi.sh section 5's
+    skipped read-back assertions are what should be revisited. A FIRST DRAFT OF THIS EVIDENCE CLAIMED THERE WAS NO
+    WAY TO TURN ACCESSIBILITY ON AND THAT WAS WRONG: sway-greet.conf binds exactly one key, bindsym --to-code
+    Mod4+Mod1+s exec /usr/libexec/apex-screen-reader toggle, the script is on the image and answers status=off
+    rc=1 as documented. Confirmed by reading the process environment rather than assuming: pid 1791 carries no
     QT_LINUX_ACCESSIBILITY_ALWAYS_ON and no other QT_/A11Y/NO_AT_BRIDGE variable, 40 env keys, the only Qt one
     being QT_QPA_PLATFORMTHEME=qt6ct. THE TRAP FOR AUDITORS: anything that inspects the a11y bus without claiming
     to be a screen reader sees an empty bus and would wrongly report the shell as publishing nothing. Queue items

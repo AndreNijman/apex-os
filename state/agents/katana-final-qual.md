@@ -128,10 +128,11 @@ machine. Say so; do not proxy them and grade them green.
 - On katana use `/var/lab/scratch`. On the L16 use `/var/lab-scratch`, never
   `/tmp` (it is a 15 GB tmpfs on 29 GB of RAM and filling it kills the machine).
 
-## LANDABLE a09bf1c6a27db53bcd720aac54b3700e93f5dd01
+## LANDABLE 45947f4edd6619c2fd8521037a4efefc5cf95885
 
-`task/katana-final-qual`, 5 commits, **evidence only — no code**. Pushed.
-Sole file: `ROADMAP/evidence/katana-final-qual-20260922.md` (787 lines).
+`task/katana-final-qual`, 6 commits, **evidence only — no code**. Pushed.
+Sole file: `ROADMAP/evidence/katana-final-qual-20260922.md` (859 lines).
+`git merge-tree` against `origin/roadmap/v2.2` (`6bbdfb57`) merges clean.
 `roadmap.yaml` is already updated for all six items (prepend, old text intact).
 
 ## NEXT
@@ -150,6 +151,14 @@ What a stranger should do with this card:
    seat (see FOUND).
 4. Correct `katana-p1038-apps-20260922.md`: it says `wineboot` is present and
    it is not, and `wineserver` is missing too.
+5. **Run the one discriminating a11y experiment** named in evidence section 5.
+   `katana-a11y-20260922.md` (landed mid-round) and this unit both measured
+   **8** — on Hyprland and on labwc, no shim — but its conclusion that "turning
+   the bridge on later does not retrofit it" has a dated counter-example here.
+   One session settles it: start the shell with `toolkit-accessibility` false
+   and no `org.a11y.Status` write, walk (expect 0), then set
+   `ScreenReaderEnabled` ALONE and walk again. 8 means the gsetting is not the
+   gate.
 
 ## DONE
 

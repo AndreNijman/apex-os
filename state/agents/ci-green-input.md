@@ -10,23 +10,28 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
 
 ## NEXT
 
-- **Four PR validation runs are IN FLIGHT on `task/ci-green-input`:
-  `35647154151 35647166056 35647177148 35647188306`** (fired 19:48-19:49 UTC
-  2026-09-21; each takes ~14 min). Read each one's `Package engine` conclusion:
-  `gh run view <id> --json jobs --jq '.jobs[]|[.name,.conclusion]|@tsv'` —
-  NOT the overall tick. If any is red, `gh run view <id> --log-failed` now
-  prints real diagnostics for both flakes (which send form, rc and stderr for
-  zellij; session status, exit code and agentd log for the sandbox) — that
-  output is the point of the last two commits, so read it and record it here.
-  Baseline to beat: mux-layouts 4/8 red, secret-broker 2/8 red,
-  apex-input 8/8 red.
-- The evidence file is ALREADY written and pushed (`0549f7e5`,
-  `ROADMAP/evidence/ci-green-input-20260921.md`); it has a `<!-- CI-RESULTS -->`
-  placeholder to fill with the four runs' outcomes. Then mark
-  `## LANDABLE <sha>` on this card.
+- Pull the two new diagnostic blocks out of the CI logs and paste them into
+  `ROADMAP/evidence/ci-green-input-20260921.md` at `<!-- CI-RESULTS -->`:
+  `gh api repos/AndreNijman/apex-os/actions/jobs/<job>/logs` for run
+  **35647154151** (mux-layouts red -> `apex-mux: what each send reported`) and
+  run **35647177148** (secret-broker red -> `the wait ended because: ...`).
+  Then mark `## LANDABLE <sha>`.
 
 ## DONE
 
+- **CI MEASURED, four `workflow_dispatch` runs on the branch
+  (`35647154151 35647166056 35647177148 35647188306`, all at `9c389baf`):**
+
+  | step | before | after |
+  | --- | --- | --- |
+  | `Run input-settings assertions` | **8/8 red** | **4/4 GREEN** |
+  | `Run terminal layout template assertions` | 4/8 red | 1/4 red (`35647154151`) |
+  | `Run secret-broker assertions` | 2/8 red | 1/4 red (`35647177148`) |
+
+  So the regression is fixed and **both flakes fired once each — which is the
+  payoff, not a setback**: each fired with the new diagnostics in place, so for
+  the first time the CI log says what actually happened. Four runs cannot show
+  a flake is cured and no such claim is made.
 - **Branch `task/ci-green-input` pushed at `e5eaebac`, 6 commits.** The three
   code commits are `cd3c06b6`, `762c5204`, `9c389baf`; the rest is evidence.
 - Evidence written and pushed: `ROADMAP/evidence/ci-green-input-20260921.md`
