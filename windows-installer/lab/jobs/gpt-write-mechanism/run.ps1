@@ -411,6 +411,24 @@ if (Test-Path $exe) {
         Select-String -Pattern 'PARTITION|VERDICT|REFUSED|windows-claims|attributes' | Out-String -Width 200
 }
 
+# The default run undoes M1 so that M2 can be measured on the same entry from
+# the same starting state. That makes the comparison fair, but it also means
+# the host verifier never sees M1's FINAL state -- so M1's row in the
+# comparison table would be true by construction rather than measured. Drop a
+# `keep-m1.txt` next to this script to stop here instead, and the host can
+# verify M1's result the same way it verifies M2's.
+if (Test-Path (Join-Path $PSScriptRoot 'keep-m1.txt')) {
+    ''
+    '################ STOPPING AFTER M1 (keep-m1.txt present) ################'
+    '  The undo and mechanism 2 are deliberately skipped so the host can'
+    '  byte-verify what the RAW read-modify-write actually left on the disk.'
+    $m1gpt = Sha256Hex (Read-At -Path $faPath -Offset 0 -Length ($SECTOR * 34))
+    "fa-primary-gpt-region-sha256-final: $m1gpt"
+    "M1-KEPT: YES"
+    '=== JOB COMPLETE ==='
+    exit 0
+}
+
 ''
 '################ UNDO -- restore the file written before the change ################'
 '  Invariant 3. Restores the TABLE, not partition contents.'
