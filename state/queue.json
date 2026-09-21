@@ -1,6 +1,6 @@
 {
  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
- "updated": "2026-09-22T05:25+0800",
+ "updated": "2026-09-22T05:50+0800",
  "concurrency_ceiling": 6,
  "units": [
   {
@@ -655,7 +655,8 @@
    "after": [],
    "conflicts": [],
    "note": "THE BLOCKER ON ANDRE'S MERGE TO MAIN. `Installer safety and UI` is red on roadmap/v2.2 deterministically, 4 of 4 runs -- installer-locale: 'FAIL ...and the console keymap -- want [de] got []'. Invisible because the changes path selector leaves installer=false on a push and a SKIPPED JOB COUNTS AS SUCCESS; a pull_request to main runs every job. Found by ci-green-input, outside its bounds. SEEDED NOT DISPATCHED round 40.",
-   "seeded": "2026-09-22 round 40"
+   "seeded": "2026-09-22 round 40",
+   "closed": "CLOSED 2026-09-22 (round 40) -- SPLIT, and the half this unit was named for is fixed. The keymap red was landed by the peer session as 6fa9ddbc and THE ENGINE WAS INNOCENT: the suite extracted set_locale_keymap_in without console_keymap_for or kbd_has, so both dependencies were undefined and the engine wrote a blank KEYMAP= from an empty substitution. Fixed 26/0 with a guard against the extraction silently reverting to measuring nothing, and made hermetic by fixture (mutation-proved: delete de.map.gz and the case answers us). THE REMAINING HALF IS UNIT ci-selector-base and it is NOT 'skipped counts as success' -- that is deliberate and documented. It is a base-ref asymmetry: a push classifies against the previous tip, a merge PR against main, so the integration branch never accumulates the full-diff verdict."
   },
   {
    "id": "secret-broker-sigkill",
@@ -677,6 +678,13 @@
    "conflicts": [],
    "note": "SEEDED NOT DISPATCHED round 40, on the peer's suggestion. katana passes apex-boot-migrate's root-space check with 43 GiB free against 43 GiB needed -- arithmetically correct and practically a coin flip. A refusal with zero headroom may want a stated margin rather than a bare comparison. Applies to the ESP check too, which has 153 MiB of real headroom. Belongs to whoever next owns migrate-preconditions.",
    "seeded": "2026-09-22 round 40"
+  },
+  {
+   "id": "ci-selector-base",
+   "after": [],
+   "conflicts": [],
+   "note": "pr-validation.yml's `changes` job classifies a push against github.event.before but a pull_request against main, so roadmap/v2.2 can be green on every push and red at the merge. workflow_dispatch already classifies against the merge base -- the precedent is in the same file. Told to re-run the full matrix and REPORT further hidden reds without fixing them. Dispatched round 40.",
+   "dispatched": "2026-09-22 round 40"
   }
  ],
  "_completed_units": {

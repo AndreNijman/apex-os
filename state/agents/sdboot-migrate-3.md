@@ -27,26 +27,26 @@ conclusion is WRONG — do not revive it.
 
 ## NEXT
 
-- **Run B boot 4 — the migration with the `join_state` fix (`b5e8ddcb`) on the
-  control disk — is RUNNING** as user unit `sdb3-boot-b4` (launched 04:04
-  AWST, ceiling 5400 s), action `act-unit-3c.sh`. A Monitor is armed on it.
-  Expect `auto rc=0`, `phase: committed`, and the ESP entry renamed to
-  `bootc_fedora-43-1+3-0.conf` by the uncommitted `count_staged_entry` splice.
-- Then boot 5, the MIGRATED boot, where item 3 is decided:
+- **Run B boot 5 — the migration with ALL THREE fixes on the control disk — is
+  RUNNING** as user unit `sdb3-boot-b5` (launched 04:12 AWST, ceiling 5400 s),
+  action `act-unit-3c.sh`, Monitor armed. The guest's leftover
+  `$SYSROOT/{state,composefs}` were cleared BY HAND from the host first (13 GB),
+  exactly as the new `partial-install` refusal instructs. Expect `auto rc=0`,
+  `phase: committed`, and `counted the entry: bootc_fedora-43-1+3-0.conf`.
+- Then boot 6, the MIGRATED boot, where item 3 is decided:
   `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-check-3.sh`, set the
   ceiling in `/var/lab-scratch/sdboot-migrate-3/run-boot-b.sh` back to **1800**,
-  then `systemd-run --user --unit=sdb3-boot-b5 --collect
+  then `systemd-run --user --unit=sdb3-boot-b6 --collect
   /var/lab-scratch/sdboot-migrate-3/run-boot-b.sh`.
   **Never `--fresh-nvram`** — `BootNext` lives in
   `/work/nvram-persist/VARS-apexmig-b.img.fd`.
-- Then append run B sections 4 and 5 to
-  `ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md` (sections 0-3 are
-  committed), commit, push, mark `## LANDABLE <sha>`.
-- If the session dies here: `task/sdboot-migrate-3` is pushed at `01234028` and
-  is already worth landing on its own — two evidence commits and one real fix
-  with tests. Only the item-3 splice and run B's last two sections are missing.
-  The spliced engine is backed up at
-  `/var/lab-scratch/sdboot-migrate-3/engine-splice-and-joinfix.bak`.
+- Then evidence sections 5 and 6, commit, push, `## LANDABLE <sha>`.
+- **If the session dies here, the branch is already worth landing.**
+  `task/sdboot-migrate-3` is pushed at `4f6678e3`: three evidence commits and
+  **two real fixes with tests**, 91/91. Only item 3's verdict and the last two
+  evidence sections are outstanding. The spliced engine (all three changes) is
+  backed up at `/var/lab-scratch/sdboot-migrate-3/engine-all.bak`; the worktree
+  copy is the same file.
 
 ### The item-3 decision rule, written down BEFORE the log exists
 
@@ -76,8 +76,9 @@ fourth one.
 | apexmig-b (2 GiB ESP) | 1 | `act-prep-3.sh` + `rsync-3` | **DONE** |
 | apexmig-b | 2 | `act-unit-3.sh` (the migration) | **DONE — ENOSPC, see FOUND** |
 | apexmig-b | 3 | `act-unit-3b.sh` (retry, grown disk) | **DONE — install OK, state-join failed** |
-| apexmig-b | 4 | `act-unit-3c.sh` (with the join_state fix) | RUNNING |
-| apexmig-b | 5 | `act-check-3.sh` (the MIGRATED boot) | — |
+| apexmig-b | 4 | `act-unit-3c.sh` (join_state fix) | **DONE — bootc "File exists"** |
+| apexmig-b | 5 | `act-unit-3c.sh` (all three fixes, state cleared) | RUNNING |
+| apexmig-b | 6 | `act-check-3.sh` (the MIGRATED boot) | — |
 
 Every boot: `./setctl.sh <action> <extra files…>` first, and the qemu launch
 needs **both** `-v …:/work:z` and `--oci /work/oci-dummy-3.img`.
@@ -101,6 +102,9 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
   * `b5e8ddcb` — **the `join_state` fix**: `-type d` on the stateroot-var
     lookup, a failure message that names which path failed, and three
     behavioural assertions extracted from the source. 86/86.
+  * `4f6678e3` — **the `partial-install` fix**: a named refusal for a
+    half-finished composefs deployment, the corrected `install-failed`
+    message, and five behavioural assertions over three fixtures. 91/91.
   * `01234028` — evidence section 4: the /var join defect, and the migrated
     cmdline read off the ESP (`:ro` confirmed, `boot=UUID=` correct,
     `rootflags=subvol=/` carried).
@@ -162,6 +166,41 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
   It stays uncommitted until run B's migrated boot says whether blessing works.
 
 ## FOUND
+
+- **`bootc install to-existing-root --composefs-backend` is NOT idempotent, and
+  the engine told the user the opposite. FIXED in `4f6678e3`.** Run B boot 4,
+  re-running after boot 3's install had succeeded and only `join_state` failed:
+
+      Bootloader: systemd
+      Installing bootloader via systemd-boot
+      error: Installing to filesystem: Setting up composefs boot:
+             Writing composefs state: Failed to create symlink for /var:
+             File exists (os error 17)
+      apex-boot-migrate: FAILED [install-failed]
+          … Re-running is safe.
+
+  **"Re-running is safe" was false** — every later run fails identically — and
+  no verb cleared it: `cmd_retry` only re-arms a migration that reached
+  `committed`, and `cmd_abort` removes the phase file while saying the files
+  left behind are "inert", which is true of BOOTING and false of RE-INSTALLING.
+  A machine could sit there permanently with nothing to get it out and a
+  message insisting it was fine. Note the two defects compound: the
+  `join_state` bug above is precisely what puts a machine into this state, so
+  before this branch a real user hit both in sequence.
+  The fix **refuses rather than deletes**, and that is a deliberate choice, not
+  timidity: on a machine that migrated, was confirmed, and is now on its GRUB
+  fallback with `/var/lib/apex/boot-migrate` gone, `$SYSROOT/state` and
+  `$SYSROOT/composefs` are the deployment it normally boots, and every signal
+  `cmd_precheck` has (booted store, booted loader) reads identically in both
+  cases. Which deployment is authoritative is the same open decision as
+  "Reclaiming the old deployment" in `sdboot-migrate.md`'s NEXT item 4.
+  Guarded on the phase, so `staged`/`committed`/`confirmed` are untouched and
+  the power-cut-between-stage-and-commit case still works. Five behavioural
+  assertions over three fixtures; verified to fail both ways.
+  **Writing them caught a real bug in the first draft:** the passing verdict is
+  named `no-partial-install`, so a bare substring grep matched it and two
+  negative assertions were green for the wrong reason. Anchored to
+  `^REFUSE +partial-install`.
 
 - **THE OTHER BIG ONE, and it is FIXED on this branch: `join_state` selected
   the deployment's SYMLINK to the stateroot var instead of the real

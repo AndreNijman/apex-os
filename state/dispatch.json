@@ -1,6 +1,6 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-22T05:25+0800",
+ "updated": "2026-09-22T05:50+0800",
  "_round": "ROUND 40, opened 2026-09-22 03:10 AWST by the AUTORESUME orchestrator (claude -p, holding ROADMAP/state/autoresume.lock). Round 39 is over and its own _round key says so. NOTHING WAS LANDED THIS ROUND BECAUSE THERE WAS NOTHING TO LAND: every branch whose card says LANDABLE is already an ancestor of roadmap/v2.2 -- kernel-akmods 444102fd, kernel-publish 76a04c49, luks-boot 1fb98233, migrate-preconditions f3280072, initramfs-slim ede9a6f7, plus windows-installer-3, sdboot-xbootldr, luks-enroll-2, luks-installer-2, kernel-build-2, sdboot-migrate-2, android-relay-flake, katana-runner, efivars-guard-2. Checked with merge-base --is-ancestor per branch, not read off the report. The 20 apex-os and 13 apex-shell branches that still report unmerged are the known pre-round-10 cherry-pick set (see _stale_branch_finding) and all show cherry_plus=0.",
  "_landed_this_round": [
   {
@@ -105,6 +105,17 @@
    "card": "ROADMAP/state/agents/pkg-alternatives.md",
    "machine": "L16 container only -- katana root is 96% full",
    "dispatched": "2026-09-22T05:22+0800"
+  },
+  {
+   "slug": "ci-selector-base",
+   "unit": "ci-selector-base",
+   "items": "none -- CI correctness, gates the merge to main",
+   "repo": "apex-os",
+   "worktree": "/var/tmp/apex-work/wt-ci-selector-base",
+   "branch": "task/ci-selector-base",
+   "card": "ROADMAP/state/agents/ci-selector-base.md",
+   "machine": "L16 + CI",
+   "dispatched": "2026-09-22T05:47+0800"
   }
  ],
  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -592,11 +603,11 @@
   "a11y_mechanism": "BOTH AGENTS HAVE NOW RETRACTED THEIR OWN CAUSAL CLAIM, which is the healthy outcome. The peer retracted the strong form of 'a late enable does not retrofit' -- its sequence changed TWO variables between the 0 and the 8 (it set the gsetting AND restarted quickshell), so it is self-consistent but not controlled. katana-final-qual's counter-example stands as a counter-example but its own hypothesis (org.a11y.Status is the gate, the gsetting merely mirrors into it) is unproven. Unit a11y-gate dispatched to settle it with a two-walk experiment whose verdicts are fixed IN ADVANCE in a table, so the result cannot be narrated afterwards. The peer has asked to amend its own file rather than have it corrected for it, and the agent is told not to touch katana-a11y-20260922.md."
  },
  "_the_thing_that_blocks_andres_merge": {
-  "headline": "`Installer safety and UI` IS RED ON roadmap/v2.2, DETERMINISTICALLY, 4 OF 4 RUNS -- AND NOBODY HAS EVER SEEN IT.",
-  "failure": "installer-locale: FAIL ...and the console keymap -- want [de] got []",
-  "why_it_is_invisible": "The `changes` path selector leaves installer=false on a roadmap/v2.2 PUSH, and A SKIPPED JOB COUNTS AS SUCCESS. So every push reads green on a job that never ran. A `pull_request` to `main` diffs against main and runs EVERY job.",
-  "consequence": "THE MERGE ANDRE IS BEING ASKED TO APPROVE IN ANDRE-TODO A.4 WILL FAIL ON IT. The one gate he is told is 'the last gate' has an unexamined red behind it. This is the 'gate that runs and inspects nothing' family again, at the worst possible place: the selector makes the whole job invisible rather than making one assertion vacuous.",
-  "ownership": "Found by ci-green-input, explicitly OUTSIDE its bounds, and correctly not fixed by it. Seeded as unit installer-locale. The peer session owns the merge to main and has been told."
+  "status": "HALF FIXED BY THE PEER, HALF DISPATCHED. The keymap red is gone (peer merge 6fa9ddbc). The reason nobody saw it is dispatched as ci-selector-base.",
+  "the_keymap_red_and_why_the_engine_was_innocent": "THE SUITE WAS MEASURING ITS OWN EXTRACTION. set_locale_keymap_in() calls console_keymap_for(), which calls kbd_has(); the suite extracted only the first, so both dependencies were undefined, the command substitution yielded empty, and the engine dutifully wrote a blank KEYMAP=. console_keymap_for CANNOT return empty -- step 5 falls back to us -- so an empty answer was only ever possible if the function did not exist. Fixed with both dependencies extracted PLUS a guard that refuses if the engine stops defining them, because otherwise it silently reverts to measuring nothing. 26/0, was 25/1. Also made HERMETIC rather than merely green: console_keymap_for falls back to the HOST's /usr/lib/kbd/keymaps, so adding the dependencies alone would have made the verdict depend on whether the runner has kbd installed. The fixture now carries its own tree, proven by mutation -- delete de.map.gz and the case answers us, not de.",
+  "MY_EARLIER_FRAMING_WAS_IMPRECISE_AND_IS_CORRECTED": "The orchestrator reported this finding as 'a skipped job counts as success', and that is NOT the defect. pr-validation.yml's `result:` job documents that behaviour deliberately and defends it correctly: a documentation-only PR legitimately must not be blocked by the installer suite, `changes` is in `needs` so a FAILURE there is caught rather than cascading into passing skips, and `cancelled` fails too. The same comment names the real adjacent hazard and puts the remedy in the right place -- a SUITE printing '0 passed, 0 failed (skipped)' and exiting 0 is invisible to any aggregate gate, so a missing prerequisite must be a failure in the suite, never a skip.",
+  "the_actual_defect_read_out_of_the_file": "A BASE-REF ASYMMETRY in pr-validation.yml's `changes` job. pull_request classifies against the PR base (main); push classifies against github.event.before (the branch's previous tip); workflow_dispatch classifies against `git merge-base origin/main $head`. So a push to roadmap/v2.2 sees only that push's paths while the merge PR sees the WHOLE branch diff -- the integration branch can be green on every push for weeks and red the instant it is proposed for merge. That is exactly what happened: no single push happened to touch installer/. workflow_dispatch ALREADY does the right thing ten lines away, which is the strongest argument that the push branch is an oversight rather than a decision.",
+  "what_is_not_yet_known": "installer is ONE JOB OF FIVE. The same reasoning applies to rust, engine and android, and nobody has looked. ci-selector-base is told to re-run the full matrix on roadmap/v2.2 and REPORT what it surfaces WITHOUT fixing it -- each is its own unit, and a round that fixes five unrelated reds at once cannot say which fix did what."
  },
  "_finding_alternatives_never_runs": {
   "headline": "apex-pkg builds the extension by EXTRACTING RPMs, and extraction does not run %post. Every package that publishes its binaries through `alternatives` therefore installs 'successfully' into the extension AND DOES NOT WORK.",
