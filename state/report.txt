@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-21 11:12 AWST
+APEX ROADMAP — resume report — 2026-09-21 11:30 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -18,32 +18,32 @@ APEX ROADMAP — resume report — 2026-09-21 11:12 AWST
 ────────────────────────────────────────────────────────────────────────────
   kernel-build-2 unknown    P1-043                             task/kernel-build-2
              head 76aa2b95 feat(android): publish the release signing certificat
-             dirty 1 file(s), 0 unpushed, card 41m
+             dirty 1 file(s), 0 unpushed, card 59m
              NEXT 1. DONE — see below. Do NOT run `podman save | sudo podman load` a
 
   sdboot-migrate-2 unknown                                       task/sdboot-migrate-2
              head 234cc4dc fix(boot): refuse a migration the root filesystem can
-             dirty 0 file(s), 0 unpushed, card 44m
+             dirty 0 file(s), 0 unpushed, card 62m
              NEXT 1. Item 1 (the APEX/btrfs lab run) is set up and running in the ba
 
   windows-installer-3 unknown                                       task/windows-installer-3
-             head ed6955fc test(windows): exercise the diskpart set id= remedy i
-             dirty 4 file(s), 0 unpushed, card 38m
+             head e38e0e42 Merge remote-tracking branch 'origin/roadmap/v2.2' in
+             dirty 0 file(s), 10 unpushed, card 56m
              NEXT 1. Priority 4 (payload deployment), synthetic payload only. Write 
 
   luks-installer-2 unknown    L-002                              task/luks-installer-2
              head 05b0ea55 feat(luks): apex-install --check-passphrase, a no-dis
-             dirty 1 file(s), 0 unpushed, card 39m
+             dirty 1 file(s), 0 unpushed, card 57m
              NEXT 1. **Read the result of the first boot run before doing anything e
 
   luks-enroll-2 unknown    L-003                              task/luks-enroll-2
              head b9844c8e feat(boot-v2): a STAGED guest scenario for the PCR 7 
-             dirty 1 file(s), 0 unpushed, card 28m
+             dirty 1 file(s), 0 unpushed, card 46m
              NEXT 1. **Run `luks-pcr7` for real on katana — not yet done.** Commit `
 
   android-release-2 unknown                                       task/android-release-2
              head 76aa2b95 feat(android): publish the release signing certificat
-             dirty 0 file(s), 0 unpushed, card 50m
+             dirty 0 file(s), 0 unpushed, card 68m
              NEXT Once roadmap/v2.2 lands on main: `gh workflow run release-android.
 
 
@@ -51,8 +51,11 @@ APEX ROADMAP — resume report — 2026-09-21 11:12 AWST
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
   int-os:  tip 4031d43f Merge task/sdboot-xbootldr into roadmap/v2.2
+    task/initramfs-slim
+      26d92144 wip(initramfs): no KMS driver and no network in the initramfs   [1/10 added lines on tip]
     task/kernel-publish
       3dc80629 fix(core): declare APEX_KERNEL_IMAGE before the first FROM   [0/10 added lines on tip]
+      544143e1 ci(kernel): publish the kernel image, so core has one to buil   [2/10 added lines on tip]
     task/luks-enroll-2
       b9844c8e feat(boot-v2): a STAGED guest scenario for the PCR 7 in-boot    [3/10 added lines on tip]
     task/luks-installer-2
@@ -63,6 +66,8 @@ APEX ROADMAP — resume report — 2026-09-21 11:12 AWST
     task/windows-installer-3
       f1fc1cdb fix(windows-installer): give the target-disk fixtures a qcow2   [0/10 added lines on tip]
       ed6955fc test(windows): exercise the diskpart set id= remedy in the la   [2/10 added lines on tip]
+      ccacf128 fix(windows-installer): the diskpart remedy needs two command   [1/10 added lines on tip]
+      6828591e test(windows): let a lab job ask for a second boot, and add t   [1/10 added lines on tip]
 
   int-shell:  tip 9567586 Merge task/focus-switcher into roadmap/v2.2 (apex-shel
     (nothing — every task branch's content is on the integration tip)
@@ -99,12 +104,12 @@ APEX ROADMAP — resume report — 2026-09-21 11:12 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 11:12:28 AWST 22s
+  snapshot timer: active   last 11:30:28 AWST 24s
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    ea0c64e  apex-os-windows-installer-
     apex-os    ef1a6fb  int-os-
-    apex-os    83ff15a  roadmap-state
+    apex-os    b9c8de5  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    dd974a7  wt-android-release-
     apex-os    9d0f766  wt-android-signing-
@@ -127,7 +132,7 @@ APEX ROADMAP — resume report — 2026-09-21 11:12 AWST
     apex-os    e354d6f  wt-gaming-release-
     apex-os    de7dff9  wt-gaming-scx-
 sed: couldn't flush stdout: Broken pipe
-    apex-shell d9abf57  apex-shell-
+    apex-shell d21db9f  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-
