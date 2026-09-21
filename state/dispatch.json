@@ -1,14 +1,75 @@
 {
   "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
-  "updated": "2026-09-21T01:45+08:00",
-  "_round": "Round 35 is COMPLETE. Zero agents running. Every unit dispatched this round finished and LANDED; roadmap/v2.2 tip 283b0690. LANDED THIS ROUND: kernel-build (APEX builds its own kernel; BTF gate returns ok for the first time on any kernel; dwarves 1.32 confirmed by name, not arithmetic), katana-runner (self-hosted runner + a 500 GiB apexdev partition cut from games, Windows partitions provably untouched, a real kernel build green in 34m23s at -j20), sdboot-migrate (IN-PLACE crash-safe migration -- the previous round's `reinstall required` was WRONG and Andre rejected it before it was measured), luks-installer (first encrypted install end to end; keymap proven by typing on an emulated keyboard through key POSITIONS), efivars-guard-2 (the morning's guard was HALF INERT and this corrects it), android-signing (key decision implemented; found pr-validation leaking the keystore into the workspace), windows-installer-2 (a real Windows VM, which immediately found three defects Linux testing could not), focus-switcher (pointer follows keyboard focus, proven with a control that reproduces Andre's bug on demand; alt-tab switcher across all workspaces), and the Ultra power-profile removal with a parity gate. A NOTE ON THIS FILE: it went stale between 23:05 and 01:45 because the orchestrator was landing rather than dispatching, and a peer session read its mtime as `nothing is happening` and nearly acted on the repo. The branch tip is the activity signal, not this file's mtime.",
+  "updated": "2026-09-21T10:15+08:00",
+  "_round": "Round 36 STARTING. Orchestrator pid 14601 (spawned by apex-roadmap-resume.timer at 09:53:37 AWST, `timeout 4h claude -p`), registered in state/orchestrator.pid, heartbeat script /var/tmp/apex-work/scratch-orch-r36/r36-heartbeat.sh guarding it (kill -0), block inhibitor `systemd-inhibit --what=handle-lid-switch:sleep:idle` held with thermal/battery release guards, confirmed with `systemd-inhibit --list`. CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 confirmed present in /proc/14601/environ. The round-30 pid (2086130) and round-26 heartbeat this file's `_orchestrator` and the heartbeat file pointed to are both dead (kill -0 fails); this session is sole owner of the autoresume.lock flock (fuser: bash 4021, timeout 14600, claude 14601, all this session's own process tree). STARTING STATE, verified rather than re-derived: report.txt (generated 09:56 AWST) said 0 agents dispatched and NOTHING unlanded in either repo -- confirmed independently: `git log --oneline 283b0690..origin/roadmap/v2.2` shows exactly one commit (76aa2b95, the android signing-certificate fingerprint), so this file's own 283b0690 tip note was one commit stale, not wrong. roadmap/v2.2 (apex-os) is now 76aa2b95. apex-shell untouched this round. QUEUE CLEANUP: closed 4 stale queue ids that round 35 had already superseded under different slugs without closing the originals -- kernel-btf-scx (superseded by kernel-build, landed round 35), sdboot-image (superseded by sdboot-migrate, landed round 35, and sdboot-migrate corrected sdboot-image's own 'must reinstall, no in-place migration' conclusion), windows-installer (no card was ever written at this slug; real work landed under windows-installer-2), and final-image (its own card says 'nothing in this unit is outstanding' -- remaining acceptance rows are Andre's merge-to-main sequence, which is the held `final` unit's, not a dispatchable task). Left OPEN: luks-installer (L-002, real NEXT items remain -- boot a disk it produced, coordinate with luks-enroll), luks-enroll (L-003, blocked on L-002, real NEXT items remain -- the in-boot PCR7 scenario), android-release (NEXT item 1 read as Andre's decision in the stale card, but checked rather than assumed: `gh secret list` shows all four APEX_KEYSTORE*/APEX_KEY* secrets already set 2026-09-20, and android/signing-certificate.sha256 on the tip already carries a real fingerprint, not UNSET -- Andre already did his part; the dry-run release workflow is real remaining agent work). DISPATCHED SIX FRESH AGENTS, each in a fresh worktree cut from origin/roadmap/v2.2 @ 76aa2b95 (the old cards' worktrees/branches from round 35 are already landed and were left untouched rather than reused, per each card's own NEXT section): kernel-build-2 (P1-043 continuation: move the rootless-store kernel image to the root store, build core against it, then exercise katana-runner's kernel-build.yml with c06a48a0 included), sdboot-migrate-2 (continuation: run the migration lab against the real APEX image on btrfs, expect the 512MiB ESP refusal then retry at 2GiB), windows-installer-3 (continuation: fix the fixture-overlay bug FIRST since every later run mutates fixture-a.raw otherwise, then the diskpart remedy test, then priority-4 payload deployment), luks-installer-2 (L-002 continuation: boot a disk the installer actually produced via OVMF, then the GUI-side passphrase-typeability check), luks-enroll-2 (L-003 continuation: the in-boot PCR7 binding scenario on katana's boot lab under systemd-run --user; explicitly told NOT to relitigate the signed-PCR11-needs-Secure-Boot disagreement, which is measured and two records in the repo already agree), android-release-2 (dry-run the release-android.yml workflow now that Andre's secrets exist, read the summary, fix anything the dry run finds). Katana checked before dispatching anything that touches it: `apex game status` active=false, no scx scheduler loaded, Andre's seat0 session present but idle -- safe for headless lab work, not for anything touching the graphical session. Local L16 disk: /var 384G free of 1.5T (75% used); katana: apex-root 50G free of 954G (95% used, tight), /var/lab 483G free of 492G (the new katana-runner partition -- luks-enroll-2 was told to use it, not apex-root paths). Four of the six run KVM/podman labs on this 29GB laptop that Andre is actively sitting at (pid 2673, interactive claude on pts/0, started 09:54) -- each brief says to memory-check before starting a guest and to sequence around the others rather than assume free concurrency.",
   "_landed_this_round": {
     "apex-os": "roadmap/v2.2 7f647470 -> 859cbb2b. ONE merge: task/p1-053e-device tip 9231f72a, six commits, 914 insertions over 12 files. Rust changed, so the workspace was REBUILT ON THE MERGED TIP rather than trusted from the branch: cargo test --locked --workspace --no-fail-fast 3407 passed / 0 failed / 2 ignored across 57 targets, cargo clippy --workspace --all-targets --locked -D warnings exit 0 with zero warnings, check-no-conflict-markers.sh PASS. Pushed with --force-with-lease. THE MERGE MESSAGE WAS AMENDED BEFORE PUSHING: it was written with git commit -m \"...\" containing backticked prose, zsh command-substituted `scheduled-job` and ate the phrase, and the tell was `(eval):1: command not found` buried under the diffstat. Third instance of that bug in this repo; rewritten from a file with a quoted heredoc. EARLIER IN THE ROUND: 0 unlanded at the resume -- every round-31 branch (task/katana-qual 1886a221, task/p1-053d-device fd316f60, task/p2-d-7 82b1efbc, task/p2-f-6 a4907070) is contained by ancestry, and task/build-verify did not exist on the remote. SECOND MERGE: 2e04fbcb (task/build-verify, tip 6e4174ee, three files -- build-local.sh, tests/test-build-local-shell-ref.sh, .github/workflows/pr-validation.yml). Verified on the merged tip: pr-validation.yml re-parses as YAML, both scripts bash -n clean, tests/test-build-local-shell-ref.sh 25 passed / 0 failed, check-suites-run-in-ci.sh 78 suites / 74 run / 4 exempt / 0 unrun-and-undeclared, check-shellcheck-coverage.sh 169 discovered / 0 known-failing / 0 newly failing. The Android work from the previous merge was confirmed present afterwards, because the branch was cut from 7f647470 and its diff against the newer tip reads as deletions. roadmap/v2.2 is now 2e04fbcb. THIRD MERGE: 2814f45d (task/p1-052-android-relay, tip c1ac18e1, seven commits, 2,683 insertions over 14 files -- the Android relay leg). No Rust changed, so the workspace was deliberately NOT rebuilt and the note says so rather than implying a run that did not happen; what did change was verified on the merged tip: check-no-conflict-markers.sh PASS, run-device-suite.sh bash -n clean, and the JVM suites RE-RUN there -- :core 497/0/0 and :app 52/0/0, with RelayTest.xml confirmed present in results timestamped during that run rather than inferred from a BUILD SUCCESSFUL line, because gradle reported 1s and a stale result would have looked identical. roadmap/v2.2 is now 2814f45d.",
     "apex-shell": "roadmap/v2.2 a8cd491 -> 9df72cf. ONE merge: task/p2-b-round32 tip ecc0e39, 548 insertions over 3 files (.github/workflows/ci.yml, tests/run-rtl-test.sh, tests/mutate-rtl.sh). --no-ff DELIBERATELY: the branch is two commits straight on a8cd491 and would have fast-forwarded, leaving no merge sha to cite. tests/check-no-conflict-markers.sh PASS on the merged tree; ci.yml re-parsed as YAML and both suites are bash -n clean on the merged tip; pushed once with --force-with-lease. The RTL suite's own numbers were NOT re-run locally -- the card forbids it and records 37/0/0/0 here and 32 passed / 0 failed / 1 skipped / 3 could-not-run on the Arch runner (CI 35417214107). SECOND MERGE, later the same session: 4eea9fb (task/p2-b-round33, tip df17c34, three commits, 1,516 insertions over 10 files, five of them new -- the QTranslator host plugin and the guide's prose, 5 marked strings to 186). Verified ON THE MERGED TIP rather than trusted from the branch: check-no-conflict-markers.sh PASS, ci.yml re-parses as YAML, all five touched suites bash -n clean, check-agent-help.sh 25 passed / 0 failed with 8/8 self-mutants, run-i18n-test.sh 23 passed / 0 failed / 0 skipped with the 186-string pin holding. roadmap/v2.2 is now 4eea9fb. apex-os got NO commits from this round by decision, not omission: shipping the plugin is apex-os work with an uncosted image cost, and a Containerfile line with nothing consuming it would be the theatre FOUND 34 warns about -- so it became round 34's dispatch instead."
   },
   "_status_recorded_this_round": "P2-004 partial and P2-003 partial, both with the landing prepended to the EXISTING evidence rather than replacing it -- set-status.py has no append flag and a straight write would have erased 33,626 and 15,073 characters of prior rounds. Verified after writing: P2-003 33626 -> 34270 chars, P2-004 15073 -> 15694, file re-parses, 128 tasks, counts unchanged at 92 done / 34 partial / 0 todo / 2 blocked. P2-003 explicitly records that the landing carried NOTHING for that row, rather than letting a merge sha imply progress it did not make. SECOND WRITE: P2-004 partial again for the round-33 landing, prepended and verified 19,523 -> 20,334 characters. P2-003 deliberately NOT rewritten -- the round-33 agent had already recorded that the round carried nothing for that row, and a second 'landed nothing' note would be padding. THIRD WRITE: P1-060, P1-055, P1-057 partial and P1-052 done for the Android landing, each prepended and each verified at exactly +558 characters (22,671->23,229 / 9,527->10,085 / 8,454->9,012 / 7,522->8,080). Counts unchanged at 92/34/0/2 of 128 after every write this round. FOURTH WRITE: P1-060 partial and P1-052 done for the relay landing, prepended and verified at +623 each (28,347->28,970 and 10,285->10,908). Counts still 92/34/0/2 of 128.",
   "_deliberately_held": "THREE SLOTS of six at 18:45, and the reason is still contention rather than caution. Every remaining unit whose re-open condition is met needs KATANA's graphical session, and katana-image-qual owns it until the section 6 run finishes: p1-038-hardware (the 18 labwc matrix rows), p2-f (a free VT nobody is sitting at), p2-b items 1-2 (Orca at the login screen, greeter audio), and p2-c -- whose gate, 'an image build lands and a NEW reader could have arrived with it', IS NOW MET for the first time, because katana is booted on apex-7f647470. All four are re-offerable the moment that agent reports. p2-d was not dispatched either: its own card says no criterion on it is closable by another round and what remains is two pieces too small to be a unit. No unit was invented to fill a slot.",
-  "agents": [],
+  "agents": [
+    {
+      "slug": "kernel-build-2",
+      "items": [
+        "P1-043"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-kernel-build-2",
+      "branch": "task/kernel-build-2",
+      "card": "ROADMAP/state/agents/kernel-build.md (predecessor; continuation card is kernel-build-2.md, written as-you-go)",
+      "dispatched": "2026-09-21T10:15+08:00"
+    },
+    {
+      "slug": "sdboot-migrate-2",
+      "items": [],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-sdboot-migrate-2",
+      "branch": "task/sdboot-migrate-2",
+      "card": "ROADMAP/state/agents/sdboot-migrate.md (predecessor; continuation card is sdboot-migrate-2.md)",
+      "dispatched": "2026-09-21T10:15+08:00"
+    },
+    {
+      "slug": "windows-installer-3",
+      "items": [],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-windows-installer-3",
+      "branch": "task/windows-installer-3",
+      "card": "ROADMAP/state/agents/windows-installer-2.md (predecessor; continuation card is windows-installer-3.md)",
+      "dispatched": "2026-09-21T10:15+08:00"
+    },
+    {
+      "slug": "luks-installer-2",
+      "items": [
+        "L-002"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-luks-installer-2",
+      "branch": "task/luks-installer-2",
+      "card": "ROADMAP/state/agents/luks-installer.md (predecessor; continuation card is luks-installer-2.md)",
+      "dispatched": "2026-09-21T10:15+08:00"
+    },
+    {
+      "slug": "luks-enroll-2",
+      "items": [
+        "L-003"
+      ],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-luks-enroll-2",
+      "branch": "task/luks-enroll-2",
+      "card": "ROADMAP/state/agents/luks-enroll.md (predecessor; continuation card is luks-enroll-2.md)",
+      "dispatched": "2026-09-21T10:15+08:00"
+    },
+    {
+      "slug": "android-release-2",
+      "items": [],
+      "repo": "apex-os",
+      "worktree": "/var/tmp/apex-work/wt-android-release-2",
+      "branch": "task/android-release-2",
+      "card": "ROADMAP/state/agents/android-signing.md (predecessor; continuation card is android-release-2.md)",
+      "dispatched": "2026-09-21T10:15+08:00"
+    }
+  ],
   "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
   "_findings": {
     "nft -c cannot run in a build container": "netlink: Error: cache initialization failed: Operation not permitted. nft -c applies nothing, but libnftables opens a netlink socket and lists the LIVE ruleset before it will look at a file, and that needs CAP_NET_ADMIN over a real netns. The build had none, so the parser never ran and the step exited 1 at STEP 99/148. Fixed by giving it a netns of its own: unshare --user --map-root-user --net nft -c -f. Proved four ways with a fake unshare on PATH - parses / rejects a mutant at line 60 col 56-60 / unshare absent / unshare REFUSED - because the first draft classified unshare's own refusal as 'nft rejected the ruleset' and would have failed the build a second time on a false diagnosis.",
@@ -76,14 +137,13 @@
   },
   "_tip_verification": "apex-shell roadmap/v2.2 = 9df72cf after the merge, pushed with --force-with-lease and read back from origin. apex-os roadmap/v2.2 = 7f647470, untouched. The landing was done in the dedicated integration worktrees /var/tmp/apex-work/int-shell and int-os, NOT in the main checkouts -- apex-os's main checkout sits detached at bd310bcd with a large untracked tree and apex-shell's carries a modified tests/check-remote-agents.sh, and an earlier orchestrator's rc.xml check against that stale tree gave the diff in the wrong DIRECTION before it was caught.",
   "_orchestrator": {
-    "session": "round 30 orchestrator",
-    "registered": "2026-09-19T02:00+08:00. state/orchestrator.pid held a DEAD pid (16655, round 26) and the heartbeat was five days old, so the file said 'no orchestrator' while one was starting - fixed first, before any merge.",
-    "pid": 2086130,
-    "started_by": "apex-roadmap-resume.timer at 2026-09-19 01:56:26 AWST (timeout 4h claude -p, so a hard wall near 05:56). Verified SOLE orchestrator: the previous pid is dead and the flock on state/autoresume.lock is held by this run.",
-    "print_mode_ceiling": "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 confirmed present in /proc/2086130/environ, not assumed from the wrapper's source. Without it the harness SIGTERMs background agents 600s after the final response.",
-    "heartbeat_refresher": "GUARDED BY `kill -0 2086130`, and the guard is the whole point — round 30 first started an UNGUARDED `for i in 1..30; touch; sleep 600` loop and then replaced it, because that shape is actively harmful. `timeout 4h` guarantees the session cannot outlive its wall, so a heartbeat still ticking afterwards does not protect the run, it BLOCKS the rescue: autoresume.sh's third check treats a heartbeat under 45 minutes old as 'an orchestrator is alive' and skips, pushing the next attempt five hours out. The live loop touches every 5 min while the orchestrator pid lives, then removes BOTH state/orchestrator.pid and state/orchestrator.heartbeat so the next timer firing sees an idle machine and continues the run. Round 26's shape, restored. Script: /var/tmp/apex-work/scratch-orch-r30/r30-heartbeat.sh.",
-    "idle_inhibitor": "The round-29 hold (pid 44567, `sleep:idle` block) was `sleep 21600` started 04:54 earlier - it would have expired near 03:06, inside this session. A fresh GUARDED hold was taken instead: systemd-inhibit --what=handle-lid-switch:sleep:idle --mode=block, released when pid 2086130 exits, when any hwmon temp1 reaches 90C, or when the battery drops below 20% while discharging. Script and log: /var/tmp/apex-work/scratch-orch-r30/r30-idle-hold.sh|.log. No polkit prompt appeared. The killer this answers is hypridle's 15-minute idle suspend, not the lid; the lid is included because it is free.",
-    "android_slot": "CHECKED, NOT ASSUMED, before leaving the slot empty: `adb devices` lists nothing and lsusb shows no android/google/samsung device. Device 61261JEA311420 from round 29 is not attached. p1-053c stays closed."
+    "session": "round 36 orchestrator",
+    "registered": "2026-09-21T10:07+08:00",
+    "pid": 14601,
+    "started_by": "apex-roadmap-resume.timer at 2026-09-21T09:53:37 AWST (timeout 4h claude -p)",
+    "print_mode_ceiling": "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 confirmed in /proc/14601/environ.",
+    "heartbeat_refresher": "/var/tmp/apex-work/scratch-orch-r36/r36-heartbeat.sh 14601, guarded by kill -0, copied from round 30's script unmodified.",
+    "idle_inhibitor": "systemd-inhibit --what=handle-lid-switch:sleep:idle --mode=block, released on pid 14601 exit, hwmon temp1 >=90C, or battery <20% while discharging. Confirmed present in `systemd-inhibit --list`. Script: /var/tmp/apex-work/scratch-orch-r36/r36-idle-hold.sh."
   },
   "_previous_pause": {
     "when": "2026-09-07T15:32+08:00 to 2026-09-08T08:56+08:00",
