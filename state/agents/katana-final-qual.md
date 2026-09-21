@@ -130,11 +130,12 @@ machine. Say so; do not proxy them and grade them green.
 
 ## NEXT
 
-- Item 2 (P2-005/006/007): run the 6 booted-machine lines off `apex devices all`
-  on katana (the criterion is what the TOOL prints, not raw nmcli), plus
-  `apex devices network/print/scan/share`. Do NOT run checklist step 5
-  (hotspot) — katana's only link is `wlo1` and a hotspot severs ssh; grade it
-  could-not-run. Do not modify any 802.1X profile. Then item 3 (session).
+- Item 3 (P2-003, a11y tree): read `ROADMAP/state/agents/katana-image-qual.md`
+  for the greetd stop/restore dance and the dead-man restore timer, and
+  `/var/tmp/apex-work/qsprobe.sh` for the prior a11y walker. Then bring up a
+  session on katana's tty1, find the quickshell pid, walk the AT-SPI tree, and
+  restore greetd byte-identical (`cmp`) with the restore in a `trap restore
+  EXIT` PLUS a separate `trap "exit 130" INT TERM`. Verify by reading back.
 
 ## DONE
 
@@ -174,6 +175,11 @@ machine. Say so; do not proxy them and grade them green.
   session. A false negative — the mirror of the false positive §5c removed.
   (a) cannot be fixed without the `scx_ops_matches` fix above, or the new
   predicate can never become true.
+- `after.txt`'s `paired devices : 2` is the WRONG QUESTION.
+  `bluetoothctl devices` lists every known device; `bluetoothctl devices
+  Paired` is 0 on katana and both devices read `Paired=no Bonded=no
+  Trusted=yes` on the bus. `apex-devices` asks the Paired form and prints
+  `none` — the tool is right and the card's starting sweep was not.
 - 26 of 73 IRQ affinity writes are refused EPERM on katana even as root
   (managed IRQs). Reported honestly by apexd (`irqs_refused: 26`), not a
   defect — recorded so the next reader does not chase it.

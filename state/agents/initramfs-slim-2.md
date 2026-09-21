@@ -10,13 +10,20 @@ Dispatched round 40, 2026-09-22 ~03:30 AWST, by the autoresume orchestrator.
 
 ## NEXT
 
-- Write `ROADMAP/evidence/initramfs-slim2-20260922.md` in
-  /var/tmp/apex-work/wt-initramfs-slim-2 with the six measurements below, then
-  fix the two stale claims in `Containerfile.apex` (the "375.2 -> 114.6 MiB"
-  comment and the "layer digest stops moving" sentence at ~line 240), commit,
-  push, mark LANDABLE.
+- Fix the two stale claims in `Containerfile.apex` lines 225-239 — the
+  "375.2 MiB to 114.6 MiB" figure (lab kernel 7.2.5; the shipped build is
+  100.9 MiB on 7.2.6-apex1) and the sentence "unchanged theme + unchanged
+  kernel yield a byte-identical initramfs and the layer digest stops moving"
+  (the initramfs half is true, the layer half is measured false). Then add the
+  ~275 MiB-per-update figure to `docs/update-cost.md` near the tier table at
+  line 55, run `tests/test-apex-initramfs-budget.sh` and the containerfile
+  checkers, commit, push, mark LANDABLE.
 
 ## DONE
+
+- **`97850c6d` pushed to `origin/task/initramfs-slim-2`** —
+  `ROADMAP/evidence/initramfs-slim2-20260922.md`, 239 lines, the six
+  measurements below. Branch cut from `origin/roadmap/v2.2` @ `f3b1b3d4`.
 
 - **Item 5 (cross-BUILD reproducibility) is ANSWERED and it splits in two.**
   All measurements below are on this machine today, recorded in

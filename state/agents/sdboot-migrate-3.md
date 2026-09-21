@@ -48,7 +48,7 @@ conclusion is WRONG — do not revive it.
 
 | guest | boot | action on ctl.img | done? |
 | --- | --- | --- | --- |
-| apexmig-a (512 MiB ESP) | 1 | `act-migrate-3.sh` | not yet |
+| apexmig-a (512 MiB ESP) | 1 | `act-migrate-3.sh` | RUNNING |
 | apexmig-b (2 GiB ESP) | 1 | `act-prep-3.sh` | disk not built |
 | apexmig-b | 2 | `act-unit-3.sh` | — |
 | apexmig-b | 3 | `act-check-3.sh` (the migrated boot) | — |
@@ -121,6 +121,49 @@ conclusion is WRONG — do not revive it.
   (now ~line 1082).
 - Memory at start: 29 Gi total, 24 Gi available, no other qemu/podman/bootc
   process running (`ps aux` checked). `/var` has 254 GB free.
+- **The migrated machine mounts `/boot` READ-ONLY, and an ordinary composefs
+  machine mounts it rw. That difference is the whole of item 3.**
+  The migrated cmdline carries `systemd.mount-extra=UUID=…:/boot:auto:ro`
+  (`ROADMAP/evidence/sdboot-migrate-20260921-lab.md:176`), where the ordinary
+  composefs + systemd-boot guest was measured at `/dev/vda2 /boot vfat
+  rw,nosuid,nodev,noexec,relatime,…`
+  (`ROADMAP/evidence/sdboot-image-20260920-decision.md:45`). On the composefs
+  path the ESP **is** `/boot`, and `systemd-bless-boot` stripping `+N-M` from
+  an entry filename is a rename *on that filesystem*. So on a migrated machine
+  the counter can be written by the stage and then never stripped — not for the
+  SELinux reason APEX already fixed, but because the filesystem is ro. Three
+  boots later systemd-boot counts the entry out and rolls the machine back on
+  its own, which is strictly worse than today's inert `Wants=`.
+  **This is the hypothesis run B exists to decide, and it is the reason item 3
+  was correctly left uncommitted rather than reasoned through.**
+- APEX has ALREADY solved the other half of this on the ordinary path, which is
+  why the ro question is the only one left: `files/system/units/
+  10-apex-bless-boot-esp.conf` runs `systemd-bless-boot` as `bootupd_t` because
+  `init_t` may not rename `dosfs_t`, with the missing permission granted by
+  `files/system/selinux/apex_sdboot.te`, and `Containerfile.base` asserts
+  `semodule -l` still lists the module. So if run B shows a failure to bless, a
+  reader will be tempted to blame SELinux; `act-check-3.sh` prints the unit's
+  SELinuxContext, the AVC log and the `/boot` mount options side by side so the
+  two causes cannot be confused.
+- **A second reason the predecessor's guests could never have booted, and it is
+  not in any card: the rig directory has the wrong SELinux label.** The
+  documented recipe is `podman run … -v /var/lab-scratch/<dir>:/work
+  localhost/apex-bootlab …` with no `:z`. `/var/lab-scratch/sdboot-migrate-2`
+  is `unconfined_u:object_r:var_t:s0`, the container is `container_t`, and the
+  guest launch dies with `/bin/bash: line 1: /work/boot-mig.sh: Permission
+  denied` — an **exec** denial that reads like a mode bit, on a file that is
+  `-rwxr-xr-x`. Unit 1's directory `/var/lab-scratch/sdboot-migrate` is
+  `container_file_t`, which is why its ~30 boots worked and why nobody noticed
+  the recipe was incomplete. Fix: `-v …:/work:z`. Measured on this machine,
+  `getenforce` = Enforcing. Anyone copying that recipe into a fresh scratch
+  directory hits this immediately.
+- `lab-run.service` in `localhost/apex-sdmig:v1` bakes `TimeoutStartSec=900`,
+  set by the predecessor against a 2 GB fedora-bootc guest. Run B's migration
+  copies an 11.5 GB image into podman storage and then writes a third copy into
+  `/composefs`; 15 minutes is not a safe ceiling and systemd killing the stage
+  mid-flight would give a run that is safe and proves nothing. `daemon-reload`
+  does not re-arm a RUNNING job's timer, so run B is deliberately THREE boots
+  with the drop-in written on boot 1.
 
 ## BLOCKED ON
 
