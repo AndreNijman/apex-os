@@ -1886,11 +1886,27 @@ install_real() {
 
 # build_pcr7_enroll_bundle HOOKDIR PASSPHRASE_FILE — the payload common to any
 # UKI that has to run the REAL shipped apex-luks-enroll inside a guest: the
-# script itself, systemd-cryptenroll and od (both absent from the generic
-# initramfs, measured with lsinitrd), python3 plus the exact stdlib closure
-# `import json` needs (discovered by actually importing it with site disabled
-# and reading sys.modules back — not by guessing which files a json.dumps
-# needs), and a hook that runs it against /dev/vdb.
+# script itself, python3 plus the exact stdlib closure `import json` needs
+# (discovered by actually importing it with site disabled and reading
+# sys.modules back — not by guessing which files a json.dumps needs), every
+# external command the shipped script invokes that the generic APEX initramfs
+# does NOT carry, and a hook that runs it against /dev/vdb.
+#
+# THE COMMAND LIST WAS DERIVED, NOT GUESSED, AND GUESSING COST A BOOT. The
+# first real run of this scenario (2026-09-21) died at `enroll-exit=127` on a
+# missing `/usr/bin/env` — the shipped script's `#!/usr/bin/env bash` — while
+# the bundle shipped only systemd-cryptenroll and od. The list below is the
+# intersection of (a) every token in command position in
+# files/system/libexec/apex-luks-enroll that names a real executable, against
+# (b) the actual `usr/bin`+`usr/sbin` inventory of a real APEX initramfs read
+# with lsinitrd. Note that lsinitrd prints symlinks as `usr/bin/awk -> gawk`,
+# so an inventory built from the LAST field silently loses every symlinked
+# name — `awk` and the whole `tpm2_*` family read as absent when they are
+# present. Match on the `usr/bin/<name>` field, not on `$NF`.
+#
+# Present in the initramfs, therefore deliberately NOT bundled: awk (→gawk),
+# basename, cat, chmod, cryptsetup, grep, mktemp, mv, readlink, rm, sed, tr,
+# and tpm2_getcap (a symlink into the one `tpm2` multicall binary).
 #
 # PYTHONHOME/LD_LIBRARY_PATH are not set anywhere in the guest for this: it is
 # unnecessary because every file lands at the SAME absolute path a real
@@ -1908,21 +1924,37 @@ build_pcr7_enroll_bundle() {
     install -m 0755 "$HERE/../../system/libexec/apex-luks-enroll" \
         "$hookdir/usr/libexec/apex-luks-enroll"
 
-    # systemd-cryptenroll and od: present on the boot lab's OWN /usr (this
-    # scenario runs inside the apex-bootlab container, which carries the same
-    # systemd/cryptsetup/coreutils stack the APEX image does), absent from the
-    # STAGED APEX INITRAMFS. The two are different things; this project has
+    # These are present on the boot lab's OWN /usr (this scenario runs inside
+    # the apex-bootlab container, which carries the same
+    # systemd/cryptsetup/coreutils stack the APEX image does) and absent from
+    # the STAGED APEX INITRAMFS. The two are different things; this project has
     # been bitten before by conflating a build box's tools with a guest's.
+    #
+    #   env      the shipped script's shebang (#!/usr/bin/env bash) AND its
+    #            `env "${getcap_env[@]}" tpm2_getcap` call. Without it the
+    #            kernel cannot start the script at all and reports ENOENT
+    #            against a file that is right there.
+    #   dirname  dirname "$RECOVERY_OUT" — runs before anything is enrolled,
+    #            so a bundle missing this fails the recovery key, not the TPM.
+    #   wc       wc -c on the generated recovery key, its length check.
+    #   head     head -3 of the enrolment stderr, the failure report.
+    #   od       od -An -tu1 -j4 -N1 on the SecureBoot efivar (efivar_byte5).
+    #   systemd-cryptenroll   the thing under test.
     local bin path
-    for bin in systemd-cryptenroll od; do
+    for bin in systemd-cryptenroll od env dirname wc head; do
         path="$(command -v "$bin")" || die "the boot lab container has no $bin to bundle"
         install_real "$hookdir" "$path" 0755
-    done
-    local lib
-    for lib in $(ldd "$(command -v systemd-cryptenroll)" \
-                 | awk '/=>/{print $3} !/=>/{if ($1 ~ /^\//) print $1}'); do
-        [[ -f "$lib" ]] || continue
-        install_real "$hookdir" "$lib" 0755
+        # ldd for EVERY bundled binary, not just systemd-cryptenroll: a
+        # coreutils binary needs only ld-linux + libc (both already in the
+        # initramfs, so these copies are redundant rather than wrong), but
+        # deriving it per binary means the next tool added here cannot arrive
+        # without its libraries.
+        local lib
+        for lib in $(ldd "$path" 2>/dev/null \
+                     | awk '/=>/{print $3} !/=>/{if ($1 ~ /^\//) print $1}'); do
+            [[ -f "$lib" ]] || continue
+            install_real "$hookdir" "$lib" 0755
+        done
     done
 
     local py pylib pyver pymods f
@@ -1945,7 +1977,7 @@ for m in sys.modules.values():
     done <<<"$pymods"
 
     ( cd "$hookdir" && find . -print0 | cpio --null -o -H newc --quiet )
-    info "PCR7 enrolment bundle: apex-luks-enroll, systemd-cryptenroll, python3 $pyver + json, od"
+    info "PCR7 enrolment bundle: apex-luks-enroll, systemd-cryptenroll, python3 $pyver + json, od, env, dirname, wc, head"
 }
 
 scenario_luks_pcr7() {
@@ -1990,6 +2022,17 @@ scenario_luks_pcr7() {
     assert_serial_has "$ser" "APEX-BOOTLAB: have-systemd-cryptenroll=yes"
     assert_serial_has "$ser" "APEX-BOOTLAB: have-apex-luks-enroll=yes"
     assert_serial_has "$ser" "APEX-BOOTLAB: tpm-device=present"
+    # The shipped script being PRESENT and the shipped script being RUNNABLE
+    # are different claims, and the first real run of this scenario proved it:
+    # `have-apex-luks-enroll=yes` sat next to `enroll-exit=127` because
+    # /usr/bin/env was not in the initramfs. Assert the interpreter, so the
+    # day a bundled command is dropped the serial log names it instead of
+    # leaving a 127 to be re-diagnosed from scratch.
+    if grep -aq "APEX-BOOTLAB: enroll-interpreter=.* MISSING" "$ser"; then
+        bad "the shipped script's shebang interpreter is missing from the guest: $(grep -ao 'APEX-BOOTLAB: enroll-interpreter=[^ ]* MISSING' "$ser" | head -1)"
+    else
+        ok "the shipped script's shebang interpreter is present in the guest"
+    fi
     if grep -aq "APEX-BOOTLAB: have-python3=yes" "$ser"; then
         ok "the bundled python3 ran inside the guest"
     else
@@ -2020,6 +2063,17 @@ scenario_luks_pcr7() {
         *)
             bad "the shipped script's tpm2: line was '$tpm2field' — expected binding=pcr7" ;;
     esac
+
+    # "TPM auto-unlock by default, WHERE SAFE" (L-003) is not satisfied by an
+    # unlock that works; it is satisfied by an unlock that works AND leaves the
+    # user another way in. Enrolment rewrites the LUKS2 header, so the
+    # passphrase it was unlocked with has to be re-proved afterwards, in this
+    # same boot, against this same volume.
+    if grep -aq "APEX-BOOTLAB: passphrase-after-enrol=SUCCESS" "$ser"; then
+        ok "the original passphrase still opens the volume after enrolment"
+    else
+        bad "the passphrase did not verify after enrolment: $(luks_serial_field "$ser" passphrase-after-enrol) — enrolling a TPM slot must never be the only way in"
+    fi
 
     local recovery=""
     recovery="$(luks_serial_field "$ser" recovery-key)"
