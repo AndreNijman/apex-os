@@ -12,11 +12,12 @@ orchestrator.
 
 ## NEXT
 
-- Write `tests/test-apex-pkg-alternatives.sh`: privileged fedora:43 container,
-  `dnf download wine-core`, source the engine, three legs — RED with
-  `apply_alternatives(){ :; }`, GREEN with the real one, negative control
-  breaking one link by hand — then wire it into `pr-validation.yml`'s `engine`
-  job next to the etc-label step.
+- Read `/var/lab-scratch/pkg-alternatives/suite1.log` (unit
+  `apex-alt-suite-1.service`, started 2026-09-22): the first run of
+  `tests/test-apex-pkg-alternatives.sh`. Fix whatever it says, then wire the
+  suite into `pr-validation.yml`'s `engine` job next to the etc-label step with
+  a measured floor, and write
+  `ROADMAP/evidence/pkg-alternatives-20260922.md`.
 
 ## DONE
 
@@ -28,6 +29,15 @@ orchestrator.
   and `fix_caches`. NOT yet run end to end.
 
 ## IN PROGRESS
+
+- `tests/test-apex-pkg-alternatives.sh` — written, first run in flight. Six
+  legs: RED (the tree straight out of `extract_rpms`, which IS the old engine's
+  output — no stub needed), GREEN, the katana symptom by attribution, a
+  negative control that breaks one link and demands the count move by exactly
+  one, a refusal control that installs nmap-ncat for real so `rpm -qf` owns
+  `/usr/bin/nc`, and a confinement canary rpm whose `%post` tries to `rm` a
+  file in `/usr/bin` and to print its uid.
+- NOT yet wired into CI. NOT yet evidenced.
 
 ## FOUND
 

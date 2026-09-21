@@ -99,15 +99,14 @@ branch is an oversight rather than a decision.
 
 ## NEXT
 
-- Watch run **35651168049** (`gh run view 35651168049` from
-  /var/tmp/apex-work/wt-ci-selector-base) — pr-validation dispatched on
-  `task/ci-selector-base`. The only thing owed is `Static validation` going
-  green with the new step "A push to the integration branch selects what the
-  merge would". If it does, append that run id to the evidence file's gate
-  section, commit, push, and the unit is done. If python3/`mktemp` behave
-  differently on the runner, fix `tests/check-ci-selector-parity.sh` there.
-- Also still watching `Package engine` on run **35650126791** (step 4); record
-  its outcome in the evidence file's "Package engine" section.
+- ONLY thing outstanding: `Package engine` on run **35650126791** (step 4's
+  last job, ~15 min). `gh run view 35650126791` from
+  /var/tmp/apex-work/wt-ci-selector-base. Write its outcome into the
+  "Package engine" section of
+  `ROADMAP/evidence/ci-selector-base-20260922.md` (replace the
+  "still running when this file was written" paragraph — it must not point at
+  this card, which is not in git), commit, push, and mark `## LANDABLE <sha>`.
+  Everything else is done and pushed.
 
 ## DONE
 
@@ -130,13 +129,17 @@ branch is an oversight rather than a decision.
   dorny/paths-filter with fetch-depth 2; and the file records that having
   build-image.yml in the `core` filter once cost a 55-minute rebuild and a
   fleet-wide ~5 GB reissue for a CI-only commit.
-- **Pushed: `task/ci-selector-base` @ `d012b5bb`.**
+- **Gate green on a GitHub runner**: run 35651168049, `Static validation`
+  success, step "A push to the integration branch selects what the merge would"
+  reports 7 passed / 0 failed. The gate uses python3 stdlib only (no PyYAML)
+  precisely so it can run there.
+- **Pushed: `task/ci-selector-base` @ `b427e2f0`** (3 commits: fix+gate,
+  evidence, evidence update).
 - Run block measured 9,160 -> 10,959 chars against the 21,000 cap.
 
 ## IN PROGRESS
 
-- Two CI runs outstanding: 35651168049 (the branch, proves the gate runs on a
-  runner) and `Package engine` on 35650126791 (step 4's last job).
+- One CI job outstanding: `Package engine` on 35650126791.
 
 ## FOUND
 
@@ -159,7 +162,18 @@ branch is an oversight rather than a decision.
     above it skipped it — that step has no `if: !cancelled()`, unlike the
     engine job's gates. So the a11y audit's state on this tree is UNKNOWN,
     which is its own (small) unit.
-  - Package engine: still running at the time of writing.
+  - Package engine: see NEXT — still running.
+- **RED 1 is dated: `installer/test-installer-luks.sh` has NEVER passed in
+  CI.** It and its workflow step landed 2026-09-20 (`92bdf557`, extended by
+  `05b0ea55`). `Run installer disk-encryption suite` was SKIPPED in runs
+  35518416643 / 35566068754 / 35611127672 (the locale suite above it was red)
+  and FAILED in 35649643570 and 35650126791, the first two to reach it. So
+  `6fa9ddbc` did not break it — it uncovered it. The five green installer runs
+  of 2026-09-12/13 predate the step entirely.
+- **A stale comment in `pr-validation.yml`, out of my bounds:** the `engine`
+  job's last step says "EXPECT THIS RED UNTIL apex-shell PR #9 MERGES".
+  apex-shell PR #9 merged **2026-09-03**. Somebody should re-read that step's
+  premise; I did not touch it.
 - `git merge-base origin/main "$head"` DOES resolve on the runner:
   run 35647188306 logged `classified workflow_dispatch over 57f593ad..9c389baf`
   and 57f593ad is the tip of `main`. actions/checkout@v4 with fetch-depth: 0
