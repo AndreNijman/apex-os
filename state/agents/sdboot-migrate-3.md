@@ -49,15 +49,31 @@ conclusion is WRONG — do not revive it.
 
 ## FOUND
 
-- **The rig is genuinely intact and run A's disk is already installed.**
-  `/var/lab-scratch/sdboot-migrate-2/apexmig-a.img` is a COMPLETED `bootc
-  install to-disk`: 45 GiB disk, `p1 BIOS-BOOT 1 MiB / p2 EFI-SYSTEM 512 MiB
-  ef00 / p3 root 44.5 GiB 8304`, 13 GB actually allocated. So APEX's own
-  default ESP on a GRUB/ostree `to-disk` install **is 512 MiB** — the question
-  sdboot-migrate-2 left open in act-unit-2.sh's last line is already answered by
-  the partition table it wrote. `localhost/apex-sdmig:v1` (11.5 GB) and
-  `localhost/apex-bootlab` (1.39 GB, the qemu container — the HOST has no
-  qemu-system-x86_64 at all) both still exist.
+- **The card says the rig is intact. The disk image is NOT — run A's install
+  never finished, and a partition table read as "installed" would have been
+  believed.** `/var/lab-scratch/sdboot-migrate-2/apexmig-a.img` has a complete
+  GPT (`p1 BIOS-BOOT 1 MiB / p2 EFI-SYSTEM 512 MiB ef00 / p3 root 44.5 GiB
+  8304`) and 13 GB allocated, which is what made it look done. Mounted it
+  read-only through a loop device and the inside is a corpse:
+    * `p2` (the ESP) — **4.0 KiB used of 511 MiB. Completely empty.** No
+      `/EFI/fedora`, no `/EFI/BOOT`, no bootloader of any kind.
+    * `p3` root (btrfs, correct) — `/boot` exists and holds only an empty
+      `efi/`. **No `loader/entries`, no kernel, no grub2.**
+    * `/ostree/repo` is 13 GB (mtime 10:44) but `/ostree/deploy` is empty.
+  So `bootc install to-disk` got as far as pulling the image into the repo and
+  died before deploying it or writing a bootloader. The disk **cannot boot**.
+  This is exactly the trap in the "permission denied is not absence" and
+  "a gate that inspects nothing" memories: the partition table is evidence that
+  sgdisk ran, not that the install finished. Had I booted it on the card's word
+  I would have got 1800 s of nothing and called `console=ttyS0` the suspect.
+  **Run A's disk has to be reinstalled from scratch.** What IS reusable, and
+  is the expensive part: `localhost/apex-sdmig:v1` (11.5 GB, no 11 GB pull
+  needed) and `localhost/apex-bootlab` (1.39 GB — the qemu container; the HOST
+  has no `qemu-system-x86_64` at all, so that image is load-bearing).
+- APEX's default ESP on a GRUB/ostree `bootc install to-disk` **is 512 MiB** —
+  the one question act-unit-2.sh's last line was left open to answer. The GPT
+  is trustworthy for this even though the install died, because partitioning is
+  the step that demonstrably completed.
 - **The rename patch no longer applies.** `sdboot-migrate-2-rename.patch` was
   cut against `234cc4dc`; `files/system/libexec/apex-boot-migrate` has moved
   **+528/-33 lines** since, from `task/migrate-preconditions` and

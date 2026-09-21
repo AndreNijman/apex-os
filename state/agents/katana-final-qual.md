@@ -130,10 +130,13 @@ machine. Say so; do not proxy them and grade them green.
 
 ## NEXT
 
-- Item 1 Row A: on katana, with nothing attached, run `sudo apex game start`
-  then read `/sys/kernel/sched_ext/state`, `enable_seq`, `root/ops` and
-  `apex game status | grep '^scx_'`. Record root/ops VERBATIM. Then `apex game
-  stop` (Row B). Lab dir `/var/lab/scratch/katana-final-qual` on katana.
+- Item 1 Row C on katana: `sudo scxctl start -s scx_rusty` (loader path), read
+  `/sys/kernel/sched_ext/state` + `root/ops`, then `sudo apex game start` and
+  assert apexd chose `switch` (journal must have NO 'no scx scheduler running').
+  Then C2: attach a scheduler by running `/usr/bin/scx_rustland` DIRECTLY
+  (bypasses scx_loader, so kernel says enabled and the loader disagrees) and
+  assert the single named-verb retry fires. Script pattern:
+  `/var/lab/scratch/katana-final-qual/rowAB.sh` (arm the kfq-deadman timer).
 
 ## DONE
 
@@ -148,6 +151,23 @@ machine. Say so; do not proxy them and grade them green.
 ## IN PROGRESS
 
 ## FOUND
+
+- **`root/ops` is NOT `lavd`. It reads `lavd_1.1.3_x86_64_unknown_linux_gnu`.**
+  First hardware reading of this string anywhere in the program.
+  `gaming-scx-20260920.md` §5 predicted the kernel publishes the bare
+  struct_ops name, so `scx_ops_matches()` strips only the `scx_` prefix and
+  compares verbatim — it therefore reports a perfectly good `scx_lavd` as
+  "attached, but not the scheduler that was asked for", in `scx_detail`, in
+  `notes`, and as an apexd journal warning. The run-book §6.8 Row A asked for
+  exactly this string verbatim and said `scx_ops_matches()` wants to know.
+  Fix: also accept `<name>_<buildid>`. No scx scheduler name is another's
+  prefix-plus-underscore, so this cannot collide.
+- 26 of 73 IRQ affinity writes are refused EPERM on katana even as root
+  (managed IRQs). Reported honestly by apexd (`irqs_refused: 26`), not a
+  defect — recorded so the next reader does not chase it.
+- `gpus_locked: 0` / `gpus_lock_attempted: 0` in `apex game status` are the
+  GPU **index** list `[0]`, not a count — the journal says `1/1 GPU(s) locked`
+  for the same session. Reads like a contradiction; it is not.
 
 ## BLOCKED ON
 

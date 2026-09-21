@@ -10,16 +10,18 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
 
 ## NEXT
 
-- Read `files/system/libexec/apex-input-apply` + the niri include block in the
-  provisioner; find where `NIRI_BIN` is set and why the extracted block at
-  `niri-include-block.sh:30` runs with it unbound. Reproduce locally by running
-  `tests/test-apex-input.sh` ALONE in the worktree.
+- Edit `tests/test-apex-input.sh`: extract the shipped `NIRI_BIN=` line into
+  `${WORK}/niri-bin-line.sh`, source it from `run_inc` before `$INC_BLOCK`,
+  assert it is exactly one line and that it sits BEFORE the 6a marker, and add
+  an "nothing unbound" assertion on `$out`. Then re-run the suite alone.
 
 ## DONE
 
 ## IN PROGRESS
 
 - Worktree reset to `f3b1b3d4` (current origin/roadmap/v2.2). Nothing committed.
+- apex-input fix designed (see NEXT). It touches the SUITE only — the shipped
+  provisioner is correct.
 
 ## FOUND
 
@@ -35,6 +37,25 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
   script and runs it; the block reads `NIRI_BIN`, which is bound somewhere else
   in the provisioner. The block aborts before appending, hence `8 -> 8`
   (nothing added) and all six downstream assertions.
+- **REPRODUCED locally, alone: `apex-input: 101 passed, 8 failed, 0 skipped`.**
+  Identical 7 as CI plus `a broken include is rejected` (that one only runs
+  where niri exists; the L16 has niri 26.04, the runner does not).
+- **The regression is `37497975` (2026-09-19, "Safe Graphics… niri ran two
+  bars").** `2605db27` had deliberately put `NIRI_BIN=` *inside* block 6a — its
+  message says "defined inside 6a so the block stays self-contained for the
+  suite that extracts and runs it". `37497975` added block 6a-pre (the waybar
+  disable) above it and MOVED the `NIRI_BIN=` line up to share it. The suite
+  extracts `/^    # ── 6a\./,/^    fi$/`, so the line left the extracted range
+  silently. **The shipped script is correct** — at runtime NIRI_BIN is assigned
+  at the top of step 6's if-body, before every use. Only the extraction
+  contract broke, and nothing asserted it.
+- Proof the cause is exactly that: `it refuses and says which way it refused`
+  (the missing-include-target branch) still PASSES — it is the one branch that
+  returns before touching `${NIRI_BIN}`.
+- **A latent blind assertion in the same suite:** `a setting changed in
+  Settings reaches niri through the include` passed in the broken run, because
+  it only checks `niri validate` + `grep repeat-rate 42` in the *generated*
+  file — neither of which needs the include to exist.
 - **secret-broker's single failure is `the session's script actually ran`** in
   the "a confined session cannot read the credential" section. The test prints
   its own diagnosis: *"the sandbox did not come up... a 'uid map: Permission
