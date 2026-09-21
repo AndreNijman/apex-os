@@ -2093,8 +2093,31 @@ scenario_luks_pcr7() {
     local recovery=""
     recovery="$(luks_serial_field "$ser" recovery-key)"
     if [[ -n "$recovery" && "$recovery" != "<not"* ]]; then
-        printf '%s\n' "$recovery" > "$WORK/luks-pcr7-recovery.key"
-        ok "captured the recovery key the guest generated"
+        # NO TRAILING NEWLINE. `cryptsetup --key-file <regular file>` uses
+        # EVERY BYTE of the file as the passphrase, so one '\n' turns a
+        # correct 71-byte recovery key into a wrong 72-byte one and boot C
+        # reports "Failed to activate with key file … (Key data incorrect?)" —
+        # which reads exactly like a broken recovery slot and is not one.
+        # Measured on katana 2026-09-21 against this very volume: 72 bytes
+        # REFUSED, the same key piped without the newline OPENS.
+        #
+        # The SHIPPED script already gets this right — it writes
+        # `systemd-cryptenroll`'s output through `tr -d '[:space:]'`, 71 bytes,
+        # and `apex-install` re-strips with `tr -d '\r\n'` before piping. Only
+        # this scenario had the bug, because it is the only one that has to
+        # recover the key from a guest's SERIAL LOG rather than from the file
+        # the script wrote; every other scenario installs `$LUKS_RECOVERY`
+        # straight through.
+        printf '%s' "$recovery" > "$WORK/luks-pcr7-recovery.key"
+        # Check the length HERE, host-side, rather than discovering it four
+        # minutes later inside boot C.
+        local reclen
+        reclen="$(wc -c < "$WORK/luks-pcr7-recovery.key")"
+        if [[ "$reclen" == 71 ]]; then
+            ok "captured the recovery key the guest generated (71 bytes, no trailing newline)"
+        else
+            bad "the captured recovery key is $reclen bytes, expected 71 — a key file with a trailing newline is a different passphrase to cryptsetup"
+        fi
     else
         bad "no recovery key came back from the enrolment boot — boot C's refusal arm has no fallback to test"
     fi
