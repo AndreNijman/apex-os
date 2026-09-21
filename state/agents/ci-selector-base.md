@@ -103,7 +103,7 @@ branch is an oversight rather than a decision.
 Three files: `.github/workflows/pr-validation.yml`,
 `tests/check-ci-selector-parity.sh`,
 `ROADMAP/evidence/ci-selector-base-20260922.md`.
-Merges clean, measured not assumed: at 2026-09-21 20:55Z `git fetch origin`
+Merges clean, measured not assumed: at 2026-09-21 20:36Z `git fetch origin`
 left `origin/roadmap/v2.2` still at `6fa9ddbc` (the commit this branch was cut
 from) and `git merge-tree --write-tree origin/roadmap/v2.2 HEAD` returned 0
 with tree `31e170e0`. Re-check if the branch has moved since.
@@ -156,7 +156,13 @@ will all run the full matrix from now on, which is the point.
 
 ## IN PROGRESS
 
-- nothing
+- Nothing of mine. One informational job is still running and needs no action:
+  `Package engine` on run **35651168049** (the branch's own dispatch, job
+  106503716684, started 20:27Z). On the base the same job was red on
+  `mux-layouts` alone; if the branch's differs, that is worth knowing but it
+  cannot be caused by this change — the change only alters the `push` arm,
+  and 35651168049 is a `workflow_dispatch`. The evidence file says this job
+  had not finished rather than guessing it.
 
 ## FOUND
 

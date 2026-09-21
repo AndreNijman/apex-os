@@ -10,34 +10,41 @@ Dispatched round 40, 2026-09-22 ~05:20 AWST, by the autoresume orchestrator.
 Diagnosis by the peer session (landed `95c0a798`); blast radius measured by the
 orchestrator.
 
+## LANDABLE 77e51d27
+
+`task/pkg-alternatives`, three commits on `origin/roadmap/v2.2` @ `6fa9ddbc`.
+Touches `files/system/libexec/apex-pkg`, `tests/test-apex-pkg-alternatives.sh`
+(new) and `.github/workflows/pr-validation.yml`.
+
 ## NEXT
 
-- Read `/var/lab-scratch/pkg-alternatives/suite1.log` (unit
-  `apex-alt-suite-1.service`, started 2026-09-22): the first run of
-  `tests/test-apex-pkg-alternatives.sh`. Fix whatever it says, then wire the
-  suite into `pr-validation.yml`'s `engine` job next to the etc-label step with
-  a measured floor, and write
-  `ROADMAP/evidence/pkg-alternatives-20260922.md`.
+- Running one last mutation: delete the `image_owns "$link"` refusal from
+  `alternatives_place` and confirm the refusal leg goes red
+  (`/var/lab-scratch/pkg-alternatives/suite-mut.log`, unit
+  `apex-alt-suite-mut`). Restore
+  `/var/lab-scratch/pkg-alternatives/apex-pkg.good` over the engine afterwards
+  and check `git status` is clean before believing anything.
 
 ## DONE
 
-- `9607c5bc` on `task/pkg-alternatives` (base `origin/roadmap/v2.2` @
-  `6fa9ddbc`): the engine fix. New in `files/system/libexec/apex-pkg` —
-  `alternatives_record`, `payload_link_resolves`, `dangling_links`,
-  `alternatives_replay`, `alternatives_candidates`, `alternatives_place`,
-  `apply_alternatives`; called from `rebuild_extension` between `extract_rpms`
-  and `fix_caches`. NOT yet run end to end.
+- `9607c5bc` the engine fix: `alternatives_record`, `payload_link_resolves`,
+  `dangling_links`, `alternatives_replay`, `alternatives_candidates`,
+  `alternatives_place`, `apply_alternatives`, called from `rebuild_extension`
+  between `extract_rpms` and `fix_caches`.
+- `c6098180` `tests/test-apex-pkg-alternatives.sh`. **15 passed, 0 failed** on
+  the L16, 56 s: RED 33 declared links absent and 12 payload symlinks dangling
+  on their account — the katana twelve, reproduced independently — GREEN 0, 0
+  and 0. Shellcheck clean; `check-suites-run-in-ci.sh` and
+  `check-shellcheck-coverage.sh` both pass.
+- `77e51d27` CI wiring (floor 15) + `ROADMAP/evidence/pkg-alternatives-20260922.md`.
+- Mutation-tested the call-site assertion both ways: with the
+  `apply_alternatives` line deleted the suite prints `14 passed, 1 failed`, and
+  with podman hidden it still runs that one assertion and exits 1.
+- `tests/test-apex-pkg.sh` still `86 passed, 0 failed`.
 
 ## IN PROGRESS
 
-- `tests/test-apex-pkg-alternatives.sh` — written, first run in flight. Six
-  legs: RED (the tree straight out of `extract_rpms`, which IS the old engine's
-  output — no stub needed), GREEN, the katana symptom by attribution, a
-  negative control that breaks one link and demands the count move by exactly
-  one, a refusal control that installs nmap-ncat for real so `rpm -qf` owns
-  `/usr/bin/nc`, and a confinement canary rpm whose `%post` tries to `rm` a
-  file in `/usr/bin` and to print its uid.
-- NOT yet wired into CI. NOT yet evidenced.
+- nothing half-written. The branch is pushed and complete.
 
 ## FOUND
 

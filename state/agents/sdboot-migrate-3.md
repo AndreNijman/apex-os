@@ -25,46 +25,96 @@ conclusion is WRONG — do not revive it.
 3. Decide the `+3-0` entry rename — lands ONLY if the 2 GiB guest's migrated
    boot shows `systemd-bless-boot` actually stripping the suffix.
 
-## NEXT
+## LANDABLE 814c3459
 
-- **Guest C's migration boot is RUNNING** as user unit `sdb3-boot-c1`
-  (launched 04:29 AWST, ceiling 5400 s), Monitor `bxf9rqyvn` armed. Guest C is
-  `apexmig-c.img` — 70 G disk, 2 GiB ESP, installed rc=0 from
-  `localhost/apex-sdmig:v2` (the image that matches what `roadmap/v2.2`
-  actually builds). Control disk holds `act-unit-3c.sh`, the engine with all
-  three changes (join fix + partial-install + the undecided splice), and
-  `apex-boot-migrate-confirm.service`. Serial:
-  `/var/lab-scratch/sdboot-migrate-2/apexmig-c-3.serial`.
-  Expect `auto rc=0`, `phase: committed`, and
-  `counted the entry: bootc_fedora-43-1+3-0.conf`.
-- Then the MIGRATED boot, which is the last measurement:
-  `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-check-3.sh`, drop
-  the ceiling in `/var/lab-scratch/sdboot-migrate-3/run-boot-c.sh` from 5400 to
-  1800, then `systemd-run --user --unit=sdb3-boot-c2 --collect
-  /var/lab-scratch/sdboot-migrate-3/run-boot-c.sh`.
-  **Never `--fresh-nvram`** — `BootNext` lives in
-  `/work/nvram-persist/VARS-apexmig-c.img.fd`.
-  **Before launching, check `ps -eo pid,args | grep '[q]emu-system'` and
-  `grep '[t]o-filesystem-lab'`** — a unit going inactive does not mean its
-  root-owned children died (see FOUND).
-- Then evidence section 6, the item-3 verdict written into the doc, commit,
-  push, and `## LANDABLE <sha>`.
-- **The branch is already worth landing without any of that.**
-  `task/sdboot-migrate-3` is pushed at `cc6b883b`: four evidence commits and
-  **two real fixes with tests**, 91/91 green, `git merge-tree` clean against
-  `origin/roadmap/v2.2`, and nothing else has touched
-  `files/system/libexec/apex-boot-migrate` or `tests/test-boot-migrate.sh`
-  since the branch point. The worktree carries only the `count_staged_entry`
-  splice, which on the evidence so far should be DROPPED — see the item-3
-  disposition below. Backup: `/var/lab-scratch/sdboot-migrate-3/engine-all.bak`.
+`task/sdboot-migrate-3`, pushed. Six commits on `origin/roadmap/v2.2`:
+
+| sha | what |
+| --- | --- |
+| `5cdaaa39` | evidence: the 512 MiB ESP refusal on a real APEX btrfs guest, and four rig defects |
+| `ebbbab54` | evidence: `root-space` passes and the migration runs out of disk **+** the `ESP_SLACK_MIB` comment correction |
+| `b5e8ddcb` | **fix**: `join_state` joins the stateroot's real var, not the deployment's symlink. 3 tests |
+| `01234028` | evidence: the /var join defect and the migrated cmdline read off the ESP |
+| `4f6678e3` | **fix**: refuse a re-run over a half-finished composefs deployment; stop promising one is safe. 5 tests |
+| `cc6b883b` | evidence: bootc installs no loader and still exits 0; `incomplete-stage` catches it |
+| `814c3459` | evidence: a real machine migrates and boots; the boot counter cannot be blessed |
+
+Checked at `814c3459`, not assumed: `tests/test-boot-migrate.sh` **91 passed,
+0 failed**; `bash -n` clean; `shellcheck` adds no finding;
+`tests/check-containerfile-assertions.sh` rc=0; worktree clean.
+
+**For the orchestrator, on the collision the dispatch card flagged:**
+`b5e8ddcb` and `ebbbab54` both touch `files/system/libexec/apex-boot-migrate`
+(`join_state` + `cmd_precheck` + one comment). Verified against the tip at
+`2c333e17`: `git merge-tree` reports **no conflict**, and
+`git log f3b1b3d4..origin/roadmap/v2.2 -- files/system/libexec/apex-boot-migrate
+tests/test-boot-migrate.sh` is **empty** — nothing else has touched either file
+since the branch point. A clean merge is expected.
+
+**Item 3 in one line:** measured, cannot land as-is, the splice is **dropped**
+— `systemd-bless-boot` fails `Read-only file system` renaming the counted entry
+because bootc hardcodes `/boot:…:ro`, and the fix is a Containerfile dropin
+setting an empty `boot_mount_spec`, not an engine change. Full reasoning below
+and in evidence section 6.
+
+## WHAT A SUCCESSOR SHOULD PICK UP
+
+1. **The `root-space` multiplier is wrong** (FOUND, and evidence section 3).
+   Needs a peak sampled *during* a migration on a disk that has not been used
+   for one before — not this unit's contaminated figure. Three things move
+   together: `root_need` in `cmd_precheck`, the `tests/test-boot-migrate.sh`
+   assertion pinning the literal `root_need=$(( repo_kib \* 2`, and the "It
+   roughly doubles the image's footprint" bullet in `docs/update-cost.md`.
+2. **`boot_mount_spec = ""`** in a `/usr/lib/bootc/install/*.toml` dropin, to
+   stop bootc emitting `systemd.mount-extra=…:/boot:auto:ro`. That unblocks the
+   whole boot-counter chain — which this run showed works up to the last step —
+   and with it, `sdboot-migrate-2`'s NEXT item 2 (`Wants=`→`Requires=`) becomes
+   landable. Caveat: image-wide, so it changes every `to-disk` install too.
+3. **The published `apex-os:daily` tag is far behind `roadmap/v2.2`** and cannot
+   migrate for three independent reasons this run found one at a time: no
+   `rsync`, no `systemd-boot-unsigned`, no `apex_sdboot` module or bless-boot
+   drop-in. Whether that matters is a release question, not an engine one.
+4. **`cmd_abort` does not undo an install.** It removes the phase file and says
+   the files left behind are "inert". After `4f6678e3` a re-run at least refuses
+   with a named reason instead of dying inside bootc, but there is still no verb
+   that puts a machine back. Same open decision as "Reclaiming the old
+   deployment".
+
+## LAB STATE LEFT BEHIND
+
+`/var/lab-scratch/sdboot-migrate-2` (the rig, reused) and
+`/var/lab-scratch/sdboot-migrate-3` (this unit's launchers, logs and the v2
+build context). **The serial logs are the evidence and are kept**:
+`apexmig-a-3.serial` (run A), `apexmig-b-3.serial` (run B), `apexmig-c-3.serial`
+(the successful migration and the migrated boot). `apexmig-a.img` and
+`apexmig-b.img` were deleted to free 100 GB once their results were committed;
+`apexmig-c.img` (~52 GB) is kept — it is a **migrated, confirmed** APEX machine
+and the only one in existence, so the next unit can boot it instead of spending
+40 minutes rebuilding one. `localhost/apex-sdmig:v2` exists in **root's** podman
+storage (see FOUND about the two stores).
 
 ### ITEM 3 — the disposition, as far as it is measured
 
-**Status: NOT landable, and the splice is to be dropped unless the migrated
-boot in guest C contradicts what follows.** The decision rule below was written
-before any of the evidence existed, and is kept so it can be applied by anyone.
+**MEASURED, AND THE SPLICE IS DROPPED.** Guest C's migrated boot landed exactly
+on the `+2-1` + EROFS row of the decision table below, which was written before
+any of the evidence existed:
 
-What is already measured, and does not depend on guest C:
+    /boot:                  /dev/vda2 /boot vfat ro,relatime,…
+    entry on the live ESP:  bootc_fedora-43-1+2-1.conf
+    LoaderBootCountPath:    \loader\entries\bootc_fedora-43-1+2-1.conf
+    systemd-bless-boot:     ConditionResult=yes, SELinuxContext applied,
+                            Active: failed, status=1/FAILURE
+    systemd-bless-boot[1106]: Failed to rename
+        '/loader/entries/bootc_fedora-43-1+2-1.conf'
+     to '/loader/entries/bootc_fedora-43-1.conf': Read-only file system
+
+**Every link works except the last.** sd-boot counted the entry, the efivar was
+set, the unit's condition passed and it entered `bootupd_t` through APEX's own
+drop-in. **It is not SELinux** — there is no `rename`-on-`dosfs_t` denial
+anywhere in the boot, and the 16 AVCs logged are all `permissive=1` and
+incidental (`lsblk` reaching for `io.systemd.Home`, `systemd-bless-b` reading
+`/proc/cmdline`, opening `/dev/vda2`, the journal socket). The supporting
+reasoning, all of which held up:
 
 1. **The migrated cmdline carries `systemd.mount-extra=UUID=…:/boot:auto:ro`.**
    Read off the ESP of a real migrated APEX/btrfs install (evidence section 4),
@@ -134,8 +184,8 @@ fourth one.
 | apexmig-b | 4 | `act-unit-3c.sh` (join_state fix) | **DONE — bootc "File exists"** |
 | apexmig-b | 5 | `act-unit-3c.sh` (all fixes, state cleared) | **DONE — /var joined; no loader on the ESP** |
 | apexmig-c (2 GiB ESP, image **v2**, 70 G) | install | — | **DONE rc=0** |
-| apexmig-c | 1 | `act-unit-3c.sh` (the migration) | RUNNING |
-| apexmig-c | 2 | `act-check-3.sh` (the MIGRATED boot) | — |
+| apexmig-c | 1 | `act-unit-3c.sh` (the migration) | **DONE — auto rc=0, committed** |
+| apexmig-c | 2 | `act-check-3.sh` (the MIGRATED boot) | **DONE — booted, confirmed, bless EROFS** |
 
 Every boot: `./setctl.sh <action> <extra files…>` first, and the qemu launch
 needs **both** `-v …:/work:z` and `--oci /work/oci-dummy-3.img`.
@@ -145,6 +195,17 @@ with run A in it already), NOT the
 `sdboot-migrate-2-20260921-lab.md` the inherited card names — that name was a
 dead unit's plan for a run that never happened, and this is unit 3 measuring on
 09-22.
+
+## NEXT
+
+- **Nothing. This unit is finished and its branch is marked LANDABLE above.**
+  All three of `sdboot-migrate-2`'s outstanding items are closed: the APEX/btrfs
+  lab ran (item 1), `ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md` is
+  written and committed in six sections (item 2), and the `+3-0` entry rename is
+  **measured and dropped** with the reason and the location of the real fix
+  recorded (item 3). The orchestrator lands `814c3459` by merge.
+- If anyone picks this up again, start from "WHAT A SUCCESSOR SHOULD PICK UP"
+  above, not from here.
 
 ## DONE
 
