@@ -824,3 +824,21 @@ In the lab, firmware variables are a GUEST's. Never this machine's.
 
 **All three Windows product decisions (ESP, GPT writes, firmware writes) are now
 settled. There is nothing left waiting on Andre.**
+
+## ⏸ PAUSED BY ANDRE — 2026-09-21. STOP. DO NOT CONTINUE THIS UNIT.
+
+*"stop all development of windows app, push to repo and everything, but show
+its archived and work is paused for now cause i dont see the need."*
+
+Paused on product judgement. **There is no blocker and no bug waiting.** Do not
+resume without Andre asking for it by name.
+
+Everything that existed at the pause is LANDED: merge `9ecdff51` carries the
+15 commits, `22605477` is the archive marker. Read
+`windows-installer/PAUSED.md` before touching anything here.
+
+Verified at the pause rather than assumed: `tests/test-windows-installer.sh`
+reads 13 passed, 0 failed, 1 could-not-run.
+
+CI keeps running these suites on purpose. A red suite while paused means
+something else in the repo moved — record it and tell Andre, do not resume.

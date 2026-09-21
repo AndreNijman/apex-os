@@ -1,6 +1,6 @@
 {
  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap \u2014 do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
- "updated": "2026-09-21T22:06+0800",
+ "updated": "2026-09-21T22:12+0800",
  "concurrency_ceiling": 6,
  "units": [
   {
@@ -567,7 +567,7 @@
    "items": [],
    "after": [],
    "title": "A portable Windows app that installs APEX into an empty partition",
-   "closed": "CLOSED BY HAND (round 36, 2026-09-21). No card was ever written at this slug; round 35's real work landed under windows-installer-2 (a real Windows VM lab, three defects found). Continuing as windows-installer-3. Re-open only if this exact slug is needed for something windows-installer-2/3 do not own."
+   "closed": "PAUSED BY ANDRE 2026-09-21, not closed and not blocked. His words: 'stop all development of windows app, push to repo and everything, but show its archived and work is paused for now cause i dont see the need.' DO NOT DISPATCH THIS. Do not re-offer it as READY. Do not resume without Andre asking for it by name. All work to that moment is LANDED -- merge 9ecdff51 carries 15 commits, and 22605477 is the archive marker. windows-installer/PAUSED.md is the file to read first; README.md and ARCHITECTURE.md carry a banner pointing at it. tests/test-windows-installer.sh was RUN at the pause, not assumed: 13 passed, 0 failed, 1 could-not-run (the guest stage needs APEX_WINLAB_GUEST=1). CI keeps running these suites deliberately; a red suite while paused means something else in the repo moved and the right response is to record it and tell Andre, NOT to resume. The three product decisions in docs/apex-owns-its-esp.md are NOT withdrawn -- they also govern the Linux migration path, which is not paused."
   },
   {
    "id": "sdboot-image",

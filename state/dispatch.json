@@ -1,6 +1,6 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-21T22:03+0800",
+ "updated": "2026-09-21T22:12+0800",
  "_round": "Round 39 STARTED 2026-09-21T17:08+0800 by the autoresume timer, after the round-38 session hit a usage limit at 14:59 (autoresume.log: 'resume session ended (exit 1)'). All six round-38 agents were dead \u2014 `ps` showed no subagent claude process \u2014 and NONE was messaged. Six fresh agents dispatched with the same slugs, each carrying a ROUND 39 CONTINUATION section appended to its card. CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 is set in this session's env (checked, not assumed), so agents are not SIGTERMed 600s after the final response; the hard bound is `timeout 4h`, which ends this session at about 21:08 AWST.",
  "_landed_this_round": [
   {
@@ -140,18 +140,6 @@
    "branch": "task/luks-boot",
    "card": "ROADMAP/state/agents/luks-boot.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
    "why": "CONTINUATION, dispatched 17:55 after the first round-39 agent finished its scope and landed as merge 4e7aa3fa. Its card carries a precise four-item NEXT: (1) a `luks-pcr7-signed` scenario where the only change from the green luks-pcr7 is building boot A's UKI WITH --pcr-key/--pcr-pubkey -- boot A already measured that the Secure-Boot and sd-stub gates pass and it refuses only for the missing signing key, so this should flip the selection to binding=signed-pcr11; (2) the integration gap that keeps L-003 at partial -- no test has ever run the REAL apex-luks-enroll through apex-install, every installer suite uses the APEX_LUKS_ENROLL_LOCAL recovery-only stand-in, and no installer-produced GRUB+shim disk has been TPM-auto-unlocked; (3) run the full default STAGED set together, since 26/0 is a result about luks-pcr7 IN ISOLATION; (4) L-002's remainder, deliberately scoped out of the first half of round 39 and still open -- the ESP-fallback check in installer/test-installer-luks-boot.sh ~line 234 fails `mount -o ro` with 'would change RO state', so the EFI/BOOT/BOOTX64.EFI fallback-loader check never actually runs."
-  },
-  {
-   "repo": "apex-os",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T17:17+0800",
-   "agent_id": "a2fc832ed713c2410",
-   "slug": "windows-installer-3",
-   "items": [],
-   "worktree": "/var/tmp/apex-work/wt-windows-installer-3",
-   "branch": "task/windows-installer-3",
-   "card": "ROADMAP/state/agents/windows-installer-3.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
-   "why": "Two round-38 results are UNPROVEN and its own merge message says so: the payload write PASSED in the guest but its host-side byte verification was cut off with no evidence file, and bitlocker-discover has never completed. Beyond that, the ESP decision hands this unit two of the four things that must be measured, because it is the only unit with a real Windows guest."
   },
   {
    "slug": "android-relay-flake",
@@ -615,5 +603,23 @@
  },
  "_all_windows_decisions_settled": "ESP ownership (bc5c3822), GPT entry writes (b137f03f), firmware writes (3cff7466). NOTHING is waiting on Andre for the Windows unit.",
  "_stale_branch_finding": "Seven apex-os task branches (p0-003-cred-broker, p0-004-policy-split, p0-005-permission-modes, p1-002-cloudflare, p1-020-agent-graph-daemon, p1-030-shell-integrations, p2-005-device-maturity) report as carrying unlanded work by BOTH `git cherry` AND `merge-base --is-ancestor`, and ALL SEVEN ARE STALE. Early rounds landed by cherry-pick so patch-ids differ forever and the old tip is not an ancestor. Verified on p0-004: the tip carries the six-dimension work AND policy.rs is 79,815 bytes against the branch's 45,691 -- landed, then built on heavily. p2-005's diff against the tip is empty outright. DO NOT re-investigate; the test that works is to grep the tip for the commit's distinctive feature and compare file sizes. Branches dated after ~2026-09-08 land by merge and a real unlanded report from those is probably real.",
- "_android_install_pending_status": "STILL PENDING at 2026-09-21T22:03+0800 -- `adb devices` empty and no Pixel on USB. Needs Andre to plug the phone in; nothing else blocks it."
+ "_android_install_pending_status": "STILL PENDING at 2026-09-21T22:03+0800 -- `adb devices` empty and no Pixel on USB. Needs Andre to plug the phone in; nothing else blocks it.",
+ "_windows_installer_PAUSED": {
+  "at": "2026-09-21T22:12+0800",
+  "by": "Andre",
+  "state": "PAUSED / ARCHIVED \u2014 not closed, not blocked, not abandoned",
+  "quote": "stop all development of windows app, push to repo and everything, but show its archived and work is paused for now cause i dont see the need.",
+  "do_not": "Do not dispatch a windows agent. Do not re-offer the unit. Do not resume without Andre asking by name.",
+  "everything_landed": "merge 9ecdff51 (15 commits of measurement) + 22605477 (the archive marker). Nothing was lost to the pause.",
+  "read_first": "windows-installer/PAUSED.md",
+  "verified_at_pause": "tests/test-windows-installer.sh RUN, not assumed: 13 passed, 0 failed, 1 could-not-run (guest stage).",
+  "findings_that_outlive_the_feature": [
+   "'Windows will not let you' is NOT a safety property for the partition table: Windows permits a raw write to LBA 2-33 of the disk it booted from, and permits SET_DRIVE_LAYOUT_EX on it.",
+   "SET_DRIVE_LAYOUT_EX RELOCATES the primary GPT entry array from LBA 2 to LBA 2016 and leaves the stale array at LBA 2 -- two disagreeing tables in the primary area, the stale one where hardcoded readers look. Scoped to disks with a 1 MiB reserve (Linux tooling's default, and APEX's own).",
+   "Windows' ESP CONTENT is not byte-identical across a boot: 42,481 bytes, Windows writing its own BCD. Any integrity check assuming otherwise fails for an innocent reason.",
+   "PCR 5 is the GPT, so where a BitLocker profile binds it, merely CREATING APEX's own ESP forces a 48-digit recovery prompt."
+  ],
+  "known_limits": "The second-ESP result used an ESP LATER in partition order, so position-dependence -- the case that would actually bite, since bootc takes find_first_colocated_esp() -- is UNTESTED. payload-write is a synthetic payload, not an APEX install.",
+  "decisions_not_withdrawn": "ESP ownership (bc5c3822), GPT entry writes (b137f03f), firmware writes (3cff7466) all stand and govern the Linux migration path too."
+ }
 }
