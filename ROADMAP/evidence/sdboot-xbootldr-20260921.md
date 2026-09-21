@@ -105,6 +105,23 @@ The third one is the important one for anybody tempted by a workaround: it is
 the **runtime** store, used by every `bootc upgrade`, `bootc status`,
 `bootc rollback` and `bootc image delete` afterwards — not just install.
 
+A fourth, for anybody hoping to ask for one in `/usr/lib/bootc/install/*.toml`
+instead — `crates/lib/src/install/config.rs:74-79`:
+
+```rust
+#[serde(deny_unknown_fields)]
+pub(crate) struct BasicFilesystems {
+    pub(crate) root: Option<RootFS>,
+    // TODO allow configuration of these other filesystems too
+    // pub(crate) xbootldr: Option<FilesystemCustomization>,
+    // pub(crate) esp: Option<FilesystemCustomization>,
+}
+```
+
+Both are commented out, and `deny_unknown_fields` means a config that names
+either is **rejected**, not ignored. There is no way to ask for an XBOOTLDR and
+no way to ask for a bigger ESP.
+
 ### 1d. Upstream says it in words, in a merged PR, five days ago
 
 bootc PR **#2440**, *"cfs/boot: Handle separate /boot mount"*, merged
