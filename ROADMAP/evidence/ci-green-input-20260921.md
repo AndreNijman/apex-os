@@ -161,6 +161,30 @@ longer waits: a dead session now fails in well under a second, so the longer
 ceiling is spent exclusively on a session that is alive. It is not claimed to
 fix the flake. It is what makes the next red answerable.
 
+**Mutation-tested, because a diagnostic nobody has seen fire is not one.** With
+`exit 7` spliced into `inside.sh` before its `echo "DONE"` — a session that dies
+after doing its work, which is the state the CI reds are consistent with — the
+gate now reports:
+
+```
+FAIL  the session's script actually ran
+      nothing below was tested. the wait ended because: the session left before
+      printing DONE (exited 7)
+      waited 0s; the transcript is 1086 bytes and stops at:
+        | apex: brokered git.fetch against https://127.0.0.1 exited 128
+      apex agent status 1:
+        state        failed
+        command      /bin/sh /tmp/tmp.3njbO0xeh2/demo/inside.sh
+        pid          979987
+        outcome      exited 7
+      stderr of `apex agent run`:
+      the agent runtime's own log, last 20 lines:
+        apex-agentd: listening on …/control.sock (6 adapters)
+```
+
+`waited 0s` against the old 25 s, and the exit status named. The false uid-map
+hint did not print, because `run.err` did not say it.
+
 ## 3. `mux-layouts` — a drop with its evidence on `/dev/null`
 
 ```
