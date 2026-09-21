@@ -90,13 +90,37 @@ the timeout instead of instantly.
 
 ## NEXT
 
-- Read `RelayDiallerTest.kt` and confirm the race described above.
+- Inject `Thread.sleep(200)` in `Double.serve()` immediately before
+  `if (input.read() < 0) closedByClient++` (uncommitted) and run
+  `./gradlew :app:testDebugUnitTest --tests '*failed dial*'` — expect a
+  deterministic `expected: <20> but was: <19>`.
 
 ## DONE
 
+- Read the card, `RelayDiallerTest.kt` and `RelayDialler.kt`.
+- **The test runs locally.** The card's "if the toolchain cannot run locally"
+  escape is not needed: 13 s warm, whole class green.
+
 ## IN PROGRESS
 
+- Reproducing the race deterministically.
+
 ## FOUND
+
+- **The local Android toolchain works, with one trap.** An Android SDK is
+  already at `/var/tmp/android-sdk` (platforms/android-36, build-tools 35+36)
+  and the Gradle cache is warm (3.1 GB), so `:app:testDebugUnitTest` takes 13 s.
+- **`/usr/lib/jvm/java-21-openjdk` on this laptop is BROKEN and owned by no
+  RPM.** Its `conf` is a dangling symlink to `/etc/java/java-21-openjdk/...`,
+  which does not exist; only `java-latest-openjdk` (27-ea) is installed. Any
+  JVM started from it dies with `InternalError: Error loading java.security
+  file` before Gradle's wrapper even unpacks. Almost certainly a leftover of
+  the 2026-09-17 Steam recovery file-copy (`/usr` files added, no `/etc`
+  payload replay). Not mine to fix — worked around by fetching Temurin 21 into
+  scratch. **Any agent running the Android build on this laptop must use**
+  `JAVA_HOME=/var/lab-scratch/android-relay-flake/tools/jdk-21.0.12.1+1` and
+  `ANDROID_HOME=/var/tmp/android-sdk`; `/usr/bin/java` (27-ea) is refused by
+  AGP and `/usr/lib/jvm/java-21-openjdk` does not start.
 
 ## BLOCKED ON
 

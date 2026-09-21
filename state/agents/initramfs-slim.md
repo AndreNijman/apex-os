@@ -1,3 +1,26 @@
+## LANDABLE — `ede9a6f7`
+
+The gate that FATALed on this branch's own initramfs is gone, replaced by a
+predicate a CI suite proves red on a fat image and green on a slim one (35
+assertions), and the evidence file exists. Landing gives a 512 MiB ESP a
+deployment of 114.6 MiB instead of 375.2 MiB.
+
+**The one caveat, stated rather than buried:** no full image build has run the
+new stanza end to end — the first build after landing is the first time
+`COPY files/scripts/check-initramfs-budget.sh` + the call execute together.
+Every static checker this repo has is green (containerfile-order,
+containerfile-assertions, shellcheck-coverage, suites-run-in-ci, the new suite,
+YAML parse). The risk that remains is a build-time one, and the new suite is
+exactly what makes it two seconds to diagnose instead of forty minutes.
+
+Confidence rests on a specific fact, checked not assumed: the **ethernet gate
+was never on `roadmap/v2.2`** — round 1 introduced it on this branch — while
+the eight unlock-chain gate references **are** already on `roadmap/v2.2` and
+have passed real builds. So this branch no longer adds a build-breaking gate,
+and it changes none of the gates that already work.
+
+---
+
 # initramfs-slim — make the initramfs fit a 512 MiB ESP
 
 items: none (no task id; dispatched as "it has to work in 512")
@@ -13,11 +36,10 @@ agent: round-39, started 17:18 AWST 2026-09-21. Orchestrator dies ~21:08.
 branch: task/initramfs-slim @ 530a9dc6 (merged origin/roadmap/v2.2 b137f03f,
         clean — no overlap on Containerfile.{apex,core,kernel})
 
-### NOT LANDABLE — one line
+### LANDABLE as of 20:35 — see the block at the top of this file.
 
-Landing it today would ship a stage-1f change whose Containerfile gate FATALs
-on the very initramfs the branch produces (`! grep -qE
-'kernel/drivers/net/ethernet/'`), so every image build would fail at that step.
+(The round opened NOT landable: the Containerfile gate FATALed on the very
+initramfs the branch produces. That is fixed in `7d9b959a`.)
 
 ### INVENTORY CORRECTIONS (checked on arrival, contradicts the notes below)
 
@@ -119,14 +141,50 @@ transfer.) Adopting -19 would mean changing the Containerfile's dracut flags.
 puts nvidia/nvidia_modeset/nvidia_drm/nvidia_uvm INTO this initramfs". The
 branch inverts exactly that. Must be rewritten with the gates.
 
+### BOOT PROOF — done, and it took TWO boots
+
+Same disk (reflink copy of the real bootc-installed lab disk), slim 98.5 MiB
+initramfs installed over the shipped 359.0 MiB one, `-vga std`, dracut
+pre-pivot hook reporting from inside the initramfs to /dev/kmsg, headless
+qemu inside `localhost/apex-bootlab` (the host L16 has NO qemu and NO OVMF —
+that is why the container exists).
+
+| | boot 1, guest defaults | boot 2, KMS blacklisted |
+|---|---|---|
+| card0 driver | `bochs-drm` | **`simple-framebuffer`** |
+| fb console | `fb0 fbcon` | `fb0 fbcon` |
+| switch-root | reached | reached |
+| initrd netifs | `lo` only | `lo` only |
+| NetworkManager | absent | absent |
+| systemd-cryptsetup | present | present |
+| full boot | graphical.target 37.0 s | graphical.target **7.714 s** |
+
+**Boot 1 is the trap.** bochs is still in the initramfs, so on `-vga std` it
+binds card0 and evicts simpledrm — a guest run without the blacklist measures
+the OLD design and "passes" while proving nothing. Boot 2 is the claim.
+Serial logs: `/var/lab-scratch/initramfs-slim/serial-{1,2}.txt`.
+
+### FOUND — the branch's own policy sentence was false
+
+Stage 1f said "NO KMS DRIVER IS IN THE INITRAMFS". bochs, cirrus-qemu,
+virtio-gpu, vmwgfx and ast are all still there. They carry no firmware — which
+is the actual hazard — and are how a VM and a BMC server get a display, so
+they stay; the sentence was corrected to "no FIRMWARE-BEARING KMS driver"
+(`ede9a6f7`). This is also exactly why the boot proof needed two boots.
+
+### FOUND — pre-existing, NOT mine, worth someone's time
+
+`android/tools/release-version.sh` fails `check-shellcheck-coverage.sh`
+(SC2034, `head_sha` unused at line 92) and is NOT on
+`tests/shellcheck-known-failing.txt`. It is on `origin/roadmap/v2.2` already,
+so that gate is red on the roadmap tip independently of this branch.
+
 ### NEXT
 
-Write `tests/test-apex-initramfs-budget.sh`: gzip `labv0.list` (fat) and
-`labv3.list` (slim) into `tests/fixtures/initramfs/`, assert the six slimming
-gates FAIL on fat and PASS on slim by name, plus a synthetic listing for the
-unlock-chain gates, then replace the inline gates in Containerfile.apex with a
-COPY + call of files/scripts/check-initramfs-budget.sh, wire the suite into
-pr-validation.yml, commit, push.
+Nothing blocking. If the orchestrator wants more before landing: run one real
+image build of Containerfile.apex and confirm the new
+`/tmp/check-initramfs-budget.sh` call prints its two `initramfs-budget:` lines
+and exits 0. Everything else on this unit is done and pushed.
 
 ### DONE — round 39
 
@@ -141,6 +199,16 @@ pr-validation.yml, commit, push.
     real file. Recorded in the commit message.
 * re-attached the lab disk (now **/dev/loop1**, was loop2), mounted the
   deployment; built v2/v3/v4/v3b; measured the full matrix + reproducibility.
+* **a4c9ab97 pushed**: `tests/test-apex-initramfs-budget.sh` (35 assertions,
+  both ways) + `tests/fixtures/initramfs/{fat,slim}.list.gz` + Containerfile.apex
+  now COPYs and calls the predicate instead of ~140 inline greps + wired into
+  `pr-validation.yml`. check-suites-run-in-ci green.
+* **0ce5e9e4 pushed**: `ROADMAP/evidence/initramfs-slim-20260921.md` — the
+  evidence file round 1 never wrote. Matrix, reproducibility, boot proof, and
+  an explicit "what this does NOT prove" section.
+* **ede9a6f7 pushed**: corrected the false policy sentence in stage 1f.
+* Lab disk copy for the boot proof: `/var/lab-scratch/initramfs-slim/vm/
+  apexboot.img` (reflink, disposable). `apex.img` is untouched.
 
 ## STATE — round 2 (fresh agent, 2026-09-21 ~11:45 AWST)
 
