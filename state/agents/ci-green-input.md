@@ -84,3 +84,59 @@ So they are NOT the same kind of problem, and must not be fixed as one:
 ## BLOCKED ON
 
 - nothing
+
+---
+
+## ROUND 40 CONTINUATION — written by the autoresume orchestrator, 2026-09-22 03:30 AWST
+
+**The round-39 agent produced nothing.** There is no `task/ci-green-input`
+branch on origin and no worktree. Everything above is still the dispatch brief,
+unconsumed — treat it as if it were written for you, because it was.
+
+**The reds are still live, checked rather than assumed.** PR validation run
+`35625128495` on `roadmap/v2.2` ("Merge fix/pkg-flatpak-only-route", 13m54s)
+failed with exactly:
+
+```
+Package engine >> Run input-settings assertions
+Package engine >> Run secret-broker assertions
+PR validation  >> Require every applicable test
+```
+
+Note that is **not** the same pair the brief above names. The brief names
+`test-apex-input.sh` and `test-mux-layouts.sh`; CI now names the
+**input-settings** and **secret-broker** assertion steps. Find out whether
+`Run secret-broker assertions` is a third defect or the same `apex-input` cause
+wearing a different step name — `gh run view 35625128495 --log-failed` answers
+it and costs one command. **Do not assume the brief's table is current.**
+
+The four `PR validation` runs that succeeded after this one (`35636984370` and
+friends) are **docs-only commits** — 3-4 minutes against 13m54s, i.e. the
+selector skipped the jobs. They are not evidence that the reds went away.
+
+### Why this is the highest-priority non-hardware unit on the board
+
+The full image now builds green (run 35624291221) and katana is booted on it.
+Per `ROADMAP/ANDRE-TODO.md` item A.4, the only thing left before Andre approves
+the merge to `main` is qualification — and merging an integration branch whose
+PR validation is red is exactly what this program has spent 40 rounds not doing.
+
+### Two facts from this repo's memory, handed over so you do not pay for them
+
+1. **The suites interfere in a sequential loop.** `apex-os` suites fail
+   spuriously when run together — re-run any suite ALONE before believing a
+   regression. The table above was built that way and it is why `mux-layouts`
+   was correctly classified as environmental.
+2. **The CI runner is a second environment.** openssl/nft/localtime/cgroup
+   defects have been found that exist ONLY off the L16. "It passes here" proves
+   nothing about the runner. Reproduce in a runner-matching container.
+
+And the standing rule this repo cares most about: **a gate that runs and
+inspects nothing is the dominant CI defect family here.** If any of this ends in
+a skip, the skip must name what the runner lacks and what still covers the
+behaviour.
+
+## NEXT (round 40)
+
+- `gh run view 35625128495 --log-failed` and find out whether `Run secret-broker
+  assertions` is a third defect or the `apex-input` cause under another name.
