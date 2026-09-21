@@ -34,6 +34,15 @@ installer/test-installer-luks-live.sh  needs root, a loop device and the 15 GB i
 # apex-bootlab container. A GitHub runner has no nested virtualisation worth
 # the name and the TCG fallback would take an hour per boot.
 installer/test-installer-keymap-boot.sh  needs /dev/kvm, root podman and the 15 GB image
+# The luks-boot suite does a REAL encrypted install (its own loopback file,
+# root and cryptsetup, same as -live above) and then boots the WHOLE DISK
+# under OVMF in the apex-bootlab container, types the passphrase through QMP
+# and reads dracut's own "Switching root" line — the property neither -live
+# nor the keymap-boot suite measures: that a disk this installer wrote
+# actually boots through firmware, shim and GRUB into the real root. Needs
+# root, a loop device, /dev/kvm, root podman, the 15 GB image and the
+# apex-bootlab container; strictly more than either suite above.
+installer/test-installer-luks-boot.sh  needs root, a loop device, /dev/kvm and the 15 GB image
 #
 # ── DEBT: these can run headless and simply were never wired in ─────────────
 # (none. 2026-09-13: the last eight were wired in or, for firewall-ssh, moved
