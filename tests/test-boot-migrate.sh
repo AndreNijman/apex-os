@@ -173,6 +173,164 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
+sec "the esp-too-small refusal names the XBOOTLDR partition it cannot use"
+# Everyone who reads esp-too-small on a machine that has a spare XBOOTLDR
+# partition has the same idea within a minute, because the Boot Loader
+# Specification is written for exactly that layout and systemd-boot reads it
+# fine. bootc's composefs backend does not write it -- the BLSCompatible arm of
+# setup_composefs_bls_boot mounts the ESP unconditionally -- so the refusal has
+# to say so. docs/boot-v2.md, "XBOOTLDR: the Boot Loader Specification allows
+# it, bootc does not implement it".
+if grep -q 'XBOOTLDR_TYPE_GUID=bc13c2ff-59e6-4262-a352-b275fd6f7172' "$CODE"; then
+    ok "the engine knows the XBOOTLDR type GUID"
+else
+    bad "XBOOTLDR_TYPE_GUID is missing or not bc13c2ff-59e6-4262-a352-b275fd6f7172"
+fi
+# The note must be attached to the esp-too-small refusal and nowhere else: a
+# note printed on a machine that is migrating fine would be noise.
+esp_refusal_block="$(awk '/refuse "esp-too-small"/{inside=1} inside{print} inside && /docs\/boot-v2.md/{exit}' "$CODE")"
+if grep -q 'xbnote' <<<"$esp_refusal_block"; then
+    ok "the esp-too-small refusal carries the XBOOTLDR note"
+else
+    bad "esp-too-small says nothing about XBOOTLDR — the next reader will spend an evening on it"
+fi
+
+# And the finder itself, run for real against a fake block layout, both ways.
+# A grep alone would pass on a find_xbootldr that never matches anything.
+FAKEBIN="$TMP/fakebin"; mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/findmnt" <<'FAKE'
+#!/usr/bin/env bash
+echo /dev/faked1p3
+FAKE
+cat > "$FAKEBIN/lsblk" <<'FAKE'
+#!/usr/bin/env bash
+dev="${*: -1}"; flags="$*"
+case "$flags" in
+    *-ndo\ TYPE*|*-dno\ TYPE*)
+        case "$dev" in */faked1) echo disk ;; *) echo part ;; esac ;;
+    *PKNAME*)   echo faked1 ;;
+    *-lno\ NAME*) printf 'faked1\nfaked1p1\nfaked1p2\nfaked1p3\n' ;;
+    *PARTTYPE*)
+        case "$dev" in
+            */faked1p1) echo c12a7328-f81f-11d2-ba4b-00a0c93ec93b ;;
+            */faked1p2) echo "${FAKE_P2_TYPE:-bc13c2ff-59e6-4262-a352-b275fd6f7172}" ;;
+            *)          echo 4f68bce3-e8cd-4db1-96e7-fbcaf984b709 ;;
+        esac ;;
+esac
+FAKE
+chmod +x "$FAKEBIN/findmnt" "$FAKEBIN/lsblk"
+
+# The engine's own definitions, lifted verbatim: from `set -uo pipefail` down to
+# the line that ends the block of finders. Testing a copy would test the copy.
+FINDERS="$TMP/finders.sh"
+sed -n '/^set -uo pipefail/,/^esp_mounted_at=/p' "$MIG" | head -n -1 > "$FINDERS"
+grep -q 'find_xbootldr()' "$FINDERS" || { echo "FATAL: find_xbootldr not in the extracted range" >&2; exit 1; }
+
+probe_xbootldr() {   # $1 = the GPT type to give the fake p2
+    FAKE_P2_TYPE="$1" PATH="$FAKEBIN:$PATH" bash -c \
+        'source "$1"; if out="$(find_xbootldr)"; then printf "FOUND:%s\n" "$(tr "\n" "," <<<"$out")"; else printf "NONE\n"; fi' \
+        _ "$FINDERS" 2>&1
+}
+got="$(probe_xbootldr bc13c2ff-59e6-4262-a352-b275fd6f7172)"
+if [[ "$got" == FOUND:/dev/faked1p2* ]]; then
+    ok "find_xbootldr finds an EA00 partition on the root disk"
+else
+    bad "find_xbootldr missed an XBOOTLDR partition: $got"
+fi
+got="$(probe_xbootldr 0fc63daf-8483-4772-8e79-3d69d8477de4)"
+if [[ "$got" == NONE ]]; then
+    ok "find_xbootldr reports nothing when no partition is XBOOTLDR-typed"
+else
+    bad "find_xbootldr matched a plain Linux partition: $got"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+sec "a machine that boots from another disk's ESP is told, not refused"
+# katana boots APEX off the 200 MiB ESP on the WINDOWS disk while its own
+# 512 MiB EFI-SYSTEM sits unused on the APEX disk. find_esp resolves the
+# machine's OWN disk, so migrating moves the boot onto it -- the right answer,
+# and a change of disk the user should hear about. It must stay a note: a
+# refusal would keep katana depending on another operating system's disk
+# forever, and a firmware that cannot see the new ESP is already covered by
+# the trial boot coming back to GRUB.
+if grep -q 'booted_esp_partuuid' "$CODE"; then
+    ok "the engine can read which ESP the firmware is booting from"
+else
+    bad "nothing reads BootCurrent's ESP — a cross-disk migration would be silent"
+fi
+if grep -qE 'refuse "(different-esp|foreign-esp|cross-disk[a-z-]*)"' "$CODE"; then
+    bad "booting from another disk's ESP is a REFUSAL — that would strand katana on the Windows disk"
+else
+    ok "booting from another disk's ESP is not a refusal"
+fi
+precheck_body="$(awk '/^cmd_precheck\(\) \{/{inside=1} inside{print} inside && /^\}/{exit}' "$CODE")"
+if grep -q 'booted_esp_partuuid' <<<"$precheck_body"; then
+    ok "the precheck is where the cross-disk case is noticed"
+else
+    bad "booted_esp_partuuid is never called from the precheck"
+fi
+
+# The parser, run for real against katana's actual efibootmgr shape.
+cat > "$FAKEBIN/efibootmgr" <<'FAKE'
+#!/usr/bin/env bash
+cat <<'OUT'
+BootCurrent: 0000
+Timeout: 1 seconds
+BootOrder: 0000,0001,0002
+Boot0000* APEX-OS Primary	HD(1,GPT,2ba9a2ea-5f0c-4c2b-9d31-7a1e6b0c8d44,0x800,0x64000)/File(\EFI\APEX\SHIMX64.EFI)
+Boot0001* Windows Boot Manager	HD(1,GPT,2ba9a2ea-5f0c-4c2b-9d31-7a1e6b0c8d44,0x800,0x64000)/File(\EFI\Microsoft\Boot\bootmgfw.efi)
+Boot0002* UEFI: Generic Flash Disk	PciRoot(0x0)/Pci(0x14,0x0)/USB(0,0)
+OUT
+FAKE
+chmod +x "$FAKEBIN/efibootmgr"
+probe_booted_esp() {   # $1 = optional override of the whole efibootmgr output
+    PATH="$FAKEBIN:$PATH" bash -c 'source "$1"; booted_esp_partuuid || echo NONE' _ "$FINDERS" 2>&1
+}
+got="$(probe_booted_esp)"
+if [[ "$got" == "2ba9a2ea-5f0c-4c2b-9d31-7a1e6b0c8d44" ]]; then
+    ok "booted_esp_partuuid reads BootCurrent's GPT PARTUUID out of efibootmgr -v"
+else
+    bad "booted_esp_partuuid returned '$got', not katana's Boot0000 PARTUUID"
+fi
+# BootCurrent pointing at an entry with no GPT device path (a USB stick, a
+# network boot) must yield nothing rather than a wrong partition.
+cat > "$FAKEBIN/efibootmgr" <<'FAKE'
+#!/usr/bin/env bash
+cat <<'OUT'
+BootCurrent: 0002
+BootOrder: 0002,0000
+Boot0000* APEX-OS Primary	HD(1,GPT,2ba9a2ea-5f0c-4c2b-9d31-7a1e6b0c8d44,0x800,0x64000)/File(\EFI\APEX\SHIMX64.EFI)
+Boot0002* UEFI: Generic Flash Disk	PciRoot(0x0)/Pci(0x14,0x0)/USB(0,0)
+OUT
+FAKE
+got="$(probe_booted_esp)"
+if [[ -z "$got" || "$got" == NONE ]]; then
+    ok "a BootCurrent with no GPT device path yields nothing, not another entry's UUID"
+else
+    bad "booted_esp_partuuid invented '$got' for a USB boot"
+fi
+# Firmware prints the loader two ways and the L16 uses the one WITHOUT the
+# File() wrapper, so both shapes are fixtures rather than one being assumed.
+# Measured on the L16, read-only, 2026-09-21:
+#   Boot0000* APEX-OS	HD(1,GPT,1c417de2-…,0x800,0x12c000)/\EFI\fedora\shimx64.efi
+cat > "$FAKEBIN/efibootmgr" <<'FAKE'
+#!/usr/bin/env bash
+cat <<'OUT'
+BootCurrent: 0000
+Timeout: 0 seconds
+BootOrder: 0000,0020,0004
+Boot0000* APEX-OS	HD(1,GPT,1c417de2-5766-455f-9318-198610885424,0x800,0x12c000)/\EFI\fedora\shimx64.efi
+Boot0004* UEFI: IP4 Realtek PCIe GBE	PciRoot(0x0)/Pci(0x1c,0x4)/MAC(001122334455,0)
+OUT
+FAKE
+got="$(probe_booted_esp)"
+if [[ "$got" == "1c417de2-5766-455f-9318-198610885424" ]]; then
+    ok "the device-path form without File() parses too (the L16's own shape)"
+else
+    bad "booted_esp_partuuid returned '$got' for the L16's real Boot0000 line"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
 sec "the state machine"
 rm -rf "$TMP/state"; mkdir -p "$TMP/state" "$TMP/esp" "$TMP/sysroot"
 

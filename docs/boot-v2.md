@@ -180,6 +180,41 @@ image update.
 | `last-attempt-failed` | the previous commit's trial boot did not come up. Not retried on its own. |
 
 
+### Which ESP, on a machine with more than one
+
+Answered here because two of the three machines in this program have two ESPs
+and the answer is not the intuitive one.
+
+**The migration writes the ESP on the disk the ROOT FILESYSTEM is on, not the
+one the firmware is booting from.** `apex-boot-migrate`'s `find_esp` walks up
+from `findmnt --target /sysroot` to a disk and scans that disk for the ESP type
+GUID. bootc does the same thing independently —
+`find_first_colocated_esp()` searches `find_all_roots()`, the disks backing the
+root device (`crates/blockdev/src/blockdev.rs:214`) — so the firmware entry and
+the files it points at can never end up on different partitions.
+
+On **katana** that is a real improvement rather than a technicality. It boots
+APEX from the 200 MiB ESP on the **Windows** disk (`Boot0000* APEX-OS Primary`
+→ `\EFI\APEX\SHIMX64.EFI`, `BootCurrent: 0000`) while its own disk carries an
+unused 512 MiB `EFI-SYSTEM`. Migrating moves APEX's boot onto its own disk, and
+APEX stops depending on another operating system's disk — which is the reason
+every brief this year has warned that one mistake on that ESP takes out two
+operating systems.
+
+Because it is an improvement, it is **a note and not a refusal**. The precheck
+reads the GPT PARTUUID out of `BootCurrent`'s device path, compares it with the
+ESP it is about to write, and when they differ says so: which partition it boots
+from, which it will write, and that nothing is written to the first, so another
+operating system installed there keeps its own boot entry. A refusal would keep
+katana on the Windows disk forever. The failure a refusal might guard against —
+firmware that does not enumerate the new disk — is already covered by the trial
+boot: it comes back to GRUB, `confirm` records `phase=failed`, and nothing
+re-arms.
+
+What this does **not** yet decide: what `confirm` should do with the old entry
+on the other disk. Today it is demoted within `BootOrder` and left in place,
+which is the right answer while that entry is also how Windows is reached.
+
 ### What boots through systemd-boot today, measured
 
 | | state |
@@ -355,6 +390,14 @@ The rules that come with choosing credentials, and they are not optional:
 
 ### How reversible this is for an existing machine — it is not, and here is why
 
+> **Superseded on its headline claim, kept for its numbers.** "A migration is
+> impossible, back up and reinstall" was the conclusion when this was written
+> and it is wrong — `bootc install to-existing-root --composefs-backend
+> --bootloader systemd` converts a running machine in place, and APEX drives it
+> from `apex update`. Read "Migrating a machine that already exists" above for
+> what actually happens. What survives here is the **ESP arithmetic**, which is
+> exactly why the migration refuses on the L16.
+
 "Additive before destructive" is achievable as a **one-shot test** and is not
 achievable as a migration.
 
@@ -377,8 +420,8 @@ additive test and it is the right way to see systemd-boot boot this hardware.
   moving the partition after it. bootc's own composefs default is 1 GiB, which
   is itself under the transient peak, so APEX must ask for more than bootc's
   default. The two unused 2 GiB XBOOTLDR partitions on the L16 cannot absorb
-  this: `strings` on the `bootc` binary contains **zero** occurrences of
-  `xbootldr` or the XBOOTLDR type GUID.
+  this, and the reason is bootc rather than systemd-boot — see the next
+  section.
 * **ostree → composefs has no converter.** So switching an existing machine is
   a reinstall with repartitioning, and its reverse is another reinstall.
 
@@ -386,6 +429,76 @@ The honest statement for a user: **migrating an existing APEX machine to
 systemd-boot means backing up and reinstalling.** New installs get it from the
 installer, where the partition table is being created anyway and the ESP can be
 sized correctly the first time.
+
+### XBOOTLDR: the Boot Loader Specification allows it, bootc does not implement it
+
+The obvious escape from the ESP arithmetic above is the one the Boot Loader
+Specification was written for: put `vmlinuz` and the initramfs on an **XBOOTLDR**
+partition (GPT type `bc13c2ff-59e6-4262-a352-b275fd6f7172`) and leave the ESP
+holding the loader. On the L16 that would cost nothing at all — `p2` is a 2 GiB
+`EA00` partition, unmounted and referenced by nothing, sitting immediately after
+the 600 MiB ESP.
+
+**systemd-boot would read that perfectly well. bootc will not write it.** The
+loader is not the problem and the measurement says so: `strings` on the very
+`systemd-bootx64.efi` that `bootc install --bootloader systemd` wrote onto a
+lab guest contains `config_load_xbootldr`, and `bootctl` carries
+`--boot-path=` and `--print-boot-path` for exactly this. Named so nobody
+re-derives it — the actor is bootc's composefs backend, not sd-boot:
+
+* `crates/lib/src/spec.rs:288` — `--bootloader systemd` maps to
+  `BootloaderKind::BLSCompatible`.
+* `crates/lib/src/bootc_composefs/boot.rs:751` and `:775`, in
+  `setup_composefs_bls_boot`. The two arms are **not** symmetric. `GRUBClassic`
+  asks `root.is_mountpoint("boot")` and roots the entry paths accordingly.
+  `BLSCompatible` never asks: it calls `mount_esp_writable(&esp_device)`
+  unconditionally, writes the kernel and initrd to `<ESP>/EFI/Linux/`, the
+  `.conf` to `<ESP>/loader/entries/`, and sets `abs_entries_path` to
+  `/EFI/Linux` — absolute to the ESP.
+* `crates/lib/src/bootc_composefs/boot.rs:1422` — *"TODO: support XBOOTLDR …
+  bootc does not yet detect or use XBOOTLDR in the composefs install path, so
+  unconditionally mount the ESP at /boot for now."*
+* `crates/lib/src/bootloader.rs:287` — *"If we supported XBOOTLDR in the
+  future, that'd go here with `--boot-path`."*
+* `crates/lib/src/install/config.rs:74` — `BasicFilesystems` carries both
+  `xbootldr` and `esp` as commented-out TODOs, and the struct is
+  `deny_unknown_fields`, so an install config that names either is **rejected**
+  rather than ignored. There is no way to ask for an XBOOTLDR and no way to ask
+  for a bigger ESP.
+* `crates/lib/src/store/mod.rs:396` — *"NOTE: Handle XBOOTLDR partitions here
+  if and when we use it"*, in the **runtime** store. This is the one that kills
+  the workaround of letting bootc write to the ESP and moving the files
+  afterwards: `boot_dir` is the ESP for every later `bootc upgrade`, `status`,
+  `rollback` and `image delete`, so a relocation breaks the first steady-state
+  update and would have to be re-applied forever.
+
+Still open on upstream `main` (`65321ae`, 2026-09-21), and identical in **1.16.4**
+— the version that actually ships inside `apex-os:daily` and therefore the one
+that runs the migration — as well as 1.16.10 and 1.16.13. Upstream states the
+design in words in merged PR **#2440** (2026-09-16): *"GrubCC and SystemdBoot
+both do not store anything inside of `/sysroot/boot` and will (should) always
+have the ESP mounted at `/boot`."*
+
+Three corollaries worth having in writing:
+
+1. **APEX is already on Type #1.** `BootType::Bls` is the default and an image
+   shipping a plain kernel under `/usr/lib/modules` gets it — that is phase 1,
+   below. "Move to Type #1 entries" is not an available change; the files are
+   already loose `vmlinuz` + `initrd` with a `.conf`. The only variable is which
+   partition they sit on, and bootc fixes that to the ESP.
+2. **Secure Boot is unaffected either way.** ESP and XBOOTLDR hold the same
+   bytes; the firmware validates the kernel PE through `LoadImage` wherever it
+   sits, and the initrd is outside the signature in phase 1 regardless. The
+   `secure-boot-unsigned-loader` refusal is about `systemd-bootx64.efi` itself
+   and is orthogonal.
+3. **An upstream fix is a six-site change** — `boot.rs:775`, `boot.rs:1422`,
+   `bootloader.rs:287`, `store/mod.rs:396`, `status.rs:408`, and
+   `finalize.rs:149` / `delete.rs:159`, all keyed off the same `boot_dir`
+   decision. APEX must not carry that as a fork.
+
+`ROADMAP/evidence/sdboot-xbootldr-20260921.md` has the full transcript, the
+measured ESP of an APEX composefs guest, and what this means for a Windows
+dual-boot machine.
 
 ### Legacy BIOS — what "all machines" costs
 
