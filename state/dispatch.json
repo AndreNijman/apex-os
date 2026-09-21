@@ -1,7 +1,7 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-21T22:12+0800",
- "_round": "Round 39 STARTED 2026-09-21T17:08+0800 by the autoresume timer, after the round-38 session hit a usage limit at 14:59 (autoresume.log: 'resume session ended (exit 1)'). All six round-38 agents were dead \u2014 `ps` showed no subagent claude process \u2014 and NONE was messaged. Six fresh agents dispatched with the same slugs, each carrying a ROUND 39 CONTINUATION section appended to its card. CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 is set in this session's env (checked, not assumed), so agents are not SIGTERMed 600s after the final response; the hard bound is `timeout 4h`, which ends this session at about 21:08 AWST.",
+ "updated": "2026-09-21T22:15+0800",
+ "_round": "ROUND 39 IS OVER as of 2026-09-21T22:15+0800. ZERO agents are running -- verified with ListAgents AND `pgrep -a claude` (only the interactive session's own pid) AND an unheld autoresume.lock, not read off this file. The eight slugs this key listed a moment ago were STALE: the autoresume `claude -p` session that dispatched them has exited. Anything those agents had committed is on their branches and in refs/wip. The ONLY thing in flight is image build 35608265004 on roadmap/v2.2 @ dc15304b, sitting in `Build core` -- it has already passed the kernel-tier resolve gate. windows-installer is PAUSED by Andre and must not be dispatched.",
  "_landed_this_round": [
   {
    "merge": "259d8976",
@@ -77,107 +77,7 @@
  ],
  "_status_recorded_this_round": "L-003 blocked -> partial, recorded by the luks-boot agent via round24-prepend.py (evidence now 16,012 chars, carrying the ROUND 32 record forward rather than replacing it -- set-status.py REPLACES and has no append flag). Verified by re-parsing roadmap.yaml: **92 done / 36 partial / 0 todo / 0 BLOCKED of 128**. This is the first time the board has had zero blocked items. L-003 is NOT done: 'by default' means the installer path, and no test has run the real `apex-luks-enroll` through `apex-install` (the suites use a recovery-only stand-in), no installer-produced disk has been TPM-auto-unlocked, it is swtpm and not silicon, and luks-pcr7 was run ALONE rather than with the STAGED set.",
  "_deliberately_held": "ZERO slots held: all six are in use. The READY list's `luks-installer (L-002)` and `luks-enroll (L-003)` were NOT dispatched as separate agents \u2014 the luks-boot unit already owns both items, and resume.sh offers them only because the queue keys IN HAND by unit id rather than by item. Dispatching them would have put three agents on one branch. Every other open queue unit is in the report's COMPLETE section.",
- "agents": [
-  {
-   "repo": "apex-os",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T17:17+0800",
-   "agent_id": "a9366bd9b6667b95d",
-   "slug": "kernel-akmods",
-   "items": [],
-   "worktree": "/var/tmp/apex-work/wt-kernel-akmods",
-   "branch": "task/kernel-akmods",
-   "card": "ROADMAP/state/agents/kernel-akmods.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
-   "why": "Still THE image blocker: no image ships until core builds. The reproducer PASSED (kmod-nvidia built in 96 s, rc=0) so the driver/kernel pair is NOT the defect and the top-ranked route is dead. The live question is a podman build that exited 1 with no `Error: building at STEP` line. Also: four dirty files with ZERO commits on the branch to attribute them, and they touch the two workflows kernel-publish rewrites."
-  },
-  {
-   "repo": "apex-os",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T17:17+0800",
-   "agent_id": "a42a169e348847c9a",
-   "slug": "kernel-publish",
-   "items": [],
-   "worktree": "/var/tmp/apex-work/wt-kernel-publish",
-   "branch": "task/kernel-publish",
-   "card": "ROADMAP/state/agents/kernel-publish.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
-   "why": "Unblocks every image build. The digest is already known and written into the card (run 35557283953 GREEN, sha256:2ff544dd0214...). Pin Containerfile.core:93, show the gate green AND still failing on a bad pin, push, dispatch the CI core build, record the run id. LANDABLE the moment the pin is in \u2014 the agent has been told to mark it."
-  },
-  {
-   "repo": "apex-os",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T17:17+0800",
-   "agent_id": "afdc5f7c1addabc69",
-   "slug": "initramfs-slim",
-   "items": [],
-   "worktree": "/var/tmp/apex-work/wt-initramfs-slim",
-   "branch": "task/initramfs-slim",
-   "card": "ROADMAP/state/agents/initramfs-slim.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
-   "why": "Andre: 'it has to work in 512.' The ESP-ownership decision explicitly does NOT retire this unit \u2014 the ceiling still binds on the L16 and every existing install. First job is the ethernet gate that FATALs on the artifact it exists to pass; then gates into a callable script, size matrix with attribution, reproducibility, a VM boot proof, and the evidence file round 1 never wrote."
-  },
-  {
-   "repo": "apex-os",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T17:17+0800",
-   "agent_id": "a230fdfa2d450b5c7",
-   "slug": "migrate-preconditions",
-   "items": [],
-   "worktree": "/var/tmp/apex-work/wt-migrate-preconditions",
-   "branch": "task/migrate-preconditions",
-   "card": "ROADMAP/state/agents/migrate-preconditions.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
-   "why": "Andre settled ESP ownership at 17:09 and it INVERTS this unit's old NEXT: there is no bootc ESP choice to mirror, because bootc writes to the ESP the caller mounts. The work is ESP creation and preferring APEX's own. First judgement is which of the 342 pre-decision lines on the branch survive."
-  },
-  {
-   "repo": "apex-os",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T17:49+0800",
-   "agent_id": "a8ce565d40c9bc3aa",
-   "slug": "luks-boot",
-   "items": [
-    "L-002",
-    "L-003"
-   ],
-   "worktree": "/var/tmp/apex-work/wt-luks-boot",
-   "branch": "task/luks-boot",
-   "card": "ROADMAP/state/agents/luks-boot.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
-   "why": "CONTINUATION, dispatched 17:55 after the first round-39 agent finished its scope and landed as merge 4e7aa3fa. Its card carries a precise four-item NEXT: (1) a `luks-pcr7-signed` scenario where the only change from the green luks-pcr7 is building boot A's UKI WITH --pcr-key/--pcr-pubkey -- boot A already measured that the Secure-Boot and sd-stub gates pass and it refuses only for the missing signing key, so this should flip the selection to binding=signed-pcr11; (2) the integration gap that keeps L-003 at partial -- no test has ever run the REAL apex-luks-enroll through apex-install, every installer suite uses the APEX_LUKS_ENROLL_LOCAL recovery-only stand-in, and no installer-produced GRUB+shim disk has been TPM-auto-unlocked; (3) run the full default STAGED set together, since 26/0 is a result about luks-pcr7 IN ISOLATION; (4) L-002's remainder, deliberately scoped out of the first half of round 39 and still open -- the ESP-fallback check in installer/test-installer-luks-boot.sh ~line 234 fails `mount -o ro` with 'would change RO state', so the EFI/BOOT/BOOTX64.EFI fallback-loader check never actually runs."
-  },
-  {
-   "slug": "android-relay-flake",
-   "items": [],
-   "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-android-relay-flake",
-   "branch": "task/android-relay-flake",
-   "card": "ROADMAP/state/agents/android-relay-flake.md (written by the orchestrator at dispatch)",
-   "dispatched": "2026-09-21T17:44+0800",
-   "agent_id": "abd645b0998b77a4d",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "why": "NEW UNIT, found by the orchestrator rather than the queue. CI run 35584033343 on roadmap/v2.2 went red on `RelayDiallerTest > a failed dial leaves no socket open()` at a commit whose ENTIRE diff is one markdown file -- so it is a flake, not a regression, and the same job passed on the commit before. The race looks like `closedByClient` being incremented on the double's acceptor thread after `input.read() < 0`, with nothing synchronising it against the test thread's immediate assertEquals(20). A flaky gate is worse than a missing one: it teaches everybody to re-run red CI instead of reading it. The agent is told to verify rather than trust that diagnosis, and explicitly NOT to fix it by loosening the assertion -- a genuine descriptor leak must still fail."
-  },
-  {
-   "repo": "apex-os",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T18:14+0800",
-   "items": [],
-   "slug": "ci-green-context",
-   "agent_id": "aa2c68df476e7d4d3",
-   "worktree": "/var/tmp/apex-work/wt-ci-green-context",
-   "branch": "task/ci-green-context",
-   "card": "ROADMAP/state/agents/ci-green-context.md (written by the orchestrator at dispatch)",
-   "why": "NEW UNIT. The `base` tier CANNOT BUILD. CI run 35582968952 got `core` green and then died in `base` with `error[E0583]: file not found for module target` in apex-backup-core. The module is NOT missing from git -- apexd/apex-backup-core/src/target/ has eight tracked files and the commit that added them (990ea554, titled 'fix(backup): the whole target module was invisible to git') is an ancestor of both roadmap/v2.2 and the failing branch. `.containerignore` line 11 is `**/target/`, UNANCHORED, so it matches a directory named target at any depth and strips the source out of the build context before podman starts. Line 10 is already the correct anchored `apexd/target/`, which is all the file's own comment asks for. The whole file arrived 2026-09-20 in aa9e582b, which is why base built fine before that. The agent must DEMONSTRATE the exclusion rather than trust this, and must gate the class -- 'a tracked source file is invisible to the build context' currently costs a 40-minute build to discover."
-  },
-  {
-   "repo": "apex-os",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T18:14+0800",
-   "items": [],
-   "slug": "ci-green-input",
-   "agent_id": "a3b7a39476e0387bb",
-   "worktree": "/var/tmp/apex-work/wt-ci-green-input",
-   "branch": "task/ci-green-input",
-   "card": "ROADMAP/state/agents/ci-green-input.md (written by the orchestrator at dispatch)",
-   "why": "NEW UNIT. roadmap/v2.2's `Package engine` job has been red on EVERY recent merge (35584358228, 35585290517, 35586055011), and the two suites behind it are two DIFFERENT kinds of problem. The orchestrator ran each ALONE locally on the merged tip, because this repo's suites interfere in a sequential loop: tests/test-apex-input.sh fails HERE TOO (101 passed, 8 failed) so it is a real regression, while tests/test-mux-layouts.sh passes 47/0 here and fails 3 only on the runner, all three about creating a zellij session. apex-input's eight failures read like ONE cause -- `exactly six lines were added (635 -> 635)` says the edit wrote nothing and everything else is downstream. The agent is told not to fix mux-layouts by skipping it unless it can say what the runner lacks and what still covers the behaviour, because a suite that skips its own subject is this repo's dominant CI defect family."
-  }
- ],
+ "agents": [],
  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
  "_findings": {
   "nft -c cannot run in a build container": "netlink: Error: cache initialization failed: Operation not permitted. nft -c applies nothing, but libnftables opens a netlink socket and lists the LIVE ruleset before it will look at a file, and that needs CAP_NET_ADMIN over a real netns. The build had none, so the parser never ran and the step exited 1 at STEP 99/148. Fixed by giving it a netns of its own: unshare --user --map-root-user --net nft -c -f. Proved four ways with a fake unshare on PATH - parses / rejects a mutant at line 60 col 56-60 / unshare absent / unshare REFUSED - because the first draft classified unshare's own refusal as 'nft rejected the ruleset' and would have failed the build a second time on a false diagnosis.",
