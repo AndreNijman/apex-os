@@ -2048,11 +2048,26 @@ scenario_luks_pcr7() {
         return
     fi
 
-    # policy_select fell through PAST signed-pcr11, for the documented reason —
-    # not because signed-pcr11 is broken, but because this UKI never published
-    # a PCR-11 signing key for sd-stub to hand it.
+    # policy_select fell through PAST signed-pcr11 — not because signed-pcr11
+    # is broken, but because this UKI never published a PCR-11 signing key for
+    # sd-stub to hand it.
+    #
+    # WHICH of probe_signed_pcr11's gates refuses is the whole point, and the
+    # first real run of this scenario (2026-09-21) asserted the wrong one. The
+    # probe refuses in order: Secure Boot off, then no StubInfo efivar, then no
+    # readable signing key, then PCR 11 unmeasured. What actually fires here is
+    # the THIRD. That is a stronger result than the second would have been:
+    # gates one and two PASSING is a measurement that this guest booted with
+    # Secure Boot enforcing AND genuinely came up through sd-stub, so the only
+    # thing standing between this lab and a signed-PCR-11 enrolment is building
+    # the UKI with --pcr-key. Assert the absence of the sd-stub refusal too, so
+    # the day that stops being true this says so instead of passing quietly.
     assert_serial_has "$ser" \
-        "APEX-BOOTLAB: enroll-err:   not using signed-pcr11: this machine did not boot through sd-stub, so nothing measured a UKI into PCR 11"
+        "APEX-BOOTLAB: enroll-err:   not using signed-pcr11: the boot did not publish a PCR signing key at /run/systemd/tpm2-pcr-public-key.pem"
+    assert_serial_lacks "$ser" \
+        "APEX-BOOTLAB: enroll-err:   not using signed-pcr11: this machine did not boot through sd-stub"
+    assert_serial_lacks "$ser" \
+        "APEX-BOOTLAB: enroll-err:   not using signed-pcr11: Secure Boot is off"
     assert_serial_has "$ser" "APEX-BOOTLAB: enroll-exit=0"
 
     local tpm2field
@@ -2083,7 +2098,11 @@ scenario_luks_pcr7() {
     else
         bad "no recovery key came back from the enrolment boot — boot C's refusal arm has no fallback to test"
     fi
-    cp "$ser" "$WORK/serial-pcr7-a.log"
+    # No copy here: vm_boot was given --serial "$WORK/serial-pcr7-a.log"
+    # already, so the log is at its final name. `cp` onto itself fails
+    # ("are the same file"), and under this file's set -e that aborted the
+    # whole scenario after boot A on the first real run — boots B and C, the
+    # reproduction and the recovery arm, never ran at all.
 
     # ── boot B: SAME vars template, SAME UKI signing cert, SAME swtpm state
     #    DIRECTORY — but a FRESH swtpm PROCESS, which resets every PCR to zero
@@ -2134,7 +2153,11 @@ scenario_luks_pcr7() {
     if [[ -n "$pcr11_a" && -n "$pcr11_b" && "$pcr11_a" != "$pcr11_b" ]]; then
         ok "PCR 11 differs between the two boots (different UKIs) while PCR 7 held — the binding really is to PCR 7, not to whatever this UKI measures"
     fi
-    cp "$serb" "$WORK/serial-pcr7-b.log"
+    # No copy here: vm_boot was given --serial "$WORK/serial-pcr7-b.log"
+    # already, so the log is at its final name. `cp` onto itself fails
+    # ("are the same file"), and under this file's set -e that aborted the
+    # whole scenario after boot A on the first real run — boots B and C, the
+    # reproduction and the recovery arm, never ran at all.
 
     # ── boot C: the Secure Boot state changes (a dbx revocation update, same
     #    technique luks-firmware-change uses for its control volume); PCR 7
@@ -2194,7 +2217,11 @@ scenario_luks_pcr7() {
     else
         cannot "no recovery key was captured from boot A, so the refusal arm's recovery path is untested this run"
     fi
-    cp "$serc" "$WORK/serial-pcr7-c.log"
+    # No copy here: vm_boot was given --serial "$WORK/serial-pcr7-c.log"
+    # already, so the log is at its final name. `cp` onto itself fails
+    # ("are the same file"), and under this file's set -e that aborted the
+    # whole scenario after boot A on the first real run — boots B and C, the
+    # reproduction and the recovery arm, never ran at all.
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
