@@ -605,10 +605,23 @@ RUN --mount=type=secret,id=apex_sb_key --mount=type=secret,id=apex_sb_crt \
     dnf5 -y install akmod-nvidia akmod-xone akmod-xpadneo; \
     for k in ${APEX_AKMODS}; do \
         echo "=== akmods: building ${k} for ${KVER} ==="; \
-        akmods --force --kernels "${KVER}" --kmod "${k}"; \
+        akmods_rc=0; \
+        akmods --force --kernels "${KVER}" --kmod "${k}" || akmods_rc=$?; \
+        if [ "${akmods_rc}" -ne 0 ]; then \
+            echo "FATAL: akmods ${k} exited ${akmods_rc} for ${KVER}"; \
+            echo "--- .last.log (akmodsbuild output; the compiler error is here) ---"; \
+            tail -200 /var/cache/akmods/${k}/.last.log 2>/dev/null || echo "(absent)"; \
+            echo "--- *.failed.log ---"; \
+            cat /var/cache/akmods/${k}/*.failed.log 2>/dev/null || echo "(absent)"; \
+            echo "--- /var/log/akmods/akmods.log (tail) ---"; \
+            tail -80 /var/log/akmods/akmods.log 2>/dev/null || echo "(absent)"; \
+            exit 1; \
+        fi; \
         RPM="$(ls -1 /var/cache/akmods/${k}/kmod-${k}-*.rpm 2>/dev/null | head -1)"; \
         test -n "${RPM}" && test -f "${RPM}" \
-            || { echo "FATAL: ${k} akmod produced no kmod RPM for ${KVER}"; \
+            || { echo "FATAL: ${k} akmod exited 0 but produced no kmod RPM for ${KVER}"; \
+                 ls -la /var/cache/akmods/${k}/ 2>/dev/null || echo "(no such directory)"; \
+                 tail -200 /var/cache/akmods/${k}/.last.log 2>/dev/null || echo "(absent)"; \
                  sed -n '1,80p' /var/cache/akmods/${k}/*.failed.log 2>/dev/null; exit 1; }; \
         echo "built: ${RPM}"; \
         dnf5 -y install "${RPM}"; \

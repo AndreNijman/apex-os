@@ -206,6 +206,20 @@ jobs:
       - name: Containerfile assertions
         run: ./tests/check-containerfile-assertions.sh
 
+      # A build failure you cannot read costs the same as a build failure you
+      # can, plus every round spent guessing. `core` died three times at
+      # `akmods … --kmod nvidia` with no compiler error anywhere in the log,
+      # because the `sed` that dumps akmods' failure log sat behind a `||` on a
+      # LATER command and `set -e` had already killed the RUN. This refuses
+      # that shape in seconds, before the 45-minute core build earns the right
+      # to be undiagnosable again.
+      - name: Every silent build driver is guarded
+        run: |
+          set -euo pipefail
+          ./files/scripts/check-run-recovery-reachable \
+              Containerfile.base Containerfile.core Containerfile.kernel \
+              Containerfile.apex Containerfile.release
+
       - name: Pin apex-shell
         id: shell
         run: |
