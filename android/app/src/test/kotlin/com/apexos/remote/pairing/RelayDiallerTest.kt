@@ -499,9 +499,10 @@ class RelayDiallerTest {
              *
              * Long enough that scheduling never reaches it — the close this
              * waits for happens microseconds after the client reads the
-             * response, so five seconds is four orders of magnitude of
-             * headroom on the loadedest runner — and short enough that the
-             * failing case still reports in a time a person will wait.
+             * response, so five seconds is six orders of magnitude of
+             * headroom on the most loaded runner there is — and short enough
+             * that the failing case still reports in a time a person will
+             * wait.
              */
             const val PATIENCE_MS = 5_000
         }
