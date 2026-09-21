@@ -62,26 +62,17 @@ function Invoke-Installer { param([string]$Cmd) & cmd /c "`"$exe`" $Cmd 2>&1" }
 #  Written out rather than borrowed: every GPT field that this job rewrites is
 #  guarded by one of these, and invariant 2 ("both copies end consistent, with
 #  correct CRCs") is unprovable without computing them independently.
-$script:CrcTable = $null
+# CRC32 lives in C# (see the Add-Type below) and not in PowerShell, because
+# PowerShell 5.1 parses `0xFFFFFFFF` as Int32 -1 and `[uint32]0xFFFFFFFF` then
+# throws "Value was either too large or too small for a UInt32". The first
+# version of this job did exactly that, so every CRC it printed was a failure
+# message and every "ok=False" it reported was its own bug rather than a fact
+# about the disk. Unsigned 32-bit arithmetic is not something to improvise in
+# this shell.
 function Get-Crc32 {
     param([byte[]]$Bytes, [int]$Offset = 0, [int]$Length = -1)
-    if ($null -eq $script:CrcTable) {
-        $script:CrcTable = New-Object uint32[] 256
-        for ($i = 0; $i -lt 256; $i++) {
-            $c = [uint32]$i
-            for ($k = 0; $k -lt 8; $k++) {
-                if ($c -band 1) { $c = [uint32](0xEDB88320 -bxor ($c -shr 1)) }
-                else            { $c = [uint32]($c -shr 1) }
-            }
-            $script:CrcTable[$i] = $c
-        }
-    }
     if ($Length -lt 0) { $Length = $Bytes.Length - $Offset }
-    $crc = [uint32]0xFFFFFFFF
-    for ($i = $Offset; $i -lt $Offset + $Length; $i++) {
-        $crc = [uint32]($script:CrcTable[(($crc -bxor $Bytes[$i]) -band 0xFF)] -bxor ($crc -shr 8))
-    }
-    return [uint32]($crc -bxor 0xFFFFFFFF)
+    return [ApexLab.Native]::Crc32($Bytes, $Offset, $Length)
 }
 
 # ── raw device I/O ──────────────────────────────────────────────────────────
@@ -91,8 +82,17 @@ function Open-Drive {
     param([string]$Path, [switch]$Write)
     $access = if ($Write) { [System.IO.FileAccess]::ReadWrite } else { [System.IO.FileAccess]::Read }
     $opts   = if ($Write) { [System.IO.FileOptions]::WriteThrough } else { [System.IO.FileOptions]::None }
+    # bufferSize 1 means UNBUFFERED. It has to be: with a 64 KiB internal
+    # buffer, reading the 512-byte BACKUP GPT header -- which lives in the very
+    # LAST sector of the disk -- makes FileStream try to read 64 KiB from that
+    # offset, run off the end of the device, and fail the whole read with "The
+    # request could not be performed because of an I/O device error". The first
+    # version of this job hit exactly that, and because the failure produced a
+    # null header rather than an exception at the call site, every later offset
+    # computed from it came out 0 and writes aimed at the backup GPT landed on
+    # the protective MBR instead.
     New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, $access,
-        [System.IO.FileShare]::ReadWrite, 65536, $opts)
+        [System.IO.FileShare]::ReadWrite, 1, $opts)
 }
 function Read-At {
     param([string]$Path, [long]$Offset, [int]$Length)
@@ -138,9 +138,18 @@ function Guid-FromBytes { param([byte[]]$B, [int]$Off)
     New-Object Guid (,[byte[]]$B[$Off..($Off + 15)]) }
 function Guid-ToBytes  { param([string]$G) (New-Object Guid $G).ToByteArray() }
 
+# A header that could not be read must stop the job. It must NEVER be turned
+# into a record of nulls, because `$h.EntriesLba * 512` on a null is 0, and a
+# write aimed at the backup GPT then lands on the protective MBR. That is not a
+# hypothetical: it is what the first run of this job did to fixture-a's
+# overlay.
 function Read-GptHeader {
     param([string]$Path, [long]$Lba)
     $h = Read-At -Path $Path -Offset ($Lba * $SECTOR) -Length $SECTOR
+    $sig = [System.Text.Encoding]::ASCII.GetString($h, 0, 8)
+    if ($sig -ne 'EFI PART') {
+        throw "no GPT header at LBA ${Lba} of ${Path}: signature is [$sig], refusing to derive any offset from it"
+    }
     [pscustomobject]@{
         Raw        = $h
         Signature  = [System.Text.Encoding]::ASCII.GetString($h, 0, 8)
@@ -167,8 +176,14 @@ function Get-HeaderCrc {
 function Test-GptConsistent {
     param([string]$Path, [string]$Tag)
     $ok = $true
-    $pri = Read-GptHeader -Path $Path -Lba 1
-    $bak = Read-GptHeader -Path $Path -Lba $pri.AltLba
+    try {
+        $pri = Read-GptHeader -Path $Path -Lba 1
+        $bak = Read-GptHeader -Path $Path -Lba $pri.AltLba
+    } catch {
+        "gpt[$Tag]: UNREADABLE -- $($_.Exception.Message)"
+        "gpt[$Tag]: BOTH-COPIES-CONSISTENT: False"
+        return
+    }
     foreach ($pair in @(@{n = 'primary'; h = $pri}, @{n = 'backup'; h = $bak})) {
         $h = $pair.h
         $entBytes = Read-At -Path $Path -Offset ($h.EntriesLba * $SECTOR) `
@@ -182,7 +197,6 @@ function Test-GptConsistent {
         "gpt[$Tag/$($pair.n)]: sig=[$($h.Signature)] sig-ok=$sigOk header-crc=0x$('{0:x8}' -f $h.HeaderCrc) calc=0x$('{0:x8}' -f $calcH) ok=$hOk entries-crc=0x$('{0:x8}' -f $h.EntriesCrc) calc=0x$('{0:x8}' -f $calcE) ok=$eOk entriesLBA=$($h.EntriesLba)"
     }
     "gpt[$Tag]: BOTH-COPIES-CONSISTENT: $ok"
-    return $ok
 }
 
 # ── IOCTL bindings ──────────────────────────────────────────────────────────
@@ -192,6 +206,18 @@ function Test-GptConsistent {
 #    SET_DRIVE_LAYOUT_EX  CTL_CODE(7,0x15,BUFFERED,READ|WRITE) = 0x0007C054
 #    UPDATE_PROPERTIES    CTL_CODE(7,0x50,BUFFERED,ANY)        = 0x00070140
 Add-Type -Namespace ApexLab -Name Native -MemberDefinition @'
+public static uint Crc32(byte[] data, int offset, int length) {
+    uint[] table = new uint[256];
+    for (uint i = 0; i < 256; i++) {
+        uint c = i;
+        for (int k = 0; k < 8; k++) c = ((c & 1) != 0) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+        table[i] = c;
+    }
+    uint crc = 0xFFFFFFFFu;
+    for (int i = offset; i < offset + length; i++)
+        crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+    return crc ^ 0xFFFFFFFFu;
+}
 [DllImport("kernel32.dll", SetLastError = true)]
 public static extern bool DeviceIoControl(
     Microsoft.Win32.SafeHandles.SafeFileHandle hDevice,
@@ -254,7 +280,7 @@ $faPath  = "\\.\PhysicalDrive$($faDisk.Number)"
 '  The doc calls this unverified. It is probed with a NO-OP: the exact bytes'
 '  just read are written straight back, so a success changes nothing and a'
 '  refusal costs nothing. Either answer is safe and the guest still boots.'
-$null = Test-GptConsistent -Path $sysPath -Tag 'sys/before'
+Test-GptConsistent -Path $sysPath -Tag 'sys/before'
 $sysEnt0 = Read-At -Path $sysPath -Offset ($ENTRIES_LBA * $SECTOR) -Length $SECTOR
 "sys-lba2-sha256-before: $(Sha256Hex $sysEnt0)"
 $e = Write-At -Path $sysPath -Offset ($ENTRIES_LBA * $SECTOR) -Bytes $sysEnt0
@@ -276,7 +302,7 @@ if ($g.Ok) {
     $s = Invoke-Ioctl -Path $sysPath -Code $IOCTL_SET_LAYOUT -In $g.Out[0..([int]$g.Bytes - 1)] -OutLen 0 -What 'SET_DRIVE_LAYOUT_EX(sys, unmodified)'
     "SYS-SET_DRIVE_LAYOUT_EX (handing back the UNMODIFIED layout): ok=$($s.Ok) err=$($s.Error)"
 }
-$null = Test-GptConsistent -Path $sysPath -Tag 'sys/after'
+Test-GptConsistent -Path $sysPath -Tag 'sys/after'
 
 ''
 '################ the target entry on fixture-a ################'
@@ -286,8 +312,18 @@ if (-not $p3) { 'FATAL: no Blank-basic partition on fixture-a'; exit 2 }
 $p3id = ($p3.Guid -replace '[{}]', '').ToLower()
 "target: offset=$($p3.Offset) size=$($p3.Size) letter=$($p3.DriveLetter) type=$($p3.GptType) id=$p3id"
 
-$pri = Read-GptHeader -Path $faPath -Lba 1
-$bak = Read-GptHeader -Path $faPath -Lba $pri.AltLba
+try {
+    $pri = Read-GptHeader -Path $faPath -Lba 1
+    $bak = Read-GptHeader -Path $faPath -Lba $pri.AltLba
+} catch {
+    "FATAL: could not read both GPT copies of fixture-a -- $($_.Exception.Message)"
+    exit 2
+}
+if ($null -eq $pri -or $null -eq $bak -or $pri.MyLba -ne 1 -or $bak.MyLba -ne $pri.AltLba) {
+    "FATAL: GPT headers did not read coherently (pri.MyLba=$($pri.MyLba) pri.AltLba=$($pri.AltLba) bak.MyLba=$($bak.MyLba)). Refusing to write anything."
+    exit 2
+}
+"gpt-geometry: primary header LBA $($pri.MyLba), entries LBA $($pri.EntriesLba); backup header LBA $($bak.MyLba), entries LBA $($bak.EntriesLba); $($pri.EntryCount) x $($pri.EntrySize) bytes"
 $entLen = [int]$pri.EntryCount * [int]$pri.EntrySize
 $priEnt = Read-At -Path $faPath -Offset ($pri.EntriesLba * $SECTOR) -Length $entLen
 $bakEnt = Read-At -Path $faPath -Offset ($bak.EntriesLba * $SECTOR) -Length $entLen
@@ -364,7 +400,7 @@ $r1 = Write-GptCopy -Path $faPath -Header $pri -Entries $newPri
 "M1-primary-write: $(if ($r1) { $r1 } else { 'OK' })"
 $r2 = Write-GptCopy -Path $faPath -Header $bak -Entries $newBak
 "M1-backup-write:  $(if ($r2) { $r2 } else { 'OK (written BY US -- the raw mechanism must maintain the second copy itself)' })"
-$m1consistent = Test-GptConsistent -Path $faPath -Tag 'fa/after-M1'
+Test-GptConsistent -Path $faPath -Tag 'fa/after-M1'
 Show-WindowsView 'M1, before UPDATE_PROPERTIES'
 $u = Invoke-Ioctl -Path $faPath -Code $IOCTL_UPDATE -In $null -OutLen 0 -What 'UPDATE_PROPERTIES'
 "M1-IOCTL_DISK_UPDATE_PROPERTIES: ok=$($u.Ok) err=$($u.Error)"
@@ -383,15 +419,19 @@ $savPriH = New-Object byte[] $SECTOR; [Array]::Copy($sav, 0, $savPriH, 0, $SECTO
 $savPriE = New-Object byte[] $entLen; [Array]::Copy($sav, $SECTOR, $savPriE, 0, $entLen)
 $savBakH = New-Object byte[] $SECTOR; [Array]::Copy($sav, $SECTOR + $entLen, $savBakH, 0, $SECTOR)
 $savBakE = New-Object byte[] $entLen; [Array]::Copy($sav, $SECTOR * 2 + $entLen, $savBakE, 0, $entLen)
-$null = Write-At -Path $faPath -Offset ($pri.EntriesLba * $SECTOR) -Bytes $savPriE
-$null = Write-At -Path $faPath -Offset ($pri.MyLba     * $SECTOR) -Bytes $savPriH
-$null = Write-At -Path $faPath -Offset ($bak.EntriesLba * $SECTOR) -Bytes $savBakE
-$null = Write-At -Path $faPath -Offset ($bak.MyLba     * $SECTOR) -Bytes $savBakH
+foreach ($w in @(
+    @{n = 'primary entries'; off = $pri.EntriesLba * $SECTOR; b = $savPriE},
+    @{n = 'primary header';  off = $pri.MyLba     * $SECTOR; b = $savPriH},
+    @{n = 'backup entries';  off = $bak.EntriesLba * $SECTOR; b = $savBakE},
+    @{n = 'backup header';   off = $bak.MyLba     * $SECTOR; b = $savBakH})) {
+    $e = Write-At -Path $faPath -Offset $w.off -Bytes $w.b
+    "undo-write[$($w.n)] at offset $($w.off): $(if ($e) { "FAILED -- $($e.Exception.Message)" } else { 'OK' })"
+}
 $null = Invoke-Ioctl -Path $faPath -Code $IOCTL_UPDATE -In $null -OutLen 0 -What 'UPDATE_PROPERTIES'
 $gptRegionAfterUndo = Sha256Hex (Read-At -Path $faPath -Offset 0 -Length ($SECTOR * 34))
 "fa-primary-gpt-region-sha256-after-undo: $gptRegionAfterUndo"
 "UNDO-BYTE-EXACT: $(if ($gptRegionAfterUndo -eq $gptRegionBefore) { 'YES -- the primary GPT region is byte-identical to the pre-change backup' } else { 'NO' })"
-$null = Test-GptConsistent -Path $faPath -Tag 'fa/after-undo'
+Test-GptConsistent -Path $faPath -Tag 'fa/after-undo'
 Show-WindowsView 'after undo'
 
 ''
@@ -443,7 +483,7 @@ if (-not $g2.Ok) {
         # mechanism had to do both by hand; the doc's claim for this one is
         # that the kernel does it.
         '--- did the kernel write both GPT copies, with correct CRCs, by itself? ---'
-        $m2consistent = Test-GptConsistent -Path $faPath -Tag 'fa/after-M2'
+        Test-GptConsistent -Path $faPath -Tag 'fa/after-M2'
         $priAfter = Read-GptHeader -Path $faPath -Lba 1
         $entAfter = Read-At -Path $faPath -Offset ($priAfter.EntriesLba * $SECTOR) -Length $entLen
         "M2-entry-type-on-disk:  $((Guid-FromBytes -B $entAfter -Off $eoff).ToString())"
