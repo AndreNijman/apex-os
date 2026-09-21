@@ -517,3 +517,144 @@ systemd-bless-boot.service apex-boot-migrate-confirm.service`).
 **Nothing in it is invented for the lab except those two accommodations.** The
 findings above stand on their own: they are what a machine running the
 currently published APEX image does.
+
+---
+
+## 6. It migrates, it boots, and the boot counter cannot be blessed
+
+Guest `apexmig-c`: 2 GiB ESP, 70 G disk, installed from `localhost/apex-sdmig:v2`
+— the image §5.3 describes, which is what `roadmap/v2.2` builds rather than what
+is published. With this unit's two fixes on the control disk, `apex-boot-migrate
+auto` runs the whole thing:
+
+```
+apex-boot-migrate: saved the removable-media fallback (949424 bytes)
+Bootloader: systemd / Installing bootloader via systemd-boot / Installation complete!
+apex-boot-migrate: restored /EFI/BOOT/BOOTX64.EFI to what it was
+apex-boot-migrate: joined /var: moved the machine's var into the composefs stateroot,
+apex-boot-migrate:              left …/ostree/deploy/default/var -> ../../../state/os/default/var
+apex-boot-migrate: carried /etc across (47M)
+apex-boot-migrate: counted the entry: bootc_fedora-43-1+3-0.conf (3 tries)
+apex-boot-migrate: removed the working copy of the image (bootc)
+apex-boot-migrate: staged: the new boot path is written and nothing the firmware reads has changed
+apex-boot-migrate: committed: the next boot is systemd-boot (Boot000B).
+auto rc=0
+
+phase: committed   store: ostreeContainer   loader: GRUB 2.12   boot entry: 000B
+BootOrder: 000A,0000,…                       <- UNCHANGED. The commit is BootNext.
+```
+
+### 6.1 The next boot is the new path, and it confirms itself
+
+```
+LoaderInfo:      systemd-boot 258.10-1.fc43
+bootc status:    composefs verity 632a73cf…, bootType: Bls, store: null, ostree: null
+/var:            /dev/vda3[/state/os/default/var] /var btrfs rw,relatime,seclabel,…
+/var/lib:        50 entries
+apex-boot-health.service:            active (exited), status=0/SUCCESS
+boot-complete.target:                active
+apex-boot-migrate-confirm.service:   active (exited), status=0/SUCCESS
+    apex-boot-migrate: confirmed: systemd-boot is the default. GRUB is still installed, behind it.
+phase:           confirmed
+BootCurrent: 000B
+BootOrder:   000B,000A,0000,…
+Boot000A* Fedora   HD(2,GPT,…)/\EFI\fedora\shimx64.efi
+Boot000B* APEX-OS  HD(2,GPT,…)/\EFI\systemd\systemd-bootx64.efi
+```
+
+**That is the whole design working on a real APEX machine on btrfs.** The 2 GiB
+ESP migrates and boots; `/var` comes across writable; GRUB is demoted, not
+removed; `BootOrder` is written only after a boot that worked.
+
+### 6.2 The steady-state disk cost, measured inside the guest
+
+`docs/update-cost.md` says a migration "roughly doubles the image's footprint on
+disk, and leaves it that way", and `cmd_stage` claims it deletes the temporary
+podman copy. Both check out, and now there are numbers:
+
+```
+/dev/vda3            68G total, 28G used, 39G avail
+/sysroot/composefs   13G      <- the new deployment
+/sysroot/ostree      13G      <- the old one, kept deliberately: it is the recovery path
+/var/lib/containers  276K     <- the temporary copy IS gone
+podman images        (empty)
+```
+
+Note the contrast with §3: the *steady state* is 26 GB, which is what the cost
+doc describes, while the *peak during the migration* is much larger and is what
+the `root-space` precheck gets wrong.
+
+### 6.3 Item 3: the entry is counted, and it can never be blessed
+
+This is what the run was for. The stage renamed the entry to `+3-0`; the loader
+decremented it; and then:
+
+```
+/boot mount:            /dev/vda2 /boot vfat ro,relatime,fmask=0022,dmask=0022,…
+entry on the live ESP:  bootc_fedora-43-1+2-1.conf
+LoaderBootCountPath:    \loader\entries\bootc_fedora-43-1+2-1.conf
+systemd-bless-boot:     ConditionResult=yes, SELinuxContext=-…:bootupd_t:s0,
+                        Active: failed (Result: exit-code), status=1/FAILURE
+
+systemd-bless-boot[1106]: Failed to rename
+    '/loader/entries/bootc_fedora-43-1+2-1.conf'
+ to '/loader/entries/bootc_fedora-43-1.conf': Read-only file system
+```
+
+So every link in the chain works except the last one. systemd-boot **did**
+count the entry (`+3-0` → `+2-1`), `LoaderBootCountPath` **was** set, and
+`systemd-bless-boot` **did** run — its condition passed, the APEX drop-in was
+applied, and it entered `bootupd_t`. It failed on **EROFS**.
+
+**And it is not SELinux.** There is no `rename`-on-`dosfs_t` denial anywhere in
+the boot. The 16 AVCs logged are all `permissive=1` and all incidental —
+`lsblk` reaching for `io.systemd.Home`, `systemd-bless-b` reading
+`/proc/cmdline`, opening `/dev/vda2`, touching the journal socket. The APEX
+policy module and drop-in that `sdboot-image` added are doing their job; the
+filesystem underneath is simply read-only.
+
+That read-only mount comes from `systemd.mount-extra=UUID=27EB-EE97:/boot:auto:ro`
+on the migrated cmdline, and **bootc hardcodes it** —
+`crates/lib/src/install.rs:2686-2689`:
+
+```rust
+// Ensure that we mount /boot readonly because it's really owned by bootc/ostree
+// and we don't want e.g. apt/dnf trying to mutate it.
+if let Some(boot) = boot.as_mut() {
+    boot.push_option("ro");
+}
+```
+
+unconditionally, after every branch that can produce a boot MountSpec. `cmd_stage`
+already mounts its staging filesystem rw and it makes no difference. An ordinary
+(non-migrated) composefs machine escapes this only because bootc finds no
+separate `/boot` there and emits no karg at all, which is why
+`sdboot-image-20260920-decision.md:45` measured `/boot` as **rw**.
+
+### 6.4 The verdict, and what the fix actually is
+
+**The `+3-0` rename does not land.** It was written, kept uncommitted through
+the whole run for exactly this reason, and is dropped.
+
+The consequence of shipping it, stated precisely rather than as "it rolls back":
+systemd-boot decrements the counter on every boot and at `+0-3` marks the entry
+bad. A migrated machine has exactly one Type #1 entry, so sd-boot still boots the
+least-bad one — it is **not a brick** — but the machine reports every boot as
+failed for the rest of its life and the health gate never converges. That is
+worse than today's inert `Wants=boot-complete.target`, which is why
+`apex-boot-migrate-confirm.service` stays as it is, the `Containerfile.base`
+assertion stays, and the two `tests/test-boot-migrate.sh` pins stay.
+
+**The real fix is not a rename at all — it is to stop bootc emitting the karg.**
+bootc supports exactly that: *"An empty boot mount spec signals to omit the
+mountspec kargs"* (`install.rs:2666-2673`, bootc issue #1441). Two things a
+successor needs to know before trying it:
+
+* `--boot-mount-spec` is exposed on `bootc install to-filesystem` and **not** on
+  `to-existing-root`, which is the subcommand the migration uses. Checked against
+  the shipped binary's `--help`, both subcommands.
+* The reachable route is therefore an install-config dropin —
+  `liboverdrop::scan(SYSTEMD_CONVENTIONAL_BASES, "bootc/install", ["toml"])`, so
+  `/usr/lib/bootc/install/*.toml` with `boot_mount_spec = ""`. That is a
+  **Containerfile** change, not an engine one, and it is image-wide: it would
+  change every `to-disk` install too. Deciding that is the next unit's work.
