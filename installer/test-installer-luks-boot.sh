@@ -231,7 +231,49 @@ echo "── whether the removable-media fallback the firmware needs is there �
 # firmware and that must not be misread as a LUKS or dracut defect.
 mkdir -p "$BOOTMNT"
 FALLBACK_PRESENT=0
-if sudo -n mount -o ro "$ESP_PART" "$BOOTMNT" 2>/dev/null; then
+
+# WHO ELSE HAS THIS PARTITION MOUNTED, asked before mounting it and reported
+# either way.
+#
+# Round 38's run failed here with the kernel's `loop1p1: Can't mount, would
+# change RO state`, and the check it guards never ran at all. That message has
+# exactly one meaning: get_tree_bdev() found a LIVE superblock for this block
+# device whose SB_RDONLY flag differs from the one being asked for — so the ESP
+# was still mounted READ-WRITE somewhere at that moment. Mount namespaces do
+# not enter into it; a superblock is global to the kernel.
+#
+# That is worse than a check that did not run, which is why this reports rather
+# than retries. apex-install mounts the ESP at $TROOT/boot/efi and unmounts it
+# with `umount -R … 2>/dev/null || true` — a failure there is silent by
+# construction. Twenty lines below, this file detaches the loop device and
+# hands the IMAGE FILE to a qemu in a different container, on the stated
+# grounds that a boot must see what an independent reader of the file would
+# see. A live rw vfat mount on the host breaks exactly that: the loop detach
+# fails too (also `2>/dev/null`), and the guest reads bytes the host's page
+# cache has not finished writing.
+ESP_HOLDERS="$(sudo -n findmnt -n -o TARGET,SOURCE,OPTIONS -S "$ESP_PART" 2>/dev/null || true)"
+if [ -n "$ESP_HOLDERS" ]; then
+    bad "nothing still holds the target ESP mounted before it is handed on" "$(printf '%s' "$ESP_HOLDERS" | tr '\n' ';')"
+    printf '%s\n' "$ESP_HOLDERS" | sed 's/^/    holder: /'
+    sudo -n fuser -vm "$ESP_PART" 2>&1 | sed 's/^/    fuser: /' || true
+    # Only OUR OWN leftovers are cleared, and only so the check below can still
+    # answer its question. A mount somewhere else on this machine is reported
+    # and left alone: this suite does not get to unmount things it did not
+    # create.
+    printf '%s\n' "$ESP_HOLDERS" | awk '{print $1}' | while read -r t; do
+        case "$t" in
+            "$WORK"/*) sudo -n umount -R "$t" 2>&1 | sed 's/^/    umount: /' || true ;;
+            *) echo "    holder $t is not under $WORK — left alone" ;;
+        esac
+    done
+else
+    ok "nothing still holds the target ESP mounted before it is handed on"
+fi
+
+# The mount's own stderr is KEPT, not sent to /dev/null: "would change RO
+# state", "wrong fs type" and "no such device" are three different defects and
+# the first of them cost a round to diagnose from a one-line summary.
+if sudo -n mount -o ro "$ESP_PART" "$BOOTMNT" 2>"$WORK/esp-mount.err"; then
     if sudo -n test -f "$BOOTMNT/EFI/BOOT/BOOTX64.EFI"; then
         FALLBACK_PRESENT=1
         ok "the ESP carries the removable-media fallback loader" "EFI/BOOT/BOOTX64.EFI"
@@ -241,7 +283,8 @@ if sudo -n mount -o ro "$ESP_PART" "$BOOTMNT" 2>/dev/null; then
     fi
     sudo -n umount "$BOOTMNT"
 else
-    bad "the ESP mounts so the fallback loader can be checked" "mount of $ESP_PART failed"
+    bad "the ESP mounts so the fallback loader can be checked" "mount of $ESP_PART failed: $(tr '\n' ' ' < "$WORK/esp-mount.err" 2>/dev/null)"
+    sed 's/^/    mount: /' "$WORK/esp-mount.err" 2>/dev/null || true
 fi
 
 # Detach the loop device before handing the file to a qemu process in a
@@ -300,6 +343,24 @@ if [ "$switched" = yes ]; then
 else
     bad "dracut switched root — the disk this installer wrote BOOTS" "verdict=$verdict — see $WORK/serial-luksboot.log"
 fi
+
+# `welcome-seen` IS NOT A CRITERION OF THIS SUITE, decided here rather than left
+# as an unexplained field with no verdict beside it.
+#
+# This suite's question is the one in its name: does the encrypted disk this
+# installer wrote BOOT. That question is fully answered by the three assertions
+# above — the prompt was drawn, the passphrase was accepted, and dracut handed
+# off to the real root. Everything after `Switching root` belongs to the
+# INSTALLED SYSTEM, not to the installer: first-boot welcome is apex-shell's,
+# it needs a graphical session this headless serial guest never starts, and
+# gating a LUKS boot test on it would make a shell regression read as an
+# encryption defect. The suite that owns first-boot welcome should assert it.
+#
+# It is still REPORTED, because the boot driver measured it and a measurement
+# that is taken and then hidden is how "nobody ever checked" becomes "somebody
+# checked and it was fine".
+welcome=$(grep '^welcome-seen=' "$BOOTOUT" | tail -1 | cut -d= -f2-)
+echo "note: welcome-seen=${welcome:-<not reported>} — informational; first-boot welcome is not a criterion of this suite (see the comment above)"
 
 echo
 printf '%s passed, %s failed\n' "$pass" "$fail"
