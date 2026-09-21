@@ -191,6 +191,24 @@ section "the engine honours the operator's choice"
 
 FN="$W/fn.sh"
 sed -n '/^set_locale_keymap_in()/,/^}/p' "$ENGINE" > "$FN"
+# ── the function's OWN dependencies, or it measures their absence ────────────
+#
+# set_locale_keymap_in() calls console_keymap_for(), which calls kbd_has().
+# Extracting only the first left both undefined, so the call substituted to
+# EMPTY and the engine wrote a blank `KEYMAP=` — which this suite read as the
+# engine failing to resolve `de`. It was not: given its dependencies the same
+# engine writes `KEYMAP=de`. The suite was measuring its own extraction.
+#
+# Invisible for a second reason worth recording: pr-validation's `changes`
+# selector leaves `installer=false` on a push to an integration branch, and a
+# SKIPPED job reports success. This job therefore only ever runs on a
+# pull_request — the merge to main, where a red is most expensive.
+sed -n '/^console_keymap_for()/,/^}/p' "$ENGINE" >> "$FN"
+sed -n '/^kbd_has()/,/^}/p'            "$ENGINE" >> "$FN"
+for _dep in console_keymap_for kbd_has; do
+    grep -q "^${_dep}()" "$FN" \
+        || die "the engine no longer defines ${_dep}(); this suite extracts it and would otherwise silently measure nothing"
+done
 # ── Take the HOST'S CLOCK out of the measurement ─────────────────────────────
 # The function infers a timezone from the real /etc/localtime. That made three
 # assertions below depend on the machine running them: this passed on a laptop
@@ -268,6 +286,15 @@ run_fn() {   # run_fn <deploy> [KEYMAP] [KEYVARIANT] [TIMEZONE]
 mk_deploy() {   # mk_deploy -> prints a fresh fake deploy root
     local d; d="$(mktemp -d "$W/deploy.XXXXXX")"
     mkdir -p "$d/etc" "$d/usr/share/zoneinfo/Europe" "$d/usr/share/zoneinfo/Australia"
+    # A keymap tree IN THE FIXTURE. console_keymap_for() prefers the target's
+    # own data and falls back to the HOST's /usr/lib/kbd/keymaps — so without
+    # this the verdict depends on whether the machine running the suite has kbd
+    # installed, the same class of defect the localtime redirection above
+    # exists to remove. Proven hermetic by mutation: delete de.map.gz and the
+    # case answers `us`, not `de`, so the fixture is what is consulted.
+    mkdir -p "$d/usr/lib/kbd/keymaps/xkb"
+    : > "$d/usr/lib/kbd/keymaps/xkb/de.map.gz"
+    : > "$d/usr/lib/kbd/keymaps/xkb/us.map.gz"
     : > "$d/usr/share/zoneinfo/Europe/Berlin"
     : > "$d/usr/share/zoneinfo/Australia/Perth"
     printf '%s' "$d"
