@@ -1,66 +1,97 @@
-APEX ROADMAP — resume report — 2026-09-21 17:08 AWST
+APEX ROADMAP — resume report — 2026-09-21 22:09 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
 ────────────────────────────────────────────────────────────────────────────
               done   partial      todo   blocked
   BASE          16         2         -         -
-  L              -         2         -         1
+  L              -         3         -         -
   P0            24         1         -         -
   P1            44        19         -         -
   P2             8        11         -         -
-  ALL           92        35         -         1   of 128
+  ALL           92        36         -         -   of 128
 
   P0 not done: P0-001(part)
 
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
-  kernel-akmods unknown                                       task/kernel-akmods
-             head 4031d43f Merge task/sdboot-xbootldr into roadmap/v2.2
-             dirty 4 file(s), 0 unpushed, card 194m
+  kernel-akmods dead 233m                                     task/kernel-akmods
+             head 444102fd docs(roadmap): the CI run was force_core=true, so akm
+             dirty 0 file(s), 0 unpushed, card 233m
              NEXT - Read the reproducer result out of `/var/lab-scratch/kernel-akmod
 
-  kernel-publish unknown                                       task/kernel-publish
-             head 3d0925b8 Merge remote-tracking branch 'origin/roadmap/v2.2' in
-             dirty 0 file(s), 14 unpushed, card 186m
+  kernel-publish dead 232m                                     task/kernel-publish
+             head 76a04c49 docs(evidence): core built green in CI against the pi
+             dirty 0 file(s), 0 unpushed, card 239m
              NEXT Read the table above first. If run 35557283953 finished green, `gh
 
-  initramfs-slim unknown                                       task/initramfs-slim
-             head 86867c61 Merge remote-tracking branch 'origin/roadmap/v2.2' in
-             dirty 0 file(s), 18 unpushed, card 193m
+  initramfs-slim dead 253m                                     task/initramfs-slim
+             head ede9a6f7 docs(initramfs): say "firmware-bearing", because the 
+             dirty 0 file(s), 0 unpushed, card 254m
              NEXT 1. [done] read 847b5bfb, verify kernel config, verify repro hashes
 
-  migrate-preconditions unknown                                       task/migrate-preconditions
-             head 754b6174 feat(boot): the precondition decision — BitLocker, wh
-             dirty 1 file(s), 0 unpushed, card 193m
+  migrate-preconditions dead 269m                                     task/migrate-preconditions
+             head f3280072 fix(boot): correct the ESP doc's mechanism claim, and
+             dirty 0 file(s), 0 unpushed, card 5m
              NEXT 1. Mirror bootc's OWN ESP choice, do not invent one. Check whether
 
-  luks-boot  unknown    L-002,L-003                        task/luks-boot
-             head fdb97b04 Merge remote-tracking branch 'origin/roadmap/v2.2' in
-             dirty 0 file(s), 0 unpushed, card 192m
-             NEXT 1. Read `/var/lab-scratch/luks-boot/run2.log` — it ends with a lit
+  luks-boot  dead 232m  L-002,L-003                        task/luks-boot
+             head 1fb98233 Merge remote-tracking branch 'origin/roadmap/v2.2' in
+             dirty 0 file(s), 0 unpushed, card 235m
+             NEXT **NEXT, one line:** read `/var/lab/scratch/luks-boot/run-staged1.l
 
-  windows-installer-3 unknown                                       task/windows-installer-3
-             head e38e0e42 Merge remote-tracking branch 'origin/roadmap/v2.2' in
-             dirty 0 file(s), 0 unpushed, card 192m
+  windows-installer-3 dead 232m                                     task/windows-installer-3
+             head ed30f92b fix(windows-lab): the usability probe could not fail 
+             dirty 0 file(s), 0 unpushed, card 5m
              NEXT 1. Priority 4 (payload deployment), synthetic payload only. Write 
+
+  android-relay-flake dead 234m                                     task/android-relay-flake
+             head d6c827bd docs(roadmap): the CI outcome for android-relay-flake
+             dirty 0 file(s), 0 unpushed, card 235m
+             NEXT - Orchestrator lands `d6c827bd`. Nothing is outstanding.
+
+  ci-green-context dead 231m                                     task/ci-green-context
+             head 11c45d36 Merge task/initramfs-slim into roadmap/v2.2
+             dirty 0 file(s), ? unpushed, card 235m
+             NEXT - Reproduce the exclusion: show that `apexd/apex-backup-core/src/t
+
+  ci-green-input dead 233m                                     task/ci-green-input
+             head 11c45d36 Merge task/initramfs-slim into roadmap/v2.2
+             dirty 0 file(s), ? unpushed, card 235m
+             NEXT - Run `tests/test-apex-input.sh` alone and find the single cause b
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 71bc2177 Merge task/windows-installer-3 into roadmap/v2.2
-    task/initramfs-slim
-      847b5bfb wip(initramfs): no KMS driver and no network in the initramfs   [1/10 added lines on tip]
+  int-os:  tip 3cff7466 Merge docs/firmware-write-policy into roadmap/v2.2
+    task/kernel-akmods
+      b237b247 docs(roadmap): akmods evidence — core is green, and the fix d   [0/10 added lines on tip]
+      2725da24 docs(roadmap): CI passed akmods on the UNGUARDED code — verdi   [0/10 added lines on tip]
+      444102fd docs(roadmap): the CI run was force_core=true, so akmods real   [0/6 added lines on tip]
     task/kernel-publish
-      3dc80629 fix(core): declare APEX_KERNEL_IMAGE before the first FROM   [0/10 added lines on tip]
-      544143e1 ci(kernel): publish the kernel image, so core has one to buil   [2/10 added lines on tip]
-      2cd11c6f ci(kernel): resolve and prove the kernel tier before core bui   [1/10 added lines on tip]
-      b981e348 ci(kernel): run the pin gate on the local path too, not only    [0/10 added lines on tip]
-    task/migrate-preconditions
-      89ff6803 fix(boot): precheck must not mount the host ESP writable, or    [0/10 added lines on tip]
-      754b6174 feat(boot): the precondition decision — BitLocker, which ESP,   [0/10 added lines on tip]
+      76a04c49 docs(evidence): core built green in CI against the pinned ker   [0/10 added lines on tip]
+    task/luks-boot
+      ef0fa0ce feat(boot-v2): luks-pcr7-signed, the shipped script choosing    [1/10 added lines on tip]
+      e8f1a97d fix(installer): the ESP fallback check never ran, and it had    [0/10 added lines on tip]
+      4029965f feat(boot-v2): luks-pcr7-signed grows its refusal arm   [2/10 added lines on tip]
+      6e4b464a docs(roadmap): evidence for signed-pcr11 in-boot selection, a   [0/10 added lines on tip]
+    task/windows-installer-3
+      9010930e test(windows): host-side byte verification of the payload wri   [0/10 added lines on tip]
+      60a38305 test(windows): bitlocker-discover reads the PCR validation pr   [0/10 added lines on tip]
+      a088c5ae fix(windows-lab): the bitlocker job never suspended anything,   [0/10 added lines on tip]
+      b4e7ba84 docs(windows): evidence for the bitlocker discovery run, and    [0/10 added lines on tip]
+      3acd27b5 test(windows): a job to measure the GPT write mechanism the d   [1/10 added lines on tip]
+      63e16ef5 fix(windows-lab): three defects that made the GPT job measure   [0/10 added lines on tip]
+      10166af3 docs(windows): the GPT write mechanism measured; SET_DRIVE_LA   [0/10 added lines on tip]
+      e6ecc4e9 docs(boot): record the GPT mechanism measurement in the decis   [1/10 added lines on tip]
+      28145f23 fix(windows): scope the SET_DRIVE_LAYOUT_EX relocation hazard   [0/10 added lines on tip]
+      978980f3 test(windows): measure mechanism 1's final state instead of a   [0/10 added lines on tip]
+      d47694cf test(windows): a job for the second-ESP question, scoped to w   [2/10 added lines on tip]
+      1f119377 fix(windows-lab): the second-ESP job reported a negative it h   [0/10 added lines on tip]
+      8898e58f docs(windows): second-ESP evidence, and the relocation predic   [0/10 added lines on tip]
+      ed30f92b fix(windows-lab): the usability probe could not fail either   [0/10 added lines on tip]
 
   int-shell:  tip 9567586 Merge task/focus-switcher into roadmap/v2.2 (apex-shel
     (nothing — every task branch's content is on the integration tip)
@@ -97,18 +128,20 @@ APEX ROADMAP — resume report — 2026-09-21 17:08 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 17:08:05 AWST 23s
+  snapshot timer: active   last 12s Mon 2026-09-21
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    ea0c64e  apex-os-windows-installer-
-    apex-os    ef1a6fb  int-os-
-    apex-os    9d20c07  roadmap-state
+    apex-os    46bf497  int-os-
+    apex-os    f274256  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
+    apex-os    14a095f  wt-android-relay-flake-
     apex-os    dd974a7  wt-android-release-
     apex-os    9d0f766  wt-android-signing-
     apex-os    c02272a  wt-base-os-
     apex-os    8957484  wt-build-verify-
     apex-os    6c9c17f  wt-clippy-
+    apex-os    3f41449  wt-ctxfix-
     apex-os    1951fdc  wt-disposable-
     apex-os    2e3bbcd  wt-editors-
     apex-os    31a3d16  wt-editors2-
@@ -122,10 +155,8 @@ APEX ROADMAP — resume report — 2026-09-21 17:08 AWST
     apex-os    36ae373  wt-followups-5-
     apex-os    59b7328  wt-followups-int3-
     apex-os    884b151  wt-followups2-
-    apex-os    d2b4c3e  wt-gaming-gpu-
-    apex-os    e354d6f  wt-gaming-release-
 sed: couldn't flush stdout: Broken pipe
-    apex-shell ff96d37  apex-shell-
+    apex-shell 5b63e0c  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-
@@ -154,7 +185,7 @@ sed: couldn't flush stdout: Broken pipe
 ────────────────────────────────────────────────────────────────────────────
   next
 ────────────────────────────────────────────────────────────────────────────
-  6 agent(s) dispatched, ceiling 6
+  9 agent(s) dispatched, ceiling 6
 
   IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
     kernel-akmods                                   The nvidia akmod will not build against the APEX kernel, and
@@ -169,12 +200,13 @@ sed: couldn't flush stdout: Broken pipe
   COMPLETE (nothing left to dispatch — not offered again).
   This says the WORK is done, not that it is landed — check the
   unlanded section above before assuming roadmap/v2.2 carries it:
-    p0-014, p1-018, p1-020, p1-023, p1-025, p1-035, p1-040-per-output-scaling, p1-044, p1-061, p2-e
+    p0-014, p1-018, p1-020, p1-023, p1-025, p1-035, p1-040-per-output-scaling, p1-061, p2-e
     p1-038-hardware — CLOSED BY HAND: CLOSED 2026-09-20 (round 34). The agent that this note used to say was 'on it' FINISHED on 2026-09-19 -- do not read the old wording as live. The 18 labwc matrix rows were run on katana and the evidence is ROADMAP/evidence/katana-qualification-20260919.md (58 verdicts) plus katana-image-qual-20260919.md. Gaming Mode lands on the monitor on the discrete card and Steam reaches Big Picture inside gamescope, both confirmed on hardware. P1-038 stays partial on rows that need applications nobody has installed (OBS, Discord, VS Code, JetBrains, LibreOffice, Wine -- proxies were run and the rows say so), physical output hotplug (nobody at the machine), and VRR, which CANNOT be tested on katana at all because no connector exposes vrr_capable. RE-OPEN only with a machine that has those applications or a different display.
     p1-005 — CLOSED BY HAND: Landed as merge 4f80746e; the range against roadmap/v2.2 is empty. P1-006 is done. P1-005 stays partial only because the token spent is account-wide — the per-task credential IS P1-011 — and P1-007 stays partial because no elevated class exists in apex-secret-core to require, which is its own item. Nothing left to dispatch here. Closed 2026-09-12 after a dispatched agent had to be redirected.
     p1-008 — CLOSED BY HAND: Landed as merge 230ee02a; 0 unlanded. P1-008 and P1-010 done. P1-009 stays partial because the third criterion turns on a schema question the pinned schema cannot settle either way — workers-ai-post-run-model declares two path parameters and no headers. A citation problem, not effort.
     p1-011 — CLOSED BY HAND: Landed as merge 598f6996; 0 unlanded. P1-011 and P1-012 are done. P1-013 stays partial for a structural reason: a preview health check is an UNAUTHENTICATED GET to *.workers.dev and the host pin correctly forbids spending an api.cloudflare.com credential anywhere else, so it belongs in the `apex cf` CLI rather than in a brokered operation — and the relay moved to a custom domain on andrenijman.com, so workers.dev is no longer the right target anyway. Closed 2026-09-12 after a THIRD agent in one round was dispatched onto finished work.
     p1-014 — CLOSED BY HAND: Landed as merge 514d46a3; 0 unlanded. P1-014, P1-016 and P1-017 done. P1-015 met ALL THREE of its acceptance criteria and is partial only because two of section 13.13's five named resources cannot be reached by anything in this build — a fact about the vocabulary, not about effort.
+    p1-044 — CLOSED BY HAND: CLOSED 2026-09-21 (round 39, by the interactive orchestrator). Both halves are landed AND built on; this unit was being offered as READY on a stale reading. VERIFIED rather than assumed, and the obvious tests all lie here -- `git cherry` says 0 unlanded while `A...B` shows 1338 insertions, because A...B measures from the merge base and not against the tip. The test that answers it is a two-dot tree diff restricted to the files the branch's own commits touch, plus a size comparison. apex-os task/p1-044-firewall-live @4cc3f4b1: all 5 files differ with the TIP ahead -- files/system/libexec/apex-firewall is 10,441 bytes on the branch and 25,127 on the tip, tests/test-apex-firewall.sh 12,470 against 35,545. The ~30 lines the branch holds that the tip lacks are the OLD shape of code the tip rewrote. apex-shell task/p1-044-firewall-settings @e51412b: all 7 files on the tip and every one larger (firewall.js 12,842 -> 21,752; firewall-test.js 11,298 -> 20,350). AND the follow-up this unit's own note called optional and outstanding -- `apex firewall status --json` so the shell page stops parsing prose -- IS ALREADY DONE on the tip: cmd_status_json at apex-firewall:206 and the documented {name,proto,port,rejected,detail} contract at :277. The two policy scope questions the note leaves open (LLMNR accepted on every interface; mDNS accepting unicast from any source) are JUDGEMENTS FOR ANDRE, not dispatchable work, and do not hold a unit open. Same for whether the page should stop offering commands katana's older image cannot run.
     p1-052-relay — CLOSED BY HAND: 0 unlanded; P1-052 done and the relay is deployed. P1-051's criteria 1, 3 and 5 are done and landed on apex-shell as a36f1a4. The remainder does not close until the device key lives in Android Keystore with setUserAuthenticationRequired, which is p1-053b/p1-053c territory, not a separate unit.
     p1-053a — CLOSED BY HAND: Landed as merge 4ae4cf22; 0 unlanded. P1-053 done. P1-054 is partial because the socket has no profile/projects/worktrees verb — adding them is a protocol change and p1-053b owns the decision. P1-055 is partial for want of a gemini fixture, and gemini is not installed on this machine.
     p1-053c — CLOSED BY HAND: CLOSED 2026-09-20 (round 34). The agent that this note used to say was 'on it' FINISHED on 2026-09-19 and its work landed as merge 4fef8cbd -- do not read the old wording as live. 24 instrumented assertions ran on a real GrapheneOS Pixel 7a, the first time this app's code executed anywhere, and found four shipped defects including that every pairing code ever minted advertised an unbracketed IPv6 address on a socket bound to 0.0.0.0. P1-060 stays partial for ONE reason: C2 needs a tablet or a foldable and neither exists here. RE-OPEN if one appears.
