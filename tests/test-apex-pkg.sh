@@ -511,6 +511,66 @@ fi
 #    lines are stripped first: the comments explaining this quote the broken
 #    invocation verbatim, and a checker that trips over its own explanation is
 #    one somebody deletes.
+# ── a flatpak-only name must not enter the dnf transaction ──────────────────
+#
+# Found 2026-09-22 on katana by `apex install obs-studio discord code
+# libreoffice blender wine chromium`. `code` has no rpm anywhere; the routing
+# kept every non-curated name for dnf, dnf answered `No package "code"
+# available`, and the WHOLE transaction died — obs-studio, libreoffice,
+# blender, wine and chromium did not install either. One unavailable name took
+# five good ones with it.
+#
+# It is the same disagreement the section below records in the other direction:
+# resolve said one thing and install did another. Asserted on the routing
+# function both now share, so they cannot drift apart again.
+ROUTE_STUB="$WORK/routestub"; mkdir -p "$ROUTE_STUB"
+cat > "$ROUTE_STUB/dnf5" <<'STUB'
+#!/usr/bin/env bash
+# An rpm exists for everything EXCEPT the name the real defect was about.
+for a in "$@"; do
+    case "$a" in
+        code) exit 0 ;;                       # no output = no candidate
+        obs-studio|chromium) printf '%s|1-1|fedora|a real package
+' "$a"; exit 0 ;;
+    esac
+done
+exit 0
+STUB
+cat > "$ROUTE_STUB/flatpak" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+    *search*code*)     printf 'com.visualstudio.code	Visual Studio Code	flathub
+' ;;
+    *search*chromium*) printf 'org.chromium.Chromium	Chromium	flathub
+' ;;
+    *remotes*)         printf 'flathub
+' ;;
+esac
+exit 0
+STUB
+chmod +x "$ROUTE_STUB/dnf5" "$ROUTE_STUB/flatpak"
+
+got="$(PATH="$ROUTE_STUB:$PATH" call bare_name_route code 2>/dev/null)"
+case "$got" in
+    "flatpak com.visualstudio.code")
+        ok "a name with no RPM anywhere routes to its Flatpak" ;;
+    *)  bad "a name with no RPM anywhere routes to its Flatpak"             "got '${got:-<nothing>}' — it would enter the dnf set and fail the whole transaction" ;;
+esac
+
+got="$(PATH="$ROUTE_STUB:$PATH" call bare_name_route obs-studio 2>/dev/null)"
+[ "$got" = rpm ]     && ok "a name with an RPM stays on the repository route"     || bad "a name with an RPM stays on the repository route" "got '${got:-<nothing>}'"
+
+# The both-ways half: a name Flatpak also carries must STILL take the rpm when
+# one exists, or this fix would quietly move every dual-published package off
+# the repositories.
+got="$(PATH="$ROUTE_STUB:$PATH" call bare_name_route chromium 2>/dev/null)"
+[ "$got" = rpm ]     && ok "an RPM wins over a Flatpak when both exist"     || bad "an RPM wins over a Flatpak when both exist" "got '${got:-<nothing>}' — the rpm route was abandoned"
+
+# And a name neither source has stays on the rpm route, so dnf produces the
+# error that names it rather than this function inventing one.
+got="$(PATH="$ROUTE_STUB:$PATH" call bare_name_route nosuchpkg 2>/dev/null)"
+[ "$got" = rpm ]     && ok "a name nothing carries stays on the rpm route, so dnf names it"     || bad "a name nothing carries stays on the rpm route, so dnf names it" "got '${got:-<nothing>}'"
+
 dd_hits=$(grep -vE '^[[:space:]]*#' "$ENGINE" | grep -cE '\bdnf5\b[^|]* -- ' || true)
 if [ "${dd_hits:-1}" = 0 ]; then
     ok "no dnf5 invocation passes '--', which dnf5 refuses"
