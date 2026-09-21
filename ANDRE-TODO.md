@@ -146,6 +146,30 @@ update for that board, so there's no capsule to apply — and flashing your lapt
 uninvited isn't a substitute.
 **You do:** follow the documented procedure once, with Secure Boot enabled.
 
+### 19a. A machine that can load a sched-ext scheduler — **P1-043**
+All three GPU vendors turned out to be reachable and were measured (the L16 is
+AMD — Radeon 780M; katana carries both an Intel Iris Xe as `boot_vga=1` and the
+NVIDIA card), so the old note claiming this "needs hardware nobody here has" was
+wrong and has been corrected. What's genuinely left is one assertion flagged
+**UNVERIFIED because no machine here can load a scheduler to look at it**. Worth
+knowing for a different reason: the audit found `apex game status` reporting a
+GPU as clock-locked when `nvidia-smi` had actually *refused* the lock — that's
+fixed.
+**You do:** free a machine where a sched-ext scheduler can actually be loaded —
+which likely means the new image, since that's what carries the kernel with BTF
+and sched-ext usable.
+
+### 19b. A booted machine for the network rows — **P2-006**
+Everything mechanical is done and landed, including the hotspot work (the
+firewall now opens DNS/DHCP **scoped to the hotspot link**, not the port, so a
+café Wi-Fi doesn't get a resolver). Three assertions that turned out to be
+**unable to fail** were found and fixed this round. What remains is the same
+shape as P2-005: a container has no D-Bus, systemd, NetworkManager, udev or
+seat, so links, connectivity, paired devices and hotplug can only ever read
+"installed and not running" until measured on a real booted machine.
+**You do:** same session as items 1 and 9 — one booted machine, the six lines
+only a booted machine can answer.
+
 ### 19. Re-enabling a TPM in firmware — one case of **L-001**
 PPI Disable is reachable from the OS, but **re-enabling needs somebody physically
 in the firmware setup screen**. Nothing can automate this.
