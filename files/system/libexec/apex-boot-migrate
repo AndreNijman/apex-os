@@ -491,6 +491,59 @@ cmd_precheck() {
         verdict OK "on-ostree" "booted store is ostreeContainer, so there is something to migrate"
     fi
 
+    # ── the remains of an attempt that died mid-install ─────────────────────
+    #
+    # `bootc install to-existing-root --composefs-backend` is NOT idempotent.
+    # Measured 2026-09-22 on the real image: a migration whose install SUCCEEDED
+    # and whose `join_state` then failed left $SYSROOT/state and
+    # $SYSROOT/composefs behind, and the next attempt died inside bootc rather
+    # than in this script —
+    #
+    #     error: Installing to filesystem: Setting up composefs boot:
+    #            Writing composefs state: Failed to create symlink for /var:
+    #            File exists (os error 17)
+    #
+    # — while this script's own `install-failed` message was telling the user
+    # "Re-running is safe." It was not: every later run failed identically, and
+    # no verb here clears it. `retry` only re-arms a migration that reached
+    # `committed`; `abort` removes the phase file and says the files left
+    # behind are "inert", which is true of BOOTING and false of re-installing.
+    #
+    # This refuses instead of deleting, deliberately. Removing $SYSROOT/state
+    # and $SYSROOT/composefs is the obvious repair and it is NOT safe to do
+    # automatically: on a machine that migrated, was confirmed, and is now
+    # sitting on its GRUB fallback with the state directory gone, those two
+    # paths are the deployment it normally boots — and every signal this
+    # function has (booted store, booted loader) reads exactly the same in both
+    # cases. Which deployment is authoritative is the same open decision as
+    # "Reclaiming the old deployment" in ROADMAP/state/agents/sdboot-migrate.md,
+    # and it is not one a precheck should take on its own at 3 a.m.
+    #
+    # Only fires when NO phase is recorded. A `staged`, `committed` or
+    # `confirmed` phase means the deployment is about to be booted or is the
+    # recovery path, and this says nothing about it.
+    local partial=""
+    if [ -z "$(cat "$STATE/phase" 2>/dev/null || true)" ]; then
+        [ -e "$SYSROOT/composefs" ] && partial="$partial $SYSROOT/composefs"
+        [ -e "$SYSROOT/state" ]     && partial="$partial $SYSROOT/state"
+    fi
+    if [ -n "$partial" ]; then
+        refuse "partial-install" \
+            "A previous migration attempt left an incomplete composefs" \
+            "deployment on this machine and recorded no phase for it:" \
+            "${partial# }." \
+            "bootc will not install over one — it fails with 'Setting up" \
+            "composefs boot: Writing composefs state: Failed to create symlink" \
+            "for /var: File exists' — so re-running cannot get past it." \
+            "This machine is on GRUB and working, and nothing here changes" \
+            "that. Removing those two paths is what unblocks it." \
+            "Do it by hand, and only after checking that this machine has no" \
+            "confirmed migration to fall back to — if it has, those paths are" \
+            "the deployment it normally boots, not leftovers."
+    else
+        verdict OK "no-partial-install" "no half-finished composefs deployment is in the way"
+    fi
+
     if [ "$(staged_present)" != yes ]; then
         verdict OK "no-staged-update" "no ostree deployment is staged for the next boot"
     else
@@ -1009,7 +1062,13 @@ print(((b.get("image") or {}).get("imageDigest")) or "")')"
         release_esp
         fail "install-failed" \
             "bootc install to-existing-root failed. Nothing committed; this" \
-            "machine still boots the way it did. Re-running is safe."
+            "machine still boots the way it did." \
+            "Re-running is safe for the BOOT PATH — nothing in BootOrder was" \
+            "touched — but it is not automatically safe for the install: if" \
+            "bootc got as far as writing the composefs state before it failed," \
+            "the next attempt refuses with 'partial-install' rather than dying" \
+            "inside bootc with 'File exists'. Run 'apex-boot-migrate precheck" \
+            "--explain' to see which of the two happened."
     fi
 
     # If bootc ever starts writing the loader into /target/boot instead of
