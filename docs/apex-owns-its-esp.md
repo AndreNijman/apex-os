@@ -192,7 +192,7 @@ about where the risk actually sits, not a theorem.
 | **GPT entry edits** — retype; create from unallocated space | **the tool**, under the invariants below |
 | **Filesystem operations** — the NTFS shrink | **the user**, in Windows' own tooling. This is correct, not a compromise: the tool has no NTFS knowledge and must not grow any |
 | **Whole-layout construction** — a table built from anything but a fresh read of the current one | **never** |
-| **Firmware writes** — `SetFirmwareEnvironmentVariable` | **still open.** ARCHITECTURE.md's "Into the firmware" section plans it; the denylist forbids it today. It is its own decision and is not folded into this one |
+| **Firmware writes** — `SetFirmwareEnvironmentVariable` | **the tool**, additively only, under the `BootNext` discipline — see "The third decision" at the end of this file |
 
 ### Invariants, not mechanism
 
@@ -259,3 +259,86 @@ Every test of a GPT write is against a **fixture inside the guest**. The L16's
 disks are never a target. A bug in this code pointed at the wrong
 `PhysicalDriveN` is the same class that took this machine's boot path out twice
 in one evening.
+
+---
+
+# The third decision: firmware writes
+
+**Decided 2026-09-21, after Andre said "complete everything".** He had been
+offered this one separately and did not reserve it, so it is taken here rather
+than left to block the unit. It is the highest-blast-radius operation in the
+project and he can overturn it.
+
+**The Windows tool writes UEFI boot variables itself — under exactly the
+discipline `apex-boot-migrate` already uses on the Linux side, and no other.**
+
+## Why not leave it to the user
+
+An install that cannot create a boot entry has not installed anything. The
+alternative is printing `bcdedit` incantations, which is the same "go type
+seven things into another program" that both earlier decisions rejected — and
+worse here, because a mistyped `bcdedit /set {fwbootmgr}` can reorder or drop
+Windows' own entry.
+
+## Why not Windows' `{fwbootmgr}` BCD store
+
+It is the tempting option: Windows constructs the variable, handles the vendor
+quirks, and it is the path Windows uses for itself. It is rejected because it
+**couples APEX's bootability to Windows' BCD**, which a Windows repair, a reset
+or a feature update can rewrite — and the entire direction of this work is to
+stop depending on Windows. katana is already the cautionary example: it boots
+APEX off the *Windows* disk today, and that is the defect the ESP decision
+exists to end. Trading an ESP dependency for a BCD dependency is not progress.
+
+## The discipline, which is not new and is already proven
+
+`files/system/libexec/apex-boot-migrate` solved this on Linux. The Windows side
+mirrors it rather than inventing a second design, so there is one boot story to
+reason about:
+
+1. **Save first.** `BootOrder` and the full entry list are written to a file
+   before anything (`bootorder.before` on the Linux side). NVRAM has no backup
+   GPT; the dump *is* the backup.
+2. **Create-only.** Write `BootXXXX` for APEX and **do not touch `BootOrder`**.
+   `efibootmgr --create-only` is the Linux equivalent. After this step the
+   machine still boots exactly what it booted before.
+3. **One commit point: a single write of `BootNext`.** Nothing else commits.
+   `BootNext` is consumed by the firmware before it launches anything, so a
+   machine that fails to boot APEX **comes back to Windows by itself, with
+   nothing to undo**. That property is why this is safe enough to do at all.
+4. **`BootOrder` is written only after a verified successful first boot** of
+   the new path, with APEX first and **Windows Boot Manager still in it, behind**.
+5. **Never delete, never reorder, never rewrite another operating system's
+   entry.** Windows Boot Manager stays byte-identical. Additive only.
+
+## The variable allowlist
+
+The source may reference **`BootOrder`, `BootNext`, `BootCurrent` and
+`Boot####`. Nothing else.** In particular, never `PK`, `KEK`, `db`, `dbx`,
+`SetupMode`, `OsIndications`, or any vendor-namespaced variable.
+
+This mirrors the IOCTL allowlist section 0 already uses, and for the same
+reason: `SetFirmwareEnvironmentVariableW` takes an arbitrary name string, so a
+denylist of one API name proves nothing about what it is pointed at. The gate
+**sharpens**: `SetFirmwareEnvironmentVariable` comes off the name denylist and
+is replaced by an allowlist of the variable names the source may contain, plus
+a refusal of any name built at runtime rather than declared as a constant. It
+must fail both ways — red on a new variable name, red on a name that stops
+being declared.
+
+## Why this is not the mistake that broke the L16 twice
+
+Those incidents were `bootc` **deleting and recreating** `Boot0000` to point at
+an ESP inside a disk image being built — a destructive rewrite of the live
+entry, from a tool that had left its container without anyone realising. Every
+clause above is aimed at that failure: additive only, never delete, the commit
+is one-shot and self-reverting, and the prior state is on disk first.
+
+The standing requirement is unchanged and applies here: an `efibootmgr -v`
+equivalent diff either side of every run, and in the lab that is a guest's
+firmware variables, never this machine's.
+
+## Nothing is left open
+
+All three Windows product decisions are now settled: the ESP, GPT entry
+writes, and firmware writes.
