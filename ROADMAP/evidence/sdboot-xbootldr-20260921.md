@@ -346,6 +346,55 @@ What is separately true and unchanged:
 
 ---
 
+## 3b. The design, since XBOOTLDR is not on the menu
+
+The dispatch asked for "Type #1 on XBOOTLDR as the universal baseline, with UKIs
+as an optional upgrade where the ESP is genuinely large". With XBOOTLDR gone,
+the two modes that exist are Type #1 on the ESP and UKI on the ESP, and the
+honest statement is:
+
+| | Type #1 (phase 1, today) | UKI (phase 2) |
+| --- | --- | --- |
+| what is on the ESP | `vmlinuz` + `initrd` + a `.conf` | one signed PE |
+| **ESP cost per deployment** | **375.6 MiB** (measured) | **~376.5 MiB** — stub, PE headers, `.osrel`/`.cmdline` sections on top of the same kernel and initramfs |
+| kernel signature | firmware validates the kernel PE through `LoadImage` | firmware validates the UKI |
+| initramfs | outside the signature; sd-boot hands it over unverified | inside the signature |
+| kargs | the `options` line works | frozen in the PE; per-machine values need a credential |
+| PCR 11 / `.pcrsig` | none | yes — and `luks-enroll` established PCR 11 is unusable on a shipped APEX machine today |
+
+**A UKI is not the answer to the ESP problem either.** It is the same kernel and
+the same initramfs in one file; the stub and the section headers make it
+marginally *larger*, not smaller. UKI vs Type #1 is a signing and measurement
+decision, and `docs/boot-v2.md` already frames it that way in "Two phases, and
+which one ships first". Nothing in this unit's finding changes which phase ships
+first.
+
+### The one lever inside bootc that does reduce the ESP cost
+
+`find_vmlinuz_initrd_duplicate` (`boot.rs:533`). Before writing a new
+deployment's kernel and initrd, bootc computes their combined sha256 and scans
+the existing `bootc_composefs-*` directories on the ESP; on a match it points
+the new `.conf` at the **existing** directory and writes nothing:
+
+```rust
+// Multiple deployments could be using the same kernel + initrd, but there
+// would be only one available
+//
+// Symlinking directories themselves would be better, but vfat does not support
+// symlinks
+```
+
+So an image update that leaves `vmlinuz` and `initramfs.img` **byte-identical**
+costs **zero** additional ESP, and `apex-boot-migrate`'s `per * 3` is a worst
+case rather than a steady state.
+
+Whether it ever fires for APEX is unmeasured and is the interesting question:
+the kernel comes from `kernel-build` and is stable across image builds, but the
+**initramfs is regenerated per build** and dracut output is not byte-reproducible
+by default. If `kernel-build` made the initramfs reproducible, most updates
+would stop costing ESP at all — which would matter far more than any partition
+layout. Nobody has checked. It is written down here so somebody does.
+
 ## 4. Verdicts
 
 ### Does the L16 still refuse, and why
