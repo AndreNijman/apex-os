@@ -190,3 +190,57 @@ future round that must redesign that gate and prove it fails both ways; and note
 the card's proposed "default build lacks WriteFile" redesign would still ship a
 read-only app, so it does not by itself satisfy "the app does the whole stack" —
 that needs a write-through-one-audited-function safety model, a separate round.
+
+---
+
+## ROUND 38 CONTINUATION — orchestrator, 2026-09-21 13:55 AWST
+
+The 3b agent died at the 12:06 shutdown mid host-verification. Read off
+disk, not inferred:
+
+| artefact (`/var/lab-scratch/winlab/`) | mtime | meaning |
+|---|---|---|
+| `apex-windows-installer.exe` | 12:02 | rebuilt after ccacf128, as planned |
+| `payload-write.log` (9.4k) | 12:04 | **RAN and PASSED**: `=== JOB COMPLETE ===`, `APEXLAB-RUN-EXIT 0`, `STATUS PASS`, firmware variables `IDENTICAL` |
+| `guest-normal.txt` (8.8k) | 12:04 | restored — `survey-complete` present |
+| `payload-write-fixture-a.qcow2` (11M) | 12:04 | the copy of `run-fixture-a.qcow2` for host-side verification |
+| `overlay-map.json` (8.9k), `overlay-map.err` (0 B) | 12:06 | `qemu-img map` done; **the sha256 / cmp steps and the evidence file were never reached** |
+| `fixture-a.raw` / `fixture-b.raw` | 10:20 | pristine baselines, untouched by three guest runs |
+
+Tree clean at `e38e0e42`; nothing committed since `6828591e`.
+
+### What the orchestrator did
+
+Landed `task/windows-installer-3` into `roadmap/v2.2` as **`71bc2177`**,
+after `tests/test-windows-installer.sh` on the branch read
+`13 passed, 0 failed, 1 could-not-run` (stage 4 needs a guest). The merge
+message states that payload-write's HOST-SIDE verification and the
+bitlocker-discover job are UNPROVEN. Your evidence file is what changes
+that; until it exists nobody may cite payload-write as verified.
+
+### NEXT (supersedes the 3b PLAN)
+
+1. Merge `origin/roadmap/v2.2` (71bc2177 — your own branch, plus luks-boot).
+2. Finish host-side verification from `payload-write-fixture-a.qcow2`
+   (do not re-copy from `run-fixture-a.qcow2` — a survey run rewrites it):
+   `overlay-map.json` depth==0 extents vs the partition offsets from the
+   survey; sha256 of the 4 MiB at APEX-TARGET-A's offset vs the
+   `PAYLOAD-SHA256` the guest printed in `payload-write.log`; `cmp` of the
+   GPT, partition 2 and partition 3 first sectors against pristine
+   `fixture-a.raw` (confirm its mtime is still 10:20 first). Record the
+   `ERROR_ACCESS_DENIED` results for p2 (live NTFS) and p3 (lettered RAW)
+   from the guest log — that is the "Windows itself is the backstop" claim,
+   measured for the first time.
+3. `ROADMAP/evidence/windows-installer-3-20260921.md` (apex-os repo).
+4. Tighten `ARCHITECTURE.md`'s Exclusivity section with what was measured.
+5. Commit, push.
+6. If time: `bitlocker-discover` (2 boots; it is the job that died last
+   time at "boot 1 of at most 2"). `systemd-run --user`, one guest at a
+   time, then restore `guest-normal.txt` with a survey run and verify
+   `grep survey-complete`.
+7. Priorities 5/6 (ESP transaction + undo): design in ARCHITECTURE.md only.
+
+Constraints unchanged: no write path in the .exe (section 0 gate stays as
+it is); the two product decisions remain Andre's. Battery was 58% and
+DISCHARGING at 13:42 — a Windows guest boot is ~2 min but check
+`/sys/class/power_supply/BAT*/status` first; `/var` has 305 G free.

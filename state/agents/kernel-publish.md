@@ -162,3 +162,61 @@ that basis. Harmless, but the comments are stale.
 - Not landing this branch myself. Not touching `roadmap/v2.2`.
 - Not editing `Containerfile.kernel` — that is kernel-build-2's ground. The curl
   retry it wants for the 429 belongs to them; noted, not done.
+
+---
+
+## ROUND 38 CONTINUATION — written by the orchestrator, 2026-09-21 13:55 AWST
+
+The round-37 agent died at the 12:06 shutdown with a clean tree at
+`b981e348` = `origin/task/kernel-publish`. Nothing of yours was lost.
+
+### Run 35557283953 is GREEN and the digest exists
+
+`gh run view 35557283953`: `status=completed conclusion=success`,
+updated 2026-09-21T04:08:33Z. The orchestrator read the registry directly
+(`skopeo list-tags` / `skopeo inspect --no-creds`):
+
+| tag | digest | created |
+|---|---|---|
+| `kernel-7.2.6-cachyos1.apex1.fc43.x86_64-544143e` | `sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6` | 2026-09-21T04:05:50Z |
+
+The floating `:kernel` tag was NOT made — correct, this ran on a `task/`
+branch. So the line for `Containerfile.core:93` is exactly:
+
+```
+ARG APEX_KERNEL_IMAGE=ghcr.io/andrenijman/apex-os@sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6
+```
+
+Re-verify it yourself with `skopeo inspect --no-creds docker://ghcr.io/andrenijman/apex-os@sha256:2ff544dd…`
+before pinning; a digest copied from a card is a claim, not a fact.
+
+### Tree state
+
+`origin/roadmap/v2.2` is `71bc2177` (luks-boot and windows-installer-3
+merges; `installer/`, `windows-installer/`, `tests/suites-not-in-ci.txt` —
+no overlap with your four files). Merge it first.
+
+### NEXT (supersedes the NEXT above)
+
+1. Pin the digest at `Containerfile.core:93` (one space, no quotes). Fix the
+   stale sentences in the comment block at lines 79-93, including the
+   citation of `ROADMAP/evidence/kernel-build-20260921.md`, which exists on
+   no branch — write `ROADMAP/evidence/kernel-publish-20260921.md` in the
+   apex-os repo and point at that.
+2. `./tests/check-kernel-image-pin.sh` → expect "the kernel pin is sound".
+   That plus the table above is the both-ways proof. Commit, push.
+3. `gh workflow run build-image.yml --ref task/kernel-publish -f force_core=true`.
+   Which runner does the core job use? If katana: `ssh katana apex game
+   status` must say `active : false` first (it did at 13:50 AWST). Record
+   the run id in the RUN IDS table THE MINUTE IT EXISTS.
+4. Watch it past `FROM ${APEX_KERNEL_IMAGE}` and the cross-tier contract RUN.
+   That is your assertion. If the akmods stage goes red afterwards, do not
+   fix it: paste the exact failing lines into `agents/kernel-akmods.md`
+   under a heading `### FROM kernel-publish — CI core run <id>` and stop.
+   kernel-akmods' own reproducer PASSED this morning, so a CI failure there
+   is a real second data point for them.
+5. Tell the orchestrator via this card (DONE section) when the gate is green
+   on your tree. Landing is the orchestrator's; do not merge to roadmap/v2.2.
+
+Battery was 58% and discharging at 13:42; CI runs cost this machine nothing,
+but read `/sys/class/power_supply/BAT*/status` before any local build.

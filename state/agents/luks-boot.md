@@ -118,3 +118,100 @@ its work is already MERGED into this branch at 3e235bc1 — do not redo it),
    pass `--tpm2-pcrs=` or `--tpm2-public-key-pcrs=` explicitly, and the test
    must assert the enrolled token carries a policy rather than that the
    command exited 0.
+
+---
+
+## ROUND 38 CONTINUATION — L-002 remainder, THEN L-003 — orchestrator, 2026-09-21 13:55 AWST
+
+The round-37 agent died at the 12:06 shutdown while `luks-boot-run2` was
+finishing. The unit finished anyway (that is why it was a systemd unit).
+
+### run2 result, read off disk by the orchestrator
+
+`/var/lab-scratch/luks-boot/run2.log`, `END 2026-09-21T12:06:02+08:00`:
+
+```
+    verdict=switched-root   qemu-rc=-9   prompt-seen=yes   typed=yes
+    switched-root=yes       welcome-seen=no
+boot driver exit=0
+PASS  the guest reached the passphrase prompt
+PASS  the passphrase was typed on the emulated keyboard
+PASS  dracut switched root — the disk this installer wrote BOOTS first time this has been measured
+6 passed, 1 failed
+artefacts kept in /var/lab-scratch/apex-luks-boot.GLHdmI
+EXIT_CODE=1
+```
+
+**L-002's blocker (a) is CLOSED.** The one FAIL:
+
+```
+mount warning:
+      * loop1p1: Can't mount, would change RO state
+FAIL  the ESP mounts so the fallback loader can be checked mount of /dev/loop1p1 failed
+```
+
+That is `test-installer-luks-boot.sh:234`, `mount -o ro "$ESP_PART"`. The
+kernel says "would change RO state" when the device is already mounted with
+the other RO state — most likely the install phase's own ESP mount
+(`$MNT/boot/efi`) had not been released when the check ran. Hypothesis, not
+confirmed: confirm it from the kept dir (`bootmnt/`, `engine-stdout.txt`)
+and fix the sequencing so the fallback-loader check actually runs. After
+the reboot `losetup -a` shows only loop0 (`apex-user.raw`); nothing leaked.
+
+### What the orchestrator did
+
+- Landed `task/luks-boot` (fdb97b04) into `roadmap/v2.2` as **`d00c3060`**,
+  pushed; tip is now `71bc2177`. Landed AHEAD of you so L-003 builds on
+  `luks-boot-drive.py` instead of re-deriving it.
+- Set **L-002 → partial** with the run2 record prepended to its evidence
+  (roadmap.yaml ~line 8332). Read that head before your own set-status.
+  `set-status.py` REPLACES: use `/var/tmp/apex-work/round24-prepend.py`
+  from `/var/home/andre/Projects/apex` with a JSON `[[id, status, text]]`.
+- Fixed the worktree upstream to `origin/task/luks-boot` (it tracked
+  `origin/roadmap/v2.2`, so a bare `git push` was a coin toss).
+
+### NEXT — L-002 remainder (small; do this first)
+
+1. Merge `origin/roadmap/v2.2` (71bc2177).
+2. Fix the ESP-fallback check sequencing; the check must run and say
+   whether `EFI/BOOT/BOOTX64.EFI` is there.
+3. Boot-half-only re-run against the kept image in
+   `/var/lab-scratch/apex-luks-boot.GLHdmI` (~5 min): `systemd-run --user`,
+   wrapper appends a literal `EXIT_CODE=` line. Repeating the boot, not the
+   25-minute install, is the half where a fluke would live.
+4. `welcome-seen=no`: decide whether first-boot welcome is a criterion of
+   this suite and say so in the suite and the evidence.
+5. set-status L-002 (prepend). Evidence file
+   `ROADMAP/evidence/L-002-luks-boot-20260921.md` in the apex-os repo.
+
+### THEN L-003 — luks-enroll, re-scoped
+
+Read `agents/luks-enroll-2.md` in full. Its `luks-pcr7` scenario (a dracut
+pre-mount hook running the SHIPPED `apex-luks-enroll` against a live PCR 7
+extended by a real Secure-Boot chain, three boots) landed as `34132080`
+but **has never been run** — it is in `run-scenarios`' `STAGED` list, and
+that card's NEXT item 1 is still "run it for real". L-003's stated block,
+"pending L-002 exercising this path end to end on a real boot", is lifted
+by run2 above — say so in L-003's evidence.
+
+- Where to run: katana has the bootlab and a real APEX root
+  (`apex-stage-root` against `/` takes seconds). Its scratch is
+  `/var/lab/scratch/luks-enroll-2/` — **`/var/lab-scratch` does not exist
+  on katana**. Or here on the L16: `localhost/apex-bootlab` is in root
+  podman storage (checked 11:50). If katana: `ssh katana apex game status`
+  must read `active : false` first (it did at 13:50); never interrupt
+  gaming.
+- Rebuild the bootlab image before the run (the cached one predates the
+  scenario). `systemd-run --user`, never `nohup &`.
+- Assert the enrolled token CARRIES a PCR policy (non-zero policy hash),
+  not that cryptenroll exited 0 — systemd 258.10 `--tpm2-device=auto` with
+  no PCR argument binds to nothing.
+- Keep the `--device DEV --recovery-out PATH` interface; exit 0 on every
+  declined case.
+- set-status L-003 (prepend) with what the run measured, and the evidence
+  file. If the scenario cannot run (`cannot` → COULD-NOT-RUN), record that
+  as the result; do not reword a non-run as a pass.
+
+Battery was 58% and DISCHARGING at 13:42 on this laptop. Read
+`/sys/class/power_supply/BAT*/status` before every run over ten minutes;
+one heavy podman/qemu job at a time on this machine.

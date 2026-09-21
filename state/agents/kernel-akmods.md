@@ -156,3 +156,90 @@ BuildRequires is satisfiable.
 ## BLOCKED ON
 
 - nothing
+
+---
+
+## ROUND 38 CONTINUATION — written by the orchestrator, 2026-09-21 13:55 AWST
+
+The round-37 agent died at the 12:06 shutdown. Everything above stands; this
+is what the orchestrator established from disk before dispatching you.
+
+### The reproducer PASSED — read that before anything else
+
+`/var/lab-scratch/kernel-akmods/repro/repro.log` (154 KB, finished 12:06:04
+AWST, `PODMAN_EXIT=0`) ends:
+
+```
+2026/09/21 04:05:25 akmodsbuild: Wrote: /tmp/akmodsbuild.wLJkZxvX/RPMS/x86_64/kmod-nvidia-7.2.6-cachyos1.apex1.fc43.x86_64-580.178.04-1.fc43.x86_64.rpm
+2026/09/21 04:05:31 akmods: Successful.
+REPRO: DONE rc=0
+```
+
+`akmodsbuild` ran 04:03:49Z → 04:05:25Z (96 s) and dnf installed the kmod.
+Built from layer `b45ec0aeb90a` with `--isolation=chroot`, image kept as
+`localhost/kakmods-repro:1` (`03b3161dc189`) in root storage. So nvidia
+580.178.04 DOES compile against 7.2.6-cachyos1.apex1, kernel-devel IS
+present, and the top-ranked route in "ROUTES, RANKED" is dead. Do not
+change the driver stream or pin a different pair.
+
+### So what killed the real build? Facts, not yet a verdict
+
+- Unit `kernel-build-2-core` (systemd-run, user manager): started 10:30:46,
+  `Main process exited, code=exited, status=1/FAILURE` at 10:46:27 (+08).
+- Log ends at line 1815, `Building and installing nvidia-kmodEXIT=1`, NO
+  trailing newline, no akmods `[ OK ]`/`[FAILED]` marker, no
+  `Error: building at STEP …` from podman. Three absences.
+- The orchestrator checked `journalctl -b -1 --since 10:40 --until 10:50`
+  for suspend/hypridle/OOM entries: NOTHING. Idle suspend did not do this.
+- The literal `EXIT=1` is printed by the wrapper — find which one (the
+  systemd-run `bash -c` in `journalctl --user -u kernel-build-2-core`, or
+  build-local.sh). Whatever prints it saw exit 1 from `sudo podman build`.
+- A `podman build` that dies without its own `Error:` line is the
+  discriminating fact. Check `journalctl -b -1 -k | grep -iE 'oom|killed|
+  segfault'` and `journalctl -b -1 _COMM=podman` around 10:46 before
+  theorising about akmods at all. Also list what differs between repro and
+  the real RUN: the real one does dnf + akmods in ONE layer, has
+  `test -d /usr/src/kernels/${KVER}` first, loops over `${APEX_AKMODS}`
+  (nvidia was the first iteration), and ran ~5 min at akmods vs 96 s here.
+
+### Your four dirty files are a real gate — commit them first
+
+`git status` in the worktree: `M .github/workflows/build-image.yml` (+14),
+`M .github/workflows/pr-validation.yml` (+27),
+`?? files/scripts/check-run-recovery-reachable`,
+`?? tests/test-run-recovery-reachable.sh`. That is the "recovery block
+unreachable under set -e" checker and its mutation harness — the general
+form of silence #1. They exist on disk and in refs/wip only. Run the
+harness, prove both ways, commit as one commit, push. The branch
+`task/kernel-akmods` now exists on origin (at 4031d43f, upstream set by the
+orchestrator). The worktree is 6 commits behind `origin/roadmap/v2.2`
+(now `71bc2177`: luks-boot + windows-installer-3 merges, no overlap) —
+merge the tip before committing.
+
+Then make the akmods RUN's failure path actually reachable in
+`Containerfile.core` (~lines 596-616): `rc=0; akmods … || rc=$?` shape,
+dump `.last.log` and `*.failed.log`, and let your new gate flag the old
+shape. kernel-publish pins `Containerfile.core:93` this round — different
+hunk, but merge their branch or the tip before you push if it has landed.
+
+### Coordination
+
+- `kernel-publish` dispatches a CI `core` build this round against the
+  published kernel digest. Its card (`agents/kernel-publish.md`) carries
+  the run id the minute it exists. That run reaches the akmods stage
+  WITHOUT your fix; its result is your second data point. Cards only, no
+  messaging.
+- One heavy podman build at a time on this laptop. Battery was 58% and
+  DISCHARGING at 13:42 — read `/sys/class/power_supply/BAT*/status` before
+  anything longer than ten minutes. Long runs via `systemd-run --user`
+  with a literal `EXIT_CODE=` line appended, never `nohup &`.
+
+### NEXT (supersedes the NEXT above)
+
+1. Run `tests/test-run-recovery-reachable.sh`; commit the four files; push.
+2. Settle HOW the 10:46 build died (podman killed vs akmods exit 1) from
+   the previous boot's journal and the wrapper. Write the verdict here.
+3. Make the akmods failure path reachable in Containerfile.core; gate it.
+4. Real `core` build (`build-local.sh core` under `systemd-run --user`,
+   log in `/var/lab-scratch/kernel-akmods/`), quote the akmods outcome.
+   `localhost/apex-kernel:local` was present in root storage at 10:30.

@@ -87,3 +87,47 @@ has no agent card yet).
 ## IN PROGRESS
 
 Orientation done, card written, nothing committed yet.
+
+---
+
+## ROUND 38 CONTINUATION — written by the orchestrator, 2026-09-21 13:55 AWST
+
+The round-37 agent died at the 12:06 shutdown. **The card above lags its
+commits** ("nothing committed yet" is false). Verified in the worktree:
+
+- `89ff6803 fix(boot): precheck must not mount the host ESP writable, or leak it`
+- `754b6174 feat(boot): the precondition decision — BitLocker, which ESP, and every check at once`
+  (+342/-28 on `files/system/libexec/apex-boot-migrate` between them)
+- ONE dirty file: `files/system/libexec/apex-boot-migrate` (+22/-9),
+  uncommitted, also in refs/wip. Read `git diff` before anything else — it
+  is the last thing the dead agent was typing.
+
+The orchestrator pushed both commits: `origin/task/migrate-preconditions`
+now exists at `754b6174` with upstream set. `origin/roadmap/v2.2` is
+`71bc2177` (luks-boot + windows-installer-3; `installer/`,
+`windows-installer/`, `tests/suites-not-in-ci.txt` — no overlap). Merge it.
+
+### NEXT (items 1-5 above stand; sharpened)
+
+0. Read the dirty diff; finish or discard it deliberately; commit.
+1. Mirror bootc's OWN ESP choice — check whether `cmd_stage` passes an ESP to
+   bootc or only lets it discover one.
+2. BitLocker = `proceed-with-note` (DECIDED above; do not reopen).
+3. precheck read-only + leak-free BEFORE it runs on the real L16. You ARE on
+   the L16; its ESP (nvme0n1p1, 600 MiB) is production. Use PATH shims and
+   loopback for development, the real machine only for the final read-only
+   `--explain`.
+4. `precheck --explain`: every check evaluated, every verdict printed.
+5. Both-ways gate as PATH shims in `tests/`.
+
+### The 512 MiB number is moving under you
+
+`initramfs-slim` is producing the slim initramfs this round (varB ≈ 100 MB
+vs 375 MB today). Do not hardcode 374.3 MiB per deployment in the fit
+check; read the sizes off the deployment being staged, and cite their
+evidence file for the projected figure. Write the refusal text so it
+prints the measured need and the measured free space, not a constant.
+
+Battery was 58% and DISCHARGING at 13:42 — check
+`/sys/class/power_supply/BAT*/status` before any loopback run over ten
+minutes.

@@ -1,7 +1,7 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-21T12:06+0800",
- "_round": "Round 37 ENDED AT 2026-09-21T12:06+0800 -- Andre said 'ok stop, shutting down, save everything'. The six agents listed below were RUNNING when the machine went down; they are DEAD now. DO NOT message them. Dispatch fresh ones and hand each its card, per CLAUDE.md. A WIP snapshot was fired immediately before shutdown: 18 worktrees + roadmap-state saved to refs/wip on the remote, so every agent's uncommitted work is recoverable there. Each agent's worktree and branch are also intact on disk. roadmap/v2.2 (apex-os) = 738b241a, pushed. apex-shell = 9567586, untouched this round.",
+ "updated": "2026-09-21T13:55+0800",
+ "_round": "Round 37 ENDED 12:06 (Andre: 'ok stop, shutting down, save everything'). Machine rebooted 13:36:41. apex-roadmap-resume.timer fired at 13:40 and a `claude -p` AUTORESUME orchestrator (pid 16256) HOLDS THE autoresume.lock AND IS RUNNING THE ROUND RIGHT NOW -- it landed d00c3060 (luks-boot) and 71bc2177 (windows-installer-3) at 13:50. THE INTERACTIVE SESSION DELIBERATELY STOOD DOWN rather than dispatch alongside it; see _incident_two_orchestrators for why. The six round-37 agents are DEAD (killed by the shutdown). DO NOT message them -- dispatch fresh and hand each its card.",
  "_landed_this_round": [
   {
    "merge": "ff921909",
@@ -27,70 +27,7 @@
  ],
  "_status_recorded_this_round": "P2-004 partial and P2-003 partial, both with the landing prepended to the EXISTING evidence rather than replacing it -- set-status.py has no append flag and a straight write would have erased 33,626 and 15,073 characters of prior rounds. Verified after writing: P2-003 33626 -> 34270 chars, P2-004 15073 -> 15694, file re-parses, 128 tasks, counts unchanged at 92 done / 34 partial / 0 todo / 2 blocked. P2-003 explicitly records that the landing carried NOTHING for that row, rather than letting a merge sha imply progress it did not make. SECOND WRITE: P2-004 partial again for the round-33 landing, prepended and verified 19,523 -> 20,334 characters. P2-003 deliberately NOT rewritten -- the round-33 agent had already recorded that the round carried nothing for that row, and a second 'landed nothing' note would be padding. THIRD WRITE: P1-060, P1-055, P1-057 partial and P1-052 done for the Android landing, each prepended and each verified at exactly +558 characters (22,671->23,229 / 9,527->10,085 / 8,454->9,012 / 7,522->8,080). Counts unchanged at 92/34/0/2 of 128 after every write this round. FOURTH WRITE: P1-060 partial and P1-052 done for the relay landing, prepended and verified at +623 each (28,347->28,970 and 10,285->10,908). Counts still 92/34/0/2 of 128.",
  "_deliberately_held": "THREE SLOTS of six at 18:45, and the reason is still contention rather than caution. Every remaining unit whose re-open condition is met needs KATANA's graphical session, and katana-image-qual owns it until the section 6 run finishes: p1-038-hardware (the 18 labwc matrix rows), p2-f (a free VT nobody is sitting at), p2-b items 1-2 (Orca at the login screen, greeter audio), and p2-c -- whose gate, 'an image build lands and a NEW reader could have arrived with it', IS NOW MET for the first time, because katana is booted on apex-7f647470. All four are re-offerable the moment that agent reports. p2-d was not dispatched either: its own card says no criterion on it is closable by another round and what remains is two pieces too small to be a unit. No unit was invented to fill a slot.",
- "agents": [
-  {
-   "slug": "kernel-akmods",
-   "items": [],
-   "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-kernel-akmods",
-   "branch": "task/kernel-akmods",
-   "card": "ROADMAP/state/agents/kernel-akmods.md (written by the orchestrator at dispatch)",
-   "dispatched": "2026-09-21T11:50+0800",
-   "why": "THE image blocker. Every core build dies ~35-40 min in at `akmods --force --kernels 7.2.6-cachyos1.apex1.fc43.x86_64 --kmod nvidia` -> EXIT=1. kernel-publish's card named it and explicitly disclaimed it; nobody owned it. Evidence: /var/lab-scratch/kernel-build-2/core-build.log line 1810+. Containerfile.core:612's own failed.log dump did NOT appear -- read that before theorising about driver versions."
-  },
-  {
-   "slug": "kernel-publish",
-   "items": [],
-   "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-kernel-publish",
-   "branch": "task/kernel-publish",
-   "card": "ROADMAP/state/agents/kernel-publish.md",
-   "dispatched": "2026-09-21T11:50+0800",
-   "why": "Publish ghcr.io/andrenijman/apex-os:kernel and consume it by digest. The predecessor's 4 dirty files were committed by the orchestrator as 2cd11c6f (check-kernel-image-pin.sh + build-image.yml/pr-validation.yml/build-local.sh) and pushed; tree clean at dispatch. akmods is explicitly NOT this agent's -- kernel-akmods owns it."
-  },
-  {
-   "slug": "initramfs-slim",
-   "items": [],
-   "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-initramfs-slim",
-   "branch": "task/initramfs-slim",
-   "card": "ROADMAP/state/agents/initramfs-slim.md (agent creates it as its first write)",
-   "dispatched": "2026-09-21T11:50+0800",
-   "why": "Andre: 'it has to work in 512. i dont care how it just has to work.' Stock Windows ESP measured at 68.3 MiB free; composefs needs ~1.1 GiB. Branch carries 847b5bfb whose own message lists the three undone items: evidence file, VM boot proof, reproducibility. origin/task/initramfs-slim (26d92144) is the same work on an older base and is STALE -- push needs --force-with-lease."
-  },
-  {
-   "slug": "migrate-preconditions",
-   "items": [],
-   "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-migrate-preconditions",
-   "branch": "task/migrate-preconditions",
-   "card": "ROADMAP/state/agents/migrate-preconditions.md (agent creates it as its first write)",
-   "dispatched": "2026-09-21T11:50+0800",
-   "why": "Decide BEFORE writing whether in-place migration is safe, which ESP, and what to say when it is not. Three hard cases: 512 MiB ESP, BitLocker (-FVE-FS-, PCR change can force a recovery prompt), katana (Boot0000 on the WINDOWS ESP, NVMe names reorder). Branch was at 0 commits -- nothing was started by the dead round-36 agent."
-  },
-  {
-   "slug": "luks-boot",
-   "items": [
-    "L-002"
-   ],
-   "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-luks-boot",
-   "branch": "task/luks-boot",
-   "card": "ROADMAP/state/agents/luks-boot.md (agent creates it as its first write)",
-   "dispatched": "2026-09-21T11:50+0800",
-   "why": "L-002. VERIFIED by merge-base --is-ancestor: origin/task/luks-installer-2 IS ALREADY CONTAINED in task/luks-boot (merge 3e235bc1), so L-002 gets ONE slot, not two. luks-enroll-2 (L-003) is NOT contained and is NOT dispatched this round -- deliberately held, one slot short of the ceiling for it."
-  },
-  {
-   "slug": "windows-installer-3",
-   "items": [],
-   "repo": "apex-os",
-   "worktree": "/var/tmp/apex-work/wt-windows-installer-3",
-   "branch": "task/windows-installer-3",
-   "card": "ROADMAP/state/agents/windows-installer-3.md",
-   "dispatched": "2026-09-21T11:50+0800",
-   "why": "Andre: 'I want the full completed working windows app that does the whole stack, not the dumb barebones you made it.' Card says BLOCKED ON nothing and names the highest-value next edit (plan.rs WINDOWS_BASIC_DATA remedy text needs `gpt attributes=0x0...0` as well as `set id=`). Priority 3 payload deployment is the substance; the section-0 write denylist gate must be redesigned, not weakened, if the binary ever needs a write path."
-  }
- ],
+ "agents": [],
  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
  "_findings": {
   "nft -c cannot run in a build container": "netlink: Error: cache initialization failed: Operation not permitted. nft -c applies nothing, but libnftables opens a netlink socket and lists the LIVE ruleset before it will look at a file, and that needs CAP_NET_ADMIN over a real netns. The build had none, so the parser never ran and the step exited 1 at STEP 99/148. Fixed by giving it a netns of its own: unshare --user --map-root-user --net nft -c -f. Proved four ways with a fake unshare on PATH - parses / rejects a mutant at line 60 col 56-60 / unshare absent / unshare REFUSED - because the first draft classified unshare's own refusal as 'nft rejected the ruleset' and would have failed the build a second time on a false diagnosis.",
@@ -156,7 +93,7 @@
   "HTTP_MAX_BYTES \u2014 an oversized read reports success with empty output": "Found round 31 by p2-f while building msgraph, MEASURED not inferred, and deliberately left unfixed so the whole family could be taken at once. curl exits 63 when it hits the cap, but its write-out still runs, so stdout is \"\\n200\" and the caller receives code 0 with empty output \u2014 a refusal that is indistinguishable from an empty file. Confirmed in gdrive; s3 and oauth 'look the same', which is a hypothesis and not a measurement. Reproduction in /var/tmp/apex-work/scratch-p2-f/round31/. Round 32's agent was dispatched at it with instructions to establish the real per-transport blast radius first, including msgraph.",
   "A consumer OneDrive item id contains `!` and valid_name refuses it": "Microsoft's own example is 12319191!11919 ({driveId}!{n}). Documented in round 31 WITHOUT widening the vocabulary, which was the right call \u2014 widening valid_name to admit `!` is a decision about the whole name surface, not about OneDrive."
  },
- "_tip_verification": "roadmap/v2.2 (apex-os) = 34132080, pushed. apex-shell = 9567586, untouched this round.",
+ "_tip_verification": "roadmap/v2.2 (apex-os) = 71bc2177 as of 2026-09-21T13:55+0800. apex-shell = 9567586, untouched since round 36.",
  "_orchestrator": {
   "pid": 2694,
   "round": 37,
@@ -417,6 +354,23 @@
    "Check refs/wip for each agent's uncommitted work BEFORE assuming a worktree is complete -- they were killed mid-flight, so their cards may lag their commits.",
    "luks-enroll (L-003) was deliberately NOT dispatched this round, one slot short of the ceiling. Its guest PCR7 scenario landed as 34132080, so re-scope it against that rather than the old card.",
    "The Pixel 10a was NOT connected, so the signed-APK install in _android_install_pending is still pending."
+  ]
+ },
+ "_handoff_to_the_autoresume_orchestrator": {
+  "at": "2026-09-21T13:55+0800",
+  "read_this_first": "Written by the interactive session that ran round 37, for whoever is holding the lock now.",
+  "unlanded_and_pushed_ready_to_land": {
+   "task/migrate-preconditions": "2 commits, PUSHED at 13:56. `feat(boot): the precondition decision -- BitLocker, which ESP, and every check at once` plus `fix(boot): precheck must not mount the host ESP writable, or leak it` -- that second one is a real safety fix, not a cleanup. 1 file still dirty in the worktree (files/system/libexec/apex-boot-migrate); it is in refs/wip/wt-migrate-preconditions-.",
+   "task/kernel-publish": "5 commits. Includes 2cd11c6f, tests/check-kernel-image-pin.sh plus the build-image.yml/pr-validation.yml/build-local.sh resolve step, committed by the orchestrator out of the dead agent's dirty tree.",
+   "task/initramfs-slim": "1 commit, WIP by its own message. origin/task/initramfs-slim was cut from an older base and needs --force-with-lease, not a plain push.",
+   "task/kernel-akmods": "0 commits. Its 4 dirty files are in refs/wip/wt-kernel-akmods- and are NOT about akmods -- they are .github workflow edits plus a new files/scripts/check-run-recovery-reachable and tests/test-run-recovery-reachable.sh. Read them before assuming the unit was started."
+  },
+  "new_queue_unit": "kernel-akmods was ADDED to queue.json this round and is READY with after=[]. It did not exist before, which is why the thing blocking EVERY image build was never offered for dispatch. Card: state/agents/kernel-akmods.md. Dispatch it first.",
+  "already_verified_do_not_redo": [
+   "luks-installer-2 IS CONTAINED in task/luks-boot (merge-base --is-ancestor). L-002 needs one slot, not two.",
+   "All 8 old apex-shell task branches show 0 unlanded by patch-id -- their content landed in earlier rounds by cherry-pick, which is why the tips are not ancestors. Not debt.",
+   "Neither tip contains conflict markers. Checked directly, not inferred.",
+   "The Pixel 10a was NOT connected at 12:00, so _android_install_pending is still pending."
   ]
  }
 }

@@ -51,3 +51,57 @@ with a true predicate.
 
 Never land on roadmap/v2.2. Never push main. Headless only. /var/lab-scratch
 not /tmp. podman/qemu in the FOREGROUND.
+
+---
+
+## ROUND 38 CONTINUATION — written by the orchestrator, 2026-09-21 13:55 AWST
+
+The round-2 agent died at the 12:06 shutdown. Its NEXT items 1-2 were done;
+3-7 were not started (tree clean at `847b5bfb`, nothing new on disk).
+
+### What the orchestrator changed
+
+- Pushed `847b5bfb` to `origin/task/initramfs-slim` with `--force-with-lease`
+  (origin was the stale `26d92144`). The branch is safe on origin now.
+- `origin/roadmap/v2.2` is `71bc2177` (luks-boot + windows-installer-3 merges:
+  `installer/`, `windows-installer/`, `tests/suites-not-in-ci.txt`). Merge it
+  first; no overlap with your three Containerfiles.
+
+### Two other agents touch Containerfile.core this round
+
+- `kernel-publish` pins `ARG APEX_KERNEL_IMAGE=…@sha256:…` at line 93.
+- `kernel-akmods` rewrites the akmods RUN (~lines 596-616) so its failure
+  path is reachable.
+
+Run `git show --stat 847b5bfb` and note which hunks of Containerfile.core
+you touch. If it is the dracut section only, merges stay clean; if you go
+near either of those, merge their branch first rather than resolving later.
+
+### Who consumes your number
+
+`migrate-preconditions` decides "does this ESP fit" with
+`need = per_deployment*3 + 48 MiB`, today against 374.3 MiB per deployment
+(vmlinuz 16.9 MB + initramfs 375.6 MB), which fails a 600 MiB ESP by ~2x.
+Your varB is 99.98 MB / 103.2 MB — roughly 16.1 + 98.5 ≈ 115 MiB per
+deployment, need ≈ 392 MiB, which FITS 512. Put the final per-deployment
+figure and the `need` it implies in your evidence file in one quotable
+line, so they cite a measurement rather than this arithmetic.
+
+### NEXT (items 3-7 stand; sharpened)
+
+3. Fix the ethernet gate (`! grep -qE 'kernel/drivers/net/ethernet/'`
+   FATALs on the image it exists to pass: cnic/cxgb4/qed arrive as SCSI
+   offload deps). Replace with a true predicate; move all the gates into a
+   script both the Containerfile and a `tests/` suite call, and show it
+   red on a fat initramfs and green on varB without a build.
+4. Size matrix with attribution (4 dracut runs, apex-tier flags).
+5. Cross-BUILD reproducibility (answers sdboot-xbootldr NEXT #2).
+6. VM boot proof on a reflink copy of
+   `/var/lab-scratch/sdboot-xbootldr/apexgrub.img` — check it still exists
+   first; headless qemu; `systemd-run --user`, never `nohup &`.
+7. Evidence file (`ROADMAP/evidence/initramfs-slim-20260921.md`, apex-os
+   repo) + commit + push.
+
+Battery was 58% and DISCHARGING at 13:42. Read
+`/sys/class/power_supply/BAT*/status` before the boot proof or any build
+over ten minutes; one heavy podman/qemu job at a time on this laptop.
