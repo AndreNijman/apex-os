@@ -157,6 +157,37 @@ find_esp() {   # prints the ESP block device
     return 1
 }
 
+# XBOOTLDR partitions on the root disk. Nothing uses these — they are here so
+# the esp-too-small refusal can say why they do not help, because everyone who
+# reads that refusal on a machine that has one has the same idea within a
+# minute. The Boot Loader Specification does put the kernel and initramfs on an
+# XBOOTLDR partition and leave the ESP holding only the loader; systemd-boot
+# reads that layout fine. bootc does not write it. In
+# `setup_composefs_bls_boot` the GRUBClassic arm asks whether /boot is a
+# separate mount and the BLSCompatible arm — which is what `--bootloader
+# systemd` maps to — does not: it mounts the ESP unconditionally and sets
+# abs_entries_path to /EFI/Linux. XBOOTLDR is a TODO in three places including
+# the runtime store every later `bootc upgrade` reads, so even moving the files
+# afterwards breaks the next update. Still open on upstream main, and the same
+# in 1.16.4, the bootc that ships inside the APEX image. Call sites in
+# docs/boot-v2.md, "XBOOTLDR: the Boot Loader Specification allows it, bootc
+# does not implement it".
+XBOOTLDR_TYPE_GUID=bc13c2ff-59e6-4262-a352-b275fd6f7172
+
+find_xbootldr() {   # prints every XBOOTLDR-typed partition on the root disk
+    local disk part t found=1
+    disk="$(root_disk)" || return 1
+    [ -n "$disk" ] || return 1
+    for part in $(lsblk -lno NAME "/dev/$disk" 2>/dev/null); do
+        [ "$part" = "$disk" ] && continue
+        t="$(lsblk -dno PARTTYPE "/dev/$part" 2>/dev/null | tr 'A-Z' 'a-z')"
+        [ "$t" = "$XBOOTLDR_TYPE_GUID" ] || continue
+        printf '/dev/%s\n' "$part"
+        found=0
+    done
+    return "$found"
+}
+
 esp_mounted_at=""      # set by with_esp
 esp_we_mounted=0
 
@@ -325,6 +356,24 @@ cmd_precheck() {
     [ -d "$esp_mounted_at/EFI/Linux" ] && staged_kib="$(du -sk "$esp_mounted_at/EFI/Linux" | awk '{print $1}')"
     if [ "$(( avail + staged_kib ))" -lt "$need" ]; then
         release_esp
+        # If this machine has an XBOOTLDR partition, say what it is and is not
+        # worth before anyone spends an evening on it.
+        # The status is taken from the command substitution itself, not from a
+        # pipeline: `find_xbootldr | tr` only reports the failure while
+        # pipefail is set, and a note that fires on every machine would name a
+        # partition that is not there.
+        local xb="" xbnote=()
+        if xb="$(find_xbootldr)"; then
+            xb="$(printf '%s' "$xb" | tr '\n' ' ')"
+            xbnote=(
+                "This machine has an XBOOTLDR partition (${xb% }) and it cannot"
+                "absorb this. The Boot Loader Specification allows the kernel"
+                "and initramfs to live there; bootc's composefs backend does"
+                "not write them there — it mounts the ESP unconditionally and"
+                "writes the entry paths absolute to it. docs/boot-v2.md,"
+                "'XBOOTLDR: the Boot Loader Specification allows it, bootc"
+                "does not implement it'.")
+        fi
         refuse "esp-too-small" \
             "The EFI System Partition has $(( avail / 1024 )) MiB free and this" \
             "machine needs $(( need / 1024 )) MiB — one deployment's kernel and" \
@@ -333,6 +382,7 @@ cmd_precheck() {
             "alongside them." \
             "An ESP cannot be grown in place without moving the partition after" \
             "it, so this machine stays on GRUB until its ESP is made bigger." \
+            ${xbnote[@]+"${xbnote[@]}"} \
             "docs/boot-v2.md, 'The ESP is the binding constraint'."
     fi
 
