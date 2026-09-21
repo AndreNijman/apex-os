@@ -524,6 +524,55 @@ if grep -q 'root_need=$(( repo_kib \* 2' "$CODE"; then
 else
     bad "the root check does not size for both the temporary and permanent copy"
 fi
+# 4c. The stateroot's var must be the DIRECTORY, never the symlink beside it.
+#
+# bootc's composefs layout puts TWO things called `var` exactly three levels
+# under $SYSROOT/state:
+#
+#     state/os/<stateroot>/var            the real directory
+#     state/deploy/<digest>/var  ->  ../../os/<stateroot>/var
+#
+# `find` walks in readdir order, not sorted, so a lookup without `-type d`
+# returns whichever the filesystem hands back first. Measured on the real APEX
+# image on btrfs, 2026-09-22: it returned the SYMLINK, join_state's
+# `[ ! -L "$newvar" ]` was false, and the migration failed `state-join` AFTER a
+# completely successful install. The predecessor's ext4 fedora-bootc guest got
+# the directory first, so the bug was invisible for two rounds.
+# ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md, section 4.
+#
+# This is behavioural, and the expression under test is EXTRACTED FROM THE
+# SOURCE rather than copied here — a copy would keep passing after the source
+# drifted, which is the failure mode this suite exists to catch.
+jt="$(mktemp -d)"
+mkdir -p "$jt/state/os/default/var" "$jt/state/deploy/abc123"
+ln -s ../../os/default/var "$jt/state/deploy/abc123/var"
+jt_expr="$(sed -n 's/^[[:space:]]*newvar="\$(\(.*\))"$/\1/p' "$CODE" | head -1)"
+if [[ -z "$jt_expr" ]]; then
+    bad "could not extract join_state's newvar lookup from the source — this test is inspecting nothing"
+else
+    jt_got="$(SYSROOT="$jt" bash -c "$jt_expr" 2>/dev/null)"
+    if [[ -n "$jt_got" && -d "$jt_got" && ! -L "$jt_got" ]]; then
+        ok "join_state's var lookup returns a real directory, not a symlink"
+    else
+        bad "join_state's var lookup returned '$jt_got' — a symlink or nothing, so the /var join fails after a successful install"
+    fi
+    if [[ "$jt_got" == "$jt/state/os/default/var" ]]; then
+        ok "join_state's var lookup picks the stateroot's own var, not the deployment's link to it"
+    else
+        bad "join_state's var lookup picked '$jt_got', not \$SYSROOT/state/os/default/var"
+    fi
+fi
+# And prove the hazard is real rather than hypothetical: with the type filter
+# removed, the candidate set genuinely does contain a symlink, so `head -1`
+# has something wrong to pick. If this ever stops holding, the assertions
+# above are guarding a layout that no longer exists and should be revisited.
+if [[ -n "$(find "$jt/state" -mindepth 3 -maxdepth 3 -name var -type l 2>/dev/null)" ]]; then
+    ok "the layout really does offer a symlink candidate at the same depth"
+else
+    bad "the fixture has no symlink candidate — this test would pass without -type d"
+fi
+rm -rf "$jt"
+
 if grep -qE 'df -Pk "\$SYSROOT"' "$CODE"; then
     ok "the root check reads free space on \$SYSROOT, not the ESP"
 else
