@@ -1265,6 +1265,23 @@ RUN set -eux; \
 # (mkfs.vfat), and /etc is carried across with rsync. precheck refuses without
 # them rather than failing halfway, but a refusal on every machine would make
 # the feature dead, so the packages are asserted here.
+# rsync is NOT in fedora-bootc, and the assertion below is what found that out
+# — the hard way, in `base`, after core had already spent 66 minutes. podman,
+# mkfs.vfat, efibootmgr and unshare all come from the base image; rsync does
+# not, and nothing here installed it, so the assertion was one that could never
+# pass. That is the family this repository has lost five days of builds to.
+#
+# It is a real dependency rather than a convenience: the migration carries /etc
+# with `rsync -aAXH --delete`, and every one of those letters is load-bearing —
+# A for ACLs, X for xattrs (which is where the SELinux contexts live), H for
+# hardlinks, --delete so a stale file from the old /etc does not survive into
+# the new deployment. `cp -a` cannot do --delete and `tar` would need the whole
+# tree staged twice.
+#
+# Cost, stated rather than buried: 913 KB installed, in `base`, so every tier
+# above it carries it. Cheap against a migration that refuses on every machine.
+RUN dnf5 -y install rsync && dnf5 clean all && rm -rf /var/cache/libdnf5
+
 COPY --chmod=0755 files/system/libexec/apex-boot-migrate \
      /usr/libexec/apex-boot-migrate
 COPY files/system/units/apex-boot-migrate-confirm.service \
