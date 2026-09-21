@@ -1,4 +1,4 @@
-## LANDABLE — `345c0557`
+## LANDABLE — `56fc1e1c`
 
 The `luks-pcr7` guest scenario now RUNS and is green: **26 passed, 0 failed**,
 `EXIT_CODE=0` on katana. It is the in-boot half of L-003 and it had never been
@@ -7,7 +7,8 @@ executed before today. Three commits fix the scenario (nothing shipped changed
 `files/scripts/boot-v2/guest-luks-enroll.sh` and one new evidence file), plus a
 merge of `roadmap/v2.2` @ `69253336`.
 
-Gates on this tip: `test-boot-v2` 150/0; shellcheck coverage 202 discovered,
+Gates run on `345c0557`, whose tree differs from `56fc1e1c` only by one
+evidence paragraph: `test-boot-v2` 150/0; shellcheck coverage 202 discovered,
 **0 newly failing**; doc-verbs 0 undocumented-and-undeclared;
 check-containerfile-assertions exit 0; `shellcheck -S warning -x` and `bash -n`
 clean on both changed files.
@@ -42,7 +43,19 @@ its work is already MERGED into this branch at 3e235bc1 — do not redo it),
 2. Then the integration gap L-003 still has: no test has ever run the REAL
    `apex-luks-enroll` through `apex-install` (every installer suite uses the
    `APEX_LUKS_ENROLL_LOCAL` recovery-only stand-in), and no installer-produced
-   disk (GRUB+shim, no sd-stub) has been TPM-auto-unlocked.
+   disk (GRUB+shim, no sd-stub) has been TPM-auto-unlocked. That is what would
+   take L-003 from `partial` to `done`.
+3. Cheap and still outstanding: run the FULL default STAGED set together
+   (`apex-image luks-tpm luks-tpm-clear luks-firmware-change luks-firmware-code
+   luks-no-tpm luks-s3 luks-pcr7`) once. They share `$WORK` and `$KEYS`, so
+   26/0 is a result about `luks-pcr7` IN ISOLATION and not yet about the set.
+4. **L-002's remainder was NOT done this round and is still open** — the round
+   39 dispatch scoped this agent to L-003, superseding it. Outstanding from
+   round 38: the ESP-fallback check in `installer/test-installer-luks-boot.sh`
+   (~line 234) fails `mount -o ro` with "would change RO state", so the
+   `EFI/BOOT/BOOTX64.EFI` fallback-loader check never actually runs; and
+   `welcome-seen=no` still needs a decision on whether first-boot welcome is a
+   criterion of that suite. L-002 stays `partial` for those.
 
 ## DONE (round 39)
 - Read this card, `luks-enroll-2.md`, `luks-enroll.md` in full.

@@ -8475,7 +8475,7 @@ tasks:
 - id: L-003
   title: Enable TPM auto-unlock by default where safe
   priority: Later
-  status: blocked
+  status: partial
   area: boot-security
   depends_on:
   - L-001
@@ -8486,16 +8486,68 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    ROUND 32 (2026-09-20), unit `luks-enroll`, branch task/luks-enroll off roadmap/v2.2 303221d5, PUSHED and NOT
-    landed. STATUS UNCHANGED - still blocked, and deliberately: the acceptance is 'Measured boot + TPM unlock +
-    recovery path validated' and it depends on L-002, whose installer is another unit's. WHAT NOW EXISTS is the
-    thing an installer calls: files/system/libexec/apex-luks-enroll, shipped by Containerfile.base as
-    /usr/libexec/apex-luks-enroll, interface `--device DEV --recovery-out PATH`. Full record:
-    ROADMAP/evidence/L-003-enrolment-20260920.md. A RECOVERY KEY IS ENROLLED FIRST ON EVERY PATH and the exit
-    status is 0 in every declined case, so an installer cannot read 'no TPM slot' as a failed install. THE BINDING
-    IS CHOSEN, NOT HARDCODED: policy_select is a best-first table (signed-pcr11, then pcr7) and each probe tests
-    its own preconditions, so the bootloader pivot to systemd-boot needs no restructure - probe_signed_pcr11 is
-    written and reachable, requiring an sd-stub boot (StubInfo efivar), a published key at
+    ROUND 39 (2026-09-21), unit luks-boot (which owns L-002 and L-003), branch task/luks-boot @ 345c0557, PUSHED
+    and LANDABLE, not yet landed. STATUS blocked -> partial. THE STATED BLOCK IS LIFTED: L-003 was blocked
+    'pending L-002 exercising this path end to end on a real boot', and L-002's run2 booted a disk apex-install
+    wrote (switched-root=yes, landed as merge d00c3060), so that dependency is discharged. WHAT IS NEW: the
+    luks-pcr7 guest scenario (landed 2026-09-21 as b9844c8e, merge 34132080) HAD NEVER BEEN RUN; it now runs green
+    on katana - 26 passed, 0 failed, EXIT_CODE=0, three real OVMF boots with Secure Boot enforcing and a software
+    TPM against a root staged from katana's own live APEX install. This is the FIRST time the shipped
+    /usr/libexec/apex-luks-enroll has run inside a real boot against a LIVE PCR 7; every earlier measurement was
+    host-side against a fixture or a test-chosen value. BOOT A (enrol): secure-boot-byte=1,
+    pcr7-pre-enroll=69E722B3756359AAE507D8D886174B6267C663001E6A96D448D4DB85F71B8F21 (a real firmware measurement,
+    so not systemd's 'effectively unenforced' trap), enroll-exit=0, tpm2 enrolled binding=pcr7 pcrs=7 bank=sha256
+    hash=91cd90cbef3cb73ad31775fbe69cb36f6112937d1b44634970b5a6b6eece3a39 pin=no, and
+    passphrase-after-enrol=SUCCESS - a NEW assertion proving enrolment does not cost the user the way in they
+    already had. WHICH signed-pcr11 GATE REFUSED MATTERS: probe_signed_pcr11 refuses in order (SB off, no
+    StubInfo, no readable signing key, PCR 11 unmeasured) and the THIRD fires - 'the boot did not publish a PCR
+    signing key at /run/systemd/tpm2-pcr-public-key.pem' - so gates 1 and 2 PASS, i.e. the guest booted
+    Secure-Boot-enforcing AND genuinely came up through sd-stub; the only thing between this lab and a
+    signed-PCR-11 enrolment is building the UKI with --pcr-key. BOOT B (unlock): a fresh swtpm process
+    (startup-clear zeroes every PCR) and a DIFFERENT UKI re-extended PCR 7 to the identical 69E722B3...,
+    tpm-unlock=SUCCESS, plaintext-marker=written, pcr-signature absent, while PCR 11 moved - so the slot is bound
+    to PCR 7 BY VALUE, not to whatever the UKI measures. BOOT C (refusal + recovery): a dbx update
+    (DBXUpdate-20260630.x64.bin via virt-fw-vars --add-dbx) moved PCR 7 to
+    C4681679813FF36D46DB3E7C191950D88F11DEDEC902BFBFE1137BF3629550D6 while PCR 0 held, cryptsetup said 'TPM policy
+    does not match current system state', tpm-unlock=REFUSED, and then recovery-unlock=SUCCESS with
+    recovery-marker=found - the same plaintext, in the same boot. That is the acceptance clause 'recovery path
+    validated' as a measurement. THREE DEFECTS FOUND, ALL IN THE LAB, NOTHING SHIPPED CHANGED (the diff against
+    roadmap/v2.2 is exactly files/scripts/boot-v2/run-scenarios, files/scripts/boot-v2/guest-luks-enroll.sh and
+    one evidence file): (1) the shipped script's shebang, /usr/bin/env bash, made it UNRUNNABLE in an initramfs -
+    have-apex-luks-enroll=yes sat next to enroll-exit=127, because execve returns ENOENT for a missing SHEBANG
+    INTERPRETER and a real APEX initramfs carries bash but not env; the same derivation showed dirname, wc and
+    head equally absent, so fixing only env would have cost another boot; note that lsinitrd prints symlinks as
+    'usr/bin/awk -> gawk', so an inventory built from the LAST FIELD loses every symlinked name and reports awk
+    and the whole tpm2_* family as absent when they are present; this is NOT a shipped defect because apex-install
+    runs the helper in a podman container from the image, with full coreutils, never in an initramfs; (2) the
+    scenario copied a serial log ONTO ITSELF (cp exits non-zero, the file runs set -euo pipefail), which aborted
+    it after boot A - boots B and C, the reproduction and the whole recovery arm, had never run; (3) boot C's
+    recovery unlock failed on a 72-byte key file where a recovery key is 71, because the scenario rewrote the
+    serial-captured key with a trailing newline and cryptsetup --key-file uses EVERY BYTE - measured host-side
+    over a read-only loop device, the 72-byte file is REFUSED and the same key without the newline OPENS; the
+    shipped script writes 71 bytes (tr -d space) and apex-install re-strips before piping, so the product was
+    never affected. Also fixed: have-apex-luks-enroll was an -x test that inspected the FILE and said nothing
+    about RUNNABILITY - the hook now reports the shebang interpreter, and the scenario fails on MISSING. GATES on
+    345c0557: test-boot-v2 150 passed 0 failed; shellcheck coverage 202 discovered, 0 newly failing;
+    check-doc-verbs 0 undocumented and undeclared; check-containerfile-assertions exit 0; shellcheck -S warning -x
+    and bash -n clean on both changed files. WHY PARTIAL AND NOT DONE: the acceptance clause is met IN THE LAB,
+    but 'by default' means the INSTALLER path and that is still unmeasured - no test has ever run the REAL
+    apex-luks-enroll through apex-install (every installer suite substitutes a recovery-key-only stand-in via
+    APEX_LUKS_ENROLL_LOCAL), no installer-produced disk (GRUB+shim, no sd-stub) has been TPM-auto-unlocked, every
+    TPM here is swtpm with no silicon and no real disk encrypted, signed-pcr11 remains untaken, and luks-pcr7 was
+    run ALONE rather than with the rest of the STAGED set, whose scenarios share $WORK and $KEYS, so the
+    cross-scenario interference check is still outstanding. Full record:
+    ROADMAP/evidence/L-003-pcr7-inboot-20260921.md. Artefacts kept on katana: /var/lab/scratch/luks-boot/run3.log
+    and out/serial-pcr7-{a,b,c}.log. ROUND 32 (2026-09-20), unit `luks-enroll`, branch task/luks-enroll off
+    roadmap/v2.2 303221d5, PUSHED and NOT landed. STATUS UNCHANGED - still blocked, and deliberately: the
+    acceptance is 'Measured boot + TPM unlock + recovery path validated' and it depends on L-002, whose installer
+    is another unit's. WHAT NOW EXISTS is the thing an installer calls: files/system/libexec/apex-luks-enroll,
+    shipped by Containerfile.base as /usr/libexec/apex-luks-enroll, interface `--device DEV --recovery-out PATH`.
+    Full record: ROADMAP/evidence/L-003-enrolment-20260920.md. A RECOVERY KEY IS ENROLLED FIRST ON EVERY PATH and
+    the exit status is 0 in every declined case, so an installer cannot read 'no TPM slot' as a failed install.
+    THE BINDING IS CHOSEN, NOT HARDCODED: policy_select is a best-first table (signed-pcr11, then pcr7) and each
+    probe tests its own preconditions, so the bootloader pivot to systemd-boot needs no restructure -
+    probe_signed_pcr11 is written and reachable, requiring an sd-stub boot (StubInfo efivar), a published key at
     /run/systemd/tpm2-pcr-public-key.pem and a PCR 11 that is measurably non-zero, and IT HAS NEVER BEEN EXERCISED
     because nothing in the lab boots the shipped script under sd-stub. On a machine today that means: Secure Boot
     on -> a TPM slot bound to PCR 7 with a non-zero policy hash; Secure Boot off -> no TPM slot, recovery key, and
