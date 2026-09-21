@@ -99,15 +99,31 @@ branch is an oversight rather than a decision.
 
 ## NEXT
 
-- Read the `changes` job's base-selection step in full, then demonstrate the
-  asymmetry: for the current tip, compute the job set for `push` and the job set
-  for a `pull_request` to `main` and show they differ.
+- Poll run 35650126791 (`gh run view 35650126791`) — the step-4 full-matrix
+  `workflow_dispatch` on `roadmap/v2.2`, dispatched 20:17Z — and record which
+  of the five jobs are red. Meanwhile write
+  `tests/check-ci-selector-parity.sh` in
+  /var/tmp/apex-work/wt-ci-selector-base.
 
 ## DONE
 
+- Worktree /var/tmp/apex-work/wt-ci-selector-base on `task/ci-selector-base`
+  cut from origin/roadmap/v2.2 @ 6fa9ddbc. Lab /var/lab-scratch/ci-selector-base.
+- Step 4 STARTED: full-matrix run dispatched as 35650126791.
+
 ## IN PROGRESS
 
+- Measuring which jobs every push run on roadmap/v2.2 actually ran
+  (`/var/lab-scratch/ci-selector-base/push-runs.tsv`, 166 runs).
+
 ## FOUND
+
+- `git merge-base origin/main "$head"` DOES resolve on the runner:
+  run 35647188306 logged `classified workflow_dispatch over
+  57f593ad..9c389baf`, and 57f593ad is the tip of `main`. So
+  actions/checkout@v4 with fetch-depth: 0 leaves refs/remotes/origin/main
+  present. The merge-base fix is therefore usable on `push` too — measured,
+  not assumed.
 
 ## BLOCKED ON
 

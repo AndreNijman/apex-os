@@ -167,6 +167,42 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
 
 ## FOUND
 
+- **`bootc` says "Installing bootloader via systemd-boot / Installation
+  complete!" and installs NO LOADER — and `apex-boot-migrate` caught it.**
+  Run B boot 5, with the `join_state` fix in place, got all the way through:
+
+      Installation complete!
+      apex-boot-migrate: restored /EFI/BOOT/BOOTX64.EFI to what it was
+      apex-boot-migrate: joined /var: moved the machine's var into the composefs stateroot,
+      apex-boot-migrate:              left /sysroot/ostree/deploy/default/var -> ../../../state/os/default/var
+      apex-boot-migrate: carried /etc across (47M)
+      apex-boot-migrate: FAILED [incomplete-stage]
+          The install reported success but EFI/systemd/systemd-bootx64.efi is not on the ESP.
+
+  Loop-mounted the ESP to check rather than trusting the message:
+  `EFI/Linux/` holds the 376 MB UKI, `loader/` has `entries.srel`,
+  `loader.conf` and the entry, `EFI/BOOT/BOOTX64.EFI` is UEFI SHIM (correctly
+  restored by the migration) — and **`EFI/systemd/` is an EMPTY DIRECTORY,
+  4.0 KiB.** bootc created it and put nothing in it, reported success, and
+  exited 0.
+  Cause, same story a FOURTH time: the published image has no
+  `systemd-boot-unsigned` — `/usr/lib/systemd/boot/efi/` does not exist in
+  `apex-os:daily`, so `bootctl` had no binary to copy. `roadmap/v2.2`'s
+  `Containerfile.core:2234` installs it and asserts the exact path at 2238,
+  and the comment at 2213 already says *"Measured in the lab: with
+  systemd-boot-unsigned absent…"*. So the branch is right and the tag is old.
+  **Two things worth keeping from this:**
+  * `bootc install --bootloader systemd` **exiting 0 having installed no
+    loader** is a genuine trap for anyone building on it. A caller that trusts
+    the exit status ships a machine with a boot entry pointing at nothing.
+  * `apex-boot-migrate`'s `incomplete-stage` post-install check is what stood
+    between that and a bricked guest, and this is the first time it has fired
+    for real. The containment held completely: `phase: not started`,
+    `BootOrder` unchanged, `boot entry: none`, `/sysroot/boot` intact.
+- **The `join_state` fix is confirmed working end to end** — the same run
+  printed `joined /var: moved the machine's var into the composefs stateroot`
+  and `carried /etc across (47M)`, which is the step that failed on boot 3.
+
 - **Where the `:ro` comes from, read out of bootc's source rather than guessed —
   and it is NOT something `apex-boot-migrate`'s mount options can change.**
   `crates/lib/src/install.rs:2686-2689` (bootc source tree already on this
