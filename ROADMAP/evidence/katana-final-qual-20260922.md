@@ -785,3 +785,75 @@ first time.
 | **P2-006** | All the NetworkManager and firewall lines answer; the hotspot row stays could-not-run for two named reasons |
 | **P2-007** | udev, udisks2 and bluetooth all answer; the tool's `paired devices` reading is right and the starting sweep's was wrong |
 | **P1-038** | Two floors measured, one row blocked on a broken wine install, and three rows lost to a second agent on the same seat |
+
+---
+
+## 5. Reconciling with `katana-a11y-20260922.md`, which landed while this ran
+
+The other agent's evidence reached `roadmap/v2.2` during this round. The two
+runs agree on the headline and **disagree on the mechanism**, and the
+disagreement is dated, so it is recorded here rather than resolved by picking
+one.
+
+### Where they agree, and it is a real cross-check
+
+| | their run | this run |
+|---|---|---|
+| compositor | **Hyprland** | **labwc** |
+| `quickshell` `ChildCount` | **8** | **8 frames** |
+| other apps on the bus | `polkit-mate-authentication`, `xdg-desktop-portal-gtk` | the same two |
+| shim needed | none | none |
+
+Two different compositors, two different probes, the same eight. That is worth
+more than either reading alone, and it is exactly the number round 30 could
+only reach with an `LD_PRELOAD` shim.
+
+### Where they disagree
+
+`katana-a11y-20260922.md` concludes:
+
+> Qt decides whether to publish when the application object is built. Turning
+> the bridge on later does not retrofit it. So on a machine where
+> `org.gnome.desktop.interface toolkit-accessibility` is false at login — which
+> is the **default** — the shell ships an empty tree no matter which quickshell
+> is installed.
+
+**This run is a counter-example, and the timestamps are on the machine.**
+
+| time (AWST) | event |
+|---|---|
+| 03:47:5x | labwc session 68 starts; `quickshell -c /usr/share/apex-shell` pid 9702 |
+| ~03:48:5x | `org.a11y.Status` read: `IsEnabled: false`, `ScreenReaderEnabled: false`. `ScreenReaderEnabled` then set to `true` over the session bus |
+| ~03:49 | the already-running pid 9702 publishes **8 frames** |
+| ~03:49:3x | session locked; the same process publishes **17** nodes, lock surfaces included |
+| **03:51:08** | the other agent runs `gsettings set org.gnome.desktop.interface toolkit-accessibility true` — `~/.config/dconf/user` is **created** at `03:51:08.251`, and it is the only file in that directory |
+
+So for the whole of this run's measurement, `andre` had **no dconf user
+database at all** and `toolkit-accessibility` was at its schema default. The
+shell process had already started. It retrofitted anyway, and it retrofitted
+twice — frames first, then the lock surfaces added live.
+
+The environment reading is the other half: pid 9702, like the greeter's pid
+1791, carried **no** `QT_LINUX_ACCESSIBILITY_ALWAYS_ON` and no other
+accessibility variable.
+
+### What the reconciliation probably is, stated as a hypothesis and not a result
+
+The property Qt's bridge watches at runtime is `org.a11y.Status` on the
+accessibility bus. The gsetting is what `at-spi-bus-launcher` mirrors *into*
+that property; it is one writer of the gate, not the gate. Setting
+`ScreenReaderEnabled` directly — which is what Orca does, and what this run did
+— moves the gate without touching dconf, and the running process picks it up.
+
+If that is right, the other run's first reading of `0` had some other cause
+(the walk landing before the bridge had connected is the obvious candidate),
+and the remedy its evidence proposes — ship the gsetting on, or set
+`QT_LINUX_ACCESSIBILITY_ALWAYS_ON` for the shell — is a good idea for a
+different reason: it makes the tree visible to an auditor who is *not* a screen
+reader. It would not be needed to make Orca work.
+
+**Neither claim should be quoted without the other until somebody runs the
+discriminating experiment**, which is one session: start the shell with
+`toolkit-accessibility` false and no `org.a11y.Status` write, walk (expect 0),
+then set `ScreenReaderEnabled` alone and walk again. If the second walk is 8,
+the gsetting is not the gate.
