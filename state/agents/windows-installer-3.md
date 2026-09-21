@@ -671,3 +671,45 @@ byte-identical against pristine `golden.raw` (#4) using the `hostverify.py`
 pattern already in `jobs/gpt-write-mechanism/`.
 **#2 "across a feature update" is NOT doable in this lab — there is no update
 media.** Say that; do not let a partial result read as the whole item.
+
+### CORRECTION + DONE (18:01) — the relocation hazard was overstated, now scoped
+Commits `28145f23`, `978980f3`, pushed. Two things the first write-up got wrong
+or left unmeasured, both fixed:
+- **`FirstUsableLBA` decides whether M2 relocates at all.** Windows parks the
+  entry array so it ENDS at `FirstUsableLBA` (`2016 + 32 == 2048`, now a real
+  check). The lab fixtures are `sgdisk`-made, `FirstUsableLBA = 2048` → moves
+  to 2016, stale table at LBA 2. **`golden.raw`, partitioned by Windows Setup
+  itself, has `FirstUsableLBA = 34` → the same rule gives LBA 2, i.e. NO
+  relocation.** So the hazard does NOT bite a disk Windows made — every real
+  target machine — and DOES bite disks made by Linux tooling, which is what
+  APEX itself creates. The golden.raw row is a **prediction**, not a second
+  measurement; labelled as such.
+- **M1's row was true by construction**, never host-verified (the job undid M1
+  before M2 ran). A `keep-m1.txt` switch + one extra 30 s boot fixed that:
+  **M1 = 48 bytes total** (16-byte type GUID + two CRCs, per copy) vs
+  **M2 = 185 bytes plus a whole stale array**. 12 checks, 0 failures.
+- Removed a `check(True, …)` from `hostverify.py` — it could not fail and was
+  inflating the check count quoted in the evidence and the doc.
+
+### NEXT (updated 18:02) — IN PROGRESS
+Write and run `windows-installer/lab/jobs/second-esp/run.ps1`, 2 boots, for
+must-measure **#2 and #4**. Scope, deliberately narrowed:
+- **NOT attempting #1** (which of two ESPs firmware booted). Distinguishing it
+  needs `BootCurrent` (volatile, absent from the varstore) or a
+  distinguishable payload; it is a rabbit hole, and saying so is the finding.
+- The sharp, cheap #2 is **`bcdboot`'s ESP selection**: diskpart `shrink
+  desired=600` on C:, `create partition efi size=500`, format FAT32, letter S;
+  give Windows' own ESP letter P; hash both trees; `bcdedit /enum {bootmgr}`
+  (note `device partition=`); run `bcdboot C:\Windows` with **NO `/s`**;
+  re-hash both trees and re-run `bcdedit`. If bcdboot writes into ESP #2 that
+  is the Windows-side analogue of bootc's `find_first_colocated_esp()`.
+- `reboot.txt` for boot 2 → prove Windows still boots with two ESPs present.
+- Host side: Windows' ESP bytes vs pristine `golden.raw`; ESP + MSR GPT
+  entries unchanged; C:'s entry changed only in `EndingLBA`; and **where the
+  primary entry array lands on a `FirstUsableLBA = 34` disk once Windows
+  rewrites the GPT** — that closes the prediction above with a measurement.
+- **#4 as literally worded ("GPT byte-identical") CANNOT hold once a partition
+  is added.** Interpreting it as "Windows' own entries and Windows' ESP bytes
+  unchanged", and saying so rather than quietly redefining it.
+- **The feature-update half of #2 is NOT doable in this lab — no update
+  media.** State it; do not let a partial result read as the whole item.

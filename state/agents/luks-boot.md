@@ -43,7 +43,39 @@ Predecessor cards to read before touching anything:
 its work is already MERGED into this branch at 3e235bc1 — do not redo it),
 `ROADMAP/state/agents/efivars-guard-2.md` (`--generic-image`, already resolved).
 
-## NEXT (round 39 — L-003)
+## NEXT (round 39b — CURRENT, written 18:12 AWST by the round-39 continuation agent)
+
+**NEXT, one line:** read `/var/lab/scratch/luks-boot/run-signed1.log` on katana
+for the literal `EXIT_CODE=` line — `luks-pcr7s-run1.service`, launched 18:10,
+running the new `luks-pcr7-signed` scenario at `ef0fa0ce`.
+
+Then, in order:
+1. (RUNNING) `luks-pcr7-signed` — committed `ef0fa0ce`, pushed. Boot A builds
+   the UKI WITH `--pcr-key`/`--pcr-pubkey` via `luks_uki`; boot B boots a
+   DIFFERENT UKI signed by the same key so PCR 11 moves. If green, add boot C
+   (foreign-key UKI -> REFUSED + recovery unlock).
+2. L-002 remainder: the ESP-fallback check in
+   `installer/test-installer-luks-boot.sh:234`. Being done on the L16 against
+   the KEPT disk `/var/lab-scratch/apex-luks-boot.GLHdmI/target.img` — no
+   25-minute reinstall needed.
+3. Run the FULL default STAGED set together once (now nine scenarios).
+4. L-003's remaining integration gap — the real `apex-luks-enroll` through
+   `apex-install`, and a TPM auto-unlock of an installer-produced GRUB+shim
+   disk. That is what takes L-003 from `partial` to `done`; it is NOT in
+   today's scope.
+
+## DONE (round 39b)
+- Read the card, `run-scenarios`' `luks-pcr7`/`luks-tpm`/`luks_uki`, the shipped
+  `apex-luks-enroll`'s `probe_signed_pcr11` and `tpm2_report`, and
+  `guest-luks-{enroll,probe}.sh` in full before writing anything.
+- `ef0fa0ce feat(boot-v2): luks-pcr7-signed …` — 214 lines, ONE file
+  (`files/scripts/boot-v2/run-scenarios`), registered in `STAGED`. PUSHED.
+  `bash -n` clean, `shellcheck -S warning -x` clean, and the
+  defined-vs-`--list` set comparison that `test-boot-v2.sh` makes agrees.
+- Launched it on katana as `luks-pcr7s-run1.service` (18:10), `systemd-run
+  --user` after probing the user bus, wrapper appends a literal `EXIT_CODE=`.
+
+## NEXT (round 39 — L-003) — superseded by the section above, kept for history
 1. **The next real piece of work is NOT this branch.** Add a `luks-pcr7-signed`
    scenario: same `build_pcr7_enroll_bundle`, same `guest-luks-enroll.sh`, the
    ONLY change is building boot A's UKI WITH `--pcr-key`/`--pcr-pubkey` (as

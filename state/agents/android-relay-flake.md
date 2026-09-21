@@ -1,3 +1,14 @@
+## LANDABLE
+
+**`dc7a470f`** — the flake is confirmed, closed and proven red both ways; the
+assertion it guards is byte-for-byte unchanged. Merges cleanly onto
+`roadmap/v2.2` (checked against tip `11c45d36`, not against the cut point).
+`:app` 53/0, `:core` 526/0. Three files, all inside the unit's bounds:
+`android/app/src/test/.../RelayDiallerTest.kt`, one `testLogging` block in
+`android/app/build.gradle.kts`, and the evidence file.
+
+---
+
 # android-relay-flake — a flaky Android test is making every CI gate unreliable
 
 items: none (no roadmap id — CI reliability, found by the orchestrator)
@@ -90,12 +101,10 @@ the timeout instead of instantly.
 
 ## NEXT
 
-- Both-ways proof direction 2: in `RelayDialler.dial`, delete
-  `runCatching { socket.close() }` from the SECOND catch and retain the socket
-  in a companion list (JDK's `NioSocketImpl` Cleaner closes an unreachable
-  socket's fd on GC, so an unretained "leak" is not one), run
-  `./gradlew :app:testDebugUnitTest --tests '*failed dial*'`, expect RED
-  saying "sockets the client left open", then `git checkout` the mutation.
+- Orchestrator lands `dc7a470f`. Nothing else is outstanding; the only thing
+  left running is CI run **35586292689** (`workflow_dispatch` on
+  `task/android-relay-flake`), which is confirmation, not a gate — both suites
+  were already run locally at the counts CI asserts.
 
 ## DONE
 
@@ -108,13 +117,44 @@ the timeout instead of instantly.
   The orchestrator's diagnosis was right in every particular.
 - **Fixed and pushed: `aaf2783d`.** 53 tests, 0 failures (the same count CI
   reports). Assertion untouched; the test now WAITS for the acceptor.
+- **PROVEN BOTH WAYS.**
+  - *Race closed*: the same `Thread.sleep(200)` probe that was deterministically
+    `expected: <20> but was: <19>` before the fix is **GREEN** after it (7 s).
+  - *A genuine leak still fails*: deleting `runCatching { socket.close() }`
+    from `RelayDialler.dial`'s second catch — **production** code, the exact
+    line the test defends — and retaining the socket gives **RED**:
+    `sockets the client left open ==> expected: <20> but was: <0>`, 1 m 45 s.
+    The socket is retained on purpose: since JDK 13 `NioSocketImpl` registers
+    a `Cleaner` that closes an unreachable socket's fd on GC, so an unretained
+    "leak" closes itself and proves nothing.
+  - Both mutations reverted; tree clean.
+- **Sibling sweep done: no second instance.** All 65 Kotlin test files under
+  `android/` swept (app 8, core 45, androidTest 12). Twelve contain any
+  cross-thread construct; all twelve read in full. Every other cross-thread
+  read is ordered by something nameable — `CountDownLatch.await`, `join()`,
+  `@Volatile` on the production field, `AtomicInteger`, `poll(30, SECONDS)`,
+  or a polling deadline. One near-miss fixed as `252d0d5b` (below).
+- Evidence written and pushed: `ROADMAP/evidence/android-relay-flake-20260921.md`.
 
 ## IN PROGRESS
 
-- Both-ways proof.
+- Nothing. Watching CI run 35586292689 only.
 
 ## FOUND
 
+- **`Double.live` was ordered only by accident** — assigned on the acceptor
+  thread, read on the test thread by `sendCarried()`/`close()`, and not
+  `@Volatile`. Safe today only because every caller of `sendCarried` reaches
+  `carried()` first and `carried()` takes the `received` monitor the acceptor
+  released after the assignment. That is the order two tests happen to call
+  things in, not a property of the field. Fixed in `252d0d5b`.
+- **LISTED, NOT FIXED** (different shape, in `:core`, outside this unit's
+  bounds): `core/src/test/.../InsecureStorageTest.kt` lines 133 and 184 run
+  `assertEquals` on the responder thread with no `finally { toDevice.close() }`.
+  A failure there kills the responder silently, leaves the client blocked in
+  `PipedInputStream.read`, and reports as a 20-second `joinOrFail` instead of
+  naming the mismatched byte. Not a flake — a legibility problem in the
+  failing case. Worth a cheap follow-up unit.
 - **A genuine leak was, before this fix, EIGHT MINUTES of the right exception
   for the wrong reason.** `Opening.accept` (`core/.../Relay.kt:584`) catches
   every `IOException` and rethrows it as `RelayException`. A
@@ -122,8 +162,11 @@ the timeout instead of instantly.
   connection at a time, so a client that really leaked would block the
   acceptor's EOF read for ever, and each later dial would fail on its own
   25 s `handshakeTimeoutMs` — wrapped into a `RelayException`, which
-  `assertThrows` happily accepts. 19 × 25 s before the count assertion was
-  even reached. So the fix also puts a bounded deadline on the double's EOF
+  `assertThrows` happily accepts. **Measured, not assumed:** a probe dialled
+  once (leaking) then again, and got
+  `RelayException ... "the relay refused the connection: Read timed out"
+  after 25026ms; isRelayException=true`. Nineteen of those ≈ 475 s before the
+  count assertion was even reached. So the fix also puts a bounded deadline on the double's EOF
   read: not tidying, it is what makes the failing direction readable.
 - **CI could not say what it saw.** The whole log for run 35584033343 was
   `AssertionFailedError at RelayDiallerTest.kt:143` — a line number and no
