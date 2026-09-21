@@ -42,6 +42,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PUSH_BEFORE: ${{ github.event.before }}
+          REF_NAME: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -58,12 +59,47 @@ jobs:
             pull_request)
               base="$BASE_SHA"; head="$HEAD_SHA" ;;
             push)
-              head="$SHA"; base="$PUSH_BEFORE"
-              # All-zeros on a branch's first push, and unreachable after a
-              # force-push; both mean "no usable predecessor".
-              if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
-                 || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              head="$SHA"
+              # An INTEGRATION branch accumulates work that reaches `main` in a
+              # SINGLE merge, so the question CI has to answer for it is "would
+              # that merge be green", not "was this one push green". Classifying
+              # over `event.before` answers the second, and this arm was the one
+              # place in this `case` that erred towards running too LITTLE —
+              # against the rule stated fifteen lines up, which every other arm
+              # and both fallbacks already obey. `workflow_dispatch` below has
+              # always classified the way this now does.
+              #
+              # Measured 2026-09-21 over every one of the 166 push runs this
+              # workflow has had on `roadmap/v2.2`: TWO of them classified all
+              # four selectable jobs, 28 classified none of them at all, and
+              # `Installer safety and UI` was selected by 9. The merge-shaped
+              # classification of the same tip selects all four — the branch
+              # is 828 files different from `main`. So 164 of 166 landings
+              # were checked against a smaller job set than the merge they are
+              # being built towards will use.
+              #
+              # Deliberately NOT every branch. A task branch keeps the narrow
+              # `event.before` range, because widening it there would make a
+              # one-line push run the world, which is the cost this selector
+              # exists to avoid. This list must equal `on.push.branches` at the
+              # top of the file: tests/check-ci-selector-parity.sh asserts that,
+              # so a branch added to the trigger cannot silently keep a base
+              # that answers the wrong question.
+              INTEGRATION_BRANCHES="roadmap/v2.2"
+              integration=false
+              case " $INTEGRATION_BRANCHES " in
+                *" $REF_NAME "*) integration=true ;;
+              esac
+              if [ "$integration" = true ]; then
                 base="$(git merge-base origin/main "$head" 2>/dev/null || true)"
+              else
+                base="$PUSH_BEFORE"
+                # All-zeros on a branch's first push, and unreachable after a
+                # force-push; both mean "no usable predecessor".
+                if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+                   || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+                  base="$(git merge-base origin/main "$head" 2>/dev/null || true)"
+                fi
               fi ;;
             *)
               head="$SHA"; base="$(git merge-base origin/main "$head" 2>/dev/null || true)" ;;
@@ -960,6 +996,27 @@ jobs:
           test -f files/scripts/check-ai-parity
           python3 files/scripts/check-ai-parity
           python3 files/scripts/check-ai-parity --self-test
+
+      # ── the selector, checked ─────────────────────────────────────────────
+      # IN `static` AND NOWHERE ELSE, AND THAT IS THE WHOLE POINT. A gate about
+      # the path selector must not be one the path selector can switch off.
+      # `.github/workflows/` is in the ENGINE selector, so before 2026-09-22 a
+      # push to `roadmap/v2.2` that did not happen to touch a workflow file
+      # would have skipped the engine job — and a skipped job counts as success
+      # at `result`. The check written to hold the selector honest would have
+      # been disarmed by the selector. `static` carries no `needs` and no `if`
+      # on `changes`, so it runs on every event this workflow accepts.
+      #
+      # It extracts the `Classify changed paths` block above and RUNS it, so it
+      # cannot drift from the code it is about, and it is proved in both
+      # directions: against the previous revision of this file it fails 2 of 7,
+      # and three deliberate mutants — merge-base for every branch, a base that
+      # selects everything, the all-zeros fallback deleted — each fail exactly
+      # the assertion written for them, the last one reproducing the rc=128 the
+      # comment at the top of that step describes.
+      - name: A push to the integration branch selects what the merge would
+        if: ${{ !cancelled() }}
+        run: ./tests/check-ci-selector-parity.sh
 
   rust:
     name: Rust validation
