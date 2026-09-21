@@ -122,6 +122,26 @@ Both are commented out, and `deny_unknown_fields` means a config that names
 either is **rejected**, not ignored. There is no way to ask for an XBOOTLDR and
 no way to ask for a bigger ESP.
 
+### 1c-bis. systemd-boot *does* support XBOOTLDR — measured on the binary bootc installed
+
+The idea is not wrong about the bootloader. Pulled out of the very
+`systemd-bootx64.efi` that `bootc install --bootloader systemd` wrote onto the
+APEX guest's ESP (`/var/lab-scratch/sdboot-lab/apex.img`, copied to
+`/var/lab-scratch/sdboot-xbootldr/sdboot.efi`, 135 KiB):
+
+```
+$ strings -a -n 5 sdboot.efi | grep -i xbootldr
+config_load_xbootldr
+$ strings -a -n 4 /usr/bin/bootc | grep -c -i 'xbootldr\|bc13c2ff'
+0
+```
+
+and `bootctl` carries `--boot-path=PATH` and `-x --print-boot-path` for exactly
+this. So the loader on the ESP would happily read Type #1 entries off an
+XBOOTLDR partition. **Nothing ever puts any there.** The actor is bootc's
+composefs backend, not systemd-boot — which is why "systemd-boot does not
+require kernels in the ESP" is a true sentence that does not help.
+
 ### 1d. Upstream says it in words, in a merged PR, five days ago
 
 bootc PR **#2440**, *"cfs/boot: Handle separate /boot mount"*, merged
