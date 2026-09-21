@@ -1,15 +1,15 @@
-APEX ROADMAP — resume report — 2026-09-21 13:40 AWST
+APEX ROADMAP — resume report — 2026-09-21 14:58 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
 ────────────────────────────────────────────────────────────────────────────
               done   partial      todo   blocked
   BASE          16         2         -         -
-  L              -         1         -         2
+  L              -         2         -         1
   P0            24         1         -         -
   P1            44        19         -         -
   P2             8        11         -         -
-  ALL           92        34         -         2   of 128
+  ALL           92        35         -         1   of 128
 
   P0 not done: P0-001(part)
 
@@ -18,57 +18,49 @@ APEX ROADMAP — resume report — 2026-09-21 13:40 AWST
 ────────────────────────────────────────────────────────────────────────────
   kernel-akmods unknown                                       task/kernel-akmods
              head 4031d43f Merge task/sdboot-xbootldr into roadmap/v2.2
-             dirty 4 file(s), ? unpushed, card 100m
+             dirty 4 file(s), 0 unpushed, card 64m
              NEXT - Read the reproducer result out of `/var/lab-scratch/kernel-akmod
 
   kernel-publish unknown                                       task/kernel-publish
-             head b981e348 ci(kernel): run the pin gate on the local path too, n
-             dirty 0 file(s), 0 unpushed, card 96m
+             head 3d0925b8 Merge remote-tracking branch 'origin/roadmap/v2.2' in
+             dirty 0 file(s), 14 unpushed, card 57m
              NEXT Read the table above first. If run 35557283953 finished green, `gh
 
   initramfs-slim unknown                                       task/initramfs-slim
-             head 847b5bfb wip(initramfs): no KMS driver and no network in the i
-             dirty 0 file(s), 10 unpushed, card 101m
+             head 86867c61 Merge remote-tracking branch 'origin/roadmap/v2.2' in
+             dirty 0 file(s), 18 unpushed, card 64m
              NEXT 1. [done] read 847b5bfb, verify kernel config, verify repro hashes
 
   migrate-preconditions unknown                                       task/migrate-preconditions
              head 754b6174 feat(boot): the precondition decision — BitLocker, wh
-             dirty 1 file(s), ? unpushed, card 103m
+             dirty 1 file(s), 0 unpushed, card 64m
              NEXT 1. Mirror bootc's OWN ESP choice, do not invent one. Check whether
 
-  luks-boot  unknown    L-002                              task/luks-boot
+  luks-boot  unknown    L-002,L-003                        task/luks-boot
              head fdb97b04 Merge remote-tracking branch 'origin/roadmap/v2.2' in
-             dirty 0 file(s), 5 unpushed, card 101m
+             dirty 0 file(s), 0 unpushed, card 63m
              NEXT 1. Read `/var/lab-scratch/luks-boot/run2.log` — it ends with a lit
 
   windows-installer-3 unknown                                       task/windows-installer-3
              head e38e0e42 Merge remote-tracking branch 'origin/roadmap/v2.2' in
-             dirty 0 file(s), 0 unpushed, card 100m
+             dirty 0 file(s), 0 unpushed, card 63m
              NEXT 1. Priority 4 (payload deployment), synthetic payload only. Write 
 
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 738b241a Merge fix/ci-discovery-checks into roadmap/v2.2
+  int-os:  tip 71bc2177 Merge task/windows-installer-3 into roadmap/v2.2
     task/initramfs-slim
-      26d92144 wip(initramfs): no KMS driver and no network in the initramfs   [1/10 added lines on tip]
+      847b5bfb wip(initramfs): no KMS driver and no network in the initramfs   [1/10 added lines on tip]
     task/kernel-publish
       3dc80629 fix(core): declare APEX_KERNEL_IMAGE before the first FROM   [0/10 added lines on tip]
       544143e1 ci(kernel): publish the kernel image, so core has one to buil   [2/10 added lines on tip]
       2cd11c6f ci(kernel): resolve and prove the kernel tier before core bui   [1/10 added lines on tip]
       b981e348 ci(kernel): run the pin gate on the local path too, not only    [0/10 added lines on tip]
-    task/luks-boot
-      21fc3dc4 feat(luks): boot a disk this installer actually produced, fir   [4/10 added lines on tip]
-      05b0ea55 feat(luks): apex-install --check-passphrase, a no-disk keymap   [0/10 added lines on tip]
-    task/luks-installer-2
-      21fc3dc4 feat(luks): boot a disk this installer actually produced, fir   [4/10 added lines on tip]
-      05b0ea55 feat(luks): apex-install --check-passphrase, a no-disk keymap   [0/10 added lines on tip]
-    task/windows-installer-3
-      f1fc1cdb fix(windows-installer): give the target-disk fixtures a qcow2   [0/10 added lines on tip]
-      ed6955fc test(windows): exercise the diskpart set id= remedy in the la   [2/10 added lines on tip]
-      ccacf128 fix(windows-installer): the diskpart remedy needs two command   [1/10 added lines on tip]
-      6828591e test(windows): let a lab job ask for a second boot, and add t   [1/10 added lines on tip]
+    task/migrate-preconditions
+      89ff6803 fix(boot): precheck must not mount the host ESP writable, or    [0/10 added lines on tip]
+      754b6174 feat(boot): the precondition decision — BitLocker, which ESP,   [0/10 added lines on tip]
 
   int-shell:  tip 9567586 Merge task/focus-switcher into roadmap/v2.2 (apex-shel
     (nothing — every task branch's content is on the integration tip)
@@ -105,12 +97,12 @@ APEX ROADMAP — resume report — 2026-09-21 13:40 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 13:40:05 AWST 26s
+  snapshot timer: active   last 14:58:51 AWST 24s
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    ea0c64e  apex-os-windows-installer-
     apex-os    ef1a6fb  int-os-
-    apex-os    1abda99  roadmap-state
+    apex-os    bd93817  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    dd974a7  wt-android-release-
     apex-os    9d0f766  wt-android-signing-
@@ -132,7 +124,8 @@ APEX ROADMAP — resume report — 2026-09-21 13:40 AWST
     apex-os    d2b4c3e  wt-gaming-gpu-
     apex-os    e354d6f  wt-gaming-release-
     apex-os    de7dff9  wt-gaming-scx-
-    apex-shell 4542ab3  apex-shell-
+sed: couldn't flush stdout: Broken pipe
+    apex-shell 59eb959  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-
@@ -163,10 +156,12 @@ APEX ROADMAP — resume report — 2026-09-21 13:40 AWST
 ────────────────────────────────────────────────────────────────────────────
   6 agent(s) dispatched, ceiling 6
 
+  IN HAND (a dispatched agent owns this unit — do NOT dispatch it again):
+    kernel-akmods                                   The nvidia akmod will not build against the APEX kernel, and
+
   READY (dependencies believed satisfied — confirm against the agent table above):
     luks-installer L-002                            The installer cannot create a LUKS2 volume at all
     luks-enroll    L-003                            TPM auto-unlock by default, where safe is a measured precond
-    android-release                                  Publish the Android APK as part of a release, signed and ver
 
   HELD:
     final          after *
@@ -207,6 +202,7 @@ APEX ROADMAP — resume report — 2026-09-21 13:40 AWST
     kernel-btf-scx — CLOSED BY HAND: CLOSED BY HAND (round 36, 2026-09-21). Diagnosis-only work; landed round 35 as part of the kernel-build merge. Continuation (deciding APEX builds its own kernel, building it, wiring core) happened under the kernel-build card and now continues as kernel-build-2. P1-043 stays partial/tracked there, not here. Re-open only if a reason emerges to redo the BTF diagnosis itself.
     windows-installer — CLOSED BY HAND: CLOSED BY HAND (round 36, 2026-09-21). No card was ever written at this slug; round 35's real work landed under windows-installer-2 (a real Windows VM lab, three defects found). Continuing as windows-installer-3. Re-open only if this exact slug is needed for something windows-installer-2/3 do not own.
     sdboot-image — CLOSED BY HAND: CLOSED BY HAND (round 36, 2026-09-21). This slug's code (bootupd_t SELinux module, apex-boot-count, the pivot design) landed round 35. Work continued under sdboot-migrate (in-place migration engine, which corrected this card's own 'no in-place converter, must reinstall' conclusion) and now continues as sdboot-migrate-2. Re-open only if fresh sdboot-image-specific work (not migration) is needed.
+    android-release — CLOSED BY HAND: CLOSED BY HAND (round 38, 2026-09-21). task/android-release @ 5dc2b5aa IS an ancestor of roadmap/v2.2 (git merge-base --is-ancestor, checked), and so is task/android-signing; the Android landing was recorded on P1-052/P1-055/P1-057/P1-060 in round 37, so the note above saying NOT LANDED is stale. android-release-2 (a branch with zero commits of its own) established that the dry run `gh workflow run release-android.yml -f dry_run=true` is STRUCTURALLY blocked until roadmap/v2.2 reaches main: workflow_dispatch resolves the workflow file on the default branch (404 'not found on the default branch'; 9 workflows registered, release-android not among them). Nothing is left for an agent before `final`. Still Andre's: the keystore backup in dispatch.json _andre_must_do, and the signed-APK phone install in _android_install_pending (device not attached at 13:50 AWST round 38: adb devices empty, lsusb shows no android device).
 
 ────────────────────────────────────────────────────────────────────────────
   how to resume
