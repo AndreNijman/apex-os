@@ -29,9 +29,16 @@ Earlier, for context (not mine):
    in-registry `skopeo copy`, and only from `main` or `roadmap/**`.
 2. **IN PROGRESS** — run 35557283953. What I need out of it is the line the
    step summary prints: `ARG APEX_KERNEL_IMAGE=ghcr.io/andrenijman/apex-os@sha256:…`
-3. **TODO** — put that digest in `Containerfile.core`'s `ARG APEX_KERNEL_IMAGE`
-   default, add `tests/check-kernel-image-pin.sh`, add the reachability guard to
-   `build-image.yml`'s core job, fix the now-false comment at `build-local.sh:107`.
+   At 03:49Z (minute 27 of ~40) it was in the `compile` step, steps 1-3 green.
+3. **DONE except the digest, pushed as `2cd11c6f`.** `tests/check-kernel-image-pin.sh`
+   (new), the reachability resolve step in `build-image.yml`'s core job (which
+   also now passes `--build-arg APEX_KERNEL_IMAGE` explicitly and refuses an
+   empty one), the same gate in `pr-validation.yml`, and the corrected comment
+   at `build-local.sh:105`. **The one thing still outstanding is the digest
+   itself**: `Containerfile.core:93` still reads
+   `ARG APEX_KERNEL_IMAGE=localhost/apex-kernel:local`, so the new gate FAILS on
+   this tree today — deliberately, and that is half of its both-ways proof:
+       FAIL: Containerfile.core defaults APEX_KERNEL_IMAGE to 'localhost/apex-kernel:local'.
 4. **TODO** — `gh workflow run build-image.yml --ref task/kernel-publish -f force_core=true`
    and watch `core` get past `FROM ${APEX_KERNEL_IMAGE}` and the cross-tier
    contract RUN. **Record the run id in the table above the minute it exists.**
@@ -39,8 +46,17 @@ Earlier, for context (not mine):
 ## NEXT (for a stranger picking this up)
 
 Read the table above first. If run 35557283953 finished green, `gh run view
-35557283953 --log | grep -A3 'pushed ghcr'` gives the digest; carry on at step 3.
-If it failed on a `curl … 22`, just dispatch it again — see the 429 note.
+35557283953 --log | grep -A3 'pushed ghcr'` gives the digest; pin it into
+`Containerfile.core:93` as exactly `ARG APEX_KERNEL_IMAGE=ghcr.io/andrenijman/apex-os@sha256:<64 hex>`
+(one space, no quotes — `build-image.yml`'s resolve regex is stricter than the
+gate's), fix the stale sentences in the comment block at lines 79-93, re-run
+`./tests/check-kernel-image-pin.sh` to see it go green, commit, push, then do
+step 4. If the kernel run failed on a `curl … 22`, just dispatch it again — see
+the 429 note.
+
+The akmods/nvidia failure named in FOUND item 2 is now owned by the
+`kernel-akmods` unit. Do not work on it; this unit's assertion stops at "core
+gets past the kernel-rpms stage and the cross-tier contract RUN".
 
 ## FOUND
 

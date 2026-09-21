@@ -128,3 +128,70 @@ worktree layout).
    unverified warp risks warping to the OLD window before the cycle starts.
    Settling it needs either a labwc source read or a client that reports its
    own pointer position.
+
+---
+
+## CONFIRMED ON ANDRE'S LIVE SESSION — 2026-09-21, by the orchestrator
+
+Andre tested and reported: *"super+arrow not working the cursor isnt moving to
+the other app"*. Measured on his running Hyprland 0.56.2 (session pid 2212),
+not in a nested harness. **This suite's diagnosis was exactly right**, and the
+live numbers are worth keeping because they show the symptom, which the comment
+in `tests/test-apex-hypr-focus.sh` describes but does not quantify:
+
+Two tiled windows, workspace 1, single 1920x1200 output. Left window middle
+`(482, 617)`, right window middle `(1437, 328)`.
+
+| dispatched | focus ends on | cursor ends at |
+|---|---|---|
+| `movefocus l` once | left window | `482, 617` — its middle. The warp works. |
+| `movefocus l` twice (what SUPER+Left actually did) | **right window** | **`1437, 328`** — where it started |
+
+With only two windows the second dispatch has nowhere further to go and **wraps
+around**, so focus and pointer both return to the origin window. That is why it
+read as "nothing happens" rather than as "it moved twice".
+
+`hyprctl binds` on his session carried **nine** doubly-bound chords, not four:
+
+    mod64 left/right/up/down   -> movefocus   x2   (literals `left` and `LEFT`)
+    mod65 left/right/up/down   -> movewindow  x2   (swap, then swap back)
+    mod64 print                -> exec        x2   (grimblast AND screenshot.sh)
+
+So SUPER+SHIFT+arrows and SUPER+Print were broken the same way and had not been
+reported — a window that moves and moves back reads as a window that did not
+move.
+
+`cursor:no_warps` on his session reads `int: 0 set: false`. The warp was never
+the defect; the keybind fired twice. The line this unit landed in
+`input-defaults.lua` is therefore correctly described in its own comment as
+pinning a value against a future upstream flip, and **the load-bearing fix is
+the bind table assertion in this suite**, not that line.
+
+### Live workaround applied (not a repo change)
+
+Andre is on the pre-Lua hyprlang seed and has no image carrying this work, so
+the nine duplicate `bind` lines in `~/.config/hypr/hyprland.conf` were commented
+out by hand, with a comment block explaining why, and `hyprctl reload` run.
+Backup at `~/.config/hypr/hyprland.conf.bak-dupbinds-20260921`. Re-measured
+after: **0 duplicated chords**. Andre confirmed: *"fixed"*.
+
+That workaround is his machine only. The shipped fix is this unit plus
+`apex-hypr-migrate`.
+
+### The migrate path was checked, not assumed
+
+`files/system/libexec/apex-hypr-migrate` handles this correctly and does not
+reintroduce the double-fire for existing users:
+
+- `convert_bind()` builds `combo = (canon_mods(mods), key.upper(), dispatcher, arg)`
+  and drops it when it is in `APEX_DEFAULT_BINDS`. `APEX_DEFAULT_BINDS` carries
+  `("SUPER", "LEFT", "movefocus", "l")`, so Andre's lower-case
+  `bind = $mainMod, left, movefocus, l` is recognised as an APEX default and
+  dropped rather than emitted alongside the Lua default.
+- A deliberate rebind on a default combo emits `claim(mods, key)`, and
+  `apex/keybindings.lua`'s `M.disable()` canonicalises with `:upper()` on the
+  key (line 45), so `claim("SUPER", "left")` and `claim("SUPER", "LEFT")` reach
+  the same handle.
+
+The case-sensitivity trap that caused this is confined to hyprlang's `unbind`,
+which the Lua path does not use.
