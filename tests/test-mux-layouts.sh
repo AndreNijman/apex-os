@@ -125,7 +125,15 @@ out="$("$MUX" build tmux sess tiled "${WORK}/no-such-plan" 2>&1)"; rc=$?
     && ok "a missing plan file is reported, not treated as empty" \
     || bad "a missing plan file is reported, not treated as empty"
 
-"$MUX" backends | grep -qE '^(tmux|zellij)$' \
+# `grep -c`, not `grep -q`, and the reason is this file's `set -o pipefail` on
+# line 24. `backends` is a LOOP of separate printfs in another process; `grep -q`
+# exits on the first line it matches, the second printf then takes SIGPIPE, and
+# pipefail makes the whole pipeline 141 — a match reported as a failure. It is a
+# race, so it is intermittent: measured here at 2 in 60 runs of this exact
+# pipeline, and it is what made this assertion red on a machine where both
+# backends are installed. `grep -c` reads its input to EOF, so there is no early
+# exit to race with.
+[ "$("$MUX" backends | grep -cE '^(tmux|zellij)$')" -ge 1 ] \
     && ok "backends lists what is installed" || bad "backends lists what is installed"
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -676,6 +676,34 @@ sed -n '/^    # ── 6a\. the generated configs must actually be INCLUDED/,/^ 
 PRE_BLOCK="${WORK}/niri-precreate-block.sh"
 sed -n '/^\[ -f "${CFG_DIR}\/ApexShellInput.kdl" \]/p' "$FIRSTRUN" > "$PRE_BLOCK"
 
+# ── the one thing the block needs from OUTSIDE itself ────────────────────────
+# The block calls niri through ${NIRI_BIN}. That resolution used to live inside
+# block 6a, on purpose — 2605db27's message says "defined inside 6a so the block
+# stays self-contained for the suite that extracts and runs it". 37497975 then
+# added block 6a-pre (disable niri's stock waybar spawn) above it and moved the
+# resolution up to share it, which is correct for the provisioner and silently
+# took the line out of the sed range above. The extracted block then ran under
+# `set -u` with NIRI_BIN unbound, died on its first validate, and SEVEN
+# assertions below went red with no named cause.
+#
+# So the harness takes the SHIPPED line rather than restating the resolution —
+# a change to how niri is resolved is still felt here — and the two assertions
+# under it pin the invariant that actually matters at runtime: the line exists
+# exactly once, and it is assigned before the first use.
+NIRI_BIN_LINE="${WORK}/niri-bin-line.sh"
+sed -n '/^ *NIRI_BIN="\$(command -v niri/p' "$FIRSTRUN" > "$NIRI_BIN_LINE"
+nbl="$(grep -c . "$NIRI_BIN_LINE")"
+[ "$nbl" = 1 ] \
+    && ok "the provisioner resolves NIRI_BIN exactly once" \
+    || bad "the provisioner resolves NIRI_BIN exactly once (found ${nbl})"
+nbl_ln="$(grep -n '^ *NIRI_BIN="\$(command -v niri' "$FIRSTRUN" | cut -d: -f1 | head -1)"
+use_ln="$(grep -n '"\${NIRI_BIN}" validate --config' "$FIRSTRUN" | cut -d: -f1 | head -1)"
+if [ -n "$nbl_ln" ] && [ -n "$use_ln" ] && [ "$nbl_ln" -lt "$use_ln" ]; then
+    ok "NIRI_BIN is resolved before its first use (${nbl_ln} < ${use_ln})"
+else
+    bad "NIRI_BIN is resolved before its first use (${nbl_ln:-?} < ${use_ln:-?})"
+fi
+
 if [ ! -s "$INC_BLOCK" ]; then
     bad "the provisioner's niri include block is where this suite drives it"
 else
@@ -802,13 +830,16 @@ mkniri() {
     : > "$h/.config/apex-shell/ApexShellKeybinds.kdl"
 }
 
-# The block reads HOME, CFG_DIR, NIRI_CONF and log(); the harness supplies those
-# and nothing else, so nothing here can drift from the shipped script.
+# The block reads HOME, CFG_DIR, NIRI_CONF, log() and NIRI_BIN. The harness
+# supplies the first four and nothing else; NIRI_BIN comes from the shipped
+# resolution line extracted above, sourced first, so the binary is still
+# resolved by the provisioner's own code and nothing here can drift from it.
 run_inc() {
     local h="$1" p="${2:-$PATH}"
     HOME="$h" CFG_DIR="$h/.config/apex-shell" NIRI_CONF="$h/.config/niri/config.kdl" \
-    PATH="$p" bash -c 'set -euo pipefail; log() { printf "%s\n" "$*"; }; source "$1"' \
-        -- "$INC_BLOCK" 2>&1
+    PATH="$p" bash -c 'set -euo pipefail; log() { printf "%s\n" "$*"; }
+                       source "$1"; source "$2"' \
+        -- "$NIRI_BIN_LINE" "$INC_BLOCK" 2>&1
 }
 
 section "niri: the include line is appended, and nothing else changes"
@@ -819,6 +850,14 @@ before_sum="$(sha256sum < "$NC" | cut -d' ' -f1)"
 before_bytes="$(wc -c < "$NC")"
 out="$(run_inc "$h" "${STUBBIN}:${PATH}")"
 printf '%s\n' "$out" | sed 's/^/      /'
+
+# FIRST, because everything under it is downstream of it. The block is sourced
+# under `set -u`, so anything the provisioner assigns OUTSIDE the extracted
+# range kills it before the append and turns one defect into seven red lines
+# that each look like a different bug. This names it in one.
+printf '%s\n' "$out" | grep -q 'unbound variable' \
+    && bad "the block ran with everything it needs (nothing it uses is assigned outside the extracted range)" \
+    || ok "the block ran with everything it needs (nothing it uses is assigned outside the extracted range)"
 
 grep -qF "include \"$h/.config/apex-shell/ApexShellInput.kdl\"" "$NC" \
     && ok "the generated input config is included" || bad "the generated input config is included"
@@ -945,7 +984,11 @@ else
     sed 's/@ACCENT@/#D9F99D/g' "${TMPL}/themerc-override" > "$h/.config/labwc/themerc-override"
     printf '{"keyboard":{"repeat_rate":42}}\n' > "$h/.config/apex-shell/input.json"
     run_gen "$h" >/dev/null 2>&1
+    # The include line is part of the condition on purpose: `niri validate` +
+    # a grep of the GENERATED file both pass with no include at all, so without
+    # it this assertion would go green while the setting reached nothing.
     if niri validate --config "$NC" >/dev/null 2>&1 \
+       && grep -qF "include \"$h/.config/apex-shell/ApexShellInput.kdl\"" "$NC" \
        && grep -q 'repeat-rate 42' "$h/.config/apex-shell/ApexShellInput.kdl"; then
         ok "a setting changed in Settings reaches niri through the include"
     else
