@@ -252,13 +252,45 @@ What the write path gets instead, and what a reviewer should hold it to:
   from ten seconds ago is not evidence about now;
 - a volume enumeration that could not be completed is a refusal, not an
   absence of claims;
-- Windows itself is the backstop: it refuses writes through a
-  `PhysicalDrive` handle to regions a mounted volume owns. That is a property
-  of the platform and not of this program's arithmetic, which is exactly what
-  makes it worth having as the second line.
+- Windows is **a partial backstop only, and the measurement says exactly where
+  it stops.** This used to read "Windows itself is the backstop: it refuses
+  writes through a `PhysicalDrive` handle to regions a mounted volume owns."
+  That sentence was never measured, and it is **false as it was written.**
+
+  Measured 2026-09-21 in the lab by `lab/jobs/payload-write` against a real
+  Windows Server 2022 guest, writing through `\\.\PhysicalDriveN` at a
+  verified partition offset, with the bytes checked again afterwards from the
+  host (evidence: `ROADMAP/evidence/windows-installer-3-20260921.md`):
+
+  | target | result |
+  |---|---|
+  | mounted **NTFS** volume (`E:`, "Windows data") | **refused by Windows** — `Access to the path is denied`, HResult `0x80070005`; target bytes unchanged, confirmed host-side against the pristine fixture |
+  | lettered volume with **no recognised filesystem** (`F:`, a RAW "Blank basic" partition) | **not refused — the write succeeded** and the bytes changed on disk, confirmed host-side |
+
+  So the platform protects a mounted volume whose filesystem it *recognises*.
+  A drive letter and a live volume object alone buy nothing. FAT is
+  unmeasured; assume nothing about it either.
+
+  **The consequence is a safety property, not a footnote.** `assess()` refuses
+  that RAW partition as "in use by Windows", and that refusal is
+  **load-bearing** — it is the only thing between a user and an overwritten
+  partition, in precisely the case a user is most likely to create: shrink
+  `C:`, leave the new volume unformatted, and Windows letters it as RAW. For
+  any partition with a recognised filesystem the offset arithmetic has a
+  second line behind it; for a RAW one it is the only line. Do not weaken the
+  ownership refusal on the theory that the platform will catch it.
 
 The `inspect` command already performs the re-enumeration and prints what it
 found, so the check exists and runs before any write does.
+
+The offset arithmetic itself has now been measured rather than argued. In the
+same run, a 4 MiB payload written at the eligible partition's verified offset
+landed at that offset and nowhere else: read back from the host through the
+qcow2 overlay, the payload hashes to the value the guest generated, the primary
+and backup GPTs are byte-identical to the pristine fixture, and **no cluster
+outside the three partitions was written at all** — proven by the overlay's own
+allocation map, which is a stronger statement than a byte comparison because an
+unwritten cluster cannot differ.
 
 ---
 
