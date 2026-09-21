@@ -235,7 +235,52 @@ worth nothing, which is the entire reason this directory exists.
 branch is ready to merge onto `roadmap/v2.2`.** The orchestrator lands on that
 signal and will not guess. If it is NOT landable, say why in one line —
 "landing this would break X" is a finding, not a failure.
-__BODY_
+### NEXT — rewritten for round 39. L-002 is done; you are here for L-003.
+
+**Round 38 landed your branch as merge `d00c3060` and recorded L-002 as
+`partial`** — the boot proof went through: a disk `apex-install` wrote has
+BOOTED, the first time that has ever been measured, and `switched-root=yes`.
+`installer/luks-boot-drive.py`, `installer/test-installer-luks-boot.sh`,
+`apex-install --check-passphrase` and the `suites-not-in-ci.txt` lines are all
+on `roadmap/v2.2`. Do not redo any of it, and do not re-run the ~25-minute
+install to re-prove it.
+
+Your unit owns **L-002 and L-003**. `resume.sh` prints `luks-installer (L-002)`
+and `luks-enroll (L-003)` in its READY list; that is an artefact of the queue
+keying IN HAND by unit id rather than by item, and the orchestrator has
+deliberately NOT dispatched either as a separate agent. Both are yours.
+
+In this order:
+
+1. **Read `ROADMAP/state/agents/luks-enroll-2.md` before touching L-003.** Its
+   PCR-7 in-boot binding guest scenario is already LANDED (merge `34132080`,
+   `b9844c8e feat(boot-v2): a STAGED guest scenario for the PCR 7 in-boot
+   binding`). Also read `luks-enroll.md`. Between them they have already paid
+   for the traps; starting from scratch is the expensive mistake here.
+2. L-003 is *"TPM auto-unlock by default, where safe is a measured
+   precondition"* — the load-bearing word is **measured**. `systemd-cryptenroll
+   --tpm2-device=auto --tpm2-pcrs=7` is the easy half. The hard half is the
+   precondition: PCR 7 is only meaningful with Secure Boot on and a firmware
+   whose PCR 7 is stable across the enrolments you will actually see. Two facts
+   already on the board and already paid for, do not re-derive them:
+   `ROADMAP/evidence/` has the two-edk2-build PCR work — **PCR 0 is movable and
+   PCR 7 turned out identical across the two Fedora edk2 revisions** — and a
+   firmware *filename* is not provenance: read the edk2 revision out of the
+   binary, because a non-secboot OVMF sits in scratch named `.secboot.fd`.
+3. Recovery is not optional and is part of "where safe": enrolling TPM unlock
+   must never be the only way in. Prove the passphrase still works after
+   enrolment, in the same guest, in the same run.
+4. Use the BOOT HALF of your own suite against a kept image (the
+   `podman run --rm --device /dev/kvm -v $WORK:/w … luks-boot-drive.py` block,
+   ~5 min) rather than a fresh install. The install is deterministic; only the
+   boot phase — prompt timing and QMP typing — is worth repeating.
+5. `ROADMAP/set-status.py L-003 <status> --evidence "…"` **REPLACES** the whole
+   evidence string. Read `roadmap.yaml`'s current L-003 evidence first and carry
+   the prior rounds' record forward, or you destroy it. (L-002's evidence is now
+   13,949 chars — round 38 prepended rather than overwrote, via
+   `round24-prepend.py`. Do the same.)
+6. L-003 is currently the roadmap's **only `blocked` item**, and it is the last
+   one. Closing it takes the board to 0 blocked.
 
 ### The contract (ROADMAP/state/README.md, short form)
 

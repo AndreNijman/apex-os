@@ -263,7 +263,45 @@ worth nothing, which is the entire reason this directory exists.
 branch is ready to merge onto `roadmap/v2.2`.** The orchestrator lands on that
 signal and will not guess. If it is NOT landable, say why in one line —
 "landing this would break X" is a finding, not a failure.
-__BODY_
+### NEXT — rewritten for round 39, in this order
+
+1. **Your four dirty files are unattributed. Diff them before anything else.**
+   `git status` in `/var/tmp/apex-work/wt-kernel-akmods` shows
+   ` M .github/workflows/build-image.yml`, ` M .github/workflows/pr-validation.yml`,
+   `?? files/scripts/check-run-recovery-reachable`,
+   `?? tests/test-run-recovery-reachable.sh` — and the branch has **zero commits
+   of its own** (`HEAD` is `4031d43f`, a `roadmap/v2.2` merge). Nothing on disk
+   proves those four belong to this brief. `git diff` them, read the two new
+   files, decide, and then either commit them with a message that says what
+   they gate, or leave them and say in `IN PROGRESS` that they are half-written
+   and why. Do not delete them; the snapshot timer is the only copy.
+2. **Workflow collision, recorded nowhere in the queue until now.** Your two
+   dirty files are `.github/workflows/build-image.yml` and
+   `pr-validation.yml`. `task/kernel-publish` is live this round and adds **+88
+   and +14 lines to those same two files** (`origin/task/kernel-publish`, at
+   `3d0925b8`). Merge `origin/task/kernel-publish` into your branch BEFORE you
+   push any workflow edit, and re-run whatever gate the edit exists for
+   afterwards. If the merge conflicts, say so on this card — do not resolve it
+   by taking your side wholesale.
+3. **Then the diagnosis, exactly as the ROUND 38 section sets it up.** The
+   reproducer PASSED (`repro.log`, `rc=0`, kmod-nvidia built in 96 s), so the
+   driver/kernel pair is NOT the defect and the top-ranked route is dead. The
+   discriminating fact is a `podman build` that died with exit 1 and printed no
+   `Error: building at STEP …`. Chase that before you touch akmods again:
+   `journalctl -b -1 -k | grep -iE 'oom|killed|segfault'` and
+   `journalctl -b -1 _COMM=podman` around 10:46, and enumerate what differs
+   between the repro invocation and the real one (`--isolation=chroot` is in
+   both; the real one runs under `sudo` from `build-local.sh`, the repro did
+   too — find the difference that is real).
+4. Silence #1 is a genuine defect regardless of the verdict and it is cheap:
+   the akmods RUN's failure dump is **unreachable by construction** under
+   `set -e`. Fix it with `rc=0; akmods … || rc=$?` so the `*.failed.log` dump
+   can actually run, and prove it both ways (a forced failure prints the dump;
+   a success does not). That is landable on its own even if the root cause is
+   still open — say so on this card when it is.
+
+This unit is still THE image blocker: until `core` builds, nothing else on the
+roadmap reaches a machine.
 
 ### The contract (ROADMAP/state/README.md, short form)
 

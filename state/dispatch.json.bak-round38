@@ -1,85 +1,100 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-21T17:17+0800",
- "_round": "Round 39 STARTED 2026-09-21T17:08+0800 by the autoresume timer, after the round-38 session hit a usage limit at 14:59 (autoresume.log: 'resume session ended (exit 1)'). All six round-38 agents were dead \u2014 `ps` showed no subagent claude process \u2014 and NONE was messaged. Six fresh agents dispatched with the same slugs, each carrying a ROUND 39 CONTINUATION section appended to its card. CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 is set in this session's env (checked, not assumed), so agents are not SIGTERMed 600s after the final response; the hard bound is `timeout 4h`, which ends this session at about 21:08 AWST.",
- "_landed_this_round": [],
- "_status_recorded_this_round": "NONE. Nothing landed, so nothing to record. Counts unchanged at 92 done / 35 partial / 0 todo / 1 blocked of 128. L-003 remains the board's only blocked item and belongs to the luks-boot unit.",
- "_deliberately_held": "ZERO slots held: all six are in use. The READY list's `luks-installer (L-002)` and `luks-enroll (L-003)` were NOT dispatched as separate agents \u2014 the luks-boot unit already owns both items, and resume.sh offers them only because the queue keys IN HAND by unit id rather than by item. Dispatching them would have put three agents on one branch. Every other open queue unit is in the report's COMPLETE section.",
+ "updated": "2026-09-21T17:09+0800",
+ "_round": "Round 38 STARTED 2026-09-21T13:40+0800 by the autoresume orchestrator after the round-37 shutdown. The six round-37 agents were dead (uptime 6 min at 13:42); none was messaged. Landed two branches (below), set L-002 partial, closed the stale android-release queue unit, pushed every unpushed task branch (initramfs-slim forced to 847b5bfb; migrate-preconditions new at 754b6174; kernel-akmods new at 4031d43f; luks-boot fast-forwarded to fdb97b04), fixed two worktrees whose upstream was origin/roadmap/v2.2 (wt-luks-boot, wt-kernel-akmods), took a sleep:idle:handle-lid-switch BLOCK inhibitor as user unit apex-roadmap-orchestrator-r38 (5 h), then re-dispatched six fresh agents, one per dead card, with L-003 folded into the luks-boot agent as a sequential second item. roadmap/v2.2 (apex-os) = 71bc2177, pushed. apex-shell = 9567586, untouched (nothing unlanded).",
+ "_landed_this_round": [
+  {
+   "merge": "d00c3060",
+   "branch": "task/luks-boot",
+   "at": "2026-09-21T13:52+0800",
+   "what": "L-002: a disk apex-install wrote has BOOTED, first time ever measured. installer/luks-boot-drive.py (OVMF guest driven over QMP through the passphrase prompt), installer/test-installer-luks-boot.sh (install + boot end to end), apex-install --check-passphrase (no-disk keymap typeability), test-installer-luks.sh, 9 lines in tests/suites-not-in-ci.txt. run2 (systemd user unit, 12:06): prompt-seen=yes typed=yes switched-root=yes, 6 passed 1 failed; the failure is the suite's own ESP-fallback check mounting a loop partition that was still mounted rw ('would change RO state') - harness, not installer.",
+   "why_now": "Landed AHEAD of the luks-boot continuation so L-003 builds on the boot driver. check-no-conflict-markers PASS; check-suites-run-in-ci: 102 suites, 95 run, 7 exempt, 0 unrun."
+  },
+  {
+   "merge": "71bc2177",
+   "branch": "task/windows-installer-3",
+   "at": "2026-09-21T13:53+0800",
+   "what": "Four finished increments: qcow2 overlays for the target-disk fixtures (Windows dirtied fixture-a.raw by mounting it); the diskpart remedy in plan.rs now names BOTH commands (set id= AND gpt attributes=0x0 - the NO_DEFAULT_DRIVE_LETTER bit every Windows-made partition carries walks the user into a second refusal), measured in one guest boot and pinned by a unit test; lab jobs can ask for a second boot; payload-write and bitlocker-discover jobs added.",
+   "why_now": "tests/test-windows-installer.sh on the branch: 13 passed, 0 failed, 1 could-not-run (stage 4 needs a guest). The merge message says explicitly: payload-write PASSED in the guest at 12:04 but its host-side byte verification was cut off by the shutdown and no evidence file exists; bitlocker-discover has never run to completion. Neither is proven by this sha. Gates after merge: conflict markers PASS, suites-run-in-ci PASS."
+  }
+ ],
+ "_status_recorded_this_round": "L-002 blocked -> partial via round24-prepend.py (evidence 11,417 -> 13,949 chars, prepended, verified re-parse). Counts 92 done / 35 partial / 0 todo / 1 blocked of 128 (L: L-001 partial, L-002 partial, L-003 blocked). windows-installer-3 has no roadmap item; recorded in _landed_this_round only. queue.json: android-release CLOSED BY HAND (5dc2b5aa and task/android-signing are ancestors of the tip; the dry run is structurally blocked until main).",
+ "_deliberately_held": "THREE SLOTS of six at 18:45, and the reason is still contention rather than caution. Every remaining unit whose re-open condition is met needs KATANA's graphical session, and katana-image-qual owns it until the section 6 run finishes: p1-038-hardware (the 18 labwc matrix rows), p2-f (a free VT nobody is sitting at), p2-b items 1-2 (Orca at the login screen, greeter audio), and p2-c -- whose gate, 'an image build lands and a NEW reader could have arrived with it', IS NOW MET for the first time, because katana is booted on apex-7f647470. All four are re-offerable the moment that agent reports. p2-d was not dispatched either: its own card says no criterion on it is closable by another round and what remains is two pieces too small to be a unit. No unit was invented to fill a slot.",
  "agents": [
   {
-   "repo": "apex-os",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T17:17+0800",
-   "agent_id": null,
    "slug": "kernel-akmods",
    "items": [],
+   "repo": "apex-os",
    "worktree": "/var/tmp/apex-work/wt-kernel-akmods",
    "branch": "task/kernel-akmods",
-   "card": "ROADMAP/state/agents/kernel-akmods.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
-   "why": "Still THE image blocker: no image ships until core builds. The reproducer PASSED (kmod-nvidia built in 96 s, rc=0) so the driver/kernel pair is NOT the defect and the top-ranked route is dead. The live question is a podman build that exited 1 with no `Error: building at STEP` line. Also: four dirty files with ZERO commits on the branch to attribute them, and they touch the two workflows kernel-publish rewrites."
+   "card": "ROADMAP/state/agents/kernel-akmods.md (ROUND 38 CONTINUATION section appended by the orchestrator at dispatch)",
+   "dispatched": "2026-09-21T14:00+0800",
+   "agent_id": "a9f50bcd118bd0278",
+   "why": "THE image blocker, highest priority on the board. NEW FACT: the reproducer PASSED (repro.log: kmod-nvidia built in 96 s and installed, rc=0, from layer b45ec0aeb90a with --isolation=chroot), so the failure is not a source incompatibility. The real build died at 10:46 with EXIT=1, no akmods marker, no podman Error line, and no suspend in the journal. First job: commit the four dirty files (the recovery-reachable gate), then settle how the build actually died before touching the driver.",
+   "session": "round 38 orchestrator (autoresume, 2026-09-21 13:40 AWST)"
   },
   {
-   "repo": "apex-os",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T17:17+0800",
-   "agent_id": null,
    "slug": "kernel-publish",
    "items": [],
+   "repo": "apex-os",
    "worktree": "/var/tmp/apex-work/wt-kernel-publish",
    "branch": "task/kernel-publish",
-   "card": "ROADMAP/state/agents/kernel-publish.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
-   "why": "Unblocks every image build. The digest is already known and written into the card (run 35557283953 GREEN, sha256:2ff544dd0214...). Pin Containerfile.core:93, show the gate green AND still failing on a bad pin, push, dispatch the CI core build, record the run id. LANDABLE the moment the pin is in \u2014 the agent has been told to mark it."
+   "card": "ROADMAP/state/agents/kernel-publish.md (ROUND 38 CONTINUATION section appended by the orchestrator at dispatch)",
+   "dispatched": "2026-09-21T14:00+0800",
+   "agent_id": "ae2a8141b6bfb5adf",
+   "why": "Run 35557283953 is GREEN; digest sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6 (tag kernel-7.2.6-cachyos1.apex1.fc43.x86_64-544143e) read off the registry by the orchestrator and written into the card. Pin it at Containerfile.core:93, gate green, push, dispatch the CI core build, record the run id. Not landable until pinned.",
+   "session": "round 38 orchestrator (autoresume, 2026-09-21 13:40 AWST)"
   },
   {
-   "repo": "apex-os",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T17:17+0800",
-   "agent_id": null,
    "slug": "initramfs-slim",
    "items": [],
+   "repo": "apex-os",
    "worktree": "/var/tmp/apex-work/wt-initramfs-slim",
    "branch": "task/initramfs-slim",
-   "card": "ROADMAP/state/agents/initramfs-slim.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
-   "why": "Andre: 'it has to work in 512.' The ESP-ownership decision explicitly does NOT retire this unit \u2014 the ceiling still binds on the L16 and every existing install. First job is the ethernet gate that FATALs on the artifact it exists to pass; then gates into a callable script, size matrix with attribution, reproducibility, a VM boot proof, and the evidence file round 1 never wrote."
+   "card": "ROADMAP/state/agents/initramfs-slim.md (ROUND 38 CONTINUATION section appended by the orchestrator at dispatch)",
+   "dispatched": "2026-09-21T14:00+0800",
+   "agent_id": "a05c92fe310e85221",
+   "why": "Andre: 'it has to work in 512.' Branch pushed by the orchestrator at 847b5bfb. NEXT 3-7: fix the ethernet gate that cannot pass, gates into a script, size matrix, cross-build reproducibility, VM boot proof, evidence. migrate-preconditions consumes the per-deployment number.",
+   "session": "round 38 orchestrator (autoresume, 2026-09-21 13:40 AWST)"
   },
   {
-   "repo": "apex-os",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T17:17+0800",
-   "agent_id": null,
    "slug": "migrate-preconditions",
    "items": [],
+   "repo": "apex-os",
    "worktree": "/var/tmp/apex-work/wt-migrate-preconditions",
    "branch": "task/migrate-preconditions",
-   "card": "ROADMAP/state/agents/migrate-preconditions.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
-   "why": "Andre settled ESP ownership at 17:09 and it INVERTS this unit's old NEXT: there is no bootc ESP choice to mirror, because bootc writes to the ESP the caller mounts. The work is ESP creation and preferring APEX's own. First judgement is which of the 342 pre-decision lines on the branch survive."
+   "card": "ROADMAP/state/agents/migrate-preconditions.md (ROUND 38 CONTINUATION section appended by the orchestrator at dispatch)",
+   "dispatched": "2026-09-21T14:00+0800",
+   "agent_id": "a50ad6ae8378fdb19",
+   "why": "Card said nothing committed; two commits (89ff6803, 754b6174) exist and are now on origin, plus one dirty apex-boot-migrate hunk. Precondition decision engine: which ESP, BitLocker as a note, precheck read-only and leak-free before it touches the real L16, --explain decision table, PATH-shim gate.",
+   "session": "round 38 orchestrator (autoresume, 2026-09-21 13:40 AWST)"
   },
   {
-   "repo": "apex-os",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T17:17+0800",
-   "agent_id": null,
    "slug": "luks-boot",
    "items": [
     "L-002",
     "L-003"
    ],
+   "repo": "apex-os",
    "worktree": "/var/tmp/apex-work/wt-luks-boot",
    "branch": "task/luks-boot",
-   "card": "ROADMAP/state/agents/luks-boot.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
-   "why": "L-002 is landed (merge d00c3060) and recorded partial: a disk this installer wrote has BOOTED, first time ever measured. The unit continues on L-003, TPM auto-unlock where safe is a MEASURED precondition \u2014 the board's only remaining blocked item. luks-enroll-2's PCR-7 guest scenario is already landed (34132080); the card says read it before starting."
+   "card": "ROADMAP/state/agents/luks-boot.md (ROUND 38 CONTINUATION section appended by the orchestrator at dispatch)",
+   "dispatched": "2026-09-21T14:00+0800",
+   "agent_id": "a553fa0621b3f63ee",
+   "why": "L-002 remainder then L-003, one agent because both use the same bootlab and this laptop runs one heavy job at a time. run2 measured switched-root=yes (blocker (a) closed, branch landed as d00c3060, L-002 partial); left: the ESP-fallback check that mounted a still-mounted loop partition, a boot-half re-run, set-status. Then run luks-enroll-2's never-run luks-pcr7 scenario for real (katana's scratch is /var/lab/scratch, not /var/lab-scratch) and record L-003.",
+   "session": "round 38 orchestrator (autoresume, 2026-09-21 13:40 AWST)"
   },
   {
-   "repo": "apex-os",
-   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T17:17+0800",
-   "agent_id": null,
    "slug": "windows-installer-3",
    "items": [],
+   "repo": "apex-os",
    "worktree": "/var/tmp/apex-work/wt-windows-installer-3",
    "branch": "task/windows-installer-3",
-   "card": "ROADMAP/state/agents/windows-installer-3.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
-   "why": "Two round-38 results are UNPROVEN and its own merge message says so: the payload write PASSED in the guest but its host-side byte verification was cut off with no evidence file, and bitlocker-discover has never completed. Beyond that, the ESP decision hands this unit two of the four things that must be measured, because it is the only unit with a real Windows guest."
+   "card": "ROADMAP/state/agents/windows-installer-3.md (ROUND 38 CONTINUATION section appended by the orchestrator at dispatch)",
+   "dispatched": "2026-09-21T14:00+0800",
+   "agent_id": "a544c193de917bf65",
+   "why": "Andre: 'the full completed working windows app that does the whole stack.' Branch landed as 71bc2177 (suite 13/0/1). payload-write PASSED in the guest at 12:04; host-side byte verification was cut off at overlay-map.json by the shutdown. Finish it, write the evidence, tighten ARCHITECTURE.md Exclusivity, then bitlocker-discover (never completed), then priorities 5/6 design.",
+   "session": "round 38 orchestrator (autoresume, 2026-09-21 13:40 AWST)"
   }
  ],
  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -212,23 +227,6 @@
    ],
    "still_open_and_still_andres": "Whether the tool may retype a Windows basic-data partition itself instead of printing `set id=` and `gpt attributes=0x0` for the user. UNCHANGED.",
    "handoff": "Appended verbatim to ROADMAP/state/agents/windows-installer-3.md and migrate-preconditions.md, because those agents belong to the autoresume orchestrator's session and cannot be messaged from the interactive one."
-  },
-  "gpt_write_policy_2026_09_21": {
-   "at": "2026-09-21T17:17+0800",
-   "by": "Claude, delegated by Andre ('you decide')",
-   "status": "SETTLED",
-   "question": "May the tool retype a Windows basic-data partition itself, or must it print `set id=` and `gpt attributes=0x0` for the user?",
-   "answer": "THE TOOL DOES IT. Handing a user raw diskpart is the MORE dangerous option -- no undo, and the USER does the targeting (`select disk N`) while the tool has already read the raw GPT and knows the exact entry. Once the tool creates a partition for APEX's ESP, refusing to change 24 bytes of an existing entry is an inconsistency, not a safety position.",
-   "landed": "b137f03f -- docs/apex-owns-its-esp.md gains the decision; windows-installer/ARCHITECTURE.md's 'Into the shared Windows ESP' section marked SUPERSEDED.",
-   "mechanism": "DELIBERATELY NOT DECIDED -- neither candidate is measured. Raw sector write to LBA 2-33 is narrow in blast radius but it is UNVERIFIED that Windows permits one on a live system disk (payload-write proved a partition extent, a different protection regime) and the cached partition view is stale until IOCTL_DISK_UPDATE_PROPERTIES 0x70140. GET/SET_DRIVE_LAYOUT_EX is wide in API, narrow in intent, and Windows maintains its own state. One guest boot decides it. Six invariants are specified instead.",
-   "new_finding_PCR5": "TCG assigns PCR 5 to the GPT. Where BitLocker's profile binds it, ANY GPT change forces a recovery prompt on the next Windows boot -- so this is a precondition for the ESP decision (bc5c3822) as well, not only for retyping. Read it with `manage-bde -protectors -get C:`. The lab's bitlocker-discover job runs -status and -protectors -disable and does NOT read the profile. Repo-wide: PCR 0/7/11 appear ~240 times, PCR 5 zero times.",
-   "boundary_as_principle": {
-    "GPT entry edits": "the tool",
-    "filesystem ops (NTFS shrink)": "the user, in Windows tooling -- correct, not a compromise: the tool has no NTFS knowledge and must not grow any",
-    "whole-layout construction": "never; any layout comes from a fresh read of the current one",
-    "firmware writes": "STILL OPEN, still Andre's, deliberately not folded in"
-   },
-   "gate": "section 0 sharpens, never weakens; must still fail both ways. One binary or two is the implementation's call."
   }
  },
  "_incident_two_orchestrators": "At 03:06 the apex-roadmap-resume.timer started its OWN `claude -p` orchestrator (pid 3849364), correctly, because the 3am usage limit had killed every one of this session's agents and it saw nothing alive. It landed four branches at 03:11 (p1-061, p2-b, p1-053c, p2-a) \u2014 good work, verified green by all three gates and kept. It was about to dispatch six agents when this session came back. TWO ORCHESTRATORS IS ACTIVELY HARMFUL: both dispatch to a ceiling of six, both write this file, and both use the same worktree paths, so two agents in /var/tmp/apex-work/wt-p2-f would corrupt each other. The duplicate was terminated before it dispatched (autoresume.log: 'resume session ended (exit 143)'), so nothing was lost. ROADMAP/state/AUTORESUME was LEFT IN PLACE deliberately \u2014 the mechanism is correct and is the only rescue if this session dies; it skips while agents are alive, which is why it only fired during the window when all of them were dead. The lesson is to re-dispatch promptly after a limit so the next timer check sees live agents and skips.",
@@ -455,13 +453,5 @@
   ]
  },
  "_battery": "58% and DISCHARGING at 13:42 AWST when this round started, on the L16. The inhibitor blocks idle AND lid suspend, so a dead battery is the failure mode now, not a suspend. Every card tells its agent to read /sys/class/power_supply/BAT*/status before any run over ten minutes; the orchestrator watches capacity and will tell agents to checkpoint if it falls under 20%. The WIP snapshot timer (3 min) is the backstop either way. UPDATE 14:02: 50% and discharging, down 8 points in 20 minutes before any heavy job started -- roughly 75 minutes to the 20% floor at that rate. Andre was push-notified to plug in.",
- "_shutdown_state_round37_consumed": "The round-37 shutdown record was acted on in round 38 (every item in next_round_should done except the phone, which is still not attached: adb devices empty, lsusb no android device at 13:50). Its text lives in git history of refs/wip/roadmap-state.",
- "_nothing_landed_and_why": {
-  "decision": "NOTHING was landed in round 39's opening pass. All three unlanded branches were held DELIBERATELY, and each hold is a finding rather than caution.",
-  "task/initramfs-slim @847b5bfb": "Its own card records that `Containerfile.apex`'s assertion `! grep -qE 'kernel/drivers/net/ethernet/'` FATALs on the very initramfs the branch produces \u2014 it contains cnic.ko.zst, cxgb4.ko.zst and qed.ko.zst, pulled in as SCSI-offload dependencies rather than by the `network` dracut module. Landing it would put a Containerfile assertion that CANNOT PASS onto the integration branch: the defect family that has already cost this program five days of image builds. Held until the gate is a true predicate.",
-  "task/kernel-publish @3d0925b8": "Not finished. `Containerfile.core:93` still reads `ARG APEX_KERNEL_IMAGE=localhost/apex-kernel:local`, so `tests/check-kernel-image-pin.sh` FAILS on the branch today \u2014 deliberately, as half of its both-ways proof. The digest is known (run 35557283953 green, sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6) and pinning it is the fresh agent's NEXT step 1, not the orchestrator's job.",
-  "task/migrate-preconditions @754b6174": "342 of its 370 changed lines implement 'which ESP' logic written BEFORE Andre settled ESP ownership at 17:09 today. The decision inverts the premise \u2014 APEX builds its own ESP rather than choosing among existing ones \u2014 so which of those lines survive is the fresh agent's first real judgement. Landing them first would make that judgement a revert on the integration branch instead of on a task branch.",
-  "pushed_instead": "The two clean-but-ahead worktrees were plain-pushed so nothing depends on a live disk: task/kernel-publish b981e348 -> 3d0925b8, task/initramfs-slim 847b5bfb -> 86867c61. Both are merges of origin/roadmap/v2.2 the dead agents had made locally and never pushed; the wip snapshot timer only covers DIRTY trees, so committed-but-unpushed work was the real exposure. The dirty files in wt-kernel-akmods (4) and wt-migrate-preconditions (1) were deliberately NOT committed by the orchestrator \u2014 attributing a half-written hunk is the agent's call, and each card now says so."
- },
- "_collision_recorded_this_round": "kernel-akmods and kernel-publish edit the same two files. wt-kernel-akmods has UNCOMMITTED edits to .github/workflows/build-image.yml and .github/workflows/pr-validation.yml; task/kernel-publish adds +88 and +14 lines to those same two files. queue.json records no conflicts_with for either. Both cards now carry the collision: kernel-akmods merges origin/task/kernel-publish BEFORE pushing any workflow edit, and kernel-publish merges back if origin/task/kernel-akmods moves."
+ "_shutdown_state_round37_consumed": "The round-37 shutdown record was acted on in round 38 (every item in next_round_should done except the phone, which is still not attached: adb devices empty, lsusb no android device at 13:50). Its text lives in git history of refs/wip/roadmap-state."
 }

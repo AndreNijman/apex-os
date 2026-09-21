@@ -269,7 +269,38 @@ worth nothing, which is the entire reason this directory exists.
 branch is ready to merge onto `roadmap/v2.2`.** The orchestrator lands on that
 signal and will not guess. If it is NOT landable, say why in one line —
 "landing this would break X" is a finding, not a failure.
-__BODY_
+### NEXT — rewritten for round 39, in this order
+
+1. **Pin the digest. It is already known and it is in this card.** Round 38's
+   orchestrator read it off the registry: run **35557283953** is GREEN, tag
+   `kernel-7.2.6-cachyos1.apex1.fc43.x86_64-544143e`, digest
+   `sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6`.
+   `Containerfile.core:93` still reads `ARG APEX_KERNEL_IMAGE=localhost/apex-kernel:local`,
+   which is why `tests/check-kernel-image-pin.sh` FAILS on this tree today —
+   deliberately, and that failure is half of the gate's both-ways proof.
+   Re-verify the digest still resolves before you write it in; then run the
+   gate and show it PASS, and show it still FAILs on a bad pin.
+2. Your branch was pushed by the orchestrator at `3d0925b8` (a merge of
+   `origin/roadmap/v2.2`; the round-38 agent had it locally and unpushed).
+   Nothing of yours was lost.
+3. **Workflow collision.** `task/kernel-akmods` is live this round and has
+   uncommitted edits to `.github/workflows/build-image.yml` and
+   `pr-validation.yml` — the same two files your branch adds +88 and +14 lines
+   to. That agent has been told to merge YOUR branch before pushing. If you see
+   `origin/task/kernel-akmods` move, merge it back before you land.
+4. `gh workflow run build-image.yml --ref task/kernel-publish -f force_core=true`,
+   watch `core` get past `FROM ${APEX_KERNEL_IMAGE}` and the cross-tier
+   contract RUN, and **record the run id in the table at the top of this card
+   the minute it exists** — the table is what survives you.
+5. Expect `core` to go red LATER, in the akmods stage. That is `kernel-akmods`'
+   unit, live in parallel, and it is not yours. Getting past `FROM` and the
+   cross-tier RUN is your success condition; say so plainly rather than
+   inheriting somebody else's red.
+
+You are the unblocker for every image build on the board. The moment the pin is
+in and the gate is green both ways, write `## LANDABLE` at the top of this card
+with the sha — the orchestrator will merge it onto `roadmap/v2.2` without
+waiting for the CI core build to finish.
 
 ### The contract (ROADMAP/state/README.md, short form)
 

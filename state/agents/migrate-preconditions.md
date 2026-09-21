@@ -192,7 +192,62 @@ worth nothing, which is the entire reason this directory exists.
 branch is ready to merge onto `roadmap/v2.2`.** The orchestrator lands on that
 signal and will not guess. If it is NOT landable, say why in one line —
 "landing this would break X" is a finding, not a failure.
-__BODY_
+### NEXT — REWRITTEN for round 39. The old NEXT #1 is SUPERSEDED.
+
+The old NEXT began *"Mirror bootc's OWN ESP choice, do not invent one."*
+**That is no longer the brief.** Andre settled the question at 17:09 today
+(the section immediately above this one, and
+`ROADMAP/state/dispatch.json` → `_decisions.esp_ownership_2026_09_21`; landed
+as `bc5c3822`). `bootc install to-filesystem` writes to the ESP **the caller
+mounts** — so there is no bootc choice to mirror. APEX is the caller, and APEX
+picks, and where there is no ESP of its own, APEX **creates** one. The work is
+ESP *creation* and *preferring APEX's own*, not ESP *selection*, which this
+tool already does (`find_esp()` vs `booted_esp_partuuid()`, and
+`APEX_MIGRATE_ESP` already exists — do not reinvent any of the three).
+
+In this order:
+
+1. **Your one dirty file is unattributed.** ` M files/system/libexec/apex-boot-migrate`
+   in `/var/tmp/apex-work/wt-migrate-preconditions`. `git diff` it and decide
+   whether it belongs to the pre-decision design. Two commits (`89ff6803`,
+   `754b6174`) are on `origin/task/migrate-preconditions` and are NOT landed —
+   the orchestrator deliberately held them this round because 342 of their 370
+   changed lines are "which ESP" logic written before the decision existed.
+   **Your first real judgement is which of those 342 lines survive it.** Say so
+   explicitly on this card; a revert with a reason is a good outcome here.
+2. Re-read the refusal path against the decision. "The refusal path is the
+   product" is still true, but the set of things worth refusing changed: a
+   machine with no room in *Windows'* ESP is no longer a refusal, it is a
+   machine that gets its own partition. A machine with no free space at all
+   still is.
+3. The decision names four things that **must be measured, not assumed** —
+   copy them into this card as a checklist and mark them off:
+   - firmware boots the intended one of two ESPs on a disk, from an explicit
+     NVRAM entry;
+   - Windows tolerates a second ESP across a feature update, a repair install,
+     and `bcdboot`;
+   - `bootupd` stays on the MOUNTED ESP for later `bootc` upgrades rather than
+     re-discovering one — its runtime store must never point at Windows' ESP;
+   - Windows' boot path byte-identical either side, GPT included, against a
+     pristine fixture.
+   Items 2-4 overlap `windows-installer-3`, which is live in parallel and has
+   the Windows guest lab. Coordinate through the cards, not by duplicating the
+   lab: say on this card which of the four you are taking.
+4. `initramfs-slim` is live in parallel and is NOT retired by the decision —
+   the 512 MiB ceiling still binds on the L16 and every existing install, which
+   is exactly the machine your own measurements are about (600 MiB ESP,
+   `need = 1170.8 MiB`, fails by ~2x). You consume its per-deployment number;
+   do not re-derive it.
+5. **katana caution.** The decision calls katana "the cheapest first proof"
+   (its own disk carries an UNUSED 512 MiB `EFI-SYSTEM` at PARTUUID
+   `99af3362` while Boot0000 points at the *Windows* ESP at `2ba9a2ea`).
+   Before ANY read on katana, check it is idle — `ssh katana` and look for
+   steam/gamescope; if a game is running, stop and come back later. **Write
+   nothing to katana this round**, and remember its NVMe names reorder across
+   reboots, so address partitions by PARTUUID and never by `nvme0n1`.
+6. Still Andre's, unchanged, do not solve: whether the tool may retype a
+   Windows basic-data partition itself instead of printing `set id=` and
+   `gpt attributes=0x0` for the user.
 
 ### The contract (ROADMAP/state/README.md, short form)
 
@@ -213,3 +268,50 @@ Everything else can be re-derived from git; the next action cannot.
   scratchpad is shared between agents: use your own subdirectory.
 - Long builds run in the FOREGROUND or under `systemd-run --user`; a
   backgrounded `podman` gets SIGTERMed and still exits 0.
+
+## SECOND PRODUCT DECISION ALSO MADE — 2026-09-21. Both are now settled.
+
+Landed as `b137f03f`. Full text in `docs/apex-owns-its-esp.md`; read it, do not
+work from this summary.
+
+Andre delegated this one ("you decide"), so the reasoning is written out in the
+doc rather than asserted.
+
+**The tool changes a partition's type GUID and attributes ITSELF.** It does not
+print `set id=` and `gpt attributes=0x0` for the user to retype into diskpart.
+Handing a user raw diskpart is the MORE dangerous option: diskpart has no undo
+and makes the *user* do the targeting (`select disk N`), while the tool has
+already read the raw GPT and knows exactly which entry. Transcription is where
+the accident lives.
+
+**THE MECHANISM IS DELIBERATELY NOT DECIDED.** Neither candidate is measured.
+A raw sector write to LBA 2–33 is narrow in blast radius, but it is UNVERIFIED
+that Windows permits one on a LIVE SYSTEM DISK at all — the payload-write proof
+was to a partition extent, a different protection regime — and Windows' cached
+partition view is stale afterwards until `IOCTL_DISK_UPDATE_PROPERTIES`
+(0x70140), which is not on the allowlist either. `GET_DRIVE_LAYOUT_EX` → change
+one entry → `SET_DRIVE_LAYOUT_EX` is wide in API but narrow in intent, and
+Windows maintains its own state and the backup GPT. **Which is safer is one
+guest boot to find out — that measurement is yours to make.** The doc lists six
+invariants the result must satisfy either way.
+
+**PCR 5 — a precondition for the ESP decision too, not just this one.** TCG
+assigns PCR 5 to the GPT partition table. Where BitLocker's profile binds it,
+ANY GPT change forces a recovery prompt on the next Windows boot, including
+creating APEX's own ESP. It is read, never assumed: `manage-bde -protectors
+-get C:`. **The `bitlocker-discover` job runs `-status` and `-protectors
+-disable` and does NOT read the profile — adding that is the first thing it
+needs.** This repo mentions PCR 0, 7 and 11 about 240 times and PCR 5 zero
+times, so there is no prior work to lean on here.
+
+**The section 0 write-API gate sharpens, it does not weaken.** It must still
+fail both ways afterwards. One binary or a default-plus-write-build is the
+implementation's call. Deleting an assertion to get a job green is not.
+
+`ARCHITECTURE.md`'s "Into the shared Windows ESP" section is now marked
+SUPERSEDED — it describes the thing `bc5c3822` forbids.
+
+**Still open and still Andre's:** firmware writes
+(`SetFirmwareEnvironmentVariable`). ARCHITECTURE.md's "Into the firmware"
+section plans it; the denylist forbids it today. It is its own decision and was
+deliberately NOT folded into this one.

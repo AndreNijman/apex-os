@@ -125,7 +125,53 @@ worth nothing, which is the entire reason this directory exists.
 branch is ready to merge onto `roadmap/v2.2`.** The orchestrator lands on that
 signal and will not guess. If it is NOT landable, say why in one line —
 "landing this would break X" is a finding, not a failure.
-__BODY_
+### NEXT — rewritten for round 39
+
+**Andre settled the ESP-ownership question at 17:09 today and it does NOT
+retire this unit.** The decision (recorded in `ROADMAP/state/dispatch.json`
+under `_decisions.esp_ownership_2026_09_21`, and landed as `bc5c3822` —
+`docs/apex-owns-its-esp.md`) is that APEX builds its own ESP on Windows
+machines rather than borrowing Windows'. Its own text says, verbatim:
+*"does_not_retire: initramfs-slim. The 512 MiB ceiling still binds wherever the
+ESP is ALREADY APEX's own — the L16 and every existing install. Andre's 'it has
+to work in 512' was about the L16, which has no Windows on it."* Keep going.
+
+Continue at step 3 of the NEXT list above, which is where the round-38 agent
+was killed. In order:
+
+1. **Fix the ethernet gate first — it is the whole "assertions that cannot
+   pass" family and it is already proven broken on your own artifact.**
+   `Containerfile.apex` asserts `! grep -qE 'kernel/drivers/net/ethernet/'`,
+   and the slim initramfs round 1 produced CONTAINS `cnic.ko.zst`,
+   `cxgb4.ko.zst` and `qed.ko.zst` — pulled in as dependencies of SCSI offload
+   modules, not by the `network` dracut module. Replace it with a true
+   predicate (the thing you actually mean is "the `network`/`nfs` dracut
+   modules are absent", not "no file path contains the word ethernet").
+2. Move the gates into a script both the Containerfile and a `tests/` suite
+   call, so both-ways can be demonstrated **without** a 40-minute image build.
+   `files/scripts/` + `tests/` is the shape the repo already uses. Remember the
+   CI suite gate: a new `tests/*.sh` has to be reachable from CI or listed in
+   `tests/suites-not-in-ci.txt` with a reason.
+3. Size matrix with attribution — 4 dracut runs, apex-tier flags, which flag
+   bought which megabytes. You have the numbers (baseline 375,738,711 ·
+   varA 138,952,921 · varB 103,248,585 · varB19 99,981,645 · varC 102,200,674);
+   what is missing is *why*.
+4. Cross-build reproducibility (varB already reproduced byte-identically:
+   sha256 `704337bc…e578a` across `repro/a.img` and `repro/b.img` — say what
+   that does and does not prove).
+5. A VM boot proof. The claim is "no KMS driver in the initramfs and the
+   machine still gets a console" — that is measurable in a guest and is the
+   only thing that turns this from a size win into a safe one. `simpledrm`
+   works on the L16's real hardware (its boot log says so); the guest tells you
+   whether the *slim* initramfs still reaches switch-root.
+6. `ROADMAP/evidence/initramfs-slim-20260921.md` — round 1 explicitly did not
+   write it. No evidence file, no landing.
+
+**Your branch was pushed by the orchestrator at `86867c61`** (your merge of
+`origin/roadmap/v2.2`; the round-38 agent had it locally and unpushed).
+`847b5bfb` is NOT landed and must not land while the ethernet gate is in it —
+it would FATAL every image build, which is precisely the defect class this
+repo has already paid five days for.
 
 ### The contract (ROADMAP/state/README.md, short form)
 

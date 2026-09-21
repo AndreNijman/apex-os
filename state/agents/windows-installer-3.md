@@ -305,7 +305,57 @@ worth nothing, which is the entire reason this directory exists.
 branch is ready to merge onto `roadmap/v2.2`.** The orchestrator lands on that
 signal and will not guess. If it is NOT landable, say why in one line —
 "landing this would break X" is a finding, not a failure.
-__BODY_
+### NEXT — rewritten for round 39
+
+**Round 38 landed your branch as merge `71bc2177`.** Four increments are on
+`roadmap/v2.2`: the qcow2 fixture overlays, the two-command diskpart remedy
+(`set id=` AND `gpt attributes=0x0`), the second-boot lab jobs, and the
+`--check-passphrase` work that rode along. `tests/test-windows-installer.sh` on
+the branch: 13 passed, 0 failed, 1 could-not-run. Do not redo any of it.
+
+**One of the two product decisions your card reserves for Andre is now
+SETTLED** — see the section immediately above, and
+`ROADMAP/state/dispatch.json` → `_decisions.esp_ownership_2026_09_21` (landed
+as `bc5c3822`, `docs/apex-owns-its-esp.md`). Windows-side installs boot
+systemd-boot like every other machine, and **APEX builds its own ESP; Windows'
+ESP is read for facts and NEVER written — not "preferably not", never, and no
+flag makes it writable.** The 68.3 MiB-free number stops being a constraint to
+defeat. The other decision — whether the tool may retype a basic-data partition
+itself — is STILL Andre's and is unchanged; do not solve it.
+
+In this order:
+
+1. **Two things from round 38 are UNPROVEN and the merge message says so.**
+   The payload-write job PASSED inside the guest at 12:04, but its **host-side
+   byte verification was cut off by the shutdown and no evidence file exists**;
+   and `bitlocker-discover` has never run to completion. Finish both before
+   starting anything new. Host-side verification is the half that matters:
+   `qemu-img convert` / `dd skip=` the `run-fixture-a.qcow2` overlay at the
+   written offset, sha256 it against the known payload, and confirm the GPT,
+   partition 2 and partition 3 extents are **byte-identical** to the pristine
+   `fixture-a.raw`.
+2. Still unmeasured and still the sharpest claim in `ARCHITECTURE.md`:
+   "Windows itself is the backstop" — the expected `ERROR_ACCESS_DENIED` on a
+   write into partition 2's live NTFS extent and into the lettered RAW
+   partition 3. A backstop nobody has seen refuse is not a backstop.
+3. Do NOT add a write path to the Rust binary. `tests/test-windows-installer.sh`
+   section 0 is a real write-API allowlist gate, not a formality.
+4. **Now that the ESP question is settled, priorities 5/6 (ESP transaction +
+   undo) have a target they did not have before.** The decision names four
+   things that must be MEASURED, not assumed; two of them are yours because you
+   are the only unit with a real Windows guest: **Windows tolerates a second
+   ESP across a feature update, a repair install, and `bcdboot`**, and
+   **Windows' boot path is byte-identical either side, GPT included, against a
+   pristine fixture**. Take them in the lab. `migrate-preconditions` is live in
+   parallel and has been told to say on its card which of the four it takes —
+   coordinate through the cards, do not duplicate the guest.
+5. **katana caution.** The decision calls katana the cheapest first proof of
+   the design (an unused 512 MiB `EFI-SYSTEM` at PARTUUID `99af3362`, while
+   Boot0000 points at the *Windows* ESP at `2ba9a2ea`). Before any read on
+   katana, `ssh katana` and check it is idle — if steam or gamescope is
+   running, stop and come back later. **Write nothing to katana this round.**
+   A `bootc install` has rewritten host NVRAM twice on this program; keep it in
+   the guest.
 
 ### The contract (ROADMAP/state/README.md, short form)
 
@@ -326,3 +376,50 @@ Everything else can be re-derived from git; the next action cannot.
   scratchpad is shared between agents: use your own subdirectory.
 - Long builds run in the FOREGROUND or under `systemd-run --user`; a
   backgrounded `podman` gets SIGTERMed and still exits 0.
+
+## SECOND PRODUCT DECISION ALSO MADE — 2026-09-21. Both are now settled.
+
+Landed as `b137f03f`. Full text in `docs/apex-owns-its-esp.md`; read it, do not
+work from this summary.
+
+Andre delegated this one ("you decide"), so the reasoning is written out in the
+doc rather than asserted.
+
+**The tool changes a partition's type GUID and attributes ITSELF.** It does not
+print `set id=` and `gpt attributes=0x0` for the user to retype into diskpart.
+Handing a user raw diskpart is the MORE dangerous option: diskpart has no undo
+and makes the *user* do the targeting (`select disk N`), while the tool has
+already read the raw GPT and knows exactly which entry. Transcription is where
+the accident lives.
+
+**THE MECHANISM IS DELIBERATELY NOT DECIDED.** Neither candidate is measured.
+A raw sector write to LBA 2–33 is narrow in blast radius, but it is UNVERIFIED
+that Windows permits one on a LIVE SYSTEM DISK at all — the payload-write proof
+was to a partition extent, a different protection regime — and Windows' cached
+partition view is stale afterwards until `IOCTL_DISK_UPDATE_PROPERTIES`
+(0x70140), which is not on the allowlist either. `GET_DRIVE_LAYOUT_EX` → change
+one entry → `SET_DRIVE_LAYOUT_EX` is wide in API but narrow in intent, and
+Windows maintains its own state and the backup GPT. **Which is safer is one
+guest boot to find out — that measurement is yours to make.** The doc lists six
+invariants the result must satisfy either way.
+
+**PCR 5 — a precondition for the ESP decision too, not just this one.** TCG
+assigns PCR 5 to the GPT partition table. Where BitLocker's profile binds it,
+ANY GPT change forces a recovery prompt on the next Windows boot, including
+creating APEX's own ESP. It is read, never assumed: `manage-bde -protectors
+-get C:`. **The `bitlocker-discover` job runs `-status` and `-protectors
+-disable` and does NOT read the profile — adding that is the first thing it
+needs.** This repo mentions PCR 0, 7 and 11 about 240 times and PCR 5 zero
+times, so there is no prior work to lean on here.
+
+**The section 0 write-API gate sharpens, it does not weaken.** It must still
+fail both ways afterwards. One binary or a default-plus-write-build is the
+implementation's call. Deleting an assertion to get a job green is not.
+
+`ARCHITECTURE.md`'s "Into the shared Windows ESP" section is now marked
+SUPERSEDED — it describes the thing `bc5c3822` forbids.
+
+**Still open and still Andre's:** firmware writes
+(`SetFirmwareEnvironmentVariable`). ARCHITECTURE.md's "Into the firmware"
+section plans it; the denylist forbids it today. It is its own decision and was
+deliberately NOT folded into this one.
