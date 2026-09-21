@@ -27,16 +27,18 @@ conclusion is WRONG — do not revive it.
 
 ## NEXT
 
-- WAIT for `systemctl --user is-active sdb3-install-b` to go inactive, confirm
-  `install rc=0` in `/var/lab-scratch/sdboot-migrate-3/install-b.log`, and
-  loop-mount `apexmig-b.img` p1 to confirm the 2 GiB ESP is POPULATED (a
-  complete GPT proves nothing — see FOUND). Then run B, boot 1:
-  `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-prep-3.sh rsync-3`
-  then `systemd-run --user --unit=sdb3-boot-b1 --collect
-  /var/lab-scratch/sdboot-migrate-3/run-boot-b.sh` (copy run-boot-a.sh and swap
-  `apexmig-a.img`→`apexmig-b.img`, `apexmig-a-3.serial`→`apexmig-b-3.serial`;
-  keep `:z` on the volume and keep `--oci /work/oci-dummy-3.img`, BOTH are
-  required — see FOUND).
+- Run B boot 1 (prep) is RUNNING as user unit `sdb3-boot-b1`; serial
+  `/var/lab-scratch/sdboot-migrate-2/apexmig-b-3.serial`. When it powers off,
+  confirm from the serial that `rsync --version` printed 3.5.0 and
+  `TimeoutStartUSec=infinity`, then boot 2:
+  `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-unit-3.sh
+   /var/tmp/apex-work/wt-sdboot-migrate-3/files/system/libexec/apex-boot-migrate
+   apex-boot-migrate-confirm.service`
+  and **edit `/var/lab-scratch/sdboot-migrate-3/run-boot-b.sh` to pass `5400`
+  instead of `1800`** — boot 2 copies ~12 GB to podman storage and then bootc
+  writes ~12 GB into /composefs, and a `timeout`-killed qemu is a power cut,
+  not a result. Put it back to 1800 for boot 3.
+  **Never pass `--fresh-nvram` on boot 3: `BootNext` lives in that VARS file.**
 
 ### Guest bookkeeping — the persistent-NVRAM rig makes boot ORDER matter
 
@@ -47,7 +49,7 @@ conclusion is WRONG — do not revive it.
 | --- | --- | --- | --- |
 | apexmig-a (512 MiB ESP) | 1 | none (ctl on vdb, see FOUND) | wasted |
 | apexmig-a (512 MiB ESP) | 2 | `act-migrate-3.sh` | **DONE — refused** |
-| apexmig-b (2 GiB ESP) | 1 | `act-prep-3.sh` + `rsync-3` | install running |
+| apexmig-b (2 GiB ESP) | 1 | `act-prep-3.sh` + `rsync-3` | **DONE** |
 | apexmig-b | 2 | `act-unit-3.sh` + engine + confirm.service | — |
 | apexmig-b | 3 | `act-check-3.sh` (the MIGRATED boot) | — |
 
@@ -246,6 +248,27 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
   exited 1: `echo "=== $(date -Is) … rc=$? ==="` runs the `date` command
   substitution first, which resets `$?`. Fixed by capturing `rc=$?` on its own
   line. The real exit status was in `to-filesystem-lab`'s own `install rc=1`.
+- **The published image is ALSO missing both halves of the blessing fix, which
+  bounds what run B can prove about item 3.** Measured in run B boot 1 on the
+  guest itself: `semodule -l | grep -c apex_sdboot` → **0**, and
+  `/usr/lib/systemd/system/systemd-bless-boot.service.d/` → **does not exist**.
+  Both are shipped by `Containerfile.base` on `roadmap/v2.2` (the drop-in at
+  1145-1146, asserted at 1244; the policy module is
+  `files/system/selinux/apex_sdboot.te`), so this is the daily tag lagging the
+  branch for a third time — the same lag that removed `rsync`. Consequence for
+  the decision: on THIS guest, `systemd-bless-boot` runs as `init_t`, which
+  Fedora 43 allows no rename on `dosfs_t`, so a failure to strip the counter
+  has **two** possible causes and they must not be conflated.
+  They are distinguishable and `act-check-3.sh` prints both:
+    * an **AVC / EACCES** on the rename → the SELinux cause, already fixed on
+      the branch, says nothing about the migrated path;
+    * **EROFS**, with `/boot … ro` in the mount line → the migration-specific
+      cause, and the one that decides item 3.
+  Installing the drop-in as a lab accommodation would make this WORSE, not
+  better: its own comment records that with the policy module absent and
+  SELinux enforcing, `setexeccon` SUCCEEDS and the kernel then denies execve on
+  the entrypoint, so the unit fails harder and for a third reason. Left alone
+  deliberately.
 - `lab-run.service` in `localhost/apex-sdmig:v1` bakes `TimeoutStartSec=900`,
   set by the predecessor against a 2 GB fedora-bootc guest. Run B's migration
   copies an 11.5 GB image into podman storage and then writes a third copy into
@@ -257,3 +280,26 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
 ## BLOCKED ON
 
 - nothing
+
+---
+
+## ORCHESTRATOR NOTE — 2026-09-22 03:55 AWST, from initramfs-slim-2's landing
+
+Two facts that bear on your unit, found by another agent this round:
+
+1. **katana's root filesystem is 96% full** — 907 G of 954 G. `apex-boot-migrate
+   precheck` there answers `OK root-space: 43 GiB free, 43 GiB needed`, which is
+   a **zero-margin pass**. If any part of your work ends up running `stage` on
+   katana rather than in an L16 guest, that OK can become a failure without any
+   code changing. Measure before you assume it will pass.
+
+2. **`esp-too-small` is retired on the current image.** The initramfs work took a
+   deployment to 100.9 MiB, so `precheck` needs 351 MiB where it needed 1173, and
+   katana now answers "This machine can migrate" for the first time. Your refusal
+   path for a 512 MiB ESP still has to hold — but the threshold it is refusing
+   against has moved, so re-read the current figure rather than the one in any
+   older card or evidence file.
+
+Also closed by that landing, so do not spend time on them: `sdboot-xbootldr`
+NEXT #2 (cross-build reproducibility), #3 (`rsync` now present) and #6 (the
+cross-disk note has fired on real hardware).

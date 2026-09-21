@@ -10,17 +10,22 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
 
 ## NEXT
 
-- Confirm `tests/test-mux-layouts.sh` is green locally (running as
-  `ci-green-input-mux1.service` -> `/var/lab-scratch/ci-green-input/mux-local-1.log`),
-  mutation-test the new apex-mux diagnostics by forcing `zellij_landed` false,
-  then commit secret-broker and apex-mux as TWO separate commits, push, and
-  `gh workflow run pr-validation.yml --ref task/ci-green-input` **at least 4
-  times** — the baseline is 4/8 red for mux-layouts and 2/8 for secret-broker,
-  so one green run proves nothing. Read `Package engine`'s conclusion via
-  `gh run view <id> --json jobs`, not the overall tick.
+- **Four PR validation runs are IN FLIGHT on `task/ci-green-input`:
+  `35647154151 35647166056 35647177148 35647188306`** (fired 19:48-19:49 UTC
+  2026-09-21; each takes ~14 min). Read each one's `Package engine` conclusion:
+  `gh run view <id> --json jobs --jq '.jobs[]|[.name,.conclusion]|@tsv'` —
+  NOT the overall tick. If any is red, `gh run view <id> --log-failed` now
+  prints real diagnostics for both flakes (which send form, rc and stderr for
+  zellij; session status, exit code and agentd log for the sandbox) — that
+  output is the point of the last two commits, so read it and record it here.
+  Baseline to beat: mux-layouts 4/8 red, secret-broker 2/8 red,
+  apex-input 8/8 red.
+- Then write `ROADMAP/evidence/ci-green-input-20260921.md` and mark
+  `## LANDABLE <sha>` on this card.
 
 ## DONE
 
+- **Branch `task/ci-green-input` pushed at `9c389baf`, 3 commits.**
 - **apex-input is green and pushed: `cd3c06b6` on `origin/task/ci-green-input`.**
   `112 passed, 0 failed, 0 skipped` run alone (was 101/8/0). Suite-only change;
   the shipped provisioner is untouched and was never broken.
@@ -31,19 +36,22 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
 
 ## IN PROGRESS
 
-- Branch `task/ci-green-input` is at `cd3c06b6`, pushed. Two further changes
-  are written but NOT yet committed in
-  `/var/tmp/apex-work/wt-ci-green-input`:
-  - `tests/test-secret-broker.sh` — the confined-session wait is now
+- Nothing uncommitted. CI has not yet been run on the branch.
+
+## COMMITS
+
+- `cd3c06b6` test(niri) — apex-input, the real regression.
+- `762c5204` test(secret) — `tests/test-secret-broker.sh` — the confined-session wait is now
     state-aware (DONE / session-left / deadline), fails at once on a session
     that has gone, raises the ceiling 25s -> 90s, and on failure prints the
     transcript byte count, the wait reason, `apex agent status`, `run.err` and
-    the tail of `agentd.log`. The false uid-map hint is now conditional on
-    `run.err` actually saying it. Verified green locally: `93 passed, 0 failed`.
-  - `files/system/libexec/apex-mux` — `zellij_build` keeps each send's form,
-    rc and stderr instead of `>/dev/null 2>&1`, prints them plus
-    `zellij list-sessions` and the layout the session DOES have before dying,
-    and retries 12 times instead of 6.
+  the tail of `agentd.log`. The false uid-map hint is now conditional on
+  `run.err` actually saying it. Verified green locally: `93 passed, 0 failed`.
+- `9c389baf` fix(mux) — `apex-mux` `zellij_build` keeps each send's form, rc
+  and stderr instead of `>/dev/null 2>&1`, prints them plus
+  `zellij list-sessions` and the session's TAB NAMES before dying, and retries
+  12 instead of 6. Plus the `backends` pipefail/SIGPIPE fix in the suite.
+  Mutation-verified; suite alone afterwards `47 passed, 0 failed, 0 skipped`.
 
 ## FOUND
 
@@ -112,6 +120,12 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
   `absorb()` was given.
 - **Does not reproduce on the L16**: `93 passed, 0 failed` run alone, and again
   under `CPUQuota=20%`. CPU starvation is not the mechanism.
+- **A THIRD flake, found locally, in `tests/test-mux-layouts.sh` line 128.**
+  `"$MUX" backends | grep -qE '^(tmux|zellij)$'` under the file's own
+  `set -o pipefail`: `backends` is a loop of printfs in another process,
+  `grep -q` exits on the first match, the second printf takes SIGPIPE, and
+  pipefail turns the match into 141. **Measured at 2 in 60** runs of that exact
+  pipeline on the L16. Fixed with `grep -c` (reads to EOF, nothing to race).
 - **Finding in its own right:** that gate conflates "never started" with
   "started and stalled at line N", and prints a diagnosis that was false on the
   very run it fired on. It should say where the transcript stopped.

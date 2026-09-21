@@ -1,6 +1,6 @@
 {
  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
- "updated": "2026-09-22T03:30+0800",
+ "updated": "2026-09-22T03:55+0800",
  "concurrency_ceiling": 6,
  "units": [
   {
@@ -629,7 +629,8 @@
    "after": [],
    "conflicts": [],
    "note": "Continuation of initramfs-slim items 4-6: attributed size matrix, cross-build reproducibility, VM boot proof. Dispatched round 40.",
-   "dispatched": "2026-09-22 round 40"
+   "dispatched": "2026-09-22 round 40",
+   "closed": "CLOSED 2026-09-22 (round 40) -- items 4, 5 and 6 done and landed as merge 57d09820. The predecessor's one stated open risk is spent: build 35624291221 ran the COPY and the budget predicate together, 17 gates / 17 passed. Item 5 SPLIT IN TWO rather than resolving one way: the initramfs IS bit-reproducible across two --no-cache builds from one parent (cmp clean), but the LAYER digest still moves because the tar records its mtime -- 14 distinct final layers across all 14 published apex-<sha> tags, so bootc's content dedup has never had the chance to fire. `podman build --timestamp 0` fixes it and is recorded as a lever NOT adopted. That also answers sdboot-xbootldr NEXT #2, and the round closed its #3 and #6 too. RE-OPEN CONDITION: none for the size work. If anyone adopts --timestamp 0, that is a new unit and needs a real image build behind it."
   }
  ],
  "_completed_units": {
