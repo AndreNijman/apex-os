@@ -130,22 +130,12 @@ machine. Say so; do not proxy them and grade them green.
 
 ## NEXT
 
-- Item 4 (P1-038), bounded: arm `qual-greetd-restore` FIRST, then
-  `sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-set.sh <session-id>
-  "" <tag>` + `sudo systemctl restart greetd` (the script clears
-  `/run/greetd.run`; never restart greetd by hand instead). Measure FLOORS only
-  for rows 8 (wine64 XWayland window vs the bar exclusive zone), 11
-  (libreoffice VCL plugin from /proc/pid/maps), 12 (blender toplevel), 13/14/15
-  (wlr-randr scale/transform/mode, bar survives, quickshell pid unchanged).
-  **And the headline bonus: walk ANDRE'S a11y bus** at
-  `/run/user/1000/at-spi/bus` the same way section 3 walked the greeter's —
-  `run-lockscreen-atspi.sh`'s one-node reading was the SHELL, not the greeter.
-  Then `sudo /var/tmp/apex-work/scratch-katana-image-qual/greetd-restore.sh`
-  and assert: `cmp` config, 0 timers, greetd active, seat0 ActiveSession.
-  Rows 1-7, 9, 10, 16, 17, 18 = could-not-run with named reasons (portal
-  pickers and share targets need a person; Discord/VS Code/Chromium can raise
-  keyring prompts with nobody at the machine; JetBrains not installed; VRR has
-  no `vrr_capable` connector; hotplug and suspend need a person).
+- Write evidence section 4 (P1-038) into
+  `ROADMAP/evidence/katana-final-qual-20260922.md` from
+  `katana:/var/lab/scratch/katana-final-qual/item4{a,b}.log`, commit, push,
+  then `set-status.py`-prepend P1-038 and mark `## LANDABLE <sha>` here.
+  **Do NOT take katana's seat again this round** — another agent is running a
+  Hyprland qualification on tty2 (see FOUND).
 
 ## DONE
 
@@ -160,6 +150,26 @@ machine. Say so; do not proxy them and grade them green.
 ## IN PROGRESS
 
 ## FOUND
+
+- **ANOTHER AGENT IS ON KATANA RIGHT NOW AND WE COLLIDED.** `sudo` journal for
+  03:35-03:55 carries commands that are not mine: `chvt 2` x3,
+  `systemd-run --unit=qual-sess-hyprland … /usr/bin/start-hyprland` x3,
+  `systemctl stop qual-sess-hyprland.service` x5, `python3 /tmp/a11y-probe.py`,
+  `gsettings get org.gnome.desktop.interface toolkit-accessibility` x3,
+  `apex-greet-wallpaper` x4. It is doing P2-003 accessibility work on a
+  Hyprland session on tty2 (`qual-sess-hyprland.service`, session 89). Its
+  `chvt 2` at 03:53 took seat0 from my labwc session, which is why labwc's
+  `wlr-randr --json` answered `[]` and rows 13/14/15 could not run.
+  **Two agents were dispatched at the same physical seat in round 40.** Neither
+  card mentions the other. I stood down, restored greetd and handed the seat
+  back. The orchestrator should serialise seat0 work.
+- **`apex install wine` on katana produced a wine that cannot run anything.**
+  `/usr/bin/wine64` exists; `wineserver`, `wineboot`, `winecfg` and `wine` do
+  NOT. `wine64 notepad` created `~/.wine` and then died with
+  `wine: could not exec wineserver`. This contradicts
+  `katana-p1038-apps-20260922.md`, which says "`/usr/bin/wine64`, `wineboot`,
+  `winedbg` … are all present". P1-038 row 8 (XWayland titlebar vs the bar
+  mask) is blocked on a broken install, not on the compositor.
 
 - **`root/ops` is NOT `lavd`. It reads `lavd_1.1.3_x86_64_unknown_linux_gnu`.**
   First hardware reading of this string anywhere in the program.
@@ -201,6 +211,29 @@ machine. Say so; do not proxy them and grade them green.
 - Orca + speech-dispatcher + espeak-ng + python3-speechd + spd-say are all
   installed and **pipewire is INACTIVE in the greetd session** — the first
   thing to look at when somebody runs the greeter-audio row.
+- **The a11y bus address must be ASKED for, not guessed.** In a user session
+  the socket is `/run/user/1000/at-spi/bus_0`, not `…/at-spi/bus` — and it does
+  not exist until somebody calls `org.a11y.Bus.GetAddress`. A probe that stats
+  the path reports "no accessibility bus" on a perfectly good session.
+- **The REAL shell under labwc publishes 9 nodes, not 1 — but its bar is still
+  empty.** `run-lockscreen-atspi.sh` records `application name=quickshell
+  ChildCount=0`. Measured: `application` + **8 empty `frame`s**, maxdepth 1,
+  no names, no actions, and it does NOT fill in over 15 s so it is not lazy.
+  **Locking the session adds the lock screen and it IS reachable**: 17 nodes,
+  two more frames (one per output), each with a `text` node whose name is empty
+  and whose description is "Type your password and press Enter to unlock." and
+  a `label`. So the markup that EXISTS now reaches the bus; the bar has none.
+  That is the concrete next task for P2-003.
+- Two other applications register on the user session's a11y bus:
+  `polkit-mate-authentication-agent-1` and `xdg-desktop-portal-gtk`, 1 node each.
+- **`loginctl unlock-session` does NOT unlock the APEX lock screen.**
+  `LockedHint` stayed `yes`. Arguably correct — a lock any process on the bus
+  can lift is not a lock — but it is undocumented and it strands an automated
+  run. Recorded, not graded.
+- LibreOffice under labwc/Wayland maps `libvcllo.so` with `libgtk-3.so.0` and
+  `libwayland-client.so.0` — the gtk3 VCL plugin on Wayland. Blender maps
+  `libwayland-client`, `libX11` and `libxcb`, so its backend is not decidable
+  from the maps alone.
 - 26 of 73 IRQ affinity writes are refused EPERM on katana even as root
   (managed IRQs). Reported honestly by apexd (`irqs_refused: 26`), not a
   defect — recorded so the next reader does not chase it.

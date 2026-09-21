@@ -27,20 +27,24 @@ conclusion is WRONG — do not revive it.
 
 ## NEXT
 
-- **Run B boot 2, the actual migration, is RUNNING** as user unit
-  `sdb3-boot-b2` (launched 03:50 AWST, qemu ceiling 5400 s). Serial
-  `/var/lab-scratch/sdboot-migrate-2/apexmig-b-3.serial` — it is APPENDED to,
-  so boot 1's output is above boot 2's; `grep -a "LAB-BOOT: 2"` to find the
-  start. When it powers off:
-  1. read `auto rc=` and the `### the entry the stage wrote — IS IT COUNTED?`
-     block. The stage should have renamed the entry to `…+3-0.conf`.
-  2. then boot 3, the MIGRATED boot, which is where item 3 is decided:
-     `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-check-3.sh`
-     then set the qemu ceiling back to 1800 in
-     `/var/lab-scratch/sdboot-migrate-3/run-boot-b.sh` and
-     `systemd-run --user --unit=sdb3-boot-b3 --collect …/run-boot-b.sh`.
-     **Do NOT pass `--fresh-nvram`** — `BootNext`, which the commit wrote, lives
-     in `/work/nvram-persist/VARS-apexmig-b.img.fd`.
+- **Run B boot 3 — the migration RETRY on a grown disk — is RUNNING** as user
+  unit `sdb3-boot-b2r` (launched 03:55 AWST, ceiling 5400 s), action
+  `act-unit-3b.sh`. Boot 2's attempt died with ENOSPC (see FOUND, the headline);
+  the host grew `apexmig-b.img` from 45 G to 90 G and p3 from 43 GiB to 88 GiB
+  with `sgdisk -e` + `growpart` + `btrfs filesystem resize max`, leaving 65 GiB
+  free, and the retry action clears the partial podman storage the failed
+  attempt left behind. When it powers off, read `auto rc=` and the
+  `### the entry the stage wrote — IS IT COUNTED?` block.
+- Then boot 4, the MIGRATED boot, which is where item 3 is decided:
+  `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-check-3.sh`,
+  set the qemu ceiling in `/var/lab-scratch/sdboot-migrate-3/run-boot-b.sh`
+  back to 1800, then `systemd-run --user --unit=sdb3-boot-b4 --collect
+  /var/lab-scratch/sdboot-migrate-3/run-boot-b.sh`.
+  **Never pass `--fresh-nvram`** — `BootNext`, which the commit writes, lives in
+  `/work/nvram-persist/VARS-apexmig-b.img.fd`.
+- Then append run B's sections to
+  `ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md` (run A is already in it
+  and committed as `5cdaaa39`), commit, push, and mark `## LANDABLE <sha>`.
 
 ### The item-3 decision rule, written down BEFORE the log exists
 
@@ -68,8 +72,9 @@ fourth one.
 | apexmig-a (512 MiB ESP) | 1 | none (ctl on vdb, see FOUND) | wasted |
 | apexmig-a (512 MiB ESP) | 2 | `act-migrate-3.sh` | **DONE — refused** |
 | apexmig-b (2 GiB ESP) | 1 | `act-prep-3.sh` + `rsync-3` | **DONE** |
-| apexmig-b | 2 | `act-unit-3.sh` + engine + confirm.service | RUNNING |
-| apexmig-b | 3 | `act-check-3.sh` (the MIGRATED boot) | — |
+| apexmig-b | 2 | `act-unit-3.sh` (the migration) | **DONE — ENOSPC, see FOUND** |
+| apexmig-b | 3 | `act-unit-3b.sh` (retry, grown disk) | RUNNING |
+| apexmig-b | 4 | `act-check-3.sh` (the MIGRATED boot) | — |
 
 Every boot: `./setctl.sh <action> <extra files…>` first, and the qemu launch
 needs **both** `-v …:/work:z` and `--oci /work/oci-dummy-3.img`.
@@ -139,6 +144,49 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
   It stays uncommitted until run B's migrated boot says whether blessing works.
 
 ## FOUND
+
+- **THE HEADLINE. `root-space` passed and the machine ran out of disk anyway.**
+  Run B boot 2, the real migration on the 2 GiB-ESP guest. The precheck that
+  `task/sdboot-migrate-2` landed *specifically to prevent this* said:
+
+      OK  root-space   28 GiB free, 24 GiB needed
+
+  and then, ~70 seconds later:
+
+      Copying local image docker://localhost/apex-sdmig:v1 to containers-storage:localhost/bootc ...
+      fatal msg="writing blob: storing blob to file
+        \"/var/tmp/container_images_storage799695552/89\":
+        no space left on device"
+      apex-boot-migrate: FAILED [image-unavailable]
+      auto rc=1
+
+  **Why the model is wrong:** it estimates peak cost as `du -sk
+  $SYSROOT/ostree/repo * 2 + 512 MiB`, on the reasoning (docs/update-cost.md)
+  that the temporary podman copy and the permanent `/composefs` copy coexist.
+  `bootc image copy-to-storage` is itself a **two-stage** operation — skopeo
+  stages the blobs into `/var/tmp/container_images_storage*` and *then* writes
+  them into containers-storage — so the temporary copy is two copies, and both
+  live on the same filesystem as the repo. The host image file grew 13 GB →
+  43 GB during the attempt, i.e. the guest wrote ~28 GB of a 43 GiB root before
+  ENOSPC, all of it before `/composefs` was touched at all. The `du` estimate is
+  also an underestimate of what lands: the ostree repo is deduplicated, and the
+  containers-storage extraction is not.
+  **The multiplier is wrong, not the idea.** Somebody has to re-derive it from a
+  measured peak, not from an argument, and `docs/update-cost.md` records the
+  argument that produced the 2x.
+- **The containment held, which is the other half of the result.** After a
+  hard failure in the middle of the migration: `phase: not started`, no
+  `boot entry`, `BootOrder` byte-identical, `BootCurrent: 000A` still
+  `\EFI\fedora\shimx64.efi`, the ESP still at **7.6 MiB used of 2.0 GiB**
+  with no `loader/entries` at all, and `/sysroot/boot` still holding
+  `grub2 loader loader.1 ostree bootupd-state.json`. `auto` returned **1**, not
+  10 — a failure, not a refusal — so `apex update` treats it as an error rather
+  than as "carry on", which is right. The engine also correctly saved the
+  removable-media fallback (949424 bytes) before touching anything.
+- The 2 GiB ESP passes its check with room: `OK esp-space 2036 MiB free,
+  1173 MiB needed`, and with rsync present the `tools` check turns into
+  `OK tools mkfs.vfat, rsync and podman are all in this image` — confirming the
+  run-A `no-rsync` refusal was the image, not the engine.
 
 - **The card says the rig is intact. The disk image is NOT — run A's install
   never finished, and a partition table read as "installed" would have been

@@ -27,11 +27,13 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
 
 ## DONE
 
-- **Branch `task/ci-green-input` pushed at `a0d122da`, 5 commits.**
+- **Branch `task/ci-green-input` pushed at `e5eaebac`, 6 commits.** The three
+  code commits are `cd3c06b6`, `762c5204`, `9c389baf`; the rest is evidence.
 - Evidence written and pushed: `ROADMAP/evidence/ci-green-input-20260921.md`
-  (`0549f7e5`, extended by `a0d122da`). The 4 in-flight CI runs test
-  `9c389baf`; the two later commits are docs-only, so the code under test is
-  the code that will land.
+  (`0549f7e5`, extended by `a0d122da` and `e5eaebac`). **Checked, not assumed:**
+  `gh run view <id> --json headSha` says all four in-flight runs checked out
+  `9c389baf`; every later commit is docs-only, so the code under test is the
+  code that will land.
 - **The new secret-broker gate is mutation-tested.** `exit 7` spliced into
   `inside.sh` before its `echo DONE`: the gate now reports `the session left
   before printing DONE (exited 7)` after `waited 0s` (against 25 s), prints
