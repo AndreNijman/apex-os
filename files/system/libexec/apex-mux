@@ -320,6 +320,16 @@ zellij_build() {
     # all six. The ordinary case lands on the first send in under 300 ms and
     # pays nothing for the other eleven; only the failing path spends the extra
     # 18s, and it now spends it producing evidence.
+    #
+    # AND THEN TWELVE WAS MEASURED, and the sentence above does not hold on a
+    # GitHub runner. Run 35647154151, with the record below in place: all
+    # TWELVE sends returned rc=0 with empty stderr, alternating both forms, and
+    # `zellij list-sessions` showed the session alive with only its own
+    # `tab name="Tab #1"` 42 seconds in. So on that runner a re-send does NOT
+    # cure the drop — the server accepts and discards every request it is
+    # given. Twelve is kept because it costs nothing when the first send lands
+    # and because the value of the extra attempts is the RECORD each one
+    # leaves, not a cure. Do not spend a round raising it again.
     attempt=0
     zrec=""
     zlanded=0
