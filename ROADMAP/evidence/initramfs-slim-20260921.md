@@ -231,3 +231,27 @@ Serial logs: `/var/lab-scratch/initramfs-slim/serial-1.txt`, `serial-2.txt`.
 but no image build has run the new stanza end to end — the boot proof used a
 lab-built initramfs installed onto an existing disk, not an image the build
 produced. See the agent card for the current state.
+
+> ### SUPERSEDED 2026-09-22 — it landed, and a build has run it
+>
+> This branch landed at `ede9a6f7`, and build run **35624291221**
+> (`roadmap/v2.2` @ `44c9a5cb`) ran the COPY and the predicate call together in
+> the `image` job: **17 gates, 17 passed**, including the eight `unlock-*` gates
+> this file says were only ever checked against a synthetic listing. The caveat
+> above is spent.
+>
+> **Two numbers in this file are now superseded by the shipped image**, because
+> the build used the APEX kernel tier (`7.2.6-cachyos1.apex1`) and not the lab's
+> `7.2.5-cachyos1`. The quotable line at the top of this file should read
+> **100.9 MiB per deployment** (`initramfs 88,935,408 B + vmlinuz
+> 16,906,312 B`) and **`need = 351 MiB`**, not 114.6 and 391. The attribution
+> matrix, the compression finding, the gate analysis and the boot proof are
+> unaffected — they are same-chroot comparisons and remain valid as measured.
+>
+> **"No real 512 MiB ESP was filled" is also superseded.** katana boots this
+> image and carries three deployments: **101M** for this build against **376M**
+> and **376M** for the two before it.
+>
+> Everything in this note is measured in
+> `ROADMAP/evidence/initramfs-slim2-20260922.md`, which also answers the
+> cross-build reproducibility question this file left open.
