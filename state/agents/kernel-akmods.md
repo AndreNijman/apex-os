@@ -1,11 +1,11 @@
 ## LANDABLE
 
-**`b237b24728fa7d3d3ccb129b673b23189413a2fc`** on `task/kernel-akmods`, pushed
-2026-09-21 18:15 AWST. Land it as the second merge.
+**`444102fd3a3f6d766468da910af569d02cb5689e`** on `task/kernel-akmods`, pushed
+2026-09-21 18:35 AWST. Land it as the second merge.
 
-**One line:** it adds `ROADMAP/evidence/kernel-akmods-20260921.md` and nothing
-else. The branch is `roadmap/v2.2`@`11c45d36` fast-forwarded plus that one
-docs commit, so the merge is trivial and cannot conflict.
+**One line:** docs only — it adds `ROADMAP/evidence/kernel-akmods-20260921.md`
+and nothing else. The branch is `roadmap/v2.2`@`11c45d36` fast-forwarded plus
+three docs commits, so the merge is trivial and cannot conflict.
 
 The earlier sha `0cc68901` is already in `roadmap/v2.2` via merge `259d8976`.
 
@@ -25,8 +25,19 @@ stopped everything else on the roadmap reaching a machine is cleared.
 second claim is proven, and the distinction is the whole point — "we changed
 something and it worked" is the reasoning this repo's gates exist to refuse.
 
-For this hunk the causal question is *decidable*, not merely open, and the
-answer is that the fix **cannot** have flipped the result:
+**The decisive evidence is not the local green build at all.** GitHub Actions
+run **35582968952** on `task/kernel-publish` built head sha **`72bab38d`** at
+17:23 AWST — **three minutes before this fix was pushed** — and that tree has
+**zero** `akmods_rc`: the original unguarded shape. Its **`core` job
+succeeded** (the run's overall failure is a later `base` job, unrelated). So
+akmods passed *with the defect still in place*, on GitHub's runner, against the
+published kernel digest, with nothing of this unit in the tree. That removes
+this branch from the experiment entirely: **the code was never what made akmods
+fail**, and the 10:46 failure is localised to this machine at that time.
+
+The local evidence agrees. For this hunk the causal question is *decidable*,
+not merely open, and the answer is that the fix **cannot** have flipped the
+result:
 
 - The change is confined to the `akmods_rc != 0` branch. The akmods argv is
   byte-identical before and after.
@@ -41,10 +52,17 @@ answer is that the fix **cannot** have flipped the result:
 inputs:** same kernel image `a889708fcfd2` (created 2026-09-20, before both
 runs, unchanged since), same `akmod-nvidia 3:580.178.04-1.fc43`, same
 `--isolation=chroot`, and the only `Containerfile.core` change inside that RUN
-across the 42 commits between the trees is this hunk. Identical inputs,
-opposite outcomes → **the 10:46 failure was not deterministic and not a
-property of the driver/kernel pair**, which round 38's reproducer had already
-shown independently. Most consistent with a transient environmental fault.
+across the 42 commits between the trees is this hunk. The toolchain was checked
+too rather than assumed, since both dnf transactions hit live repos seven hours
+apart: `akmods` 0.6.2-9.fc43, `kmodtool` 1.1-14.fc43, `gcc` 15.3.1-1.fc43 and
+`kernel-cachyos-devel` 7.2.6-cachyos1.apex1.fc43 all match. One input is *not*
+provably identical and is named rather than glossed: the base is the floating
+tag `quay.io/fedora/fedora-bootc:43` and neither log records its digest.
+
+Identical inputs, opposite outcomes → **the 10:46 failure was not deterministic
+and not a property of the driver/kernel pair**, which round 38's reproducer had
+already shown independently. Most consistent with a transient environmental
+fault, local to this machine.
 
 ### Absence #3 is NOT settled — stated, not quietly dropped
 
