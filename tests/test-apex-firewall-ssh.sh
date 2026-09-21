@@ -297,9 +297,15 @@ sec "loading it, over the connection it could break"
 # if it is there it is the honest probe; anything else bound to a wildcard will
 # do. Measured before the load, so "it stopped answering" is a change rather
 # than an assumption.
-# 22, 5353 and 5355 are in the policy, so a probe against one of them would
-# stay reachable and read as "nothing is being filtered". The port has to be
-# one the policy really closes.
+# 22 is in the policy, so a probe against it would stay reachable and read as
+# "nothing is being filtered". The port has to be one the policy really closes.
+#
+# 5353 and 5355 stay excluded although neither is an accepted TCP port any
+# more: the mDNS rule was always UDP-only, and LLMNR is no longer accepted at
+# all since systemd-resolved ships LLMNR=resolve and answers nothing. Keeping
+# them out costs a candidate and cannot cause a false pass — an empty
+# CLOSED_PORT skips the probe rather than asserting anything — and it leaves
+# the list correct if either ever comes back.
 CLOSED_PORT="$(on "ss -tlnH 2>/dev/null | awk '\$4 ~ /^(0\\.0\\.0\\.0|\\[?::\\]?|\\*):/ { split(\$4,a,\":\"); p=a[length(a)]; if (p != 22 && p != 5353 && p != 5355) { print p; exit } }'")"
 if [ -n "$CLOSED_PORT" ] && tcp_open "$CLOSED_PORT"; then
     ok "port $CLOSED_PORT answers from off the machine before the policy loads"
