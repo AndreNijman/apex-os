@@ -3480,6 +3480,26 @@ jobs:
           # owner asked for by name, which no CI run had ever executed.
           ./tests/check-suites-run-in-ci.sh
 
+      - name: No merge conflict markers reach the tip
+        # Landed after a merge replay shipped `<<<<<<<`/`=======`/`>>>>>>>` into
+        # apex-shell's src/state/IpcManager.qml and a smoke script. The QML one
+        # is a PARSE ERROR, so IpcManager failed to load, so every singleton
+        # importing src/ failed with it and the shell did not start at all —
+        # nothing branched off the tip could be run. Seconds to check, and the
+        # failure it prevents costs everyone on the branch their whole tree.
+        #
+        # It was landed and then named in no workflow for two weeks, because
+        # check-suites-run-in-ci.sh discovered `test-*.sh` only and could not
+        # see a `check-*.sh` at all — the gate written to stop that recurring
+        # was itself never run. Discovery now covers both patterns, which is
+        # what turned this step up.
+        #
+        # `if: !cancelled()` for the same reason as the two steps below it: a
+        # red step ABOVE these gates makes them report `-`, and a skipped check
+        # reads as success.
+        if: ${{ !cancelled() }}
+        run: ./tests/check-no-conflict-markers.sh
+
       - name: Every shell script is linted, by discovery
         # `if: !cancelled()` for the reason the comment block below gives
         # about placement, read in its other direction. That block is about a
