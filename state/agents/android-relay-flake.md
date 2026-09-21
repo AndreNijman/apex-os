@@ -1,11 +1,12 @@
 ## LANDABLE
 
-**`0990aecd`** — the flake is confirmed, closed and proven red both ways; the
+**`d6c827bd`** — the flake is confirmed, closed and proven red both ways; the
 assertion it guards is byte-for-byte unchanged. Merges cleanly onto
 `roadmap/v2.2` (checked against tip `11c45d36`, not against the cut point).
-`:app` 53/0, `:core` 526/0. Three files, all inside the unit's bounds:
-`android/app/src/test/.../RelayDiallerTest.kt`, one `testLogging` block in
-`android/app/build.gradle.kts`, and the evidence file.
+`:app` 53/0, `:core` 526/0 locally, 25/25 on repeat, and **`Android client`
+is `success` on CI run 35586292689**. Three files, all inside the unit's
+bounds: `android/app/src/test/.../RelayDiallerTest.kt`, one `testLogging`
+block in `android/app/build.gradle.kts`, and the evidence file.
 
 ---
 
@@ -101,17 +102,7 @@ the timeout instead of instantly.
 
 ## NEXT
 
-- Orchestrator lands `0990aecd`. Nothing else is outstanding.
-- Still in flight, confirmation rather than a gate: CI run **35586292689**
-  (`workflow_dispatch` on this branch, against `252d0d5b`; the two commits
-  since change only comments and markdown). `Select tests`, `Static
-  validation` and `Rust validation` are already green there. **`Installer
-  safety and UI` has FAILED in that run and it is not this branch** — the
-  whole diff is `android/` plus one evidence file, and that suite does not
-  read either. It runs at all only because `workflow_dispatch` diffs against
-  `merge-base origin/main` and therefore selects every suite, which a
-  `roadmap/v2.2` push never does (there it is `skipped`). Read the **Android
-  client** job's own conclusion and nothing else when judging this unit.
+- Orchestrator lands `d6c827bd`. Nothing is outstanding.
 
 ## DONE
 
@@ -142,10 +133,15 @@ the timeout instead of instantly.
   `@Volatile` on the production field, `AtomicInteger`, `poll(30, SECONDS)`,
   or a polling deadline. One near-miss fixed as `252d0d5b` (below).
 - Evidence written and pushed: `ROADMAP/evidence/android-relay-flake-20260921.md`.
+- **CI run 35586292689, `Android client`: `success`.** Dispatched against
+  `252d0d5b`; every commit after it changes only comments and markdown.
+- Repetition datapoint: the fixed test run **25 consecutive times** with
+  `--rerun` (fresh JVM each), 25 pass / 0 fail. Weaker evidence than the
+  deterministic probe, recorded only as the absence of a residual tail.
 
 ## IN PROGRESS
 
-- Nothing. Watching CI run 35586292689 only.
+- Nothing. Unit complete.
 
 ## FOUND
 
@@ -155,6 +151,20 @@ the timeout instead of instantly.
   `carried()` first and `carried()` takes the `received` monitor the acceptor
   released after the assignment. That is the order two tests happen to call
   things in, not a property of the field. Fixed in `252d0d5b`.
+- **TWO JOBS FAILED IN THAT SAME CI RUN AND NEITHER IS THIS BRANCH.**
+  `Package engine` is **already red on `roadmap/v2.2`**, at this branch's own
+  cut point `69253336` and again at `4e7aa3fa` — `Run input-settings
+  assertions` (Hyprland input/keybind config) and `Run terminal layout
+  template assertions` (zellij). `Installer safety and UI` fails one
+  locale/timezone assertion, `…and the console keymap — want [de] got []`,
+  the runner-is-a-second-environment class. The whole diff here is `android/`
+  plus one markdown file; neither suite reads either path.
+- **A CI-reliability finding worth its own unit, same disease as this one.**
+  Both of those jobs are **`skipped` on every `roadmap/v2.2` push**, because
+  the path selector picks suites from the diff — and a skipped job counts as
+  success. They ran here only because `workflow_dispatch` diffs against
+  `merge-base origin/main` and so selects everything. That is how a red
+  `Installer` job sits unnoticed on the integration branch.
 - **LISTED, NOT FIXED** (different shape, in `:core`, outside this unit's
   bounds): `core/src/test/.../InsecureStorageTest.kt` lines 133 and 184 run
   `assertEquals` on the responder thread with no `finally { toDevice.close() }`.

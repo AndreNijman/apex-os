@@ -8342,24 +8342,53 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    ROUND 38 (2026-09-21) - blocked -> partial. BLOCKER (2) IS CLOSED: the installer CAN encrypt, and the disk it
-    writes BOOTS. task/luks-boot landed as merge d00c3060 (installer/apex-install --check-passphrase, a no-disk
-    check that the passphrase is typeable on the initramfs 'us' keymap; installer/luks-boot-drive.py, an OVMF
-    guest driven over QMP through the passphrase prompt; installer/test-installer-luks-boot.sh, install and boot
-    end to end; installer/test-installer-luks.sh; tests/suites-not-in-ci.txt). MEASURED 2026-09-21 12:06 AWST in
-    /var/lab-scratch/luks-boot/run2.log, run as a systemd user unit (luks-boot-run2) so no agent teardown could
-    SIGTERM it: an encrypted apex-install onto a loop-attached image, then the OVMF boot: prompt-seen=yes,
-    typed=yes, switched-root=yes, 'dracut switched root - the disk this installer wrote BOOTS first time this has
-    been measured'; 6 passed, 1 failed, EXIT_CODE=1, artefacts kept in /var/lab-scratch/apex-luks-boot.GLHdmI. THE
-    ONE FAILURE IS THE HARNESS, NOT THE INSTALLER: 'the ESP mounts so the fallback loader can be checked' - `mount
-    -o ro` of loop1p1 (test-installer-luks-boot.sh:234) was refused with 'Can't mount, would change RO state', the
-    message given when the device is already mounted in a different RO state; most likely the install phase's own
-    ESP mount had not been released when the check ran (hypothesis for the continuation, not confirmed). So the
-    removable-media fallback loader is UNVERIFIED this round, not shown absent. RUN 1 (luks-installer-2's launch)
-    MEASURED NOTHING: engine exit=143 after 869 s, a backgrounded podman SIGTERMed when its agent's session ended,
-    while the outer script still printed '0 passed, 3 failed' - do not quote that line as a result about the
-    installer. NOT DONE because the acceptance is 'does not strand users across qualified hardware/recovery cases'
-    and: welcome-seen=no (the guest switched root but the run did not observe the first-boot welcome); the
+    ROUND 39b (2026-09-21) - partial, UNCHANGED, and two of its open points are now CLOSED. Branch task/luks-boot
+    @ 1fb98233, PUSHED, LANDABLE, gates green. (1) THE ESP FALLBACK LOADER IS PRESENT, measured rather than
+    inferred. Round 38's one failure was test-installer-luks-boot.sh:234, `mount -o ro` refused with 'Can't mount,
+    would change RO state', so the EFI/BOOT/BOOTX64.EFI check never ran. The kernel prints that from
+    get_tree_bdev() when a LIVE superblock for the device has a different SB_RDONLY flag, which has one meaning:
+    the ESP was still mounted READ-WRITE at that moment (mount namespaces are irrelevant, a superblock is global).
+    That is worse than a skipped check, because twenty lines later the suite detaches the loop and hands the IMAGE
+    FILE to a qemu in another container specifically so the boot sees what an independent reader would - a live rw
+    vfat mount breaks exactly that and the losetup -d fails silently under its own 2>/dev/null. ANSWERED WITHOUT A
+    REINSTALL: the kept disk from round 38 (/var/lab-scratch/apex-luks-boot.GLHdmI/target.img) attached over a
+    fresh losetup -r -fP and mounted -o ro carries EFI/BOOT/BOOTX64.EFI at 949424 bytes (shim), EFI/BOOT/fbx64.efi
+    at 87816, and the full EFI/fedora tree (shimx64, shim, grubx64, mmx64, BOOTX64.CSV, grub.cfg, bootuuid.cfg);
+    partitions p1 1G ESP, p2 1G apex-boot, p3 22G apex-luks, p4 1M BIOS boot. So the check round 38 could not run
+    WOULD have passed. FIXED in e8f1a97d: the block asks findmnt -S first and names the holder (target, source,
+    options, plus fuser -vm), unmounts ONLY holders under $WORK, and keeps mount's stderr instead of discarding
+    it. TESTED BOTH WAYS by lifting the block out of the suite and running it against the ESP of that same disk:
+    clean -> 2 passed 0 failed with FALLBACK_PRESENT=1; with a deliberate live rw mount on the same device ->
+    holder detected and named, suite FAILS, and the fallback check STILL answers FALLBACK_PRESENT=1. (2)
+    welcome-seen IS DECIDED and was never a failing check: luks-boot-drive.py prints it and the suite asserts
+    three other fields and not this one, so it was always informational. It is NOT a criterion of this suite,
+    written down in the suite itself - everything after 'Switching root' belongs to the installed system,
+    first-boot welcome is apex-shell's and needs a graphical session this headless serial guest never starts, and
+    gating a LUKS boot test on it would make a shell regression read as an encryption defect. Still reported, not
+    asserted. Evidence file ROADMAP/evidence/L-002-esp-fallback-20260921.md. STILL NOT DONE, against the
+    acceptance 'encryption default does not strand users across qualified hardware/recovery cases': the unlock
+    keymap is still always 'us' (--check-passphrase refuses what that keymap cannot type, but a non-US user is
+    still the stranding case), plymouth message() is still a no-op, cryptsetup is still unpinned, the boot half
+    has been measured ONCE and not repeated with the fixed suite end to end, and L-001's TPM-clear and TPM-removed
+    hardware cases on katana are still outstanding. ROUND 38 (2026-09-21) - blocked -> partial. BLOCKER (2) IS
+    CLOSED: the installer CAN encrypt, and the disk it writes BOOTS. task/luks-boot landed as merge d00c3060
+    (installer/apex-install --check-passphrase, a no-disk check that the passphrase is typeable on the initramfs
+    'us' keymap; installer/luks-boot-drive.py, an OVMF guest driven over QMP through the passphrase prompt;
+    installer/test-installer-luks-boot.sh, install and boot end to end; installer/test-installer-luks.sh;
+    tests/suites-not-in-ci.txt). MEASURED 2026-09-21 12:06 AWST in /var/lab-scratch/luks-boot/run2.log, run as a
+    systemd user unit (luks-boot-run2) so no agent teardown could SIGTERM it: an encrypted apex-install onto a
+    loop-attached image, then the OVMF boot: prompt-seen=yes, typed=yes, switched-root=yes, 'dracut switched root
+    - the disk this installer wrote BOOTS first time this has been measured'; 6 passed, 1 failed, EXIT_CODE=1,
+    artefacts kept in /var/lab-scratch/apex-luks-boot.GLHdmI. THE ONE FAILURE IS THE HARNESS, NOT THE INSTALLER:
+    'the ESP mounts so the fallback loader can be checked' - `mount -o ro` of loop1p1
+    (test-installer-luks-boot.sh:234) was refused with 'Can't mount, would change RO state', the message given
+    when the device is already mounted in a different RO state; most likely the install phase's own ESP mount had
+    not been released when the check ran (hypothesis for the continuation, not confirmed). So the removable-media
+    fallback loader is UNVERIFIED this round, not shown absent. RUN 1 (luks-installer-2's launch) MEASURED
+    NOTHING: engine exit=143 after 869 s, a backgrounded podman SIGTERMed when its agent's session ended, while
+    the outer script still printed '0 passed, 3 failed' - do not quote that line as a result about the installer.
+    NOT DONE because the acceptance is 'does not strand users across qualified hardware/recovery cases' and:
+    welcome-seen=no (the guest switched root but the run did not observe the first-boot welcome); the
     fallback-loader check is unverified; the boot half has been measured once, not repeated; L-001's TPM clear and
     TPM-removed cases are still Andre's on katana; blocker (3) is only partly answered (--check-passphrase refuses
     what the 'us' keymap cannot type, but the keymap is still always 'us', plymouth message() is still a no-op,
@@ -8486,19 +8515,55 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    ROUND 39 (2026-09-21), unit luks-boot (which owns L-002 and L-003), branch task/luks-boot @ 345c0557, PUSHED
-    and LANDABLE, not yet landed. STATUS blocked -> partial. THE STATED BLOCK IS LIFTED: L-003 was blocked
-    'pending L-002 exercising this path end to end on a real boot', and L-002's run2 booted a disk apex-install
-    wrote (switched-root=yes, landed as merge d00c3060), so that dependency is discharged. WHAT IS NEW: the
-    luks-pcr7 guest scenario (landed 2026-09-21 as b9844c8e, merge 34132080) HAD NEVER BEEN RUN; it now runs green
-    on katana - 26 passed, 0 failed, EXIT_CODE=0, three real OVMF boots with Secure Boot enforcing and a software
-    TPM against a root staged from katana's own live APEX install. This is the FIRST time the shipped
-    /usr/libexec/apex-luks-enroll has run inside a real boot against a LIVE PCR 7; every earlier measurement was
-    host-side against a fixture or a test-chosen value. BOOT A (enrol): secure-boot-byte=1,
-    pcr7-pre-enroll=69E722B3756359AAE507D8D886174B6267C663001E6A96D448D4DB85F71B8F21 (a real firmware measurement,
-    so not systemd's 'effectively unenforced' trap), enroll-exit=0, tpm2 enrolled binding=pcr7 pcrs=7 bank=sha256
-    hash=91cd90cbef3cb73ad31775fbe69cb36f6112937d1b44634970b5a6b6eece3a39 pin=no, and
-    passphrase-after-enrol=SUCCESS - a NEW assertion proving enrolment does not cost the user the way in they
+    ROUND 39b (2026-09-21) - partial, UNCHANGED, and the signed-PCR-11 branch is no longer forward-looking in the
+    lab. Branch task/luks-boot @ 1fb98233, PUSHED, LANDABLE, gates green (test-boot-v2 150/0, shellcheck coverage
+    204 discovered 0 newly failing, doc-verbs 0 undocumented-and-undeclared, containerfile-assertions rc=0,
+    suites-run-in-ci 105/98/7/0). NEW SCENARIO luks-pcr7-signed (ef0fa0ce, boot C in 4029965f), STAGED, one file
+    (files/scripts/boot-v2/run-scenarios). It is luks-pcr7 with exactly one variable changed: boot A's UKI is
+    built WITH --pcr-key/--pcr-pubkey. RAN GREEN FIRST TIME on katana under systemd-run --user: run1 21 passed 0
+    failed EXIT_CODE=0 (boots A+B), run2 28 passed 0 failed EXIT_CODE=0 (boots A+B+C), logs
+    /var/lab/scratch/luks-boot/run-signed{1,2}.log, serials out/serial-pcr7s-{a,b,c}.log. WHAT IT MEASURED. (1)
+    THE SHIPPED SCRIPT CHOSE binding=signed-pcr11 BY ITSELF, LIVE, IN A REAL BOOT, for the first time: 'tpm2:
+    enrolled binding=signed-pcr11 pcrs=11 bank=sha256 hash=... pin=no' with NOT ONE of probe_signed_pcr11's four
+    refusals on stderr (the scenario asserts that absence on the shared prefix 'not using signed-pcr11', so a gate
+    added later is covered), secure-boot-byte=1,
+    pcr11=7ABDFF81ADEB57F15DEDDAE2F81747AB6459D8FF51B5C45BC2CEF07AF071C537 read live from that boot's own sd-stub
+    measurement. binding= is not remembered, it is derived by tpm2_report from the SHAPE of the LUKS2 token read
+    back with luksDump --dump-json-metadata (tpm2_pubkey_pcrs present = signed policy), and the same function
+    refuses a zero policy hash - the systemd 258.10 --tpm2-device=auto trap. (2) THE POLICY SURVIVED A UKI CHANGE
+    THAT MOVED PCR 11, against a token APEX chose rather than one the lab enrolled: boot B's different UKI
+    measured DD9A93720200654A53C03E57B8AAA79736BAC91D54E2FE1B02C3CFAED39F7545 where boot A enrolled at
+    7ABDFF81..., and tpm-unlock=SUCCESS with pcr-signature=/run/systemd/tpm2-pcr-signature.json and
+    plaintext-marker=written. A VALUE-BOUND POLICY WOULD HAVE REFUSED. That is the single claim the shipped policy
+    table's ordering rests on (signed-pcr11 above pcr7 because it survives a kernel update) and it had only ever
+    been shown for a host-side lab enrolment (luks-tpm) before. The two PCR 11 values are compared FIRST and the
+    claim is only made when they differ, so an accidental no-op cannot read as a pass. (3) RECOVERY IS NOT
+    OPTIONAL and was proved in the same boot: passphrase-after-enrol=SUCCESS (cryptsetup open --test-passphrase
+    against the header the enrolment just rewrote) and a 71-byte recovery key with no trailing newline, length
+    checked host-side at capture. (4) THE REFUSAL ARM, boot C: a UKI whose PCR policy is signed by the FOREIGN key
+    with --pcrpkey left as the REAL public key, so the refusal is isolated to the signature and not to key
+    identity - pcr-signature published, tpm-unlock=REFUSED, tpm-unlock=SUCCESS asserted ABSENT,
+    recovery-unlock=SUCCESS and recovery-marker=found in that same refused boot. Without it, boot B had two
+    explanations (a satisfied PolicyAuthorize, or a policy that constrains nothing). Evidence file
+    ROADMAP/evidence/L-003-signed-pcr11-20260921.md. STILL PARTIAL, and the gap is unchanged: no test has ever run
+    the REAL apex-luks-enroll through apex-install (every installer suite stands it in with an
+    APEX_LUKS_ENROLL_LOCAL recovery-only stub), and no INSTALLER-PRODUCED disk has been TPM-auto-unlocked -
+    apex-install writes GRUB+shim, not a UKI, so there is no sd-stub on it, no PCR 11 measurement, and nothing for
+    probe_signed_pcr11 to bind to. Both of this scenario's bindings are therefore still forward-looking with
+    respect to the disk APEX ships today, which is why luks-pcr7 (the pcr7 fallthrough) and luks-pcr7-signed (the
+    sd-boot future) both exist. That pair is what would take L-003 to done. ROUND 39 (2026-09-21), unit luks-boot
+    (which owns L-002 and L-003), branch task/luks-boot @ 345c0557, PUSHED and LANDABLE, not yet landed. STATUS
+    blocked -> partial. THE STATED BLOCK IS LIFTED: L-003 was blocked 'pending L-002 exercising this path end to
+    end on a real boot', and L-002's run2 booted a disk apex-install wrote (switched-root=yes, landed as merge
+    d00c3060), so that dependency is discharged. WHAT IS NEW: the luks-pcr7 guest scenario (landed 2026-09-21 as
+    b9844c8e, merge 34132080) HAD NEVER BEEN RUN; it now runs green on katana - 26 passed, 0 failed, EXIT_CODE=0,
+    three real OVMF boots with Secure Boot enforcing and a software TPM against a root staged from katana's own
+    live APEX install. This is the FIRST time the shipped /usr/libexec/apex-luks-enroll has run inside a real boot
+    against a LIVE PCR 7; every earlier measurement was host-side against a fixture or a test-chosen value. BOOT A
+    (enrol): secure-boot-byte=1, pcr7-pre-enroll=69E722B3756359AAE507D8D886174B6267C663001E6A96D448D4DB85F71B8F21
+    (a real firmware measurement, so not systemd's 'effectively unenforced' trap), enroll-exit=0, tpm2 enrolled
+    binding=pcr7 pcrs=7 bank=sha256 hash=91cd90cbef3cb73ad31775fbe69cb36f6112937d1b44634970b5a6b6eece3a39 pin=no,
+    and passphrase-after-enrol=SUCCESS - a NEW assertion proving enrolment does not cost the user the way in they
     already had. WHICH signed-pcr11 GATE REFUSED MATTERS: probe_signed_pcr11 refuses in order (SB off, no
     StubInfo, no readable signing key, PCR 11 unmeasured) and the THIRD fires - 'the boot did not publish a PCR
     signing key at /run/systemd/tpm2-pcr-public-key.pem' - so gates 1 and 2 PASS, i.e. the guest booted

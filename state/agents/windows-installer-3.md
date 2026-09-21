@@ -1,4 +1,4 @@
-## LANDABLE — `e6ecc4e9`
+## LANDABLE — `ed30f92b`
 
 **Both of round 38's UNPROVEN results are now proven.** (a) payload-write's
 host-side byte verification is done — 13 checks, 0 failures; (b)
@@ -14,7 +14,11 @@ but does NOT refuse one into a lettered RAW volume — and the doc now says so.
 no write path was added to the binary. Merged `origin/roadmap/v2.2` (b137f03f)
 clean. Landing this breaks nothing.
 
-**Also landed in this round:** the GPT write-mechanism measurement the second
+**Also landed in this round:** the second-ESP measurements (must-measure #2
+partial and #4, `bcdboot` does NOT wander to a second ESP; Windows boots fine
+with two; Windows' own ESP entry and the MSR entry byte-unchanged; but Windows
+writes its OWN ESP 42 kB worth during ordinary disk changes), and the GPT
+write-mechanism measurement the second
 product decision (`b137f03f`) explicitly handed to this unit — one boot, 13
 host checks, 0 failures. Windows **permits** a raw write to LBA 2–33 of the
 disk it booted from AND `SET_DRIVE_LAYOUT_EX` on it; and
@@ -713,3 +717,71 @@ must-measure **#2 and #4**. Scope, deliberately narrowed:
   unchanged", and saying so rather than quietly redefining it.
 - **The feature-update half of #2 is NOT doable in this lab — no update
   media.** State it; do not let a partial result read as the whole item.
+
+### DONE this round — item 3, second ESP (18:14)
+Commits `d47694cf`, `1f119377`, `8898e58f`, `ed30f92b`, pushed. New job
+`windows-installer/lab/jobs/second-esp` + `hostverify.py`. Two boots (~60 s),
+both `APEXLAB-RUN-EXIT 0`, `STATUS PASS`, firmware IDENTICAL; host verification
+**9 checks, 0 failures**.
+- **must-measure #2, the `bcdboot` half — ANSWERED.** With two ESPs present and
+  no `/s`, `bcdboot C:\Windows` (exit 0) changed **4 files in Windows' OWN ESP**
+  and wrote **0 files into the new one** (access path proven usable by a probe
+  file first). `bcdedit` still names Windows' ESP before, after, and across the
+  reboot. So it does NOT behave like bootc's `find_first_colocated_esp()`.
+  **Limit stated, not buried: the second ESP was LATER in partition order, so
+  position-dependence — the case that would bite — is UNTESTED.**
+- **must-measure #2, tolerance — ANSWERED**: Windows boots normally with two
+  ESPs (phase 2 running is the proof).
+  **The feature-update and repair-install halves are NOT doable here (no
+  media) and remain OPEN.**
+- **must-measure #4 — ANSWERED as restated.** Literally worded it cannot hold
+  once a partition is added, so read as "Windows' own entries and ESP bytes
+  unchanged": Windows' ESP entry and the MSR entry are **completely
+  unchanged**; `C:`'s entry changed in `EndingLBA` **alone** (exactly 600 MiB);
+  one partition added, none removed; both GPT copies self-consistent.
+  **But Windows' ESP CONTENT changed by 42 483 bytes** — all Windows' own BCD
+  writes, two of the four files before `bcdboot` even ran. "APEX never writes
+  Windows' ESP" is a rule about APEX, **not** a claim the partition sits still.
+- **The `FirstUsableLBA` prediction is now a MEASUREMENT.** Windows rewrote
+  `golden.raw`'s GPT for real and the primary entry array **stayed at LBA 2**.
+  The `SET_DRIVE_LAYOUT_EX` relocation hazard is confirmed scoped to
+  1 MiB-reserve disks (Linux tooling's default — **APEX's own**), not
+  Windows-made ones.
+- **must-measure #1 deliberately NOT attempted and still OPEN**: telling which
+  of two ESPs firmware booted needs `BootCurrent` (volatile, absent from the
+  varstore) or a distinguishable payload. A confident wrong answer is worse
+  than a stated gap.
+- **Three defects in the job, all the same family** (a check that runs,
+  inspects nothing, reports a result), two of them introduced *while fixing*
+  the previous one: ESP found by `DriveLetter` which reads blank for ESP-typed
+  partitions; a manifest that returned empty for both "directory empty" and
+  "path absent"; and the usability probe itself returning a truthy array
+  whether it passed or failed. In PowerShell any uncaptured expression inside a
+  function joins its return value — every helper that both reports and decides
+  is this bug waiting to happen.
+
+### FINAL STATE (18:14)
+- `tests/test-windows-installer.sh`: **13 passed, 0 failed, 1 could-not-run**.
+  Section 0's write-API gate **UNCHANGED**; nothing was added to the .exe.
+- `guest-normal.txt` restored by a real survey run, `survey-complete` present.
+- `fixture-a.raw`, `fixture-b.raw` (10:20) and `golden.raw` (00:05) all still
+  pristine after **eight** guest runs this round — the qcow2 overlays held.
+- Working tree clean, everything pushed.
+
+### BLOCKED ON
+- nothing
+
+### NEXT for whoever picks this up
+1. **must-measure #1** (which of two ESPs firmware boots) — needs a
+   distinguishable payload in the second ESP, e.g. a systemd-boot or a
+   shim/unsigned stub that identifies itself, plus a `Boot####` entry created
+   against that partition. Or read `BootCurrent` in-guest via
+   `GetFirmwareEnvironmentVariable` (a READ; the denylist forbids the *write*).
+2. **`bcdboot` with the new ESP EARLIER in partition order** — the untested
+   half of the finding above, and the one that would actually bite.
+3. **PCR 5 on a machine with a TPM** — needs `swtpm` added to
+   `windows-installer/lab/Containerfile` and `-tpmdev`/`tpm-tis` on the qemu
+   line in `winlab`. The reading code is already in `bitlocker-discover`.
+4. **The mechanism choice itself** is the implementation's, and it now has the
+   measurement: M1 = 48 bytes and one table; M2 = 185 bytes, a relocated array
+   and a stale table, but only on 1 MiB-reserve disks.
