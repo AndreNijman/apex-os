@@ -136,3 +136,43 @@ A grep for the refusal's name would have passed the second mutation.
 
 No `esp-is-windows` verdict appears on the L16, correctly: it has no NTFS and
 no Windows on any disk.
+
+## 5. katana: the refusal does not strand it — but 512 MiB still does
+
+Read-only over ssh, 2026-09-21 17:31 AWST, checked idle first (no
+`steamwebhelper`, no `gamescope`, GPU 0%, load 0.56). **Nothing was written.**
+Addressed by PARTUUID throughout: katana's `nvme0n1`/`nvme1n1` reorder across
+ordinary reboots.
+
+```
+root:  /dev/nvme0n1p3  btrfs                     -> root's disk is nvme0n1
+ESP:   nvme0n1p2  512M  PARTUUID 99af3362-…  LABEL EFI-SYSTEM   (APEX's own)
+ESP:   nvme1n1p1  200M  PARTUUID 2ba9a2ea-…                     (Windows')
+neither ESP is mounted
+```
+
+`find_first_colocated_esp()` searches only the disks backing the root, so on
+katana it returns **99af3362**, APEX's own 512 MiB `EFI-SYSTEM`. Windows' ESP is
+on a *different physical disk* and is not reachable by bootc's search at all.
+
+Two things follow, and no ESP had to be mounted to establish either:
+
+- **`esp-is-windows` cannot fire on katana.** The refusal does not over-reach
+  into the machine the ESP decision calls "the cheapest first proof".
+- **The existing `esp-changes-disk` NOTE is the correct verdict there**: it
+  boots from 2ba9a2ea and would write 99af3362. That is precisely the
+  dependency on Windows' disk the decision wants removed.
+
+### But katana is blocked on `initramfs-slim` too, which the decision does not say
+
+`docs/apex-owns-its-esp.md` has katana needing "no new partition at all — it
+needs to start using the one it already has", and lists it as needing no shrink
+and no partitioning. True, and not sufficient: that partition is **512 MiB**.
+With today's 374 MiB per deployment, `need = 374*3 + 48 = 1170 MiB` and katana
+fails the fit check by more than 2x, exactly as the L16 does.
+
+**katana's per-deployment ceiling is ~154 MiB** — `(511 - 48)/3` — which is
+*tighter* than the L16's 180 MiB, because its ESP is 512 MiB rather than 600.
+So "it has to work in 512" and the katana proof are the same requirement, and
+both wait on `initramfs-slim`. Not derived from their numbers; derived from
+katana's partition and this engine's own formula.
