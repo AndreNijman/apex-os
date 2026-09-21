@@ -229,3 +229,182 @@ at every step.**
 | Row C1 — status reports the switch correctly | **fail** — race, measured at 1.42 s |
 | Row C2 — named-verb retry, loader/kernel disagreement | **pass** |
 | exit STOPS rather than restores a pre-existing scheduler | **limitation, witnessed** |
+
+---
+
+## 2. P2-005 / P2-006 / P2-007 — the lines only a booted machine answers
+
+`ROADMAP/evidence/P2-005-007-device-maturity.md` closes with Andre's checklist.
+Everything below follows it in order. **Graded off what `apex devices` prints**,
+because the whole defect that round removed was the tool saying "could not
+ask"; the raw `systemctl`/`nmcli` readings are the cross-check, not the
+criterion. Log `item2.log` / `item2b.log`, 03:34–03:36 AWST.
+
+### Step 1 — on the new image
+
+`bootc status --json` → the 44c9a5cb image named at the top of this file.
+Not re-derived; it is the same reading every section here is taken on.
+
+### Step 2 — the six lines. All six, with the checklist's own expected answers
+
+| line | checklist says | katana printed | verdict |
+|---|---|---|---|
+| `links` | a count, then one row per interface | `4`, then `wlo1 wifi connected` / `lo loopback connected (externally)` / `p2p-dev-wlo1 wifi-p2p disconnected` / `enp5s0 ethernet unavailable` | **pass** |
+| `connectivity` | `full, and checked` | `full, and checked` | **pass** |
+| `hotplug (udev)` | `systemd-udevd is running` | `systemd-udevd is running` | **pass** |
+| `paired devices` | a count or `none` | `none` | **pass** — see the finding below |
+| `this machine serves` | `nothing (no smbd, no nfs-server)` | `nothing (no smbd, no nfs-server)` | **pass** |
+| `auto-mount` | `udisks2 running` | `udisks2 running` | **pass** |
+
+None of the six says "could not be asked". On every container run of this tool,
+and on the L16 before the update, several of them did.
+
+Cross-check, all agreeing: `apex-firewall active`, `avahi-daemon active` and
+`enabled`, `systemd-udevd active`, `udisks2 active`, `bluetooth active`,
+`cups.socket active`, `smb`/`smbd`/`nfs-server` all `inactive`,
+`nmcli -t -f CONNECTIVITY general` → `full`.
+
+**The `connectivity` line is the one that could have silently failed.** It reads
+`full, and checked` rather than "not detected, because nothing checked", and
+`21-apex-connectivity.conf` is on disk at
+`/usr/etc/NetworkManager/conf.d/21-apex-connectivity.conf` — owned by **no rpm**,
+which is correct for a file the Containerfile writes — and its `/etc` merge copy
+is **byte-identical** (`cmp`). So the drop-in landed from the image rather than
+having been put there by hand.
+
+#### Finding: the `paired devices` count in the card's own starting sweep was wrong
+
+`/var/lab-scratch/katana-measure/after.txt` reported `paired devices : 2`, taken
+as `bluetoothctl devices | wc -l`. On katana:
+
+```
+bluetoothctl devices          2   (9C:44:3D:5D:EE:4D, 14:5A:FC:5C:1D:A2 "50PUT7605/79")
+bluetoothctl devices Paired   0
+bluetoothctl devices Bonded   0
+per-device from the bus:      Paired=no Bonded=no Trusted=yes   (both)
+```
+
+`bluetoothctl devices` lists every device the adapter *knows*, paired or not.
+`apex-devices` asks `bluetoothctl devices Paired`, which is the right question,
+and `none` is the right answer. **The tool is correct and the sweep was not** —
+recorded because the sweep is what a reader would have quoted.
+
+### Step 3 — the line that is a safety claim
+
+`hotspot / tethering` → **`nothing known is in the way`**, and the forbidden
+reading `not known — the firewall could not be asked` does **not** appear.
+`sudo apex firewall status` answers on this machine and says
+`not sharing this machine's connection on any link`, so the firewall genuinely
+was asked. **pass.**
+
+### Step 4 — avahi, printing and scanning
+
+avahi is `active` and `enabled` on katana; it was never masked here, so the
+unmask has nothing to do. `mDNS (avahi)` → `running`. **pass.**
+
+Two driverless printers are on this LAN, both found over mDNS:
+
+| | |
+|---|---|
+| `Canon TR4600 series` | `cA4D05300000.local` → `192.168.1.121:631`, `rp=ipp/print`, `Scan=T` |
+| `FUJIFILM ApeosPrint C325/328 dw` | `FF-1C7D224E44ED.local` → `192.168.1.213:631`, `rp=ipp/print` |
+
+`apex devices print` → `queues none configured` with the hint that names mDNS.
+Correct: no CUPS queue has been added, and adding one changes the machine.
+
+`apex devices scan` → `1 found`,
+`airscan:e0:Canon TR4600 series is a eSCL Canon TR4600 series ip=192.168.1.121`,
+which `scanimage -L` independently repeats. **pass.**
+
+#### The IPP path proved end to end, without printing anything
+
+The P2-005 evidence's own limit was "no print job has been sent". A job needs
+paper and a person. `ipptool` proves the protocol path instead — the machine
+opens 631 outbound through the shipped firewall, speaks IPP and gets a real
+response:
+
+```
+ipptool -t ipp://192.168.1.121/ipp/print get-printer-attributes.test   [PASS]
+ipptool -t ipp://192.168.1.213/ipp/print get-printer-attributes.test   [PASS]
+```
+
+and the attributes are the printers' own, not a stub:
+
+| | Canon | FUJIFILM |
+|---|---|---|
+| `printer-make-and-model` | `Canon TR4600 series` | `FUJIFILM ApeosPrint C325/328 dw` |
+| `printer-state` | `idle` | `idle` |
+| `printer-state-reasons` | `none` | **`toner-low-warning`** |
+| `ipp-versions-supported` | `1.1,2.0` | `2.0,1.1,1.0` |
+
+The FUJIFILM reporting its own toner level is the part a fixture could not
+fake. **Two vendors, one image, no paper.** P2-005 printing moves from
+"discovery reaches the machine" to "the IPP conversation completes"; sending a
+job is still not done and still needs a person.
+
+### Step 5 — the hotspot, end to end: **COULD-NOT-RUN**
+
+Two independent reasons, both named rather than worked around:
+
+1. **katana has exactly one usable link.** `nmcli` shows `wlo1` (wifi,
+   connected) and `enp5s0` (ethernet, **unavailable** — no cable).
+   `nmcli device wifi hotspot ifname wlo1` tears down the station connection
+   this session arrives over, so it severs ssh and leaves the machine off the
+   network with nobody at it. The card forbids exactly this class of step.
+2. The acceptance criterion needs **a phone to join the hotspot and resolve a
+   name**, which no agent has.
+
+What *can* be said without running it is already above: the firewall answered,
+`apex firewall status` reports `not sharing this machine's connection on any
+link`, and `hotspot / tethering` names no blocker.
+
+### Step 6 — the 802.1X exposure: **does not exist on katana**
+
+`enterprise Wi-Fi (802.1X)` → **`no saved profile uses it`**, and
+`system CA trust store` → `readable`. The exposure on record is the **L16's**
+two saved profiles, and the L16 is Andre's daily machine. Nothing was modified.
+**not applicable here; the L16 row stays open.**
+
+### Step 7 — sharing a printer
+
+`sharing a printer` → `off`; `this machine serves` → `nothing (no smbd, no
+nfs-server)`; `apex firewall status` → `exceptions you have added: (none)`.
+Consistent across the firewall, the tool and systemd. Starting a share changes
+the machine, so the `THE FIREWALL IS WHY` branch was not provoked.
+**pass on the reading; the failure branch stays fixture-proved.**
+
+### What `apex devices all` answered that the checklist did not ask about
+
+Worth recording because each is a real reading from a real machine, and several
+had never been taken outside a container:
+
+- `SD card slot` → `none — this kernel registered no MMC host`, with the note
+  that a USB card reader is not one of these.
+- `this session's seat` → `none`, with the explanation that udisks2 refuses to
+  mount for a seatless session. That is *this ssh session* being described
+  correctly, which is the tool distinguishing "absent" from "refused".
+- `camera (PTP) tooling` → `no — gphoto2 is absent`. A genuine gap in the image,
+  stated as one.
+- `Thunderbolt` → `no controller on this machine`; `USB-C ports` → `the kernel
+  exposes no Type-C class`, with the caveat that the ports may still work.
+- `headset codecs` → `aac aptx faststream g722 lc3 ldac opus-g opus sbc`.
+- `SMB/WebDAV/NFS/MTP/cameras (file manager)` all `yes`; `mount.cifs` and
+  `mount.nfs` both present. These are the packages the P2-005 round added,
+  present on a booted image for the first time.
+
+### P2-005/006/007 scorecard
+
+| item | criterion | verdict |
+|---|---|---|
+| P2-005 | printing — discovery | **pass** (two printers, mDNS, `_ipp`) |
+| P2-005 | printing — IPP path end to end | **pass** (`ipptool`, both vendors, no paper) |
+| P2-005 | printing — a job on paper | **could-not-run** — needs a person and paper |
+| P2-005 | scanning | **pass** (eSCL Canon TR4600, two independent tools) |
+| P2-005 | SMB/NFS/WebDAV/MTP/cameras floor | **pass** (all present on the booted image) |
+| P2-005 | a share actually mounted from a server | **could-not-run** — no server credentials |
+| P2-006 | `links`, `connectivity` | **pass** |
+| P2-006 | hotspot end to end | **could-not-run** — one link; would sever ssh; needs a phone |
+| P2-006 | 802.1X | **not applicable on katana** — no saved enterprise profile |
+| P2-007 | `hotplug (udev)`, `auto-mount` | **pass** |
+| P2-007 | Thunderbolt / USB-C / dock | **could-not-run** — no controller, no Type-C class on this hardware |
+| P2-007 | bluetooth adapter, radio, codecs, paired | **pass** |
