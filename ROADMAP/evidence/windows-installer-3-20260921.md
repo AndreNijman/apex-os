@@ -538,7 +538,7 @@ against pristine `golden.raw`:
 - Exactly one partition added, none removed; both rewritten GPT copies
   self-consistent with correct CRCs and agreeing with each other.
 
-**Windows' ESP *content* is NOT byte-identical: 42 481 of 104 857 600 bytes
+**Windows' ESP *content* is NOT byte-identical: 42 483 of 104 857 600 bytes
 changed (0.041%).** Every one of them is Windows writing its own BCD — the
 guest's file-level manifest names the four files, and two of them changed
 merely from shrinking `C:` and creating a partition, before `bcdboot` was run
@@ -587,5 +587,18 @@ against.
    `NOT MEASURED` instead of `UNCHANGED`, and the path is proven writable with
    a probe file first.
 
-Both are the dominant defect family in this repo: a check that runs, inspects
-nothing, and reports a result.
+3. And the guard added to fix (2) had the bug **a third time**:
+   `Test-PathUsable` emitted its verdict into the same pipeline as its return
+   value, so `$ok = Test-PathUsable …` captured a two-element array — truthy
+   whether the probe passed or failed. The check that licensed the phrase *"the
+   access path was proven usable"* could not itself fail, and its diagnostic
+   line never reached the transcript. The verdict now travels in a
+   script-scoped variable, the function only emits, and
+   `PATH-USABLE[second ESP]: YES -- created and removed a probe file` is in the
+   log of the run this section describes.
+
+All three are the dominant defect family in this repo: a check that runs,
+inspects nothing, and reports a result. Two of them were introduced *while
+fixing* the previous one, which is worth saying out loud — in PowerShell, any
+uncaptured expression inside a function joins its return value, so every helper
+that both reports and decides is this bug waiting to happen.

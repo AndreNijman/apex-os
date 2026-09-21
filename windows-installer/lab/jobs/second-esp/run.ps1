@@ -74,17 +74,17 @@ function Get-TreeManifest {
 # not evidence of anything.
 function Test-PathUsable {
     param([string]$Root, [string]$Tag)
-    if (-not (Test-Path $Root)) { Emit "PATH-USABLE[$Tag]: NO -- $Root does not exist"; return $false }
+    $script:PathUsable = $false
+    if (-not (Test-Path $Root)) { Emit "PATH-USABLE[$Tag]: NO -- $Root does not exist"; return }
     $probe = Join-Path $Root 'apexlab-probe.tmp'
     try {
         Set-Content -Path $probe -Value 'probe' -Encoding Ascii -ErrorAction Stop
-        $ok = Test-Path $probe
+        $ok = [bool](Test-Path $probe)
         Remove-Item $probe -Force -ErrorAction SilentlyContinue
-        Emit "PATH-USABLE[$Tag]: $(if ($ok) { 'YES -- created and removed a probe file' } else { 'NO -- write appeared to succeed but the file is not there' })"
-        return $ok
+        $script:PathUsable = $ok
+        Emit "PATH-USABLE[$Tag]: $(if ($ok) { 'YES -- created and removed a probe file' } else { 'NO -- the write reported success but the file is not there' })"
     } catch {
         Emit "PATH-USABLE[$Tag]: NO -- $($_.Exception.Message)"
-        return $false
     }
 }
 
@@ -197,16 +197,21 @@ if ($phase -eq 1) {
     # Get-Partition.DriveLetter even when diskpart has assigned one, so the
     # access path is PROVEN usable before any claim is based on what is or is
     # not in it.
-    $s2usable = Test-PathUsable 'S:\' 'second ESP'
+    Test-PathUsable 'S:\' 'second ESP'
+    $s2usable = $script:PathUsable
     if (-not $s2usable) {
         Emit "falling back to a directory mount point for the second ESP"
         New-Item -ItemType Directory -Path 'C:\esp2' -Force | Out-Null
         Add-PartitionAccessPath -DiskNumber 0 -PartitionNumber $esp2.PartitionNumber `
             -AccessPath 'C:\esp2' -ErrorAction SilentlyContinue
         $script:S2ROOT = 'C:\esp2'
-        $s2usable = Test-PathUsable $script:S2ROOT 'second ESP via mount point'
+        Test-PathUsable $script:S2ROOT 'second ESP via mount point'
+        $s2usable = $script:PathUsable
     } else { $script:S2ROOT = 'S:\' }
-    $pUsable = Test-PathUsable 'P:\' "Windows' own ESP"
+    Test-PathUsable 'P:\' "Windows' own ESP"
+    if (-not $s2usable) {
+        Emit "SECOND-ESP-PATH: UNUSABLE -- nothing this run says about the second ESP's contents is evidence"
+    }
     $s2Before = Get-TreeManifest $script:S2ROOT
     Emit "second-esp root: $($script:S2ROOT); files before bcdboot: $(if ($null -eq $s2Before) { 'NOT MEASURED' } else { $s2Before.Count })"
     Emit "--- BCDBOOT RUN: bcdboot C:\Windows, NO /s, two ESPs present ---"
