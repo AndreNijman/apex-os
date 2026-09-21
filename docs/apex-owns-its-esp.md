@@ -38,6 +38,21 @@ guarantee that is to never open the file for writing.
 
 ## The mechanism already mostly exists
 
+> **CORRECTION 2026-09-21 — two of the three bullets below are wrong, and they
+> were labelled "checked rather than assumed".** They were checked against
+> `--help` text; checked against bootc's source they do not hold for the
+> composefs + systemd-boot path, which is the only path APEX uses.
+> `crates/lib/src/bootc_composefs/boot.rs` reaches the ESP at four call sites
+> and every one is `find_first_colocated_esp()`; `boot_mount_spec()` appears
+> there only to build a `systemd.mount-extra=` karg and does **not** steer the
+> loader write. Both `BootSetupType::Upgrade` arms re-discover, so every later
+> `bootc upgrade` re-walks the GPT. Read at bootc 1.16.10 — the installed
+> version — and re-checked at 1.16.11. **The decision itself is unaffected**;
+> only the claim that the mechanism is nearly free. ESP preference can be
+> expressed only as GPT partition ORDER, which makes it a GPT change and so
+> must-measure #1. Full evidence:
+> `ROADMAP/evidence/migrate-preconditions-20260921.md` §1.
+
 Three things are already true on `roadmap/v2.2`, checked rather than assumed:
 
 - **`bootc install to-filesystem` uses the ESP the CALLER mounted.** Its own
