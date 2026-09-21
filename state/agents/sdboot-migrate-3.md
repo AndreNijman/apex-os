@@ -27,39 +27,36 @@ conclusion is WRONG — do not revive it.
 
 ## NEXT
 
-- **Building `localhost/apex-sdmig:v2` in ROOT's podman storage** as user unit
-  `sdb3-build-v2r`, log
-  `/var/lab-scratch/sdboot-migrate-3/build-v2-root.log`, context
-  `/var/lab-scratch/sdboot-migrate-3/v2/`. It is `apex-sdmig:v1` (= the
-  published `apex-os:daily`) brought up to what `roadmap/v2.2` actually
-  produces, for the **three** things the published tag is missing that between
-  them make a migration impossible — `rsync`, `systemd-boot-unsigned`, and the
-  `apex_sdboot` policy module + bless-boot drop-in. Every line is the branch's
-  own command, so the guest is the machine the branch builds rather than a lab
-  special. It also bakes the two lab accommodations (multi-user default,
-  lab-run drop-in with the timeout AND the `After=` ordering) so the guest needs
-  **no prep boot**.
-- Then, when the build succeeds:
-  1. `/var/lab-scratch/sdboot-migrate-3/run-install-c.sh` is already written
-     (v2, `apexmig-c.img`, 2 GiB ESP, **70 G** disk because of the ENOSPC
-     defect — say so in the evidence rather than pretending 45 G worked).
-     A Monitor (`bigkiwrs7`) chains the build into it automatically.
-  2. Boot 1 = `act-unit-3c.sh` + engine + `apex-boot-migrate-confirm.service`
-     (no prep boot needed now). Expect `auto rc=0`, `phase: committed`,
-     `counted the entry: bootc_fedora-43-1+3-0.conf`.
-  3. Boot 2 = `act-check-3.sh`. **This is where item 3 is decided.** Copy
-     `run-boot-b.sh` to `run-boot-c.sh` (swap the img/serial names), ceiling
-     5400 for boot 1 and 1800 for boot 2, keep `:z` and `--oci`, and
-     **never `--fresh-nvram`**.
-- Then evidence sections 5-6, commit, push, `## LANDABLE <sha>`.
-- **If the session dies here the branch is already worth landing.**
+- **Guest C's migration boot is RUNNING** as user unit `sdb3-boot-c1`
+  (launched 04:29 AWST, ceiling 5400 s), Monitor `bxf9rqyvn` armed. Guest C is
+  `apexmig-c.img` — 70 G disk, 2 GiB ESP, installed rc=0 from
+  `localhost/apex-sdmig:v2` (the image that matches what `roadmap/v2.2`
+  actually builds). Control disk holds `act-unit-3c.sh`, the engine with all
+  three changes (join fix + partial-install + the undecided splice), and
+  `apex-boot-migrate-confirm.service`. Serial:
+  `/var/lab-scratch/sdboot-migrate-2/apexmig-c-3.serial`.
+  Expect `auto rc=0`, `phase: committed`, and
+  `counted the entry: bootc_fedora-43-1+3-0.conf`.
+- Then the MIGRATED boot, which is the last measurement:
+  `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-check-3.sh`, drop
+  the ceiling in `/var/lab-scratch/sdboot-migrate-3/run-boot-c.sh` from 5400 to
+  1800, then `systemd-run --user --unit=sdb3-boot-c2 --collect
+  /var/lab-scratch/sdboot-migrate-3/run-boot-c.sh`.
+  **Never `--fresh-nvram`** — `BootNext` lives in
+  `/work/nvram-persist/VARS-apexmig-c.img.fd`.
+  **Before launching, check `ps -eo pid,args | grep '[q]emu-system'` and
+  `grep '[t]o-filesystem-lab'`** — a unit going inactive does not mean its
+  root-owned children died (see FOUND).
+- Then evidence section 6, the item-3 verdict written into the doc, commit,
+  push, and `## LANDABLE <sha>`.
+- **The branch is already worth landing without any of that.**
   `task/sdboot-migrate-3` is pushed at `cc6b883b`: four evidence commits and
-  **two real fixes with tests**, 91/91 green, no conflict with the current tip
-  (`git merge-tree` clean, and nothing else has touched
+  **two real fixes with tests**, 91/91 green, `git merge-tree` clean against
+  `origin/roadmap/v2.2`, and nothing else has touched
   `files/system/libexec/apex-boot-migrate` or `tests/test-boot-migrate.sh`
-  since the branch point). The worktree carries only the still-undecided
-  `count_staged_entry` splice; a backup is
-  `/var/lab-scratch/sdboot-migrate-3/engine-all.bak`.
+  since the branch point. The worktree carries only the `count_staged_entry`
+  splice, which on the evidence so far should be DROPPED — see the item-3
+  disposition below. Backup: `/var/lab-scratch/sdboot-migrate-3/engine-all.bak`.
 
 ### ITEM 3 — the disposition, as far as it is measured
 
@@ -136,8 +133,8 @@ fourth one.
 | apexmig-b | 3 | `act-unit-3b.sh` (retry, grown disk) | **DONE — install OK, state-join failed** |
 | apexmig-b | 4 | `act-unit-3c.sh` (join_state fix) | **DONE — bootc "File exists"** |
 | apexmig-b | 5 | `act-unit-3c.sh` (all fixes, state cleared) | **DONE — /var joined; no loader on the ESP** |
-| apexmig-c (2 GiB ESP, image **v2**, 70 G) | install | — | RUNNING (`sdb3-install-c4`) |
-| apexmig-c | 1 | `act-unit-3c.sh` (the migration) | chained by Monitor |
+| apexmig-c (2 GiB ESP, image **v2**, 70 G) | install | — | **DONE rc=0** |
+| apexmig-c | 1 | `act-unit-3c.sh` (the migration) | RUNNING |
 | apexmig-c | 2 | `act-check-3.sh` (the MIGRATED boot) | — |
 
 Every boot: `./setctl.sh <action> <extra files…>` first, and the qemu launch

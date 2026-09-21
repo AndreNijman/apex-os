@@ -99,11 +99,15 @@ branch is an oversight rather than a decision.
 
 ## NEXT
 
-- Wait for `Package engine` on run 35650126791 (`gh run view 35650126791`,
-  from /var/tmp/apex-work/wt-ci-selector-base), then write
-  `ROADMAP/evidence/ci-selector-base-20260922.md` with the step-4 report and
-  the red/green transcripts already in /var/lab-scratch/ci-selector-base.
-  Also still owed: the `build-image.yml` decision paragraph (BOUNDS).
+- Watch run **35651168049** (`gh run view 35651168049` from
+  /var/tmp/apex-work/wt-ci-selector-base) — pr-validation dispatched on
+  `task/ci-selector-base`. The only thing owed is `Static validation` going
+  green with the new step "A push to the integration branch selects what the
+  merge would". If it does, append that run id to the evidence file's gate
+  section, commit, push, and the unit is done. If python3/`mktemp` behave
+  differently on the runner, fix `tests/check-ci-selector-parity.sh` there.
+- Also still watching `Package engine` on run **35650126791** (step 4); record
+  its outcome in the evidence file's "Package engine" section.
 
 ## DONE
 
@@ -118,12 +122,21 @@ branch is an oversight rather than a decision.
   mut-no-zero-fallback (both fallbacks, rc=128).
 - Local gates green: check-suites-run-in-ci (107 suites, 100 in CI, 0 unrun),
   check-shellcheck-coverage (206 scripts, 0 newly failing), no-conflict-markers.
-- Step 4 full-matrix run dispatched and mostly read: 35650126791.
+- Step 4 full-matrix run dispatched and read: 35650126791 (all four jobs
+  selected; classified over 57f593ad..6fa9ddbc).
+- `ROADMAP/evidence/ci-selector-base-20260922.md` written, committed, pushed.
+- `build-image.yml` decision written into the evidence: do NOT change it — its
+  push trigger is `main` only, so the push IS the merge; it uses
+  dorny/paths-filter with fetch-depth 2; and the file records that having
+  build-image.yml in the `core` filter once cost a 55-minute rebuild and a
+  fleet-wide ~5 GB reissue for a CI-only commit.
+- **Pushed: `task/ci-selector-base` @ `d012b5bb`.**
 - Run block measured 9,160 -> 10,959 chars against the 21,000 cap.
 
 ## IN PROGRESS
 
-- Evidence file not yet written.
+- Two CI runs outstanding: 35651168049 (the branch, proves the gate runs on a
+  runner) and `Package engine` on 35650126791 (step 4's last job).
 
 ## FOUND
 
