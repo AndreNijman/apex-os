@@ -12,8 +12,8 @@
 #  whiptail text UI, reached as a fallback whenever the graphical installer
 #  failed to start — and that fallback is exactly where real users kept getting
 #  stranded, so the text UI was deleted outright (not hidden behind a flag;
-#  a hidden path nobody tests is how the stranding happened). There are exactly
-#  two ways to run this engine:
+#  a hidden path nobody tests is how the stranding happened). There are three
+#  ways to run this engine, and only the first two touch a disk:
 #
 #    apex-install --headless ANSWERS   driven by the graphical front end
 #                                      (apex-installer-gui, started via
@@ -25,6 +25,12 @@
 #                                      <reason>` on any failure.
 #    apex.unattended (kernel cmdline)  TEST/CI only — see the marker-file gate
 #                                      below.
+#    apex-install --check-passphrase   a one-shot, no-disk advisory check the
+#      LAYOUT [VARIANT] <<< PASSPHRASE GUI calls from the encrypt page, before
+#                                      the confirm step: can this keyboard
+#                                      layout type this passphrase at the
+#                                      unlock prompt? Prints one line, always
+#                                      exits 0. See the case arm for why.
 #
 #  Run with no arguments it refuses (exit 2) and points at the graphical
 #  installer. It never prompts for anything.
@@ -1269,6 +1275,42 @@ fi
 # so it must never be world-readable or logged.
 case "${1:-}" in
   --headless) ANSWERS="${2:-}" ;;
+  # A ONE-SHOT, NO-DISK check the GUI calls from the encrypt page itself,
+  # BEFORE the confirm step — not after it, on the progress page, which is
+  # where this same verdict used to surface (see the UNLOCK_KEYMAP block
+  # below: it is the identical logic, run here in isolation). Nothing is
+  # partitioned, nothing is mounted, no answers file is read. The passphrase
+  # comes off stdin, one line, never argv: this engine never puts a secret
+  # where `ps` or /proc/PID/cmdline can see it, and this mode does not start
+  # that now. Prints exactly one line and exits 0 whether or not the layout
+  # can type the passphrase — this is advisory information for a form field,
+  # not a guard, and a non-zero exit here must never be read as "refuse the
+  # install".
+  #   apex-install --check-passphrase LAYOUT [VARIANT]  <<< "PASSPHRASE"
+  --check-passphrase)
+    _cp_layout="${2:-}"
+    _cp_variant="${3:-}"
+    IFS= read -r _cp_pass || true
+    if [ -z "$_cp_layout" ]; then
+      echo "typeable: unknown reason=no-layout"
+      exit 0
+    fi
+    _cp_console=$(console_keymap_for "$_cp_layout" "$_cp_variant" "")
+    # Same gate as the real install path just below: `us` is never checked,
+    # because the unlock prompt only ever falls back TO `us` — a layout that
+    # already resolves there has nothing to fall back from.
+    if [ -z "$_cp_console" ] || [ "$_cp_console" = us ]; then
+      echo "typeable: yes console=${_cp_console:-us}"
+      exit 0
+    fi
+    _cp_verdict=$(keymap_can_type "$_cp_pass" /usr/lib/kbd/keymaps "$_cp_console")
+    case "$_cp_verdict" in
+      yes)  echo "typeable: yes console=$_cp_console" ;;
+      no:*) echo "typeable: no console=$_cp_console chars=${_cp_verdict#no:}" ;;
+      *)    echo "typeable: unknown console=$_cp_console" ;;
+    esac
+    exit 0
+    ;;
   "")
     # Not an install path — refuse loudly, start nothing, prompt for nothing.
     restore_console
@@ -1276,7 +1318,7 @@ case "${1:-}" in
     echo "Run the graphical installer (apex-installer-launch), or pass --headless ANSWERS." >&2
     exit 2
     ;;
-  *)          die "unknown argument: $1 (expected --headless ANSWERS)" ;;
+  *)          die "unknown argument: $1 (expected --headless ANSWERS or --check-passphrase LAYOUT [VARIANT])" ;;
 esac
 
 [ -f "$ANSWERS" ] || die "answers file not found: $ANSWERS"
@@ -2234,6 +2276,20 @@ elif [ "$ENCRYPT" = yes ]; then
     BOOT_UUID=$(blkid -s UUID -o value "$BOOT_PART" 2>>"$LOG" || true)
     if [ -n "$BOOT_UUID" ]; then
       LUKS_KARGS+=(--boot-mount-spec "UUID=$BOOT_UUID")
+    fi
+    # TEST-ONLY, environment-only, same shape as APEX_LUKS_ENROLL_LOCAL and
+    # APEX_RECOVERY_DIR above: never read from the answers file or the kernel
+    # command line. A space-separated list of raw kernel arguments appended
+    # to this install only. Exists so a boot-lab script can make the
+    # INSTALLED kernel and systemd visible on a serial console (e.g.
+    # `console=ttyS0,115200 loglevel=7 systemd.log_target=kmsg`) without this
+    # engine knowing anything about qemu — the property under test is that a
+    # disk this installer writes actually boots, and that needs eyes on it.
+    if [ -n "${APEX_LUKS_EXTRA_KARGS:-}" ]; then
+      # shellcheck disable=SC2086  # intentional word-splitting, same pattern
+      # as `for k in $(kvall apex.karg)` above: each word is its own --karg.
+      for _xk in ${APEX_LUKS_EXTRA_KARGS}; do LUKS_KARGS+=(--karg "$_xk"); done
+      log "luks: extra test-only kargs in use (APEX_LUKS_EXTRA_KARGS='$APEX_LUKS_EXTRA_KARGS')"
     fi
     log "luks kargs: ${LUKS_KARGS[*]}"
     set_nvram_args_for "$DISK"
