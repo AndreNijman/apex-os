@@ -163,6 +163,11 @@ YAML with nothing but python3's standard library, deliberately, because the
 runner image is not contracted to carry PyYAML and a gate that cannot run is
 worth nothing.
 
+The rest of that run reproduces the base exactly — `Static validation`,
+`Select tests`, `Rust validation` and `Android client` green,
+`Installer safety and UI` red on the same disk-encryption step. The change adds
+no new red.
+
 The five assertions that pass in both directions are the point of the second
 list: they are the evidence that the fallbacks were not regressed while the
 base was changed.
