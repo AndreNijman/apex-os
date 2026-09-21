@@ -1,4 +1,4 @@
-## LANDABLE — `b4e7ba84`
+## LANDABLE — `e6ecc4e9`
 
 **Both of round 38's UNPROVEN results are now proven.** (a) payload-write's
 host-side byte verification is done — 13 checks, 0 failures; (b)
@@ -13,6 +13,14 @@ but does NOT refuse one into a lettered RAW volume — and the doc now says so.
 (guest, needs `APEX_WINLAB_GUEST=1`). Section 0's write-API gate is UNCHANGED;
 no write path was added to the binary. Merged `origin/roadmap/v2.2` (b137f03f)
 clean. Landing this breaks nothing.
+
+**Also landed in this round:** the GPT write-mechanism measurement the second
+product decision (`b137f03f`) explicitly handed to this unit — one boot, 13
+host checks, 0 failures. Windows **permits** a raw write to LBA 2–33 of the
+disk it booted from AND `SET_DRIVE_LAYOUT_EX` on it; and
+`SET_DRIVE_LAYOUT_EX` **relocates the primary entry array from LBA 2 to LBA
+2016 and leaves the stale old table at LBA 2**. `docs/apex-owns-its-esp.md`
+now records the result inline.
 
 ---
 
@@ -612,3 +620,54 @@ orchestrator asked you to take reduce to must-measure #2 (Windows tolerates a
 second ESP across a feature update, a repair install and `bcdboot`) and #4
 (Windows' boot path byte-identical either side, GPT included). Those still need
 your guest. `migrate-preconditions` did not touch your card or your lab.
+
+### DONE this round — item 2, the GPT write mechanism (17:55)
+Commits `3acd27b5`, `63e16ef5`, `10166af3`, `e6ecc4e9`, pushed. New job
+`windows-installer/lab/jobs/gpt-write-mechanism` + its `hostverify.py`.
+One boot (~30 s), `STATUS PASS`, firmware IDENTICAL; host verification
+**13 checks, 0 failures** (`/var/lab-scratch/windows-installer-3/hostverify-gpt.log`).
+This is the measurement `docs/apex-owns-its-esp.md` (second decision) said was
+mine; the doc now records the result inline.
+- **The doc's stated unknown is answered: Windows PERMITS a raw write to
+  LBA 2–33 of the disk it booted from** (`IsSystem=True, IsBoot=True`), and
+  permits `SET_DRIVE_LAYOUT_EX` on it too. Probed with no-ops; the host
+  confirms the system disk's primary AND backup GPT are byte-identical to
+  pristine `golden.raw` afterwards. So "Windows will not let you" is **not**
+  an available safety property for the partition table either — the SECOND
+  time this round a claimed platform backstop turned out not to be there.
+- **Both mechanisms work**; all four CRCs correct in both cases; **neither
+  writes a byte of partition content**.
+- Raw RMW: Windows' view is **stale** until `IOCTL_DISK_UPDATE_PROPERTIES`
+  (`0x00070140`), which fixes it — the doc's prediction, confirmed.
+- **`SET_DRIVE_LAYOUT_EX` RELOCATES the primary entry array, LBA 2 → LBA
+  2016, and leaves the old array at LBA 2 untouched.** Two disagreeing
+  partition tables in the primary GPT area, the stale one at the LBA every
+  hardcoded GPT reader uses. That is its real price. Our tool reads
+  `PartitionEntryLBA` properly; other tools on a user's machine may not.
+- **Invariant 3 exercised**: both copies saved to a 33 792-byte file before
+  the change, restored after, `UNDO-BYTE-EXACT: YES`.
+- Three defects found in the job BY RUNNING IT, all fixed and documented:
+  PS 5.1 parses `0xFFFFFFFF` as Int32 `-1` (so every CRC was an exception and
+  every `ok=False` was its own bug); `FileStream`'s 64 KiB buffer over-reads
+  past the end of the device when reading the last-sector backup header; and a
+  failed header read became a record of nulls, so `EntriesLba * 512` was 0 and
+  backup-GPT writes landed on the protective MBR.
+- `guest-normal.txt` restored with a real survey run (`survey-complete`
+  present, PASS). `tests/test-windows-installer.sh`: **13 passed, 0 failed, 1
+  could-not-run**. Section 0 write-API gate UNCHANGED.
+
+### NEXT (updated 17:56)
+must-measure **#1, #2 and #4** from `docs/apex-owns-its-esp.md` — the
+second-ESP items — are **NOT DONE and remain open**. `migrate-preconditions`'
+card confirms it takes none of the four lab measurements, so they are this
+unit's. The job to write:
+`windows-installer/lab/jobs/second-esp/run.ps1` — shrink `C:` with
+`Resize-Partition` (the user's own act in the real flow), create a second ESP
+(`New-Partition -GptType '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' -Size 512MB`,
+format FAT32), copy Windows' own `bootmgfw.efi` into it under a distinct path,
+reboot, and check firmware boot-entry resolution (#1), that Windows still boots
+and tolerates it (#2, partial), and that Windows' own ESP + GPT are
+byte-identical against pristine `golden.raw` (#4) using the `hostverify.py`
+pattern already in `jobs/gpt-write-mechanism/`.
+**#2 "across a feature update" is NOT doable in this lab — there is no update
+media.** Say that; do not let a partial result read as the whole item.

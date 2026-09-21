@@ -15,9 +15,20 @@ exactly what makes it two seconds to diagnose instead of forty minutes.
 
 Confidence rests on a specific fact, checked not assumed: the **ethernet gate
 was never on `roadmap/v2.2`** — round 1 introduced it on this branch — while
-the eight unlock-chain gate references **are** already on `roadmap/v2.2` and
-have passed real builds. So this branch no longer adds a build-breaking gate,
+the eight unlock-chain gate references **are** already on `roadmap/v2.2`,
+unchanged by this branch. So this branch no longer adds a build-breaking gate,
 and it changes none of the gates that already work.
+
+**If the first build fails on an `unlock-*` gate, that is a v2.2 gate, not
+this branch's.** I cannot claim those have passed a real build: the only real
+image I could inspect (the lab disk) PREDATES `files/dracut/apex-unlock-hint/`,
+which is exactly why the suite tests them against a synthetic listing and says
+so out loud.
+
+Checked before claiming landable: `--vmlinuz "/usr/lib/modules/${KVER}/vmlinuz"`
+is a path the build already hard-verifies itself at `Containerfile.core:355`,
+and it exists in the real deployment at 16,910,408 bytes. The script FATALs if
+it is absent, so this was worth confirming rather than assuming.
 
 ---
 
