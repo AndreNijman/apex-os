@@ -328,3 +328,12 @@ A live interactive session (Andre driving) is already orchestrating this roadmap
 2026-09-21 01:43:10 resume session ended (exit 0)
 2026-09-21 09:57:06 report refreshed (175 lines)
 2026-09-21 09:57:06 starting a resume session (36 items outstanding)
+Two more updates, both good:
+
+**kernel-build-2**: found and fixed a real long-standing bug — `Containerfile.core` declared `ARG APEX_KERNEL_IMAGE` *inside* a build stage rather than before the file's first `FROM`, so `FROM ${APEX_KERNEL_IMAGE} AS kernel-rpms` always resolved empty. This meant **core could never have built against the kernel tier with any value of that arg, ever** — a latent bug nobody had hit because this is the first time anyone's tried building core against APEX's own kernel. Fixed, and the second build attempt is now well past that point (installing the kernel RPMs). Still running.
+
+**sdboot-migrate-2**: shipped a real fix (root-filesystem free-space precheck before migration, committed and pushed), and is now running the btrfs lab experiments. Worth flagging: it discovered a **worktree I didn't dispatch** (`wt-sdboot-xbootldr`) is concurrently running its own `bootc install` lab work against the same file (`apex-boot-migrate`) — likely Andre working directly in his own interactive session rather than a roadmap agent. My agent checked for line-level overlap before editing, found none, and proceeded carefully rather than colliding. No action needed from me — just noting it since it means landing this file later will need a real three-way merge, not independent cherry-picks.
+
+Still waiting on windows-installer-3, luks-installer-2, luks-enroll-2, and the kernel-build-2/sdboot-migrate-2 lab runs to finish.
+2026-09-21 11:12:52 report refreshed (216 lines)
+2026-09-21 11:12:52 skipped: agents are still writing output

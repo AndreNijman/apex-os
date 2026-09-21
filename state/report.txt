@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-21 09:56 AWST
+APEX ROADMAP — resume report — 2026-09-21 11:12 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -16,12 +16,53 @@ APEX ROADMAP — resume report — 2026-09-21 09:56 AWST
 ────────────────────────────────────────────────────────────────────────────
   agents
 ────────────────────────────────────────────────────────────────────────────
+  kernel-build-2 unknown    P1-043                             task/kernel-build-2
+             head 76aa2b95 feat(android): publish the release signing certificat
+             dirty 1 file(s), 0 unpushed, card 41m
+             NEXT 1. DONE — see below. Do NOT run `podman save | sudo podman load` a
+
+  sdboot-migrate-2 unknown                                       task/sdboot-migrate-2
+             head 234cc4dc fix(boot): refuse a migration the root filesystem can
+             dirty 0 file(s), 0 unpushed, card 44m
+             NEXT 1. Item 1 (the APEX/btrfs lab run) is set up and running in the ba
+
+  windows-installer-3 unknown                                       task/windows-installer-3
+             head ed6955fc test(windows): exercise the diskpart set id= remedy i
+             dirty 4 file(s), 0 unpushed, card 38m
+             NEXT 1. Priority 4 (payload deployment), synthetic payload only. Write 
+
+  luks-installer-2 unknown    L-002                              task/luks-installer-2
+             head 05b0ea55 feat(luks): apex-install --check-passphrase, a no-dis
+             dirty 1 file(s), 0 unpushed, card 39m
+             NEXT 1. **Read the result of the first boot run before doing anything e
+
+  luks-enroll-2 unknown    L-003                              task/luks-enroll-2
+             head b9844c8e feat(boot-v2): a STAGED guest scenario for the PCR 7 
+             dirty 1 file(s), 0 unpushed, card 28m
+             NEXT 1. **Run `luks-pcr7` for real on katana — not yet done.** Commit `
+
+  android-release-2 unknown                                       task/android-release-2
+             head 76aa2b95 feat(android): publish the release signing certificat
+             dirty 0 file(s), 0 unpushed, card 50m
+             NEXT Once roadmap/v2.2 lands on main: `gh workflow run release-android.
+
 
 ────────────────────────────────────────────────────────────────────────────
   unlanded work (content-checked against roadmap/v2.2)
 ────────────────────────────────────────────────────────────────────────────
-  int-os:  tip 76aa2b95 feat(android): publish the release signing certificat
-    (nothing — every task branch's content is on the integration tip)
+  int-os:  tip 4031d43f Merge task/sdboot-xbootldr into roadmap/v2.2
+    task/kernel-publish
+      3dc80629 fix(core): declare APEX_KERNEL_IMAGE before the first FROM   [0/10 added lines on tip]
+    task/luks-enroll-2
+      b9844c8e feat(boot-v2): a STAGED guest scenario for the PCR 7 in-boot    [3/10 added lines on tip]
+    task/luks-installer-2
+      21fc3dc4 feat(luks): boot a disk this installer actually produced, fir   [4/10 added lines on tip]
+      05b0ea55 feat(luks): apex-install --check-passphrase, a no-disk keymap   [0/10 added lines on tip]
+    task/sdboot-migrate-2
+      234cc4dc fix(boot): refuse a migration the root filesystem cannot hold   [0/10 added lines on tip]
+    task/windows-installer-3
+      f1fc1cdb fix(windows-installer): give the target-disk fixtures a qcow2   [0/10 added lines on tip]
+      ed6955fc test(windows): exercise the diskpart set id= remedy in the la   [2/10 added lines on tip]
 
   int-shell:  tip 9567586 Merge task/focus-switcher into roadmap/v2.2 (apex-shel
     (nothing — every task branch's content is on the integration tip)
@@ -58,12 +99,12 @@ APEX ROADMAP — resume report — 2026-09-21 09:56 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 09:56:40 AWST 23s
+  snapshot timer: active   last 11:12:28 AWST 22s
   wip refs:
     apex-os    dd3496b  apex-os-
     apex-os    ea0c64e  apex-os-windows-installer-
     apex-os    ef1a6fb  int-os-
-    apex-os    9ae578f  roadmap-state
+    apex-os    83ff15a  roadmap-state
     apex-os    4d32e35  wt-ai-apps-
     apex-os    dd974a7  wt-android-release-
     apex-os    9d0f766  wt-android-signing-
@@ -86,7 +127,7 @@ APEX ROADMAP — resume report — 2026-09-21 09:56 AWST
     apex-os    e354d6f  wt-gaming-release-
     apex-os    de7dff9  wt-gaming-scx-
 sed: couldn't flush stdout: Broken pipe
-    apex-shell 830057e  apex-shell-
+    apex-shell d9abf57  apex-shell-
     apex-shell bcfe98f  base-
     apex-shell b73bf3f  int-shell-
     apex-shell 68c971d  wt-base-shell-
@@ -115,15 +156,11 @@ sed: couldn't flush stdout: Broken pipe
 ────────────────────────────────────────────────────────────────────────────
   next
 ────────────────────────────────────────────────────────────────────────────
-  0 agent(s) dispatched, ceiling 6
+  6 agent(s) dispatched, ceiling 6
 
   READY (dependencies believed satisfied — confirm against the agent table above):
-    final-image    P0-001                           Build the image carrying the last two fixes, before the L16 
-    kernel-btf-scx P1-043                           No sched-ext scheduler can load: the baked kernel's BTF pred
     luks-installer L-002                            The installer cannot create a LUKS2 volume at all
     luks-enroll    L-003                            TPM auto-unlock by default, where safe is a measured precond
-    windows-installer                                  A portable Windows app that installs APEX into an empty part
-    sdboot-image                                    Pivot every machine to systemd-boot: UKIs, signing, blessing
     android-release                                  Publish the Android APK as part of a release, signed and ver
 
   HELD:
@@ -161,6 +198,10 @@ sed: couldn't flush stdout: Broken pipe
     integrated-image — CLOSED BY HAND: CLOSED 2026-09-20 (round 34) -- DONE, and it is the first time the whole thing has been built and put on hardware together. Image build run 35461554871, workflow_dispatch on task/integrated-image @ 97c9e8f2, green end to end in 1h12m, every job's STEPS read rather than assumed. Tag ghcr.io/andrenijman/apex-os:apex-97c9e8f25ee55593a97502505f51c6115ebbee7c at digest sha256:55fc9e4ee9b2c1b27045cba5a594a40e97fb0d73c70170cfbe0003f5cd4d73b0; it pinned apex-shell roadmap/v2.2 03d77f96 through the ordered fallback and moved NO floating tag, so nothing but katana saw it. katana was switched and rebooted onto it and ALL FOUR rows this unit owed are confirmed: pkg-update, gaming-release, p2-b and the coredump drop-in. Each unit's own `closed` note carries its numbers. TWO DEFECTS FOUND AND NOT FIXED HERE, deliberately, because the image under qualification was already built and on the machine: (a) apex-pkg's install_etc writes /etc with cp -a and never relabels, so /etc/.pwd.lock lands mislabelled and breaks DynamicUser=yes for six units including capsule@.service and rpm-ostreed, with NO AVC logged - and it RECURS on every extension rebuild with whatever wrong type the extraction tree carried, so it breaks the machine only sometimes; (b) apexd runs `scxctl switch` where the machine needs `scxctl start`, so sched-ext has never loaded while apex game status claims it did. Both want their own unit, and (a) should land BEFORE the main merges because the L16 rebuilds its clippy extension on first boot. THE L16 HALF IS ANDRE'S and was not touched. Merge order when he does it: apex-shell roadmap/v2.2 -> main FIRST (Containerfile.base carries ARG APEX_SHELL_REF=main), THEN apex-os. Evidence ROADMAP/evidence/integrated-image-20260920.md and katana-pwd-lock-selinux-20260920.md; card ROADMAP/state/agents/integrated-image.md.
     pkg-etc-label — CLOSED BY HAND: CLOSED 2026-09-20 (round 33) -- fixed and landed as merge 661a9d80. install_etc collects every path it creates or overwrites AS IT GOES and hands the list to `restorecon -F -i -f`, so the label comes from the LOADED POLICY instead of from `cp -a` preserving the extraction tree's rpm_var_lib_t. Each branch records only what it actually wrote; a directory is recorded only when WE create it, because mkdir inherits the parent's type (wrong for e.g. /etc/cron.d -> system_cron_spool_t); the removal pass records survivors no installed package owns, which is the class the katana leftover belonged to. `-F` IS LOAD-BEARING: a bare restorecon silently DECLINES any type in the policy's customizable_types list, says `not reset as customized by admin`, and still exits 0. stderr is deliberately not swallowed -- this defect reported nothing for months, so a fix that could also report nothing would not be one. `label_tree` is untouched ON PURPOSE: split_out_of_image has already moved /etc out of the payload root before it runs. SELF-HEALING SIDE EFFECT: because the pass relabels tracked paths it declines to delete, the next `apex install` or `apex update` repairs a machine that already carries the mislabel. THE GATE asserts the property over EVERYTHING the pass writes, never over .pwd.lock (only where it bit). Real packages decide which paths exist, a before/after CTIME snapshot decides which the pass touched (a directory counts only when new, because a dir's ctime moves when a child lands in it), and the engine runs TWICE because the SECOND install is the overwrite that broke katana. Enforced 21/0; coverage-forced 9/0 which is the CI floor. Every control fires, including a pre-fix replica reproducing the katana finding exactly (58 files wrong). The suite REFUSES TO DEGRADE SILENTLY: a host with /sys/fs/selinux/enforce that does not run the enforced leg is a FAIL, not a skip. CI floor is 9 because ubuntu-24.04 has no SELinux AND podman's rootfs is mounted `context=` where setxattr security.selinux is EOPNOTSUPP. THE SUITE HAS NEVER RUN ON AN UBUNTU RUNNER -- if that job goes red, read PROBE_MODE/PROBE_CAPABILITY first. ONLY A REAL MACHINE CAN CONFIRM: that a DynamicUser unit starts after an install (no PID 1 in a container), that restorecon resolves against APEX's loaded policy rather than Fedora 43's policy rpm, and that the extraction tree comes out rpm_var_lib_t on its own (the suite chcons it to reproduce katana exactly).
     gaming-scx — CLOSED BY HAND: CLOSED 2026-09-20 (round 33) -- fixed and landed as merge faa1992d. scxctl has TWO verbs and they are not interchangeable: `start` attaches when none is running, `switch` replaces one that is, and each REFUSES in the other's state. APEX loads nothing at boot so the first entry always finds none, and the code hardcoded `switch`. Swapping in `start` would have been the same mistake spelled differently -- correct on every machine APEX ships today, wrong on any machine already running a scheduler. The verb is now READ off /sys/kernel/sched_ext/state with one retry on whichever verb the loader's own error names; both refusal strings came out of the shipped scxctl 1.1.2 binary, not guesswork. THE STATUS WAS THE EXPENSIVE HALF: scxctl exiting 0 is a fact about scxctl. The writer now waits (bounded, 2 s) and reports what it read from the KERNEL. `not loaded` keeps its cause -- scxctl refused, or scxctl exited 0 and the kernel still reads disabled (the general form of this defect), or no CONFIG_SCHED_CLASS_EXT (a DEFINITE answer, not an unknown). `unknown` is only an unreadable state or one caught mid-transition, never rounded to either neighbour. Outcome gained a third variant because two could not hold `I could not tell`. SIBLING AUDIT, same shape next door: gpus_locked was cloned from the plan while run_nvidia_smi's refusal went unread, so a GPU whose lock was REJECTED was reported as locked; and game_exit discarded every outcome but a hard Err, so a refused restore was silent under a line asserting the machine had been put back. Both fixed. TWO DOCUMENTS CLAIMED KATANA RAN scx_lavd FOR 75 MINUTES. Nothing was running. Corrected in place and marked as corrections. RUN-BOOK: the `sched_ext/state expect: enabled` row is DELETED -- it read disabled throughout, so it passed on a file that never moved; the 6.6 destroy step is now `kill -9` the owner, because a greetd restart leaves the script alive to run its own trap and was testing the cooperative path; governor and sched-ext are now a named PAIR of non-discriminators on katana. ONE MUTATION ESCAPED THE FIRST PASS (MB11): nothing pinned the plan-time note, so restoring the sentence that had claimed a scheduler on three images turned nothing red -- a gate that inspects nothing, inside the work fixing a gate that inspects nothing. Two assertions added, caught both ways; the near-miss is in the evidence. KNOWN AND STATED: game mode STOPS a scheduler it found running rather than restoring it (`scxctl restore` would be the fix); that branch has never been reached. Three rows in 6.8 need hardware, including the `switch` branch a fixture cannot honestly stand in for.
+    final-image — CLOSED BY HAND: CLOSED BY HAND (round 36, 2026-09-21). Per the unit's own card: 'Nothing in this unit is outstanding.' The image was built, both fixes (etc labelling, sched-ext verb) confirmed on katana hardware, evidence committed, P0-001 recorded partial. Everything left (merge apex-shell then apex-os to main, main build, L16 apex update+reboot) is Andre's / the held `final` unit's, not a dispatchable agent task.
+    kernel-btf-scx — CLOSED BY HAND: CLOSED BY HAND (round 36, 2026-09-21). Diagnosis-only work; landed round 35 as part of the kernel-build merge. Continuation (deciding APEX builds its own kernel, building it, wiring core) happened under the kernel-build card and now continues as kernel-build-2. P1-043 stays partial/tracked there, not here. Re-open only if a reason emerges to redo the BTF diagnosis itself.
+    windows-installer — CLOSED BY HAND: CLOSED BY HAND (round 36, 2026-09-21). No card was ever written at this slug; round 35's real work landed under windows-installer-2 (a real Windows VM lab, three defects found). Continuing as windows-installer-3. Re-open only if this exact slug is needed for something windows-installer-2/3 do not own.
+    sdboot-image — CLOSED BY HAND: CLOSED BY HAND (round 36, 2026-09-21). This slug's code (bootupd_t SELinux module, apex-boot-count, the pivot design) landed round 35. Work continued under sdboot-migrate (in-place migration engine, which corrected this card's own 'no in-place converter, must reinstall' conclusion) and now continues as sdboot-migrate-2. Re-open only if fresh sdboot-image-specific work (not migration) is needed.
 
 ────────────────────────────────────────────────────────────────────────────
   how to resume
