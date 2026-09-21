@@ -30,3 +30,18 @@ apex fleet status
 # does today. `apex fleet report --dry-run` is that verb."
 apex fleet report
 
+
+# docs/apex-owns-its-esp.md opens with Andre's decision in his own words:
+# "windows side install should be like everything else with the systemd-boot.
+# maybe it should build a new esp for apex or something." That is a quotation
+# of SPEECH, not a claim that a verb exists — but `mentions()` scans prose, not
+# just backticked text, so it reads "apex or something" as a two-word verb and
+# refuses it. roadmap/v2.2 went red on exactly this the moment the doc landed.
+#
+# The line is here rather than in the document because the document's whole
+# value is that the decision is recorded verbatim; rewording Andre to satisfy a
+# regex would destroy the only thing it is for. The extractor's real limitation
+# is that it cannot tell an English function word from a subcommand name —
+# nothing is or will be named `or` — and tightening it is a separate change
+# with its own both-ways test, not something to smuggle in behind a doc fix.
+apex or something
