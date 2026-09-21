@@ -432,3 +432,88 @@ Three things read straight off it:
 The entry is `bootc_fedora-43-1.conf` — **uncounted**. `count_staged_entry`,
 the uncommitted splice item 3 turns on, runs *after* `join_state` in
 `cmd_stage`, so this run never reached it.
+
+---
+
+## 5. Two more things that make the published image unmigratable — and the check that caught the second one
+
+With the `join_state` fix on the control disk and the leftover deployment
+cleared by hand (as the new `partial-install` refusal instructs), the migration
+gets one step further every time. Two more blockers turned up, and both are the
+same story as §1's `no-rsync`: `roadmap/v2.2`'s Containerfiles are right and the
+**published `apex-os:daily` tag is older than them**.
+
+### 5.1 `bootc install --bootloader systemd` exits 0 having installed no loader
+
+The run reached the end of the whole sequence:
+
+```
+Installing image: docker://localhost/apex-sdmig:v1
+Bootloader: systemd
+Installing bootloader via systemd-boot
+Installation complete!
+apex-boot-migrate: restored /EFI/BOOT/BOOTX64.EFI to what it was
+apex-boot-migrate: joined /var: moved the machine's var into the composefs stateroot,
+apex-boot-migrate:              left /sysroot/ostree/deploy/default/var -> ../../../state/os/default/var
+apex-boot-migrate: carried /etc across (47M)
+apex-boot-migrate: FAILED [incomplete-stage]
+    The install reported success but EFI/systemd/systemd-bootx64.efi is not on the ESP.
+```
+
+Loop-mounted the ESP rather than trusting either message:
+
+```
+EFI/Linux/bootc_composefs-5a049b1c…/   376M   the UKI, written
+EFI/fedora/                            6.5M   GRUB + shim, untouched
+EFI/BOOT/BOOTX64.EFI                   "UEFI SHIM"   correctly restored
+loader/{loader.conf,entries.srel,entries/bootc_fedora-43-1.conf}   written
+EFI/systemd/                           4.0K   EMPTY
+```
+
+**bootc created `EFI/systemd/`, put nothing in it, said "Installation
+complete!" and exited 0.** The cause is that the published image has no
+`systemd-boot-unsigned` — `/usr/lib/systemd/boot/efi/` does not exist in it at
+all — so `bootctl` had no binary to copy. `Containerfile.core:2234` installs it
+and asserts that exact path at 2238, and its comment at 2213 already begins
+*"Measured in the lab: with systemd-boot-unsigned absent…"*.
+
+Two things worth carrying forward:
+
+* **A `bootc install --bootloader systemd` that exits 0 is not evidence that a
+  loader was installed.** Anything building on bootc has to look at the ESP.
+* **`apex-boot-migrate`'s `incomplete-stage` check is what stood between that
+  and a guest with a boot entry pointing at nothing**, and this is the first
+  time it has fired for real. Containment was total: `phase: not started`,
+  `boot entry: none`, `BootOrder` byte-identical, `/sysroot/boot` intact.
+
+### 5.2 The blessing fix is not in the published image either
+
+Read on the guest itself, not inferred: `semodule -l | grep -c apex_sdboot`
+returns **0**, and `/usr/lib/systemd/system/systemd-bless-boot.service.d/`
+**does not exist**. Both are shipped by `Containerfile.base` (the drop-in at
+1145-1146, asserted at 1244) and `Containerfile.core` (the module compiled at
+2275-2285). Without them `systemd-bless-boot` runs as `init_t`, which Fedora 43
+allows no rename on `dosfs_t` — so a failure to strip a boot counter on this
+image would have had two possible causes and they must not be conflated.
+
+Deliberately NOT worked around by installing the drop-in alone: its own comment
+records that with the policy module absent and SELinux enforcing, `setexeccon`
+*succeeds* and the kernel then denies the execve, so the unit fails harder and
+for a third reason.
+
+### 5.3 What the guest had to become
+
+To measure anything past this point the guest has to be the machine
+`roadmap/v2.2` builds rather than the tag that is published. `localhost/
+apex-sdmig:v2` is `v1` plus exactly the branch's own commands — `dnf5 -y
+install rsync systemd-boot-unsigned systemd-ukify checkpolicy policycoreutils
+python3-setools`, the `10-apex-bless-boot-esp.conf` drop-in, and
+`checkmodule`/`semodule_package`/`semodule -N -i` on `apex_sdboot.te` with
+`verify-apex-sdboot.py` run afterwards — plus two lab accommodations baked in
+(multi-user default target, and a `lab-run.service` drop-in with
+`TimeoutStartSec=infinity` and `After=boot-complete.target
+systemd-bless-boot.service apex-boot-migrate-confirm.service`).
+
+**Nothing in it is invented for the lab except those two accommodations.** The
+findings above stand on their own: they are what a machine running the
+currently published APEX image does.
