@@ -72,6 +72,35 @@ That is the whole mechanism. It needs no build cache and no registry cache, and
 it cannot silently stop working: if the core digest moves, the layers move; if
 it does not, they do not.
 
+### The one row that rebuilds every run got 275 MiB smaller
+
+The `image` row above is the only tier that rebuilds on every single run, and it
+is built `--layers=false` — one squashed layer for the whole of
+`Containerfile.apex`. Its digest therefore moves every build and **every machine
+re-downloads all of it on every update**. Measured with `skopeo inspect --raw`
+across all 14 published `apex-<sha>` tags (manifests only, nothing pulled):
+
+| apex-tier layer, compressed | |
+|---|---|
+| the 13 builds up to 2026-09-21 | **358.1 – 359.5 MiB** |
+| `apex-44c9a5cb`, first with the slim initramfs | **84.5 MiB** |
+
+**~275 MiB off every `bootc upgrade`**, for free, as a side effect of
+`initramfs-slim`. It is the cheapest recurring win on this page, because unlike
+core it is paid by every machine every time.
+
+Two things that measurement also settled, both in
+`ROADMAP/evidence/initramfs-slim2-20260922.md`:
+
+* **The initramfs itself is bit-reproducible** — two `podman build --no-cache`
+  runs from the same parent produce the same 88,934,458 bytes, `cmp` clean. So
+  bootc's `find_vmlinuz_initrd_duplicate`, which digests content, *can* make a
+  second deployment cost zero extra ESP.
+* **It has never had the chance.** All 14 apex tags sit on their own
+  `base-<same sha>`; no two APEX image builds have ever shared a parent. The
+  lever for both the ESP cost and this download is *"do not rebuild `base` when
+  nothing in it changed"* — not anything to do with dracut.
+
 ### The fourth tier: the kernel
 
 APEX builds its own kernel (`ROADMAP/evidence/kernel-build-20260920.md` says

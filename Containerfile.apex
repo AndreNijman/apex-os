@@ -227,16 +227,32 @@ RUN set -eux; \
 # 99-nvidia-dracut.conf has to be in place before it. That file used to be what
 # put nvidia/nvidia_modeset/nvidia_drm/nvidia_uvm INTO this initramfs; since
 # 2026-09-21 it is what keeps EVERY KMS driver out of it, along with the
-# network stack, which is what takes a deployment from 375.2 MiB to 114.6 MiB
-# and makes a 512 MiB ESP possible. Either way the claim is asserted below
-# against the produced image, not assumed from the config file.
+# network stack. MEASURED on the first build that ran this stanza end to end
+# (run 35624291221, kernel 7.2.6-cachyos1.apex1): vmlinuz 16,906,312 B +
+# initramfs 88,935,408 B = 100.9 MiB per deployment, so apex-boot-migrate needs
+# 3 x 100.9 + 48 = 351 MiB and a 512 MiB ESP fits with 161 MiB spare. It was
+# 375.2 MiB and 1173 MiB before. Confirmed on katana, which boots this image:
+# its three deployment directories are 101M (this build) against 376M and 376M
+# (the two before it). Either way the claim is asserted below against the
+# produced image, not assumed from the config file.
 #
 # Keeping the theme switch in this tier rather than core is a download
 # optimisation: every dnf transaction rewrites the ~200 MB sqlite rpmdb into its
 # layer, so installing plymouth here would cost an rpmdb-sized layer on every
 # build. With the engine in core, all this layer holds is a theme plus a
-# --reproducible dracut run: unchanged theme + unchanged kernel yield a
-# byte-identical initramfs and the layer digest stops moving.
+# --reproducible dracut run.
+#
+# WHAT THAT DOES AND DOES NOT BUY, because the earlier version of this comment
+# claimed too much. Two `podman build --no-cache` runs from the same parent give
+# a BYTE-IDENTICAL initramfs (sha256 4569c3b0…, 88,934,458 B, `cmp` clean), so
+# bootc's find_vmlinuz_initrd_duplicate — which digests content — can dedupe a
+# deployment. The LAYER digest still moves: the tar records initramfs.img's
+# mtime, and --reproducible normalises timestamps inside the cpio, not the file
+# dracut writes. Measured across all 14 published apex-<sha> tags: 14 distinct
+# final layers. `podman build --timestamp 0` makes the layer and the image id
+# stable (verified twice) but rewrites every mtime in the tier, so it is not
+# taken here without a real image build behind it.
+# See ROADMAP/evidence/initramfs-slim2-20260922.md.
 COPY files/branding/plymouth/apex-os-chartreuse \
      /usr/share/plymouth/themes/apex-os-chartreuse
 COPY --chmod=0755 files/scripts/check-initramfs-budget.sh \
