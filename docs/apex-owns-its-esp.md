@@ -194,8 +194,37 @@ measured yet and the choice is empirical:
   API but narrow in intent, and Windows maintains its own state and the backup
   GPT for you.
 
-Which is safer is one guest boot to find out. What the implementation must
-satisfy either way:
+Which is safer is one guest boot to find out.
+
+> **MEASURED 2026-09-21 — that boot has happened.** Evidence:
+> `ROADMAP/evidence/windows-installer-3-20260921.md`; job
+> `windows-installer/lab/jobs/gpt-write-mechanism`; 13 host checks, 0 failures.
+> The mechanism is still the implementation's to choose, but it is no longer
+> choosing blind.
+>
+> - **The stated unknown is answered: Windows PERMITS a write to LBA 2–33 of
+>   the disk it booted from**, and permits `SET_DRIVE_LAYOUT_EX` on it too.
+>   Both probed with no-ops, and the host confirms the system disk's primary
+>   and backup GPT are byte-identical to pristine afterwards. "Windows will not
+>   let you" is not a safety property available here — the second time in one
+>   round that a platform backstop turned out not to be there.
+> - **Both mechanisms work** and produce a GPT whose four CRCs are all correct,
+>   and **neither writes a byte of partition content**.
+> - The raw mechanism's stale-view prediction **holds**, and
+>   `IOCTL_DISK_UPDATE_PROPERTIES` (`0x00070140`) fixes it (`ok=True err=0`).
+> - **`SET_DRIVE_LAYOUT_EX` relocated the primary entry array from LBA 2 to
+>   LBA 2016 and left the old array at LBA 2 untouched.** Two partition tables
+>   that disagree now sit in the primary GPT area, and the stale one is at the
+>   LBA that hardcoded GPT readers look at. That is its real price, and it is
+>   not what "the kernel maintains it for you" sounds like. The raw mechanism
+>   edits in place and leaves exactly one table.
+> - **Invariant 3 is exercised, not just specified**: both copies saved to a
+>   33 792-byte file before the change, restored afterwards, byte-exact.
+> - If `SET_DRIVE_LAYOUT_EX` ever wins, `0x0007C054` and `0x00070140` have to
+>   join section 0's allowlist — a deliberate widening that must keep the gate
+>   failing both ways.
+
+What the implementation must satisfy either way:
 
 1. The delta is **exactly one entry's type GUID and attributes**. Nothing else
    on the disk changes, proven byte-identical against a pristine fixture.
