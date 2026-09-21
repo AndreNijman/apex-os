@@ -1,6 +1,6 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-21T17:41+0800",
+ "updated": "2026-09-21T17:44+0800",
  "_round": "Round 39 STARTED 2026-09-21T17:08+0800 by the autoresume timer, after the round-38 session hit a usage limit at 14:59 (autoresume.log: 'resume session ended (exit 1)'). All six round-38 agents were dead \u2014 `ps` showed no subagent claude process \u2014 and NONE was messaged. Six fresh agents dispatched with the same slugs, each carrying a ROUND 39 CONTINUATION section appended to its card. CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 is set in this session's env (checked, not assumed), so agents are not SIGTERMed 600s after the final response; the hard bound is `timeout 4h`, which ends this session at about 21:08 AWST.",
  "_landed_this_round": [
   {
@@ -121,6 +121,18 @@
    "branch": "task/windows-installer-3",
    "card": "ROADMAP/state/agents/windows-installer-3.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
    "why": "Two round-38 results are UNPROVEN and its own merge message says so: the payload write PASSED in the guest but its host-side byte verification was cut off with no evidence file, and bitlocker-discover has never completed. Beyond that, the ESP decision hands this unit two of the four things that must be measured, because it is the only unit with a real Windows guest."
+  },
+  {
+   "slug": "android-relay-flake",
+   "items": [],
+   "repo": "apex-os",
+   "worktree": "/var/tmp/apex-work/wt-android-relay-flake",
+   "branch": "task/android-relay-flake",
+   "card": "ROADMAP/state/agents/android-relay-flake.md (written by the orchestrator at dispatch)",
+   "dispatched": "2026-09-21T17:44+0800",
+   "agent_id": "abd645b0998b77a4d",
+   "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
+   "why": "NEW UNIT, found by the orchestrator rather than the queue. CI run 35584033343 on roadmap/v2.2 went red on `RelayDiallerTest > a failed dial leaves no socket open()` at a commit whose ENTIRE diff is one markdown file -- so it is a flake, not a regression, and the same job passed on the commit before. The race looks like `closedByClient` being incremented on the double's acceptor thread after `input.read() < 0`, with nothing synchronising it against the test thread's immediate assertEquals(20). A flaky gate is worse than a missing one: it teaches everybody to re-run red CI instead of reading it. The agent is told to verify rather than trust that diagnosis, and explicitly NOT to fix it by loosening the assertion -- a genuine descriptor leak must still fail."
   }
  ],
  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -518,5 +530,6 @@
    "at": "2026-09-21T17:41+0800",
    "finding": "katana is NOT the cheap proof docs/apex-owns-its-esp.md calls it. Needing no new partition is true but not sufficient: the partition it already has is 512 MiB, so it fails the same fit check the L16 does. Per-deployment ceilings computed from the LIVE partitions rather than hardcoded: L16 180 MiB, katana 154 MiB, against 374 MiB today. So the binding number for initramfs-slim is 154, it is the SUM of kernel and initramfs, and its measured varB (103 MB) and varB19 (100 MB) both clear it while varA (139 MB) only just does once the 16.9 MiB vmlinuz is added. Appended to its card."
   }
- ]
+ ],
+ "_slot_accounting": "Ceiling 6. Live at 18:00: initramfs-slim, luks-boot, windows-installer-3, android-relay-flake. PARKED on builds they started and will be resumed in this session rather than re-dispatched: kernel-akmods (local `core` build, systemd-run user unit kernel-akmods-core, started 17:27:20) and kernel-publish (CI build-image run on task/kernel-publish). RETURNED and landed: migrate-preconditions. That is 6 at the ceiling once the two parked ones resume -- which is why no further unit was dispatched even though a slot briefly looked free."
 }

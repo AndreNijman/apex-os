@@ -1,6 +1,25 @@
+## LANDABLE — `345c0557`
+
+The `luks-pcr7` guest scenario now RUNS and is green: **26 passed, 0 failed**,
+`EXIT_CODE=0` on katana. It is the in-boot half of L-003 and it had never been
+executed before today. Three commits fix the scenario (nothing shipped changed
+— the diff against `roadmap/v2.2` is exactly `files/scripts/boot-v2/run-scenarios`,
+`files/scripts/boot-v2/guest-luks-enroll.sh` and one new evidence file), plus a
+merge of `roadmap/v2.2` @ `69253336`.
+
+Gates on this tip: `test-boot-v2` 150/0; shellcheck coverage 202 discovered,
+**0 newly failing**; doc-verbs 0 undocumented-and-undeclared;
+check-containerfile-assertions exit 0; `shellcheck -S warning -x` and `bash -n`
+clean on both changed files.
+
+Landing it breaks nothing: it only makes a STAGED scenario work that currently
+aborts after its first boot.
+
+---
+
 # luks-boot — L-002, finish it: the installer makes a LUKS2 disk AND that disk boots
 
-items: L-002
+items: L-002 L-003
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-luks-boot
 branch: task/luks-boot
@@ -12,19 +31,36 @@ its work is already MERGED into this branch at 3e235bc1 — do not redo it),
 `ROADMAP/state/agents/efivars-guard-2.md` (`--generic-image`, already resolved).
 
 ## NEXT (round 39 — L-003)
-1. RUNNING/NEXT: on katana, `/var/lab/scratch/luks-boot/`, run the `luks-pcr7`
-   scenario for real:
-   `systemd-run --user --collect --unit=luks-pcr7-run1 /var/lab/scratch/luks-boot/run.sh`
-   where run.sh does `podman run --rm --device /dev/kvm -v /var/lab/scratch/luks-boot:/work:z localhost/apex-bootlab -c '/work/apex-os/files/scripts/boot-v2/run-scenarios --work /work/out luks-pcr7'`
-   and appends a literal `EXIT_CODE=` line to `/var/lab/scratch/luks-boot/run1.log`.
-2. Then read the three serial logs, write `ROADMAP/evidence/L-003-pcr7-inboot-20260921.md`,
-   and `set-status.py L-003 <status>` PREPENDING via `round24-prepend.py`
-   (current evidence at roadmap.yaml:8488 — REPLACES, so carry it forward).
+1. **The next real piece of work is NOT this branch.** Add a `luks-pcr7-signed`
+   scenario: same `build_pcr7_enroll_bundle`, same `guest-luks-enroll.sh`, the
+   ONLY change is building boot A's UKI WITH `--pcr-key`/`--pcr-pubkey` (as
+   `luks_uki`'s "good" spec does). Boot A measured that
+   `probe_signed_pcr11`'s Secure-Boot and sd-stub gates ALREADY PASS in this
+   lab and it refuses only for the missing signing key, so this should flip
+   the selection to `binding=signed-pcr11`. Assert that, and the ABSENCE of
+   the "not using signed-pcr11" line.
+2. Then the integration gap L-003 still has: no test has ever run the REAL
+   `apex-luks-enroll` through `apex-install` (every installer suite uses the
+   `APEX_LUKS_ENROLL_LOCAL` recovery-only stand-in), and no installer-produced
+   disk (GRUB+shim, no sd-stub) has been TPM-auto-unlocked.
 
 ## DONE (round 39)
 - Read this card, `luks-enroll-2.md`, `luks-enroll.md` in full.
 - Read katana's UNREAD `serial-pcr7-a.log` from 10:45 today. See FOUND #5 —
   the scenario HAS been run once; the card saying "never been run" was stale.
+- `325df6c4` bundle env/dirname/wc/head + interpreter probe + passphrase proof.
+- `31a3419b` the self-`cp` abort and the wrong signed-pcr11 gate assertion.
+- `2225d94c` the recovery key's trailing newline, + a host-side length guard.
+- `22b9295d` `ROADMAP/evidence/L-003-pcr7-inboot-20260921.md`.
+- `345c0557` merge of `roadmap/v2.2` @ `69253336`. All PUSHED.
+- Ran `luks-pcr7` three times on katana; run3 green, 26/0.
+- Gates: test-boot-v2 150/0; shellcheck coverage 202 discovered / 0 newly
+  failing (the `android/tools/release-version.sh` failure seen mid-round came
+  in WITH `roadmap/v2.2` and was already fixed on its newer tip — merging
+  cleared it, it was never mine); doc-verbs 0 undocumented-and-undeclared;
+  check-containerfile-assertions exit 0.
+- set-status L-003 `blocked` -> `partial`, evidence PREPENDED via
+  `round24-prepend.py` (verified: nothing after L-003 in roadmap.yaml moved).
 
 ## NEXT — superseded (round 38 and earlier, kept for history)
 1. Read `/var/lab-scratch/luks-boot/run2.log` — it ends with a literal
@@ -94,18 +130,11 @@ its work is already MERGED into this branch at 3e235bc1 — do not redo it),
    `/var`, 21 GB available RAM, `/dev/kvm` present.
 
 ## IN PROGRESS
-- **round 39: `luks-pcr7-run3.service` on KATANA**, launched 17:33 AWST,
-  checkout `2225d94c`, log `/var/lab/scratch/luks-boot/run3.log`.
-  run2 (`31a3419b`) ran ALL THREE BOOTS: **25 passed, 1 failed**, the one
-  failure being boot C's recovery unlock — FOUND #13, a trailing newline in
-  the LAB's key file, now fixed. run1 (`325df6c4`) aborted after boot A.
-- (superseded) `luks-pcr7-run1.service`, launched 17:35 AWST under
-  `systemd-run --user`. Dir `/var/lab/scratch/luks-boot/` (my own; the other
-  unit's `luks-enroll-2/` tree is untouched — apex-root was COPIED, 376 MB).
-  Checkout is `task/luks-boot` @ `325df6c4`. Log
-  `/var/lab/scratch/luks-boot/run1.log`, ends with a literal `EXIT_CODE=`.
-  Three guest boots: A enrol, B cold reproduction, C dbx firmware change +
-  recovery. Read the log AND `out/serial-pcr7-{a,b,c}.log`.
+- **Nothing is running.** `luks-pcr7-run3.service` on katana FINISHED at
+  17:36:31 AWST: **26 passed, 0 failed, `EXIT_CODE=0`**.
+- Primary artefacts, do not delete:
+  `/var/lab/scratch/luks-boot/run3.log` and
+  `/var/lab/scratch/luks-boot/out/serial-pcr7-{a,b,c}.log` on katana.
 - (round 38, finished) `luks-boot-run2.service` — L-002, landed as `d00c3060`.
 
 ## BLOCKED ON
