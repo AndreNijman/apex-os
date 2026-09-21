@@ -156,7 +156,7 @@ sec "every refusal exists"
 # refusing is how a laptop with a 600 MiB ESP gets a migration that cannot fit.
 for token in not-root not-uefi already-migrated update-staged bootc-too-old \
              secure-boot-unsigned-loader no-esp esp-too-small no-dosfstools \
-             no-rsync no-podman; do
+             no-rsync no-podman no-repo-size root-too-small; do
     if grep -q "refuse \"$token\"" "$CODE"; then
         ok "refuses: $token"
     else
@@ -355,6 +355,35 @@ if grep -q 'need=$(( per \* 3 / 1024' "$CODE"; then
     ok "the ESP check sizes for three deployments"
 else
     bad "the ESP check sizes for fewer deployments than an update needs"
+fi
+
+# 4b. The ROOT filesystem is checked too, and separately from the ESP — a
+# migration writes a second full image copy into /composefs, and the ESP
+# being big enough says nothing about that. This is item 2's whole point:
+# before this, only the ESP was checked.
+if grep -q 'root_need=$(( repo_kib \* 2' "$CODE"; then
+    ok "the root check sizes for two image copies (the temporary + the permanent one)"
+else
+    bad "the root check does not size for both the temporary and permanent copy"
+fi
+if grep -qE 'df -Pk "\$SYSROOT"' "$CODE"; then
+    ok "the root check reads free space on \$SYSROOT, not the ESP"
+else
+    bad "the root check does not measure \$SYSROOT — it may be checking the wrong filesystem"
+fi
+if grep -qE 'du -sk "\$SYSROOT/ostree/repo"' "$CODE"; then
+    ok "the root check estimates size from the ostree repo, offline and without copying anything"
+else
+    bad "the root check has no offline size estimate — it may need to copy data to know if there is room for the copy"
+fi
+# The root check has to run whether or not this machine even has room for it
+# to mount an ESP — a machine that is refusing no-esp should still refuse
+# root-too-small first if it is ALSO too small, so a fix to one refusal is not
+# mistaken for a fix to both. Order it ahead of with_esp in the source.
+if awk '/^cmd_precheck\(\) \{/{p=1} p && /root_need=\$\(\(/{print "root"; exit} p && /with_esp \|\| refuse "no-esp"/{print "esp"; exit}' "$CODE" | grep -qx root; then
+    ok "the root-space check runs before the ESP is even mounted"
+else
+    bad "the root-space check runs after with_esp — reorder so it does not depend on ESP state"
 fi
 
 # 5. A LUKS root must still find its ESP.
