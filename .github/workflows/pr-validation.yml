@@ -315,6 +315,33 @@ jobs:
             exit 1
           fi
 
+      # The same gate one level up. The checker that refuses an unreadable
+      # build failure is itself a gate, and a gate nobody has watched go red
+      # is this repository's most-recorded defect. Every case in the harness
+      # sits on one side or the other: a checker that always exited 1 fails
+      # eight of them, one that always exited 0 fails seven, and the naive
+      # `grep -q akmods` mutation is caught by its own control (the word
+      # appearing as a PATH in a `sed` argument).
+      - name: The unreadable-failure checker can still fail
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          ./tests/test-run-recovery-reachable.sh | tee /tmp/run-recovery.log
+          # Read the summary back rather than banking the exit code: a suite
+          # that printed nothing and exited 0 is otherwise indistinguishable
+          # from one that ran.
+          line=$(tail -1 /tmp/run-recovery.log)
+          echo "measured: $line"
+          n=$(sed -n 's/^\([0-9]*\) passed.*/\1/p' <<<"$line")
+          if [ -z "$n" ] || [ "$n" -lt 28 ]; then
+            echo "FATAL: expected at least 28 passing cases, got: $line"
+            exit 1
+          fi
+          if ! grep -q ', 0 failed$' <<<"$line"; then
+            echo "FATAL: the harness reported failures: $line"
+            exit 1
+          fi
+
       - name: Input page and generator agree
         if: ${{ !cancelled() }}
         run: |
