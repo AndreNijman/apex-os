@@ -206,6 +206,30 @@ jobs:
       - name: Containerfile assertions
         run: ./tests/check-containerfile-assertions.sh
 
+      # Seconds, and it guards the one line whose failure costs EVERY image
+      # build: `FROM ${APEX_KERNEL_IMAGE}`. It has already broken twice — once
+      # pointing at a localhost image CI cannot have, once declared where the
+      # ARG was invisible to its own FROM — and each time the symptom was
+      # "determining starting point for build: no FROM statement found" after
+      # the toolbuilder stage. Runs BEFORE anything is built, like the line
+      # above it and for the same reason.
+      - name: The kernel tier is pinned, and pinned to a digest
+        run: ./tests/check-kernel-image-pin.sh
+
+      # A build failure you cannot read costs the same as a build failure you
+      # can, plus every round spent guessing. `core` died three times at
+      # `akmods … --kmod nvidia` with no compiler error anywhere in the log,
+      # because the `sed` that dumps akmods' failure log sat behind a `||` on a
+      # LATER command and `set -e` had already killed the RUN. This refuses
+      # that shape in seconds, before the 45-minute core build earns the right
+      # to be undiagnosable again.
+      - name: Every silent build driver is guarded
+        run: |
+          set -euo pipefail
+          ./files/scripts/check-run-recovery-reachable \
+              Containerfile.base Containerfile.core Containerfile.kernel \
+              Containerfile.apex Containerfile.release
+
       - name: Pin apex-shell
         id: shell
         run: |
@@ -497,10 +521,73 @@ jobs:
           echo "digest=$D" >> "$GITHUB_OUTPUT"
           echo "fedora-bootc digest: $D"
 
+      # ═══ THE KERNEL TIER — resolved and proven reachable BEFORE the build ═══
+      #
+      # `Containerfile.core` opens with `ARG APEX_KERNEL_IMAGE=<a ghcr digest>`
+      # and consumes it as `FROM ${APEX_KERNEL_IMAGE} AS kernel-rpms`. If that
+      # image cannot be pulled, podman fails — which is correct and loud, and
+      # deliberately so: a core that fell back to the COPR kernel would ship the
+      # BTF defect the kernel tier exists to fix, and nobody would find out until
+      # a sched-ext scheduler failed to load on a user's machine. There is no
+      # fallback, and `tests/check-kernel-image-pin.sh` is what keeps it that way.
+      #
+      # What this step adds is WHEN and HOW CLEARLY it fails. Without it the
+      # failure arrives after the toolbuilder stage as a pull error mentioning
+      # nothing about kernels, and with `--no-cache` that is minutes of build
+      # thrown away. With it, an unpublished kernel is a named error in seconds.
+      #
+      # The reference is parsed out of the Containerfile rather than duplicated
+      # here, because two places to change is one place to forget — and the regex
+      # is strict, so a typo in that line fails HERE rather than in FROM.
+      - name: Resolve the kernel tier and prove it is reachable
+        id: kernel
+        run: |
+          set -euo pipefail
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+
+          ref="$(sed -nE 's|^ARG APEX_KERNEL_IMAGE=(ghcr\.io/andrenijman/apex-os@sha256:[0-9a-f]{64})$|\1|p' Containerfile.core | head -1)"
+          if [ -z "$ref" ]; then
+            echo "::error::Containerfile.core's ARG APEX_KERNEL_IMAGE default is not a"
+            echo "::error::ghcr.io/andrenijman/apex-os@sha256:<64 hex> digest reference."
+            grep -n '^ARG APEX_KERNEL_IMAGE=' Containerfile.core || true
+            exit 1
+          fi
+          echo "kernel tier: $ref"
+
+          # The same five-attempt shape the fedora-bootc resolve below uses, and
+          # for the same reason: one transient registry read must not discard an
+          # hour of build, and the LAST failure must still be fatal.
+          #
+          # `sudo podman login` has already run above, but skopeo does not see
+          # root's auth, so pass credentials explicitly — the package is private.
+          creds="${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"
+          got=""
+          for _try in 1 2 3 4 5; do
+              if got="$(skopeo inspect --creds "$creds" --format '{{.Digest}}' \
+                          "docker://$ref" 2>&1)" && [ -n "$got" ]; then
+                  echo "resolved on attempt $_try"
+                  break
+              fi
+              echo "attempt $_try failed: $got"
+              got=""
+              [ "$_try" -lt 5 ] && sleep $(( _try * 10 ))
+          done
+          if [ -z "$got" ]; then
+            echo "::error::the kernel tier $ref cannot be pulled."
+            echo "::error::core installs its kernel from that image and has NO fallback —"
+            echo "::error::a COPR kernel would carry the BTF defect the tier exists to fix."
+            echo "::error::Publish one: gh workflow run kernel-build.yml --ref <this ref>,"
+            echo "::error::then paste the digest its summary prints into Containerfile.core."
+            exit 1
+          fi
+          echo "kernel tier is reachable: $got"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Build core
         env:
           APEX_SB_KEY_B64: ${{ secrets.APEX_SB_KEY_B64 }}
           APEX_SB_CRT_B64: ${{ secrets.APEX_SB_CRT_B64 }}
+          APEX_KERNEL_IMAGE: ${{ steps.kernel.outputs.ref }}
         run: |
           # ── Secure Boot signing key ──────────────────────────────────────
           # Containerfile.core signs the CachyOS kernel with the APEX MOK only
@@ -553,9 +640,24 @@ jobs:
             NOCACHE="--no-cache"
           fi
 
+          # Passed explicitly even though it is also the Containerfile's default,
+          # so the build log records which kernel this core actually installed
+          # and the value the step above PROVED reachable is the value used.
+          #
+          # Asserted non-empty first, because an empty --build-arg OVERRIDES the
+          # default with nothing and reproduces the exact failure this whole
+          # change exists to remove: `FROM ${APEX_KERNEL_IMAGE}` expands empty
+          # and podman dies with "determining starting point for build: no FROM
+          # statement found".
+          case "${APEX_KERNEL_IMAGE:-}" in
+            ghcr.io/andrenijman/apex-os@sha256:*) : ;;
+            *) echo "::error::APEX_KERNEL_IMAGE is '${APEX_KERNEL_IMAGE:-}' — the resolve step did not produce a digest"; exit 1 ;;
+          esac
+
           sudo podman build --isolation=chroot $NOCACHE \
             --build-arg APEX_REVISION="${{ github.sha }}" \
             --build-arg FEDORA_BOOTC_DIGEST="${{ steps.upstream.outputs.digest }}" \
+            --build-arg APEX_KERNEL_IMAGE="$APEX_KERNEL_IMAGE" \
             $SECRET_ARGS \
             -f Containerfile.core \
             -t "$IMAGE:$TAG_CORE-${{ github.sha }}" \
