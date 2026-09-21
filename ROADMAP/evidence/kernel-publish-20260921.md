@@ -129,34 +129,74 @@ proven the same way without spending a CI run, by running its body verbatim
 
 CI run [`35582968952`](https://github.com/AndreNijman/apex-os/actions/runs/35582968952),
 dispatched 2026-09-21 17:23 AWST from `task/kernel-publish` @ `72bab38d` with
-`force_core=true` (a full, cache-bypassing core rebuild).
+`force_core=true` — a full, cache-bypassing core rebuild. **`core` completed
+green at 17:58 AWST, in 35 minutes.** `changes: success`, `rust: success`,
+`core: success`.
 
-**Status at the time of writing: `core` is still building.** What has already
-passed is the part this unit is accountable for:
+This is the first time `core` has built in CI in this program.
 
-| step | result |
-|---|---|
-| `changes` job — where `check-kernel-image-pin.sh` runs | **success** |
-| `core` / Resolve upstream fedora-bootc digest | **success** |
-| `core` / **Resolve the kernel tier and prove it is reachable** | **success** |
-| `core` / Build core | in progress |
+### The pinned image is what the build actually consumed
 
-That third row is the one that matters. It is the step that reads the pinned
-reference out of `Containerfile.core` with the strict regex and proves GitHub's
-runner can pull it from GHCR. It passing means the pin is well formed **and**
-the image is reachable from a machine that has never seen this laptop — which
-is precisely the two-part claim that `FROM ${APEX_KERNEL_IMAGE}` needs and that
-no test in this repository could make before today.
+Not inferred from a green tick — read out of the build log
+(`/var/lab-scratch/kernel-publish/r39/ci-core-job.clean.log`, 7,856 lines):
 
-`core` is EXPECTED to go red later, roughly 35-40 minutes in, at
-`akmods --force --kernels 7.2.6-cachyos1.apex1.fc43.x86_64 --kmod nvidia`
-(nvidia 580.178.04 against CachyOS 7.2.6). That belongs to the `kernel-akmods`
-unit, which is live in parallel. **It is downstream of this unit's assertion and
-is not evidence against the pin**: reaching the akmods stage at all requires the
-kernel image to have been pulled, the RPMs copied out of it and the
-`btf_scx=usable` contract check to have passed. The final state of this run is
-recorded in the RUN IDS table of `ROADMAP/state/agents/kernel-publish.md`, which
-is the live record; this file is the argument.
+```
+resolved on attempt 1
+[2/3] STEP 1/1: FROM ghcr.io/andrenijman/apex-os@sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6 AS kernel-rpms
+[3/3] STEP 7/69: COPY --from=kernel-rpms /rpms     /tmp/apex-kernel-rpms
+[3/3] STEP 8/69: COPY --from=kernel-rpms /manifest /tmp/apex-kernel-manifest
+```
+
+`FROM ${APEX_KERNEL_IMAGE}` — the one line whose failure stopped every image
+build in the project — expanded to the pinned digest and resolved on the first
+attempt.
+
+### The cross-tier contract held
+
+```
++ test -d /tmp/apex-kernel-rpms
+btf_scx=usable
++ BTF=usable
+kernel BTF verdict from the build that made these RPMs: usable
+kernel image was built from this commit's kernel/kernel.pin
+installed: kernel-cachyos-7.2.6-cachyos1.apex1.fc43.x86_64
+installed: kernel-cachyos-core-7.2.6-cachyos1.apex1.fc43.x86_64
+installed: kernel-cachyos-modules-7.2.6-cachyos1.apex1.fc43.x86_64
+installed: kernel-cachyos-devel-matched-7.2.6-cachyos1.apex1.fc43.x86_64
+kernel 7.2.6-cachyos1.apex1.fc43.x86_64 installed, from APEX's own build
+```
+
+All three assertions fired and passed: the RPMs arrived, the manifest vouches
+`btf_scx=usable`, and the `cmp` identity check confirms the published image was
+built from **this commit's** `kernel/kernel.pin` — so the digest is not merely
+reachable, it is the right kernel for this tree. Every kernel package installed
+came from the copied files, none from a repository.
+
+Secure Boot came out of it intact too: `SECURE BOOT: kernel
+7.2.6-cachyos1.apex1.fc43.x86_64 signed with the APEX MOK` and `SECURE BOOT: 14
+out-of-tree modules signed with the APEX MOK`.
+
+### The predicted akmods failure did NOT reproduce — a finding for `kernel-akmods`
+
+This card predicted `core` would go red ~35-40 minutes in at
+`akmods --force --kernels 7.2.6-cachyos1.apex1.fc43.x86_64 --kmod nvidia`,
+because `kernel-build-2`'s **local** core build died exactly there. It did not:
+
+```
+=== akmods: building nvidia for 7.2.6-cachyos1.apex1.fc43.x86_64 ===
+built: /var/cache/akmods/nvidia/kmod-nvidia-7.2.6-cachyos1.apex1.fc43.x86_64-580.178.04-1.fc43.x86_64.rpm
+=== akmods: building xone for 7.2.6-cachyos1.apex1.fc43.x86_64 ===
+built: /var/cache/akmods/xone/kmod-xone-7.2.6-cachyos1.apex1.fc43.x86_64-1000.0.0.git.1442.85e53359-2.fc43.x86_64.rpm
+=== akmods: building xpadneo/…
+built: /var/cache/akmods/xpadneo/kmod-xpadneo-7.2.6-cachyos1.apex1.fc43.x86_64-0.10.2-1.fc43.x86_64.rpm
+```
+
+nvidia **580.178.04 against CachyOS 7.2.6 builds fine on GitHub's runner**, and
+this run does NOT carry `kernel-akmods`' fix (`027f6fe8` is on their branch, not
+on `72bab38d`). So the failure is environment-specific to the local build, not a
+property of the kernel/driver pair. That belongs to `kernel-akmods`; it is
+recorded on their card as a second data point, alongside their own reproducer
+passing this morning.
 
 ## Bounds held
 
