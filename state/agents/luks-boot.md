@@ -11,7 +11,22 @@ Predecessor cards to read before touching anything:
 its work is already MERGED into this branch at 3e235bc1 — do not redo it),
 `ROADMAP/state/agents/efivars-guard-2.md` (`--generic-image`, already resolved).
 
-## NEXT (fill in as you go)
+## NEXT (round 39 — L-003)
+1. RUNNING/NEXT: on katana, `/var/lab/scratch/luks-boot/`, run the `luks-pcr7`
+   scenario for real:
+   `systemd-run --user --collect --unit=luks-pcr7-run1 /var/lab/scratch/luks-boot/run.sh`
+   where run.sh does `podman run --rm --device /dev/kvm -v /var/lab/scratch/luks-boot:/work:z localhost/apex-bootlab -c '/work/apex-os/files/scripts/boot-v2/run-scenarios --work /work/out luks-pcr7'`
+   and appends a literal `EXIT_CODE=` line to `/var/lab/scratch/luks-boot/run1.log`.
+2. Then read the three serial logs, write `ROADMAP/evidence/L-003-pcr7-inboot-20260921.md`,
+   and `set-status.py L-003 <status>` PREPENDING via `round24-prepend.py`
+   (current evidence at roadmap.yaml:8488 — REPLACES, so carry it forward).
+
+## DONE (round 39)
+- Read this card, `luks-enroll-2.md`, `luks-enroll.md` in full.
+- Read katana's UNREAD `serial-pcr7-a.log` from 10:45 today. See FOUND #5 —
+  the scenario HAS been run once; the card saying "never been run" was stale.
+
+## NEXT — superseded (round 38 and earlier, kept for history)
 1. Read `/var/lab-scratch/luks-boot/run2.log` — it ends with a literal
    `EXIT_CODE=` line. If `switched-root=yes`, L-002's blocker (a) — "NO DISK
    THIS INSTALLER PRODUCED HAS EVER BEEN BOOTED", the phrase in the item's own
@@ -301,3 +316,29 @@ Everything else can be re-derived from git; the next action cannot.
   scratchpad is shared between agents: use your own subdirectory.
 - Long builds run in the FOREGROUND or under `systemd-run --user`; a
   backgrounded `podman` gets SIGTERMed and still exits 0.
+
+## FOUND (round 39)
+5. **`luks-pcr7` HAS been run once — at 10:45 today on katana — and the card
+   said it never had.** Artefacts in `/var/lab/scratch/luks-enroll-2/out/`:
+   `disk-pcr7-a.img`, `luks-pcr7-hook-a.cpio` (26 MB, so the bundle built),
+   `serial-pcr7-a.log`. Boot A REACHED THE DRACUT PRE-MOUNT HOOK and measured:
+   `have-systemd-cryptenroll=yes`, `have-python3=yes (3.14.7)`,
+   `have-apex-luks-enroll=yes`, `tpm-device=present`, `secure-boot-byte=1`,
+   `pcr7-pre-enroll=09D59A7648E5663744AF2050EFF9ABC7561391317DD5C8287E80141C55D7AC46`
+   (a REAL firmware measurement, not zeros), `pcr11=525F9519CB34…`. Only boot A
+   ran; there is no `-b`/`-c` disk. Read the artefacts before believing a card.
+6. **The single defect that stopped it: `#!/usr/bin/env bash`.**
+   `enroll-exit=127`, `enroll-err: timeout: failed to run command
+   '/usr/libexec/apex-luks-enroll': No such file or directory` — while
+   `have-apex-luks-enroll=yes`. That contradiction is the signature of a
+   MISSING INTERPRETER, not a missing file: `execve` returns ENOENT for the
+   shebang target. Confirmed with `lsinitrd` against katana's real
+   `7.2.6-cachyos1.fc43.x86_64` initramfs: `usr/bin/bash` IS present,
+   **`usr/bin/env` is NOT**. Every `files/system/libexec/apex-*` script uses
+   `#!/usr/bin/env bash`, so the shebang is repo convention and is fine for
+   the installer (which has coreutils); the LAB BUNDLE is what has to carry
+   `env`. Note for anyone who later wants enrolment to run from a real
+   initramfs in production: that path needs `env` installed by a dracut module.
+7. **`have-apex-luks-enroll=yes` is a `-x` test — it inspected the file and
+   said nothing about runnability.** The repo's dominant defect family. The
+   hook now also reports the shebang interpreter's presence.

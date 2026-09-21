@@ -7,6 +7,77 @@ branch: task/initramfs-slim, cut from roadmap/v2.2 @ 4031d43f
 lab: /var/lab-scratch/initramfs-slim
 evidence: ROADMAP/evidence/initramfs-slim-20260921.md (being written)
 
+## ROUND 39 — LIVE STATE (newest; wins over every section below)
+
+agent: round-39, started 17:18 AWST 2026-09-21. Orchestrator dies ~21:08.
+branch: task/initramfs-slim @ 530a9dc6 (merged origin/roadmap/v2.2 b137f03f,
+        clean — no overlap on Containerfile.{apex,core,kernel})
+
+### NOT LANDABLE — one line
+
+Landing it today would ship a stage-1f change whose Containerfile gate FATALs
+on the very initramfs the branch produces (`! grep -qE
+'kernel/drivers/net/ethernet/'`), so every image build would fail at that step.
+
+### INVENTORY CORRECTIONS (checked on arrival, contradicts the notes below)
+
+* The round-38 note "tree clean at 847b5bfb, nothing new on disk" is WRONG.
+  Round 2 left a great deal in /var/lab-scratch/initramfs-slim/vm:
+  - `apex.img` — a REAL 48 GiB bootc-installed APEX disk.
+  - `mk-initramfs.sh` — builds one variant inside the deployment chroot with
+    the exact flags Containerfile.apex uses (bind-mounts conf.d, /opt, /var).
+  - `run-qemu.sh` — headless OVMF boot, serial to a file, `-vga std`.
+  - `hook/99-apexprobe.sh` — pre-pivot hook writing /run/apexprobe-initrd.txt
+    (DRM driver bound, module count, netifs, NM, cryptsetup) — survives
+    switch-root because /run is the same tmpfs.
+  - `confs/v0..v4.conf` — the ATTRIBUTION matrix, already defined.
+  - `out/v0-nohook.img` (377M) and `out/v1-nohook.img` (291M) already BUILT;
+    v2 was killed mid-run (log exists, no image).
+  These are NOT the same variants as round 1's varA/varB/varC — varA is 139 MB
+  where v1 is 291 MB. Do not map one onto the other.
+* Round 38 (13:55-14:59) produced exactly one artifact: `varB.modules.dep`.
+* The loop device is GONE (reboot). `vm/loop.env` says /dev/loop2; nothing is
+  attached now and nothing under /var/lab-scratch is mounted. Re-attach with
+  `losetup -fP --show` before using `dep.env`'s deployment path.
+
+### FOUND — round 39
+
+* **The ethernet gate is broken worse than the card said.** varB also contains
+  `drivers/net/wireless/` — libertas, libertas_sdio, mt76, mt76-sdio,
+  mt76-connac-lib, mt792x-lib, mt7921-common, mt7921s. Eleven files, 1.5 MiB.
+* **They arrive by THREE unrelated paths, not "SCSI offload deps":**
+  - `cnic` <- `scsi/bnx2fc` and `qed` <- `scsi/qedf`  (FCoE offload) — 2 files
+  - `cxgb4` <- `crypto/chelsio/chcr`  (a CRYPTO accelerator, not SCSI) — 1 file
+  - libertas* and mt76* <- SDIO wireless (`*_sdio`), pulled along the MMC/SDIO
+    block path — 8 files
+  So no `omit_dracutmodules` change can remove them; they are dependencies of
+  modules that are in the initramfs for storage and crypto reasons.
+* **The real, quantified predicate**: `kernel/drivers/net/` goes from
+  **322 files / 21.9 MiB** (baseline) to **11 files / 1.5 MiB** (varB). The
+  regression this gate exists to catch is the 20.4 MiB `kernel-network-modules`
+  tree coming back, and a bounded size/count assertion catches it while the
+  dependency residue passes.
+* **The green fixture MUST be deployment-built, not host-built.** varB.list was
+  built on the L16 host and is MISSING `apex-unlock-hint`,
+  `apex-unlock-hint.service`, `apex-vconsole-credential` and its
+  `sysinit.target.wants` symlink (0 matches each) — the host has no APEX dracut
+  modules. A host-built listing therefore fails four unlock-chain gates for a
+  reason that has nothing to do with this branch.
+
+### NEXT
+
+Write `files/scripts/check-initramfs-budget.sh` (predicate script, two modes:
+`--initrd IMG` for the Containerfile, `--list/--mods/--kconfig/--vmlinuz-bytes`
+for tests so CI never needs `lsinitrd`), replace the three broken/duplicated
+gates in Containerfile.apex with a call to it, add `tests/test-apex-initramfs-
+budget.sh` with a red fixture (vm/out/v0-nohook.img) and a green one
+(deployment-built v3), wire into pr-validation.yml, commit, push.
+
+### DONE — round 39
+
+* merged origin/roadmap/v2.2 (b137f03f) into the branch at 530a9dc6, clean
+* ran all 12 gates against varB.list — found the two defects above
+
 ## STATE — round 2 (fresh agent, 2026-09-21 ~11:45 AWST)
 
 Round 1 left `847b5bfb` (Containerfile.apex + .core + .kernel) and measured

@@ -1,3 +1,29 @@
+## LANDABLE — `b505b747`
+
+The kernel digest is pinned and the gate is green both ways. Landing this
+unblocks every image build on the board; NOT landing it leaves `roadmap/v2.2`
+with `ARG APEX_KERNEL_IMAGE=localhost/apex-kernel:local`, which is the exact
+line that killed run 35552604603 and every image build after it.
+
+- `Containerfile.core:112` = `ARG APEX_KERNEL_IMAGE=ghcr.io/andrenijman/apex-os@sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6`,
+  a digest re-verified against the registry (not this card) before it was written in.
+- `tests/check-kernel-image-pin.sh`: **13/13 ok, exit 0** on the real tree, and
+  exit 1 on nine single-change mutants — see GATE PROOF ROUND 39 below.
+- Merged up to `origin/roadmap/v2.2` @ `b137f03f`, clean. `check-no-conflict-markers.sh`,
+  `check-containerfile-assertions.sh` and `check-kernel-pin.sh` all exit 0.
+- Do NOT wait for CI run 35582968952 to finish. It is expected to go red LATER,
+  in the akmods/nvidia stage, which belongs to `kernel-akmods`. This unit's
+  assertion is that `core` gets PAST `FROM ${APEX_KERNEL_IMAGE}` and the
+  cross-tier contract RUN.
+- Two commits: `72bab38d` is the pin itself; `b505b747` closes a seam the
+  mutants found (the gate stripped quotes, `build-image.yml`'s resolve regex
+  does not — a quoted pin passed the gate and would have died in CI blaming the
+  digest). Landing `72bab38d` alone is enough to unblock builds; `b505b747` is
+  a gate-only change and touches no image input.
+- CI run 35582968952 on `72bab38d`: the `changes` job, which is where
+  `check-kernel-image-pin.sh` runs, is **completed/success** — the gate passes
+  on GitHub's runner, not just this laptop.
+
 # kernel-publish — publish the kernel image, unblock every image build
 
 items: (unblocks all of roadmap/v2.2 — no image can be built until this lands)
@@ -9,8 +35,8 @@ branch: task/kernel-publish, cut from roadmap/v2.2 @ 4031d43f
 
 | what | run id | ref | result |
 |---|---|---|---|
-| kernel-build.yml, first run with publish | **35557283953** | task/kernel-publish | IN PROGRESS from 2026-09-21 11:22 AWST, ~40 min |
-| build-image.yml, the proof core builds | (not dispatched yet — needs the digest from the run above) | task/kernel-publish | — |
+| kernel-build.yml, first run with publish | **35557283953** | task/kernel-publish | **GREEN.** Published `sha256:2ff544dd…`, tag `kernel-7.2.6-cachyos1.apex1.fc43.x86_64-544143e`. PINNED in `72bab38d`. |
+| build-image.yml, the proof core builds | **35582968952** | task/kernel-publish @ `72bab38d` | DISPATCHED 2026-09-21 17:23 AWST, `force_core=true`, in_progress. https://github.com/AndreNijman/apex-os/actions/runs/35582968952 |
 
 Earlier, for context (not mine):
 - `35552604603` roadmap/v2.2 — the failure this unit exists to fix.

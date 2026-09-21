@@ -322,3 +322,87 @@ Everything else can be re-derived from git; the next action cannot.
   scratchpad is shared between agents: use your own subdirectory.
 - Long builds run in the FOREGROUND or under `systemd-run --user`; a
   backgrounded `podman` gets SIGTERMed and still exits 0.
+
+---
+
+## ROUND 39 LIVE LOG — agent, from 17:25 AWST
+
+### NEXT
+
+- Fix `Containerfile.core:608` akmods to the `rc=0; akmods … || rc=$?` shape, re-run `tests/test-run-recovery-reachable.sh` expecting `28 passed, 0 failed`, and commit all five files as ONE commit.
+
+### IN PROGRESS
+
+- nothing yet
+
+### BLOCKED ON
+
+- nothing
+
+### DONE
+
+- Read and ran the four inherited dirty files. They are unambiguously this
+  brief's work and are attributed here rather than guessed at: the checker
+  `files/scripts/check-run-recovery-reachable` (306 lines, python3) refuses an
+  unguarded `akmods`/`akmodsbuild`/`dkms`/`rpmbuild` under `set -e` in a
+  Containerfile RUN; `tests/test-run-recovery-reachable.sh` (218 lines) is its
+  mutation harness; the two workflow hunks wire both into CI. Committing them.
+- Ran the harness on the tree as inherited: **26 passed, 2 failed**. Both
+  failures are the LIVE defect, not harness bugs — the checker reports
+  `Containerfile.core:593: UNREADABLE FAILURE: akmods is an unguarded simple
+  command under set -e`, and names the `sed …*.failed.log` as dead code. The
+  other four Containerfiles (`base` 53 errexit RUNs, `kernel` 5, `apex` 5,
+  `release` 2) are clean. So the gate goes RED on the real tree today and will
+  go GREEN when the akmods RUN is fixed — proven both ways, by the tree itself.
+- `pr-validation.yml`'s inherited hunk demands `>= 28 passing, 0 failed`. That
+  is 26 + the 2 that the Containerfile fix flips. The gate and the fix are
+  therefore ONE commit; committing the gate alone would put a red CI step on
+  the sha and `## LANDABLE` there would be false.
+
+### FOUND — corrections to the ROUND 38 section, checked rather than assumed
+
+1. **The "no OOM/suspend" check was run against the wrong boot.** The ROUND 38
+   section reports `journalctl -b -1 --since 10:40 --until 10:50` returning
+   NOTHING and reads that as "idle suspend did not do this". `-b -1` began at
+   **14:55:30**, so 10:40 is not in it and the empty result was vacuous — a
+   permission/absence-style false negative, same family as the memory note
+   "Permission denied is not absence". The 10:46 build actually lived in boot
+   **`833dc05bc31b4c59944af005f46dbc3f`, index `-10`** (confirmed by reading
+   `_BOOT_ID` off the `kernel-build-2-core` journal entries).
+2. **Re-run against boot `-10`, the conclusion happens to survive**: no `oom`,
+   no `Killed`, no `segfault`, no `Out of memory`, no thermal event, no suspend
+   between 10:30 and 10:50. So the verdict stands, but it is now actually
+   evidenced.
+3. **Absence #3 is real and is NOT a redirect.** Checked `build-local.sh`
+   `build_core()` (lines 331-336): the invocation is a bare
+   `sudo podman build --isolation=chroot "${SECRET_ARGS[@]}" … -f Containerfile.core -t "$CORE_IMG" .`
+   — no pipe, no `$(…)` capture, no per-stream redirect. Both fds inherit the
+   systemd-run wrapper's `>> core-build.log 2>&1`. So podman's own
+   `Error: building at STEP …` would have landed in the log had podman emitted
+   it. `grep -c Error core-build.log` = **0**. podman never printed it.
+4. **The log's final bytes, read with `cat -A`**, are
+   `Checking·kmods·exist·for·…·[··OK··]␍␊Building·and·installing·nvidia-kmodEXIT=1␊`
+   — akmods wrote its label and then never wrote the `[··OK··]`/`[FAILED]`
+   that always follows it on the same line. It died mid-status-line.
+5. **Recorded, not chased: the machine was not quiet.** Boot `-10` shows other
+   roadmap agents running heavy root podman work against the SAME
+   `/var/lib/containers` throughout — `sdboot-migrate-2` ran a
+   `podman run --rm --privileged --pid=host -v /var/lib/containers:/var/lib/containers`
+   bootc loopback install at 10:31, there is logind session churn and a
+   `umount /mnt/ctltmp2` at **10:46:00**, and `apex-boot-windows --check` on
+   tty1 at **10:46:23** — four seconds before the build's death at 10:46:27.
+   This is a correlation and nothing more today. It is the lead ONLY if the
+   rerun below reproduces the silent death.
+6. Machine state checked before scheduling anything long: battery **Charging,
+   66%**; `/var` has **304 G** free. No blocker.
+
+### THE PLAN THIS ROUND, AND WHY THIS ORDER
+
+The reproducer already proved nvidia 580.178.04 compiles against
+7.2.6-cachyos1.apex1 in 96 s, so the driver/kernel pair is not the defect and
+the root cause is still open. Rather than more journal archaeology, **the fix
+to silence #1 IS the diagnostic instrument**: with the dump reachable, the next
+real `core` build either prints the compiler error (answer), or gets past
+akmods (in which case 10:46 was not akmods and item 5 becomes the lead), or
+dies silently again (in which case the silence itself is the defect, now with
+absence #3 established as real rather than a redirect). All three are verdicts.

@@ -423,3 +423,64 @@ SUPERSEDED — it describes the thing `bc5c3822` forbids.
 (`SetFirmwareEnvironmentVariable`). ARCHITECTURE.md's "Into the firmware"
 section plans it; the denylist forbids it today. It is its own decision and was
 deliberately NOT folded into this one.
+
+---
+
+## ROUND 39 WORKING — agent, started 17:19 AWST 2026-09-21
+
+### NEXT
+Run `/var/lab-scratch/windows-installer-3/hostverify.sh` inside
+`localhost/apex-winlab:latest` (podman, `-v /var/lab-scratch/winlab:/w:z
+-v /var/lab-scratch/windows-installer-3:/o:z`): `qemu-img convert -f qcow2 -O
+raw /w/payload-write-fixture-a.qcow2 /o/pw-fixture-a.raw`, then dd/cmp/sha256
+the five regions listed under IN PROGRESS below against pristine
+`/w/fixture-a.raw` (mtime must still be 2026-09-21 10:20).
+
+### IN PROGRESS — host-side byte verification of round 38's payload-write
+Facts read off `/var/lab-scratch/winlab/` this round, not inferred:
+`payload-write-fixture-a.qcow2` is qcow2 over `fixture-a.raw`, virtual
+38654705664 B, 10.6 MiB allocated; `fixture-a.raw` mtime 10:20 (pristine).
+Partition extents from the guest's own survey:
+- p1 APEX-TARGET-A (Linux fs)  1048576 .. 18254659584
+- p2 "Windows data" NTFS, E:  18254659584 .. 19328401408
+- p3 "Blank basic" RAW, F:    19328401408 .. 37582012416
+- primary GPT 0 .. 17408; backup GPT 38654688768 .. 38654705664
+
+The five regions to verify:
+1. p1: sha256 of 4 MiB at 1048576 == `551611eab74b0fd88e2c00685778fb6aad233dc0916e3c464ddbc4ac2d21b683`
+2. p1 remainder (5242880 .. 18254659584): no depth-0 extent => untouched
+3. GPT primary and backup: no depth-0 extent, AND `cmp` clean vs pristine
+4. p2: `cmp` the 512 B at 18254659584 vs pristine (the refused write's exact
+   target) => must be identical; all other p2 deltas are Windows' own NTFS
+   activity and must be reported as such, with a differing-byte count
+5. p3: exactly one 64 KiB cluster at 19328401408; every differing byte must
+   lie inside [19328401408, 19328401408+512) and their sha256 == `f4d5587c…`
+
+### FOUND — the backstop claim is measured, and it is HALF FALSE
+**The card's ROUND 39 NEXT item 2 says this is "still unmeasured". It is not —
+round 38's guest measured it at 12:04 and the orchestrator never read the log.**
+From `/var/lab-scratch/winlab/payload-write.log`, `STATUS PASS`,
+`APEXLAB-RUN-EXIT 0`, firmware variables IDENTICAL:
+
+- **write 1**, into the eligible Linux-filesystem partition at its verified
+  offset: **SUCCEEDED**, read back in-guest, sha256 MATCH.
+- **write 2**, into mounted NTFS "Windows data" (E:): **REFUSED by Windows** —
+  `Access to the path is denied`, HResult `-2146233087`. Target bytes
+  unchanged. The backstop holds here.
+- **write 3**, into the lettered but RAW "Blank basic" partition (F:):
+  **SUCCEEDED. Windows did NOT block it.** `p3-before` `076a27c7…` ->
+  `p3-after` `f4d5587c…`, `WRITE-3-UNCHANGED: NO`.
+
+So ARCHITECTURE.md's *"Windows itself is the backstop: it refuses writes
+through a PhysicalDrive handle to regions a mounted volume owns"* is **false as
+written**. Windows protects a mounted volume with a RECOGNISED filesystem
+(NTFS measured); it does **not** protect a lettered volume with no recognised
+filesystem, even though that volume has a drive letter and a volume object.
+**Consequence: `assess()`'s "in use by Windows" refusal on such a partition is
+load-bearing safety, not redundant defence.** This is exactly the partition the
+phase-0 finding above describes — a user who shrinks C: and leaves the new
+volume unformatted — so the one case a user is most likely to create is the one
+case Windows will not catch.
+
+### BLOCKED ON
+- nothing

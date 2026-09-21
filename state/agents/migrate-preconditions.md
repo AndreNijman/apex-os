@@ -1,5 +1,129 @@
 # migrate-preconditions — decide, before anything is written, whether this machine may migrate
 
+## ROUND 39 STATUS — read this first; it supersedes every section below it
+
+### THE JUDGEMENT ON THE 342 LINES: they survive. Do not revert them.
+
+The round-39 brief said to revert on the grounds that "`bootc install
+to-filesystem` writes to the ESP the caller mounts, so there was never a bootc
+choice to mirror". **That is about the wrong subcommand.** `cmd_stage` runs
+`bootc install to-existing-root`, and `to-existing-root --help` lists no ESP
+option and no `--boot-mount-spec` at all — only `[ROOT_PATH]`. On the migration
+path the caller CANNOT point bootc at an ESP. So the 342 lines describe a
+**constraint of the subcommand this tool uses**, not an ESP-selection policy
+APEX invented, and the ownership decision does not contradict them.
+
+Reframed, not reverted: from *"mirror bootc's choice"* to **"know what bootc
+WILL write, and refuse when that turns out to be Windows' ESP."** The decision
+is about ownership; the code is about what the subcommand does; they are
+compatible once precheck enforces the bound.
+
+### AND THE DECISION DOC'S MECHANISM CLAIM IS FALSE FOR THIS PATH — read source, at `bootc 1.16.10`
+
+`docs/apex-owns-its-esp.md` says "**`bootc install to-filesystem` uses the ESP
+the CALLER mounted** … bootc does not go hunting; it writes where it is
+pointed." Checked against the source, not assumed —
+`/var/lab-scratch/sdboot-xbootldr/bootc-src` is `3e76c16`/`v1.16.10`, which is
+**exactly the `bootc --version` on this machine**, and `bootc-main` is
+`v1.16.11`:
+
+`crates/lib/src/bootc_composefs/boot.rs`, **four** call sites — 691, 729,
+1256, 1273 in 1.16.10; 708, 746, 1285, 1302 in 1.16.11 — every one of them:
+
+```
+// Locate ESP partition device by walking up to the root disk(s)
+let esp_part = root_setup.device_info.find_first_colocated_esp()?;
+...
+let esp_mount = mount_esp_writable(&esp_device)
+```
+
+`boot_mount_spec()` appears in that function exactly once and only to build a
+`systemd.mount-extra=…:/boot` karg. **It does not steer the loader write.** On
+the composefs + systemd-boot path — the only path APEX uses — the ESP is always
+`find_first_colocated_esp()`: `find_colocated_esps()?.remove(0)`, i.e. the
+FIRST ESP-typed partition in partition order on the first disk backing the
+root. Not the biggest, not the booted one, not the mounted one.
+
+Two consequences, both bigger than this unit:
+
+1. **Mounting APEX's ESP does not make bootc write it.** A design that mounts a
+   chosen ESP and expects the UKI to land there is not what 1.16.10 or 1.16.11
+   does. → `windows-installer-3`, see BLOCKED/COORDINATION below.
+2. **The `Upgrade` arm re-discovers too.** Both `BootSetupType::Upgrade` arms
+   call `find_first_colocated_esp()` afresh. So this is not an install-time
+   choice that can be pinned once — **every later `bootc upgrade` re-walks the
+   GPT**, and if Windows' ESP is first in partition order it is written forever,
+   not once. That is the decision doc's **must-measure #3 answered from source**:
+   nothing persists a pointer; there is nothing to pin.
+
+### DONE this round
+
+- Merged `origin/roadmap/v2.2` (`b137f03f`) — clean, no conflict on the tool.
+- `dc2590ef` `test(boot): let precheck describe a machine it is not running on`
+  — the orphan dirty hunk, attributed. It is `APEX_MIGRATE_FAKEROOT` /
+  `APEX_MIGRATE_MOUNTDIR`: test plumbing for the both-ways gate, orthogonal to
+  the ESP decision, empty-by-default so production paths are unchanged. Checked
+  it is complete: every bare path test in `cmd_precheck` is now prefixed.
+
+### MUST-MEASURE CHECKLIST (from `docs/apex-owns-its-esp.md`) — who takes what
+
+| # | item | owner |
+|---|---|---|
+| 1 | firmware boots the intended one of two ESPs from an explicit NVRAM entry | **`windows-installer-3`** (needs the guest lab) — not me |
+| 2 | Windows tolerates a second ESP across feature update / repair / `bcdboot` | **`windows-installer-3`** — not me |
+| 3 | does `bootupd`/bootc stay on the mounted ESP for later upgrades | **ME — ANSWERED ABOVE, from source.** No: it re-discovers every upgrade |
+| 4 | Windows' boot path byte-identical, GPT included, vs a pristine fixture | **`windows-installer-3`** — not me |
+| 5 | whether BitLocker's PCR profile binds PCR 5 | `windows-installer-3`'s `bitlocker-discover` job |
+
+**I take none of the four lab measurements.** I contribute the source read that
+answers #3 and that #1 depends on.
+
+### NEXT
+
+1. Reword `esp_candidates`' header + the `no-esp`/`othernote` refusal text to
+   the reframing above, and add the `esp-is-windows` REFUSAL — fire it when
+   `windows_loader_on_esp` is true of the ESP `find_esp()` returns. Fold the
+   now-unreachable `bitlocker-shared-esp` NOTE into it; keep `same-disk` and
+   `other-disk`.
+
+### FOUND (round 39 — defects in shipped/landed material, not mine)
+
+- **`APEX_MIGRATE_ESP` does not do what `docs/apex-owns-its-esp.md` says it
+  does.** The doc calls it "the override needed to target a chosen partition".
+  It is not: it only changes where `with_esp` **measures**. `cmd_stage` still
+  calls `find_esp()` for the FAT volume id, and bootc still self-discovers, so
+  the override cannot move a single byte of the write. The `esp-choice`
+  verdict's `(overridden)` tag implies steering that does not happen — fixing
+  that wording is part of the next commit.
+- **`find_first_colocated_esp()` is not overridable by any flag on either
+  subcommand.** There is no supported way for APEX to hand bootc an ESP on the
+  composefs path today. ESP *preference* therefore has to be expressed as GPT
+  partition ORDER, not as an argument.
+
+### BLOCKED ON / COORDINATION
+
+- **ESP creation and preference on the migration path is blocked**, and not on
+  effort: with `find_first_colocated_esp()` taking the first ESP in partition
+  order and no flag to override it, "prefer APEX's own ESP" on an existing
+  machine means making it the first ESP-typed partition on the root's disk —
+  a GPT change, which is must-measure #1 and (where Windows shares the disk)
+  #5. **I did not attempt creation this round**, deliberately.
+- **`windows-installer-3` should read the source note above before building on
+  "mount the ESP you want".** It is the one finding here that could invalidate
+  a design outside this unit. Coordinating through this card, not by entering
+  its lab.
+- `initramfs-slim`: unchanged, still the lever for the L16's 600 MiB ESP. I
+  consume its per-deployment number; the fit check reads sizes off the
+  deployment rather than hardcoding 374.3 MiB.
+
+### Still Andre's, untouched
+
+Whether the tool may retype a basic-data partition itself — **settled**
+(`b137f03f`, the tool does it). Firmware writes via
+`SetFirmwareEnvironmentVariable` — **still open**, not touched here.
+
+---
+
 items: none (dispatched as the precondition half of the GRUB → systemd-boot pivot)
 repo: apex-os
 worktree: /var/tmp/apex-work/wt-migrate-preconditions
