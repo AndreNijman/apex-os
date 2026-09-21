@@ -1,3 +1,18 @@
+## LANDABLE — `810a246c`
+
+Round 38's payload-write result is **no longer UNPROVEN**: host-side byte
+verification is done (13 checks, 0 failures) and
+`ROADMAP/evidence/windows-installer-3-20260921.md` exists. The round found that
+ARCHITECTURE.md's "Windows itself is the backstop" claim is **false as
+written** — Windows refuses a PhysicalDrive write into a mounted NTFS volume
+but does NOT refuse one into a lettered RAW volume — and the doc now says so.
+`tests/test-windows-installer.sh`: **13 passed, 0 failed, 1 could-not-run**
+(guest, needs `APEX_WINLAB_GUEST=1`). Section 0's write-API gate is UNCHANGED;
+no write path was added to the binary. Merged `origin/roadmap/v2.2` (b137f03f)
+clean. Landing this breaks nothing.
+
+---
+
 # windows-installer-3 — continuation of windows-installer-2
 
 items: none directly (queue id `windows-installer` is closed; this is a direct continuation)
@@ -484,3 +499,37 @@ case Windows will not catch.
 
 ### BLOCKED ON
 - nothing
+
+### DONE this round — item 1a, payload-write host-side verification (17:35)
+Commit `9010930e`, merge `810a246c`, pushed. **13 host checks, 0 failures**
+(`/var/lab-scratch/windows-installer-3/hostverify.log`):
+- payload sha256 at the verified offset == the guest's `551611ea…`
+- partition 1 has **exactly one** written extent, `[1048576, 5242880)` — the
+  payload landed where it was aimed and nowhere else
+- primary AND backup GPT **byte-identical** to pristine `fixture-a.raw`
+- **no cluster outside p1/p2/p3 was written at all** (51 extents, 10 616 832 B,
+  all inside the three partitions) — proof by allocation map, stronger than a
+  byte compare because an unallocated cluster cannot differ
+- write 2's exact 512-byte target byte-identical to pristine → the NTFS refusal
+  was real
+- write 3's damage bounded to exactly the 512 bytes it wrote, inside one 64 KiB
+  cluster, content == the guest's `f4d5587c…`
+- p2's other 126 538 differing bytes attributed, not hand-waved: Windows' own
+  NTFS metadata from having E: mounted
+Shipped: `windows-installer/lab/jobs/payload-write/hostverify.{sh,py}` +
+`HOSTVERIFY.md` so this is reproducible, and ARCHITECTURE.md's Exclusivity
+section rewritten to state the measured boundary and name the old sentence as
+false. Evidence: `ROADMAP/evidence/windows-installer-3-20260921.md`.
+`tests/test-windows-installer.sh` 13 passed / 0 failed / 1 could-not-run.
+
+### NEXT (updated 17:35)
+Add `manage-bde -protectors -get C:` (the PCR **profile** read — the second
+product decision says this is the first thing the job needs and it is absent
+today) to `windows-installer/lab/jobs/bitlocker-discover/run.ps1`, then run it
+foreground with `APEX_WINLAB_GUEST`-style `winlab run bitlocker-discover` in
+`/var/tmp/apex-work/wt-windows-installer-3/windows-installer/lab/`, tee to
+`/var/lab-scratch/winlab/bl-discover.log`. **Caveat to state in the evidence,
+not discover afterwards:** the qemu line in `winlab` has no `-tpmdev`, so
+BitLocker is almost certainly OFF in this guest — the run proves the job
+COMPLETES and reads the profile API correctly; it does not answer the PCR-5
+question. Say that rather than letting "bitlocker-discover verified" imply more.

@@ -8,7 +8,8 @@ line that killed run 35552604603 and every image build after it.
 - `Containerfile.core:112` = `ARG APEX_KERNEL_IMAGE=ghcr.io/andrenijman/apex-os@sha256:2ff544dd021478dbd36dab4efb1ce43ad9cc858f16cd07a271f01693822972d6`,
   a digest re-verified against the registry (not this card) before it was written in.
 - `tests/check-kernel-image-pin.sh`: **13/13 ok, exit 0** on the real tree, and
-  exit 1 on nine single-change mutants — see GATE PROOF ROUND 39 below.
+  exit 1 on **ten** single-change mutants (eleven counting the re-test of the
+  one that initially got through) — see GATE PROOF ROUND 39 below.
 - Merged up to `origin/roadmap/v2.2` @ `b137f03f`, clean. `check-no-conflict-markers.sh`,
   `check-containerfile-assertions.sh` and `check-kernel-pin.sh` all exit 0.
 - Do NOT wait for CI run 35582968952 to finish. It is expected to go red LATER,
@@ -23,6 +24,17 @@ line that killed run 35552604603 and every image build after it.
   `ROADMAP/evidence/kernel-publish-20260921.md` — the file `Containerfile.core`'s
   ARG comment has been citing since `72bab38d`, and which until now existed on
   no branch. That citation resolves on this branch and will resolve on v2.2.
+- **Landability checked empirically, not asserted**: `git merge-tree --write-tree
+  origin/roadmap/v2.2 HEAD` produces a conflict-free tree, `3dbbbc14`.
+- **The workflow collision the round-39 brief warned about is resolved, by them.**
+  `origin/task/kernel-akmods` moved `4031d43f` → `0cc68901`, and `0cc68901` is
+  `Merge task/kernel-publish into task/kernel-akmods` — they took `72bab38d` and
+  `b505b747` as instructed. The `ARG APEX_KERNEL_IMAGE=` line is byte-identical
+  on their tip at the same line 112, and they took `check-kernel-image-pin.sh`
+  unmodified. They do NOT have `e58d39bc` (pushed after their merge), which is
+  harmless — a new file nothing else touches. **Either landing order works.**
+- All three commits carry **no AI attribution**; checked across all three with
+  `git log -3 --format='%h%n%B' | grep -iE 'co-authored|claude-session'`.
 - CI run 35582968952 on `72bab38d`: the `changes` job, which is where
   `check-kernel-image-pin.sh` runs, is **completed/success** — the gate passes
   on GitHub's runner, not just this laptop.
@@ -353,7 +365,7 @@ Everything else can be re-derived from git; the next action cannot.
 
 ---
 
-## ROUND 39 AGENT — started 2026-09-21 ~17:30 AWST
+## ROUND 39 AGENT — started 2026-09-21 ~17:20 AWST
 
 Working log, newest at the bottom.
 
@@ -378,11 +390,28 @@ Working log, newest at the bottom.
   branch (`2cd11c6f`, `544143e1`) do carry `Co-Authored-By`/`Claude-Session`
   trailers, which is against Andre's standing rule; I did not copy the habit.
 
-### NEXT (round 39)
-Re-run the gate-red mutants on the NOW-PINNED tree (mutate.sh's base is the real
-worktree, so its base changed under it — diff each mutant before trusting its
-exit code), then write `## LANDABLE 72bab38d` at the top of this card, then
-`gh workflow run build-image.yml --ref task/kernel-publish -f force_core=true`.
+### NEXT (round 39) — the pin, the gate and the dispatch are all DONE
+
+**Do NOT re-dispatch build-image.yml.** Run 35582968952 is already in flight on
+`72bab38d`; a second `force_core=true` would queue behind it in the
+`apex-image-publish` concurrency group and cost another 45 minutes for nothing.
+
+One line: **`gh run view 35582968952 --json status,conclusion,jobs`.** Then:
+
+1. Record the conclusion in the RUN IDS table at the top of this card.
+2. `gh run view 35582968952 --log` (logs are NOT retrievable mid-run — tried the
+   job-logs API at 17:30, empty) and confirm the two things this unit asserts:
+   the kernel RPMs were installed from `/tmp/apex-kernel-rpms`, and the
+   `test "${BTF}" = usable` cross-tier contract RUN passed. Save to
+   `/var/lab-scratch/kernel-publish/r39/`.
+3. If the failure is in akmods/nvidia, that is EXPECTED and is not this unit's:
+   paste the exact failing lines into `agents/kernel-akmods.md` under a heading
+   `### FROM kernel-publish — CI core run 35582968952`, and stop there.
+4. Replace the "core is still building" paragraph in
+   `ROADMAP/evidence/kernel-publish-20260921.md` with the result, commit
+   `docs(evidence):`, push, and move the LANDABLE sha at the top of this card.
+
+The branch is landable NOW at `e58d39bc` regardless of how that run ends.
 
 ### GATE PROOF — ROUND 39, re-run against the PINNED tree
 
@@ -424,6 +453,24 @@ otherwise have silently no-opped and read as green. Full output:
 8. **`origin/roadmap/v2.2` moved twice during this unit's life** (`71bc2177` →
    `b137f03f`), both times docs-only. Re-check it before landing rather than
    trusting any sha written in this card, including the ones I wrote.
+10. **The gate PROVABLY ran in CI, and proving it nearly went wrong.** A green
+   job is not evidence a gate executed — that is the dominant CI defect family
+   in this repo. Checked properly: run 35582968952's `changes` job, step 4,
+   "The kernel tier is pinned, and pinned to a digest" :: completed/success,
+   and its log contains the gate's own output, including
+   `ok: APEX_KERNEL_IMAGE is declared at line 112, before the first FROM at line 114`
+   and `check-kernel-image-pin: the kernel pin is sound`. Saved:
+   `/var/lab-scratch/kernel-publish/r39/ci-changes-job.clean.log`.
+11. **GOTCHA that cost me ten minutes and reads exactly like a disaster:**
+   `gh api repos/…/actions/jobs/<id>/logs` returns a **BOM + CRLF** stream, and
+   a plain `grep` over it finds NOTHING — no match, no "binary file matches",
+   no error, exit 1. My first search for `check-kernel-image-pin` in a 762-line
+   log came back empty and read as "the gate did not run in CI". It had run and
+   passed. Use `grep -a`, or `tr -d '\r' | sed 's/\xef\xbb\xbf//'` first.
+   Same family as this repo's `grep -q`/pipefail trap: a silent zero that looks
+   like a real negative finding. **Also: job logs are NOT retrievable while the
+   run is in progress** — both `gh run view --log` and the job-logs API return
+   empty. Wait for completion.
 9. `tests/check-shellcheck-coverage.sh` still fails on
    `android/tools/release-version.sh` — pre-existing, on the base, not mine.
    Confirmed by running shellcheck on my edited gate both before and after the

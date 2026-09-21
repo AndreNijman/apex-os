@@ -1,9 +1,18 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-21T17:17+0800",
+ "updated": "2026-09-21T17:31+0800",
  "_round": "Round 39 STARTED 2026-09-21T17:08+0800 by the autoresume timer, after the round-38 session hit a usage limit at 14:59 (autoresume.log: 'resume session ended (exit 1)'). All six round-38 agents were dead \u2014 `ps` showed no subagent claude process \u2014 and NONE was messaged. Six fresh agents dispatched with the same slugs, each carrying a ROUND 39 CONTINUATION section appended to its card. CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 is set in this session's env (checked, not assumed), so agents are not SIGTERMed 600s after the final response; the hard bound is `timeout 4h`, which ends this session at about 21:08 AWST.",
- "_landed_this_round": [],
- "_status_recorded_this_round": "NONE. Nothing landed, so nothing to record. Counts unchanged at 92 done / 35 partial / 0 todo / 1 blocked of 128. L-003 remains the board's only blocked item and belongs to the luks-boot unit.",
+ "_landed_this_round": [
+  {
+   "merge": "259d8976",
+   "branch": "task/kernel-akmods",
+   "at": "2026-09-21T17:31+0800",
+   "what": "The akmods failure dump was UNREACHABLE BY CONSTRUCTION: the RUN opens with `set -eux` and calls `akmods` as an unguarded simple command, so its non-zero exit killed the shell before the `RPM=` assignment, the `test` and the `sed` that dumps `*.failed.log` could run. Every core build that died in that stage died silently -- which is why the 10:46 EXIT=1 had no failure log, no akmods marker and no podman `Error: building at STEP` line. Fixed with `akmods_rc=0; akmods \u2026 || akmods_rc=$?` plus an explicit `if` that dumps .last.log, *.failed.log and /var/log/akmods/akmods.log. GATED, not just fixed: files/scripts/check-run-recovery-reachable refuses an unguarded akmods/akmodsbuild/dkms/rpmbuild under `set -e` in any Containerfile RUN, with a 28-case mutation harness (tests/test-run-recovery-reachable.sh). Carries task/kernel-publish up to b505b747, including the kernel tier pin at Containerfile.core:112 (ghcr.io/andrenijman/apex-os@sha256:2ff544dd\u2026, the digest run 35557283953 published); kernel-publish's later commits are NOT in this merge and its branch lands separately.",
+   "why_now": "The agent marked `## LANDABLE` on its card and the both-ways proof is real rather than argued: on the tree as inherited the harness was 26 passed / 2 failed and BOTH failures were the live defect at Containerfile.core:593; with the fix, 28 passed / 0 failed. The predicted kernel-akmods/kernel-publish workflow collision was real -- both branches added a pre-build gate to build-image.yml at the same anchor -- and the agent kept BOTH steps rather than taking its own side.",
+   "gates_after_merge": "check-no-conflict-markers PASS. check-kernel-image-pin PASS (the pin the held branch was failing on is now in). test-run-recovery-reachable 28 passed / 0 failed. check-suites-run-in-ci: 104 suites, 97 run, 7 exempt, 0 unrun and undeclared. check-containerfile-assertions PASS. check-kernel-contract FAILs for an environmental reason only (wants a local RPMS dir). check-shellcheck-coverage FAILs on android/tools/release-version.sh -- VERIFIED PRE-EXISTING on b137f03f, the pre-merge tip, by building a detached worktree at it and re-running the gate. Not caused by this merge, but it is a live red on the integration branch and nobody owns it."
+  }
+ ],
+ "_status_recorded_this_round": "NONE so far. task/kernel-akmods has no roadmap item id -- it is an image blocker, not a numbered task -- so its landing is recorded here only. Counts unchanged at 92 done / 35 partial / 0 todo / 1 blocked of 128.",
  "_deliberately_held": "ZERO slots held: all six are in use. The READY list's `luks-installer (L-002)` and `luks-enroll (L-003)` were NOT dispatched as separate agents \u2014 the luks-boot unit already owns both items, and resume.sh offers them only because the queue keys IN HAND by unit id rather than by item. Dispatching them would have put three agents on one branch. Every other open queue unit is in the report's COMPLETE section.",
  "agents": [
   {

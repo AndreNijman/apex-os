@@ -94,7 +94,10 @@ its work is already MERGED into this branch at 3e235bc1 — do not redo it),
    `/var`, 21 GB available RAM, `/dev/kvm` present.
 
 ## IN PROGRESS
-- **round 39: `luks-pcr7-run1.service` on KATANA**, launched 17:35 AWST under
+- **round 39: `luks-pcr7-run2.service` on KATANA**, launched 17:55 AWST,
+  checkout `31a3419b`, log `/var/lab/scratch/luks-boot/run2.log`. run1
+  (`325df6c4`) got boot A fully green and then aborted — see FOUND #8/#9.
+- (superseded) `luks-pcr7-run1.service`, launched 17:35 AWST under
   `systemd-run --user`. Dir `/var/lab/scratch/luks-boot/` (my own; the other
   unit's `luks-enroll-2/` tree is untouched — apex-root was COPIED, 376 MB).
   Checkout is `task/luks-boot` @ `325df6c4`. Log
@@ -349,3 +352,41 @@ Everything else can be re-derived from git; the next action cannot.
 7. **`have-apex-luks-enroll=yes` is a `-x` test — it inspected the file and
    said nothing about runnability.** The repo's dominant defect family. The
    hook now also reports the shebang interpreter's presence.
+8. **run1 (17:27 AWST): boot A PASSED — the shipped script enrolled a TPM
+   slot, live, in a real boot, for the first time.** `12 passed, 1 failed`.
+   `enroll-exit=0`;
+   `TPM key slot enrolled: binding=pcr7 pcrs=7 bank=sha256
+   hash=91cd90cbef3cb73ad31775fbe69cb36f6112937d1b44634970b5a6b6eece3a39
+   pin=no`, against a live `pcr7-pre-enroll=69E722B3756359AAE507D8D886174B62…`
+   read from that boot's own firmware measurement. A recovery key was written,
+   and the new `passphrase-after-enrol=SUCCESS` line proves the original
+   passphrase STILL OPENS the volume afterwards. Bundling `env dirname wc head`
+   was the whole fix.
+9. **The scenario aborted after boot A, and the cause is in the scenario, not
+   the product: `cp "$ser" "$WORK/serial-pcr7-a.log"` copies the file onto
+   itself.** `vm_boot --serial` already wrote it at that exact name, so `cp`
+   exits non-zero with "are the same file", and this file runs `set -euo
+   pipefail`. Boots B (cold PCR 7 reproduction) and C (dbx firmware change +
+   recovery unlock) never ran. All three copies removed in `31a3419b`.
+10. **The signed-pcr11 assertion named the WRONG GATE, and the truth is a
+   better result.** `probe_signed_pcr11` refuses in order: SB off, no StubInfo,
+   no readable signing key, PCR 11 unmeasured. The scenario asserted the
+   second; what fires is the THIRD — `not using signed-pcr11: the boot did not
+   publish a PCR signing key at /run/systemd/tpm2-pcr-public-key.pem`. So gates
+   1 and 2 PASS: this guest booted Secure-Boot-enforcing AND genuinely came up
+   through sd-stub. The only thing between this lab and a signed-PCR-11
+   enrolment is building the UKI with `--pcr-key` — which is exactly what
+   `luks-enroll-2.md`'s NEXT #2 proposed, now with its precondition measured
+   rather than assumed.
+11. **The installer's PRODUCTION call path does not run the script in an
+   initramfs**, so FOUND #6's `env` gap is lab-scoped and is NOT a shipped
+   defect. `installer/apex-install:2189` runs `/usr/libexec/apex-luks-enroll`
+   inside a `podman run --rm --privileged --pid=host -v /dev:/dev "$IMAGE"`
+   container, which carries full coreutils. The installer SUITES use a
+   recovery-only stand-in via `APEX_LUKS_ENROLL_LOCAL`, so no test has ever run
+   the real script through the installer.
+12. **Cosmetic but real: the bundled python3 prints `Could not find platform
+   independent libraries <prefix>` on every invocation**, five-plus times into
+   the shipped script's stderr — the stream the contract reserves for prose
+   shown to a person. It does not affect correctness (every parse returned the
+   right answer), but it is noise inside a user-facing stream.
