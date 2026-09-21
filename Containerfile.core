@@ -755,27 +755,107 @@ RUN set -eux; \
     esac; \
     echo "glvnd: libGL.so.1 owned by ${owner}; mesa and nvidia GLX/EGL/Vulkan coexist"
 
-# ── Stage 1f: NVIDIA boot correctness — nouveau, KMS, initramfs ────────────
+# ── Stage 1f: NVIDIA boot correctness + the initramfs size budget ──────────
 # Everything here MUST land before the LAST initramfs regeneration in the build,
 # which is the Plymouth dracut run in Containerfile.apex. (apex-logs 46)
 #
-# THREE FINDINGS FROM THE FLASH-READINESS REVIEW, unchanged by unification:
+# ═══ THE SIZE BUDGET, AND WHY IT OWNS THIS FILE ══════════════════════════════
 #
-# 1. nouveau is NOT blacklisted by anything else. RPMFusion ships its blacklist
-#    ONLY via a %posttrans grubby call, which is inert on bootc — there is no
-#    modprobe.d fallback anywhere in RPMFusion F43. The CachyOS kernel ships
-#    nouveau with a catch-all pci:v000010DEd* alias AND nouveau is present in the
-#    initramfs, so it races nvidia for the dGPU during early boot.
+# A 512 MiB ESP is the normal case on a Windows dual-boot machine, and
+# systemd-boot needs the kernel and initramfs ON the ESP: `bootc` does not
+# implement XBOOTLDR Type #1 entries (measured 2026-09-21 — the GUID constant
+# exists in its source and nothing reachable references it), so there is no
+# second partition to put them on. apex-boot-migrate needs room for three
+# deployments plus slack — booted, rollback, and the one an update stages
+# alongside them — so the arithmetic is `3 × (vmlinuz + initramfs) + 48 MiB`.
 #
-# 2. RPMFusion deliberately OMITS nvidia from the initramfs
-#    (/usr/lib/dracut/dracut.conf.d/99-nvidia-dracut.conf), reasoning "avoid
-#    needing to regenerate the ramdisk on updates". That reasoning does not apply
-#    to bootc, where every driver update IS an image rebuild — and the omission
-#    means the splash/greeter cannot come up on a dGPU-attached output. We
-#    OVERWRITE that exact file (plain `=`, not `+=`) rather than relying on
-#    add_drivers-vs-omit_drivers precedence, so the fix is correct either way.
+# MEASURED on the L16, 2026-09-21, dracut-107-8.fc43, kernel
+# 7.2.3-cachyos2.fc43.x86_64 (ROADMAP/evidence/initramfs-slim-20260921.md):
 #
-# 3. nvidia-drm modeset: RPMFusion's nvidia-kmod carries make_modeset_default.patch
+#     initramfs   358.3 MiB       of which  203 MiB was GPU firmware under
+#     vmlinuz      16.1 MiB                 /usr/lib/firmware/nvidia alone
+#     ──────────────────                    ( 101 MiB proprietary GSP blobs,
+#     per deployment 374.4 MiB                100 MiB nouveau GSP blobs)
+#     × 3 + 48 MiB = 1171 MiB   →  every 512 MiB ESP refused `esp-too-small`.
+#
+# The initramfs was 96% of it, and firmware was 70% of the initramfs. Two
+# omissions in the dracut config below take it to:
+#
+#     initramfs    98.5 MiB
+#     vmlinuz      16.1 MiB
+#     ──────────────────
+#     per deployment 114.6 MiB  ×  3 + 48 MiB = 392 MiB   →  fits.
+#
+# ═══ FINDING 1 — the nouveau blacklist stays ═════════════════════════════════
+#
+# nouveau is NOT blacklisted by anything else. RPMFusion ships its blacklist
+# ONLY via a %posttrans grubby call, which is inert on bootc — there is no
+# modprobe.d fallback anywhere in RPMFusion F43. The CachyOS kernel ships
+# nouveau with a catch-all pci:v000010DEd* alias, so on the REAL root it races
+# nvidia for the dGPU. modprobe.d + the kargs below are what stop that, and
+# they are unchanged.
+#
+# ═══ FINDING 2 — REVISED 2026-09-21: no KMS driver goes in the initramfs ═════
+#
+# This file used to OVERWRITE RPMFusion's 99-nvidia-dracut.conf to force
+# `add_drivers+=" nvidia nvidia_modeset nvidia_drm nvidia_uvm "`, so that a
+# dGPU-attached panel would get KMS during the initrd phase. That bought a
+# nicer splash and cost 101 MiB of GSP firmware, because dracut installs the
+# firmware of every driver it installs. dracut's own `drm` module then swept in
+# nouveau, amdgpu, i915, xe and radeon with another ~138 MiB behind them.
+#
+# The replacement policy is one line to state: NO KMS DRIVER IS IN THE
+# INITRAMFS. Plymouth and the LUKS passphrase prompt run on `simpledrm`, which
+# binds the framebuffer UEFI's GOP already set up. That is not a hope — it is a
+# kernel contract, asserted in Containerfile.kernel:
+#
+#     CONFIG_DRM=y  CONFIG_DRM_SIMPLEDRM=y  CONFIG_SYSFB_SIMPLEFB=y
+#     CONFIG_DRM_FBDEV_EMULATION=y  CONFIG_FRAMEBUFFER_CONSOLE=y
+#
+# all built IN, so they are present with zero modules and zero firmware in the
+# initrd. Every UEFI machine therefore has a DRM device before a single module
+# loads. (This is also RPMFusion's own shipped default; it is stage 1f that had
+# departed from it.)
+#
+# REMOVING A DRIVER AND KEEPING ITS FIRMWARE WOULD BE WORSE THAN EITHER. A KMS
+# driver calls drm_aperture_remove_conflicting_pci_framebuffers() early in
+# probe — it evicts simpledrm BEFORE it loads firmware. So a driver present
+# without its firmware kills the console and then fails to replace it: a black
+# screen at the passphrase prompt. `omit_drivers` removes module and firmware
+# together, which is why it is the lever used here and why `add_drivers` had to
+# go rather than be fought with omit-vs-add precedence (dracut drops any
+# omit_drivers entry that also appears in add_drivers — /usr/bin/dracut:1453).
+#
+# WHAT THIS BETS AGAINST, stated rather than implied: a UEFI machine whose GOP
+# framebuffer is not on a display the owner can see. On the machines this image
+# targets there is none. What it does cost is cosmetic and real: on a
+# dGPU-attached panel the splash and the passphrase prompt are at firmware
+# resolution, and the handover to the real driver is a visible mode change a
+# second later instead of a flicker-free one. The greeter is unaffected — the
+# real root loads nvidia/amdgpu normally.
+#
+# ═══ FINDING 2b — the initramfs has no network ═══════════════════════════════
+#
+# The other 34 MiB is dracut's network stack: `kernel-network-modules` installs
+# all of `=drivers/net` (23 MiB of PHY and ethernet drivers) and
+# `network`/`network-manager` bring NetworkManager, libnm and a glib stack.
+# All of it exists to mount a root filesystem over a network — NFS, NVMe-oF,
+# iSCSI, netboot — or to reach a Tang server for a network-bound keyslot.
+#
+# APEX roots are local block devices. The installer already made this decision
+# for the live ISO ("No 'livenet' … we don't netboot", installer/build-live-iso.sh
+# line 137) and nothing in this repo sets rd.neednet, netroot, nfsroot or
+# iscsi. So the initramfs stops carrying it.
+#
+# WHAT THIS BETS AGAINST: network-root installs of any kind, and Clevis/Tang
+# network unlock — `clevis-pin-tang` drops out with the network module, while
+# `clevis-pin-tpm2`, which is what 50-bootc-clevis.conf and APEX's own
+# enrolment actually use, stays. A machine that needs a network root cannot run
+# this image's initramfs; it was never a machine APEX shipped for.
+#
+# ═══ FINDING 3 — nvidia-drm modeset ══════════════════════════════════════════
+#
+# RPMFusion's nvidia-kmod carries make_modeset_default.patch
 #    so the built default is already on. We set it EXPLICITLY anyway, so a future
 #    RPMFusion respin that drops that patch cannot silently ship an image with no
 #    KMS — an explicit modprobe option beats whatever the compiled-in default is.
@@ -811,11 +891,23 @@ RUN set -eux; \
         'kargs = ["rd.driver.blacklist=nouveau", "modprobe.blacklist=nouveau"]' \
         > /usr/lib/bootc/kargs.d/25-apex-nvidia.toml; \
     printf '%s\n' \
-        '# APEX-OS overwrite of RPMFusion 99-nvidia-dracut.conf.' \
-        '# Assignment, NOT +=, so their omit_drivers is cleared outright and we' \
-        '# do not depend on add_drivers-vs-omit_drivers precedence.' \
+        '# APEX-OS replacement for RPMFusion 99-nvidia-dracut.conf.' \
+        '# Keeps their filename because this file exists to SHADOW theirs; it' \
+        '# now carries the whole initramfs size policy, not just nvidia.' \
+        '# See Containerfile.core stage 1f for the measurements and the bets.' \
+        '#' \
+        '# No KMS driver in the initramfs. Plymouth and the LUKS prompt run on' \
+        '# simpledrm over the UEFI GOP framebuffer, which is built into the' \
+        '# kernel. Assignment first, so RPMFusion cannot contribute a value;' \
+        '# then ours. omit_drivers takes MODULE NAMES, anchored ^name$ by' \
+        '# dracut, and removes each module together with its firmware.' \
         'omit_drivers=""' \
-        'add_drivers+=" nvidia nvidia_modeset nvidia_drm nvidia_uvm "' \
+        'omit_drivers+=" nouveau amdgpu i915 xe radeon amdkfd "' \
+        'omit_drivers+=" nvidia nvidia_modeset nvidia_drm nvidia_uvm "' \
+        '#' \
+        '# No network in the initramfs: APEX roots are local block devices.' \
+        'omit_dracutmodules+=" network network-manager kernel-network-modules "' \
+        'omit_dracutmodules+=" nfs nvmf qemu-net walinuxagent "' \
         > /usr/lib/dracut/dracut.conf.d/99-nvidia-dracut.conf; \
     systemctl mask nvidia-fallback.service; \
     for u in nvidia-powerd nvidia-persistenced; do \
@@ -831,8 +923,18 @@ RUN set -eux; \
     done; \
     test -s /usr/lib/modprobe.d/50-apex-nvidia.conf; \
     test -s /usr/lib/bootc/kargs.d/25-apex-nvidia.toml; \
-    grep -q 'omit_drivers=""' /usr/lib/dracut/dracut.conf.d/99-nvidia-dracut.conf; \
-    echo "nvidia: nouveau blacklisted, KMS forced, driver added to initramfs"
+    NVCONF=/usr/lib/dracut/dracut.conf.d/99-nvidia-dracut.conf; \
+    grep -q '^omit_drivers=""$' "${NVCONF}"; \
+    grep -q 'omit_drivers+=" nouveau amdgpu i915 xe radeon amdkfd "' "${NVCONF}"; \
+    grep -q 'omit_dracutmodules+=" network network-manager kernel-network-modules "' "${NVCONF}"; \
+    if grep -q 'add_drivers' "${NVCONF}"; then \
+        echo "FATAL: ${NVCONF} still has an add_drivers line. dracut DROPS any"; \
+        echo "       omit_drivers entry whose name also appears in add_drivers"; \
+        echo "       (/usr/bin/dracut:1453), so the GPU firmware would come"; \
+        echo "       straight back and the ESP budget with it."; \
+        exit 1; \
+    fi; \
+    echo "nvidia: nouveau blacklisted on the real root, no KMS driver in the initramfs"
 
 # ── Stage 1g: controller + fan/IRQ policy that is no longer edition-specific ─
 # These four moved out of Containerfile.gaming unchanged in effect. They were
