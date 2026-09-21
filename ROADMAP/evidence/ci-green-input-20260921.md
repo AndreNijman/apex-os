@@ -249,12 +249,87 @@ loop.
 Four `workflow_dispatch` runs on `task/ci-green-input`, because a 25-50% flake
 can go green once on nothing:
 
-<!-- CI-RESULTS -->
+| run | `Run input-settings` | `Run terminal layout template` | `Run secret-broker` |
+| --- | --- | --- | --- |
+| `35647154151` | success | **failure** | success |
+| `35647166056` | success | success | success |
+| `35647177148` | success | success | **failure** |
+| `35647188306` | success | success | success |
+| baseline (8 runs on `roadmap/v2.2`) | 8/8 RED | 4/8 red | 2/8 red |
+
+All four checked out `9c389baf` (`gh run view <id> --json headSha`), so the two
+later docs commits are not under test.
+
+**`apex-input` is fixed: 4/4 green, and the count is exactly the predicted
+one** — `apex-input: 103 passed, 0 failed, 8 skipped`, against a red baseline of
+`93 passed, 7 failed, 8 skipped` (93 + the 7 repaired + 3 new; the strengthened
+assertion lives in the niri-only section, which skips on the runner). Diffing
+the **whole set of 41 suite summary lines** against baseline run `35625128495`
+changes exactly one line — that one — so nothing else moved.
+
+**Both flakes fired once each, which is the point.** Four runs cannot show a
+flake is cured: 0/4 green would be p≈0.06 against a 4/8 rate and p≈0.32 against
+2/8. No such claim is made. What each red now says is the deliverable.
+
+### What `secret-broker` said, for the first time (`35647177148`)
+
+```
+FAIL  the session's script actually ran
+      nothing below was tested. the wait ended because: the session left
+      before printing DONE (killed by signal 9)
+      waited 0s; the transcript is 59 bytes and stops at:
+        | --- can the session read the credential file directly? ---
+      apex agent status 1:
+        state        exited
+        command      /bin/sh /tmp/tmp.uJ183ayhVJ/demo/inside.sh
+        pid          24689
+        outcome      killed by signal 9
+```
+
+**The session is SIGKILLed, immediately.** Not a sandbox that failed to come
+up, not a sysctl, not slowness — `waited 0s` against the old 25 s. Every
+previous red said the opposite, and two rounds of briefing repeated it.
+
+The obvious next hypothesis was tested and **refuted**: `apex-agent-core`'s
+sandbox passes `--die-with-parent`, the `fork()` happens on a per-connection
+`apex-agentd-conn` thread, and Linux `PR_SET_PDEATHSIG` is scoped to the parent
+THREAD — so a detached session should die when its creating connection closes.
+It does not, on the L16: a probe running `apex agent run -d -- sh -c 'echo
+LINE1; sleep 6; echo DONE-LATE'` and then watching `apex agent status` gave
+`starting → working → complete`, `outcome exited 0`, both lines in the
+transcript. Whatever sends signal 9 on the runner is not that, or not
+deterministically. Naming it is a unit in `apexd/`, not in this one's bounds.
+
+### What `mux-layouts` said, for the first time (`35647154151`)
+
+```
+apex-mux: what each send reported —
+    #1 action new-tab  rc=0
+    #2 top-level       rc=0
+    ...            (all twelve)
+    #12 top-level      rc=0
+apex-mux: zellij list-sessions —
+    apex-demo-zellij [Created 42s ago]
+apex-mux: the tabs this session DOES have —
+        tab name="Tab #1" {
+```
+
+**Twelve sends, both forms, every one rc=0 with empty stderr, and the session
+still has only zellij's own scratch tab after 42 seconds.** That settles the
+question `zellij_build`'s comment says "is not understood", and it settles it
+against the current remedy: the top-level form is not failing on the runner
+(it exits 0 silently), and **retrying is not the cure there** — the comment's
+"a dropped request is cured by an identical one issued a moment later" held for
+6 and does not hold for 12. On that runner, in that window, the session server
+accepts and discards every tab request it is given, from both IPC forms, with
+no error anywhere. Six more attempts bought nothing, which is worth knowing
+before anyone spends a round adding more.
 
 ## Out of scope, and it will block the merge: the installer job is red too
 
 Found while verifying this branch, not fixed — the brief's bounds are the
-suites above. Run `35647154151`, job `Installer safety and UI`:
+suites above. It failed in **all four** runs, so unlike the two above it is
+deterministic. Job `Installer safety and UI`:
 
 ```
 ── the engine honours the operator's choice ──
