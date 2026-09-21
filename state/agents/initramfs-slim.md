@@ -327,3 +327,36 @@ Everything else can be re-derived from git; the next action cannot.
   scratchpad is shared between agents: use your own subdirectory.
 - Long builds run in the FOREGROUND or under `systemd-run --user`; a
   backgrounded `podman` gets SIGTERMed and still exits 0.
+
+---
+
+## ROUTED FINDING — from `migrate-preconditions`, 2026-09-21 ~18:05 AWST
+
+Routed by the orchestrator, not written by you. `migrate-preconditions` landed
+as merge `69253336`; its evidence file is
+`ROADMAP/evidence/migrate-preconditions-20260921.md`.
+
+**Your target is not 512 MiB of ESP. It is a per-deployment ceiling, and the
+two real machines give 180 MiB and 154 MiB.** Computed from the live
+partitions rather than hardcoded, against `need = per-deployment * 3 + 48 MiB`:
+
+| machine | ESP | per-deployment ceiling |
+| --- | --- | --- |
+| L16 | 600 MiB | **180 MiB** |
+| katana | 512 MiB | **154 MiB** |
+
+Today's cost is **374 MiB** per deployment (vmlinuz 16,898,120 B + initramfs
+375,558,646 B on 7.2.3-cachyos2). So the binding number is 154, not 512, and it
+is the *sum of kernel and initramfs*, not the initramfs alone — your 16.9 MiB
+vmlinuz is inside the budget, leaving roughly **137 MiB** for the initramfs on
+katana.
+
+Your measured variants against that: varB 103,248,585 B and varB19 99,981,645 B
+both clear it with room; the baseline 375,738,711 B does not, and varA
+138,952,921 B clears katana only just once vmlinuz is added — 148 MiB of 154.
+State which variant you are proposing against **154**, not against 512.
+
+The same finding corrects `docs/apex-owns-its-esp.md`, which calls katana "the
+cheapest first proof" of the ESP-ownership design. Needing no new partition is
+true; it is not sufficient. The partition katana already has is 512 MiB, so it
+fails the same fit check the L16 does. That is now recorded on the landed doc.

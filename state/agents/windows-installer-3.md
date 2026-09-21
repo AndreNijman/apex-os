@@ -578,3 +578,37 @@ advisor and the decision doc both make the mechanism the higher-value single
 boot, and "#2 across a feature update" is not doable in this lab at all — there
 is no update media. If #1/#2/#4 are not reached this round they stay open with
 that reason; say so rather than implying they were done.
+
+---
+
+## ROUTED FINDING — from `migrate-preconditions`, 2026-09-21 ~18:05 AWST
+
+Routed by the orchestrator, not written by you. `migrate-preconditions` landed
+as merge `69253336`; start at `ROADMAP/evidence/migrate-preconditions-20260921.md`
+§1. Its worktree copy is `/var/tmp/apex-work/wt-migrate-preconditions/`.
+
+**Mounting a chosen ESP does not steer where bootc writes, so any design that
+mounts one and expects the UKI to land there does not match bootc 1.16.10 or
+1.16.11.** Read out of bootc's own source, not inferred from `--help`:
+
+- `apex-boot-migrate cmd_stage` runs `to-existing-root`, which has **no ESP
+  option at all** — its only positional is `[ROOT_PATH]`. The
+  `install to-filesystem` behaviour everyone quotes is a different subcommand.
+- The composefs writer reaches the ESP at **four** call sites and every one is
+  `find_first_colocated_esp()`. `boot_mount_spec()` appears once and only
+  builds a `systemd.mount-extra=` karg.
+- **Both `Upgrade` arms re-discover the ESP**, so every later `bootc upgrade`
+  re-walks the GPT. There is no pointer to pin.
+
+That last point **answers must-measure #3 from source, with no lab run
+needed** — "bootupd stays on the MOUNTED ESP for later bootc upgrades rather
+than re-discovering one" is FALSE as written, and the honest version of the
+requirement is that APEX's ESP must be the one `find_first_colocated_esp()`
+finds, which means being first in the root disk's partition order. That is a
+GPT-ordering property, so it collapses into must-measure #1.
+
+So of the four must-measure items, **#3 is answered** and the two the
+orchestrator asked you to take reduce to must-measure #2 (Windows tolerates a
+second ESP across a feature update, a repair install and `bcdboot`) and #4
+(Windows' boot path byte-identical either side, GPT included). Those still need
+your guest. `migrate-preconditions` did not touch your card or your lab.

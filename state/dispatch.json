@@ -1,6 +1,6 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-21T17:38+0800",
+ "updated": "2026-09-21T17:41+0800",
  "_round": "Round 39 STARTED 2026-09-21T17:08+0800 by the autoresume timer, after the round-38 session hit a usage limit at 14:59 (autoresume.log: 'resume session ended (exit 1)'). All six round-38 agents were dead \u2014 `ps` showed no subagent claude process \u2014 and NONE was messaged. Six fresh agents dispatched with the same slugs, each carrying a ROUND 39 CONTINUATION section appended to its card. CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 is set in this session's env (checked, not assumed), so agents are not SIGTERMed 600s after the final response; the hard bound is `timeout 4h`, which ends this session at about 21:08 AWST.",
  "_landed_this_round": [
   {
@@ -33,6 +33,15 @@
    "what": "roadmap/v2.2's CI has been RED on every commit since docs/apex-owns-its-esp.md landed, and nobody had noticed. `tests/check-doc-verbs.sh`'s `mentions()` scans PROSE, not only backticked text, so it read Andre's verbatim decision -- 'maybe it should build a new esp for apex or something' -- as a two-word verb, asked the CLI for it, and refused. That failed the `Docs and the CLI agree, in both directions` step and through it `Require every applicable test`. Recorded in tests/doc-verbs-allow with its reason rather than fixed in the document: the document's entire value is that the decision is in Andre's own words, and rewording him to satisfy a regex destroys the only thing it is for.",
    "why_now": "Found by the orchestrator, not by an agent: `gh run list` after the kernel landings showed the two preceding roadmap/v2.2 runs (35582430113, 35581614026) already red. The extractor's real limitation -- it cannot tell an English function word from a subcommand name -- is written down next to the allow entry as the separate change it deserves, rather than smuggled in behind a doc fix.",
    "gates_after_merge": "check-doc-verbs whole gate: 273 valid, 9 deliberate, 0 not a command; command surface 195 documented, 111 declared undocumented, 0 undocumented and undeclared, 0 stale. Proven BOTH ways: a scratch file naming `apex frobnicate` still gives BAD and exit 1. check-no-conflict-markers PASS."
+  },
+  {
+   "merge": "69253336",
+   "branch": "task/migrate-preconditions",
+   "at": "2026-09-21T17:41+0800",
+   "what": "The precondition half of the GRUB -> systemd-boot pivot: everything that runs before `apex-boot-migrate stage` writes a byte. New `esp-is-windows` REFUSAL enforcing docs/apex-owns-its-esp.md -- a refusal rather than a note because it is CLEARABLE, the same test that made BitLocker a note. Six behavioural assertions prove it by RUNNING the engine against two fixture ESPs differing by one file, and the gate was mutation-tested red both ways: a grep for the refusal's name would have passed the 'unconditional' mutation. Also corrects two claims in the landed ESP doc that were labelled 'checked rather than assumed' but had only been checked against `--help`.",
+   "why_now": "The agent signalled `## LANDABLE` at f3280072, and this round's one real judgement call went AGAINST its dispatch brief on evidence, which is the right outcome and the reason to read the merge. The brief expected the 342 pre-decision 'which ESP' lines to be REVERTED because `bootc install to-filesystem` writes to the ESP the caller mounts. But `cmd_stage` runs `to-existing-root`, which has NO ESP option at all -- only [ROOT_PATH]. Read out of bootc 1.16.10's source (this machine's installed version): the composefs writer reaches the ESP at four call sites and every one is `find_first_colocated_esp()`; `boot_mount_spec()` appears once and only builds a `systemd.mount-extra=` karg. The lines describe a constraint of the SUBCOMMAND, not a policy APEX invented. Kept and reframed from 'mirror bootc's choice' to 'know what bootc will write, and refuse when that is Windows''.",
+   "gates_after_merge": "check-no-conflict-markers PASS; tests/test-boot-migrate.sh 83 passed / 0 failed; check-suites-run-in-ci 104 suites, 97 run, 7 exempt, 0 unrun and undeclared; check-shellcheck-coverage 202 discovered / 0 newly failing; check-doc-verbs forward pass on the edited ESP doc clean.",
+   "live_machine_risk": "One new refusal is the only behaviour change on a real machine, and both machines this program owns were checked: the L16 has no Windows at all, and katana's root-disk ESP is its own EFI-SYSTEM (Windows' ESP is on a disk bootc never searches). Neither is affected."
   }
  ],
  "_status_recorded_this_round": "NONE. None of the three landings maps to a numbered roadmap item -- kernel-akmods and kernel-publish are image blockers, and the shellcheck fix is gate hygiene. Counts unchanged at 92 done / 35 partial / 0 todo / 1 blocked of 128.",
@@ -495,5 +504,19 @@
   "task/migrate-preconditions @754b6174": "342 of its 370 changed lines implement 'which ESP' logic written BEFORE Andre settled ESP ownership at 17:09 today. The decision inverts the premise \u2014 APEX builds its own ESP rather than choosing among existing ones \u2014 so which of those lines survive is the fresh agent's first real judgement. Landing them first would make that judgement a revert on the integration branch instead of on a task branch.",
   "pushed_instead": "The two clean-but-ahead worktrees were plain-pushed so nothing depends on a live disk: task/kernel-publish b981e348 -> 3d0925b8, task/initramfs-slim 847b5bfb -> 86867c61. Both are merges of origin/roadmap/v2.2 the dead agents had made locally and never pushed; the wip snapshot timer only covers DIRTY trees, so committed-but-unpushed work was the real exposure. The dirty files in wt-kernel-akmods (4) and wt-migrate-preconditions (1) were deliberately NOT committed by the orchestrator \u2014 attributing a half-written hunk is the agent's call, and each card now says so."
  },
- "_collision_recorded_this_round": "kernel-akmods and kernel-publish edit the same two files. wt-kernel-akmods has UNCOMMITTED edits to .github/workflows/build-image.yml and .github/workflows/pr-validation.yml; task/kernel-publish adds +88 and +14 lines to those same two files. queue.json records no conflicts_with for either. Both cards now carry the collision: kernel-akmods merges origin/task/kernel-publish BEFORE pushing any workflow edit, and kernel-publish merges back if origin/task/kernel-akmods moves."
+ "_collision_recorded_this_round": "kernel-akmods and kernel-publish edit the same two files. wt-kernel-akmods has UNCOMMITTED edits to .github/workflows/build-image.yml and .github/workflows/pr-validation.yml; task/kernel-publish adds +88 and +14 lines to those same two files. queue.json records no conflicts_with for either. Both cards now carry the collision: kernel-akmods merges origin/task/kernel-publish BEFORE pushing any workflow edit, and kernel-publish merges back if origin/task/kernel-akmods moves.",
+ "_routed_findings_this_round": [
+  {
+   "from": "migrate-preconditions",
+   "to": "windows-installer-3",
+   "at": "2026-09-21T17:41+0800",
+   "finding": "Mounting a chosen ESP does NOT steer where bootc writes, so any design that mounts one and expects the UKI to land there does not match bootc 1.16.10 or 1.16.11. Four ESP call sites, all `find_first_colocated_esp()`; both `Upgrade` arms re-discover the ESP, so every later `bootc upgrade` re-walks the GPT and there is no pointer to pin. This ANSWERS must-measure #3 from source with no lab run: 'bootupd stays on the MOUNTED ESP' is false as written, and the honest requirement -- APEX's ESP must be the one find_first_colocated_esp() finds, i.e. first in the root disk's partition order -- collapses into must-measure #1. Leaves #2 and #4 for the Windows guest. Appended to its card."
+  },
+  {
+   "from": "migrate-preconditions",
+   "to": "initramfs-slim",
+   "at": "2026-09-21T17:41+0800",
+   "finding": "katana is NOT the cheap proof docs/apex-owns-its-esp.md calls it. Needing no new partition is true but not sufficient: the partition it already has is 512 MiB, so it fails the same fit check the L16 does. Per-deployment ceilings computed from the LIVE partitions rather than hardcoded: L16 180 MiB, katana 154 MiB, against 374 MiB today. So the binding number for initramfs-slim is 154, it is the SUM of kernel and initramfs, and its measured varB (103 MB) and varB19 (100 MB) both clear it while varA (139 MB) only just does once the 16.9 MiB vmlinuz is added. Appended to its card."
+  }
+ ]
 }
