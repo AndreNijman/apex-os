@@ -64,6 +64,16 @@ Two consequences, both bigger than this unit:
   `APEX_MIGRATE_MOUNTDIR`: test plumbing for the both-ways gate, orthogonal to
   the ESP decision, empty-by-default so production paths are unchanged. Checked
   it is complete: every bare path test in `cmd_precheck` is now prefixed.
+- `011eed35` `feat(boot): refuse to migrate onto Windows' ESP, and stop
+  claiming bootc can be steered` — the reframe, plus the new **`esp-is-windows`
+  REFUSAL**: if the ESP bootc would write carries
+  `EFI/Microsoft/Boot/bootmgfw.efi`, stop. Refusal and not note because it is
+  CLEARABLE (an ESP of APEX's own, which APEX creates), which is the exact test
+  that made BitLocker a note. Also fixed the `esp-choice` verdict, which tagged
+  `APEX_MIGRATE_ESP` as "(overridden)" and so claimed a steering that does not
+  exist. `bitlocker-shared-esp` kept but now only reachable under `--explain`,
+  reworded to describe the fix rather than a hazard that can no longer happen.
+  **77 passed, 0 failed** (`tests/test-boot-migrate.sh`).
 
 ### MUST-MEASURE CHECKLIST (from `docs/apex-owns-its-esp.md`) — who takes what
 
@@ -80,11 +90,13 @@ answers #3 and that #1 depends on.
 
 ### NEXT
 
-1. Reword `esp_candidates`' header + the `no-esp`/`othernote` refusal text to
-   the reframing above, and add the `esp-is-windows` REFUSAL — fire it when
-   `windows_loader_on_esp` is true of the ESP `find_esp()` returns. Fold the
-   now-unreachable `bitlocker-shared-esp` NOTE into it; keep `same-disk` and
-   `other-disk`.
+1. Add the both-ways gate for `esp-is-windows` to `tests/test-boot-migrate.sh`:
+   PATH shims for lsblk/findmnt/blkid/df/du plus `APEX_MIGRATE_FAKEROOT` and
+   `APEX_MIGRATE_MOUNTDIR`, one fixture ESP WITH
+   `EFI/Microsoft/Boot/bootmgfw.efi` and one without, asserting REFUSE on the
+   first and no `esp-is-windows` verdict on the second. It must fail when the
+   refusal is deleted AND fail when it is made unconditional — a gate that
+   passes both ways is the dominant CI defect family in this repo.
 
 ### FOUND (round 39 — defects in shipped/landed material, not mine)
 

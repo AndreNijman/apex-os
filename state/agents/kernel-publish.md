@@ -1,4 +1,4 @@
-## LANDABLE — `b505b747`
+## LANDABLE — `e58d39bc`
 
 The kernel digest is pinned and the gate is green both ways. Landing this
 unblocks every image build on the board; NOT landing it leaves `roadmap/v2.2`
@@ -15,11 +15,14 @@ line that killed run 35552604603 and every image build after it.
   in the akmods/nvidia stage, which belongs to `kernel-akmods`. This unit's
   assertion is that `core` gets PAST `FROM ${APEX_KERNEL_IMAGE}` and the
   cross-tier contract RUN.
-- Two commits: `72bab38d` is the pin itself; `b505b747` closes a seam the
+- Three commits: `72bab38d` is the pin itself; `b505b747` closes a seam the
   mutants found (the gate stripped quotes, `build-image.yml`'s resolve regex
   does not — a quoted pin passed the gate and would have died in CI blaming the
   digest). Landing `72bab38d` alone is enough to unblock builds; `b505b747` is
-  a gate-only change and touches no image input.
+  a gate-only change and touches no image input. `e58d39bc` adds
+  `ROADMAP/evidence/kernel-publish-20260921.md` — the file `Containerfile.core`'s
+  ARG comment has been citing since `72bab38d`, and which until now existed on
+  no branch. That citation resolves on this branch and will resolve on v2.2.
 - CI run 35582968952 on `72bab38d`: the `changes` job, which is where
   `check-kernel-image-pin.sh` runs, is **completed/success** — the gate passes
   on GitHub's runner, not just this laptop.
@@ -380,3 +383,49 @@ Re-run the gate-red mutants on the NOW-PINNED tree (mutate.sh's base is the real
 worktree, so its base changed under it — diff each mutant before trusting its
 exit code), then write `## LANDABLE 72bab38d` at the top of this card, then
 `gh workflow run build-image.yml --ref task/kernel-publish -f force_core=true`.
+
+### GATE PROOF — ROUND 39, re-run against the PINNED tree
+
+The round-2 proof was run against a tree with a *placeholder* digest. Pinning
+the real one moved that harness's base under it, so I re-ran with
+`/var/lab-scratch/kernel-publish/r39/mutate39.sh`, which `diff`s every mutant
+against the source and **refuses to report an exit code for a mutation that
+changed nothing** — a mutation written against the old `localhost` line would
+otherwise have silently no-opped and read as green. Full output:
+`/var/lab-scratch/kernel-publish/gate-proof-round39.out`.
+
+| mutant | gate |
+|---|---|
+| the real pinned tree, unmutated | **exit 0**, 13/13 ok |
+| reverted to `localhost/apex-kernel:local` | exit 1 |
+| `:kernel` floating tag | exit 1 |
+| same digest, `ghcr.io/attacker/apex-os` | exit 1 |
+| `ARG APEX_KERNEL_IMAGE=` empty | exit 1 |
+| digest truncated to 40 hex | exit 1 |
+| **pin wrapped in double quotes** | **exit 0 — got through.** Closed by `b505b747`, re-mutated → exit 1 |
+| ARG moved below the first `FROM` | exit 1, names both line numbers |
+| `--digestfile` removed from kernel-build.yml | exit 1 |
+| `build-local.sh` drops `--build-arg` | exit 1 |
+| `btf_scx=usable` refusal removed | exit 1 |
+
+## FOUND (round 39)
+
+7. **The gate and the thing it protects disagreed about quoting, and mutation
+   testing is the only reason anyone knows.** `check-kernel-image-pin.sh`
+   stripped optional quotes before judging the pin (correct — the Dockerfile
+   parser accepts them). `build-image.yml:534`'s resolve step uses an anchored
+   `sed -nE 's|^ARG APEX_KERNEL_IMAGE=(ghcr\.io/…@sha256:[0-9a-f]{64})$|\1|p'`
+   that does not. A quoted pin would build locally, pass the millisecond gate
+   whose entire job is catching this class, and then fail in CI with a message
+   **accusing the digest** — which is well formed — rather than the quotes.
+   `b505b747` makes the stricter parser win. This is the "a gate that inspects
+   nothing" family again, in its subtler form: the gate inspected the right
+   line and applied a looser rule than its consumer.
+8. **`origin/roadmap/v2.2` moved twice during this unit's life** (`71bc2177` →
+   `b137f03f`), both times docs-only. Re-check it before landing rather than
+   trusting any sha written in this card, including the ones I wrote.
+9. `tests/check-shellcheck-coverage.sh` still fails on
+   `android/tools/release-version.sh` — pre-existing, on the base, not mine.
+   Confirmed by running shellcheck on my edited gate both before and after the
+   change: identical single SC2016 *info*, below the repo's `-S warning`
+   threshold. My file is not among the newly-failing.

@@ -94,7 +94,14 @@ its work is already MERGED into this branch at 3e235bc1 — do not redo it),
    `/var`, 21 GB available RAM, `/dev/kvm` present.
 
 ## IN PROGRESS
-- `luks-boot-run2.service`. Install phase then OVMF boot phase.
+- **round 39: `luks-pcr7-run1.service` on KATANA**, launched 17:35 AWST under
+  `systemd-run --user`. Dir `/var/lab/scratch/luks-boot/` (my own; the other
+  unit's `luks-enroll-2/` tree is untouched — apex-root was COPIED, 376 MB).
+  Checkout is `task/luks-boot` @ `325df6c4`. Log
+  `/var/lab/scratch/luks-boot/run1.log`, ends with a literal `EXIT_CODE=`.
+  Three guest boots: A enrol, B cold reproduction, C dbx firmware change +
+  recovery. Read the log AND `out/serial-pcr7-{a,b,c}.log`.
+- (round 38, finished) `luks-boot-run2.service` — L-002, landed as `d00c3060`.
 
 ## BLOCKED ON
 - (nothing)

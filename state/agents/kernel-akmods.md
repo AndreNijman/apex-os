@@ -1,3 +1,41 @@
+## LANDABLE
+
+**`0cc68901a204442cc65fc340b8eacfd2997765d3`** on `task/kernel-akmods`, pushed
+2026-09-21 17:26 AWST. Land it.
+
+**One-line reason:** it makes `core`'s akmods failure dump reachable instead of
+dead code under `set -e`, so the next red build prints the compiler error
+rather than one truncated status word — and it ships the checker plus a 28-case
+mutation harness that refuse the shape's return, proven red on the tree as
+inherited and green with the fix.
+
+**What lands with it, so the orchestrator is not surprised:** this sha already
+carries `origin/roadmap/v2.2`@`b137f03f` and **`origin/task/kernel-publish`@
+`3d0925b8`** (merge `0cc68901`). Both branches added a pre-build gate to
+`.github/workflows/build-image.yml` at the same anchor and conflicted; resolved
+by keeping BOTH steps, kernel-publish's `check-kernel-image-pin.sh` first so
+its comment's "like the line above it" still refers to the
+Containerfile-assertions step as it did on its own branch. Neither side was
+taken wholesale. `pr-validation.yml` and `Containerfile.core` auto-merged —
+kernel-publish's Containerfile.core hunk is the kernel-image ARG pin at the
+top, mine is the akmods loop at the bottom. **If kernel-publish is landed
+separately first, this merge makes that a no-op, not a conflict.**
+
+**Verified after the merge, not before:** `tests/test-run-recovery-reachable.sh`
+28 passed / 0 failed; `check-run-recovery-reachable` exit 0 on all five
+Containerfiles; kernel-publish's own `check-kernel-image-pin.sh` and
+`check-containerfile-assertions.sh` both still exit 0; both workflow YAMLs
+parse; `bash -n` clean on the rewritten RUN body.
+
+**What landing this does NOT do — stated plainly:** it does not prove `core`
+builds. The unit stays OPEN. The root cause of the 10:46 death is still
+unsettled, because the reproducer PASSED (kmod-nvidia built in 96 s) and the
+real build died with no akmods status marker and no `Error: building at STEP`
+from podman. Landing this is what makes the next failure readable; it is not
+the answer itself. Nothing here can regress a build that is already red.
+
+---
+
 # kernel-akmods — nvidia akmod will not build against the APEX kernel
 
 Dispatched round 37, 2026-09-21. Worktree `/var/tmp/apex-work/wt-kernel-akmods`,
@@ -329,11 +367,19 @@ Everything else can be re-derived from git; the next action cannot.
 
 ### NEXT
 
-- Fix `Containerfile.core:608` akmods to the `rc=0; akmods … || rc=$?` shape, re-run `tests/test-run-recovery-reachable.sh` expecting `28 passed, 0 failed`, and commit all five files as ONE commit.
+- Read `/var/lab-scratch/kernel-akmods/core-build.log` for the akmods outcome (`journalctl --user -u kernel-akmods-core`; started 17:27, reaches akmods ~17:43) and record the verdict; if it failed, quote the compiler error the new dump printed.
 
 ### IN PROGRESS
 
-- nothing yet
+- Real `core` build, unit **`kernel-akmods-core`**, started **17:27:20 AWST**
+  at HEAD `0cc68901`. Runner `/var/lab-scratch/kernel-akmods/run-core.sh`.
+  Streams are split on purpose: merged log `core-build.log`, **stderr only** in
+  `core-build.err.log`. That second file settles absence #3 beyond argument —
+  if podman emits `Error: building at STEP …` it lands there, and if it is
+  empty of one again the silence is proven rather than inferred from a grep
+  over a merged log. Wrapped in a `sleep:idle:handle-lid-switch` block
+  inhibitor (memory: "hypridle suspends after 15 min idle" is the real killer
+  of autonomous rounds). Ends with a literal `EXIT_CODE=` line in both files.
 
 ### BLOCKED ON
 
