@@ -8332,7 +8332,7 @@ tasks:
 - id: L-002
   title: Enable LUKS2 by default
   priority: Later
-  status: blocked
+  status: partial
   area: boot-security
   depends_on:
   - L-001
@@ -8342,53 +8342,76 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    ROUND 29 (2026-09-18) - STATUS UNCHANGED, still blocked; this records what exists toward it so the next reader
-    does not re-derive it. THE ACCEPTANCE IS 'does not strand users across qualified hardware/recovery cases', and
-    the case that had no scenario at all now has one: apex-os task/later-2 adds luks-no-tpm to
-    files/scripts/boot-v2/run-scenarios, 16 passed / 0 failed / 1 could-not-run, container later-r7-notpm ExitCode
-    0. One volume booted twice with the TPM DEVICE as the only difference: with it, tpm-unlock=SUCCESS and
-    plaintext-marker=written; without it, tpm-device=absent, tpm-unlock=REFUSED, recovery-unlock=SUCCESS and
-    recovery-marker=found, so the recovery key returns the same plaintext the TPM path wrote. The qemu exit status
-    is asserted, because a guest that hangs on a missing TPM strands the user as surely as one that refuses. THE
-    TPM IS EMULATED (swtpm), and the run does not model a machine that NEVER had a TPM - such a volume could not
-    carry a systemd-tpm2 token at all. THREE THINGS STILL BLOCK THIS, none of them fixed by that scenario. (1)
-    L-001's acceptance word 'Real' is unmet: no silicon TPM has done an enrol-and-recover cycle, and
-    state/queue.json makes L-002 wait on it. (2) THE INSTALLER CANNOT ENCRYPT AT ALL - re-verified round 28: every
-    crypto_LUKS branch in installer/apex-install is a refusal to overwrite an existing header (:920-925), never a
-    path that creates one, and the same at apex-installer-gui:170. There is no in-place path either. (3) The
-    supporting details are unresolved: the initramfs keymap is always 'us' (Containerfile.core:2104-2107),
-    plymouth's message() is a no-op (apex-os.script:230), and cryptsetup is an unpinned transitive dependency
-    asserted nowhere. Two SHIPPED files already assert LUKS2+TPM2 as settled fact (apex-session-select:18-22 and
-    its sudoers :9-12), which is a defect regardless of when this lands. docs/boot-v2.md carries the five-run
-    hardware procedure that would satisfy (1). LANDED round 30 (2026-09-19): merge c6bc990a carries round 29's
-    boot-v2 work; nothing on this item changed and nothing here was re-verified. STAYS BLOCKED on L-001, and the
-    dispatch unit `later` is closed to dispatch from this round for the reason recorded on L-001 - the remainder
-    is Andre's five-run hardware procedure in docs/boot-v2.md, not an agent's. ROUND 31 (2026-09-19) - STATUS
-    UNCHANGED, still blocked, but ONE of the three blockers is now smaller and a FOURTH has appeared. Real silicon
-    was finally available (MSI Katana GF76 12UG, Intel PTT fTPM, INTC/ADL fw 0x2580012); see L-001 ROUND 31 and
-    ROADMAP/evidence/L-001-katana-tpm-20260919.md. BLOCKER (1) NARROWS: the acceptance is 'does not strand users
-    across qualified hardware/recovery cases', and the enrol-and-recover cycle itself now passes on real hardware
-    - a LUKS2 volume with one systemd-tpm2 token and one systemd-recovery token unlocked through the TPM in 0.29 s
-    and through the recovery key in 0.032 s, returning the same plaintext both ways, and survived a real
-    suspend/resume with a fresh unseal afterwards. What is still unqualified on silicon is the TPM CLEAR (not run
-    - a live Windows install owns katana's TPM and a clear costs Andre's Windows Hello PIN; it needs his yes, not
-    a machine, and the two-command PPI procedure is written down) and the TPM-REMOVED case (could-not-run - PPI
-    Disable is reachable but re-enabling needs somebody in firmware setup). BLOCKER (2) IS UNCHANGED AND UNTOUCHED
-    BY THIS ROUND: the installer still cannot encrypt a disk at all - every crypto_LUKS branch in
-    installer/apex-install is a refusal to overwrite an existing header, never a path that creates one. Nothing on
-    katana was encrypted either; the whole run was on loopback files, deliberately, because katana's system disk
-    must not become encrypted. BLOCKER (3) unchanged: initramfs keymap always 'us', plymouth message() a no-op,
-    cryptsetup an unpinned transitive dependency. NEW BLOCKER (4), and it is squarely in this item's subject
-    matter: `systemd-cryptenroll --tpm2-device=auto` ON SYSTEMD 258.10 BINDS TO NO PCRs AT ALL - tpm2-hash-pcrs
-    empty, tpm2-pcr-bank n/a, tpm2-policy-hash 32 zero bytes, measured on katana. A 'LUKS2 by default' built on
-    that default would seal the volume key to the SRK and nothing else, so any OS booted on the same hardware
-    could unseal it. Whatever turns encryption on must pass --tpm2-pcrs= or --tpm2-public-key-pcrs= explicitly,
-    and a test must assert the enrolled token actually carries a policy rather than that the command exited 0.
-    ROUND 32 (2026-09-20) - STATUS UNCHANGED, still blocked, but BLOCKER (2) IS GONE and BLOCKER (3) is closed in
-    a way that was measured rather than asserted. Branch apex-os task/luks-installer, merged from roadmap/v2.2
-    b5f696cb, tip f0ec87de. BLOCKER (2), 'the installer cannot encrypt at all', is no longer true: encrypt=yes
-    builds ESP + plain ext4 /boot + LUKS2 -> btrfs, calls /usr/libexec/apex-luks-enroll, proves BOTH the
-    passphrase and the recovery key open the volume BEFORE the install, surfaces the recovery key to the user
+    ROUND 38 (2026-09-21) - blocked -> partial. BLOCKER (2) IS CLOSED: the installer CAN encrypt, and the disk it
+    writes BOOTS. task/luks-boot landed as merge d00c3060 (installer/apex-install --check-passphrase, a no-disk
+    check that the passphrase is typeable on the initramfs 'us' keymap; installer/luks-boot-drive.py, an OVMF
+    guest driven over QMP through the passphrase prompt; installer/test-installer-luks-boot.sh, install and boot
+    end to end; installer/test-installer-luks.sh; tests/suites-not-in-ci.txt). MEASURED 2026-09-21 12:06 AWST in
+    /var/lab-scratch/luks-boot/run2.log, run as a systemd user unit (luks-boot-run2) so no agent teardown could
+    SIGTERM it: an encrypted apex-install onto a loop-attached image, then the OVMF boot: prompt-seen=yes,
+    typed=yes, switched-root=yes, 'dracut switched root - the disk this installer wrote BOOTS first time this has
+    been measured'; 6 passed, 1 failed, EXIT_CODE=1, artefacts kept in /var/lab-scratch/apex-luks-boot.GLHdmI. THE
+    ONE FAILURE IS THE HARNESS, NOT THE INSTALLER: 'the ESP mounts so the fallback loader can be checked' - `mount
+    -o ro` of loop1p1 (test-installer-luks-boot.sh:234) was refused with 'Can't mount, would change RO state', the
+    message given when the device is already mounted in a different RO state; most likely the install phase's own
+    ESP mount had not been released when the check ran (hypothesis for the continuation, not confirmed). So the
+    removable-media fallback loader is UNVERIFIED this round, not shown absent. RUN 1 (luks-installer-2's launch)
+    MEASURED NOTHING: engine exit=143 after 869 s, a backgrounded podman SIGTERMed when its agent's session ended,
+    while the outer script still printed '0 passed, 3 failed' - do not quote that line as a result about the
+    installer. NOT DONE because the acceptance is 'does not strand users across qualified hardware/recovery cases'
+    and: welcome-seen=no (the guest switched root but the run did not observe the first-boot welcome); the
+    fallback-loader check is unverified; the boot half has been measured once, not repeated; L-001's TPM clear and
+    TPM-removed cases are still Andre's on katana; blocker (3) is only partly answered (--check-passphrase refuses
+    what the 'us' keymap cannot type, but the keymap is still always 'us', plymouth message() is still a no-op,
+    cryptsetup is still unpinned); blocker (4) (--tpm2-device=auto binds to no PCRs on systemd 258.10) belongs to
+    L-003. Continuation dispatched round 38 as luks-boot-2: fix the ESP check, re-run the boot half alone against
+    the kept image, then L-003. ROUND 29 (2026-09-18) - STATUS UNCHANGED, still blocked; this records what exists
+    toward it so the next reader does not re-derive it. THE ACCEPTANCE IS 'does not strand users across qualified
+    hardware/recovery cases', and the case that had no scenario at all now has one: apex-os task/later-2 adds
+    luks-no-tpm to files/scripts/boot-v2/run-scenarios, 16 passed / 0 failed / 1 could-not-run, container
+    later-r7-notpm ExitCode 0. One volume booted twice with the TPM DEVICE as the only difference: with it,
+    tpm-unlock=SUCCESS and plaintext-marker=written; without it, tpm-device=absent, tpm-unlock=REFUSED,
+    recovery-unlock=SUCCESS and recovery-marker=found, so the recovery key returns the same plaintext the TPM path
+    wrote. The qemu exit status is asserted, because a guest that hangs on a missing TPM strands the user as
+    surely as one that refuses. THE TPM IS EMULATED (swtpm), and the run does not model a machine that NEVER had a
+    TPM - such a volume could not carry a systemd-tpm2 token at all. THREE THINGS STILL BLOCK THIS, none of them
+    fixed by that scenario. (1) L-001's acceptance word 'Real' is unmet: no silicon TPM has done an
+    enrol-and-recover cycle, and state/queue.json makes L-002 wait on it. (2) THE INSTALLER CANNOT ENCRYPT AT ALL
+    - re-verified round 28: every crypto_LUKS branch in installer/apex-install is a refusal to overwrite an
+    existing header (:920-925), never a path that creates one, and the same at apex-installer-gui:170. There is no
+    in-place path either. (3) The supporting details are unresolved: the initramfs keymap is always 'us'
+    (Containerfile.core:2104-2107), plymouth's message() is a no-op (apex-os.script:230), and cryptsetup is an
+    unpinned transitive dependency asserted nowhere. Two SHIPPED files already assert LUKS2+TPM2 as settled fact
+    (apex-session-select:18-22 and its sudoers :9-12), which is a defect regardless of when this lands.
+    docs/boot-v2.md carries the five-run hardware procedure that would satisfy (1). LANDED round 30 (2026-09-19):
+    merge c6bc990a carries round 29's boot-v2 work; nothing on this item changed and nothing here was re-verified.
+    STAYS BLOCKED on L-001, and the dispatch unit `later` is closed to dispatch from this round for the reason
+    recorded on L-001 - the remainder is Andre's five-run hardware procedure in docs/boot-v2.md, not an agent's.
+    ROUND 31 (2026-09-19) - STATUS UNCHANGED, still blocked, but ONE of the three blockers is now smaller and a
+    FOURTH has appeared. Real silicon was finally available (MSI Katana GF76 12UG, Intel PTT fTPM, INTC/ADL fw
+    0x2580012); see L-001 ROUND 31 and ROADMAP/evidence/L-001-katana-tpm-20260919.md. BLOCKER (1) NARROWS: the
+    acceptance is 'does not strand users across qualified hardware/recovery cases', and the enrol-and-recover
+    cycle itself now passes on real hardware - a LUKS2 volume with one systemd-tpm2 token and one systemd-recovery
+    token unlocked through the TPM in 0.29 s and through the recovery key in 0.032 s, returning the same plaintext
+    both ways, and survived a real suspend/resume with a fresh unseal afterwards. What is still unqualified on
+    silicon is the TPM CLEAR (not run - a live Windows install owns katana's TPM and a clear costs Andre's Windows
+    Hello PIN; it needs his yes, not a machine, and the two-command PPI procedure is written down) and the
+    TPM-REMOVED case (could-not-run - PPI Disable is reachable but re-enabling needs somebody in firmware setup).
+    BLOCKER (2) IS UNCHANGED AND UNTOUCHED BY THIS ROUND: the installer still cannot encrypt a disk at all - every
+    crypto_LUKS branch in installer/apex-install is a refusal to overwrite an existing header, never a path that
+    creates one. Nothing on katana was encrypted either; the whole run was on loopback files, deliberately,
+    because katana's system disk must not become encrypted. BLOCKER (3) unchanged: initramfs keymap always 'us',
+    plymouth message() a no-op, cryptsetup an unpinned transitive dependency. NEW BLOCKER (4), and it is squarely
+    in this item's subject matter: `systemd-cryptenroll --tpm2-device=auto` ON SYSTEMD 258.10 BINDS TO NO PCRs AT
+    ALL - tpm2-hash-pcrs empty, tpm2-pcr-bank n/a, tpm2-policy-hash 32 zero bytes, measured on katana. A 'LUKS2 by
+    default' built on that default would seal the volume key to the SRK and nothing else, so any OS booted on the
+    same hardware could unseal it. Whatever turns encryption on must pass --tpm2-pcrs= or --tpm2-public-key-pcrs=
+    explicitly, and a test must assert the enrolled token actually carries a policy rather than that the command
+    exited 0. ROUND 32 (2026-09-20) - STATUS UNCHANGED, still blocked, but BLOCKER (2) IS GONE and BLOCKER (3) is
+    closed in a way that was measured rather than asserted. Branch apex-os task/luks-installer, merged from
+    roadmap/v2.2 b5f696cb, tip f0ec87de. BLOCKER (2), 'the installer cannot encrypt at all', is no longer true:
+    encrypt=yes builds ESP + plain ext4 /boot + LUKS2 -> btrfs, calls /usr/libexec/apex-luks-enroll, proves BOTH
+    the passphrase and the recovery key open the volume BEFORE the install, surfaces the recovery key to the user
     behind an acknowledgement checkbox that gates Reboot, and installs with bootc install to-filesystem.
     installer/test-installer-luks.sh is 57 passed / 0 failed in CI. BLOCKER (3): the keymap is no longer 'always
     us' and the proof is a KEYSTROKE, not a config file. installer/test-installer-keymap-boot.sh boots FIVE real

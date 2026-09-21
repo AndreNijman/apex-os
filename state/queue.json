@@ -1,610 +1,611 @@
 {
-  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap \u2014 do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
-  "updated": "2026-09-20T04:20+08:00",
-  "concurrency_ceiling": 6,
-  "units": [
-    {
-      "id": "p1-038-hardware",
-      "repo": "apex-shell",
-      "items": [
-        "P1-038"
-      ],
-      "title": "The 18 labwc matrix rows that need real applications",
-      "after": [],
-      "conflicts": [],
-      "note": "Automated already: screenshots, multi-monitor, lock and idle, scaling. The remainder needs real programs on a real session and is written out step by step in state/agents/p1-038.md: portals, Firefox and Chromium screen sharing, OBS, Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling, rotation, refresh rate, VRR, suspend and resume, dock hotplug. This one cannot be done headless and cannot be done on the L16 while Andre is using it \u2014 it is a katana job, or a job for Andre with a checklist. Do not pretend otherwise.",
-      "closed": "CLOSED 2026-09-20 (round 34). The agent that this note used to say was 'on it' FINISHED on 2026-09-19 -- do not read the old wording as live. The 18 labwc matrix rows were run on katana and the evidence is ROADMAP/evidence/katana-qualification-20260919.md (58 verdicts) plus katana-image-qual-20260919.md. Gaming Mode lands on the monitor on the discrete card and Steam reaches Big Picture inside gamescope, both confirmed on hardware. P1-038 stays partial on rows that need applications nobody has installed (OBS, Discord, VS Code, JetBrains, LibreOffice, Wine -- proxies were run and the rows say so), physical output hotplug (nobody at the machine), and VRR, which CANNOT be tested on katana at all because no connector exposes vrr_capable. RE-OPEN only with a machine that has those applications or a different display."
-    },
-    {
-      "id": "p0-014",
-      "repo": "apex-os",
-      "items": [
-        "P0-014",
-        "P0-015"
-      ],
-      "title": "Remote Control privilege policy and lock-state policy, wired end to end",
-      "after": [
-        "integrate-3"
-      ],
-      "conflicts": [],
-      "note": "Both are already implemented on task/p0-013-request-origin and land as `partial`. P0-014's remainder is a real FIDO/WebAuthn path behind --origin-policy remote. P0-015's remainder is that nothing reports lock state: APEX Shell locks with ext-session-lock and never calls SetLockedHint, so logind reports LockedHint=no on a session locked for an hour. The shell half was recovered from a WIP snapshot and pushed as fix/locked-hint at 87c84f3 (LockedHintService.qml, qmldir, Lockscreen.qml wiring) \u2014 integrate that first. P0-015 criterion 2 also needs P0-007's session grants to exist. P0-005's agent also produced an apex-shell branch, task/p0-005-agent-center-modes (the row shows the mode an agent is in) \u2014 integrate it alongside the apex-os side."
-    },
-    {
-      "id": "p1-018",
-      "repo": "apex-os",
-      "items": [
-        "P1-018",
-        "P1-019"
-      ],
-      "title": "MCP auth helper integration and per-MCP sidecar sandboxing",
-      "after": [
-        "p0-003"
-      ],
-      "conflicts": [
-        "p0-003"
-      ],
-      "note": "Depends on the credential broker landing. Sidecar sandboxing should reuse the bubblewrap profile work from P0-009 rather than inventing a second one."
-    },
-    {
-      "id": "p1-005",
-      "repo": "apex-os",
-      "items": [
-        "P1-005",
-        "P1-006",
-        "P1-007"
-      ],
-      "title": "Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets",
-      "after": [
-        "integrate-3"
-      ],
-      "conflicts": [
-        "p1-002"
-      ],
-      "note": "26 of section 13.2's 32 operations remain after P1-002 took seven. Two framework gaps the Cloudflare author hit and worked around locally, which P1-005 should fix generally rather than repeat: Bound carries no provider payload, so bind cannot hand what it resolved to perform \u2014 Cloudflare re-resolves and refuses on mismatch, but git does NOT, which makes git's host pin a TOCTOU rather than a guarantee; and mint cannot reach a companion service, which is why OAuth refresh could not be expressed as mint and why P1-011 will hit the same wall.",
-      "closed": "Landed as merge 4f80746e; the range against roadmap/v2.2 is empty. P1-006 is done. P1-005 stays partial only because the token spent is account-wide \u2014 the per-task credential IS P1-011 \u2014 and P1-007 stays partial because no elevated class exists in apex-secret-core to require, which is its own item. Nothing left to dispatch here. Closed 2026-09-12 after a dispatched agent had to be redirected."
-    },
-    {
-      "id": "p1-008",
-      "repo": "apex-os",
-      "items": [
-        "P1-008",
-        "P1-009",
-        "P1-010"
-      ],
-      "title": "Cloudflare One, Workers AI and AI Gateway, Secrets Store",
-      "after": [
-        "integrate-3"
-      ],
-      "conflicts": [
-        "p1-002",
-        "p1-005"
-      ],
-      "closed": "Landed as merge 230ee02a; 0 unlanded. P1-008 and P1-010 done. P1-009 stays partial because the third criterion turns on a schema question the pinned schema cannot settle either way \u2014 workers-ai-post-run-model declares two path parameters and no headers. A citation problem, not effort."
-    },
-    {
-      "id": "p1-011",
-      "repo": "apex-os",
-      "items": [
-        "P1-011",
-        "P1-012",
-        "P1-013"
-      ],
-      "title": "Temporary task credentials, transparent brokered wrangler/cloudflared/terraform, transactional deploy",
-      "after": [
-        "p1-005"
-      ],
-      "conflicts": [
-        "p1-005",
-        "p1-008"
-      ],
-      "closed": "Landed as merge 598f6996; 0 unlanded. P1-011 and P1-012 are done. P1-013 stays partial for a structural reason: a preview health check is an UNAUTHENTICATED GET to *.workers.dev and the host pin correctly forbids spending an api.cloudflare.com credential anywhere else, so it belongs in the `apex cf` CLI rather than in a brokered operation \u2014 and the relay moved to a custom domain on andrenijman.com, so workers.dev is no longer the right target anyway. Closed 2026-09-12 after a THIRD agent in one round was dispatched onto finished work."
-    },
-    {
-      "id": "p1-014",
-      "repo": "apex-os",
-      "items": [
-        "P1-014",
-        "P1-015",
-        "P1-016",
-        "P1-017"
-      ],
-      "title": "Cloudflare environment protection, worktree preview environments, cost guardrails, MCP through the broker",
-      "after": [
-        "p1-011",
-        "p1-018"
-      ],
-      "conflicts": [
-        "p1-011"
-      ],
-      "closed": "Landed as merge 514d46a3; 0 unlanded. P1-014, P1-016 and P1-017 done. P1-015 met ALL THREE of its acceptance criteria and is partial only because two of section 13.13's five named resources cannot be reached by anything in this build \u2014 a fact about the vocabulary, not about effort."
-    },
-    {
-      "id": "p1-020",
-      "repo": "apex-shell",
-      "items": [
-        "P1-020",
-        "P1-021",
-        "P1-022"
-      ],
-      "title": "Agent/subagent graph in Agent Center, Claude statusline telemetry, notification bridge and deduplication",
-      "after": [
-        "p0-018b"
-      ],
-      "conflicts": [
-        "p0-018b",
-        "p1-023"
-      ],
-      "note": "P0-022 already rewrote the Agent Center to say what each agent is; the graph builds on that, it does not replace it.",
-      "landed": "both halves landed by integrate-4; P1-020/021/022 all done 2026-09-07."
-    },
-    {
-      "id": "p1-023",
-      "repo": "both",
-      "items": [
-        "P1-023",
-        "P1-024",
-        "P1-029"
-      ],
-      "title": "Global push-to-talk routing, cross-agent handoff packet, local/remote/scheduled/cloud lifecycle types",
-      "after": [
-        "p1-020"
-      ],
-      "conflicts": [
-        "p1-020"
-      ]
-    },
-    {
-      "id": "p1-025",
-      "repo": "apex-os",
-      "items": [
-        "P1-025",
-        "P1-026",
-        "P1-027",
-        "P1-028"
-      ],
-      "title": "Skill inventory and audit, plugin provenance and isolation, memory provider interface, connector trust planes",
-      "after": [
-        "p1-018"
-      ],
-      "conflicts": [],
-      "note": "Blocked in practice, not by the queue: `after: p1-018` and p1-018's work is COMPLETE but UNLANDED. Land it before dispatching this."
-    },
-    {
-      "id": "p1-035",
-      "repo": "apex-os",
-      "items": [
-        "P1-035",
-        "P1-036",
-        "P1-037"
-      ],
-      "title": "Screenshot/file injection into TUI agents, worktree test/conflict/PR status, agent disposable capsules",
-      "after": [
-        "p1-030"
-      ],
-      "conflicts": [
-        "p1-030"
-      ],
-      "note": "Dispatched round 5. Its queue conflict with p1-030 is moot while p1-030 is neither dispatched nor unlanded."
-    },
-    {
-      "id": "p1-040-per-output-scaling",
-      "repo": "apex-shell",
-      "items": [
-        "P1-040"
-      ],
-      "after": [],
-      "conflicts": [],
-      "title": "Per-output scaling: two densities, two sizes, one shell",
-      "note": "REPLACES the old p1-039 unit, which landed on 2026-09-08 (apex-shell 690014a -> a90cef6, apex-os 678bb5d -> e67fab9). Left in place it would have offered finished work again: P1-039 and P1-041 are DONE, and resume.sh only calls a unit finished when EVERY item is done, so a unit carrying three hardware-blocked partials reads as READY forever. What is actually left here, and it is real dispatchable work: the shell resolves ONE scale factor through two singletons with 831 call sites across 82 files, so 'two outputs at compositor scale 1 with different densities each get their own size' was never attempted. The landed page states when the desk cannot share one size rather than claiming a per-output result it does not compute. Start at src/theme/scaling.js (the breakpoint table both the shell and node read) and src/theme/Metrics.qml, and treat the call-site count as the actual cost. The harness is already there: tests/run-scaling-test.sh brings up two headless outputs at different densities through tests/lib/headless.sh and is 30/0, so the assertion has somewhere to live on day one."
-    },
-    {
-      "id": "p1-044",
-      "repo": "apex-os",
-      "items": [
-        "P1-044"
-      ],
-      "title": "Integrate the firewall branches (work is finished, not merged)",
-      "after": [],
-      "conflicts": [],
-      "note": "DONE and pushed: task/p1-044-firewall-live 4cc3f4b (apex-os) and task/p1-044-firewall-settings e51412b (apex-shell). Optional follow-up its author names: apex firewall status --json so the shell page stops parsing prose. Two policy scope questions stay open on purpose -- LLMNR accepted on every interface, and mDNS accepting unicast from any source. Also open: katana's installed apex predates the firewall subcommand, and whether the page should stop offering commands that image cannot run is a judgement nobody has made. ALSO, from the P2-005 agent, measured with positive controls: a hotspot cannot work under the shipped policy, three independent ways -- forward is policy drop, the DHCP rule matches replies rather than a client's DISCOVER, and port 53 is shut. The exception mechanism itself is sound (631/445/2049 reopen immediately). And two lines in `apex devices network` state the current policy as fact and go stale the day it changes; ping task/p2-005-device-maturity when the policy moves.",
-      "landed": "both halves landed by integrate-4; P1-044 marked done 2026-09-07."
-    },
-    {
-      "id": "p1-052-relay",
-      "items": [
-        "P1-051",
-        "P1-052"
-      ],
-      "repo": "both",
-      "after": [],
-      "conflicts": [],
-      "title": "The APEX Remote remainder: relay, reconnect, mDNS, connection quality, and the two shell pages",
-      "note": "REPLACES the old p1-050 unit, which was landed on apex-os roadmap/v2.2 as 1ab542c on 2026-09-07 (P1-050 done). Keeping p1-050 in the queue would have offered finished work again -- it read as HELD 'after p0-014' in the report, one dependency away from being dispatched twice. What is actually left, and it is a unit of its own: (1) no Cloudflare Worker or Durable Object relay is deployed -- the client exists in apex-remote-core, the server side does not; (2) no reconnect across network changes; (3) no mDNS discovery; (4) connection quality is not rendered; (5) apex-shell owes a QR pairing page and a paired-device page. P1-051 also stays partial for a reason NOT in this unit: --origin-policy remote stays refused until the device key lives in Android Keystore with setUserAuthenticationRequired, with a per-approval challenge and attestation -- that is p1-053a's work, and p0-014's CTAP2 verifier is the desktop half of it. Do not close P1-051 from here alone.",
-      "landed_predecessor": "apex-os roadmap/v2.2 1ab542c on 2026-09-07. P1-050 done. P1-051 and P1-052 stay partial and their remainders do NOT belong to this unit: P1-051 needs the key in Android Keystore with setUserAuthenticationRequired plus a per-approval challenge and attestation (that is p1-053a), and apex-shell owes it a QR page and a paired-device page. P1-052 needs a deployed Cloudflare Worker + Durable Object relay, reconnect across network changes, mDNS discovery and rendered connection quality -- a unit of its own. Do NOT re-dispatch p1-050; carve those two out instead.",
-      "closed": "0 unlanded; P1-052 done and the relay is deployed. P1-051's criteria 1, 3 and 5 are done and landed on apex-shell as a36f1a4. The remainder does not close until the device key lives in Android Keystore with setUserAuthenticationRequired, which is p1-053b/p1-053c territory, not a separate unit."
-    },
-    {
-      "id": "p1-053a",
-      "repo": "apex-android",
-      "items": [
-        "P1-053",
-        "P1-054",
-        "P1-055"
-      ],
-      "title": "Android app foundation, Agent Center parity, full PTY/TUI remote terminal",
-      "after": [],
-      "conflicts": [],
-      "note": "Its `after: p1-050` was dropped when p1-050 landed. Also owns the real second factor for P1-051 (Android Keystore with setUserAuthenticationRequired, per-approval challenge, attestation); p0-014 is building the desktop CTAP2 verifier it pairs with.",
-      "closed": "Landed as merge 4ae4cf22; 0 unlanded. P1-053 done. P1-054 is partial because the socket has no profile/projects/worktrees verb \u2014 adding them is a protocol change and p1-053b owns the decision. P1-055 is partial for want of a gemini fixture, and gemini is not installed on this machine."
-    },
-    {
-      "id": "p1-053c",
-      "repo": "apex-android",
-      "items": [
-        "P1-059",
-        "P1-060"
-      ],
-      "title": "Android voice, screenshot, file and clipboard handoff; ship as a production-quality application",
-      "after": [
-        "p1-053b"
-      ],
-      "conflicts": [
-        "p1-053b"
-      ],
-      "closed": "CLOSED 2026-09-20 (round 34). The agent that this note used to say was 'on it' FINISHED on 2026-09-19 and its work landed as merge 4fef8cbd -- do not read the old wording as live. 24 instrumented assertions ran on a real GrapheneOS Pixel 7a, the first time this app's code executed anywhere, and found four shipped defects including that every pairing code ever minted advertised an unbracketed IPv6 address on a socket bound to 0.0.0.0. P1-060 stays partial for ONE reason: C2 needs a tablet or a foldable and neither exists here. RE-OPEN if one appears."
-    },
-    {
-      "id": "p1-061",
-      "repo": "apex-os",
-      "items": [
-        "P1-061",
-        "P1-062"
-      ],
-      "title": "Extend APEX capabilities to normal application permissions; destructive chaos/torture reliability infrastructure",
-      "after": [
-        "p1-025"
-      ],
-      "conflicts": [],
-      "note": "P1-062 must never run its destructive suite against Andre's machine or his data. It gets a disposable target or it does not run."
-    },
-    {
-      "id": "base-partials",
-      "repo": "both",
-      "items": [
-        "BASE-002",
-        "BASE-005",
-        "BASE-009",
-        "BASE-010",
-        "BASE-013",
-        "BASE-014",
-        "BASE-016",
-        "BASE-018"
-      ],
-      "title": "Close the eight BASE preservation items still marked partial",
-      "after": [
-        "p1-039"
-      ],
-      "conflicts": [],
-      "note": "These assert that v2.2 did not regress what v2.1 shipped. Each needs an actual check that the preserved thing still works, not a reading of the code.",
-      "closed": "Landed round 12 on both repos; `git merge-base --is-ancestor` confirms task/base-partials and task/base-partials-shell are both contained in roadmap/v2.2, zero unlanded commits. BASE-009 needs a disposable machine with a gaming userspace (the switch is `loginctl terminate-user`, which kills the session running the test) and katana is off-limits; BASE-010 needs non-zero spendable VRAM and this is an APU, so apexd falls to Backend::Cpu by design. Closed 2026-09-12 after a second agent was dispatched onto a finished unit."
-    },
-    {
-      "id": "p2-b",
-      "repo": "both",
-      "items": [
-        "P2-003",
-        "P2-004"
-      ],
-      "title": "Accessibility baseline and internationalisation baseline",
-      "after": [],
-      "conflicts": [
-        "p1-048"
-      ],
-      "note": "Accessibility is a real audit against a screen reader and keyboard-only navigation, not a sweep for missing labels.",
-      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 32) -- and this says the remaining work is a TRANSLATOR'S and ANDRE'S, not that it is done. Round 34 landed as f8b8184d (apex-os) and 03d77f9 (apex-shell): the Apex.I18n module is built into the image for the first time and the shell reaches it, which closes FOUND 3, the host blocker this unit had been parked behind since the i18n baseline began. What is left, from the card's own ordered list: (1) WRITE THE GERMAN -- the catalogue ships and covers 5 of the 186 marked strings; the other 181 extract, compile and load and come back in English because nobody has written them, and the suite REPORTS that gap rather than hiding it. Adding a language is now one file: drop translations/apex-shell_<lang>.ts into apex-shell and the image compiles, installs and load-proves it with no further apex-os change. That is a translator's job, not an agent's. (2) Orca at the login screen and greeter audio still need HARDWARE and are the oldest open things on this card. (3) An optional tidy-up, REJECTED this round on blast radius: the catalogue stage clones apex-shell a second time and the alternative moves the vendoring stanza into its own stage, but that stanza is the most load-bearing thing in Containerfile.base and the two clones are proved to agree by a sha256 cross-check -- if anybody restructures it, delete the cross-check with it. ONE THING FOR THE NEXT IMAGE BUILD: no full base build has carried the catalogue stage yet. It was proved as a real podman build against the local core image with the worktree standing in for the clone, six builds, one positive and five negatives. Verify it in the first full build that carries it. || HARDWARE-CONFIRMED 2026-09-20 by unit integrated-image: 'the first full build that carries it' has now happened. Build run 35461554871 printed 'catalogue: compiled 1 catalogue(s) from apex-shell 03d77f96...', 'Apex.I18n built and proved to load: 29776 bytes', 'Apex.I18n stage complete' and 'catalogue: apex-shell_de.qm loads under LANG=de'. On the booted machine, libapexi18n.so (29776 bytes), qmldir and apex-shell_de.qm (1421 bytes) are all present, the shell half imports it (I18nBootstrap.qml:25, created from shell.qml), greetd is active - a fatal root import would prevent that - and the Containerfile's own offscreen probe reproduced on the booted /usr reports 'APEXI18N: installed /usr/share/apex-shell/translations/apex-shell_de.qm' under de_DE.UTF-8 and honestly 'no catalogue for C' under C.UTF-8. The greeter's JOURNAL is not a channel for this: greetd dup2s the VT onto the session stdio. What remains is unchanged and is a translator's and Andre's: 181 of 186 strings, and Orca at the login screen."
-    },
-    {
-      "id": "p2-c",
-      "repo": "apex-os",
-      "items": [
-        "P2-005",
-        "P2-006",
-        "P2-007"
-      ],
-      "title": "Printing/scanning/network-share, networking, Bluetooth/dock/peripheral maturity",
-      "after": [],
-      "conflicts": [],
-      "closed": "CLOSED TO DISPATCH 2026-09-18 (round 27) \u2014 and this says the work is ANDRE'S, not that it is done. The container sweep that found FOUND 3, 4, 11 and 12 is exhausted: every remaining reader needs a BOOTED machine, and reaching one needs `apex update` plus a reboot, which is the boot path and off-limits to agents. A container can move a reader to 'installed, and whether it runs was not answered' and no further. The step-by-step checklist for Andre is at the end of ROADMAP/evidence/P2-005-007-device-maturity.md. The three items stay `partial` because their acceptance criteria genuinely are not met \u2014 that is the state this hatch exists for. Re-open only after an image build lands and a NEW reader could have arrived with it."
-    },
-    {
-      "id": "p2-d",
-      "repo": "apex-os",
-      "items": [
-        "P2-008",
-        "P2-009",
-        "P2-012"
-      ],
-      "title": "First-party virtualization UX, disposable VM agent execution, secure browser automation capsule",
-      "after": [
-        "p1-037"
-      ],
-      "conflicts": [],
-      "closed": "CLOSED 2026-09-20 (round 34). The agent that this note used to say was 'on it' FINISHED on 2026-09-19 and route B landed as merge f666f5c1 -- do not read the old wording as live. P2-012 is DONE. P2-008 and P2-009 stay partial on their own separate grounds: USB passthrough needs a physical device somebody will detach, and P2-009's gap is a guest image carrying an agent CLI, which is a build rather than a test. Two things the round recorded as NOT claimed: no Firefox has gone through the shipped proxy (the join is by construction, not by a browser run), and present_pin's secret-service half is code-reviewed rather than tested."
-    },
-    {
-      "id": "p2-e",
-      "repo": "apex-os",
-      "items": [
-        "P2-010",
-        "P2-011",
-        "P2-014",
-        "P2-015"
-      ],
-      "title": "Hardware qualification database, agent cgroup budgets, Storage Manager and disk health, firmware lifecycle",
-      "after": [],
-      "conflicts": []
-    },
-    {
-      "id": "p2-f",
-      "repo": "both",
-      "items": [
-        "P2-016",
-        "P2-017",
-        "P2-018",
-        "P2-019"
-      ],
-      "title": "Multi-user/guest/kiosk, APEX Online Accounts, guaranteed safe graphics failover, Fleet architecture",
-      "after": [
-        "p2-a"
-      ],
-      "conflicts": [],
-      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 31) -- and this says the remaining work is ANDRE'S, not that it is done. Rounds 32 and 33 landed as merge bd0c41ce; 0 unlanded. The aborted-transfer family is finished, and round 33 found and fixed a real privilege defect nobody was looking for: ensure_private_dir was called on the leaf, so create_dir_all made the scratch ROOT under the umask and nothing checked it -- a root pre-created 0777 succeeded silently, and a leaf planted as a symlink succeeded and chmodded the symlink's target to 0700. Both copies fixed (apex-aid duplicates it deliberately and had all three defects). What is left of P2-016 is three follow-ups that need a SPARE VT and would take Andre's screen: fast user switching, a standard account created at install time, and a kiosk session actually booted. Nothing ran on a second logind session this round and the card says so -- `sudo -u nobody` settles ownership, it is not a fast-user-switching test. P2-017, P2-018 and P2-019 stay partial on their own recorded grounds. RE-OPEN when there is a machine with a free VT that nobody is sitting at."
-    },
-    {
-      "id": "later",
-      "repo": "apex-os",
-      "items": [
-        "L-001",
-        "L-002",
-        "L-003"
-      ],
-      "title": "TPM and recovery qualification, then LUKS2 by default and TPM auto-unlock where safe",
-      "after": [
-        "p2-e"
-      ],
-      "conflicts": [],
-      "note": "L-002 and L-003 are blocked on L-001, and L-001 is NOT finished. TWO GATES THIS NOTE ONCE NAMED ARE NOW MET AND NEITHER WAS ENOUGH. Round 31 (unit later-silicon) did a real enrol-and-recover cycle on silicon; round 32 (unit later-silicon-2, 2026-09-19, commit 16fe7ad3) CLEARED KATANA'S TPM with Andre's explicit approval and showed tpm-unlock=REFUSED -> recovery-unlock=SUCCESS -> marker identical in one boot on an Intel PTT fTPM. Do NOT read either as grounds to unblock anything. L-001 stays partial at 4 of 5 runs: Run 5, the TPM-removed case, needs a hand in firmware setup because PPI operation 2 takes /sys/class/tpm/tpm0/ppi with it and re-enabling is not symmetric with disabling; Run 3 has no firmware capsule to apply. L-002 stays blocked because installer/apex-install still cannot create a LUKS header at all, and because systemd-cryptenroll's default on systemd 258.10 binds to NO PCRs, so a naive 'encrypt by default' would seal to the SRK and nothing else. L-003 stays blocked because systemd-pcrextend is a silent no-op (exit 0, PCR 11 unchanged) on a GRUB machine, so the signed PCR 11 policy cannot be satisfied at boot on a default APEX install - that needs the sd-stub/UKI path, not the Secure Boot switch. Turning on full-disk encryption by default without a proven recovery path is how a user loses everything. AND A HARDWARE RULE FOR ANYONE WHO TOUCHES KATANA: /dev/nvme0n1 IS NOT A STABLE NAME THERE. The two NVMe controllers are probed asynchronously. Round 32 logged three boots: the first two enumerated them one way and the third - an ORDINARY reboot, not the clear - enumerated them the other way, so the disk this programme is told never to write became the APEX disk. Identify by serial (Micron_2450 220534D1CB81 = APEX, SPCC M.2 240023925111005 = Windows), by PCI function (0000:03:00.0 = APEX, 0000:02:00.0 = Windows), by PARTUUID, or by label (apex-root / EFI-SYSTEM / games). And APEX's default boot entry Boot0000 lives on the WINDOWS disk's ESP (PARTUUID 2ba9a2ea), the same partition Windows Boot Manager boots from.",
-      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 32). Round 31 asked Andre whether katana's TPM could be cleared; HE SAID YES, and unit later-silicon-2 ran Run 2 on branch task/later-silicon-2 (commit 16fe7ad3, pushed, cut from roadmap/v2.2 f602f1cb). Evidence: ROADMAP/evidence/L-001-katana-tpm-20260919.md sections 14-21. THE CLEAR HAPPENED AND WAS VERIFIED FIVE WAYS rather than inferred from the reboot - lockoutAuthSet 1->0, five persistent handles->none, thirteen NV indices->five, four NV counters->zero, DA counter 2->0 well before its first decay step. A volume enrolled BEFORE the clear then gave tpm-unlock=REFUSED -> recovery-unlock=SUCCESS -> recovery-marker=MATCH in ONE BOOT. The authorised cost was Andre's Windows Hello PIN; there is no BitLocker, so no data. L-001 IS NOW 4 OF 5 RUNS AND STAYS partial. WHAT IS LEFT IS STILL NOT AN AGENT'S: Run 5 disables the TPM, and on this firmware that removes the ppi directory that would re-enable it, so somebody has to be in firmware setup. Run 3 has no capsule. DO NOT DISPATCH A UNIT TO 'FINISH L-001' - there is nothing left an agent can do on this machine. NEW FINDINGS FROM ROUND 32, all landed: ppi/response reads '5 0: Success' the instant the request is written, before any reboot, so it proves nothing; the part returns TWO codes for a failed unseal and systemd prints ONE sentence for both (0x18b TPM_RC_HANDLE = the SRK at 0x81000001 is absent and is recoverable without re-enrolment because the SRK is deterministic from the storage seed; 0x1df TPM_RC_INTEGRITY = the seed was rolled and only re-enrolment works); systemd-cryptenroll provisions that SRK and systemd-cryptsetup never does, so an evicted SRK is a machine that refuses every TPM unlock at boot with the recovery key as the only way in; 'executing no operation' is a no-op on the LUKS HEADER ONLY - it persists a key at 0x81000001, a handle shared with every other OS on the machine - and the one-command re-enrolment trap is now measured after a REAL firmware clear, which is the case docs/boot-v2.md is actually about; a TPM clear moves PCR 1 PERMANENTLY on this board (three extra events in the firmware's own log, stable across a control reboot taken for that purpose) while PCR 0, 4 and 7 stay byte-identical across three boots. STILL TRUE FROM ROUND 31: systemd-pcrextend is a silent no-op on a GRUB machine and Secure Boot will NOT fix it; --tpm2-device=auto binds to no PCRs; a zero PCR 11 is a local DoS; DA is 32 tries / 2 h decay / 24 h recovery and a good auth does not clear the counter. EXACTLY THREE ROWS need redoing with Secure Boot ON and round 32 adds none: the --tpm2-pcrs=7 volume, the PCR 7 value itself, and the event-log replay."
-    },
-    {
-      "id": "final",
-      "repo": "both",
-      "items": [
-        "P0-001"
-      ],
-      "title": "Qualify the integrated image on real hardware, then merge to main",
-      "after": [
-        "*"
-      ],
-      "conflicts": [],
-      "note": "The last unit. Build the integrated image, boot the L16 onto it, qualify, then apex-shell roadmap/v2.2 -> main FIRST (Containerfile.base carries ARG APEX_SHELL_REF=main), then apex-os roadmap/v2.2 -> main. This is the only point at which GitHub CI is allowed to run."
-    },
-    {
-      "id": "p1-063",
-      "repo": "both",
-      "items": [
-        "P1-063"
-      ],
-      "title": "Lid-closed continuous operation \u2014 agents and the VPN keep running with the lid shut",
-      "after": [],
-      "conflicts": [],
-      "note": "Andre's own request, in his words. The primitive is a handle-lid-switch BLOCK inhibitor, not an edit to HandleLidSwitch= - it is dynamic, it reverts the moment the holder dies, and it leaves a machine with no live work suspending exactly as it does now; a static HandleLidSwitch=ignore would turn every laptop bag into an oven. Guards are not optional and must say which one fired. Round 2 owns the apex-shell half and the seven undocumented `apex lid` verbs. Two criteria need hardware or Andre's own machine and must not be faked: re-running the live suite with every external display unplugged, and measuring that a powered-down lid-closed session draws measurably less.",
-      "closed": "CLOSED TO DISPATCH 2026-09-13 (round 24). Round 3 is finished, pushed AND landed \u2014 apex-os 619e764a, apex-shell 1da66c7 \u2014 and followups-4 wired its 60 lid assertions into CI runner-green. Both remaining criteria are ANDRE'S PHYSICAL ACTIONS and an agent must not fake either. Criterion 1: causation needs the external display physically unplugged. Re-measured 2026-09-13 \u2014 Docked=b true, card1-DP-1 connected \u2014 and with a display attached logind consults HandleLidSwitchDocked (default ignore) BEFORE any inhibitor, so the lid does nothing with or without APEX's block and the non-suspend cannot be attributed to APEX. The one command that closes it, undocked: `sudo ./tests/test-apex-lid-live.sh`. Criterion 3: 'draws measurably less' needs an undocked machine ON BATTERY that nobody is using \u2014 power_now reads CHARGING power on mains \u2014 and the runnable recipe is in docs/lid.md under 'What has NOT been measured'. Nothing here is waiting on an agent."
-    },
-    {
-      "id": "pkg-share",
-      "items": [
-        "P0-001"
-      ],
-      "after": [],
-      "title": "The multilib pass drops 32-bit Vulkan ICDs, and resolve predicts the wrong source",
-      "closed": "CLOSED 2026-09-20 (round 34). RE-OPEN CONDITION IS SPENT -- the image was built and the fix is CONFIRMED ON HARDWARE: 177 shadowed paths to 0, 14 32-bit ELF shadows to 0, 0 to 13 i686 Vulkan ICDs, GStreamer from 2 usable features back to 1344, and comm -12 between the extension and rpm -qal empty. Evidence in ROADMAP/evidence/katana-image-qual-20260919.md. Nothing left here."
-    },
-    {
-      "id": "gaming-gpu",
-      "items": [
-        "P1-043",
-        "P1-038"
-      ],
-      "after": [],
-      "title": "Gaming Mode picks the iGPU and the laptop panel; Safe Graphics cannot light a dGPU",
-      "closed": "CLOSED 2026-09-20 (round 34). RE-OPEN CONDITION IS SPENT -- katana was free, the run-book was executed and the result is in ROADMAP/evidence/katana-image-qual-20260919.md section 6. Gaming Mode lands on HDMI-A-1 on the RTX 3070 at 240 Hz with zero occurrences of card1 or eDP-1 in a 3,789-line session log, and Steam reaches Big Picture. What came OUT of that run became units gaming-release and gaming-scx, both now closed, and kernel-btf-scx, which is open: no sched-ext scheduler can load on an APEX image at all."
-    },
-    {
-      "id": "build-verify",
-      "items": [],
-      "after": [],
-      "title": "Does roadmap/v2.2 still build? The quickshell and multilib changes are unbuilt",
-      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 33) -- landed as merge 2e04fbcb, 0 unlanded. The question it was dispatched for is ANSWERED: roadmap/v2.2 builds. The local build succeeded end to end (~2h24m for base+apex on a reused core) and the step that killed the previous agent now prints 'apex-labwc-keybinds: 70 defaults, 4 without a labwc equivalent / PASS' with rc.xml untouched; four tags resolve to one image, kernel and 14 out-of-tree modules signed. In CI 35433705393, rust/changes/core/base are all green and inside `image` everything APEX passed -- build, the Secure Boot chain for kernel AND modules, payload split, push, cosign signing -- and the per-SHA tag is live at sha256:be3bdd0c6384. FIXED AND LANDED: build-local.sh now resolves want -> roadmap/v2.2 -> main and prints which rung, three rungs rather than build-image.yml's two because this script runs from whatever worktree you are in and every task/* worktree here has no twin; a SECOND, SILENT defect underneath it -- the 'unreachable remote is FATAL' property was unreachable code, because pipefail hands the assignment ls-remote's 128 and errexit kills the script before the FATAL line, with git's message already eaten by 2>/dev/null (measured: exit 128, nothing printed); and a pr-validation selector that named no repo-root script, so a PR editing only build-local.sh skipped every job INCLUDING the suite guarding it -- the seventh instance of the bug the six comments already in that block describe. tests/test-build-local-shell-ref.sh, 25 assertions, proved in three directions (25/0 with the fix, 8/17 against the old block, and 23/2 with the middle rung deleted -- exactly the two cases that justify it). WHAT REMAINS IS NOT THIS UNIT: the SBOM step OOMs the runner, and that is unit `sbom-oom`, dispatched the same round."
-    },
-    {
-      "id": "katana-image-qual",
-      "items": [],
-      "after": [],
-      "conflicts": [
-        "gaming-gpu",
-        "pkg-share",
-        "p1-038-hardware",
-        "p2-f",
-        "p2-c",
-        "p2-b"
-      ],
-      "title": "Rebase katana onto the tip image, then the gaming and multilib run-books",
-      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 32) -- the run-book is FINISHED. Sections 0 through 6 are complete on hardware and landed as merges c13ac17a and de77ae5d; the evidence is 1,218 lines. Gaming Mode lands on the monitor on the discrete card (the selector's answer, then gamescope's five predicted lines verbatim, and zero occurrences of card1 or eDP-1 in a 3,789-line session log), and Steam reaches Big Picture inside gamescope for the first time on that machine -- zero BInit/VK_KHR_surface failures where every prior attempt died exactly there. pkg-share is confirmed: 177 shadowed paths to 0, 14 ELF shadows to 0, 0 to 13 i686 Vulkan ICDs, GStreamer 2 to 1344 features. greetd was restored and VERIFIED (cmp identical, 0 timers armed, apex game status false). The card's own NEXT says not to dispatch another agent at katana for section 6. What came OUT of the run is now unit gaming-release (the session cannot release itself; mangoapp crash-loops) and unit pkg-update (an image update delivers the fix to nobody). Untested and NAMED rather than claimed: Safe Graphics' automatic dGPU branch needs the panel genuinely dark, and no actual game was launched."
-    },
-    {
-      "id": "p1-053e",
-      "items": [],
-      "after": [],
-      "conflicts": [
-        "p1-053c",
-        "p1-053b"
-      ],
-      "title": "APEX Remote Android round 2 on the real device: terminal, PTY read-back, dual-stack bind",
-      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 33) -- landed as merge 859cbb2b, 0 unlanded. Four takeable items closed plus approvals, which round 1's evidence named and the dispatch did not. P1-060 C1 is met EXCEPT THE RELAY LEG, and that leg is a missing FEATURE rather than a missing test: there is no relay client on Android at all -- PairingService.kt:108 prints its own apology, :core has no WebSocket code, no OkHttp in the build -- while MachinesScreen.kt:288 already shows 'relay available'. That is now unit `p1-052-android-relay`, dispatched the same round on the finding agent's own recommendation. P1-060 C2 is NOT an agent's: it names a tablet and a foldable and neither exists here; it gained the terminal this round and LOST a claim, because TerminalView is a bare Canvas and TalkBack has nothing to announce on it. THE FINDING WITH THE WIDEST BLAST RADIUS IS ABOUT THIS PROGRAM, NOT THIS UNIT: a roadmap-dispatched agent cannot pair, because its cgroup makes origin::observe_pid classify the broker as `scheduled-job` and apex-remoted correctly refuses -- 8 of 24 tests failed on that alone, and round 1 never saw it because it ran interactively. Everything needing a human-at-the-keyboard must go through tests/in-login-session.sh. Also fixed: the suite leaked an apex-remoted per reconnect test and round 1's worktree still held seven orphans."
-    },
-    {
-      "id": "p1-052-android-relay",
-      "items": [],
-      "after": [],
-      "conflicts": [
-        "p1-053e",
-        "p1-053c",
-        "p1-053b"
-      ],
-      "title": "The relay leg the Android app has never had \u2014 P1-060 C1s last piece",
-      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 33) -- landed as merge 2814f45d, 0 unlanded. THE RELAY LEG WORKS END TO END OVER THE REAL DEPLOYED RELAY, proven twice and independently: a hand-rolled Python guest (so the client under test was not also the witness) dialled wss://apex-relay.andrenijman.com and got HTTP/1.1 101, a matching accept value, {\"relay\":\"paired\"} and its hello byte spliced onto the daemon's listener; then a real Pixel 7a paired and ran a session through Cloudflare, device suite OK (35 tests), up from 32. The seam PairingService.kt:21 claimed turned out to be real, so no refactor was needed, and NO NEW DEPENDENCY was added -- argued rather than defaulted. WHAT IS LEFT IS A PERSON, NOT AN AGENT: the phone is still on the same Wi-Fi and takes the relay because the offer's LAN addresses were WITHHELD, not because they were unreachable. A phone on mobile data needs somebody holding it. P1-060 C2 stays open and unfakeable -- it names a tablet and a foldable and neither exists here. P1-051 was not touched and nothing this round bears on its remainder. FOUR DEFECTS WORTH REMEMBERING, all invisible to passing tests: SSLSocket does not verify the HOSTNAME by default (chain yes, name no), so without endpointIdentificationAlgorithm=\"HTTPS\" the rendezvous id goes to whoever answers the address while every 'is TLS on?' test still passes; every relayed session leaked its socket because Session.close closes the streams and the adapters inherited a no-op close(); the Noise handshake on the relay leg ran with NO deadline despite a comment claiming otherwise; and four mutations into Relay.kt caught only two, one surviving because the parity assertion looked for a literal in the Rust source and compared it to nothing."
-    },
-    {
-      "id": "sbom-oom",
-      "items": [],
-      "after": [],
-      "conflicts": [
-        "build-verify"
-      ],
-      "title": "syft is SIGKILLed cataloguing the image \u2014 the last red step in build-image",
-      "closed": "CLOSED TO DISPATCH 2026-09-20 (round 32) -- SOLVED AND VERIFIED, landed as merge b7e28d87. The SIGKILL was Go heap growth under the default GOGC=100 driving a 16 GB runner through memory and swap; GOMEMLIMIT=10GiB fixes it and syft is now PINNED to 1.52.0, which it was not -- it had been installing whatever main served, which would have left a measured fix protecting an unmeasured binary. Verified in a real build (run 35450175806): catalogued in 742 s, peak RSS 15,303,652 KB, 9830 packages, mem_avail never below ~4.7 GiB. THE NEGATIVE RESULTS ARE WORTH MORE THAN THE FIX, across eleven arms: the image SOURCE is irrelevant (oci-dir on local disk died identically to registry), so the fix previously preferred on this card addressed a non-cause; PARALLELISM is irrelevant (par 1 died the same), which means the timeout-death that justified raising the timeout to 45 minutes was ALSO a memory death, misread; the limit's VALUE is irrelevant (4, 6 and 10 GiB all peak at 14.65-14.80 GiB); swap adds nothing while the limit is set (32 GB bought 16 MB, 1 GB ever touched) and was deliberately not committed; swap WITHOUT the limit works badly (1958 s vs 904 s, 8.7M major faults). THE OOM-KILLER CLAIM IS LEFT CALIBRATED, not upgraded: oom_kill was 0 in every arm that lived to read it, so it has still never been read from a kernel message. The step now prints the counter delta, dmesg, peak RSS and the NAMED signal so the next death settles it. sbom-probe.yml is deleted; it answered its question. WHAT REMAINS IS A DIFFERENT PROBLEM and is unit sbom-attest: cosign gives up posting the ~166 MB predicate to Rekor."
-    },
-    {
-      "id": "pkg-update",
-      "items": [
-        "P0-001"
-      ],
-      "after": [],
-      "title": "apex update does not deliver a baked fix to an existing machine",
-      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 34) -- the code is finished and pushed as branch task/pkg-update (178cc10c, 627315a9, b512cf12, 6f28505b), NOT landed. rebuild_extension's short-circuit now compares pkg_compat_level, the constant is bumped 2 -> 3 in a separate commit, and tests/test-apex-pkg-update.sh (17/0/0, CI floor 17 in pr-validation.yml's engine job) holds the resolved rpm set constant while varying only the level, with two mutants that require the defect back so a bare bump cannot read as green. Do NOT dispatch another agent to redo this. Two things remain and neither is this unit's: LAND the branch by merge, not rebase; and after it reaches an image build, ONE machine must show the rebuild happening -- the checks are named in P0-001's evidence and in ROADMAP/state/agents/pkg-update.md. RE-OPEN CONDITION: an image built from a tip carrying b512cf12, taken by a machine that already has an extension. || HARDWARE-CONFIRMED 2026-09-20 by unit integrated-image, and the RE-OPEN CONDITION IS SPENT. Image run 35461554871 (task/integrated-image @ 97c9e8f2, tag apex-97c9e8f2..., digest sha256:55fc9e4e...) carries b512cf12; katana took it with bootc switch and the rebuild ran for 53.8 SECONDS where the same unit took 33 MILLISECONDS on the previous boot, naming its own reason: 'extension compatibility changed (OS 43, level 2 -> OS 43, level 3) - rebuilding'. state.json pkg_compat_level 3, extension sha eb3b8ba0 -> 75290ae7, i686 ICDs still 13, comm -12 against rpm -qal empty over 3564/266093 paths, nothing failed after. Two honest corrections to this unit's own predictions: the duration is under a MINUTE, not minutes, because katana's rpms were cached; and the extension is byte-different with an IDENTICAL file set, because the resolved set of 223 did not move - the level did, which is the whole fix. Katana's rebuild was the redundant one this card predicted. STILL UNANSWERED: whether systemd-sysext refresh re-merging /usr disturbs a LIVE desktop - katana ran only the greeter, and the L16 will be the first machine to answer it. Evidence ROADMAP/evidence/integrated-image-20260920.md section 2."
-    },
-    {
-      "id": "gaming-release",
-      "items": [
-        "P1-043"
-      ],
-      "after": [],
-      "title": "Gaming Mode cannot release itself, and mangoapp fills /var with core dumps",
-      "closed": "CLOSED TO DISPATCH 2026-09-19 (round 32) -- code done and landed as merge b76339cb. BOTH FIXES NEED AN IMAGE BUILD before anything is confirmed on hardware; the run-book rows are written (docs/gaming-and-sessions.md 6.6 and 6.7). The release fix is in apexd, the mangoapp fix in files/system/libexec/apex-gaming-session. RELEASE: apexd owns it now, not the session -- apex-gaming-session starts with an owner pid, apexd records the pid AND its /proc start time, and a 2 s watch calls the same idempotent game_exit when the owner is gone, emitting the same ActiveChanged/Status/TierChanged set a D-Bus exit emits so the shell does not keep showing a dead session. The polkit rule was DELIBERATELY NOT LOOSENED: allow_inactive is every local session, so loosening it would let any unprivileged user stop somebody else's Gaming Mode, and a SIGKILLed session runs no trap for a looser rule to permit anyway. MANGOAPP: diagnosed, not guessed. Core dump backtrace is XInternAtom from main with a NULL display; controlled headless A/B with the environment read out of /proc -- `--mangoapp` alone gives 0 restarts in 22 s, adding `--expose-wayland` gives 171. APEX passed both unconditionally, so the combination is ours. --expose-wayland STAYS (the hardware qualification was done with it and the overlay has never drawn a pixel); --mangoapp is gated on it, and APEX_GAMING_EXPOSE_WAYLAND=0 brings it back, which is what makes the gate testable both ways. THE 4 GB WAS NOT A MISSING BOUND -- MaxUse defaults to 10 percent of the filesystem CAPPED AT 4 GiB and katana's /var is 954 GB, so systemd's vacuum was working exactly as designed and 4 GiB is the wrong size for an ostree machine; the drop-in sets MaxUse=256M and KeepFree=2G. WHAT IS NOT A DISCRIMINATOR, and the run-book says so: katana's default AC tier is already `performance`, so the governor reads the same before, during and after -- use `active: false`, the apex-game cgroup being gone, sched_ext/state disabled, and apexd's `the session owner is gone` line instead. STILL UNCONFIRMED: that the MangoHud overlay actually RENDERS with expose-wayland off (it never has here), Safe Graphics' automatic dGPU branch, and any real game launch. RE-OPEN after an image build. || HARDWARE-CONFIRMED 2026-09-20 by unit integrated-image, and the RE-OPEN CONDITION IS SPENT. apex game status printed owner_pid 7799 matching bash /usr/libexec/apex-gaming-session. 6.6: THE RUN-BOOK'S OWN RECIPE DOES NOT TEST THIS ROW - `systemctl restart greetd` killed gamescope but the session script survived long enough to run its trap and released cleanly ('apexd game mode released', three times, idempotent). SIGKILLing the owner is what 'nothing can cooperate' has to mean, and then apexd fired 1.9 s later: 'game: the session owner is gone (/proc/9688 is gone) - releasing game mode. Nothing else could'. active false, apex-game cgroup removed, no gamescope left. The run-book should be amended. 6.7: gamescope starts --expose-wayland and WITHOUT --mangoapp with the explanation printed; 0 new mangoapp dumps against 15376 in one boot, 0 Glfw Error lines against 57612, 171 session journal lines against 144187, MaxUse=256M KeepFree=2G live. greetd restored byte-identical, 0 timers. NOT confirmed and not claimed: the overlay RENDERING with APEX_GAMING_EXPOSE_WAYLAND=0, Safe Graphics' dGPU branch, any real game. AND A NEW DEFECT: sched_ext/state is NOT a discriminator here either, because apexd runs `scxctl switch -s scx_lavd` where the machine needs `scxctl start` (scxctl says so verbatim) - so Gaming Mode has NEVER loaded a sched-ext scheduler, on this image or the previous two, while apex game status's notes field claims it did. apexd/apexd-core/src/syswriter.rs:739. Wants its own unit. Evidence integrated-image-20260920.md sections 6 and 7."
-    },
-    {
-      "id": "sbom-attest",
-      "items": [],
-      "after": [],
-      "title": "cosign cannot post the SBOM attestation to Rekor",
-      "closed": "CLOSED 2026-09-20 (round 32) -- SOLVED, VERIFIED AND LANDED as merge 97c9e8f2. The whole image job is green for the first time, INCLUDING the two steps that had been skipped and therefore unproved in every failing run: promoting the published tags and asserting they all resolve to this digest. REKOR WAS NOT RETURNING 413 AND THE CEILING IS NOT 16 MB. Sixteen direct posts at ascending sizes, each retested: at or below 25,000,092 B Rekor answers 400 having FULLY PROCESSED the body; at or above 25,165,916 B it answers 502 with size_upload=0 in ~0.43 s, refused by the fronting proxy on Content-Length before a byte is sent. The boundary brackets 24 MiB exactly and was re-confirmed from a GitHub runner. That also explains the message: 502 is in go-retryablehttp's RETRYABLE class, so cosign retried a refusal that can never succeed and said `giving up after 4 attempt(s)` -- structurally incapable of naming its cause -- and size_upload=0 is why four attempts fit in 3.86 s. CHOSEN: trim the predicate, KEEP the transparency log. Published is the complete package inventory (9830 packages, every version, 9830 purls, 55,652 CPEs, both Electron trees); file rows and the 16,463-edge dependency graph are dropped. Same signature, same keyless identity, same spdxjson type, same public Rekor entry. The cost is in docs/trust-enforcement.md: the SBOM is a flat list and no longer says which files are in the image -- structure, reproducible from the published digest with one syft run, where identity is not reproducible from anything smaller. THE OCI-ARTEFACT OPTION WOULD HAVE BEEN ACTIVELY HARMFUL: verify.rs:540 requires predicateType to contain spdx, and a FAILED provenance check is refused even at provenance=warn, so it would have refused updates on every machine in the field. DO NOT, per the unit's own warning: tighten provenance=warn to enforce, or edit the `no published APEX image has an SBOM attestation yet` sentences in docs/ or verify.rs. Both are STILL TRUE -- this was a task branch and the PUBLISH guard moved no tracked tag. They belong to the first green main build. THREE THINGS THAT COST REAL TIME, recorded so they do not again: SYFT_FILE_METADATA_SELECTION=none is NOT the lever (13%, not 64%) and does not reduce RSS; `local a=\"$1\" b=\"${a}\"` is an unbound-variable error under set -u and threw away 915 s; and a workflow `run:` block is capped at 21,000 characters, which surfaces as a JOBLESS FAILED RUN, not a failing step."
-    },
-    {
-      "id": "integrated-image",
-      "items": [
-        "P0-001"
-      ],
-      "after": [],
-      "title": "Build the integrated image and qualify it on katana (the L16 half is Andre's)",
-      "closed": "CLOSED 2026-09-20 (round 34) -- DONE, and it is the first time the whole thing has been built and put on hardware together. Image build run 35461554871, workflow_dispatch on task/integrated-image @ 97c9e8f2, green end to end in 1h12m, every job's STEPS read rather than assumed. Tag ghcr.io/andrenijman/apex-os:apex-97c9e8f25ee55593a97502505f51c6115ebbee7c at digest sha256:55fc9e4ee9b2c1b27045cba5a594a40e97fb0d73c70170cfbe0003f5cd4d73b0; it pinned apex-shell roadmap/v2.2 03d77f96 through the ordered fallback and moved NO floating tag, so nothing but katana saw it. katana was switched and rebooted onto it and ALL FOUR rows this unit owed are confirmed: pkg-update, gaming-release, p2-b and the coredump drop-in. Each unit's own `closed` note carries its numbers. TWO DEFECTS FOUND AND NOT FIXED HERE, deliberately, because the image under qualification was already built and on the machine: (a) apex-pkg's install_etc writes /etc with cp -a and never relabels, so /etc/.pwd.lock lands mislabelled and breaks DynamicUser=yes for six units including capsule@.service and rpm-ostreed, with NO AVC logged - and it RECURS on every extension rebuild with whatever wrong type the extraction tree carried, so it breaks the machine only sometimes; (b) apexd runs `scxctl switch` where the machine needs `scxctl start`, so sched-ext has never loaded while apex game status claims it did. Both want their own unit, and (a) should land BEFORE the main merges because the L16 rebuilds its clippy extension on first boot. THE L16 HALF IS ANDRE'S and was not touched. Merge order when he does it: apex-shell roadmap/v2.2 -> main FIRST (Containerfile.base carries ARG APEX_SHELL_REF=main), THEN apex-os. Evidence ROADMAP/evidence/integrated-image-20260920.md and katana-pwd-lock-selinux-20260920.md; card ROADMAP/state/agents/integrated-image.md."
-    },
-    {
-      "id": "pkg-etc-label",
-      "items": [
-        "P0-001"
-      ],
-      "after": [],
-      "title": "apex install mislabels every /etc file it writes, silently, with no AVC",
-      "closed": "CLOSED 2026-09-20 (round 33) -- fixed and landed as merge 661a9d80. install_etc collects every path it creates or overwrites AS IT GOES and hands the list to `restorecon -F -i -f`, so the label comes from the LOADED POLICY instead of from `cp -a` preserving the extraction tree's rpm_var_lib_t. Each branch records only what it actually wrote; a directory is recorded only when WE create it, because mkdir inherits the parent's type (wrong for e.g. /etc/cron.d -> system_cron_spool_t); the removal pass records survivors no installed package owns, which is the class the katana leftover belonged to. `-F` IS LOAD-BEARING: a bare restorecon silently DECLINES any type in the policy's customizable_types list, says `not reset as customized by admin`, and still exits 0. stderr is deliberately not swallowed -- this defect reported nothing for months, so a fix that could also report nothing would not be one. `label_tree` is untouched ON PURPOSE: split_out_of_image has already moved /etc out of the payload root before it runs. SELF-HEALING SIDE EFFECT: because the pass relabels tracked paths it declines to delete, the next `apex install` or `apex update` repairs a machine that already carries the mislabel. THE GATE asserts the property over EVERYTHING the pass writes, never over .pwd.lock (only where it bit). Real packages decide which paths exist, a before/after CTIME snapshot decides which the pass touched (a directory counts only when new, because a dir's ctime moves when a child lands in it), and the engine runs TWICE because the SECOND install is the overwrite that broke katana. Enforced 21/0; coverage-forced 9/0 which is the CI floor. Every control fires, including a pre-fix replica reproducing the katana finding exactly (58 files wrong). The suite REFUSES TO DEGRADE SILENTLY: a host with /sys/fs/selinux/enforce that does not run the enforced leg is a FAIL, not a skip. CI floor is 9 because ubuntu-24.04 has no SELinux AND podman's rootfs is mounted `context=` where setxattr security.selinux is EOPNOTSUPP. THE SUITE HAS NEVER RUN ON AN UBUNTU RUNNER -- if that job goes red, read PROBE_MODE/PROBE_CAPABILITY first. ONLY A REAL MACHINE CAN CONFIRM: that a DynamicUser unit starts after an install (no PID 1 in a container), that restorecon resolves against APEX's loaded policy rather than Fedora 43's policy rpm, and that the extraction tree comes out rpm_var_lib_t on its own (the suite chcons it to reproduce katana exactly)."
-    },
-    {
-      "id": "gaming-scx",
-      "items": [
-        "P1-043"
-      ],
-      "after": [],
-      "title": "Gaming Mode never loads a scheduler, and status claims it did",
-      "closed": "CLOSED 2026-09-20 (round 33) -- fixed and landed as merge faa1992d. scxctl has TWO verbs and they are not interchangeable: `start` attaches when none is running, `switch` replaces one that is, and each REFUSES in the other's state. APEX loads nothing at boot so the first entry always finds none, and the code hardcoded `switch`. Swapping in `start` would have been the same mistake spelled differently -- correct on every machine APEX ships today, wrong on any machine already running a scheduler. The verb is now READ off /sys/kernel/sched_ext/state with one retry on whichever verb the loader's own error names; both refusal strings came out of the shipped scxctl 1.1.2 binary, not guesswork. THE STATUS WAS THE EXPENSIVE HALF: scxctl exiting 0 is a fact about scxctl. The writer now waits (bounded, 2 s) and reports what it read from the KERNEL. `not loaded` keeps its cause -- scxctl refused, or scxctl exited 0 and the kernel still reads disabled (the general form of this defect), or no CONFIG_SCHED_CLASS_EXT (a DEFINITE answer, not an unknown). `unknown` is only an unreadable state or one caught mid-transition, never rounded to either neighbour. Outcome gained a third variant because two could not hold `I could not tell`. SIBLING AUDIT, same shape next door: gpus_locked was cloned from the plan while run_nvidia_smi's refusal went unread, so a GPU whose lock was REJECTED was reported as locked; and game_exit discarded every outcome but a hard Err, so a refused restore was silent under a line asserting the machine had been put back. Both fixed. TWO DOCUMENTS CLAIMED KATANA RAN scx_lavd FOR 75 MINUTES. Nothing was running. Corrected in place and marked as corrections. RUN-BOOK: the `sched_ext/state expect: enabled` row is DELETED -- it read disabled throughout, so it passed on a file that never moved; the 6.6 destroy step is now `kill -9` the owner, because a greetd restart leaves the script alive to run its own trap and was testing the cooperative path; governor and sched-ext are now a named PAIR of non-discriminators on katana. ONE MUTATION ESCAPED THE FIRST PASS (MB11): nothing pinned the plan-time note, so restoring the sentence that had claimed a scheduler on three images turned nothing red -- a gate that inspects nothing, inside the work fixing a gate that inspects nothing. Two assertions added, caught both ways; the near-miss is in the evidence. KNOWN AND STATED: game mode STOPS a scheduler it found running rather than restoring it (`scxctl restore` would be the fix); that branch has never been reached. Three rows in 6.8 need hardware, including the `switch` branch a fixture cannot honestly stand in for."
-    },
-    {
-      "id": "final-image",
-      "items": [
-        "P0-001"
-      ],
-      "after": [],
-      "title": "Build the image carrying the last two fixes, before the L16 boots anything",
-      "closed": "CLOSED BY HAND (round 36, 2026-09-21). Per the unit's own card: 'Nothing in this unit is outstanding.' The image was built, both fixes (etc labelling, sched-ext verb) confirmed on katana hardware, evidence committed, P0-001 recorded partial. Everything left (merge apex-shell then apex-os to main, main build, L16 apex update+reboot) is Andre's / the held `final` unit's, not a dispatchable agent task."
-    },
-    {
-      "id": "kernel-btf-scx",
-      "items": [
-        "P1-043"
-      ],
-      "after": [],
-      "title": "No sched-ext scheduler can load: the baked kernel's BTF predates pahole 1.26",
-      "closed": "CLOSED BY HAND (round 36, 2026-09-21). Diagnosis-only work; landed round 35 as part of the kernel-build merge. Continuation (deciding APEX builds its own kernel, building it, wiring core) happened under the kernel-build card and now continues as kernel-build-2. P1-043 stays partial/tracked there, not here. Re-open only if a reason emerges to redo the BTF diagnosis itself."
-    },
-    {
-      "id": "luks-installer",
-      "items": [
-        "L-002"
-      ],
-      "after": [],
-      "title": "The installer cannot create a LUKS2 volume at all"
-    },
-    {
-      "id": "luks-enroll",
-      "items": [
-        "L-003"
-      ],
-      "after": [],
-      "title": "TPM auto-unlock by default, where safe is a measured precondition"
-    },
-    {
-      "id": "windows-installer",
-      "items": [],
-      "after": [],
-      "title": "A portable Windows app that installs APEX into an empty partition",
-      "closed": "CLOSED BY HAND (round 36, 2026-09-21). No card was ever written at this slug; round 35's real work landed under windows-installer-2 (a real Windows VM lab, three defects found). Continuing as windows-installer-3. Re-open only if this exact slug is needed for something windows-installer-2/3 do not own."
-    },
-    {
-      "id": "sdboot-image",
-      "items": [],
-      "after": [],
-      "title": "Pivot every machine to systemd-boot: UKIs, signing, blessing, migration",
-      "closed": "CLOSED BY HAND (round 36, 2026-09-21). This slug's code (bootupd_t SELinux module, apex-boot-count, the pivot design) landed round 35. Work continued under sdboot-migrate (in-place migration engine, which corrected this card's own 'no in-place converter, must reinstall' conclusion) and now continues as sdboot-migrate-2. Re-open only if fresh sdboot-image-specific work (not migration) is needed."
-    },
-    {
-      "id": "android-release",
-      "items": [],
-      "after": [],
-      "title": "Publish the Android APK as part of a release, signed and versioned",
-      "note": "WORK COMPLETE AND PUSHED 2026-09-20, round 35, task/android-release @ 5dc2b5aa (eight commits, merged roadmap/v2.2 cleanly, NOT LANDED). Deliberately NOT marked closed: landing is the orchestrator's, and one thing genuinely remains open that is not an agent's to take. Do not dispatch a fresh agent at this without reading ROADMAP/state/agents/android-release.md first -- there is nothing half-done in it. Shipped: GitHub Releases flow (release-version.sh + release-artifacts.sh + release-notes.sh + release-android.yml, workflow_dispatch-only, main-only, dry_run defaults true), a protocol version WINDOW replacing the equality test that made every OS bump look like a mass revocation, an in-app updater that verifies the APK's sha256 before PackageInstaller.commit, docs/android-app.md, and the README section that finally tells a person the app exists. Proved without publishing: release-artifacts.sh run end to end against a throwaway keystore, aapt2 confirming versionCode 1330 in the built APK, v2/v3 APK signature and a jarsigner-clean AAB; the generated page is ROADMAP/evidence/android-release-page-20260920.md. No release created, no tag moved. STILL OPEN FOR ANDRE: no Android signing key exists (gh secret list returns only APEX_SB_CRT_B64 and APEX_SB_KEY_B64), and until the four APEX_KEYSTORE*/APEX_KEY* secrets exist the release workflow refuses on its first real step, which is the correct failure. apksigner rotate makes the key ROTATABLE while the old one lives, so the decision is about where the backup goes -- written up at the end of docs/android-app.md."
-    }
-  ],
-  "_completed_units": {
-    "followups-integrate-3": "COMPLETE AND LANDED 2026-09-07, round 6. All four hardening items the third integration round routed onward are on apex-os roadmap/v2.2 as ef87088..678bb5d (the broker's bare curl reading the owner's ~/.curlrc under root, 'reaches the same thing everywhere' made a declared fact, a bind test that bound nothing and passed, one curl in this build with a readable contract, and the MCP verbs documented in docs/agent-runtime.md). REMOVED from units rather than left with a marker, because resume.sh derives 'finished' from roadmap.yaml item status and this unit's items are '(hardening)' - no roadmap ids - so it can never satisfy that test and would have been offered as READY forever, which is exactly the double-dispatch the queue exists to prevent. One follow-up did NOT belong to it and is still owed: apex remote pair|devices|revoke|status|enable is documented nowhere, and it is recorded in dispatch.json _deliberately_held for the next integrate round.",
-    "trust-enforcement": "COMPLETE AND LANDED 2026-09-08 on apex-os roadmap/v2.2 as e67fab9 -> 583355e. APEX now refuses an update whose image signature does not verify: cosign-free sigstore verification (skopeo + openssl) against a PINNED Sigstore root shipped by Containerfile.base, wired into ops::update BEFORE channel::record_update and BEFORE FsyncGuard::disable, escaping only via --allow-unverified. 455 Rust tests in the crate (+51) and a new tests/test-apex-trust-enforcement.sh at 77/0 with real minted-CA cryptography. REMOVED from units rather than marked done, because its items are '(new, from P1-047)' - not roadmap ids - so resume.sh's finished() test can never be satisfied and the unit would have been offered forever. Still open and recorded on P1-047's evidence: provenance=warn until a build publishes a .att; /etc/containers/policy.json is still one insecureAcceptAnything; transparency-log inclusion is not verified and every report says so; and `bootc upgrade` run directly bypasses the gate (ops::update is its only caller in the repo, grepped).",
-    "desktop-ai-apps": "COMPLETE AND LANDED 2026-09-12 on apex-os roadmap/v2.2 as merge 3bf8e558 (branch tip d7b12d37). Both AI desktop apps ship from Containerfile.core stage 5a-aiapps, arrive via sudo apex update alone, and have both vendor self-update channels removed. Proven END TO END in a scratch fedora-bootc:43 container with the stanza text extracted VERBATIM from the Containerfile: exit 0, chatgpt 26.908.40401-1 and claude-desktop 1.52386.0 installed, repo file absent, both schemes registered. Eleven mutation pairs, eleven named assertions red, file restored byte-identical. REMOVED from units rather than marked done because its items are '(new, from the 2026-09-11 CLAUDE.md decision)' - not roadmap ids - so resume.sh's finished() test can never be satisfied and it would be offered forever, the same trap followups-integrate-3 and trust-enforcement hit. OUTSTANDING and NOT the unit's to do: the claude-desktop-update.timer stopgap on the L16 cannot be retired until an image built from this tip is deployed, and /etc/yum.repos.d/chatgpt.repo is live and enabled on that machine - a self-update side channel that ostree's /etc merge will KEEP because it was never an image default.",
-    "p2-a": "COMPLETE 2026-09-13, round 23. Round 1 landed as merge 05227d16; round 2 landed as merge cd4a799e (five commits). All three items are now DONE: P2-001 (all five of \u00a713.5's target kinds carried - local, nas, ssh, s3, r2 - with the ssh target exercised against a real sshd on loopback and the s3 target against a loopback double that recomputes SigV4 from what arrives), P2-002 (unchanged, already done), P2-013 (github, cloudflare, ssh and agent identity all enforced, with is_enforced/enforced_by flipped in the same commits that enforce them so `apex project identity` never claims enforcement before it exists). Removed from the ready set; p2-f, which was held behind it, is dispatched.",
-    "p1-053b": "COMPLETE AND LANDED. Its work is merge 69a2f51e and the branch is an ancestor of roadmap/v2.2 with 0 commits ahead. It was still sitting in READY on 2026-09-13 and would have been offered forever - the same double-dispatch trap that had already cost three agent runs on p1-005, p1-011 and base-partials. Removed from units.",
-    "later": "CLOSED TO DISPATCH 2026-09-19 (round 30) \u2014 and this says the remaining work is ANDRE'S, not that it is done. Round 29 landed as merge c6bc990a with 0 unlanded; test-boot-v2 is 105/0. Everything a VM can qualify is now qualified: the PCR 0 scenario earlier rounds called impossible exists (two Fedora edk2 revisions move PCR 0 and leave PCR 7 identical), the no-TPM arm exists, and the TPM-clear recovery is asserted against the user's DATA rather than a keyslot opening. What is left of L-001 is the acceptance word 'Real' \u2014 no silicon TPM has done an enrol-and-recover cycle, the L16's TPM is off-limits and katana is off-limits \u2014 so no agent can satisfy it from here. L-002 and L-003 are held behind exactly that by this unit's own note, and L-002 has an independent blocker: every crypto_LUKS branch in installer/apex-install is a refusal to overwrite an existing header, never a path that creates one. The deliverable that replaces the dispatch is written down rather than wished for: docs/boot-v2.md, 'The run somebody with hardware would have to do' \u2014 five numbered runs, four prerequisites, what to record at each step; runs 1, 2 and 5 are the minimum that moves L-001 off partial. Same shape as p1-038-hardware and p2-c. RE-OPEN the moment there is a machine whose TPM somebody is willing to clear.",
-    "p2-d": "CLOSED TO DISPATCH 2026-09-19 (round 30) \u2014 and unlike later, p2-c and p1-038-hardware, this one is not waiting on HARDWARE, it is waiting on a DECISION. Gap 5 landed as merge da6fc0fb and every bullet under 'What is not decided' in docs/browser-capsule-auth.md is now struck through. THE QUESTION, VERBATIM, from 'The question, for Andre' in that page: \"May apex-agentd read the plaintext of a capsule's connection to the one destination that capsule was pinned to, in order to add a credential the capsule is never given?\" YES -> route B is a round of its own and it takes PROTOCOL_VERSION 11, NOT 10 \u2014 gap 5 took 10 (BROWSER_CA_VERSION = 10) and the page's three old reservations of 10 were rewritten this round. Fold the SessionInfo.trust_ca follow-up into that round. NO -> that is still a dispatch, a small one: record P2-012's capability auth as PERMANENTLY UNMET rather than pending, say so in the item, and fold SessionInfo.trust_ca into the same round. Do not read 'no' as 'nothing to do'. THE ONE REMAINING PIECE OF ENGINEERING, named here so 'closed' is not read as 'finished': SessionInfo carries no trust_ca, so `apex agent status` cannot show that a session trusts an extra root. It is an additive optional field on a stability surface, it is in NEITHER capsule doc (checked with grep, not assumed), and it is too small to be a unit on its own. P2-008 and P2-009 stay partial on their own grounds, recorded in their own evidence: USB passthrough needs a physical device somebody will detach, and P2-009's gap is a guest image carrying an agent CLI, which is a build rather than a test. RE-OPEN the moment Andre answers, either way."
+ "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
+ "updated": "2026-09-21T13:55+0800",
+ "concurrency_ceiling": 6,
+ "units": [
+  {
+   "id": "p1-038-hardware",
+   "repo": "apex-shell",
+   "items": [
+    "P1-038"
+   ],
+   "title": "The 18 labwc matrix rows that need real applications",
+   "after": [],
+   "conflicts": [],
+   "note": "Automated already: screenshots, multi-monitor, lock and idle, scaling. The remainder needs real programs on a real session and is written out step by step in state/agents/p1-038.md: portals, Firefox and Chromium screen sharing, OBS, Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling, rotation, refresh rate, VRR, suspend and resume, dock hotplug. This one cannot be done headless and cannot be done on the L16 while Andre is using it — it is a katana job, or a job for Andre with a checklist. Do not pretend otherwise.",
+   "closed": "CLOSED 2026-09-20 (round 34). The agent that this note used to say was 'on it' FINISHED on 2026-09-19 -- do not read the old wording as live. The 18 labwc matrix rows were run on katana and the evidence is ROADMAP/evidence/katana-qualification-20260919.md (58 verdicts) plus katana-image-qual-20260919.md. Gaming Mode lands on the monitor on the discrete card and Steam reaches Big Picture inside gamescope, both confirmed on hardware. P1-038 stays partial on rows that need applications nobody has installed (OBS, Discord, VS Code, JetBrains, LibreOffice, Wine -- proxies were run and the rows say so), physical output hotplug (nobody at the machine), and VRR, which CANNOT be tested on katana at all because no connector exposes vrr_capable. RE-OPEN only with a machine that has those applications or a different display."
   },
-  "_notes": {
-    "trust-enforcement": "DISPATCHED 2026-09-07 15:02 (round 6), the slot freed by followups-integrate-3 finishing. Its `after: [integrate-3]` is long satisfied. No card existed; the agent creates ROADMAP/state/agents/trust-enforcement.md and its own worktree /var/tmp/apex-work/wt-trust on branch task/trust-enforcement.",
-    "p1-025": "UNBLOCKED as of round 6. `after: [p1-018]` is satisfied: p1-018's work is landed by content on roadmap/v2.2 (the diff of every file origin/task/p1-018-mcp-auth touches against the tip is empty, even though the branch is 10 commits 'ahead' by graph). Not dispatched only because the ceiling is six; first in line next round alongside one of the Cloudflare units.",
-    "editors": "User-directed, outside the roadmap: Andre reported nvim and zed do not work. Zed's half is fixed and landed (ec91e92 - the image had installed the desktop entry from a filename the tarball never shipped, behind `|| true`, so the editor was invisible in every launcher on every machine). The other half is with an agent on task/terminal-entries-launchable, measuring whether the launcher honours Terminal=true, which nvim.desktop declares. Not added as a queue unit because it is one defect with a branch already open; if it grows, give it one.",
-    "p2-c": "The card says every remainder is hardware nobody here has. That is true of the validation MATRICES and not of everything: P2-006's own evidence records that a hotspot CANNOT work under the shipped firewall policy three independent ways, 'hotspot validated' is literally its acceptance criterion, and the netns harness reaches it with no hardware. That is round 2's spine.",
-    "p1-063": "Added to the dispatchable set in round 23. Andre's own request, `partial`, and its apex-shell half was never written - which is now cheap, because run-privacy-page-test.sh landed the same night as a worked example of building a page through PageRegistry on a headless labwc. Also carries the seven `apex lid` verbs that are in the binary and in no document, which two separate agents have now reported with nobody owning them.",
-    "later": "Closed to dispatch 2026-09-19 (round 30) \u2014 see _completed_units. Do not offer it as READY again. The card ROADMAP/state/agents/later.md is kept because its NEXT is the hand-off text for whoever has the hardware.",
-    "p2-d": "Closed to dispatch 2026-09-19 (round 30) \u2014 see _completed_units. It is blocked on an ANSWER, not on hardware, and BOTH answers produce a dispatch. Do not offer it as READY until Andre has answered."
+  {
+   "id": "p0-014",
+   "repo": "apex-os",
+   "items": [
+    "P0-014",
+    "P0-015"
+   ],
+   "title": "Remote Control privilege policy and lock-state policy, wired end to end",
+   "after": [
+    "integrate-3"
+   ],
+   "conflicts": [],
+   "note": "Both are already implemented on task/p0-013-request-origin and land as `partial`. P0-014's remainder is a real FIDO/WebAuthn path behind --origin-policy remote. P0-015's remainder is that nothing reports lock state: APEX Shell locks with ext-session-lock and never calls SetLockedHint, so logind reports LockedHint=no on a session locked for an hour. The shell half was recovered from a WIP snapshot and pushed as fix/locked-hint at 87c84f3 (LockedHintService.qml, qmldir, Lockscreen.qml wiring) — integrate that first. P0-015 criterion 2 also needs P0-007's session grants to exist. P0-005's agent also produced an apex-shell branch, task/p0-005-agent-center-modes (the row shows the mode an agent is in) — integrate it alongside the apex-os side."
   },
-  "_hardware_blocked": {
-    "P1-042 tablet leg": "Four of five creator input/audio legs are landed. The fifth owes one assertion - 'a stylus enumerates, is classified tablet, and its settings reach the compositor' - and NO TABLET EXISTS on either machine: libwacom finds none on the L16 or on katana. This is NOT a katana-while-gaming wait, so no amount of patience clears it; somebody has to plug a tablet in. Not dispatchable unattended, and deliberately not left inside a queue unit where it would keep a finished unit READY.",
-    "P1-043 NVIDIA verification": "GPU parity is landed for AMD, Intel and the hybrid case, and the nvidia-smi three-state fix closed test-apex-ai (43/1 -> 44/0). One verification assertion remains - 'SmiOutcome::Ready is what a real loaded NVIDIA driver produces' - and it needs katana while katana is NOT gaming. Functionally covered already: 9b68be3 measured nvidia-smi answering there, and 454ae3a does not touch that path's parsing. A katana job for an idle window, not a dispatchable unit.",
-    "P1-038 labwc matrix": "Unchanged and still held: the 18 matrix rows need real applications on a real session. Cannot be done headless and cannot be done on the L16 while Andre is using it. Still listed as its own unit (p1-038-hardware) because it is a whole item rather than a remainder.",
-    "L-001 run 5, the TPM goes away": "L-001 is 4 of 5 runs after round 32 cleared katana's TPM and showed refusal-then-recovery in one boot. The last run disables the TPM and records that the boot prompts for the recovery key rather than hanging, then re-enables it and records that unlock returns with no re-enrolment. PPI operation 2 (Disable) reads 'User not required' and IS reachable over SSH - and must not be used, because once firmware hides the TPM, /sys/class/tpm/tpm0 and its ppi directory go with it, so re-enabling needs somebody in firmware setup. Disabling is not symmetric with enabling. Two units have now declined to create a state they cannot leave. Somebody at the keyboard, or L-001 stays partial. Not dispatchable."
+  {
+   "id": "p1-018",
+   "repo": "apex-os",
+   "items": [
+    "P1-018",
+    "P1-019"
+   ],
+   "title": "MCP auth helper integration and per-MCP sidecar sandboxing",
+   "after": [
+    "p0-003"
+   ],
+   "conflicts": [
+    "p0-003"
+   ],
+   "note": "Depends on the credential broker landing. Sidecar sandboxing should reuse the bubblewrap profile work from P0-009 rather than inventing a second one."
+  },
+  {
+   "id": "p1-005",
+   "repo": "apex-os",
+   "items": [
+    "P1-005",
+    "P1-006",
+    "P1-007"
+   ],
+   "title": "Cloudflare R2, D1/KV/Queues/Hyperdrive, DNS capability sets",
+   "after": [
+    "integrate-3"
+   ],
+   "conflicts": [
+    "p1-002"
+   ],
+   "note": "26 of section 13.2's 32 operations remain after P1-002 took seven. Two framework gaps the Cloudflare author hit and worked around locally, which P1-005 should fix generally rather than repeat: Bound carries no provider payload, so bind cannot hand what it resolved to perform — Cloudflare re-resolves and refuses on mismatch, but git does NOT, which makes git's host pin a TOCTOU rather than a guarantee; and mint cannot reach a companion service, which is why OAuth refresh could not be expressed as mint and why P1-011 will hit the same wall.",
+   "closed": "Landed as merge 4f80746e; the range against roadmap/v2.2 is empty. P1-006 is done. P1-005 stays partial only because the token spent is account-wide — the per-task credential IS P1-011 — and P1-007 stays partial because no elevated class exists in apex-secret-core to require, which is its own item. Nothing left to dispatch here. Closed 2026-09-12 after a dispatched agent had to be redirected."
+  },
+  {
+   "id": "p1-008",
+   "repo": "apex-os",
+   "items": [
+    "P1-008",
+    "P1-009",
+    "P1-010"
+   ],
+   "title": "Cloudflare One, Workers AI and AI Gateway, Secrets Store",
+   "after": [
+    "integrate-3"
+   ],
+   "conflicts": [
+    "p1-002",
+    "p1-005"
+   ],
+   "closed": "Landed as merge 230ee02a; 0 unlanded. P1-008 and P1-010 done. P1-009 stays partial because the third criterion turns on a schema question the pinned schema cannot settle either way — workers-ai-post-run-model declares two path parameters and no headers. A citation problem, not effort."
+  },
+  {
+   "id": "p1-011",
+   "repo": "apex-os",
+   "items": [
+    "P1-011",
+    "P1-012",
+    "P1-013"
+   ],
+   "title": "Temporary task credentials, transparent brokered wrangler/cloudflared/terraform, transactional deploy",
+   "after": [
+    "p1-005"
+   ],
+   "conflicts": [
+    "p1-005",
+    "p1-008"
+   ],
+   "closed": "Landed as merge 598f6996; 0 unlanded. P1-011 and P1-012 are done. P1-013 stays partial for a structural reason: a preview health check is an UNAUTHENTICATED GET to *.workers.dev and the host pin correctly forbids spending an api.cloudflare.com credential anywhere else, so it belongs in the `apex cf` CLI rather than in a brokered operation — and the relay moved to a custom domain on andrenijman.com, so workers.dev is no longer the right target anyway. Closed 2026-09-12 after a THIRD agent in one round was dispatched onto finished work."
+  },
+  {
+   "id": "p1-014",
+   "repo": "apex-os",
+   "items": [
+    "P1-014",
+    "P1-015",
+    "P1-016",
+    "P1-017"
+   ],
+   "title": "Cloudflare environment protection, worktree preview environments, cost guardrails, MCP through the broker",
+   "after": [
+    "p1-011",
+    "p1-018"
+   ],
+   "conflicts": [
+    "p1-011"
+   ],
+   "closed": "Landed as merge 514d46a3; 0 unlanded. P1-014, P1-016 and P1-017 done. P1-015 met ALL THREE of its acceptance criteria and is partial only because two of section 13.13's five named resources cannot be reached by anything in this build — a fact about the vocabulary, not about effort."
+  },
+  {
+   "id": "p1-020",
+   "repo": "apex-shell",
+   "items": [
+    "P1-020",
+    "P1-021",
+    "P1-022"
+   ],
+   "title": "Agent/subagent graph in Agent Center, Claude statusline telemetry, notification bridge and deduplication",
+   "after": [
+    "p0-018b"
+   ],
+   "conflicts": [
+    "p0-018b",
+    "p1-023"
+   ],
+   "note": "P0-022 already rewrote the Agent Center to say what each agent is; the graph builds on that, it does not replace it.",
+   "landed": "both halves landed by integrate-4; P1-020/021/022 all done 2026-09-07."
+  },
+  {
+   "id": "p1-023",
+   "repo": "both",
+   "items": [
+    "P1-023",
+    "P1-024",
+    "P1-029"
+   ],
+   "title": "Global push-to-talk routing, cross-agent handoff packet, local/remote/scheduled/cloud lifecycle types",
+   "after": [
+    "p1-020"
+   ],
+   "conflicts": [
+    "p1-020"
+   ]
+  },
+  {
+   "id": "p1-025",
+   "repo": "apex-os",
+   "items": [
+    "P1-025",
+    "P1-026",
+    "P1-027",
+    "P1-028"
+   ],
+   "title": "Skill inventory and audit, plugin provenance and isolation, memory provider interface, connector trust planes",
+   "after": [
+    "p1-018"
+   ],
+   "conflicts": [],
+   "note": "Blocked in practice, not by the queue: `after: p1-018` and p1-018's work is COMPLETE but UNLANDED. Land it before dispatching this."
+  },
+  {
+   "id": "p1-035",
+   "repo": "apex-os",
+   "items": [
+    "P1-035",
+    "P1-036",
+    "P1-037"
+   ],
+   "title": "Screenshot/file injection into TUI agents, worktree test/conflict/PR status, agent disposable capsules",
+   "after": [
+    "p1-030"
+   ],
+   "conflicts": [
+    "p1-030"
+   ],
+   "note": "Dispatched round 5. Its queue conflict with p1-030 is moot while p1-030 is neither dispatched nor unlanded."
+  },
+  {
+   "id": "p1-040-per-output-scaling",
+   "repo": "apex-shell",
+   "items": [
+    "P1-040"
+   ],
+   "after": [],
+   "conflicts": [],
+   "title": "Per-output scaling: two densities, two sizes, one shell",
+   "note": "REPLACES the old p1-039 unit, which landed on 2026-09-08 (apex-shell 690014a -> a90cef6, apex-os 678bb5d -> e67fab9). Left in place it would have offered finished work again: P1-039 and P1-041 are DONE, and resume.sh only calls a unit finished when EVERY item is done, so a unit carrying three hardware-blocked partials reads as READY forever. What is actually left here, and it is real dispatchable work: the shell resolves ONE scale factor through two singletons with 831 call sites across 82 files, so 'two outputs at compositor scale 1 with different densities each get their own size' was never attempted. The landed page states when the desk cannot share one size rather than claiming a per-output result it does not compute. Start at src/theme/scaling.js (the breakpoint table both the shell and node read) and src/theme/Metrics.qml, and treat the call-site count as the actual cost. The harness is already there: tests/run-scaling-test.sh brings up two headless outputs at different densities through tests/lib/headless.sh and is 30/0, so the assertion has somewhere to live on day one."
+  },
+  {
+   "id": "p1-044",
+   "repo": "apex-os",
+   "items": [
+    "P1-044"
+   ],
+   "title": "Integrate the firewall branches (work is finished, not merged)",
+   "after": [],
+   "conflicts": [],
+   "note": "DONE and pushed: task/p1-044-firewall-live 4cc3f4b (apex-os) and task/p1-044-firewall-settings e51412b (apex-shell). Optional follow-up its author names: apex firewall status --json so the shell page stops parsing prose. Two policy scope questions stay open on purpose -- LLMNR accepted on every interface, and mDNS accepting unicast from any source. Also open: katana's installed apex predates the firewall subcommand, and whether the page should stop offering commands that image cannot run is a judgement nobody has made. ALSO, from the P2-005 agent, measured with positive controls: a hotspot cannot work under the shipped policy, three independent ways -- forward is policy drop, the DHCP rule matches replies rather than a client's DISCOVER, and port 53 is shut. The exception mechanism itself is sound (631/445/2049 reopen immediately). And two lines in `apex devices network` state the current policy as fact and go stale the day it changes; ping task/p2-005-device-maturity when the policy moves.",
+   "landed": "both halves landed by integrate-4; P1-044 marked done 2026-09-07."
+  },
+  {
+   "id": "p1-052-relay",
+   "items": [
+    "P1-051",
+    "P1-052"
+   ],
+   "repo": "both",
+   "after": [],
+   "conflicts": [],
+   "title": "The APEX Remote remainder: relay, reconnect, mDNS, connection quality, and the two shell pages",
+   "note": "REPLACES the old p1-050 unit, which was landed on apex-os roadmap/v2.2 as 1ab542c on 2026-09-07 (P1-050 done). Keeping p1-050 in the queue would have offered finished work again -- it read as HELD 'after p0-014' in the report, one dependency away from being dispatched twice. What is actually left, and it is a unit of its own: (1) no Cloudflare Worker or Durable Object relay is deployed -- the client exists in apex-remote-core, the server side does not; (2) no reconnect across network changes; (3) no mDNS discovery; (4) connection quality is not rendered; (5) apex-shell owes a QR pairing page and a paired-device page. P1-051 also stays partial for a reason NOT in this unit: --origin-policy remote stays refused until the device key lives in Android Keystore with setUserAuthenticationRequired, with a per-approval challenge and attestation -- that is p1-053a's work, and p0-014's CTAP2 verifier is the desktop half of it. Do not close P1-051 from here alone.",
+   "landed_predecessor": "apex-os roadmap/v2.2 1ab542c on 2026-09-07. P1-050 done. P1-051 and P1-052 stay partial and their remainders do NOT belong to this unit: P1-051 needs the key in Android Keystore with setUserAuthenticationRequired plus a per-approval challenge and attestation (that is p1-053a), and apex-shell owes it a QR page and a paired-device page. P1-052 needs a deployed Cloudflare Worker + Durable Object relay, reconnect across network changes, mDNS discovery and rendered connection quality -- a unit of its own. Do NOT re-dispatch p1-050; carve those two out instead.",
+   "closed": "0 unlanded; P1-052 done and the relay is deployed. P1-051's criteria 1, 3 and 5 are done and landed on apex-shell as a36f1a4. The remainder does not close until the device key lives in Android Keystore with setUserAuthenticationRequired, which is p1-053b/p1-053c territory, not a separate unit."
+  },
+  {
+   "id": "p1-053a",
+   "repo": "apex-android",
+   "items": [
+    "P1-053",
+    "P1-054",
+    "P1-055"
+   ],
+   "title": "Android app foundation, Agent Center parity, full PTY/TUI remote terminal",
+   "after": [],
+   "conflicts": [],
+   "note": "Its `after: p1-050` was dropped when p1-050 landed. Also owns the real second factor for P1-051 (Android Keystore with setUserAuthenticationRequired, per-approval challenge, attestation); p0-014 is building the desktop CTAP2 verifier it pairs with.",
+   "closed": "Landed as merge 4ae4cf22; 0 unlanded. P1-053 done. P1-054 is partial because the socket has no profile/projects/worktrees verb — adding them is a protocol change and p1-053b owns the decision. P1-055 is partial for want of a gemini fixture, and gemini is not installed on this machine."
+  },
+  {
+   "id": "p1-053c",
+   "repo": "apex-android",
+   "items": [
+    "P1-059",
+    "P1-060"
+   ],
+   "title": "Android voice, screenshot, file and clipboard handoff; ship as a production-quality application",
+   "after": [
+    "p1-053b"
+   ],
+   "conflicts": [
+    "p1-053b"
+   ],
+   "closed": "CLOSED 2026-09-20 (round 34). The agent that this note used to say was 'on it' FINISHED on 2026-09-19 and its work landed as merge 4fef8cbd -- do not read the old wording as live. 24 instrumented assertions ran on a real GrapheneOS Pixel 7a, the first time this app's code executed anywhere, and found four shipped defects including that every pairing code ever minted advertised an unbracketed IPv6 address on a socket bound to 0.0.0.0. P1-060 stays partial for ONE reason: C2 needs a tablet or a foldable and neither exists here. RE-OPEN if one appears."
+  },
+  {
+   "id": "p1-061",
+   "repo": "apex-os",
+   "items": [
+    "P1-061",
+    "P1-062"
+   ],
+   "title": "Extend APEX capabilities to normal application permissions; destructive chaos/torture reliability infrastructure",
+   "after": [
+    "p1-025"
+   ],
+   "conflicts": [],
+   "note": "P1-062 must never run its destructive suite against Andre's machine or his data. It gets a disposable target or it does not run."
+  },
+  {
+   "id": "base-partials",
+   "repo": "both",
+   "items": [
+    "BASE-002",
+    "BASE-005",
+    "BASE-009",
+    "BASE-010",
+    "BASE-013",
+    "BASE-014",
+    "BASE-016",
+    "BASE-018"
+   ],
+   "title": "Close the eight BASE preservation items still marked partial",
+   "after": [
+    "p1-039"
+   ],
+   "conflicts": [],
+   "note": "These assert that v2.2 did not regress what v2.1 shipped. Each needs an actual check that the preserved thing still works, not a reading of the code.",
+   "closed": "Landed round 12 on both repos; `git merge-base --is-ancestor` confirms task/base-partials and task/base-partials-shell are both contained in roadmap/v2.2, zero unlanded commits. BASE-009 needs a disposable machine with a gaming userspace (the switch is `loginctl terminate-user`, which kills the session running the test) and katana is off-limits; BASE-010 needs non-zero spendable VRAM and this is an APU, so apexd falls to Backend::Cpu by design. Closed 2026-09-12 after a second agent was dispatched onto a finished unit."
+  },
+  {
+   "id": "p2-b",
+   "repo": "both",
+   "items": [
+    "P2-003",
+    "P2-004"
+   ],
+   "title": "Accessibility baseline and internationalisation baseline",
+   "after": [],
+   "conflicts": [
+    "p1-048"
+   ],
+   "note": "Accessibility is a real audit against a screen reader and keyboard-only navigation, not a sweep for missing labels.",
+   "closed": "CLOSED TO DISPATCH 2026-09-19 (round 32) -- and this says the remaining work is a TRANSLATOR'S and ANDRE'S, not that it is done. Round 34 landed as f8b8184d (apex-os) and 03d77f9 (apex-shell): the Apex.I18n module is built into the image for the first time and the shell reaches it, which closes FOUND 3, the host blocker this unit had been parked behind since the i18n baseline began. What is left, from the card's own ordered list: (1) WRITE THE GERMAN -- the catalogue ships and covers 5 of the 186 marked strings; the other 181 extract, compile and load and come back in English because nobody has written them, and the suite REPORTS that gap rather than hiding it. Adding a language is now one file: drop translations/apex-shell_<lang>.ts into apex-shell and the image compiles, installs and load-proves it with no further apex-os change. That is a translator's job, not an agent's. (2) Orca at the login screen and greeter audio still need HARDWARE and are the oldest open things on this card. (3) An optional tidy-up, REJECTED this round on blast radius: the catalogue stage clones apex-shell a second time and the alternative moves the vendoring stanza into its own stage, but that stanza is the most load-bearing thing in Containerfile.base and the two clones are proved to agree by a sha256 cross-check -- if anybody restructures it, delete the cross-check with it. ONE THING FOR THE NEXT IMAGE BUILD: no full base build has carried the catalogue stage yet. It was proved as a real podman build against the local core image with the worktree standing in for the clone, six builds, one positive and five negatives. Verify it in the first full build that carries it. || HARDWARE-CONFIRMED 2026-09-20 by unit integrated-image: 'the first full build that carries it' has now happened. Build run 35461554871 printed 'catalogue: compiled 1 catalogue(s) from apex-shell 03d77f96...', 'Apex.I18n built and proved to load: 29776 bytes', 'Apex.I18n stage complete' and 'catalogue: apex-shell_de.qm loads under LANG=de'. On the booted machine, libapexi18n.so (29776 bytes), qmldir and apex-shell_de.qm (1421 bytes) are all present, the shell half imports it (I18nBootstrap.qml:25, created from shell.qml), greetd is active - a fatal root import would prevent that - and the Containerfile's own offscreen probe reproduced on the booted /usr reports 'APEXI18N: installed /usr/share/apex-shell/translations/apex-shell_de.qm' under de_DE.UTF-8 and honestly 'no catalogue for C' under C.UTF-8. The greeter's JOURNAL is not a channel for this: greetd dup2s the VT onto the session stdio. What remains is unchanged and is a translator's and Andre's: 181 of 186 strings, and Orca at the login screen."
+  },
+  {
+   "id": "p2-c",
+   "repo": "apex-os",
+   "items": [
+    "P2-005",
+    "P2-006",
+    "P2-007"
+   ],
+   "title": "Printing/scanning/network-share, networking, Bluetooth/dock/peripheral maturity",
+   "after": [],
+   "conflicts": [],
+   "closed": "CLOSED TO DISPATCH 2026-09-18 (round 27) — and this says the work is ANDRE'S, not that it is done. The container sweep that found FOUND 3, 4, 11 and 12 is exhausted: every remaining reader needs a BOOTED machine, and reaching one needs `apex update` plus a reboot, which is the boot path and off-limits to agents. A container can move a reader to 'installed, and whether it runs was not answered' and no further. The step-by-step checklist for Andre is at the end of ROADMAP/evidence/P2-005-007-device-maturity.md. The three items stay `partial` because their acceptance criteria genuinely are not met — that is the state this hatch exists for. Re-open only after an image build lands and a NEW reader could have arrived with it."
+  },
+  {
+   "id": "p2-d",
+   "repo": "apex-os",
+   "items": [
+    "P2-008",
+    "P2-009",
+    "P2-012"
+   ],
+   "title": "First-party virtualization UX, disposable VM agent execution, secure browser automation capsule",
+   "after": [
+    "p1-037"
+   ],
+   "conflicts": [],
+   "closed": "CLOSED 2026-09-20 (round 34). The agent that this note used to say was 'on it' FINISHED on 2026-09-19 and route B landed as merge f666f5c1 -- do not read the old wording as live. P2-012 is DONE. P2-008 and P2-009 stay partial on their own separate grounds: USB passthrough needs a physical device somebody will detach, and P2-009's gap is a guest image carrying an agent CLI, which is a build rather than a test. Two things the round recorded as NOT claimed: no Firefox has gone through the shipped proxy (the join is by construction, not by a browser run), and present_pin's secret-service half is code-reviewed rather than tested."
+  },
+  {
+   "id": "p2-e",
+   "repo": "apex-os",
+   "items": [
+    "P2-010",
+    "P2-011",
+    "P2-014",
+    "P2-015"
+   ],
+   "title": "Hardware qualification database, agent cgroup budgets, Storage Manager and disk health, firmware lifecycle",
+   "after": [],
+   "conflicts": []
+  },
+  {
+   "id": "p2-f",
+   "repo": "both",
+   "items": [
+    "P2-016",
+    "P2-017",
+    "P2-018",
+    "P2-019"
+   ],
+   "title": "Multi-user/guest/kiosk, APEX Online Accounts, guaranteed safe graphics failover, Fleet architecture",
+   "after": [
+    "p2-a"
+   ],
+   "conflicts": [],
+   "closed": "CLOSED TO DISPATCH 2026-09-19 (round 31) -- and this says the remaining work is ANDRE'S, not that it is done. Rounds 32 and 33 landed as merge bd0c41ce; 0 unlanded. The aborted-transfer family is finished, and round 33 found and fixed a real privilege defect nobody was looking for: ensure_private_dir was called on the leaf, so create_dir_all made the scratch ROOT under the umask and nothing checked it -- a root pre-created 0777 succeeded silently, and a leaf planted as a symlink succeeded and chmodded the symlink's target to 0700. Both copies fixed (apex-aid duplicates it deliberately and had all three defects). What is left of P2-016 is three follow-ups that need a SPARE VT and would take Andre's screen: fast user switching, a standard account created at install time, and a kiosk session actually booted. Nothing ran on a second logind session this round and the card says so -- `sudo -u nobody` settles ownership, it is not a fast-user-switching test. P2-017, P2-018 and P2-019 stay partial on their own recorded grounds. RE-OPEN when there is a machine with a free VT that nobody is sitting at."
+  },
+  {
+   "id": "later",
+   "repo": "apex-os",
+   "items": [
+    "L-001",
+    "L-002",
+    "L-003"
+   ],
+   "title": "TPM and recovery qualification, then LUKS2 by default and TPM auto-unlock where safe",
+   "after": [
+    "p2-e"
+   ],
+   "conflicts": [],
+   "note": "L-002 and L-003 are blocked on L-001, and L-001 is NOT finished. TWO GATES THIS NOTE ONCE NAMED ARE NOW MET AND NEITHER WAS ENOUGH. Round 31 (unit later-silicon) did a real enrol-and-recover cycle on silicon; round 32 (unit later-silicon-2, 2026-09-19, commit 16fe7ad3) CLEARED KATANA'S TPM with Andre's explicit approval and showed tpm-unlock=REFUSED -> recovery-unlock=SUCCESS -> marker identical in one boot on an Intel PTT fTPM. Do NOT read either as grounds to unblock anything. L-001 stays partial at 4 of 5 runs: Run 5, the TPM-removed case, needs a hand in firmware setup because PPI operation 2 takes /sys/class/tpm/tpm0/ppi with it and re-enabling is not symmetric with disabling; Run 3 has no firmware capsule to apply. L-002 stays blocked because installer/apex-install still cannot create a LUKS header at all, and because systemd-cryptenroll's default on systemd 258.10 binds to NO PCRs, so a naive 'encrypt by default' would seal to the SRK and nothing else. L-003 stays blocked because systemd-pcrextend is a silent no-op (exit 0, PCR 11 unchanged) on a GRUB machine, so the signed PCR 11 policy cannot be satisfied at boot on a default APEX install - that needs the sd-stub/UKI path, not the Secure Boot switch. Turning on full-disk encryption by default without a proven recovery path is how a user loses everything. AND A HARDWARE RULE FOR ANYONE WHO TOUCHES KATANA: /dev/nvme0n1 IS NOT A STABLE NAME THERE. The two NVMe controllers are probed asynchronously. Round 32 logged three boots: the first two enumerated them one way and the third - an ORDINARY reboot, not the clear - enumerated them the other way, so the disk this programme is told never to write became the APEX disk. Identify by serial (Micron_2450 220534D1CB81 = APEX, SPCC M.2 240023925111005 = Windows), by PCI function (0000:03:00.0 = APEX, 0000:02:00.0 = Windows), by PARTUUID, or by label (apex-root / EFI-SYSTEM / games). And APEX's default boot entry Boot0000 lives on the WINDOWS disk's ESP (PARTUUID 2ba9a2ea), the same partition Windows Boot Manager boots from.",
+   "closed": "CLOSED TO DISPATCH 2026-09-19 (round 32). Round 31 asked Andre whether katana's TPM could be cleared; HE SAID YES, and unit later-silicon-2 ran Run 2 on branch task/later-silicon-2 (commit 16fe7ad3, pushed, cut from roadmap/v2.2 f602f1cb). Evidence: ROADMAP/evidence/L-001-katana-tpm-20260919.md sections 14-21. THE CLEAR HAPPENED AND WAS VERIFIED FIVE WAYS rather than inferred from the reboot - lockoutAuthSet 1->0, five persistent handles->none, thirteen NV indices->five, four NV counters->zero, DA counter 2->0 well before its first decay step. A volume enrolled BEFORE the clear then gave tpm-unlock=REFUSED -> recovery-unlock=SUCCESS -> recovery-marker=MATCH in ONE BOOT. The authorised cost was Andre's Windows Hello PIN; there is no BitLocker, so no data. L-001 IS NOW 4 OF 5 RUNS AND STAYS partial. WHAT IS LEFT IS STILL NOT AN AGENT'S: Run 5 disables the TPM, and on this firmware that removes the ppi directory that would re-enable it, so somebody has to be in firmware setup. Run 3 has no capsule. DO NOT DISPATCH A UNIT TO 'FINISH L-001' - there is nothing left an agent can do on this machine. NEW FINDINGS FROM ROUND 32, all landed: ppi/response reads '5 0: Success' the instant the request is written, before any reboot, so it proves nothing; the part returns TWO codes for a failed unseal and systemd prints ONE sentence for both (0x18b TPM_RC_HANDLE = the SRK at 0x81000001 is absent and is recoverable without re-enrolment because the SRK is deterministic from the storage seed; 0x1df TPM_RC_INTEGRITY = the seed was rolled and only re-enrolment works); systemd-cryptenroll provisions that SRK and systemd-cryptsetup never does, so an evicted SRK is a machine that refuses every TPM unlock at boot with the recovery key as the only way in; 'executing no operation' is a no-op on the LUKS HEADER ONLY - it persists a key at 0x81000001, a handle shared with every other OS on the machine - and the one-command re-enrolment trap is now measured after a REAL firmware clear, which is the case docs/boot-v2.md is actually about; a TPM clear moves PCR 1 PERMANENTLY on this board (three extra events in the firmware's own log, stable across a control reboot taken for that purpose) while PCR 0, 4 and 7 stay byte-identical across three boots. STILL TRUE FROM ROUND 31: systemd-pcrextend is a silent no-op on a GRUB machine and Secure Boot will NOT fix it; --tpm2-device=auto binds to no PCRs; a zero PCR 11 is a local DoS; DA is 32 tries / 2 h decay / 24 h recovery and a good auth does not clear the counter. EXACTLY THREE ROWS need redoing with Secure Boot ON and round 32 adds none: the --tpm2-pcrs=7 volume, the PCR 7 value itself, and the event-log replay."
+  },
+  {
+   "id": "final",
+   "repo": "both",
+   "items": [
+    "P0-001"
+   ],
+   "title": "Qualify the integrated image on real hardware, then merge to main",
+   "after": [
+    "*"
+   ],
+   "conflicts": [],
+   "note": "The last unit. Build the integrated image, boot the L16 onto it, qualify, then apex-shell roadmap/v2.2 -> main FIRST (Containerfile.base carries ARG APEX_SHELL_REF=main), then apex-os roadmap/v2.2 -> main. This is the only point at which GitHub CI is allowed to run."
+  },
+  {
+   "id": "p1-063",
+   "repo": "both",
+   "items": [
+    "P1-063"
+   ],
+   "title": "Lid-closed continuous operation — agents and the VPN keep running with the lid shut",
+   "after": [],
+   "conflicts": [],
+   "note": "Andre's own request, in his words. The primitive is a handle-lid-switch BLOCK inhibitor, not an edit to HandleLidSwitch= - it is dynamic, it reverts the moment the holder dies, and it leaves a machine with no live work suspending exactly as it does now; a static HandleLidSwitch=ignore would turn every laptop bag into an oven. Guards are not optional and must say which one fired. Round 2 owns the apex-shell half and the seven undocumented `apex lid` verbs. Two criteria need hardware or Andre's own machine and must not be faked: re-running the live suite with every external display unplugged, and measuring that a powered-down lid-closed session draws measurably less.",
+   "closed": "CLOSED TO DISPATCH 2026-09-13 (round 24). Round 3 is finished, pushed AND landed — apex-os 619e764a, apex-shell 1da66c7 — and followups-4 wired its 60 lid assertions into CI runner-green. Both remaining criteria are ANDRE'S PHYSICAL ACTIONS and an agent must not fake either. Criterion 1: causation needs the external display physically unplugged. Re-measured 2026-09-13 — Docked=b true, card1-DP-1 connected — and with a display attached logind consults HandleLidSwitchDocked (default ignore) BEFORE any inhibitor, so the lid does nothing with or without APEX's block and the non-suspend cannot be attributed to APEX. The one command that closes it, undocked: `sudo ./tests/test-apex-lid-live.sh`. Criterion 3: 'draws measurably less' needs an undocked machine ON BATTERY that nobody is using — power_now reads CHARGING power on mains — and the runnable recipe is in docs/lid.md under 'What has NOT been measured'. Nothing here is waiting on an agent."
+  },
+  {
+   "id": "pkg-share",
+   "items": [
+    "P0-001"
+   ],
+   "after": [],
+   "title": "The multilib pass drops 32-bit Vulkan ICDs, and resolve predicts the wrong source",
+   "closed": "CLOSED 2026-09-20 (round 34). RE-OPEN CONDITION IS SPENT -- the image was built and the fix is CONFIRMED ON HARDWARE: 177 shadowed paths to 0, 14 32-bit ELF shadows to 0, 0 to 13 i686 Vulkan ICDs, GStreamer from 2 usable features back to 1344, and comm -12 between the extension and rpm -qal empty. Evidence in ROADMAP/evidence/katana-image-qual-20260919.md. Nothing left here."
+  },
+  {
+   "id": "gaming-gpu",
+   "items": [
+    "P1-043",
+    "P1-038"
+   ],
+   "after": [],
+   "title": "Gaming Mode picks the iGPU and the laptop panel; Safe Graphics cannot light a dGPU",
+   "closed": "CLOSED 2026-09-20 (round 34). RE-OPEN CONDITION IS SPENT -- katana was free, the run-book was executed and the result is in ROADMAP/evidence/katana-image-qual-20260919.md section 6. Gaming Mode lands on HDMI-A-1 on the RTX 3070 at 240 Hz with zero occurrences of card1 or eDP-1 in a 3,789-line session log, and Steam reaches Big Picture. What came OUT of that run became units gaming-release and gaming-scx, both now closed, and kernel-btf-scx, which is open: no sched-ext scheduler can load on an APEX image at all."
+  },
+  {
+   "id": "build-verify",
+   "items": [],
+   "after": [],
+   "title": "Does roadmap/v2.2 still build? The quickshell and multilib changes are unbuilt",
+   "closed": "CLOSED TO DISPATCH 2026-09-19 (round 33) -- landed as merge 2e04fbcb, 0 unlanded. The question it was dispatched for is ANSWERED: roadmap/v2.2 builds. The local build succeeded end to end (~2h24m for base+apex on a reused core) and the step that killed the previous agent now prints 'apex-labwc-keybinds: 70 defaults, 4 without a labwc equivalent / PASS' with rc.xml untouched; four tags resolve to one image, kernel and 14 out-of-tree modules signed. In CI 35433705393, rust/changes/core/base are all green and inside `image` everything APEX passed -- build, the Secure Boot chain for kernel AND modules, payload split, push, cosign signing -- and the per-SHA tag is live at sha256:be3bdd0c6384. FIXED AND LANDED: build-local.sh now resolves want -> roadmap/v2.2 -> main and prints which rung, three rungs rather than build-image.yml's two because this script runs from whatever worktree you are in and every task/* worktree here has no twin; a SECOND, SILENT defect underneath it -- the 'unreachable remote is FATAL' property was unreachable code, because pipefail hands the assignment ls-remote's 128 and errexit kills the script before the FATAL line, with git's message already eaten by 2>/dev/null (measured: exit 128, nothing printed); and a pr-validation selector that named no repo-root script, so a PR editing only build-local.sh skipped every job INCLUDING the suite guarding it -- the seventh instance of the bug the six comments already in that block describe. tests/test-build-local-shell-ref.sh, 25 assertions, proved in three directions (25/0 with the fix, 8/17 against the old block, and 23/2 with the middle rung deleted -- exactly the two cases that justify it). WHAT REMAINS IS NOT THIS UNIT: the SBOM step OOMs the runner, and that is unit `sbom-oom`, dispatched the same round."
+  },
+  {
+   "id": "katana-image-qual",
+   "items": [],
+   "after": [],
+   "conflicts": [
+    "gaming-gpu",
+    "pkg-share",
+    "p1-038-hardware",
+    "p2-f",
+    "p2-c",
+    "p2-b"
+   ],
+   "title": "Rebase katana onto the tip image, then the gaming and multilib run-books",
+   "closed": "CLOSED TO DISPATCH 2026-09-19 (round 32) -- the run-book is FINISHED. Sections 0 through 6 are complete on hardware and landed as merges c13ac17a and de77ae5d; the evidence is 1,218 lines. Gaming Mode lands on the monitor on the discrete card (the selector's answer, then gamescope's five predicted lines verbatim, and zero occurrences of card1 or eDP-1 in a 3,789-line session log), and Steam reaches Big Picture inside gamescope for the first time on that machine -- zero BInit/VK_KHR_surface failures where every prior attempt died exactly there. pkg-share is confirmed: 177 shadowed paths to 0, 14 ELF shadows to 0, 0 to 13 i686 Vulkan ICDs, GStreamer 2 to 1344 features. greetd was restored and VERIFIED (cmp identical, 0 timers armed, apex game status false). The card's own NEXT says not to dispatch another agent at katana for section 6. What came OUT of the run is now unit gaming-release (the session cannot release itself; mangoapp crash-loops) and unit pkg-update (an image update delivers the fix to nobody). Untested and NAMED rather than claimed: Safe Graphics' automatic dGPU branch needs the panel genuinely dark, and no actual game was launched."
+  },
+  {
+   "id": "p1-053e",
+   "items": [],
+   "after": [],
+   "conflicts": [
+    "p1-053c",
+    "p1-053b"
+   ],
+   "title": "APEX Remote Android round 2 on the real device: terminal, PTY read-back, dual-stack bind",
+   "closed": "CLOSED TO DISPATCH 2026-09-19 (round 33) -- landed as merge 859cbb2b, 0 unlanded. Four takeable items closed plus approvals, which round 1's evidence named and the dispatch did not. P1-060 C1 is met EXCEPT THE RELAY LEG, and that leg is a missing FEATURE rather than a missing test: there is no relay client on Android at all -- PairingService.kt:108 prints its own apology, :core has no WebSocket code, no OkHttp in the build -- while MachinesScreen.kt:288 already shows 'relay available'. That is now unit `p1-052-android-relay`, dispatched the same round on the finding agent's own recommendation. P1-060 C2 is NOT an agent's: it names a tablet and a foldable and neither exists here; it gained the terminal this round and LOST a claim, because TerminalView is a bare Canvas and TalkBack has nothing to announce on it. THE FINDING WITH THE WIDEST BLAST RADIUS IS ABOUT THIS PROGRAM, NOT THIS UNIT: a roadmap-dispatched agent cannot pair, because its cgroup makes origin::observe_pid classify the broker as `scheduled-job` and apex-remoted correctly refuses -- 8 of 24 tests failed on that alone, and round 1 never saw it because it ran interactively. Everything needing a human-at-the-keyboard must go through tests/in-login-session.sh. Also fixed: the suite leaked an apex-remoted per reconnect test and round 1's worktree still held seven orphans."
+  },
+  {
+   "id": "p1-052-android-relay",
+   "items": [],
+   "after": [],
+   "conflicts": [
+    "p1-053e",
+    "p1-053c",
+    "p1-053b"
+   ],
+   "title": "The relay leg the Android app has never had — P1-060 C1s last piece",
+   "closed": "CLOSED TO DISPATCH 2026-09-19 (round 33) -- landed as merge 2814f45d, 0 unlanded. THE RELAY LEG WORKS END TO END OVER THE REAL DEPLOYED RELAY, proven twice and independently: a hand-rolled Python guest (so the client under test was not also the witness) dialled wss://apex-relay.andrenijman.com and got HTTP/1.1 101, a matching accept value, {\"relay\":\"paired\"} and its hello byte spliced onto the daemon's listener; then a real Pixel 7a paired and ran a session through Cloudflare, device suite OK (35 tests), up from 32. The seam PairingService.kt:21 claimed turned out to be real, so no refactor was needed, and NO NEW DEPENDENCY was added -- argued rather than defaulted. WHAT IS LEFT IS A PERSON, NOT AN AGENT: the phone is still on the same Wi-Fi and takes the relay because the offer's LAN addresses were WITHHELD, not because they were unreachable. A phone on mobile data needs somebody holding it. P1-060 C2 stays open and unfakeable -- it names a tablet and a foldable and neither exists here. P1-051 was not touched and nothing this round bears on its remainder. FOUR DEFECTS WORTH REMEMBERING, all invisible to passing tests: SSLSocket does not verify the HOSTNAME by default (chain yes, name no), so without endpointIdentificationAlgorithm=\"HTTPS\" the rendezvous id goes to whoever answers the address while every 'is TLS on?' test still passes; every relayed session leaked its socket because Session.close closes the streams and the adapters inherited a no-op close(); the Noise handshake on the relay leg ran with NO deadline despite a comment claiming otherwise; and four mutations into Relay.kt caught only two, one surviving because the parity assertion looked for a literal in the Rust source and compared it to nothing."
+  },
+  {
+   "id": "sbom-oom",
+   "items": [],
+   "after": [],
+   "conflicts": [
+    "build-verify"
+   ],
+   "title": "syft is SIGKILLed cataloguing the image — the last red step in build-image",
+   "closed": "CLOSED TO DISPATCH 2026-09-20 (round 32) -- SOLVED AND VERIFIED, landed as merge b7e28d87. The SIGKILL was Go heap growth under the default GOGC=100 driving a 16 GB runner through memory and swap; GOMEMLIMIT=10GiB fixes it and syft is now PINNED to 1.52.0, which it was not -- it had been installing whatever main served, which would have left a measured fix protecting an unmeasured binary. Verified in a real build (run 35450175806): catalogued in 742 s, peak RSS 15,303,652 KB, 9830 packages, mem_avail never below ~4.7 GiB. THE NEGATIVE RESULTS ARE WORTH MORE THAN THE FIX, across eleven arms: the image SOURCE is irrelevant (oci-dir on local disk died identically to registry), so the fix previously preferred on this card addressed a non-cause; PARALLELISM is irrelevant (par 1 died the same), which means the timeout-death that justified raising the timeout to 45 minutes was ALSO a memory death, misread; the limit's VALUE is irrelevant (4, 6 and 10 GiB all peak at 14.65-14.80 GiB); swap adds nothing while the limit is set (32 GB bought 16 MB, 1 GB ever touched) and was deliberately not committed; swap WITHOUT the limit works badly (1958 s vs 904 s, 8.7M major faults). THE OOM-KILLER CLAIM IS LEFT CALIBRATED, not upgraded: oom_kill was 0 in every arm that lived to read it, so it has still never been read from a kernel message. The step now prints the counter delta, dmesg, peak RSS and the NAMED signal so the next death settles it. sbom-probe.yml is deleted; it answered its question. WHAT REMAINS IS A DIFFERENT PROBLEM and is unit sbom-attest: cosign gives up posting the ~166 MB predicate to Rekor."
+  },
+  {
+   "id": "pkg-update",
+   "items": [
+    "P0-001"
+   ],
+   "after": [],
+   "title": "apex update does not deliver a baked fix to an existing machine",
+   "closed": "CLOSED TO DISPATCH 2026-09-19 (round 34) -- the code is finished and pushed as branch task/pkg-update (178cc10c, 627315a9, b512cf12, 6f28505b), NOT landed. rebuild_extension's short-circuit now compares pkg_compat_level, the constant is bumped 2 -> 3 in a separate commit, and tests/test-apex-pkg-update.sh (17/0/0, CI floor 17 in pr-validation.yml's engine job) holds the resolved rpm set constant while varying only the level, with two mutants that require the defect back so a bare bump cannot read as green. Do NOT dispatch another agent to redo this. Two things remain and neither is this unit's: LAND the branch by merge, not rebase; and after it reaches an image build, ONE machine must show the rebuild happening -- the checks are named in P0-001's evidence and in ROADMAP/state/agents/pkg-update.md. RE-OPEN CONDITION: an image built from a tip carrying b512cf12, taken by a machine that already has an extension. || HARDWARE-CONFIRMED 2026-09-20 by unit integrated-image, and the RE-OPEN CONDITION IS SPENT. Image run 35461554871 (task/integrated-image @ 97c9e8f2, tag apex-97c9e8f2..., digest sha256:55fc9e4e...) carries b512cf12; katana took it with bootc switch and the rebuild ran for 53.8 SECONDS where the same unit took 33 MILLISECONDS on the previous boot, naming its own reason: 'extension compatibility changed (OS 43, level 2 -> OS 43, level 3) - rebuilding'. state.json pkg_compat_level 3, extension sha eb3b8ba0 -> 75290ae7, i686 ICDs still 13, comm -12 against rpm -qal empty over 3564/266093 paths, nothing failed after. Two honest corrections to this unit's own predictions: the duration is under a MINUTE, not minutes, because katana's rpms were cached; and the extension is byte-different with an IDENTICAL file set, because the resolved set of 223 did not move - the level did, which is the whole fix. Katana's rebuild was the redundant one this card predicted. STILL UNANSWERED: whether systemd-sysext refresh re-merging /usr disturbs a LIVE desktop - katana ran only the greeter, and the L16 will be the first machine to answer it. Evidence ROADMAP/evidence/integrated-image-20260920.md section 2."
+  },
+  {
+   "id": "gaming-release",
+   "items": [
+    "P1-043"
+   ],
+   "after": [],
+   "title": "Gaming Mode cannot release itself, and mangoapp fills /var with core dumps",
+   "closed": "CLOSED TO DISPATCH 2026-09-19 (round 32) -- code done and landed as merge b76339cb. BOTH FIXES NEED AN IMAGE BUILD before anything is confirmed on hardware; the run-book rows are written (docs/gaming-and-sessions.md 6.6 and 6.7). The release fix is in apexd, the mangoapp fix in files/system/libexec/apex-gaming-session. RELEASE: apexd owns it now, not the session -- apex-gaming-session starts with an owner pid, apexd records the pid AND its /proc start time, and a 2 s watch calls the same idempotent game_exit when the owner is gone, emitting the same ActiveChanged/Status/TierChanged set a D-Bus exit emits so the shell does not keep showing a dead session. The polkit rule was DELIBERATELY NOT LOOSENED: allow_inactive is every local session, so loosening it would let any unprivileged user stop somebody else's Gaming Mode, and a SIGKILLed session runs no trap for a looser rule to permit anyway. MANGOAPP: diagnosed, not guessed. Core dump backtrace is XInternAtom from main with a NULL display; controlled headless A/B with the environment read out of /proc -- `--mangoapp` alone gives 0 restarts in 22 s, adding `--expose-wayland` gives 171. APEX passed both unconditionally, so the combination is ours. --expose-wayland STAYS (the hardware qualification was done with it and the overlay has never drawn a pixel); --mangoapp is gated on it, and APEX_GAMING_EXPOSE_WAYLAND=0 brings it back, which is what makes the gate testable both ways. THE 4 GB WAS NOT A MISSING BOUND -- MaxUse defaults to 10 percent of the filesystem CAPPED AT 4 GiB and katana's /var is 954 GB, so systemd's vacuum was working exactly as designed and 4 GiB is the wrong size for an ostree machine; the drop-in sets MaxUse=256M and KeepFree=2G. WHAT IS NOT A DISCRIMINATOR, and the run-book says so: katana's default AC tier is already `performance`, so the governor reads the same before, during and after -- use `active: false`, the apex-game cgroup being gone, sched_ext/state disabled, and apexd's `the session owner is gone` line instead. STILL UNCONFIRMED: that the MangoHud overlay actually RENDERS with expose-wayland off (it never has here), Safe Graphics' automatic dGPU branch, and any real game launch. RE-OPEN after an image build. || HARDWARE-CONFIRMED 2026-09-20 by unit integrated-image, and the RE-OPEN CONDITION IS SPENT. apex game status printed owner_pid 7799 matching bash /usr/libexec/apex-gaming-session. 6.6: THE RUN-BOOK'S OWN RECIPE DOES NOT TEST THIS ROW - `systemctl restart greetd` killed gamescope but the session script survived long enough to run its trap and released cleanly ('apexd game mode released', three times, idempotent). SIGKILLing the owner is what 'nothing can cooperate' has to mean, and then apexd fired 1.9 s later: 'game: the session owner is gone (/proc/9688 is gone) - releasing game mode. Nothing else could'. active false, apex-game cgroup removed, no gamescope left. The run-book should be amended. 6.7: gamescope starts --expose-wayland and WITHOUT --mangoapp with the explanation printed; 0 new mangoapp dumps against 15376 in one boot, 0 Glfw Error lines against 57612, 171 session journal lines against 144187, MaxUse=256M KeepFree=2G live. greetd restored byte-identical, 0 timers. NOT confirmed and not claimed: the overlay RENDERING with APEX_GAMING_EXPOSE_WAYLAND=0, Safe Graphics' dGPU branch, any real game. AND A NEW DEFECT: sched_ext/state is NOT a discriminator here either, because apexd runs `scxctl switch -s scx_lavd` where the machine needs `scxctl start` (scxctl says so verbatim) - so Gaming Mode has NEVER loaded a sched-ext scheduler, on this image or the previous two, while apex game status's notes field claims it did. apexd/apexd-core/src/syswriter.rs:739. Wants its own unit. Evidence integrated-image-20260920.md sections 6 and 7."
+  },
+  {
+   "id": "sbom-attest",
+   "items": [],
+   "after": [],
+   "title": "cosign cannot post the SBOM attestation to Rekor",
+   "closed": "CLOSED 2026-09-20 (round 32) -- SOLVED, VERIFIED AND LANDED as merge 97c9e8f2. The whole image job is green for the first time, INCLUDING the two steps that had been skipped and therefore unproved in every failing run: promoting the published tags and asserting they all resolve to this digest. REKOR WAS NOT RETURNING 413 AND THE CEILING IS NOT 16 MB. Sixteen direct posts at ascending sizes, each retested: at or below 25,000,092 B Rekor answers 400 having FULLY PROCESSED the body; at or above 25,165,916 B it answers 502 with size_upload=0 in ~0.43 s, refused by the fronting proxy on Content-Length before a byte is sent. The boundary brackets 24 MiB exactly and was re-confirmed from a GitHub runner. That also explains the message: 502 is in go-retryablehttp's RETRYABLE class, so cosign retried a refusal that can never succeed and said `giving up after 4 attempt(s)` -- structurally incapable of naming its cause -- and size_upload=0 is why four attempts fit in 3.86 s. CHOSEN: trim the predicate, KEEP the transparency log. Published is the complete package inventory (9830 packages, every version, 9830 purls, 55,652 CPEs, both Electron trees); file rows and the 16,463-edge dependency graph are dropped. Same signature, same keyless identity, same spdxjson type, same public Rekor entry. The cost is in docs/trust-enforcement.md: the SBOM is a flat list and no longer says which files are in the image -- structure, reproducible from the published digest with one syft run, where identity is not reproducible from anything smaller. THE OCI-ARTEFACT OPTION WOULD HAVE BEEN ACTIVELY HARMFUL: verify.rs:540 requires predicateType to contain spdx, and a FAILED provenance check is refused even at provenance=warn, so it would have refused updates on every machine in the field. DO NOT, per the unit's own warning: tighten provenance=warn to enforce, or edit the `no published APEX image has an SBOM attestation yet` sentences in docs/ or verify.rs. Both are STILL TRUE -- this was a task branch and the PUBLISH guard moved no tracked tag. They belong to the first green main build. THREE THINGS THAT COST REAL TIME, recorded so they do not again: SYFT_FILE_METADATA_SELECTION=none is NOT the lever (13%, not 64%) and does not reduce RSS; `local a=\"$1\" b=\"${a}\"` is an unbound-variable error under set -u and threw away 915 s; and a workflow `run:` block is capped at 21,000 characters, which surfaces as a JOBLESS FAILED RUN, not a failing step."
+  },
+  {
+   "id": "integrated-image",
+   "items": [
+    "P0-001"
+   ],
+   "after": [],
+   "title": "Build the integrated image and qualify it on katana (the L16 half is Andre's)",
+   "closed": "CLOSED 2026-09-20 (round 34) -- DONE, and it is the first time the whole thing has been built and put on hardware together. Image build run 35461554871, workflow_dispatch on task/integrated-image @ 97c9e8f2, green end to end in 1h12m, every job's STEPS read rather than assumed. Tag ghcr.io/andrenijman/apex-os:apex-97c9e8f25ee55593a97502505f51c6115ebbee7c at digest sha256:55fc9e4ee9b2c1b27045cba5a594a40e97fb0d73c70170cfbe0003f5cd4d73b0; it pinned apex-shell roadmap/v2.2 03d77f96 through the ordered fallback and moved NO floating tag, so nothing but katana saw it. katana was switched and rebooted onto it and ALL FOUR rows this unit owed are confirmed: pkg-update, gaming-release, p2-b and the coredump drop-in. Each unit's own `closed` note carries its numbers. TWO DEFECTS FOUND AND NOT FIXED HERE, deliberately, because the image under qualification was already built and on the machine: (a) apex-pkg's install_etc writes /etc with cp -a and never relabels, so /etc/.pwd.lock lands mislabelled and breaks DynamicUser=yes for six units including capsule@.service and rpm-ostreed, with NO AVC logged - and it RECURS on every extension rebuild with whatever wrong type the extraction tree carried, so it breaks the machine only sometimes; (b) apexd runs `scxctl switch` where the machine needs `scxctl start`, so sched-ext has never loaded while apex game status claims it did. Both want their own unit, and (a) should land BEFORE the main merges because the L16 rebuilds its clippy extension on first boot. THE L16 HALF IS ANDRE'S and was not touched. Merge order when he does it: apex-shell roadmap/v2.2 -> main FIRST (Containerfile.base carries ARG APEX_SHELL_REF=main), THEN apex-os. Evidence ROADMAP/evidence/integrated-image-20260920.md and katana-pwd-lock-selinux-20260920.md; card ROADMAP/state/agents/integrated-image.md."
+  },
+  {
+   "id": "pkg-etc-label",
+   "items": [
+    "P0-001"
+   ],
+   "after": [],
+   "title": "apex install mislabels every /etc file it writes, silently, with no AVC",
+   "closed": "CLOSED 2026-09-20 (round 33) -- fixed and landed as merge 661a9d80. install_etc collects every path it creates or overwrites AS IT GOES and hands the list to `restorecon -F -i -f`, so the label comes from the LOADED POLICY instead of from `cp -a` preserving the extraction tree's rpm_var_lib_t. Each branch records only what it actually wrote; a directory is recorded only when WE create it, because mkdir inherits the parent's type (wrong for e.g. /etc/cron.d -> system_cron_spool_t); the removal pass records survivors no installed package owns, which is the class the katana leftover belonged to. `-F` IS LOAD-BEARING: a bare restorecon silently DECLINES any type in the policy's customizable_types list, says `not reset as customized by admin`, and still exits 0. stderr is deliberately not swallowed -- this defect reported nothing for months, so a fix that could also report nothing would not be one. `label_tree` is untouched ON PURPOSE: split_out_of_image has already moved /etc out of the payload root before it runs. SELF-HEALING SIDE EFFECT: because the pass relabels tracked paths it declines to delete, the next `apex install` or `apex update` repairs a machine that already carries the mislabel. THE GATE asserts the property over EVERYTHING the pass writes, never over .pwd.lock (only where it bit). Real packages decide which paths exist, a before/after CTIME snapshot decides which the pass touched (a directory counts only when new, because a dir's ctime moves when a child lands in it), and the engine runs TWICE because the SECOND install is the overwrite that broke katana. Enforced 21/0; coverage-forced 9/0 which is the CI floor. Every control fires, including a pre-fix replica reproducing the katana finding exactly (58 files wrong). The suite REFUSES TO DEGRADE SILENTLY: a host with /sys/fs/selinux/enforce that does not run the enforced leg is a FAIL, not a skip. CI floor is 9 because ubuntu-24.04 has no SELinux AND podman's rootfs is mounted `context=` where setxattr security.selinux is EOPNOTSUPP. THE SUITE HAS NEVER RUN ON AN UBUNTU RUNNER -- if that job goes red, read PROBE_MODE/PROBE_CAPABILITY first. ONLY A REAL MACHINE CAN CONFIRM: that a DynamicUser unit starts after an install (no PID 1 in a container), that restorecon resolves against APEX's loaded policy rather than Fedora 43's policy rpm, and that the extraction tree comes out rpm_var_lib_t on its own (the suite chcons it to reproduce katana exactly)."
+  },
+  {
+   "id": "gaming-scx",
+   "items": [
+    "P1-043"
+   ],
+   "after": [],
+   "title": "Gaming Mode never loads a scheduler, and status claims it did",
+   "closed": "CLOSED 2026-09-20 (round 33) -- fixed and landed as merge faa1992d. scxctl has TWO verbs and they are not interchangeable: `start` attaches when none is running, `switch` replaces one that is, and each REFUSES in the other's state. APEX loads nothing at boot so the first entry always finds none, and the code hardcoded `switch`. Swapping in `start` would have been the same mistake spelled differently -- correct on every machine APEX ships today, wrong on any machine already running a scheduler. The verb is now READ off /sys/kernel/sched_ext/state with one retry on whichever verb the loader's own error names; both refusal strings came out of the shipped scxctl 1.1.2 binary, not guesswork. THE STATUS WAS THE EXPENSIVE HALF: scxctl exiting 0 is a fact about scxctl. The writer now waits (bounded, 2 s) and reports what it read from the KERNEL. `not loaded` keeps its cause -- scxctl refused, or scxctl exited 0 and the kernel still reads disabled (the general form of this defect), or no CONFIG_SCHED_CLASS_EXT (a DEFINITE answer, not an unknown). `unknown` is only an unreadable state or one caught mid-transition, never rounded to either neighbour. Outcome gained a third variant because two could not hold `I could not tell`. SIBLING AUDIT, same shape next door: gpus_locked was cloned from the plan while run_nvidia_smi's refusal went unread, so a GPU whose lock was REJECTED was reported as locked; and game_exit discarded every outcome but a hard Err, so a refused restore was silent under a line asserting the machine had been put back. Both fixed. TWO DOCUMENTS CLAIMED KATANA RAN scx_lavd FOR 75 MINUTES. Nothing was running. Corrected in place and marked as corrections. RUN-BOOK: the `sched_ext/state expect: enabled` row is DELETED -- it read disabled throughout, so it passed on a file that never moved; the 6.6 destroy step is now `kill -9` the owner, because a greetd restart leaves the script alive to run its own trap and was testing the cooperative path; governor and sched-ext are now a named PAIR of non-discriminators on katana. ONE MUTATION ESCAPED THE FIRST PASS (MB11): nothing pinned the plan-time note, so restoring the sentence that had claimed a scheduler on three images turned nothing red -- a gate that inspects nothing, inside the work fixing a gate that inspects nothing. Two assertions added, caught both ways; the near-miss is in the evidence. KNOWN AND STATED: game mode STOPS a scheduler it found running rather than restoring it (`scxctl restore` would be the fix); that branch has never been reached. Three rows in 6.8 need hardware, including the `switch` branch a fixture cannot honestly stand in for."
+  },
+  {
+   "id": "final-image",
+   "items": [
+    "P0-001"
+   ],
+   "after": [],
+   "title": "Build the image carrying the last two fixes, before the L16 boots anything",
+   "closed": "CLOSED BY HAND (round 36, 2026-09-21). Per the unit's own card: 'Nothing in this unit is outstanding.' The image was built, both fixes (etc labelling, sched-ext verb) confirmed on katana hardware, evidence committed, P0-001 recorded partial. Everything left (merge apex-shell then apex-os to main, main build, L16 apex update+reboot) is Andre's / the held `final` unit's, not a dispatchable agent task."
+  },
+  {
+   "id": "kernel-btf-scx",
+   "items": [
+    "P1-043"
+   ],
+   "after": [],
+   "title": "No sched-ext scheduler can load: the baked kernel's BTF predates pahole 1.26",
+   "closed": "CLOSED BY HAND (round 36, 2026-09-21). Diagnosis-only work; landed round 35 as part of the kernel-build merge. Continuation (deciding APEX builds its own kernel, building it, wiring core) happened under the kernel-build card and now continues as kernel-build-2. P1-043 stays partial/tracked there, not here. Re-open only if a reason emerges to redo the BTF diagnosis itself."
+  },
+  {
+   "id": "luks-installer",
+   "items": [
+    "L-002"
+   ],
+   "after": [],
+   "title": "The installer cannot create a LUKS2 volume at all"
+  },
+  {
+   "id": "luks-enroll",
+   "items": [
+    "L-003"
+   ],
+   "after": [],
+   "title": "TPM auto-unlock by default, where safe is a measured precondition"
+  },
+  {
+   "id": "windows-installer",
+   "items": [],
+   "after": [],
+   "title": "A portable Windows app that installs APEX into an empty partition",
+   "closed": "CLOSED BY HAND (round 36, 2026-09-21). No card was ever written at this slug; round 35's real work landed under windows-installer-2 (a real Windows VM lab, three defects found). Continuing as windows-installer-3. Re-open only if this exact slug is needed for something windows-installer-2/3 do not own."
+  },
+  {
+   "id": "sdboot-image",
+   "items": [],
+   "after": [],
+   "title": "Pivot every machine to systemd-boot: UKIs, signing, blessing, migration",
+   "closed": "CLOSED BY HAND (round 36, 2026-09-21). This slug's code (bootupd_t SELinux module, apex-boot-count, the pivot design) landed round 35. Work continued under sdboot-migrate (in-place migration engine, which corrected this card's own 'no in-place converter, must reinstall' conclusion) and now continues as sdboot-migrate-2. Re-open only if fresh sdboot-image-specific work (not migration) is needed."
+  },
+  {
+   "id": "android-release",
+   "items": [],
+   "after": [],
+   "title": "Publish the Android APK as part of a release, signed and versioned",
+   "note": "WORK COMPLETE AND PUSHED 2026-09-20, round 35, task/android-release @ 5dc2b5aa (eight commits, merged roadmap/v2.2 cleanly, NOT LANDED). Deliberately NOT marked closed: landing is the orchestrator's, and one thing genuinely remains open that is not an agent's to take. Do not dispatch a fresh agent at this without reading ROADMAP/state/agents/android-release.md first -- there is nothing half-done in it. Shipped: GitHub Releases flow (release-version.sh + release-artifacts.sh + release-notes.sh + release-android.yml, workflow_dispatch-only, main-only, dry_run defaults true), a protocol version WINDOW replacing the equality test that made every OS bump look like a mass revocation, an in-app updater that verifies the APK's sha256 before PackageInstaller.commit, docs/android-app.md, and the README section that finally tells a person the app exists. Proved without publishing: release-artifacts.sh run end to end against a throwaway keystore, aapt2 confirming versionCode 1330 in the built APK, v2/v3 APK signature and a jarsigner-clean AAB; the generated page is ROADMAP/evidence/android-release-page-20260920.md. No release created, no tag moved. STILL OPEN FOR ANDRE: no Android signing key exists (gh secret list returns only APEX_SB_CRT_B64 and APEX_SB_KEY_B64), and until the four APEX_KEYSTORE*/APEX_KEY* secrets exist the release workflow refuses on its first real step, which is the correct failure. apksigner rotate makes the key ROTATABLE while the old one lives, so the decision is about where the backup goes -- written up at the end of docs/android-app.md.",
+   "closed": "CLOSED BY HAND (round 38, 2026-09-21). task/android-release @ 5dc2b5aa IS an ancestor of roadmap/v2.2 (git merge-base --is-ancestor, checked), and so is task/android-signing; the Android landing was recorded on P1-052/P1-055/P1-057/P1-060 in round 37, so the note above saying NOT LANDED is stale. android-release-2 (a branch with zero commits of its own) established that the dry run `gh workflow run release-android.yml -f dry_run=true` is STRUCTURALLY blocked until roadmap/v2.2 reaches main: workflow_dispatch resolves the workflow file on the default branch (404 'not found on the default branch'; 9 workflows registered, release-android not among them). Nothing is left for an agent before `final`. Still Andre's: the keystore backup in dispatch.json _andre_must_do, and the signed-APK phone install in _android_install_pending (device not attached at 13:50 AWST round 38: adb devices empty, lsusb shows no android device)."
   }
+ ],
+ "_completed_units": {
+  "followups-integrate-3": "COMPLETE AND LANDED 2026-09-07, round 6. All four hardening items the third integration round routed onward are on apex-os roadmap/v2.2 as ef87088..678bb5d (the broker's bare curl reading the owner's ~/.curlrc under root, 'reaches the same thing everywhere' made a declared fact, a bind test that bound nothing and passed, one curl in this build with a readable contract, and the MCP verbs documented in docs/agent-runtime.md). REMOVED from units rather than left with a marker, because resume.sh derives 'finished' from roadmap.yaml item status and this unit's items are '(hardening)' - no roadmap ids - so it can never satisfy that test and would have been offered as READY forever, which is exactly the double-dispatch the queue exists to prevent. One follow-up did NOT belong to it and is still owed: apex remote pair|devices|revoke|status|enable is documented nowhere, and it is recorded in dispatch.json _deliberately_held for the next integrate round.",
+  "trust-enforcement": "COMPLETE AND LANDED 2026-09-08 on apex-os roadmap/v2.2 as e67fab9 -> 583355e. APEX now refuses an update whose image signature does not verify: cosign-free sigstore verification (skopeo + openssl) against a PINNED Sigstore root shipped by Containerfile.base, wired into ops::update BEFORE channel::record_update and BEFORE FsyncGuard::disable, escaping only via --allow-unverified. 455 Rust tests in the crate (+51) and a new tests/test-apex-trust-enforcement.sh at 77/0 with real minted-CA cryptography. REMOVED from units rather than marked done, because its items are '(new, from P1-047)' - not roadmap ids - so resume.sh's finished() test can never be satisfied and the unit would have been offered forever. Still open and recorded on P1-047's evidence: provenance=warn until a build publishes a .att; /etc/containers/policy.json is still one insecureAcceptAnything; transparency-log inclusion is not verified and every report says so; and `bootc upgrade` run directly bypasses the gate (ops::update is its only caller in the repo, grepped).",
+  "desktop-ai-apps": "COMPLETE AND LANDED 2026-09-12 on apex-os roadmap/v2.2 as merge 3bf8e558 (branch tip d7b12d37). Both AI desktop apps ship from Containerfile.core stage 5a-aiapps, arrive via sudo apex update alone, and have both vendor self-update channels removed. Proven END TO END in a scratch fedora-bootc:43 container with the stanza text extracted VERBATIM from the Containerfile: exit 0, chatgpt 26.908.40401-1 and claude-desktop 1.52386.0 installed, repo file absent, both schemes registered. Eleven mutation pairs, eleven named assertions red, file restored byte-identical. REMOVED from units rather than marked done because its items are '(new, from the 2026-09-11 CLAUDE.md decision)' - not roadmap ids - so resume.sh's finished() test can never be satisfied and it would be offered forever, the same trap followups-integrate-3 and trust-enforcement hit. OUTSTANDING and NOT the unit's to do: the claude-desktop-update.timer stopgap on the L16 cannot be retired until an image built from this tip is deployed, and /etc/yum.repos.d/chatgpt.repo is live and enabled on that machine - a self-update side channel that ostree's /etc merge will KEEP because it was never an image default.",
+  "p2-a": "COMPLETE 2026-09-13, round 23. Round 1 landed as merge 05227d16; round 2 landed as merge cd4a799e (five commits). All three items are now DONE: P2-001 (all five of §13.5's target kinds carried - local, nas, ssh, s3, r2 - with the ssh target exercised against a real sshd on loopback and the s3 target against a loopback double that recomputes SigV4 from what arrives), P2-002 (unchanged, already done), P2-013 (github, cloudflare, ssh and agent identity all enforced, with is_enforced/enforced_by flipped in the same commits that enforce them so `apex project identity` never claims enforcement before it exists). Removed from the ready set; p2-f, which was held behind it, is dispatched.",
+  "p1-053b": "COMPLETE AND LANDED. Its work is merge 69a2f51e and the branch is an ancestor of roadmap/v2.2 with 0 commits ahead. It was still sitting in READY on 2026-09-13 and would have been offered forever - the same double-dispatch trap that had already cost three agent runs on p1-005, p1-011 and base-partials. Removed from units.",
+  "later": "CLOSED TO DISPATCH 2026-09-19 (round 30) — and this says the remaining work is ANDRE'S, not that it is done. Round 29 landed as merge c6bc990a with 0 unlanded; test-boot-v2 is 105/0. Everything a VM can qualify is now qualified: the PCR 0 scenario earlier rounds called impossible exists (two Fedora edk2 revisions move PCR 0 and leave PCR 7 identical), the no-TPM arm exists, and the TPM-clear recovery is asserted against the user's DATA rather than a keyslot opening. What is left of L-001 is the acceptance word 'Real' — no silicon TPM has done an enrol-and-recover cycle, the L16's TPM is off-limits and katana is off-limits — so no agent can satisfy it from here. L-002 and L-003 are held behind exactly that by this unit's own note, and L-002 has an independent blocker: every crypto_LUKS branch in installer/apex-install is a refusal to overwrite an existing header, never a path that creates one. The deliverable that replaces the dispatch is written down rather than wished for: docs/boot-v2.md, 'The run somebody with hardware would have to do' — five numbered runs, four prerequisites, what to record at each step; runs 1, 2 and 5 are the minimum that moves L-001 off partial. Same shape as p1-038-hardware and p2-c. RE-OPEN the moment there is a machine whose TPM somebody is willing to clear.",
+  "p2-d": "CLOSED TO DISPATCH 2026-09-19 (round 30) — and unlike later, p2-c and p1-038-hardware, this one is not waiting on HARDWARE, it is waiting on a DECISION. Gap 5 landed as merge da6fc0fb and every bullet under 'What is not decided' in docs/browser-capsule-auth.md is now struck through. THE QUESTION, VERBATIM, from 'The question, for Andre' in that page: \"May apex-agentd read the plaintext of a capsule's connection to the one destination that capsule was pinned to, in order to add a credential the capsule is never given?\" YES -> route B is a round of its own and it takes PROTOCOL_VERSION 11, NOT 10 — gap 5 took 10 (BROWSER_CA_VERSION = 10) and the page's three old reservations of 10 were rewritten this round. Fold the SessionInfo.trust_ca follow-up into that round. NO -> that is still a dispatch, a small one: record P2-012's capability auth as PERMANENTLY UNMET rather than pending, say so in the item, and fold SessionInfo.trust_ca into the same round. Do not read 'no' as 'nothing to do'. THE ONE REMAINING PIECE OF ENGINEERING, named here so 'closed' is not read as 'finished': SessionInfo carries no trust_ca, so `apex agent status` cannot show that a session trusts an extra root. It is an additive optional field on a stability surface, it is in NEITHER capsule doc (checked with grep, not assumed), and it is too small to be a unit on its own. P2-008 and P2-009 stay partial on their own grounds, recorded in their own evidence: USB passthrough needs a physical device somebody will detach, and P2-009's gap is a guest image carrying an agent CLI, which is a build rather than a test. RE-OPEN the moment Andre answers, either way."
+ },
+ "_notes": {
+  "trust-enforcement": "DISPATCHED 2026-09-07 15:02 (round 6), the slot freed by followups-integrate-3 finishing. Its `after: [integrate-3]` is long satisfied. No card existed; the agent creates ROADMAP/state/agents/trust-enforcement.md and its own worktree /var/tmp/apex-work/wt-trust on branch task/trust-enforcement.",
+  "p1-025": "UNBLOCKED as of round 6. `after: [p1-018]` is satisfied: p1-018's work is landed by content on roadmap/v2.2 (the diff of every file origin/task/p1-018-mcp-auth touches against the tip is empty, even though the branch is 10 commits 'ahead' by graph). Not dispatched only because the ceiling is six; first in line next round alongside one of the Cloudflare units.",
+  "editors": "User-directed, outside the roadmap: Andre reported nvim and zed do not work. Zed's half is fixed and landed (ec91e92 - the image had installed the desktop entry from a filename the tarball never shipped, behind `|| true`, so the editor was invisible in every launcher on every machine). The other half is with an agent on task/terminal-entries-launchable, measuring whether the launcher honours Terminal=true, which nvim.desktop declares. Not added as a queue unit because it is one defect with a branch already open; if it grows, give it one.",
+  "p2-c": "The card says every remainder is hardware nobody here has. That is true of the validation MATRICES and not of everything: P2-006's own evidence records that a hotspot CANNOT work under the shipped firewall policy three independent ways, 'hotspot validated' is literally its acceptance criterion, and the netns harness reaches it with no hardware. That is round 2's spine.",
+  "p1-063": "Added to the dispatchable set in round 23. Andre's own request, `partial`, and its apex-shell half was never written - which is now cheap, because run-privacy-page-test.sh landed the same night as a worked example of building a page through PageRegistry on a headless labwc. Also carries the seven `apex lid` verbs that are in the binary and in no document, which two separate agents have now reported with nobody owning them.",
+  "later": "Closed to dispatch 2026-09-19 (round 30) — see _completed_units. Do not offer it as READY again. The card ROADMAP/state/agents/later.md is kept because its NEXT is the hand-off text for whoever has the hardware.",
+  "p2-d": "Closed to dispatch 2026-09-19 (round 30) — see _completed_units. It is blocked on an ANSWER, not on hardware, and BOTH answers produce a dispatch. Do not offer it as READY until Andre has answered."
+ },
+ "_hardware_blocked": {
+  "P1-042 tablet leg": "Four of five creator input/audio legs are landed. The fifth owes one assertion - 'a stylus enumerates, is classified tablet, and its settings reach the compositor' - and NO TABLET EXISTS on either machine: libwacom finds none on the L16 or on katana. This is NOT a katana-while-gaming wait, so no amount of patience clears it; somebody has to plug a tablet in. Not dispatchable unattended, and deliberately not left inside a queue unit where it would keep a finished unit READY.",
+  "P1-043 NVIDIA verification": "GPU parity is landed for AMD, Intel and the hybrid case, and the nvidia-smi three-state fix closed test-apex-ai (43/1 -> 44/0). One verification assertion remains - 'SmiOutcome::Ready is what a real loaded NVIDIA driver produces' - and it needs katana while katana is NOT gaming. Functionally covered already: 9b68be3 measured nvidia-smi answering there, and 454ae3a does not touch that path's parsing. A katana job for an idle window, not a dispatchable unit.",
+  "P1-038 labwc matrix": "Unchanged and still held: the 18 matrix rows need real applications on a real session. Cannot be done headless and cannot be done on the L16 while Andre is using it. Still listed as its own unit (p1-038-hardware) because it is a whole item rather than a remainder.",
+  "L-001 run 5, the TPM goes away": "L-001 is 4 of 5 runs after round 32 cleared katana's TPM and showed refusal-then-recovery in one boot. The last run disables the TPM and records that the boot prompts for the recovery key rather than hanging, then re-enables it and records that unlock returns with no re-enrolment. PPI operation 2 (Disable) reads 'User not required' and IS reachable over SSH - and must not be used, because once firmware hides the TPM, /sys/class/tpm/tpm0 and its ppi directory go with it, so re-enabling needs somebody in firmware setup. Disabling is not symmetric with enabling. Two units have now declined to create a state they cannot leave. Somebody at the keyboard, or L-001 stays partial. Not dispatchable."
+ }
 }
