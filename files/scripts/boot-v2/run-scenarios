@@ -50,7 +50,7 @@ ALL=(prereq signed-uki reproducible negative-unsigned negative-foreign
 # of ALL so a default run cannot silently skip them and still report success:
 # they are requested by name and hard-fail when their input is missing.
 STAGED=(apex-image luks-tpm luks-tpm-clear luks-firmware-change
-        luks-firmware-code luks-no-tpm luks-s3 luks-pcr7)
+        luks-firmware-code luks-no-tpm luks-s3 luks-pcr7 luks-pcr7-signed)
 if (( LIST )); then printf '%s\n' "${ALL[@]}" "${STAGED[@]}"; exit 0; fi
 (( ${#SCENARIOS[@]} )) || SCENARIOS=("${ALL[@]}")
 
@@ -2245,6 +2245,220 @@ scenario_luks_pcr7() {
     # ("are the same file"), and under this file's set -e that aborted the
     # whole scenario after boot A on the first real run — boots B and C, the
     # reproduction and the recovery arm, never ran at all.
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  luks-pcr7-signed — the same live in-boot enrolment as luks-pcr7, with ONE
+#  variable changed: boot A's UKI is built WITH --pcr-key/--pcr-pubkey.
+# ═════════════════════════════════════════════════════════════════════════════
+#
+#  WHY THIS IS A SEPARATE SCENARIO AND NOT A FLAG ON luks-pcr7. The two are
+#  the same harness answering opposite questions, and both answers matter:
+#
+#    luks-pcr7          a machine with no systemd-boot pivot — which is every
+#                       APEX machine today, because apex-install writes
+#                       GRUB + shim. policy_select falls THROUGH signed-pcr11
+#                       to pcr7, and that fallthrough is the property.
+#    luks-pcr7-signed   a machine that boots a UKI carrying a PCR signing key —
+#                       what the sd-boot pivot turns every APEX machine into.
+#                       policy_select must now STOP at signed-pcr11.
+#
+#  The first real run of luks-pcr7 (2026-09-21) measured the precondition
+#  rather than assuming it: probe_signed_pcr11 refuses in order — Secure Boot
+#  off, no StubInfo efivar, no readable signing key, PCR 11 unmeasured — and
+#  what fired was the THIRD. Gates one and two PASSED. So this lab was already
+#  one `--pcr-key` away from a signed-PCR-11 enrolment, and that is the entire
+#  delta between this scenario and its neighbour.
+#
+#  WHAT THIS PROVES THAT luks-tpm DOES NOT. luks-tpm enrols the signed policy
+#  HOST-SIDE, with a lab-chosen systemd-cryptenroll command line, and then
+#  boots a guest to show the token unseals. It never runs the shipped script,
+#  so it cannot say which binding APEX would CHOOSE. This scenario's boot A is
+#  the shipped /usr/libexec/apex-luks-enroll, in a real initramfs, picking
+#  signed-pcr11 out of its own table against a live TPM — and boot B then shows
+#  the token it created surviving a UKI change that moves PCR 11. That
+#  survival is the whole reason signed-pcr11 sits ABOVE pcr7 in the table, and
+#  until this scenario the ordering had never been justified by a token the
+#  shipped script itself wrote.
+#
+#  EVERY $WORK PATH HERE IS PREFIXED pcr7s. The default STAGED run executes
+#  this scenario and luks-pcr7 in the same $WORK: a shared `tpm-pcr7` state
+#  directory (which luks-pcr7 `rm -rf`s) or a shared volume image would make
+#  one scenario's result an artefact of the other's, silently and in the
+#  direction that reads as success.
+scenario_luks_pcr7_signed() {
+    log "luks-pcr7-signed: L-003, the shipped script CHOOSING signed-pcr11 in a real boot"
+    luks_require_root
+    local root="$LUKS_ROOT"
+    : "$root"
+
+    # ── the volume, host-side, with a KNOWN passphrase the guest presents via
+    #    --unlock-key-file ───────────────────────────────────────────────────
+    local img="$WORK/luks-pcr7s.img"
+    enroll_volume "$img"
+
+    # ── boot A: enrol, live, inside the guest, against THIS boot's own real
+    #    PCR 11, with sd-stub publishing the signing key ─────────────────────
+    build_pcr7_enroll_bundle "$WORK/luks-pcr7s-hook-a" "$ENROLL_KEYFILE" \
+        > "$WORK/luks-pcr7s-hook-a.cpio"
+    [[ -s "$WORK/luks-pcr7s-hook-a.cpio" ]] \
+        || { bad "empty PCR7-signed enrolment bundle"; return; }
+
+    # luks_uki rather than a bare apex-mkuki call, deliberately: it is the
+    # helper that carries --pcr-key/--pcr-pubkey AND re-checks the .pcrsig
+    # section afterwards. A forgotten --pcr-key here would not fail — it would
+    # produce exactly luks-pcr7's green result (binding=pcr7) under this
+    # scenario's name, which is the worst failure mode available.
+    luks_uki pcr7sa "$KEYS/pcr/key.pem" "$WORK/luks-pcr7s-hook-a.cpio" "" || return
+
+    local state="$WORK/tpm-pcr7s"
+    rm -rf "$state"
+    local disk="$WORK/disk-pcr7s-a.img" vars="$WORK/vars-pcr7s-a.fd"
+    local ser="$WORK/serial-pcr7s-a.log" rc=0
+    "$HERE/apex-mkesp" --disk "$disk" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "lukspcr7sa:0:$WORK/uki-luks-pcr7sa.efi" --default 'apex-lukspcr7sa*' >/dev/null
+    fresh_vars "$vars"
+    vm_boot --disk "$disk" --vars "$vars" --name pcr7s-enrol --serial "$ser" \
+            --tpm-state "$state" --extra-disk "$img" \
+            --mem 4096 --timeout 300 || rc=$?
+    assert_eq 0 "$rc" "pcr7-signed enrol boot: clean guest poweroff"
+    assert_serial_has "$ser" "APEX-BOOTLAB: apex-initramfs-reached"
+    assert_serial_has "$ser" "APEX-BOOTLAB: have-systemd-cryptenroll=yes"
+    assert_serial_has "$ser" "APEX-BOOTLAB: have-apex-luks-enroll=yes"
+    assert_serial_has "$ser" "APEX-BOOTLAB: tpm-device=present"
+    # Asserted here and not in luks-pcr7, because signed-pcr11's FIRST gate is
+    # Secure Boot: if this byte were not 1 the refusal below would be the SB
+    # gate wearing the signing-key gate's clothes, and the diagnosis would
+    # start in the wrong place.
+    assert_serial_has "$ser" "APEX-BOOTLAB: secure-boot-byte=1"
+    if grep -aq "APEX-BOOTLAB: enroll-interpreter=.* MISSING" "$ser"; then
+        bad "the shipped script's shebang interpreter is missing from the guest: $(grep -ao 'APEX-BOOTLAB: enroll-interpreter=[^ ]* MISSING' "$ser" | head -1)"
+    else
+        ok "the shipped script's shebang interpreter is present in the guest"
+    fi
+    if grep -aq "APEX-BOOTLAB: have-python3=yes" "$ser"; then
+        ok "the bundled python3 ran inside the guest"
+    else
+        bad "python3 did not report itself present — the bundle did not reach the guest correctly"
+    fi
+
+    # PCR 11 is what this binding is ABOUT, so it is the register that has to
+    # be a real measurement before enrolment — the same check luks-pcr7 makes
+    # of PCR 7, moved to the register under test. probe_signed_pcr11 makes it
+    # too, and would decline; asserting it here means a decline is reported as
+    # "PCR 11 was empty" rather than as a bare missing binding.
+    local pcr11_a
+    pcr11_a="$(luks_serial_field "$ser" pcr11)"
+    if luks_pcr_is_real "$pcr11_a"; then
+        ok "PCR 11 was a real measurement before enrolment ($pcr11_a)"
+    else
+        bad "PCR 11 read '$pcr11_a' before enrolment — not a real sd-stub measurement, so a signed policy bound to it would be unenforced"
+        return
+    fi
+
+    # THE assertion this scenario exists for. luks-pcr7 asserts the PRESENCE of
+    # the third refusal; this asserts the ABSENCE of all four, matched on the
+    # prefix they share so a gate added to probe_signed_pcr11 later is covered
+    # without anybody remembering to edit this line.
+    assert_serial_lacks "$ser" "APEX-BOOTLAB: enroll-err:   not using signed-pcr11"
+    assert_serial_has "$ser" "APEX-BOOTLAB: enroll-exit=0"
+
+    # `+` is in the character classes because tpm2_report joins a multi-PCR
+    # binding with it (`signed-pcr11+12`). Today the shipped script asks for
+    # 11 alone; a regex that could not express the other shape would report a
+    # future change as "no tpm2: line at all".
+    local tpm2field
+    tpm2field="$(grep -ao 'APEX-BOOTLAB: enroll-out: tpm2: enrolled binding=[a-z0-9+-]* pcrs=[0-9+]* bank=[a-z0-9]* hash=[[:xdigit:]]* pin=[a-z]*' "$ser" | head -1)"
+    case "$tpm2field" in
+        *"binding=signed-pcr11 pcrs=11 bank=sha256 hash="*)
+            ok "the shipped script chose binding=signed-pcr11, live, against a real boot" ;;
+        *"binding=pcr7"*)
+            bad "the shipped script fell back to binding=pcr7 — this UKI carries a PCR signing key, so signed-pcr11 should have won; read the 'not using' lines in $ser for which gate refused" ;;
+        *)
+            bad "the shipped script's tpm2: line was '$tpm2field' — expected binding=signed-pcr11" ;;
+    esac
+
+    # Same contract as luks-pcr7: an enrolment that costs the user their
+    # passphrase is not "where safe" under any reading of L-003.
+    if grep -aq "APEX-BOOTLAB: passphrase-after-enrol=SUCCESS" "$ser"; then
+        ok "the original passphrase still opens the volume after the signed enrolment"
+    else
+        bad "the passphrase did not verify after enrolment: $(luks_serial_field "$ser" passphrase-after-enrol) — enrolling a TPM slot must never be the only way in"
+    fi
+
+    local recovery=""
+    recovery="$(luks_serial_field "$ser" recovery-key)"
+    if [[ -n "$recovery" && "$recovery" != "<not"* ]]; then
+        # NO TRAILING NEWLINE, and the length checked HERE rather than four
+        # minutes later inside a guest: `cryptsetup --key-file <regular file>`
+        # uses EVERY BYTE as the passphrase, so one '\n' turns a correct
+        # 71-byte recovery key into a wrong 72-byte one and the failure reads
+        # exactly like a broken recovery slot. Measured on katana 2026-09-21
+        # against this very volume; see luks-pcr7's copy of this comment.
+        printf '%s' "$recovery" > "$WORK/luks-pcr7s-recovery.key"
+        local reclen
+        reclen="$(wc -c < "$WORK/luks-pcr7s-recovery.key")"
+        if [[ "$reclen" == 71 ]]; then
+            ok "captured the recovery key the signed enrolment generated (71 bytes, no trailing newline)"
+        else
+            bad "the captured recovery key is $reclen bytes, expected 71 — a key file with a trailing newline is a different passphrase to cryptsetup"
+        fi
+    else
+        bad "no recovery key came back from the signed enrolment boot"
+    fi
+
+    # ── boot B: a DIFFERENT UKI, signed by the SAME PCR key. Its cmdline
+    #    differs (apex.bootlab.entry=lukspcr7sb), so sd-stub measures a
+    #    DIFFERENT PCR 11 — the faithful stand-in for a kernel update that
+    #    luks-tpm's 'update' UKI uses, because sd-stub measures the .cmdline
+    #    section into PCR 11 exactly as it measures a new .linux.
+    #
+    #    A VALUE-BOUND POLICY WOULD REFUSE HERE. That this one does not is the
+    #    whole reason signed-pcr11 sits above pcr7 in the shipped table, and
+    #    it is being shown for the first time against a token the SHIPPED
+    #    SCRIPT created rather than one the lab enrolled for itself. ─────────
+    local hookdir_b="$WORK/luks-pcr7s-hook-b"
+    rm -rf "$hookdir_b"; mkdir -p "$hookdir_b/var/lib/dracut/hooks/pre-mount"
+    install -m 0755 "$HERE/guest-luks-probe.sh" \
+        "$hookdir_b/var/lib/dracut/hooks/pre-mount/50-apex-luks-probe.sh"
+    ( cd "$hookdir_b" && find . -print0 | cpio --null -o -H newc --quiet ) \
+        > "$WORK/luks-pcr7s-hook-b.cpio"
+    luks_uki pcr7sb "$KEYS/pcr/key.pem" "$WORK/luks-pcr7s-hook-b.cpio" \
+        "apex.bootlab.luks=unlock" || return
+
+    local diskb="$WORK/disk-pcr7s-b.img" varsb="$WORK/vars-pcr7s-b.fd"
+    local serb="$WORK/serial-pcr7s-b.log"
+    "$HERE/apex-mkesp" --disk "$diskb" --size 1024 \
+        --sb-key "$KEYS/sb/key.pem" --sb-cert "$KEYS/sb/cert.pem" \
+        --uki "lukspcr7sb:0:$WORK/uki-luks-pcr7sb.efi" --default 'apex-lukspcr7sb*' >/dev/null
+    fresh_vars "$varsb"
+    rc=0
+    vm_boot --disk "$diskb" --vars "$varsb" --name pcr7s-unlock --serial "$serb" \
+            --tpm-state "$state" --extra-disk "$img" \
+            --mem 4096 --timeout 240 || rc=$?
+    assert_eq 0 "$rc" "pcr7-signed unlock boot: clean guest poweroff"
+    # Which file the signature was found in is reported by the probe and
+    # asserted here: "the signature is missing" and "the signature did not
+    # satisfy the policy" are different failures, and only the first would make
+    # the unlock below a statement about the fixture instead of the policy.
+    assert_serial_has "$serb" "APEX-BOOTLAB: pcr-signature=/run/systemd/tpm2-pcr-signature.json"
+    assert_serial_has "$serb" "APEX-BOOTLAB: tpm-unlock=SUCCESS"
+    assert_serial_has "$serb" "APEX-BOOTLAB: plaintext-marker=written"
+
+    # The unlock is only interesting if PCR 11 actually MOVED. If the two boots
+    # measured the same value, boot B is a second copy of boot A and says
+    # nothing about surviving an update — so the comparison runs first and the
+    # claim is only made when it holds.
+    local pcr11_b
+    pcr11_b="$(luks_serial_field "$serb" pcr11)"
+    if ! luks_pcr_is_real "$pcr11_b"; then
+        bad "PCR 11 read '$pcr11_b' in the unlock boot — not a real measurement, so the comparison below is meaningless"
+    elif [[ "$(tr 'A-F' 'a-f' <<<"$pcr11_b")" == "$(tr 'A-F' 'a-f' <<<"$pcr11_a")" ]]; then
+        bad "PCR 11 is identical in both boots ($pcr11_a) — the second UKI did not move it, so this unlock proves nothing a value-bound policy could not also do"
+    else
+        ok "PCR 11 MOVED between the enrolling boot and this one ($pcr11_a -> $pcr11_b) and the signed policy still unsealed — a value-bound policy would have refused"
+    fi
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
