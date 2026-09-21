@@ -88,10 +88,23 @@
 #      APEX_MIGRATE_ESP      an already-mounted ESP, instead of finding one
 #      APEX_MIGRATE_DRYRUN   print the install argv instead of running it
 #      APEX_MIGRATE_STORE    the booted storage backend, instead of asking bootc
+#      APEX_MIGRATE_FAKEROOT prefix for the firmware/image paths a shim cannot fake
+#      APEX_MIGRATE_MOUNTDIR where to mount the ESP privately, instead of /run
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
 SYSROOT="${APEX_MIGRATE_ROOT:-/sysroot}"
+# A prefix for the paths that describe the IMAGE and the FIRMWARE rather than
+# the disks — /sys/firmware/efi, the SecureBoot variable, the signed-loader
+# marker, /usr/lib/modules. The block-device facts are all reached through
+# lsblk/findmnt/blkid/df/du and a test can shim those on PATH; these four are
+# bare path tests and cannot be shimmed, so the layout gate needs this to
+# describe a machine it is not running on. Empty in production, which leaves
+# every path below exactly as it was written.
+FAKEROOT="${APEX_MIGRATE_FAKEROOT:-}"
+# Where the ESP gets mounted privately. Overridable for the same reason: a
+# test runner is not root and cannot write under /run.
+MOUNTDIR="${APEX_MIGRATE_MOUNTDIR:-/run/apex-boot-migrate}"
 STATE="${APEX_MIGRATE_STATE:-/var/lib/apex/boot-migrate}"
 ESP_OVERRIDE="${APEX_MIGRATE_ESP:-}"
 DRYRUN="${APEX_MIGRATE_DRYRUN:-0}"
@@ -356,16 +369,16 @@ with_esp() {   # mount the ESP somewhere private; idempotent
     local dev; dev="$(find_esp)" || return 1
     local here; here="$(findmnt -n -o TARGET -S "$dev" 2>/dev/null | head -1)"
     if [ -n "$here" ]; then esp_mounted_at="$here"; return 0; fi
-    mkdir -p /run/apex-boot-migrate/esp || return 1
-    mount -o "$mode" "$dev" /run/apex-boot-migrate/esp || return 1
-    esp_mounted_at=/run/apex-boot-migrate/esp
+    mkdir -p "$MOUNTDIR/esp" || return 1
+    mount -o "$mode" "$dev" "$MOUNTDIR/esp" || return 1
+    esp_mounted_at="$MOUNTDIR/esp"
     esp_we_mounted=1
 }
 
 release_esp() {
     [ "$esp_we_mounted" = 1 ] || return 0
     sync
-    umount /run/apex-boot-migrate/esp 2>/dev/null
+    umount "$MOUNTDIR/esp" 2>/dev/null
     esp_we_mounted=0
 }
 
@@ -423,7 +436,7 @@ carried_kargs() {
 
 deployment_kernel_bytes() {   # kernel + initramfs of the booted deployment
     local kd total=0 f
-    kd="$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
+    kd="$(find "$FAKEROOT/usr/lib/modules" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
     [ -n "$kd" ] || { echo 0; return; }
     for f in "$kd/vmlinuz" "$kd/initramfs.img"; do
         [ -f "$f" ] && total=$(( total + $(stat -c %s "$f") ))
@@ -439,7 +452,7 @@ cmd_precheck() {
 
     [ "$(id -u)" = 0 ] || refuse "not-root" "This has to run as root."
 
-    if [ -d /sys/firmware/efi ]; then
+    if [ -d "$FAKEROOT/sys/firmware/efi" ]; then
         verdict OK "uefi" "booted through UEFI"
     else
         refuse "not-uefi" \
@@ -494,7 +507,7 @@ cmd_precheck() {
     # on the machine it was written for. The efivarfs read needs `dd bs=1
     # skip=4`; `tail -c +5` cannot read efivarfs at all (apex-boot-health hit
     # the same thing). Byte 5 is the value; the first four are attributes.
-    local sb_var=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+    local sb_var="$FAKEROOT/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
     local sb=""
     if [ -e "$sb_var" ]; then
         sb="$(dd if="$sb_var" bs=1 skip=4 count=1 status=none 2>/dev/null | od -An -tu1 | tr -d ' \n')"
@@ -507,10 +520,10 @@ cmd_precheck() {
         verdict OK "secure-boot" "Secure Boot is not enforcing, so an unsigned loader is accepted"
     fi
     if [ "$sb" = 1 ]; then
-        if [ -f /usr/share/apex-os/boot/sdboot-signed ]; then
+        if [ -f "$FAKEROOT/usr/share/apex-os/boot/sdboot-signed" ]; then
             verdict OK "secure-boot" "Secure Boot is on and this image's systemd-boot is signed"
         fi
-        if [ ! -f /usr/share/apex-os/boot/sdboot-signed ]; then
+        if [ ! -f "$FAKEROOT/usr/share/apex-os/boot/sdboot-signed" ]; then
             refuse "secure-boot-unsigned-loader" \
                 "Secure Boot is enabled and this image's systemd-boot is unsigned." \
                 "The firmware would refuse the new loader and the machine would" \
