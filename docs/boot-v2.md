@@ -180,6 +180,41 @@ image update.
 | `last-attempt-failed` | the previous commit's trial boot did not come up. Not retried on its own. |
 
 
+### Which ESP, on a machine with more than one
+
+Answered here because two of the three machines in this program have two ESPs
+and the answer is not the intuitive one.
+
+**The migration writes the ESP on the disk the ROOT FILESYSTEM is on, not the
+one the firmware is booting from.** `apex-boot-migrate`'s `find_esp` walks up
+from `findmnt --target /sysroot` to a disk and scans that disk for the ESP type
+GUID. bootc does the same thing independently —
+`find_first_colocated_esp()` searches `find_all_roots()`, the disks backing the
+root device (`crates/blockdev/src/blockdev.rs:214`) — so the firmware entry and
+the files it points at can never end up on different partitions.
+
+On **katana** that is a real improvement rather than a technicality. It boots
+APEX from the 200 MiB ESP on the **Windows** disk (`Boot0000* APEX-OS Primary`
+→ `\EFI\APEX\SHIMX64.EFI`, `BootCurrent: 0000`) while its own disk carries an
+unused 512 MiB `EFI-SYSTEM`. Migrating moves APEX's boot onto its own disk, and
+APEX stops depending on another operating system's disk — which is the reason
+every brief this year has warned that one mistake on that ESP takes out two
+operating systems.
+
+Because it is an improvement, it is **a note and not a refusal**. The precheck
+reads the GPT PARTUUID out of `BootCurrent`'s device path, compares it with the
+ESP it is about to write, and when they differ says so: which partition it boots
+from, which it will write, and that nothing is written to the first, so another
+operating system installed there keeps its own boot entry. A refusal would keep
+katana on the Windows disk forever. The failure a refusal might guard against —
+firmware that does not enumerate the new disk — is already covered by the trial
+boot: it comes back to GRUB, `confirm` records `phase=failed`, and nothing
+re-arms.
+
+What this does **not** yet decide: what `confirm` should do with the old entry
+on the other disk. Today it is demoted within `BootOrder` and left in place,
+which is the right answer while that entry is also how Windows is reached.
+
 ### What boots through systemd-boot today, measured
 
 | | state |

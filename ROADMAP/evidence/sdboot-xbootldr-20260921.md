@@ -408,10 +408,14 @@ So an image update that leaves `vmlinuz` and `initramfs.img` **byte-identical**
 costs **zero** additional ESP, and `apex-boot-migrate`'s `per * 3` is a worst
 case rather than a steady state.
 
-Whether it ever fires for APEX is unmeasured and is the interesting question:
-the kernel comes from `kernel-build` and is stable across image builds, but the
-**initramfs is regenerated per build** and dracut output is not byte-reproducible
-by default. If `kernel-build` made the initramfs reproducible, most updates
+`sdboot-migrate` already measured the mechanism itself working both ways —
+`docs/boot-v2.md`, "What boots through systemd-boot today": *"dedupes the ESP
+directory when kernel+initramfs are unchanged, writes a second one when the
+initramfs moves."* So the question is not whether the code works; it is
+**whether an APEX image update ever leaves the initramfs byte-identical**, and
+that is unmeasured. The kernel comes from `kernel-build` and is stable across
+image builds, but the initramfs is regenerated per build and dracut output is
+not byte-reproducible by default. If it were made reproducible, most updates
 would stop costing ESP at all — which would matter far more than any partition
 layout. Nobody has checked. It is written down here so somebody does.
 
