@@ -2556,115 +2556,26 @@ tasks:
   - tests
   - stop_slop
   evidence: >-
-    Floating/labwc validation matrix. THE REFRAME, and the most valuable thing on this item: the three supposedly
-    unmerged August branches are not unmerged -- all 17 commits landed byte-for-byte as squash-merges, proven by
-    `git diff origin/fix/<branch> <squash>` being empty for all three (fix/screenshot-off-hyprland -> 4e267eb,
-    fix/labwc-desktop-parity -> f609a6c, fix/popup-first-open-and-media-keys -> b8a63a8). They appear in `git log
-    roadmap/v2.2..origin/<branch>` only because the branch pointers were never deleted. A survival audit confirms
-    all 17 survive on d2d1f33, with two August CI guards deliberately superseded and documented in place.
-    Automated on task/p1-038-labwc-parity: screenshots, multi-monitor, lock and idle, scaling. REMAINDER: 18
-    matrix rows needing real applications on a real session (portals, Firefox and Chromium screen sharing, OBS,
-    Discord, Steam, gamescope, Wine/XWayland, VS Code, JetBrains, LibreOffice, Blender, fractional scaling,
-    rotation, refresh rate, VRR, suspend/resume, dock hotplug). Cannot be done headless and cannot be done on the
-    L16 while Andre is using it. reconstructed 2026-09-07 from ROADMAP/state/agents/p1-038.md; the original text
-    was destroyed by the set-status.py --evidence defect (script fixed the same day). labwc parity LANDED by
-    integrate-4: apex-shell roadmap/v2.2 = 4037a1b, 3 commits, ZERO conflicts -- the anticipated
-    .github/workflows/ci.yml clash did not happen (p1-020 and p1-038 append in different regions), and ci.yml was
-    re-validated as YAML after the landing. check-screenshot-dispatch 42/0 with 4 mutants. Still partial, and for
-    one reason only: rows 1-18 of the validation matrix need real applications in a real labwc session on the L16.
-    Nothing further is automatable without those applications present, so this is a checklist for a human at the
-    machine, not an agent task. tests/run-labwc-matrix-test.sh was NOT run at integration but WAS read, and
-    contrary to expectation it is correctly guarded (private XDG_RUNTIME_DIR and HOME,
-    WAYLAND_DISPLAY/DISPLAY/HYPRLAND_INSTANCE_SIGNATURE/NIRI_SOCKET unset, WLR_BACKENDS=headless, and a hard FAIL
-    if WAYLAND_DISPLAY does not name a socket in the private dir) -- it is safe headless and was held only to run
-    once on a final tip. || 2026-09-19: all 18 labwc matrix rows attempted on katana with per-row evidence at
-    ROADMAP/evidence/katana-qualification-20260919.md section 7 -- the first time this item has had a machine.
-    Screen sharing under labwc offers MONITORS ONLY, never a window (AvailableSourceTypes = 1), and that is the
-    portal's ceiling rather than the client's: identical for Firefox and Chromium. Recording works on the NVIDIA
-    output (wf-recorder). VRR cannot be tested on this machine at all -- no connector exposes vrr_capable, so
-    Gaming Mode's VRR probe can never fire here. Physical output hotplug could not be done because nobody was at
-    the machine. OBS, Discord, VS Code, JetBrains, LibreOffice and Wine are not installed, so Qt/GTK3/Electron
-    proxies were run instead and the rows say so. The portal rows are labwc-only evidence by construction (7.5).
-    ROUND gaming-gpu 2026-09-19, the Gaming Mode half of the matrix, on apex-os task/gaming-gpu (f666f5c1 ->
-    4fc0ab06, PUSHED NOT MERGED). Row 7 (gamescope) FAIL is fixed in code and is pending one katana run: gamescope
-    was given no device preference, took the first DRM node -- the Intel iGPU -- and never saw HDMI-A-1 on card2.
-    It now chooses from sysfs with one rule (the output decides the card) and says so loudly when it cannot; see
-    P1-043 for the rule and the tests. Row 6 (Steam, Big Picture half) is BLOCKED and must not be retested yet:
-    `apex install steam` ships no *_icd.i686.json at all (6.5), so Steam s 32-bit client has zero Vulkan ICDs, and
-    the fix is in files/system/libexec/apex-pkg which unit pkg-share owns this round. The gate is `ls
-    /usr/share/vulkan/icd.d/ | grep i686` non-empty; until it passes a Big Picture failure says nothing about
-    Gaming Mode. The second cause seen in 6.3 -- bwrap refusing with "Unexpected capabilities but not setuid" --
-    is classified and NOT attributed: bwrap refuses when a non-setuid process has a non-empty PERMITTED set, the
-    qualification ran sessions through systemd-run --property=PAMName=login rather than greetd (section 4), and
-    those can differ, so apex-gaming-session now logs CapEff/CapPrm/CapAmb unconditionally and names the
-    consequence when CapPrm is non-zero. The next greetd login answers it from the session log alone. "Unable to
-    open X11 display" needs no separate work: gamescope had already died on card1 before Xwayland came up, so it
-    is downstream of row 7. Row 16 (VRR) stays COULD NOT RUN -- no connector on katana publishes vrr_capable, and
-    the L16 s amdgpu does not publish it for eDP-1 either -- but the probe no longer produces the SAME SILENCE for
-    that as for "this display has no VRR", and no longer answers about a screen the session is not using. Two
-    other sessions were fixed in the same round because they are the same class of defect: 5.5 Safe Graphics could
-    not light a dGPU output (pixman cannot import DMA-BUFs, so wlroots multi-GPU fails; it now points wlroots at
-    the card when every connected screen is on one non-primary card, and otherwise names the outputs it will leave
-    dark -- labwc honours WLR_DRM_DEVICES where gamescope does not), and 5.4 the niri session ran waybar AND
-    quickshell because niri s own upstream default starts waybar and apex-shell-firstrun only ever appended. Rows
-    that need the machine are a written checklist with exact commands at docs/gaming-and-sessions.md section 6;
-    nothing was simulated and katana was not touched. Agent card ROADMAP/state/agents/gaming-gpu.md. || 2026-09-19
-    ROUND 33, unit katana-image-qual, on hardware: ROWS 6 AND 7 ARE CLOSED and both were retested only after their
-    gate was met. Evidence ROADMAP/evidence/katana-image-qual-20260919.md section 3, branch
-    task/katana-image-qual-2 (commit ef0b95b2, pushed). Katana was rebased onto apex-7f647470 (digest
-    sha256:be3bdd0c) first, so these are readings of a build that carries both merges. Row 7 (gamescope) PASSES:
-    through a real greetd login the session logs GPU/output: --prefer-vk-device 10de:249d --prefer-output HDMI-A-1
-    and gamescope answers with the five predicted lines verbatim -- selecting physical device NVIDIA GeForce RTX
-    3070 Laptop GPU, opening DRM node /dev/dri/card2, Connector HDMI-A-1 -> LEN - R25f-30, selecting connector
-    HDMI-A-1, selecting mode 1920x1080@240Hz. The whole 3789-line session log contains ZERO occurrences of card1
-    or eDP-1. Render proof is fd ownership plus nvidia-smi, because grim and wlr-randr do not work under
-    gamescope: gamescope-wl holds /dev/dri/card2 and not card1, and nvidia-smi lists gamescope C+G, Xwayland G,
-    steam G and steamwebhelper G holding 265 MiB. card1-eDP-1 is NOT asserted dark -- it read enabled/dpms On
-    throughout, because nobody holds it once the greeter is gone. Row 6 (Steam, Big Picture half) PASSES for the
-    first time on this machine now that pkg-share put 13 i686 ICDs on /usr: zero BInit or VK_KHR_surface failures
-    after the marker line, where every earlier attempt died there (2026-09-06 16:59, 2026-09-17 17:58, 2026-09-19
-    09:25 and 17:31). Steam reports requirements are satisfied, reaches
-    bus_name=com.steampowered.PressureVessel.LaunchAlongsideSteam, and steamwebhelper runs with -uimode4, which is
-    Big Picture. A parallel run held the same stack up for 2 h 11 m, with Fossilize replay on the dGPU still going
-    4 m before it was cut. The bwrap half needed no fix at all: zero Unexpected capabilities lines, CapPrm 0 from
-    greetd, which confirms section 0.7's attribution to the round-31 systemd-run harness. Section 6.4 Safe
-    Graphics and 6.5 the niri bar also pass; 6.5's transform had already run at 18:29:35 from
-    apex-shell-firstrun.service at user-manager start, not at the niri login, so the doc's precondition is stated
-    too narrowly. STILL PARTIAL, and the remaining rows are unchanged in kind: OBS, Discord, VS Code, JetBrains,
-    LibreOffice and Wine are still not installed anywhere; VRR still cannot be tested because no connector on
-    either machine publishes vrr_capable; physical output hotplug still needs a person at the machine; and Safe
-    Graphics' AUTOMATIC dGPU branch could not be reached because it needs the panel genuinely dark (lid shut and
-    docked, or disabled in firmware) -- the forced-device path is what was proven. TWO NEW DEFECTS FOUND BY
-    RUNNING IT, neither of them a matrix row. (1) Gaming Mode cannot release itself when its session is torn down
-    from outside: cleanup() calls apex game stop, whose polkit action org.apexos.apexd.manage-power is
-    allow_active yes and auth_admin otherwise, so the moment logind deactivates the session the trap's own call is
-    refused -- measured both ways, the trap succeeded on a clean gamescope exit and never completed on a greetd
-    restart, leaving the p-core cpuset, IRQ steering, the performance tier and scx_lavd installed with nothing
-    able to undo them. (2) mangoapp crash-loops at about 2 Hz for the whole of every Gaming Mode session: 15376
-    core dumps in one boot, 14403 respawns in a 2-hour session, 144187 journal lines, and the overlay never
-    renders. --mangoapp is added unconditionally whenever mangoapp is on PATH. Also recorded: gamescope segfaults
-    on every exit (139), which predates this image; and section 6.2's check is ambiguous as written, because
-    gamescope prints 'No CAP_SYS_NICE, falling back to regular-priority' whether or not --rt was passed, so only
-    the 'starting: gamescope' line discriminates. greetd was restored byte-identical, the greeter is live on tty1,
-    no timers were left armed. || ROUND gaming-release 2026-09-19 on apex-os task/gaming-release (de77ae5d ->
-    fc0a29d5, PUSHED NOT MERGED). The Gaming Mode half's two follow-up defects are fixed in the repository and
-    neither is confirmed on hardware, because both need an image build. Row 7 (gamescope) now has a release path
-    that does not depend on the session's own privileges: apexd watches the PID that asked for game mode and
-    releases it when that PID dies, so a greetd restart, a VT switch or a SIGKILL no longer leaves the machine
-    tuned with nothing able to undo it. The polkit rule was deliberately NOT loosened - allow_inactive is every
-    local session, and a SIGKILLed session runs no trap for a looser rule to permit. mangoapp's ~2 Hz crash loop
-    is removed at the cause: --expose-wayland puts WAYLAND_DISPLAY into mangoapp's environment, GLFW then takes
-    its Wayland backend, and mangoapp dereferences the NULL X11 display it gets back - proven by a controlled
-    headless A/B on katana (0 restarts in 22 s without the flag, 171 with it, environments read out of /proc) and
-    by the kept core dump's two-frame backtrace. --expose-wayland stays because rows 6.1 and 6.3 were qualified
-    WITH it; --mangoapp is gated on it and APEX_GAMING_EXPOSE_WAYLAND=0 brings it back. A coredump storage bound
-    now stops any 2 Hz crasher filling /var, and the reframe behind it is that the 4.0 GB was systemd's DEFAULT
-    cap (10 percent capped at 4 GiB) working correctly rather than an absent bound. Two matrix-adjacent doc
-    defects fixed because neither check could distinguish its two answers: section 6.2 told the reader to grep for
-    CAP_SYS_NICE, which gamescope prints whether or not --rt was passed, and section 6.5 claimed the niri bar
-    transform needs a niri login when it runs from apex-shell-firstrun.service at user-manager start - on katana
-    four hours before any niri session. New run-book rows 6.6 and 6.7 cover the teardown property and the absence
-    of the crash loop; both need the image first. Detail at ROADMAP/evidence/gaming-release-20260919.md.
+    Automated already: screenshots, multi-monitor, lock and idle, scaling. 18 matrix rows needed real applications
+    on a real session; the step-by-step list is in state/agents/p1-038.md. || ROUND 39d 2026-09-22 - THE
+    APPLICATION PREREQUISITE IS GONE. Andre gave standing permission to use katana, so the applications the rows
+    need are installed there and evidence is ROADMAP/evidence/katana-p1038-apps-20260922.md: obs, libreoffice,
+    blender, wine64 and chromium-browser in the system extension (692 packages, 3.8 GB, backed up to
+    /var/lib/apex-user.raw.bak-20260922 and SHA-compared before the engine was run at all, because that file holds
+    Steam's 219 packages), plus Discord and VS Code as Flatpaks, with firefox, steam and gamescope already
+    present. JetBrains deliberately not installed - a proprietary toolbox for one row. THIS REMOVES THE
+    PREREQUISITE AND NOT THE MEASUREMENT: no row is claimed to pass, the rows still need a session to run in, and
+    the hardware-blocked ones are unchanged (VRR cannot be tested on katana at all because no connector exposes
+    vrr_capable, physical output hotplug needs somebody at the machine, and a second display is still a second
+    display). TWO FINDINGS WORTH HAVING BEFORE THE ROWS RUN. (1) 'wine' and 'chromium' are NOT binary names on
+    Fedora - /usr/bin/wine64, wineboot, winedbg and /usr/bin/chromium-browser are what exist, so a command -v wine
+    answering ABSENT is a wrong question rather than a failed install, and the rows will ask the same question.
+    (2) A REAL ENGINE DEFECT, found by running the actual command: apex install with a Flatpak-only name put it in
+    the dnf set, dnf refused the WHOLE transaction with 'No package code available', and obs-studio, libreoffice,
+    blender, wine and chromium did not install either - while apex resolve code had already printed 'APEX would
+    use: flatpak'. Resolve and install disagreed, which is the family the engine suite already records in the
+    other direction. Fixed the same session as bare_name_route with four assertions, 86/0 with the fix and 85/1
+    mutated back.
 - id: P1-039
   title: Compositor-neutral Night Light
   priority: P1
