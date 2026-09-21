@@ -27,26 +27,39 @@ conclusion is WRONG — do not revive it.
 
 ## NEXT
 
-- **Run B boot 5 — the migration with ALL THREE fixes on the control disk — is
-  RUNNING** as user unit `sdb3-boot-b5` (launched 04:12 AWST, ceiling 5400 s),
-  action `act-unit-3c.sh`, Monitor armed. The guest's leftover
-  `$SYSROOT/{state,composefs}` were cleared BY HAND from the host first (13 GB),
-  exactly as the new `partial-install` refusal instructs. Expect `auto rc=0`,
-  `phase: committed`, and `counted the entry: bootc_fedora-43-1+3-0.conf`.
-- Then boot 6, the MIGRATED boot, where item 3 is decided:
-  `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-check-3.sh`, set the
-  ceiling in `/var/lab-scratch/sdboot-migrate-3/run-boot-b.sh` back to **1800**,
-  then `systemd-run --user --unit=sdb3-boot-b6 --collect
-  /var/lab-scratch/sdboot-migrate-3/run-boot-b.sh`.
-  **Never `--fresh-nvram`** — `BootNext` lives in
-  `/work/nvram-persist/VARS-apexmig-b.img.fd`.
-- Then evidence sections 5 and 6, commit, push, `## LANDABLE <sha>`.
-- **If the session dies here, the branch is already worth landing.**
-  `task/sdboot-migrate-3` is pushed at `4f6678e3`: three evidence commits and
-  **two real fixes with tests**, 91/91. Only item 3's verdict and the last two
-  evidence sections are outstanding. The spliced engine (all three changes) is
-  backed up at `/var/lab-scratch/sdboot-migrate-3/engine-all.bak`; the worktree
-  copy is the same file.
+- **Building `localhost/apex-sdmig:v2` in ROOT's podman storage** as user unit
+  `sdb3-build-v2r`, log
+  `/var/lab-scratch/sdboot-migrate-3/build-v2-root.log`, context
+  `/var/lab-scratch/sdboot-migrate-3/v2/`. It is `apex-sdmig:v1` (= the
+  published `apex-os:daily`) brought up to what `roadmap/v2.2` actually
+  produces, for the **three** things the published tag is missing that between
+  them make a migration impossible — `rsync`, `systemd-boot-unsigned`, and the
+  `apex_sdboot` policy module + bless-boot drop-in. Every line is the branch's
+  own command, so the guest is the machine the branch builds rather than a lab
+  special. It also bakes the two lab accommodations (multi-user default,
+  lab-run drop-in with the timeout AND the `After=` ordering) so the guest needs
+  **no prep boot**.
+- Then, when the build succeeds:
+  1. `/var/lab-scratch/sdboot-migrate-3/run-install-c.sh` is already written
+     (v2, `apexmig-c.img`, 2 GiB ESP, **70 G** disk because of the ENOSPC
+     defect — say so in the evidence rather than pretending 45 G worked).
+     A Monitor (`bigkiwrs7`) chains the build into it automatically.
+  2. Boot 1 = `act-unit-3c.sh` + engine + `apex-boot-migrate-confirm.service`
+     (no prep boot needed now). Expect `auto rc=0`, `phase: committed`,
+     `counted the entry: bootc_fedora-43-1+3-0.conf`.
+  3. Boot 2 = `act-check-3.sh`. **This is where item 3 is decided.** Copy
+     `run-boot-b.sh` to `run-boot-c.sh` (swap the img/serial names), ceiling
+     5400 for boot 1 and 1800 for boot 2, keep `:z` and `--oci`, and
+     **never `--fresh-nvram`**.
+- Then evidence sections 5-6, commit, push, `## LANDABLE <sha>`.
+- **If the session dies here the branch is already worth landing.**
+  `task/sdboot-migrate-3` is pushed at `cc6b883b`: four evidence commits and
+  **two real fixes with tests**, 91/91 green, no conflict with the current tip
+  (`git merge-tree` clean, and nothing else has touched
+  `files/system/libexec/apex-boot-migrate` or `tests/test-boot-migrate.sh`
+  since the branch point). The worktree carries only the still-undecided
+  `count_staged_entry` splice; a backup is
+  `/var/lab-scratch/sdboot-migrate-3/engine-all.bak`.
 
 ### The item-3 decision rule, written down BEFORE the log exists
 
@@ -77,8 +90,9 @@ fourth one.
 | apexmig-b | 2 | `act-unit-3.sh` (the migration) | **DONE — ENOSPC, see FOUND** |
 | apexmig-b | 3 | `act-unit-3b.sh` (retry, grown disk) | **DONE — install OK, state-join failed** |
 | apexmig-b | 4 | `act-unit-3c.sh` (join_state fix) | **DONE — bootc "File exists"** |
-| apexmig-b | 5 | `act-unit-3c.sh` (all three fixes, state cleared) | RUNNING |
-| apexmig-b | 6 | `act-check-3.sh` (the MIGRATED boot) | — |
+| apexmig-b | 5 | `act-unit-3c.sh` (all fixes, state cleared) | **DONE — /var joined; no loader on the ESP** |
+| apexmig-c (2 GiB ESP, image v2) | 1 | `act-unit-3c.sh` | image building |
+| apexmig-c | 2 | `act-check-3.sh` (the MIGRATED boot) | — |
 
 Every boot: `./setctl.sh <action> <extra files…>` first, and the qemu launch
 needs **both** `-v …:/work:z` and `--oci /work/oci-dummy-3.img`.
@@ -102,6 +116,9 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
   * `b5e8ddcb` — **the `join_state` fix**: `-type d` on the stateroot-var
     lookup, a failure message that names which path failed, and three
     behavioural assertions extracted from the source. 86/86.
+  * `cc6b883b` — evidence section 5: bootc installing no loader and still
+    exiting 0, `incomplete-stage` catching it, and what the lab guest had to
+    become.
   * `4f6678e3` — **the `partial-install` fix**: a named refusal for a
     half-finished composefs deployment, the corrected `install-failed`
     message, and five behavioural assertions over three fixtures. 91/91.
@@ -522,6 +539,21 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
   SELinux enforcing, `setexeccon` SUCCEEDS and the kernel then denies execve on
   the entrypoint, so the unit fails harder and for a third reason. Left alone
   deliberately.
+- **The lab's two podman storages are different, and a rootless `podman build`
+  lands the image where the install cannot see it.** `to-filesystem-lab` runs
+  podman as root (it needs loop devices); root's `Store.GraphRoot` is
+  `/var/lib/containers/storage`, this user's is
+  `~/.local/share/containers/storage`. Building `apex-sdmig:v2` as `andre` and
+  installing as root made bootc fall through to the NETWORK:
+
+      Trying to pull localhost/apex-sdmig:v2...
+      Error: pinging container registry localhost:
+             Get "https://localhost/v2/": dial tcp 127.0.0.1:443: connection refused
+
+  `rc=125`, and the message names a registry rather than the real cause. Build
+  with `sudo podman build` for anything the lab's root-side tools will install.
+  (`localhost/apex-sdmig:v1` exists in BOTH stores with different image IDs,
+  which is why nothing tripped over this until now.)
 - `lab-run.service` in `localhost/apex-sdmig:v1` bakes `TimeoutStartSec=900`,
   set by the predecessor against a 2 GB fedora-bootc guest. Run B's migration
   copies an 11.5 GB image into podman storage and then writes a third copy into

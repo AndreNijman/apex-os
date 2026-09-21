@@ -32,13 +32,29 @@ orchestrator.
 - Scriptlet text uses shell line continuations, single-quoted names with
   parentheses (`'wine-dxgi(x86-64)'`), `--slave` (the old spelling of
   `--follower`) and trailing `|| :`. A parser must tokenize, not regex.
-- **The image's own alternatives state is half-dead already.** `alternatives`
-  rpm owns `/var/lib/alternatives` and `/etc/alternatives.admindir`; on this
-  booted APEX image **neither exists**. `/etc/alternatives` has real symlinks
-  (java etc.) but there is no admin database behind them, so
-  `alternatives --display/--config/--remove` cannot work on APEX today. Not
-  this unit's bug, but it is why reproducing the full alternatives triangle in
-  the extension would buy nothing.
+- **CORRECTION — alternatives IS fully functional on APEX.** I first claimed the
+  admin database was missing because `rpm -ql alternatives` lists
+  `/etc/alternatives.admindir` (a **dot**) and `/var/lib/alternatives`, and
+  neither exists on the booted image. `strace` says the binary actually reads
+  `/etc/alternatives-admindir` (a **hyphen**), which does exist and is
+  populated; `alternatives --display java` and `--list` both work, and
+  `find /etc/alternatives -xtype l` is 0. The rpm file list and the binary
+  disagree about the spelling. Read the syscall, not the file list.
+- `alternatives --altdir/--admindir` CANNOT be pointed at a build root: with
+  `--altdir /r/etc/alternatives` it writes `<link> -> /r/etc/alternatives/wine`,
+  the build-time prefix baked into the runtime symlink, and records the
+  prefixed link path in the admin file too. Measured, not assumed.
+- `iptables-nft`'s scriptlet builds its `--install` arguments from **shell
+  variables** (`$pfx`, `$pfx6`). A text parser cannot read it. Executing the
+  scriptlet with a recording `alternatives` on PATH recovers all three
+  invocations and every `--follower` in full.
+- Interception by PATH alone is not enough: `wine-core`, `nmap-ncat` and
+  `java-latest-openjdk` all invoke `/usr/bin/alternatives` by **absolute path**.
+  Rewriting `(/usr)?/s?bin/(update-)?alternatives` in the scriptlet body to the
+  recorder's own absolute path catches both forms and keeps `[ -x … ]` tests
+  true.
+- `setpriv` and `runuser` are **absent from `registry.fedoraproject.org/fedora:43`**
+  (present on the L16). A suite that drops privileges must install util-linux.
 
 ## BLOCKED ON
 
