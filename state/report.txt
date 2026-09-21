@@ -1,4 +1,4 @@
-APEX ROADMAP — resume report — 2026-09-21 12:32 AWST
+APEX ROADMAP — resume report — 2026-09-21 12:41 AWST
 
 ────────────────────────────────────────────────────────────────────────────
   roadmap
@@ -18,32 +18,32 @@ APEX ROADMAP — resume report — 2026-09-21 12:32 AWST
 ────────────────────────────────────────────────────────────────────────────
   kernel-akmods unknown                                       task/kernel-akmods
              head 4031d43f Merge task/sdboot-xbootldr into roadmap/v2.2
-             dirty 4 file(s), ? unpushed, card 33m
+             dirty 4 file(s), ? unpushed, card 42m
              NEXT - Read the reproducer result out of `/var/lab-scratch/kernel-akmod
 
   kernel-publish unknown                                       task/kernel-publish
              head b981e348 ci(kernel): run the pin gate on the local path too, n
-             dirty 0 file(s), 0 unpushed, card 28m
+             dirty 0 file(s), 0 unpushed, card 38m
              NEXT Read the table above first. If run 35557283953 finished green, `gh
 
   initramfs-slim unknown                                       task/initramfs-slim
              head 847b5bfb wip(initramfs): no KMS driver and no network in the i
-             dirty 0 file(s), 10 unpushed, card 33m
+             dirty 0 file(s), 10 unpushed, card 42m
              NEXT 1. [done] read 847b5bfb, verify kernel config, verify repro hashes
 
   migrate-preconditions unknown                                       task/migrate-preconditions
              head 754b6174 feat(boot): the precondition decision — BitLocker, wh
-             dirty 1 file(s), ? unpushed, card 36m
+             dirty 1 file(s), ? unpushed, card 45m
              NEXT 1. Mirror bootc's OWN ESP choice, do not invent one. Check whether
 
   luks-boot  unknown    L-002                              task/luks-boot
              head fdb97b04 Merge remote-tracking branch 'origin/roadmap/v2.2' in
-             dirty 0 file(s), 5 unpushed, card 34m
+             dirty 0 file(s), 5 unpushed, card 43m
              NEXT 1. Read `/var/lab-scratch/luks-boot/run2.log` — it ends with a lit
 
   windows-installer-3 unknown                                       task/windows-installer-3
              head e38e0e42 Merge remote-tracking branch 'origin/roadmap/v2.2' in
-             dirty 0 file(s), 0 unpushed, card 32m
+             dirty 0 file(s), 0 unpushed, card 42m
              NEXT 1. Priority 4 (payload deployment), synthetic payload only. Write 
 
 
@@ -105,59 +105,8 @@ APEX ROADMAP — resume report — 2026-09-21 12:32 AWST
 ────────────────────────────────────────────────────────────────────────────
   durability
 ────────────────────────────────────────────────────────────────────────────
-  snapshot timer: active   last 12:32:21 AWST 27s
+  snapshot timer: active   last 2min 33s Mon
   wip refs:
-    apex-os    dd3496b  apex-os-
-    apex-os    ea0c64e  apex-os-windows-installer-
-    apex-os    ef1a6fb  int-os-
-    apex-os    af68f6c  roadmap-state
-    apex-os    4d32e35  wt-ai-apps-
-    apex-os    dd974a7  wt-android-release-
-    apex-os    9d0f766  wt-android-signing-
-    apex-os    c02272a  wt-base-os-
-    apex-os    8957484  wt-build-verify-
-    apex-os    6c9c17f  wt-clippy-
-    apex-os    1951fdc  wt-disposable-
-    apex-os    2e3bbcd  wt-editors-
-    apex-os    31a3d16  wt-editors2-
-    apex-os    526ff13  wt-efivars-guard-
-    apex-os    317f1fd  wt-efivars-guard-2-
-    apex-os    6d02ade  wt-focus-switcher-
-    apex-os    7ebac77  wt-followups-
-    apex-os    0a2f642  wt-followups-3-
-    apex-os    a6e9909  wt-followups-4-
-    apex-os    36ae373  wt-followups-5-
-    apex-os    59b7328  wt-followups-int3-
-    apex-os    884b151  wt-followups2-
-    apex-os    d2b4c3e  wt-gaming-gpu-
-    apex-os    e354d6f  wt-gaming-release-
-    apex-os    de7dff9  wt-gaming-scx-
-sed: couldn't flush stdout: Broken pipe
-    apex-shell 250457d  apex-shell-
-    apex-shell bcfe98f  base-
-    apex-shell b73bf3f  int-shell-
-    apex-shell 68c971d  wt-base-shell-
-    apex-shell 856b52a  wt-drop-ultra-
-    apex-shell c8f1e50  wt-editors2-shell-
-    apex-shell 878b8a4  wt-focus-shell-
-    apex-shell 6e7aca4  wt-followups-3-shell-
-    apex-shell 75049cf  wt-greeter-shell-
-    apex-shell ed92eaa  wt-lockhint-
-    apex-shell ad2d89d  wt-p0-005-shell-
-    apex-shell 1bf2c2b  wt-p0-015-shell-
-    apex-shell 2afecfc  wt-p0-016-
-    apex-shell 5cf1789  wt-p0-017-
-    apex-shell e1d8a82  wt-p0-017b-
-    apex-shell 763c26e  wt-p0-018-prefix-
-    apex-shell 5b2a749  wt-p0-018b-
-    apex-shell 4eb5711  wt-p0-019-shell-
-    apex-shell a006b8c  wt-p0-023-
-    apex-shell b1621de  wt-p1-020-
-    apex-shell 3c297fc  wt-p1-023-
-    apex-shell ad337cd  wt-p1-029-
-    apex-shell 3db5952  wt-p1-038-
-    apex-shell f10daa7  wt-p1-039-
-    apex-shell 589d611  wt-p1-040-
 
 ────────────────────────────────────────────────────────────────────────────
   next
