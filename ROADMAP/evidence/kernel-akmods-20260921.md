@@ -50,7 +50,10 @@ built and installed the same way. All three are in the 14 signed modules.
 ## THE VERDICT: (b), and the distinction matters
 
 **The fix did NOT change this outcome. It made the failure readable. Those are
-different claims and only the second one is proven.**
+different claims and only the second one is proven.** The decisive evidence is
+not the green build on this laptop at all — it is CI run 35582968952, which
+passed the akmods stage on the *unguarded* code three minutes before the fix
+was pushed. See "The third data point" below.
 
 A green build after a change is not evidence the change caused the green. Here
 the causal question is not merely unresolved — for this hunk it is *decidable*,
@@ -83,12 +86,57 @@ red one.** The inputs to that RUN were identical across both:
   is kernel-publish relocating `ARG APEX_KERNEL_IMAGE` above the first FROM,
   which `build-local.sh` overrides identically in both runs).
 
+The **toolchain** was checked too, rather than assumed, because both dnf
+transactions resolved against live repos seven hours apart and "identical
+inputs" would be an overstatement otherwise. All four resolved to the same
+versions in both logs:
+
+| package | red | green |
+|---|---|---|
+| `akmods` | 0.6.2-9.fc43 | 0.6.2-9.fc43 |
+| `kmodtool` | 1.1-14.fc43 | 1.1-14.fc43 |
+| `gcc` | 15.3.1-1.fc43 | 15.3.1-1.fc43 |
+| `kernel-cachyos-devel` | 7.2.6-cachyos1.apex1.fc43 | 7.2.6-cachyos1.apex1.fc43 |
+
+One input is **not** provably identical and is named rather than glossed: the
+base is the floating tag `quay.io/fedora/fedora-bootc:43` in both runs and
+neither log records the digest it resolved to, so it could in principle have
+moved in those seven hours. Every other input is pinned and matched.
+
 Identical inputs, opposite outcomes. **The 10:46 failure was therefore not
 deterministic and not a property of the driver/kernel pair.** Round 38's
 reproducer independently agrees: built `FROM b45ec0aeb90a` — the red build's
 *own* pre-akmods layer — it produced
 `kmod-nvidia-7.2.6-cachyos1.apex1.fc43.x86_64-580.178.04-1.fc43` in 96 s,
 `rc=0`.
+
+### The third data point, and it is the strongest: CI passed the OLD code
+
+GitHub Actions run **35582968952** on `task/kernel-publish`, created
+2026-09-21 09:23:06 UTC (17:23 AWST — **three minutes before this fix was
+pushed at 17:26**), built head sha **`72bab38d`**. That tree contains **zero**
+occurrences of `akmods_rc`: it is the original, unguarded shape, exactly as it
+stood when the stage was failing. Its `core` job **succeeded**.
+
+```
+success   changes
+success   rust
+skipped   installer-iso
+success   core        <- akmods passed here, with the unguarded code
+failure   base        <- a later, unrelated stage
+skipped   image
+```
+
+So the akmods stage passed **with the defective shape still in place**, on
+GitHub's runner — a different machine, a different kernel source (the published
+image digest rather than `localhost/apex-kernel:local`), and nothing of this
+unit's work in the tree.
+
+That is the cleanest available evidence for verdict (b): **the code was never
+what made akmods fail.** It settles the causal question far more firmly than
+the local green build does, because it removes this branch entirely from the
+experiment. It also localises the 10:46 failure to *this machine at that time*,
+which strengthens the concurrency lead below without proving it.
 
 ### What is still NOT known
 
@@ -169,8 +217,11 @@ Both directions demonstrated, not asserted:
 ## Bottom line
 
 `core` builds. The image blocker is cleared and the akmods stage is green with
-nvidia, xone and xpadneo all built and signed. The landed change is a
-**durability improvement** that did not cause this pass, and the root cause of
-the 10:46 failure remains formally open — most consistent with a transient
-environmental fault, since identical inputs produced opposite outcomes. If it
-recurs, the log will say why instead of stopping mid-word.
+nvidia, xone and xpadneo all built and signed.
+
+The landed change is a **durability improvement that did not cause this pass**.
+That is not modesty — CI passed the same stage on the unguarded code, on
+another machine, three minutes before the fix existed. The root cause of the
+10:46 failure stays formally open and is now localised to this machine at that
+time; the surviving lead is the concurrent privileged podman, held as
+correlation. If it recurs, the log will say why instead of stopping mid-word.
