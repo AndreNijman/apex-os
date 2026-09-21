@@ -158,11 +158,20 @@ REFUSE  esp-too-small   The ESP has 503 MiB free, needs 1173 MiB, short by 669 M
 ```
 
 Measured, not projected: `/dev/vda2 511M 7.6M 504M 2%` with only GRUB's own
-`EFI/fedora` + `EFI/BOOT` on it. **1173 MiB** is two deployments of APEX's
-kernel + 375 MiB initramfs plus the loader and 48 MiB of slack. A 512 MiB ESP —
-which is what `bootc install to-disk` gives an APEX machine by default, checked
-on this disk's own partition table rather than assumed — is short by two thirds
-of what it needs.
+`EFI/fedora` + `EFI/BOOT` on it. **1173 MiB** is `per * 3 + ESP_SLACK_MIB` —
+**three** deployments' worth of APEX's kernel + initramfs (booted, rollback,
+and the one an update stages alongside them) plus 48 MiB, so 1125 = 3 x 375
+MiB. A 512 MiB ESP — which is what `bootc install to-disk` gives an APEX
+machine by default, read off this disk's own partition table rather than
+assumed — has 503 MiB of the 1173 it needs, 43%.
+
+While checking that arithmetic rather than quoting it, one shipped comment
+turned out to contradict the code it documents. `ESP_SLACK_MIB`'s header said
+*"Two deployments' worth of kernel+initramfs, plus the loader and slack"*,
+while the check it feeds does `per * 3` and carries its own comment saying
+*"Three, not two."* Anyone deriving the budget from the header gets 798 MiB and
+concludes a 1 GiB ESP is comfortable. Corrected on this branch; only the
+comment changed.
 
 ### 1.2 The root-filesystem precheck fired for real, and passed
 
@@ -194,3 +203,108 @@ ls: cannot access '/var/lib/apex/boot-migrate': No such file or directory
 `\EFI\fedora\shimx64.efi`, `/sysroot/boot` still holding `grub2 loader loader.1
 ostree bootupd-state.json`, and the state directory never created. nvram-guard
 on the host: `verified — boot variables identical before and after`.
+
+---
+
+## 2. The 2 GiB guest: every precondition clears
+
+`apexmig-b`, the same APEX image installed by `bootc install to-filesystem`
+onto a hand-partitioned disk — `p1 1M EF02 / p2 2 GiB EF00 / p3 btrfs` — so
+that the only difference from run A is the size of the ESP. Boot 1 is a prep
+boot that makes three lab accommodations, each written into `/etc` so it
+survives the migration:
+
+* `systemctl set-default multi-user.target`, because `apex-boot-health`'s
+  `do_check` requires the default target to be ACTIVE and APEX ships
+  `graphical.target`, which a serial-only guest with no GPU never reaches;
+* `TimeoutStartSec=infinity` on `lab-run.service` (the image bakes 900 s, set
+  against a 2 GB fedora-bootc guest) plus `After=boot-complete.target
+  systemd-bless-boot.service apex-boot-migrate-confirm.service`, so the check
+  boot cannot read a race as a result;
+* `rsync`, for the reason in §1 — restoring what `Containerfile.base` puts in
+  the image on the branch under test.
+
+With those in place the verdict table on boot 2 is clean:
+
+```
+OK      tools         mkfs.vfat, rsync and podman are all in this image
+OK      root-space    28 GiB free, 24 GiB needed
+OK      esp-choice    bootc will write PARTUUID d08a4114-…-d6e09a44e311 of 1 ESP(s) on the root's disk
+OK      esp-space     2036 MiB free, 1173 MiB needed
+This machine can migrate. "apex update" will do it, or run
+"apex-boot-migrate auto" now.
+precheck-explain rc=0
+```
+
+`2036 MiB free, 1173 MiB needed` against run A's `503 MiB free, 1173 MiB
+needed`. Same image, same engine, same arithmetic; only the partition changed.
+
+---
+
+## 3. `root-space` passed and the machine ran out of disk anyway
+
+This is the defect this run exists to have found, and it is in code that landed
+last round specifically to prevent it.
+
+`apex-boot-migrate auto` on the guest above, ~70 seconds after the precheck
+that had just said 28 GiB was enough:
+
+```
+apex-boot-migrate: saved the removable-media fallback (949424 bytes)
+apex-boot-migrate: migrating to the image this machine is already running:
+    localhost/apex-sdmig:v1 (sha256:629303a3…)
+apex-boot-migrate: making the booted image available to podman
+    (no download: it is already on this disk)
+  Copying local image docker://localhost/apex-sdmig:v1 to containers-storage:localhost/bootc ...
+  level=error msg="Rolling back transaction: cannot rollback - no transaction is active"   (x4)
+  level=fatal msg="writing blob: storing blob to file
+      \"/var/tmp/container_images_storage799695552/89\": no space left on device"
+apex-boot-migrate: FAILED [image-unavailable]
+    The booted image is not in podman's storage and bootc could not copy it there.
+auto rc=1
+```
+
+### Why the model is wrong
+
+`cmd_precheck` estimates peak cost as
+
+```
+root_need = du -sk $SYSROOT/ostree/repo * 2 + ROOT_SLACK_MIB
+```
+
+on the reasoning recorded in `docs/update-cost.md`: the temporary
+`bootc image copy-to-storage` copy and the permanent `/composefs` copy can
+coexist, so two copies plus slack. Two things that reasoning does not account
+for, both measured here:
+
+1. **`copy-to-storage` is itself a two-stage operation.** skopeo stages the
+   blobs into `/var/tmp/container_images_storage*` and *then* writes them into
+   containers-storage. Both live on the same filesystem as the repo, so the
+   "temporary copy" is two copies, not one — and the failure is in the staging
+   directory, before `/composefs` is touched at all.
+2. **`du` on the ostree repo under-reports what lands.** The repo is
+   content-addressed and deduplicated; the containers-storage extraction is
+   not.
+
+Measured peak, read from the host's sparse image file: 13 GB → **43 GB**, i.e.
+the guest wrote ~28 GB onto a 43 GiB root before ENOSPC, with `/composefs`
+still empty. The estimate said 24 GiB total. The multiplier is wrong; the idea
+is right. Re-deriving it needs a measured peak rather than an argument.
+
+### The containment held, which is the other half of the result
+
+After a hard failure in the middle of the migration:
+
+```
+phase:        not started
+boot entry:   none
+BootOrder:    000A,0000,0001,0002,0003,0004,0005,0006,0007,0008,0009   (unchanged)
+BootCurrent:  000A   -> \EFI\fedora\shimx64.efi                        (unchanged)
+/dev/vda2     2.0G  7.6M  2.0G   1%      the ESP: untouched, no loader/entries
+/sysroot/boot boot bootupd-state.json efi grub2 loader loader.1 ostree ostree-1.conf
+```
+
+`auto` returned **1**, not 10 — a failure, not a refusal — so
+`apexd/apex/src/ops.rs` treats it as an error rather than as "carry on", which
+is the correct direction. The removable-media fallback had already been saved
+before anything was touched. Nothing needed repairing and re-running was safe.
