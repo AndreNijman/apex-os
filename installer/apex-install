@@ -2235,6 +2235,20 @@ elif [ "$ENCRYPT" = yes ]; then
     if [ -n "$BOOT_UUID" ]; then
       LUKS_KARGS+=(--boot-mount-spec "UUID=$BOOT_UUID")
     fi
+    # TEST-ONLY, environment-only, same shape as APEX_LUKS_ENROLL_LOCAL and
+    # APEX_RECOVERY_DIR above: never read from the answers file or the kernel
+    # command line. A space-separated list of raw kernel arguments appended
+    # to this install only. Exists so a boot-lab script can make the
+    # INSTALLED kernel and systemd visible on a serial console (e.g.
+    # `console=ttyS0,115200 loglevel=7 systemd.log_target=kmsg`) without this
+    # engine knowing anything about qemu — the property under test is that a
+    # disk this installer writes actually boots, and that needs eyes on it.
+    if [ -n "${APEX_LUKS_EXTRA_KARGS:-}" ]; then
+      # shellcheck disable=SC2086  # intentional word-splitting, same pattern
+      # as `for k in $(kvall apex.karg)` above: each word is its own --karg.
+      for _xk in ${APEX_LUKS_EXTRA_KARGS}; do LUKS_KARGS+=(--karg "$_xk"); done
+      log "luks: extra test-only kargs in use (APEX_LUKS_EXTRA_KARGS='$APEX_LUKS_EXTRA_KARGS')"
+    fi
     log "luks kargs: ${LUKS_KARGS[*]}"
     set_nvram_args_for "$DISK"
     podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
