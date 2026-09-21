@@ -1,6 +1,6 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-21T17:44+0800",
+ "updated": "2026-09-21T17:49+0800",
  "_round": "Round 39 STARTED 2026-09-21T17:08+0800 by the autoresume timer, after the round-38 session hit a usage limit at 14:59 (autoresume.log: 'resume session ended (exit 1)'). All six round-38 agents were dead \u2014 `ps` showed no subagent claude process \u2014 and NONE was messaged. Six fresh agents dispatched with the same slugs, each carrying a ROUND 39 CONTINUATION section appended to its card. CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 is set in this session's env (checked, not assumed), so agents are not SIGTERMed 600s after the final response; the hard bound is `timeout 4h`, which ends this session at about 21:08 AWST.",
  "_landed_this_round": [
   {
@@ -42,9 +42,18 @@
    "why_now": "The agent signalled `## LANDABLE` at f3280072, and this round's one real judgement call went AGAINST its dispatch brief on evidence, which is the right outcome and the reason to read the merge. The brief expected the 342 pre-decision 'which ESP' lines to be REVERTED because `bootc install to-filesystem` writes to the ESP the caller mounts. But `cmd_stage` runs `to-existing-root`, which has NO ESP option at all -- only [ROOT_PATH]. Read out of bootc 1.16.10's source (this machine's installed version): the composefs writer reaches the ESP at four call sites and every one is `find_first_colocated_esp()`; `boot_mount_spec()` appears once and only builds a `systemd.mount-extra=` karg. The lines describe a constraint of the SUBCOMMAND, not a policy APEX invented. Kept and reframed from 'mirror bootc's choice' to 'know what bootc will write, and refuse when that is Windows''.",
    "gates_after_merge": "check-no-conflict-markers PASS; tests/test-boot-migrate.sh 83 passed / 0 failed; check-suites-run-in-ci 104 suites, 97 run, 7 exempt, 0 unrun and undeclared; check-shellcheck-coverage 202 discovered / 0 newly failing; check-doc-verbs forward pass on the edited ESP doc clean.",
    "live_machine_risk": "One new refusal is the only behaviour change on a real machine, and both machines this program owns were checked: the L16 has no Windows at all, and katana's root-disk ESP is its own EFI-SYSTEM (Windows' ESP is on a disk bootc never searches). Neither is affected."
+  },
+  {
+   "merge": "4e7aa3fa",
+   "branch": "task/luks-boot",
+   "at": "2026-09-21T17:48+0800",
+   "what": "L-003's in-boot half is MEASURED rather than written. The `luks-pcr7` guest scenario landed in round 38 and had NEVER been executed; it now runs green on katana -- three real OVMF boots, Secure Boot enforcing, software TPM, against a root staged from katana's own live install. 26 passed / 0 failed. Boot A enrols live against that boot's own PCR 7 (69E722B3...) giving binding=pcr7 pcrs=7 bank=sha256 hash=91cd90cb... pin=no, plus a new passphrase-after-enrol=SUCCESS. Boot B reproduces PCR 7 identically across a FRESH swtpm process and unlocks. Boot C moves PCR 7 with a dbx update (C4681679...), the slot refuses, and the recovery key opens the volume in the same boot with recovery-marker=found.",
+   "three_lab_defects_found_by_running_it": "Nothing shipped changed. (1) The shipped enrolment script's `#!/usr/bin/env bash` was unrunnable in an initramfs -- execve returns ENOENT for a MISSING INTERPRETER, so the failure named the script rather than `env`; dirname, wc and head were absent by the same derivation. (2) The scenario copied a serial log onto itself, which under `set -euo pipefail` aborted it after boot A -- boots B and C had never run at all, so this green result is the first time the scenario reached its own end. (3) A trailing newline made a correct 71-byte recovery key read as a wrong 72-byte one, confirmed host-side over a loop device: 72 bytes REFUSED, the same key without the newline OPENS. Also replaced an assertion that inspected nothing -- `have-apex-luks-enroll=yes` was an `-x` test, which says a file is executable and nothing about whether it runs, which is how a 127 came to sit one line under a 'yes'.",
+   "why_now": "The agent signalled `## LANDABLE` at 56fc1e1c. Diff against roadmap/v2.2 is exactly three files.",
+   "gates_after_merge": "check-no-conflict-markers PASS; tests/test-boot-v2.sh 150 passed / 0 failed; check-suites-run-in-ci 104 suites, 97 run, 7 exempt, 0 unrun and undeclared; check-shellcheck-coverage 202 discovered / 0 newly failing."
   }
  ],
- "_status_recorded_this_round": "NONE. None of the three landings maps to a numbered roadmap item -- kernel-akmods and kernel-publish are image blockers, and the shellcheck fix is gate hygiene. Counts unchanged at 92 done / 35 partial / 0 todo / 1 blocked of 128.",
+ "_status_recorded_this_round": "L-003 blocked -> partial, recorded by the luks-boot agent via round24-prepend.py (evidence now 16,012 chars, carrying the ROUND 32 record forward rather than replacing it -- set-status.py REPLACES and has no append flag). Verified by re-parsing roadmap.yaml: **92 done / 36 partial / 0 todo / 0 BLOCKED of 128**. This is the first time the board has had zero blocked items. L-003 is NOT done: 'by default' means the installer path, and no test has run the real `apex-luks-enroll` through `apex-install` (the suites use a recovery-only stand-in), no installer-produced disk has been TPM-auto-unlocked, it is swtpm and not silicon, and luks-pcr7 was run ALONE rather than with the STAGED set.",
  "_deliberately_held": "ZERO slots held: all six are in use. The READY list's `luks-installer (L-002)` and `luks-enroll (L-003)` were NOT dispatched as separate agents \u2014 the luks-boot unit already owns both items, and resume.sh offers them only because the queue keys IN HAND by unit id rather than by item. Dispatching them would have put three agents on one branch. Every other open queue unit is in the report's COMPLETE section.",
  "agents": [
   {
@@ -98,8 +107,8 @@
   {
    "repo": "apex-os",
    "session": "round 39 orchestrator (autoresume, 2026-09-21 17:08 AWST, pid 16639, timeout 4h -> ~21:08)",
-   "dispatched": "2026-09-21T17:17+0800",
-   "agent_id": "ae5627fec5f70a33f",
+   "dispatched": "2026-09-21T17:49+0800",
+   "agent_id": "a8ce565d40c9bc3aa",
    "slug": "luks-boot",
    "items": [
     "L-002",
@@ -108,7 +117,7 @@
    "worktree": "/var/tmp/apex-work/wt-luks-boot",
    "branch": "task/luks-boot",
    "card": "ROADMAP/state/agents/luks-boot.md (ROUND 39 CONTINUATION section appended by the orchestrator at dispatch; it SUPERSEDES the older NEXT where they disagree)",
-   "why": "L-002 is landed (merge d00c3060) and recorded partial: a disk this installer wrote has BOOTED, first time ever measured. The unit continues on L-003, TPM auto-unlock where safe is a MEASURED precondition \u2014 the board's only remaining blocked item. luks-enroll-2's PCR-7 guest scenario is already landed (34132080); the card says read it before starting."
+   "why": "CONTINUATION, dispatched 17:55 after the first round-39 agent finished its scope and landed as merge 4e7aa3fa. Its card carries a precise four-item NEXT: (1) a `luks-pcr7-signed` scenario where the only change from the green luks-pcr7 is building boot A's UKI WITH --pcr-key/--pcr-pubkey -- boot A already measured that the Secure-Boot and sd-stub gates pass and it refuses only for the missing signing key, so this should flip the selection to binding=signed-pcr11; (2) the integration gap that keeps L-003 at partial -- no test has ever run the REAL apex-luks-enroll through apex-install, every installer suite uses the APEX_LUKS_ENROLL_LOCAL recovery-only stand-in, and no installer-produced GRUB+shim disk has been TPM-auto-unlocked; (3) run the full default STAGED set together, since 26/0 is a result about luks-pcr7 IN ISOLATION; (4) L-002's remainder, deliberately scoped out of the first half of round 39 and still open -- the ESP-fallback check in installer/test-installer-luks-boot.sh ~line 234 fails `mount -o ro` with 'would change RO state', so the EFI/BOOT/BOOTX64.EFI fallback-loader check never actually runs."
   },
   {
    "repo": "apex-os",

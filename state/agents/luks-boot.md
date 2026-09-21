@@ -1,4 +1,16 @@
-## LANDABLE — `56fc1e1c`
+## LANDED — `56fc1e1c` went onto `roadmap/v2.2` as merge `4e7aa3fa` at 17:47 AWST
+
+Gates re-run by the orchestrator on the merge result, not taken on trust:
+check-no-conflict-markers PASS, `tests/test-boot-v2.sh` **150 passed / 0
+failed**, check-suites-run-in-ci 104 suites / 97 run / 7 exempt / 0 unrun,
+check-shellcheck-coverage 202 discovered / 0 newly failing.
+
+`roadmap.yaml` re-parsed after your set-status call: **92 done, 36 partial,
+0 todo, 0 BLOCKED of 128.** That is the first time this board has had zero
+blocked items. Do not re-land this branch; start from the NEXT list below,
+which is current.
+
+## LANDABLE (now landed) — `56fc1e1c`
 
 The `luks-pcr7` guest scenario now RUNS and is green: **26 passed, 0 failed**,
 `EXIT_CODE=0` on katana. It is the in-boot half of L-003 and it had never been
