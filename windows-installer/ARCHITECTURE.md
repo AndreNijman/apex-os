@@ -204,6 +204,18 @@ its own guards — default route, DNS, and a ≥ 22 GB non-tmpfs scratch check. 
 400 MB bootstrap that pulls a verified image beats a 5 GB payload that has to
 survive being copied into RAM before its own partition is reformatted.
 
+### SUPERSEDED 2026-09-21: there is no shared Windows ESP
+
+Andre decided that APEX builds its **own** ESP and that Windows' ESP is read for
+facts and never written. The section below describes writing into a shared one
+and is kept only as the record of what was planned; do not build toward it.
+An agent reading this file fresh would otherwise implement exactly the thing the
+decision forbids.
+
+See `docs/apex-owns-its-esp.md` — both product decisions now live there,
+together with the five things that must be measured before either is claimed to
+work, and the invariants any GPT write has to satisfy.
+
 ### Into the shared Windows ESP
 
 One new directory, created with create-new semantics, containing only files

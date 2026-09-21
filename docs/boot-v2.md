@@ -430,6 +430,21 @@ systemd-boot means backing up and reinstalling.** New installs get it from the
 installer, where the partition table is being created anyway and the ESP can be
 sized correctly the first time.
 
+### SUPERSEDED IN PART, 2026-09-21: APEX builds its own ESP
+
+Everything below about XBOOTLDR and about squeezing into a 512 MiB ESP still
+reads true, and the measurements stand. What changed is the question.
+
+Andre decided that Windows-side installs boot systemd-boot like every other
+machine, and that **APEX gets its own EFI System Partition rather than writing
+into Windows'**. The 68.3 MiB-free figure stops being a constraint to defeat
+and becomes a reason not to borrow the partition at all. See
+`docs/apex-owns-its-esp.md` for the decision, what already exists to implement
+it, and the four things that must be measured before it is claimed to work.
+
+The 512 MiB ceiling still binds on machines whose ESP is already APEX's own —
+the L16 and every existing install — so the initramfs work is not retired.
+
 ### XBOOTLDR: the Boot Loader Specification allows it, bootc does not implement it
 
 The obvious escape from the ESP arithmetic above is the one the Boot Loader
