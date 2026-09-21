@@ -47,7 +47,12 @@
 #      winlab media              remaster the Microsoft ISO
 #      winlab golden             run Setup; produce golden.raw + golden-VARS.fd
 #      winlab fixtures           build the target-disk fixtures
-#      winlab run DIR [--swap]   boot the golden with DIR/run.ps1, print results
+#      winlab run DIR [--swap] [--boots N]
+#                                boot the golden with DIR/run.ps1, print results.
+#                                --boots N lets the job ask for another boot: it
+#                                writes reboot.txt on the transport and exits, and
+#                                the host powers the machine back on with the same
+#                                overlays. Up to N boots; the default is 1.
 #      winlab status             what exists and what does not
 #
 #  $APEX_WINLAB_DIR defaults to /var/lab-scratch/winlab. It is not /tmp on
@@ -376,9 +381,19 @@ size=17GiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"APEX-TARGET-B\"
 #  target-disk fixtures now get the same treatment, and for longer — see the
 #  comment at the overlay creation below for why that used to not be true.
 cmd_run() {
-    local rundir="${1:-}" swap=no
-    [ -n "$rundir" ] || die "usage: winlab run DIR [--swap]"
-    [ "${2:-}" = --swap ] && swap=yes
+    local rundir="${1:-}" swap=no boots=1
+    [ -n "$rundir" ] || die "usage: winlab run DIR [--swap] [--boots N]"
+    shift || true
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --swap)  swap=yes ;;
+            --boots) shift; boots="${1:-1}" ;;
+            *)       die "unknown argument $1" ;;
+        esac
+        shift
+    done
+    case "$boots" in ''|*[!0-9]*) die "--boots wants a number" ;; esac
+    [ "$boots" -ge 1 ] || die "--boots must be at least 1"
     rundir="$(cd "$rundir" && pwd)"
     [ -f "$rundir/run.ps1" ] || die "$rundir/run.ps1 is missing"
     need "$GOLDEN" golden
@@ -388,7 +403,7 @@ cmd_run() {
 
     podman run --rm --device /dev/kvm \
         -v "$DIR":/w:z -v "$HERE":/lab:ro,z -v "$rundir":/job:ro,z \
-        -e SWAP="$swap" \
+        -e SWAP="$swap" -e BOOTS="$boots" \
         "$IMAGE" bash -uo pipefail -c "$(qemu_args)"'
         set -e
         export VARS=/w/run-VARS.fd SYSDISK=/w/run.qcow2 SYSFMT=qcow2 \
@@ -440,24 +455,82 @@ cmd_run() {
         trport=1; faport=2
         [ "$SWAP" = yes ] && { trport=2; faport=1; }
 
-        rc=0
-        QEMU_TIMEOUT=900 qemu_run disk \
-            -drive "id=tr,file=/w/run-transport.raw,format=raw,if=none" \
-            -device "ide-hd,drive=tr,bus=ahci.$trport,model=APEX-LAB-TRANSPORT,serial=TRN0000000001" \
-            -drive "id=fa,file=/w/run-fixture-a.qcow2,format=qcow2,if=none" \
-            -device "ide-hd,drive=fa,bus=ahci.$faport,model=APEX-FIXTURE-A,serial=FIXA00000001" \
-            -drive "id=fb,file=/w/run-fixture-b.qcow2,format=qcow2,if=none" \
-            -device "nvme,drive=fb,serial=FIXB00000002" || rc=$?
-        echo "qemu exited rc=$rc"
-
-        virt-fw-vars -i "$VARS" --print 2>/dev/null |
-            grep -E "^(Boot[0-9]{4}|BootOrder)" | sort > /w/fw-after.txt
-
+        # ── the boot loop ────────────────────────────────────────────────
+        #  One boot is the common case and behaves exactly as it always has.
+        #  A job that needs more than one -- installing a Windows FEATURE, for
+        #  instance, which is what BitLocker is on Server -- writes reboot.txt
+        #  on the transport volume and exits 0; the agent then powers the
+        #  machine off as usual and this loop powers it back on with the SAME
+        #  overlays, the SAME varstore and the SAME transport. The host owns
+        #  the reboot rather than the guest calling Restart-Computer, because
+        #  Restart-Computer races the agent`s own status.txt write and the
+        #  result is a run that sometimes has a status and sometimes does not.
+        #
+        #  The agent TRUNCATES result.txt at the start of every boot (its
+        #  first Out-File has no -Append), so each boot`s transcript is
+        #  copied out before the next one starts and the copies are
+        #  concatenated at the end. A job that wants more than the agent`s
+        #  transcript writes its own phase files next to result.txt; they are
+        #  copied out too.
         tag=normal; [ "$SWAP" = yes ] && tag=swapped
-        mtype -i /w/run-transport.raw@@1048576 ::/result.txt >"/w/guest-$tag.txt" 2>/dev/null
-        echo "═══ GUEST RESULT ($tag; also saved as /w/guest-$tag.txt) ═══"
+        rm -f "/w/guest-$tag.txt"
+        boot=1; rc=0
+        while :; do
+            echo "-- boot $boot of at most ${BOOTS:-1} -- $(date -u +%H:%M:%S)"
+            export SHOTTAG="run-b$boot"
+            rc=0
+            QEMU_TIMEOUT=900 qemu_run disk \
+                -drive "id=tr,file=/w/run-transport.raw,format=raw,if=none" \
+                -device "ide-hd,drive=tr,bus=ahci.$trport,model=APEX-LAB-TRANSPORT,serial=TRN0000000001" \
+                -drive "id=fa,file=/w/run-fixture-a.qcow2,format=qcow2,if=none" \
+                -device "ide-hd,drive=fa,bus=ahci.$faport,model=APEX-FIXTURE-A,serial=FIXA00000001" \
+                -drive "id=fb,file=/w/run-fixture-b.qcow2,format=qcow2,if=none" \
+                -device "nvme,drive=fb,serial=FIXB00000002" || rc=$?
+            echo "qemu exited rc=$rc after boot $boot"
+
+            # The firmware baseline after EVERY boot, not only the last one.
+            # A fault-injection run has to be able to say WHICH boot changed
+            # a variable, and a single after-image cannot.
+            virt-fw-vars -i "$VARS" --print 2>/dev/null |
+                grep -E "^(Boot[0-9]{4}|BootOrder)" | sort > "/w/fw-after-b$boot.txt"
+            cp "/w/fw-after-b$boot.txt" /w/fw-after.txt
+
+            {
+                echo "=== BOOT $boot ==="
+                mtype -i /w/run-transport.raw@@1048576 ::/result.txt 2>/dev/null ||
+                    echo "(no result.txt from boot $boot)"
+            } >> "/w/guest-$tag.txt"
+
+            # reboot.txt is the job asking for another boot. It is deleted
+            # here rather than by the guest, so a guest that died before it
+            # could clean up cannot loop this harness forever.
+            if mtype -i /w/run-transport.raw@@1048576 ::/reboot.txt >/dev/null 2>&1; then
+                mdel -i /w/run-transport.raw@@1048576 ::/reboot.txt 2>/dev/null
+                if [ "$boot" -ge "${BOOTS:-1}" ]; then
+                    echo "the job asked for another boot but --boots ${BOOTS:-1} is exhausted"
+                    break
+                fi
+                boot=$((boot+1))
+                continue
+            fi
+            break
+        done
+
+        # Whatever the job left on the transport besides result.txt and
+        # status.txt. A job that produces more than one transcript writes
+        # phase-N.txt; the host copies each one out so the evidence is a file
+        # on the host and not a scrollback line.
+        for n in 1 2 3 4 5 6 7 8; do
+            mtype -i /w/run-transport.raw@@1048576 "::/phase-$n.txt" \
+                > "/w/job-phase-$n.txt" 2>/dev/null &&
+                [ -s "/w/job-phase-$n.txt" ] &&
+                echo "job artefact: /w/job-phase-$n.txt" ||
+                rm -f "/w/job-phase-$n.txt"
+        done
+
+        echo "=== GUEST RESULT ($tag, $boot boot(s); saved as /w/guest-$tag.txt) ==="
         cat "/w/guest-$tag.txt" 2>/dev/null ||
-            echo "(no result.txt — the guest produced nothing)"
+            echo "(no result.txt - the guest produced nothing)"
         echo "═══ STATUS ═══"
         mtype -i /w/run-transport.raw@@1048576 ::/status.txt 2>/dev/null ||
             echo "(no status.txt)"
