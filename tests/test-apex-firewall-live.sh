@@ -99,7 +99,7 @@ if [ "$SELFTEST" = 1 ]; then
 "rules|s/^\( *\)ip protocol icmp icmp type { echo-request }.*/\1# mutant/|ping answers from outside"
 "rules|s/^\( *\)ip6 nexthdr icmpv6 icmpv6 type { echo-request }.*/\1# mutant/|ping6 answers from outside"
 "rules|s/nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, nd-redirect,/nd-router-advert, nd-redirect,/|IPv6 neighbour discovery still resolves this machine"
-"rules|/^ *udp dport 5353 accept$/d|mDNS is still answered"
+"rules|/^ *ip daddr 224.0.0.251 udp dport 5353 accept$/d|mDNS is still answered"
 "rules|/^ *tcp dport @allowed_tcp accept$/d|allow really opens a port against the live ruleset"
 "helper|s/^\( *\)nft add element/\1: skipped-by-mutant nft add element/|allow really opens a port against the live ruleset"
 "helper|s/^\( *\)rm -f \"\${CONF_DIR}\/\${name}.conf\"$/\1: mutant kept the file/|deny really closes it again"
@@ -508,13 +508,44 @@ unload_policy; load_policy >/dev/null
 # ═════════════════════════════════════════════════════════════════════════════
 sec "mDNS, which apex host and every printer depend on"
 # ═════════════════════════════════════════════════════════════════════════════
+# A real mDNS query goes to the group address, not to this host. RFC 6762 is
+# multicast, which is why scoping the rule to 224.0.0.251 costs discovery
+# nothing. The listener joins the group on `hn` explicitly; without the
+# membership the kernel never delivers the datagram and the case would fail for
+# a reason that has nothing to do with the firewall.
 rm -f "$W/mdns"
-listen_udp "$NS_HOST" 5353 "$W/mdns"
-udp_send "$NS_NET" 10.9.44.2 5353 "QUERY"
+nsx "$NS_HOST" socat -u "UDP4-RECV:5353,ip-add-membership=224.0.0.251:hn" "CREATE:$W/mdns" >/dev/null 2>&1 &
+sleep 0.4
+# Bind the source to the veth address: without it the kernel has no route for
+# 224.0.0.0/4 in this namespace and the datagram never leaves.
+udp_send "$NS_NET" 224.0.0.251 5353 "QUERY" 10.9.44.1:5353
 sleep 0.5
 grep -q QUERY "$W/mdns" 2>/dev/null \
     && ok "mDNS is still answered" \
     || bad "mDNS is still answered" "the machine cannot be found by name on its own LAN"
+
+# The other half of the same decision, and the reason the rule was narrowed.
+# A unicast datagram to port 5353 is not how a printer is found; it is how a
+# stranger enumerates this machine and how an mDNS reflector recruits it.
+rm -f "$W/mdns-uni"
+listen_udp "$NS_HOST" 5353 "$W/mdns-uni"
+udp_send "$NS_NET" 10.9.44.2 5353 "UNICAST"
+sleep 0.5
+grep -q UNICAST "$W/mdns-uni" 2>/dev/null \
+    && bad "a unicast probe to 5353 is refused" "the port is open to any host, not just the mDNS group" \
+    || ok "a unicast probe to 5353 is refused"
+
+# LLMNR is not accepted at all. systemd-resolved ships LLMNR=resolve, which
+# asks and never answers, so the old accept admitted packets to a service that
+# discards them. Asserted rather than left implied, so re-adding the rule
+# without re-deciding the policy turns this red.
+rm -f "$W/llmnr"
+listen_udp "$NS_HOST" 5355 "$W/llmnr"
+udp_send "$NS_NET" 10.9.44.2 5355 "LLMNR"
+sleep 0.5
+grep -q LLMNR "$W/llmnr" 2>/dev/null \
+    && bad "LLMNR is not reachable from the network" "5355 is open, and nothing on this machine answers it" \
+    || ok "LLMNR is not reachable from the network"
 
 # ═════════════════════════════════════════════════════════════════════════════
 sec "allow and deny, against the live ruleset rather than the config file"

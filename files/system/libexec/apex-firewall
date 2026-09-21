@@ -35,7 +35,7 @@ readonly HOTSPOT_SET=hotspot_ifaces
 # Written once because it is now said twice — the prose status prints it and
 # `status --json` reports it. Two copies of a sentence listing what a firewall
 # never drops is two chances to tell a user something that stopped being true.
-readonly ALWAYS_ALLOWED='established replies, loopback, ICMP, DHCP, mDNS/LLMNR, ssh'
+readonly ALWAYS_ALLOWED='established replies, loopback, ICMP, DHCP, mDNS, ssh'
 
 msg()  { printf 'apex-firewall: %s\n' "$*"; }
 warn() { printf 'apex-firewall: warning: %s\n' "$*" >&2; }
