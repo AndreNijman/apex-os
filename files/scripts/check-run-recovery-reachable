@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""Catch a build failure you will not be able to read.
+
+## The defect
+
+`Containerfile.core`'s akmods stage looked like this, and cost two roadmap
+rounds:
+
+    RUN set -eux; \\
+        akmods --force --kernels "${KVER}" --kmod "${k}"; \\
+        RPM="$(ls -1 /var/cache/akmods/${k}/kmod-${k}-*.rpm | head -1)"; \\
+        test -n "${RPM}" && test -f "${RPM}" \\
+            || { echo "FATAL: ${k} akmod produced no kmod RPM"; \\
+                 sed -n '1,80p' /var/cache/akmods/${k}/*.failed.log; exit 1; }
+
+Read it as the author did and it is careful: if the kmod RPM is missing, dump
+akmods' failure log so a human can see the compiler error.
+
+Read it as `bash -e` does and the dump is dead code. `akmods` is an unguarded
+simple command, so its non-zero exit terminates the shell on the spot. The
+`RPM=` assignment never runs, the `test` never runs, and the `sed` that was
+the entire point never runs. The recovery block is reachable only on the path
+where akmods SUCCEEDED and merely produced a surprising filename — which is
+not the path anyone wrote it for.
+
+That is bad for any command. It is fatal for this specific family of tools,
+because they do not print their errors at all: akmods sends the whole
+compile to `/var/cache/akmods/<kmod>/.last.log` and prints one status word.
+So the build dies, `set -x` shows you the command that failed, and there is
+no compiler error anywhere in the build log. Nobody can diagnose it without
+re-running the build by hand.
+
+## What this checks
+
+In every `RUN` that enables errexit, an invocation of a tool from
+SILENT_DRIVERS must be GUARDED: the condition of an `if`/`while`/`until`, or
+followed by `&&` or `||`. Anything else and its failure is unreadable.
+
+If an unguarded one is followed later in the same RUN by a block that reads a
+log file or announces FATAL, that is named too — it is the recovery the
+author believed they had written.
+
+usage: check-run-recovery-reachable [CONTAINERFILE ...]
+exit 0 = clean, 1 = defect found, 2 = usage error
+"""
+import os
+import re
+import sys
+
+# Tools whose failure output does NOT go to stdout/stderr but into a log file
+# they write themselves. An unguarded call to one of these under errexit is a
+# build failure with no readable cause, which is why the set is deliberately
+# small and specific rather than "every long-running command".
+#
+#   akmods       -> /var/cache/akmods/<kmod>/.last.log  (prints one status word)
+#   akmodsbuild  -> --logfile <path>                    (called with --quiet)
+#   dkms         -> /var/lib/dkms/<m>/<v>/build/make.log
+#   rpmbuild     -> silent under --quiet; the useful part is the %build tail
+SILENT_DRIVERS = ("akmods", "akmodsbuild", "dkms", "rpmbuild")
+
+# A block is "recovery" if it announces a fatal condition or reads a log.
+RECOVERY_RE = re.compile(r"FATAL|\.log\b|failed\.log", re.I)
+
+FROM_RE = re.compile(r"^FROM\s", re.I)
+RUN_RE = re.compile(r"^RUN\s", re.I)
+ERREXIT_RE = re.compile(r"(^|[;&|\n(){}\s])set\s+-[a-zA-Z]*e[a-zA-Z]*(\s|;|$)")
+MOUNT_RE = re.compile(r"^--mount=\S+\s*")
+
+
+def instructions(path):
+    """Yield (first_physical_line_number, joined_text) for each instruction.
+
+    Continuation lines are joined with a literal newline kept in the text so
+    the scanner still sees a statement separator where the author put one.
+    """
+    raw = open(path, encoding="utf-8").read().split("\n")
+    i = 0
+    while i < len(raw):
+        line = raw[i]
+        start = i + 1
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+        parts = []
+        while True:
+            cur = raw[i].rstrip()
+            if cur.endswith("\\"):
+                parts.append(cur[:-1])
+                i += 1
+                if i >= len(raw):
+                    break
+                continue
+            parts.append(cur)
+            i += 1
+            break
+        yield start, "\n".join(parts)
+
+
+def split_statements(body):
+    """Split a shell fragment into (offset, text) statements.
+
+    Tracks quoting and $(…)/(…)/{…} nesting so a `;` inside a string or a
+    command substitution is not mistaken for a separator. Returns the text of
+    each statement plus the separator that FOLLOWS it, which is what decides
+    whether a command is guarded.
+    """
+    out = []
+    buf = []
+    start = 0
+    i = 0
+    n = len(body)
+    quote = None
+    depth = 0
+    while i < n:
+        c = body[i]
+        if quote:
+            buf.append(c)
+            if c == "\\" and quote == '"' and i + 1 < n:
+                buf.append(body[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            buf.append(c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            buf.append(c)
+            buf.append(body[i + 1])
+            i += 2
+            continue
+        if c in "({":
+            depth += 1
+            buf.append(c)
+            i += 1
+            continue
+        if c in ")}":
+            depth = max(0, depth - 1)
+            buf.append(c)
+            i += 1
+            continue
+        if depth == 0:
+            two = body[i:i + 2]
+            if two in ("&&", "||"):
+                out.append((start, "".join(buf), two))
+                buf = []
+                i += 2
+                start = i
+                continue
+            if c in ";\n":
+                out.append((start, "".join(buf), ";"))
+                buf = []
+                i += 1
+                start = i
+                continue
+            if c == "|":
+                out.append((start, "".join(buf), "|"))
+                buf = []
+                i += 1
+                start = i
+                continue
+        buf.append(c)
+        i += 1
+    if "".join(buf).strip():
+        out.append((start, "".join(buf), ""))
+    return out
+
+
+LEADING_RE = re.compile(r"^\s*(?:(if|while|until|then|else|elif|do|done|fi|\{|\()\s+|!\s*)")
+
+
+def leading_command(stmt):
+    """Return (command_basename, in_condition, inverted) for a statement.
+
+    Strips shell keywords and leading environment assignments so
+    `if ! FOO=1 /usr/sbin/akmods --force` reports `akmods`.
+    """
+    text = stmt
+    in_condition = False
+    inverted = False
+    while True:
+        m = LEADING_RE.match(text)
+        if not m:
+            break
+        kw = m.group(1)
+        if kw in ("if", "while", "until"):
+            in_condition = True
+        if m.group(0).strip() == "!":
+            inverted = True
+        text = text[m.end():]
+    # leading VAR=value assignments
+    while True:
+        m = re.match(r"^\s*[A-Za-z_][A-Za-z_0-9]*=(?:\"[^\"]*\"|'[^']*'|\S*)\s+", text)
+        if not m:
+            break
+        text = text[m.end():]
+    m = re.match(r"^\s*([^\s;|&()]+)", text)
+    if not m:
+        return None, in_condition, inverted
+    return os.path.basename(m.group(1)), in_condition, inverted
+
+
+def check(path):
+    findings = []
+    runs = 0
+    calls = 0
+    for lineno, text in instructions(path):
+        if not RUN_RE.match(text.strip()):
+            continue
+        body = re.sub(r"^RUN\s+", "", text.strip(), count=1)
+        while MOUNT_RE.match(body):
+            body = MOUNT_RE.sub("", body, count=1)
+        if not ERREXIT_RE.search(body):
+            continue
+        runs += 1
+        stmts = split_statements(body)
+        unguarded = []
+        for idx, (off, stmt, sep) in enumerate(stmts):
+            cmd, in_condition, inverted = leading_command(stmt)
+            if cmd not in SILENT_DRIVERS:
+                continue
+            calls += 1
+            if in_condition:
+                continue
+            # `cmd || handler` is a guard. `cmd && next` is NOT: if cmd fails
+            # the whole AND-list returns non-zero and errexit still fires. So
+            # walk the AND-OR list forward and only accept it if a `||`
+            # actually appears in it — `a && b || c` is guarded, `a && b` is
+            # not. Getting this backwards is how a checker passes a defect.
+            guarded = False
+            j = idx
+            while j < len(stmts):
+                s = stmts[j][2]
+                if s == "||":
+                    guarded = True
+                    break
+                if s != "&&":
+                    break
+                j += 1
+            if guarded:
+                continue
+            if inverted:
+                unguarded.append((idx, cmd, stmt.strip(), "inverted"))
+                continue
+            unguarded.append((idx, cmd, stmt.strip(), "bare"))
+        for idx, cmd, stmt, kind in unguarded:
+            dead = None
+            for off2, stmt2, _sep2 in stmts[idx + 1:]:
+                if RECOVERY_RE.search(stmt2):
+                    dead = " ".join(stmt2.split())[:110]
+                    break
+            findings.append((lineno, cmd, " ".join(stmt.split())[:110], kind, dead))
+    return findings, runs, calls
+
+
+def main(argv):
+    paths = argv[1:]
+    if not paths:
+        paths = [p for p in ("Containerfile.core", "Containerfile.base",
+                             "Containerfile.kernel", "Containerfile.apex")
+                 if os.path.exists(p)]
+    if not paths:
+        print("check-run-recovery-reachable: no Containerfile to check", file=sys.stderr)
+        return 2
+    bad = 0
+    for path in paths:
+        # A named input that is not on disk is a FAILURE, never a skip. CI
+        # passes these paths explicitly; a rename must not quietly stop
+        # checking a whole image variant while still reporting green.
+        if not os.path.exists(path):
+            print(f"{path}: MISSING — named on the command line but not on disk")
+            bad += 1
+            continue
+        findings, runs, calls = check(path)
+        if not findings:
+            print(f"{path}: OK [{runs} errexit RUN(s), {calls} silent-driver call(s), all guarded]")
+        for lineno, cmd, stmt, kind, dead in findings:
+            bad += 1
+            if kind == "inverted":
+                why = (f"`! {cmd} …` — errexit does not apply to an inverted command, "
+                       f"so a failure here is swallowed entirely and the build carries on")
+            else:
+                why = (f"`{cmd}` is an unguarded simple command under `set -e`, so its "
+                       f"failure terminates this RUN on the spot")
+            print(f"{path}:{lineno}: UNREADABLE FAILURE: {why}.")
+            print(f"    {stmt}")
+            if dead:
+                print(f"    the recovery written for it is therefore dead code:")
+                print(f"    {dead}")
+            print(f"    {cmd} logs its errors to a FILE, not to stdout — an unguarded call "
+                  f"leaves no compiler error anywhere in the build log.")
+            print(f"    Fix: `if ! {cmd} …; then <dump the logs>; exit 1; fi`, or "
+                  f"`rc=0; {cmd} … || rc=$?`.")
+    if bad:
+        print(f"\ncheck-run-recovery-reachable: {bad} unreadable failure path(s)")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
