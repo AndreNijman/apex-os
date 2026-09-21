@@ -207,7 +207,18 @@ RUN set -eux; \
     test "${GOTPAHOLE}" = "${PAHOLE_VERSION_EXPECTED}" \
         || { echo "FATAL: kernel was built with CONFIG_PAHOLE_VERSION=${GOTPAHOLE}, pin requires ${PAHOLE_VERSION_EXPECTED}"; exit 1; }; \
     echo "CONFIG_PAHOLE_VERSION=${GOTPAHOLE} (as pinned)"; \
-    for opt in CONFIG_SCHED_CLASS_EXT CONFIG_DEBUG_INFO_BTF CONFIG_EFI_STUB; do \
+    # CONFIG_DRM_SIMPLEDRM and friends are here because APEX's initramfs
+    # deliberately carries NO KMS driver — that is what took it from 358 MiB to
+    # 98 MiB and what makes a 512 MiB ESP possible (Containerfile.core stage
+    # 1f). The only thing left to draw the LUKS passphrase prompt is simpledrm
+    # binding the framebuffer UEFI's GOP already set up, so it has to be built
+    # IN: a module would have to come from the initramfs we just emptied.
+    # SYSFB_SIMPLEFB is what registers the simple-framebuffer platform device
+    # in the first place; without it simpledrm has nothing to bind and the
+    # prompt is a black screen on every machine, not an unlucky one.
+    for opt in CONFIG_SCHED_CLASS_EXT CONFIG_DEBUG_INFO_BTF CONFIG_EFI_STUB \
+               CONFIG_DRM CONFIG_DRM_SIMPLEDRM CONFIG_SYSFB_SIMPLEFB \
+               CONFIG_DRM_FBDEV_EMULATION CONFIG_FRAMEBUFFER_CONSOLE; do \
         grep -q "^${opt}=y" "${CONF}" \
             || { echo "FATAL: ${opt} is not =y in the built config"; grep -E "^#? *${opt}" "${CONF}" || true; exit 1; }; \
         echo "${opt}=y"; \
