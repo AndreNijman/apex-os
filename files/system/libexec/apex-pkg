@@ -1559,7 +1559,7 @@ cmd_install() {
         # takes effect if that arm runs, so `id` assigned in the "" arm below
         # would otherwise leak into the global scope of a script running as
         # root.
-        local n id curated forced
+        local n id curated forced route
         case "$SOURCE" in
             capsule)
                 # Returns; a capsule install touches neither the extension nor
@@ -1593,6 +1593,17 @@ cmd_install() {
                             flatpaks+=("$id")
                             continue
                         fi
+                    fi
+                    # No curated opinion. Ask the same question resolve
+                    # asks: is there an rpm at all? A flatpak-only name in the
+                    # dnf set fails the whole transaction.
+                    route="$(bare_name_route "$n")"
+                    if [ "${route%% *}" = flatpak ]; then
+                        id="${route#* }"
+                        msg "'${n}' has no RPM in any enabled repository; installing the Flatpak ${id}"
+                        msg "to see why: apex resolve ${n}"
+                        flatpaks+=("$id")
+                        continue
                     fi
                     kept+=("$n")
                 done
@@ -2078,6 +2089,39 @@ flatpak_match() {
 # Pure, and separated from the probes for exactly that reason: the ranking is
 # the policy, and a policy that can only be exercised with a network and a
 # populated dnf cache is a policy nobody checks.
+# Where a BARE name goes when no --source was given. `apex resolve` and
+# `apex install` must not disagree about this, and they have before: the suite
+# records a round where resolve told a user to install the Chromium flatpak
+# while install fetched the Fedora rpm. This is the same disagreement in the
+# other direction, found 2026-09-22 by `apex install obs-studio discord code
+# libreoffice blender wine chromium` on katana.
+#
+# `code` has NO rpm anywhere — only a flatpak — and the old routing kept every
+# non-curated name for dnf. dnf then failed the WHOLE transaction with
+# `No package "code" available`, so obs-studio, libreoffice, blender, wine and
+# chromium did not install either. One unavailable name took five good ones
+# with it, and `apex resolve code` had already said "APEX would use: flatpak".
+#
+# Prints `flatpak <appid>` or `rpm`. The rpm probe is the same one resolve
+# uses, so the two answers are the same answer by construction rather than by
+# two functions agreeing today.
+#
+# The caveat, stated because it is a real one: probe_rpm matches a package NAME
+# exactly, so a name that dnf could only satisfy through a `Provides:` reads as
+# having no rpm. Such a name is rerouted only when a Flatpak actually exists
+# for it, and resolve would have said flatpak too — so the tools still agree,
+# which is the property being defended here.
+bare_name_route() {
+    local n="$1" id
+    if [ -n "$(probe_rpm "$n")" ]; then printf 'rpm\n'; return 0; fi
+    if id="$(first_flatpak_id "$n")" && [ -n "$id" ]; then
+        printf 'flatpak %s\n' "$id"; return 0
+    fi
+    # No rpm and no flatpak: keep it on the rpm route so dnf produces the error
+    # naming it, rather than this function inventing one.
+    printf 'rpm\n'
+}
+
 rank_sources() {
     local have_rpm="$1" have_flatpak="$2" have_capsule="$3"
     [ "$have_rpm" = 1 ]     && printf 'rpm\n'
