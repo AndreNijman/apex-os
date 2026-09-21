@@ -127,6 +127,14 @@ failure   base        <- a later, unrelated stage
 skipped   image
 ```
 
+The run was `build-image.yml` with **`force_core=true`** — a full
+cache-bypassing rebuild — so the akmods layer genuinely executed rather than
+being served from cache. That detail is load-bearing: a green `core` job that
+cache-hit the akmods layer would prove nothing. `kernel-publish` recorded the
+same run on this card independently, with the built RPM paths for all three
+kmods and `14 out-of-tree modules signed`, and reached the same conclusion
+without coordination.
+
 So the akmods stage passed **with the defective shape still in place**, on
 GitHub's runner — a different machine, a different kernel source (the published
 image digest rather than `localhost/apex-kernel:local`), and nothing of this
