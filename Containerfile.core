@@ -804,10 +804,27 @@ RUN set -eux; \
 # firmware of every driver it installs. dracut's own `drm` module then swept in
 # nouveau, amdgpu, i915, xe and radeon with another ~138 MiB behind them.
 #
-# The replacement policy is one line to state: NO KMS DRIVER IS IN THE
-# INITRAMFS. Plymouth and the LUKS passphrase prompt run on `simpledrm`, which
-# binds the framebuffer UEFI's GOP already set up. That is not a hope — it is a
-# kernel contract, asserted in Containerfile.kernel:
+# The replacement policy is one line to state: NO FIRMWARE-BEARING KMS DRIVER
+# IS IN THE INITRAMFS. Plymouth and the LUKS passphrase prompt run on
+# `simpledrm`, which binds the framebuffer UEFI's GOP already set up. That is
+# not a hope — it is a kernel contract, asserted in Containerfile.kernel:
+#
+# SAY "FIRMWARE-BEARING" AND MEAN IT. An earlier draft of this comment claimed
+# NO KMS driver at all, and that is measurably false: `omit_drivers` below
+# names the big ones, and bochs, cirrus-qemu, virtio-gpu, vmwgfx and ast are
+# still in the initramfs. They are left there deliberately. The hazard is not
+# "a KMS driver" — it is a driver that calls
+# drm_aperture_remove_conflicting_pci_framebuffers(), evicting simpledrm, and
+# then cannot light the panel because its firmware was omitted with it. These
+# five need no firmware, and they are how a VM and a BMC-equipped server get a
+# display at all, so removing them would cost the lab its console and buy
+# nothing: together they are under a megabyte.
+#
+# It also matters for anyone testing this in a guest. On `-vga std` bochs binds
+# card0 and evicts simpledrm, so a QEMU boot WITHOUT
+# `rd.driver.blacklist=bochs` measures the old design and proves nothing about
+# this one. Measured both ways 2026-09-21 — see
+# ROADMAP/evidence/initramfs-slim-20260921.md.
 #
 #     CONFIG_DRM=y  CONFIG_DRM_SIMPLEDRM=y  CONFIG_SYSFB_SIMPLEFB=y
 #     CONFIG_DRM_FBDEV_EMULATION=y  CONFIG_FRAMEBUFFER_CONSOLE=y
