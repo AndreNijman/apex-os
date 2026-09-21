@@ -1,38 +1,72 @@
 ## LANDABLE
 
-**`0cc68901a204442cc65fc340b8eacfd2997765d3`** on `task/kernel-akmods`, pushed
-2026-09-21 17:26 AWST. Land it.
+**`b237b24728fa7d3d3ccb129b673b23189413a2fc`** on `task/kernel-akmods`, pushed
+2026-09-21 18:15 AWST. Land it as the second merge.
 
-**One-line reason:** it makes `core`'s akmods failure dump reachable instead of
-dead code under `set -e`, so the next red build prints the compiler error
-rather than one truncated status word — and it ships the checker plus a 28-case
-mutation harness that refuse the shape's return, proven red on the tree as
-inherited and green with the fix.
+**One line:** it adds `ROADMAP/evidence/kernel-akmods-20260921.md` and nothing
+else. The branch is `roadmap/v2.2`@`11c45d36` fast-forwarded plus that one
+docs commit, so the merge is trivial and cannot conflict.
 
-**What lands with it, so the orchestrator is not surprised:** this sha already
-carries `origin/roadmap/v2.2`@`b137f03f` and **`origin/task/kernel-publish`@
-`3d0925b8`** (merge `0cc68901`). Both branches added a pre-build gate to
-`.github/workflows/build-image.yml` at the same anchor and conflicted; resolved
-by keeping BOTH steps, kernel-publish's `check-kernel-image-pin.sh` first so
-its comment's "like the line above it" still refers to the
-Containerfile-assertions step as it did on its own branch. Neither side was
-taken wholesale. `pr-validation.yml` and `Containerfile.core` auto-merged —
-kernel-publish's Containerfile.core hunk is the kernel-image ARG pin at the
-top, mine is the akmods loop at the bottom. **If kernel-publish is landed
-separately first, this merge makes that a no-op, not a conflict.**
+The earlier sha `0cc68901` is already in `roadmap/v2.2` via merge `259d8976`.
 
-**Verified after the merge, not before:** `tests/test-run-recovery-reachable.sh`
-28 passed / 0 failed; `check-run-recovery-reachable` exit 0 on all five
-Containerfiles; kernel-publish's own `check-kernel-image-pin.sh` and
-`check-containerfile-assertions.sh` both still exit 0; both workflow YAMLs
-parse; `bash -n` clean on the rewritten RUN body.
+---
 
-**What landing this does NOT do — stated plainly:** it does not prove `core`
-builds. The unit stays OPEN. The root cause of the 10:46 death is still
-unsettled, because the reproducer PASSED (kmod-nvidia built in 96 s) and the
-real build died with no akmods status marker and no `Error: building at STEP`
-from podman. Landing this is what makes the next failure readable; it is not
-the answer itself. Nothing here can regress a build that is already red.
+## THE UNIT IS RESOLVED — `core` BUILDS
+
+`kernel-akmods-core`, 17:27:20 → 18:06:54 AWST (39 min 34 s), `EXIT_CODE=0`,
+`localhost/apex-os-core:latest` = `afe03dcdf173`, 14 out-of-tree modules signed
+by the APEX MOK. akmods built **kmod-nvidia 580.178.04**, **xone** and
+**xpadneo** against `7.2.6-cachyos1.apex1.fc43.x86_64`. The image blocker that
+stopped everything else on the roadmap reaching a machine is cleared.
+
+### The verdict is (b), and it is not a hedge
+
+**The fix did not cause this pass. It made the failure readable.** Only the
+second claim is proven, and the distinction is the whole point — "we changed
+something and it worked" is the reasoning this repo's gates exist to refuse.
+
+For this hunk the causal question is *decidable*, not merely open, and the
+answer is that the fix **cannot** have flipped the result:
+
+- The change is confined to the `akmods_rc != 0` branch. The akmods argv is
+  byte-identical before and after.
+- The green log carries `+ '[' 0 -ne 0 ']'` and no dump output — the guard was
+  evaluated and skipped. `FATAL: akmods` occurs exactly once in 6853 lines, on
+  line 1071, which is podman's *echo* of the RUN body at `STEP 19/69`, not an
+  execution of it.
+- So on the success path the change is two no-ops. A build that failed with the
+  old shape would have failed with the new one too — it would have *said why*.
+
+**akmods returned 0 here and never reported a status at 10:46, from identical
+inputs:** same kernel image `a889708fcfd2` (created 2026-09-20, before both
+runs, unchanged since), same `akmod-nvidia 3:580.178.04-1.fc43`, same
+`--isolation=chroot`, and the only `Containerfile.core` change inside that RUN
+across the 42 commits between the trees is this hunk. Identical inputs,
+opposite outcomes → **the 10:46 failure was not deterministic and not a
+property of the driver/kernel pair**, which round 38's reproducer had already
+shown independently. Most consistent with a transient environmental fault.
+
+### Absence #3 is NOT settled — stated, not quietly dropped
+
+The split-stream capture proves the *instrument* works: `core-build.err.log` is
+348 KB / 4859 lines of genuinely stderr-only output, and `build_core()` invokes
+a bare `sudo podman build` with no pipe, capture or per-stream redirect, so
+podman's `Error: building at STEP …` would have landed there. Round 38's worry
+that the missing line was a redirect is therefore disproven.
+
+But **a successful build has no such line to emit**, so its absence here
+carries no information. Whether a *failing* podman build in this configuration
+omits it **cannot be answered without reproducing the failure**. The instrument
+is in place to answer it the moment the stage goes red again.
+
+### What would distinguish the remaining theories
+
+Re-run tree `76aa2b95` with only this hunk cherry-picked — so a failure is
+readable — **while** reproducing the concurrency (a second privileged
+`--pid=host` container sharing `/var/lib/containers`, as `sdboot-migrate-2` ran
+at 10:31, with the red run's death 4 s after `apex-boot-windows --check`).
+Green under load falsifies the concurrency lead; red now prints the cause.
+Worth doing only if the stage fails again. It builds today.
 
 ---
 
@@ -367,19 +401,11 @@ Everything else can be re-derived from git; the next action cannot.
 
 ### NEXT
 
-- Read `/var/lab-scratch/kernel-akmods/core-build.log` for the akmods outcome (`journalctl --user -u kernel-akmods-core`; started 17:27, reaches akmods ~17:43) and record the verdict; if it failed, quote the compiler error the new dump printed.
+- Nothing blocking. If the akmods stage ever goes red again, read `core-build.err.log` (stderr only) for a podman `Error: building at STEP …` line and the new in-RUN dump for the compiler error — that pair settles absence #3 and the root cause in one run.
 
 ### IN PROGRESS
 
-- Real `core` build, unit **`kernel-akmods-core`**, started **17:27:20 AWST**
-  at HEAD `0cc68901`. Runner `/var/lab-scratch/kernel-akmods/run-core.sh`.
-  Streams are split on purpose: merged log `core-build.log`, **stderr only** in
-  `core-build.err.log`. That second file settles absence #3 beyond argument —
-  if podman emits `Error: building at STEP …` it lands there, and if it is
-  empty of one again the silence is proven rather than inferred from a grep
-  over a merged log. Wrapped in a `sleep:idle:handle-lid-switch` block
-  inhibitor (memory: "hypridle suspends after 15 min idle" is the real killer
-  of autonomous rounds). Ends with a literal `EXIT_CODE=` line in both files.
+- nothing — the build finished green and the evidence is written and pushed.
 
 ### BLOCKED ON
 
@@ -452,3 +478,55 @@ real `core` build either prints the compiler error (answer), or gets past
 akmods (in which case 10:46 was not akmods and item 5 becomes the lead), or
 dies silently again (in which case the silence itself is the defect, now with
 absence #3 established as real rather than a redirect). All three are verdicts.
+
+
+---
+
+### FROM kernel-publish — CI core run 35582968952 (2026-09-21 ~18:00 AWST)
+
+**The akmods/nvidia failure did NOT reproduce in CI. All three akmods built.**
+
+I was told to paste you the failing lines if `core` went red in your stage. It
+did not go red — which is a more useful data point, so here it is instead.
+
+Run [`35582968952`](https://github.com/AndreNijman/apex-os/actions/runs/35582968952),
+`build-image.yml` with `force_core=true` (full cache-bypassing rebuild), from
+`task/kernel-publish` @ `72bab38d`. The `core` job is **green end to end**,
+35 minutes, through verify/push/cosign.
+
+```
+=== akmods: building nvidia for 7.2.6-cachyos1.apex1.fc43.x86_64 ===
+built: /var/cache/akmods/nvidia/kmod-nvidia-7.2.6-cachyos1.apex1.fc43.x86_64-580.178.04-1.fc43.x86_64.rpm
+=== akmods: building xone for 7.2.6-cachyos1.apex1.fc43.x86_64 ===
+built: /var/cache/akmods/xone/kmod-xone-7.2.6-cachyos1.apex1.fc43.x86_64-1000.0.0.git.1442.85e53359-2.fc43.x86_64.rpm
+=== akmods: building xpadneo for 7.2.6-cachyos1.apex1.fc43.x86_64 ===
+built: /var/cache/akmods/xpadneo/kmod-xpadneo-7.2.6-cachyos1.apex1.fc43.x86_64-0.10.2-1.fc43.x86_64.rpm
+SECURE BOOT: kernel 7.2.6-cachyos1.apex1.fc43.x86_64 signed with the APEX MOK
+SECURE BOOT: 14 out-of-tree modules signed with the APEX MOK
+```
+
+**The part that matters for your unit: this run does NOT carry your fix.** It
+ran on `72bab38d`, which is my pin commit; your `027f6fe8` is on
+`task/kernel-akmods` and was never in this tree. So nvidia **580.178.04 against
+CachyOS 7.2.6 builds unaided on GitHub's `ubuntu-24.04` runner**.
+
+That makes `kernel-build-2`'s local failure
+(`/var/lab-scratch/kernel-build-2/core-build.log`, `Building and installing
+nvidia-kmod` EXIT=1) **environment-specific, not a property of the
+kernel/driver pair** — which is the opposite of what my card assumed all day and
+worth knowing before you harden against a defect CI cannot reproduce. Combined
+with your own reproducer passing this morning, that is two independent passes
+against one local failure.
+
+Your `027f6fe8` ("make the akmods failure dump reachable, and gate the shape")
+still looks worth having on its own merits — when an akmod DOES fail, the dump
+being unreachable is a real defect. This note is not an argument against it.
+It is an argument against treating the nvidia build itself as broken.
+
+Full log: `/var/lab-scratch/kernel-publish/r39/ci-core-job.clean.log` (7,856
+lines, ANSI-stripped). Note `gh api …/jobs/<id>/logs` returns BOM+CRLF and a
+plain `grep` over it silently finds nothing — use `grep -a`.
+
+Also, for your landing: you merged my `72bab38d`/`b505b747` correctly, thank
+you. I have since pushed `e58d39bc` and `76a04c49` (evidence only, new file,
+`ROADMAP/evidence/kernel-publish-20260921.md`). No conflict with you either way.

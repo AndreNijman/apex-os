@@ -1,4 +1,4 @@
-## LANDABLE — `e58d39bc`
+## LANDABLE — `76a04c49`
 
 The kernel digest is pinned and the gate is green both ways. Landing this
 unblocks every image build on the board; NOT landing it leaves `roadmap/v2.2`
@@ -16,8 +16,15 @@ line that killed run 35552604603 and every image build after it.
   step 8 "Resolve the kernel tier and prove it is reachable" success, step 9
   **"Build core" :: SUCCESS** (17:58 AWST, a full cache-bypassing rebuild).
   `core` did not merely get past `FROM ${APEX_KERNEL_IMAGE}` and the cross-tier
-  contract RUN — **the whole core image built.** For the first time in this
-  program, `core` builds in CI.
+  contract RUN — **the whole `core` job is green**, through verify, push and
+  cosign signing. For the first time in this program, `core` builds in CI.
+  Proven from the 7,856-line log, not from the tick: `resolved on attempt 1`;
+  `FROM ghcr.io/andrenijman/apex-os@sha256:2ff544dd… AS kernel-rpms`;
+  `btf_scx=usable`; `kernel image was built from this commit's kernel/kernel.pin`
+  (the `cmp` identity check — the digest is the RIGHT kernel for this tree, not
+  merely a reachable one); all four kernel packages installed from the copied
+  files. Secure Boot intact: kernel + 14 out-of-tree modules signed with the
+  APEX MOK. `76a04c49` puts all of this in the evidence file.
 - Three commits: `72bab38d` is the pin itself; `b505b747` closes a seam the
   mutants found (the gate stripped quotes, `build-image.yml`'s resolve regex
   does not — a quoted pin passed the gate and would have died in CI blaming the
@@ -398,22 +405,17 @@ Working log, newest at the bottom.
 `72bab38d`; a second `force_core=true` would queue behind it in the
 `apex-image-publish` concurrency group and cost another 45 minutes for nothing.
 
-One line: **`gh run view 35582968952 --json status,conclusion,jobs`.** Then:
+**THIS UNIT IS FINISHED.** Everything it owes is committed, pushed and proven:
+the pin, the gate green both ways, the CI core build green, the evidence file.
+`task/kernel-publish` @ `76a04c49` is landable and the tree is clean.
 
-1. Record the conclusion in the RUN IDS table at the top of this card.
-2. `gh run view 35582968952 --log` (logs are NOT retrievable mid-run — tried the
-   job-logs API at 17:30, empty) and confirm the two things this unit asserts:
-   the kernel RPMs were installed from `/tmp/apex-kernel-rpms`, and the
-   `test "${BTF}" = usable` cross-tier contract RUN passed. Save to
-   `/var/lab-scratch/kernel-publish/r39/`.
-3. If the failure is in akmods/nvidia, that is EXPECTED and is not this unit's:
-   paste the exact failing lines into `agents/kernel-akmods.md` under a heading
-   `### FROM kernel-publish — CI core run 35582968952`, and stop there.
-4. Replace the "core is still building" paragraph in
-   `ROADMAP/evidence/kernel-publish-20260921.md` with the result, commit
-   `docs(evidence):`, push, and move the LANDABLE sha at the top of this card.
+The only thing left is the orchestrator's: **merge `76a04c49` onto
+`roadmap/v2.2`.** Nothing else on this roadmap reaches a machine until that
+merge happens, and it is now a proven-green merge rather than a hopeful one.
 
-The branch is landable NOW at `e58d39bc` regardless of how that run ends.
+If you are a fresh agent and the merge has already happened, there is nothing
+here for you — go pick up another unit. Do NOT re-dispatch build-image.yml;
+35582968952 already answered the question.
 
 ### GATE PROOF — ROUND 39, re-run against the PINNED tree
 
