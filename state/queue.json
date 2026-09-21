@@ -1,6 +1,6 @@
 {
  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
- "updated": "2026-09-22T06:40+0800",
+ "updated": "2026-09-22T07:10+0800",
  "concurrency_ceiling": 6,
  "units": [
   {
@@ -685,13 +685,35 @@
    "after": [],
    "conflicts": [],
    "note": "pr-validation.yml's `changes` job classifies a push against github.event.before but a pull_request against main, so roadmap/v2.2 can be green on every push and red at the merge. workflow_dispatch already classifies against the merge base -- the precedent is in the same file. Told to re-run the full matrix and REPORT further hidden reds without fixing them. Dispatched round 40.",
-   "dispatched": "2026-09-22 round 40"
+   "dispatched": "2026-09-22 round 40",
+   "closed": "CLOSED 2026-09-22 (round 40) -- landed as merge e73ec8bf, with a gate that executes the workflow step's own run: block so it cannot drift. Four further reds are named as their own units below and were deliberately not fixed."
   },
   {
    "id": "shell-a11y-markup",
    "after": [],
    "conflicts": [],
    "note": "SEEDED NOT DISPATCHED round 40, offered to the peer session. The a11y bridge now works and the shell publishes frames, but EVERY FRAME IS EMPTY -- no name, no description, no Action interface. apex-shell (QML) work, not apex-os. This is what P2-003 actually needs now.",
+   "seeded": "2026-09-22 round 40"
+  },
+  {
+   "id": "luks-suite-ci",
+   "after": [],
+   "conflicts": [],
+   "note": "installer/test-installer-luks.sh is 24/7 and HAS NEVER PASSED IN CI. Three independent causes, and the worst is that six --check-passphrase assertions fail INCLUDING THE MUTANT CONTROL -- the suite cannot tell a broken guard from a missing localhost/apex-os:daily image. Gate-that-inspects-nothing family. 6fa9ddbc uncovered it and did not cause it. SEEDED NOT DISPATCHED round 40.",
+   "seeded": "2026-09-22 round 40"
+  },
+  {
+   "id": "installer-job-cancelled-guard",
+   "after": [],
+   "conflicts": [],
+   "note": "The installer job's steps carry no `if: ${{ !cancelled() }}`, so its accessibility audit has been silently SKIPPED SINCE 2026-09-13. SEEDED NOT DISPATCHED round 40.",
+   "seeded": "2026-09-22 round 40"
+  },
+  {
+   "id": "mux-layouts-flake",
+   "after": [],
+   "conflicts": [],
+   "note": "44/3 and the only red left in Package engine. Pairs with secret-broker-sigkill: both need a STATED FLAKE POLICY, since secret-broker came back 93/0 in the matrix run and that is a 2-in-8 flake being green, not a fix. SEEDED NOT DISPATCHED round 40.",
    "seeded": "2026-09-22 round 40"
   }
  ],
