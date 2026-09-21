@@ -292,11 +292,20 @@ partuuid_of() {   # $1 = /dev/sdXN
 # This exists to be HONEST about a machine with more than one, and the ordering
 # is not a preference this script gets to have.
 #
-# bootc discovers the ESP on its own — `cmd_stage`'s argv passes no ESP at all
-# — so any rule here that differs from bootc's is fiction: precheck would
-# measure partition A and the install would write partition B. Read out of
-# bootc's source rather than guessed (crates/blockdev/src/blockdev.rs, the copy
-# `sdboot-xbootldr` checked across five revisions):
+# APEX owns its ESP and never writes Windows' (docs/apex-owns-its-esp.md). That
+# decision is about WHICH partition may be written. This function answers a
+# different question — which one bootc WILL write — and on this path that is not
+# APEX's to choose: `cmd_stage` runs `bootc install to-existing-root`, whose
+# --help takes only [ROOT_PATH]. No ESP argument, no --boot-mount-spec. The
+# caller cannot point it anywhere. So precheck's job is to find out what bootc
+# has already decided and refuse when that collides with the ownership rule.
+# A rule here that differed from bootc's would only mean precheck measured
+# partition A while the install wrote partition B.
+#
+# Read out of bootc's source rather than guessed, at the exact version this
+# machine runs — `bootc --version` is 1.16.10 and sdboot-xbootldr's bootc-src is
+# 3e76c16 / v1.16.10; v1.16.11 is identical in every respect below
+# (crates/blockdev/src/blockdev.rs):
 #
 #   find_first_colocated_esp()  ->  find_colocated_esps()?.remove(0)
 #   find_colocated_esps()       ->  for root in find_all_roots():
@@ -305,9 +314,17 @@ partuuid_of() {   # $1 = /dev/sdXN
 #
 # `.find()` takes the FIRST matching child and `.remove(0)` takes the FIRST
 # disk's ESP. So: first ESP-typed partition, in partition order, on the first
-# backing disk that has one. Not the biggest, not the one being booted. If the
-# first one is too small, bootc will not reach for a later one, and neither may
-# the refusal — it says so instead.
+# backing disk that has one. Not the biggest, not the one being booted — and
+# not the one the caller mounted either: crates/lib/src/bootc_composefs/boot.rs
+# reaches the ESP at four call sites and all four are
+# `find_first_colocated_esp()`. `boot_mount_spec()` appears in that file only
+# to build a `systemd.mount-extra=…:/boot` karg; it does not steer the loader
+# write. Both `BootSetupType::Upgrade` arms call the same function again, so
+# every later `bootc upgrade` re-walks the GPT — there is no pointer to pin,
+# and ESP preference on this path can only be expressed as partition ORDER.
+#
+# If the first one is too small, bootc will not reach for a later one, and
+# neither may the refusal — it says so instead.
 esp_candidates() {   # one "/dev/NAME PARTUUID SIZE_BYTES" per line, bootc order
     local disk part t uuid size found=1
     disk="$(root_disk)" || return 1
@@ -591,8 +608,48 @@ cmd_precheck() {
         chosen="$(find_esp 2>/dev/null)" || chosen=""
         chosen_uuid="$(partuuid_of "$chosen" 2>/dev/null)"
         ncand="$(esp_candidates 2>/dev/null | wc -l)"
+        # APEX_MIGRATE_ESP moves where this MEASURES and nothing else. It does
+        # not steer the write: cmd_stage still calls find_esp() for the FAT
+        # volume id, and bootc self-discovers regardless. Saying "overridden"
+        # here claimed a steering that does not exist.
         verdict OK "esp-choice" \
-            "writing PARTUUID ${chosen_uuid:-unknown}${ESP_OVERRIDE:+ (overridden)} of ${ncand:-0} ESP(s) on the root's disk"
+            "bootc will write PARTUUID ${chosen_uuid:-unknown} of ${ncand:-0} ESP(s) on the root's disk${ESP_OVERRIDE:+; APEX_MIGRATE_ESP moved this measurement only}"
+
+        # ── may APEX write that ESP at all? ──────────────────────────────
+        #
+        # docs/apex-owns-its-esp.md: APEX owns its own ESP, and Windows' ESP is
+        # read for facts and NEVER written — not "preferably not", and no flag
+        # makes it writable. So the first question about the chosen ESP is not
+        # how big it is. It is whose it is.
+        #
+        # A REFUSAL, not a note, and it passes the test that killed the
+        # BitLocker refusal: it is CLEARABLE. The remedy — an ESP of APEX's own,
+        # earlier in this disk's partition order — is work APEX does, not an
+        # instruction the user could never satisfy. Detection does not become a
+        # permanent sentence.
+        #
+        # It is also not a one-off risk. Both `BootSetupType::Upgrade` arms in
+        # bootc's composefs writer call find_first_colocated_esp() afresh, so a
+        # machine waved through here would write Windows' ESP on every later
+        # `bootc upgrade`, not once at migration time.
+        if windows_loader_on_esp; then
+            refuse "esp-is-windows" \
+                "The ESP this migration would write is Windows' own boot partition." \
+                "It carries EFI/Microsoft/Boot/bootmgfw.efi, and APEX does not write" \
+                "Windows' ESP — docs/apex-owns-its-esp.md. A Windows feature update" \
+                "that grew EFI/Microsoft would reclaim whatever space APEX had" \
+                "squeezed in, and a machine that worked yesterday would fail its" \
+                "next update." \
+                "This is not a size problem, and a bigger ESP does not fix it." \
+                "bootc writes the FIRST ESP-typed partition in partition order on" \
+                "the disk holding the root filesystem, and there is no flag on" \
+                "'install to-existing-root' that overrides it — so this machine" \
+                "needs an ESP of its OWN, earlier in that order, before it can" \
+                "migrate. That partition is APEX's to create; it is not something" \
+                "to do by hand." \
+                "Until then this machine keeps booting the way it does now, and" \
+                "Windows' boot files are not touched."
+        fi
     else
         # Deliberately not softened into "we will use the other disk's ESP".
         # bootc only ever searches find_all_roots() — the disks backing the
@@ -749,23 +806,26 @@ cmd_precheck() {
             [ -n "$bldisk" ] && [ "$bldisk" = "$espdisk" ] && sameddisk=1
         done
         if [ "$shared" = 1 ]; then
+            # Reachable only under --explain, which evaluates every check
+            # instead of stopping at the first refusal: plain `precheck` has
+            # already refused `esp-is-windows` before reaching here, because
+            # `shared` is the same condition. Kept so the decision table shows
+            # BOTH reasons rather than leaving BitLocker unmentioned on the one
+            # machine shape where it matters most.
             verdict NOTE "bitlocker-shared-esp" \
-                "BitLocker present and Windows boots from the ESP being written: ${bl% }"
-            log "note: this machine has BitLocker-protected volumes (${bl% })"
-            log "      AND Windows boots from the same ESP this migration writes."
-            log "      The migration itself does not change Windows' boot path: it"
-            log "      writes nothing under EFI/Microsoft, it does not touch Windows'"
-            log "      own firmware entry, and the one file it replaces on this ESP"
-            log "      (EFI/BOOT/BOOTX64.EFI) is saved and put back byte for byte."
-            log "      What DOES change PCR 4 and PCR 7 — and makes Windows ask for"
-            log "      the 48-digit recovery key — is reaching Windows through a"
-            log "      different loader. After migrating, boot Windows with the"
-            log "      power menu's 'Boot into Windows' button (apex-boot-windows),"
-            log "      which arms Windows' OWN firmware entry for one boot, and not"
-            log "      through any Windows entry that appears in a boot menu."
-            log "      Suspending BitLocker protection from Windows once, before"
-            log "      the first Windows boot after migrating, removes the risk"
-            log "      entirely. Have the recovery key to hand either way."
+                "BitLocker present, and the ESP bootc would write is Windows' own — see esp-is-windows: ${bl% }"
+            log "note: this machine has BitLocker-protected volumes (${bl% }) AND"
+            log "      the ESP bootc would write is Windows' own. The migration is"
+            log "      refused for that second reason (esp-is-windows), so nothing"
+            log "      here warns about something that is about to happen."
+            log "      It matters for the FIX. Once APEX has an ESP of its own,"
+            log "      systemd-boot sits on a partition with no bootmgfw.efi to"
+            log "      auto-detect, so it cannot offer Windows in its menu — and"
+            log "      reaching Windows through another loader is exactly what"
+            log "      changes PCR 4 and PCR 7 and asks for the 48-digit key."
+            log "      Boot Windows with the power menu's 'Boot into Windows'"
+            log "      button (apex-boot-windows), which arms Windows' OWN firmware"
+            log "      entry for one boot. Have the recovery key to hand."
         elif [ "$sameddisk" = 1 ]; then
             verdict NOTE "bitlocker-same-disk" \
                 "BitLocker volume on the disk being written, separate ESP: ${bl% }"
