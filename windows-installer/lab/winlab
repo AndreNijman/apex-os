@@ -372,7 +372,9 @@ size=17GiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=\"APEX-TARGET-B\"
 # ── winlab run ───────────────────────────────────────────────────────────────
 #  Boot the golden image with a job on the transport disk. The golden itself is
 #  never written to: the guest runs on a qcow2 overlay and a copy of the
-#  firmware variables, so a run that corrupts Windows costs one `rm`.
+#  firmware variables, so a run that corrupts Windows costs one `rm`. The two
+#  target-disk fixtures now get the same treatment, and for longer — see the
+#  comment at the overlay creation below for why that used to not be true.
 cmd_run() {
     local rundir="${1:-}" swap=no
     [ -n "$rundir" ] || die "usage: winlab run DIR [--swap]"
@@ -381,6 +383,7 @@ cmd_run() {
     [ -f "$rundir/run.ps1" ] || die "$rundir/run.ps1 is missing"
     need "$GOLDEN" golden
     need "$DIR/fixture-a.raw" fixtures
+    need "$DIR/fixture-b.raw" fixtures
     have_kvm || die "/dev/kvm is not usable"
 
     podman run --rm --device /dev/kvm \
@@ -394,6 +397,19 @@ cmd_run() {
         rm -f "$SYSDISK" "$VARS" /w/run-transport.raw
         qemu-img create -f qcow2 -b /w/golden.raw -F raw "$SYSDISK" >/dev/null
         cp /w/golden-VARS.fd "$VARS"
+
+        # Fixture disks are attached RAW, with no per-run overlay, unlike the
+        # system disk above. A run that writes anything to fixture-a.raw or
+        # fixture-b.raw directly would permanently mutate the fixture, and
+        # every later run would silently measure a different disk than it
+        # thinks it does. Give each fixture the same qcow2-over-raw treatment
+        # SYSDISK gets, fresh every run, and point the guest at the overlay,
+        # never at the fixture file itself. The overlays are deliberately NOT
+        # cleaned up at the end of this function: host-side verification (a
+        # `cmp` against what the guest just wrote) reads them after qemu exits.
+        rm -f /w/run-fixture-a.qcow2 /w/run-fixture-b.qcow2
+        qemu-img create -f qcow2 -b /w/fixture-a.raw -F raw /w/run-fixture-a.qcow2 >/dev/null
+        qemu-img create -f qcow2 -b /w/fixture-b.raw -F raw /w/run-fixture-b.qcow2 >/dev/null
 
         # The firmware baseline, taken from the varstore the guest is about to
         # boot — not from a note about what it should contain.
@@ -428,9 +444,9 @@ cmd_run() {
         QEMU_TIMEOUT=900 qemu_run disk \
             -drive "id=tr,file=/w/run-transport.raw,format=raw,if=none" \
             -device "ide-hd,drive=tr,bus=ahci.$trport,model=APEX-LAB-TRANSPORT,serial=TRN0000000001" \
-            -drive "id=fa,file=/w/fixture-a.raw,format=raw,if=none" \
+            -drive "id=fa,file=/w/run-fixture-a.qcow2,format=qcow2,if=none" \
             -device "ide-hd,drive=fa,bus=ahci.$faport,model=APEX-FIXTURE-A,serial=FIXA00000001" \
-            -drive "id=fb,file=/w/fixture-b.raw,format=raw,if=none" \
+            -drive "id=fb,file=/w/run-fixture-b.qcow2,format=qcow2,if=none" \
             -device "nvme,drive=fb,serial=FIXB00000002" || rc=$?
         echo "qemu exited rc=$rc"
 
