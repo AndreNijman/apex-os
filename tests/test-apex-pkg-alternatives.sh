@@ -78,8 +78,29 @@ cd "$(dirname "$0")/.." || exit 2
 ENGINE=files/system/libexec/apex-pkg
 [ -f "$ENGINE" ] || { echo "cannot find $ENGINE"; exit 2; }
 
+# ── the call site, asserted before anything else ────────────────────────────
+# Every leg below calls apply_alternatives directly, exactly as the multilib and
+# etc-label suites call extract_rpms and install_etc. That proves the pass
+# works and proves nothing about whether an `apex install` reaches it — delete
+# the one line in rebuild_extension and all fourteen assertions still pass. So
+# the order of the three calls in rebuild_extension is read out of the shipped
+# engine here, and this runs even on a machine with no podman, where everything
+# else abstains.
+callsite=$(grep -n -E '^\s+(extract_rpms|apply_alternatives|fix_caches) ' "$ENGINE" \
+           | sed -E 's/^[0-9]+:\s*([a-z_]+).*/\1/' | paste -sd, -)
+precall=0
+case "$callsite" in
+    *extract_rpms,apply_alternatives,fix_caches*) precall=1 ;;
+esac
+
 if ! command -v podman >/dev/null 2>&1; then
-    echo "SKIP  podman is absent; this suite needs a real dnf, a real repository and real rpm scriptlets"
+    if [ "$precall" = 1 ]; then
+        echo "PASS  rebuild_extension calls apply_alternatives between extract_rpms and fix_caches"
+    else
+        echo "FAIL  rebuild_extension does not call apply_alternatives between extract_rpms and fix_caches; the call order is '$callsite'"
+        exit 1
+    fi
+    echo "SKIP  podman is absent; the rest of this suite needs a real dnf, a real repository and real rpm scriptlets"
     exit 0
 fi
 
@@ -340,6 +361,8 @@ printf '      GREEN placeable=%s absent=%s  dangling-because-of-it=%s  dangling-
        "$(field GREEN_PLACEABLE)" "$grn_absent" "$grn_attrib" "$grn_dangling" "$grn_nonplaceable"
 printf '\n'
 
+[ "$precall" = 1 ] && ok "rebuild_extension calls apply_alternatives between extract_rpms and fix_caches — every other assertion here calls the pass directly, so without this one the call site could be deleted and the suite would stay green" \
+                    || bad "rebuild_extension does not call apply_alternatives between extract_rpms and fix_caches; the call order is '$callsite'"
 [ "$extract_rc" = 0 ] && ok "extract_rpms built a payload from the real package set" \
                       || bad "extract_rpms exited $extract_rc — nothing below means anything"
 [ "$apply_rc" = 0 ] && ok "apply_alternatives exited 0" || bad "apply_alternatives exited $apply_rc"

@@ -3349,6 +3349,66 @@ jobs:
               exit 1
           fi
 
+      # tests/test-apex-pkg-alternatives.sh — does a package that publishes its
+      # binaries through `alternatives` actually get them? Until 2026-09-22 it
+      # did not. The extension is built by extracting rpms with --noscripts, and
+      # such a package creates its binaries IN ITS SCRIPTLETS, so they were
+      # never created at all. On katana `apex install wine` left /usr/bin/wine
+      # and /usr/bin/wineserver absent and twelve /usr/bin entries — msidb,
+      # msiexec, notepad, regedit, regsvr32, wineboot, winecfg, wineconsole,
+      # winedbg, winefile, winemine, winepath — as dangling symlinks. The
+      # install reported success. `command -v` answered and `wine64 --version`
+      # printed a version; only running a program failed, which is why this
+      # needs a gate and not a smoke test.
+      #
+      # Wine is the example, not the bug: java, the iptables/nftables
+      # compatibility wrappers, `nc`, editors and compilers all publish this
+      # way, and nothing in the engine or in the suite names a package.
+      #
+      # The property is NOT "no dangling symlinks". gcc's extraction leaves
+      # eight, all links into subpackages the set did not carry, measured
+      # 2026-09-22 — a suite demanding zero could never be made green. What is
+      # asserted is that every link the set's scriptlets DECLARE and the engine
+      # is allowed to create exists and resolves, and the katana symptom is
+      # reproduced separately by attributing each dangling link to the missing
+      # target it leads to.
+      #
+      # The suite is red and green in one run and does not need a mutant to
+      # prove it: a payload on which the pass has not yet run IS what the old
+      # engine shipped. Measured on the L16 on 2026-09-22 — RED 33 declared
+      # links absent and 12 payload symlinks dangling on their account, GREEN
+      # 0, 0 and 0 — in 56 s including a 221 MB download and a 1.4 GB
+      # extraction. Same containment as the steps above: podman, repository
+      # mounted read-only, nothing installed on the runner, no sysext built.
+      #
+      # Three of the assertions exist purely so the other ones cannot pass over
+      # an empty population or a blind checker: the declarations must number at
+      # least ten and at least ten must be ones the engine may create (so
+      # "absent 0" cannot be reached by refusing everything), and a link the
+      # pass just created is broken by hand and the checker's count must move by
+      # exactly one.
+      - name: P0 pkg — every binary a package publishes through alternatives
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          command -v podman >/dev/null || { echo "::error::podman is not on this runner; the alternatives suite would SKIP and exit 0, and a could-not-run is not a pass"; exit 1; }
+          rc=0; out="$(./tests/test-apex-pkg-alternatives.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the alternatives suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^apex-pkg-alternatives: [0-9]+ passed, [0-9]+ failed$' || true)"
+          [ -n "$summary" ] || { echo "::error::the alternatives suite printed no summary line, which is what it does when podman is absent or no repository was reachable — it then exits 0, so this line is the only thing between that and a green tick"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary; the parse below would read the wrong one"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^apex-pkg-alternatives: //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed alternatives assertions failed"; exit 1; }
+          [ "$passed" -ge 15 ] || { echo "::error::only $passed alternatives assertions ran; 15 is what the L16 measured on 2026-09-22, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+              echo "::error::the alternatives suite printed a SKIP; that means podman, the repository, util-linux or rpm-build was unavailable, and the assertions it guards did not run"
+              exit 1
+          fi
+
       # tests/test-apex-pkg-update.sh — does a fix baked into an image ever
       # reach a machine that is already running one? On 2026-09-19 it did not.
       # katana was rebased onto the image carrying pkg-share, rebooted, and
