@@ -12,10 +12,12 @@ line that killed run 35552604603 and every image build after it.
   one that initially got through) — see GATE PROOF ROUND 39 below.
 - Merged up to `origin/roadmap/v2.2` @ `b137f03f`, clean. `check-no-conflict-markers.sh`,
   `check-containerfile-assertions.sh` and `check-kernel-pin.sh` all exit 0.
-- Do NOT wait for CI run 35582968952 to finish. It is expected to go red LATER,
-  in the akmods/nvidia stage, which belongs to `kernel-akmods`. This unit's
-  assertion is that `core` gets PAST `FROM ${APEX_KERNEL_IMAGE}` and the
-  cross-tier contract RUN.
+- **THE ASSERTION IS MET, and then some.** CI run 35582968952's `core` job:
+  step 8 "Resolve the kernel tier and prove it is reachable" success, step 9
+  **"Build core" :: SUCCESS** (17:58 AWST, a full cache-bypassing rebuild).
+  `core` did not merely get past `FROM ${APEX_KERNEL_IMAGE}` and the cross-tier
+  contract RUN — **the whole core image built.** For the first time in this
+  program, `core` builds in CI.
 - Three commits: `72bab38d` is the pin itself; `b505b747` closes a seam the
   mutants found (the gate stripped quotes, `build-image.yml`'s resolve regex
   does not — a quoted pin passed the gate and would have died in CI blaming the
@@ -51,7 +53,7 @@ branch: task/kernel-publish, cut from roadmap/v2.2 @ 4031d43f
 | what | run id | ref | result |
 |---|---|---|---|
 | kernel-build.yml, first run with publish | **35557283953** | task/kernel-publish | **GREEN.** Published `sha256:2ff544dd…`, tag `kernel-7.2.6-cachyos1.apex1.fc43.x86_64-544143e`. PINNED in `72bab38d`. |
-| build-image.yml, the proof core builds | **35582968952** | task/kernel-publish @ `72bab38d` | DISPATCHED 2026-09-21 17:23 AWST, `force_core=true`, in_progress. https://github.com/AndreNijman/apex-os/actions/runs/35582968952 |
+| build-image.yml, the proof core builds | **35582968952** | task/kernel-publish @ `72bab38d` | **`Build core` :: SUCCESS at 17:58 AWST** (35 min, `force_core=true`, cache-bypassing). `changes` success, `rust` success. Assertion MET. https://github.com/AndreNijman/apex-os/actions/runs/35582968952 |
 
 Earlier, for context (not mine):
 - `35552604603` roadmap/v2.2 — the failure this unit exists to fix.
