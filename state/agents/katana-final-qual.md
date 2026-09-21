@@ -130,12 +130,14 @@ machine. Say so; do not proxy them and grade them green.
 
 ## NEXT
 
-- Item 3 (P2-003, a11y tree): read `ROADMAP/state/agents/katana-image-qual.md`
-  for the greetd stop/restore dance and the dead-man restore timer, and
-  `/var/tmp/apex-work/qsprobe.sh` for the prior a11y walker. Then bring up a
-  session on katana's tty1, find the quickshell pid, walk the AT-SPI tree, and
-  restore greetd byte-identical (`cmp`) with the restore in a `trap restore
-  EXIT` PLUS a separate `trap "exit 130" INT TERM`. Verify by reading back.
+- Item 4 (P1-038): decide and execute. The 18 rows are listed in
+  `ROADMAP/state/agents/p1-038.md`. Most need a labwc USER session with
+  applications running, which means the greetd `initial_session` dance
+  (`/var/tmp/apex-work/scratch-katana-image-qual/greetd-set.sh` + the
+  `qual-greetd-restore` dead-man timer, both still on katana and documented in
+  `ROADMAP/state/agents/katana-image-qual.md`). Then write evidence section 4
+  and run `set-status.py` (PREPEND, never replace) for P1-043, P2-003, P2-005,
+  P2-006, P2-007, P1-038.
 
 ## DONE
 
@@ -180,6 +182,17 @@ machine. Say so; do not proxy them and grade them green.
   Paired` is 0 on katana and both devices read `Paired=no Bonded=no
   Trusted=yes` on the bus. `apex-devices` asks the Paired form and prints
   `none` — the tool is right and the card's starting sweep was not.
+- **`after.txt`/`measure.sh` graded a11y COULD-NOT-RUN on `pgrep -x quickshell`.
+  The process is named `qs`.** Second wrong-string in the same starting sweep.
+- **P2-003, new and bigger than the row asked:** on the shipped greeter the
+  a11y bus has ZERO applications, not one, because `org.a11y.Status.IsEnabled`
+  is false and Qt's bridge never registers. The one-node reading on record came
+  from a harness with a11y already on. Nothing in APEX turns the flag on except
+  a screen reader starting; there is no toggle, no cmdline, no
+  `QT_LINUX_ACCESSIBILITY_ALWAYS_ON` in the greeter environment.
+- Orca + speech-dispatcher + espeak-ng + python3-speechd + spd-say are all
+  installed and **pipewire is INACTIVE in the greetd session** — the first
+  thing to look at when somebody runs the greeter-audio row.
 - 26 of 73 IRQ affinity writes are refused EPERM on katana even as root
   (managed IRQs). Reported honestly by apexd (`irqs_refused: 26`), not a
   defect — recorded so the next reader does not chase it.

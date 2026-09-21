@@ -27,19 +27,16 @@ conclusion is WRONG — do not revive it.
 
 ## NEXT
 
-- WAIT for `systemctl --user is-active sdb3-install-a` to go inactive, then
-  `tail /var/lab-scratch/sdboot-migrate-3/install-a.log` for `install rc=0` AND
-  loop-mount `apexmig-a.img` p2 to confirm the ESP is NOT empty this time (see
-  FOUND — a complete GPT proved nothing). Then:
-  `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-migrate-3.sh
-   /var/tmp/apex-work/wt-sdboot-migrate-3/files/system/libexec/apex-boot-migrate`
-  and boot run A under `systemd-run --user` (never nohup) via
-  `/var/lab-scratch/sdboot-migrate-3/run-boot-a.sh`, which wraps:
-  `sudo -n /var/tmp/apex-work/wt-sdboot-migrate-3/tests/lab/nvram-guard --label apexmig-a --
-   podman run --rm --device /dev/kvm -v /var/lab-scratch/sdboot-migrate-2:/work
-   localhost/apex-bootlab -c '/work/boot-mig.sh /work/apexmig-a.img
-   /work/apexmig-a-3.serial 1800 --ctl /work/ctl.img'`
-  Expect `REFUSED [esp-too-small]`.
+- WAIT for `systemctl --user is-active sdb3-install-b` to go inactive, confirm
+  `install rc=0` in `/var/lab-scratch/sdboot-migrate-3/install-b.log`, and
+  loop-mount `apexmig-b.img` p1 to confirm the 2 GiB ESP is POPULATED (a
+  complete GPT proves nothing — see FOUND). Then run B, boot 1:
+  `cd /var/lab-scratch/sdboot-migrate-2 && ./setctl.sh act-prep-3.sh rsync-3`
+  then `systemd-run --user --unit=sdb3-boot-b1 --collect
+  /var/lab-scratch/sdboot-migrate-3/run-boot-b.sh` (copy run-boot-a.sh and swap
+  `apexmig-a.img`→`apexmig-b.img`, `apexmig-a-3.serial`→`apexmig-b-3.serial`;
+  keep `:z` on the volume and keep `--oci /work/oci-dummy-3.img`, BOTH are
+  required — see FOUND).
 
 ### Guest bookkeeping — the persistent-NVRAM rig makes boot ORDER matter
 
@@ -48,12 +45,44 @@ conclusion is WRONG — do not revive it.
 
 | guest | boot | action on ctl.img | done? |
 | --- | --- | --- | --- |
-| apexmig-a (512 MiB ESP) | 1 | `act-migrate-3.sh` | RUNNING |
-| apexmig-b (2 GiB ESP) | 1 | `act-prep-3.sh` | disk not built |
-| apexmig-b | 2 | `act-unit-3.sh` | — |
-| apexmig-b | 3 | `act-check-3.sh` (the migrated boot) | — |
+| apexmig-a (512 MiB ESP) | 1 | none (ctl on vdb, see FOUND) | wasted |
+| apexmig-a (512 MiB ESP) | 2 | `act-migrate-3.sh` | **DONE — refused** |
+| apexmig-b (2 GiB ESP) | 1 | `act-prep-3.sh` + `rsync-3` | install running |
+| apexmig-b | 2 | `act-unit-3.sh` + engine + confirm.service | — |
+| apexmig-b | 3 | `act-check-3.sh` (the MIGRATED boot) | — |
+
+Every boot: `./setctl.sh <action> <extra files…>` first, and the qemu launch
+needs **both** `-v …:/work:z` and `--oci /work/oci-dummy-3.img`.
+
+Evidence file: `ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md`, NOT the
+`sdboot-migrate-2-20260921-lab.md` the inherited card names — that name was a
+dead unit's plan for a run that never happened, and this is unit 3 measuring on
+09-22.
 
 ## DONE
+
+- **RUN A IS MEASURED AND IT REFUSED.** Serial log
+  `/var/lab-scratch/sdboot-migrate-2/apexmig-a-3.serial`, guest boot 2, real
+  APEX image on btrfs, GRUB 2.12, `store=ostreeContainer` — the L16's shape.
+  `precheck --explain` verdict table, verbatim:
+
+      OK      uefi              booted through UEFI
+      OK      on-ostree         booted store is ostreeContainer …
+      OK      no-staged-update  no ostree deployment is staged for the next boot
+      REFUSE  no-rsync          rsync is not in this image …
+      OK      bootc-new-enough  install to-existing-root has --composefs-backend
+      OK      secure-boot       Secure Boot is not enforcing …
+      OK      root-space        30 GiB free, 24 GiB needed
+      OK      esp-choice        bootc will write PARTUUID 77223857-… of 1 ESP(s)
+      REFUSE  esp-too-small     The ESP has 503 MiB free, needs 1173 MiB,
+                                short by 669 MiB.
+
+  `precheck` rc=10, `auto` rc=10, phase stayed `not started`, `/var/lib/apex/
+  boot-migrate` was never created, BootOrder and every Boot#### byte unchanged,
+  `/sysroot/boot` intact. nvram-guard: `verified — boot variables identical`.
+  The root-space check that `task/sdboot-migrate-2` landed also fired for real
+  for the first time here and passed correctly (repo measured at 12,701,900 KiB
+  → 24 GiB needed, 30 GiB free).
 
 - Orientation. Worktree `/var/tmp/apex-work/wt-sdboot-migrate-3` created on
   branch `task/sdboot-migrate-3` from `origin/roadmap/v2.2` @ `f3b1b3d4`.
@@ -157,6 +186,18 @@ conclusion is WRONG — do not revive it.
   the recipe was incomplete. Fix: `-v …:/work:z`. Measured on this machine,
   `getenforce` = Enforcing. Anyone copying that recipe into a fresh scratch
   directory hits this immediately.
+- **`boot-mig.sh --ctl` alone puts the control disk on `vdb`, and `lab-run.sh`
+  looks for it on `vdc`.** A third rig defect, measured on the first real boot
+  of this program's run A: `LAB-CTL: FAILED to mount /dev/vdc` / `LAB-OCI:
+  mounted` / `LAB-ACTION: none on the control disk`, on a boot that otherwise
+  worked perfectly. `boot-mig.sh` appends the OCI drive as `hd1` and the CTL
+  drive as `hd2`, so `vdc` is only correct when BOTH are passed; the image's
+  baked `lab-run.sh` hardcodes `/dev/vdc` for ctl and `/dev/vdb` for oci. Every
+  predecessor run passed an OCI disk, so the coupling was never visible. It
+  fails **silently and successfully** — the guest boots, powers off, exits 0,
+  and the serial log says the experiment simply had nothing to do. Worked
+  around with a 4 MiB `oci-dummy-3.img` in the `--oci` slot rather than by
+  editing the baked driver.
 - `lab-run.service` in `localhost/apex-sdmig:v1` bakes `TimeoutStartSec=900`,
   set by the predecessor against a 2 GB fedora-bootc guest. Run B's migration
   copies an 11.5 GB image into podman storage and then writes a third copy into

@@ -8,16 +8,19 @@ lab: /var/lab-scratch/initramfs-slim-2
 
 Dispatched round 40, 2026-09-22 ~03:30 AWST, by the autoresume orchestrator.
 
+## LANDABLE — `ba9a417a` (more coming; see NEXT)
+
+Three commits, all pushed to `origin/task/initramfs-slim-2`. Evidence file plus
+the correction of two claims the first real build disproved. Nothing in the
+branch changes a build step — it is documentation and measurement only, so the
+landing risk is nil.
+
 ## NEXT
 
-- Fix the two stale claims in `Containerfile.apex` lines 225-239 — the
-  "375.2 MiB to 114.6 MiB" figure (lab kernel 7.2.5; the shipped build is
-  100.9 MiB on 7.2.6-apex1) and the sentence "unchanged theme + unchanged
-  kernel yield a byte-identical initramfs and the layer digest stops moving"
-  (the initramfs half is true, the layer half is measured false). Then add the
-  ~275 MiB-per-update figure to `docs/update-cost.md` near the tier table at
-  line 55, run `tests/test-apex-initramfs-budget.sh` and the containerfile
-  checkers, commit, push, mark LANDABLE.
+- Add section 7 to `ROADMAP/evidence/initramfs-slim2-20260922.md` recording the
+  katana precheck below, update `docs/boot-v2.md`'s `esp-too-small` row and
+  `ROADMAP/evidence/migrate-preconditions-20260921.md` §5 (both still say the
+  512 MiB ESP is the blocker), commit, push, re-mark LANDABLE with the new sha.
 
 ## DONE
 
@@ -83,6 +86,37 @@ the only one genuinely open, and only its cross-BUILD half — round 39 measured
 run-to-run in one chroot and lab-vs-image faithfulness, and said in the
 evidence file, correctly, "what this does not prove: cross-host
 bit-reproducibility".
+
+### **katana can migrate. It is the first APEX machine that can.**
+
+`sudo apex-boot-migrate precheck --explain` on katana, booted on the slim
+image — the verb documents itself as writing nothing and mounting the ESP `ro`,
+and `status` was read first:
+
+```
+OK      esp-choice   bootc will write PARTUUID 99af3362-… of 1 ESP(s) on the root's disk
+OK      esp-space    503 MiB free, 350 MiB needed
+NOTE    esp-changes-disk  boots from PARTUUID 2ba9a2ea-…, will write 99af3362-…
+This machine can migrate.                                               rc=0
+```
+
+Every check OK. Before this image the same machine refused **`esp-too-small`,
+503 MiB free against 1173 MiB needed**. The initramfs work is the only change
+between those two runs. The engine's own arithmetic says **350 MiB**, which
+matches the build log's `3 x 100.9 + 48` to the rounding.
+
+**Three other units' open items fall out of that one command:**
+
+* `sdboot-xbootldr` NEXT #6 — *"the cross-disk note … has never fired in a
+  guest"*. It has now fired on **real hardware**: `NOTE esp-changes-disk`,
+  BootCurrent's PARTUUID `2ba9a2ea…` (the Windows disk) against the ESP it will
+  write, `99af3362…` (APEX's own). `esp-choice` picks the root's disk exactly as
+  that unit's source reading predicted.
+* `sdboot-xbootldr` NEXT #3 — *"apex-os:daily ships no rsync, the FIRST refusal
+  a real machine gets"*. `OK tools: mkfs.vfat, rsync and podman are all in this
+  image`. Fixed by this build, as predicted.
+* `migrate-preconditions` — katana's 154 MiB per-deployment ceiling is met with
+  53 MiB to spare (100.9), and its `esp-too-small` line is now stale.
 
 ### ITEM 5 — the answer, measured
 

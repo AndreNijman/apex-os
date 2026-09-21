@@ -31,18 +31,30 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
 
 ## IN PROGRESS
 
-- Worktree reset to `f3b1b3d4` (current origin/roadmap/v2.2). Nothing committed.
-- secret-broker: diagnosed only as far as "the sandbox came up and the script
-  stalled after its first line". Nothing written.
+- Branch `task/ci-green-input` is at `cd3c06b6`, pushed, one commit ahead of
+  `f3b1b3d4`.
+- secret-broker + mux-layouts: flake mechanism not yet named. Nothing written
+  for either.
 
 ## FOUND
 
-- **The brief's table is stale, confirmed against run 35625128495.**
-  `mux-layouts` is **47 passed / 0 failed / 0 skipped in CI** now — the workflow
-  installs zellij 0.45.1 explicitly (log line 3487-3498) and all three
-  previously-red zellij assertions pass. That half of the unit is already done
-  by someone else; do not touch it.
-- **The two live reds are `apex-input` (93/7/8) and `secret-broker` (83/1).**
+- **CORRECTED — an earlier version of this card said mux-layouts was fixed.
+  IT IS NOT. It is a FLAKE, and so is secret-broker.** Measured over the eight
+  most recent `roadmap/v2.2` runs whose `Package engine` job actually ran:
+
+  | suite | red runs |
+  | --- | --- |
+  | `apex-input` | **8 / 8** (a real regression — fixed, see DONE) |
+  | `mux-layouts` | **4 / 8** (44 passed/3 failed vs 47/0) |
+  | `secret-broker` | **2 / 8** (83 passed/1 failed vs 93/0) |
+
+- **Proof they are flakes and not regressions, checked rather than assumed:**
+  across `1156daa4 69253336 4e7aa3fa 11c45d36 10b2f449 9eef37a2 89036ec7
+  44c9a5cb e02561fb` — reds and greens interleaved — `tests/test-secret-broker.sh`
+  is blob `8668547a35` at EVERY one, `apexd/` is tree `fd247b5193` at every one,
+  `tests/test-mux-layouts.sh` is `d8658e648e` and `files/system/libexec/apex-mux`
+  is `afe43acead` at every one. Identical bytes, different outcomes. There is
+  nothing to bisect. (Use `bash -c` for `git rev-parse ref:path` — zsh eats it.)
 - **apex-input's single cause is named in the CI log, line 410:**
   `/tmp/tmp.XXXX/niri-include-block.sh: line 30: NIRI_BIN: unbound variable`
   The suite extracts the provisioner's niri-include block into a standalone
@@ -81,6 +93,16 @@ Dispatched round 39; re-dispatched round 40, 2026-09-22.
   (`--- can the session read the credential file directly? ---`). So the
   sandbox came up and the script stalled after line 1, or the transcript
   stopped updating. The 25 s is exactly the poll budget (100 x 0.25 s).
+- **The two red secret-broker runs are byte-identical in shape** (35616795800
+  at 15:15:20->15:15:46, and 35625128495 at 16:29:07->16:29:32): exactly ONE
+  transcript line, the full 25 s, zero further progress. That is a STALL, not
+  slowness — a longer ceiling alone will not fix it.
+- Not a transcript-buffering artefact: `Session::write_log` in
+  `apexd/apex-agentd/src/registry.rs` holds `log: Option<File>` (unbuffered)
+  and `write_all`s straight to the fd. The 58 bytes on disk are the 58 bytes
+  `absorb()` was given.
+- **Does not reproduce on the L16**: `93 passed, 0 failed` run alone, and again
+  under `CPUQuota=20%`. CPU starvation is not the mechanism.
 - **Finding in its own right:** that gate conflates "never started" with
   "started and stalled at line N", and prints a diagnosis that was false on the
   very run it fired on. It should say where the transcript stopped.
