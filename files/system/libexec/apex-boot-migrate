@@ -232,13 +232,21 @@ partuuid_of() {   # $1 = /dev/sdXN
 esp_mounted_at=""      # set by with_esp
 esp_we_mounted=0
 
-with_esp() {   # mount the ESP read-write somewhere private; idempotent
+# $1 = "ro" or "rw" (default). The mode is not decoration: `precheck` documents
+# itself as writing nothing, and a bare `mount` of a FAT volume is read-write,
+# which sets the dirty bit on the ESP this machine boots from. A precheck that
+# is killed between the mount and the umount then leaves the host's ESP mounted
+# writable with the dirty flag set, and the next firmware or fsck sees a volume
+# that was not cleanly unmounted. Nothing in precheck needs to write, so
+# precheck asks for ro and the promise in its own usage line becomes true.
+with_esp() {   # mount the ESP somewhere private; idempotent
+    local mode="${1:-rw}"
     if [ -n "$ESP_OVERRIDE" ]; then esp_mounted_at="$ESP_OVERRIDE"; return 0; fi
     local dev; dev="$(find_esp)" || return 1
     local here; here="$(findmnt -n -o TARGET -S "$dev" 2>/dev/null | head -1)"
     if [ -n "$here" ]; then esp_mounted_at="$here"; return 0; fi
     mkdir -p /run/apex-boot-migrate/esp || return 1
-    mount "$dev" /run/apex-boot-migrate/esp || return 1
+    mount -o "$mode" "$dev" /run/apex-boot-migrate/esp || return 1
     esp_mounted_at=/run/apex-boot-migrate/esp
     esp_we_mounted=1
 }
@@ -249,6 +257,14 @@ release_esp() {
     umount /run/apex-boot-migrate/esp 2>/dev/null
     esp_we_mounted=0
 }
+
+# Every exit path, not just the ones somebody remembered. `refuse` is `exit 10`
+# and several refusals fire AFTER with_esp with no release in between — the
+# `no-kernel` one always did — so without this the host's ESP stays mounted
+# under /run after a refusal. release_esp is idempotent and only acts on a
+# mount this process made, so it can never unmount an ESP somebody else had
+# already mounted.
+trap release_esp EXIT
 
 booted_store() {
     # The test hook is here and not around the call sites: the phase logic in
@@ -417,7 +433,7 @@ cmd_precheck() {
             "migrates the boot path'."
     fi
 
-    with_esp || refuse "no-esp" \
+    with_esp ro || refuse "no-esp" \
         "No EFI System Partition was found on the disk holding the root filesystem."
 
     # Space. Two deployments plus the staged third is what a steady-state
