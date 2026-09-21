@@ -42,7 +42,7 @@ conclusion is WRONG — do not revive it.
 - Then append run B sections 4 and 5 to
   `ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md` (sections 0-3 are
   committed), commit, push, mark `## LANDABLE <sha>`.
-- If the session dies here: `task/sdboot-migrate-3` is pushed at `b5e8ddcb` and
+- If the session dies here: `task/sdboot-migrate-3` is pushed at `01234028` and
   is already worth landing on its own — two evidence commits and one real fix
   with tests. Only the item-3 splice and run B's last two sections are missing.
   The spliced engine is backed up at
@@ -98,7 +98,14 @@ dead unit's plan for a run that never happened, and this is unit 3 measuring on
     and the ENOSPC defect, **plus** the one-comment correction to
     `ESP_SLACK_MIB`'s header in `files/system/libexec/apex-boot-migrate`
     (it said "two deployments'" while the check does `per * 3`).
-  `tests/test-boot-migrate.sh` 83/83 on the pushed tip.
+  * `b5e8ddcb` — **the `join_state` fix**: `-type d` on the stateroot-var
+    lookup, a failure message that names which path failed, and three
+    behavioural assertions extracted from the source. 86/86.
+  * `01234028` — evidence section 4: the /var join defect, and the migrated
+    cmdline read off the ESP (`:ro` confirmed, `boot=UUID=` correct,
+    `rootflags=subvol=/` carried).
+  `tests/test-boot-migrate.sh` 86/86 on the pushed tip; `bash -n` and
+  `shellcheck` clean; `tests/check-containerfile-assertions.sh` rc=0.
   **NOT yet LANDABLE** — the migrated boot has not happened and the item-3
   decision is not taken. The `count_staged_entry` splice is deliberately still
   uncommitted in the worktree; a backup of the spliced file is at

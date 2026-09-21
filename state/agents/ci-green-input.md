@@ -8,12 +8,22 @@ lab: /var/lab-scratch/ci-green-input
 
 Dispatched round 39; re-dispatched round 40, 2026-09-22.
 
-## LANDABLE 65be1e49
+## LANDABLE bba42759
 
-Branch `task/ci-green-input`, 8 commits on `origin`. The three that change code
-are `cd3c06b6` (apex-input suite), `762c5204` (secret-broker suite),
-`9c389baf` (`apex-mux` + mux-layouts suite); the rest is
+Branch `task/ci-green-input`, 9 commits on `origin`. Three change code —
+`cd3c06b6` (apex-input suite), `762c5204` (secret-broker suite), `9c389baf`
+(`apex-mux` + mux-layouts suite). `bba42759` is a comment-only correction to
+`apex-mux`: the paragraph justifying 6 -> 12 asserted that a re-send cures the
+drop, and run 35647154151 refuted that after the fact, so the shipped comment
+is not left saying the opposite of what was measured. The rest is
 `ROADMAP/evidence/ci-green-input-20260921.md`. Land by merge.
+
+The four CI runs tested `9c389baf`; everything after it is comments and
+evidence, so the tested code is the code that lands.
+
+**Merges clean:** `git merge-tree $(git merge-base HEAD origin/roadmap/v2.2)
+HEAD origin/roadmap/v2.2` gives **0 conflict markers** against
+`d7f504a7` (Merge task/katana-final-qual), checked 2026-09-22.
 
 ## NEXT
 
@@ -168,15 +178,20 @@ are `cd3c06b6` (apex-input suite), `762c5204` (secret-broker suite),
   `transcript is 59 bytes`, `outcome  killed by signal 9`. **The confined
   session is SIGKILLed immediately** — not a sandbox that failed to come up,
   not a sysctl, not slowness.
-  The obvious follow-up hypothesis was TESTED AND REFUTED rather than written
-  down as fact: `apex-agent-core/src/sandbox.rs` passes `--die-with-parent`,
+  The obvious follow-up hypothesis was TESTED rather than written down as fact,
+  and what it rules out is the DETERMINISTIC version of it, not a race: `apex-agent-core/src/sandbox.rs` passes `--die-with-parent`,
   the `fork()` is on a per-connection `apex-agentd-conn` thread, and Linux
   `PR_SET_PDEATHSIG` is parent-THREAD-scoped — so a detached session ought to
   die with its client. It does not here: a probe
   (`/var/lab-scratch/ci-green-input/pdeath-probe.sh`) ran
   `apex agent run -d -- sh -c 'echo LINE1; sleep 6; echo DONE-LATE'`, watched
   `apex agent status`, and got `starting -> working -> complete`,
-  `outcome exited 0`, both lines. **Needs an `apexd/` unit.**
+  `outcome exited 0`, both lines. So conn-thread exit does not reliably kill a
+  detached session on the L16; a race on a loaded runner with bwrap 0.9.0 is
+  not excluded. **Needs an `apexd/` unit** — and note for whoever takes it:
+  `agentd.log` held only its `listening on …` line when the session died by
+  signal 9, i.e. **the runtime does not log a session ending by signal**, so
+  the next investigator gets the same 20 empty lines I did.
 - **THE `mux-layouts` DROP IS NOT CURED BY RETRYING, which the shipped comment
   assumed it was.** Run `35647154151`: all **twelve** sends returned `rc=0`
   with **empty stderr**, both IPC forms alternating, and

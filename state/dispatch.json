@@ -1,6 +1,6 @@
 {
  "_comment": "Live dispatch table. The orchestrator writes this at every dispatch and every landing. resume.sh reads it. agent_id is only useful while the session that spawned it lives; after a restart, dispatch a fresh agent with the card instead.",
- "updated": "2026-09-22T04:20+0800",
+ "updated": "2026-09-22T04:35+0800",
  "_round": "ROUND 40, opened 2026-09-22 03:10 AWST by the AUTORESUME orchestrator (claude -p, holding ROADMAP/state/autoresume.lock). Round 39 is over and its own _round key says so. NOTHING WAS LANDED THIS ROUND BECAUSE THERE WAS NOTHING TO LAND: every branch whose card says LANDABLE is already an ancestor of roadmap/v2.2 -- kernel-akmods 444102fd, kernel-publish 76a04c49, luks-boot 1fb98233, migrate-preconditions f3280072, initramfs-slim ede9a6f7, plus windows-installer-3, sdboot-xbootldr, luks-enroll-2, luks-installer-2, kernel-build-2, sdboot-migrate-2, android-relay-flake, katana-runner, efivars-guard-2. Checked with merge-base --is-ancestor per branch, not read off the report. The 20 apex-os and 13 apex-shell branches that still report unmerged are the known pre-round-10 cherry-pick set (see _stale_branch_finding) and all show cherry_plus=0.",
  "_landed_this_round": [
   {
@@ -72,6 +72,17 @@
    "machine": "L16 KVM lab",
    "dispatched": "2026-09-22T03:35+0800",
    "status": "COMPLETE -- landed as merge 57d09820 at 2026-09-22T03:52+0800"
+  },
+  {
+   "slug": "a11y-gate",
+   "unit": "a11y-gate",
+   "items": "P2-003",
+   "repo": "apex-os",
+   "worktree": "/var/tmp/apex-work/wt-a11y-gate",
+   "branch": "task/a11y-gate",
+   "card": "ROADMAP/state/agents/a11y-gate.md",
+   "machine": "katana seat0 (exclusive, per _seat_split_agreed)",
+   "dispatched": "2026-09-22T04:32+0800"
   }
  ],
  "_field_contract": "resume.sh does os.path.isdir(worktree) and git rev-list origin/<branch>..HEAD, so `worktree` and `branch` must each be ONE value. An agent working two repos records the other in second_worktree/second_branch, which resume.sh ignores. Writing 'a and b' there makes the next report say 'no worktree' for a worktree that is fine.",
@@ -547,5 +558,15 @@
   "the_collision": "The parallel unit's `chvt 2` took seat0 mid-run and cost katana-final-qual its P1-038 rows 13, 14 and 15. That agent stood down correctly rather than fighting for the seat: it restored greetd cmp-identical, terminated only its own session, and chvt'd the seat back. SEAT0 WORK MUST BE SERIALISED -- one agent at a physical seat, ever.",
   "also": "pid 3277 landed 6bbdfb57 directly on roadmap/v2.2 while the autoresume session was also landing merges there. Both used --force-with-lease and neither lost work, but that is luck rather than design.",
   "the_lesson_that_generalises": "The lock file and the heartbeat are NOT sufficient: the interactive session does not take the lock and does not write the heartbeat. `pgrep -a claude` finding a second session is the signal, and the correct response is to COORDINATE (the peer is addressable by name via ListAgents/SendMessage) or to stand down -- not to decide from process state whether the other session is capable of resuming. The 2026-09-21 01:38 autoresume got this right and stood down; round 40 got it wrong."
+ },
+ "_seat_split_agreed": {
+  "at": "2026-09-22T04:30+0800",
+  "what": "NEGOTIATED AND AGREED between the two live orchestrators after the seat collision, by SendMessage rather than by guessing. The autoresume session (pid 817750) owns KATANA AND SEAT0. Andre's interactive session (pid 3277, peer name 'Start and finish P0 roadmap tasks') owns THE L16 and its own landings, has stopped qual-sess-hyprland work, and will not chvt or start a session on katana without saying so first.",
+  "the_rule_that_generalises": "ONE AGENT AT A PHYSICAL SEAT, EVER. A `chvt 2` mid-run cost katana-final-qual three P1-038 rows. Every card dispatched onto a seat now carries this and is told to STOP and write the card rather than take a seat it finds occupied.",
+  "how_it_was_settled": "The peer is addressable by name via ListAgents/SendMessage. That is the mechanism _incident_two_orchestrators should have used all along and it cost two messages. Do not diagnose a peer session from process state -- ask it."
+ },
+ "_routed_findings_round40": {
+  "wine_is_not_a_broken_install_it_is_an_extension_that_did_not_survive_an_update": "ROUTED TO THE PEER SESSION, which owns it because only it has the evidence. katana-final-qual recorded only the POST-reboot absence (wineserver/wineboot/winecfg ABSENT, wine64 dies 'could not exec wineserver', /usr/bin/wine64 still present). The peer holds an `ls /usr/bin/ | grep ^wine` from BEFORE the reboot showing wineboot, winecfg, wineconsole, winedbg, winedump present. That before/after pair reclassifies it from a failed install into a SYSTEM EXTENSION THAT DID NOT SURVIVE AN IMAGE UPDATE INTACT -- an update-path defect, and far more interesting than the P1-038 row it broke. Diff hint handed over: integrated-image-20260920.md section 2 records the previous boot's rebuild producing a byte-different extension with an IDENTICAL file set of 223 packages, so if binaries vanished this time the file set did NOT stay identical. katana-p1038-apps-20260922.md is wrong and the peer is correcting it.",
+  "a11y_mechanism": "BOTH AGENTS HAVE NOW RETRACTED THEIR OWN CAUSAL CLAIM, which is the healthy outcome. The peer retracted the strong form of 'a late enable does not retrofit' -- its sequence changed TWO variables between the 0 and the 8 (it set the gsetting AND restarted quickshell), so it is self-consistent but not controlled. katana-final-qual's counter-example stands as a counter-example but its own hypothesis (org.a11y.Status is the gate, the gsetting merely mirrors into it) is unproven. Unit a11y-gate dispatched to settle it with a two-walk experiment whose verdicts are fixed IN ADVANCE in a table, so the result cannot be narrated afterwards. The peer has asked to amend its own file rather than have it corrected for it, and the agent is told not to touch katana-a11y-20260922.md."
  }
 }

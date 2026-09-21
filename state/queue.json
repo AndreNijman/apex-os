@@ -1,6 +1,6 @@
 {
  "_comment": "Ordered dispatch queue for everything not yet done. `after` names dispatch slugs (from dispatch.json) or queue ids that must land first. `conflicts` names slugs whose files overlap — do not run both at once. Six concurrent agents is the ceiling: four agents plus the orchestrator hit the session limit twice on 2026-09-06, and the cap is usage, not wall-clock.",
- "updated": "2026-09-22T04:20+0800",
+ "updated": "2026-09-22T04:35+0800",
  "concurrency_ceiling": 6,
  "units": [
   {
@@ -639,6 +639,15 @@
    "conflicts": [],
    "note": "SEEDED NOT DISPATCHED 2026-09-22 (round 40). Two sched-ext defects found by katana-final-qual on the first hardware that could ever execute this path. (a) scx_ops_matches() compares against 'lavd' but root/ops reads 'lavd_1.1.3_x86_64_unknown_linux_gnu' -- every correct load is reported as the wrong scheduler. (b) The switch branch races: scx_settle_until(Enabled) is satisfied by the scheduler being REPLACED rather than by the new one attaching, and the later scx.observed read lands in the ~1.26 s disabled trough. NEEDS A DESIGN DECISION, which is why it was not patched inside a qualification unit. Spec is the timing log in ROADMAP/evidence/katana-final-qual-20260922.md.",
    "seeded": "2026-09-22 round 40"
+  },
+  {
+   "id": "a11y-gate",
+   "after": [],
+   "conflicts": [
+    "katana-final-qual"
+   ],
+   "note": "Settles what actually gates quickshell's accessibility tree, after two runs agreed on ChildCount=8 across two compositors and disagreed on the mechanism. Two-walk experiment, verdicts fixed in advance. Dispatched round 40. HOLDS KATANA'S SEAT0 EXCLUSIVELY.",
+   "dispatched": "2026-09-22 round 40"
   }
  ],
  "_completed_units": {
