@@ -153,10 +153,15 @@ pub fn assess(p: &PartitionFacts, claims: &[Claim]) -> Verdict {
                     p.type_guid
                 ),
                 Some(format!(
-                    "in an elevated diskpart, select this partition and run \
-                     `set id={LINUX_FILESYSTEM}` to hand it to Linux, then run this \
-                     program again. That is a deliberate, reversible act by you; this \
-                     program will not retype a partition on your behalf."
+                    "in an elevated diskpart, select this partition and run BOTH of \
+                     `set id={LINUX_FILESYSTEM}` (hands the partition to Linux) and \
+                     `gpt attributes=0x0000000000000000` (clears the no-drive-letter \
+                     flag Windows puts on partitions it creates), then run this program \
+                     again. Both commands are needed: `set id=` changes only the type \
+                     GUID and leaves the attribute bit in place, which this program \
+                     refuses separately -- measured in the lab, not assumed. That is a \
+                     deliberate, reversible act by you; this program will not retype a \
+                     partition on your behalf."
                 )),
             );
         }
@@ -359,6 +364,15 @@ mod tests {
                 let remedy = r.remedy.expect("basic data must carry a remedy");
                 assert!(remedy.contains("diskpart"), "{remedy}");
                 assert!(remedy.contains(LINUX_FILESYSTEM), "{remedy}");
+                // BOTH diskpart commands. `set id=` alone leaves GPT attribute
+                // bit 63 in place on every partition Windows made, and this
+                // program refuses that separately -- so a one-command remedy
+                // walks the user out of one refusal and straight into another.
+                // Measured in the guest: lab/jobs/diskpart-remedy.
+                assert!(
+                    remedy.contains("gpt attributes=0x0000000000000000"),
+                    "the remedy must clear the attributes too, or it is a dead end: {remedy}"
+                );
                 assert!(
                     remedy.contains("will not retype"),
                     "the remedy must be the user's act, not ours: {remedy}"
