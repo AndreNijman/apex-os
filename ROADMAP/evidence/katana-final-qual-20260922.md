@@ -482,11 +482,18 @@ root | role=application | name=quickshell | desc=/usr/bin/quickshell
 ```
 
 **This is the single largest open accessibility defect in the repository
-closing, measured rather than argued.** `tests/check-quickshell-a11y-cause.sh`
-exists to pin a null root caused by quickshell destroying a `QCoreApplication`
-before constructing its `QGuiApplication`; the build on this image carries
-upstream `916a0dd` ("launch: avoid creating multiple QApplications"), and the
-shell now publishes a frame per output with every control under it.
+closing, measured rather than argued.** `run-lockscreen-atspi.sh` records the
+tree as one node and nothing beneath it; the build on this image carries
+upstream `916a0dd` ("launch: avoid creating multiple QApplications") and
+publishes a frame per output with every control under it.
+
+**Do not expect `tests/check-quickshell-a11y-cause.sh` to go red because of
+this.** That suite's own header says it is a pin on *Qt's* behaviour — mode A
+reproduces the QCoreApplication-destruction shape in a 168-line program with no
+quickshell in it, and that shape still produces a null root. What changed is
+that quickshell no longer has that shape. The thing to revisit is
+`run-lockscreen-atspi.sh` §5, whose assertions are skipped on the grounds that
+there is nothing under the root to read back. On this image there is.
 
 Four things worth reading off that tree rather than the headline:
 
@@ -495,10 +502,11 @@ Four things worth reading off that tree rather than the headline:
   behaviour `check-lockscreen-a11y.sh` asserts on the QML side and which had
   never been confirmed on the bus. A screen reader is told what the field is
   for and is not told what is in it.
-- **Two frames, one per output.** katana has `eDP-1` and `HDMI-A-1` connected
-  (`katana-displays-20260922.md`), and the greeter publishes the whole login
-  form twice, once per panel. Independent confirmation of the two-output state
-  from a completely different subsystem.
+- **Two frames, one per output — checked, not inferred.** sway's own IPC
+  (`swaymsg -t get_outputs` on `/run/user/973/sway-ipc.973.1518.sock`) reports
+  **2 outputs, both `active`, both `scale 1.0`**: `HDMI-A-1` 1920x1080@239.96
+  and `eDP-1` 1920x1080@144.03. DRM agrees (`card2-HDMI-A-1`, `card1-eDP-1`).
+  So the greeter publishes the whole login form twice, once per panel.
 - **12 of the 17 nodes expose the `Action` interface** with `Press` and
   `SetFocus`, so the tree is operable and not merely readable. No action was
   invoked: pressing "Next session" at a live greeter changes what the machine
@@ -527,19 +535,40 @@ What can be said: **the software chain is complete and pipewire is not running
 in the greeter session**, which is the thing to look at first when somebody does
 run it.
 
-### The gate is the finding
+### The gate, and the entry point that turns out to exist
 
-A screen reader user's chain on this image is: Orca starts → it sets
-`ScreenReaderEnabled` → Qt registers → the tree appears. That works. What does
-not exist is any other way to turn it on: there is no APEX toggle, no kernel
-cmdline, no `QT_LINUX_ACCESSIBILITY_ALWAYS_ON` in the greeter's environment. So
+The chain is: Orca starts → it sets `org.a11y.Status.ScreenReaderEnabled` → Qt's
+bridge registers → the tree appears. Measured above, end to end.
 
-- a screen reader started **by the user** gets the full 17-node tree, and
-- anything that reads the bus **without** setting the flag — an audit, a test,
-  a magnifier that does not claim to be a screen reader — sees an empty bus and
-  would reasonably report the shell as inaccessible.
+A first draft of this section said there was no way into that chain except
+finding a terminal. **That was wrong, and reading the machine is what corrected
+it.** `/usr/share/apex-greet/sway-greet.conf` binds exactly one key, and it is
+this one:
 
-That is the shape of the reading `after.txt` and this section both started with.
+```
+bindsym --to-code Mod4+Mod1+s exec /usr/libexec/apex-screen-reader toggle
+```
+
+with a comment explaining that it is the host's only binding precisely because
+"a user who cannot see the screen has no way to ask for a reader through a
+client they cannot read", that `--to-code` binds the physical key so the
+shortcut survives a layout that has not been chosen yet, and that Orca sets the
+gating property itself. `/usr/libexec/apex-screen-reader` is on the image, 8159
+bytes, and `apex-screen-reader status` run as the `greetd` user answers `off`
+with exit 1 — the documented contract. The design is complete; it was the
+reading that was incomplete.
+
+Confirmed rather than assumed, having got that wrong once: the greeter's
+quickshell process (pid 1791) carries **no** `QT_LINUX_ACCESSIBILITY_ALWAYS_ON`
+and no other `QT_*`/`A11Y`/`NO_AT_BRIDGE` variable — its full environment is 40
+keys and the only Qt one is `QT_QPA_PLATFORMTHEME=qt6ct`. So the gate really is
+the only switch, and the keybind really is the only way a user flips it.
+
+What this does mean, and it is worth stating because it is how both `after.txt`
+and this section first read the machine wrongly: **anything that inspects the
+a11y bus without claiming to be a screen reader sees an empty bus.** An audit,
+a CI probe or a magnifier would report the shell as publishing nothing, and be
+wrong. Any future check of this must set the flag first, as this one did.
 
 ### The machine was put back
 
@@ -566,7 +595,8 @@ nobody has asked.
 | quickshell publishes an accessibility tree | **pass — 17 nodes, 2 frames, depth 2** |
 | the tree is operable (`Action` interface) | **pass — 12 nodes, `Press`/`SetFocus`** |
 | the password field does not leak its contents over the bus | **pass — empty name, description kept** |
-| the shell is reachable without a screen reader running | **fail — 0 applications while `IsEnabled` is false** |
-| Orca at the login screen (queue item 1) | **could-not-run** — it speaks, and nobody is at the machine |
+| an entry point exists for a user who cannot see the screen | **pass** — `SUPER+ALT+S` → `/usr/libexec/apex-screen-reader toggle`, the greeter host's only keybind; `status` answers `off`/rc 1 as documented |
+| the bus is empty until a screen reader asks | **by design, and a trap for auditors** — 0 applications while `IsEnabled` is false; any probe must set the flag first |
+| Orca at the login screen (queue item 1) | **could-not-run** — pressing the key makes the machine speak, and nobody is at it |
 | greeter audio (queue item 2) | **could-not-run** — same; pipewire is inactive in the greeter session, which is the first thing to check |
 | magnifier / high-contrast / reduced-motion | **not measured this round** |
