@@ -23,14 +23,34 @@ APEX machine is not the one on the developer's host:
 | where | bootc version |
 | --- | --- |
 | the L16 host | 1.16.10-1.fc43 (`rpm -q bootc`) |
-| **`ghcr.io/andrenijman/apex-os:daily` — the one that runs the migration** | **1.16.4** (`podman run --rm … bootc --version`) |
+| **`ghcr.io/andrenijman/apex-os:daily` — the one that runs the migration** | **1.16.11**, read out of a booted guest installed from a fresh pull |
 | `sdboot-migrate`'s lab guest | 1.16.13 |
 | upstream `main` | `65321ae`, fetched 2026-09-21 |
 
-All four behave identically. Sources at
-`/var/lab-scratch/sdboot-xbootldr/bootc-src` (tag `v1.16.10`) and
-`/var/lab-scratch/sdboot-xbootldr/bootc-main` (`main`, and `v1.16.4` checked
-out into it).
+All four behave identically.
+
+> **A trap, because it nearly went into this document as a fact.**
+> `podman run --rm ghcr.io/andrenijman/apex-os:daily bootc --version` answered
+> **1.16.4**, and that number is wrong. Rootless and root podman keep separate
+> storages, and `podman run` on a registry reference uses whatever local copy
+> exists without asking the registry. The rootless copy on this machine is
+> **7 weeks old**; root's, pulled for the install, is 6 days old:
+>
+> ```
+> $ podman images | grep apex-os:daily
+> ghcr.io/andrenijman/apex-os:daily   7 weeks ago   a20b0b04f958
+> $ sudo podman images | grep apex-os:daily
+> ghcr.io/andrenijman/apex-os:daily   6 days ago    1d21fb12c5de
+> ```
+>
+> The authority for "what ships in the image" is the **booted guest**, which
+> says 1.16.11. 1.16.4 is kept in the list below anyway — it was read from
+> source and is identical, so the conclusion held despite the stale read. Sources at `/var/lab-scratch/sdboot-xbootldr/bootc-src` (tag `v1.16.10`) and
+`/var/lab-scratch/sdboot-xbootldr/bootc-main` (`main`, with `v1.16.4` and
+`v1.16.11` also checked out into it). In **v1.16.11** the same three lines are
+at `boot.rs:793` (`mount_esp_writable`), `boot.rs:802`
+(`abs_entries_path = /EFI/Linux`), `boot.rs:1455` (the TODO) and
+`store/mod.rs:396` (the NOTE).
 
 ### 1a. `--bootloader systemd` maps to `BLSCompatible`
 
@@ -435,9 +455,265 @@ on. Neither is "the one you meant" on a two-ESP machine. Same family as
 
 ---
 
-## 5. Lab: the L16-shaped guest
+## 5. katana, and the ESP the machine actually boots from
+
+Andre added a requirement mid-unit: **the migration must work on katana too.**
+katana's measured layout (by serial, because its NVMe names have now swapped
+four times):
+
+```
+nvme1n1  1.8T  serial 240023925111005 (SPCC)    — the WINDOWS disk
+  p1  200 MiB  EFI System  PARTUUID 2ba9a2ea…   ← Boot0000* APEX-OS Primary
+                                                  \EFI\APEX\SHIMX64.EFI, BootCurrent=0000
+nvme0n1  954G  serial 220534D1CB81 (Micron)     — the APEX disk (root lives here)
+  p2  512 MiB  EFI System  label EFI-SYSTEM  PARTUUID 99af3362…   ← unused
+```
+
+### The suggestion was "make the migration prefer the machine's own ESP". It already does.
+
+The brief assumed `find_esp()` resolves the ESP the machine currently boots
+from. It does not, and the file says so in a comment written for exactly this
+machine:
+
+```sh
+# The ESP, by GPT type GUID on the disk the root filesystem is on. Not by
+# /etc/fstab and not by label: on this machine's lineage the ESP is not mounted
+# at all, and katana's APEX entry lives on the ESP Windows created.
+ESP_TYPE_GUID=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+
+find_esp() {
+    disk="$(root_disk)" || return 1        # findmnt --target /sysroot, then up to a disk
+    for part in $(lsblk -lno NAME "/dev/$disk"); do ...
+```
+
+bootc agrees, from its own source — `crates/blockdev/src/blockdev.rs:214`:
+
+```rust
+pub fn find_first_colocated_esp(&self) -> Result<Device> {
+    self.find_colocated_esps()? ...
+```
+
+`find_colocated_esps` searches `find_all_roots()`, the disks backing the **root**
+device. So the engine and bootc pick the same partition, and on katana that is
+`nvme0n1p2` — the APEX disk's own unused 512 MiB `EFI-SYSTEM`, **not** the
+200 MiB ESP on the Windows disk.
+
+**Measured in the lab, in a guest built for this**: the APEX guest was booted
+with a second disk carrying a 200 MiB ESP holding a stand-in Windows Boot
+Manager, an `EFI/Boot/bootx64.efi` and an `EFI/APEX/SHIMX64.EFI` — katana's
+shape. From inside the guest:
+
+```
+ESPs on the ROOT disk    : /dev/vda2
+ESPs on OTHER disk /dev/vdb  : /dev/vdb1
+  root_disk()      = vda
+  find_esp()       = /dev/vda2      <- the root's own disk, with two ESPs present
+  find_xbootldr()  = /dev/vda4
+```
+
+So katana's migration moves APEX's boot onto its own disk as a **side effect of
+migrating at all**, which is the outcome asked for. Nothing had to change to
+get it.
+
+### The Windows ESP is untouched, asserted rather than intended
+
+Hashed before and after the whole precheck run, in the same boot:
+
+```
+  before                                   after
+  d2bf54c5…  EFI/Microsoft/Boot/bootmgfw.efi   d2bf54c5…   identical
+  6b2164ba…  EFI/Boot/bootx64.efi              6b2164ba…   identical
+  710d912d…  EFI/APEX/SHIMX64.EFI              710d912d…   identical
+```
+
+A precheck writes nothing anywhere, so this is a weak assertion on its own —
+its value is that it is now *in* the harness, so the same three hashes can be
+taken around a stage and a commit when somebody runs those. The structural
+argument is the stronger one: the engine only ever mounts `find_esp()`'s
+partition, and `find_esp()` cannot return a partition on a disk the root is not
+on.
+
+### What was missing, and now is not: the user is never told their boot moved disks
+
+A machine that boots from one disk's ESP and roots on another's silently stops
+depending on the first. That is the improvement, and it is also exactly the sort
+of change that should not be silent. `apex-boot-migrate` now reads the PARTUUID
+out of `BootCurrent`'s device path and, when it differs from the ESP it is about
+to write, prints:
+
+```
+note: this machine BOOTS from the ESP at PARTUUID 2ba9a2ea-…,
+      which is not on the disk its root filesystem is on. The
+      migration writes /dev/nvme0n1p2 (PARTUUID 99af3362-…), the ESP on
+      the root's own disk, and adds a firmware entry pointing there.
+      Nothing is written to 2ba9a2ea-…, so another operating system
+      installed on it keeps its own boot entry untouched. After the
+      trial boot this machine no longer depends on that disk.
+```
+
+**A note, deliberately not a refusal**, against `sdboot-migrate`'s NEXT #5 which
+proposed refusing. Refusing would keep katana booting off the Windows disk
+forever, which is the thing worth fixing; and the failure mode a refusal would
+be guarding against — firmware that cannot see the new ESP — is already handled
+by the machinery that exists: the trial boot comes back to GRUB, `confirm`
+records `phase=failed`, and nothing re-arms.
+
+The parser was checked against **the L16's real firmware output**, read-only:
+
+```
+$ efibootmgr -v | grep '^Boot0000'
+Boot0000* APEX-OS	HD(1,GPT,1c417de2-5766-455f-9318-198610885424,0x800,0x12c000)/\EFI\fedora\shimx64.efi
+
+booted_esp_partuuid  = 1c417de2-5766-455f-9318-198610885424
+find_esp             = /dev/nvme0n1p1
+partuuid_of find_esp = 1c417de2-5766-455f-9318-198610885424   -> equal, so the note does NOT fire
+```
+
+The L16 boots from its own disk, so the negative case is measured on real
+hardware. Both device-path spellings are fixtures in `test-boot-migrate` —
+katana's `…/File(\EFI\APEX\SHIMX64.EFI)` and the L16's bare
+`…/\EFI\fedora\shimx64.efi` — because a parser of another tool's output is
+exactly where an assumption breaks quietly.
+
+### katana still refuses today, and the number that decides it
+
+512 MiB against 1173 MiB. The binding rule is `apex-boot-migrate`'s, and it is
+**three** deployments, not two:
+
+```
+need = (vmlinuz + initramfs) x 3 + 48 MiB slack
+```
+
+Solving it for the initramfs, with `vmlinuz` at 16.1 MiB:
+
+| machine | ESP | largest initramfs that migrates |
+| --- | --- | --- |
+| **katana** | 512 MiB | **≤ 138.6 MiB** |
+| L16 today | 600 MiB | ≤ 168.6 MiB |
+| L16 if `p2` were absorbed into `p1` | 2648 MiB | ≤ 866 MiB (not a constraint) |
+
+**For `initramfs-slim`:** its stated target — *"slimmed toward ~120 MiB so two
+deployments fit 512"* — lands correctly but is sized against the wrong rule.
+Two deployments in 512 MiB would allow 215.9 MiB; the engine asks for three, so
+the real budget is **138.6 MiB**. At 120 MiB, `need` = 456 MiB and katana
+migrates with 56 MiB to spare. At 160 MiB — comfortably inside a "two
+deployments" target — it does not. The three-deployment rule is
+`apex-boot-migrate` lines 218-232 and 348-352, and `sdboot-migrate`'s own
+comment explains it: the steady state is booted + rollback, and an update stages
+a third alongside them. Nothing in this unit assumes the slimmer number.
+
+---
+
+## 6. Lab: the L16-shaped guest, and what it measured
+
+Guest: `ghcr.io/andrenijman/apex-os:daily` — the real image — installed through
+`tests/lab/bootc-install-lab` (so `--generic-image`, under `nvram-guard`) onto a
+45 GiB loopback file, `--filesystem btrfs`, no `--bootloader`, so **ostree +
+GRUB + bootupd**: the shape the L16 has. Then a 2 GiB `EA00` XBOOTLDR added in
+the free tail left by `--root-size 40G`, and a second disk attached carrying
+katana's 200 MiB Windows ESP.
+
+```
+vda  45G      p1 1M BIOS-BOOT · p2 512M vfat EFI-SYSTEM · p3 40G btrfs root · p4 2G ext4 apex-newboot (EA00)
+vdb 400M      p1 200M vfat SYSTEM (ESP) · p2 199M basic data
+vdc  64M      the control disk
+```
+
+Both installs returned **`verdict: verified — boot variables identical before
+and after`**. Firmware read out of the binary, not the filename:
+`edk2-2970e5699ba6`.
+
+### What the guest says
+
+```
+bootc 1.16.11
+root: /dev/vda3  btrfs
+/usr/lib/modules/7.2.5-cachyos1.fc43.x86_64/vmlinuz         16 910 408 B
+/usr/lib/modules/7.2.5-cachyos1.fc43.x86_64/initramfs.img  376 456 492 B
+per-deployment = 393 366 900 bytes = 375 MiB
+need (3x + 48) = 1173 MiB
+ESP: 511 MiB total, 503 MiB free — EFI/BOOT/{BOOTX64.EFI,fbx64.efi},
+     EFI/fedora/{shim.efi,shimx64.efi,mmx64.efi,grubx64.efi,grub.cfg,…}
+XBOOTLDR /dev/vda4: 0 files
+```
+
+### The two refusals, in order, verbatim
+
+```
+--- 6. precheck, exactly as the image would run it ---
+apex-boot-migrate: REFUSED [no-rsync]
+    rsync is not in this image; the migration needs it to carry /etc across.
+PRECHECK_RC=10
+```
+
+**`apex-os:daily` ships no `rsync`.** That is the *first* refusal on a real
+APEX machine today, not `esp-too-small`, and nobody has seen it because the
+migration has never run on a real image. `Containerfile.base` on `roadmap/v2.2`
+asserts rsync is present, so the next image build fixes it — but until one
+exists, this is what a user gets.
+
+With a stub `rsync` on `PATH` purely to reach the next refusal — the run stages
+nothing, so `rsync` is never called:
+
+```
+--- 7. precheck again with a stub rsync on PATH ---
+apex-boot-migrate: REFUSED [esp-too-small]
+    The EFI System Partition has 503 MiB free and this
+    machine needs 1173 MiB — one deployment's kernel and
+    initramfs is 375 MiB, systemd-boot keeps the
+    booted one and the rollback, and an update stages a third
+    alongside them.
+    An ESP cannot be grown in place without moving the partition after
+    it, so this machine stays on GRUB until its ESP is made bigger.
+    This machine has an XBOOTLDR partition (/dev/vda4) and it cannot
+    absorb this. The Boot Loader Specification allows the kernel
+    and initramfs to live there; bootc's composefs backend does
+    not write them there — it mounts the ESP unconditionally and
+    writes the entry paths absolute to it. docs/boot-v2.md,
+    'XBOOTLDR: the Boot Loader Specification allows it, bootc
+    does not implement it'.
+PRECHECK_RC=10
+```
+
+That is the refusal the L16 gets, on the real image, on btrfs, with an XBOOTLDR
+partition present — which is the question this unit was asked. The XBOOTLDR is
+still **0 files** afterwards, and the other disk's ESP still hashes identically.
+
+### What this run did NOT do
+
+* **It did not migrate.** Both prechecks refused, by design — the point was the
+  refusal. The stage, the commit, the trial boot and the confirm are unmeasured
+  on the APEX image and on btrfs; that is `sdboot-migrate-2`'s NEXT item 1, and
+  `apexgrub.img` is handed to it rather than built twice.
+* **It did not exercise the cross-disk note end to end.** `ctl.img` carried the
+  engine as it stood before that note was written, and the guest's NVRAM was
+  fresh (no `Boot0000` pointing at the second disk), so the note had nothing to
+  fire on. It is covered by three assertions in `test-boot-migrate` against
+  katana's and the L16's real `efibootmgr -v` shapes, and by the L16 run above.
+  A guest boot that arms `Boot0000` on the second disk first would close it.
+* **It did not test Secure Boot.** The OVMF build is non-secboot, so
+  `secure-boot-unsigned-loader` could not fire and did not; the guest's
+  `SecureBoot` efivar read is in the log for whoever needs it.
+
+### A lab trap worth one line
+
+The first boot died with `/bin/bash: line 1: /work/boot-mig.sh: Permission
+denied` and exit 126 — not a mode bit. A freshly created directory under
+`/var/lab-scratch` is `var_t`; a bind mount into a container needs
+`container_file_t` (what `-v …:z` sets). `sdboot-migrate`'s lab directory
+already had it, so the harness looked like it "just works". `chcon -R -t
+container_file_t` on the lab directory, and the second run was clean.
+
+---
+
+## 7. Bounds
 
 Nothing in this unit touched the L16's partitions, ESP, NVRAM or bootloader.
-The only read of the machine was `stat` on two files under `/usr/lib/modules`
-and `lsblk`. The APEX guest in section 2a was mounted **read-only** from an
-image file `sdboot-image` left behind.
+The reads of the machine were: `stat` on two files under `/usr/lib/modules`,
+`lsblk`, `efibootmgr -v` (which prints variables and writes none), and
+`find_esp`/`find_xbootldr`/`booted_esp_partuuid` run out of the engine. The APEX
+composefs guest in section 2a was mounted **read-only** from an image file
+`sdboot-image` left behind. Every install went through
+`tests/lab/bootc-install-lab` under `nvram-guard`, and every run returned
+`verdict: verified`. katana was not touched at all — its layout above is the
+orchestrator's measurement, and the lab guest stands in for it.

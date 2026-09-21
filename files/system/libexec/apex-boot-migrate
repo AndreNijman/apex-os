@@ -188,6 +188,40 @@ find_xbootldr() {   # prints every XBOOTLDR-typed partition on the root disk
     return "$found"
 }
 
+# The ESP the FIRMWARE is booting from right now, by the GPT PARTUUID inside
+# BootCurrent's device path. This is deliberately NOT how find_esp works and
+# the difference is the whole point: find_esp answers "which ESP belongs to
+# this machine's root disk", this answers "which ESP did the firmware load the
+# loader from", and on a dual-boot machine those are two different partitions.
+#
+# katana, measured 2026-09-21: `Boot0000* APEX-OS Primary` points at
+# PARTUUID 2ba9a2ea… — the 200 MiB ESP on the WINDOWS disk, beside Windows Boot
+# Manager — while the APEX disk carries its own unused 512 MiB `EFI-SYSTEM` at
+# PARTUUID 99af3362…. find_esp returns the second one, which is the right
+# answer and also a change of disk. Saying so is not optional: a user whose
+# machine quietly stops depending on another operating system's disk should be
+# told, and a user whose firmware cannot see the new disk needs to know which
+# thing to look at when the trial boot comes back to GRUB.
+#
+# Read-only: `efibootmgr -v` prints variables, it does not write any.
+booted_esp_partuuid() {
+    command -v efibootmgr >/dev/null 2>&1 || return 1
+    local out cur line
+    out="$(efibootmgr -v 2>/dev/null)" || return 1
+    cur="$(printf '%s\n' "$out" | sed -n 's/^BootCurrent: *//p' | head -1)"
+    [ -n "$cur" ] || return 1
+    line="$(printf '%s\n' "$out" | sed -n "s/^Boot${cur}\*\{0,1\} //p" | head -1)"
+    [ -n "$line" ] || return 1
+    # HD(1,GPT,<partuuid>,0x800,0x64000)
+    printf '%s\n' "$line" |
+        grep -o -i 'HD([0-9]*,GPT,[0-9a-f-]*' |
+        head -1 | sed 's/.*,//' | tr 'A-Z' 'a-z'
+}
+
+partuuid_of() {   # $1 = /dev/sdXN
+    lsblk -dno PARTUUID "$1" 2>/dev/null | head -1 | tr 'A-Z' 'a-z'
+}
+
 esp_mounted_at=""      # set by with_esp
 esp_we_mounted=0
 
@@ -388,6 +422,29 @@ cmd_precheck() {
 
     [ -f "$esp_mounted_at/EFI/BOOT/BOOTX64.EFI" ] || log \
         "note: there is no /EFI/BOOT/BOOTX64.EFI to preserve on this ESP"
+
+    # A machine that boots from one disk's ESP and roots on another's gets the
+    # migration on its OWN disk, which is the right answer and is also a
+    # change the user should hear about rather than discover. Deliberately a
+    # note and not a refusal: refusing would keep katana booting off the
+    # Windows disk forever, which is the thing worth fixing, and a firmware
+    # that cannot see the new ESP is already handled -- the trial boot comes
+    # back to GRUB, confirm records it failed, and nothing re-arms.
+    local target_uuid booted_uuid target_dev
+    if [ -z "$ESP_OVERRIDE" ] && target_dev="$(find_esp)"; then
+        target_uuid="$(partuuid_of "$target_dev")"
+        booted_uuid="$(booted_esp_partuuid)" || booted_uuid=""
+        if [ -n "$booted_uuid" ] && [ -n "$target_uuid" ] &&
+           [ "$booted_uuid" != "$target_uuid" ]; then
+            log "note: this machine BOOTS from the ESP at PARTUUID $booted_uuid,"
+            log "      which is not on the disk its root filesystem is on. The"
+            log "      migration writes $target_dev (PARTUUID $target_uuid), the ESP on"
+            log "      the root's own disk, and adds a firmware entry pointing there."
+            log "      Nothing is written to $booted_uuid, so another operating system"
+            log "      installed on it keeps its own boot entry untouched. After the"
+            log "      trial boot this machine no longer depends on that disk."
+        fi
+    fi
 
     release_esp
     [ "$quiet" = quiet ] || log "precheck: this machine can migrate safely"
