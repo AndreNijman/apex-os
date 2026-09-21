@@ -127,6 +127,9 @@ ESP_SLACK_MIB=48
 # mid-copy, and the cost of guessing low is the thing this check exists to
 # avoid.
 ROOT_SLACK_MIB=512
+# The same tally apex-boot-count and apex-mkesp use for every other counted
+# entry on this lineage (docs/boot-v2.md) — not a knob this script reinvents.
+BOOT_TRIES="${APEX_BOOT_TRIES:-3}"
 
 log()    { printf 'apex-boot-migrate: %s\n' "$*" >&2; }
 
@@ -914,6 +917,64 @@ cmd_precheck() {
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  count the migrated entry, so the health gate the first boot rests on is real
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# bootc writes no boot counter — the same fact apex-boot-count exists to fix on
+# the ordinary update path, measured there across six installs and upgrades.
+# Without a `+N-M` suffix on the entry filename, systemd-boot sets no
+# LoaderBootCountPath, systemd-bless-boot and apex-boot-health are both skipped
+# by their own ConditionPathExists, and apex-boot-migrate-confirm.service's
+# `Wants=boot-complete.target` pulls in a target that is reached for free
+# rather than because anything checked the machine. Confirming on it is
+# confirming on nothing.
+#
+# WHY THIS RENAMES THE LIVE ENTRY, WHERE apex-boot-count REFUSES TO
+#
+# apex-boot-count counts `loader/entries.staged/` and says so at length: on the
+# ordinary path a live rename is destroyed by the next `bootc upgrade`, which
+# writes a fresh uncounted set into entries.staged/ and lets
+# bootc-finalize-staged swap the whole directory in at shutdown. None of that
+# applies here. A migration has no entries.staged/ — the install has already
+# happened and is complete — and the counter only has to survive the ONE boot
+# that commits or fails this migration. By the time an ordinary upgrade runs,
+# the machine is confirmed and apex-boot-count owns the counter again.
+#
+# WHAT IT REFUSES TO DO
+#
+# Re-count an entry that already carries a suffix. A second rename would reset
+# a counter systemd-boot has already decremented — the same hard stop
+# apex-boot-count makes, and for the same reason. `retry` after a failed
+# migration re-enters this function, so it is not a hypothetical.
+count_staged_entry() {   # $1 = the .conf the stage just verified
+    local ent="$1" base counted
+    base="$(basename "$ent")"
+
+    # Already counted: leave it exactly as it is. Not an error — a `retry`
+    # reaches here with the previous attempt's suffix in place.
+    case "$base" in
+        *+[0-9]*) log "the entry already carries a counter ($base); leaving it alone"
+                  return 0 ;;
+    esac
+
+    counted="${ent%.conf}+${BOOT_TRIES}-0.conf"
+    mv "$ent" "$counted" 2>/dev/null
+    # `mv` on a FAT filesystem under a confined domain can report success and
+    # move nothing, so the rename is checked by looking rather than by $?.
+    # This is the failure the "a gate that runs and inspects nothing" family is
+    # named after, and the ESP is the exact filesystem it keeps happening on.
+    if [ ! -e "$counted" ] || [ -e "$ent" ]; then
+        release_esp
+        fail "entry-count-failed" \
+            "Could not rename $base to carry a boot counter." \
+            "Without one, systemd-bless-boot never runs and the first boot of" \
+            "the new path would be confirmed without being checked." \
+            "The migration is NOT committed and re-running it is safe."
+    fi
+    log "counted the entry: $(basename "$counted") ($BOOT_TRIES tries)"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  stage — write the whole new boot path, change nothing the firmware reads
 # ═════════════════════════════════════════════════════════════════════════════
 cmd_stage() {
@@ -1146,6 +1207,9 @@ print(((b.get("image") or {}).get("imageDigest")) or "")')"
     [ -d "$SYSROOT/boot/grub2" ] || { release_esp; fail "grub-boot-wiped" \
         "The root filesystem's /boot/grub2 is gone — the containment failed."; }
 
+    # ── 6. count the entry, so the health gate this boot rests on is real ────
+    count_staged_entry "$ent"
+
     echo staged > "$STATE/phase"
     sync
 
@@ -1215,7 +1279,7 @@ join_state() {
     # was then false, and the whole migration failed `state-join` after a
     # completely successful install. The predecessor's ext4 fedora-bootc guest
     # got the directory first and the bug was invisible —
-    # ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md section 4.
+    # ROADMAP/evidence/sdboot-migrate-3-20260922-lab.md §4.
     #
     # `find` does not follow symlinks unless asked, so `-type d` alone selects
     # the real directory. The `etc` lookup thirty lines down has always had it;
