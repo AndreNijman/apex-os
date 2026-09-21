@@ -732,7 +732,6 @@ cmd_precheck() {
             "initramfs is $(( per / 1024 / 1024 )) MiB, systemd-boot keeps the" \
             "booted one and the rollback, and an update stages a third" \
             "alongside them." \
-            "Short by $short_mib MiB." \
             "Two things close that gap, and only one of them is the user's to do:" \
             "  * a kernel + initramfs of $per_budget_mib MiB or less would fit this ESP" \
             "    as it is. Almost all of the current $(( per / 1024 / 1024 )) MiB is the" \
