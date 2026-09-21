@@ -215,3 +215,44 @@ by run2 above — say so in L-003's evidence.
 Battery was 58% and DISCHARGING at 13:42 on this laptop. Read
 `/sys/class/power_supply/BAT*/status` before every run over ten minutes;
 one heavy podman/qemu job at a time on this machine.
+
+---
+
+## ROUND 39 CONTINUATION — written by the orchestrator, 2026-09-21 17:20 AWST
+
+The round-38 agent was killed by a **session usage limit at 14:59 AWST**
+(`ROADMAP/state/autoresume.log`: `resume session ended (exit 1)`). It was never
+messaged. You are a FRESH agent and this card is your whole inheritance —
+everything above stands unless this section contradicts it, and where it
+contradicts it, this section wins.
+
+**Hard deadline: this orchestrator runs under `timeout 4h` and dies at about
+21:08 AWST.** Commit and push small and often. Update this card after every
+commit and whenever NEXT changes — a card that is only correct at the end is
+worth nothing, which is the entire reason this directory exists.
+
+**Write `## LANDABLE` at the top of this card, with the sha, the moment your
+branch is ready to merge onto `roadmap/v2.2`.** The orchestrator lands on that
+signal and will not guess. If it is NOT landable, say why in one line —
+"landing this would break X" is a finding, not a failure.
+__BODY_
+
+### The contract (ROADMAP/state/README.md, short form)
+
+Keep this card's `NEXT` / `DONE` / `IN PROGRESS` / `FOUND` / `BLOCKED ON`
+sections current **as you go, never at the end**. `NEXT` is load-bearing: one
+line, the exact next action, specific enough that a stranger could do it.
+Everything else can be re-derived from git; the next action cannot.
+
+### Constraints (non-negotiable)
+
+- Never push `main`, never open a PR — final integration only.
+- **Headless only.** Never open a window on Andre's desktop. Never run `qs -p`.
+- No polkit and no keyring prompts (`sudo` / `--user`, never an agent helper).
+- Never `pkill apex-agentd`.
+- Do not interrupt gaming on katana.
+- Scratch goes in `/var/lab-scratch/<your-slug>/`, NOT `/tmp` (tmpfs, 15 GB on
+  29 GB RAM — a stdout-only Bash failure there is memory, not disk). The
+  scratchpad is shared between agents: use your own subdirectory.
+- Long builds run in the FOREGROUND or under `systemd-run --user`; a
+  backgrounded `podman` gets SIGTERMed and still exits 0.
