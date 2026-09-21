@@ -110,9 +110,15 @@ ESP_OVERRIDE="${APEX_MIGRATE_ESP:-}"
 DRYRUN="${APEX_MIGRATE_DRYRUN:-0}"
 LOADER_PATH='\EFI\systemd\systemd-bootx64.efi'
 ENTRY_LABEL='APEX-OS'
-# Two deployments' worth of kernel+initramfs, plus the loader and slack. An ESP
-# that cannot hold this cannot hold an update, and a machine that discovers
-# that halfway through is the failure this whole script exists to avoid.
+# Slack on top of THREE deployments' worth of kernel+initramfs — booted plus
+# rollback plus the one an update stages alongside them. The number is applied
+# at the esp-too-small check below (`per * 3 + ESP_SLACK_MIB`), whose own
+# comment spells the reasoning out. This header used to say "two", which is
+# what the check was sized for before it was corrected and is not what it
+# computes; a reader who trusted it got 1173 MiB from 2 x 375 + 48 and a wrong
+# answer. An ESP that cannot hold all three cannot take its first update, and a
+# machine that discovers that halfway through is the failure this whole script
+# exists to avoid.
 ESP_SLACK_MIB=48
 # Slack on top of the doubled repo estimate for the ROOT filesystem check
 # below: filesystem overhead (btrfs metadata, ext4 reserved blocks), and the
