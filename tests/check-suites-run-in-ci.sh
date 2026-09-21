@@ -45,8 +45,19 @@ is_exempt() { local n; for n in ${exempt[@]+"${exempt[@]}"}; do [ "$n" = "$1" ] 
 # look like coverage, and be run by nobody — the exact defect this file exists
 # to prevent, one directory over. Discovery has to cover every place a suite
 # lives, or it is a list again.
+#
+# It kept a second hand-written list for two weeks after that was written: the
+# NAME. Discovery matched `test-*.sh` only, so every `check-*.sh` in this very
+# directory — this file included — was invisible to it. Measured 2026-09-21:
+# 8 check-*.sh existed and `tests/check-no-conflict-markers.sh` was named in no
+# workflow, having been landed after a merge replay shipped `<<<<<<<` markers
+# into `src/state/IpcManager.qml` on the apex-shell tip. That is a QML parse
+# error, so IpcManager failed to load, so every singleton importing `src/`
+# failed with it and the shell did not start at all. The gate written to stop
+# that recurring was itself never run. A gate this file cannot see is exactly
+# the defect this file exists to name, so the pattern is now `{test,check}-*`.
 missing=(); resurrected=(); run=0
-for s in tests/test-*.sh installer/test-*.sh; do
+for s in tests/test-*.sh tests/check-*.sh installer/test-*.sh installer/check-*.sh; do
     [ -f "$s" ] || continue
     base="${s##*/}"
     # A COMMENT naming a suite is not an invocation of it. This file's own
@@ -64,7 +75,7 @@ for s in tests/test-*.sh installer/test-*.sh; do
     fi
 done
 
-total=$(ls tests/test-*.sh installer/test-*.sh 2>/dev/null | wc -l | tr -d ' ')
+total=$(ls tests/test-*.sh tests/check-*.sh installer/test-*.sh installer/check-*.sh 2>/dev/null | wc -l | tr -d ' ')
 printf '\nsuite coverage: %s suites, %d run by CI, %d exempt, %d unrun and undeclared\n' \
     "$total" "$run" "${#exempt[@]}" "${#missing[@]}"
 
