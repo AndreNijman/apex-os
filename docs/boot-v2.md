@@ -404,8 +404,12 @@ holding the loader. On the L16 that would cost nothing at all — `p2` is a 2 Gi
 `EA00` partition, unmounted and referenced by nothing, sitting immediately after
 the 600 MiB ESP.
 
-**systemd-boot would read that perfectly well. bootc will not write it.** Named
-so nobody re-derives it — the actor is bootc's composefs backend, not sd-boot:
+**systemd-boot would read that perfectly well. bootc will not write it.** The
+loader is not the problem and the measurement says so: `strings` on the very
+`systemd-bootx64.efi` that `bootc install --bootloader systemd` wrote onto a
+lab guest contains `config_load_xbootldr`, and `bootctl` carries
+`--boot-path=` and `--print-boot-path` for exactly this. Named so nobody
+re-derives it — the actor is bootc's composefs backend, not sd-boot:
 
 * `crates/lib/src/spec.rs:288` — `--bootloader systemd` maps to
   `BootloaderKind::BLSCompatible`.
@@ -421,6 +425,11 @@ so nobody re-derives it — the actor is bootc's composefs backend, not sd-boot:
   unconditionally mount the ESP at /boot for now."*
 * `crates/lib/src/bootloader.rs:287` — *"If we supported XBOOTLDR in the
   future, that'd go here with `--boot-path`."*
+* `crates/lib/src/install/config.rs:74` — `BasicFilesystems` carries both
+  `xbootldr` and `esp` as commented-out TODOs, and the struct is
+  `deny_unknown_fields`, so an install config that names either is **rejected**
+  rather than ignored. There is no way to ask for an XBOOTLDR and no way to ask
+  for a bigger ESP.
 * `crates/lib/src/store/mod.rs:396` — *"NOTE: Handle XBOOTLDR partitions here
   if and when we use it"*, in the **runtime** store. This is the one that kills
   the workaround of letting bootc write to the ESP and moving the files
